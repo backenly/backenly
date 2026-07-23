@@ -1,0 +1,47 @@
+# Golden Environment Docker Compose
+# For internal testing and verification
+
+version: '3.8'
+
+services:
+  # PostgreSQL database
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: backenly
+      POSTGRES_PASSWORD: backenly_dev
+      POSTGRES_DB: backenly_test
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U backenly"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Golden environment builder
+  builder:
+    build:
+      context: ../workspace/${WORKSPACE_ID}
+      dockerfile: ../../docker/golden-environment.Dockerfile
+    environment:
+      - DATABASE_URL=postgresql://backenly:backenly_dev@postgres:5432/backenly_test
+      - NODE_ENV=production
+      - PORT=10000
+      - JWT_SECRET=test_secret_key_change_in_production
+    ports:
+      - "10000:10000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:10000/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  postgres_data:

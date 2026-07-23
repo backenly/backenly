@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# Production deploy: pull, sync schema if changed, build, restart, health-check.
+# Usage (on the server):  bash scripts/deploy.sh
+#
+# Exists because two incident classes came from hand-run deploys:
+#   1. Skipped db:push — schema.prisma changed somewhere in the pulled range
+#      (not necessarily HEAD), DB drifted, Prisma threw P2022 and /state 500'd
+#      (2026-07-06: projects.lastObservedAt).
+#   2. Restart race — PM2 restarted while build/postbuild was still writing
+#      .next/standalone, so the live process required chunks that had been
+#      swapped out from under it (112 lifetime crash-restarts).
+# This script checks the WHOLE pulled range for schema changes and only
+# restarts PM2 after build + postbuild have fully completed.
+
+set -euo pipefail
+
+APP_DIR=/opt/backenly
+cd "$APP_DIR"
+
+OLD_SHA=$(git rev-parse HEAD)
+git pull origin main
+NEW_SHA=$(git rev-parse HEAD)
+
+if [ "$OLD_SHA" = "$NEW_SHA" ]; then
+  echo "deploy: no new commits (HEAD $NEW_SHA) — rebuilding anyway"
+fi
+
+# Dependencies first — package.json can gain build-time deps (2026-07-16:
+# esbuild for the generated SDK bundles). npm install is a fast no-op when
+# the lockfile is unchanged, and a missing dep fails the build loudly later
+# anyway — installing unconditionally is strictly safer than detection.
+echo "deploy: syncing dependencies"
+npm install --no-audit --no-fund
+
+# Always sync the schema. Range-based detection (git diff OLD_SHA..NEW_SHA)
+# was defeated by the documented one-liner, which runs `git pull && deploy.sh`
+# — by the time this script captured OLD_SHA the pull had already happened, so
+# the range was empty and db:push was silently skipped (2026-07-10:
+# project_auth_configs missing after a green deploy). db:push is a ~1s no-op
+# when nothing changed and fails loudly on destructive changes, so
+# unconditional is strictly safer than detection.
+echo "deploy: syncing database schema (db:push is a no-op when unchanged)"
+npm run db:push
+
+# Build into a STAGING directory, never over the tree the live process is
+# serving from.
+#
+# Ordering alone was not enough. The old script already built fully before
+# restarting, yet `npm run build` still rewrote .next in place — for minutes —
+# while the previous process kept answering requests. Next resolves route
+# chunks lazily, so any request landing in that window could require a module
+# that had just been swapped out and got a 500. Measured 2026-07-20:
+#
+#   23:03:08  BUILD_ID written
+#   23:03:15  ⨯ Cannot find module …/healthz/route.js   ← live traffic, 500
+#   23:03:40  build finishes, pm2 restarts
+#
+# Building off to the side reduces the exposure to a single rename.
+STAGING=.next.staging
+LIVE=.next
+PREVIOUS=.next.previous
+
+echo "deploy: building into $STAGING (live tree untouched)"
+rm -rf "$STAGING" "$PREVIOUS"
+
+# Drop the LIVE tree's generated route types before building.
+#
+# tsconfig.json includes ".next/types/**/*.ts" — a hardcoded path to the live
+# dist dir, not to $STAGING. So a staging build still type-checks against
+# whatever routes the PREVIOUS build generated types for, and a deleted route
+# leaves behind a type file importing a page that no longer exists:
+#
+#   .next/types/app/mcp/page.ts:2
+#   Type error: Cannot find module '../../../../app/mcp/page.js'
+#
+# That failed a deploy on 2026-07-22 after /mcp was merged into /quickstart.
+# The build is correct and the source is fine; only the stale artifact is wrong.
+# These files are build-time only — the running server never reads them — so
+# removing them cannot affect the process currently serving traffic. Next
+# regenerates the whole directory during the build.
+rm -rf "$LIVE/types"
+
+NEXT_DIST_DIR="$STAGING" npm run build
+
+# Refuse to swap in a build that did not produce the entry point. Renaming a
+# broken build into place would take the site down with no way back except a
+# second full build.
+if [ ! -f "$STAGING/standalone/server.js" ]; then
+  echo "deploy: BUILD INCOMPLETE — $STAGING/standalone/server.js missing. Live tree left untouched."
+  exit 1
+fi
+
+# Swap. Two renames on the same filesystem: the gap where .next is absent is
+# sub-millisecond, versus minutes of a half-written tree.
+echo "deploy: swapping $STAGING into place"
+mv "$LIVE" "$PREVIOUS"
+mv "$STAGING" "$LIVE"
+
+pm2 restart backenly-nextjs backenly-runtime --update-env
+
+# Health check. Retry rather than judging on a single probe 4s after restart —
+# a cold Next process can still be compiling its first route then, and a false
+# failure here now triggers a rollback, so a flaky check is expensive.
+echo "deploy: waiting for health"
+HEALTHY=0
+for _ in $(seq 1 15); do
+  sleep 2
+
+  HTML=$(curl -sf --max-time 10 http://localhost:3000/ || true)
+  [ -n "$HTML" ] || continue
+
+  # A 200 on / is NOT evidence the site works. Next renders the HTML shell from
+  # the server even when every static asset is missing, so the old check passed
+  # a deploy whose every JS chunk and stylesheet 404'd in the browser
+  # (2026-07-21: postbuild wrote static into standalone/.next while the staging
+  # build had baked distDir=.next.staging into server.js). Pull a real asset URL
+  # out of the page we just served and confirm the runtime can actually return it.
+  ASSET=$(printf '%s' "$HTML" | grep -o '/_next/static/chunks/[^"]*\.js' | head -1 || true)
+  if [ -z "$ASSET" ]; then
+    echo "deploy: no chunk URL found in served HTML — cannot verify assets"
+    continue
+  fi
+
+  ASSET_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://localhost:3000$ASSET" || true)
+  if [ "$ASSET_CODE" = "200" ]; then
+    HEALTHY=1
+    break
+  fi
+  echo "deploy: page renders but asset $ASSET returned $ASSET_CODE"
+done
+
+if [ "$HEALTHY" = "1" ]; then
+  echo "deploy: OK — $NEW_SHA live"
+  rm -rf "$PREVIOUS"
+else
+  # The previous build is still on disk, so recovery is a rename rather than
+  # a rebuild — seconds instead of minutes with the site down the whole time.
+  echo "deploy: HEALTH CHECK FAILED — rolling back to previous build"
+  pm2 logs backenly-nextjs --lines 30 --nostream || true
+  if [ -d "$PREVIOUS" ]; then
+    rm -rf "$LIVE"
+    mv "$PREVIOUS" "$LIVE"
+    pm2 restart backenly-nextjs backenly-runtime --update-env
+    echo "deploy: rolled back to the previous build. $NEW_SHA is NOT live."
+  else
+    echo "deploy: no previous build to roll back to — site may be down."
+  fi
+  exit 1
+fi

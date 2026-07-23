@@ -1,0 +1,53 @@
+{
+  "name": "@backenly/mcp-server",
+  "version": "0.2.4",
+  "description": "Backenly MCP server — gives Claude Code, Cursor, Codex, Cline, and Claude Desktop direct access to your Backenly backend (tables, APIs, brain chat, runtime data).",
+  "license": "MIT",
+  "author": "Backenly",
+  "homepage": "https://backenly.com/quickstart",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/backenly/backenly.git",
+    "directory": "packages/mcp-server"
+  },
+  "bin": {
+    "mcp-server": "dist/cli.js"
+  },
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "backenly",
+    "backend",
+    "claude",
+    "claude-code",
+    "cursor",
+    "cline",
+    "ai",
+    "agentic"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "bugs": {
+    "url": "https://github.com/backenly/backenly/issues"
+  }
+}

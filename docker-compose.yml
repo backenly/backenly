@@ -1,0 +1,65 @@
+# Backenly API Tester - Docker Compose Configuration
+# 
+# Usage:
+#   docker-compose up -d          # Start in background
+#   docker-compose up --build     # Rebuild and start
+#   docker-compose logs -f worker # View logs
+#   docker-compose down           # Stop and remove
+
+version: '3.8'
+
+services:
+  worker:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    container_name: backenly-worker
+    ports:
+      - "${WORKER_PORT:-5173}:5173"
+    volumes:
+      # Mount workspace directory for dynamic routes
+      - ./workspace:/workspace:ro
+      # For development: mount source and enable hot-reload
+      # - ./worker/src:/app/src:ro
+    environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - WORKER_PORT=5173
+      - WORKSPACE_ROOT=/workspace
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5173/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 5s
+      retries: 3
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Optional: Development mode with hot-reload
+  worker-dev:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+      target: builder  # Use builder stage for dev
+    container_name: backenly-worker-dev
+    command: npm run dev
+    profiles:
+      - dev
+    ports:
+      - "${WORKER_PORT:-5173}:5173"
+    volumes:
+      - ./worker:/app
+      - ./workspace:/workspace
+      - /app/node_modules  # Prevent overwriting node_modules
+    environment:
+      - NODE_ENV=development
+      - WORKER_PORT=5173
+      - WORKSPACE_ROOT=/workspace
+    working_dir: /app
+
+networks:
+  default:
+    name: backenly-network

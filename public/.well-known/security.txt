@@ -1,0 +1,12 @@
+# Backenly Security Policy
+# https://www.rfc-editor.org/rfc/rfc9116
+
+Contact: mailto:security@backenly.com
+Expires: 2027-12-31T23:59:59.000Z
+Preferred-Languages: en
+Canonical: https://backenly.com/.well-known/security.txt
+Policy: https://backenly.com/security
+
+# We welcome responsible disclosure of security vulnerabilities.
+# Please email us before publicly disclosing — we aim to acknowledge within 48 hours.
+# Out of scope: rate limiting, social engineering of staff, physical attacks.

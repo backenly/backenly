@@ -1,0 +1,171 @@
+name: CI
+
+# Runs on every push and PR. Deliberately split into jobs that need NO database
+# (fast, always run) and jobs that need Postgres (service container), so a
+# missing database can never silently skip the checks that guard published
+# behaviour.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── No database CONNECTION required ─────────────────────────────────────────
+  # These guard the contracts that broke in the 2026-07-19 post-mortem: the
+  # published install command, the payment heuristic, intent conformance, the
+  # destructive-confirmation window, and sensor honesty.
+  #
+  # The assertions are all pure functions and issue no queries — but the modules
+  # they live in import the Prisma client at module load, and PrismaClient
+  # validates DATABASE_URL when it is CONSTRUCTED, not when it first queries.
+  # `.env` is gitignored, so without a placeholder the whole suite dies on
+  # import. The URL below is deliberately unroutable: if any test ever starts
+  # issuing real queries, it must fail loudly here rather than quietly acquiring
+  # a hidden database dependency.
+  static:
+    name: typecheck + unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DATABASE_URL: postgresql://ci:ci@127.0.0.1:1/unused
+      DIRECT_URL: postgresql://ci:ci@127.0.0.1:1/unused
+      # jest.setup.js refuses to run without TEST_DATABASE_URL — a deliberate
+      # "never run tests against production" guard. Satisfy it with the same
+      # unroutable placeholder rather than weakening the guard.
+      TEST_DATABASE_URL: postgresql://ci:ci@127.0.0.1:1/unused
+      JWT_SECRET: ci-not-a-real-secret
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # tsc needs the generated Prisma client to resolve @prisma/client types.
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Typecheck
+        run: npx tsc --noEmit -p tsconfig.json
+
+      # Under PostgREST the API IS the schema, so an ApiDefinition row decides
+      # nothing — it is a second, writable copy of a fact the PostgreSQL catalog
+      # already owns, and the only thing a second copy can do is disagree. It
+      # did: the APIs page advertised CRUD on `_email_verifications`, a table the
+      # runtime 404s. Every writer was deleted 2026-07-21; this keeps the next
+      # one from being added. Runs here as well as in `npm run build` so a
+      # violation is caught on push rather than at deploy time.
+      - name: No ApiDefinition write paths
+        run: npx tsx scripts/assert-no-apidefinition-writes.ts
+
+      # tests/unit is deliberately database-free so it runs on every push.
+      # docs-install-command.spec.ts is the one that fails when public/llms.txt
+      # and the MCP CLI parser drift apart — the defect that made the published
+      # install command unusable. It only protects anything if it runs here.
+      - name: Unit tests
+        run: npx jest tests/unit --ci --verbose
+
+  # ── MCP server package ──────────────────────────────────────────────────────
+  secrets:
+    name: no credentials in committed content
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci --ignore-scripts
+      # --tree only. The history scan needs full history and several minutes,
+      # and its findings cannot be fixed by a pull request anyway — they are
+      # resolved by publishing from a fresh repository. What CI can usefully
+      # prevent is a NEW credential being committed, which is exactly what the
+      # tree scan catches, on every push, before it reaches the history it
+      # would then be stuck in.
+      - name: preflight (working tree)
+        run: npx tsx scripts/preflight-oss.ts --tree
+
+  mcp-server:
+    name: mcp-server build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install + build
+        working-directory: packages/mcp-server
+        run: |
+          npm install
+          npm run build
+      - name: Verify the published entrypoint parses its documented flags
+        working-directory: packages/mcp-server
+        run: |
+          node -e "
+            const { parseServerFlags } = require('./dist/config.js');
+          " 2>/dev/null || node --input-type=module -e "
+            import { parseServerFlags } from './dist/config.js';
+            const parsed = parseServerFlags(['--project','p1','--key','k1']);
+            if (parsed.projectId !== 'p1' || parsed.apiKey !== 'k1') {
+              console.error('documented flags not honoured:', parsed);
+              process.exit(1);
+            }
+            console.log('install flags OK');
+          "
+
+  # ── Database-backed ─────────────────────────────────────────────────────────
+  # Probe fixtures construct a violating state directly and assert the probe
+  # FIRES. A probe that has never been observed producing a finding is presumed
+  # broken, not healthy — detectMissingRls sat dead in every environment and
+  # detectTablesWithNoApiDefinition was an unimplemented stub, both while the
+  # dashboard rendered green.
+  probes:
+    name: probe fixtures
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: backenly_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/backenly_test
+      DIRECT_URL: postgresql://postgres:postgres@localhost:5432/backenly_test
+      # Required by jest.setup.js. Here it is the real service container — the
+      # fixtures create and drop their own schema inside it.
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/backenly_test
+      JWT_SECRET: ci-not-a-real-secret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Push schema to the test database
+        run: npx prisma db push --accept-data-loss --skip-generate
+      - run: npx prisma generate
+      # --forceExit: the modules under test hold their own Prisma singletons,
+      # which this suite's afterAll cannot close, so Jest would hang on open
+      # handles after a fully successful run.
+      - name: Probe fixture suite
+        run: npx jest tests/probes --ci --runInBand --verbose --forceExit

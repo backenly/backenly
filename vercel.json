@@ -1,0 +1,45 @@
+{
+  "buildCommand": "npm run build",
+  "framework": "nextjs",
+  "installCommand": "npm install",
+  "version": 2,
+  "functions": {
+    "app/api/ai/chat/route.ts": {
+      "maxDuration": 120
+    }
+  },
+  "crons": [
+    {
+      "path": "/api/cron/run-ai-jobs",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/storage-cleanup",
+      "schedule": "0 2 * * *"
+    },
+    {
+      "path": "/api/cron/archive-cleanup",
+      "schedule": "0 3 * * 0"
+    },
+    {
+      "path": "/api/cron/serverless-warmup",
+      "schedule": "0 4 * * *"
+    },
+    {
+      "path": "/api/cron/cleanup-graphs",
+      "schedule": "0 5 * * *"
+    },
+    {
+      "path": "/api/cron/reset-monthly-usage",
+      "schedule": "0 0 1 * *"
+    },
+    {
+      "path": "/api/cron/process-grace-periods",
+      "schedule": "0 1 * * *"
+    },
+    {
+      "path": "/api/cron/snapshot-db-storage",
+      "schedule": "0 * * * *"
+    }
+  ]
+}

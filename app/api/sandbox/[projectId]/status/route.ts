@@ -1,0 +1,63 @@
+export const dynamic = 'force-dynamic'
+
+import { NextRequest, NextResponse } from 'next/server'
+import { verifyToken } from '@/lib/auth/jwt'
+import { prisma } from '@/lib/db'
+import { getSandboxStatus } from '@/lib/sandbox-runtime'
+
+/**
+ * GET /api/sandbox/[projectId]/status
+ * 
+ * Get sandbox runtime status for project
+ */
+export async function GET(
+  request: NextRequest,
+  { params }: { params: { projectId: string } }
+) {
+  try {
+    // Authenticate user session
+    const sessionToken = request.cookies.get('auth-token')?.value
+    if (!sessionToken) {
+      return NextResponse.json(
+        { error: 'Unauthorized - Please log in' },
+        { status: 401 }
+      )
+    }
+
+    const decoded = await verifyToken(sessionToken)
+    const userId = decoded.userId
+    const projectId = params.projectId
+
+    // Verify project ownership
+    const project = await prisma.project.findFirst({
+      where: {
+        id: projectId,
+        userId: userId,
+      },
+    })
+
+    if (!project) {
+      return NextResponse.json(
+        { error: 'Project not found or access denied' },
+        { status: 404 }
+      )
+    }
+
+    // Get sandbox status
+    const status = getSandboxStatus(projectId)
+
+    return NextResponse.json({
+      success: true,
+      ...status,
+    })
+  } catch (error: any) {
+    console.error('Sandbox status error:', error)
+    return NextResponse.json(
+      {
+        success: false,
+        error: error.message || 'Failed to get sandbox status',
+      },
+      { status: 500 }
+    )
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "name": "@backenly/cli",
+  "version": "0.1.1",
+  "description": "Backenly CLI — inspect, type, and verify your Backenly backend from the terminal or a coding agent.",
+  "type": "module",
+  "bin": {
+    "backenly": "bin/backenly.mjs"
+  },
+  "files": [
+    "bin",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "backenly",
+    "backend",
+    "cli",
+    "codegen",
+    "openapi",
+    "types",
+    "mcp",
+    "agent"
+  ],
+  "author": "Backenly",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/backenly/backenly.git",
+    "directory": "packages/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/backenly/backenly/issues"
+  }
+}

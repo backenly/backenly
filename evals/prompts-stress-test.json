@@ -1,0 +1,49 @@
+{
+  "categories": {
+    "SCHEMA_DEPENDENCY_HELL": {
+      "description": "Complex schema + API dependency chains that test auto-creation and foreign key inference",
+      "prompts": [
+        "Create an orders API but users should already exist and orders must reference them",
+        "I want products, and each product can belong to multiple categories",
+        "Generate an API to track subscriptions for users",
+        "Create a payments API for orders",
+        "I want to rate products from 1 to 5 stars",
+        "Build an API to store delivery addresses for each user",
+        "Create a wishlist feature for users and products",
+        "I want comments on products with replies",
+        "Generate APIs for invoices linked to orders and users",
+        "Create a cart system where users can add products"
+      ]
+    },
+    "AMBIGUOUS_HUMAN_REQUESTS": {
+      "description": "Vague, incomplete requests that require inference and context understanding",
+      "prompts": [
+        "Store when users last logged in",
+        "I need to know if an order is delivered or not",
+        "Track stock for products",
+        "I want to filter products by price and category",
+        "Make my APIs faster for large product lists",
+        "Some products are digital, some are physical",
+        "I want to soft-delete users",
+        "Orders should expire after 30 days if unpaid",
+        "Users should have roles like admin and customer",
+        "I want to archive old orders"
+      ]
+    },
+    "OPERATIONS_THAT_BREAK_WEAK_SYSTEMS": {
+      "description": "Destructive, edge-case, and schema-altering operations that expose orchestration gaps",
+      "prompts": [
+        "Rename price to unit_price in products",
+        "Add unique emails to users",
+        "Add index on orders.created_at",
+        "Change product price from integer to decimal",
+        "Generate APIs for whatever tables exist",
+        "Delete all orders older than 60 days",
+        "Insert some fake products for testing",
+        "Update all electronics products to have 10% discount",
+        "Show me all tables and what APIs exist",
+        "Rebuild my products API after schema changes"
+      ]
+    }
+  }
+}

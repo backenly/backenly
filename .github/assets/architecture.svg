@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 960 392" width="960" height="392" role="img" aria-label="Your coding agent drives Backenly over MCP: the Brain plans, executeAction governs the change, and it lands in PostgreSQL. A closed autonomy loop (MAPE-K) monitors the running backend and repairs it back through the Brain.">
+  <defs>
+    <style>
+      .title { font: 600 15px ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; fill: #ededf2; }
+      .sub   { font: 400 11px ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; fill: #8b8b99; }
+      .lbl   { font: 500 11px ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; fill: #8b8b99; letter-spacing: .04em; }
+      .acc   { fill: #a78bfa; }
+      @keyframes pulse { 0%,100% { opacity: .35 } 50% { opacity: 1 } }
+      .beat { animation: pulse 2.4s ease-in-out infinite; }
+    </style>
+    <path id="fwd" d="M212,128 L748,128" />
+    <path id="loop" d="M836,168 C836,250 836,300 772,300 L440,300 C392,300 362,272 362,170" />
+    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="2.4" result="b" />
+      <feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge>
+    </filter>
+    <marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L9,5 L0,10 z" fill="#6b6b7a" />
+    </marker>
+  </defs>
+
+  <!-- card -->
+  <rect x="1" y="1" width="958" height="390" rx="16" fill="#0c0d11" stroke="#ffffff" stroke-opacity="0.06" />
+
+  <!-- connectors (faint rails, drawn under the nodes) -->
+  <line x1="212" y1="128" x2="271" y2="128" stroke="#4b4b58" stroke-width="1.4" marker-end="url(#ah)" />
+  <line x1="449" y1="128" x2="508" y2="128" stroke="#4b4b58" stroke-width="1.4" marker-end="url(#ah)" />
+  <line x1="686" y1="128" x2="745" y2="128" stroke="#4b4b58" stroke-width="1.4" marker-end="url(#ah)" />
+  <use xlink:href="#loop" fill="none" stroke="#8b5cf6" stroke-opacity="0.22" stroke-width="1.4" marker-end="url(#ah)" />
+
+  <!-- flowing data dots along the pipeline (hidden where they pass under a node) -->
+  <circle r="3.1" class="acc" filter="url(#glow)">
+    <animateMotion dur="3.4s" repeatCount="indefinite" begin="0s"><mpath xlink:href="#fwd" /></animateMotion>
+  </circle>
+  <circle r="3.1" class="acc" filter="url(#glow)">
+    <animateMotion dur="3.4s" repeatCount="indefinite" begin="1.13s"><mpath xlink:href="#fwd" /></animateMotion>
+  </circle>
+  <circle r="3.1" class="acc" filter="url(#glow)">
+    <animateMotion dur="3.4s" repeatCount="indefinite" begin="2.26s"><mpath xlink:href="#fwd" /></animateMotion>
+  </circle>
+  <!-- autonomy loop dots (feedback from the database back into the Brain) -->
+  <circle r="3" fill="#8b5cf6" filter="url(#glow)">
+    <animateMotion dur="4.6s" repeatCount="indefinite" begin="0.4s"><mpath xlink:href="#loop" /></animateMotion>
+  </circle>
+  <circle r="3" fill="#8b5cf6" filter="url(#glow)">
+    <animateMotion dur="4.6s" repeatCount="indefinite" begin="2.7s"><mpath xlink:href="#loop" /></animateMotion>
+  </circle>
+
+  <!-- arrow label -->
+  <text x="242" y="114" text-anchor="middle" class="lbl acc">MCP</text>
+
+  <!-- nodes (opaque, drawn over the rails so dots read as flowing between stages) -->
+  <g>
+    <rect x="36"  y="88" width="176" height="80" rx="13" fill="#16171d" stroke="#ffffff" stroke-opacity="0.09" />
+    <text x="124" y="124" text-anchor="middle" class="title">Coding agent</text>
+    <text x="124" y="143" text-anchor="middle" class="sub">Claude Code · Cursor · Codex</text>
+  </g>
+  <g>
+    <rect x="273" y="88" width="176" height="80" rx="13" fill="#16171d" stroke="#ffffff" stroke-opacity="0.09" />
+    <text x="361" y="124" text-anchor="middle" class="title">Brain</text>
+    <text x="361" y="143" text-anchor="middle" class="sub">plans the change</text>
+  </g>
+  <g>
+    <rect x="510" y="88" width="176" height="80" rx="13" fill="#16171d" stroke="#8b5cf6" stroke-opacity="0.30" />
+    <text x="598" y="124" text-anchor="middle" class="title">executeAction</text>
+    <text x="598" y="143" text-anchor="middle" class="sub">governs · verifies</text>
+  </g>
+  <g>
+    <rect x="748" y="88" width="176" height="80" rx="13" fill="#16171d" stroke="#ffffff" stroke-opacity="0.09" />
+    <text x="836" y="124" text-anchor="middle" class="title">PostgreSQL</text>
+    <text x="836" y="143" text-anchor="middle" class="sub">your data, exportable</text>
+  </g>
+
+  <!-- autonomy loop caption: label above the line, MAPE-K stages below it -->
+  <circle cx="516" cy="286" r="3.2" class="acc beat" />
+  <text x="600" y="290" text-anchor="middle" class="lbl acc">Autonomy loop · MAPE-K</text>
+  <text x="606" y="346" text-anchor="middle" class="sub">monitor · analyze · plan · execute · knowledge</text>
+</svg>

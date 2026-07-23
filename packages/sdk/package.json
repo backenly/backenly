@@ -1,0 +1,34 @@
+{
+  "name": "@backenly/sdk",
+  "version": "0.1.0",
+  "description": "Official Backenly SDK for JavaScript",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "keywords": [
+    "backenly",
+    "backend",
+    "sdk",
+    "api"
+  ],
+  "author": "Backenly",
+  "license": "MIT",
+  "dependencies": {},
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/backenly/backenly.git",
+    "directory": "packages/sdk"
+  },
+  "bugs": {
+    "url": "https://github.com/backenly/backenly/issues"
+  }
+}

@@ -1,0 +1,2924 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model User {
+  id                      String                   @id @default(uuid())
+  email                   String                   @unique
+  name                    String?
+  password                String?
+  emailVerified           Boolean                  @default(false)
+  twoFactorEnabled        Boolean                  @default(false)
+  twoFactorSecret         String?
+  provider                String                   @default("email")
+  providerId              String?
+  lastLogin               DateTime?
+  lastActiveAt            DateTime?
+  roleId                  String?
+  createdAt               DateTime                 @default(now())
+  updatedAt               DateTime                 @updatedAt
+  tokenVersion            Int                      @default(0)
+  deletedAt               DateTime?
+  suspendedAt             DateTime? // Set by admin to block all auth for this user
+  suspensionReason        String?
+  tier                    String                   @default("free")
+  // Account lockout fields (#69)
+  failedLoginAttempts     Int                      @default(0)
+  lockedUntil             DateTime?
+  // ── Assistant-credit bonus balance (referral / promo grants) ──────────────
+  // Persistent, spendable balance of assistant credits granted outside the
+  // monthly plan allowance. The effective monthly cap is
+  // `plan.monthlyAiCredits + bonusCredits`; consumption is reconciled at month
+  // rollover (see lib/billing/credit-ledger.ts). Never silently re-ratioed.
+  bonusCredits            Int                      @default(0)
+  // Last YYYY-MM whose bonus consumption has been reconciled into bonusCredits.
+  // Guards the idempotent month-rollover reconciliation (no cron dependency).
+  bonusReconciledThrough  String?
+  // Referral attribution — who referred this user (set at signup from ?ref=).
+  referredById            String?
+  apiKeys                 ApiKey[]
+  apiRequestLogs          ApiRequestLog[]
+  auditLogs               AuditLog[]
+  acknowledgedIncidents   Incident[]               @relation("IncidentAcknowledger")
+  paddleSubscriptions     PaddleSubscription[]
+  previewShares           PreviewShare[]
+  projects                Project[]
+  sessions                Session[]
+  subscriptions           Subscription[]
+  userAiUsage             UserAiUsage[]
+  role                    Role?                    @relation(fields: [roleId], references: [id])
+  workspaces              Workspace[]
+  platformNotifications   PlatformNotification[]
+  notificationPreferences NotificationPreference[]
+  twoFactorBackupCodes    TwoFactorBackupCode[]
+  supportTickets          SupportTicket[]
+  featureRequests         FeatureRequest[]
+  // ── Referral + credit-ledger relations ───────────────────────────────────
+  referredBy              User?                    @relation("UserReferrals", fields: [referredById], references: [id], onDelete: SetNull)
+  referrals               User[]                   @relation("UserReferrals")
+  referralCode            ReferralCode?
+  creditLedger            CreditLedgerEntry[]
+  referralGrantsMade      ReferralGrant[]          @relation("ReferralReferrer")
+  referralGrantReceived   ReferralGrant?           @relation("ReferralReferee")
+  // ── Organization relations (Phase 6) ──────────────────────────────────────
+  ownedOrganizations      Organization[]           @relation("OrgOwner")
+  orgMemberships          OrganizationMember[]
+  projectMemberships      ProjectMember[]
+
+  @@index([email])
+  @@index([provider, providerId])
+  @@index([tokenVersion])
+  @@index([deletedAt])
+  @@index([suspendedAt])
+  @@index([lockedUntil])
+  @@index([lastActiveAt])
+  @@index([referredById])
+  @@map("users")
+}
+
+model Project {
+  id                      String                 @id @default(uuid())
+  name                    String
+  description             String?
+  userId                  String?
+  createdAt               DateTime               @default(now())
+  updatedAt               DateTime               @updatedAt
+  environment             String                 @default("development")
+  apiUrlDev               String?
+  apiUrlStaging           String?
+  apiUrlProd              String?
+  apiRequests             Int                    @default(0)
+  avgLatency              Int                    @default(0)
+  errorCount              Int                    @default(0)
+  storageUsed             BigInt                 @default(0)
+  rowCount                Int                    @default(0)
+  activeUsers             Int                    @default(0)
+  lastMetricsUpdate       DateTime?
+  lastObservedAt          DateTime? // Stamped at the end of every observer scan, clean or not — HealthFinding.detectedAt only moves when something is found, so it can't serve as a "last checked" clock
+  maxFileSize             BigInt                 @default(10485760)
+  maxFilesPerBucket       Int                    @default(1000)
+  publicEnabled           Boolean                @default(false)
+  slug                    String?                @unique
+  storageLimit            BigInt                 @default(1073741824)
+  customDomain            String?                @unique
+  domainVerificationToken String?
+  domainVerified          Boolean                @default(false)
+  subdomain               String?                @unique
+  workerContainerId       String?
+  workerPort              Int?
+  jwtSecret               String?
+  anonKey                 String? // Public anon key (plaintext) — safe to embed in frontend code
+  authManifest            Json?
+  architecturalMemory     String?
+  projectBrain            String? // JSON: ProjectBrainData — product vision, preferences, business rules
+  deployedAt              DateTime?
+  deploymentError         String?
+  expiresAt               DateTime? // null = never expires (production). Set for sandbox projects.
+  deletedAt               DateTime? // Soft delete — set instead of removing the row
+  lockedDownAt            DateTime? // Founder-triggered emergency lockdown — blocks public API + freezes the project. See lib/platform/controls.ts.
+  lockedDownReason        String? // Human-readable note for why the project was locked.
+  isDeployed              Boolean                @default(false)
+  isBackendGenerated      Boolean                @default(false)
+  isFrontendConnected     Boolean                @default(false)
+  hasExternalUsers        Boolean                @default(false)
+  activeIntegrations      Json?
+  projectStatus           ProjectStatus          @default(PRIVATE)
+  // Autonomy risk dial — owner-controlled. AGGRESSIVE (Autopilot) by default:
+  // self-healing IS the product (founder decision 2026-07-18) — the loop
+  // auto-applies the safe Tier-0/1 band out of the box and the owner can dial
+  // DOWN any time. The Tier-2+ approval floor (auth/destructive/irreversible)
+  // is unaffected by this dial, and every read is still clamped to the plan
+  // cap via getProjectAutonomyLevel. See lib/autonomy/autonomy-level.ts.
+  autonomyLevel           AutonomyLevel          @default(AGGRESSIVE)
+  publicUrl               String?
+  activeGraphId           String?
+  activeGraph             BackendGraph?          @relation("ActiveGraph", fields: [activeGraphId], references: [id])
+  deployments             Deployment[]
+  deploymentAudits        DeploymentAudit[]
+  deployConfirmations     DeployConfirmation[]
+  aiConfiguration         AiConfiguration?
+  aiUsage                 AiUsage[]
+  anomalies               Anomaly[]
+  apiKeys                 ApiKey[]
+  apiRequestLogs          ApiRequestLog[]
+  auditLogs               AuditLog[]
+  graphs                  BackendGraph[]         @relation("ProjectGraphs")
+  blockedAttacks          BlockedAttack[]
+  databaseIssues          DatabaseIssue[]
+  delegatedConnections    DelegatedConnection[]
+  incidents               Incident[]
+  intentLogs              IntentLog[]
+  schemaIntents           SchemaIntent[]
+  logs                    Log[]
+  metrics                 Metric[]
+  previewShares           PreviewShare[]
+  metadata                ProjectMetadata?
+  user                    User?                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  providerCredentials     ProviderCredential[]
+  roles                   Role[]
+  securityIssues          SecurityIssue[]
+  securityScans           SecurityScan[]
+  storageBuckets          StorageBucket[]
+  storageFiles            StorageFile[]
+  multipartUploads        MultipartUpload[]
+  tables                  Table[]
+  workspaceOAuthConfigs   WorkspaceOAuthConfig[]
+  workspaces              Workspace[]
+  webhooks                Webhook[]
+  customDomains           CustomDomain[]
+  conversationMessages    ConversationMessage[]
+  connectedApps           ConnectedApp[]
+  envVars                 ProjectEnvVar[]
+
+  integrationKeys        ProjectIntegrationKey[]
+  appTriggers            AppTrigger[]
+  permissionPolicies     PermissionPolicy[]
+  aiFunctions            AiFunction[]
+  projectUsage           ProjectUsage[]
+  projectPreferences     ProjectPreference[]
+  rejectionPatterns      ProjectRejectionPattern[]
+  executionCancellations ExecutionCancellation[]
+  executionTimeline      ExecutionTimelineEntry[]
+  correctionEvents       CorrectionEvent[]
+  workspaceBackups       WorkspaceBackup[]
+  healthFindings         HealthFinding[]
+  agentApprovalRequests  AgentApprovalRequest[]
+  shareTokens            ShareToken[]
+  workspaceBranches      WorkspaceBranch[]
+  autonomousActions      AutonomousAction[]
+  chatRuns               ChatRun[]
+  backendEvents          BackendEvent[]
+  changeReceipts         ChangeReceipt[]
+  mauRecords             ProjectActiveUser[]
+  authConfig             ProjectAuthConfig?
+  // Owning organization (Phase 6). Nullable + backfilled lazily; when null the
+  // access check falls back to owner-only, so this is fully additive.
+  organizationId         String?
+  organization           Organization?             @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  projectMembers         ProjectMember[]
+
+  @@index([userId])
+  @@index([updatedAt])
+  @@index([expiresAt])
+  @@index([deletedAt])
+  @@index([organizationId])
+  @@map("projects")
+}
+
+model ProjectIntegrationKey {
+  id            String   @id @default(uuid())
+  projectId     String
+  integrationId String
+  encryptedKey  String
+  maskedKey     String
+  connectedAt   DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  // Did the PROVIDER confirm this key works?
+  //
+  // "Stored" and "working" are different facts, and conflating them is how a
+  // fabricated Stripe key read as `connected` until the first real customer
+  // payment. verified | rejected | unverifiable | unreachable | unchecked —
+  // see lib/integrations/key-verification.ts. `unverifiable` is honest, not a
+  // failure: some credentials (webhook signing secrets, write-only ingest keys)
+  // have no endpoint that can confirm them.
+  verification       String   @default("unchecked")
+  verificationDetail String?
+  verifiedAt         DateTime?
+
+  project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, integrationId])
+  @@index([projectId])
+  @@map("project_integration_keys")
+}
+
+model DelegatedConnection {
+  id          String               @id @default(uuid())
+  projectId   String
+  provider    String
+  tokenHash   String               @unique
+  permissions Json
+  metadata    Json?
+  expiresAt   DateTime
+  createdAt   DateTime             @default(now())
+  revokedAt   DateTime?
+  lastUsedAt  DateTime?
+  usageCount  Int                  @default(0)
+  ipAddress   String?
+  userAgent   String?
+  project     Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  auditLogs   DelegationAuditLog[]
+
+  @@index([projectId])
+  @@index([tokenHash])
+  @@index([provider])
+  @@index([expiresAt])
+  @@index([revokedAt])
+  @@map("delegated_connections")
+}
+
+model DelegationAuditLog {
+  id           String              @id @default(uuid())
+  connectionId String
+  action       String
+  endpoint     String?
+  ipAddress    String?
+  userAgent    String?
+  metadata     Json?
+  createdAt    DateTime            @default(now())
+  connection   DelegatedConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@index([connectionId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("delegation_audit_logs")
+}
+
+model ProjectMetadata {
+  id                String   @id @default(uuid())
+  projectId         String   @unique
+  originalPrompt    String
+  entities          Json
+  relationships     Json
+  behaviors         Json
+  security          Json
+  tablePlans        Json
+  apiPlans          Json
+  tablesCreated     Boolean  @default(false)
+  apisCreated       Boolean  @default(false)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  backendStateGraph Json?
+  project           Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@map("project_metadata")
+}
+
+model IntentLog {
+  id                  String    @id @default(uuid())
+  projectId           String
+  executionId         String
+  intent              String
+  canonicalIntent     Json
+  timestamp           DateTime  @default(now())
+  success             Boolean
+  changes             Json?
+  rollbackData        Json?
+  rollbackExecutionId String?
+  rolledBack          Boolean   @default(false)
+  rolledBackAt        DateTime?
+  liveMutation        Boolean   @default(false)
+  liveMutationStatus  String?
+  project             Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([timestamp])
+  @@index([executionId])
+  @@index([rolledBack])
+  @@index([liveMutation])
+  @@map("intent_logs")
+}
+
+/// Intent ledger — the shape a caller ASKED for, per column.
+///
+/// The platform records what it BUILT (the PostgreSQL catalog) but never
+/// recorded what was REQUESTED. With nothing to compare against, a column
+/// created as the wrong type is indistinguishable from a column that was
+/// supposed to be that type, so no probe can flag it.
+///
+/// That gap is why `{ name: "start_date", type: "timestamp" }` sitting in the
+/// database as INTEGER survived from May to July while the autonomy loop ran
+/// continuously: the loop checks infrastructure invariants (missing RLS,
+/// missing FKs, missing indexes) and had no notion of intent conformance. A
+/// senior engineer notices "you asked for a date and got an integer" instantly.
+///
+/// Rows are written on the request path, BEFORE execution, so a mismatch is
+/// always attributable — and deliberately never overwritten from the catalog,
+/// which would make the ledger agree with reality by construction and destroy
+/// its only purpose.
+model SchemaIntent {
+  id         String @id @default(uuid())
+  projectId  String
+  tableName  String
+  columnName String
+
+  /// Type as the caller declared it, e.g. "timestamp" — not the type created.
+  requestedType     String
+  requestedNullable Boolean?
+  requestedUnique   Boolean?
+  /// Table the caller asked this column to reference.
+  requestedFkTo     String?
+
+  /// Which surface declared it: create_table | add_column.
+  source    String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, tableName, columnName])
+  @@index([projectId])
+  @@index([projectId, tableName])
+  @@map("schema_intents")
+}
+
+model BackendEvent {
+  id          String         @id @default(uuid())
+  projectId   String         @map("project_id")
+  eventType   String         @map("event_type")
+  actorType   String         @map("actor_type")
+  actorId     String?        @map("actor_id")
+  summary     String
+  beforeState Json?          @map("before_state")
+  afterState  Json?          @map("after_state")
+  reason      String?
+  riskLevel   String         @default("low") @map("risk_level")
+  status      String         @default("applied")
+  receiptId   String?        @map("receipt_id")
+  createdAt   DateTime       @default(now()) @map("created_at")
+  project     Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  receipt     ChangeReceipt? @relation(fields: [receiptId], references: [id], onDelete: SetNull)
+
+  @@index([projectId, createdAt])
+  @@index([projectId, eventType])
+  @@index([projectId, status])
+  @@index([eventType])
+  @@index([riskLevel])
+  @@index([receiptId])
+  @@map("backend_events")
+}
+
+// Phase 6 — anonymized cross-project pattern learning. Deliberately has NO
+// projectId/userId column: the aggregation itself (many projects collapsing
+// into one counter row per project_type + pattern_type + resource_type) is
+// the anonymization mechanism. Never write row data, free-text descriptions,
+// or tenant identifiers here — only structural naming choices (table/column/
+// API/auth-rule shapes) and outcome counts. See lib/patterns/cross-project-learning.ts.
+model BackendPattern {
+  id             String   @id @default(uuid())
+  projectType    String   @map("project_type") // social-media | marketplace | saas | chat-app | blog | project-mgmt | general
+  patternType    String   @map("pattern_type") // schema | auth | api | rollback | health_failure
+  resourceType   String   @map("resource_type") // table | column | api_route | auth_rule | storage_bucket | rollback
+  patternSummary String   @map("pattern_summary")
+  frequency      Int      @default(0)
+  failureCount   Int      @default(0)
+  successCount   Int      @default(0)
+  riskScore      String   @default("low") @map("risk_score")
+  lastSeenAt     DateTime @default(now()) @map("last_seen_at")
+
+  @@unique([projectType, patternType, resourceType])
+  @@index([projectType])
+  @@index([patternType])
+  @@index([riskScore])
+  @@map("backend_patterns")
+}
+
+model ChangeReceipt {
+  id                String         @id @default(uuid())
+  projectId         String         @map("project_id")
+  eventIds          String[]       @default([]) @map("event_ids")
+  title             String
+  summary           String
+  resourcesChanged  Json?          @map("resources_changed")
+  riskLevel         String         @default("low") @map("risk_level")
+  rollbackAvailable Boolean        @default(false) @map("rollback_available")
+  rollbackId        String?        @map("rollback_id")
+  createdAt         DateTime       @default(now()) @map("created_at")
+  project           Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  events            BackendEvent[]
+
+  @@index([projectId, createdAt])
+  @@index([projectId, riskLevel])
+  @@index([rollbackAvailable])
+  @@map("change_receipts")
+}
+
+model BackendGraph {
+  id             String         @id @default(uuid())
+  projectId      String
+  graphData      Json
+  createdAt      DateTime       @default(now())
+  intentId       String?
+  sequenceNumber Int            @default(0)
+  parentId       String? // For version lineage tracking
+  project        Project        @relation("ProjectGraphs", fields: [projectId], references: [id], onDelete: Cascade)
+  activeProjects Project[]      @relation("ActiveGraph")
+  parent         BackendGraph?  @relation("VersionLineage", fields: [parentId], references: [id])
+  children       BackendGraph[] @relation("VersionLineage")
+
+  // CRITICAL: Unique version constraint - prevents duplicate sequence numbers
+  @@unique([projectId, sequenceNumber])
+  // CRITICAL: Version lineage constraint - ensures parent exists
+  @@index([parentId])
+  @@index([projectId])
+  @@index([createdAt])
+  @@index([intentId])
+  @@map("backend_graphs")
+}
+
+model ProjectSuggestion {
+  id              String   @id @default(uuid())
+  projectId       String
+  graphId         String
+  type            String
+  severity        String
+  message         String
+  rationale       String
+  suggestedPrompt String?
+  createdAt       DateTime @default(now())
+
+  @@index([projectId])
+  @@index([graphId])
+  @@map("project_suggestions")
+}
+
+model Session {
+  id                    String    @id @default(uuid())
+  userId                String
+  token                 String    @unique
+  expiresAt             DateTime
+  createdAt             DateTime  @default(now())
+  projectId             String?
+  // Refresh token fields (#67)
+  refreshToken          String?   @unique
+  refreshTokenExpiresAt DateTime?
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([projectId])
+  @@index([expiresAt])
+  @@index([refreshToken])
+  @@map("sessions")
+}
+
+// 2FA backup codes (#71)
+model TwoFactorBackupCode {
+  id        String    @id @default(uuid())
+  userId    String
+  codeHash  String // bcrypt hash of the backup code
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("two_factor_backup_codes")
+}
+
+model Workspace {
+  id                    String          @id @default(uuid())
+  name                  String
+  description           String?
+  projectId             String
+  userId                String?
+  createdAt             DateTime        @default(now())
+  updatedAt             DateTime        @updatedAt
+  environment           String          @default("development")
+  apiBaseUrl            String?
+  status                String          @default("active")
+  totalFiles            Int             @default(0)
+  totalRoutes           Int             @default(0)
+  totalFunctions        Int             @default(0)
+  lastActivity          DateTime?
+  databaseProvisioned   Boolean         @default(false)
+  databaseProvisionedAt DateTime?
+  mongodbDatabase       String?
+  postgresSchema        String?
+  deployTarget          String          @default("node")
+  language              String          @default("typescript")
+  runtime               String          @default("express")
+  runtimeLocked         Boolean         @default(true)
+  files                 WorkspaceFile[]
+  project               Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user                  User?           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId])
+  @@index([userId])
+  @@index([runtime])
+  @@map("workspaces")
+}
+
+model WorkspaceFile {
+  id          String     @id @default(uuid())
+  projectId   String
+  path        String
+  content     String
+  description String?
+  language    String     @default("typescript")
+  category    String     @default("code")
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  workspaceId String?
+  workspace   Workspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, path])
+  @@index([projectId])
+  @@index([category])
+  @@map("workspace_files")
+}
+
+model Table {
+  id            String         @id @default(uuid())
+  name          String
+  schema        String         @default("public")
+  description   String?
+  projectId     String
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  apiDefinition ApiDefinition?
+  project       Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([name, schema, projectId])
+  @@map("tables")
+}
+
+model DatabaseIssue {
+  id               String    @id @default(uuid())
+  projectId        String
+  title            String
+  description      String
+  severity         String
+  database         String
+  category         String
+  impact           String?
+  suggestedFix     String
+  rawQuery         String?
+  affectedTables   String[]
+  estimatedImpact  String?
+  detailedAnalysis String?
+  whyItHappened    String?
+  sqlFix           String?
+  migrationSteps   String?
+  status           String    @default("open")
+  resolvedAt       DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  project          Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([severity])
+  @@index([status])
+  @@index([database])
+  @@index([projectId, status])
+  @@index([projectId, severity])
+  @@map("database_issues")
+}
+
+model AuthProvider {
+  id            String    @id @default(uuid())
+  name          String    @unique
+  enabled       Boolean   @default(false)
+  configured    Boolean   @default(false)
+  type          String
+  clientId      String?
+  clientSecret  String?
+  redirectUri   String?
+  scopes        String[]
+  icon          String?
+  warning       String?
+  codeGenerated Boolean   @default(false)
+  lastModified  DateTime?
+  modifiedBy    String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@map("auth_providers")
+}
+
+model AuthPolicy {
+  id            String   @id @default(uuid())
+  name          String   @unique
+  description   String
+  enabled       Boolean  @default(false)
+  warning       String?
+  codeGenerated Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@map("auth_policies")
+}
+
+model WorkspaceOAuthConfig {
+  id           String    @id @default(uuid())
+  projectId    String
+  provider     String
+  clientId     String
+  clientSecret String
+  redirectUri  String?
+  scopes       String[]  @default([])
+  enabled      Boolean   @default(true)
+  generatedAt  DateTime?
+  configuredAt DateTime  @default(now())
+  lastUsed     DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  project      Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, provider])
+  @@index([projectId])
+  @@index([provider])
+  @@map("workspace_oauth_configs")
+}
+
+model ApiKey {
+  id              String        @id @default(uuid())
+  name            String
+  keyPrefix       String
+  role            String        @default("client")
+  permissions     String[]
+  userId          String
+  lastUsed        DateTime?
+  expiresAt       DateTime?
+  rateLimit       Int           @default(1000)
+  rateLimitWindow Int           @default(3600)
+  requestCount    Int           @default(0)
+  resetAt         DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  capabilities    String[]
+  keyType         String        @default("public")
+  projectId       String?
+  serviceRole     Boolean       @default(false)
+  keyHash         String        @unique
+  key             String?
+  // Scope decides which surfaces this key can call:
+  //   "runtime" (default) — /api/v1/{projectId}/* runtime data API (SDK clients).
+  //                         Cannot reach brain tools or any /api/mcp/* surface.
+  //   "mcp"               — issued from the MCP setup page. Can call /api/mcp/*
+  //                         (brain chat + direct tool dispatch + runtime data).
+  //                         These can create/alter/drop tables — never embed
+  //                         them in a public client.
+  // A leaked SDK key cannot drop tables; a leaked MCP key can. Splitting the
+  // scope keeps that blast radius explicit and auditable.
+  scope           String        @default("runtime")
+  // Free-text label for MCP keys, e.g. "Claude Code laptop" / "Cursor work mac".
+  mcpClientLabel  String?
+  usageLogs       ApiKeyUsage[]
+  project         Project?      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([projectId])
+  @@index([keyPrefix])
+  @@index([keyType])
+  @@index([resetAt])
+  @@index([keyHash])
+  @@index([scope])
+  @@map("api_keys")
+}
+
+model ApiKeyUsage {
+  id           String   @id @default(uuid())
+  apiKeyId     String
+  endpoint     String
+  method       String
+  statusCode   Int
+  responseTime Int?
+  timestamp    DateTime @default(now())
+  metadata     Json?
+  apiKey       ApiKey   @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+
+  @@index([apiKeyId])
+  @@index([timestamp])
+  @@index([endpoint])
+  @@map("api_key_usage")
+}
+
+model Role {
+  id          String   @id @default(uuid())
+  name        String
+  description String?
+  permissions String[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  projectId   String?
+  project     Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  users       User[]
+
+  @@unique([name, projectId])
+  @@index([projectId])
+  @@map("roles")
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  action    String
+  type      String
+  timestamp DateTime @default(now())
+  userId    String?
+  userEmail String?
+  details   String?
+  metadata  Json?
+  projectId String?
+  project   Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user      User?    @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([projectId])
+  @@index([timestamp])
+  @@index([type])
+  @@map("audit_logs")
+}
+
+model Metric {
+  id        String   @id @default(uuid())
+  type      String
+  source    String
+  sourceId  String?
+  value     Float
+  timestamp DateTime @default(now())
+  metadata  Json?
+  projectId String
+  createdAt DateTime @default(now())
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([type])
+  @@index([source])
+  @@index([timestamp])
+  @@index([projectId])
+  @@map("metrics")
+}
+
+model Anomaly {
+  id            String    @id @default(uuid())
+  type          String
+  metric        String
+  value         Float
+  expectedValue Float
+  deviation     Float
+  timestamp     DateTime  @default(now())
+  explanation   String?
+  status        String    @default("detected")
+  projectId     String
+  createdAt     DateTime  @default(now())
+  resolvedAt    DateTime?
+  project       Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([type])
+  @@index([status])
+  @@index([timestamp])
+  @@index([projectId])
+  @@map("anomalies")
+}
+
+model Incident {
+  id                 String    @id @default(uuid())
+  title              String
+  description        String
+  severity           String
+  status             String    @default("active")
+  affectedServices   String[]
+  startedAt          DateTime  @default(now())
+  resolvedAt         DateTime?
+  acknowledgedAt     DateTime?
+  acknowledgedBy     String?
+  projectId          String
+  metadata           Json?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  acknowledgedByUser User?     @relation("IncidentAcknowledger", fields: [acknowledgedBy], references: [id])
+  project            Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@index([severity])
+  @@index([startedAt])
+  @@index([projectId])
+  @@map("incidents")
+}
+
+model Log {
+  id         String   @id @default(uuid())
+  type       String
+  severity   String
+  message    String
+  service    String?
+  endpoint   String?
+  method     String?
+  statusCode Int?
+  userId     String?
+  projectId  String?
+  metadata   Json?
+  stackTrace String?
+  duration   Int?
+  timestamp  DateTime @default(now())
+  createdAt  DateTime @default(now())
+  project    Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([type])
+  @@index([severity])
+  @@index([service])
+  @@index([timestamp])
+  @@index([projectId])
+  @@index([userId])
+  @@index([endpoint])
+  @@map("logs")
+}
+
+model SecurityIssue {
+  id           String    @id @default(uuid())
+  severity     String
+  title        String
+  description  String
+  category     String
+  detectedAt   DateTime  @default(now())
+  fixed        Boolean   @default(false)
+  fixedAt      DateTime?
+  fixedBy      String?
+  projectId    String
+  metadata     Json?
+  aiFixPreview Json?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  project      Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([severity])
+  @@index([category])
+  @@index([fixed])
+  @@index([projectId])
+  @@index([detectedAt])
+  @@map("security_issues")
+}
+
+model BlockedAttack {
+  id          String   @id @default(uuid())
+  attackType  String
+  pattern     String
+  endpoint    String?
+  method      String?
+  ipAddress   String?
+  userAgent   String?
+  requestBody String?
+  blockedAt   DateTime @default(now())
+  projectId   String
+  userId      String?
+  metadata    Json?
+  createdAt   DateTime @default(now())
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([attackType])
+  @@index([endpoint])
+  @@index([blockedAt])
+  @@index([projectId])
+  @@index([ipAddress])
+  @@map("blocked_attacks")
+}
+
+model SecurityScan {
+  id          String    @id @default(uuid())
+  scanType    String
+  status      String
+  startedAt   DateTime  @default(now())
+  completedAt DateTime?
+  issuesFound Int       @default(0)
+  score       Int?
+  projectId   String
+  metadata    Json?
+  error       String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  project     Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([scanType])
+  @@index([status])
+  @@index([startedAt])
+  @@index([projectId])
+  @@map("security_scans")
+}
+
+model StorageBucket {
+  id                String            @id @default(uuid())
+  name              String
+  projectId         String
+  isPublic          Boolean           @default(false)
+  // Per-bucket access control (#74): "public_read" | "private" | "owner_only" | "cdn_cacheable"
+  accessPolicy      String            @default("private")
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+  allowedExtensions String[]          @default([".jpg", ".jpeg", ".png", ".gif", ".webp", ".pdf", ".txt", ".csv"])
+  allowedMimeTypes  String[]          @default(["image/jpeg", "image/png", "image/gif", "image/webp", "application/pdf", "text/plain", "text/csv"])
+  blockExecutables  Boolean           @default(true)
+  maxFileSizeBytes  BigInt            @default(10485760)
+  overwriteStrategy String            @default("auto_rename")
+  project           Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  files             StorageFile[]
+  multipartUploads  MultipartUpload[]
+
+  @@unique([name, projectId])
+  @@index([projectId])
+  @@map("storage_buckets")
+}
+
+model StorageFile {
+  id               String        @id @default(uuid())
+  bucketId         String
+  name             String
+  path             String
+  size             BigInt        @default(0)
+  mimeType         String?
+  isPublic         Boolean       @default(false)
+  uploadedBy       String?
+  projectId        String
+  metadata         Json?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+  deletedAt        DateTime?
+  deletedBy        String?
+  originalName     String        @default("")
+  version          Int           @default(1)
+  // File processing fields (#77): "pending" | "processing" | "complete" | "failed" | null
+  processingStatus String?
+  processingResult Json? // {thumbnailUrl, width, height, duration, codec, waveform, etc.}
+  bucket           StorageBucket @relation(fields: [bucketId], references: [id], onDelete: Cascade)
+  project          Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([bucketId])
+  @@index([projectId])
+  @@index([name])
+  @@index([createdAt])
+  @@index([deletedAt])
+  @@index([processingStatus])
+  @@map("storage_files")
+}
+
+// Multipart / chunked upload tracking (#73)
+model MultipartUpload {
+  id        String        @id @default(uuid())
+  projectId String
+  bucketId  String
+  fileName  String
+  mimeType  String?
+  uploadId  String        @unique // S3 multipart upload ID or local UUID
+  parts     Json          @default("[]") // [{partNumber: Int, etag: String, size: Int}]
+  status    String        @default("pending") // "pending" | "completed" | "aborted"
+  totalSize BigInt        @default(0)
+  chunkSize Int           @default(10485760) // 10MB default
+  createdAt DateTime      @default(now())
+  expiresAt DateTime // multipart uploads expire after 24h if not completed
+  bucket    StorageBucket @relation(fields: [bucketId], references: [id], onDelete: Cascade)
+  project   Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([bucketId])
+  @@index([uploadId])
+  @@index([status])
+  @@index([expiresAt])
+  @@map("multipart_uploads")
+}
+
+model AiConfiguration {
+  id           String   @id @default(uuid())
+  projectId    String   @unique
+  model        String   @default("gpt-4")
+  temperature  Float    @default(0.7)
+  maxTokens    Int      @default(2000)
+  systemPrompt String?
+  config       Json?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  project      Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@map("ai_configurations")
+}
+
+model AiUsage {
+  id               String   @id @default(uuid())
+  projectId        String
+  model            String
+  promptTokens     Int      @default(0)
+  completionTokens Int      @default(0)
+  totalTokens      Int      @default(0)
+  cost             Float?
+  endpoint         String?
+  metadata         Json?
+  createdAt        DateTime @default(now())
+  project          Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([createdAt])
+  @@index([model])
+  @@map("ai_usage")
+}
+
+// Billing-specific usage tracking (user-scoped, monthly)
+// `date` is stored as YYYY-MM for monthly reset
+model UserAiUsage {
+  id                    String   @id @default(uuid())
+  userId                String
+  date                  String // YYYY-MM for monthly tracking
+  intentCount           Int      @default(0) // AI build actions this month (committed)
+  reservedCount         Int      @default(0) // AI build actions reserved but not yet committed
+  tokenCount            Int      @default(0)
+  apiRequestCount       BigInt   @default(0) // API requests this month
+  aiFunctionInvocations Int      @default(0) // AI Function invocations this month
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, date])
+  @@index([userId])
+  @@index([date])
+  @@map("user_ai_usage")
+}
+
+// Monthly Active Users — one row per (project, end-user, calendar month).
+// An end-user is "active" when they authenticate (sign-in / token refresh /
+// OAuth) against a project in a given YYYY-MM. Distinct count per project per
+// month is the billable MAU figure enforced against Plan.maxMonthlyActiveUsers.
+model ProjectActiveUser {
+  id         String   @id @default(uuid())
+  projectId  String
+  endUserId  String // id within workspace_{projectId}.users
+  month      String // YYYY-MM
+  lastSeenAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, endUserId, month])
+  @@index([projectId, month])
+  @@map("project_active_users")
+}
+
+// Credit reservation — holds a slot during long-running AI jobs.
+// Status transitions: reserved → committed (on success) or refunded (on failure/timeout).
+// Stale reservations (status=reserved past expiresAt) are cleaned up by the nightly cron.
+model CreditReservation {
+  id          String    @id @default(uuid())
+  userId      String
+  date        String // YYYY-MM — must match the UserAiUsage row it debits
+  amount      Int       @default(1)
+  jobId       String    @unique // opaque caller-supplied job identifier
+  status      String    @default("reserved") // reserved | committed | refunded
+  createdAt   DateTime  @default(now())
+  expiresAt   DateTime // stale reservations auto-refunded after this time
+  committedAt DateTime?
+  refundedAt  DateTime?
+
+  @@index([userId, date])
+  @@index([jobId])
+  @@index([status, expiresAt])
+  @@map("credit_reservations")
+}
+
+// ─── Credit ledger (bonus assistant credits) ────────────────────────────────
+// Append-only audit trail of every bonus-credit movement: grants (referral,
+// promo, signup bonus) as positive amounts, and month-rollover burns (bonus
+// consumed beyond the plan allowance) as negatives. The Billing "Credit
+// activity" tab reads from here; `User.bonusCredits` is the running balance.
+model CreditLedgerEntry {
+  id           String   @id @default(uuid())
+  userId       String
+  // Signed credits: +grant, -burn. Sum over a user == bonusCredits ever moved.
+  amount       Int
+  // Running bonus balance immediately AFTER this entry (for a clean history UI).
+  balanceAfter Int
+  // 'referral_signup' | 'referral_paid' | 'promo' | 'admin_grant' |
+  // 'monthly_bonus_burn' | 'signup_bonus'
+  reason       String
+  // Free-form human note shown in the history row.
+  description  String?
+  // Optional link to the originating record (ReferralGrant id, promo code, …).
+  referenceId  String?
+  createdAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("credit_ledger_entries")
+}
+
+// ─── Referral program ───────────────────────────────────────────────────────
+// One stable, shareable code per user. `uses` is a denormalised counter of how
+// many accounts signed up with this code (authoritative count lives in
+// ReferralGrant rows).
+model ReferralCode {
+  id        String   @id @default(uuid())
+  userId    String   @unique
+  code      String   @unique
+  uses      Int      @default(0)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([code])
+  @@map("referral_codes")
+}
+
+// One row per referred signup. Tracks the two-stage reward: a signup grant to
+// the referee, and a paid grant to the referrer when the referee first upgrades.
+// refereeId is unique — a user can only be referred once.
+model ReferralGrant {
+  id                   String   @id @default(uuid())
+  referrerId           String
+  refereeId            String   @unique
+  refereeEmail         String
+  code                 String
+  // 'signup_granted' (referee bonus paid) → 'paid_granted' (referrer bonus paid)
+  status               String   @default("signup_granted")
+  signupCreditsGranted Int      @default(0)
+  payCreditsGranted    Int      @default(0)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  referrer User @relation("ReferralReferrer", fields: [referrerId], references: [id], onDelete: Cascade)
+  referee  User @relation("ReferralReferee", fields: [refereeId], references: [id], onDelete: Cascade)
+
+  @@index([referrerId])
+  @@index([code])
+  @@map("referral_grants")
+}
+
+// ─── Organizations (Phase 6 — team accounts) ────────────────────────────────
+// A platform-level account that owns projects and (org-based) billing. Every
+// user gets one personal Organization lazily (lib/org). Teams are formed by
+// inviting other users as members with a role. Access + billing resolve through
+// the org; the change is additive — a solo user's personal org behaves exactly
+// like today's owner-only model.
+model Organization {
+  id        String   @id @default(uuid())
+  name      String
+  ownerId   String // the User who created it (also holds an OWNER membership row)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  owner          User                 @relation("OrgOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  members        OrganizationMember[]
+  invites        OrganizationInvite[]
+  projectMembers ProjectMember[]
+  projects       Project[]
+  subscriptions  Subscription[]
+
+  @@index([ownerId])
+  @@map("organizations")
+}
+
+model OrganizationMember {
+  id        String   @id @default(uuid())
+  orgId     String
+  userId    String
+  // OWNER | ADMIN | DEVELOPER | VIEWER
+  role      String   @default("DEVELOPER")
+  // Project-scoped access (Pro+). When true, this member can only reach the
+  // projects granted to them in ProjectMember — every other project in the org
+  // is invisible and forbidden. OWNER/ADMIN ignore this flag (always org-wide).
+  // When false (the default), the member has org-wide access — the original
+  // Phase-6 behavior, so nothing changes for existing members. Enforcement runs
+  // regardless of plan; only *setting* a restriction requires a paid plan, so a
+  // downgrade can never silently widen a restricted member's reach.
+  restricted Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, userId])
+  @@index([userId])
+  @@map("organization_members")
+}
+
+// Project-scoped access grant (Pro+). One row = "this user may open this
+// project" and only matters for members whose OrganizationMember.restricted is
+// true. A restricted member with zero rows sees NOTHING (safe default — an
+// empty allowlist never means "everything"). onDelete cascades keep the
+// allowlist tight when a project, user, or org goes away.
+model ProjectMember {
+  id        String   @id @default(uuid())
+  orgId     String
+  userId    String
+  projectId String
+  createdAt DateTime @default(now())
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project      Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, projectId])
+  @@index([orgId, userId])
+  @@index([projectId])
+  @@map("project_members")
+}
+
+model OrganizationInvite {
+  id          String    @id @default(uuid())
+  orgId       String
+  email       String
+  role        String    @default("DEVELOPER")
+  token       String    @unique
+  invitedById String
+  // Project-scoped invite (Pro+). If `restricted` is true, on accept the member
+  // is created restricted and granted exactly `scopedProjectIds` — so they never
+  // see the org's other projects, not even in the window right after joining.
+  // Default false + empty = the original org-wide invite.
+  restricted       Boolean  @default(false)
+  scopedProjectIds String[] @default([])
+  // pending | accepted | revoked | expired
+  status      String    @default("pending")
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+  createdAt   DateTime  @default(now())
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@index([orgId, status])
+  @@index([email])
+  @@map("organization_invites")
+}
+
+model Deployment {
+  id                   String              @id @default(uuid())
+  projectId            String
+  provider             String
+  environment          String              @default("preview")
+  status               String              @default("queued")
+  url                  String?
+  buildId              String?
+  commitSha            String?
+  branch               String?             @default("main")
+  config               Json?
+  manifest             String?
+  startedAt            DateTime?
+  completedAt          DateTime?
+  duration             Int?
+  errorMessage         String?
+  errorStack           String?
+  promotedFrom         String?
+  rolledBackTo         String?
+  version              Int?
+  graphSnapshotId      String?
+  changeSummary        String?
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+  providerCredentialId String?
+  project              Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  providerCredential   ProviderCredential? @relation(fields: [providerCredentialId], references: [id])
+  logs                 DeploymentLog[]
+
+  @@index([projectId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model DeploymentLog {
+  id           String     @id @default(uuid())
+  deploymentId String
+  projectId    String
+  level        String
+  step         String
+  message      String
+  timestamp    DateTime   @default(now())
+  metadata     Json?
+  deployment   Deployment @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+
+  @@index([deploymentId])
+  @@index([projectId])
+  @@index([timestamp])
+  @@index([level])
+}
+
+model DeploymentAudit {
+  id                 String   @id
+  projectId          String
+  triggerSource      String
+  confirmedBy        String
+  changeSummary      String
+  timestamp          DateTime @default(now())
+  result             String
+  error              String?
+  deploymentId       String
+  rollbackReference  String?
+  graphVersionBefore Int
+  graphVersionAfter  Int
+  project            Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([timestamp])
+  @@index([result])
+}
+
+model DeployConfirmation {
+  id             String   @id @default(uuid())
+  confirmationId String   @unique
+  projectId      String
+  userId         String
+  diff           Json
+  status         String   @default("pending") // pending | confirmed | expired | cancelled
+  expiresAt      DateTime
+  createdAt      DateTime @default(now())
+  project        Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, status])
+  @@index([confirmationId])
+  @@index([expiresAt])
+  @@map("deploy_confirmations")
+}
+
+model ProviderCredential {
+  id          String       @id @default(uuid())
+  projectId   String
+  provider    String
+  name        String?
+  credentials String
+  lastUsedAt  DateTime?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  deployments Deployment[]
+  project     Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, provider])
+  @@index([projectId])
+  @@index([provider])
+  @@map("provider_credentials")
+}
+
+model PreviewShare {
+  id             String    @id @default(uuid())
+  projectId      String
+  userId         String
+  token          String    @unique
+  accessLevel    String    @default("read_only")
+  allowAuth      Boolean   @default(false)
+  allowWrites    Boolean   @default(false)
+  expiresAt      DateTime
+  accessCount    Int       @default(0)
+  lastAccessedAt DateTime?
+  revoked        Boolean   @default(false)
+  revokedAt      DateTime?
+  revokedBy      String?
+  label          String?
+  metadata       Json?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  project        Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([userId])
+  @@index([token])
+  @@index([expiresAt])
+  @@index([revoked])
+  @@map("preview_shares")
+}
+
+model ApiDefinition {
+  id           String        @id @default(uuid())
+  tableId      String        @unique
+  projectId    String
+  name         String
+  version      String        @default("v1")
+  basePath     String
+  description  String?
+  enabled      Boolean       @default(true)
+  authRequired Boolean       @default(true)
+  authStrategy String?
+  rateLimit    Int?          @default(100)
+  operations   Json
+  endpoints    Json
+  validation   Json?
+  config       Json?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  createdBy    String?
+  table        Table         @relation(fields: [tableId], references: [id], onDelete: Cascade)
+  usageLogs    ApiUsageLog[]
+
+  @@unique([projectId, name, version])
+  @@index([projectId])
+  @@index([enabled])
+  @@index([version])
+  @@map("api_definitions")
+}
+
+model ApiUsageLog {
+  id              String        @id @default(uuid())
+  apiDefinitionId String
+  endpoint        String
+  method          String
+  statusCode      Int
+  responseTime    Int?
+  ipAddress       String?
+  userAgent       String?
+  userId          String?
+  timestamp       DateTime      @default(now())
+  metadata        Json?
+  apiDefinition   ApiDefinition @relation(fields: [apiDefinitionId], references: [id], onDelete: Cascade)
+
+  @@index([apiDefinitionId])
+  @@index([timestamp])
+  @@index([endpoint])
+  @@index([userId])
+  @@map("api_usage_logs")
+}
+
+model TableArchive {
+  id            String    @id @default(uuid())
+  projectId     String
+  originalName  String
+  archivedName  String
+  archivedAt    DateTime  @default(now())
+  reason        String
+  canRestore    Boolean   @default(true)
+  dataPreserved Boolean   @default(true)
+  restoredAt    DateTime?
+  deletedAt     DateTime?
+
+  @@index([projectId])
+  @@index([archivedAt])
+  @@index([canRestore])
+  @@map("table_archives")
+}
+
+model PITRSnapshot {
+  id           String   @id
+  projectId    String
+  capturedAt   DateTime @default(now())
+  graphState   Json
+  schemaState  Json
+  canRestoreTo Boolean  @default(true)
+
+  @@index([projectId])
+  @@index([capturedAt])
+  @@map("pitr_snapshots")
+}
+
+model StateSnapshot {
+  id           String   @id @default(uuid())
+  projectId    String
+  executionId  String
+  timestamp    DateTime @default(now())
+  graphState   Json
+  lineageHash  String
+  version      Int
+  snapshotType String   @default("pre_mutation")
+  metadata     Json?
+
+  @@index([projectId])
+  @@index([executionId])
+  @@index([timestamp])
+  @@index([lineageHash])
+  @@map("state_snapshots")
+}
+
+model RollbackExecution {
+  id                    String   @id @default(uuid())
+  projectId             String
+  executionId           String
+  targetIntentId        String
+  targetIntentHash      String?
+  timestamp             DateTime @default(now())
+  success               Boolean
+  stepsExecuted         Int      @default(0)
+  totalSteps            Int
+  durationMs            Int
+  error                 String?
+  recoveryAction        String?
+  preRollbackSnapshotId String?
+  affectedResources     Json?
+  timelineEntry         Json?
+
+  @@index([projectId])
+  @@index([executionId])
+  @@index([targetIntentId])
+  @@index([timestamp])
+  @@index([success])
+  @@map("rollback_executions")
+}
+
+model PaddleSubscription {
+  id                   String    @id @default(uuid())
+  userId               String
+  paddleSubscriptionId String    @unique
+  paddleCustomerId     String
+  paddlePlanId         String
+  status               String
+  nextBillDate         DateTime?
+  cancelUrl            String?
+  updateUrl            String?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+  user                 User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([paddleSubscriptionId])
+  @@index([paddleCustomerId])
+  @@index([status])
+  @@map("paddle_subscriptions")
+}
+
+// Preview branch — a full structural+data clone of the workspace schema where
+// an agent or owner can experiment; merge brings additive changes back through
+// the governed kernel, destructive diffs go to the approval path. Foundation
+// for "PRs for your backend" (agent-era pillar 2).
+model WorkspaceBranch {
+  id          String    @id @default(uuid())
+  projectId   String
+  name        String    // slug, e.g. "add-payments"
+  schemaName  String    @unique // workspace_{projectId}_br_{name}
+  status      String    @default("active") // active | merged | discarded
+  createdBy   String
+  createdAt   DateTime  @default(now())
+  mergedAt    DateTime?
+  discardedAt DateTime?
+  project     Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, name])
+  @@index([projectId, status])
+  @@map("workspace_branches")
+}
+
+// Revocable public-share token for read-only report pages (/report/[token]).
+// Only the SHA-256 hash is stored; the raw token is shown once at creation.
+// Powers the agency deliverable: "here is proof of what changed and that
+// nothing broke" — trust artifacts as a shareable link.
+model ShareToken {
+  id           String    @id @default(uuid())
+  projectId    String
+  kind         String    @default("change_report")
+  tokenHash    String    @unique
+  createdBy    String
+  createdAt    DateTime  @default(now())
+  revokedAt    DateTime?
+  lastViewedAt DateTime?
+  project      Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, kind])
+  @@map("share_tokens")
+}
+
+// An MCP-connected coding agent asked for a destructive operation. Instead of
+// a flat refusal, the request is parked here for human decision — the Review
+// Queue renders pending rows, the agent polls check_approval. On approve the
+// original message re-runs through the brain with destructiveConfirmed=true.
+model AgentApprovalRequest {
+  id            String    @id @default(uuid())
+  projectId     String
+  userId        String
+  apiKeyId      String?   // which scoped key asked — agent identity for receipts
+  message       String    // original natural-language request, replayed on approval
+  tool          String    // blocked destructive tool (e.g. drop_table)
+  target        String    // human description, e.g. "recipes table"
+  rowCount      Int?      // live rows affected when cheaply knowable
+  reversible    Boolean   @default(false)
+  status        String    @default("pending") // pending|approved|rejected|expired|executed|failed
+  decidedBy     String?
+  decidedAt     DateTime?
+  executedAt    DateTime?
+  resultSummary String?
+  createdAt     DateTime  @default(now())
+  expiresAt     DateTime
+  project       Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, status])
+  @@index([apiKeyId, createdAt])
+  @@map("agent_approval_requests")
+}
+
+model ApiRequestLog {
+  id         String   @id @default(uuid())
+  projectId  String
+  userId     String
+  method     String
+  path       String
+  statusCode Int
+  duration   Int
+  timestamp  DateTime @default(now())
+  project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, timestamp])
+  @@index([userId, timestamp])
+  @@index([timestamp])
+  @@map("api_request_logs")
+}
+
+model OAuthAuthorizationCode {
+  id            String   @id @default(uuid())
+  code          String   @unique
+  projectId     String
+  clientId      String
+  scope         String
+  redirectUri   String
+  codeChallenge String?
+  expiresAt     DateTime
+  used          Boolean  @default(false)
+  createdAt     DateTime @default(now())
+
+  @@index([code])
+  @@index([projectId])
+  @@index([clientId])
+  @@index([expiresAt])
+  @@map("oauth_authorization_codes")
+}
+
+model OIDCAccessToken {
+  id        String    @id @default(uuid())
+  jti       String    @unique
+  projectId String
+  clientId  String
+  scope     String
+  expiresAt DateTime
+  revoked   Boolean   @default(false)
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([jti])
+  @@index([projectId])
+  @@index([clientId])
+  @@index([expiresAt])
+  @@map("oidc_access_tokens")
+}
+
+model ApiVersion {
+  id             String   @id @default(uuid())
+  versionId      String   @unique
+  projectId      String
+  tableId        String
+  tableName      String
+  schemaHash     String
+  endpoints      Json
+  schemaSnapshot Json
+  createdBy      String
+  createdAt      DateTime @default(now())
+
+  @@unique([projectId, tableId, schemaHash])
+  @@index([projectId])
+  @@index([tableId])
+  @@index([versionId])
+  @@index([schemaHash])
+  @@map("api_versions")
+}
+
+enum ProjectStatus {
+  PRIVATE
+  DEPLOYING
+  LIVE
+  FAILED
+}
+
+// Owner-controlled autonomy dial (Tesla-Autopilot-style levels).
+//   OFF          — loop observes only; never auto-applies anything
+//   CONSERVATIVE — auto-applies silent Tier-0 fixes only (default)
+//   BALANCED     — auto-applies Tier-0 + announced Tier-1 fixes
+//   AGGRESSIVE   — Tier-0 + Tier-1, with a raised per-window action ceiling
+// Tier-2/3 (auth, destructive, irreversible) ALWAYS require human approval
+// regardless of level — that is a hard safety contract, not a setting.
+enum AutonomyLevel {
+  OFF
+  CONSERVATIVE
+  BALANCED
+  AGGRESSIVE
+}
+
+// ============================================================================
+// BILLING & SUBSCRIPTION MODELS
+// ============================================================================
+
+model Plan {
+  id               String @id @default(uuid())
+  name             String @unique // FREE | STARTER | GROWTH | PRO
+  priceCents       Int    @default(0)
+  annualPriceCents Int? // Monthly-equivalent price when billed annually
+
+  // Scale dimensions — null = unlimited
+  maxProjects               Int?
+  maxMonthlyActiveUsers     Int? // Distinct end-users per calendar month (null = unlimited)
+  maxAiBuildActionsPerMonth Int? // LEGACY action-count cap — superseded by monthlyAiCredits (kept for admin display)
+  monthlyAiCredits          Int? // Token-backed AI credits per calendar month (null = unlimited). 1 credit = TOKENS_PER_CREDIT tokens. Autonomy NEVER deducts from this.
+
+  // Autonomy entitlements — the always-on monitor/self-repair loop is funded by
+  // the platform for paid tiers; Free gets a bounded taste that converts.
+  autonomyScanIntervalMin          Int     @default(360) // Min minutes between expensive multi-agent scans for a project
+  autonomyMonthlyScanBudget        Int? // Hard cap on expensive scans/project/month (null = unlimited / fair-use)
+  autonomyMaxLevel                 String  @default("CONSERVATIVE") // Ceiling for the owner's risk dial: CONSERVATIVE | BALANCED | AGGRESSIVE
+  autonomyMaxActionsPerWindow      Int     @default(3) // Circuit-breaker ceiling: autonomous mutations/project/rolling-window
+  maxApiRequestsPerMonth           BigInt? // API request cap — monthly OR lifetime (see apiQuotaIsLifetime)
+  apiQuotaIsLifetime               Boolean @default(false) // true = maxApiRequestsPerMonth is a lifetime total that never resets (Free)
+  maxPostgresStorageMb             Int? // PostgreSQL storage in MB
+  maxFileStorageMb                 Int? // File/object storage in MB
+  maxRealtimeConnections           Int? // Concurrent SSE/realtime connections
+  maxAiFunctionInvocationsPerMonth Int? // AI Function calls per calendar month
+  maxTriggersPerProject            Int? // Event triggers per project (null = unlimited)
+  maxTeamSeats                     Int     @default(1)
+  maxDeploymentHistory             Int? // Build history entries (null = unlimited, 0 = none)
+
+  // Governance
+  logRetentionDays     Int      @default(7)
+  supportResponseHours Int? // null = community only, no SLA
+  allowedAuthProviders String[] @default(["email", "google"])
+
+  // Feature flags
+  allowCustomDomain       Boolean @default(false)
+  allowAdvancedMonitoring Boolean @default(false)
+  allowRbac               Boolean @default(false)
+  allowSso                Boolean @default(false)
+  allowDeploymentRollback Boolean @default(false)
+  allowWebhooks           Boolean @default(false)
+  prioritySupport         Boolean @default(false)
+  allowDeployment         Boolean @default(true) // false = sandbox plan, no production deploy
+  isSandboxPlan           Boolean @default(false) // true = project auto-expires
+  sandboxExpiryDays       Int? // days until sandbox project expires
+  isPayAsYouGo            Boolean @default(false) // true = credits-based billing
+
+  // Legacy fields — kept for backward compatibility, superseded by fields above
+  maxRowsPerProject  Int?
+  apiRateLimitPerMin Int  @default(60)
+  maxAiIntentsPerDay Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  subscriptions Subscription[]
+
+  @@index([name])
+  @@map("plans")
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  FREE
+  GRACE
+  CANCELED
+  PAST_DUE
+}
+
+model Subscription {
+  id                   String             @id @default(uuid())
+  userId               String
+  planId               String
+  paddleSubscriptionId String?            @unique
+  status               SubscriptionStatus @default(FREE)
+  currentPeriodEnd     DateTime?
+  graceUntil           DateTime?
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+  // Owning organization (Phase 6 billing). Nullable + backfilled lazily to the
+  // owner's personal org; entitlement resolution falls back to userId when null.
+  organizationId       String?
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan         Plan          @relation(fields: [planId], references: [id])
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([planId])
+  @@index([status])
+  @@index([paddleSubscriptionId])
+  @@index([organizationId])
+  @@map("subscriptions")
+}
+
+// ============================================================================
+// PHASE 7: WEBHOOK SYSTEM (PRO Only)
+// ============================================================================
+
+model Webhook {
+  id        String   @id @default(uuid())
+  projectId String
+  eventType String // row.inserted | row.deleted | auth.user.created
+  targetUrl String
+  secret    String // For HMAC signature
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  project Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  logs    WebhookLog[]
+
+  @@index([projectId])
+  @@index([eventType])
+  @@index([active])
+  @@map("webhooks")
+}
+
+enum WebhookDeliveryStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  RETRYING
+  DEAD_LETTER
+}
+
+model WebhookLog {
+  id           String                @id @default(uuid())
+  webhookId    String
+  eventType    String
+  payload      Json // The event payload sent
+  signature    String // HMAC signature used
+  status       WebhookDeliveryStatus @default(PENDING)
+  statusCode   Int? // HTTP response status
+  responseBody String? // Response body (truncated)
+  error        String? // Error message if failed
+  attemptCount Int                   @default(0)
+  nextRetryAt  DateTime? // Next retry timestamp
+  deliveredAt  DateTime? // Successful delivery timestamp
+  createdAt    DateTime              @default(now())
+
+  webhook Webhook @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+
+  @@index([webhookId])
+  @@index([status])
+  @@index([createdAt])
+  @@index([nextRetryAt])
+  @@map("webhook_logs")
+}
+
+// ============================================================================
+// PHASE 8: CUSTOM DOMAIN (PRO Only)
+// ============================================================================
+
+model CustomDomain {
+  id                String    @id @default(uuid())
+  projectId         String
+  domain            String    @unique
+  verificationToken String    @unique
+  verified          Boolean   @default(false)
+  verifiedAt        DateTime?
+  dnsRecordType     String    @default("TXT") // TXT record for verification
+  dnsRecordValue    String // The value to set in DNS
+  sslEnabled        Boolean   @default(false)
+  sslCertUrl        String?
+  active            Boolean   @default(false) // Only active after verification
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([domain])
+  @@index([verified])
+  @@index([active])
+  @@map("custom_domains")
+}
+
+// ============================================================================
+// CONNECT FRONTEND — canonical record of frontends connected to a backend.
+// Replaces the legacy Project.allowedOrigins string array. Writes go through
+// lib/services/connectFrontend.ts (deployment-gated, audit-logged, version-
+// pinned). CORS read path queries this table where isActive = true.
+// ============================================================================
+
+model ConnectedApp {
+  id             String    @id @default(cuid())
+  projectId      String
+  origin         String // exact origin (protocol+host+port), normalized, no wildcards
+  isActive       Boolean   @default(true)
+  connectedBy    String // 'CHAT' | 'UI' | 'API'
+  backendVersion Int // DeploymentAudit.graphVersionAfter at connect time
+  connectedAt    DateTime  @default(now())
+  disconnectedAt DateTime?
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, origin])
+  @@index([projectId, isActive])
+  @@map("connected_apps")
+}
+
+// ============================================================================
+// PROJECT ENV VARS — encrypted per-project secrets injected as ctx.env into
+// AI Functions and webhook delivery contexts. Values are stored encrypted
+// (AES-256-GCM) and decrypted lazily by lib/services/projectEnvVars.ts.
+// ============================================================================
+
+model ProjectEnvVar {
+  id          String   @id @default(cuid())
+  projectId   String
+  key         String // SHOUTING_SNAKE_CASE — must match /^[A-Z][A-Z0-9_]{0,63}$/
+  valueCipher String // base64 AES-256-GCM ciphertext
+  valueIv     String // base64 12-byte IV
+  valueTag    String // base64 GCM auth tag
+  description String? // optional human-readable note
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  createdBy   String // userId of whoever set this (chat or UI)
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, key])
+  @@index([projectId])
+  @@map("project_env_vars")
+}
+
+// ============================================================================
+// PHASE 9: CONVERSATION MESSAGES (Chat Persistence)
+// ============================================================================
+
+model ConversationMessage {
+  id        String   @id @default(uuid())
+  projectId String
+  role      String // 'user' | 'ai' | 'system'
+  content   String   @db.Text
+  metadata  Json? // Optional metadata like intent, executionId, etc.
+  createdAt DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([createdAt])
+  @@index([projectId, createdAt])
+  @@map("conversation_messages")
+}
+
+// ─── Durable Chat Runs (refresh-safe streaming) ──────────────────────────────
+// Every chat submission creates one ChatRun row. The SSE events emitted by the
+// server are mirrored to ChatRunEvent so the client can re-attach and replay
+// after a page reload, network blip, or tab switch. This is what makes the
+// product feel "agentic" instead of "the page lost my response."
+model ChatRun {
+  id           String    @id @default(uuid())
+  projectId    String
+  userId       String
+  /// Client-supplied idempotency key — prevents double-runs on accidental
+  /// double-submit (StrictMode, fast clicks, network retries).
+  requestId    String?
+  prompt       String    @db.Text
+  /// streaming | completed | failed | cancelled
+  status       String    @default("streaming")
+  /// Monotonic event sequence — the next ChatRunEvent.seq written for this run.
+  nextSeq      Int       @default(0)
+  startedAt    DateTime  @default(now())
+  lastEventAt  DateTime  @default(now())
+  completedAt  DateTime?
+  errorMessage String?   @db.Text
+
+  project Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  events  ChatRunEvent[]
+
+  @@unique([projectId, requestId])
+  @@index([projectId, status])
+  @@index([projectId, startedAt])
+  @@map("chat_runs")
+}
+
+model ChatRunEvent {
+  id        String   @id @default(uuid())
+  runId     String
+  /// Per-run monotonic sequence — client passes ?fromSeq=N to resume past it.
+  seq       Int
+  /// SSE event type (e.g. progress | ai_activity | conversational_response | task_plan | error | complete).
+  type      String
+  data      Json
+  createdAt DateTime @default(now())
+
+  run ChatRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, seq])
+  @@index([runId, seq])
+  @@map("chat_run_events")
+}
+
+// ============================================================================
+// EVENT TRIGGERS — Automated reactions to data changes
+// "When a post is created, automatically create a notification"
+// ============================================================================
+
+model AppTrigger {
+  id            String   @id @default(uuid())
+  projectId     String
+  name          String
+  description   String?
+  sourceTable   String // Table that fires the trigger (e.g. "likes")
+  event         String // 'insert' | 'update' | 'delete' | 'all'
+  conditions    Json? // Optional filter: { "status": "published" }
+  actionType    String // 'insert_row' | 'update_row' | 'delete_rows' | 'webhook'
+  targetTable   String? // For insert_row/update_row: destination table
+  fieldMappings Json? // Maps source fields → target fields: { "userId": "userId", "postId": "id" }
+  staticFields  Json? // Static values to merge: { "type": "like", "read": false }
+  webhookUrl    String? // For webhook action type
+  webhookSecret String? // HMAC signing secret for webhook
+  enabled       Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  project      Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  deliveryLogs TriggerDeliveryLog[]
+
+  @@index([projectId])
+  @@index([sourceTable])
+  @@index([event])
+  @@index([enabled])
+  @@map("app_triggers")
+}
+
+// ============================================================================
+// PERMISSION POLICIES — Row-Level Security rules for workspace tables
+// "Users can only read/write their own rows"
+// ============================================================================
+
+model PermissionPolicy {
+  id          String   @id @default(uuid())
+  projectId   String
+  tableName   String // Workspace table name (e.g. "posts")
+  policyName  String // Unique name (e.g. "own_posts_read")
+  operation   String // 'SELECT' | 'INSERT' | 'UPDATE' | 'DELETE' | 'ALL'
+  role        String   @default("authenticated") // 'authenticated' | 'anon' | 'service'
+  using       String? // USING expression: "user_id = auth.uid()"
+  withCheck   String? // WITH CHECK expression (for INSERT/UPDATE)
+  description String?
+  enabled     Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, tableName, policyName])
+  @@index([projectId])
+  @@index([tableName])
+  @@map("permission_policies")
+}
+
+// ============================================================================
+// AI FUNCTIONS — Serverless logic described in natural language, run by AI
+// "When a user signs up, assign a tier based on their country"
+// ============================================================================
+
+model AiFunction {
+  id            String    @id @default(uuid())
+  projectId     String
+  name          String // Auto-generated short name
+  description   String // User's natural language description
+  generatedCode String    @db.Text // AI-generated JS function body
+  triggerType   String // on_signup | on_db_insert | on_db_update | on_db_delete | manual | cron
+  triggerTable  String? // Table name for db triggers; for cron jobs stores the cron expression (e.g. "0 9 * * *")
+  status        String    @default("active") // active | inactive | error
+  lastRun       DateTime?
+  lastError     String?
+  runCount      Int       @default(0)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  project       Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  executionLogs AiFunctionLog[]
+
+  @@index([projectId])
+  @@index([projectId, triggerType])
+  @@index([projectId, status])
+  @@map("ai_functions")
+}
+
+// ============================================================================
+// AI FUNCTION EXECUTION LOGS — per-invocation records for the logs UI (GAP 9)
+// Retained for 30 days, then pruned by the daily cleanup job.
+// ============================================================================
+
+model AiFunctionLog {
+  id          String   @id @default(uuid())
+  functionId  String
+  projectId   String
+  success     Boolean
+  logs        String[] // captured ctx.log() lines
+  error       String?
+  durationMs  Int
+  triggerType String // cron | on_db_insert | on_signup | manual …
+  createdAt   DateTime @default(now())
+
+  function AiFunction @relation(fields: [functionId], references: [id], onDelete: Cascade)
+
+  @@index([functionId])
+  @@index([projectId])
+  @@index([projectId, createdAt])
+  @@map("ai_function_logs")
+}
+
+// ============================================================================
+// WORKSPACE BACKUPS — pg_dump records per workspace schema (GAP 2)
+// Daily automated + on-demand via AI chat. 7-day retention.
+// ============================================================================
+
+model WorkspaceBackup {
+  id         String   @id @default(uuid())
+  projectId  String
+  filename   String // e.g. "2024-01-15-02-00.sql.gz"
+  filePath   String // absolute path on disk
+  sizeBytes  Int      @default(0)
+  schemaName String // workspace_{projectId}
+  status     String // completed | failed
+  error      String?
+  createdAt  DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([projectId, createdAt])
+  @@index([status])
+  @@map("workspace_backups")
+}
+
+// ============================================================================
+// PROCESSED WEBHOOK EVENTS — DB-backed idempotency for Paddle webhooks
+// Prevents double-processing when Vercel spawns multiple function instances
+// ============================================================================
+
+model ProcessedWebhookEvent {
+  id          String   @id // Paddle eventId
+  processedAt DateTime @default(now())
+
+  @@map("processed_webhook_events")
+}
+
+// Single-use password reset token tracking. We sign a short-lived JWT with a
+// jti and record it here on issue; the reset route deletes the row on success
+// to make the token un-replayable. Expired rows are GC'd by the cleanup-tokens
+// cron job.
+model PasswordResetToken {
+  jti       String   @id
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("password_reset_tokens")
+}
+
+// ============================================================================
+// PLATFORM NOTIFICATIONS — In-app notifications for developers using the platform
+// Created automatically by system events (payment, job status, low credits, etc.)
+// ============================================================================
+
+model PlatformNotification {
+  id        String    @id @default(uuid())
+  userId    String
+  type      String // payment_success | payment_failed | credits_low | job_completed | job_failed | system
+  title     String
+  body      String
+  read      Boolean   @default(false)
+  readAt    DateTime?
+  metadata  Json? // Extra event data (jobId, amount, etc.)
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([read])
+  @@index([type])
+  @@index([createdAt])
+  @@index([userId, read])
+  @@map("platform_notifications")
+}
+
+// ============================================================================
+// NOTIFICATION PREFERENCES — Per-user opt-in/out per notification type
+// Both in-app and email can be toggled independently per type.
+// Defaults: emailEnabled=true, inAppEnabled=true (rows created on first toggle)
+// ============================================================================
+
+model NotificationPreference {
+  id           String   @id @default(uuid())
+  userId       String
+  type         String // matches PlatformNotification.type values
+  emailEnabled Boolean  @default(true)
+  inAppEnabled Boolean  @default(true)
+  updatedAt    DateTime @updatedAt
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, type])
+  @@index([userId])
+  @@map("notification_preferences")
+}
+
+// ============================================================================
+// AUTONOMOUS ACTIONS — "While you were away" audit log of autonomous fixes
+// Written by the 15-minute background-health cron. Surfaced on project open.
+// ============================================================================
+
+model AutonomousAction {
+  id        String  @id @default(cuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  appliedFixes  Json // string[] — fix titles applied automatically (safe, additive)
+  pendingReview Json // BackgroundFinding[] — findings needing user approval
+
+  seenByUser Boolean   @default(false)
+  seenAt     DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([projectId])
+  @@index([projectId, seenByUser])
+  @@index([createdAt])
+  @@map("autonomous_actions")
+}
+
+// ============================================================================
+// PROJECT USAGE — Per-project monthly usage counters for credit billing
+// Tracks: API units, DB storage, file storage (B2), realtime events
+// ============================================================================
+
+model ProjectUsage {
+  id                String   @id @default(uuid())
+  projectId         String
+  month             String // YYYY-MM
+  apiUnitsUsed      BigInt   @default(0) // 1 unit = 1 simple req; complex = 2-20
+  dbStorageUsedMb   Float    @default(0) // PostgreSQL storage (measured periodically)
+  fileStorageUsedMb Float    @default(0) // Backblaze B2 storage
+  realtimeEvents    BigInt   @default(0) // SSE events dispatched
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, month])
+  @@index([projectId])
+  @@index([month])
+  @@map("project_usage")
+}
+
+// ============================================================================
+// CREDIT BILL — Monthly invoice record for BUILDER (pay-as-you-go) users
+// Formula: finalCost = MAX($5, totalUsageCost)
+// ============================================================================
+
+model CreditBill {
+  id             String   @id @default(uuid())
+  userId         String
+  month          String // YYYY-MM
+  apiCost        Float    @default(0) // (apiUnits / 100_000) * 1.5
+  dbCost         Float    @default(0) // (dbMb / 1024) * 0.20
+  storageCost    Float    @default(0) // (fileMb / 1024) * 0.12
+  realtimeCost   Float    @default(0) // (events / 50_000) * 1.0
+  totalUsageCost Float    @default(0) // sum of above
+  finalCost      Float    @default(5) // MAX(5, totalUsageCost)
+  overage        Float    @default(0) // MAX(0, totalUsageCost - 5)
+  paid           Boolean  @default(false)
+  paddleChargeId String? // Paddle transaction ID for overage charge
+  invoiceId      String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([userId, month])
+  @@index([userId])
+  @@index([month])
+  @@index([paid])
+  @@map("credit_bills")
+}
+
+// ============================================================================
+// TRIGGER DELIVERY LOG — Dead-letter queue for AppTrigger webhook failures
+// Every webhook attempt is recorded. Permanently failed ones stay as 'dead'
+// and can be manually replayed from the dashboard.
+// ============================================================================
+
+enum TriggerDeliveryStatus {
+  SUCCESS
+  FAILED
+  DEAD // Exhausted all retries — sits in the DLQ until manually replayed
+}
+
+model TriggerDeliveryLog {
+  id           String                @id @default(uuid())
+  triggerId    String
+  projectId    String
+  eventType    String // 'insert' | 'update' | 'delete'
+  table        String // Source table that fired the event
+  payload      Json // Full event payload that was sent
+  status       TriggerDeliveryStatus
+  attemptCount Int                   @default(1)
+  statusCode   Int? // HTTP response status (null if network error)
+  error        String? // Last error message
+  deliveredAt  DateTime? // Set on SUCCESS
+  createdAt    DateTime              @default(now())
+  updatedAt    DateTime              @updatedAt
+
+  trigger AppTrigger @relation(fields: [triggerId], references: [id], onDelete: Cascade)
+
+  @@index([triggerId])
+  @@index([projectId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("trigger_delivery_logs")
+}
+
+// ─── FOUNDER ANALYTICS ─────────────────────────────────────────────────────
+
+model ProductEvent {
+  id        String   @id @default(uuid())
+  userId    String
+  projectId String?
+  eventType String // backend_generated | frontend_connected | deployed | external_usage_started | signup | project_created | ai_prompt
+  metadata  Json?
+  timestamp DateTime @default(now())
+
+  @@index([userId])
+  @@index([projectId])
+  @@index([eventType])
+  @@index([timestamp])
+  @@map("product_events")
+}
+
+model UsageMetric {
+  id          String   @id @default(uuid())
+  userId      String
+  projectId   String?
+  apiCalls    Int      @default(0)
+  dbReads     Int      @default(0)
+  dbWrites    Int      @default(0)
+  computeTime Int      @default(0)
+  storageUsed BigInt   @default(0)
+  aiCalls     Int      @default(0)
+  date        DateTime @default(now()) // date of the metric bucket
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+  @@index([projectId])
+  @@index([date])
+  @@map("usage_metrics")
+}
+
+// ─── Agent Memory (persistent pattern store) ────────────────────────────────
+model AgentMemory {
+  id          String   @id @default(uuid())
+  fingerprint String   @unique // Hash of normalized input tokens
+  strategy    String // pattern-based | schema-fix | direct-mutation | integration-setup
+  successRate Float    @default(0.9)
+  sampleGoal  String
+  usageCount  Int      @default(1)
+  lastUsed    DateTime @default(now())
+  createdAt   DateTime @default(now())
+
+  @@index([fingerprint])
+  @@map("agent_memories")
+}
+
+// ─── Execution Log (observability) ──────────────────────────────────────────
+model ExecutionLog {
+  id         String   @id @default(uuid())
+  projectId  String
+  userId     String?
+  intent     String // BUILD | MODIFY | FIX | QUESTION | INTEGRATION
+  strategy   String // execution strategy chosen
+  action     String // specific action taken
+  durationMs Int // wall-clock time in ms
+  success    Boolean
+  errorMsg   String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  @@index([projectId])
+  @@index([createdAt])
+  @@index([intent])
+  @@index([success])
+  @@map("execution_logs")
+}
+
+// ─── Project Preference Memory (persisted — survives restarts) ──────────────
+model ProjectPreference {
+  id              String   @id @default(uuid())
+  projectId       String
+  type            String // api_style | auth_pattern | naming_convention | db_approach | general
+  key             String
+  value           String
+  confidence      Float    @default(0.3)
+  positiveSignals Int      @default(1)
+  negativeSignals Int      @default(0)
+  examples        Json     @default("[]") // Array of {executionId, action, timestamp}
+  lastSeen        DateTime @default(now())
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, type, key])
+  @@index([projectId])
+  @@map("project_preferences")
+}
+
+model ProjectRejectionPattern {
+  id           String   @id @default(uuid())
+  projectId    String
+  pattern      String
+  reason       String
+  count        Int      @default(1)
+  examples     Json     @default("[]") // Array of {executionId, action, proposal, rejectionReason, timestamp}
+  lastRejected DateTime @default(now())
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  project      Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, pattern])
+  @@index([projectId])
+  @@map("project_rejection_patterns")
+}
+
+// ─── Execution Cancellation Token ────────────────────────────────────────────
+model ExecutionCancellation {
+  id        String   @id @default(uuid())
+  projectId String
+  convId    String
+  cancelled Boolean  @default(false)
+  createdAt DateTime @default(now())
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, convId])
+  @@index([projectId])
+  @@map("execution_cancellations")
+}
+
+// ─── Execution Timeline (Phase 8) ────────────────────────────────────────────
+// Per-action records: start/end, duration, status, retry count, self-corrected
+// flag, error taxonomy classification. Used by the operator dashboard so failures
+// are understandable without reading raw logs.
+model ExecutionTimelineEntry {
+  id                  String    @id @default(uuid())
+  projectId           String
+  userId              String?
+  /// Groups all actions that belong to a single AI execution run
+  executionId         String
+  /// AIAction.action string (e.g. CREATE_TABLE, ADD_COLUMN)
+  actionType          String
+  /// The params passed to the action
+  actionParams        Json
+  startedAt           DateTime
+  completedAt         DateTime?
+  /// Wall-clock milliseconds from open to close
+  durationMs          Int?
+  /// pending | success | failed | self_corrected | skipped
+  status              String    @default("pending")
+  /// Number of retry attempts made (0 = succeeded on first try)
+  retryCount          Int       @default(0)
+  /// True if a heal action was applied (idempotent skip or pre-fix)
+  selfCorrected       Boolean   @default(false)
+  /// Taxonomy code: FK_CONSTRAINT | DUPLICATE_RESOURCE | MIGRATION_FAILURE |
+  /// INTEGRATION_MISCONFIG | AUTH_MISCONFIG | WEBHOOK_VERIFY_FAILURE |
+  /// TRIGGER_DELIVERY_FAILURE | UNKNOWN | null (no error)
+  errorClassification String?
+  /// Truncated error message (≤2000 chars)
+  errorMessage        String?
+  /// Array of RetryAttemptRecord — per-attempt detail for debugging
+  healingApplied      Json?
+  metadata            Json?
+  createdAt           DateTime  @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, executionId])
+  @@index([projectId, startedAt])
+  @@index([status])
+  @@index([errorClassification])
+  @@map("execution_timeline_entries")
+}
+
+// ─── Phase 10: Correction Logging & Learning Loop ────────────────────────────
+
+/// A single correction that occurred to an AI-generated artifact.
+/// Populated fire-and-forget from the execution pipeline — never blocks it.
+/// Three sources:
+///   AI_SELF_CORRECT   — execution-agent diagnosed and re-executed a failed step
+///   POST_EXEC_FIX     — post-execution-verifier found a broken endpoint and re-generated it
+///   USER_ALTER        — user issued ALTER/DROP soon after the AI created the table
+model CorrectionEvent {
+  id        String  @id @default(uuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  /// Execution that originally created the artifact being corrected
+  originalExecutionId  String?
+  /// e.g. CREATE_TABLE, GENERATE_API, ADD_COLUMN
+  originalActionType   String
+  /// Params of the original action (table name, columns, etc.)
+  originalActionParams Json?
+
+  /// AI_SELF_CORRECT | POST_EXEC_FIX | USER_ALTER | USER_DROP
+  correctionType   String
+  /// What was applied — fix strategy, new params, or user change detail
+  correctionDetail Json?
+
+  /// Detected project domain at time of correction (ecommerce, cms, saas, …)
+  domain              String?
+  /// Taxonomy code from lib/errors/taxonomy.ts, if the error was classified
+  errorClassification String?
+  /// Ms between original creation and this correction (null if unknown)
+  elapsedMs           Int?
+
+  createdAt DateTime @default(now())
+
+  @@index([projectId])
+  @@index([correctionType])
+  @@index([domain, originalActionType])
+  @@index([errorClassification])
+  @@index([createdAt])
+  @@map("correction_events")
+}
+
+/// Aggregated view of recurring correction patterns, mined from CorrectionEvents.
+/// Created by pattern-miner.ts, promoted only after human review.
+/// Auto-injecting rules without review is explicitly prohibited.
+model CorrectionPattern {
+  id String @id @default(uuid())
+
+  /// null means the pattern is cross-domain
+  domain              String?
+  /// e.g. CREATE_TABLE, GENERATE_API
+  actionType          String
+  /// Taxonomy code, or null if pattern is not error-specific
+  errorClassification String?
+
+  /// Human-readable description generated by the pattern miner
+  patternSummary  String
+  /// How many CorrectionEvents match this pattern
+  occurrenceCount Int    @default(0)
+  /// Up to 5 CorrectionEvent IDs used as evidence
+  exampleIds      Json   @default("[]")
+
+  /// PENDING_REVIEW | APPROVED | REJECTED | ARCHIVED
+  status     String    @default("PENDING_REVIEW")
+  /// Platform userId of the reviewer
+  reviewedBy String?
+  reviewedAt DateTime?
+  /// Optional reviewer comment (why approved/rejected)
+  reviewNote String?
+
+  /// Short planning hint injected into intent-planner when APPROVED.
+  /// Set by the reviewer — never auto-generated.
+  ruleHint String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([domain, actionType, errorClassification])
+  @@index([status])
+  @@index([domain, actionType])
+  @@map("correction_patterns")
+}
+
+// ─── Background Job Queue ─────────────────────────────────────────────────────
+// Persistent async job queue backed by PostgreSQL.
+// Handles email, webhook delivery, cleanup, and any async task that must not
+// block an HTTP request. Upgrade to BullMQ by swapping lib/queue/index.ts
+// without touching callers.
+//
+// Status lifecycle:
+//   queued → running → completed
+//                    ↘ queued (retry with backoff)
+//                               → dead_letter (after maxAttempts)
+model BackgroundJob {
+  id          String    @id @default(uuid())
+  projectId   String? // null = system-scoped job
+  type        String // email | webhook_delivery | cleanup | custom
+  status      String    @default("queued") // queued | running | completed | failed | dead_letter
+  payload     Json // job-specific input data
+  result      Json? // output written on success
+  error       String? // last error message
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(5)
+  runAt       DateTime  @default(now()) // earliest time to run (honoured on retries too)
+  startedAt   DateTime?
+  completedAt DateTime?
+  timeoutAt   DateTime? // deadline for the running attempt; runner fails the job if exceeded
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([status, runAt])
+  @@index([projectId])
+  @@index([type, status])
+  @@index([timeoutAt])
+  @@map("background_jobs")
+}
+
+// ─── Schema Version (rollback capability) ───────────────────────────────────
+model SchemaVersion {
+  id          String   @id @default(uuid())
+  projectId   String
+  versionNum  Int // Monotonically increasing
+  snapshot    Json // Full schema snapshot at this point
+  description String // What changed
+  triggeredBy String // user message or system action
+  createdAt   DateTime @default(now())
+
+  @@index([projectId])
+  @@index([projectId, versionNum])
+  @@map("schema_versions")
+}
+
+// ============================================================================
+// HEALTH FINDINGS — Unified store for all workspace observer findings.
+// Written by workspace-observer (cron + event-driven). Read by the dashboard.
+// ============================================================================
+
+// Unified findings pipeline (IA restructure §8.3 / §13).
+// Every detector — reconciler, behavioral verifier, contract observer, health
+// deep-scan — writes into this single model; the Overview advisor block (§6.2),
+// the Autonomy Activity tab, and the Review Queue all READ from it. Per the
+// report, we EXTEND this model rather than invent a parallel `Finding` table.
+model HealthFinding {
+  id           String    @id @default(uuid())
+  projectId    String
+  detectedAt   DateTime  @default(now())
+  // 'missing_rls' | 'missing_fk' | 'api_drift' | 'broken_webhook' |
+  // 'broken_auth' | 'orphan_table' | 'auth_spike' | 'deploy_failure' | …
+  type         String
+  severity     String // 'critical' | 'warning' | 'info'  (advisor maps → HIGH/MED/LOW)
+  // §6.2 severity-filter chips: 'security' | 'performance' | 'reliability'.
+  // Nullable so existing rows need no backfill; detectors populate it going forward.
+  category     String?
+  // Which detector emitted this finding: 'reconciler' | 'behavioral_verifier'
+  // | 'contract_observer' | 'health_scan'. Lets one pipeline stay auditable.
+  source       String?
+  details      Json
+  status       String    @default("open")
+  // 'open' | 'proposed' | 'auto_fixed' | 'pending_approval' | 'fixed' | 'dismissed'
+  autoFixed    Boolean   @default(false)
+  fixAppliedAt DateTime?
+  project      Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, status])
+  @@index([projectId, severity])
+  @@index([projectId, category])
+  @@index([projectId, detectedAt])
+  @@index([type])
+  @@map("health_findings")
+}
+
+// ─── Workspace Schema Snapshot (#86) ────────────────────────────────────────
+// Captures the LIVE database DDL for each workspace schema after every mutation.
+// Unlike SchemaVersion (which stores the AI graph state), this stores the actual
+// PostgreSQL schema — column types, constraints, indexes, foreign keys — so
+// ROLLBACK_TO_VERSION can restore the real database state, not just the AI representation.
+model WorkspaceSchemaSnapshot {
+  id          String   @id @default(uuid())
+  projectId   String
+  versionNum  Int // Monotonically increasing per project
+  trigger     String // What triggered this snapshot: 'pre_migration' | 'post_migration' | 'manual' | 'build_complete'
+  tables      Json // Array of { name, columns: [{name, type, nullable, default, isPrimary}], indexes, foreignKeys }
+  rawDdl      String // Full DDL SQL that could recreate the schema
+  tableCount  Int      @default(0)
+  columnCount Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  @@index([projectId])
+  @@index([projectId, versionNum])
+  @@index([projectId, createdAt])
+  @@map("workspace_schema_snapshots")
+}
+
+// ── Persistent Workflow State Machine ────────────────────────────────────────
+// Tracks multi-turn interactions that require user input before they can proceed.
+// Every incoming chat message must check for an active PendingWorkflow first.
+// This prevents follow-up messages from being routed as fresh build requests
+// when the system is in the middle of collecting credentials or confirmations.
+model PendingWorkflow {
+  id        String @id @default(uuid())
+  projectId String
+  userId    String
+
+  // Workflow type — determines validation rules and resume action
+  type String // oauth_setup | api_key_setup | webhook_secret_setup |
+  // storage_creation | destructive_confirmation | deploy_confirmation |
+  // rollback_confirmation | integration_setup | scan_running | build_resume
+
+  // Lifecycle status
+  status String @default("awaiting_input")
+  // awaiting_input | executing | completed | failed | cancelled | expired
+
+  // Optional context fields
+  provider   String? // google | stripe | resend | openai | github | sendgrid
+  action     String? // The specific action this workflow will perform on completion
+  buildJobId String? // ID of the BuildJob this workflow is associated with (for resume)
+
+  // Validation config — JSON schemas so the validator knows what to accept
+  requiredInputs  Json @default("{}") // { clientId?: {pattern, hint}, clientSecret?: {pattern, hint} }
+  validationRules Json @default("{}") // { clientId: "/.apps.googleusercontent.com$/", clientSecret: "/^GOCSPX-/" }
+
+  // Opaque context bag for the resume handler
+  context Json @default("{}") // whatever the initiating stage needs to resume
+
+  // Collected inputs (partial — grows as user provides each piece)
+  collectedInputs Json @default("{}")
+
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([projectId, status])
+  @@index([projectId, type])
+  @@index([expiresAt])
+  @@map("pending_workflows")
+}
+
+// ─── Platform Control Plane ───────────────────────────────────────────────────
+// Founder-facing emergency switches. A single row keyed by "singleton" holds
+// the current platform mode. Every relevant entry-point reads it via
+// lib/platform/controls.ts (5s in-process cache) so toggling is near-instant.
+
+model PlatformControl {
+  id              String   @id @default("singleton") // exactly one row
+  aiFrozen        Boolean  @default(false) // block all AI execution (chat + execute routes)
+  signupsDisabled Boolean  @default(false) // block new platform user creation (email + OAuth)
+  maintenanceMode Boolean  @default(false) // banner + block all writes platform-wide
+  readOnly        Boolean  @default(false) // block end-user + AI writes; reads still flow
+  note            String? // optional founder note shown in the admin UI
+  updatedAt       DateTime @updatedAt
+  updatedBy       String? // userId of the admin who last changed this
+
+  @@map("platform_controls")
+}
+
+// IP / email / domain blocklist. Checked at signup + login + (later) at the
+// edge. Domains match the suffix of the email after '@', e.g. "spambot.com".
+model Blocklist {
+  id        String   @id @default(uuid())
+  kind      String // "ip" | "email" | "domain"
+  value     String // lowercased; ip in CIDR or plain
+  reason    String?
+  createdAt DateTime @default(now())
+  createdBy String? // userId of the admin who added the entry
+
+  @@unique([kind, value])
+  @@index([kind])
+  @@map("blocklist")
+}
+
+// Generic security signal table — filled by Phase B (cross-tenant, anomaly,
+// suspicious prompt, secret leak, API abuse). Lives here so the migration is
+// done once; the admin Security tab reads from it.
+model SecurityEvent {
+  id         String    @id @default(uuid())
+  kind       String // "cross_tenant" | "auth_anomaly" | "suspicious_prompt" | "secret_leak" | "api_abuse" | "blocklist_hit" | "lockdown" | "kill_switch"
+  severity   String    @default("info") // "info" | "warn" | "high" | "critical"
+  userId     String?
+  userEmail  String?
+  projectId  String?
+  ip         String?
+  summary    String // short human-readable line for the feed
+  detail     Json? // full structured context
+  resolved   Boolean   @default(false)
+  resolvedAt DateTime?
+  resolvedBy String?
+  createdAt  DateTime  @default(now())
+
+  @@index([kind])
+  @@index([severity])
+  @@index([userId])
+  @@index([projectId])
+  @@index([resolved])
+  @@index([createdAt])
+  @@map("security_events")
+}
+
+// Product-feedback signal: a user asked the AI for something Backenly
+// deliberately does NOT do (frontend build, raw SQL, manual schema, …).
+// Observe-only — recorded at the AI entry-points, never changes behaviour.
+// This is the founder's roadmap, written by users.
+model UnsupportedRequest {
+  id             String   @id @default(uuid())
+  userId         String?
+  projectId      String?
+  category       String // NonFeature.category (custom-sql | manual-schema | …)
+  promptExcerpt  String // first ~240 chars of the user's message
+  refusalMessage String? // the canonical refusal copy for this non-feature
+  createdAt      DateTime @default(now())
+
+  @@index([category])
+  @@index([userId])
+  @@index([createdAt])
+  @@map("unsupported_requests")
+}
+
+// In-app support inbox. User submits via Settings → "Contact support" form.
+// Founder reads from admin Feedback tab. No email round-trip required.
+model SupportTicket {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subject   String
+  message   String
+  status    String   @default("open") // open | resolved | dismissed
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("support_tickets")
+}
+
+// Founder's roadmap, written by users. Submitted via Settings → "Feature requests" form.
+// Surfaces in the admin Feedback tab alongside the unsupported-request signal.
+model FeatureRequest {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  body      String
+  status    String   @default("open") // open | planned | shipped | declined
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("feature_requests")
+}
+
+// Per-project end-user auth settings: branding for auth emails (app name +
+// URL used in verification / magic-link / reset links) and policy toggles.
+model ProjectAuthConfig {
+  id                       String   @id @default(uuid())
+  projectId                String   @unique
+  appName                  String? // Shown in end-user auth emails; falls back to project.name
+  appUrl                   String? // Base URL auth links point back to (the developer's app)
+  requireEmailVerification Boolean  @default(false)
+  magicLinksEnabled        Boolean  @default(true)
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+  project                  Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@map("project_auth_configs")
+}
+
+// ─── Direct Database Access (open-loop) ───────────────────────────────────────
+// Per-project PostgreSQL login roles so developers can connect psql / TablePlus /
+// BI tools straight to their workspace schema. READ_ONLY roles hold SELECT only;
+// READ_WRITE roles additionally hold DML + in-schema DDL, and every out-of-band
+// DDL statement they run is captured as a SchemaDriftEvent by the event trigger
+// installed in scripts/setup-direct-access.sql — the autonomy loop then adopts
+// or flags it. Passwords are AES-256-GCM encrypted (lib/security/projectEnvCrypto)
+// so the dashboard can re-show the connection string; rotate to invalidate.
+// No Project relation on purpose — follows WorkspaceSchemaSnapshot precedent.
+model DatabaseCredential {
+  id             String    @id @default(uuid())
+  projectId      String
+  mode           String // 'READ_ONLY' | 'READ_WRITE'
+  roleName       String    @unique // bkn_ro_<hex12> / bkn_rw_<hex12>
+  passwordCipher String
+  passwordIv     String
+  passwordTag    String
+  createdAt      DateTime  @default(now())
+  rotatedAt      DateTime?
+
+  @@unique([projectId, mode])
+  @@index([projectId])
+  @@map("database_credentials")
+}
+
+// One row per out-of-band DDL statement executed by a bkn_% role, inserted
+// directly by the superuser-installed event trigger (backenly_capture_ddl in
+// scripts/setup-direct-access.sql — column names here MUST stay in sync with
+// that INSERT). The drift-watch probe turns pending rows into an
+// external_schema_change finding; adopting snapshots the new reality, resyncs
+// grants, and marks the rows adopted.
+model SchemaDriftEvent {
+  id             String    @id @default(uuid())
+  projectId      String? // parsed from schema name by the trigger; null = not a workspace schema
+  roleName       String
+  commandTag     String // 'CREATE TABLE' | 'ALTER TABLE' | 'DROP TABLE' | …
+  objectType     String?
+  objectIdentity String? // schema-qualified, e.g. workspace_<id>.orders
+  schemaName     String?
+  capturedAt     DateTime  @default(now())
+  status         String    @default("pending") // pending | adopted | ignored
+  resolvedAt     DateTime?
+  findingId      String?
+
+  @@index([projectId, status])
+  @@index([capturedAt])
+  @@map("schema_drift_events")
+}
