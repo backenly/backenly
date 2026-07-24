@@ -32,7 +32,7 @@ Most backend platforms hand you primitives and leave you owning schema design,
 API wiring, RLS policies, monitoring, and recovery. Newer agent-native backends
 hand an agent raw SQL and no safety net.
 
-Backenly does neither. You describe your product in plain English through the
+Backenly does neither. You describe the product you're building through the
 coding agent you already use (Claude Code, Cursor, Codex) over an MCP server.
 Backenly derives the data model, generates the endpoints, writes the policies,
 applies the change, and then **verifies it against the live runtime**. A
