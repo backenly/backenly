@@ -1,6 +1,8 @@
 <div align="center">
 
-<img src="x-cover-banner.svg" alt="Backenly - the autonomous backend platform" width="880" />
+<img src="public/backenly-icon-hd.svg" alt="Backenly" width="112" height="112" />
+
+# Backenly
 
 ### Your coding agent builds it. Backenly keeps it running.
 
