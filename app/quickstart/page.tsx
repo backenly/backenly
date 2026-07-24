@@ -46,7 +46,7 @@ const APP_URL = 'https://backenly.com'
 export const metadata: Metadata = {
   title: 'Quickstart — Connect Claude Code, Cursor & Codex to a real backend | Backenly',
   description:
-    'Connect Backenly to Claude Code, Cursor, Codex, or Cline over MCP in one command, describe your backend in plain English, and query it with the PostgREST grammar you already know.',
+    'Connect Backenly to Claude Code, Cursor, Codex, or Cline over MCP in one command, describe the backend you need, and query it with the PostgREST grammar you already know.',
   keywords: [
     'Backenly quickstart',
     'Backenly MCP',
@@ -154,7 +154,7 @@ server, migrations, or connection code.
 
 3. Call read_backend_state first on any non-trivial task. It is the
    single read-state door; pass \`section\` to drill in.
-4. To build: prefer backend_chat with a plain-English request. For
+4. To build: prefer backend_chat and describe the change. For
    schema you can express as DDL, apply_migration takes ordinary
    PostgreSQL and translates it into governed actions.
 5. To read data: run_query takes standard read-only SQL (joins,
@@ -187,7 +187,7 @@ const STEPS: { n: string; title: string; body: string; code?: Snippet; extra?: S
     n: '03',
     title: 'Describe the backend',
     body: 'Say what the product does, including who is allowed to see what. Backenly derives the tables, foreign keys, indexes, REST surface and row-level security from it, shows you the plan, and applies it as governed steps once you confirm.',
-    code: { label: 'to your agent, in plain English', language: 'text', code: DESCRIBE },
+    code: { label: 'what you say to your agent', language: 'text', code: DESCRIBE },
   },
   {
     n: '04',
@@ -314,7 +314,7 @@ const howToSchema = {
   '@type': 'HowTo',
   name: 'Connect your coding agent to a Backenly backend over MCP',
   description:
-    'Connect Backenly to Claude Code, Cursor, Codex, or Cline over MCP, describe a backend in plain English, and query it over PostgREST.',
+    'Connect Backenly to Claude Code, Cursor, Codex, or Cline over MCP, describe the backend you need, and query it over PostgREST.',
   step: STEPS.map((s, i) => ({
     '@type': 'HowToStep',
     position: i + 1,
