@@ -145,7 +145,7 @@
         font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"
         font-size="26" font-weight="400" letter-spacing="-0.3">
     <tspan fill="rgba(255,255,255,0.5)">The </tspan>
-    <tspan fill="url(#purpleText)" font-weight="600" font-style="italic">AI-Native</tspan>
+    <tspan fill="url(#purpleText)" font-weight="600" font-style="italic">Autonomous</tspan>
     <tspan fill="rgba(255,255,255,0.8)"> Backend Platform</tspan>
   </text>
 
@@ -161,7 +161,7 @@
   <text x="730" y="345" text-anchor="start"
         font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"
         font-size="16" font-weight="400" fill="rgba(255,255,255,0.35)" letter-spacing="0.3">
-    Generated and deployed from natural language
+    Built and kept running by your coding agent
   </text>
 
   <!-- Website URL -->
