@@ -13,7 +13,6 @@ import {
 } from 'lucide-react'
 import { SiteShell } from '@/components/site/SiteShell'
 import {
-  Breadcrumb,
   InlineArrow,
   PageHero,
   PrimaryButton,
@@ -347,8 +346,6 @@ export default function QuickstartPage() {
       />
 
       <main className="relative z-20">
-        <Breadcrumb items={[{ label: 'Home', href: '/' }, { label: 'Quickstart' }]} />
-
         <PageHero
           align="center"
           eyebrow="Quickstart · MCP"
