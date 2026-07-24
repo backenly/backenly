@@ -5,24 +5,30 @@ them, verifies the result, and keeps every change reviewable and reversible.
 That last property is the product. Most of the conventions below exist to
 protect it.
 
+> **Heads up: we are not merging external pull requests yet.** Backenly is in
+> early access and moving fast, so for now the best way to contribute is to
+> **open an issue**. Bug reports, feature requests, and questions are all
+> welcome and read. Everything below describes the workflow for when pull
+> requests open up.
+
 ## Licensing
 
-The platform is **Apache-2.0**. Client libraries under `packages/` — the SDK,
-CLI, and MCP server — are **MIT**, because they get embedded in your users'
+The platform is **Apache-2.0**. Client libraries under `packages/` (the SDK,
+CLI, and MCP server) are **MIT**, because they get embedded in your users'
 applications and should carry the lightest possible obligation.
 
 Apache-2.0 is permissive: you may use, modify, and redistribute this, including
-commercially and in closed-source products. It adds two things MIT does not — an
+commercially and in closed-source products. It adds two things MIT does not: an
 explicit patent grant from contributors, and a requirement to state what you
-changed — which is what makes it straightforward for companies to adopt.
+changed. That is what makes it straightforward for companies to adopt.
 
 By contributing you agree your contribution is licensed under the same terms as
 the code it touches, per Apache-2.0 section 5.
 
 ## Getting a local instance running
 
-You need Docker and Node 20+. You do **not** need access to any Backenly server —
-if a change only works against production, that is a bug in the change.
+You need Docker and Node 20+. You do **not** need access to any Backenly server.
+If a change only works against production, that is a bug in the change.
 
 ```bash
 cp .env.example .env          # fill in OPENAI_API_KEY; the rest have defaults
@@ -32,7 +38,7 @@ npm run db:push               # create the schema
 npm run dev                   # Next.js + the Express runtime, together
 ```
 
-Then `npm test`. Tests use a **real database** — see below.
+Then `npm test`. Tests use a **real database**. See below.
 
 ## The rules that are not negotiable
 
@@ -43,7 +49,7 @@ previously caused a production incident.
 
 Tests run against real PostgreSQL. Mocks agree with whatever you believed when
 you wrote them, which means a test suite full of mocks passes precisely when
-your mental model is wrong — the exact case a test exists to catch. Several
+your mental model is wrong, the exact case a test exists to catch. Several
 outages in this codebase were shipped green.
 
 ### Platform users and end users are different systems
@@ -68,7 +74,7 @@ because a change made outside the governed pipeline has no plan and no rollback.
 
 Detectors return findings; they do not swallow errors into an empty result. An
 empty array means "I looked and found nothing", and a failed query returning `[]`
-is a claim of health for a system nobody examined. Throw instead — the caller
+is a claim of health for a system nobody examined. Throw instead: the caller
 records the probe as unavailable, which is true.
 
 ### Auto-fixes may not widen a security boundary
@@ -79,6 +85,8 @@ for this is not "would this help" but "what happens if the diagnosis was wrong":
 a wrong additive fix wastes a cycle, a wrong permissive fix is a breach.
 
 ## Before you open a pull request
+
+(When pull requests open, this is the checklist.)
 
 ```bash
 npm run lint
@@ -93,7 +101,7 @@ and rewriting the commit later does not recall the copies.
 
 ## Commit messages
 
-Explain **why**, not what — the diff already says what. If a change prevents a
+Explain **why**, not what. The diff already says what. If a change prevents a
 specific failure, name the failure. A future reader deciding whether they can
 safely remove your code needs to know what it was protecting against.
 
