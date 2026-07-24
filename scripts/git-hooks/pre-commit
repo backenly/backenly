@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Backenly pre-commit secret guard.
+#
+# This repo is PUBLIC. A secret committed here is scraped within seconds and
+# cannot be recalled by amending — the leaked commit lives on in clones, forks
+# and GitHub's cache. So the only safe place to stop a leak is BEFORE the commit.
+#
+# Scans the STAGED diff (what is actually about to be committed) for real
+# secret shapes and known-bad values. Exits non-zero to block the commit.
+# Bypass only if you are certain it is a false positive:  git commit --no-verify
+#
+# Install once:  git config core.hooksPath scripts/git-hooks
+set -uo pipefail
+
+# Only the staged additions (+ lines), excluding template/example files.
+added=$(git diff --cached --no-color --diff-filter=ACM \
+  -- . ':(exclude).env.example' ':(exclude).env.storage.example' ':(exclude)scripts/git-hooks/*' \
+  | grep -E '^\+' | grep -vE '^\+\+\+')
+
+[ -z "$added" ] && exit 0
+
+fail=0
+hit() { echo "  ✗ $1"; fail=1; }
+
+# 1. A real .env file being added is an instant block.
+if git diff --cached --name-only --diff-filter=ACM | grep -qE '(^|/)\.env(\.|$)' \
+   && ! git diff --cached --name-only --diff-filter=ACM | grep -qE '\.env\.(example|storage\.example)$'; then
+  # allow only the two example templates; any other .env* is blocked
+  bad=$(git diff --cached --name-only --diff-filter=ACM | grep -E '(^|/)\.env' | grep -vE '\.env\.(example|storage\.example)$' || true)
+  [ -n "$bad" ] && hit "real env file staged: $bad"
+fi
+
+# 2. Secret-shaped strings in the staged additions.
+echo "$added" | grep -qE '\bsk-(proj-)?[A-Za-z0-9_-]{20,}'                                  && hit "OpenAI API key (sk-...)"
+echo "$added" | grep -qE '\bgh[pousr]_[A-Za-z0-9]{30,}'                                     && hit "GitHub token (ghp_/gho_/...)"
+echo "$added" | grep -qE '\bGOCSPX-[A-Za-z0-9_-]{20,}'                                      && hit "Google client secret (GOCSPX-...)"
+echo "$added" | grep -qE '\bnpg_[A-Za-z0-9]{10,}'                                           && hit "Neon Postgres password (npg_...)"
+echo "$added" | grep -qE '\bnapi_[A-Za-z0-9]{20,}'                                          && hit "Neon API key (napi_...)"
+echo "$added" | grep -qE '\bre_[A-Za-z0-9]{16,}'                                            && hit "Resend API key (re_...)"
+echo "$added" | grep -qE '\bpdl_(live|ntfset)_[A-Za-z0-9]'                                  && hit "Paddle key (pdl_live/ntfset_...)"
+echo "$added" | grep -qE '\bAKIA[0-9A-Z]{16}\b'                                             && hit "AWS access key (AKIA...)"
+echo "$added" | grep -qE -- '-----BEGIN [A-Z ]*PRIVATE KEY-----'                           && hit "private key block"
+echo "$added" | grep -qE '\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}' && hit "JWT (eyJ...)"
+# secret-name = long value (hex or base64), the shape of JWT_SECRET / MASTER_ENCRYPTION_KEY / etc.
+echo "$added" | grep -qE '(JWT_SECRET|SESSION_SECRET|MASTER_ENCRYPTION_KEY|INTERNAL_API_TOKEN|CRON_SECRET|SECRET_KEY|PRIVATE_KEY|CLIENT_SECRET)[A-Z_]*\s*[=:]\s*["'\'']?[A-Za-z0-9+/_-]{16,}' \
+  && hit "hardcoded secret assignment (NAME=<long value>)"
+# connection string carrying real credentials (not localhost / placeholder)
+echo "$added" | grep -qE '(mongodb(\+srv)?|postgres(ql)?)://[^\s:/@]+:[^@\s]+@' \
+  | grep -qvE 'localhost|127\.0\.0\.1|changeme|<password>|user:pass|username:password' \
+  && hit "connection string with embedded credentials"
+
+if [ "$fail" -ne 0 ]; then
+  echo ""
+  echo "🛑 pre-commit: possible secret in staged changes (repo is PUBLIC). Commit blocked."
+  echo "   Move the value into .env (gitignored) and read it via process.env.*"
+  echo "   If this is genuinely a false positive:  git commit --no-verify"
+  echo ""
+  exit 1
+fi
+exit 0

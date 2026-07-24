@@ -79,8 +79,10 @@ public/*.pdf
 # Local operator secrets — never committed
 .secrets.local.md
 
-# Local Claude Code permissions — machine-specific, and has held credentials
-.claude/settings.local.json
+# Local Claude Code state — machine-specific, and has held credentials.
+# Ignore the whole dir; only explicitly re-allow shared, secret-free config.
+.claude/
+!.claude/settings.json
 
 # Playwright run artifacts. These were tracked, so every test run left the tree
 # dirty with churn nobody reviews — and with parallel sessions running in this
