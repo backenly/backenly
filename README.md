@@ -141,11 +141,10 @@ moves your data between the two in either direction.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Before opening a PR, run:
-
-```bash
-npm run lint && npm test
-```
+**We are not merging external pull requests yet** while Backenly is in early
+access. The best way to help right now is to open an issue: bug reports, feature
+requests, and questions are all welcome. See [CONTRIBUTING.md](CONTRIBUTING.md)
+for the full guide, including the checklist for when pull requests open.
 
 Tests run against a real PostgreSQL instance. The database is never mocked,
 because mocking it has caused production incidents here before.
