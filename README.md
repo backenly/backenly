@@ -1,6 +1,6 @@
 <div align="center">
 
-# Backenly
+<img src="x-cover-banner.svg" alt="Backenly - the autonomous backend platform" width="880" />
 
 ### Your coding agent builds it. Backenly keeps it running.
 
@@ -16,13 +16,14 @@ verified, and reversible.
 
 [![Follow on X](https://img.shields.io/badge/Follow-%40Backenly-0f0f0f?style=for-the-badge&logo=x&logoColor=white)](https://x.com/Backenly)
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-Backenly-0A66C2?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/company/117034579)
+[![Discord](https://img.shields.io/badge/Join-Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/backenly)
 [![Star on GitHub](https://img.shields.io/badge/Star-on%20GitHub-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/backenly/backenly)
 
 **[backenly.com](https://backenly.com)** &nbsp;·&nbsp; [Quickstart](https://backenly.com/quickstart) &nbsp;·&nbsp; [Client libraries](https://github.com/backenly/backenly-js)
 
 </div>
 
-> If Backenly saves you time, a ⭐ on the repo helps other builders find it.
+> ⭐ **Star the repo** to follow releases and help other builders find Backenly.
 
 ---
 
