@@ -34,6 +34,7 @@ import {
   dispatchTool,
   isDestructiveTool,
   isReadOnlyTool,
+  humanTitle,
   type ToolDispatchContext,
   type ToolName,
 } from './tools'
@@ -137,7 +138,54 @@ export interface BrainResult {
    * would double the time budget and sign up throwaway end-users twice.
    */
   verifiedInline?: boolean
+  /**
+   * ── Machine-readable failure classification ─────────────────────────────────
+   *
+   * The prose in `summary` has always been honest about WHY a turn failed
+   * ("I stopped before changing anything because the AI provider rate-limited
+   * us"). None of it was machine-readable, so every caller had to regex the
+   * summary or give up — and `/api/mcp/chat` gave up, returning a bare
+   * `Brain run failed.` with no code, no retryable flag and no indication that
+   * the identical request would succeed on a second attempt (defect #14).
+   *
+   * The rate-limit case is the sharpest version: the brain stopped cleanly and
+   * said so, and the only place that reached the agent was the `resultSummary`
+   * of a later `check_approval` poll — a field nobody would think to read for it
+   * (defect #15).
+   *
+   * Set only when the turn did not complete cleanly.
+   */
+  failureCode?: BrainFailureCode
+  /**
+   * Whether an identical retry has a reasonable chance of succeeding. A rate
+   * limit and a model timeout are retryable; running out of steps is not (the
+   * caller should say "continue" instead), and neither is a tool that refused on
+   * the merits.
+   */
+  retryable?: boolean
+  /**
+   * Mutations that ACTUALLY landed this turn, whatever the outcome.
+   *
+   * Populated even on failure, because "the run stopped" and "nothing changed"
+   * are different facts and conflating them is what turns a partial success into
+   * a duplicate-creating retry.
+   */
+  applied?: string[]
 }
+
+export type BrainFailureCode =
+  /** The AI provider returned 429. Retry after a pause. */
+  | 'RATE_LIMITED'
+  /** The model call timed out. Retryable. */
+  | 'MODEL_TIMEOUT'
+  /** The model errored for some other reason. Retryable once. */
+  | 'MODEL_ERROR'
+  /** Hit MAX_ITERATIONS. Not retryable as-is — continue instead. */
+  | 'STEP_BUDGET_EXHAUSTED'
+  /** The turn ended asking the user something. Not a failure to retry. */
+  | 'NEEDS_USER'
+  /** A tool refused on the merits. Retrying the same call will refuse again. */
+  | 'TOOL_REFUSED'
 
 const MAX_ITERATIONS = 12
 
@@ -1168,6 +1216,9 @@ async function runAgentLoop(
   let terminalData: unknown = null
   let modelFailed = false
   let modelFailureReason = ''
+  let modelFailureCode: BrainFailureCode | undefined
+  /** Mutations that landed this turn — reported even if the turn later fails. */
+  const appliedMutationTitles: string[] = []
   let tokensUsed = 0
   // Per-tool outcome, aligned by index to `toolsRun`. Recorded to Memory so an
   // action that landed reads 'applied' even when a later model call in this
@@ -1197,11 +1248,19 @@ async function runAgentLoop(
         mutated,
       })
       modelFailed = true
-      modelFailureReason = /timeout|timed out/i.test(e?.message ?? '')
-        ? 'the AI model timed out'
-        : e?.status === 429
-          ? 'the AI provider rate-limited us'
-          : 'the AI model returned an error'
+      // Classified ONCE, into prose for the human and a code for the caller.
+      // Deriving them separately is how the prose came to say "rate-limited" while
+      // the transport reported an unclassified `Brain run failed.`
+      if (e?.status === 429 || /rate.?limit/i.test(e?.message ?? '')) {
+        modelFailureReason = 'the AI provider rate-limited us'
+        modelFailureCode = 'RATE_LIMITED'
+      } else if (/timeout|timed out/i.test(e?.message ?? '')) {
+        modelFailureReason = 'the AI model timed out'
+        modelFailureCode = 'MODEL_TIMEOUT'
+      } else {
+        modelFailureReason = 'the AI model returned an error'
+        modelFailureCode = 'MODEL_ERROR'
+      }
       break
     }
 
@@ -1293,6 +1352,10 @@ async function runAgentLoop(
       if (isMutation) {
         mutated = true
         verifiedAfterMutation = false
+        // Recorded even when the turn later fails, so the caller can tell "the
+        // run stopped" from "nothing changed" — the distinction that decides
+        // whether retrying is safe or duplicates work.
+        if (result.ok) appliedMutationTitles.push(humanTitle(toolName, args))
       }
 
       // Clip hard before feeding back into the loop. Executor summaries can be
@@ -1380,6 +1443,25 @@ async function runAgentLoop(
   await saveTurn(input.projectId, input.message, finalSummary, input.requestId ?? null)
   await recordBrainOperationalMemory(input, toolsRun, finalSummary, success ? 'applied' : 'failed', toolStatuses)
 
+  // ── The failure classification the caller gets ──────────────────────────────
+  //
+  // Derived from the same facts the summary prose is derived from, so the two can
+  // never disagree. `applied` is populated regardless of outcome: a caller must be
+  // able to distinguish "the run stopped" from "nothing changed".
+  const failureCode: BrainFailureCode | undefined = success
+    ? undefined
+    : modelFailureCode
+      ? modelFailureCode
+      : needsUser
+        ? 'NEEDS_USER'
+        : iter >= MAX_ITERATIONS
+          ? 'STEP_BUDGET_EXHAUSTED'
+          : toolStatuses.includes('failed')
+            ? 'TOOL_REFUSED'
+            : undefined
+
+  const RETRYABLE: BrainFailureCode[] = ['RATE_LIMITED', 'MODEL_TIMEOUT', 'MODEL_ERROR']
+
   return {
     success,
     summary: finalSummary,
@@ -1388,6 +1470,8 @@ async function runAgentLoop(
     toolsRun,
     classification,
     tokensUsed,
+    ...(failureCode ? { failureCode, retryable: RETRYABLE.includes(failureCode) } : {}),
+    applied: appliedMutationTitles,
   }
 }
 

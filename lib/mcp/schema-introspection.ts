@@ -60,6 +60,24 @@ export function isCrudExposable(name: string): boolean {
   return isExposedTable(name) && !isAuthManagedTable(name)
 }
 
+/**
+ * `pg_policies.roles` → a plain string array.
+ *
+ * The column is `name[]`. Depending on how the driver maps it, it arrives either
+ * already as an array or as PostgreSQL's array literal (`{authenticated,anon}`).
+ * Returning the literal would hand an agent a string it has to parse, which is
+ * the sort of thing that turns a fix into a new bug one layer down.
+ */
+function normalizeRoles(raw: unknown): string[] {
+  if (Array.isArray(raw)) return raw.map((r) => String(r))
+  if (typeof raw === 'string') {
+    const inner = raw.replace(/^\{/, '').replace(/\}$/, '').trim()
+    if (!inner) return []
+    return inner.split(',').map((r) => r.trim().replace(/^"|"$/g, '')).filter(Boolean)
+  }
+  return []
+}
+
 /** Deep-convert BigInt → Number so the payload is always JSON-safe. */
 function jsonSafe<T>(value: T): T {
   return JSON.parse(
@@ -122,12 +140,71 @@ export interface TableSchema {
   rlsEnabled: boolean
   forceRls: boolean
   columns: TableColumn[]
+  /**
+   * Columns whose names are NOT lower-case and therefore MUST be double-quoted in
+   * SQL, plus a ready-to-read note when a table mixes conventions.
+   *
+   * ── Why this is in the payload ──────────────────────────────────────────────
+   *
+   * Backenly provisions `createdAt` / `updatedAt` (camelCase) alongside
+   * `deleted_at` (snake_case), and authors add snake_case columns of their own. So
+   * a single table genuinely mixes conventions, and in PostgreSQL that is not
+   * cosmetic: an unquoted `createdAt` folds to `createdat` and the query fails
+   * with `column "createdat" does not exist`, while `deleted_at` needs no quoting
+   * at all. An agent has to get this right per column, and reported the mix as a
+   * real cost (defect #20).
+   *
+   * The column names themselves cannot be changed without a breaking migration on
+   * every existing project — `"createdAt"` appears in generated SQL throughout the
+   * platform, and `deleted_at` is what the soft-delete filters and autonomy probes
+   * look for. Renaming either would trade a naming inconsistency for broken
+   * queries on live backends.
+   *
+   * What CAN be removed is the guesswork, which is where the cost actually lands.
+   * This states the rule for this table, computed from its real columns.
+   */
+  identifierQuoting: {
+    /** Columns that must be written as "Name" in SQL. */
+    mustQuote: string[]
+    /** Present only when the table mixes conventions. */
+    note?: string
+  }
   primaryKey: string[]
   foreignKeys: Array<{ column: string; references: string; onDelete?: string }>
   indexes: Array<{ name: string; definition: string; unique: boolean }>
   checkConstraints: Array<{ name: string; definition: string }>
   triggers: Array<{ name: string; timing: string; event: string }>
-  policies: Array<{ name: string; command: string; using: string | null; withCheck: string | null }>
+  /**
+   * Live RLS policies.
+   *
+   * ── Why `roles` is here ─────────────────────────────────────────────────────
+   *
+   * It was missing, and its absence made a correctly-scoped policy read as a
+   * security hole. `bkn_direct_read USING (true)` looks like a wide-open SELECT
+   * on every row until you know it is granted only to the direct-connection
+   * role — and with `roles` absent there was no way to know that from this tool.
+   * An agent reviewing the schema reported it as an exposure and only ruled it
+   * out by noticing the same policy on a table it had never touched (defect #17).
+   *
+   * `run_query` refuses `pg_policies` for good reason — the catalogs are
+   * instance-wide, not per-project — so there was no fallback either (defect #18).
+   * The fix belongs here, in the tool that already reads the catalog server-side
+   * and filters to the calling project, rather than in loosening that refusal.
+   *
+   * `permissive` is included for the same reason: a RESTRICTIVE policy ANDs with
+   * the others instead of ORing, so two policies that look permissive in
+   * isolation can combine into something much narrower.
+   */
+  policies: Array<{
+    name: string
+    command: string
+    /** Database roles the policy applies to. `["public"]` means every role. */
+    roles: string[]
+    /** PERMISSIVE (ORed with other policies) or RESTRICTIVE (ANDed). */
+    permissive: string
+    using: string | null
+    withCheck: string | null
+  }>
 }
 
 /** Full, RLS-aware schema for a single workspace table. */
@@ -195,7 +272,8 @@ export async function getTableSchema(projectId: string, tableNameRaw: string): P
         schema, table,
       ),
       prisma.$queryRawUnsafe<Array<any>>(
-        `SELECT policyname, cmd, qual, with_check FROM pg_policies WHERE schemaname = $1 AND tablename = $2`,
+        `SELECT policyname, cmd, roles, permissive, qual, with_check
+           FROM pg_policies WHERE schemaname = $1 AND tablename = $2`,
         schema, table,
       ),
       recordCount(projectId, schema, table),
@@ -211,6 +289,10 @@ export async function getTableSchema(projectId: string, tableNameRaw: string): P
     maxLength: c.character_maximum_length ?? null,
   }))
 
+  // Anything not already lower-case folds when unquoted, so it must be quoted.
+  const mustQuote = columns.map((c) => c.name).filter((n) => n !== n.toLowerCase())
+  const hasSnake = columns.some((c) => c.name.includes('_') && c.name === c.name.toLowerCase())
+
   return jsonSafe({
     table,
     schema,
@@ -218,6 +300,21 @@ export async function getTableSchema(projectId: string, tableNameRaw: string): P
     rlsEnabled: rlsRaw[0]?.relrowsecurity ?? false,
     forceRls: rlsRaw[0]?.relforcerowsecurity ?? false,
     columns,
+    identifierQuoting: {
+      mustQuote,
+      ...(mustQuote.length && hasSnake
+        ? {
+            note:
+              `This table mixes naming conventions. ${mustQuote.map((n) => `"${n}"`).join(', ')} ` +
+              `${mustQuote.length === 1 ? 'is' : 'are'} camelCase and MUST be double-quoted in SQL — ` +
+              `unquoted, PostgreSQL folds ${mustQuote.length === 1 ? 'it' : 'them'} to lower case and the ` +
+              `query fails with \`column "${mustQuote[0].toLowerCase()}" does not exist\`. The snake_case ` +
+              `columns need no quoting. Backenly provisions createdAt/updatedAt in camelCase and deleted_at ` +
+              `in snake_case; the names cannot be unified without breaking existing backends, so quote by ` +
+              `this list rather than by convention.`,
+          }
+        : {}),
+    },
     primaryKey: Array.from(pkCols),
     foreignKeys: fksRaw.map((f) => ({
       column: f.from_col,
@@ -238,6 +335,12 @@ export async function getTableSchema(projectId: string, tableNameRaw: string): P
     policies: polRaw.map((p) => ({
       name: p.policyname,
       command: p.cmd,
+      // pg_policies.roles is a name[]; the pg driver may hand it back as an
+      // array or as the literal `{a,b}` text form depending on the type mapping.
+      // Both are normalised here so the field is never a raw `{...}` string an
+      // agent has to parse.
+      roles: normalizeRoles(p.roles),
+      permissive: String(p.permissive ?? 'PERMISSIVE'),
       using: p.qual ?? null,
       withCheck: p.with_check ?? null,
     })),

@@ -20,6 +20,7 @@
 import {
   inferRlsPlanFromCatalog,
   severityForPlan,
+  exposureReason,
   type OwnershipCatalog,
 } from '@/lib/services/rls-ownership'
 import { looksFabricated, verificationLabel } from '@/lib/integrations/key-verification'
@@ -66,7 +67,7 @@ describe('RLS ownership follows foreign keys, not column names', () => {
     if (plan.kind === 'related_rows') {
       expect(plan.via.localColumn).toBe('order_id')
       expect(plan.via.parentTable).toBe('orders')
-      expect(plan.via.parentOwnerColumn).toBe('user_id')
+      expect(plan.via.parentOwnerColumns).toEqual(['user_id'])
     }
   })
 
@@ -307,5 +308,141 @@ describe('agent-facing text never recommends an unadvertised tool (#43)', () => 
     // The guard does recommend tools — if this is empty the test is vacuous.
     expect(named.size).toBeGreaterThan(0)
     expect([...named].filter((t) => !advertised.has(t))).toEqual([])
+  })
+})
+
+/**
+ * ── #12 — two-party tables ───────────────────────────────────────────────────
+ *
+ * `own_rows` compares ONE column to the caller. On a table where a row belongs to
+ * two users it does not degrade gracefully; it picks a side. The inference took
+ * whichever foreign key the catalog listed first, so on
+ *
+ *     connections(requester_id → users, addressee_id → users)
+ *
+ * it installed `requester_id = auth.uid()` and the ADDRESSEE could not read the
+ * connection request addressed to them. Same for conversations(user_a, user_b)
+ * and messages(sender_id, recipient_id).
+ *
+ * Reported as defect #12, and it is the gap that made owner-only RLS unable to
+ * express any social, messaging or marketplace schema. The related escalation —
+ * "Cannot apply own_rows to connections — it has no ownership column" — was the
+ * same schema hitting the OTHER owner detector, which read column names only.
+ */
+function socialCatalog(): OwnershipCatalog {
+  return {
+    schemaName: 'workspace_test',
+    columns: new Map<string, string[]>([
+      ['users', ['id', 'email', 'password_hash']],
+      ['profiles', ['id', 'user_id', 'headline', 'is_public']],
+      ['connections', ['id', 'requester_id', 'addressee_id', 'status']],
+      ['conversations', ['id', 'user_a', 'user_b', 'last_message_at']],
+      ['messages', ['id', 'conversation_id', 'sender_id', 'body']],
+      ['follows', ['id', 'follower_id', 'following_id']],
+      ['profile_views', ['id', 'viewer_id', 'viewed_profile_id']],
+    ]),
+    foreignKeys: [
+      { childTable: 'profiles', childColumn: 'user_id', parentTable: 'users', parentColumn: 'id' },
+      { childTable: 'connections', childColumn: 'requester_id', parentTable: 'users', parentColumn: 'id' },
+      { childTable: 'connections', childColumn: 'addressee_id', parentTable: 'users', parentColumn: 'id' },
+      { childTable: 'conversations', childColumn: 'user_a', parentTable: 'users', parentColumn: 'id' },
+      { childTable: 'conversations', childColumn: 'user_b', parentTable: 'users', parentColumn: 'id' },
+      { childTable: 'messages', childColumn: 'conversation_id', parentTable: 'conversations', parentColumn: 'id' },
+      { childTable: 'messages', childColumn: 'sender_id', parentTable: 'users', parentColumn: 'id' },
+    ],
+  }
+}
+
+describe('two-party tables get a two-party policy (#12)', () => {
+  const catalog = socialCatalog()
+
+  it('connections is owned by BOTH the requester and the addressee', () => {
+    const plan = inferRlsPlanFromCatalog(catalog, 'connections')
+    expect(plan.kind).toBe('party_rows')
+    if (plan.kind === 'party_rows') {
+      expect(plan.partyColumns).toEqual(['requester_id', 'addressee_id'])
+      expect(plan.basis).toBe('foreign_key')
+    }
+  })
+
+  it('conversations is owned by both participants', () => {
+    const plan = inferRlsPlanFromCatalog(catalog, 'conversations')
+    expect(plan.kind).toBe('party_rows')
+    if (plan.kind === 'party_rows') expect(plan.partyColumns).toEqual(['user_a', 'user_b'])
+  })
+
+  it('never resolves a two-party table to own_rows on one side', () => {
+    for (const table of ['connections', 'conversations']) {
+      const plan = inferRlsPlanFromCatalog(catalog, table)
+      expect(plan.kind).not.toBe('own_rows')
+    }
+  })
+
+  it('a one-owner table is still own_rows — the fix does not widen access', () => {
+    const plan = inferRlsPlanFromCatalog(catalog, 'profiles')
+    expect(plan.kind).toBe('own_rows')
+    if (plan.kind === 'own_rows') expect(plan.userIdColumn).toBe('user_id')
+  })
+
+  it('messages inherit BOTH participants of their conversation', () => {
+    // messages has FKs to users(sender_id) AND conversations. Ownership through
+    // the conversation must carry both parties, or the recipient cannot read a
+    // message sent to them — defect #12 one hop further out.
+    const plan = inferRlsPlanFromCatalog(catalog, 'messages')
+    if (plan.kind === 'related_rows') {
+      expect(plan.via.parentTable).toBe('conversations')
+      expect(plan.via.parentOwnerColumns).toEqual(expect.arrayContaining(['user_a', 'user_b']))
+    } else {
+      // Resolving via the sender FK is also acceptable ONLY if it names both
+      // parties — never a single side.
+      expect(plan.kind).toBe('party_rows')
+    }
+  })
+
+  it('recognises a two-party table with no declared foreign keys', () => {
+    const c: OwnershipCatalog = {
+      schemaName: 'workspace_test',
+      columns: new Map([
+        ['users', ['id']],
+        ['follows', ['id', 'follower_id', 'following_id']],
+      ]),
+      foreignKeys: [],
+    }
+    const plan = inferRlsPlanFromCatalog(c, 'follows')
+    expect(plan.kind).toBe('party_rows')
+    if (plan.kind === 'party_rows') {
+      expect(plan.partyColumns).toEqual(expect.arrayContaining(['follower_id', 'following_id']))
+    }
+  })
+
+  it('treats a declared owner plus a named counterparty as two-party', () => {
+    // Only the sender FK was declared; the recipient is named by convention.
+    // owner-only RLS here hides a message from the person it was sent to.
+    const c: OwnershipCatalog = {
+      schemaName: 'workspace_test',
+      columns: new Map([
+        ['users', ['id']],
+        ['dms', ['id', 'sender_id', 'recipient_id', 'body']],
+      ]),
+      foreignKeys: [
+        { childTable: 'dms', childColumn: 'sender_id', parentTable: 'users', parentColumn: 'id' },
+      ],
+    }
+    const plan = inferRlsPlanFromCatalog(c, 'dms')
+    expect(plan.kind).toBe('party_rows')
+    if (plan.kind === 'party_rows') {
+      expect(plan.partyColumns).toEqual(expect.arrayContaining(['sender_id', 'recipient_id']))
+    }
+  })
+
+  it('a two-party table with RLS off is still critical', () => {
+    expect(severityForPlan(inferRlsPlanFromCatalog(catalog, 'connections'))).toBe('critical')
+  })
+
+  it('names both parties in the exposure reason, not just one', () => {
+    const plan = inferRlsPlanFromCatalog(catalog, 'connections')
+    const why = exposureReason('connections', plan)
+    expect(why).toMatch(/requester_id/)
+    expect(why).toMatch(/addressee_id/)
   })
 })

@@ -179,6 +179,24 @@ export async function POST(request: NextRequest) {
       approval,
       iterations: result.iterations,
       toolsRun: result.toolsRun,
+      // ── The failure classification, at the TOP LEVEL ─────────────────────────
+      //
+      // The brain has always known why it stopped. None of it reached the agent:
+      // a rate-limited run returned a bare `Brain run failed.` with no code and
+      // no retryable flag, so an agent could not tell a transient fault from a
+      // real one and had no basis for backing off (defects #14 and #15).
+      //
+      // `code` is the stable slug, `retryable` says whether an identical retry is
+      // worth making, and `applied` lists what DID land — the fact that decides
+      // whether retrying is safe or duplicates work.
+      ...(escalated || result.success ? {} : {
+        code: result.failureCode ?? 'BRAIN_FAILED',
+        retryable: !!result.retryable,
+        ...(result.retryable
+          ? { retryAfterMs: result.failureCode === 'RATE_LIMITED' ? 30_000 : 5_000 }
+          : {}),
+      }),
+      ...(result.applied?.length ? { applied: result.applied } : {}),
       classification: {
         intent: result.classification.intent,
         confidence: result.classification.confidence,
@@ -223,7 +241,7 @@ export async function POST(request: NextRequest) {
         `Applied ${applied.length} change(s): ${applied.join('; ')}. ` +
         `The run then reached its time budget during final verification, so I'm ` +
         `reporting the applied changes directly — confirm with get_table_schema / ` +
-        `get_backend_metadata. Do NOT blindly retry; the change is already in place.`
+        `read_backend_state. Do NOT blindly retry; the change is already in place.`
       recordMcpCall(
         { ...auth, endpoint: ENDPOINT, startedAt },
         { statusCode: 200, tool: 'backend_chat', mutation: true, summary },
@@ -232,21 +250,43 @@ export async function POST(request: NextRequest) {
         ok: true,
         summary,
         partial: true,
+        // The exact tool that could not be confirmed, so "verify" is a specific
+        // instruction rather than an invitation to audit the whole backend —
+        // which is what the previous message amounted to (defect #16).
         applied,
+        verifyWith: applied.map((a) => `get_table_schema / read_backend_state — confirm: ${a}`),
         timing: { ms: Date.now() - startedAt },
         events: events.map(condense),
       }))
     }
 
+    // ── A failure that applied SOMETHING is not a clean failure ───────────────
+    //
+    // This branch used to require `!anyFail`, so a run that applied three changes
+    // and then had one tool fail fell through to a bare error — and an agent
+    // reading `ok:false` reasonably concluded nothing had happened and replayed
+    // the whole request. `applied` and `partial` are now reported on every
+    // failure path that changed something.
+    const partial = applied.length > 0
     recordMcpCall(
       { ...auth, endpoint: ENDPOINT, startedAt },
-      { statusCode: status, tool: 'backend_chat', error: msg },
+      { statusCode: status, tool: 'backend_chat', mutation: partial, error: msg },
     )
     return withCors(NextResponse.json(
       {
         ok: false,
-        error: msg,
+        error: partial
+          ? `${msg}. ${applied.length} change(s) DID take effect before this failed: ${applied.join('; ')}. ` +
+            `Do NOT replay the whole request — verify current state with read_backend_state and ask only ` +
+            `for what is missing.`
+          : `${msg}. Nothing was applied.`,
         code: timedOut ? 'BRAIN_TIMEOUT' : 'BRAIN_FAILED',
+        // A timeout is worth one retry; an unclassified brain failure is not
+        // assumed to be.
+        retryable: timedOut && !partial,
+        ...(timedOut && !partial ? { retryAfterMs: 5_000 } : {}),
+        partial,
+        ...(partial ? { applied } : {}),
         partialEvents: events.map(condense),
         timing: { ms: Date.now() - startedAt },
       },

@@ -299,11 +299,11 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     'Alias of get_backend_metadata — a complete structured overview of the project backend (tables + counts + relationships + auth/storage/realtime/functions). Use to confirm the connection and ground your plan. Side-effect free.',
     {}),
   fn('get_table_schema',
-    'Complete, RLS-aware schema for ONE table: every column (type, nullable, default, primary key, max length), the primary key, foreign keys (with ON DELETE), indexes, CHECK constraints (with the ACTUAL allowed values so you never violate them), triggers, whether RLS/FORCE-RLS is on, the live row-level-security policies (USING + WITH CHECK), and the exact record count. Call this before writing any query, insert, or migration against a table. Reads the live PostgreSQL catalog — never stale. Side-effect free.',
+    'Complete, RLS-aware schema for ONE table: every column (type, nullable, default, primary key, max length), the primary key, foreign keys (with ON DELETE), indexes (with UNIQUE and the full column tuple), CHECK constraints (with the ACTUAL allowed values so you never violate them), triggers, whether RLS/FORCE-RLS is on, the live row-level-security policies (command, ROLES the policy applies to, PERMISSIVE/RESTRICTIVE, USING + WITH CHECK), and the exact record count. The policy roles matter: a `USING (true)` policy is not open access if it is granted only to an internal role, so read `roles` before concluding a table is exposed. Call this before writing any query, insert, or migration against a table. Reads the live PostgreSQL catalog — never stale. Side-effect free.',
     { tableName: { type: 'string', description: 'The table to describe (snake_case).' } },
     ['tableName']),
   fn('create_table',
-    'Create a new database table with columns. Columns: {name, type (text|int|bigint|boolean|timestamp|uuid|jsonb|numeric), nullable?, unique?, fkTo? (other table name)}.',
+    'Create a new database table with columns. Columns: {name, type (text|int|bigint|boolean|timestamp|uuid|jsonb|numeric, or an array of any of them such as text[]), nullable?, unique?, fkTo? (other table name), default?}. `id`, `createdAt` and `updatedAt` are provisioned automatically — do not declare them. CHECK constraints are not part of this contract: create the table, then add them with add_constraint (or send the whole thing as SQL to apply_migration, which does both). RLS is applied automatically from the schema and the chosen policy is reported in the result — read it, because a two-party table gets `participants` rather than owner-only access.',
     {
       tableName: { type: 'string' },
       columns: {
@@ -339,11 +339,26 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     },
     ['tableName', 'column']),
   fn('create_index',
-    'Create an index on one or more columns for query performance.',
+    'Create an index on one or more columns for query performance, or a UNIQUE index to enforce ' +
+    'uniqueness across a combination of columns (which is how PostgreSQL implements a composite ' +
+    'UNIQUE constraint). Every field below is honoured exactly as given — a multi-column `columns` ' +
+    'array creates one composite index, not several single-column ones, and `unique: true` is ' +
+    'never downgraded.',
     {
       tableName: { type: 'string' },
-      columns: { type: 'array', items: { type: 'string' } },
-      unique: { type: 'boolean' },
+      columns: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Ordered column list. Several columns create ONE composite index over that exact tuple.',
+      },
+      unique: { type: 'boolean', description: 'Enforce uniqueness over the whole column tuple.' },
+      indexName: { type: 'string', description: 'Optional explicit index name. Omit and one is derived from the table and columns.' },
+      method: {
+        type: 'string',
+        enum: ['btree', 'gin', 'gist', 'hash', 'brin'],
+        description: 'Index method. Defaults to btree; use gin for array or jsonb containment queries.',
+      },
+      where: { type: 'string', description: 'Optional predicate for a PARTIAL index — only rows matching it are indexed.' },
     },
     ['tableName', 'columns']),
   fn('generate_api',
@@ -374,16 +389,39 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     ['bucketName']),
   fn('add_rls',
     'Add a row-level-security policy to a table. Templates:\n' +
-    '  • auto — RECOMMENDED DEFAULT. Reads the table\'s columns and foreign keys and installs the policy the schema implies: direct ownership → owner_read_write, ownership through a parent (order_items → orders → users) → owned_via_parent, reference data → public_read. Refuses with an explanation rather than guessing when ownership is genuinely ambiguous.\n' +
-    '  • owner_read_write — each user can read/write only rows they own (table has its own user column)\n' +
-    '  • owned_via_parent — the row belongs to whoever owns its PARENT row. Use for tables with no user column of their own but a foreign key to a user-owned table: line items, shipping addresses, saved cards, message attachments. Without this such tables are readable by any API key.\n' +
+    '  • auto — RECOMMENDED DEFAULT. Reads the table\'s columns and foreign keys and installs the policy the schema implies: one owner column → owner_read_write, TWO OR MORE user columns → participants, ownership through a parent (order_items → orders → users) → owned_via_parent, reference data → public_read. Refuses with an explanation rather than guessing when ownership is genuinely ambiguous.\n' +
+    '  • owner_read_write — each user can read/write only rows they own (table has ONE user column)\n' +
+    '  • participants — the row belongs to SEVERAL users and each of them can read and modify it. Use for every two-party table: connections(requester_id, addressee_id), conversations(user_a, user_b), messages(sender_id, recipient_id), follows, matches, invitations. owner_read_write is WRONG on these — it grants access to one side and locks the other out of their own row. Pass `partyColumns` to be explicit, or omit it and the foreign keys are read.\n' +
+    '  • owned_via_parent — the row belongs to whoever owns its PARENT row. Use for tables with no user column of their own but a foreign key to a user-owned table: line items, shipping addresses, saved cards, messages in a conversation. Works when the parent is itself two-party, so a message is visible to both participants. Without this such tables are readable by any API key.\n' +
     '  • public_read — anyone can read, only the owner can write (blogs, marketplaces)\n' +
     '  • org_members — multi-tenant B2B: users can access rows where organization_id matches an org they belong to. REQUIRES the table to have an organization_id column AND the project to have enable_teams already run.\n' +
     '  • admin_only — only service-role API keys (server-side jobs) can access\n' +
-    '  • all_access — every authenticated user can read/write everything (rare; use with care)',
+    '  • all_access — every authenticated user can read/write everything (rare; use with care)\n' +
+    '  • custom — THE ESCAPE HATCH. Your own predicate when no template fits. REQUIRES `using`: a boolean expression over this table\'s columns where backenly_jwt_claim(\'sub\') is the calling end-user\'s id, e.g. "owner_id::text = backenly_jwt_claim(\'sub\') OR is_public". Subqueries are refused — if the rule has to read another table, use owned_via_parent, which builds that lookup for you.\n' +
+    'This tool NEVER substitutes a different policy for the one you asked for: an unrecognised template is refused with the list of real ones, and applying `participants` where you asked for `owner_read_write` is reported in the result.',
     {
       tableName: { type: 'string' },
-      policy: { type: 'string', enum: ['auto', 'owner_read_write', 'owned_via_parent', 'public_read', 'org_members', 'admin_only', 'all_access'] },
+      policy: {
+        type: 'string',
+        enum: [
+          'auto', 'owner_read_write', 'participants', 'owned_via_parent', 'public_read',
+          'org_members', 'admin_only', 'all_access', 'admin_read_all', 'role_based',
+          'moderator_access', 'custom',
+        ],
+      },
+      partyColumns: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'For `participants`: the columns naming each user party to a row, e.g. ["requester_id","addressee_id"].',
+      },
+      using: {
+        type: 'string',
+        description: 'For `custom`: the predicate a row must satisfy to be readable. Use backenly_jwt_claim(\'sub\') for the caller\'s user id.',
+      },
+      withCheck: {
+        type: 'string',
+        description: 'For `custom`: an optional separate predicate for INSERT/UPDATE. Defaults to `using`.',
+      },
     },
     ['tableName']),
   fn('create_trigger',
@@ -652,14 +690,41 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     },
     ['tableName', 'oldName', 'newName']),
   fn('add_constraint',
-    'Add a constraint to an existing column (NOT NULL, UNIQUE, CHECK, FOREIGN KEY). Use to tighten data integrity after a table has been in use.',
+    'Add or relax a constraint on an existing table: NOT NULL, UNIQUE, CHECK (single- OR multi-column), ' +
+    'FOREIGN KEY, and column DEFAULTs. Use to tighten data integrity after a table has been in use. ' +
+    'A CHECK spanning several columns (`start_date < end_date`, `requester_id <> addressee_id`) is a ' +
+    'table-level constraint — pass every column it references in `columns`.',
     {
       tableName: { type: 'string' },
-      columnName: { type: 'string' },
-      constraintType: { type: 'string', enum: ['not_null', 'unique', 'check', 'foreign_key'] },
-      expression: { type: 'string', description: 'For CHECK: the boolean expression. For FOREIGN KEY: "otherTable(column)".' },
+      columnName: {
+        type: 'string',
+        description: 'The column the constraint applies to. Required for every type except a multi-column CHECK.',
+      },
+      columns: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'For a CHECK spanning several columns: every column the expression references.',
+      },
+      constraintType: {
+        type: 'string',
+        enum: ['not_null', 'drop_not_null', 'unique', 'check', 'foreign_key', 'set_default', 'drop_default'],
+      },
+      expression: {
+        type: 'string',
+        description:
+          'For CHECK: the boolean expression. For FOREIGN KEY: "otherTable(column)". ' +
+          'For set_default: the default expression.',
+      },
+      constraintName: {
+        type: 'string',
+        description:
+          'Optional explicit constraint name. Give one when a table needs two constraints on the same ' +
+          'column — without it a name is derived from the table, columns AND the expression, so distinct ' +
+          'constraints never collide.',
+      },
+      referencedTable: { type: 'string', description: 'For FOREIGN KEY: the table being referenced.' },
     },
-    ['tableName', 'columnName', 'constraintType']),
+    ['tableName', 'constraintType']),
 
   // ── Storage edit / delete ─────────────────────────────────────────────────
   fn('set_bucket_public',
@@ -902,7 +967,18 @@ function fn(
 
 // ── Dispatch ──────────────────────────────────────────────────────────────────
 
-const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
+/**
+ * Brain tool → executor action.
+ *
+ * Exported so `tests/unit/tool-arg-forwarding.spec.ts` can assert that every
+ * DECLARED property of a tool's schema survives the hop. A mapper that quietly
+ * drops one is the most expensive bug this file can carry, and it carried two:
+ * `create_index` declared `unique` and did not forward it, and forwarded only
+ * `columns[0]`'s worth of information downstream — so a UNIQUE composite index
+ * arrived as a plain single-column one and reported success (defects #4 and #5).
+ * Neither showed up in any test, because both sides type-checked fine.
+ */
+export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
   adopt_external_schema: () => ({ action: 'ADOPT_EXTERNAL_SCHEMA', params: {} }),
   create_table: (a) => ({ action: 'CREATE_TABLE', params: { tableName: a.tableName, columns: a.columns } }),
   add_column: (a) => ({
@@ -920,9 +996,34 @@ const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
       column: a.column,
     },
   }),
-  create_index: (a) => ({ action: 'CREATE_INDEX', params: { tableName: a.tableName, columns: a.columns, unique: !!a.unique } }),
+  // Every declared field is forwarded. A mapper that quietly drops one is the
+  // most expensive bug this table can carry: `unique` and the tail of `columns`
+  // were both absent here, so a UNIQUE composite index arrived at the executor
+  // as a plain single-column one and reported success (defects #4 and #5).
+  create_index: (a) => ({
+    action: 'CREATE_INDEX',
+    params: {
+      tableName: a.tableName,
+      columns: a.columns,
+      unique: !!a.unique,
+      indexName: a.indexName,
+      method: a.method,
+      where: a.where,
+    },
+  }),
   rename_column: (a) => ({ action: 'RENAME_COLUMN', params: { tableName: a.tableName, oldName: a.oldName, newName: a.newName } }),
-  add_constraint: (a) => ({ action: 'ADD_CONSTRAINT', params: { tableName: a.tableName, columnName: a.columnName, constraintType: a.constraintType, expression: a.expression } }),
+  add_constraint: (a) => ({
+    action: 'ADD_CONSTRAINT',
+    params: {
+      tableName: a.tableName,
+      columnName: a.columnName,
+      columns: a.columns,
+      constraintType: a.constraintType,
+      expression: a.expression,
+      constraintName: a.constraintName,
+      referencedTable: a.referencedTable,
+    },
+  }),
   generate_api: (a) => ({ action: 'GENERATE_API', params: { tableName: a.tableName } }),
   enable_auth: () => ({ action: 'ENABLE_AUTH', params: {} }),
   // add_oauth_provider is NOT here — it has a dedicated dispatch branch in
@@ -936,20 +1037,41 @@ const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
       // Brain-side policy names map onto the executor's validated template names.
       // The brain names are friendlier; the executor names predate this work.
       //
-      // An OMITTED or unrecognised policy resolves to 'auto' — the executor reads
-      // the schema and picks. It used to fall through as the raw string, which
-      // the executor then rejected as an invalid template: a model that said
-      // "protect order_items" without naming a template got an error instead of
-      // the correct policy.
-      template: ({
-        auto: 'auto',
-        owner_read_write: 'own_rows',
-        owned_via_parent: 'related_rows',
-        public_read: 'public_read',
-        org_members: 'org_members',
-        admin_only: 'admin_only',
-        all_access: 'all_access',
-      } as Record<string, string>)[String(a.policy)] || 'auto',
+      // ── An OMITTED policy resolves to 'auto'. An UNRECOGNISED one does not ──
+      //
+      // Both used to collapse to 'auto', and that difference is defect #3. When a
+      // model asked for a policy this table has no name for, the request was
+      // silently replaced by "read the schema and pick" — so the engine installed
+      // its own inferred owner-only policy and reported "Applied 2 change(s) ·
+      // auto RLS". Three requests to replace a policy on three tables all came
+      // back successful with all three policies unchanged.
+      //
+      // Omission genuinely means "you decide" and still maps to 'auto'. A NAME
+      // this table does not know is passed through unchanged so the executor
+      // refuses it and lists what exists — one recoverable error instead of a
+      // silent substitution. `custom` carries the caller's predicate.
+      template: a.policy === undefined || a.policy === null || a.policy === ''
+        ? 'auto'
+        : ({
+            auto: 'auto',
+            owner_read_write: 'own_rows',
+            own_rows: 'own_rows',
+            participants: 'party_rows',
+            party_rows: 'party_rows',
+            owned_via_parent: 'related_rows',
+            related_rows: 'related_rows',
+            public_read: 'public_read',
+            org_members: 'org_members',
+            admin_only: 'admin_only',
+            all_access: 'all_access',
+            admin_read_all: 'admin_read_all',
+            role_based: 'role_based',
+            moderator_access: 'moderator_access',
+            custom: 'custom',
+          } as Record<string, string>)[String(a.policy)] ?? String(a.policy),
+      ...(Array.isArray(a.partyColumns) ? { partyColumns: a.partyColumns } : {}),
+      ...(a.using ? { using: a.using } : {}),
+      ...(a.withCheck ? { withCheck: a.withCheck } : {}),
     },
   }),
   create_trigger: (a) => {
@@ -2239,7 +2361,23 @@ async function runExecutor(
       ...(requiresConfirmation ? { terminal: true, needsUser: true } : {}),
     }
   }
-  return { ok: false, summary: clip(result.error || result.message || 'Action failed.') }
+  // ── `message` first, `error` second ───────────────────────────────────────
+  //
+  // This was the other way round, so an executor that took the trouble to write
+  // "Cannot create a unique index on conversations (user_a, user_b) — the table
+  // already contains duplicate rows; find them with SELECT … HAVING count(*) > 1"
+  // had that replaced by the raw driver text in `error`. The actionable sentence
+  // was computed and then thrown away in favour of the one the agent cannot act
+  // on. `error` remains the fallback for executors that only set that field.
+  //
+  // `code` is forwarded so an agent can branch without regexing prose — the MCP
+  // tool route already surfaces it, but nothing was ever putting it there.
+  return {
+    ok: false,
+    summary: clip(result.message || result.error || 'Action failed.'),
+    ...(result.code ? { code: result.code } : {}),
+    ...(result.data !== undefined ? { data: result.data } : {}),
+  }
 }
 
 function clip(s: string, max = 800): string {
@@ -2247,7 +2385,15 @@ function clip(s: string, max = 800): string {
   return s.length <= max ? s : `${s.slice(0, max - 1)}…`
 }
 
-function humanTitle(name: string, args: Record<string, unknown>): string {
+/**
+ * A short human label for a tool call, e.g. "Creating table posts".
+ *
+ * Exported because `runBrain` needs the same phrasing for the `applied` list it
+ * reports on a failed turn — a second, drifting copy of these strings inside the
+ * agent is how "Applied 2 change(s): Securing conversations" ended up describing
+ * something other than what the events said.
+ */
+export function humanTitle(name: string, args: Record<string, unknown>): string {
   switch (name) {
     case 'read_backend_state': return 'Reading backend state'
     case 'list_findings': return 'Checking open issues'

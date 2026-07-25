@@ -180,8 +180,13 @@ describe('ALTER TABLE', () => {
     expect(a.args).toEqual({
       tableName: 'posts',
       columnName: 'title',
+      columns: ['title'],
       constraintType: 'check',
       expression: 'length(title) > 0',
+      // The author's name is carried through. It used to be dropped in favour of
+      // `chk_<table>_<column>`, which collides with every other constraint on
+      // the same column — the root of the false "already exists" (defect #2).
+      constraintName: 'title_len',
     })
   })
 
@@ -190,18 +195,70 @@ describe('ALTER TABLE', () => {
     expect(a.args).toMatchObject({ columnName: 'status', constraintType: 'check' })
   })
 
-  it('refuses a CHECK spanning several columns rather than guessing one', () => {
-    const err = expectRefusal('ALTER TABLE t ADD CONSTRAINT d CHECK (start_date < end_date)')
-    expect(err.code).toBe('AMBIGUOUS_CONSTRAINT')
-    expect(err.hint).toMatch(/backend_chat/)
+  // A CHECK over two columns is not ambiguous — in SQL it is a table-level
+  // constraint. Refusing it as AMBIGUOUS_CONSTRAINT made every cross-column
+  // invariant inexpressible: date ordering, no-self-reference on a join table,
+  // `user_a < user_b` canonical ordering. Reported as defect #11.
+  it('applies a CHECK spanning several columns as a table-level constraint', () => {
+    const a = parseOne('ALTER TABLE t ADD CONSTRAINT d CHECK (start_date < end_date)')
+    expect(a.tool).toBe('add_constraint')
+    expect(a.args).toEqual({
+      tableName: 't',
+      columns: ['start_date', 'end_date'],
+      constraintType: 'check',
+      expression: 'start_date < end_date',
+      constraintName: 'd',
+    })
+    // No columnName — the constraint belongs to the table, not one column.
+    expect(a.args).not.toHaveProperty('columnName')
+  })
+
+  it('applies a no-self-reference CHECK on a two-party join table', () => {
+    const a = parseOne('ALTER TABLE connections ADD CONSTRAINT no_self CHECK (requester_id <> addressee_id)')
+    expect(a.args).toMatchObject({
+      tableName: 'connections',
+      columns: ['requester_id', 'addressee_id'],
+      constraintType: 'check',
+    })
   })
 
   it('translates UNIQUE and FOREIGN KEY constraints', () => {
     expect(parseOne('ALTER TABLE u ADD CONSTRAINT ue UNIQUE (email)').args).toEqual({
-      tableName: 'u', columnName: 'email', constraintType: 'unique',
+      tableName: 'u', columnName: 'email', constraintType: 'unique', constraintName: 'ue',
     })
     expect(parseOne('ALTER TABLE p ADD FOREIGN KEY (author_id) REFERENCES users(id)').args).toEqual({
-      tableName: 'p', columnName: 'author_id', constraintType: 'foreign_key', expression: 'users(id)',
+      tableName: 'p',
+      columnName: 'author_id',
+      constraintType: 'foreign_key',
+      expression: 'users(id)',
+      referencedTable: 'users',
+    })
+  })
+
+  // Defect #10: this was refused, and its own hint pointed at CREATE UNIQUE
+  // INDEX — which then silently dropped both the composite-ness and the
+  // uniqueness (defects #5 and #4). Three bugs in one dead end.
+  it('applies a multi-column UNIQUE as a composite unique index', () => {
+    const a = parseOne('ALTER TABLE conversations ADD CONSTRAINT pair UNIQUE (user_a, user_b)')
+    expect(a.tool).toBe('create_index')
+    expect(a.args).toEqual({
+      tableName: 'conversations',
+      columns: ['user_a', 'user_b'],
+      unique: true,
+      indexName: 'pair',
+    })
+    expect(a.notes?.join(' ')).toMatch(/unique index/i)
+  })
+
+  it('translates ALTER COLUMN DROP NOT NULL and DEFAULT changes', () => {
+    expect(parseOne('ALTER TABLE posts ALTER COLUMN title DROP NOT NULL').args).toEqual({
+      tableName: 'posts', columnName: 'title', constraintType: 'drop_not_null',
+    })
+    expect(parseOne("ALTER TABLE posts ALTER COLUMN status SET DEFAULT 'draft'").args).toEqual({
+      tableName: 'posts', columnName: 'status', constraintType: 'set_default', expression: "'draft'",
+    })
+    expect(parseOne('ALTER TABLE posts ALTER COLUMN status DROP DEFAULT').args).toEqual({
+      tableName: 'posts', columnName: 'status', constraintType: 'drop_default',
     })
   })
 
@@ -232,11 +289,46 @@ describe('ALTER TABLE', () => {
 
 describe('CREATE INDEX', () => {
   // create_index's contract is {tableName, columns, unique} — no index name.
-  it('translates a named unique index, reporting that the name is dropped', () => {
+  // Defect #4: `unique` was declared here but dropped by the dispatch mapper, so
+  // a UNIQUE index arrived non-unique and nothing prevented duplicate rows. The
+  // response mentioned only the renamed index — the one harmless difference.
+  it('keeps UNIQUE and honours the caller-supplied index name', () => {
     const a = parseOne('CREATE UNIQUE INDEX idx_email ON users (email)')
     expect(a.tool).toBe('create_index')
-    expect(a.args).toEqual({ tableName: 'users', columns: ['email'], unique: true })
-    expect(a.notes?.join(' ')).toMatch(/idx_email/)
+    expect(a.args).toEqual({
+      tableName: 'users', columns: ['email'], unique: true, indexName: 'idx_email',
+    })
+    expect(a.notes).toBeUndefined()
+  })
+
+  // Defect #5: two columns became one, silently.
+  it('keeps every column of a composite unique index', () => {
+    const a = parseOne('CREATE UNIQUE INDEX idx_pair ON conversations (user_a, user_b)')
+    expect(a.args).toEqual({
+      tableName: 'conversations',
+      columns: ['user_a', 'user_b'],
+      unique: true,
+      indexName: 'idx_pair',
+    })
+  })
+
+  it('carries an index method through instead of dropping it', () => {
+    expect(parseOne('CREATE INDEX ON posts USING gin (tags)').args).toEqual({
+      tableName: 'posts', columns: ['tags'], unique: false, method: 'gin',
+    })
+  })
+
+  it('carries a partial index predicate through instead of dropping it', () => {
+    const a = parseOne('CREATE INDEX ON posts (author_id) WHERE deleted_at IS NULL')
+    expect(a.args).toMatchObject({
+      tableName: 'posts', columns: ['author_id'], where: 'deleted_at IS NULL',
+    })
+  })
+
+  it('refuses an index clause it cannot translate rather than ignoring it', () => {
+    const err = expectRefusal('CREATE INDEX ON posts (author_id) INCLUDE (title)')
+    expect(err.code).toBe('UNSUPPORTED_STATEMENT')
+    expect(err.hint).toBeTruthy()
   })
 
   it('translates an unnamed multi-column index and strips sort modifiers', () => {
@@ -273,9 +365,15 @@ describe('refusals route somewhere', () => {
   })
 
   it('refuses an unsupported type but lists the supported ones', () => {
-    const err = expectRefusal('CREATE TABLE t (tags text[])')
+    const err = expectRefusal('CREATE TABLE t (shape geometry)')
     expect(err.code).toBe('UNSUPPORTED_TYPE')
     expect(err.hint).toMatch(/backend_chat/)
+  })
+
+  it('refuses an unsupported ARRAY element type by naming the element', () => {
+    const err = expectRefusal('CREATE TABLE t (shapes geometry[])')
+    expect(err.code).toBe('UNSUPPORTED_TYPE')
+    expect(err.message).toMatch(/geometry/)
   })
 
   it('refuses a schema-qualified name and shows the bare form', () => {
@@ -457,5 +555,171 @@ describe('declared DDL survives translation', () => {
     expect(a.tool).toBe('add_column')
     expect((a.args.column as any).default).toBe("'draft'")
     expect((a.args.column as any).nullable).toBe(false)
+  })
+})
+
+/**
+ * ── The silent-loss suite ───────────────────────────────────────────────────
+ *
+ * Every case here was reported from a real MCP session as an operation that
+ * returned ✅ while the database disagreed. That is the worst class of defect
+ * this surface can have — a refusal costs an agent one turn, but a false success
+ * costs it the assumption that its schema is what it wrote. Each test names the
+ * defect number it locks down.
+ */
+describe('silent loss — nothing declared may vanish without a refusal', () => {
+  it('#1 extracts an inline column CHECK instead of dropping it', () => {
+    const actions = parseMigration(
+      `CREATE TABLE connections (
+         requester_id uuid NOT NULL REFERENCES users(id),
+         addressee_id uuid NOT NULL REFERENCES users(id),
+         status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','accepted','declined'))
+       )`,
+    )
+    expect(actions.map((a) => a.tool)).toEqual(['create_table', 'add_constraint'])
+
+    // The column itself keeps its declared shape — the CHECK is lifted out, not
+    // traded against the DEFAULT or the nullability.
+    const status = (actions[0].args.columns as any[]).find((c) => c.name === 'status')
+    expect(status).toEqual({ name: 'status', type: 'text', nullable: false, default: "'pending'" })
+
+    expect(actions[1].args).toMatchObject({
+      tableName: 'connections',
+      columnName: 'status',
+      constraintType: 'check',
+      expression: "status IN ('pending','accepted','declined')",
+    })
+  })
+
+  it('#1 extracts a table-level named CHECK instead of dropping it', () => {
+    const actions = parseMigration(
+      `CREATE TABLE connections (
+         requester_id uuid NOT NULL,
+         addressee_id uuid NOT NULL,
+         CONSTRAINT connections_no_self CHECK (requester_id <> addressee_id)
+       )`,
+    )
+    expect(actions).toHaveLength(2)
+    expect(actions[1].args).toMatchObject({
+      constraintType: 'check',
+      expression: 'requester_id <> addressee_id',
+      constraintName: 'connections_no_self',
+      columns: ['requester_id', 'addressee_id'],
+    })
+  })
+
+  it('#1 handles several CHECKs in one CREATE TABLE, in declaration order', () => {
+    const actions = parseMigration(
+      `CREATE TABLE events (
+         name text NOT NULL CHECK (length(name) > 0),
+         starts_at timestamptz NOT NULL,
+         ends_at timestamptz NOT NULL,
+         seats integer NOT NULL CHECK (seats > 0),
+         CONSTRAINT date_order CHECK (starts_at < ends_at)
+       )`,
+    )
+    expect(actions.map((a) => a.tool)).toEqual([
+      'create_table', 'add_constraint', 'add_constraint', 'add_constraint',
+    ])
+    expect(actions.slice(1).map((a) => a.args.expression)).toEqual([
+      'length(name) > 0', 'seats > 0', 'starts_at < ends_at',
+    ])
+  })
+
+  it('#1 extracts an inline CHECK on ADD COLUMN', () => {
+    const actions = parseMigration(
+      "ALTER TABLE posts ADD COLUMN state text NOT NULL DEFAULT 'draft' CHECK (state IN ('draft','live'))",
+    )
+    expect(actions.map((a) => a.tool)).toEqual(['add_column', 'add_constraint'])
+    expect((actions[0].args.column as any).default).toBe("'draft'")
+    expect(actions[1].args.expression).toBe("state IN ('draft','live')")
+  })
+
+  it('#1 refuses a table-level constraint form it cannot translate', () => {
+    // The path that used to swallow constraints: parseColumnDef returned null for
+    // anything matching TABLE_CONSTRAINT and the caller simply `continue`d.
+    const err = expectRefusal(
+      'CREATE TABLE t (a int, EXCLUDE USING gist (a WITH &&))',
+    )
+    expect(err.code).toBe('UNSUPPORTED_CONSTRAINT')
+    expect(err.hint).toBeTruthy()
+  })
+
+  it('#9 accepts array columns in both spellings', () => {
+    expect((parseOne('CREATE TABLE t (tags text[])').args.columns as any[])[0])
+      .toMatchObject({ name: 'tags', type: 'text[]' })
+    expect((parseOne('CREATE TABLE t (scores integer[])').args.columns as any[])[0])
+      .toMatchObject({ type: 'int[]' })
+    expect((parseOne('CREATE TABLE t (ids uuid ARRAY)').args.columns as any[])[0])
+      .toMatchObject({ type: 'uuid[]' })
+    expect((parseOne('CREATE TABLE t (tags varchar(64)[])').args.columns as any[])[0])
+      .toMatchObject({ type: 'text[]' })
+  })
+
+  it('#9 an array column still honours NOT NULL and DEFAULT', () => {
+    const col = (parseOne("CREATE TABLE t (tags text[] NOT NULL DEFAULT '{}')").args.columns as any[])[0]
+    expect(col).toMatchObject({ name: 'tags', type: 'text[]', nullable: false })
+  })
+
+  it('does not mistake a CHECK keyword inside a string literal for a constraint', () => {
+    const actions = parseMigration(
+      `CREATE TABLE t (note text NOT NULL DEFAULT 'needs check (soon)')`,
+    )
+    expect(actions).toHaveLength(1)
+    expect((actions[0].args.columns as any[])[0].default).toBe("'needs check (soon)'")
+  })
+
+  it('refuses CREATE POLICY by naming add_rls rather than shrugging', () => {
+    const err = expectRefusal('CREATE POLICY p ON messages FOR SELECT USING (true)')
+    expect(err.code).toBe('RLS_NOT_MIGRATION')
+    expect(err.hint).toMatch(/add_rls/)
+  })
+
+  it('refuses CREATE TYPE by pointing at the CHECK it should be', () => {
+    const err = expectRefusal("CREATE TYPE status AS ENUM ('a','b')")
+    expect(err.code).toBe('UNSUPPORTED_STATEMENT')
+    expect(err.hint).toMatch(/CHECK/)
+  })
+})
+
+describe('CHECK expressions cannot smuggle SQL into DDL', () => {
+  const unsafe = [
+    'ALTER TABLE t ADD CONSTRAINT c CHECK (1=1); DROP TABLE users; --',
+    'ALTER TABLE t ADD CONSTRAINT c CHECK (a > (SELECT count(*) FROM users))',
+    "ALTER TABLE t ADD CONSTRAINT c CHECK (pg_sleep(10) IS NULL)",
+    "ALTER TABLE t ADD CONSTRAINT c CHECK (a = pg_read_file('/etc/passwd'))",
+    'ALTER TABLE t ADD CONSTRAINT c CHECK ($$x$$ = a)',
+    'ALTER TABLE t ADD CONSTRAINT c CHECK (a > 0) /* comment */ AND',
+  ]
+
+  for (const sql of unsafe) {
+    it(`refuses: ${sql.slice(30, 80)}`, () => {
+      const err = expectRefusal(sql)
+      expect(['UNSAFE_CONSTRAINT', 'BAD_STATEMENT', 'UNSUPPORTED_CONSTRAINT', 'UNSUPPORTED_STATEMENT'])
+        .toContain(err.code)
+      expect(err.hint).toBeTruthy()
+    })
+  }
+
+  it('still accepts the ordinary predicates a schema actually needs', () => {
+    for (const expr of [
+      'price > 0',
+      "status IN ('a','b','c')",
+      'length(title) BETWEEN 1 AND 200',
+      'starts_at < ends_at',
+      'requester_id <> addressee_id',
+      'lower(email) = email',
+      'rating >= 1 AND rating <= 5',
+      'cardinality(tags) <= 10',
+      'discount IS NULL OR discount < total',
+    ]) {
+      const a = parseOne(`ALTER TABLE t ADD CONSTRAINT c CHECK (${expr})`)
+      expect(a.args.expression).toBe(expr)
+    }
+  })
+
+  it('rejects a CHECK that constrains nothing', () => {
+    const err = expectRefusal('ALTER TABLE t ADD CONSTRAINT c CHECK (1 = 1)')
+    expect(err.code).toBe('UNSAFE_CONSTRAINT')
   })
 })

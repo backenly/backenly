@@ -134,10 +134,14 @@ RLS-DENIED TEST RESULTS ARE SUCCESS, NOT FAILURE (read this twice):
 - If every test returns RLS-denied on a freshly built backend, that is the expected, correct end-state. Call finish with: "Backend built and secured — endpoints require authenticated user context to write, which is the RLS doing its job."
 
 CHOOSING AN RLS POLICY (add_rls — pick correctly the FIRST time):
-- owner_read_write (owner-scoped: each user sees only their own rows) REQUIRES the table to have an ownership column — user_id, author_id, owner_id, created_by, sender_id, and similar. Check that table's columns in BACKEND STATE before choosing it.
-- A table with NO ownership column — reference/lookup tables (hashtags, categories, tags), shared catalogs, throwaway or "sample" tables — CANNOT use owner_read_write; the engine will refuse it. Use public_read (everyone reads, only the service role writes) or all_access instead.
+- Count how many columns on the table point at a user. THAT is the decision.
+- ONE user column → owner_read_write (each user sees only their own rows). The column can be named user_id, author_id, owner_id, created_by, sender_id or anything else that foreign-keys to users.
+- TWO OR MORE user columns → participants, ALWAYS. connections(requester_id, addressee_id), conversations(user_a, user_b), messages(sender_id, recipient_id), follows, matches, invitations. owner_read_write on these is a BUG, not a simplification: it grants access to one side and locks the other user out of the row that describes their own relationship. Pass partyColumns to be explicit.
+- NO user column but a foreign key to a user-owned table → owned_via_parent (line items, addresses, saved cards, messages belonging to a conversation). This also works when the parent is two-party, so both participants see the child rows.
+- NO user column at all — reference/lookup tables (hashtags, categories, tags), shared catalogs → public_read (everyone reads, only the service role writes) or all_access.
 - org_members requires an organization_id column on the table.
-- Picking owner_read_write on an ownerless table burns a whole step on a guaranteed failure. Read the columns, then choose once.
+- A rule none of those expresses → custom, with "using" set to the predicate, e.g. using: "author_id::text = backenly_jwt_claim('sub') OR published". Use this instead of settling for a template that is close but wrong — a policy that is nearly right is a policy that locks real users out of real rows.
+- Never claim a policy was applied that you did not apply. If add_rls refuses, say so and say which template you will use instead.
 
 BUILD COMPREHENSIVELY — A REAL PRODUCT, NOT A 4-TABLE TOY:
 - For any recognised product class (social-media, marketplace, SaaS, chat, blog, project-management) you are EXPECTED to deliver the entire surface that real users would expect: every table, every API, RLS on every table, realtime on the live-data tables, notify triggers on user-facing write paths, storage buckets for media, and an aggregate /stats/summary endpoint for dashboards. The platform's domain-blueprint layer normally handles this for you — when it has run, every step is preset. When it has NOT run (custom domain), match its ambition: a social media platform has 12+ tables, not 4.

@@ -236,6 +236,17 @@ export function formatProof(proof: ProofBlock): string {
     lines.push('')
   }
 
+  // ── APIs: say WHY the list is what it is ───────────────────────────────────
+  //
+  // The list is derived from the catalog — every exposed table has a full REST
+  // surface the moment it exists, with no generation step. But the field is named
+  // `apis`, and an empty one reads as "these tables are unreachable from a
+  // client", which is what a session concluded: "a table with no REST endpoint is
+  // unreachable and nothing says so" (defect #13). It was reasoning about the
+  // absence of a record that is never written any more.
+  //
+  // So the section now states the rule rather than just the list, and the empty
+  // case explains itself instead of looking like a missing step.
   if (proof.apis.length > 0) {
     const byTable: Record<string, string[]> = {}
     for (const api of proof.apis) {
@@ -245,12 +256,23 @@ export function formatProof(proof: ProofBlock): string {
     const tableNames = Object.keys(byTable)
     const allRest = Object.values(byTable).every(m => m.length === 1 && m[0] === 'REST')
     if (allRest) {
-      lines.push(`**APIs** · ${proof.apis.length} REST endpoints`)
-      lines.push(tableNames.join(', '))
+      lines.push(`**APIs** · ${proof.apis.length} REST endpoints (automatic — every table is served from the catalog)`)
+      lines.push(tableNames.map(t => `/db/${t}`).join(', '))
     } else {
       lines.push(`**APIs** · ${proof.apis.length}`)
       lines.push(Object.entries(byTable).map(([t, methods]) => `${t}: ${methods.join(', ')}`).join(' · '))
     }
+    lines.push('')
+  } else if (proof.tables.length > 0) {
+    // Tables exist but none is CRUD-exposable — i.e. the only table is the
+    // auth-managed `users`. Saying so is the difference between "your schema is
+    // fine, auth owns that table" and "generate_api never ran".
+    lines.push('**APIs** · none yet')
+    lines.push(
+      'REST endpoints are automatic — `/db/<table>` is live the moment a table exists, with no ' +
+      'generate_api step. The only table here is `users`, which is managed through `/auth/*` ' +
+      '(signup/signin) and deliberately never exposed as `/db/users` because it holds password hashes.',
+    )
     lines.push('')
   }
 

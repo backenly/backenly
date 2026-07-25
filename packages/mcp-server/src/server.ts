@@ -360,6 +360,11 @@ function brainFailure(result: {
   ok: boolean
   error?: string
   summary?: string
+  code?: string
+  retryable?: boolean
+  retryAfterMs?: number
+  partial?: boolean
+  applied?: string[]
   toolsRun?: string[]
   iterations?: number
   events?: Array<{ type: string; [k: string]: any }>
@@ -367,9 +372,31 @@ function brainFailure(result: {
   const parts: string[] = []
   parts.push(result.error || result.summary || 'The brain run did not complete.')
 
-  if (result.toolsRun?.length) {
-    // The single most important thing an agent can know here: work may already
-    // be done. Retrying a partially-applied run creates duplicates.
+  // ── The classification the server now sends ────────────────────────────────
+  //
+  // `code` and `retryable` exist so an agent does not have to guess whether an
+  // identical retry is worth making. Dropping them here would have left the
+  // server-side fix invisible over stdio, which is the transport most clients use
+  // — the same shape of bug as the one being fixed (a field computed and then
+  // discarded one hop away).
+  if (result.code) parts.push(`Code: ${result.code}.`)
+  if (result.retryable) {
+    const wait = result.retryAfterMs ? `${Math.round(result.retryAfterMs / 1000)}s` : 'a moment'
+    parts.push(`This is transient — the same request is worth retrying after ${wait}.`)
+  } else if (result.retryable === false) {
+    parts.push('Retrying the identical request will fail the same way; change the request.')
+  }
+
+  // What actually landed outranks everything else here: retrying a partially
+  // applied run duplicates whatever already succeeded.
+  if (result.applied?.length) {
+    parts.push(
+      `ALREADY APPLIED — do not repeat these: ${result.applied.join('; ')}. ` +
+      `Verify with read_backend_state and ask only for what is missing.`,
+    )
+  } else if (result.partial === false) {
+    parts.push('Nothing was applied.')
+  } else if (result.toolsRun?.length) {
     parts.push(
       `Tools that ran before it stopped: ${result.toolsRun.join(', ')}. ` +
       `Some of this may already be applied — check with read_backend_state before retrying.`,
@@ -409,6 +436,18 @@ async function dispatch(
       needsUser: result.needsUser ?? false,
       toolsRun: result.toolsRun ?? [],
       iterations: result.iterations ?? 0,
+      // ── The escalation object, forwarded ────────────────────────────────────
+      //
+      // A destructive request comes back `ok:true` with `status:
+      // "awaiting_approval"` and an `approval` object carrying the id to poll.
+      // This function returned four fields and dropped the rest, so the id
+      // survived only as prose inside `summary` — an agent had to regex it out to
+      // call check_approval. The structured fields are what make the branch
+      // mechanical.
+      ...(result.status ? { status: result.status } : {}),
+      ...(result.approval ? { approval: result.approval } : {}),
+      ...(result.applied?.length ? { applied: result.applied } : {}),
+      ...(result.partial ? { partial: true } : {}),
     }
   }
 
@@ -421,7 +460,23 @@ async function dispatch(
     throw new Error(`Tool "${name}" is local but not routed. This is a bug.`)
   }
   const result = await client.callTool(name, args)
-  if (!result.ok) throw new Error(result.error ?? result.summary ?? `Tool "${name}" failed.`)
+  if (!result.ok) {
+    // `code` is a stable slug the tool route sets on every failure
+    // (CONSTRAINT_CONFLICT, DUPLICATE_ROWS, COLUMN_NOT_FOUND, RLS_NOT_APPLIED,
+    // VERIFY_FAILED, …). Appending it costs nothing and saves an agent from
+    // pattern-matching prose to decide what to do next. `hint` is the route's
+    // named way forward — dropping it turns a recoverable refusal into a dead end.
+    const anyResult = result as Record<string, any>
+    const parts = [result.error ?? result.summary ?? `Tool "${name}" failed.`]
+    if (anyResult.code) parts.push(`Code: ${anyResult.code}.`)
+    if (anyResult.hint) parts.push(anyResult.hint)
+    if (Array.isArray(anyResult.applied) && anyResult.applied.length) {
+      parts.push(
+        `ALREADY APPLIED — do not repeat: ${anyResult.applied.map((a: any) => a.summary ?? a).join('; ')}.`,
+      )
+    }
+    throw new Error(parts.join(' '))
+  }
   return { summary: result.summary, data: result.data, needsUser: result.needsUser ?? false }
 }
 

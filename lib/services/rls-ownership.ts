@@ -26,24 +26,36 @@
  *
  * ── The rules, in priority order ─────────────────────────────────────────────
  *
- *  1. FK to the end-user table         → own_rows on that column.
+ *  1. TWO OR MORE columns naming end-users → party_rows over all of them.
+ *     Checked FIRST, because a two-party table also satisfies rule 2 — and that
+ *     is exactly how it used to be mis-resolved. `connections(requester_id,
+ *     addressee_id)` took the first foreign key and locked the addressee out of
+ *     their own row; `conversations(user_a, user_b)` hid each thread from one
+ *     participant. A row on a join table between two users belongs to both of
+ *     them, and no reading of the schema supports picking a side.
+ *  2. ONE FK to the end-user table     → own_rows on that column.
  *     A `customer_id uuid REFERENCES users(id)` IS direct ownership. Naming is
  *     a convention; a foreign key is a declaration. The key wins.
- *  2. Name-matched ownership column    → own_rows on that column.
+ *  3. Name-matched ownership column    → own_rows on that column.
  *     Covers schemas that never declared the FK.
- *  3. Single FK to a table that itself resolves by (1) or (2)
+ *  4. Single FK to a table that itself resolves by (1), (2) or (3)
  *                                      → related_rows through that parent.
- *     This is the case that was silently unprotected.
- *  4. Reference/catalog table          → public_read.
+ *     This is the case that was silently unprotected. When the PARENT is
+ *     multi-party the child inherits every party, so a message is readable by
+ *     both participants of its conversation and not only by its sender — this
+ *     also OUTRANKS a single direct owner on the child, since the parent's party
+ *     set already contains it.
+ *  5. Reference/catalog table          → public_read.
  *     World-readable is CORRECT for a product catalog. But "RLS disabled" is
  *     not the same thing as "publicly readable": it also leaves INSERT/UPDATE/
  *     DELETE open to any key. public_read is what the user actually meant —
  *     reads open, writes service-role only.
- *  5. Anything else                    → undecidable.
+ *  6. Anything else                    → undecidable.
  *     Reported honestly with the candidates that were checked, so a human or an
  *     agent decides. We do NOT enable RLS with no policy: that turns a data
  *     exposure into an outage (the table reads empty), which is a worse bug
- *     than the one being fixed.
+ *     than the one being fixed. The caller can then state the rule itself via
+ *     add_rls's `custom` template.
  *
  * Depth is capped at ONE hop on purpose. Two hops produces policies whose cost
  * and semantics are hard to predict, and an ambiguous inference installed
@@ -95,7 +107,7 @@ const REFERENCE_TABLE_PATTERNS = [
   'tax_rates', 'coupons', 'promotions', 'banners', 'announcements',
 ]
 
-export type InferredTemplate = 'own_rows' | 'related_rows' | 'public_read'
+export type InferredTemplate = 'own_rows' | 'party_rows' | 'related_rows' | 'public_read'
 
 export interface RelatedRowsVia {
   /** Column on THIS table holding the parent reference (e.g. `order_id`). */
@@ -104,8 +116,17 @@ export interface RelatedRowsVia {
   parentTable: string
   /** Column on the parent the local column points at (almost always `id`). */
   parentColumn: string
-  /** The parent's own ownership column (e.g. `user_id`). */
-  parentOwnerColumn: string
+  /**
+   * The parent's ownership column(s).
+   *
+   * A LIST, not a single column, because the parent may itself be two-party. A
+   * `messages` table hanging off `conversations(user_a, user_b)` is owned by
+   * whoever is either participant — and with a single column here, only the
+   * first participant could read the conversation's messages. That is the same
+   * defect as #12, one hop further out, and it is the shape every chat and
+   * connection-request schema has.
+   */
+  parentOwnerColumns: string[]
 }
 
 /**
@@ -121,6 +142,35 @@ export type RlsPlan =
       kind: 'own_rows'
       template: 'own_rows'
       userIdColumn: string
+      basis: 'foreign_key' | 'column_name'
+      reason: string
+    }
+  | {
+      /**
+       * TWO OR MORE parties own the row, and each of them may read it.
+       *
+       * ── Why this exists ─────────────────────────────────────────────────────
+       *
+       * `own_rows` picks ONE ownership column. On a two-party table that is not a
+       * simplification, it is wrong: for
+       *
+       *     connections(requester_id → users, addressee_id → users)
+       *
+       * the inference took the first foreign key it found and installed
+       * `requester_id = auth.uid()`, which locks the ADDRESSEE out of the row
+       * describing their own connection request. The same happened to
+       * `conversations(user_a, user_b)` and `messages(sender_id, recipient_id)`.
+       * Reported as defect #12 — and it is what made owner-only RLS unable to
+       * express any social, messaging, or marketplace schema.
+       *
+       * Every two-party table in the report was a case of this. The policy is
+       * "you own the row if you are ANY of its parties", which is both correct
+       * and the only reading a join table between two users supports.
+       */
+      kind: 'party_rows'
+      template: 'party_rows'
+      /** Every column naming a party to the row, in schema order. */
+      partyColumns: string[]
       basis: 'foreign_key' | 'column_name'
       reason: string
     }
@@ -246,20 +296,94 @@ function directOwnerColumn(
   catalog: OwnershipCatalog,
   tableName: string,
 ): { column: string; basis: 'foreign_key' | 'column_name' } | null {
-  // (1) A declared FK into `users` is ownership regardless of what it's called.
-  const fkToUsers = catalog.foreignKeys.find(
-    (fk) => fk.childTable === tableName && fk.parentTable === END_USER_TABLE,
-  )
-  if (fkToUsers) return { column: fkToUsers.childColumn, basis: 'foreign_key' }
+  const all = directOwnerColumns(catalog, tableName)
+  return all ? { column: all.columns[0], basis: all.basis } : null
+}
+
+/**
+ * EVERY column that names an owning end-user, not just the first.
+ *
+ * ── Why "the first" was a bug and not a shortcut ──────────────────────────────
+ *
+ * `Array.find` on the foreign keys returned whichever FK to `users` the catalog
+ * happened to list first. On a one-owner table that is the right answer. On a
+ * two-party table it silently picks a side:
+ *
+ *     connections(requester_id → users, addressee_id → users)
+ *
+ * became `own_rows` on `requester_id`, so the addressee could not read the
+ * request addressed to them. Nothing reported that a choice had been made.
+ *
+ * Foreign keys and names are still ranked in that order — a declared FK is a
+ * declaration, a name is a convention — but within a basis, ALL matches are
+ * returned so the caller can tell one-party from many-party.
+ *
+ * Bases are not mixed: if any FK to `users` exists, only FK-declared columns
+ * count. Mixing them would let a `created_by` audit column that was never
+ * declared as a foreign key become a "party" to a row it merely records, which
+ * would widen access rather than describe it.
+ */
+function directOwnerColumns(
+  catalog: OwnershipCatalog,
+  tableName: string,
+): { columns: string[]; basis: 'foreign_key' | 'column_name' } | null {
+  // (1) Declared FKs into `users` are ownership regardless of what they're called.
+  const fkCols = catalog.foreignKeys
+    .filter((fk) => fk.childTable === tableName && fk.parentTable === END_USER_TABLE)
+    .map((fk) => fk.childColumn)
+  const distinctFk = [...new Set(fkCols)]
+  if (distinctFk.length > 0) return { columns: distinctFk, basis: 'foreign_key' }
 
   // (2) Fall back to naming convention for schemas that never declared the FK.
+  // Ordered by the candidate list so the canonical name leads, which keeps the
+  // single-owner answer identical to what it was before.
   const cols = catalog.columns.get(tableName) ?? []
   const byName = new Map(cols.map((c) => [c.toLowerCase(), c]))
+  const named: string[] = []
   for (const candidate of OWNERSHIP_COLUMN_CANDIDATES) {
     const actual = byName.get(candidate.toLowerCase())
-    if (actual) return { column: actual, basis: 'column_name' }
+    if (actual && !named.includes(actual)) named.push(actual)
   }
+  if (named.length > 0) return { columns: named, basis: 'column_name' }
   return null
+}
+
+/**
+ * Column-name pairs that mean "two parties to one row" even without a declared
+ * foreign key. A schema that writes `user_a`/`user_b` or `from_user_id`/
+ * `to_user_id` is describing a two-party relationship as plainly as one that
+ * declares both FKs, and `OWNERSHIP_COLUMN_CANDIDATES` only lists the first
+ * member of each pair.
+ */
+const PARTY_COLUMN_PATTERNS = [
+  /^user_[ab]$/i, /^user[12]$/i,
+  /^(from|to)_user_id$/i, /^(sender|recipient|receiver)_id$/i,
+  /^(requester|addressee|requestee)_id$/i,
+  /^(follower|following)_id$/i,
+  /^(buyer|seller)_id$/i,
+  /^(inviter|invitee)_id$/i,
+  /^participant_[ab12]$/i,
+]
+
+/** Columns matching a two-party naming pattern. */
+function partyNamedColumns(catalog: OwnershipCatalog, tableName: string): string[] {
+  const cols = catalog.columns.get(tableName) ?? []
+  return cols.filter((c) => PARTY_COLUMN_PATTERNS.some((p) => p.test(c)))
+}
+
+/** Every foreign key leaving this table. */
+function parentLinksOf(catalog: OwnershipCatalog, tableName: string): ForeignKey[] {
+  return catalog.foreignKeys.filter((fk) => fk.childTable === tableName)
+}
+
+/**
+ * Every column of `tableName` that names an owning end-user — declared or
+ * conventionally named. Used to ask "is this table multi-party?" about a PARENT.
+ */
+function allOwnerColumnsOf(catalog: OwnershipCatalog, tableName: string): string[] {
+  const declared = directOwnerColumns(catalog, tableName)
+  const named = partyNamedColumns(catalog, tableName)
+  return [...new Set([...(declared?.columns ?? []), ...named])]
 }
 
 /**
@@ -280,17 +404,115 @@ export function inferRlsPlanFromCatalog(
     }
   }
 
-  const direct = directOwnerColumn(catalog, tableName)
+  const direct = directOwnerColumns(catalog, tableName)
+
+  // (1a) TWO OR MORE parties. Checked before the single-owner case, because a
+  // two-party table satisfies the single-owner test too — that is precisely how
+  // it used to be mis-resolved.
+  if (direct && direct.columns.length >= 2) {
+    return {
+      kind: 'party_rows',
+      template: 'party_rows',
+      partyColumns: direct.columns,
+      basis: direct.basis,
+      reason:
+        `"${tableName}" names ${direct.columns.length} end-user parties ` +
+        `(${direct.columns.join(', ')})` +
+        (direct.basis === 'foreign_key' ? ` — each is a foreign key to ${END_USER_TABLE}(id)` : '') +
+        `. A row belongs to every party, so each of them can read it and neither can read anyone else's.`,
+    }
+  }
+
+  // (1b) A single declared owner PLUS a column named like a counterparty. This
+  // catches `messages(sender_id, recipient_id)` in a schema that only declared
+  // the FK on the sender — where owner-only RLS would let the sender read the
+  // message and hide it from the person it was sent to.
+  if (direct && direct.columns.length === 1) {
+    const partyNamed = partyNamedColumns(catalog, tableName)
+    const parties = [...new Set([...direct.columns, ...partyNamed])]
+    if (parties.length >= 2) {
+      return {
+        kind: 'party_rows',
+        template: 'party_rows',
+        partyColumns: parties,
+        basis: direct.basis,
+        reason:
+          `"${tableName}" is a two-party table: "${direct.columns[0]}" owns the row and ` +
+          `${partyNamed.filter((c) => c !== direct.columns[0]).map((c) => `"${c}"`).join(', ')} ` +
+          `names the counterparty. Both sides can read the row.`,
+      }
+    }
+  }
+
+  // (1d) A single direct owner, but the row ALSO hangs off a TWO-PARTY parent.
+  //
+  // `messages(conversation_id → conversations, sender_id → users)` is the case.
+  // The sender is a direct owner, so this used to resolve to `own_rows` on
+  // `sender_id` — and the OTHER participant could not read a message sent to
+  // them. The conversation is the more complete rule: a message belongs to the
+  // thread, and both participants of the thread can read it. The sender is
+  // always one of those participants, so this never narrows access; it widens it
+  // to exactly the set the parent already grants.
+  //
+  // Only a MULTI-PARTY parent triggers this. When the parent has one owner, the
+  // direct owner is already the right answer and nothing changes — so
+  // `order_items(order_id → orders, added_by → users)` and
+  // `comments(post_id → posts, author_id → users)` behave exactly as before.
+  if (direct && direct.columns.length === 1) {
+    const partyParents = parentLinksOf(catalog, tableName)
+      .map((fk) => {
+        if (fk.parentTable === tableName) return null
+        const parentOwners = allOwnerColumnsOf(catalog, fk.parentTable)
+        return parentOwners.length >= 2 ? { fk, parentOwners } : null
+      })
+      .filter((x): x is { fk: ForeignKey; parentOwners: string[] } => x !== null)
+
+    if (partyParents.length === 1) {
+      const { fk, parentOwners } = partyParents[0]
+      return {
+        kind: 'related_rows',
+        template: 'related_rows',
+        via: {
+          localColumn: fk.childColumn,
+          parentTable: fk.parentTable,
+          parentColumn: fk.parentColumn,
+          parentOwnerColumns: parentOwners,
+        },
+        basis: 'fk_chain',
+        reason:
+          `"${tableName}"."${direct.columns[0]}" names one end-user, but the row belongs to a shared ` +
+          `"${fk.parentTable}" with ${parentOwners.length} parties (${parentOwners.join(', ')}). Access ` +
+          `follows the parent, so every party to it can read the row — scoping to ` +
+          `"${direct.columns[0]}" alone would hide each row from the other side.`,
+      }
+    }
+  }
+
   if (direct) {
     return {
       kind: 'own_rows',
       template: 'own_rows',
-      userIdColumn: direct.column,
+      userIdColumn: direct.columns[0],
       basis: direct.basis,
       reason:
         direct.basis === 'foreign_key'
-          ? `"${direct.column}" is a foreign key to ${END_USER_TABLE}(id), so each row belongs to exactly one end-user.`
-          : `"${direct.column}" names the owning end-user.`,
+          ? `"${direct.columns[0]}" is a foreign key to ${END_USER_TABLE}(id), so each row belongs to exactly one end-user.`
+          : `"${direct.columns[0]}" names the owning end-user.`,
+    }
+  }
+
+  // (1c) No declared or canonically-named owner, but two party-named columns —
+  // e.g. `follows(follower_id, following_id)` in a schema with no FKs at all.
+  const partyOnly = partyNamedColumns(catalog, tableName)
+  if (partyOnly.length >= 2) {
+    return {
+      kind: 'party_rows',
+      template: 'party_rows',
+      partyColumns: partyOnly,
+      basis: 'column_name',
+      reason:
+        `"${tableName}" names two end-user parties (${partyOnly.join(', ')}) by convention. ` +
+        `A row belongs to both, so each can read it.`,
     }
   }
 
@@ -306,17 +528,21 @@ export function inferRlsPlanFromCatalog(
       // Self-references cannot carry ownership downward and would make the
       // policy subquery re-enter the very table being protected.
       if (fk.parentTable === tableName) return null
-      const parentOwner = directOwnerColumn(catalog, fk.parentTable)
-      return parentOwner ? { fk, parentOwnerColumn: parentOwner.column } : null
+      // ALL of the parent's owner columns. A `messages` row hanging off
+      // `conversations(user_a, user_b)` is readable by either participant; with
+      // only the first column here, the second participant could not read the
+      // messages in their own conversation.
+      const owners = allOwnerColumnsOf(catalog, fk.parentTable)
+      return owners.length > 0 ? { fk, parentOwnerColumns: owners } : null
     })
-    .filter((x): x is { fk: ForeignKey; parentOwnerColumn: string } => x !== null)
+    .filter((x): x is { fk: ForeignKey; parentOwnerColumns: string[] } => x !== null)
 
   // De-duplicate by parent table: two FKs to the same parent still describe one
   // ownership path.
   const distinctParents = new Set(ownedParents.map((p) => p.fk.parentTable))
 
   if (ownedParents.length > 0 && distinctParents.size === 1) {
-    const { fk, parentOwnerColumn } = ownedParents[0]
+    const { fk, parentOwnerColumns } = ownedParents[0]
     return {
       kind: 'related_rows',
       template: 'related_rows',
@@ -324,13 +550,17 @@ export function inferRlsPlanFromCatalog(
         localColumn: fk.childColumn,
         parentTable: fk.parentTable,
         parentColumn: fk.parentColumn,
-        parentOwnerColumn,
+        parentOwnerColumns,
       },
       basis: 'fk_chain',
       reason:
         `Rows are owned indirectly: "${tableName}"."${fk.childColumn}" → ` +
-        `"${fk.parentTable}"."${fk.parentColumn}", and "${fk.parentTable}"."${parentOwnerColumn}" ` +
-        `names the end-user. Access follows the parent.`,
+        `"${fk.parentTable}"."${fk.parentColumn}", and ` +
+        (parentOwnerColumns.length === 1
+          ? `"${fk.parentTable}"."${parentOwnerColumns[0]}" names the end-user`
+          : `"${fk.parentTable}" has ${parentOwnerColumns.length} parties ` +
+            `(${parentOwnerColumns.join(', ')}), any of whom owns it`) +
+        `. Access follows the parent.`,
     }
   }
 
@@ -396,12 +626,19 @@ export function exposureReason(tableName: string, plan: RlsPlan): string {
         `Rows in "${tableName}" belong to individual end-users (via "${plan.userIdColumn}") but RLS is ` +
         `disabled — every user can read and modify every other user's rows.`
       )
+    case 'party_rows':
+      return (
+        `Rows in "${tableName}" belong to specific pairs of end-users ` +
+        `(${plan.partyColumns.join(' / ')}) but RLS is disabled — every user can read and modify every ` +
+        `other pair's rows. On a connections, conversations or messages table that is the whole private ` +
+        `social graph.`
+      )
     case 'related_rows':
       return (
         `Rows in "${tableName}" belong to individual end-users through ` +
-        `"${plan.via.parentTable}"."${plan.via.parentOwnerColumn}", but RLS is disabled — every row is ` +
-        `readable by any API key. Indirectly-owned tables (line items, addresses, saved cards) hold the ` +
-        `same private data as their parent.`
+        `${plan.via.parentOwnerColumns.map((c) => `"${plan.via.parentTable}"."${c}"`).join(' / ')}, ` +
+        `but RLS is disabled — every row is readable by any API key. Indirectly-owned tables (line items, ` +
+        `addresses, saved cards, messages in a conversation) hold the same private data as their parent.`
       )
     case 'public_read':
       return (

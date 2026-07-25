@@ -189,7 +189,9 @@ export function assertReadOnlySql(sqlRaw: string): void {
       'The catalogs are shared by every project on the instance, so a query against ' +
       'them is not scoped to yours. To inspect YOUR schema use read_backend_state ' +
       '{section:"tables"} or get_table_schema {tableName} — those answer the same questions ' +
-      'and only ever describe this project.',
+      'and only ever describe this project. In particular get_table_schema returns the live ' +
+      'RLS policies with their command, ROLES, permissive/restrictive flag and both ' +
+      'predicates, so pg_policies is not needed to audit a policy\'s scope.',
     )
   }
 }

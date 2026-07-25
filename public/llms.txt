@@ -164,13 +164,38 @@ Or remote (Streamable-HTTP — no npx, nothing to install; the host connects str
 claude mcp add --transport http backenly https://backenly.com/api/mcp --header "x-api-key: <scoped-key>"
 ```
 
-The MCP catalog is a curated, MCP-shaped projection of the brain's toolset, in tiers:
+### The advertised tools
 
-- **`backend_chat`** *(chat)* — natural-language fall-through to the brain (runs `POST /api/mcp/chat`). The killer tool: the agent does **not** need to know Backenly's tool vocabulary. It says *"add likes and comments to my posts table"* and the brain plans and executes the steps.
-- **Read tools** — `fetch_docs` (self-serve this documentation), `get_table_schema`, `get_backend_metadata`, `get_instructions`, `get_metrics`, `get_errors`, `list_tables`, `check_approval`, and every other read-only tool. Safe by definition.
-- **Build tools** *(non-destructive)* — `create_table`, `add_column`, `create_index`, `generate_api`, `enable_auth`, `create_bucket`, `add_rls`, `create_trigger`, `enable_realtime`, `generate_function`, `enable_vector_search`, `create_cron_job`, `generate_aggregate_api`, `enable_teams`, `connect_frontend`, `get_database_credentials`, `adopt_external_schema`, and more.
-- **Runtime data** — `run_query`: read-only SQL over the workspace schema (joins, GROUP BY, aggregates, window functions, CTEs, `EXPLAIN`). Runs as a SELECT-only role scoped to the project, so it cannot write and cannot reach another tenant; secret-bearing columns come back redacted. `db_query` / `db_insert` / `db_update` / `db_delete`: owner-level CRUD on workspace tables for seeding and debugging.
-- **Destructive tools** *(`drop_table`, `truncate_table`, `delete_bucket`)* are **never auto-executed over MCP.** Describe the operation via `backend_chat`; it is parked in the project's **Review Queue** and returns an approval id. A human approves it in the dashboard, and the agent polls `check_approval` until it is executed or rejected.
+Exactly **20** tools are advertised to the host. That number is deliberate: tool-selection accuracy degrades as a catalog grows, so the surface is an allowlist where every request has one obvious door, not a projection of everything the brain can do. `GET /api/mcp/manifest` returns this list, and `tools/list` on the MCP server is the authority — trust it over any document, including this one.
+
+| Tool | What it is for |
+| --- | --- |
+| `backend_chat` | Natural-language fall-through to the brain. The agent does **not** need Backenly's tool vocabulary: it says *"add likes and comments to my posts table"* and the brain plans and executes. Everything not listed below is reached through here. |
+| `read_backend_state` | The one read door for state — tables, REST endpoints, auth, buckets, RLS, integrations, realtime. Takes an optional `section` (`tables`, `rls`, `functions`, …). Call it first to ground any decision. |
+| `get_table_schema` | Everything about ONE table: columns (type/nullable/default/PK), foreign keys with `ON DELETE`, indexes (including `UNIQUE` and the full column tuple), CHECK constraints **with their permitted values**, triggers, and the live RLS policies with the **roles** each applies to. Read this before any write. |
+| `run_query` | Read-only SQL over the workspace schema — joins, `GROUP BY`, aggregates, window functions, CTEs, `EXPLAIN`. Runs as a SELECT-only role scoped to the project, so it cannot write and cannot reach another tenant; secret-bearing columns come back redacted. |
+| `apply_migration` | Schema changes as **SQL**: `CREATE TABLE`, `ALTER TABLE` (`ADD COLUMN` / `RENAME COLUMN` / `ADD CONSTRAINT` / `ALTER COLUMN SET`\|`DROP NOT NULL` / `SET`\|`DROP DEFAULT`), `CREATE [UNIQUE] INDEX`. Translated into governed typed actions, all-or-nothing, and anything it cannot map is refused with the route forward rather than silently dropped. |
+| `db_insert` / `db_update` / `db_delete` | Row changes. Typed and governed; `apply_migration` handles schema, these handle data. |
+| `enable_auth` | End-user authentication (JWT, email + password). |
+| `create_bucket` | A storage bucket. |
+| `enable_realtime` | Live change events for a table. |
+| `generate_api` | Regenerate the domain endpoints for a table. CRUD does **not** need this — see below. |
+| `generate_function` | A backend function (HTTP or event-driven). |
+| `create_api_key` | A scoped API key. |
+| `set_env_var` | An encrypted project env var, readable from functions as `ctx.env.KEY`. |
+| `get_database_credentials` | A direct PostgreSQL connection string (read-only on demand; read-write only after a human arms it). |
+| `adopt_external_schema` | Reconcile out-of-band DDL back under governance. |
+| `branch` | Preview branches — one tool, `action`: `create` \| `list` \| `diff` \| `merge`. |
+| `check_approval` | Poll an escalated destructive operation. |
+| `fetch_docs` | Self-serve this documentation at run time. |
+
+**REST endpoints are automatic.** `/db/<table>` is live the moment a table exists, resolved from the PostgreSQL catalog per request — there is no generation step and no record to create. The one exception is `users`, which is managed through `/auth/*` and deliberately never exposed as `/db/users` because it holds password hashes. So an empty `apis` list on a project whose only table is `users` is correct, not a missing step.
+
+**Row-Level Security** is set through `add_rls`, reachable via `backend_chat` (`"lock messages down so only the conversation's participants can read them"`). Its templates: `auto` (read the schema and pick), `owner_read_write` (one owner column), `participants` (**two or more** user columns — `connections(requester_id, addressee_id)`, `conversations(user_a, user_b)`; owner-only access is wrong on these because it locks one side out of its own row), `owned_via_parent` (ownership through a foreign key, including to a two-party parent), `public_read`, `org_members`, `admin_only`, `all_access`, and `custom` — an arbitrary predicate for a rule no template expresses. `add_rls` never substitutes a different policy for the one asked for: an unrecognised template is refused with the real list.
+
+**Destructive tools** (`drop_table`, `truncate_table`, `drop_column`, `delete_bucket`, `delete_ai_function`, `trigger_deploy`, …) are **never auto-executed over MCP.** Describe the operation via `backend_chat`; it is parked in the project's **Review Queue** and returns an approval id. A human approves it in the dashboard, and the agent polls `check_approval` until the status is terminal. Those statuses distinguish `failed` (nothing was applied — safe to retry) from `partial` (some changes landed before the run stopped — verify current state instead of replaying).
+
+**Older tool names still work.** Clients pinned to an earlier manifest may hold `list_tables`, `create_table`, `add_column`, `create_index`, `add_rls`, `create_trigger`, `get_backend_metadata`, `get_metrics` and the rest of the pre-consolidation set. Those remain **dispatchable** at `POST /api/mcp/tool` so an existing setup keeps working — they are simply no longer advertised, because being listed costs every agent accuracy on every call.
 
 Every MCP surface reads from a single catalog, and the PostgreSQL catalog is the source of truth for a project's schema — so what the agent sees is always what actually exists.
 

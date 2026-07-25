@@ -340,9 +340,12 @@ export function buildDispatchable(): McpToolDescriptor[] {
     tier: 'read',
     description:
       'Check the status of a destructive-operation approval request created by backend_chat. ' +
-      'Returns pending | executed | failed | rejected | expired plus a result summary once decided. ' +
+      'Returns pending | executed | partial | failed | rejected | expired plus a result summary once decided. ' +
       'Poll every 15-30s while pending; stop on any terminal status. Only the human can approve — ' +
-      'from the Backenly dashboard Review Queue.',
+      'from the Backenly dashboard Review Queue. ' +
+      'The distinction that matters: `failed` means NOTHING was applied and the backend is unchanged, ' +
+      'so it is safe to retry; `partial` means some changes DID land before the run stopped, so you must ' +
+      'read resultSummary and verify current state rather than replaying the request.',
     inputSchema: {
       type: 'object',
       properties: {

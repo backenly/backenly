@@ -26,7 +26,27 @@ import { prisma } from '@/lib/db/prisma'
 import { runBrain, type BrainEvent } from '@/lib/ai/brain/agent'
 
 export const APPROVAL_TTL_MS = 24 * 60 * 60 * 1000
-const EXECUTE_CAP_MS = 90_000
+
+/**
+ * Wall-clock budget for executing an APPROVED operation.
+ *
+ * ── Why this is not the interactive 90s ──────────────────────────────────────
+ *
+ * It was, and that was wrong on both sides of the trade. The 90s cap on
+ * `/api/mcp/chat` exists because an MCP host blocks on a tool call and must not
+ * hang — it is a latency budget for a caller that is waiting.
+ *
+ * Nobody is waiting here. A human already read the operation, decided it was
+ * safe, and clicked approve; the agent polls `check_approval` asynchronously.
+ * Reusing the interactive cap meant a multi-step destructive plan could burn the
+ * most expensive step in the whole system — human review — and then fail with
+ * "Approved execution exceeded 90000ms" (defect #7). Post-approval work is
+ * exactly the work that deserves room to finish.
+ *
+ * Ten minutes is chosen to be longer than any plan we have measured while still
+ * bounded, so a genuinely stuck run cannot hold the row in `approved` forever.
+ */
+const EXECUTE_CAP_MS = 10 * 60 * 1000
 
 export interface DangerInfo {
   tool: string
@@ -159,12 +179,36 @@ export async function decideApproval(input: {
 
   // Execute: replay the original message with destructive confirmation — the
   // exact resume path the dashboard confirmation card uses.
+  //
+  // ── `executed` must mean "and here is what changed" ─────────────────────────
+  //
+  // The status was derived from `result.success` alone, so it carried no
+  // information about what actually happened to the schema. Two failure modes
+  // followed, in opposite directions (defect #8):
+  //
+  //   • `executed` on a run that succeeded overall while doing something OTHER
+  //     than what was asked — the report saw owner-only auto RLS recorded as a
+  //     successful custom-policy application.
+  //   • `failed` on a run that had already APPLIED part of its plan before
+  //     stopping — "Approved but execution failed" on a request that had removed
+  //     the old policies and re-applied some of them.
+  //
+  // In both cases the truth was in the event stream and was thrown away. The
+  // events are now scanned for mutations that landed, a `partial` status is
+  // recorded when some did and the run still failed, and the applied list is
+  // written into the summary the agent polls. An agent that knows three of five
+  // steps landed can finish the job; one told only "failed" replays the whole
+  // thing.
+  const events: BrainEvent[] = []
   let summary = ''
   let ok = false
+  let timedOut = false
   try {
-    const events: BrainEvent[] = []
     const timeout = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error(`Approved execution exceeded ${EXECUTE_CAP_MS}ms`)), EXECUTE_CAP_MS).unref?.()
+      setTimeout(() => {
+        timedOut = true
+        reject(new Error(`Approved execution exceeded ${Math.round(EXECUTE_CAP_MS / 1000)}s`))
+      }, EXECUTE_CAP_MS).unref?.()
     })
     const result = await Promise.race([
       runBrain(
@@ -186,16 +230,53 @@ export async function decideApproval(input: {
     summary = err?.message ?? 'Execution failed'
   }
 
+  const applied = appliedMutations(events)
+
+  // `partial` is a distinct terminal status, not a flavour of failed. A caller
+  // that sees `failed` may safely assume nothing changed; on a partial run that
+  // assumption is false and acting on it double-applies.
+  const status = ok ? 'executed' : applied.length > 0 ? 'partial' : 'failed'
+
+  const detail =
+    status === 'executed'
+      ? summary
+      : status === 'partial'
+        ? `${summary}\n\n⚠️ PARTIALLY APPLIED — ${applied.length} change(s) DID take effect before the run ` +
+          `stopped: ${applied.join('; ')}.\nDo NOT replay the original request; verify the current state with ` +
+          `get_table_schema / read_backend_state and ask for only what is still missing.` +
+          (timedOut ? `\nThe run hit its ${Math.round(EXECUTE_CAP_MS / 1000)}s execution budget.` : '')
+        : `${summary}\n\nNothing was applied — the backend is in the state it was before approval.`
+
   await prisma.agentApprovalRequest.update({
     where: { id: row.id },
     data: {
-      status: ok ? 'executed' : 'failed',
+      status,
       executedAt: new Date(),
-      resultSummary: summary.slice(0, 2000),
+      resultSummary: detail.slice(0, 2000),
     },
   })
 
-  return { ok, status: ok ? 'executed' : 'failed', resultSummary: summary }
+  return { ok, status, resultSummary: detail }
+}
+
+/**
+ * Mutations from a brain run that actually landed.
+ *
+ * Read-only tools are excluded by prefix rather than by an allowlist of writers,
+ * so a tool added later is treated as a mutation until proven otherwise — the
+ * safe direction for a function whose job is to warn that something changed.
+ */
+const NON_MUTATION_TOOL = /^(read_backend_state|get_|list_|check_|run_query|run_test|finish|answer_question|propose_plan|ask_user)/
+
+function appliedMutations(events: BrainEvent[]): string[] {
+  const out: string[] = []
+  for (const e of events) {
+    if (e.type !== 'tool_done') continue
+    const tool = (e as any).tool as string | undefined
+    if (!tool || NON_MUTATION_TOOL.test(tool)) continue
+    out.push((e as any).title || tool)
+  }
+  return out
 }
 
 async function auditDecision(

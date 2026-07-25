@@ -171,7 +171,12 @@ export async function POST(request: NextRequest) {
     const guidance: Record<string, string> = {
       pending: 'Still waiting for the human. Poll again in 15-30s, or remind them to open the Review Queue.',
       executed: 'Approved and executed — the resultSummary describes what changed. Verify with read tools if needed.',
-      failed: 'Approved but execution failed — read resultSummary and report it to the human.',
+      // `failed` now means NOTHING was applied, which is what makes it safe to
+      // act on. A run that applied some of its plan and then stopped reports
+      // `partial` instead — treating that as `failed` and replaying is how a
+      // half-finished destructive plan gets double-applied.
+      failed: 'Approved but execution failed and NOTHING was applied — the backend is unchanged. Read resultSummary and report it to the human.',
+      partial: 'Approved, and SOME changes were applied before the run stopped. Do NOT replay the original request. resultSummary lists exactly what landed; verify with get_table_schema / read_backend_state and ask only for what is still missing.',
       rejected: 'The human rejected this operation. Do not retry it; ask what they want instead.',
       expired: 'The request expired unapproved (24h). Ask the human whether to raise it again.',
     }

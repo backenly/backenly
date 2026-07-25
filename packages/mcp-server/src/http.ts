@@ -180,6 +180,24 @@ export class BackenlyClient {
       toolsRun?: string[]
       events?: Array<{ type: string; [k: string]: any }>
       error?: string
+      /**
+       * Fields the route sends that this type used to omit — so they were dropped
+       * before `dispatch` could forward them, and the escalation id survived only
+       * as prose inside `summary`.
+       *
+       *   status       'awaiting_approval' when the request was parked for human review
+       *   approval     { id, status, poll, note } — the id to poll with check_approval
+       *   code         stable failure slug (RATE_LIMITED, BRAIN_TIMEOUT, …)
+       *   retryable    whether an identical retry is worth making
+       *   applied      mutations that DID land, even on failure
+       */
+      status?: string
+      approval?: { id: string; status: string; poll: string; note: string } | null
+      code?: string
+      retryable?: boolean
+      retryAfterMs?: number
+      partial?: boolean
+      applied?: string[]
     }>('POST', '/api/mcp/chat', { message })
   }
 

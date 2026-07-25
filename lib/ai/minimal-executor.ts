@@ -146,6 +146,14 @@ export interface ExecutionResult {
   advisories?: string[]
   /** ISO timestamp set when a live DB read-back confirmed the artifact exists */
   verifiedAt?: string
+  /**
+   * Machine-readable failure code, forwarded to the agent by `dispatchTool` and
+   * the MCP tool route so a caller can branch without regexing prose.
+   *
+   * Stable slugs — DUPLICATE_ROWS, COLUMN_NOT_FOUND, CONSTRAINT_CONFLICT,
+   * VERIFY_FAILED, VALIDATION. Only meaningful when `success` is false.
+   */
+  code?: string
 }
 
 export interface ValidationResult {
@@ -1468,7 +1476,7 @@ TRIGGERS (event automation — "when X happens, do Y automatically"):
 
 PERMISSIONS (row-level security — "users can only see their own rows"):
 - SET_PERMISSION - Apply a row-level security policy to a table
-  Templates: own_rows, public_read, admin_only, all_access, org_members,
+  Templates: auto, own_rows, party_rows, related_rows, public_read, admin_only, all_access, org_members,
              admin_read_all (admins see ALL; users see own), role_based (admins/superadmins bypass),
              moderator_access (admins+moderators see all; users see own)
   Optional: roleColumn (column name storing the role, defaults to 'role')
@@ -2248,7 +2256,7 @@ export async function validateAction(
     // ========== PERMISSION ACTIONS ==========
     case 'SET_PERMISSION':
       if (!action.params.tableName) errors.push('tableName is required')
-      if (!action.params.template) errors.push('template is required (own_rows | public_read | admin_only | all_access | org_members | admin_read_all | role_based | moderator_access)')
+      if (!action.params.template) errors.push('template is required (auto | own_rows | party_rows | related_rows | public_read | admin_only | all_access | org_members | admin_read_all | role_based | moderator_access | custom)')
       preview = `Apply "${action.params.template}" policy to "${action.params.tableName}"`
       break
 
@@ -7550,33 +7558,235 @@ async function executeSetAlert(params: any, projectId: string): Promise<Executio
 // ========================================
 
 /**
- * DATABASE: Create Index (idempotent — uses IF NOT EXISTS)
+ * DATABASE: Create Index
+ *
+ * ── What was wrong here ──────────────────────────────────────────────────────
+ *
+ * This function took `columns` and used `columns[0]`, and it never read `unique`
+ * at all. So `CREATE UNIQUE INDEX profiles_user_id_key ON profiles (user_id)`
+ * produced a NON-UNIQUE index, and
+ * `CREATE UNIQUE INDEX ON conversations (user_a, user_b)` produced a non-unique
+ * index on `user_a` alone — both reporting ✅. Reported as defects #4 and #5.
+ *
+ * Two columns became one and a uniqueness guarantee evaporated, which meant
+ * nothing stopped duplicate profiles per user or duplicate conversation pairs.
+ * The response even mentioned the ONE difference that did not matter (the index
+ * was renamed) while saying nothing about the two that did.
+ *
+ * Every field is now honoured, and the result is VERIFIED against pg_indexes
+ * before success is reported. `IF NOT EXISTS` is also no longer trusted on its
+ * own: an existing index with the same NAME but a different DEFINITION is a
+ * conflict, not a success, and saying so is the difference between an agent that
+ * can fix its migration and one that believes a lie.
  */
 async function executeCreateIndex(params: any, projectId: string): Promise<ExecutionResult> {
-  const { tableName, indexName } = params
-  // Accept either { columnName } (autonomy buildFixAction) or { columns: [...] }
-  // (chat/LLM path). A param-name drift here must never silently no-op a real fix.
-  const columnName = params.columnName ?? (Array.isArray(params.columns) ? params.columns[0] : undefined)
-  if (!tableName || !columnName) {
-    return { success: false, message: 'tableName and columnName are required', error: 'Missing parameters' }
+  const { tableName } = params
+  // Accept { columnName } (autonomy buildFixAction) or { columns: [...] } (chat,
+  // MCP, migration parser). A param-name drift here must never silently no-op.
+  const columns: string[] = Array.isArray(params.columns) && params.columns.length
+    ? params.columns.map((c: unknown) => String(c ?? '').trim()).filter(Boolean)
+    : params.columnName ? [String(params.columnName).trim()] : []
+
+  if (!tableName || columns.length === 0) {
+    return {
+      success: false,
+      message: 'tableName and at least one column are required',
+      error: 'Missing parameters',
+      code: 'VALIDATION',
+    }
   }
+
+  const unique = !!params.unique
+  const method = typeof params.method === 'string' ? params.method.toLowerCase().trim() : ''
+  const where = typeof params.where === 'string' ? params.where.trim() : ''
+
+  const INDEX_METHODS = new Set(['btree', 'gin', 'gist', 'hash', 'brin'])
+  if (method && !INDEX_METHODS.has(method)) {
+    return {
+      success: false,
+      message: `Unsupported index method "${method}". Supported: ${[...INDEX_METHODS].join(', ')}.`,
+      error: 'Unsupported index method',
+      code: 'VALIDATION',
+    }
+  }
+
+  // Identifiers reach raw DDL, so they are VALIDATED rather than stripped. The
+  // old `replace(/[^a-z0-9_]/gi, '')` silently turned `user-id` into `userid` and
+  // indexed a column that does not exist — or worse, a different one that does.
+  const { SAFE_IDENT, validateBooleanExpression } = await import('@/lib/db/sql-expression')
+  for (const ident of [tableName, ...columns, params.indexName].filter(Boolean)) {
+    if (!SAFE_IDENT.test(String(ident))) {
+      return {
+        success: false,
+        message: `"${ident}" is not a valid PostgreSQL identifier.`,
+        error: 'Invalid identifier',
+        code: 'VALIDATION',
+      }
+    }
+  }
+
+  let wherePredicate = ''
+  if (where) {
+    const checked = validateBooleanExpression(where, { requireColumn: true })
+    if (checked.kind !== 'ok') {
+      return {
+        success: false,
+        message: `Partial-index predicate rejected: ${checked.reason} ${checked.hint}`,
+        error: 'Unsafe predicate',
+        code: 'VALIDATION',
+      }
+    }
+    wherePredicate = checked.expression
+  }
+
   try {
     const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
-    const safe = (s: string) => s.replace(/[^a-z0-9_]/gi, '')
-    const idxName = indexName || `idx_${safe(tableName)}_${safe(columnName)}`
-    await prisma.$executeRawUnsafe(
-      `CREATE INDEX IF NOT EXISTS "${idxName}" ON "${postgresSchema}"."${safe(tableName)}"("${safe(columnName)}")`
+
+    const idxName = params.indexName || defaultIndexName(tableName, columns, unique)
+    const colList = columns.map((c) => `"${c}"`).join(', ')
+    const usingClause = method ? ` USING ${method}` : ''
+    const whereClause = wherePredicate ? ` WHERE (${wherePredicate})` : ''
+    const ddl =
+      `CREATE${unique ? ' UNIQUE' : ''} INDEX IF NOT EXISTS "${idxName}" ` +
+      `ON "${postgresSchema}"."${tableName}"${usingClause} (${colList})${whereClause}`
+
+    // ── Name-collision check BEFORE creating ────────────────────────────────
+    // `IF NOT EXISTS` matches on NAME only. If an index of this name already
+    // exists over different columns — or without UNIQUE — Postgres returns
+    // success and leaves the old one in place. That is exactly how a "created"
+    // unique index turned out to be a pre-existing non-unique one.
+    const existing = await prisma.$queryRawUnsafe<Array<{ indexdef: string }>>(
+      `SELECT indexdef FROM pg_indexes WHERE schemaname = $1 AND tablename = $2 AND indexname = $3`,
+      postgresSchema, tableName, idxName,
     )
+    if (existing.length > 0) {
+      const def = existing[0].indexdef
+      const sameUnique = /CREATE UNIQUE/i.test(def) === unique
+      const sameCols = indexDefColumns(def).join(',') === columns.map((c) => c.toLowerCase()).join(',')
+      if (sameUnique && sameCols) {
+        return {
+          success: true,
+          message: `Index "${idxName}" already exists on ${tableName} (${columns.join(', ')})${unique ? ', unique' : ''} — nothing to do.`,
+          data: { tableName, columns, unique, indexName: idxName, alreadyExisted: true, definition: def },
+        }
+      }
+      return {
+        success: false,
+        message:
+          `An index named "${idxName}" already exists on ${tableName} with a DIFFERENT definition, ` +
+          `so the requested one was not created.\n` +
+          `  existing:  ${def}\n` +
+          `  requested: ${unique ? 'UNIQUE ' : ''}(${columns.join(', ')})\n` +
+          `Pass a different indexName, or drop the existing index first (destructive — route it through backend_chat).`,
+        error: 'Index name conflict',
+        code: 'INDEX_CONFLICT',
+        data: { indexName: idxName, existingDefinition: def, requested: { columns, unique } },
+      }
+    }
+
+    await prisma.$executeRawUnsafe(ddl)
+
+    // ── Verify, do not assume ───────────────────────────────────────────────
+    const after = await prisma.$queryRawUnsafe<Array<{ indexdef: string }>>(
+      `SELECT indexdef FROM pg_indexes WHERE schemaname = $1 AND tablename = $2 AND indexname = $3`,
+      postgresSchema, tableName, idxName,
+    )
+    if (after.length === 0) {
+      return {
+        success: false,
+        message: `CREATE INDEX reported no error but "${idxName}" is not in the catalog.`,
+        error: 'Index not created',
+        code: 'VERIFY_FAILED',
+      }
+    }
+    const def = after[0].indexdef
+    if (unique && !/CREATE UNIQUE/i.test(def)) {
+      return {
+        success: false,
+        message: `Index "${idxName}" was created but is NOT unique: ${def}`,
+        error: 'Uniqueness not applied',
+        code: 'VERIFY_FAILED',
+      }
+    }
+
+    const shape =
+      `${unique ? 'unique ' : ''}index on ${tableName} (${columns.join(', ')})` +
+      `${method ? ` using ${method}` : ''}${wherePredicate ? ` where ${wherePredicate}` : ''}`
     return {
       success: true,
-      message: `✅ Index "${idxName}" created on ${tableName}.${columnName}`,
-      data: { tableName, columnName, indexName: idxName }
+      message: `✅ Created ${shape} as "${idxName}"`,
+      data: { tableName, columns, unique, method: method || 'btree', where: wherePredicate || null, indexName: idxName, definition: def },
     }
   } catch (error: any) {
-    return { success: false, message: `Failed to create index: ${error.message}`, error: error.message }
+    // A duplicate-key failure on CREATE UNIQUE INDEX means the table already
+    // holds rows that violate the requested uniqueness. That is the single most
+    // useful thing to say, and "Failed to create index: <pg error>" buried it.
+    if (error?.code === '23505' || /duplicate key value|could not create unique index/i.test(error?.message ?? '')) {
+      return {
+        success: false,
+        message:
+          `Cannot create a unique index on ${tableName} (${columns.join(', ')}) — the table already ` +
+          `contains duplicate rows for that combination. Find them with run_query: ` +
+          `SELECT ${columns.join(', ')}, count(*) FROM ${tableName} GROUP BY ${columns.join(', ')} HAVING count(*) > 1. ` +
+          `Original error: ${error.message}`,
+        error: error.message,
+        code: 'DUPLICATE_ROWS',
+      }
+    }
+    if (error?.code === '42703' || /column .* does not exist/i.test(error?.message ?? '')) {
+      return {
+        success: false,
+        message:
+          `Cannot index ${tableName} (${columns.join(', ')}) — one of those columns does not exist. ` +
+          `Call get_table_schema { tableName: "${tableName}" } for the real column list. ` +
+          `Original error: ${error.message}`,
+        error: error.message,
+        code: 'COLUMN_NOT_FOUND',
+      }
+    }
+    return { success: false, message: `Failed to create index: ${error.message}`, error: error.message, code: 'INDEX_FAILED' }
   }
+}
+
+/**
+ * Derive an index name that encodes the whole shape.
+ *
+ * `idx_<table>_<col>` collided the moment a table needed two indexes starting
+ * with the same column, and `IF NOT EXISTS` then made the second one a silent
+ * no-op. Including every column and the uniqueness makes distinct indexes have
+ * distinct names, and the 63-byte PostgreSQL identifier limit is respected by
+ * falling back to a hash suffix rather than a truncation that could still collide.
+ */
+export function defaultIndexName(tableName: string, columns: string[], unique: boolean): string {
+  const prefix = unique ? 'uniq' : 'idx'
+  const full = `${prefix}_${tableName}_${columns.join('_')}`
+  if (full.length <= 63) return full
+  const crypto = require('crypto') as typeof import('crypto')
+  const hash = crypto.createHash('sha1').update(`${tableName}|${columns.join(',')}|${unique}`).digest('hex').slice(0, 8)
+  return `${prefix}_${tableName}`.slice(0, 54) + `_${hash}`
+}
+
+/** Column list of a pg_indexes definition, lower-cased for comparison. */
+export function indexDefColumns(indexdef: string): string[] {
+  const open = indexdef.lastIndexOf('(')
+  const close = indexdef.indexOf(')', open)
+  if (open === -1 || close === -1) return []
+  return indexdef
+    .slice(open + 1, close)
+    .split(',')
+    // Sort modifiers are stripped BEFORE the quotes. The other order leaves
+    // `"createdAt" DESC` as `createdat"` — the closing quote is no longer at the
+    // end of the string once DESC follows it.
+    .map((c) =>
+      c.trim()
+        .replace(/\s+(ASC|DESC|NULLS\s+(FIRST|LAST))$/i, '')
+        .trim()
+        .replace(/^"|"$/g, '')
+        .toLowerCase(),
+    )
+    .filter(Boolean)
 }
 
 /**
@@ -7608,62 +7818,460 @@ async function executeRenameColumn(params: any, projectId: string): Promise<Exec
 }
 
 /**
- * DATABASE: Add Constraint
+ * DATABASE: Add / relax a constraint.
+ *
+ * ── What was wrong here, and why it was the worst bug on the surface ─────────
+ *
+ * Three independent defects compounded into a tool that lied.
+ *
+ * 1. CONTRACT DRIFT. Every caller — the migration parser, the brain's
+ *    `add_constraint` mapper — sends the predicate as `expression`. This function
+ *    only ever read `constraintDefinition`. So `expression` was always undefined
+ *    and execution fell through to a hardcoded synthesis whose CHECK branch was
+ *
+ *        if (ct === 'CHECK' && columnName) return `CHECK ("col" IS NOT NULL)`
+ *
+ *    An author's `CHECK (status IN ('pending','accepted','declined'))` was
+ *    therefore installed as `CHECK (status IS NOT NULL)` — a different
+ *    constraint, silently, reported as success.
+ *
+ * 2. NAME COLLISION. The generated name was `chk_<table>_<column>`, which is the
+ *    same for every constraint on a column. The second one hit Postgres's
+ *    duplicate-name error.
+ *
+ * 3. THE ERROR WAS SWALLOWED. `if (error.message.includes('already exists'))
+ *    return { success: true }`. So the retry that should have repaired defect 1
+ *    instead confirmed it: "✅ Constraint already exists on connections", while
+ *    the only constraint present was the wrong one this function had invented.
+ *
+ * Together those are defects #1 and #2 as reported, and #2 is the one that made
+ * #1 unrecoverable — the obvious fix path returned success.
+ *
+ * Every branch below therefore: reads the real contract, derives a name from the
+ * DEFINITION rather than the column, compares against what already exists before
+ * claiming idempotency, and reads the constraint back out of the catalog before
+ * reporting success. `NOT NULL` is also a real `ALTER COLUMN SET NOT NULL` now,
+ * not a CHECK impersonating one.
  */
 async function executeAddConstraint(params: any, projectId: string): Promise<ExecutionResult> {
-  const { tableName, constraintName, constraintDefinition, constraintType, columnName, referencedTable } = params
+  const { tableName, constraintName, constraintDefinition, referencedTable } = params
+  const columnName = params.columnName ? String(params.columnName).trim() : ''
+  // `expression` is the declared contract; `constraintDefinition` is the older
+  // internal spelling. Both are read so neither caller is silently ignored.
+  const expression = typeof params.expression === 'string' ? params.expression.trim() : ''
 
-  // ── FOREIGN KEY branch ──────────────────────────────────────────────────────
-  // The autonomy auto-fix engine maps a `missing_fk` finding to ADD_CONSTRAINT
-  // with { tableName, columnName, referencedTable }. A foreign key is not a CHECK/
-  // UNIQUE definition, so it is repaired by the shared FK repairer (same cascade
-  // rules + naming as the batch pass) rather than the generic ALTER below.
-  const ctUpper = String(constraintType ?? '').toUpperCase().replace(/_/g, ' ')
+  // Normalised type. `ctUpper` used to replace underscores while the synthesis
+  // below compared against the RAW value, so `not_null` matched the FK sniffer's
+  // 'NOT NULL' but never the definition builder's — producing
+  // `ADD CONSTRAINT "chk_x_y" undefined` and a syntax error.
+  const ct = String(params.constraintType ?? '').trim().toLowerCase().replace(/\s+/g, '_')
+
   const looksLikeFk =
-    ctUpper === 'FOREIGN KEY' ||
+    ct === 'foreign_key' ||
     !!referencedTable ||
-    (!constraintDefinition && !constraintType && /(_id|Id)$/.test(String(columnName ?? '')))
+    (!constraintDefinition && !ct && /(_id|Id)$/.test(columnName))
   if (looksLikeFk && tableName && columnName) {
+    // `expression` carries "target(column)" from the migration parser; prefer an
+    // explicit referencedTable, then the expression, then inference.
+    const fromExpr = /^([A-Za-z_][A-Za-z0-9_$]*)\s*\(/.exec(expression)?.[1]
+    const target = referencedTable || fromExpr
     const { repairForeignKeyColumn } = await import('./fk-repair')
-    const r = await repairForeignKeyColumn(projectId, tableName, columnName, referencedTable)
+    const r = await repairForeignKeyColumn(projectId, tableName, columnName, target)
     return r.success
       ? { success: true, message: `✅ ${r.message}`, data: { tableName, columnName, referencedTable: r.referencedTable } }
-      : { success: false, message: r.message, error: r.message }
+      : { success: false, message: r.message, error: r.message, code: 'FK_FAILED' }
   }
 
-  if (!tableName || (!constraintDefinition && !constraintType)) {
-    return { success: false, message: 'tableName and constraintDefinition are required', error: 'Missing parameters' }
+  if (!tableName || (!constraintDefinition && !ct)) {
+    return {
+      success: false,
+      message: 'tableName and constraintType are required',
+      error: 'Missing parameters',
+      code: 'VALIDATION',
+    }
   }
+
+  const { SAFE_IDENT, validateBooleanExpression } = await import('@/lib/db/sql-expression')
+
+  // Columns the constraint covers. A multi-column CHECK passes `columns`; every
+  // other form is column-scoped.
+  const columns: string[] = Array.isArray(params.columns) && params.columns.length
+    ? params.columns.map((c: unknown) => String(c ?? '').trim()).filter(Boolean)
+    : columnName ? [columnName] : []
+
+  for (const ident of [tableName, ...columns, constraintName].filter(Boolean)) {
+    if (!SAFE_IDENT.test(String(ident))) {
+      return {
+        success: false,
+        message: `"${ident}" is not a valid PostgreSQL identifier.`,
+        error: 'Invalid identifier',
+        code: 'VALIDATION',
+      }
+    }
+  }
+
+  const NEEDS_COLUMN = new Set(['not_null', 'drop_not_null', 'unique', 'set_default', 'drop_default'])
+  if (NEEDS_COLUMN.has(ct) && !columnName) {
+    return {
+      success: false,
+      message: `constraintType "${ct}" applies to one column — pass columnName.`,
+      error: 'Missing columnName',
+      code: 'VALIDATION',
+    }
+  }
+
   try {
     const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
-    const safe = (s: string) => s.replace(/[^a-z0-9_]/gi, '')
-    const cName = constraintName || `chk_${safe(tableName)}_${safe(columnName || constraintType || 'constraint')}`
-    // Build constraint definition from type if not provided directly
-    const definition = constraintDefinition || (() => {
-      const ct = (constraintType || '').toUpperCase()
-      const col = safe(columnName || '')
-      if (ct === 'NOT NULL') return `CHECK ("${col}" IS NOT NULL)`
-      if (ct === 'UNIQUE') return `UNIQUE ("${col}")`
-      if (ct === 'CHECK' && columnName) return `CHECK ("${col}" IS NOT NULL)`
-      return constraintDefinition
-    })()
-    await prisma.$executeRawUnsafe(
-      `ALTER TABLE "${postgresSchema}"."${safe(tableName)}" ADD CONSTRAINT "${cName}" ${definition}`
+    const qualified = `"${postgresSchema}"."${tableName}"`
+
+    // ── ALTER COLUMN forms: not constraints in the pg_constraint sense ───────
+    // NOT NULL is a column attribute. Expressing it as `CHECK (col IS NOT NULL)`
+    // — as this used to — produces a constraint that does not participate in
+    // planner null-rejection, does not show as `is_nullable = NO` in
+    // information_schema, and litters the table with the `chk_*` rows the
+    // reporter mistook for platform-generated noise.
+    if (ct === 'not_null' || ct === 'drop_not_null') {
+      const verb = ct === 'not_null' ? 'SET NOT NULL' : 'DROP NOT NULL'
+      try {
+        await prisma.$executeRawUnsafe(`ALTER TABLE ${qualified} ALTER COLUMN "${columnName}" ${verb}`)
+      } catch (err: any) {
+        if (err?.code === '23502' || /contains null values/i.test(err?.message ?? '')) {
+          return {
+            success: false,
+            message:
+              `Cannot set ${tableName}.${columnName} NOT NULL — it already contains NULL rows. ` +
+              `Backfill them first (db_update with a filter on ${columnName} IS NULL), then retry. ` +
+              `Original error: ${err.message}`,
+            error: err.message,
+            code: 'NULL_ROWS_PRESENT',
+          }
+        }
+        throw err
+      }
+      const nullable = await columnIsNullable(prisma, postgresSchema, tableName, columnName)
+      if (nullable === null) {
+        return {
+          success: false,
+          message: `Column ${tableName}.${columnName} does not exist.`,
+          error: 'Column not found',
+          code: 'COLUMN_NOT_FOUND',
+        }
+      }
+      const wanted = ct === 'not_null' ? false : true
+      if (nullable !== wanted) {
+        return {
+          success: false,
+          message: `${verb} reported no error but ${tableName}.${columnName} is still ${nullable ? 'nullable' : 'NOT NULL'}.`,
+          error: 'Verification failed',
+          code: 'VERIFY_FAILED',
+        }
+      }
+      import('@/lib/services/workspace-validator')
+        .then(({ invalidateSchemaCache }) => invalidateSchemaCache(projectId, tableName)).catch(() => {})
+      return {
+        success: true,
+        message: `✅ ${tableName}.${columnName} is now ${wanted ? 'nullable' : 'NOT NULL'}`,
+        data: { tableName, columnName, nullable: wanted },
+      }
+    }
+
+    if (ct === 'set_default' || ct === 'drop_default') {
+      if (ct === 'drop_default') {
+        await prisma.$executeRawUnsafe(`ALTER TABLE ${qualified} ALTER COLUMN "${columnName}" DROP DEFAULT`)
+        return {
+          success: true,
+          message: `✅ Dropped the default on ${tableName}.${columnName}`,
+          data: { tableName, columnName, default: null },
+        }
+      }
+      // The default expression reaches raw DDL, so it goes through the same
+      // closed allowlist a column-level default does.
+      const expr = normalizeDefaultExpression(expression || constraintDefinition)
+      if (!expr) {
+        return {
+          success: false,
+          message:
+            `Default expression "${expression || constraintDefinition}" is not one Backenly will place in DDL. ` +
+            `Supported: a quoted literal, a number, true/false/null, NOW(), CURRENT_TIMESTAMP, ` +
+            `CURRENT_DATE, gen_random_uuid(), '{}'::jsonb.`,
+          error: 'Unsupported default',
+          code: 'VALIDATION',
+        }
+      }
+      await prisma.$executeRawUnsafe(`ALTER TABLE ${qualified} ALTER COLUMN "${columnName}" SET DEFAULT ${expr}`)
+      return {
+        success: true,
+        message: `✅ ${tableName}.${columnName} now defaults to ${expr}`,
+        data: { tableName, columnName, default: expr },
+      }
+    }
+
+    // ── Real table constraints: UNIQUE and CHECK ─────────────────────────────
+    let definition: string
+    if (constraintDefinition) {
+      // Legacy internal callers pass a whole `CHECK (…)` / `UNIQUE (…)` clause.
+      // Validate the predicate inside it rather than trusting the string.
+      const inner = /^\s*check\s*\(([\s\S]*)\)\s*$/i.exec(String(constraintDefinition))
+      if (inner) {
+        const checked = validateBooleanExpression(inner[1], { requireColumn: true })
+        if (checked.kind !== 'ok') {
+          return {
+            success: false,
+            message: `CHECK expression rejected: ${checked.reason} ${checked.hint}`,
+            error: 'Unsafe expression',
+            code: 'VALIDATION',
+          }
+        }
+        definition = `CHECK (${checked.expression})`
+      } else if (/^\s*unique\s*\(\s*"?[A-Za-z_][A-Za-z0-9_$]*"?\s*(,\s*"?[A-Za-z_][A-Za-z0-9_$]*"?\s*)*\)\s*$/i.test(String(constraintDefinition))) {
+        definition = String(constraintDefinition).trim()
+      } else {
+        return {
+          success: false,
+          message:
+            `constraintDefinition "${String(constraintDefinition).slice(0, 60)}" is not a form Backenly ` +
+            `will place in DDL. Pass { constraintType: "check", expression: "<predicate>" } or ` +
+            `{ constraintType: "unique", columnName }.`,
+          error: 'Unsupported constraint definition',
+          code: 'VALIDATION',
+        }
+      }
+    } else if (ct === 'unique') {
+      definition = `UNIQUE (${columns.map((c) => `"${c}"`).join(', ')})`
+    } else if (ct === 'check') {
+      const checked = validateBooleanExpression(expression, { requireColumn: true })
+      if (checked.kind !== 'ok') {
+        return {
+          success: false,
+          message:
+            `CHECK expression rejected: ${checked.reason} ${checked.hint}` +
+            (expression ? '' : ' Pass the predicate in `expression`, e.g. { expression: "price > 0" }.'),
+          error: 'Unsafe or missing expression',
+          code: 'VALIDATION',
+        }
+      }
+      definition = `CHECK (${checked.expression})`
+    } else {
+      return {
+        success: false,
+        message:
+          `Unsupported constraintType "${params.constraintType}". ` +
+          `Supported: not_null, drop_not_null, unique, check, foreign_key, set_default, drop_default.`,
+        error: 'Unsupported constraintType',
+        code: 'VALIDATION',
+      }
+    }
+
+    // ── The name ────────────────────────────────────────────────────────────
+    // Derived from the DEFINITION, not just the column, so two different CHECKs
+    // on `status` get two different names instead of colliding. An explicit
+    // constraintName always wins — that is the author's own namespace.
+    const cName = constraintName || derivedConstraintName(tableName, ct, columns, definition)
+
+    // ── Compare before claiming idempotency ─────────────────────────────────
+    // "already exists" is only good news if what exists is what was asked for.
+    const existing = await prisma.$queryRawUnsafe<Array<{ conname: string; def: string }>>(
+      `SELECT con.conname, pg_get_constraintdef(con.oid) AS def
+         FROM pg_constraint con
+         JOIN pg_class rel ON rel.oid = con.conrelid
+         JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+        WHERE nsp.nspname = $1 AND rel.relname = $2 AND con.conname = $3`,
+      postgresSchema, tableName, cName,
     )
+    if (existing.length > 0) {
+      const have = existing[0].def
+      if (sameConstraint(have, definition)) {
+        return {
+          success: true,
+          message: `Constraint "${cName}" already exists on ${tableName} with the same definition — nothing to do.`,
+          data: { tableName, constraintName: cName, constraintDefinition: have, alreadyExisted: true },
+        }
+      }
+      return {
+        success: false,
+        message:
+          `A constraint named "${cName}" already exists on ${tableName} with a DIFFERENT definition, ` +
+          `so the requested one was NOT applied.\n` +
+          `  existing:  ${have}\n` +
+          `  requested: ${definition}\n` +
+          `Pass an explicit constraintName to add this alongside it, or drop the existing constraint ` +
+          `first (destructive — route it through backend_chat).`,
+        error: 'Constraint name conflict',
+        code: 'CONSTRAINT_CONFLICT',
+        data: { tableName, constraintName: cName, existingDefinition: have, requestedDefinition: definition },
+      }
+    }
+
+    // An equivalent constraint under a DIFFERENT name is also already-satisfied.
+    // Without this, an author who wrote the same CHECK twice under two names got
+    // two identical constraints on the table.
+    const equivalent = await prisma.$queryRawUnsafe<Array<{ conname: string; def: string }>>(
+      `SELECT con.conname, pg_get_constraintdef(con.oid) AS def
+         FROM pg_constraint con
+         JOIN pg_class rel ON rel.oid = con.conrelid
+         JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+        WHERE nsp.nspname = $1 AND rel.relname = $2 AND con.contype IN ('c','u')`,
+      postgresSchema, tableName,
+    )
+    const match = equivalent.find((e) => sameConstraint(e.def, definition))
+    if (match) {
+      return {
+        success: true,
+        message:
+          `${tableName} already enforces this rule as "${match.conname}" (${match.def}) — nothing to do. ` +
+          `No second constraint was added.`,
+        data: { tableName, constraintName: match.conname, constraintDefinition: match.def, alreadyExisted: true },
+      }
+    }
+
+    await prisma.$executeRawUnsafe(`ALTER TABLE ${qualified} ADD CONSTRAINT "${cName}" ${definition}`)
+
+    // ── Verify against the catalog ──────────────────────────────────────────
+    const after = await prisma.$queryRawUnsafe<Array<{ def: string }>>(
+      `SELECT pg_get_constraintdef(con.oid) AS def
+         FROM pg_constraint con
+         JOIN pg_class rel ON rel.oid = con.conrelid
+         JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+        WHERE nsp.nspname = $1 AND rel.relname = $2 AND con.conname = $3`,
+      postgresSchema, tableName, cName,
+    )
+    if (after.length === 0) {
+      return {
+        success: false,
+        message: `ADD CONSTRAINT reported no error but "${cName}" is not in the catalog.`,
+        error: 'Constraint not created',
+        code: 'VERIFY_FAILED',
+      }
+    }
+
+    import('@/lib/services/workspace-validator')
+      .then(({ invalidateSchemaCache }) => invalidateSchemaCache(projectId, tableName)).catch(() => {})
+
     return {
       success: true,
-      message: `✅ Constraint "${cName}" added to ${tableName}`,
-      data: { tableName, constraintName: cName, constraintDefinition: definition }
+      // The ACTUAL installed definition is echoed, so a caller can see what it
+      // got rather than trusting that it matches what it sent.
+      message: `✅ Added constraint "${cName}" to ${tableName}: ${after[0].def}`,
+      data: { tableName, constraintName: cName, constraintDefinition: after[0].def, columns },
     }
   } catch (error: any) {
-    // Duplicate constraint is not a fatal error
-    if (error.message?.includes('already exists')) {
-      return { success: true, message: `✅ Constraint already exists on ${tableName}`, data: { tableName } }
+    // ── "already exists" is never silently a success ─────────────────────────
+    // Reaching here means the name-comparison above did not see it, so the
+    // conflict is real and the caller must know the constraint was not applied.
+    if (/already exists/i.test(error?.message ?? '')) {
+      return {
+        success: false,
+        message:
+          `PostgreSQL refused the constraint on ${tableName} because a constraint of that name already ` +
+          `exists: ${error.message}. Nothing was applied. Call get_table_schema { tableName: "${tableName}" } ` +
+          `to see the existing constraints, then retry with an explicit constraintName.`,
+        error: error.message,
+        code: 'CONSTRAINT_CONFLICT',
+      }
     }
-    return { success: false, message: `Failed to add constraint: ${error.message}`, error: error.message }
+    if (error?.code === '23514' || /violates check constraint|is violated by some row/i.test(error?.message ?? '')) {
+      return {
+        success: false,
+        message:
+          `Cannot add this constraint to ${tableName} — existing rows already violate it, so PostgreSQL ` +
+          `rejected it and nothing was applied. Find the offending rows with run_query, fix or delete them, ` +
+          `then retry. Original error: ${error.message}`,
+        error: error.message,
+        code: 'EXISTING_ROWS_VIOLATE',
+      }
+    }
+    if (error?.code === '42703' || /column .* does not exist/i.test(error?.message ?? '')) {
+      return {
+        success: false,
+        message:
+          `The constraint references a column that does not exist on ${tableName}. ` +
+          `Call get_table_schema { tableName: "${tableName}" } for the real column list. ` +
+          `Original error: ${error.message}`,
+        error: error.message,
+        code: 'COLUMN_NOT_FOUND',
+      }
+    }
+    return { success: false, message: `Failed to add constraint: ${error.message}`, error: error.message, code: 'CONSTRAINT_FAILED' }
   }
+}
+
+/** Live nullability of a column, or null when the column does not exist. */
+async function columnIsNullable(
+  prisma: any,
+  schema: string,
+  table: string,
+  column: string,
+): Promise<boolean | null> {
+  const rows = await prisma.$queryRawUnsafe(
+    `SELECT is_nullable FROM information_schema.columns
+      WHERE table_schema = $1 AND table_name = $2 AND column_name = $3`,
+    schema, table, column,
+  ) as Array<{ is_nullable: string }>
+  if (rows.length === 0) return null
+  return rows[0].is_nullable === 'YES'
+}
+
+/**
+ * A constraint name that encodes the whole definition.
+ *
+ * `chk_<table>_<column>` is the same string for every constraint on a column, so
+ * a table needing both `CHECK (status IN (…))` and `CHECK (status <> '')` could
+ * only ever hold one — and the second attempt reported success. A short hash of
+ * the normalised definition makes distinct constraints distinctly named while
+ * keeping the name stable and re-derivable, so re-running the same migration is
+ * genuinely idempotent instead of accidentally so.
+ */
+export function derivedConstraintName(
+  tableName: string,
+  ct: string,
+  columns: string[],
+  definition: string,
+): string {
+  const prefix = ct === 'unique' ? 'uq' : 'chk'
+  const crypto = require('crypto') as typeof import('crypto')
+  const hash = crypto.createHash('sha1').update(normalizeConstraintDef(definition)).digest('hex').slice(0, 8)
+  const base = `${prefix}_${tableName}_${columns.join('_')}`
+  return `${base.slice(0, 53)}_${hash}`
+}
+
+/**
+ * Compare two constraint definitions for semantic equality.
+ *
+ * `pg_get_constraintdef` normalises what it is given — it re-quotes identifiers,
+ * adds casts (`status = ANY (ARRAY['a'::text, 'b'::text])` for an `IN` list) and
+ * respaces operators — so a byte comparison against the SQL we submitted would
+ * report "different" for a constraint that is identical, and then refuse to
+ * re-apply a migration that was already correctly applied.
+ *
+ * This deliberately errs toward reporting DIFFERENT: a false "same" claims
+ * idempotency that is not there, which is the failure mode being fixed. A false
+ * "different" produces a clear CONSTRAINT_CONFLICT the caller can act on.
+ */
+export function sameConstraint(a: string, b: string): boolean {
+  return normalizeConstraintDef(a) === normalizeConstraintDef(b)
+}
+
+export function normalizeConstraintDef(def: string): string {
+  return String(def ?? '')
+    .toLowerCase()
+    // Drop casts. `((status)::text = any ((array[…])::text[]))` becomes readable
+    // only once these are gone, and they carry no semantic weight for comparison.
+    .replace(/::\s*[a-z_][a-z0-9_ ]*(\[\s*\])?/g, '')
+    // `= ANY (ARRAY[…])` is how pg_get_constraintdef renders an IN list. Reduced
+    // in two independent steps rather than one regex, because the real output
+    // nests extra parens between ANY and ARRAY that a single pattern misses.
+    .replace(/\barray\b/g, '')
+    .replace(/=\s*any\b/g, 'in')
+    // Collapse every grouping character. Parenthesisation differs freely between
+    // what an author writes and what Postgres stores, and means nothing here.
+    .replace(/[()\[\]"\s]+/g, ' ')
+    // Operator and comma spacing, so `price>0` and `price > 0` agree.
+    .replace(/\s*(<>|!=|>=|<=|=|>|<|\+|-|\*|\/|%)\s*/g, ' $1 ')
+    .replace(/\s*,\s*/g, ',')
+    .replace(/\s+/g, ' ')
+    .trim()
 }
 
 // ============================================================================
@@ -7988,52 +8596,91 @@ async function executeSetPermission(params: any, projectId: string): Promise<Exe
   const userIdColumn = params.userIdColumn
 
   if (!tableName || !template) {
-    return { success: false, message: 'table/tableName and policy/template are required' }
-  }
-
-  // `auto` reads the schema and picks the template; `related_rows` protects a
-  // table owned through a FK to a user-owned parent (order_items → orders).
-  const validTemplates = ['auto', 'own_rows', 'related_rows', 'public_read', 'admin_only', 'all_access', 'org_members', 'admin_read_all', 'role_based', 'moderator_access']
-  if (!validTemplates.includes(template)) {
     return {
       success: false,
-      message: `Invalid template "${template}". Use one of: ${validTemplates.join(', ')}`,
+      message: 'table/tableName and policy/template are required',
+      code: 'VALIDATION',
+    }
+  }
+
+  // `auto` reads the schema and picks; `party_rows` covers a table owned by TWO
+  // OR MORE users (connections, conversations, messages); `related_rows`
+  // protects a table owned through a FK to a user-owned parent; `custom` takes
+  // the caller's own predicate.
+  const validTemplates = [
+    'auto', 'own_rows', 'party_rows', 'related_rows', 'public_read', 'admin_only',
+    'all_access', 'org_members', 'admin_read_all', 'role_based', 'moderator_access', 'custom',
+  ]
+  if (!validTemplates.includes(template)) {
+    // A REFUSAL, not a fallback to `auto`. Silently resolving an unrecognised
+    // template to "read the schema and pick" is what let three requests to
+    // replace a policy report success while changing nothing (defect #3).
+    return {
+      success: false,
+      message:
+        `Unknown RLS template "${template}" — no policy was applied to "${tableName}".\n` +
+        `Valid templates: ${validTemplates.join(', ')}.\n` +
+        `If none of them expresses your rule, use { template: "custom", using: "<predicate>" } — ` +
+        `a boolean expression over this table's columns where backenly_jwt_claim('sub') is the calling ` +
+        `end-user's id.`,
+      code: 'UNKNOWN_TEMPLATE',
+    }
+  }
+
+  if (template === 'custom' && !params.using) {
+    return {
+      success: false,
+      message:
+        `template "custom" requires \`using\`: the predicate a row must satisfy to be accessible. ` +
+        `Example: { template: "custom", using: "author_id::text = backenly_jwt_claim('sub') OR published" }.`,
+      code: 'VALIDATION',
     }
   }
 
   try {
     const { applyPermissionPolicy } = await import('@/lib/services/workspace-rls')
 
-    const result = await applyPermissionPolicy(projectId, { tableName, template, userIdColumn, roleColumn: params.roleColumn })
+    const result = await applyPermissionPolicy(projectId, {
+      tableName,
+      template,
+      userIdColumn,
+      roleColumn: params.roleColumn,
+      ...(Array.isArray(params.partyColumns) ? { partyColumns: params.partyColumns } : {}),
+      ...(params.using ? { using: params.using } : {}),
+      ...(params.withCheck ? { withCheck: params.withCheck } : {}),
+    })
 
     if (!result.success) {
-      return { success: false, message: `Failed to apply policy: ${result.message}`, error: result.message }
+      return {
+        success: false,
+        message: `No policy was applied to "${tableName}". ${result.message}`,
+        error: result.message,
+        code: 'RLS_NOT_APPLIED',
+      }
     }
 
-    const templateNames: Record<string, string> = {
-      own_rows: 'Users can only see/edit their own rows',
-      related_rows: 'Users can only see/edit rows whose parent row belongs to them',
-      public_read: 'Anyone can read; only the owner can write',
-      admin_only: 'Only service-role API keys can access',
-      all_access: 'All authenticated users can access all rows',
-      org_members: 'Users can only access rows within their organization',
-      admin_read_all: 'Admins see all rows; regular users see only their own',
-      role_based: 'Role-based: admins/superadmins see all rows; users see only their own',
-      moderator_access: 'Moderators & admins see all rows; regular users see only their own',
-    }
-
-    // With `auto` the caller does not know which template ran, so report the
-    // resolved rule rather than echoing the request back. `result.message` is
-    // the concrete description built from the installed policy.
-    const rule = templateNames[template] ?? result.message
-
+    // ── Report what was INSTALLED, not what was requested ────────────────────
+    //
+    // This used to look the requested template up in a table of generic
+    // descriptions and print that. So a request for `own_rows` printed "Users can
+    // only see/edit their own rows" whether or not that was the policy the engine
+    // actually installed — which is how a two-party table's `party_rows` upgrade,
+    // and the reason for it, would have been invisible in the response.
+    //
+    // `result.message` is built from the policy that landed. It is the only
+    // honest thing to print.
     return {
       success: true,
-      message: `✅ **Permission policy applied to \`${tableName}\`.**\n\n**Rule:** ${rule}\n\nThis is enforced at the PostgreSQL level — no app-layer code needed.`,
-      data: { tableName, template, description: result.message },
+      message:
+        `✅ **Permission policy applied to \`${tableName}\`.**\n\n` +
+        `**Rule:** ${result.message}\n\n` +
+        `This is enforced at the PostgreSQL level — no app-layer code needed. ` +
+        `Confirm with get_table_schema { tableName: "${tableName}" }, which lists the live policies ` +
+        `including the roles they apply to.`,
+      data: { tableName, requestedTemplate: template, description: result.message },
     }
   } catch (error: any) {
-    return { success: false, message: `Failed to set permission: ${error.message}`, error: error.message }
+    return { success: false, message: `Failed to set permission: ${error.message}`, error: error.message, code: 'RLS_FAILED' }
   }
 }
 
@@ -8074,15 +8721,22 @@ async function executeRemovePermission(params: any, projectId: string): Promise<
 
   try {
     const { removePermissionPolicy } = await import('@/lib/services/workspace-rls')
-    await removePermissionPolicy(projectId, tableName)
+    // The end state is READ BACK from the catalog, not asserted. This used to
+    // report "All authenticated users can now access all rows" unconditionally —
+    // which is the exact INVERSE of the truth when RLS is left enabled with zero
+    // policies, because PostgreSQL then denies everything (defect #6).
+    const state = await removePermissionPolicy(projectId, tableName)
 
     return {
-      success: true,
-      message: `✅ Permission policies removed from \`${tableName}\`. All authenticated users can now access all rows.`,
-      data: { tableName, removed: true },
+      // RLS still on with no usable end-user policy is not a successful removal.
+      // Reporting it as one is what let a half-finished run look complete.
+      success: !(state.rlsEnabled && state.policyCount === 0),
+      message: `Permission policies removed from \`${tableName}\`.\n\n**Actual state:** ${state.message}`,
+      data: { tableName, removed: true, rlsEnabled: state.rlsEnabled, policyCount: state.policyCount },
+      ...(state.rlsEnabled && state.policyCount === 0 ? { code: 'RLS_LOCKED_OUT' } : {}),
     }
   } catch (error: any) {
-    return { success: false, message: `Failed to remove permission: ${error.message}`, error: error.message }
+    return { success: false, message: `Failed to remove permission: ${error.message}`, error: error.message, code: 'RLS_REMOVE_FAILED' }
   }
 }
 
