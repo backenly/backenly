@@ -1,11 +1,11 @@
-import { AuthModule } from './auth'
-import { QueryBuilder, TableClient } from './database'
-import { StorageModule } from './storage'
-import { RealtimeModule } from './realtime'
-import type { BroadcastCallback, Unsubscribe } from './realtime'
-import { PresenceModule } from './presence'
-import type { BackenlyConfig } from './types'
-import { BackenlyError, normalizeError } from './errors'
+import { AuthModule } from './auth.js'
+import { QueryBuilder, TableClient } from './database.js'
+import { StorageModule } from './storage.js'
+import { RealtimeModule } from './realtime.js'
+import type { BroadcastCallback, Unsubscribe } from './realtime.js'
+import { PresenceModule } from './presence.js'
+import type { BackenlyConfig } from './types.js'
+import { BackenlyError, normalizeError } from './errors.js'
 
 /**
  * BackenlyClient
@@ -278,6 +278,36 @@ export class BackenlyClient {
   }
 
   // ── Internal HTTP ─────────────────────────────────────────────────────────
+
+  /**
+   * The same authenticated fetch as `request`, returning the raw `Response`.
+   *
+   * `request` parses JSON and throws on a non-2xx, which discards two things a
+   * PostgREST caller needs: the `Content-Range` header (the exact row count) and
+   * the structured error body (`{ message, code, details, hint }` — the shape
+   * supabase-js callers branch on). The compat shim needs both, so it needs the
+   * response object, not a parsed body.
+   */
+  async rawRequest(
+    endpoint: string,
+    options?: RequestInit & { skipAuth?: boolean },
+  ): Promise<Response> {
+    if (!this.apiKey && !options?.skipAuth) {
+      await this.ensureApiKey()
+    }
+
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (this.apiKey && !options?.skipAuth) headers['Authorization'] = `Bearer ${this.apiKey}`
+    if (this.userToken && !options?.skipAuth) headers['X-User-Token'] = this.userToken
+    if (options?.headers) {
+      Object.entries(options.headers as Record<string, string>).forEach(
+        ([key, value]) => { headers[key] = value },
+      )
+    }
+
+    const { skipAuth: _skipAuth, ...fetchOptions } = options ?? {}
+    return fetch(`${this.apiUrl}${endpoint}`, { ...fetchOptions, headers })
+  }
 
   async request(endpoint: string, options?: RequestInit & { skipAuth?: boolean }): Promise<any> {
     // Auto-bootstrap: never let an authenticated request leave without an

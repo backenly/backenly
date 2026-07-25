@@ -21,8 +21,8 @@
  *   }
  */
 
-import { BackenlyClient } from './client'
-import type { TableClient } from './database'
+import { BackenlyClient } from './client.js'
+import type { TableClient } from './database.js'
 
 // ── Type helpers ──────────────────────────────────────────────────────────────
 

@@ -193,7 +193,22 @@ const MCP_SURFACE = new Set<string>([
   // Capabilities with no SQL expression and no competing tool.
   'enable_auth',
   'create_bucket',
-  'generate_api',
+  // ── Deliberately absent: generate_api ─────────────────────────────────────
+  //
+  // It contradicts what read_backend_state now says. Since the PostgREST
+  // cutover the REST surface is derived from the catalog — `/db/<table>` is live
+  // the moment a table exists — and the state report says so in those words
+  // ("automatic — every table is served from the catalog", the defect #13 fix).
+  //
+  // Advertising a generation step beside that message asks an agent to believe
+  // both. It writes an ApiDefinition metadata row and nothing that serves
+  // traffic, so an agent that calls it has spent a turn to change nothing
+  // observable, and one that DOESN'T call it may conclude its tables are
+  // unreachable. Still dispatchable for pinned clients, per the note on
+  // buildDispatchable — this removes a selection cost, not a capability.
+  //
+  // The slot it frees goes to generate_types, which the surface genuinely
+  // lacked. Net advertised count is unchanged.
   'generate_function',
   'enable_realtime',
   'create_api_key',
@@ -224,6 +239,17 @@ const MCP_SURFACE = new Set<string>([
   // Agent self-service.
   'fetch_docs',
   'check_approval',
+  // ── generate_types ─────────────────────────────────────────────────────────
+  //
+  // The generator has existed for a long time (lib/typegen) and was reachable
+  // from the CLI and the dashboard — never from MCP. So an agent building a typed
+  // frontend against a Backenly project hand-wrote its row types, and those types
+  // then drifted silently on the next schema change with nothing to detect it.
+  //
+  // That is the single cheapest high-value tool on this surface: one call, no
+  // mutation, and it removes an entire class of stale-type bug from the workflow
+  // this product is for. Competing platforms expose exactly this.
+  'generate_types',
 ])
 
 /**
@@ -288,6 +314,39 @@ export function buildDispatchable(): McpToolDescriptor[] {
         topic: {
           type: 'string',
           description: 'Optional section to narrow the docs, e.g. "auth", "database", "storage", "realtime", "functions", "integrations", "mcp".',
+        },
+      },
+      additionalProperties: false,
+    },
+  })
+
+  // generate_types — TypeScript row types straight from the live catalog.
+  //
+  // Read-only, one call, no brain. It closes the loop between "the agent changed
+  // the schema" and "the frontend's types still describe the old one": before
+  // this, an agent building a typed client had to hand-write row types, and
+  // nothing detected that they had gone stale on the next migration.
+  out.push({
+    name: 'generate_types',
+    tier: 'read',
+    description:
+      'Generate TypeScript types for every table in this project, read from the live PostgreSQL catalog. ' +
+      'Returns ready-to-save source — write it to a file (conventionally `src/backenly.types.ts`) and import ' +
+      '`Database`, `Row<T>`, `Insert<T>`, `Update<T>` and `TableName` from it. ' +
+      'format="dts" (default) is the type declarations; format="client" additionally emits a typed client ' +
+      'bound to this project; format="openapi" emits an OpenAPI 3.1 spec of the REST surface. ' +
+      'ALWAYS call this instead of hand-writing row types — hand-written types drift silently the next time ' +
+      'the schema changes, and the response carries `schemaHash` so you can tell whether a regeneration ' +
+      'actually changed anything. Side-effect free.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        format: {
+          type: 'string',
+          enum: ['dts', 'client', 'openapi'],
+          description:
+            'dts = type declarations only (default). client = declarations plus a typed client for this ' +
+            'project. openapi = OpenAPI 3.1 description of the REST endpoints.',
         },
       },
       additionalProperties: false,

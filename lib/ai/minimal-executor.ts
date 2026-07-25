@@ -51,6 +51,7 @@ export interface AIAction {
     | 'CREATE_JUNCTION_TABLE'
     // Triggers (event automation)
     | 'CREATE_TRIGGER' | 'LIST_TRIGGERS' | 'DELETE_TRIGGER'
+    | 'SYNC_COLUMN' | 'LIST_SYNCED_COLUMNS' | 'REMOVE_SYNC_COLUMN'
     // Permissions (row-level security)
     | 'SET_PERMISSION' | 'LIST_PERMISSIONS' | 'REMOVE_PERMISSION'
     // AI Functions (serverless logic described in natural language)
@@ -2248,6 +2249,30 @@ export async function validateAction(
       preview = 'List all event triggers'
       break
 
+    // ── Derived columns ("keep column X in sync with related rows") ──────────
+    case 'SYNC_COLUMN':
+      if (!action.params.sourceTable) errors.push('sourceTable is required (the child table whose writes drive the value)')
+      if (!action.params.targetTable) errors.push('targetTable is required (the parent table holding the derived column)')
+      if (!action.params.targetColumn) errors.push('targetColumn is required (the derived column on the parent)')
+      if (!action.params.via) errors.push('via is required (the foreign-key column on the child pointing at the parent)')
+      if (!action.params.compute) errors.push('compute is required (latest | count | sum | max | min)')
+      preview =
+        `Keep ${action.params.targetTable}.${action.params.targetColumn} in sync with ` +
+        `${action.params.compute}(${action.params.sourceTable}` +
+        `${action.params.sourceColumn ? `.${action.params.sourceColumn}` : ''})`
+      break
+
+    case 'LIST_SYNCED_COLUMNS':
+      preview = 'List derived columns kept in sync by the database'
+      break
+
+    case 'REMOVE_SYNC_COLUMN':
+      if (!action.params.targetTable) errors.push('targetTable is required')
+      if (!action.params.targetColumn) errors.push('targetColumn is required')
+      if (!action.params.sourceTable) errors.push('sourceTable is required (the table the trigger lives on)')
+      preview = `Stop maintaining ${action.params.targetTable}.${action.params.targetColumn}`
+      break
+
     case 'DELETE_TRIGGER':
       if (!action.params.triggerId && !action.params.name) errors.push('triggerId or name is required')
       preview = `Delete trigger "${action.params.name || action.params.triggerId}"`
@@ -2959,7 +2984,7 @@ async function verifyExecution(
 const DECISION_MEMORY_ACTIONS = new Set<AIAction['action']>([
   'CREATE_TABLE', 'CREATE_JUNCTION_TABLE', 'ADD_COLUMN', 'GENERATE_API',
   'SET_PERMISSION', 'REMOVE_PERMISSION', 'STORE_INTEGRATION_KEY', 'ENABLE_AUTH',
-  'CREATE_TRIGGER', 'FIX_AUTH', 'FIX_API', 'FIX_TABLE', 'FIX_DEPLOY',
+  'CREATE_TRIGGER', 'SYNC_COLUMN', 'FIX_AUTH', 'FIX_API', 'FIX_TABLE', 'FIX_DEPLOY',
   'FIX_REALTIME', 'FIX_STORAGE', 'FIX_INTEGRATION',
 ])
 
@@ -3352,6 +3377,16 @@ async function executeSingleAction(
 
       case 'DELETE_TRIGGER':
         return await executeDeleteTrigger(action.params, projectId)
+
+      // ========== DERIVED COLUMNS ==========
+      case 'SYNC_COLUMN':
+        return await executeSyncColumn(action.params, projectId)
+
+      case 'LIST_SYNCED_COLUMNS':
+        return await executeListSyncedColumns(projectId)
+
+      case 'REMOVE_SYNC_COLUMN':
+        return await executeRemoveSyncColumn(action.params, projectId)
 
       // ========== PERMISSION ACTIONS ==========
       case 'SET_PERMISSION':
@@ -7647,7 +7682,35 @@ async function executeCreateIndex(params: any, projectId: string): Promise<Execu
     const idxName = params.indexName || defaultIndexName(tableName, columns, unique)
     const colList = columns.map((c) => `"${c}"`).join(', ')
     const usingClause = method ? ` USING ${method}` : ''
-    const whereClause = wherePredicate ? ` WHERE (${wherePredicate})` : ''
+
+    // ── A UNIQUE index must not count soft-deleted rows ──────────────────────
+    //
+    // Every Backenly table is provisioned with `deleted_at`, and a client DELETE
+    // sets it rather than removing the row (bkn_pgrst_soft_delete). A plain
+    // UNIQUE index therefore keeps enforcing uniqueness against rows the
+    // application can no longer see:
+    //
+    //   user deletes their profile  → row survives with deleted_at set
+    //   user creates a new profile  → 23505 unique violation against an
+    //                                 INVISIBLE row
+    //
+    // The user cannot see the conflicting row, the API cannot return it, and
+    // nothing in the error names it. It only shows up in production, on the
+    // second lifecycle of a record, which is the worst possible time to find it.
+    //
+    // So a UNIQUE index over a soft-delete table becomes PARTIAL — the standard
+    // Postgres answer, and the one every soft-delete schema converges on. A
+    // caller who supplies their own `where` has said what they want and is left
+    // alone; a NON-unique index is unaffected because duplicates were never the
+    // question.
+    let softDeleteScoped = false
+    let effectiveWhere = wherePredicate
+    if (unique && !wherePredicate && (await hasSoftDeleteColumn(prisma, postgresSchema, tableName))) {
+      effectiveWhere = '"deleted_at" IS NULL'
+      softDeleteScoped = true
+    }
+
+    const whereClause = effectiveWhere ? ` WHERE (${effectiveWhere})` : ''
     const ddl =
       `CREATE${unique ? ' UNIQUE' : ''} INDEX IF NOT EXISTS "${idxName}" ` +
       `ON "${postgresSchema}"."${tableName}"${usingClause} (${colList})${whereClause}`
@@ -7713,11 +7776,32 @@ async function executeCreateIndex(params: any, projectId: string): Promise<Execu
 
     const shape =
       `${unique ? 'unique ' : ''}index on ${tableName} (${columns.join(', ')})` +
-      `${method ? ` using ${method}` : ''}${wherePredicate ? ` where ${wherePredicate}` : ''}`
+      `${method ? ` using ${method}` : ''}${effectiveWhere ? ` where ${effectiveWhere}` : ''}`
     return {
       success: true,
-      message: `✅ Created ${shape} as "${idxName}"`,
-      data: { tableName, columns, unique, method: method || 'btree', where: wherePredicate || null, indexName: idxName, definition: def },
+      // The soft-delete scoping is REPORTED, never silent. It changes the
+      // semantics of the constraint the caller asked for — narrowing it to live
+      // rows — and a caller who wanted uniqueness across deleted rows too needs
+      // to know it did not get that.
+      message:
+        `✅ Created ${shape} as "${idxName}"` +
+        (softDeleteScoped
+          ? `\n\nScoped to \`WHERE deleted_at IS NULL\`, because "${tableName}" uses soft delete: a client ` +
+            `DELETE sets \`deleted_at\` instead of removing the row. An unscoped UNIQUE index would keep ` +
+            `enforcing uniqueness against rows the app can no longer see — so a user who deleted their ` +
+            `record and created a new one would hit a unique violation against an invisible row. ` +
+            `If you DO want uniqueness across deleted rows, pass \`where\` explicitly (e.g. "true").`
+          : ''),
+      data: {
+        tableName,
+        columns,
+        unique,
+        method: method || 'btree',
+        where: effectiveWhere || null,
+        softDeleteScoped,
+        indexName: idxName,
+        definition: def,
+      },
     }
   } catch (error: any) {
     // A duplicate-key failure on CREATE UNIQUE INDEX means the table already
@@ -7747,6 +7831,35 @@ async function executeCreateIndex(params: any, projectId: string): Promise<Execu
       }
     }
     return { success: false, message: `Failed to create index: ${error.message}`, error: error.message, code: 'INDEX_FAILED' }
+  }
+}
+
+/**
+ * Does this table participate in soft delete?
+ *
+ * The presence of `deleted_at` is the whole test: it is what the PostgREST
+ * exposure layer keys the `bkn_pgrst_soft_delete` policy off, and what the
+ * autonomy probes read. Asking the catalog rather than assuming keeps this
+ * correct for adopted external tables that have no such column.
+ */
+async function hasSoftDeleteColumn(
+  prisma: { $queryRawUnsafe: (sql: string, ...args: unknown[]) => Promise<unknown> },
+  schemaName: string,
+  tableName: string,
+): Promise<boolean> {
+  try {
+    const rows = (await prisma.$queryRawUnsafe(
+      `SELECT 1 FROM information_schema.columns
+        WHERE table_schema = $1 AND table_name = $2 AND column_name = 'deleted_at'
+        LIMIT 1`,
+      schemaName,
+      tableName,
+    )) as unknown[]
+    return Array.isArray(rows) && rows.length > 0
+  } catch {
+    // Cannot tell → do not silently narrow the caller's constraint. A plain
+    // UNIQUE is what they asked for; guessing the other way would weaken it.
+    return false
   }
 }
 
@@ -8039,6 +8152,36 @@ async function executeAddConstraint(params: any, projectId: string): Promise<Exe
         }
       }
     } else if (ct === 'unique') {
+      // ── Soft delete makes a UNIQUE *constraint* the wrong instrument ────────
+      //
+      // Every Backenly table carries `deleted_at`, and a client DELETE sets it
+      // rather than removing the row. A UNIQUE CONSTRAINT cannot be partial —
+      // PostgreSQL has no `ADD CONSTRAINT … UNIQUE … WHERE` — so it would keep
+      // enforcing uniqueness against soft-deleted rows the application can no
+      // longer see. The user deletes a record, creates a replacement, and gets a
+      // 23505 naming a row that no query of theirs can return.
+      //
+      // A partial UNIQUE INDEX is the same guarantee, correctly scoped, and is
+      // exactly what Postgres implements a UNIQUE constraint AS. So the request
+      // is routed to executeCreateIndex, which applies the `deleted_at IS NULL`
+      // scoping and reports it. Uniqueness is delivered; only the catalog object
+      // differs, and the response says so.
+      if (await hasSoftDeleteColumn(prisma, postgresSchema, tableName)) {
+        const idxResult = await executeCreateIndex(
+          { tableName, columns, unique: true, ...(constraintName ? { indexName: constraintName } : {}) },
+          projectId,
+        )
+        if (!idxResult.success) return idxResult
+        return {
+          ...idxResult,
+          message:
+            `${idxResult.message}\n\n` +
+            `Applied as a partial UNIQUE INDEX rather than a UNIQUE CONSTRAINT: "${tableName}" uses soft ` +
+            `delete, and PostgreSQL constraints cannot be scoped to live rows. The uniqueness guarantee is ` +
+            `identical for rows your app can see — it simply does not collide with soft-deleted ones. ` +
+            `It appears under indexes, not constraints, in get_table_schema.`,
+        }
+      }
       definition = `UNIQUE (${columns.map((c) => `"${c}"`).join(', ')})`
     } else if (ct === 'check') {
       const checked = validateBooleanExpression(expression, { requireColumn: true })
@@ -8581,6 +8724,107 @@ async function executeDeleteTrigger(params: any, projectId: string): Promise<Exe
 }
 
 // ============================================================================
+// DERIVED COLUMNS — "keep column X in sync with related rows"
+// ============================================================================
+
+/**
+ * SYNC_COLUMN: maintain a derived column from related rows, in the database.
+ *
+ * The gap this fills: keeping `conversations.last_message_at` current had no
+ * primitive between "two client round trips that silently drift" and
+ * "generate_function with an on_insert trigger" — a deployed serverless function,
+ * with an invocation quota, for a one-line derived value. See
+ * lib/services/derived-columns.ts.
+ */
+async function executeSyncColumn(params: any, projectId: string): Promise<ExecutionResult> {
+  const { applyDerivedColumn, DERIVED_COMPUTES } = await import('@/lib/services/derived-columns')
+
+  const sourceTable = String(params.sourceTable ?? params.table ?? '').trim()
+  const targetTable = String(params.targetTable ?? '').trim()
+  const targetColumn = String(params.targetColumn ?? params.column ?? '').trim()
+  const via = String(params.via ?? params.foreignKey ?? '').trim()
+  const compute = String(params.compute ?? '').trim().toLowerCase()
+  const sourceColumn = params.sourceColumn ? String(params.sourceColumn).trim() : undefined
+
+  if (!sourceTable || !targetTable || !targetColumn || !via || !compute) {
+    return {
+      success: false,
+      message:
+        `sourceTable, targetTable, targetColumn, via and compute are all required. Example: ` +
+        `{ sourceTable: "messages", targetTable: "conversations", targetColumn: "last_message_at", ` +
+        `via: "conversation_id", compute: "latest", sourceColumn: "created_at" }.`,
+      code: 'VALIDATION',
+    }
+  }
+  if (!(DERIVED_COMPUTES as string[]).includes(compute)) {
+    return {
+      success: false,
+      message:
+        `Unknown compute "${compute}". Available: ${DERIVED_COMPUTES.join(', ')}. ` +
+        `Backenly generates the aggregate itself — there is no raw-SQL form of this, by design.`,
+      code: 'VALIDATION',
+    }
+  }
+
+  const result = await applyDerivedColumn(projectId, {
+    sourceTable,
+    targetTable,
+    targetColumn,
+    via,
+    compute: compute as any,
+    ...(sourceColumn ? { sourceColumn } : {}),
+  })
+
+  if (!result.success) {
+    return { success: false, message: result.message, error: result.message, code: 'SYNC_NOT_APPLIED' }
+  }
+  return {
+    success: true,
+    message: `✅ ${result.message}`,
+    data: { sourceTable, targetTable, targetColumn, via, compute, sourceColumn: sourceColumn ?? null, backfilled: result.backfilled ?? 0 },
+  }
+}
+
+async function executeListSyncedColumns(projectId: string): Promise<ExecutionResult> {
+  const { listDerivedColumns } = await import('@/lib/services/derived-columns')
+  const rows = await listDerivedColumns(projectId)
+  if (rows.length === 0) {
+    return {
+      success: true,
+      message:
+        'No derived columns are being maintained. Use sync_column to keep a parent column in step with ' +
+        'its child rows (e.g. conversations.last_message_at from messages.created_at).',
+      data: { synced: [] },
+    }
+  }
+  return {
+    success: true,
+    message:
+      `${rows.length} derived column(s) maintained by database triggers:\n` +
+      rows.map((r) => `  • ${r.triggerName} on ${r.sourceTable}`).join('\n'),
+    data: { synced: rows },
+  }
+}
+
+async function executeRemoveSyncColumn(params: any, projectId: string): Promise<ExecutionResult> {
+  const { removeDerivedColumn } = await import('@/lib/services/derived-columns')
+  const targetTable = String(params.targetTable ?? '').trim()
+  const targetColumn = String(params.targetColumn ?? '').trim()
+  const sourceTable = String(params.sourceTable ?? '').trim()
+  if (!targetTable || !targetColumn || !sourceTable) {
+    return {
+      success: false,
+      message: 'targetTable, targetColumn and sourceTable are required.',
+      code: 'VALIDATION',
+    }
+  }
+  const result = await removeDerivedColumn(projectId, targetTable, targetColumn, sourceTable)
+  return result.success
+    ? { success: true, message: `✅ ${result.message}`, data: { targetTable, targetColumn } }
+    : { success: false, message: result.message, error: result.message }
+}
+
+// ============================================================================
 // PERMISSION / RLS ACTIONS
 // ============================================================================
 
@@ -8627,12 +8871,23 @@ async function executeSetPermission(params: any, projectId: string): Promise<Exe
     }
   }
 
-  if (template === 'custom' && !params.using) {
+  const hasCommands =
+    params.commands &&
+    typeof params.commands === 'object' &&
+    !Array.isArray(params.commands) &&
+    Object.keys(params.commands).length > 0
+
+  if (template === 'custom' && !params.using && !params.withCheck && !hasCommands) {
     return {
       success: false,
       message:
-        `template "custom" requires \`using\`: the predicate a row must satisfy to be accessible. ` +
-        `Example: { template: "custom", using: "author_id::text = backenly_jwt_claim('sub') OR published" }.`,
+        `template "custom" needs a predicate. The four commands are independent, so the usual form names ` +
+        `each one:\n` +
+        `  { template: "custom", commands: { select: "published OR author_id::text = backenly_jwt_claim('sub')", ` +
+        `insert: "author_id::text = backenly_jwt_claim('sub')", update: "author_id::text = backenly_jwt_claim('sub')", ` +
+        `delete: "author_id::text = backenly_jwt_claim('sub')" } }\n` +
+        `Naming only SOME commands scopes the edit to those and leaves the rest untouched. ` +
+        `A single \`using\` applies one rule to all four, and \`withCheck\` overrides it for the writes.`,
       code: 'VALIDATION',
     }
   }
@@ -8648,6 +8903,7 @@ async function executeSetPermission(params: any, projectId: string): Promise<Exe
       ...(Array.isArray(params.partyColumns) ? { partyColumns: params.partyColumns } : {}),
       ...(params.using ? { using: params.using } : {}),
       ...(params.withCheck ? { withCheck: params.withCheck } : {}),
+      ...(hasCommands ? { commands: params.commands } : {}),
     })
 
     if (!result.success) {
@@ -8673,11 +8929,18 @@ async function executeSetPermission(params: any, projectId: string): Promise<Exe
       success: true,
       message:
         `✅ **Permission policy applied to \`${tableName}\`.**\n\n` +
-        `**Rule:** ${result.message}\n\n` +
+        `${result.message}\n\n` +
         `This is enforced at the PostgreSQL level — no app-layer code needed. ` +
         `Confirm with get_table_schema { tableName: "${tableName}" }, which lists the live policies ` +
         `including the roles they apply to.`,
-      data: { tableName, requestedTemplate: template, description: result.message },
+      data: {
+        tableName,
+        requestedTemplate: template,
+        description: result.message,
+        // Which commands this call actually targeted, so a caller can tell a
+        // scoped edit from a full replacement without parsing the prose.
+        ...(hasCommands ? { commandsTargeted: Object.keys(params.commands) } : {}),
+      },
     }
   } catch (error: any) {
     return { success: false, message: `Failed to set permission: ${error.message}`, error: error.message, code: 'RLS_FAILED' }

@@ -69,6 +69,9 @@ export type ToolName =
   | 'set_bucket_public'
   | 'add_rls'
   | 'create_trigger'
+  | 'sync_column'
+  | 'list_synced_columns'
+  | 'remove_sync_column'
   | 'enable_realtime'
   | 'generate_function'
   | 'enable_vector_search'
@@ -397,8 +400,28 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     '  • org_members — multi-tenant B2B: users can access rows where organization_id matches an org they belong to. REQUIRES the table to have an organization_id column AND the project to have enable_teams already run.\n' +
     '  • admin_only — only service-role API keys (server-side jobs) can access\n' +
     '  • all_access — every authenticated user can read/write everything (rare; use with care)\n' +
-    '  • custom — THE ESCAPE HATCH. Your own predicate when no template fits. REQUIRES `using`: a boolean expression over this table\'s columns where backenly_jwt_claim(\'sub\') is the calling end-user\'s id, e.g. "owner_id::text = backenly_jwt_claim(\'sub\') OR is_public". Subqueries are refused — if the rule has to read another table, use owned_via_parent, which builds that lookup for you.\n' +
-    'This tool NEVER substitutes a different policy for the one you asked for: an unrecognised template is refused with the list of real ones, and applying `participants` where you asked for `owner_read_write` is reported in the result.',
+    '  • custom — THE ESCAPE HATCH. Your own predicate when no template fits. Write it over this table\'s columns with backenly_jwt_claim(\'sub\') as the calling end-user\'s id. Subqueries are refused — if the rule has to read another table, use owned_via_parent, which builds that lookup for you.\n' +
+    '\n' +
+    'CUSTOM: SELECT / INSERT / UPDATE / DELETE ARE INDEPENDENT RULES.\n' +
+    '  • `commands` gives each command its own rule and is the form to reach for: ' +
+    '{ policy: "custom", commands: { select: "is_public OR owner_id::text = backenly_jwt_claim(\'sub\')", ' +
+    'insert: "owner_id::text = backenly_jwt_claim(\'sub\')", update: "owner_id::text = backenly_jwt_claim(\'sub\')", ' +
+    'delete: "owner_id::text = backenly_jwt_claim(\'sub\')" } }. Per command you may pass a string, or ' +
+    '{ using, check } — `using` is which rows the command may TARGET, `check` is which rows it may WRITE.\n' +
+    '  • NAMING ONLY SOME COMMANDS SCOPES THE EDIT: { commands: { update: "…", delete: "…" } } replaces the ' +
+    'UPDATE and DELETE policies and LEAVES SELECT AND INSERT EXACTLY AS THEY ARE. This is how you change one ' +
+    'command without disturbing the rest — no need to restate rules you are happy with.\n' +
+    '  • `using` alone means "one rule for all four commands", and is refused when that rule can be satisfied ' +
+    'without the caller proving who they are (e.g. "is_public OR owner = me"): copying such a rule onto DELETE ' +
+    'would let any signed-in caller delete rows they do not own. Pass `withCheck` for the write rule, or use ' +
+    '`commands`. An owner-only rule ("owner_id::text = backenly_jwt_claim(\'sub\')") broadcasts freely.\n' +
+    '  • `withCheck` governs INSERT/UPDATE/DELETE — including which rows UPDATE and DELETE may TARGET, not just ' +
+    'what they may write. USING alone would let a caller aim at somebody else\'s row and rewrite the owner column ' +
+    'to themselves.\n' +
+    'The result reports the LIVE per-command policy set read back from PostgreSQL, including which commands were ' +
+    'left unchanged and any command that ended up open. This tool NEVER substitutes a different policy for the one ' +
+    'you asked for: an unrecognised template is refused with the list of real ones, and applying `participants` ' +
+    'where you asked for `owner_read_write` is reported in the result.',
     {
       tableName: { type: 'string' },
       policy: {
@@ -416,11 +439,29 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
       },
       using: {
         type: 'string',
-        description: 'For `custom`: the predicate a row must satisfy to be readable. Use backenly_jwt_claim(\'sub\') for the caller\'s user id.',
+        description:
+          'For `custom`: ONE predicate for all four commands. Use backenly_jwt_claim(\'sub\') for the caller\'s ' +
+          'user id. Refused when the predicate does not reference the caller (use `commands` or `withCheck` ' +
+          'to say what the write rule is).',
       },
       withCheck: {
         type: 'string',
-        description: 'For `custom`: an optional separate predicate for INSERT/UPDATE. Defaults to `using`.',
+        description:
+          'For `custom`: the write rule. Governs INSERT, and which rows UPDATE and DELETE may target as well ' +
+          'as write. Defaults to `using`.',
+      },
+      commands: {
+        type: 'object',
+        description:
+          'For `custom`: a rule PER COMMAND. Naming only some commands scopes the edit to those — the ' +
+          'policies for the others are left exactly as they are. Each value is a predicate string, or ' +
+          '{ using, check }.',
+        properties: {
+          select: { type: 'string', description: 'Which rows may be read.' },
+          insert: { type: 'string', description: 'Which rows may be created.' },
+          update: { type: 'string', description: 'Which rows may be modified (targeted and written).' },
+          delete: { type: 'string', description: 'Which rows may be deleted.' },
+        },
       },
     },
     ['tableName']),
@@ -432,6 +473,44 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
       kind: { type: 'string', enum: ['webhook', 'notify'] },
     },
     ['tableName', 'on', 'kind']),
+  fn('sync_column',
+    'Keep a column on a PARENT table in step with its CHILD rows, maintained by the database itself. ' +
+    'Use this for every denormalised value that must not drift: conversations.last_message_at, ' +
+    'posts.comment_count, orders.total, users.last_seen_at.\n' +
+    'This is the LIGHTWEIGHT option and should be your default for a derived value. Reach for ' +
+    'generate_function { trigger: "on_insert" } only when the reaction needs real code (calling Stripe, ' +
+    'sending an email) — a whole serverless function for a one-line aggregate costs an invocation on every ' +
+    'write and can fail independently of the write it follows.\n' +
+    'Never tell the user to maintain such a column from their client: that is two round trips, and the ' +
+    'value drifts permanently the first time the second one fails.\n' +
+    'compute:\n' +
+    '  • latest — the newest value of sourceColumn among the child rows (last_message_at from messages.created_at)\n' +
+    '  • count  — how many child rows exist (comment_count). Takes NO sourceColumn.\n' +
+    '  • sum / max / min — aggregate sourceColumn across the child rows (order total from line_items.price)\n' +
+    'The value is recomputed (not incremented) on every insert, update and delete, so it stays correct even ' +
+    'when a child row moves between parents. Existing rows are back-filled and the count is reported. ' +
+    'The target column must already exist and, except for `count`, must be nullable.',
+    {
+      sourceTable:  { type: 'string', description: 'The CHILD table whose writes drive the value, e.g. "messages".' },
+      targetTable:  { type: 'string', description: 'The PARENT table holding the derived column, e.g. "conversations".' },
+      targetColumn: { type: 'string', description: 'The derived column on the parent, e.g. "last_message_at".' },
+      via:          { type: 'string', description: 'Foreign-key column on the child pointing at the parent id, e.g. "conversation_id".' },
+      compute:      { type: 'string', enum: ['latest', 'count', 'sum', 'max', 'min'] },
+      sourceColumn: { type: 'string', description: 'Child column to aggregate. Required for latest/sum/max/min; omit for count.' },
+    },
+    ['sourceTable', 'targetTable', 'targetColumn', 'via', 'compute']),
+  fn('list_synced_columns',
+    'List every derived column the database is currently keeping in sync (see sync_column).',
+    {},
+    []),
+  fn('remove_sync_column',
+    'Stop maintaining a derived column. The column and its current values stay; they simply stop updating.',
+    {
+      sourceTable:  { type: 'string' },
+      targetTable:  { type: 'string' },
+      targetColumn: { type: 'string' },
+    },
+    ['sourceTable', 'targetTable', 'targetColumn']),
   fn('enable_realtime',
     'Enable realtime change events for a table.',
     { tableName: { type: 'string' } },
@@ -574,7 +653,7 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     "The backend briefing: everything Backenly's autonomous operator detected, fixed, or queued while nobody was watching. Returns open findings with evidence, changes awaiting human approval in the Review Queue, fixes auto-applied in the last 24h, pending external schema drift, and the latest restore point. Call this FIRST when starting a session on an existing backend, or when the user asks \"what happened?\" / \"any issues?\". Side-effect free.",
     {}),
   fn('get_database_credentials',
-    "Get a real PostgreSQL connection string (host, port, database, role, password) for this project's schema — for psql, ORMs, BI tools, or running your own migrations. mode=READ_ONLY (default) provisions instantly and is SELECT-only. mode=READ_WRITE is returned only after the project owner enables write access in the dashboard (Connect → Direct); DDL you run over it is observed by the drift watch and adopted into the governed contract — call adopt_external_schema afterwards. Treat the returned connection string as a secret: use it, do not print it into files or logs.",
+    "Get a real PostgreSQL connection string (host, port, database, role, password) for this project's schema — for psql, ORMs, BI tools, or running your own migrations. mode=READ_ONLY (default) provisions instantly and is SELECT-only. mode=READ_WRITE is returned only after the project owner enables write access in the dashboard (Connect → Direct); DDL you run over it is observed by the drift watch and adopted into the governed contract — call adopt_external_schema afterwards. EVERY response carries `data.readWriteArmed` and `data.armReadWriteUrl`, so you can check whether write access exists WITHOUT requesting it, and hand the human a direct link when it does not. Treat the returned connection string as a secret: use it, do not print it into files or logs.",
     {
       mode: { type: 'string', enum: ['READ_ONLY', 'READ_WRITE'], description: 'Access level. Default READ_ONLY.' },
     }),
@@ -1072,7 +1151,30 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
       ...(Array.isArray(a.partyColumns) ? { partyColumns: a.partyColumns } : {}),
       ...(a.using ? { using: a.using } : {}),
       ...(a.withCheck ? { withCheck: a.withCheck } : {}),
+      // Per-command rules. Forwarded as-is: the executor validates every
+      // predicate and the resolver decides what a partial set means (a SCOPED
+      // edit). Dropping this here is precisely the class of bug that made a
+      // four-command request collapse to one predicate.
+      ...(a.commands && typeof a.commands === 'object' && !Array.isArray(a.commands)
+        ? { commands: a.commands }
+        : {}),
     },
+  }),
+  sync_column: (a) => ({
+    action: 'SYNC_COLUMN',
+    params: {
+      sourceTable: a.sourceTable,
+      targetTable: a.targetTable,
+      targetColumn: a.targetColumn,
+      via: a.via,
+      compute: a.compute,
+      ...(a.sourceColumn ? { sourceColumn: a.sourceColumn } : {}),
+    },
+  }),
+  list_synced_columns: () => ({ action: 'LIST_SYNCED_COLUMNS', params: {} }),
+  remove_sync_column: (a) => ({
+    action: 'REMOVE_SYNC_COLUMN',
+    params: { sourceTable: a.sourceTable, targetTable: a.targetTable, targetColumn: a.targetColumn },
   }),
   create_trigger: (a) => {
     // The brain emits a high-level (tableName, on, kind) tuple — translate it
@@ -1451,9 +1553,9 @@ export async function dispatchTool(
         '## 2. Build',
         '- `apply_migration { sql }` for schema. Ordinary PostgreSQL DDL: CREATE TABLE, ALTER TABLE ADD COLUMN / RENAME COLUMN / ADD CONSTRAINT, CREATE INDEX. Multiple statements, semicolon-separated. Your DDL is applied AS WRITTEN — declared NOT NULL, DEFAULT and nullability are honoured exactly, and `id`/`created_at`/`updated_at` are provisioned for you (declaring them is skipped and reported).',
         '- `backend_chat { message }` for anything not expressible as DDL — auth rules, RLS policies, triggers, cron jobs, teams, webhooks, integrations — or for anything you would rather describe than specify ("add likes and comments to posts"). The brain plans, executes and verifies.',
-        '- Named capability tools: `enable_auth`, `create_bucket`, `generate_api`, `generate_function`, `enable_realtime`, `create_api_key`, `set_env_var`.',
+        '- Named capability tools: `enable_auth`, `create_bucket`, `generate_function`, `enable_realtime`, `create_api_key`, `set_env_var`, `generate_types`.',
         '- **Unsure about a migration? Stage it.** `branch { action: "create", name: "add-payments" }` clones this project\'s schema AND data into an isolated PostgreSQL schema. Build against it, `branch { action: "diff", branchId }` to see exactly what would land, then `branch { action: "merge", branchId }`. `branch { action: "list" }` for ids. Up to 5 active. A merge applies new tables through the governed kernel and returns added columns / type changes / drops as review items rather than reshaping a live column silently. Discarding a branch is destructive — ask via `backend_chat`.',
-        '- A table is served over REST as soon as it exists — exposure is derived from the live catalog, so there is no separate "generate the API" step for plain CRUD. `generate_api` adds domain endpoints beyond CRUD.',
+        '- A table is served over REST as soon as it exists — exposure is derived from the live catalog, so there is no separate "generate the API" step, and no tool for one. If you are looking for something to call after creating a table: there is nothing to call.',
         '',
         '## 3. Data',
         '- `run_query { sql }` — read-only SQL over this project\'s schema: joins, GROUP BY, aggregates, window functions, CTEs, EXPLAIN. Tables are already in scope (`SELECT * FROM posts`, not `workspace_x.posts`). One statement per call; results capped (default 200, max 1000) with `truncated` telling you if more exist; password/token/key columns come back as `[redacted]`. It cannot write and cannot read another project\'s data. System catalogs (`pg_*`, `information_schema`) are refused — they are instance-wide, not per-project; use `get_table_schema` instead.',
@@ -2241,6 +2343,11 @@ export async function dispatchTool(
     // the human already armed it in Connect → Direct: the dashboard click is
     // the consent artifact, so a scoped agent key can never self-grant DDL.
     if (name === 'get_database_credentials') {
+      /** Attach the project's direct-access posture to any result shape. */
+      const withAccess = <T extends { data?: unknown }>(r: T, access: Record<string, unknown>): T => ({
+        ...r,
+        data: { ...(r.data as Record<string, unknown> | undefined), ...access },
+      })
       const mode = args.mode === 'READ_WRITE' ? 'READ_WRITE' as const : 'READ_ONLY' as const
       const da = await import('@/lib/services/direct-access')
       const status = await da.getDirectAccessStatus(ctx.projectId)
@@ -2268,17 +2375,40 @@ export async function dispatchTool(
         },
       })
 
-      if (existing) return finalize(describe(existing, false))
+      // ── The arm status is ALWAYS reported, on every branch ─────────────────
+      //
+      // There was no way to ask "is read-write armed?" without REQUESTING it and
+      // reading the refusal, and no link to hand the human. Two sessions dead-
+      // ended here. Both facts are cheap — `status` is already loaded — so both
+      // ride along on every response, and the refusal carries the deep link.
+      const appUrl = (process.env.NEXT_PUBLIC_APP_URL || 'https://backenly.com').replace(/\/$/, '')
+      const armUrl = `${appUrl}/app/projects/${ctx.projectId}/connect?tab=direct`
+      const access = {
+        readOnlyProvisioned: status.credentials.some((c) => c.mode === 'READ_ONLY'),
+        readWriteArmed: status.credentials.some((c) => c.mode === 'READ_WRITE'),
+        armReadWriteUrl: armUrl,
+      }
+
+      if (existing) return finalize(withAccess(describe(existing, false), access))
       if (mode === 'READ_ONLY') {
         const cred = await da.provisionDirectAccess(ctx.projectId, 'READ_ONLY')
-        return finalize(describe({ ...cred }, true))
+        return finalize(withAccess(describe({ ...cred }, true), access))
       }
       return finalize({
         ok: false,
         needsUser: true,
         code: 'WRITE_ACCESS_NOT_ARMED',
         summary:
-          'Read-write database access is not enabled for this project. Only the project owner can arm it — ask them to open the dashboard → Connect → Direct and create read-write credentials (one click; every schema change over that connection is observed and adopted by the autonomy loop). Read-only access is available right now via mode=READ_ONLY.',
+          'Read-write database access is not armed for this project, so there is no read-write connection ' +
+          'string to hand you. Only the project OWNER can arm it, and it is one click:\n\n' +
+          `  ${armUrl}\n\n` +
+          'Give the human that link and ask them to create read-write credentials (Connect → Direct). Every ' +
+          'schema change made over that connection is observed as drift and adopted by the autonomy loop, ' +
+          'which is why it is opt-in. Then call this tool again with mode=READ_WRITE.\n' +
+          'Read-only access needs no approval and is available right now via mode=READ_ONLY — it covers ' +
+          'inspection, EXPLAIN, BI and pg_dump. For SCHEMA CHANGES you do not need direct access at all: ' +
+          'apply_migration takes ordinary DDL and is governed, verified and reversible.',
+        data: access,
       })
     }
 
@@ -2419,9 +2549,23 @@ export function humanTitle(name: string, args: Record<string, unknown>): string 
       const policy = args.policy
         ? ` · ${rlsLabels[String(args.policy)] ?? String(args.policy)} RLS`
         : ' with RLS'
-      return `Securing ${args.tableName ?? ''}${policy}`.trim()
+      // A SCOPED edit names its commands in the title. "Securing profiles ·
+      // custom RLS" read identically whether the call replaced all four
+      // commands or two, which is how a run that reverted SELECT to owner-only
+      // looked exactly like the run that had set it correctly.
+      const cmds =
+        args.commands && typeof args.commands === 'object' && !Array.isArray(args.commands)
+          ? Object.keys(args.commands as Record<string, unknown>)
+          : []
+      const scope = cmds.length > 0 && cmds.length < 4 ? ` (${cmds.join('/')} only)` : ''
+      return `Securing ${args.tableName ?? ''}${policy}${scope}`.trim()
     }
     case 'create_trigger': return `Adding ${args.on ?? ''} trigger on ${args.tableName ?? ''}`.trim()
+    case 'sync_column':
+      return `Keeping ${args.targetTable ?? ''}.${args.targetColumn ?? ''} in sync with ${args.sourceTable ?? ''}`.trim()
+    case 'list_synced_columns': return 'Listing derived columns'
+    case 'remove_sync_column':
+      return `No longer maintaining ${args.targetTable ?? ''}.${args.targetColumn ?? ''}`.trim()
     case 'enable_realtime': return `Enabling realtime on ${args.tableName ?? ''}`.trim()
     case 'get_realtime_status': return 'Reading realtime status'
     case 'generate_function': {

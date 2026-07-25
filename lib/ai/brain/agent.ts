@@ -92,6 +92,23 @@ export interface BrainInput {
    * this failing" resolve without re-asking. Never required.
    */
   surface?: string | null
+  /**
+   * ── The wall-clock deadline this turn must respect (epoch ms) ───────────────
+   *
+   * Verification used to be the LAST thing the loop did, so it was always the
+   * thing a wall-clock cap cut off. Four out of four RLS calls over MCP came back
+   * "reached its time budget during final verification" — meaning the operations
+   * that most needed proof were exactly the ones that never got any.
+   *
+   * With a deadline the loop stops taking NEW work while `VERIFY_RESERVE_MS`
+   * still remains and spends that reserve on a deterministic verification pass
+   * (see `verifyWithinBudget`). Verification is no longer a step the model may or
+   * may not reach; it is a budget line item that is spent first from the end.
+   *
+   * Omit it and the loop behaves exactly as before — the dashboard has no hard
+   * cap, only the MCP transport does.
+   */
+  deadlineAt?: number
 }
 
 export type BrainEvent =
@@ -171,6 +188,17 @@ export interface BrainResult {
    * a duplicate-creating retry.
    */
   applied?: string[]
+  /**
+   * The loop stopped early to protect its verification reserve, and DID verify.
+   *
+   * Distinct from every failure code: nothing went wrong, the run simply ran out
+   * of wall clock with work still queued. `summary` carries the verified live
+   * state, so the caller can report a truthful partial result instead of a
+   * timeout the agent has to guess about.
+   */
+  budgetStopped?: boolean
+  /** True when a verification pass actually ran and its result is in `summary`. */
+  verified?: boolean
 }
 
 export type BrainFailureCode =
@@ -188,6 +216,15 @@ export type BrainFailureCode =
   | 'TOOL_REFUSED'
 
 const MAX_ITERATIONS = 12
+
+/**
+ * Wall clock held back from the loop and spent on verification.
+ *
+ * Sized for one `collectProof` against the live catalog with headroom for a slow
+ * connection — a handful of catalog queries, not a model call. Deliberately
+ * generous: an unverified "✅" costs more than a step the caller can ask for again.
+ */
+const VERIFY_RESERVE_MS = 15_000
 
 /**
  * Per-mutation-tool proxy token cost used by the deterministic blueprint
@@ -1232,8 +1269,22 @@ async function runAgentLoop(
   // by the phrases the model itself suggested.
   const blockedDestructive: PendingDestructiveCall[] = []
 
+  /** Set when the loop stopped to protect its verification reserve. */
+  let budgetStopped = false
+
   let iter = 0
   for (; iter < MAX_ITERATIONS; iter++) {
+    // ── Spend the verification reserve BEFORE it can be taken ────────────────
+    //
+    // Checked at the iteration boundary rather than mid-tool: a model round trip
+    // plus a tool can easily be 10-20s, so starting one with less than the
+    // reserve left is what guaranteed the run died during verification instead
+    // of before it.
+    if (input.deadlineAt && Date.now() > input.deadlineAt - VERIFY_RESERVE_MS) {
+      budgetStopped = true
+      break
+    }
+
     let completion: OpenAI.Chat.Completions.ChatCompletion
     try {
       completion = await callModelWithRetry(openai, messages, turnTools)
@@ -1419,6 +1470,37 @@ async function runAgentLoop(
     emit({ type: 'error', message: `Recovered from a mid-loop model failure (${reason}) — reported the true state.` })
   }
 
+  // ── The reserved verification pass ─────────────────────────────────────────
+  //
+  // Deterministic, not model-driven, and that is the point: the step that proves
+  // what landed cannot itself be skipped because the model chose a different
+  // tool or because a round trip ran long. It reads the live catalog directly.
+  let verified = false
+  if (budgetStopped) {
+    emit({ type: 'phase', phase: 'verify' })
+    const proof = await collectProof(input.projectId).catch(() => null)
+    verified = !!proof
+    const state = proof && !proof.nothingBuilt ? formatProof(proof) : ''
+    finalSummary = appliedMutationTitles.length
+      ? `I ran out of time budget with work still queued, so I stopped taking new steps and spent the ` +
+        `remaining budget VERIFYING what had already landed.\n\n` +
+        `Applied and verified (${appliedMutationTitles.length}): ${appliedMutationTitles.join('; ')}.\n\n` +
+        (state
+          ? `Live state read back from the catalog:\n\n${state}\n\n`
+          : `The state read-back itself failed, so treat the list above as applied-but-unconfirmed.\n\n`) +
+        `Nothing else was attempted. Say "continue" for the rest — do NOT replay the whole request, ` +
+        `the changes above are already in place.`
+      : `I ran out of time budget before changing anything. Nothing was applied. ` +
+        `Say "continue" to retry with a fresh budget.` +
+        (state ? `\n\nCurrent state, unchanged:\n\n${state}` : '')
+    emit({
+      type: 'error',
+      message:
+        `Stopped ${VERIFY_RESERVE_MS / 1000}s before the deadline to guarantee a verification pass — ` +
+        `verification is budgeted, never dropped.`,
+    })
+  }
+
   if (!finalSummary) {
     finalSummary =
       iter >= MAX_ITERATIONS
@@ -1472,6 +1554,7 @@ async function runAgentLoop(
     tokensUsed,
     ...(failureCode ? { failureCode, retryable: RETRYABLE.includes(failureCode) } : {}),
     applied: appliedMutationTitles,
+    ...(budgetStopped ? { budgetStopped: true, verified } : {}),
   }
 }
 

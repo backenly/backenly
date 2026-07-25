@@ -22,6 +22,9 @@
 import { prisma } from '@/lib/db/prisma'
 import { isReservedWorkspaceTable } from '@/lib/security/workspace-schema'
 
+/** The four commands a policy can govern — used to name the ones that are NOT covered. */
+const ALL_COMMANDS = ['SELECT', 'INSERT', 'UPDATE', 'DELETE'] as const
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface ProofBlock {
@@ -30,6 +33,18 @@ export interface ProofBlock {
   authEnabled: boolean
   authProviders: string[]          // e.g. ['email', 'google', 'github']
   rlsPolicies: Array<{ table: string; operation: string; policyName: string }>
+  /**
+   * Per-table RLS posture, read from pg_class + pg_policies. Covers EVERY table,
+   * including the ones with no policies — which is the whole point.
+   */
+  rlsByTable: Array<{
+    table: string
+    rlsEnabled: boolean
+    forced: boolean
+    policyCount: number
+    /** Commands that have at least one policy. Absent commands are DENIED. */
+    commands: string[]
+  }>
   integrations: string[]           // integration names, no keys
   buckets: string[]                // storage bucket names from live DB — never from BackendGraph
   realtimeTables: string[]         // tables with a live backenly_realtime NOTIFY trigger — ground truth, never a proxy
@@ -108,20 +123,74 @@ async function readAuth(
 
 async function readRls(
   projectId: string,
-): Promise<Array<{ table: string; operation: string; policyName: string }>> {
+): Promise<{
+  policies: Array<{ table: string; operation: string; policyName: string }>
+  byTable: ProofBlock['rlsByTable']
+}> {
+  // ── pg_policies, not PermissionPolicy ──────────────────────────────────────
+  //
+  // The metadata table records ONE row per applied template while the database
+  // holds four policies per template, so its count answered a different question
+  // than the one it was printed under: a project with 6 live policies on a single
+  // table reported "7 policies · across 6 tables".
+  //
+  // It was also an INNER view: a table with no metadata row simply did not appear,
+  // so a table with zero policies read as absent rather than as a warning. An
+  // agent skimming that concludes RLS is on everywhere. The live catalog cannot
+  // do that — every table is listed with its real posture, including the empty ones.
   try {
-    const policies = await prisma.permissionPolicy.findMany({
-      where: { projectId },
-      select: { tableName: true, operation: true, policyName: true },
-      orderBy: { createdAt: 'asc' },
-    })
-    return policies.map(p => ({
-      table: p.tableName,
-      operation: p.operation,
-      policyName: p.policyName,
-    }))
+    // One row per (table, policy). Tables with no policy still appear, with
+    // NULLs — that LEFT JOIN is what makes a zero-policy table visible.
+    const rows = await prisma.$queryRawUnsafe<Array<{
+      table_name: string
+      rls_enabled: boolean
+      forced: boolean
+      policy_name: string | null
+      cmd: string | null
+    }>>(
+      `SELECT c.relname              AS table_name,
+              c.relrowsecurity       AS rls_enabled,
+              c.relforcerowsecurity  AS forced,
+              p.policyname           AS policy_name,
+              upper(p.cmd)           AS cmd
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         LEFT JOIN pg_policies p
+                ON p.schemaname = n.nspname AND p.tablename = c.relname
+        WHERE n.nspname = $1 AND c.relkind = 'r'
+        ORDER BY c.relname, p.policyname`,
+      `workspace_${projectId}`,
+    )
+
+    const byTable = new Map<string, ProofBlock['rlsByTable'][number]>()
+    const policies: Array<{ table: string; operation: string; policyName: string }> = []
+
+    for (const r of rows) {
+      if (!r.table_name || isReservedWorkspaceTable(r.table_name)) continue
+      let entry = byTable.get(r.table_name)
+      if (!entry) {
+        entry = {
+          table: r.table_name,
+          rlsEnabled: !!r.rls_enabled,
+          forced: !!r.forced,
+          policyCount: 0,
+          commands: [],
+        }
+        byTable.set(r.table_name, entry)
+      }
+      if (!r.policy_name) continue
+      entry.policyCount += 1
+      const cmd = r.cmd || 'ALL'
+      // A `FOR ALL` policy covers all four; recording only "ALL" would make the
+      // per-command list look incomplete when it is in fact total.
+      const covered = cmd === 'ALL' || cmd === '*' ? ['SELECT', 'INSERT', 'UPDATE', 'DELETE'] : [cmd]
+      for (const c of covered) if (!entry.commands.includes(c)) entry.commands.push(c)
+      policies.push({ table: r.table_name, operation: cmd, policyName: r.policy_name })
+    }
+
+    return { policies, byTable: [...byTable.values()] }
   } catch {
-    return []
+    return { policies: [], byTable: [] }
   }
 }
 
@@ -180,7 +249,7 @@ export async function collectProof(
   projectId: string,
   verifiedAt?: string,
 ): Promise<ProofBlock> {
-  const [tables, apis, auth, rlsPolicies, integrations, buckets, realtimeTables] = await Promise.all([
+  const [tables, apis, auth, rls, integrations, buckets, realtimeTables] = await Promise.all([
     readTables(projectId),
     readApis(projectId),
     readAuth(projectId),
@@ -189,6 +258,7 @@ export async function collectProof(
     readBuckets(projectId),
     readRealtime(projectId),
   ])
+  const rlsPolicies = rls.policies
 
   // `realtimeTables` is intentionally NOT part of nothingBuilt — realtime
   // cannot exist without a table, so a non-empty realtime set always implies
@@ -207,6 +277,7 @@ export async function collectProof(
     authEnabled: auth.enabled,
     authProviders: auth.providers,
     rlsPolicies,
+    rlsByTable: rls.byTable,
     integrations,
     buckets,
     realtimeTables,
@@ -285,10 +356,51 @@ export function formatProof(proof: ProofBlock): string {
     lines.push('')
   }
 
-  if (proof.rlsPolicies.length > 0) {
-    const policyTables = [...new Set(proof.rlsPolicies.map(p => p.table))]
-    lines.push(`**Row-Level Security** · ${proof.rlsPolicies.length} policies`)
-    lines.push(`Across ${policyTables.length} table${policyTables.length === 1 ? '' : 's'}: ${policyTables.join(', ')}`)
+  // ── RLS: per-table, and the gaps stated as gaps ────────────────────────────
+  //
+  // This block used to print a project-wide policy count and then list only the
+  // tables that HAD policies. Both halves misled. The count came from the
+  // metadata table (one row per template, four live policies per row), and the
+  // list was an inner join — so a table with zero policies was invisible, which
+  // reads as "not mentioned, therefore fine" rather than "denies everyone" or
+  // "wide open". An agent skimming it concluded RLS was on everywhere.
+  //
+  // Now: a line per table with its real policy count and the commands actually
+  // covered, and every unprotected or default-deny table called out by name.
+  if (proof.rlsByTable.length > 0) {
+    const withPolicies = proof.rlsByTable.filter(t => t.policyCount > 0)
+    const deniesAll = proof.rlsByTable.filter(t => t.rlsEnabled && t.policyCount === 0)
+    const unprotected = proof.rlsByTable.filter(t => !t.rlsEnabled)
+    const total = proof.rlsByTable.reduce((n, t) => n + t.policyCount, 0)
+
+    lines.push(
+      `**Row-Level Security** · ${total} live polic${total === 1 ? 'y' : 'ies'} ` +
+      `on ${withPolicies.length} of ${proof.rlsByTable.length} tables (from pg_policies)`,
+    )
+    for (const t of withPolicies) {
+      const missing = ALL_COMMANDS.filter(c => !t.commands.includes(c))
+      lines.push(
+        `- ${t.table} — ${t.policyCount} polic${t.policyCount === 1 ? 'y' : 'ies'}` +
+        `${t.forced ? ', FORCED' : ''}: ${t.commands.join('/')}` +
+        (missing.length ? ` · no policy for ${missing.join('/')} (denied to end-users)` : ''),
+      )
+    }
+    // These two are WARNINGS, not omissions. Saying nothing is what let a
+    // FORCE-RLS table with zero policies survive an entire release.
+    for (const t of deniesAll) {
+      lines.push(
+        `- ⚠ ${t.table} — RLS is ENABLED${t.forced ? ' (FORCED)' : ''} with ZERO policies. ` +
+        `PostgreSQL denies by default, so every end-user read returns no rows and every write is ` +
+        `rejected. This table is DEAD to your app, not protected — apply a policy with add_rls, ` +
+        `or turn RLS off if it is meant to be open.`,
+      )
+    }
+    for (const t of unprotected) {
+      lines.push(
+        `- ⚠ ${t.table} — no row-level security. Every row is reachable by any caller holding an ` +
+        `API key for this project.`,
+      )
+    }
     lines.push('')
   }
 

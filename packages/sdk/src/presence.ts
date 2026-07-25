@@ -33,8 +33,8 @@
  * Server TTL is 60 s — heartbeat every 25 s keeps the user "online".
  */
 
-import type { BackenlyClient } from './client'
-import type { Unsubscribe } from './realtime'
+import type { BackenlyClient } from './client.js'
+import type { Unsubscribe } from './realtime.js'
 
 export interface PresenceUser {
   userId: string

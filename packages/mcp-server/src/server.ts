@@ -434,8 +434,22 @@ async function dispatch(
     return {
       summary: result.summary,
       needsUser: result.needsUser ?? false,
-      toolsRun: result.toolsRun ?? [],
-      iterations: result.iterations ?? 0,
+      // ── Never default an unmeasured field ─────────────────────────────────────
+      //
+      // These used to be `?? []` and `?? 0`, and the server's partial-result path
+      // did not send them — so a body reading `{ applied: ["Securing profiles ·
+      // custom RLS"], partial: true, toolsRun: [], iterations: 0 }` reached the
+      // agent. A change applied by zero tools in zero iterations is not a fact
+      // the server reported; it is one this line invented, and it made the
+      // response unauditable.
+      //
+      // Absent now means absent. `verified` is forwarded for the same reason: an
+      // agent must be able to tell a verified partial from an unverified one
+      // without parsing prose.
+      ...(result.toolsRun ? { toolsRun: result.toolsRun } : {}),
+      ...(typeof result.iterations === 'number' ? { iterations: result.iterations } : {}),
+      ...(typeof result.verified === 'boolean' ? { verified: result.verified } : {}),
+      ...(result.verifyWith ? { verifyWith: result.verifyWith } : {}),
       // ── The escalation object, forwarded ────────────────────────────────────
       //
       // A destructive request comes back `ok:true` with `status:

@@ -80,6 +80,20 @@ export type FindingType =
   // so every project created afterwards was born with a dead data plane.
   // See lib/autonomy/schema-registration.ts.
   | 'schema_not_registered'
+  // ── RLS is ON (often FORCE) and the table has ZERO policies, so PostgreSQL
+  // denies every end-user read and write. Default-deny: the table is not
+  // exposed, it is DEAD.
+  //
+  // `missing_rls` cannot see this. Its query is `NOT pc.relrowsecurity` — it
+  // looks for RLS switched OFF, which is the exposure case. The opposite fault
+  // is an OUTAGE, and it survived a full release on a live project: a table left
+  // FORCE-RLS'd with no policies by a failed approval read empty in the app for
+  // days while the autonomy loop, pitched on detecting "RLS gaps", said nothing
+  // about the most detectable gap there is.
+  //
+  // Auto-fixable exactly when a policy is derivable (same rule as missing_rls):
+  // installing a policy restores service. Undecidable ownership escalates.
+  | 'rls_denies_everything'
 
 export type FindingSeverity = 'critical' | 'warning' | 'info'
 export type FindingStatus = 'open' | 'auto_fixed' | 'pending_approval' | 'dismissed'
@@ -119,7 +133,7 @@ const CANONICAL: ReadonlySet<string> = new Set<FindingType>([
   'oauth_config_invalid', 'workflow_broken', 'verification_failed',
   'missing_api_crud', 'dead_api_endpoint', 'missing_rate_limit', 'realtime_gap',
   'missing_archival_job', 'missing_token_cleanup_cron', 'ai_action_pending',
-  'external_schema_change', 'schema_not_registered',
+  'external_schema_change', 'schema_not_registered', 'rls_denies_everything',
 ])
 
 // Category prefix → canonical base. Most-specific first.

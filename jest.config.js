@@ -11,6 +11,14 @@ const customJestConfig = {
   testEnvironment: 'node', // Use node environment for API tests
   testTimeout: 20000, // 20 second timeout for integration tests
   moduleNameMapper: {
+    // The SDK subpath exports resolve through `exports` in its package.json,
+    // which ts-jest's CommonJS transform does not honour. Map them at source so
+    // a test imports the same module graph a consumer does.
+    '^@backenly/sdk/supabase$': '<rootDir>/packages/sdk/src/supabase-compat.ts',
+    '^@backenly/sdk$': '<rootDir>/packages/sdk/src/index.ts',
+    // The SDK sources carry explicit `.js` extensions so the published ESM build
+    // is resolvable by Node. Strip them for ts-jest, which reads the .ts.
+    '^(\\.{1,2}/.*)\\.js$': '$1',
     '^@/(.*)$': '<rootDir>/$1',
   },
   collectCoverageFrom: [

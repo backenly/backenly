@@ -198,6 +198,17 @@ export class BackenlyClient {
       retryAfterMs?: number
       partial?: boolean
       applied?: string[]
+      /**
+       * Did a verification pass actually run against the live catalog?
+       *
+       * The brain holds back a verification reserve and stops taking new steps
+       * while it remains, so a partial result now normally arrives VERIFIED. The
+       * transport's hard wall clock is the one path that cannot be, and it says
+       * `verified: false`. An agent must be able to tell those apart without
+       * reading prose — "reported the applied changes directly" gave it no way to.
+       */
+      verified?: boolean
+      verifyWith?: string | string[]
     }>('POST', '/api/mcp/chat', { message })
   }
 

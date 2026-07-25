@@ -1,12 +1,12 @@
-import { BackenlyClient } from './client'
+import { BackenlyClient } from './client.js'
 
-export { BackenlyClient } from './client'
-export { AuthModule } from './auth'
-export { QueryBuilder, TableClient } from './database'
-export { StorageModule } from './storage'
+export { BackenlyClient } from './client.js'
+export { AuthModule } from './auth.js'
+export { QueryBuilder, TableClient } from './database.js'
+export { StorageModule } from './storage.js'
 
 // Realtime
-export { RealtimeModule } from './realtime'
+export { RealtimeModule } from './realtime.js'
 export type {
   RealtimeEvent,
   DBChangeEvent,
@@ -16,14 +16,14 @@ export type {
   RealtimeCallback,
   BroadcastCallback,
   Unsubscribe,
-} from './realtime'
+} from './realtime.js'
 
 // Presence
-export { PresenceModule } from './presence'
-export type { PresenceUser, PresenceEvent, PresenceCallback } from './presence'
+export { PresenceModule } from './presence.js'
+export type { PresenceUser, PresenceEvent, PresenceCallback } from './presence.js'
 
-export { BackenlyError } from './errors'
-export * from './types'
+export { BackenlyError } from './errors.js'
+export * from './types.js'
 
 /**
  * Create a Backenly client.
@@ -40,12 +40,12 @@ export function createClient(config: { projectId: string; apiUrl?: string; apiKe
 }
 
 // ── Typed client (for generated backenly.client.ts files) ────────────────────
-export { createTypedClient } from './typed'
-export type { TypedClient, Row, Insert, Update } from './typed'
+export { createTypedClient } from './typed.js'
+export type { TypedClient, Row, Insert, Update } from './typed.js'
 
 // ── supabase-js compatibility shim (migration bridge) ────────────────────────
 export {
   createClient as createSupabaseCompatClient,
   BackenlySupabaseCompat,
   CompatQueryBuilder,
-} from './supabase-compat'
+} from './supabase-compat.js'

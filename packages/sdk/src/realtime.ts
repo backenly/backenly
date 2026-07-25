@@ -29,8 +29,8 @@
  *   - When all subscribers are removed, the EventSource is closed.
  */
 
-import type { BackenlyClient } from './client'
-import type { PresenceCallback, PresenceEvent } from './presence'
+import type { BackenlyClient } from './client.js'
+import type { PresenceCallback, PresenceEvent } from './presence.js'
 
 // ── Event types ──────────────────────────────────────────────────────────────
 
@@ -215,13 +215,55 @@ export class RealtimeModule {
     return undefined
   }
 
-  private _sseUrl(filter?: string): string {
+  /**
+   * ── Why this asks the server for a ticket first ───────────────────────────
+   *
+   * `EventSource` cannot send headers, so the credential must go in the URL. It
+   * used to be the project API key — and a URL is the worst place for a
+   * long-lived credential: nginx access logs, every proxy in the path, browser
+   * history, and `Referer` on outbound links all keep a copy. Clients that
+   * hand-rolled the connection were putting the end-user's session JWT there too.
+   *
+   * So the SDK exchanges its headers for a ticket that lasts 30 seconds and one
+   * connection. What leaks into a log is already spent. The `?apiKey=` form is
+   * kept as a fallback for a server that predates the ticket endpoint — never as
+   * the first choice.
+   */
+  private async _mintTicket(): Promise<string | null> {
+    const projectId = this.client.getProjectId()
+    const base = this.client.getApiUrl()
+    const apiKey = this.client.getApiKey()
+    if (!apiKey) return null
+    try {
+      const res = await fetch(new URL(`/api/v1/${projectId}/realtime/ticket`, base).toString(), {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          ...(this.client.getUserToken() ? { 'X-User-Token': this.client.getUserToken()! } : {}),
+        },
+      })
+      if (!res.ok) return null
+      const body = (await res.json()) as { ticket?: string }
+      return typeof body?.ticket === 'string' && body.ticket ? body.ticket : null
+    } catch {
+      // Network failure, or a server without the endpoint. Fall back rather than
+      // leave the caller with no realtime at all.
+      return null
+    }
+  }
+
+  private _sseUrl(filter: string | undefined, ticket: string | null): string {
     const projectId = this.client.getProjectId()
     const base = this.client.getApiUrl()
     const url = new URL(`/api/v1/${projectId}/realtime`, base)
     if (filter) url.searchParams.set('table', filter)
-    // EventSource cannot send custom headers in the browser, so we pass the
-    // API key as a query parameter. The server accepts ?apiKey= for SSE routes.
+    if (ticket) {
+      url.searchParams.set('ticket', ticket)
+      return url.toString()
+    }
+    // Fallback for a server without /realtime/ticket. Deprecated: this puts a
+    // long-lived key into the URL, which is the problem the ticket solves.
     const apiKey = this.client.getApiKey()
     if (apiKey) url.searchParams.set('apiKey', apiKey)
     return url.toString()
@@ -269,7 +311,30 @@ export class RealtimeModule {
     }
 
     this.currentFilter = neededFilter
-    this.es = new EventSource(this._sseUrl(neededFilter))
+
+    // A ticket is single-use, so it must be minted per CONNECTION — including
+    // every reconnect, which is why this sits inside _connect and not in the
+    // constructor. `_openStream` is separated out so both the ticketed and the
+    // fallback path share one set of handlers.
+    void this._mintTicket().then(
+      (ticket) => {
+        // A later _connect may have superseded this attempt while the mint was
+        // in flight; don't clobber a live stream with a stale one.
+        if (this.fatal || !this._hasSubscribers) return
+        if (this.currentFilter !== neededFilter) return
+        this._openStream(neededFilter, ticket)
+      },
+      () => {
+        if (this.fatal || !this._hasSubscribers) return
+        if (this.currentFilter !== neededFilter) return
+        this._openStream(neededFilter, null)
+      },
+    )
+  }
+
+  private _openStream(neededFilter: string | undefined, ticket: string | null): void {
+    if (this.es && this.es.readyState !== EventSource.CLOSED) this.es.close()
+    this.es = new EventSource(this._sseUrl(neededFilter, ticket))
 
     this.es.onmessage = (msg) => {
       try {

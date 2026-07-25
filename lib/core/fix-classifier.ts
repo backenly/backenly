@@ -30,6 +30,7 @@ export interface FixClassification {
 
 const AUTO_SAFE = new Set<FindingType>([
   'missing_rls',            // Adding RLS protection is always safe
+  'rls_denies_everything',  // Installing a policy on a default-deny table RESTORES service
   'api_drift',              // Re-generating a missing API is additive
   'missing_fk',             // Adding a FK constraint (safe when data is consistent)
   'missing_fk_index',       // Adding an index — performance only, no data change
@@ -112,6 +113,7 @@ export function classifyFix(
 
 const AUTO_ACTION_MAP: Partial<Record<FindingType, string>> = {
   missing_rls:              'SET_PERMISSION (own_rows template)',
+  rls_denies_everything:    'SET_PERMISSION (schema-inferred template)',
   api_drift:                'FIX_API',
   missing_fk:               'ADD_CONSTRAINT',
   missing_fk_index:         'CREATE_INDEX',

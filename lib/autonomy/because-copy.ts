@@ -157,6 +157,19 @@ export function explainAutonomyEvent(details: AutonomyEventDetails | null | unde
       return { what, why, full: `${what} because ${why}`, kind }
     }
 
+    // The mirror image of missing_rls, and it must NOT borrow that copy: this
+    // table was not "readable across accounts", it was readable by nobody. A
+    // repair note that describes an exposure a user never had teaches them to
+    // distrust the queue.
+    case 'rls_denies_everything': {
+      const what = `Backenly installed a row-level-security policy on "${t}"`
+      const why =
+        `security was switched on with no policy at all, and PostgreSQL denies by default — ` +
+        `so every read returned zero rows and every write was rejected. The table was dead ` +
+        `to your app rather than protected.`
+      return { what, why, full: `${what} because ${why}`, kind }
+    }
+
     case 'over_permissive_rls': {
       const what = `Backenly tightened a no-op RLS policy on "${t}"`
       const why =

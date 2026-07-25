@@ -27,6 +27,8 @@ import { dispatchTool, isDestructiveTool, READ_ONLY_TOOLS } from '@/lib/ai/brain
 import { dbQuery, dbInsert, dbUpdate, dbDelete } from '@/lib/mcp/runtime-db'
 import { dbErrorBody } from '@/lib/db/query-errors'
 import { parseMigration, MigrationParseError } from '@/lib/mcp/migration-parser'
+import { prisma } from '@/lib/db/prisma'
+import { createHash } from 'crypto'
 
 const ENDPOINT = '/api/mcp/tool'
 
@@ -91,6 +93,85 @@ export async function POST(request: NextRequest) {
       ok: true,
       summary: matchedTopic ? `Backenly docs — ${matchedTopic}` : 'Backenly agent guide',
       data: { topic: matchedTopic ?? null, markdown },
+      needsUser: false,
+      timing: { ms: Date.now() - startedAt, heavy: false },
+    }))
+  }
+
+  // generate_types — synthetic read-only tool. TypeScript row types straight
+  // from the live PostgreSQL catalog, so an agent never hand-writes types that
+  // silently drift on the next migration. No brain call, no mutation.
+  if (tool === 'generate_types') {
+    const format = typeof args.format === 'string' ? args.format.trim().toLowerCase() : 'dts'
+    if (!['dts', 'client', 'openapi'].includes(format)) {
+      const res = NextResponse.json(
+        {
+          ok: false,
+          error: `Unknown format "${format}". Use "dts" (type declarations), "client" (declarations + a typed client), or "openapi".`,
+          code: 'VALIDATION',
+        },
+        { status: 400 },
+      )
+      recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 400, tool, error: 'VALIDATION' })
+      return withCors(res)
+    }
+
+    const { readWorkspaceSchema } = await import('@/lib/typegen/schema-reader')
+    const { generateTypes } = await import('@/lib/typegen/type-generator')
+    const schema = await readWorkspaceSchema(auth.projectId)
+    const types = generateTypes(schema)
+
+    let source = types.source
+    let filename = 'backenly.types.ts'
+    if (format === 'client') {
+      const { generateTypedClient } = await import('@/lib/typegen/client-generator')
+      source = generateTypedClient(schema, types, { projectId: auth.projectId }).source
+      filename = 'backenly.client.ts'
+    } else if (format === 'openapi') {
+      const { generateOpenApiSpec } = await import('@/lib/typegen/openapi-generator')
+      const project = await prisma.project.findUnique({
+        where: { id: auth.projectId },
+        select: { name: true },
+      })
+      source = JSON.stringify(
+        generateOpenApiSpec(schema, {
+          title: `Backenly API — ${project?.name ?? auth.projectId}`,
+          serverUrl: process.env.NEXT_PUBLIC_APP_URL || 'https://backenly.com',
+        }),
+        null,
+        2,
+      )
+      filename = 'backenly.openapi.json'
+    }
+
+    // A content hash, so "regenerate and diff" is one comparison rather than a
+    // read of the whole file. This is what makes drift DETECTABLE instead of
+    // merely fixable.
+    const schemaHash = createHash('sha256').update(source).digest('hex').slice(0, 16)
+
+    const summary = schema.tables.length
+      ? `Generated ${format === 'openapi' ? 'an OpenAPI 3.1 spec' : 'TypeScript types'} for ` +
+        `${schema.tables.length} table(s): ${types.tableNames.join(', ')}. ` +
+        `Save data.source as ${filename}. schemaHash=${schemaHash} — regenerate and compare hashes to ` +
+        `detect drift after any migration.`
+      : `This project has no tables yet, so there is nothing to type. Create tables first ` +
+        `(apply_migration or backend_chat), then call generate_types again.`
+
+    recordMcpCall(
+      { ...auth, endpoint: ENDPOINT, startedAt },
+      { statusCode: 200, tool, mutation: false, summary: `types: ${format} (${schema.tables.length} tables)` },
+    )
+    return withCors(NextResponse.json({
+      ok: true,
+      summary,
+      data: {
+        format,
+        filename,
+        source,
+        tableNames: types.tableNames,
+        schemaHash,
+        generatedAt: schema.generatedAt,
+      },
       needsUser: false,
       timing: { ms: Date.now() - startedAt, heavy: false },
     }))

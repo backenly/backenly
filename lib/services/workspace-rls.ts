@@ -113,6 +113,27 @@ export type PolicyTemplate =
  */
 export type PolicyTemplateRequest = PolicyTemplate | 'auto'
 
+/** The four SQL commands a row-level-security policy can govern. */
+export type RlsCommand = 'select' | 'insert' | 'update' | 'delete'
+
+export const RLS_COMMANDS: RlsCommand[] = ['select', 'insert', 'update', 'delete']
+
+/**
+ * The rule for ONE command.
+ *
+ *   using — which rows this command may TARGET. Meaningful for SELECT, UPDATE
+ *           and DELETE; Postgres has no USING clause for INSERT.
+ *   check — which rows this command may PRODUCE. Meaningful for INSERT and
+ *           UPDATE; Postgres has no WITH CHECK for SELECT or DELETE.
+ *
+ * A bare string is shorthand for "use this for whichever clause the command
+ * has" — `{ delete: "author_id::text = backenly_jwt_claim('sub')" }`.
+ */
+export interface CommandRule {
+  using?: string
+  check?: string
+}
+
 export interface PolicyConfig {
   tableName: string
   template: PolicyTemplateRequest
@@ -152,10 +173,314 @@ export interface PolicyConfig {
    */
   using?: string
   /**
-   * Optional separate predicate for INSERT/UPDATE. Defaults to `using`, which is
-   * the right default: a row you may not read is a row you may not create.
+   * Optional separate predicate for the WRITE commands. When given it governs
+   * INSERT's WITH CHECK *and* UPDATE/DELETE's USING — see the note on
+   * `resolveCustomCommands` for why USING and not only WITH CHECK.
    */
   withCheck?: string
+  /**
+   * ── Per-command rules: the four commands are INDEPENDENT ───────────────────
+   *
+   * `using` alone describes one predicate, and one predicate cannot express the
+   * ordinary case "anyone may read a public profile, only the owner may change
+   * it". It used to be broadcast to all four commands, so a correct request
+   * produced a live vulnerability: DELETE inherited the read rule and any
+   * authenticated caller could delete any public row.
+   *
+   * Naming a command here also SCOPES the edit to the commands named — the
+   * others keep the policies they already have. "Change only UPDATE and DELETE"
+   * used to rewrite all four and silently revert SELECT to owner-only, which
+   * fixed a security hole by breaking the feature it protected.
+   */
+  commands?: Partial<Record<RlsCommand, string | CommandRule>>
+}
+
+/** One command's resolved rule, ready to become a CREATE POLICY statement. */
+export interface ResolvedCommandRule {
+  command: RlsCommand
+  using?: string
+  check?: string
+  /** True when this rule can be satisfied without the caller proving identity. */
+  identityIndependent: boolean
+}
+
+/** Result of running a caller predicate through lib/db/sql-expression.ts. */
+export type PredicateCheck =
+  | { ok: true; expression: string }
+  | { ok: false; reason: string }
+
+export type CustomPolicyPlan =
+  | {
+      kind: 'ok'
+      rules: ResolvedCommandRule[]
+      /** True when only SOME commands were named — the rest must be preserved. */
+      scoped: boolean
+      /** Human-readable warnings that MUST reach the caller's result message. */
+      warnings: string[]
+    }
+  | { kind: 'refused'; reason: string }
+
+/**
+ * Split a validated boolean predicate on its TOP-LEVEL `OR`s.
+ *
+ * The input has already passed lib/db/sql-expression.ts — a closed grammar with
+ * no subqueries, no semicolons and no dollar-quoting — so tracking parenthesis
+ * depth and single-quoted literals is sufficient to find the real disjunction
+ * boundaries. Returns a single-element array for a predicate with no top-level OR.
+ */
+export function splitTopLevelOr(expr: string): string[] {
+  const parts: string[] = []
+  let depth = 0
+  let inString = false
+  let cur = ''
+  for (let i = 0; i < expr.length; i++) {
+    const ch = expr[i]
+    if (inString) {
+      cur += ch
+      if (ch === "'") inString = expr[i + 1] === "'" ? (cur += expr[++i], true) : false
+      continue
+    }
+    if (ch === "'") { inString = true; cur += ch; continue }
+    if (ch === '(') depth++
+    if (ch === ')') depth--
+    if (
+      depth === 0 &&
+      (ch === 'o' || ch === 'O') &&
+      /^or\b/i.test(expr.slice(i)) &&
+      (i === 0 || /[\s)]/.test(expr[i - 1]))
+    ) {
+      parts.push(cur.trim())
+      cur = ''
+      i += 1 // consume the 'r'
+      continue
+    }
+    cur += ch
+  }
+  if (cur.trim()) parts.push(cur.trim())
+  return parts.filter(Boolean)
+}
+
+/**
+ * Can this predicate be satisfied WITHOUT the caller proving who they are?
+ *
+ * A predicate is identity-independent when at least one of its top-level
+ * disjuncts never mentions the JWT subject. `is_public = true OR user_id::text =
+ * backenly_jwt_claim('sub')` is: the first branch alone admits every caller.
+ *
+ * That property is harmless — desirable, even — on SELECT. On UPDATE or DELETE
+ * it means "any authenticated caller may modify or destroy any row that happens
+ * to satisfy the public branch", which is exactly the vulnerability a broadcast
+ * read predicate produced. `(a = sub) OR (b = sub)` is NOT identity-independent
+ * and is broadcast freely, which is what keeps two-party tables working.
+ */
+export function isIdentityIndependent(expr: string): boolean {
+  const normalized = expr.trim().toLowerCase()
+  if (normalized === 'true' || normalized === '(true)') return true
+  return splitTopLevelOr(expr).some((branch) => !/backenly_jwt_claim\s*\(/i.test(branch))
+}
+
+const CLAUSES: Record<RlsCommand, { using: boolean; check: boolean }> = {
+  select: { using: true,  check: false },
+  insert: { using: false, check: true  },
+  update: { using: true,  check: true  },
+  delete: { using: true,  check: false },
+}
+
+/**
+ * Turn a caller's request into one independent rule PER COMMAND.
+ *
+ * ── Why `withCheck` governs USING and not only WITH CHECK ───────────────────
+ *
+ * `UPDATE USING (<read rule>) WITH CHECK (owner)` looks safe and is not. USING
+ * decides which rows you may TARGET, so a caller can aim at somebody else's row
+ * and then satisfy WITH CHECK by rewriting the owner column to themselves — a
+ * profile hijack. If the caller has said what they may WRITE, that is also the
+ * set they may target.
+ *
+ * Pure resolution: no database access, no I/O. The refusals here are the whole
+ * point of the function, so they are unit-testable without a Postgres.
+ */
+export function resolveCustomCommands(
+  config: Pick<PolicyConfig, 'using' | 'withCheck' | 'commands'>,
+  validate: (expr: string) => PredicateCheck,
+): CustomPolicyPlan {
+  const named = config.commands
+    ? (Object.keys(config.commands) as RlsCommand[]).filter(
+        (c) => RLS_COMMANDS.includes(c) && config.commands![c] !== undefined,
+      )
+    : []
+  const unknown = config.commands
+    ? Object.keys(config.commands).filter((c) => !RLS_COMMANDS.includes(c as RlsCommand))
+    : []
+  if (unknown.length) {
+    return {
+      kind: 'refused',
+      reason:
+        `Unknown command${unknown.length > 1 ? 's' : ''} in \`commands\`: ${unknown.join(', ')}. ` +
+        `A row-level-security policy governs exactly four: select, insert, update, delete.`,
+    }
+  }
+
+  const scoped = named.length > 0
+  const targets = scoped ? named : RLS_COMMANDS
+
+  if (!scoped && !config.using && !config.withCheck) {
+    return {
+      kind: 'refused',
+      reason:
+        `A custom policy needs a predicate. Pass \`using\` to govern all four commands with one rule, ` +
+        `or \`commands\` to give each command its own — ` +
+        `e.g. { commands: { select: "is_public OR owner_id::text = backenly_jwt_claim('sub')", ` +
+        `update: "owner_id::text = backenly_jwt_claim('sub')", delete: "owner_id::text = backenly_jwt_claim('sub')" } }.`,
+    }
+  }
+
+  const warnings: string[] = []
+  const rules: ResolvedCommandRule[] = []
+  /** Write commands that would have silently inherited an unsafe read rule. */
+  const bled: RlsCommand[] = []
+
+  // The read rule is what a broadcast would copy onto the write commands, so it
+  // is resolved first and then checked against every write command.
+  const readSource = pickRule(config.commands?.select)?.using ?? config.using
+
+  for (const command of targets) {
+    const explicit = pickRule(config.commands?.[command])
+    const clause = CLAUSES[command]
+
+    // The blanket fallbacks. `withCheck` outranks `using` on every WRITE command
+    // — including their USING — for the reason in the header comment.
+    const usingSource = clause.using
+      ? explicit?.using ?? (command === 'select' ? config.using : config.withCheck ?? config.using)
+      : undefined
+    const checkSource = clause.check
+      ? explicit?.check ?? explicit?.using ?? config.withCheck ?? config.using
+      : undefined
+
+    if (clause.using && !usingSource) {
+      return {
+        kind: 'refused',
+        reason:
+          `\`commands.${command}\` needs a \`using\` predicate (which rows ${command.toUpperCase()} may reach). ` +
+          `Pass a string, or { using: "…" }.`,
+      }
+    }
+    if (clause.check && !checkSource) {
+      return {
+        kind: 'refused',
+        reason:
+          `\`commands.${command}\` needs a \`check\` predicate (which rows ${command.toUpperCase()} may write). ` +
+          `Pass a string, or { check: "…" }.`,
+      }
+    }
+    // Only an EXPLICIT `{ using }` / `{ check }` on a command that has no such
+    // clause is worth reporting. The bare-string shorthand deliberately means
+    // "whichever clause this command has", so it is never a mistake.
+    if (explicit && !explicit.shorthand) {
+      if (explicit.using && !clause.using) {
+        warnings.push(
+          `\`commands.${command}.using\` was ignored — PostgreSQL has no USING clause for ${command.toUpperCase()}. ` +
+          `Its rule comes from \`check\`.`,
+        )
+      }
+      if (explicit.check && !clause.check) {
+        warnings.push(
+          `\`commands.${command}.check\` was ignored — PostgreSQL has no WITH CHECK clause for ${command.toUpperCase()}. ` +
+          `Its rule comes from \`using\`.`,
+        )
+      }
+    }
+
+    const rule: ResolvedCommandRule = { command, identityIndependent: false }
+    for (const [field, source] of [['using', usingSource], ['check', checkSource]] as const) {
+      if (!source) continue
+      const v: PredicateCheck = validate(source)
+      if (v.ok === false) {
+        return {
+          kind: 'refused',
+          reason: `\`${command}.${field}\` predicate rejected: ${v.reason}`,
+        }
+      }
+      rule[field] = v.expression
+    }
+
+    // ── The widening guard ───────────────────────────────────────────────────
+    //
+    // A write command may not inherit an identity-independent read rule by
+    // DEFAULT. It may still be given one deliberately (naming the command in
+    // `commands` is that deliberate act) — but never silently, and the result
+    // message says so either way.
+    const effective = rule.using ?? rule.check
+    if (effective && command !== 'select' && isIdentityIndependent(effective)) {
+      rule.identityIndependent = true
+      if (!explicit && !!readSource && effective === normalizeForCompare(readSource, validate)) {
+        bled.push(command)
+      } else {
+        warnings.push(
+          `${command.toUpperCase()} is governed by "${effective}", which does not reference the caller's identity — ` +
+          `any authenticated caller can ${VERB[command]} every row that matches it. ` +
+          `This was requested explicitly, so it was applied.`,
+        )
+      }
+    }
+
+    rules.push(rule)
+  }
+
+  // ── One refusal naming EVERY command that would have been widened ──────────
+  //
+  // Refusing on the first offender alone would have the caller fix INSERT, retry,
+  // and be refused again on UPDATE — three round trips to learn one fact.
+  if (bled.length) {
+    const list = bled.map((c) => c.toUpperCase()).join(', ')
+    const readRule = readSource ?? ''
+    return {
+      kind: 'refused',
+      reason:
+        `Refusing to apply the read rule to ${list}. "${readRule}" can be satisfied without the caller ` +
+        `proving who they are, so copying it onto ${bled.length > 1 ? 'those commands' : 'that command'} would let ` +
+        `any authenticated caller ${bled.map((c) => VERB[c]).join(' / ')} every row that matches it — ` +
+        `${bled.includes('delete') ? 'including rows they do not own. ' : ''}` +
+        `The four commands are independent and Backenly will not guess the write rule.\n` +
+        `Say what it is:\n` +
+        `  • { using: "<read rule>", withCheck: "<write rule>" } — one rule for INSERT/UPDATE/DELETE.\n` +
+        `  • { commands: { select: "<read rule>", insert: "<write rule>", update: "<write rule>", ` +
+        `delete: "<write rule>" } } — a rule per command.\n` +
+        `If an open ${list} really is intended, name ${bled.length > 1 ? 'each' : 'it'} explicitly under \`commands\`.`,
+    }
+  }
+
+  return { kind: 'ok', rules, scoped, warnings }
+}
+
+const VERB: Record<RlsCommand, string> = {
+  select: 'read',
+  insert: 'create',
+  update: 'modify',
+  delete: 'delete',
+}
+
+/** Normalise a raw predicate through the same validator the rules went through. */
+function normalizeForCompare(
+  expr: string,
+  validate: (e: string) => PredicateCheck,
+): string | null {
+  const v = validate(expr)
+  return v.ok ? v.expression : null
+}
+
+function pickRule(
+  value: string | CommandRule | undefined,
+): (CommandRule & { shorthand: boolean }) | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    // Shorthand: one predicate for whichever clause this command actually has.
+    return trimmed ? { using: trimmed, check: trimmed, shorthand: true } : { shorthand: true }
+  }
+  const using = typeof value.using === 'string' && value.using.trim() ? value.using.trim() : undefined
+  const check = typeof value.check === 'string' && value.check.trim() ? value.check.trim() : undefined
+  return { ...(using ? { using } : {}), ...(check ? { check } : {}), shorthand: false }
 }
 
 /**
@@ -194,32 +519,24 @@ export async function applyPermissionPolicy(
   // ── The custom escape hatch ────────────────────────────────────────────────
   if (template === 'custom') {
     const { validateBooleanExpression } = await import('@/lib/db/sql-expression')
-    const usingCheck = validateBooleanExpression(config.using, { requireColumn: false })
-    if (usingCheck.kind !== 'ok') {
-      return {
-        success: false,
-        message:
-          `Custom RLS predicate rejected: ${usingCheck.reason} ${usingCheck.hint} ` +
-          `Write it against this table's columns, using backenly_jwt_claim('sub') for the ` +
-          `calling end-user's id — e.g. "owner_id::text = backenly_jwt_claim('sub') OR is_public".`,
-      }
+    const validate = (expr: string) => {
+      const r = validateBooleanExpression(expr, { requireColumn: false })
+      return r.kind === 'ok'
+        ? ({ ok: true, expression: r.expression } as const)
+        : ({
+            ok: false,
+            reason:
+              `${r.reason} ${r.hint} Write it against this table's columns, using ` +
+              `backenly_jwt_claim('sub') for the calling end-user's id — e.g. ` +
+              `"owner_id::text = backenly_jwt_claim('sub') OR is_public".`,
+          } as const)
     }
-    let withCheckExpr = usingCheck.expression
-    if (config.withCheck) {
-      const wc = validateBooleanExpression(config.withCheck, { requireColumn: false })
-      if (wc.kind !== 'ok') {
-        return { success: false, message: `Custom RLS withCheck predicate rejected: ${wc.reason} ${wc.hint}` }
-      }
-      withCheckExpr = wc.expression
+
+    const plan = resolveCustomCommands(config, validate)
+    if (plan.kind === 'refused') {
+      return { success: false, message: `No policy was changed on "${tableName}". ${plan.reason}` }
     }
-    return installValidatedCustomPolicy(
-      projectId,
-      tableName,
-      schemaName,
-      qualifyClaimCalls(usingCheck.expression, schemaName),
-      qualifyClaimCalls(withCheckExpr, schemaName),
-      role,
-    )
+    return installCustomPolicySet(projectId, tableName, schemaName, plan, role)
   }
 
   // ── Owner detection: the catalog is the source of truth, not a name list ────
@@ -478,16 +795,27 @@ export async function applyPermissionPolicy(
 }
 
 /**
- * Drop every Backenly-managed policy on a table, leaving user-authored ones
- * alone. Extracted so the template path, the custom path and the restore path
- * share ONE implementation — three inline copies of this `DO $$` block was how
- * they drifted.
+ * Drop Backenly-managed policies on a table, leaving user-authored ones alone.
+ * Extracted so the template path, the custom path and the restore path share ONE
+ * implementation — three inline copies of this `DO $$` block was how they drifted.
+ *
+ * `commands` narrows the drop to the policies governing exactly those commands.
+ * That is what makes a scoped edit possible: the SELECT policy a caller asked to
+ * leave alone is never dropped, so it cannot be "restored" to something else.
+ * Omit it and every Backenly policy on the table goes, as before.
  */
 async function dropBackenlyPolicies(
   projectId: string,
   schemaName: string,
   tableName: string,
+  commands?: RlsCommand[],
 ): Promise<void> {
+  // pg_policies.cmd renders as SELECT / INSERT / UPDATE / DELETE / ALL. A scoped
+  // drop deliberately does NOT match 'ALL' — installCustomPolicySet refuses that
+  // combination up front rather than silently removing a broader policy here.
+  const cmdFilter = commands?.length
+    ? `AND upper(cmd) IN (${commands.map((c) => `'${c.toUpperCase()}'`).join(', ')})`
+    : ''
   await executeInWorkspaceSchema(
     projectId,
     `
@@ -498,6 +826,7 @@ async function dropBackenlyPolicies(
         SELECT policyname FROM pg_policies
         WHERE schemaname = '${schemaName}' AND tablename = '${tableName}'
         AND policyname LIKE 'backenly_%'
+        ${cmdFilter}
       LOOP
         EXECUTE 'DROP POLICY IF EXISTS ' || quote_ident(pol.policyname) || ' ON "${schemaName}"."${tableName}"';
       END LOOP;
@@ -729,72 +1058,219 @@ function qualifyClaimCalls(expr: string, schemaName: string): string {
   )
 }
 
+/** One live policy row as PostgreSQL renders it. Ground truth, never metadata. */
+export interface LivePolicyRow {
+  policyName: string
+  /** 'SELECT' | 'INSERT' | 'UPDATE' | 'DELETE' | 'ALL' — pg_policies.cmd. */
+  cmd: string
+  permissive: string
+  roles: string[]
+  using: string | null
+  withCheck: string | null
+}
+
 /**
- * custom: the caller's own predicate, under the same governance as a template.
+ * Read every policy PostgreSQL currently has on a table.
  *
- * The predicate arrives already validated against lib/db/sql-expression.ts (a
- * closed grammar — no subqueries, no semicolons, no arbitrary function calls),
- * so what remains here is to install it with the same shape every other template
- * has: FORCE RLS, a service-role escape, and per-command policies.
+ * This is the only honest source for "what is the rule right now". The
+ * PermissionPolicy metadata table records one row per applied TEMPLATE while the
+ * database holds four policies per template — which is how a project with 6
+ * live policies on one table reported "7 policies across 6 tables".
+ */
+export async function readLivePolicies(
+  schemaName: string,
+  tableName: string,
+): Promise<LivePolicyRow[]> {
+  try {
+    const rows = await prisma.$queryRawUnsafe<Array<{
+      policyname: string
+      cmd: string
+      permissive: string
+      roles: string[] | string | null
+      qual: string | null
+      with_check: string | null
+    }>>(
+      `SELECT policyname, cmd, permissive, roles::text[] AS roles, qual, with_check
+         FROM pg_policies
+        WHERE schemaname = $1 AND tablename = $2
+        ORDER BY policyname`,
+      schemaName,
+      tableName,
+    )
+    return rows.map((r) => ({
+      policyName: r.policyname,
+      cmd: String(r.cmd || '').toUpperCase(),
+      permissive: r.permissive,
+      roles: Array.isArray(r.roles)
+        ? r.roles
+        : typeof r.roles === 'string'
+          ? r.roles.replace(/^\{|\}$/g, '').split(',').filter(Boolean)
+          : [],
+      using: r.qual,
+      withCheck: r.with_check,
+    }))
+  } catch {
+    return []
+  }
+}
+
+/** Which of the four commands does a live policy row govern? */
+function commandsCoveredBy(row: LivePolicyRow): RlsCommand[] {
+  if (row.cmd === 'ALL' || row.cmd === '*') return [...RLS_COMMANDS]
+  const c = row.cmd.toLowerCase() as RlsCommand
+  return RLS_COMMANDS.includes(c) ? [c] : []
+}
+
+/**
+ * custom: the caller's own rules, one per command, under the same governance as
+ * a template.
+ *
+ * ── Three properties this function owes the caller ──────────────────────────
+ *
+ * 1. INDEPENDENCE. Each command gets the rule that command was given. One
+ *    predicate is no longer copied onto four commands, because a read rule on
+ *    DELETE is a data-loss vulnerability generated from a correct request.
+ *
+ * 2. SCOPE. A scoped edit touches only the commands it names. The policies for
+ *    the others are not rewritten — they are not even dropped — so "change only
+ *    UPDATE and DELETE" cannot revert SELECT. What was preserved is REPORTED,
+ *    read back from pg_policies rather than assumed.
+ *
+ * 3. VERIFICATION. Success is claimed only after re-reading pg_policies and
+ *    confirming a policy exists for every targeted command. Three consecutive
+ *    "✅ custom RLS" results with one actual change is the failure this closes;
+ *    an unverified claim is worse than an error.
  *
  * The service-role clause is added by Backenly, not by the caller, and is not
  * optional. Without it the platform's own migrations, verifier and backup paths
  * would be subject to a rule written for end-users — which is how a "stricter"
  * custom policy silently breaks the autonomy loop rather than the app.
  */
-async function installValidatedCustomPolicy(
+async function installCustomPolicySet(
   projectId: string,
   tableName: string,
   schemaName: string,
-  usingExpr: string,
-  withCheckExpr: string,
+  plan: Extract<CustomPolicyPlan, { kind: 'ok' }>,
   role: string,
 ): Promise<{ success: boolean; message: string }> {
+  const targeted = plan.rules.map((r) => r.command)
   const preState = await readRlsState(projectId, schemaName, tableName)
+  const before = await readLivePolicies(schemaName, tableName)
+
+  // ── A scoped edit cannot coexist with a FOR ALL policy ─────────────────────
+  //
+  // Permissive policies combine with OR, so leaving a `FOR ALL` policy in place
+  // while adding a narrower per-command one WIDENS access instead of narrowing
+  // it. Refusing is the only honest outcome: the caller has to say what the
+  // whole set should be.
+  if (plan.scoped) {
+    const blanket = before.filter((p) => p.policyName.startsWith('backenly_') && commandsCoveredBy(p).length === 4)
+    if (blanket.length) {
+      return {
+        success: false,
+        message:
+          `No policy was changed on "${tableName}". It carries a FOR ALL policy ` +
+          `(${blanket.map((p) => p.policyName).join(', ')}) that already governs ` +
+          `${targeted.join('/').toUpperCase()}. Adding a narrower policy alongside it would WIDEN access, ` +
+          `not narrow it, because PostgreSQL combines permissive policies with OR. ` +
+          `Restate all four commands so the whole set is replaced at once.`,
+      }
+    }
+  }
+
+  const preserved = plan.scoped
+    ? before.filter(
+        (p) =>
+          p.policyName.startsWith('backenly_') &&
+          commandsCoveredBy(p).length > 0 &&
+          !commandsCoveredBy(p).some((c) => targeted.includes(c)),
+      )
+    : []
+
   try {
     await executeInWorkspaceSchema(projectId, jwtClaimFunctionSql(schemaName))
     await executeInWorkspaceSchema(
       projectId,
       `ALTER TABLE "${schemaName}"."${tableName}" ENABLE ROW LEVEL SECURITY;`,
     )
-    await dropBackenlyPolicies(projectId, schemaName, tableName)
 
-    await execStatements(projectId, `
-      ALTER TABLE "${schemaName}"."${tableName}" FORCE ROW LEVEL SECURITY;
+    // Drop only what this edit replaces. A full replacement targets all four and
+    // therefore still clears everything Backenly owns.
+    await dropBackenlyPolicies(projectId, schemaName, tableName, plan.scoped ? targeted : undefined)
 
-      CREATE POLICY backenly_custom_select ON "${schemaName}"."${tableName}"
-        FOR SELECT USING (${serviceRoleClause(schemaName)} OR (${usingExpr}));
+    const svc = serviceRoleClause(schemaName)
+    const statements: string[] = [
+      `ALTER TABLE "${schemaName}"."${tableName}" FORCE ROW LEVEL SECURITY;`,
+    ]
+    for (const rule of plan.rules) {
+      const clauses: string[] = []
+      if (rule.using) clauses.push(`USING (${svc} OR (${qualifyClaimCalls(rule.using, schemaName)}))`)
+      if (rule.check) clauses.push(`WITH CHECK (${svc} OR (${qualifyClaimCalls(rule.check, schemaName)}))`)
+      // No `TO <role>` clause, deliberately — every template creates PUBLIC-role
+      // policies and relies on the service-role escape for platform access. A
+      // policy scoped `TO authenticated` would leave `anon` and the owning
+      // `backenly_user` with no policy at all under FORCE RLS, i.e. denied.
+      statements.push(
+        `CREATE POLICY backenly_custom_${rule.command} ON "${schemaName}"."${tableName}" ` +
+        `FOR ${rule.command.toUpperCase()} ${clauses.join(' ')};`,
+      )
+    }
+    for (const stmt of statements) await executeInWorkspaceSchema(projectId, stmt)
 
-      CREATE POLICY backenly_custom_insert ON "${schemaName}"."${tableName}"
-        FOR INSERT WITH CHECK (${serviceRoleClause(schemaName)} OR (${withCheckExpr}));
-
-      CREATE POLICY backenly_custom_update ON "${schemaName}"."${tableName}"
-        FOR UPDATE USING (${serviceRoleClause(schemaName)} OR (${usingExpr}))
-                   WITH CHECK (${serviceRoleClause(schemaName)} OR (${withCheckExpr}));
-
-      CREATE POLICY backenly_custom_delete ON "${schemaName}"."${tableName}"
-        FOR DELETE USING (${serviceRoleClause(schemaName)} OR (${usingExpr}));
-    `)
-
-    const post = await readRlsState(projectId, schemaName, tableName)
-    if (post.policyCount === 0) {
+    // ── Read-back: what does the database actually say now? ──────────────────
+    const after = await readLivePolicies(schemaName, tableName)
+    const missing = targeted.filter(
+      (c) => !after.some((p) => p.policyName === `backenly_custom_${c}`),
+    )
+    if (missing.length) {
       await restoreRlsState(projectId, schemaName, tableName, preState)
-      throw new Error('Custom RLS install planted zero policies — table state restored.')
+      throw new Error(
+        `CREATE POLICY reported no error but pg_policies has no policy for ` +
+        `${missing.join(', ').toUpperCase()} — table state restored rather than reporting a change that is not there.`,
+      )
     }
 
-    await prisma.permissionPolicy.upsert({
-      where: { projectId_tableName_policyName: { projectId, tableName, policyName: 'backenly_custom' } },
-      update: { operation: 'ALL', role, using: usingExpr, description: `Custom rule: ${usingExpr}`, enabled: true },
-      create: { projectId, tableName, policyName: 'backenly_custom', operation: 'ALL', role, using: usingExpr, description: `Custom rule: ${usingExpr}` },
-    })
+    await recordCustomPolicyMetadata(projectId, tableName, plan.rules, role, plan.scoped)
 
-    return {
-      success: true,
-      message:
-        `Applied a custom RLS rule to "${tableName}": a row is accessible when ${usingExpr}` +
-        (withCheckExpr !== usingExpr ? `, and writable when ${withCheckExpr}` : '') +
-        `. Service-role keys bypass it.`,
+    // ── The message describes the LIVE set, not the request ──────────────────
+    const lines: string[] = [
+      `Row-level security on "${tableName}" — live policy set, read back from PostgreSQL:`,
+    ]
+    for (const command of RLS_COMMANDS) {
+      const own = after.find((p) => p.policyName === `backenly_custom_${command}`)
+      const other = after.find(
+        (p) => p.policyName.startsWith('backenly_') && commandsCoveredBy(p).includes(command),
+      )
+      const row = own ?? other
+      if (!row) {
+        lines.push(`  • ${command.toUpperCase()} — no policy: this command is DENIED for end-users.`)
+        continue
+      }
+      const changed = targeted.includes(command)
+      const rule = plan.rules.find((r) => r.command === command)
+      const shown = rule
+        ? [rule.using ? `may target: ${rule.using}` : null, rule.check ? `may write: ${rule.check}` : null]
+            .filter(Boolean)
+            .join(' · ')
+        : describeLiveRow(row)
+      lines.push(
+        `  • ${command.toUpperCase()} — ${changed ? 'CHANGED' : 'unchanged'} (${row.policyName}): ${shown}`,
+      )
     }
+    if (plan.scoped) {
+      lines.push(
+        preserved.length
+          ? `Left untouched as requested: ${[...new Set(preserved.flatMap(commandsCoveredBy))]
+              .filter((c) => !targeted.includes(c))
+              .join(', ')
+              .toUpperCase()}.`
+          : `No other Backenly policy existed on this table, so only ${targeted.join('/').toUpperCase()} is governed.`,
+      )
+    }
+    for (const w of plan.warnings) lines.push(`  ⚠ ${w}`)
+    lines.push('Service-role keys bypass all of it.')
+
+    return { success: true, message: lines.join('\n') }
   } catch (err: any) {
     // Same install-or-restore guarantee as every template: a half-applied custom
     // policy must never leave the table FORCE-RLS'd with nothing readable.
@@ -810,6 +1286,78 @@ async function installValidatedCustomPolicy(
         `state. PostgreSQL rejected the policy: ${err.message}. Check that every column your predicate ` +
         `names exists (get_table_schema) and that the types compare — ids are compared as ::text.`,
     }
+  }
+}
+
+/** Render a live policy row for a human, when we did not author it this call. */
+function describeLiveRow(row: LivePolicyRow): string {
+  const parts = [
+    row.using ? `may target: ${row.using}` : null,
+    row.withCheck ? `may write: ${row.withCheck}` : null,
+  ].filter(Boolean)
+  return parts.length ? parts.join(' · ') : 'no predicate recorded'
+}
+
+/**
+ * Record ONE metadata row per command, mirroring the live policy set.
+ *
+ * The old shape was a single `backenly_custom` row with operation 'ALL', which
+ * described a policy set that no longer exists in that form and made a
+ * per-command edit invisible to `list_permissions`. A scoped edit only rewrites
+ * the rows for the commands it changed.
+ */
+async function recordCustomPolicyMetadata(
+  projectId: string,
+  tableName: string,
+  rules: ResolvedCommandRule[],
+  role: string,
+  scoped: boolean,
+): Promise<void> {
+  try {
+    // The pre-per-command row described a set that is no longer installed.
+    await prisma.permissionPolicy.deleteMany({
+      where: { projectId, tableName, policyName: 'backenly_custom' },
+    })
+    if (!scoped) {
+      await prisma.permissionPolicy.deleteMany({
+        where: {
+          projectId,
+          tableName,
+          policyName: { startsWith: 'backenly_' },
+          NOT: { policyName: { in: rules.map((r) => `backenly_custom_${r.command}`) } },
+        },
+      })
+    }
+    for (const rule of rules) {
+      const policyName = `backenly_custom_${rule.command}`
+      const description =
+        `Custom ${rule.command.toUpperCase()} rule` +
+        (rule.using ? ` — may target: ${rule.using}` : '') +
+        (rule.check ? ` — may write: ${rule.check}` : '')
+      await prisma.permissionPolicy.upsert({
+        where: { projectId_tableName_policyName: { projectId, tableName, policyName } },
+        update: {
+          operation: rule.command.toUpperCase(),
+          role,
+          using: rule.using ?? rule.check ?? '',
+          description,
+          enabled: true,
+        },
+        create: {
+          projectId,
+          tableName,
+          policyName,
+          operation: rule.command.toUpperCase(),
+          role,
+          using: rule.using ?? rule.check ?? '',
+          description,
+        },
+      })
+    }
+  } catch (err: any) {
+    // Metadata is a convenience index; the database is the source of truth. A
+    // bookkeeping failure must not turn an applied policy into a reported failure.
+    console.error(`[RLS] Failed to record custom policy metadata for "${tableName}":`, err?.message)
   }
 }
 

@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "outDir": "./dist/cjs",
+    // The ESM build owns the .d.ts files that `exports.types` points at, so the
+    // CJS pass emits JS only. Two identical declaration trees is how a package
+    // ends up with `types` and `require` disagreeing after one of them drifts.
+    "declaration": false,
+    "sourceMap": true
+  }
+}

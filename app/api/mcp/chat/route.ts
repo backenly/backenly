@@ -97,6 +97,14 @@ export async function POST(request: NextRequest) {
           // confirmation, so a destructive request must escalate to the Review
           // Queue rather than dead-end on a conversational "reply to confirm".
           surface: 'mcp',
+          // ── Verification is budgeted, not hoped for ─────────────────────────
+          //
+          // The brain now stops taking new steps while a verification reserve
+          // remains and spends it proving what landed. Before this, the 90s cap
+          // hit mid-verification every time — 4 of 4 RLS calls came back
+          // "reached its time budget during final verification", i.e. the
+          // operations that most needed proof were the only ones without any.
+          deadlineAt: startedAt + MAX_BRAIN_MS,
         },
         (e) => events.push(e),
       ),
@@ -170,10 +178,25 @@ export async function POST(request: NextRequest) {
         `Nothing has changed yet.`
       : result.summary
 
+    // ── A budget stop that VERIFIED is a partial success, not a failure ───────
+    //
+    // The brain reserved time, stopped early, and read the live catalog back. It
+    // knows what landed and has proof. Reporting that as ok:false would send the
+    // agent down the retry path for work that is already in place and confirmed —
+    // the exact mistake the reserve exists to prevent.
+    const budgetPartial = !!result.budgetStopped && (result.applied?.length ?? 0) > 0
+
     const body = {
-      ok: escalated ? true : result.success,
+      ok: escalated || budgetPartial ? true : result.success,
       /** Set only on escalation, so an agent can branch without parsing prose. */
       ...(escalated ? { status: 'awaiting_approval' as const } : {}),
+      ...(budgetPartial
+        ? {
+            partial: true as const,
+            verified: !!result.verified,
+            verifyWith: `read_backend_state — the state in \`summary\` was read back at ${new Date().toISOString()}`,
+          }
+        : {}),
       summary,
       needsUser: result.needsUser,
       approval,
@@ -189,7 +212,7 @@ export async function POST(request: NextRequest) {
       // `code` is the stable slug, `retryable` says whether an identical retry is
       // worth making, and `applied` lists what DID land — the fact that decides
       // whether retrying is safe or duplicates work.
-      ...(escalated || result.success ? {} : {
+      ...(escalated || budgetPartial || result.success ? {} : {
         code: result.failureCode ?? 'BRAIN_FAILED',
         retryable: !!result.retryable,
         ...(result.retryable
@@ -228,20 +251,34 @@ export async function POST(request: NextRequest) {
     // so the agent can verify instead of blindly retrying.
     const NON_MUTATION = /^(read_backend_state|get_|list_|run_test|finish|answer_question|propose_plan|ask_user)/
     const applied: string[] = []
+    // ── `toolsRun` and `iterations` are DERIVED, never defaulted ──────────────
+    //
+    // This branch used to omit both, and the stdio shim filled the holes with
+    // `[]` and `0` — producing `{ applied: ["Securing profiles · custom RLS"],
+    // toolsRun: [], iterations: 0 }`. A body that says a change was applied by
+    // zero tools in zero iterations is unauditable, and it is a fabrication:
+    // nobody measured those zeros, a `??` invented them. The event stream knows
+    // exactly which tools ran, so read it.
+    const toolsRun: string[] = []
     let anyFail = false
     for (const e of events) {
+      if ((e.type === 'tool_done' || e.type === 'tool_fail') && e.tool) toolsRun.push(e.tool)
       if (e.type === 'tool_done' && e.tool && !NON_MUTATION.test(e.tool)) {
         applied.push(e.title || e.tool)
       }
       if (e.type === 'tool_fail') anyFail = true
     }
+    // One iteration per assistant turn that called at least one tool. `tool_start`
+    // is emitted once per dispatch, so a lower bound of "at least as many
+    // iterations as distinct tool batches" is the honest number available here.
+    const iterations = events.filter((e) => e.type === 'phase').length || (toolsRun.length ? 1 : 0)
 
     if (timedOut && applied.length > 0 && !anyFail) {
       const summary =
         `Applied ${applied.length} change(s): ${applied.join('; ')}. ` +
-        `The run then reached its time budget during final verification, so I'm ` +
-        `reporting the applied changes directly — confirm with get_table_schema / ` +
-        `read_backend_state. Do NOT blindly retry; the change is already in place.`
+        `The run then hit the transport's hard wall clock, so these changes are ` +
+        `reported UNVERIFIED — confirm with get_table_schema / read_backend_state. ` +
+        `Do NOT blindly retry; the changes above are already in place.`
       recordMcpCall(
         { ...auth, endpoint: ENDPOINT, startedAt },
         { statusCode: 200, tool: 'backend_chat', mutation: true, summary },
@@ -250,10 +287,16 @@ export async function POST(request: NextRequest) {
         ok: true,
         summary,
         partial: true,
+        // Stated plainly rather than implied by the prose: this path did NOT
+        // verify. The brain's own budget reserve (see deadlineAt) is what makes
+        // reaching here rare; when it happens the agent must know the difference.
+        verified: false,
         // The exact tool that could not be confirmed, so "verify" is a specific
         // instruction rather than an invitation to audit the whole backend —
         // which is what the previous message amounted to (defect #16).
         applied,
+        toolsRun,
+        iterations,
         verifyWith: applied.map((a) => `get_table_schema / read_backend_state — confirm: ${a}`),
         timing: { ms: Date.now() - startedAt },
         events: events.map(condense),
@@ -286,7 +329,10 @@ export async function POST(request: NextRequest) {
         retryable: timedOut && !partial,
         ...(timedOut && !partial ? { retryAfterMs: 5_000 } : {}),
         partial,
+        verified: false,
         ...(partial ? { applied } : {}),
+        toolsRun,
+        iterations,
         partialEvents: events.map(condense),
         timing: { ms: Date.now() - startedAt },
       },

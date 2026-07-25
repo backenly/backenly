@@ -852,6 +852,11 @@ function translateAddConstraint(tableName: string, body: string, stmt: string): 
       notes: [
         `Multi-column UNIQUE (${cols.join(', ')}) applied as a unique index on ${tableName} — ` +
         `that is how PostgreSQL enforces a composite UNIQUE constraint. The guarantee is identical.`,
+        // Named up front rather than discovered in production. The executor
+        // scopes a UNIQUE index on a soft-delete table to live rows, because an
+        // unscoped one collides with rows the app can no longer see.
+        `If ${tableName} carries \`deleted_at\` (every Backenly-created table does), the index is scoped ` +
+        `\`WHERE deleted_at IS NULL\` so it does not collide with soft-deleted rows.`,
       ],
     }]
   }

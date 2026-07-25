@@ -199,6 +199,10 @@ export async function runObserverForProject(projectId: string): Promise<Observer
   const detectors = [
     // ── Existing checks ──────────────────────────────────────────────────────
     detectMissingRls(projectId),
+    // The mirror image of detectMissingRls: RLS on with zero policies denies
+    // everyone. One probe cannot answer both questions — see the note on the
+    // detector.
+    detectRlsDeniesEverything(projectId),
     detectApiDrift(projectId),
     detectBrokenWebhooks(projectId),
     detectOrphanTables(projectId),
@@ -820,6 +824,105 @@ export async function detectMissingRls(projectId: string): Promise<RawFinding[]>
       fix: plan.kind !== 'undecidable'
         ? async () => {
             await applyPermissionPolicy(projectId, { tableName, template: 'auto' })
+          }
+        : undefined,
+    }
+  })
+}
+
+/**
+ * Detect tables where RLS is ON and there are NO policies — default-deny.
+ *
+ * ── Why this is a separate probe from detectMissingRls ──────────────────────
+ *
+ * `detectMissingRls` asks `NOT pc.relrowsecurity`: RLS switched OFF, i.e. the
+ * table is EXPOSED. This asks the opposite question — RLS on, policy count zero
+ * — and the answer is an OUTAGE, not an exposure. PostgreSQL's rule is
+ * default-deny, so a table in this state returns zero rows to every end-user
+ * request and accepts no writes, while the API answers 200 and health stays
+ * green. Nothing errors, so nothing was ever reported.
+ *
+ * That is not hypothetical: a live project carried a FORCE-RLS `connections`
+ * table with zero policies across a failed approval and an entire release. Every
+ * surface said the project was fine, the app's feature silently returned nothing,
+ * and the loop that advertises RLS-gap detection never mentioned the most
+ * detectable gap available to it.
+ *
+ * Severity is critical: unlike a missing index this is a hard functional break,
+ * and unlike a missing policy it is not a security trade-off — there is no
+ * reading under which "denies everyone" is the intended configuration of a table
+ * a client is meant to reach.
+ */
+export async function detectRlsDeniesEverything(projectId: string): Promise<RawFinding[]> {
+  const schemaName = `workspace_${projectId}`
+
+  const rows = await queryWorkspaceSchema(
+    projectId,
+    `
+    SELECT t.tablename,
+           pc.relforcerowsecurity AS forced
+    FROM pg_tables t
+    JOIN pg_class pc
+      ON pc.relname = t.tablename
+      AND pc.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = $1)
+    WHERE t.schemaname = $1
+      AND pc.relrowsecurity
+      AND ${notReservedTableSql('t.tablename')}
+      AND NOT EXISTS (
+        SELECT 1 FROM pg_policies p
+        WHERE p.schemaname = $1 AND p.tablename = t.tablename
+      )
+      -- Reachability, guarded exactly as detectMissingRls guards it: a table no
+      -- client role can reach is not serving anyone, so denying them is moot.
+      AND (
+        NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('anon', 'authenticated'))
+        OR has_table_privilege('anon', pc.oid, 'SELECT')
+        OR has_table_privilege('authenticated', pc.oid, 'SELECT')
+      )
+    ORDER BY t.tablename
+    `,
+    schemaName,
+  ).catch(probeQueryFailed('detectRlsDeniesEverything'))
+
+  const hits: Array<{ tablename: string; forced: boolean }> = (rows?.rows ?? rows ?? []) as any
+  if (!hits.length) return []
+
+  const catalog = await loadOwnershipCatalog(projectId)
+
+  return hits.map(({ tablename: tableName, forced }) => {
+    const plan = inferRlsPlanFromCatalog(catalog, tableName)
+    return {
+      type: 'rls_denies_everything' as FindingType,
+      severity: 'critical' as FindingSeverity,
+      details: {
+        tableName,
+        schemaName,
+        reason:
+          `Row-level security is enabled${forced ? ' (FORCED)' : ''} on "${tableName}" and the table has ZERO ` +
+          `policies. PostgreSQL denies by default, so every end-user read returns no rows and every write is ` +
+          `rejected — the table is dead to your app, not protected. ` +
+          (plan.kind === 'undecidable'
+            ? `Backenly cannot derive the right policy here (${plan.reason}), so a human has to say what the ` +
+              `rule is — or disable RLS on the table if it is meant to be open.`
+            : `The schema implies "${plan.template}" (${plan.basis}): ${plan.reason}`),
+        rlsTemplate: plan.template,
+        rlsBasis: plan.basis,
+        rlsRationale: plan.reason,
+        forceRowSecurity: !!forced,
+      },
+      // Same rule as missing_rls: repair only when a policy is DERIVABLE.
+      // Installing a wrong policy here would replace an outage with a different
+      // outage, so undecidable ownership goes to the human who knows the intent.
+      autoFixable: plan.kind !== 'undecidable',
+      fix: plan.kind !== 'undecidable'
+        ? async () => {
+            const result = await applyPermissionPolicy(projectId, { tableName, template: 'auto' })
+            // Never report a repair that did not land — an unfixed default-deny
+            // table that reads as "auto_fixed" is worse than an open finding,
+            // because the queue stops showing it.
+            if (!result.success) {
+              throw new Error(`Could not install a policy on "${tableName}": ${result.message}`)
+            }
           }
         : undefined,
     }

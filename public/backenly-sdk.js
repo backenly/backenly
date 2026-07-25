@@ -954,11 +954,50 @@ Fix it: ${this.fixUrl}` : ""
       }
       return void 0;
     }
-    _sseUrl(filter) {
+    /**
+     * ── Why this asks the server for a ticket first ───────────────────────────
+     *
+     * `EventSource` cannot send headers, so the credential must go in the URL. It
+     * used to be the project API key — and a URL is the worst place for a
+     * long-lived credential: nginx access logs, every proxy in the path, browser
+     * history, and `Referer` on outbound links all keep a copy. Clients that
+     * hand-rolled the connection were putting the end-user's session JWT there too.
+     *
+     * So the SDK exchanges its headers for a ticket that lasts 30 seconds and one
+     * connection. What leaks into a log is already spent. The `?apiKey=` form is
+     * kept as a fallback for a server that predates the ticket endpoint — never as
+     * the first choice.
+     */
+    async _mintTicket() {
+      const projectId = this.client.getProjectId();
+      const base = this.client.getApiUrl();
+      const apiKey = this.client.getApiKey();
+      if (!apiKey) return null;
+      try {
+        const res = await fetch(new URL(`/api/v1/${projectId}/realtime/ticket`, base).toString(), {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+            ...this.client.getUserToken() ? { "X-User-Token": this.client.getUserToken() } : {}
+          }
+        });
+        if (!res.ok) return null;
+        const body = await res.json();
+        return typeof (body == null ? void 0 : body.ticket) === "string" && body.ticket ? body.ticket : null;
+      } catch {
+        return null;
+      }
+    }
+    _sseUrl(filter, ticket) {
       const projectId = this.client.getProjectId();
       const base = this.client.getApiUrl();
       const url = new URL(`/api/v1/${projectId}/realtime`, base);
       if (filter) url.searchParams.set("table", filter);
+      if (ticket) {
+        url.searchParams.set("ticket", ticket);
+        return url.toString();
+      }
       const apiKey = this.client.getApiKey();
       if (apiKey) url.searchParams.set("apiKey", apiKey);
       return url.toString();
@@ -990,7 +1029,22 @@ Fix it: ${this.fixUrl}` : ""
         this.es.close();
       }
       this.currentFilter = neededFilter;
-      this.es = new EventSource(this._sseUrl(neededFilter));
+      void this._mintTicket().then(
+        (ticket) => {
+          if (this.fatal || !this._hasSubscribers) return;
+          if (this.currentFilter !== neededFilter) return;
+          this._openStream(neededFilter, ticket);
+        },
+        () => {
+          if (this.fatal || !this._hasSubscribers) return;
+          if (this.currentFilter !== neededFilter) return;
+          this._openStream(neededFilter, null);
+        }
+      );
+    }
+    _openStream(neededFilter, ticket) {
+      if (this.es && this.es.readyState !== EventSource.CLOSED) this.es.close();
+      this.es = new EventSource(this._sseUrl(neededFilter, ticket));
       this.es.onmessage = (msg) => {
         try {
           this._dispatch(JSON.parse(msg.data));
@@ -1402,6 +1456,32 @@ Fix it: ${this.fixUrl}` : ""
       return this.apiUrl;
     }
     // ── Internal HTTP ─────────────────────────────────────────────────────────
+    /**
+     * The same authenticated fetch as `request`, returning the raw `Response`.
+     *
+     * `request` parses JSON and throws on a non-2xx, which discards two things a
+     * PostgREST caller needs: the `Content-Range` header (the exact row count) and
+     * the structured error body (`{ message, code, details, hint }` — the shape
+     * supabase-js callers branch on). The compat shim needs both, so it needs the
+     * response object, not a parsed body.
+     */
+    async rawRequest(endpoint, options) {
+      if (!this.apiKey && !(options == null ? void 0 : options.skipAuth)) {
+        await this.ensureApiKey();
+      }
+      const headers = { "Content-Type": "application/json" };
+      if (this.apiKey && !(options == null ? void 0 : options.skipAuth)) headers["Authorization"] = `Bearer ${this.apiKey}`;
+      if (this.userToken && !(options == null ? void 0 : options.skipAuth)) headers["X-User-Token"] = this.userToken;
+      if (options == null ? void 0 : options.headers) {
+        Object.entries(options.headers).forEach(
+          ([key, value]) => {
+            headers[key] = value;
+          }
+        );
+      }
+      const { skipAuth: _skipAuth, ...fetchOptions } = options != null ? options : {};
+      return fetch(`${this.apiUrl}${endpoint}`, { ...fetchOptions, headers });
+    }
     async request(endpoint, options) {
       if (!this.apiKey && !(options == null ? void 0 : options.skipAuth)) {
         await this.ensureApiKey();
@@ -1456,29 +1536,53 @@ Fix it: ${this.fixUrl}` : ""
     const m = e instanceof Error ? e.message : String(e);
     return { message: m, code: (_a = e == null ? void 0 : e.code) != null ? _a : "BACKENLY_ERROR", details: null, hint: null };
   }
+  function operand(value) {
+    if (value === null) return "null";
+    if (typeof value === "boolean" || typeof value === "number") return String(value);
+    const s = String(value);
+    return /[,.()"\s]/.test(s) ? `"${s.replace(/(["\\])/g, "\\$1")}"` : s;
+  }
+  function listOperand(values) {
+    return `(${values.map((v) => operand(v)).join(",")})`;
+  }
+  function arrayLiteral(values) {
+    return `{${values.map((v) => typeof v === "string" && /[,{}"\s]/.test(v) ? `"${v.replace(/(["\\])/g, "\\$1")}"` : String(v)).join(",")}}`;
+  }
   var CompatQueryBuilder = class {
     constructor(backend, tableName) {
       this.backend = backend;
       this.tableName = tableName;
       this.mode = "select";
-      this.where = {};
+      this.filters = [];
       this.payload = null;
-      this.orderBy = null;
+      this.selectColumns = "*";
+      this.orderParts = [];
       this.limitN = null;
       this.offsetN = null;
       this.wantSingle = null;
-      this.wantCount = false;
+      this.countMode = null;
       this.returnRows = true;
-      this.unsupported = null;
+      this.upsertPrefer = [];
+      this.onConflict = null;
     }
     // ── verbs ────────────────────────────────────────────────────────────────────
+    /**
+     * Column projection and embedded resources, passed through verbatim.
+     *
+     * `select('*, author(*)')` used to be REFUSED with "embeds are not supported by
+     * the compat shim". They are supported — by Postgres, through PostgREST, which
+     * is what serves this request. Refusing the single most-used PostgREST feature
+     * blocked exactly the migration this file exists to enable.
+     *
+     * Embedding another table is not a security hole here: `anon` and
+     * `authenticated` have been REVOKED on `users` and every `_`-prefixed table, so
+     * `select=*,users(*)` fails on a missing privilege however it is spelled. The
+     * boundary is a grant, never a parser.
+     */
     select(columns, opts) {
-      if (columns && columns.trim() !== "*" && columns.trim() !== "") {
-        if (/[(,]/.test(columns) && columns.includes("(")) {
-          this.unsupported = `Foreign-table embeds in select("${columns}") are not supported by the compat shim. Use the Backenly SDK's include option instead: backend.${this.tableName}.list({ include: [...] }).`;
-        }
-      }
-      if (opts == null ? void 0 : opts.count) this.wantCount = true;
+      const c = columns == null ? void 0 : columns.trim();
+      if (c) this.selectColumns = c;
+      if (opts == null ? void 0 : opts.count) this.countMode = opts.count;
       if (opts == null ? void 0 : opts.head) this.returnRows = false;
       return this;
     }
@@ -1487,9 +1591,22 @@ Fix it: ${this.fixUrl}` : ""
       this.payload = values;
       return this;
     }
-    upsert(values, _opts) {
+    /**
+     * A real upsert. `onConflict` names the conflict target and
+     * `ignoreDuplicates` chooses between merge and ignore, exactly as supabase-js
+     * defines them.
+     *
+     * The previous implementation took `_opts` and threw it away — so a caller who
+     * said "merge on email" got a plain insert that failed on the unique
+     * constraint, and nothing in the response mentioned that the instruction had
+     * been dropped. Accepting an argument and ignoring it is worse than refusing it.
+     */
+    upsert(values, opts) {
       this.mode = "insert";
       this.payload = values;
+      this.upsertPrefer.push((opts == null ? void 0 : opts.ignoreDuplicates) ? "resolution=ignore-duplicates" : "resolution=merge-duplicates");
+      if (opts == null ? void 0 : opts.onConflict) this.onConflict = opts.onConflict;
+      if (opts == null ? void 0 : opts.count) this.countMode = opts.count;
       return this;
     }
     update(values) {
@@ -1501,55 +1618,130 @@ Fix it: ${this.fixUrl}` : ""
       this.mode = "delete";
       return this;
     }
-    // ── filters (map to Backenly where-operators) ───────────────────────────────
+    // ── filters → PostgREST operators, one to one ───────────────────────────────
     eq(column, value) {
-      this.where[column] = value;
-      return this;
+      return this.push(column, `eq.${operand(value)}`);
     }
     neq(column, value) {
-      this.mergeOp(column, { not: value });
-      return this;
+      return this.push(column, `neq.${operand(value)}`);
     }
     gt(column, value) {
-      this.mergeOp(column, { gt: value });
-      return this;
+      return this.push(column, `gt.${operand(value)}`);
     }
     gte(column, value) {
-      this.mergeOp(column, { gte: value });
-      return this;
+      return this.push(column, `gte.${operand(value)}`);
     }
     lt(column, value) {
-      this.mergeOp(column, { lt: value });
-      return this;
+      return this.push(column, `lt.${operand(value)}`);
     }
     lte(column, value) {
-      this.mergeOp(column, { lte: value });
-      return this;
+      return this.push(column, `lte.${operand(value)}`);
     }
     in(column, values) {
-      this.mergeOp(column, { in: values });
-      return this;
+      return this.push(column, `in.${listOperand(values)}`);
     }
-    /** like/ilike → Backenly `contains` (ILIKE %…%). Leading/trailing % stripped. */
     like(column, pattern) {
-      return this.ilike(column, pattern);
+      return this.push(column, `like.${operand(pattern)}`);
     }
     ilike(column, pattern) {
-      this.mergeOp(column, { contains: pattern.replace(/^%|%$/g, "") });
-      return this;
+      return this.push(column, `ilike.${operand(pattern)}`);
+    }
+    likeAllOf(column, patterns) {
+      return this.push(column, `like(all).${listOperand(patterns)}`);
+    }
+    likeAnyOf(column, patterns) {
+      return this.push(column, `like(any).${listOperand(patterns)}`);
+    }
+    ilikeAllOf(column, patterns) {
+      return this.push(column, `ilike(all).${listOperand(patterns)}`);
+    }
+    ilikeAnyOf(column, patterns) {
+      return this.push(column, `ilike(any).${listOperand(patterns)}`);
     }
     is(column, value) {
-      if (value === null) this.where[column] = null;
-      else this.where[column] = value;
+      return this.push(column, `is.${value === null ? "null" : String(value)}`);
+    }
+    /** Array / range / jsonb containment — `@>`. */
+    contains(column, value) {
+      return this.push(column, `cs.${containmentOperand(value)}`);
+    }
+    /** Contained by — `<@`. */
+    containedBy(column, value) {
+      return this.push(column, `cd.${containmentOperand(value)}`);
+    }
+    /**
+     * Array / range overlap — `&&`.
+     *
+     * Previously "not implemented", which cost the array operators that are the
+     * whole reason to choose an array column over jsonb.
+     */
+    overlaps(column, value) {
+      return this.push(column, `ov.${containmentOperand(value)}`);
+    }
+    rangeGt(column, range) {
+      return this.push(column, `sr.${range}`);
+    }
+    rangeGte(column, range) {
+      return this.push(column, `nxl.${range}`);
+    }
+    rangeLt(column, range) {
+      return this.push(column, `sl.${range}`);
+    }
+    rangeLte(column, range) {
+      return this.push(column, `nxr.${range}`);
+    }
+    rangeAdjacent(column, range) {
+      return this.push(column, `adj.${range}`);
+    }
+    textSearch(column, query, opts) {
+      const op = (opts == null ? void 0 : opts.type) === "plain" ? "plfts" : (opts == null ? void 0 : opts.type) === "phrase" ? "phfts" : (opts == null ? void 0 : opts.type) === "websearch" ? "wfts" : "fts";
+      return this.push(column, `${op}${(opts == null ? void 0 : opts.config) ? `(${opts.config})` : ""}.${operand(query)}`);
+    }
+    /** Raw escape hatch — `filter('col', 'gte', 5)`, same as supabase-js. */
+    filter(column, operator, value) {
+      return this.push(column, `${operator}.${operand(value)}`);
+    }
+    /** Negation — `.not('status', 'eq', 'draft')`. */
+    not(column, operator, value) {
+      return this.push(column, `not.${operator}.${operand(value)}`);
+    }
+    /** `.match({ a: 1, b: 2 })` → two equality filters. */
+    match(query) {
+      for (const [k, v] of Object.entries(query)) this.eq(k, v);
       return this;
     }
-    or(_filters) {
-      this.unsupported = "The .or() filter string is not supported by the compat shim (Backenly composes AND filters). Split the query, or use the Backenly SDK directly.";
-      return this;
+    /**
+     * Disjunction. `or('is_public.eq.true,author_id.eq.7')`.
+     *
+     * This used to hard-refuse with "Backenly composes AND filters" — a statement
+     * about the old translation layer, not about the database. PostgREST's `or=(…)`
+     * has always been available on this data plane, and a Supabase frontend of any
+     * size uses it.
+     *
+     * `referencedTable` scopes the disjunction to an embedded resource, matching
+     * supabase-js's `{ referencedTable }` / legacy `{ foreignTable }` option.
+     */
+    or(filters, opts) {
+      var _a;
+      const scope = (_a = opts == null ? void 0 : opts.referencedTable) != null ? _a : opts == null ? void 0 : opts.foreignTable;
+      return this.push(
+        scope ? `${scope}.or` : "or",
+        `(${filters})`,
+        /* raw */
+        true
+      );
+    }
+    /** Conjunction, for nesting inside `or(...)` — `and=(a.eq.1,b.eq.2)`. */
+    and(filters, opts) {
+      return this.push((opts == null ? void 0 : opts.referencedTable) ? `${opts.referencedTable}.and` : "and", `(${filters})`, true);
     }
     // ── modifiers ────────────────────────────────────────────────────────────────
     order(column, opts) {
-      this.orderBy = { column, ascending: (opts == null ? void 0 : opts.ascending) !== false };
+      var _a;
+      const dir = (opts == null ? void 0 : opts.ascending) === false ? "desc" : "asc";
+      const nulls = (opts == null ? void 0 : opts.nullsFirst) === void 0 ? "" : opts.nullsFirst ? ".nullsfirst" : ".nullslast";
+      const scope = (_a = opts == null ? void 0 : opts.referencedTable) != null ? _a : opts == null ? void 0 : opts.foreignTable;
+      this.orderParts.push(`${scope ? `${scope}.` : ""}${column}.${dir}${nulls}`);
       return this;
     }
     limit(n) {
@@ -1569,80 +1761,138 @@ Fix it: ${this.fixUrl}` : ""
       this.wantSingle = "maybe";
       return this;
     }
+    /** No-op, kept for source compatibility: every response here is already JSON. */
+    csv() {
+      return this;
+    }
     // ── execution ────────────────────────────────────────────────────────────────
     then(onfulfilled, onrejected) {
       return this.execute().then(onfulfilled != null ? onfulfilled : void 0, onrejected != null ? onrejected : void 0);
     }
-    mergeOp(column, op) {
-      const existing = this.where[column];
-      if (existing && typeof existing === "object" && !Array.isArray(existing)) {
-        this.where[column] = { ...existing, ...op };
-      } else {
-        this.where[column] = op;
+    push(key, value, raw = false) {
+      this.filters.push([key, raw ? value : value]);
+      return this;
+    }
+    /** Assemble the PostgREST query string in the order the chain was written. */
+    queryString() {
+      const parts = [];
+      if (this.mode === "select" || this.returnRows) {
+        parts.push(`select=${encodeURIComponent(this.selectColumns)}`);
       }
+      for (const [k, v] of this.filters) {
+        parts.push(`${encodeURIComponent(k)}=${encodeURIComponent(v)}`);
+      }
+      if (this.orderParts.length) parts.push(`order=${encodeURIComponent(this.orderParts.join(","))}`);
+      const effectiveLimit = this.wantSingle ? 2 : this.limitN;
+      if (effectiveLimit !== null && effectiveLimit !== void 0) parts.push(`limit=${effectiveLimit}`);
+      if (this.offsetN !== null) parts.push(`offset=${this.offsetN}`);
+      if (this.onConflict) parts.push(`on_conflict=${encodeURIComponent(this.onConflict)}`);
+      return parts.join("&");
+    }
+    preferHeader() {
+      const prefer = [...this.upsertPrefer];
+      if (this.countMode) prefer.push(`count=${this.countMode}`);
+      if (this.mode !== "select") {
+        prefer.push(this.returnRows ? "return=representation" : "return=minimal");
+      }
+      return prefer.length ? prefer.join(",") : null;
     }
     async execute() {
-      var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j;
-      if (this.unsupported) {
-        return { data: null, error: err(this.unsupported, "UNSUPPORTED"), count: null, status: 400, statusText: "Bad Request" };
-      }
+      var _a, _b, _c, _d;
       const projectId = this.backend.getProjectId();
+      const method = this.mode === "select" ? "GET" : this.mode === "insert" ? "POST" : this.mode === "update" ? "PATCH" : "DELETE";
+      if ((this.mode === "update" || this.mode === "delete") && this.filters.length === 0) {
+        return {
+          data: null,
+          error: err(
+            `${this.mode}() requires at least one filter (e.g. .eq("id", \u2026)) \u2014 unfiltered ${this.mode}s are refused`,
+            "NO_FILTER"
+          ),
+          count: null,
+          status: 400,
+          statusText: "Bad Request"
+        };
+      }
+      const qs = this.queryString();
+      const path = `/api/v2/${projectId}/${encodeURIComponent(this.tableName)}${qs ? `?${qs}` : ""}`;
+      const prefer = this.preferHeader();
       try {
-        if (this.mode === "select") {
-          const body = {
-            table: this.tableName,
-            where: Object.keys(this.where).length ? this.where : void 0,
-            orderBy: this.orderBy ? { [this.orderBy.column]: this.orderBy.ascending ? "asc" : "desc" } : void 0,
-            limit: this.wantSingle ? 2 : (_a = this.limitN) != null ? _a : void 0,
-            offset: (_b = this.offsetN) != null ? _b : void 0
-          };
-          const res2 = await this.backend.request(`/api/v1/${projectId}/database/query`, {
-            method: "POST",
-            body: JSON.stringify(body)
-          });
-          const rows = Array.isArray(res2) ? res2 : Array.isArray(res2 == null ? void 0 : res2.data) ? res2.data : Array.isArray((_c = res2 == null ? void 0 : res2.data) == null ? void 0 : _c.data) ? res2.data.data : [];
-          const count = (_g = (_f = (_d = res2 == null ? void 0 : res2.data) == null ? void 0 : _d.count) != null ? _f : (_e = res2 == null ? void 0 : res2.meta) == null ? void 0 : _e.total) != null ? _g : null;
-          if (this.wantSingle) {
-            if (rows.length === 0) {
-              return this.wantSingle === "strict" ? { data: null, error: err("JSON object requested, multiple (or no) rows returned", "PGRST116", "single() found 0 rows"), count, status: 406, statusText: "Not Acceptable" } : { data: null, error: null, count, status: 200, statusText: "OK" };
-            }
-            return { data: rows[0], error: null, count, status: 200, statusText: "OK" };
-          }
-          return { data: this.returnRows ? rows : null, error: null, count: this.wantCount ? count : null, status: 200, statusText: "OK" };
-        }
-        if (this.mode === "insert") {
-          const res2 = await this.backend.request(`/api/v1/${projectId}/database/insert`, {
-            method: "POST",
-            body: JSON.stringify({ table: this.tableName, data: this.payload })
-          });
-          const data2 = (_h = res2 == null ? void 0 : res2.data) != null ? _h : res2;
-          return { data: data2, error: null, count: null, status: 201, statusText: "Created" };
-        }
-        if (this.mode === "update") {
-          if (Object.keys(this.where).length === 0) {
-            return { data: null, error: err('update() requires at least one filter (e.g. .eq("id", \u2026)) \u2014 unfiltered updates are refused', "NO_FILTER"), count: null, status: 400, statusText: "Bad Request" };
-          }
-          const res2 = await this.backend.request(`/api/v1/${projectId}/database/update`, {
-            method: "POST",
-            body: JSON.stringify({ table: this.tableName, data: this.payload, where: this.where })
-          });
-          const data2 = (_i = res2 == null ? void 0 : res2.data) != null ? _i : res2;
-          return { data: data2, error: null, count: null, status: 200, statusText: "OK" };
-        }
-        if (Object.keys(this.where).length === 0) {
-          return { data: null, error: err('delete() requires at least one filter (e.g. .eq("id", \u2026)) \u2014 unfiltered deletes are refused', "NO_FILTER"), count: null, status: 400, statusText: "Bad Request" };
-        }
-        const res = await this.backend.request(`/api/v1/${projectId}/database/delete`, {
-          method: "POST",
-          body: JSON.stringify({ table: this.tableName, where: this.where })
+        const res = await this.backend.rawRequest(path, {
+          method,
+          ...prefer ? { headers: { Prefer: prefer } } : {},
+          ...this.mode === "insert" || this.mode === "update" ? { body: JSON.stringify(this.payload) } : {}
         });
-        const data = (_j = res == null ? void 0 : res.data) != null ? _j : null;
-        return { data, error: null, count: null, status: 200, statusText: "OK" };
+        const count = parseContentRange(res.headers.get("content-range"));
+        const text = await res.text();
+        const parsed = text ? safeJson(text) : null;
+        if (!res.ok) {
+          const body = parsed != null ? parsed : {};
+          return {
+            data: null,
+            error: {
+              message: (_a = body.message) != null ? _a : `Request failed with ${res.status}`,
+              code: (_b = body.code) != null ? _b : String(res.status),
+              details: (_c = body.details) != null ? _c : null,
+              hint: (_d = body.hint) != null ? _d : null
+            },
+            count,
+            status: res.status,
+            statusText: res.statusText
+          };
+        }
+        const rows = Array.isArray(parsed) ? parsed : parsed ? [parsed] : [];
+        if (this.wantSingle) {
+          if (rows.length === 0) {
+            return this.wantSingle === "strict" ? {
+              data: null,
+              error: err("JSON object requested, multiple (or no) rows returned", "PGRST116", "single() found 0 rows"),
+              count,
+              status: 406,
+              statusText: "Not Acceptable"
+            } : { data: null, error: null, count, status: 200, statusText: "OK" };
+          }
+          if (rows.length > 1) {
+            return {
+              data: null,
+              error: err("JSON object requested, multiple (or no) rows returned", "PGRST116", "single() found more than one row"),
+              count,
+              status: 406,
+              statusText: "Not Acceptable"
+            };
+          }
+          return { data: rows[0], error: null, count, status: res.status, statusText: res.statusText };
+        }
+        return {
+          data: this.returnRows ? rows : null,
+          error: null,
+          count: this.countMode ? count : null,
+          status: res.status,
+          statusText: res.statusText
+        };
       } catch (e) {
         return { data: null, error: fromException(e), count: null, status: 400, statusText: "Bad Request" };
       }
     }
   };
+  function containmentOperand(value) {
+    if (typeof value === "string") return value;
+    if (Array.isArray(value)) return arrayLiteral(value);
+    return JSON.stringify(value);
+  }
+  function parseContentRange(header) {
+    if (!header) return null;
+    const total = header.split("/")[1];
+    if (!total || total === "*") return null;
+    const n = Number(total);
+    return Number.isFinite(n) ? n : null;
+  }
+  function safeJson(text) {
+    try {
+      return JSON.parse(text);
+    } catch {
+      return null;
+    }
+  }
   var CompatAuth = class {
     constructor(backend) {
       this.backend = backend;

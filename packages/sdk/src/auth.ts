@@ -1,6 +1,6 @@
-import type { BackenlyClient } from './client'
-import type { AuthResponse, User } from './types'
-import { normalizeError } from './errors'
+import type { BackenlyClient } from './client.js'
+import type { AuthResponse, User } from './types.js'
+import { normalizeError } from './errors.js'
 
 export class AuthModule {
   constructor(private client: BackenlyClient) {}

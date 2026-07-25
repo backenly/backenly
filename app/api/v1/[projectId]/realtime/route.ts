@@ -21,9 +21,10 @@
  * URL:  GET /api/v1/:projectId/realtime          (all tables)
  */
 
-import { NextRequest } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 import { v1ApiMiddleware } from '@/lib/api/v1/middleware'
 import { listenerHub } from '@/lib/realtime/listener-hub'
+import { redeemRealtimeTicketParam } from '@/lib/realtime/ticket-auth'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -32,10 +33,29 @@ export async function GET(
   request: NextRequest,
   { params }: { params: { projectId: string } }
 ) {
-  // Authenticate via API key (supports ?apiKey= query param since EventSource
-  // cannot send Authorization headers in the browser).
-  const middleware = await v1ApiMiddleware(request, params)
-  if (middleware.response) return middleware.response
+  // ── Preferred: a short-lived single-use ticket ─────────────────────────────
+  //
+  // `EventSource` cannot send headers, so the credential has to be in the URL.
+  // A ticket is the credential designed for that: 30 seconds, one connection,
+  // signed with the project's own secret. `?apiKey=` still works for existing
+  // clients — see the deprecation note below — but it puts a long-lived
+  // credential into every access log it passes through.
+  const ticket = request.nextUrl.searchParams.get('ticket')
+  if (ticket) {
+    const redeemed = await redeemRealtimeTicketParam(params.projectId, ticket)
+    // `=== false` rather than `!redeemed.ok`: this project builds with
+    // `strict: false`, so discriminated-union narrowing on a negated boolean
+    // literal does not kick in. An explicit comparison narrows regardless.
+    if (redeemed.ok === false) {
+      return NextResponse.json({ error: redeemed.message, code: redeemed.code }, { status: 401 })
+    }
+  } else {
+    // Authenticate via API key (supports ?apiKey= query param since EventSource
+    // cannot send Authorization headers in the browser). DEPRECATED for browser
+    // clients: prefer POST /realtime/ticket.
+    const middleware = await v1ApiMiddleware(request, params)
+    if (middleware.response) return middleware.response
+  }
 
   const { projectId } = params
   const tableFilter = request.nextUrl.searchParams.get('table')

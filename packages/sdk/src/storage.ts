@@ -1,6 +1,6 @@
-import type { BackenlyClient } from './client'
-import type { StorageUploadResponse } from './types'
-import { normalizeError } from './errors'
+import type { BackenlyClient } from './client.js'
+import type { StorageUploadResponse } from './types.js'
+import { normalizeError } from './errors.js'
 
 export interface StorageUploadOptions {
   /** Bucket name to upload into. Defaults to 'default'. */

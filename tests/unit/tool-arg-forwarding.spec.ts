@@ -210,4 +210,96 @@ describe('the specific fields whose loss was reported', () => {
     expect(params.template).toBe('party_rows')
     expect(params.partyColumns).toEqual(['requester_id', 'addressee_id'])
   })
+
+  // ── P0-1/P0-2: per-command rules are the whole request, not a decoration ────
+  //
+  // If `commands` were dropped here the executor would see only `using` — which
+  // is exactly the shape that broadcast one predicate onto all four commands and
+  // produced a DELETE policy any authenticated caller satisfied. This is the same
+  // bug class as #4/#5/#2 above: declared, accepted, silently discarded.
+  it('P0-1 add_rls forwards a full per-command rule set intact', () => {
+    const commands = {
+      select: "(is_public AND NOT is_flagged) OR user_id::text = backenly_jwt_claim('sub')",
+      insert: "user_id::text = backenly_jwt_claim('sub')",
+      update: "user_id::text = backenly_jwt_claim('sub')",
+      delete: "user_id::text = backenly_jwt_claim('sub')",
+    }
+    const params = TOOL_TO_ACTION.add_rls({
+      tableName: 'profiles',
+      policy: 'custom',
+      commands,
+    }).params as Record<string, unknown>
+    expect(params.template).toBe('custom')
+    expect(params.commands).toEqual(commands)
+  })
+
+  // A SCOPED edit is defined by which commands are ABSENT. Forwarding a
+  // helpfully-completed four-command set would silently rewrite the two the
+  // caller said to leave alone — the P0-2 failure exactly.
+  it('P0-2 add_rls forwards a PARTIAL command set without completing it', () => {
+    const params = TOOL_TO_ACTION.add_rls({
+      tableName: 'profiles',
+      policy: 'custom',
+      commands: { update: 'owner', delete: 'owner' },
+    }).params as Record<string, unknown>
+    expect(Object.keys(params.commands as object).sort()).toEqual(['delete', 'update'])
+  })
+
+  it('P0-1 add_rls omits `commands` entirely when it was not given', () => {
+    const params = TOOL_TO_ACTION.add_rls({
+      tableName: 'profiles',
+      policy: 'custom',
+      using: 'owner',
+    }).params as Record<string, unknown>
+    expect('commands' in params).toBe(false)
+  })
+
+  // A non-object `commands` must not reach the resolver as one.
+  it('P0-1 add_rls ignores a malformed commands value rather than forwarding it', () => {
+    for (const bad of [['select'], 'select', 42, null]) {
+      const params = TOOL_TO_ACTION.add_rls({
+        tableName: 'profiles',
+        policy: 'custom',
+        using: 'owner',
+        commands: bad,
+      }).params as Record<string, unknown>
+      expect('commands' in params).toBe(false)
+    }
+  })
+})
+
+describe('sync_column: the derived-column primitive forwards its whole shape', () => {
+  // P2-15. Every field is load-bearing: drop `via` and the trigger links nothing,
+  // drop `sourceColumn` and a "latest" aggregate has no column to aggregate.
+  it('carries every field through to SYNC_COLUMN', () => {
+    const action = TOOL_TO_ACTION.sync_column({
+      sourceTable: 'messages',
+      targetTable: 'conversations',
+      targetColumn: 'last_message_at',
+      via: 'conversation_id',
+      compute: 'latest',
+      sourceColumn: 'created_at',
+    })
+    expect(action.action).toBe('SYNC_COLUMN')
+    expect(action.params).toEqual({
+      sourceTable: 'messages',
+      targetTable: 'conversations',
+      targetColumn: 'last_message_at',
+      via: 'conversation_id',
+      compute: 'latest',
+      sourceColumn: 'created_at',
+    })
+  })
+
+  it('omits sourceColumn for a count, which aggregates rows rather than a value', () => {
+    const params = TOOL_TO_ACTION.sync_column({
+      sourceTable: 'comments',
+      targetTable: 'posts',
+      targetColumn: 'comment_count',
+      via: 'post_id',
+      compute: 'count',
+    }).params as Record<string, unknown>
+    expect('sourceColumn' in params).toBe(false)
+    expect(params.compute).toBe('count')
+  })
 })

@@ -1,7 +1,7 @@
-import type { BackenlyClient } from './client'
-import type { QueryResponse, InsertResponse, UpdateResponse, DeleteResponse, OrderByOptions, QueryFilter, CountResponse } from './types'
-import { normalizeError } from './errors'
-import type { RealtimeCallback, Unsubscribe } from './realtime'
+import type { BackenlyClient } from './client.js'
+import type { QueryResponse, InsertResponse, UpdateResponse, DeleteResponse, OrderByOptions, QueryFilter, CountResponse } from './types.js'
+import { normalizeError } from './errors.js'
+import type { RealtimeCallback, Unsubscribe } from './realtime.js'
 
 /**
  * Relations to attach to returned rows. Accepts a single name, a list, or the

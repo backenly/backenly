@@ -133,11 +133,15 @@ Your data is portable by design. Backenly's moat is autonomy and governance, not
 One-line install for React, Next.js, Vue, Svelte, and vanilla JS. The dashboard generates a ready-to-paste config block and shows live snippets for the most common flows (sign-up, list rows, subscribe to a table, upload a file).
 
 ### SDK
-The `BackenlyClient` JavaScript/TypeScript SDK (published at `backenly.com/backenly-sdk.js` and `backenly-sdk.esm.js`) wraps the entire runtime:
+Install from npm. The package is `@backenly/sdk` and the factory is `createClient` — one name, one install path, ESM + CommonJS + TypeScript declarations, zero dependencies.
 
-```js
-import { BackenlyClient } from "backenly"
-const backend = new BackenlyClient({ projectId, apiKey })
+```bash
+npm install @backenly/sdk
+```
+
+```ts
+import { createClient } from "@backenly/sdk"
+const backend = createClient({ projectId, apiKey })
 
 await backend.auth.signUp({ email, password })
 await backend.posts.create({ title: "Hello" })
@@ -147,6 +151,71 @@ backend.posts.subscribe(({ event, row }) => { ... })
 ```
 
 QueryBuilder operators include `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `isNull`, `ilike`, `search`, `count`, `sum`, `avg`. Realtime, presence, and broadcast are first-class.
+
+A supabase-js compatibility entry point lives at `@backenly/sdk/supabase` — see "Migrating from Supabase" below.
+
+There are also CDN bundles at `backenly.com/backenly-sdk.js` (script tag, global `createClient`) and `backenly.com/backenly-sdk.esm.js` (ESM). Use them only for a plain HTML page with no build step: a CDN URL cannot be typechecked, lockfiled or bundled, and it breaks under SSR.
+
+### REST reference — exact endpoints, for hand-written clients
+
+Everything the SDK does is plain HTTP. `{projectId}` is your project id; the base is `https://backenly.com/api/v1/{projectId}`.
+
+**Authentication uses TWO headers, and this is not guessable — read it:**
+
+- `Authorization: Bearer <apiKey>` — identifies the **project**. Required on every request.
+- `X-User-Token: <end-user JWT>` — identifies the **end-user**, and is what row-level security policies read (`backenly_jwt_claim('sub')` resolves to this token's subject). Omit it and the request runs unauthenticated: RLS-protected rows return empty rather than erroring.
+
+**Auth endpoints**
+
+| Method | Path | Body / notes |
+| --- | --- | --- |
+| POST | `/auth/signup` | `{ email, password, name? }` → `{ user, accessToken, refreshToken }` |
+| POST | `/auth/signin` | `{ email, password }` → `{ user, accessToken, refreshToken }` |
+| POST | `/auth/refresh-token` | `{ refreshToken }` → `{ accessToken, refreshToken }` |
+| POST | `/auth/logout` | `X-User-Token` required; revokes the session |
+| POST | `/auth/forgot-password` | `{ email }` → always 200 (no account enumeration) |
+| POST | `/auth/reset-password` | `{ token, password }` |
+| GET | `/auth/me` | `X-User-Token` required → the current end-user |
+| GET | `/auth/{provider}?redirect_to=…` | OAuth start; `provider` ∈ `google`, `github`, `replit`. Redirects back to the URL passed in that query parameter, with the tokens. |
+| POST | `/auth/magic-link` | `{ email, redirectTo? }` — emails a one-time sign-in link |
+| POST | `/auth/verify-email` | `{ token }` |
+
+**Data endpoints** — two grammars over one engine (see "APIs" above):
+
+- `/db/{table}` — Backenly's stable REST contract: `GET` (list), `POST` (create), `GET /db/{table}/{id}`, `PATCH /db/{table}/{id}`, `DELETE /db/{table}/{id}`.
+- `/api/v2/{projectId}/{table}` — PostgREST grammar verbatim: `?price=gte.100`, `?or=(a.eq.1,b.eq.2)`, `?order=created_at.desc`, `?select=*,author(*)`.
+
+`/db/users` is deliberately never served — that table holds password hashes and is reached only through `/auth/*`.
+
+**Realtime transport (SSE)** — for clients not using the SDK:
+
+```
+GET /api/v1/{projectId}/realtime/subscribe?table=<table>&ticket=<ticket>
+Accept: text/event-stream
+```
+
+`EventSource` cannot send headers, so the credential travels in the query string. Request a **short-lived, single-use ticket** rather than putting a JWT there:
+
+```
+POST /api/v1/{projectId}/realtime/ticket
+Authorization: Bearer <apiKey>
+X-User-Token: <end-user JWT>
+→ { ticket, expiresIn }   # seconds, single connection
+```
+
+A JWT in a URL lands in access logs, proxy logs and browser history; a ticket that expires in seconds and burns on first use does not. Legacy `?apiKey=&userToken=` is still accepted for existing clients and is deprecated.
+
+Event envelope, one `data:` line per event:
+
+```json
+{ "type": "insert" | "update" | "delete" | "connected" | "error",
+  "table": "messages",
+  "record": { "...": "the row" },
+  "old": { "...": "previous row, on update/delete" },
+  "at": "2026-07-25T10:00:00.000Z" }
+```
+
+Presence and broadcast use the same transport with `?channel=<name>`; presence has a 60-second activity window, broadcast a 6 KB payload limit.
 
 ### Agent tooling — MCP + CLI + skill
 
@@ -179,7 +248,7 @@ Exactly **20** tools are advertised to the host. That number is deliberate: tool
 | `enable_auth` | End-user authentication (JWT, email + password). |
 | `create_bucket` | A storage bucket. |
 | `enable_realtime` | Live change events for a table. |
-| `generate_api` | Regenerate the domain endpoints for a table. CRUD does **not** need this — see below. |
+| `generate_types` | TypeScript types for every table, read from the live catalog. `format`: `dts` (declarations) \| `client` (declarations + a typed client) \| `openapi`. Carries a `schemaHash` so you can tell whether a regeneration actually changed anything. Use this instead of hand-writing row types — hand-written ones drift silently on the next migration. |
 | `generate_function` | A backend function (HTTP or event-driven). |
 | `create_api_key` | A scoped API key. |
 | `set_env_var` | An encrypted project env var, readable from functions as `ctx.env.KEY`. |
@@ -189,7 +258,7 @@ Exactly **20** tools are advertised to the host. That number is deliberate: tool
 | `check_approval` | Poll an escalated destructive operation. |
 | `fetch_docs` | Self-serve this documentation at run time. |
 
-**REST endpoints are automatic.** `/db/<table>` is live the moment a table exists, resolved from the PostgreSQL catalog per request — there is no generation step and no record to create. The one exception is `users`, which is managed through `/auth/*` and deliberately never exposed as `/db/users` because it holds password hashes. So an empty `apis` list on a project whose only table is `users` is correct, not a missing step.
+**REST endpoints are automatic, which is why there is no `generate_api` in the list.** `/db/<table>` is live the moment a table exists, resolved from the PostgreSQL catalog per request — there is no generation step and no record to create. `generate_api` remains dispatchable for pinned clients but is no longer advertised: it writes a metadata row and nothing that serves traffic, so listing it beside "automatic" asked an agent to believe both. The one exception to automatic exposure is `users`, which is managed through `/auth/*` and deliberately never exposed as `/db/users` because it holds password hashes. So an empty `apis` list on a project whose only table is `users` is correct, not a missing step.
 
 **Row-Level Security** is set through `add_rls`, reachable via `backend_chat` (`"lock messages down so only the conversation's participants can read them"`). Its templates: `auto` (read the schema and pick), `owner_read_write` (one owner column), `participants` (**two or more** user columns — `connections(requester_id, addressee_id)`, `conversations(user_a, user_b)`; owner-only access is wrong on these because it locks one side out of its own row), `owned_via_parent` (ownership through a foreign key, including to a two-party parent), `public_read`, `org_members`, `admin_only`, `all_access`, and `custom` — an arbitrary predicate for a rule no template expresses. `add_rls` never substitutes a different policy for the one asked for: an unrecognised template is refused with the real list.
 

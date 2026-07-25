@@ -75,6 +75,7 @@ export function buildFixAction(
   switch (norm.base) {
     // ── RLS / Permissions ───────────────────────────────────────────────────
     case 'missing_rls':
+    case 'rls_denies_everything':
     case 'unprotected_user_data':
     case 'rls_expression_invalid':
       // `'auto'` resolves against the live schema at execution time rather than
@@ -289,6 +290,7 @@ const SCHEMA_TOUCHING = new Set<FindingType>([
   'missing_fk',
   'missing_fk_index',
   'missing_rls',
+  'rls_denies_everything',
   'rls_expression_invalid',
   'unprotected_user_data',
   'auth_users_table_missing',
