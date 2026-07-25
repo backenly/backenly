@@ -85,7 +85,7 @@ const BUILD_TOOLS = new Set<string>([
   'create_table', 'add_column', 'create_index', 'rename_column', 'add_constraint',
   // (list_branches / diff_branch are read tools; all four are reachable through
   // the single advertised `branch` tool — see BRANCH_ACTIONS.)
-  'generate_api', 'enable_auth', 'create_bucket', 'set_bucket_public', 'add_rls',
+  'generate_api', 'enable_auth', 'create_bucket', 'set_bucket_public', 'add_rls', 'set_rls',
   'create_trigger', 'enable_realtime', 'generate_function', 'enable_vector_search',
   'create_cron_job', 'set_rate_limit', 'generate_aggregate_api', 'enable_teams',
   'send_push', 'rotate_webhook_secret', 'connect_frontend',
@@ -190,6 +190,26 @@ const MCP_SURFACE = new Set<string>([
   // routes through backend_chat → the human Review Queue like every other
   // irreversible operation.
   'branch',
+  // ── set_rls — the deterministic door onto the one security-critical write ──
+  //
+  // RLS was reachable only through `backend_chat`. `add_rls` dispatches but was
+  // never advertised, so from an MCP host's side it did not exist, and the only
+  // way to write a policy was to describe it to a language model.
+  //
+  // That put the single operation where being wrong is a vulnerability behind
+  // the single least deterministic path, and every consequence followed from it:
+  // a request to change UPDATE and DELETE re-derived all four commands and
+  // reverted SELECT; `P AND sender_id = sub` came back as `P`, dropping the
+  // conjunct that restricted it; a cross-table EXISTS regressed to the
+  // owner-column form the model knew best. All three are the same failure — a
+  // predicate re-generated from prose instead of applied as written — and none
+  // of them is fixable with a better prompt. It was also the only write with no
+  // non-LLM fallback, so provider rate limiting blocked it outright.
+  //
+  // This tool takes the SQL verbatim, installs exactly the commands named, and
+  // reads pg_policies back before reporting. `add_rls` remains for the named
+  // templates and stays dispatchable.
+  'set_rls',
   // Capabilities with no SQL expression and no competing tool.
   'enable_auth',
   'create_bucket',
@@ -233,9 +253,24 @@ const MCP_SURFACE = new Set<string>([
   // existed. Fixed in the guide rather than by widening the surface: the answer
   // to "I could not find the door" is a sign, not a second door.
   //
-  // Direct Postgres + drift reconciliation.
+  // Direct Postgres access.
   'get_database_credentials',
-  'adopt_external_schema',
+  // ── Deliberately absent: adopt_external_schema ────────────────────────────
+  //
+  // The slot pays for `set_rls`. This allowlist is capped at 20 by test, and the
+  // cap is the point — every addition has to displace something rather than
+  // quietly cost every other call its accuracy.
+  //
+  // This is the weakest tool on the list to give up. It is bookkeeping-only and
+  // never emits DDL: it reconciles Backenly's metadata after someone changed the
+  // schema directly over psql. So it changes nothing an end-user can observe,
+  // and an agent that needs it is already inside an advanced workflow — it has
+  // called get_database_credentials, connected with a Postgres client, and run
+  // its own DDL. One `backend_chat` at the end of that is not the friction that
+  // writing a security policy through a language model was.
+  //
+  // Still dispatchable for pinned clients, and get_database_credentials names it
+  // in its own response so the door is signposted where it is actually needed.
   // Agent self-service.
   'fetch_docs',
   'check_approval',

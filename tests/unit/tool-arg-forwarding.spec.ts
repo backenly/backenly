@@ -303,3 +303,61 @@ describe('sync_column: the derived-column primitive forwards its whole shape', (
     expect(params.compute).toBe('count')
   })
 })
+
+// ── v0.3.1 session: the fields whose loss was reported this round ────────────
+
+describe('composite UNIQUE survives the whole path (#4)', () => {
+  it('add_constraint forwards EVERY column of a composite unique, not just the first', () => {
+    const a = TOOL_TO_ACTION['add_constraint']({
+      tableName: 'conversations',
+      constraintType: 'unique',
+      columns: ['user_a', 'user_b'],
+    })
+    expect(a.params.columns).toEqual(['user_a', 'user_b'])
+    // columnName is legitimately absent: the uniqueness is over the PAIR. The
+    // executor guard used to refuse exactly this shape as "applies to one
+    // column", which is how UNIQUE(user_a, user_b) went missing with no error.
+    expect(a.params.constraintType).toBe('unique')
+  })
+
+  it('declares `columns` as the composite door in its own schema', () => {
+    const tool = BRAIN_TOOLS.find((t) => t.function?.name === 'add_constraint')!
+    const desc = tool.function.description as string
+    // An agent only knows to send `columns` if the description says so.
+    expect(desc).toMatch(/composite UNIQUE/i)
+    expect(desc).toContain('columns')
+  })
+})
+
+describe('set_rls forwards per-command SQL verbatim (P0-1/P0-2/P0-3)', () => {
+  const P = "sender_id::text = backenly_jwt_claim('sub')"
+  const EXISTS =
+    "EXISTS (SELECT 1 FROM conversations p WHERE p.id = messages.conversation_id AND (p.user_a::text = backenly_jwt_claim('sub') OR p.user_b::text = backenly_jwt_claim('sub')))"
+
+  it('carries a cross-table EXISTS predicate through untouched', () => {
+    const a = TOOL_TO_ACTION['set_rls']({ tableName: 'messages', select: { using: EXISTS } })
+    expect(a.params.commands.select.using).toBe(EXISTS)
+  })
+
+  it('keeps a narrowing AND conjunct instead of dropping it', () => {
+    const narrowed = `${EXISTS} AND ${P}`
+    const a = TOOL_TO_ACTION['set_rls']({ tableName: 'messages', insert: { check: narrowed } })
+    expect(a.params.commands.insert.check).toBe(narrowed)
+    expect(a.params.commands.insert.check).toContain(' AND ')
+  })
+
+  it('sends ONLY the named commands, so an unnamed one cannot be rewritten', () => {
+    const a = TOOL_TO_ACTION['set_rls']({
+      tableName: 'messages',
+      update: { using: P },
+      delete: { using: P },
+    })
+    expect(Object.keys(a.params.commands).sort()).toEqual(['delete', 'update'])
+    expect('select' in a.params.commands).toBe(false)
+  })
+
+  it('always requests the custom engine path, never a template', () => {
+    const a = TOOL_TO_ACTION['set_rls']({ tableName: 't', select: { using: P } })
+    expect(a.params.template).toBe('custom')
+  })
+})

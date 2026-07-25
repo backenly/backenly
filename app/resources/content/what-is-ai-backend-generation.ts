@@ -62,7 +62,8 @@ export const article: ArticleData = {
           kind: 'code',
           language: 'js',
           label: 'Calling a generated backend from any frontend',
-          code: `const backend = new BackenlyClient({ projectId, apiKey })
+          code: `import { createClient } from '@backenly/sdk'
+const backend = createClient({ projectId, apiKey })
 
 // Auth was generated with the schema — sign a real user up:
 await backend.auth.signUp({ email: 'maya@example.com', password: '••••••••' })

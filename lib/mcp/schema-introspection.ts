@@ -204,7 +204,124 @@ export interface TableSchema {
     permissive: string
     using: string | null
     withCheck: string | null
+    /**
+     * ── The same rule, in the form you can send BACK to set_rls ──────────────
+     *
+     * `using` / `withCheck` above are PostgreSQL's rendering, and it is not
+     * round-trippable. Postgres stores what Backenly installed, which wraps the
+     * author's predicate in the service-role escape and schema-qualifies the
+     * claim reader:
+     *
+     *   ((backenly_jwt_claim('role') = 'service_role')
+     *     OR (sender_id::text = "workspace_x"."backenly_jwt_claim"('sub')))
+     *
+     * Feeding that back to set_rls fails twice over — the predicate grammar
+     * refuses a quoted function name, and the service-role clause would be
+     * double-wrapped by the installer that adds it.
+     *
+     * So an agent told to "read the current policy and re-send the commands you
+     * are not changing" could not actually do it, and would fall back to
+     * rewriting the predicate from its own understanding — which is the
+     * re-derivation this whole surface exists to stop.
+     *
+     * These fields are that predicate as the author would write it: service-role
+     * clause removed, claim reader unqualified. Copy them verbatim into
+     * set_rls. Null when the policy is not one Backenly installed.
+     */
+    editableUsing: string | null
+    editableCheck: string | null
   }>
+}
+
+/**
+ * Turn PostgreSQL's rendering of a Backenly policy back into the predicate an
+ * author would write — the exact string that can be sent to `set_rls`.
+ *
+ * Two transformations, both the inverse of what the installer did:
+ *
+ *   1. Drop the leading service-role escape. `installCustomPolicySet` emits
+ *      `(<service-role check> OR (<author predicate>))`, and that clause is
+ *      Backenly's, not the caller's: it is re-added on every install, so
+ *      returning it here would double-wrap on the next write.
+ *   2. Unqualify the claim reader. Postgres renders it as
+ *      `"workspace_x"."backenly_jwt_claim"('sub')`, and the predicate grammar
+ *      refuses a quoted function name outright.
+ *
+ * Returns null when the shape is not one Backenly installed — a hand-written or
+ * direct-connection policy is reported as-is rather than guessed at, because a
+ * wrong "editable" form is worse than none: it invites an agent to send back a
+ * predicate that does not mean what the live one means.
+ */
+export function toAuthorForm(raw: string | null | undefined, schema: string): string | null {
+  if (!raw || typeof raw !== 'string') return null
+
+  // Not a Backenly-installed policy: no service-role escape to peel. Reported
+  // as-is by the caller rather than guessed at.
+  if (!/service_role/i.test(raw)) return null
+
+  let s = stripWrappingParens(raw.trim())
+
+  // Split on the FIRST top-level OR. Everything left of it is Backenly's
+  // service-role escape; everything right of it is the author's predicate.
+  // Done by paren depth rather than by matching the escape's exact text, which
+  // varies with how PostgreSQL chooses to render casts ('role' vs 'role'::text)
+  // and parenthesise the comparison.
+  const split = splitFirstTopLevelOr(s)
+  if (!split) return null
+  const [head, tail] = split
+  if (!/service_role/i.test(head)) return null   // OR was the author's, not ours
+
+  s = stripWrappingParens(tail.trim())
+
+  // Unqualify the claim reader back to its callable, grammar-legal spelling.
+  // Quoted and unquoted renderings both occur depending on the catalog.
+  s = s.replace(
+    new RegExp(`"?${schema}"?\\s*\\.\\s*"?backenly_jwt_claim"?\\s*\\(`, 'gi'),
+    'backenly_jwt_claim(',
+  )
+  // The EXISTS clause carries a schema-qualified table; set_rls re-qualifies it
+  // from the project's own schema name, so it goes back to a bare table name.
+  s = s.replace(new RegExp(`"?${schema}"?\\s*\\.\\s*(?=")`, 'gi'), '')
+
+  return s.trim() || null
+}
+
+/** Remove redundant paren pairs that wrap the WHOLE expression. */
+function stripWrappingParens(input: string): string {
+  let s = input.trim()
+  while (s.startsWith('(') && s.endsWith(')')) {
+    let depth = 0
+    let wraps = true
+    for (let i = 0; i < s.length; i++) {
+      const ch = s[i]
+      if (ch === "'") { i++; while (i < s.length && s[i] !== "'") i++; continue }
+      if (ch === '(') depth++
+      else if (ch === ')') { depth--; if (depth === 0 && i < s.length - 1) { wraps = false; break } }
+    }
+    if (!wraps) break
+    s = s.slice(1, -1).trim()
+  }
+  return s
+}
+
+/** `[before, after]` around the first depth-0 `OR`, or null if there is none. */
+function splitFirstTopLevelOr(s: string): [string, string] | null {
+  let depth = 0
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]
+    if (ch === "'") { i++; while (i < s.length && s[i] !== "'") i++; continue }
+    if (ch === '(') { depth++; continue }
+    if (ch === ')') { depth--; continue }
+    if (
+      depth === 0 &&
+      (ch === 'o' || ch === 'O') &&
+      /^or\b/i.test(s.slice(i)) &&
+      (i === 0 || /[\s)]/.test(s[i - 1]))
+    ) {
+      return [s.slice(0, i), s.slice(i + 2)]
+    }
+  }
+  return null
 }
 
 /** Full, RLS-aware schema for a single workspace table. */
@@ -343,6 +460,8 @@ export async function getTableSchema(projectId: string, tableNameRaw: string): P
       permissive: String(p.permissive ?? 'PERMISSIVE'),
       using: p.qual ?? null,
       withCheck: p.with_check ?? null,
+      editableUsing: toAuthorForm(p.qual, schema),
+      editableCheck: toAuthorForm(p.with_check, schema),
     })),
   })
 }

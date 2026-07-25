@@ -72,6 +72,21 @@ const CONTROL_TOOLS = new Set<string>([
   'apply_proposal', 'run_test', 'rollback',
 ])
 
+/**
+ * Tools that read their own result back out of the live catalog before they
+ * return, and fail rather than report an unconfirmed change.
+ *
+ * Membership is a claim about the EXECUTOR, not a convenience: a tool belongs
+ * here only if ok:true already means "PostgreSQL was asked what it now contains
+ * and the answer matched". `set_rls` and `add_rls` share
+ * installCustomPolicySet, which re-reads pg_policies per command and restores
+ * the table if a policy it just created is not there.
+ *
+ * Anything listed here that does NOT do that would suppress the verification
+ * pass while proving nothing — strictly worse than not being listed.
+ */
+const SELF_VERIFYING_TOOLS = new Set<string>(['set_rls', 'add_rls'])
+
 export interface BrainInput {
   projectId: string
   userId: string
@@ -199,6 +214,16 @@ export interface BrainResult {
   budgetStopped?: boolean
   /** True when a verification pass actually ran and its result is in `summary`. */
   verified?: boolean
+  /**
+   * Mutations that were attempted and REFUSED, with the reason each gave.
+   *
+   * Present whenever any tool returned ok:false, including on an otherwise
+   * successful turn. Without it a multi-item request reported only what worked:
+   * six items in, four applied, two silently absent. `applied` says what is now
+   * true; this says what still is not, and the caller needs both to know whether
+   * the request is actually done.
+   */
+  refused?: Array<{ title: string; reason: string }>
 }
 
 export type BrainFailureCode =
@@ -256,6 +281,7 @@ const STEP_TOKEN_COST: Partial<Record<ToolName, number>> = {
   add_oauth_provider: 500,
   create_bucket: 400,
   add_rls: 800,
+  set_rls: 800,
   create_trigger: 500,
   enable_realtime: 400,
   // Functions / aggregates — internal LLM emission.
@@ -725,7 +751,7 @@ function groupStepsForProposal(steps: BlueprintStep[]): Array<{ label: string }>
     const tn = (s.args as { tableName?: string }).tableName
     if (t === 'create_table' && tn) tables.push(tn)
     else if (t === 'generate_api' && tn) apis.push(tn)
-    else if (t === 'add_rls' && tn) rls.push(tn)
+    else if ((t === 'add_rls' || t === 'set_rls') && tn) rls.push(tn)
     else if (t === 'enable_realtime' && tn) realtime.push(tn)
     else if (t === 'create_trigger' && tn) triggers.push(tn)
     else if (t === 'create_bucket') buckets.push(String((s.args as { bucketName?: string }).bucketName ?? 'media'))
@@ -1256,6 +1282,20 @@ async function runAgentLoop(
   let modelFailureCode: BrainFailureCode | undefined
   /** Mutations that landed this turn — reported even if the turn later fails. */
   const appliedMutationTitles: string[] = []
+  /**
+   * Mutations that were ATTEMPTED and refused, with the reason.
+   *
+   * Successes were reported and failures were not, so a six-item request where
+   * two items were refused came back describing the four that worked — "no
+   * error, no warning, no mention". For an additive request that reads as
+   * complete, and the caller only discovers the gap when the feature depending
+   * on it does not work.
+   *
+   * A refusal is an OUTCOME of the turn and belongs in its report next to the
+   * successes. Kept separate from `applied` rather than merged, because the two
+   * answer different questions: what is now true, and what still is not.
+   */
+  const refusedMutations: Array<{ title: string; reason: string }> = []
   let tokensUsed = 0
   // Per-tool outcome, aligned by index to `toolsRun`. Recorded to Memory so an
   // action that landed reads 'applied' even when a later model call in this
@@ -1402,11 +1442,30 @@ async function runAgentLoop(
       const isMutation = !isReadOnlyTool(toolName) && !CONTROL_TOOLS.has(toolName)
       if (isMutation) {
         mutated = true
-        verifiedAfterMutation = false
+        // ── A self-verifying tool does not need a verification pass ───────────
+        //
+        // Verification was a single step at the END of the run, so it was always
+        // the step a wall clock cut: four RLS calls in one session all landed and
+        // all reported UNVERIFIED. The operation whose correctness matters most
+        // was the one that never got confirmed.
+        //
+        // SELF_VERIFYING tools re-read the catalog INSIDE the executor and refuse
+        // to return ok:true if what they read back does not match what they
+        // asked for — set_rls compares pg_policies per command and restores the
+        // table rather than report a change that is not there. That is a
+        // stronger check than the final read_backend_state would have been, and
+        // it has already happened by the time we get here. Demanding a second
+        // pass afterwards is what pushed the run into the time budget in the
+        // first place.
+        verifiedAfterMutation = result.ok && SELF_VERIFYING_TOOLS.has(toolName)
         // Recorded even when the turn later fails, so the caller can tell "the
         // run stopped" from "nothing changed" — the distinction that decides
         // whether retrying is safe or duplicates work.
         if (result.ok) appliedMutationTitles.push(humanTitle(toolName, args))
+        else refusedMutations.push({
+          title: humanTitle(toolName, args),
+          reason: (result.summary || 'no reason given').slice(0, 300),
+        })
       }
 
       // Clip hard before feeding back into the loop. Executor summaries can be
@@ -1488,6 +1547,10 @@ async function runAgentLoop(
         (state
           ? `Live state read back from the catalog:\n\n${state}\n\n`
           : `The state read-back itself failed, so treat the list above as applied-but-unconfirmed.\n\n`) +
+        (refusedMutations.length
+          ? `Attempted and REFUSED (${refusedMutations.length}) — these did NOT take effect:\n` +
+            refusedMutations.map((r) => `  • ${r.title} — ${r.reason}`).join('\n') + '\n\n'
+          : '') +
         `Nothing else was attempted. Say "continue" for the rest — do NOT replay the whole request, ` +
         `the changes above are already in place.`
       : `I ran out of time budget before changing anything. Nothing was applied. ` +
@@ -1554,6 +1617,10 @@ async function runAgentLoop(
     tokensUsed,
     ...(failureCode ? { failureCode, retryable: RETRYABLE.includes(failureCode) } : {}),
     applied: appliedMutationTitles,
+    // Reported on EVERY path, including a turn that otherwise succeeded. A
+    // request whose six items produced four changes and two refusals is not a
+    // success with a footnote; the caller has to be told which two.
+    ...(refusedMutations.length ? { refused: refusedMutations } : {}),
     ...(budgetStopped ? { budgetStopped: true, verified } : {}),
   }
 }

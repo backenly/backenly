@@ -220,6 +220,15 @@ export async function POST(request: NextRequest) {
           : {}),
       }),
       ...(result.applied?.length ? { applied: result.applied } : {}),
+      // ── What did NOT land, on a call that otherwise succeeded ───────────────
+      //
+      // Only `applied` was reported, so a request listing six additive changes
+      // came back describing the four that worked and saying nothing at all
+      // about the two that were refused. The turn looked complete. An agent has
+      // no way to notice an omission it is never told about, so this is
+      // reported alongside `applied` on every path rather than folded into an
+      // error the success branch never reaches.
+      ...(result.refused?.length ? { refused: result.refused } : {}),
       classification: {
         intent: result.classification.intent,
         confidence: result.classification.confidence,

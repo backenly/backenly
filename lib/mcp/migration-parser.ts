@@ -276,7 +276,10 @@ function mapType(rawType: string, stmt: string): string {
         `Unsupported array element type "${element}" in "${rawType.trim()}".`,
         'UNSUPPORTED_TYPE',
         `Arrays are supported over any scalar Backenly type: ${SUPPORTED_TYPE_LIST}. ` +
-        `So text[], int[], uuid[] and numeric[] all work — "${element}[]" does not.`,
+        `So text[], int[], uuid[] and numeric[] all work — "${element}[]" does not. ` +
+        `If "${element}" is an enum or a custom domain, describe the column via backend_chat — ` +
+        `it models the value domain as a CHECK constraint over text[], which get_table_schema then ` +
+        `reports with its permitted values.`,
         stmt,
       )
     }
@@ -1202,10 +1205,13 @@ function translateStatement(stmt: string): PlannedAction[] {
     throw new MigrationParseError(
       `Row-Level Security is not set through apply_migration.`,
       'RLS_NOT_MIGRATION',
-      `Use add_rls, which takes a policy template AND an optional explicit predicate: ` +
-      `{ tableName, policy: "participants", partyColumns: ["user_a","user_b"] } for a two-party table, ` +
-      `or { tableName, policy: "custom", using: "<predicate>" } for a rule the templates do not cover. ` +
-      `read_backend_state {section:"rls"} shows what is currently installed.`,
+      `Use set_rls — it takes the SAME per-command predicates you were about to write, installs them ` +
+      `verbatim, and reads pg_policies back to confirm. A CREATE POLICY … FOR SELECT USING (x) becomes ` +
+      `{ tableName, select: { using: "x" } }, and USING / WITH CHECK map to \`using\` / \`check\`. ` +
+      `Name only the commands you want to change; the rest are left untouched. ` +
+      `Predicates may reach a parent row with EXISTS (SELECT 1 FROM parent p WHERE p.id = child.parent_id AND …). ` +
+      `For one of the named templates instead, add_rls takes { tableName, policy: "participants", ` +
+      `partyColumns: ["user_a","user_b"] }. read_backend_state {section:"rls"} shows what is installed now.`,
       s,
     )
   }

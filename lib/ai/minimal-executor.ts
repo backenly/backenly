@@ -8023,12 +8023,34 @@ async function executeAddConstraint(params: any, projectId: string): Promise<Exe
     }
   }
 
-  const NEEDS_COLUMN = new Set(['not_null', 'drop_not_null', 'unique', 'set_default', 'drop_default'])
+  // ── UNIQUE is not single-column ──────────────────────────────────────────
+  //
+  // `unique` used to sit in this set, so a composite UNIQUE had no way through:
+  // sending `columns: ["user_a","user_b"]` without a `columnName` was refused as
+  // "applies to one column", and sending `columnName` instead silently produced
+  // a single-column constraint that forbids a user appearing in TWO
+  // conversations — a different and much stricter rule than the one asked for.
+  //
+  // Reported as two composite UNIQUEs going missing from an explicitly additive
+  // six-item request, with no error and no mention. The DDL path below always
+  // handled the multi-column form (it forwards `columns` to executeCreateIndex);
+  // only this guard stood in front of it.
+  const NEEDS_COLUMN = new Set(['not_null', 'drop_not_null', 'set_default', 'drop_default'])
   if (NEEDS_COLUMN.has(ct) && !columnName) {
     return {
       success: false,
       message: `constraintType "${ct}" applies to one column — pass columnName.`,
       error: 'Missing columnName',
+      code: 'VALIDATION',
+    }
+  }
+  if (ct === 'unique' && columns.length === 0) {
+    return {
+      success: false,
+      message:
+        `constraintType "unique" needs the column(s) it covers — pass columnName for one, ` +
+        `or columns: ["a","b"] for a composite UNIQUE such as (user_a, user_b).`,
+      error: 'Missing columns',
       code: 'VALIDATION',
     }
   }

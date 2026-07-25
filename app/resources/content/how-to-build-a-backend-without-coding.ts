@@ -84,7 +84,8 @@ and a due date. Users can only see their own projects and tasks.`,
           kind: 'code',
           language: 'js',
           label: 'The full CRUD surface, per table',
-          code: `const backend = new BackenlyClient({ projectId, apiKey })
+          code: `import { createClient } from '@backenly/sdk'
+const backend = createClient({ projectId, apiKey })
 
 // Create
 const task = await backend.tasks.create({

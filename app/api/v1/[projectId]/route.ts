@@ -90,9 +90,22 @@ export async function GET(
         alternativeHeader: 'Authorization: Bearer <token>',
         note: 'All data routes require authentication. Create a key in the dashboard under Connect.',
       },
+      // ── Name the npm package, not just the CDN bundle ────────────────────
+      //
+      // This block advertised only the CDN URL and a bare `new BackenlyClient(…)`
+      // with no import line. A CDN script cannot be bundled, server-rendered,
+      // type-checked or lockfile-pinned, so an agent building a real app in a
+      // real framework read this and hand-wrote its own client instead.
+      // `@backenly/sdk` is the published package; the CDN build stays for
+      // script-tag use.
       sdk: {
-        javascript: 'https://backenly.com/backenly-sdk.js',
-        usage: `const backend = new BackenlyClient({ projectId: "${project.id}", apiKey: "<your-api-key>" })`,
+        npm: '@backenly/sdk',
+        install: 'npm install @backenly/sdk',
+        usage:
+          `import { createClient } from "@backenly/sdk"\n` +
+          `const backend = createClient({ projectId: "${project.id}", apiKey: "<your-api-key>" })`,
+        supabaseCompat: '@backenly/sdk/supabase',
+        cdn: 'https://backenly.com/backenly-sdk.esm.js',
       },
       endpoints: {
         auth: {

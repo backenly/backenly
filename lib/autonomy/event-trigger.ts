@@ -45,6 +45,7 @@ const KICK_REASONS = new Set<string>([
   'generate_api',
   // Security surface changes — RLS / permission gaps the loop reconciles.
   'add_rls',
+  'set_rls',
   'enable_auth',
   'add_oauth_provider',
   // Realtime / triggers — touch the workspace schema in ways that can shift

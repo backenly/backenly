@@ -581,7 +581,7 @@ export const MANUAL_CAPABILITIES: Capability[] = [
   {
     id: 'sdk',
     name: 'Client SDK',
-    what: 'A JavaScript SDK (`BackenlyClient`) is auto-published at `public/backenly-sdk.js`. End-user apps use it for CRUD, auth, storage, realtime, presence, broadcast. The agent does not edit the SDK — it derives from the project schema.',
+    what: 'A JavaScript SDK published to npm as `@backenly/sdk` (`npm install @backenly/sdk`; `import { createClient } from "@backenly/sdk"`), with a Supabase-compatible entry at `@backenly/sdk/supabase` and a CDN build at `public/backenly-sdk.esm.js` for script tags. End-user apps use it for CRUD, auth, storage, realtime, presence, broadcast. Always give the npm package, never the CDN URL alone — a CDN script cannot be bundled, server-rendered or type-checked. The agent does not edit the SDK — it derives from the project schema.',
     manualOnly: true,
   },
   {

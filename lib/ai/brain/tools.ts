@@ -68,6 +68,7 @@ export type ToolName =
   | 'create_bucket'
   | 'set_bucket_public'
   | 'add_rls'
+  | 'set_rls'
   | 'create_trigger'
   | 'sync_column'
   | 'list_synced_columns'
@@ -302,7 +303,7 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     'Alias of get_backend_metadata — a complete structured overview of the project backend (tables + counts + relationships + auth/storage/realtime/functions). Use to confirm the connection and ground your plan. Side-effect free.',
     {}),
   fn('get_table_schema',
-    'Complete, RLS-aware schema for ONE table: every column (type, nullable, default, primary key, max length), the primary key, foreign keys (with ON DELETE), indexes (with UNIQUE and the full column tuple), CHECK constraints (with the ACTUAL allowed values so you never violate them), triggers, whether RLS/FORCE-RLS is on, the live row-level-security policies (command, ROLES the policy applies to, PERMISSIVE/RESTRICTIVE, USING + WITH CHECK), and the exact record count. The policy roles matter: a `USING (true)` policy is not open access if it is granted only to an internal role, so read `roles` before concluding a table is exposed. Call this before writing any query, insert, or migration against a table. Reads the live PostgreSQL catalog — never stale. Side-effect free.',
+    'Complete, RLS-aware schema for ONE table: every column (type, nullable, default, primary key, max length), the primary key, foreign keys (with ON DELETE), indexes (with UNIQUE and the full column tuple), CHECK constraints (with the ACTUAL allowed values so you never violate them), triggers, whether RLS/FORCE-RLS is on, the live row-level-security policies (command, ROLES the policy applies to, PERMISSIVE/RESTRICTIVE, USING + WITH CHECK), and the exact record count. The policy roles matter: a `USING (true)` policy is not open access if it is granted only to an internal role, so read `roles` before concluding a table is exposed. Each policy also carries `editableUsing` / `editableCheck`: the SAME rule rewritten into the form set_rls accepts, so you can read a live policy and send it straight back unchanged. Use those when editing — the raw `using` / `withCheck` are PostgreSQL\'s rendering and include a service-role wrapper plus a schema-qualified claim reader, so sending them back is rejected. Call this before writing any query, insert, or migration against a table, and ALWAYS before changing one command of an existing policy. Reads the live PostgreSQL catalog — never stale. Side-effect free.',
     { tableName: { type: 'string', description: 'The table to describe (snake_case).' } },
     ['tableName']),
   fn('create_table',
@@ -462,6 +463,55 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
           update: { type: 'string', description: 'Which rows may be modified (targeted and written).' },
           delete: { type: 'string', description: 'Which rows may be deleted.' },
         },
+      },
+    },
+    ['tableName']),
+  fn('set_rls',
+    'Write row-level security as EXACT SQL, one rule per command. Deterministic: your predicates are ' +
+    'installed verbatim — never re-derived, re-worded, simplified or inferred — and the result is read ' +
+    'back from pg_policies before this reports success. No language model is involved, so it cannot be ' +
+    'rate-limited and the same call twice produces the same state.\n' +
+    'USE THIS, not backend_chat, whenever you can write the predicate yourself. Prefer `add_rls` only ' +
+    'for the named templates (owner_read_write, participants, …).\n' +
+    'THE FOUR COMMANDS ARE INDEPENDENT. Name only the ones you want to change — the rest are left ' +
+    'byte-identical, so "fix UPDATE and DELETE, leave SELECT alone" is a supported operation rather ' +
+    'than a re-statement of the whole set. Naming a subset while a FOR ALL policy is present is refused ' +
+    'rather than silently widened.\n' +
+    'PREDICATE GRAMMAR: this table\'s columns, `backenly_jwt_claim(\'sub\')` for the calling end-user\'s ' +
+    'id, comparisons, AND/OR/NOT, IN, BETWEEN, IS NULL, casts, and pure functions. To depend on a PARENT ' +
+    'row, write `EXISTS (SELECT 1 FROM parent p WHERE p.id = this_table.parent_id AND …)` — the parent ' +
+    'and every column it names are checked against the live schema. Nothing else may read another table.\n' +
+    'USING = which rows the command may TARGET (select/update/delete). CHECK = which rows it may PRODUCE ' +
+    '(insert/update). Omitting `check` on insert/update means "anything the caller may target", so state ' +
+    'it whenever the write rule is narrower than the read rule.',
+    {
+      tableName: { type: 'string' },
+      select: {
+        type: 'object',
+        description: 'SELECT rule. { using: "<predicate>" } — which rows are readable.',
+        properties: { using: { type: 'string' } },
+      },
+      insert: {
+        type: 'object',
+        description: 'INSERT rule. { check: "<predicate>" } — which rows may be created.',
+        properties: { check: { type: 'string' } },
+      },
+      update: {
+        type: 'object',
+        description:
+          'UPDATE rule. { using: "<which rows may be edited>", check: "<what they may become>" }. ' +
+          'Give BOTH when they differ — `using` alone lets a caller target a row and rewrite its owner ' +
+          'column to themselves.',
+        properties: { using: { type: 'string' }, check: { type: 'string' } },
+      },
+      delete: {
+        type: 'object',
+        description: 'DELETE rule. { using: "<predicate>" } — which rows may be removed.',
+        properties: { using: { type: 'string' } },
+      },
+      role: {
+        type: 'string',
+        description: 'Database role the policy is recorded against. Defaults to `authenticated`.',
       },
     },
     ['tableName']),
@@ -653,7 +703,7 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     "The backend briefing: everything Backenly's autonomous operator detected, fixed, or queued while nobody was watching. Returns open findings with evidence, changes awaiting human approval in the Review Queue, fixes auto-applied in the last 24h, pending external schema drift, and the latest restore point. Call this FIRST when starting a session on an existing backend, or when the user asks \"what happened?\" / \"any issues?\". Side-effect free.",
     {}),
   fn('get_database_credentials',
-    "Get a real PostgreSQL connection string (host, port, database, role, password) for this project's schema — for psql, ORMs, BI tools, or running your own migrations. mode=READ_ONLY (default) provisions instantly and is SELECT-only. mode=READ_WRITE is returned only after the project owner enables write access in the dashboard (Connect → Direct); DDL you run over it is observed by the drift watch and adopted into the governed contract — call adopt_external_schema afterwards. EVERY response carries `data.readWriteArmed` and `data.armReadWriteUrl`, so you can check whether write access exists WITHOUT requesting it, and hand the human a direct link when it does not. Treat the returned connection string as a secret: use it, do not print it into files or logs.",
+    "Get a real PostgreSQL connection string (host, port, database, role, password) for this project's schema — for psql, ORMs, BI tools, or running your own migrations. mode=READ_ONLY (default) provisions instantly and is SELECT-only. mode=READ_WRITE is returned only after the project owner enables write access in the dashboard (Connect → Direct); DDL you run over it is observed by the drift watch and adopted into the governed contract — afterwards, reconcile it by sending `adopt_external_schema` to backend_chat (it is dispatchable but not on the advertised tool list, so ask for it by name). EVERY response carries `data.readWriteArmed` and `data.armReadWriteUrl`, so you can check whether write access exists WITHOUT requesting it, and hand the human a direct link when it does not. Treat the returned connection string as a secret: use it, do not print it into files or logs.",
     {
       mode: { type: 'string', enum: ['READ_ONLY', 'READ_WRITE'], description: 'Access level. Default READ_ONLY.' },
     }),
@@ -769,20 +819,27 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     },
     ['tableName', 'oldName', 'newName']),
   fn('add_constraint',
-    'Add or relax a constraint on an existing table: NOT NULL, UNIQUE, CHECK (single- OR multi-column), ' +
-    'FOREIGN KEY, and column DEFAULTs. Use to tighten data integrity after a table has been in use. ' +
-    'A CHECK spanning several columns (`start_date < end_date`, `requester_id <> addressee_id`) is a ' +
-    'table-level constraint — pass every column it references in `columns`.',
+    'Add or relax a constraint on an existing table: NOT NULL, UNIQUE (single- OR multi-column), ' +
+    'CHECK (single- OR multi-column), FOREIGN KEY, and column DEFAULTs. Use to tighten data integrity ' +
+    'after a table has been in use.\n' +
+    'ANYTHING SPANNING SEVERAL COLUMNS USES `columns`, NOT `columnName`:\n' +
+    '  • composite UNIQUE — `{ constraintType: "unique", columns: ["user_a","user_b"] }` forbids the same ' +
+    'PAIR twice. Passing columnName: "user_a" instead is a DIFFERENT and much stricter rule (that user may ' +
+    'then appear in only one row at all), so use `columns` whenever the uniqueness is over a combination.\n' +
+    '  • multi-column CHECK — `start_date < end_date`, `requester_id <> addressee_id`: pass every column ' +
+    'the expression references.',
     {
       tableName: { type: 'string' },
       columnName: {
         type: 'string',
-        description: 'The column the constraint applies to. Required for every type except a multi-column CHECK.',
+        description: 'The single column the constraint applies to. Use `columns` instead for anything spanning several.',
       },
       columns: {
         type: 'array',
         items: { type: 'string' },
-        description: 'For a CHECK spanning several columns: every column the expression references.',
+        description:
+          'Every column the constraint covers. Required for a composite UNIQUE (["user_a","user_b"]) and ' +
+          'for a CHECK spanning several columns. Order matters for UNIQUE — it is the index column order.',
       },
       constraintType: {
         type: 'string',
@@ -1109,6 +1166,34 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
   // dispatchTool() that handles the "no credentials yet → ask the user" flow.
   create_bucket: (a) => ({ action: 'CREATE_BUCKET', params: { bucketName: a.bucketName, isPublic: !!a.isPublic } }),
   set_bucket_public: (a) => ({ action: 'SET_BUCKET_PUBLIC', params: { bucketName: a.bucketName, isPublic: !!a.isPublic } }),
+  // ── set_rls: the four commands arrive as top-level arguments ───────────────
+  //
+  // Flat `select`/`insert`/`update`/`delete` rather than a nested `commands`
+  // object, because a nested object is one more place a model can put the right
+  // predicate under the wrong key and have it silently vanish. Everything below
+  // is a rename onto the executor's existing `commands` contract — no defaults,
+  // no inference. A command the caller did not name does not appear here at all,
+  // which is what makes the edit SCOPED rather than a full rewrite.
+  set_rls: (a) => {
+    const commands: Record<string, unknown> = {}
+    for (const c of ['select', 'insert', 'update', 'delete'] as const) {
+      const v = a[c]
+      if (v === undefined || v === null) continue
+      // A bare string is accepted as shorthand for whichever clause the command
+      // has, so a model that writes `delete: "owner_id = …"` is not punished for
+      // skipping the wrapper object.
+      commands[c] = typeof v === 'string' ? v : v
+    }
+    return {
+      action: 'SET_PERMISSION',
+      params: {
+        tableName: a.tableName,
+        template: 'custom',
+        commands,
+        ...(a.role ? { role: a.role } : {}),
+      },
+    }
+  },
   add_rls: (a) => ({
     action: 'SET_PERMISSION',
     params: {
@@ -2538,6 +2623,14 @@ export function humanTitle(name: string, args: Record<string, unknown>): string 
     case 'enable_auth': return 'Enabling authentication'
     case 'add_oauth_provider': return `Adding ${args.provider ?? 'OAuth'} sign-in`
     case 'create_bucket': return `Creating bucket ${args.bucketName ?? ''}`.trim()
+    case 'set_rls': {
+      // The commands actually named, in SQL order — the whole point of this tool
+      // is that a subset stays a subset, so the title has to show which one.
+      const named = ['select', 'insert', 'update', 'delete'].filter((c) => args[c] != null)
+      return named.length && named.length < 4
+        ? `Securing ${args.tableName ?? ''} · RLS (${named.join('/')} only)`.trim()
+        : `Securing ${args.tableName ?? ''} · RLS (all four commands)`.trim()
+    }
     case 'add_rls': {
       // Name the policy in the title so a failed owner-only attempt and a
       // successful retry on a different template read as distinct steps —

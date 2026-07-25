@@ -221,7 +221,7 @@ function eventTypeForTool(tool: string): BackendEventType | null {
     return 'schema_changed'
   }
   if (['generate_api', 'generate_aggregate_api'].includes(tool)) return 'api_created'
-  if (['enable_auth', 'add_rls', 'add_oauth_provider'].includes(tool)) return 'auth_rule_created'
+  if (['enable_auth', 'add_rls', 'set_rls', 'add_oauth_provider'].includes(tool)) return 'auth_rule_created'
   if (['disable_oauth_provider', 'remove_permission', 'block_end_user', 'unblock_end_user', 'reset_end_user_password'].includes(tool)) {
     return 'auth_changed'
   }
@@ -239,7 +239,7 @@ function riskForTool(tool: string): BackendRiskLevel {
   if (['drop_table', 'drop_column', 'truncate_table', 'delete_bucket', 'delete_file', 'delete_env_var', 'rollback_deploy'].includes(tool)) {
     return 'high'
   }
-  if (['add_rls', 'disable_oauth_provider', 'remove_permission', 'trigger_deploy', 'set_env_var', 'generate_function', 'create_cron_job'].includes(tool)) {
+  if (['add_rls', 'set_rls', 'disable_oauth_provider', 'remove_permission', 'trigger_deploy', 'set_env_var', 'generate_function', 'create_cron_job'].includes(tool)) {
     return 'medium'
   }
   return 'low'
@@ -269,6 +269,7 @@ const TOOL_NOUN: Record<string, { one: string; many: string }> = {
   generate_aggregate_api: { one: 'aggregate API', many: 'aggregate APIs' },
   enable_auth: { one: 'auth setup', many: 'auth setups' },
   add_rls: { one: 'access rule', many: 'access rules' },
+  set_rls: { one: 'access rule', many: 'access rules' },
   add_oauth_provider: { one: 'OAuth provider', many: 'OAuth providers' },
   create_bucket: { one: 'storage bucket', many: 'storage buckets' },
   set_bucket_public: { one: 'bucket change', many: 'bucket changes' },

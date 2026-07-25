@@ -37,6 +37,7 @@ import {
   OWNERSHIP_COLUMN_CANDIDATES,
   type RelatedRowsVia,
 } from './rls-ownership'
+import type { ExistsContext } from '@/lib/db/sql-expression'
 
 /**
  * Split a SQL string on semicolons that are NOT inside $$ dollar-quoted blocks,
@@ -519,8 +520,21 @@ export async function applyPermissionPolicy(
   // ── The custom escape hatch ────────────────────────────────────────────────
   if (template === 'custom') {
     const { validateBooleanExpression } = await import('@/lib/db/sql-expression')
+
+    // ── Why the catalog is loaded before validating ──────────────────────────
+    //
+    // A predicate may reach the parent table through `EXISTS (SELECT 1 FROM …)`,
+    // and that clause is only safe if the parent and every column it names are
+    // checked against the live schema. Without it the grammar refused SELECT
+    // outright, so the one genuinely two-table rule — a message belongs to the
+    // participants of its conversation — could not be written as a custom
+    // policy. Callers fell back to whatever single-column rule the templates
+    // could express, which is how a correct cross-table predicate turned into
+    // `sender_id = sub` and stayed that way through three attempts to restore it.
+    const existsCtx = await loadExistsContext(projectId, schemaName, tableName)
+
     const validate = (expr: string) => {
-      const r = validateBooleanExpression(expr, { requireColumn: false })
+      const r = validateBooleanExpression(expr, { requireColumn: false, exists: existsCtx })
       return r.kind === 'ok'
         ? ({ ok: true, expression: r.expression } as const)
         : ({
@@ -528,7 +542,9 @@ export async function applyPermissionPolicy(
             reason:
               `${r.reason} ${r.hint} Write it against this table's columns, using ` +
               `backenly_jwt_claim('sub') for the calling end-user's id — e.g. ` +
-              `"owner_id::text = backenly_jwt_claim('sub') OR is_public".`,
+              `"owner_id::text = backenly_jwt_claim('sub') OR is_public". ` +
+              `To depend on a parent row, use ` +
+              `"EXISTS (SELECT 1 FROM parent p WHERE p.id = ${tableName}.parent_id AND …)".`,
           } as const)
     }
 
@@ -737,6 +753,33 @@ export async function applyPermissionPolicy(
       )
     }
 
+    // ── Per-COMMAND read-back, not just "some policy exists" ─────────────────
+    //
+    // The check above only asked whether the count was non-zero, so a template
+    // that planted SELECT and silently failed to plant DELETE passed it. Under
+    // FORCE RLS an uncovered command is denied outright, so that is a table that
+    // reads fine and refuses every write — reported as a success.
+    //
+    // Every template here installs all four commands (all_access is the
+    // exception: it turns RLS off, so having no policies IS the outcome). Ask
+    // PostgreSQL which commands actually ended up covered and refuse to report
+    // a change that is not there. This is also what lets the brain treat an
+    // RLS call as already verified instead of owing a separate pass that a
+    // wall clock then cuts.
+    if (template !== 'all_access') {
+      const live = await readLivePolicies(schemaName, tableName)
+      const covered = new Set(live.flatMap(commandsCoveredBy))
+      const uncovered = RLS_COMMANDS.filter((c) => !covered.has(c))
+      if (uncovered.length) {
+        await restoreRlsState(projectId, schemaName, tableName, preState)
+        throw new Error(
+          `RLS install for template "${template}" left ${uncovered.join(', ').toUpperCase()} with no policy. ` +
+          `Under FORCE ROW LEVEL SECURITY an uncovered command is denied to every end-user, so this would ` +
+          `have been a silent outage on those operations. The table was restored to its previous state.`,
+        )
+      }
+    }
+
     // Step 4: Save policy metadata
     await prisma.permissionPolicy.upsert({
       where: {
@@ -792,6 +835,29 @@ export async function applyPermissionPolicy(
     }
     return { success: false, message: err.message }
   }
+}
+
+/**
+ * The catalog a predicate's `EXISTS` clause is checked against.
+ *
+ * Reuses the ownership catalog rather than issuing its own introspection: it
+ * already reads every table's columns for the whole schema in one query, and a
+ * second reader would be a second thing to keep in step with the live schema.
+ *
+ * A schema that reads back empty yields an empty table map, which makes the
+ * grammar refuse every EXISTS with "not a table in this project" rather than
+ * qualify a name it could not confirm. Failing closed is the point: the
+ * alternative is emitting DDL that names a table nobody verified exists.
+ */
+async function loadExistsContext(
+  projectId: string,
+  schemaName: string,
+  selfTable: string,
+): Promise<ExistsContext> {
+  const catalog = await loadOwnershipCatalog(projectId)
+  const tables = new Map<string, Set<string>>()
+  for (const [table, cols] of catalog.columns) tables.set(table, new Set(cols))
+  return { schemaName, selfTable, tables }
 }
 
 /**

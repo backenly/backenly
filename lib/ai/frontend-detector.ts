@@ -83,9 +83,9 @@ export function generateFrameworkSnippet(
       return {
         framework,
         label: 'Next.js',
-        installCommand: 'npm install backenly-sdk',
+        installCommand: 'npm install @backenly/sdk',
         setupCode: `// lib/backend.ts
-import { BackenlyClient } from 'backenly-sdk'
+import { BackenlyClient } from '@backenly/sdk'
 
 export const backend = new BackenlyClient({
   projectId: '${projectId}',
@@ -112,9 +112,9 @@ export async function createPost(data: FormData) {
       return {
         framework,
         label: 'React',
-        installCommand: 'npm install backenly-sdk',
+        installCommand: 'npm install @backenly/sdk',
         setupCode: `// src/lib/backend.ts
-import { BackenlyClient } from 'backenly-sdk'
+import { BackenlyClient } from '@backenly/sdk'
 
 export const backend = new BackenlyClient({
   projectId: '${projectId}',
@@ -139,9 +139,9 @@ export function Posts() {
       return {
         framework,
         label: 'Vue 3',
-        installCommand: 'npm install backenly-sdk',
+        installCommand: 'npm install @backenly/sdk',
         setupCode: `// src/lib/backend.ts
-import { BackenlyClient } from 'backenly-sdk'
+import { BackenlyClient } from '@backenly/sdk'
 
 export const backend = new BackenlyClient({
   projectId: '${projectId}',
@@ -169,9 +169,9 @@ onMounted(async () => {
       return {
         framework,
         label: 'Nuxt 3',
-        installCommand: 'npm install backenly-sdk',
+        installCommand: 'npm install @backenly/sdk',
         setupCode: `// plugins/backend.ts
-import { BackenlyClient } from 'backenly-sdk'
+import { BackenlyClient } from '@backenly/sdk'
 
 export default defineNuxtPlugin(() => {
   const backend = new BackenlyClient({
@@ -198,9 +198,9 @@ const { data: posts } = await useAsyncData('posts', () => $backend.posts.list())
       return {
         framework,
         label: framework === 'sveltekit' ? 'SvelteKit' : 'Svelte',
-        installCommand: 'npm install backenly-sdk',
+        installCommand: 'npm install @backenly/sdk',
         setupCode: `// src/lib/backend.ts
-import { BackenlyClient } from 'backenly-sdk'
+import { BackenlyClient } from '@backenly/sdk'
 
 export const backend = new BackenlyClient({
   projectId: '${projectId}',
@@ -226,8 +226,8 @@ export const backend = new BackenlyClient({
       return {
         framework: 'vanilla',
         label: 'JavaScript',
-        installCommand: 'npm install backenly-sdk',
-        setupCode: `import { BackenlyClient } from 'backenly-sdk'
+        installCommand: 'npm install @backenly/sdk',
+        setupCode: `import { BackenlyClient } from '@backenly/sdk'
 
 const backend = new BackenlyClient({
   projectId: '${projectId}',

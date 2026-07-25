@@ -252,11 +252,15 @@ Exactly **20** tools are advertised to the host. That number is deliberate: tool
 | `generate_function` | A backend function (HTTP or event-driven). |
 | `create_api_key` | A scoped API key. |
 | `set_env_var` | An encrypted project env var, readable from functions as `ctx.env.KEY`. |
+| `set_rls` | Row-level security as **exact SQL**, one rule per command. Your predicates are installed verbatim — never re-derived or simplified — and read back from `pg_policies` before it reports success. No model is involved, so it cannot be rate-limited and is idempotent. Name only the commands you want to change and the rest are left byte-identical. Predicates may reach a parent row through `EXISTS (SELECT 1 FROM parent p WHERE p.id = child.parent_id AND …)`. |
 | `get_database_credentials` | A direct PostgreSQL connection string (read-only on demand; read-write only after a human arms it). |
-| `adopt_external_schema` | Reconcile out-of-band DDL back under governance. |
 | `branch` | Preview branches — one tool, `action`: `create` \| `list` \| `diff` \| `merge`. |
 | `check_approval` | Poll an escalated destructive operation. |
 | `fetch_docs` | Self-serve this documentation at run time. |
+
+**Row-level security has a deterministic door, and you should use it.** `set_rls` takes SQL, not prose. Reach for `backend_chat` for RLS only when you genuinely cannot write the predicate — describing a policy to a model means it is re-derived rather than applied, and a re-derived predicate can come back simplified in the permissive direction. `add_rls` (the named templates: `owner_read_write`, `participants`, `owned_via_parent`, `public_read`, `org_members`, …) also still dispatches by name, it is just not advertised.
+
+**`adopt_external_schema` is dispatchable but no longer advertised.** The allowlist is capped at 20, so `set_rls` had to displace something, and this was the weakest claim on a slot: it is bookkeeping-only, never emits DDL, and an agent that needs it has already taken a direct Postgres connection and run its own migrations. Ask for it by name through `backend_chat` after doing that; `get_database_credentials` says so in its own response.
 
 **REST endpoints are automatic, which is why there is no `generate_api` in the list.** `/db/<table>` is live the moment a table exists, resolved from the PostgreSQL catalog per request — there is no generation step and no record to create. `generate_api` remains dispatchable for pinned clients but is no longer advertised: it writes a metadata row and nothing that serves traffic, so listing it beside "automatic" asked an agent to believe both. The one exception to automatic exposure is `users`, which is managed through `/auth/*` and deliberately never exposed as `/db/users` because it holds password hashes. So an empty `apis` list on a project whose only table is `users` is correct, not a missing step.
 

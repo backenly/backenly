@@ -82,7 +82,8 @@ Agent: Refused — destructive operations are blocked at the MCP key
           kind: 'code',
           language: 'js',
           label: 'The integration layer your agent writes against',
-          code: `const backend = new BackenlyClient({ projectId, apiKey })
+          code: `import { createClient } from '@backenly/sdk'
+const backend = createClient({ projectId, apiKey })
 
 // Auth — real sessions, project-scoped JWTs
 await backend.auth.signUp({ email, password })
