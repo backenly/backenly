@@ -1,6 +1,6 @@
 {
   "name": "@backenly/sdk",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Official Backenly SDK — typed database, auth, storage, realtime and a supabase-js compatibility shim for any JavaScript or TypeScript project.",
   "license": "MIT",
   "author": "Backenly",
