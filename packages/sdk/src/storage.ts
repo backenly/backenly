@@ -55,8 +55,9 @@ export class StorageModule {
       const apiKey = await this.client.ensureApiKey()
       const userToken = this.client.getUserToken()
       const headers: HeadersInit = {}
+      // Project key goes in x-api-key; Authorization is the end-user JWT's slot.
       if (apiKey) {
-        headers['Authorization'] = `Bearer ${apiKey}`
+        headers['x-api-key'] = apiKey
       }
       if (userToken) {
         headers['X-User-Token'] = userToken

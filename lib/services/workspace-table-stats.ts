@@ -29,7 +29,7 @@
  * same rule as the canonical schema-name helper.
  */
 
-import { queryWorkspace } from './workspace-pool'
+import { queryWorkspace, queryWorkspaceAsOwner } from './workspace-pool'
 import { assertValidProjectId, quoteIdent, notReservedTableSql } from '@/lib/security/workspace-schema'
 
 export interface TableStat {
@@ -152,7 +152,10 @@ async function refresh(projectId: string, tableName: string): Promise<TableStat>
   // here means the hyphen-vs-underscore class of bug literally cannot occur.
   let rows = 0
   try {
-    const result = await queryWorkspace<{ count: string }>(
+    // Owner context: FORCE RLS binds the table owner too, so an uncontexted
+    // COUNT(*) reports 0 on every policy-protected table — which is what made
+    // the inspector show an empty database that was not empty.
+    const result = await queryWorkspaceAsOwner<{ count: string }>(
       projectId,
       `SELECT COUNT(*)::text AS count FROM ${quoteIdent(tableName)}`,
     )

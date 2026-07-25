@@ -942,10 +942,26 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
 
   // ── IAM (platform API keys) ───────────────────────────────────────────────
   fn('create_api_key',
-    'Issue a new platform API key for server-to-server / scripted access to this project. Returns the secret in plaintext ONCE — relay it to the user. Permissions default to read-only unless overridden.',
+    'Issue a new API key for this project. Returns the secret in plaintext ONCE — relay it to the user. ' +
+    'Keys look like `proj_live_…` (NOT `sk_live_…`, which is Stripe\'s prefix).\n' +
+    'WHICH KIND YOU GET, AND WHERE IT MAY GO:\n' +
+    '  • Default (`serviceRole` omitted or false) — a PUBLISHABLE key. It is safe in a browser bundle, a ' +
+    'mobile app, or a public repo: it names the project but is not a user, so it reads only what your ' +
+    'SELECT policies expose to anonymous callers and CANNOT write anything until the caller also sends ' +
+    '`X-User-Token` with an end-user JWT. This is the key a frontend uses. It is the equivalent of ' +
+    'Supabase\'s anon key.\n' +
+    '  • `serviceRole: true` — a SECRET key that BYPASSES ROW-LEVEL SECURITY ENTIRELY. Server-side only: ' +
+    'cron jobs, backend workers, migrations. Never put one in a browser, a mobile binary, or a client repo. ' +
+    'The response says which kind was issued and where it may be used — read it before handing the key on.',
     {
-      description: { type: 'string', description: 'Human label, e.g. "cron worker".' },
+      description: { type: 'string', description: 'Human label, e.g. "web frontend" or "cron worker".' },
       permissions: { type: 'array', items: { type: 'string' }, description: 'e.g. ["read:posts","write:posts"]. Default ["read:*"].' },
+      serviceRole: {
+        type: 'boolean',
+        description:
+          'False/omitted (default) issues a browser-safe publishable key. True issues an RLS-BYPASSING ' +
+          'secret key for server-side use only — never ship one to a client.',
+      },
     }),
   fn('revoke_api_key',
     'DESTRUCTIVE. Permanently revoke an API key — every client using it stops working immediately. Requires confirmation.',
@@ -1430,7 +1446,7 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
   remove_permission: (a) => ({ action: 'REMOVE_PERMISSION', params: { tableName: a.tableName } }),
 
   // IAM (platform API keys)
-  create_api_key: (a) => ({ action: 'CREATE_KEY', params: { description: a.description, permissions: a.permissions } }),
+  create_api_key: (a) => ({ action: 'CREATE_KEY', params: { description: a.description, permissions: a.permissions, serviceRole: a.serviceRole === true } }),
   revoke_api_key: (a) => ({ action: 'REVOKE_KEY', params: { keyId: a.keyId } }),
   rotate_api_key: (a) => ({ action: 'ROTATE_KEY', params: { keyId: a.keyId } }),
   set_key_permissions: (a) => ({ action: 'SET_KEY_PERMISSIONS', params: { keyId: a.keyId, permissions: a.permissions } }),
@@ -1649,7 +1665,8 @@ export async function dispatchTool(
         '',
         '## 4. The runtime API (the app you build)',
         `- Base URL: \`${base}\``,
-        '- Header `x-api-key: <sk_live_… runtime key>` on every call.',
+        '- Header `x-api-key: <proj_live_... runtime key>` on every call. (`sk_live_` is the Stripe prefix, NOT the Backenly one -- a Backenly project key always starts `proj_live_` or `proj_test_`.)',
+        '- **The project key is SAFE IN A BROWSER BUNDLE.** It identifies the project, it is not a user. On its own it can only read what your SELECT policies make public, and every write is refused until you also send `X-User-Token`. It is the equivalent of a publishable/anon key — ship it in your frontend. The key you must NEVER ship is a SERVICE-ROLE key, which bypasses RLS entirely.',
         '- End-user auth: `POST /auth/signup` and `POST /auth/signin` → `{ token }`. Send that token as header **`X-User-Token: <token>`** on data calls — RLS then scopes rows to that user. (An API key alone is NOT a user; owner writes without a user token are correctly denied on own-rows tables.)',
         '- **CRUD paths — one form only:** `GET /db/<table>`, `POST /db/<table>`, `GET /db/<table>/<id>`, `PUT /db/<table>/<id>`, `DELETE /db/<table>/<id>`. The `/db/` prefix is required. There is no bare `/<table>` route.',
         '- PostgREST grammar is also available at `/api/v2/<projectId>/<table>` — `?select=*,author(*)`, `?price=gte.100`, `?order=created_at.desc`. Same auth, same RLS.',

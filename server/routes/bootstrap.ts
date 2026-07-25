@@ -46,7 +46,25 @@ setInterval(() => {
   for (const [k, b] of buckets) if (b.resetAt < now) buckets.delete(k)
 }, WINDOW_MS).unref?.()
 
-router.get('/:projectId/bootstrap', async (req: Request, res: Response) => {
+// ── GET *and* POST ─────────────────────────────────────────────────────────
+//
+// This handler was mounted on GET only. `bootstrap` is not a Next-owned
+// section, so it stays in this runtime — and a POST therefore fell straight
+// past it into the dynamic CRUD catch-all, which read "bootstrap" as a table
+// name and answered:
+//
+//   {"error":"Authentication required","code":"NO_AUTH_PROVIDED",
+//    "hint":"Include x-api-key header or Authorization: Bearer token"}
+//
+// So the endpoint whose entire job is to HAND OUT the anon key appeared to
+// demand one, and a reasonable reader concluded cold-start bootstrapping was
+// impossible. It was not — GET worked the whole time — but nothing in that
+// error said so, because it came from a different handler entirely.
+//
+// The verb is not load-bearing here: this returns a public, per-project anon
+// key and is rate-limited per (project, IP). Accepting both spellings costs
+// nothing and removes a dead end that reads like a platform-wide auth bug.
+const handleBootstrap = async (req: Request, res: Response) => {
   const projectId = req.params.projectId
 
   if (!projectId || !/^[a-z0-9-]{8,64}$/i.test(projectId)) {
@@ -169,12 +187,15 @@ router.get('/:projectId/bootstrap', async (req: Request, res: Response) => {
     anonKey,
     apiUrl: 'https://backenly.com',
   })
-})
+}
+
+router.get('/:projectId/bootstrap', handleBootstrap)
+router.post('/:projectId/bootstrap', handleBootstrap)
 
 // CORS preflight for bootstrap (arbitrary origins).
 router.options('/:projectId/bootstrap', (_req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*')
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS')
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
   res.setHeader('Access-Control-Allow-Headers', 'content-type, accept')
   res.setHeader('Access-Control-Max-Age', '86400')
   res.status(204).end()

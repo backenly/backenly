@@ -60,6 +60,12 @@ const NOT_TOOLS = new Set([
   // ("`list_products` deploys as `list-products`") — a user's function name,
   // not a Backenly tool.
   'list_products',
+  // API-key PREFIXES, not tools. The guide names them because an agent that
+  // does not know the shape of a Backenly key cannot tell one from a Stripe
+  // secret — `sk_live_` is Stripe's and was previously (wrongly) documented as
+  // ours, which is how a browser-safe publishable key came to look like a
+  // credential you must never ship.
+  'sk_live_', 'proj_live_', 'proj_test_', 'svc_live_',
 ])
 
 describe('get_instructions names only advertised tools', () => {

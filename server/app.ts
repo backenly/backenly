@@ -50,7 +50,50 @@ app.use(cors({
     return callback(null, false)
   },
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key', 'X-User-Token'],
+  // ── The PostgREST control headers, which this list used to omit ────────────
+  //
+  // /api/v2 is advertised as "PostgREST's native grammar, passed through
+  // untouched". `Prefer` is how that grammar expresses the three things every
+  // client needs on a write:
+  //
+  //   return=representation   — give me back the row I just created
+  //   resolution=merge-duplicates — upsert
+  //   count=exact             — how many rows match
+  //
+  // Leaving it out of the preflight response did not weaken those features, it
+  // removed them from every BROWSER: the preflight succeeds, the browser then
+  // refuses to send the real request, and the app sees `TypeError: Failed to
+  // fetch` with no status, no body and nothing naming CORS. Reads kept working
+  // (a GET carries no Prefer), so the platform looked half-alive and the
+  // evidence pointed at the client. Node-based tests cannot catch this at all —
+  // they do not enforce CORS.
+  //
+  // Every Supabase migrant writes `.insert(…).select().single()` on day one, and
+  // that is `Prefer: return=representation`. It died here.
+  //
+  // `Range` / `Range-Unit` are PostgREST's pagination pair, needed for the same
+  // reason.
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'x-api-key',
+    'X-User-Token',
+    'Prefer',
+    'Range',
+    'Range-Unit',
+    'Accept-Profile',
+    'Content-Profile',
+    'X-Requested-With',
+  ],
+  // ── Response headers a browser is otherwise not allowed to READ ────────────
+  //
+  // Allowing `Prefer: count=exact` through without exposing `Content-Range` is
+  // half a fix: PostgREST answers the count in that header, and cross-origin
+  // JavaScript cannot see a response header unless it is named here. The client
+  // would send a correct request and get a body with no way to read the total.
+  // `Location` is the same story for a created row's URI.
+  exposedHeaders: ['Content-Range', 'Content-Location', 'Location', 'Range-Unit', 'Preference-Applied'],
+  maxAge: 86400,
 }))
 
 // ── Next.js-owned v1 surfaces (storage, orgs, stats, checkout, …) ──────────────

@@ -206,6 +206,23 @@ export async function GET(
   return res
 }
 
+/**
+ * POST is accepted as an alias for GET.
+ *
+ * Kept in step with the Express twin (server/routes/bootstrap.ts), which is what
+ * actually answers in production. There, a POST fell past the GET-only route
+ * into the CRUD catch-all and came back "Authentication required" — from the
+ * endpoint whose job is to issue the credential. Same handler, both verbs, both
+ * runtimes: a caller who guesses the wrong verb gets the key, not a dead end
+ * that reads like a platform auth failure.
+ */
+export async function POST(
+  request: NextRequest,
+  ctx: { params: { projectId: string } },
+) {
+  return GET(request, ctx)
+}
+
 // CORS preflight — bootstrap is called from arbitrary frontend origins
 // (lovable.app preview, vercel.app, netlify.app, custom domains), so we
 // always allow.
@@ -214,7 +231,7 @@ export async function OPTIONS() {
     status: 204,
     headers: {
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
       'Access-Control-Allow-Headers': 'content-type, accept',
       'Access-Control-Max-Age': '86400',
     },

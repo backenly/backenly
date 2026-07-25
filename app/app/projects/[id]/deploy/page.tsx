@@ -253,6 +253,20 @@ export default function PublishPage() {
   const blockingChecks = readinessChecks.filter(c => c.status === 'fail' && c.severity === 'blocking')
   const warningChecks = readinessChecks.filter(c => c.status === 'fail' && c.severity !== 'blocking')
 
+  /**
+   * What the readiness card actually draws: anything that FAILED, then the
+   * passes, capped. Sorting before the cap is what guarantees a blocker can
+   * never be the item that falls off the end — see the note at the render site.
+   */
+  const VISIBLE_CHECK_LIMIT = 8
+  const orderedChecks = [
+    ...blockingChecks,
+    ...warningChecks,
+    ...readinessChecks.filter(c => c.status === 'pass'),
+  ]
+  const visibleChecks = orderedChecks.slice(0, VISIBLE_CHECK_LIMIT)
+  const hiddenCheckCount = Math.max(0, orderedChecks.length - visibleChecks.length)
+
   const runtimeStatus: { label: string; tone: 'operational' | 'attention' | 'paused' | 'managed' | 'beta' } = (() => {
     if (status === 'LIVE' && hasRealBackend) return { label: 'Live', tone: 'operational' }
     if (status === 'DEPLOYING')               return { label: 'Deploying', tone: 'attention' }
@@ -613,7 +627,25 @@ export default function PublishPage() {
                   )}
                 </div>
                 <div className="space-y-2">
-                  {readinessChecks.slice(0, 8).map(check => (
+                  {/*
+                    Failures first, blocking before warning, and only THEN the
+                    passes.
+
+                    This list used to render `readinessChecks.slice(0, 8)` in
+                    the server's own order while the "N to clear" counter above
+                    it was computed across every check. So when the one blocking
+                    failure sat at index 8 or beyond it was silently cropped,
+                    and the panel showed eight green ticks under a header
+                    reading "1 to clear" — with nothing anywhere naming the
+                    blocker. Publishing then refused with "1 readiness issue
+                    must be cleared first. Details are in the readiness panel",
+                    pointing at a panel that did not contain them.
+
+                    Ordering by severity makes the crop harmless: whatever is
+                    blocking publish is now always in the visible set, because
+                    it sorts above everything that passed.
+                  */}
+                  {visibleChecks.map(check => (
                     <div key={check.id} title={check.message} className="flex items-start gap-2">
                       {check.status === 'pass' ? (
                         <Check className="w-3 h-3 text-emerald-400/70 flex-shrink-0 mt-0.5" />
@@ -622,11 +654,27 @@ export default function PublishPage() {
                           check.severity === 'blocking' ? 'text-rose-300' : 'text-amber-500/80'
                         }`} />
                       )}
-                      <p className={`text-[12px] leading-snug ${
-                        check.status === 'pass' ? 'text-zinc-500' : 'text-zinc-300'
-                      }`}>{check.name}</p>
+                      <div className="min-w-0">
+                        <p className={`text-[12px] leading-snug ${
+                          check.status === 'pass' ? 'text-zinc-500' : 'text-zinc-300'
+                        }`}>{check.name}</p>
+                        {/*
+                          A failing check states WHY inline. "Details are in the
+                          readiness panel" was only true if the panel showed the
+                          reason, and it showed the name alone — the message was
+                          buried in a title attribute nobody hovers.
+                        */}
+                        {check.status !== 'pass' && check.message && (
+                          <p className="mt-0.5 text-[11.5px] leading-snug text-zinc-500">{check.message}</p>
+                        )}
+                      </div>
                     </div>
                   ))}
+                  {hiddenCheckCount > 0 && (
+                    <p className="pt-0.5 text-[11.5px] text-zinc-600">
+                      +{hiddenCheckCount} more passing {hiddenCheckCount === 1 ? 'check' : 'checks'}
+                    </p>
+                  )}
                 </div>
               </KitCard>
             )}

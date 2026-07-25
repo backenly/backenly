@@ -134,7 +134,7 @@ export class PresenceModule {
       const apiKey = this.client.getApiKey()
       const userToken = this.client.getUserToken()
       const headers: Record<string, string> = {}
-      if (apiKey) headers.Authorization = `Bearer ${apiKey}`
+      if (apiKey) headers['x-api-key'] = apiKey
       if (userToken) headers['X-User-Token'] = userToken
 
       await fetch(
@@ -190,7 +190,7 @@ export class PresenceModule {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+        ...(apiKey ? { 'x-api-key': apiKey } : {}),
         ...(userToken ? { 'X-User-Token': userToken } : {}),
       },
       body: JSON.stringify({ userId: this.userId, metadata: this.metadata }),

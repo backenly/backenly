@@ -6450,6 +6450,10 @@ async function executeTriggerDeploy(params: any, projectId: string): Promise<Exe
  */
 async function executeCreateKey(params: any, projectId: string): Promise<ExecutionResult> {
   const { permissions = ['read', 'write'], description } = params
+  // Service-role is OPT-IN. A key issued without asking bypasses nothing: it is
+  // the browser-safe publishable key, which is what a frontend needs and what
+  // this tool is asked for most often.
+  const serviceRole = params.serviceRole === true
   
   try {
     const { prisma } = await import('@/lib/db')
@@ -6469,8 +6473,22 @@ async function executeCreateKey(params: any, projectId: string): Promise<Executi
       }
     }
     
-    // Generate API key
-    const keyValue = `sk_live_${crypto.randomBytes(24).toString('hex')}`
+    // ── The prefix says what the key IS ──────────────────────────────────────
+    //
+    // This used to mint `sk_live_…` by hand, which is wrong twice over. It is
+    // Stripe's prefix, so it reads as a third-party credential; and in Stripe's
+    // vocabulary `sk_` means SECRET KEY — the one you must never ship — while
+    // this key is the opposite: RLS-bound, write-refusing without an end-user
+    // token, and safe in a browser bundle. A reader had to run experiments
+    // (GET 200 / POST 401 / PATCH 401) to work out that it was publishable,
+    // because the only signal available told them it was secret.
+    //
+    // Backenly's own generator is used now, and the prefix distinguishes the two
+    // real kinds: `proj_live_…` is publishable, `svc_live_…` bypasses RLS.
+    const { generateApiKey } = await import('@/lib/auth/apiKeyAuth')
+    const keyValue = serviceRole
+      ? `svc_live_${crypto.randomBytes(24).toString('hex')}`
+      : generateApiKey('live')
     const keyPrefix = keyValue.substring(0, 12)
     const keyHash = crypto.createHash('sha256').update(keyValue).digest('hex')
         
@@ -6483,20 +6501,44 @@ async function executeCreateKey(params: any, projectId: string): Promise<Executi
         keyHash,
         keyPrefix,
         permissions: Array.isArray(permissions) ? permissions : ['read', 'write'],
-        role: 'custom',
+        serviceRole,
+        role: serviceRole ? 'service' : 'custom',
         expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000), // 1 year
       }
     })
     
+    // Say where the key may go. Nobody should have to determine that by probing
+    // the API with a GET and a POST and inferring the answer from the statuses.
+    const safety = serviceRole
+      ? `⚠️ **SERVICE-ROLE KEY — server-side only.** This key BYPASSES row-level security ` +
+        `entirely and can read and write every row in the project. Never put it in a browser ` +
+        `bundle, a mobile binary, or a client-side repo. Use it from cron jobs, workers and ` +
+        `migrations. For a frontend, create a key WITHOUT serviceRole.`
+      : `✅ **Publishable key — safe in a browser bundle.** It identifies the project, it is not a ` +
+        `user: on its own it reads only what your SELECT policies expose to anonymous callers, and ` +
+        `every write is refused until the caller also sends \`X-User-Token\` with an end-user JWT. ` +
+        `This is the key your frontend ships (Supabase calls its equivalent the anon key). ` +
+        `Send it as \`x-api-key: ${keyPrefix}…\` — NOT as \`Authorization: Bearer\`, which is the ` +
+        `end-user token's slot.`
+
     return {
       success: true,
       message: `✅ Created API key: ${keyPrefix}...
+
+${safety}
 
 **Copy this key (shown once):**
 \`\`\`
 ${keyValue}
 \`\`\``,
-      data: { apiKey: keyValue, keyId: apiKey.id }
+      data: {
+        apiKey: keyValue,
+        keyId: apiKey.id,
+        serviceRole,
+        publishable: !serviceRole,
+        header: 'x-api-key',
+        safeInBrowser: !serviceRole,
+      }
     }
   } catch (error: any) {
     return {

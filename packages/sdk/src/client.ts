@@ -297,7 +297,7 @@ export class BackenlyClient {
     }
 
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-    if (this.apiKey && !options?.skipAuth) headers['Authorization'] = `Bearer ${this.apiKey}`
+    if (this.apiKey && !options?.skipAuth) headers['x-api-key'] = this.apiKey
     if (this.userToken && !options?.skipAuth) headers['X-User-Token'] = this.userToken
     if (options?.headers) {
       Object.entries(options.headers as Record<string, string>).forEach(
@@ -310,8 +310,8 @@ export class BackenlyClient {
   }
 
   async request(endpoint: string, options?: RequestInit & { skipAuth?: boolean }): Promise<any> {
-    // Auto-bootstrap: never let an authenticated request leave without an
-    // Authorization header. If the key is missing this throws a descriptive
+    // Auto-bootstrap: never let an authenticated request leave without a
+    // credential. If the key is missing this throws a descriptive
     // BackenlyError instead of letting the server 401 with "missing header".
     if (!this.apiKey && !options?.skipAuth) {
       await this.ensureApiKey()
@@ -321,8 +321,24 @@ export class BackenlyClient {
       'Content-Type': 'application/json',
     }
 
+    // ── The project key goes in x-api-key. NEVER in Authorization ────────────
+    //
+    // These are two different credentials and the server treats them as such:
+    // `x-api-key` is looked up as a hashed project key, while `Authorization:
+    // Bearer` is parsed as a JWT and verified against the project's signing
+    // secret. An `sk_live_…` key is not a JWT, so sending it as a Bearer token
+    // fails at `token.split('.')[1]` and comes back 401 INVALID_TOKEN.
+    //
+    // This client sent every data-plane call the second way, so the published
+    // SDK could not read or write anything — and because it is also what people
+    // reverse-engineer the contract from, it taught the wrong scheme to anyone
+    // who read it.
+    //
+    // `Authorization` stays reserved for the END-USER JWT, which is what
+    // `X-User-Token` carries here. The two are sent together on purpose: the key
+    // says which project, the user token says which end-user, and RLS needs both.
     if (this.apiKey && !options?.skipAuth) {
-      headers['Authorization'] = `Bearer ${this.apiKey}`
+      headers['x-api-key'] = this.apiKey
     }
 
     if (this.userToken && !options?.skipAuth) {

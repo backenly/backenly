@@ -7,6 +7,19 @@ import { prisma } from './postgres'
 import { getMongoDB, getCollection } from './mongodb'
 import { Prisma } from '@prisma/client'
 
+/**
+ * A tagged `Prisma.Sql` → the positional form `$queryRawUnsafe` takes.
+ *
+ * `.text` renders `$1, $2, …` for PostgreSQL and `.values` holds the bound
+ * parameters in order, so nothing is interpolated and the injection posture is
+ * identical to `$queryRaw`. Needed because the RLS-aware executor sets session
+ * variables in a transaction and then runs raw SQL, which cannot accept a
+ * template object.
+ */
+function toRawSql(q: Prisma.Sql): { sql: string; values: unknown[] } {
+  return { sql: q.text, values: q.values as unknown[] }
+}
+
 // Types
 export type DatabaseType = 'postgresql' | 'mongodb'
 
@@ -496,7 +509,33 @@ export class PostgresService {
       ? Prisma.sql`SELECT COUNT(*) as count FROM ${Prisma.raw(escapedSchema)}.${Prisma.raw(escapedTable)} ${whereClause}`
       : Prisma.sql`SELECT COUNT(*) as count FROM ${Prisma.raw(escapedSchema)}.${Prisma.raw(escapedTable)}`
     
-    const countResult = await prisma.$queryRaw<Array<{ count: bigint }>>(countQuery)
+    // ── The dashboard must read as the OWNER, not as an anonymous end-user ────
+    //
+    // Every workspace table is FORCE ROW LEVEL SECURITY, and FORCE means the
+    // table's own owner is subject to the policies too. These queries ran on a
+    // plain `prisma.$queryRaw` with no RLS session variables set, so
+    // `backenly_jwt_claim('sub')` was null and the service-role escape was
+    // false. Every owner-scoped predicate therefore matched nothing and the
+    // inspector reported a table with rows in it as empty — while the
+    // customer's own app, holding an end-user JWT, read those same rows back
+    // perfectly.
+    //
+    // The failure got worse as security improved: each table that gained a
+    // policy became another table the dashboard could not see. The empty-state
+    // copy ("Data lands here the moment your app or agent writes to it") then
+    // asserted the opposite of the truth, which is how a working backend gets
+    // mistaken for a broken one.
+    //
+    // `executeWithUserContext(_, true, …)` is the same service-role path
+    // get_table_schema's recordCount already used — which is exactly why
+    // run_query reported 1 row while this reported 0 in the same second.
+    const { executeWithUserContext } = await import('@/lib/services/workspace-rls')
+    const runAsOwner = async <R>(q: Prisma.Sql): Promise<R[]> => {
+      const { sql, values } = toRawSql(q)
+      return executeWithUserContext<R>('', true, sql, values)
+    }
+
+    const countResult = await runAsOwner<{ count: bigint }>(countQuery)
     const total = Number(countResult[0]?.count || 0)
 
     // Build the data query with pagination
@@ -511,7 +550,7 @@ export class PostgresService {
       dataQuery = Prisma.sql`SELECT * FROM ${Prisma.raw(escapedSchema)}.${Prisma.raw(escapedTable)} LIMIT ${limit} OFFSET ${offset}`
     }
     
-    const data = await prisma.$queryRaw<any[]>(dataQuery)
+    const data = await runAsOwner<any>(dataQuery)
     
     // Convert BigInt values to numbers for JSON serialization
     const serializedData = data.map(row => {

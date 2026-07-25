@@ -174,6 +174,57 @@ export async function queryWorkspace<T extends Record<string, unknown> = Record<
 }
 
 /**
+ * Run a query in the workspace schema AS THE PROJECT OWNER — RLS applies, but
+ * the service-role escape every Backenly policy carries is satisfied.
+ *
+ * ── Why this is a separate function ────────────────────────────────────────
+ *
+ * `queryWorkspace` sets search_path and a statement timeout and nothing else,
+ * so a query it runs arrives with no RLS session variables at all. Under FORCE
+ * ROW LEVEL SECURITY — which every workspace table has, and which binds the
+ * table's owner too — `backenly_jwt_claim('sub')` is then null and the
+ * service-role clause is false, so an owner-scoped policy matches no rows.
+ *
+ * `SELECT COUNT(*)` therefore returned 0 for tables holding real data, and the
+ * dashboard rendered "Table is empty · No rows yet. Data lands here the moment
+ * your app or agent writes to it" over a table the customer's app was reading
+ * from successfully. The count is not wrong about the query; the query was
+ * asking as nobody.
+ *
+ * This is deliberately NOT folded into `queryWorkspace`. That function is used
+ * by paths that must stay subject to policy, and quietly granting all of them a
+ * service-role context would turn a display bug into a data-exposure one. Ask
+ * for owner context explicitly, at the call site that needs it.
+ */
+export async function queryWorkspaceAsOwner<T extends Record<string, unknown> = Record<string, unknown>>(
+  projectId: string,
+  sql: string,
+  params: unknown[] = []
+): Promise<T[]> {
+  const { rlsSessionSql, rlsSessionParams } = await import('./rls-session')
+  const client = await acquireWorkspaceClient(projectId)
+  try {
+    // `set_config(..., true)` is transaction-local, so the elevated context
+    // cannot leak to the next borrower of this pooled connection.
+    await client.query('BEGIN')
+    try {
+      await client.query(
+        rlsSessionSql(),
+        rlsSessionParams({ userId: '', isServiceRole: true, userRole: 'service' }),
+      )
+      const result: QueryResult<T> = await client.query(sql, params)
+      await client.query('COMMIT')
+      return result.rows
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {})
+      throw err
+    }
+  } finally {
+    client.release()
+  }
+}
+
+/**
  * Run a parameterised DML (INSERT / UPDATE / DELETE) in the project's workspace schema.
  * Returns the number of affected rows.
  */

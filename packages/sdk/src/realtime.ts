@@ -238,7 +238,7 @@ export class RealtimeModule {
       const res = await fetch(new URL(`/api/v1/${projectId}/realtime/ticket`, base).toString(), {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${apiKey}`,
+          'x-api-key': apiKey,
           'Content-Type': 'application/json',
           ...(this.client.getUserToken() ? { 'X-User-Token': this.client.getUserToken()! } : {}),
         },

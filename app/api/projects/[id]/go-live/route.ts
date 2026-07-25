@@ -28,11 +28,32 @@ export async function POST(
       // a clean one-line error and refresh its readiness panel, instead of the
       // markdown blob meant for the chat path.
       if (result.readinessReport) {
-        const n = result.readinessReport.blockers.length
+        // ── Name the blockers HERE, in the refusal itself ─────────────────────
+        //
+        // This used to say "N readiness issues must be cleared first. Details
+        // are in the readiness panel." The panel rendered the first eight checks
+        // in the scorer's own order, so a blocker sitting past that cut was
+        // invisible — leaving a user staring at eight green ticks under a
+        // header reading "1 to clear", with the error pointing at the one place
+        // that did not contain the answer.
+        //
+        // The panel ordering is fixed too, but a refusal should carry its own
+        // reason regardless: whoever is reading this response should never have
+        // to go somewhere else to find out what it means.
+        const blockers = result.readinessReport.blockers ?? []
+        const n = blockers.length
+        const named = blockers
+          .map((b: any) => b?.name ?? b?.id)
+          .filter(Boolean)
+        const detail = named.length
+          ? ` Blocking: ${named.join('; ')}.`
+          : ''
         return NextResponse.json(
           {
             success: false,
-            error: `Publish blocked — ${n} readiness issue${n === 1 ? '' : 's'} must be cleared first. Details are in the readiness panel.`,
+            error:
+              `Publish blocked — ${n} readiness issue${n === 1 ? '' : 's'} must be cleared first.${detail}`,
+            blockers,
             readiness: result.readinessReport,
           },
           { status: 422 }
