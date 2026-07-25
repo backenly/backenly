@@ -2,6 +2,15 @@
 
 All notable changes to `@backenly/mcp-server` are documented here. Follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] — 2026-07-25
+
+### Fixed
+- **`toolsRun` and `iterations` are no longer invented.** They were defaulted with `?? []` and `?? 0`, and the server's partial-result path did not send them — so a real response read `{ applied: ["Securing profiles · custom RLS"], partial: true, toolsRun: [], iterations: 0 }`. A change applied by zero tools in zero iterations is not a fact anybody measured; it made the response unauditable. Absent now means absent.
+
+### Added
+- **`verified`** is forwarded on partial results, so an agent can tell a verified partial from an unverified one without reading prose. Backenly now holds back a verification reserve and stops taking new steps while it remains, so a partial result normally arrives verified; only the transport's hard wall clock produces `verified: false`.
+- **`verifyWith`** is forwarded alongside it — the specific thing to re-check, rather than an invitation to audit the whole backend.
+
 ## [0.2.1] — 2026-07-22
 
 ### Changed
