@@ -1,7 +1,7 @@
 /**
  * GET /api/cron/autonomy — run the autonomy reconciler across active projects
  *
- * Scheduled every 30 minutes by:
+ * Scheduled every minute by:
  *   - node-cron in instrumentation.ts (self-hosted / Hetzner — the real path)
  *   - Vercel Cron via vercel.json (optional, for Vercel deployments)
  *

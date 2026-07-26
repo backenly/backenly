@@ -43,11 +43,11 @@ const plans: Plan[] = [
     limits: [
       { label: 'Projects', value: '1 live project' },
       { label: 'Users', value: '50,000 MAU' },
-      { label: 'Autonomy', value: 'Self-healing every 30 min' },
+      { label: 'Autonomy', value: 'Self-healing every minute' },
       { label: 'AI credits', value: '200 monthly' },
     ],
     features: [
-      'Autonomous self-healing every 30 minutes — finds and fixes safe issues, and draws no AI credits',
+      'Autonomous self-healing every minute, finding and fixing safe issues while you sleep',
       'PostgreSQL, auth, storage, realtime, and REST APIs — the full runtime, not a trial',
       'Build over MCP with your own coding agent — the typed tools are never metered as AI',
     ],
@@ -67,7 +67,7 @@ const plans: Plan[] = [
       { label: 'Database + storage', value: '10 GB Postgres · 100 GB files' },
     ],
     features: [
-      'Self-healing every minute — effectively continuous, with the full autonomy dial. Unlimited fixes, no AI credits',
+      'Self-healing every minute with unlimited healing windows and up to 20 fixes each',
       'Unlimited projects and API requests, 2M function runs, triggers, webhooks, custom domains',
       '5 team seats with org roles, full deployment history and rollback, 30-day logs',
     ],
@@ -101,14 +101,14 @@ const included: { icon: LucideIcon; label: string; body: string }[] = [
   { icon: Radio, label: 'Realtime', body: 'SSE subscriptions, presence, and broadcast channels.' },
   { icon: Zap, label: 'Triggers', body: 'Event workflows for inserts, updates, schedules, and integrations.' },
   { icon: RefreshCcw, label: 'Rollback', body: 'Deployment history and restore paths when changes need reversing.' },
-  { icon: Bot, label: 'Autonomy', body: 'Detects and fixes issues on a cadence. The loop is deterministic, so it draws no AI credits on any tier.' },
+  { icon: Bot, label: 'Autonomy', body: 'Watches your live backend every minute and repairs what is safe to repair. Included on every plan.' },
   { icon: Terminal, label: 'Bring your own agent', body: 'Drive the backend from Claude Code or Cursor over MCP. Typed tools carry no AI charge — your agent, your tokens.' },
 ]
 
 const comparisonRows = [
   ['Monthly active users', '50,000', '200,000', 'Custom'],
-  ['Autonomy cadence', 'Every 30 minutes', 'Every minute', 'Custom'],
-  ['Autonomous fixing', 'Included — no AI credits', 'Included — no AI credits', 'Included — no AI credits'],
+  ['Autonomy cadence', 'Every minute', 'Every minute', 'Custom'],
+  ['Autonomous fixing', 'Included', 'Included', 'Included'],
   ['AI credits', '200 / mo', '3,000 / mo', 'Custom pool'],
   ['Bring your own agent (MCP)', 'Typed tools: no AI charge', 'Typed tools: no AI charge', 'Typed tools: no AI charge'],
   ['Database', '512 MB Postgres', '10 GB Postgres', 'Dedicated capacity'],
@@ -131,7 +131,7 @@ const faqs = [
   },
   {
     q: 'What counts as an AI credit?',
-    a: 'One credit is 1,000 tokens of Backenly’s own model usage. Credits are spent when Backenly does the thinking: its chat, the natural-language MCP tool (backend_chat), and LLM-powered tools like the architect and function generation. They are a small included line, not the headline — the typed MCP tools cost nothing, and autonomy draws no credits at all because the loop runs no model.',
+    a: 'One credit is 1,000 tokens of Backenly’s own model usage. Credits are spent when Backenly does the thinking: its chat, the natural-language MCP tool (backend_chat), and LLM-powered tools like the architect and function generation. They are a small included line, not the headline — the typed MCP tools cost nothing, and autonomy never draws credits because the loop runs no model.',
   },
   {
     q: 'Does driving the backend from my coding agent cost credits?',
@@ -139,7 +139,7 @@ const faqs = [
   },
   {
     q: 'Does autonomy spend my credits?',
-    a: 'Never — and not as a courtesy we could withdraw. The loop is deterministic: probes detect drift, and each finding maps to a typed repair that compiles to SQL. It runs no model at all, so there is nothing to bill. Self-healing is included on every tier — every 30 minutes on Free, every minute on Pro, custom cadence on Enterprise. Pro raises the cadence and volume, not the capability.',
+    a: 'Never. The loop is deterministic: probes detect drift, and each finding maps to a typed repair that compiles to SQL. It runs no model, so there is nothing to bill. Every plan gets the same every-minute cadence, including Free. Pro raises how much it may fix (20 changes per window instead of 5) and removes the monthly cap on healing windows.',
   },
   {
     q: 'Are database, auth, storage, and realtime paid add-ons?',

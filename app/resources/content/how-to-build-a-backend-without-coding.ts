@@ -176,7 +176,7 @@ Each comment has a body and belongs to a user.`,
       blocks: [
         {
           kind: 'p',
-          text: 'Deploying is a sentence ("put it live") with two gates in front of it: the platform runs a readiness check and reports blockers and warnings, then asks for explicit confirmation before anything becomes publicly callable. Deployments are versioned, and Pro can roll back to a previous one. After launch, the autonomy loop monitors your real traffic — requests, latency, error rates — on a cadence set by your plan (daily on Free, every 30 minutes on Pro). What happens when it detects a problem is up to the autonomy level you set: at the cautious end, every proposed fix waits in the review queue for your approval; further up the dial, low-risk repairs are applied automatically and written up afterward with what was detected, what changed, and how the fix was verified.',
+          text: 'Deploying is a sentence ("put it live") with two gates in front of it: the platform runs a readiness check and reports blockers and warnings, then asks for explicit confirmation before anything becomes publicly callable. Deployments are versioned, and Pro can roll back to a previous one. After launch, the autonomy loop monitors your real traffic — requests, latency, error rates — every minute on every plan. What happens when it detects a problem is up to the autonomy level you set: at the cautious end, every proposed fix waits in the review queue for your approval; further up the dial, low-risk repairs are applied automatically and written up afterward with what was detected, what changed, and how the fix was verified.',
         },
         {
           kind: 'p',

@@ -2,8 +2,8 @@
  * Billing Seed Script — Backenly 3-Plan Architecture (v4)
  *
  * Plans (internal code → display name):
- *   SANDBOX → Free        $0/mo    — 200 AI credits/mo, autonomy every 30 min
- *   BUILDER → Pro         $25/mo   — 3,000 AI credits/mo, 30-min funded autonomy
+ *   SANDBOX → Free        $0/mo    — 200 AI credits/mo, autonomy every minute
+ *   BUILDER → Pro         $25/mo   — 3,000 AI credits/mo, unlimited autonomy windows
  *   SCALE   → Enterprise  Custom   — sales-led, custom limits, SSO + SLA
  *
  * v4 (2026-07-17): the old Starter ($19) / Pro ($99) split collapsed into a
@@ -15,9 +15,9 @@
  * display names moved.
  *
  * AI is metered as token-backed credits (1 credit = 1,000 tokens — published,
- * stable ratio). The always-on autonomy loop (monitor + self-repair) NEVER
- * deducts user credits — the platform funds it on every tier; Free gets a
- * bounded daily taste that converts (see lib/ai/background-monitor.ts).
+ * stable ratio). The always-on autonomy loop (monitor + self-repair) never
+ * deducts user credits because it runs no model. Every plan gets the same
+ * every-minute cadence; Free is bounded by windows/month and fixes/window.
  *
  * No pay-as-you-go or usage-based billing. Paid plans are flat monthly rates.
  * Projects are not capped on paid plans — MAU is the real constraint.
@@ -41,14 +41,31 @@ const PLANS = [
     maxAiBuildActionsPerMonth: 20,             // legacy display only — superseded by monthlyAiCredits
     monthlyAiCredits: 200,                     // 200 token-backed AI credits/month (1 credit = 1k tokens)
 
-    // Autonomy: self-healing is the product — Free gets the full dial on a
-    // 30-min cadence (founder decisions 2026-07-18 + 2026-07-23; Pro runs
-    // every minute). Cadence AND the monthly scan budget are the Free↔Pro
-    // conversion levers: after ~120 loop runs/mo it degrades to detect-only.
-    autonomyScanIntervalMin: 30,               // every 30 min
-    autonomyMonthlyScanBudget: 120,            // ~4 healing windows/day, then detect-only
+    // ── Autonomy: same cadence as Pro, deliberately (founder decision 2026-07-26)
+    //
+    // The reconciler is deterministic — probes detect drift, each finding maps
+    // to a typed action that compiles to SQL. Measured in production: 145 ticks,
+    // 48 live runs and 3 real repairs in 24h against ZERO rows in ai_usage. It
+    // spends no tokens, so charging for how OFTEN it runs was rationing
+    // something that costs nothing to give.
+    //
+    // Neither Supabase nor InsForge has an autonomy loop at all, so "your
+    // backend heals itself every minute, free forever" is the sharpest thing we
+    // can say — and gating it behind $25 blunted our own best argument.
+    //
+    // Free↔Pro now converts on what autonomy is ALLOWED TO DO, not how often it
+    // looks: fixes per window (5 vs 20) and healing windows per month (120 then
+    // detect-only, vs unlimited). That is a more honest axis anyway — Pro is not
+    // "we check more", it is "we keep fixing".
+    //
+    // The real cost of this change is audit volume, not compute: every tick
+    // writes an AUTONOMY_TICK row, so a project goes from ~1.4k to ~43k rows a
+    // month. Fine at current scale (audit_logs was 1 MB total when this landed);
+    // needs a retention policy before free signups reach the thousands.
+    autonomyScanIntervalMin: 1,                // every minute — same as Pro
+    autonomyMonthlyScanBudget: 120,            // ~120 healing windows/mo, then detect-only (a Free↔Pro lever)
     autonomyMaxLevel: 'AGGRESSIVE',            // full dial — Autopilot available
-    autonomyMaxActionsPerWindow: 5,
+    autonomyMaxActionsPerWindow: 5,            // vs Pro 20 — the other conversion lever
     maxApiRequestsPerMonth: BigInt(100_000),   // 100k API requests TOTAL (lifetime — see apiQuotaIsLifetime)
     apiQuotaIsLifetime: true,                  // Free's API cap is a lifetime total, never resets
     maxPostgresStorageMb: 512,                 // 512 MB PostgreSQL
@@ -84,7 +101,7 @@ const PLANS = [
   // ─── PRO (BUILDER) — $25/mo flat rate, the single self-serve paid tier ─────
   // Priced against the standard BaaS Pro tier ($25). Where they
   // meter overages per GB/MAU, this stays flat — and includes the two things
-  // they don't have: the 30-min autonomous self-healing loop (deterministic — no model, no credits)
+  // they don't have: unlimited every-minute autonomous self-healing (runs no model)
   // and token-backed AI credits with a published, stable ratio.
   {
     name: 'BUILDER',
@@ -224,7 +241,7 @@ async function main() {
 
   console.log('\n✨ Billing seed complete.')
   console.log('\nPlan summary:')
-  console.log('  Free (SANDBOX):        $0/mo   — 200 AI credits/mo, autonomy every 30 min (~30/mo then detect-only), 50k MAU')
+  console.log('  Free (SANDBOX):        $0/mo   — 200 AI credits/mo, autonomy every minute (~120 windows/mo then detect-only), 50k MAU')
   console.log('  Pro (BUILDER):         $25/mo  — 3,000 AI credits/mo, 30-min funded autonomy (full dial), 200k MAU, 10 GB PG + 100 GB files')
   console.log('  Enterprise (SCALE):    Custom  — custom limits, SSO, 12h SLA, sales-led (no self-serve checkout)')
 }

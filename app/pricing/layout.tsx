@@ -3,7 +3,7 @@ import { Metadata } from 'next'
 export const metadata: Metadata = {
   title: 'Pricing — Free, Pro & Enterprise Plans',
   description:
-    'Backenly pricing: free forever plan (1 project, no credit card), Pro at $25/month, Enterprise custom. Every plan includes autonomous self-healing — deterministic, and never billed to your AI credits.',
+    'Backenly pricing: free forever plan (1 project, no credit card), Pro at $25/month, Enterprise custom. Every plan includes autonomous self-healing every minute, never billed to your AI credits.',
   keywords: [
     'Backenly pricing',
     'AI backend pricing',

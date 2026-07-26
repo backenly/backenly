@@ -104,7 +104,7 @@ const autonomyItems = [
   {
     icon: Gauge,
     title: 'Included on every plan',
-    body: 'The loop is deterministic, so autonomy spends no AI credits on any plan. Free heals every 30 minutes; Pro every minute, effectively continuous.',
+    body: 'Every plan heals every minute, Free included. The loop runs no model, so it never spends your AI credits.',
   },
 ]
 
@@ -619,7 +619,7 @@ const faqs = [
   },
   {
     q: 'What does it cost?',
-    a: 'Self-hosting is free under Apache-2.0: you bring the servers, and an OpenAI key only if you want the natural-language build tools — the self-healing loop itself runs no model. On Backenly Cloud, the Free plan is genuinely free, with no credit card, and includes a real, permanent backend plus the self-healing loop every 30 minutes. Pro is $25/month and raises capacity and autonomy cadence (every minute, effectively continuous), not capability; Enterprise is custom. Driving the backend from your own coding agent through the typed MCP tools is never metered as AI, and autonomy draws no credits on any Cloud tier.',
+    a: 'Self-hosting is free under Apache-2.0: you bring the servers, and an OpenAI key only if you want the natural-language build tools — the self-healing loop itself runs no model. On Backenly Cloud, the Free plan is genuinely free, with no credit card, and includes a real, permanent backend plus the self-healing loop every minute. Pro is $25/month and raises capacity and how much autonomy may fix per window, not the cadence; Enterprise is custom. Driving the backend from your own coding agent through the typed MCP tools is never metered as AI, and autonomy is included on every Cloud tier.',
   },
   {
     q: 'If my agent does the building, what is the dashboard for?',
