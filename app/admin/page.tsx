@@ -9,12 +9,60 @@ import {
   Settings, Minus, Plus, Ban, RotateCcw,
   MessageSquare, Package, Copy, Check, Mail, ArrowDownRight,
   Sparkles, DollarSign, UserPlus, ExternalLink, Inbox, Loader2,
-  TrendingDown, Server, Wrench,
+  TrendingDown, Server, Wrench, Bot, ShieldCheck, GitCommitHorizontal,
 } from 'lucide-react'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type Tab = 'overview' | 'growth' | 'billing' | 'users' | 'funnel' | 'projects' | 'insights' | 'health' | 'webhooks' | 'audit' | 'ops' | 'control' | 'security' | 'activity' | 'builds' | 'feedback' | 'revenue' | 'system'
+type Tab = 'overview' | 'growth' | 'billing' | 'users' | 'funnel' | 'projects' | 'insights' | 'health' | 'webhooks' | 'audit' | 'ops' | 'control' | 'security' | 'activity' | 'builds' | 'feedback' | 'revenue' | 'system' | 'agents'
+
+// ─── Agent operations ─────────────────────────────────────────────────────────
+// Backs the Agents tab. Counts only work executed through an MCP-scoped API key
+// — i.e. by Claude Code / Cursor / Codex / Cline against a live backend — as
+// opposed to the Projects tab, which counts projects created and deployed.
+
+interface AgentCounters {
+  ops: number; statements: number
+  schemaOps: number; schemaStatements: number
+  policyOps: number; dataOps: number; chatOps: number; otherOps: number; reads: number
+  applied: number; refused: number; unresolved: number; errored: number
+  lastAt: string | null
+}
+
+interface AgentOpsData {
+  window: { days: number; since: string; until: string }
+  totals: AgentCounters & { activeUsers: number; activeProjects: number; activeClients: number }
+  integrity: {
+    unresolvedRunCount: number
+    rollbacks: number
+    failedRollbacks: number
+    rolledBackIntents: number
+    criticalFindings: number
+    integrityEvents: number
+    cleanRate: number | null
+    unresolvedRuns: {
+      id: string; projectId: string | null; projectName: string | null; ownerEmail: string | null
+      client: string; tool: string; code: string; summary: string; statusCode: number; at: string
+    }[]
+  }
+  byClient: (AgentCounters & { client: string; userCount: number; projectCount: number })[]
+  byUser: (AgentCounters & {
+    userId: string; email: string | null; name: string | null; tier: string | null
+    projectCount: number; clientCount: number; clients: string[]
+  })[]
+  byProject: (AgentCounters & {
+    projectId: string; name: string; isDeployed: boolean
+    ownerUserId: string; ownerEmail: string | null
+    clientCount: number; clients: string[]
+    rollbacks: number; failedRollbacks: number; rolledBackIntents: number
+    criticalFindings: number; integrityEvents: number
+  })[]
+  byTool: (AgentCounters & { tool: string; kind: string })[]
+  guardrails: { code: string; label: string; count: number }[]
+  monthly: { month: string; schemaOps: number; schemaStatements: number; applied: number; unresolved: number }[]
+  caveats: string[]
+  evaluatedAt: string
+}
 
 interface SystemData {
   aiCost: {
@@ -407,6 +455,7 @@ const STATUS_COLOR: Record<string, string> = {
 
 const TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
   { id: 'overview',  label: 'Overview',  icon: <Activity className="w-3.5 h-3.5" /> },
+  { id: 'agents',    label: 'Agents',    icon: <Bot className="w-3.5 h-3.5" /> },
   { id: 'activity',  label: 'Activity',  icon: <Inbox className="w-3.5 h-3.5" /> },
   { id: 'growth',    label: 'Growth',    icon: <TrendingUp className="w-3.5 h-3.5" /> },
   { id: 'billing',   label: 'Billing',   icon: <CreditCard className="w-3.5 h-3.5" /> },
@@ -507,6 +556,9 @@ export default function AdminPage() {
   const [feedback, setFeedback] = useState<FeedbackData | null>(null)
   const [system, setSystem] = useState<SystemData | null>(null)
   const [revenue, setRevenue] = useState<RevenueData | null>(null)
+  const [agentOps, setAgentOps] = useState<AgentOpsData | null>(null)
+  const [agentDays, setAgentDays] = useState<30 | 90 | 365>(30)
+  const [agentBreakdown, setAgentBreakdown] = useState<'project' | 'user' | 'client' | 'tool'>('project')
   const [revActionMsg, setRevActionMsg] = useState<string | null>(null)
   const [revBusy, setRevBusy] = useState<string | null>(null)
   const [compForm, setCompForm] = useState<{ userId: string; planName: string }>({ userId: '', planName: 'PRO' })
@@ -737,6 +789,22 @@ export default function AdminPage() {
       setLoad('revenue', false)
     }
   }, [])
+
+  const fetchAgentOps = useCallback(async (force = false) => {
+    if (!force && fetchedRef.current.has('agents')) return
+    fetchedRef.current.add('agents')
+    setLoad('agents', true); setErr('agents', '')
+    try {
+      const r = await fetch(`/api/admin/agent-ops?days=${agentDays}`)
+      if (!r.ok) throw new Error(`${r.status}`)
+      setAgentOps(await r.json())
+      markFetched('agents')
+    } catch (e: any) {
+      setErr('agents', e.message)
+    } finally {
+      setLoad('agents', false)
+    }
+  }, [agentDays])
 
   const billingAction = useCallback(async (payload: Record<string, any>, busyKey: string) => {
     setRevBusy(busyKey); setRevActionMsg(null)
@@ -988,7 +1056,8 @@ export default function AdminPage() {
     else if (tab === 'feedback') fetchFeedback(true)
     else if (tab === 'revenue') fetchRevenue(true)
     else if (tab === 'system') fetchSystem(true)
-  }, [tab, fetchOverview, fetchGrowth, fetchBilling, fetchUsers, fetchInsights, fetchHealth, fetchWebhooks, fetchAudit, fetchOperator, fetchControl, fetchSecurity, fetchActivity, fetchBuilds, fetchFeedback, fetchRevenue, fetchSystem])
+    else if (tab === 'agents') fetchAgentOps(true)
+  }, [tab, fetchOverview, fetchGrowth, fetchBilling, fetchUsers, fetchInsights, fetchHealth, fetchWebhooks, fetchAudit, fetchOperator, fetchControl, fetchSecurity, fetchActivity, fetchBuilds, fetchFeedback, fetchRevenue, fetchSystem, fetchAgentOps])
 
   // Tab routing
   useEffect(() => {
@@ -1007,8 +1076,15 @@ export default function AdminPage() {
     else if (tab === 'feedback') fetchFeedback()
     else if (tab === 'revenue') fetchRevenue()
     else if (tab === 'system') fetchSystem()
+    else if (tab === 'agents') fetchAgentOps()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab])
+
+  // Refetch agent ops when the window changes
+  useEffect(() => {
+    if (fetchedRef.current.has('agents')) fetchAgentOps(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentDays])
 
   // Refetch security when its filters change
   useEffect(() => {
@@ -2833,6 +2909,331 @@ export default function AdminPage() {
           )
         )}
 
+        {/* ════════ AGENTS — what coding agents executed, and how it landed ════════ */}
+        {tab === 'agents' && (
+          loading.agents && !agentOps ? <Skeleton /> : errors.agents ? (
+            <Card title="Agents" sub="Failed to load">
+              <EmptyState icon={<Bot className="w-5 h-5" />} text={`Error: ${errors.agents}`} />
+            </Card>
+          ) : agentOps && (
+            <div className="space-y-6">
+              <div className="flex items-end justify-between gap-4 flex-wrap">
+                <SectionHeader
+                  title="Agent Operations"
+                  sub="Work executed against live backends through an MCP key — Claude Code, Cursor, Codex, Cline. Not projects created or deployed: operations performed."
+                />
+                <div className="flex items-center gap-1 bg-white/[0.04] rounded-lg p-1 border border-white/[0.06]">
+                  {([30, 90, 365] as const).map(d => (
+                    <button
+                      key={d}
+                      onClick={() => setAgentDays(d)}
+                      className={`px-3 py-1.5 rounded-md text-[11px] font-medium transition-colors ${
+                        agentDays === d ? 'bg-white/[0.08] text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'
+                      }`}
+                    >
+                      {d === 365 ? '1y' : `${d}d`}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* The headline row — the four numbers an external claim is built from. */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <StatCard
+                  icon={<GitCommitHorizontal className="w-4 h-4" />}
+                  label="Schema Changes"
+                  value={n(agentOps.totals.schemaStatements)}
+                  color="violet"
+                  sub={`${n(agentOps.totals.schemaOps)} calls · statements is the change count`}
+                />
+                <StatCard
+                  icon={<CheckCircle className="w-4 h-4" />}
+                  label="Landed Clean"
+                  value={agentOps.integrity.cleanRate === null ? '—' : `${agentOps.integrity.cleanRate}%`}
+                  color={
+                    agentOps.integrity.cleanRate === null ? 'zinc'
+                    : agentOps.integrity.cleanRate >= 100 ? 'emerald'
+                    : agentOps.integrity.cleanRate >= 99 ? 'amber' : 'red'
+                  }
+                  sub={`${n(agentOps.integrity.integrityEvents)} of ${n(agentOps.totals.applied + agentOps.totals.unresolved)} writes needed undoing`}
+                />
+                <StatCard
+                  icon={<Users className="w-4 h-4" />}
+                  label="Users w/ Agents"
+                  value={n(agentOps.totals.activeUsers)}
+                  color="blue"
+                  sub={`${n(agentOps.totals.activeProjects)} projects · ${n(agentOps.totals.activeClients)} clients`}
+                />
+                <StatCard
+                  icon={<ShieldCheck className="w-4 h-4" />}
+                  label="Guardrail Stops"
+                  value={n(agentOps.totals.refused)}
+                  color="amber"
+                  sub="refused before anything changed"
+                />
+              </div>
+
+              {/* Outcome ledger. Named for what each bucket means, because the
+                  difference between "refused" and "unresolved" is the whole
+                  safety story and a generic "failed" column erases it. */}
+              <Card
+                title="Outcome of every agent write"
+                sub={`${n(agentOps.totals.ops)} write operations in the last ${agentOps.window.days} days · ${n(agentOps.totals.reads)} reads excluded`}
+              >
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  <OutcomeStat label="Applied" value={agentOps.totals.applied} tone="emerald" note="Tool reported success — the change is in." />
+                  <OutcomeStat label="Refused" value={agentOps.totals.refused} tone="zinc" note="A gate stopped it. Nothing was applied." />
+                  <OutcomeStat label="Unresolved" value={agentOps.totals.unresolved} tone="amber" note="Multi-step run stopped part-way. May have half-applied." />
+                  <OutcomeStat label="Errored" value={agentOps.totals.errored} tone="red" note="The platform itself failed (5xx)." />
+                </div>
+
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3">
+                  <UsageStat icon={<Database className="w-3.5 h-3.5" />} label="Schema" value={n(agentOps.totals.schemaOps)} />
+                  <UsageStat icon={<Shield className="w-3.5 h-3.5" />} label="Policy / RLS" value={n(agentOps.totals.policyOps)} />
+                  <UsageStat icon={<Layers className="w-3.5 h-3.5" />} label="Row writes" value={n(agentOps.totals.dataOps)} />
+                  <UsageStat icon={<MessageSquare className="w-3.5 h-3.5" />} label="backend_chat" value={n(agentOps.totals.chatOps)} />
+                </div>
+              </Card>
+
+              {/* Integrity — the evidence behind a "no corruption" statement. */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <Card title="Data integrity" sub="Everything on record that argues against a clean landing">
+                  <div className="grid grid-cols-2 gap-3">
+                    <UsageStat icon={<RotateCcw className="w-3.5 h-3.5" />} label="Rollbacks" value={n(agentOps.integrity.rollbacks)} />
+                    <UsageStat icon={<XCircle className="w-3.5 h-3.5" />} label="Failed rollbacks" value={n(agentOps.integrity.failedRollbacks)} />
+                    <UsageStat icon={<RotateCcw className="w-3.5 h-3.5" />} label="Reverted intents" value={n(agentOps.integrity.rolledBackIntents)} />
+                    <UsageStat icon={<AlertTriangle className="w-3.5 h-3.5" />} label="Critical findings" value={n(agentOps.integrity.criticalFindings)} />
+                  </div>
+                  <p className="text-[11px] text-zinc-600 mt-3 leading-relaxed">
+                    Critical findings are context on projects with agent traffic — the detectors
+                    record no cause, so they are not attributed to agents.
+                  </p>
+                </Card>
+
+                <Card
+                  title="Guardrails that fired"
+                  sub="Why refused operations were refused"
+                >
+                  {agentOps.guardrails.length === 0 ? (
+                    <EmptyState icon={<ShieldCheck className="w-5 h-5" />} text="No refusals in this window" />
+                  ) : (
+                    <div className="space-y-2">
+                      {agentOps.guardrails.slice(0, 8).map(g => {
+                        const max = agentOps.guardrails[0].count || 1
+                        return (
+                          <div key={g.code} className="flex items-center gap-3">
+                            <span className="text-zinc-300 text-[11px] w-52 truncate" title={g.code}>{g.label}</span>
+                            <div className="flex-1 h-4 bg-white/[0.04] rounded overflow-hidden">
+                              <div className="h-full bg-amber-500/60 rounded" style={{ width: `${Math.max((g.count / max) * 100, 2)}%` }} />
+                            </div>
+                            <span className="text-zinc-300 text-xs font-mono tabular-nums w-12 text-right">{n(g.count)}</span>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </Card>
+              </div>
+
+              {/* Unresolved runs. Listed one by one on purpose: a zero-corruption
+                  claim is only as good as someone having read each of these. */}
+              {agentOps.integrity.unresolvedRuns.length > 0 && (
+                <Card
+                  title="Unresolved runs — review before claiming zero corruption"
+                  sub="Multi-step operations that stopped part-way. The usage row does not record how far they got."
+                >
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left">
+                      <thead>
+                        <tr className="border-b border-white/[0.06]">
+                          <th className="pb-2 text-zinc-500 text-[10px] uppercase tracking-[0.12em] font-semibold">When</th>
+                          <th className="pb-2 text-zinc-500 text-[10px] uppercase tracking-[0.12em] font-semibold">Project</th>
+                          <th className="pb-2 text-zinc-500 text-[10px] uppercase tracking-[0.12em] font-semibold">Client</th>
+                          <th className="pb-2 text-zinc-500 text-[10px] uppercase tracking-[0.12em] font-semibold">Tool</th>
+                          <th className="pb-2 text-zinc-500 text-[10px] uppercase tracking-[0.12em] font-semibold">Detail</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {agentOps.integrity.unresolvedRuns.map(r => (
+                          <tr key={r.id} className="border-b border-white/[0.04] last:border-0">
+                            <td className="py-2.5 text-zinc-500 text-[11px] whitespace-nowrap">{ago(r.at)}</td>
+                            <td className="py-2.5 text-zinc-200 text-[11px] max-w-[160px] truncate">
+                              {r.projectName ?? '—'}
+                              <div className="text-zinc-600 text-[10px]">{r.ownerEmail ?? '—'}</div>
+                            </td>
+                            <td className="py-2.5 text-zinc-400 text-[11px] max-w-[140px] truncate">{r.client}</td>
+                            <td className="py-2.5"><Pill>{r.tool}</Pill></td>
+                            <td className="py-2.5 text-zinc-400 text-[11px] max-w-[380px] truncate" title={r.summary}>
+                              <span className="text-amber-500/90 font-mono text-[10px]">{r.code || r.statusCode}</span>
+                              {r.summary ? ` · ${r.summary}` : ''}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </Card>
+              )}
+
+              {/* The per-user / per-project breakdown the tab exists for. */}
+              <Card
+                title="Breakdown"
+                sub="Same ledger, sliced four ways"
+                action={
+                  <div className="flex items-center gap-1 bg-white/[0.04] rounded-lg p-1 border border-white/[0.06]">
+                    {(['project', 'user', 'client', 'tool'] as const).map(b => (
+                      <button
+                        key={b}
+                        onClick={() => setAgentBreakdown(b)}
+                        className={`px-3 py-1 rounded-md text-[11px] font-medium capitalize transition-colors ${
+                          agentBreakdown === b ? 'bg-white/[0.08] text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'
+                        }`}
+                      >
+                        {b}
+                      </button>
+                    ))}
+                  </div>
+                }
+              >
+                {agentBreakdown === 'project' && (
+                  agentOps.byProject.length === 0
+                    ? <EmptyState icon={<Layers className="w-5 h-5" />} text="No agent traffic on any project in this window" />
+                    : <AgentTable
+                        head={['Project', 'Owner', 'Schema', 'Policy', 'Rows', 'Applied', 'Refused', 'Unresolved', 'Integrity', 'Last']}
+                        rows={agentOps.byProject.map(p => ({
+                          key: p.projectId,
+                          onClick: () => openUser(p.ownerUserId),
+                          cells: [
+                            { v: p.name, sub: `${p.clientCount} client${p.clientCount === 1 ? '' : 's'}${p.isDeployed ? ' · deployed' : ''}`, wide: true },
+                            { v: p.ownerEmail ?? '—', muted: true },
+                            { v: n(p.schemaStatements), sub: `${n(p.schemaOps)} calls`, mono: true },
+                            { v: n(p.policyOps), mono: true },
+                            { v: n(p.dataOps), mono: true },
+                            { v: n(p.applied), mono: true, tone: 'emerald' },
+                            { v: n(p.refused), mono: true, muted: true },
+                            { v: n(p.unresolved), mono: true, tone: p.unresolved > 0 ? 'amber' : undefined },
+                            { v: n(p.integrityEvents), mono: true, tone: p.integrityEvents > 0 ? 'red' : undefined },
+                            { v: ago(p.lastAt), muted: true },
+                          ],
+                        }))}
+                      />
+                )}
+
+                {agentBreakdown === 'user' && (
+                  agentOps.byUser.length === 0
+                    ? <EmptyState icon={<Users className="w-5 h-5" />} text="No user ran an agent in this window" />
+                    : <AgentTable
+                        head={['User', 'Tier', 'Projects', 'Schema', 'Policy', 'Rows', 'Applied', 'Refused', 'Unresolved', 'Last']}
+                        rows={agentOps.byUser.map(u => ({
+                          key: u.userId,
+                          onClick: () => openUser(u.userId),
+                          cells: [
+                            { v: u.email ?? u.userId, sub: u.clients.join(', '), wide: true },
+                            { v: (u.tier ?? 'free').toUpperCase(), muted: true },
+                            { v: n(u.projectCount), mono: true },
+                            { v: n(u.schemaStatements), sub: `${n(u.schemaOps)} calls`, mono: true },
+                            { v: n(u.policyOps), mono: true },
+                            { v: n(u.dataOps), mono: true },
+                            { v: n(u.applied), mono: true, tone: 'emerald' },
+                            { v: n(u.refused), mono: true, muted: true },
+                            { v: n(u.unresolved), mono: true, tone: u.unresolved > 0 ? 'amber' : undefined },
+                            { v: ago(u.lastAt), muted: true },
+                          ],
+                        }))}
+                      />
+                )}
+
+                {agentBreakdown === 'client' && (
+                  agentOps.byClient.length === 0
+                    ? <EmptyState icon={<Bot className="w-5 h-5" />} text="No MCP client has connected in this window" />
+                    : <AgentTable
+                        head={['Client', 'Users', 'Projects', 'Writes', 'Schema', 'Applied', 'Refused', 'Unresolved', 'Reads', 'Last']}
+                        rows={agentOps.byClient.map(c => ({
+                          key: c.client,
+                          cells: [
+                            { v: c.client, wide: true },
+                            { v: n(c.userCount), mono: true },
+                            { v: n(c.projectCount), mono: true },
+                            { v: n(c.ops), mono: true },
+                            { v: n(c.schemaStatements), sub: `${n(c.schemaOps)} calls`, mono: true },
+                            { v: n(c.applied), mono: true, tone: 'emerald' },
+                            { v: n(c.refused), mono: true, muted: true },
+                            { v: n(c.unresolved), mono: true, tone: c.unresolved > 0 ? 'amber' : undefined },
+                            { v: n(c.reads), mono: true, muted: true },
+                            { v: ago(c.lastAt), muted: true },
+                          ],
+                        }))}
+                      />
+                )}
+
+                {agentBreakdown === 'tool' && (
+                  agentOps.byTool.length === 0
+                    ? <EmptyState icon={<Terminal className="w-5 h-5" />} text="No write tool was called in this window" />
+                    : <AgentTable
+                        head={['Tool', 'Kind', 'Calls', 'Statements', 'Applied', 'Refused', 'Unresolved', 'Errored', 'Last']}
+                        rows={agentOps.byTool.map(t => ({
+                          key: t.tool,
+                          cells: [
+                            { v: t.tool, mono: true, wide: true },
+                            { v: t.kind, muted: true },
+                            { v: n(t.ops), mono: true },
+                            { v: n(t.statements), mono: true },
+                            { v: n(t.applied), mono: true, tone: 'emerald' },
+                            { v: n(t.refused), mono: true, muted: true },
+                            { v: n(t.unresolved), mono: true, tone: t.unresolved > 0 ? 'amber' : undefined },
+                            { v: n(t.errored), mono: true, tone: t.errored > 0 ? 'red' : undefined },
+                            { v: ago(t.lastAt), muted: true },
+                          ],
+                        }))}
+                      />
+                )}
+              </Card>
+
+              {/* Monthly trend — so "last month we handled N" is read off a row. */}
+              <Card title="Schema changes by month" sub="Last 12 months — the row to quote when a claim names a month">
+                {agentOps.monthly.length === 0 ? (
+                  <EmptyState icon={<BarChart2 className="w-5 h-5" />} text="No agent schema changes recorded yet" />
+                ) : (
+                  <div className="space-y-2">
+                    {agentOps.monthly.map(m => {
+                      const max = Math.max(...agentOps.monthly.map(x => x.schemaStatements), 1)
+                      return (
+                        <div key={m.month} className="flex items-center gap-3">
+                          <span className="text-zinc-400 text-[11px] w-20 font-mono tabular-nums">{m.month}</span>
+                          <div className="flex-1 h-5 bg-white/[0.04] rounded overflow-hidden">
+                            <div className="h-full bg-violet-500/50 rounded" style={{ width: `${Math.max((m.schemaStatements / max) * 100, 2)}%` }} />
+                          </div>
+                          <span className="text-zinc-100 text-xs font-mono tabular-nums w-16 text-right">{n(m.schemaStatements)}</span>
+                          <span className="text-zinc-600 text-[10px] font-mono tabular-nums w-24 text-right">
+                            {n(m.schemaOps)} calls
+                          </span>
+                          <span className={`text-[10px] font-mono tabular-nums w-20 text-right ${m.unresolved > 0 ? 'text-amber-500' : 'text-zinc-700'}`}>
+                            {m.unresolved > 0 ? `${n(m.unresolved)} unresolved` : 'clean'}
+                          </span>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </Card>
+
+              {/* How each number is defined. Kept on the page, not in a doc:
+                  these figures leave the building in marketing copy, and the
+                  definition has to travel with them. */}
+              <Card title="How these numbers are defined" sub={`Evaluated ${ago(agentOps.evaluatedAt)}`}>
+                <ul className="space-y-2">
+                  {agentOps.caveats.map((c, i) => (
+                    <li key={i} className="flex gap-2.5 text-[11.5px] text-zinc-400 leading-relaxed">
+                      <span className="text-violet-400/60 flex-shrink-0 mt-0.5">•</span>
+                      <span>{c}</span>
+                    </li>
+                  ))}
+                </ul>
+              </Card>
+            </div>
+          )
+        )}
+
         {/* ════════ ACTIVITY (Phase C — live merged stream) ════════ */}
         {tab === 'activity' && (
           <div className="space-y-5">
@@ -3970,6 +4371,91 @@ function UsageStat({ icon, label, value }: { icon: React.ReactNode; label: strin
     <div className="rounded-lg bg-white/[0.02] border border-white/[0.06] px-4 py-3">
       <div className="flex items-center gap-1.5 text-zinc-600 mb-2">{icon}<span className="text-[10px] uppercase tracking-[0.12em] font-semibold text-zinc-500">{label}</span></div>
       <div className="text-zinc-100 font-mono text-[18px] font-medium tabular-nums leading-none">{value}</div>
+    </div>
+  )
+}
+
+// One outcome bucket on the Agents tab. Carries its definition inline because
+// "refused" vs "unresolved" is the distinction the whole safety claim rests on,
+// and a bare number invites reading them as the same kind of failure.
+function OutcomeStat({
+  label, value, tone, note,
+}: { label: string; value: number; tone: 'emerald' | 'amber' | 'red' | 'zinc'; note: string }) {
+  const tones = {
+    emerald: 'text-emerald-300',
+    amber:   'text-amber-500',
+    red:     'text-rose-300',
+    zinc:    'text-zinc-300',
+  }
+  return (
+    <div className="rounded-lg bg-white/[0.02] border border-white/[0.06] px-4 py-3">
+      <div className="text-[10px] uppercase tracking-[0.12em] font-semibold text-zinc-500">{label}</div>
+      <div className={`font-mono text-[20px] font-medium tabular-nums leading-none mt-2 ${tones[tone]}`}>
+        {value.toLocaleString()}
+      </div>
+      <div className="text-[10.5px] text-zinc-600 mt-2 leading-snug">{note}</div>
+    </div>
+  )
+}
+
+interface AgentCell {
+  v: string
+  sub?: string
+  mono?: boolean
+  muted?: boolean
+  wide?: boolean
+  tone?: 'emerald' | 'amber' | 'red'
+}
+
+// Shared table for the Agents tab's four breakdowns. They differ only in
+// columns, so one table beats four near-identical copies drifting apart.
+function AgentTable({
+  head, rows,
+}: {
+  head: string[]
+  rows: { key: string; onClick?: () => void; cells: AgentCell[] }[]
+}) {
+  const tones = { emerald: 'text-emerald-300', amber: 'text-amber-500', red: 'text-rose-300' }
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-left">
+        <thead>
+          <tr className="border-b border-white/[0.06]">
+            {head.map((h, i) => (
+              <th
+                key={h}
+                className={`pb-2 text-zinc-500 text-[10px] uppercase tracking-[0.12em] font-semibold whitespace-nowrap ${i === 0 ? '' : 'text-right'}`}
+              >
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(r => (
+            <tr
+              key={r.key}
+              onClick={r.onClick}
+              className={`border-b border-white/[0.04] last:border-0 ${r.onClick ? 'cursor-pointer hover:bg-white/[0.02]' : ''}`}
+            >
+              {r.cells.map((c, i) => (
+                <td
+                  key={i}
+                  className={`py-2.5 text-[11.5px] whitespace-nowrap ${i === 0 ? '' : 'text-right'} ${
+                    c.wide ? 'max-w-[220px] truncate' : ''
+                  } ${c.mono ? 'font-mono tabular-nums' : ''} ${
+                    c.tone ? tones[c.tone] : c.muted ? 'text-zinc-500' : 'text-zinc-200'
+                  }`}
+                  title={c.v}
+                >
+                  {c.v}
+                  {c.sub && <div className="text-zinc-600 text-[10px] font-sans">{c.sub}</div>}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   )
 }
