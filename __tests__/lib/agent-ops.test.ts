@@ -51,6 +51,14 @@ describe('classifyTool', () => {
     // harmless — never silently inside the schema count.
     expect(classifyTool('some_future_tool')).toBe('other')
   })
+
+  it('does not count a tool-less usage row as a write', () => {
+    // GET /api/mcp/manifest records with no tool name, as does a request whose
+    // body failed to parse. Neither ran anything. Production had exactly three
+    // agent rows — one catalog read and two manifest fetches — and reported two
+    // writes until this case was pinned.
+    expect(classifyTool('unknown')).toBe('read')
+  })
 })
 
 describe('classifyOutcome', () => {

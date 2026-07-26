@@ -138,6 +138,14 @@ const READ_TOOLS = new Set([
 ])
 
 export function classifyTool(tool: string): AgentOpKind {
+  // Sentinel for a usage row whose metadata carries no `tool` key. Only two
+  // paths produce one, and neither is a write: GET /api/mcp/manifest (an agent
+  // discovering the tool catalog, recorded with no tool name), and a request
+  // whose body failed to parse. Counting these as writes put phantom "other"
+  // operations in the totals — observed on production, where the entire agent
+  // ledger was one manifest fetch and one catalog read, yet reported two
+  // writes. A row that never named a tool is not evidence that one ran.
+  if (tool === 'unknown') return 'read'
   if (SCHEMA_TOOLS.has(tool)) return 'schema'
   if (POLICY_TOOLS.has(tool)) return 'policy'
   if (DATA_TOOLS.has(tool)) return 'data'
