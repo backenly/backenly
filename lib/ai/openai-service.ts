@@ -33,9 +33,15 @@ export function trackCompletionCost(
   const usage = response.usage
   if (!usage) return
 
+  // Tokens OpenAI served from its prompt cache at 25% of the input rate. The
+  // brain's ~15.7k-token tool catalog is byte-identical on every request, so
+  // this is normally the bulk of the prompt after the first call of a turn —
+  // pricing it as fresh input overstated the loop's cost roughly fourfold.
+  const cachedTokens = usage.prompt_tokens_details?.cached_tokens ?? 0
+
   import('./cost-tracker')
     .then(({ recordAiUsage }) =>
-      recordAiUsage(projectId, response.model, usage.prompt_tokens, usage.completion_tokens, endpoint)
+      recordAiUsage(projectId, response.model, usage.prompt_tokens, usage.completion_tokens, endpoint, cachedTokens)
     )
     .catch((err: any) => console.error('[OpenAIService] cost tracking failed:', err))
 }

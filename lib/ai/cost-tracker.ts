@@ -46,11 +46,55 @@ const SINGLE_REQUEST_ALERT_THRESHOLD = 0.10
 /**
  * Calculate the USD cost for a given model and token counts.
  */
-export function calculateCost(model: string, promptTokens: number, completionTokens: number): number {
+/**
+ * Fraction of the input price charged for tokens served from OpenAI's prompt
+ * cache. Cached input bills at 25% on the gpt-4o and gpt-4.1 families.
+ *
+ * This matters far more here than it looks. The brain sends `BRAIN_TOOLS`
+ * (~15.7k tokens) plus a fixed system prompt as the first thing in every single
+ * request, byte-identical across every turn, every project and every user — a
+ * textbook cacheable prefix. Treating those tokens as full price overstated the
+ * cost of the loop's dominant component by 4x, on top of the gpt-4 prefix bug.
+ */
+const CACHED_INPUT_MULTIPLIER = 0.25
+
+/**
+ * `cachedTokens` is the subset of `promptTokens` OpenAI served from cache
+ * (`usage.prompt_tokens_details.cached_tokens`). Omit it and behaviour is
+ * unchanged — every prompt token bills at full rate.
+ */
+export function calculateCost(
+  model: string,
+  promptTokens: number,
+  completionTokens: number,
+  cachedTokens = 0,
+): number {
   const pricing = resolvePricing(model)
-  const inputCost = (promptTokens / 1_000_000) * pricing.inputPer1M
+  // Clamp: cached can never exceed prompt, and a bad reading must not produce a
+  // negative bill.
+  const cached = Math.max(0, Math.min(cachedTokens, promptTokens))
+  const fresh = promptTokens - cached
+  const inputCost =
+    (fresh / 1_000_000) * pricing.inputPer1M +
+    (cached / 1_000_000) * pricing.inputPer1M * CACHED_INPUT_MULTIPLIER
   const outputCost = (completionTokens / 1_000_000) * pricing.outputPer1M
   return parseFloat((inputCost + outputCost).toFixed(6))
+}
+
+/**
+ * Tokens weighted by what they actually cost us, for metering against a user's
+ * credit balance. A cached prompt token is a quarter of a fresh one, so billing
+ * it as a whole one charges the user four times over for a catalog they did not
+ * ask for and we did not re-pay for.
+ *
+ * This is what makes a long multi-step build affordable: iteration 1 pays for
+ * the tool catalog, iterations 2..N read it from cache, and the credit meter now
+ * reflects that instead of charging 15.7k tokens per step.
+ */
+export function effectiveTokens(promptTokens: number, completionTokens: number, cachedTokens = 0): number {
+  const cached = Math.max(0, Math.min(cachedTokens, promptTokens))
+  const fresh = promptTokens - cached
+  return Math.round(fresh + cached * CACHED_INPUT_MULTIPLIER + completionTokens)
 }
 
 /**
@@ -72,10 +116,11 @@ export async function recordAiUsage(
   promptTokens: number,
   completionTokens: number,
   endpoint: string,
+  cachedTokens = 0,
 ): Promise<void> {
   try {
     const { prisma } = await import('@/lib/db/prisma')
-    const cost = calculateCost(model, promptTokens, completionTokens)
+    const cost = calculateCost(model, promptTokens, completionTokens, cachedTokens)
     const totalTokens = promptTokens + completionTokens
 
     await prisma.aiUsage.create({
@@ -87,6 +132,11 @@ export async function recordAiUsage(
         totalTokens,
         cost,
         endpoint,
+        // Cache hit rate is the single most useful number for reasoning about
+        // brain cost, and there is no column for it — `metadata` is Json, so
+        // record it there rather than migrate. Lets a query answer "what share
+        // of our prompt tokens are we actually re-paying for?"
+        metadata: { cachedTokens, cacheHitRate: promptTokens > 0 ? +(cachedTokens / promptTokens).toFixed(3) : 0 },
       },
     })
 

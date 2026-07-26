@@ -24,6 +24,7 @@
 
 import type { OpenAI } from 'openai'
 import { getOpenAIClient, trackCompletionCost } from '../openai-service'
+import { effectiveTokens } from '../cost-tracker'
 import { getModel } from '../model-router'
 import { agentSystemPrompt, clarifyPrompt } from './prompts'
 import { collectProof, formatProof } from '../proof-system'
@@ -1373,7 +1374,17 @@ async function runAgentLoop(
     }
 
     if (input.projectId) trackCompletionCost(completion, input.projectId, 'brain-agent')
-    const turnTokens = completion.usage?.total_tokens ?? 0
+    // ── Meter what the turn COST, not how many tokens crossed the wire ────────
+    //
+    // The tool catalog (~15.7k tokens) is re-sent on every iteration and served
+    // from OpenAI's prompt cache at a quarter of the price after the first call.
+    // Charging raw totals billed a user the full catalog on every step of a
+    // multi-step build — the deep, useful builds were penalised hardest, for
+    // context they never asked for and we were not re-paying for.
+    const u = completion.usage
+    const turnTokens = u
+      ? effectiveTokens(u.prompt_tokens, u.completion_tokens, u.prompt_tokens_details?.cached_tokens ?? 0)
+      : 0
     tokensUsed += turnTokens
     // Report as spent, not as returned — see BrainInput.onTokens. A caller
     // racing a wall clock only ever sees this.
