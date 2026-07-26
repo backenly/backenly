@@ -297,7 +297,7 @@ const FAQ = [
   },
   {
     q: 'What does it cost?',
-    a: 'The MCP server is free to install from npm. When your agent drives the backend through direct tool calls, that is never metered as AI — your agent supplies the intelligence and you pay your own model provider, while Backenly meters only infrastructure against your plan. The exception is backend_chat, which runs Backenly’s own brain.',
+    a: 'The MCP server is free to install from npm. When your agent drives the backend through direct tool calls, that is never metered as AI — your agent supplies the intelligence and you pay your own model provider, while Backenly meters only infrastructure against your plan. The exceptions are backend_chat and generate_function, where Backenly runs its own model on your behalf and credits are drawn.',
   },
   {
     q: 'The agent says my key has the wrong scope.',

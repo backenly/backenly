@@ -90,7 +90,7 @@ const useCases = [
     label: 'Side Projects',
     headline: 'A real backend, free forever',
     description:
-      'One permanently free project, no credit card. Backenly gives your side project a real backend — not a toy — and a daily self-healing loop so it is still running when someone finds it months later.',
+      'One permanently free project, no credit card. Backenly gives your side project a real backend — not a toy — and a self-healing loop that runs every 30 minutes so it is still running when someone finds it months later.',
     shortDescription:
       'Use one permanent free project to launch a serious side project without infrastructure spend — and without maintenance being the reason it dies.',
     icon: Sprout,

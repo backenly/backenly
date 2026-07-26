@@ -11,7 +11,7 @@
  * Honesty (§5.4): credits are shown as balance + this-cycle burn. A per-event
  * credit *ledger history* tab needs the `CreditLedgerEntry` model, which is
  * Phase 3 data-model work (not yet in schema) — so it is intentionally absent
- * rather than faked. Autonomy is company-funded and never metered here.
+ * rather than faked. Autonomy runs no model, so it is never metered here.
  */
 
 import { useState, useEffect } from 'react'
@@ -64,7 +64,7 @@ const PLAN_DEFS: PlanDef[] = [
     recommended: false,
     limits: [
       '1 project, permanently live, no expiry',
-      'Self-healing every 30 minutes, company-funded and always on',
+      'Self-healing every 30 minutes, always on, and draws no AI credits',
       'Up to 50,000 monthly active users',
       '10,000 function invocations / month',
       '512 MB Postgres + 1 GB storage',

@@ -294,7 +294,7 @@ const USE_CASES: Record<string, UseCaseData> = {
     afterLaunch: [
       {
         heading: 'Side projects die of maintenance, not launch',
-        body: "Every developer knows the graveyard: side projects that shipped, worked, and quietly rotted because nobody wanted to spend Saturday debugging a database that filled up or an auth flow that broke. The free plan includes daily automated monitoring and self-repair — the platform checks your project's health and fixes what is safe to fix even while you're ignoring it for months. That is the difference between a side project that is 'down, whenever I get to it' and one that is simply still running when someone shares it on a forum at 2 a.m.",
+        body: "Every developer knows the graveyard: side projects that shipped, worked, and quietly rotted because nobody wanted to spend Saturday debugging a database that filled up or an auth flow that broke. The free plan checks your project's health every 30 minutes and repairs what is safe to repair, even while you're ignoring it for months. That is the difference between a side project that is 'down, whenever I get to it' and one that is simply still running when someone shares it on a forum at 2 a.m.",
       },
       {
         heading: 'If it takes off, nothing gets rebuilt',
@@ -308,7 +308,7 @@ const USE_CASES: Record<string, UseCaseData> = {
       },
       {
         q: 'What are the limits on the free plan?',
-        a: 'The free plan includes 1 project, 200 AI credits per month, daily automated monitoring and self-repair, up to 50,000 monthly active users, 512 MB PostgreSQL, 1 GB file storage, and full access to auth and realtime.',
+        a: 'The free plan includes 1 project, 200 AI credits per month, automated monitoring and self-repair every 30 minutes, up to 50,000 monthly active users, 512 MB PostgreSQL, 1 GB file storage, and full access to auth and realtime.',
       },
       {
         q: 'Can I upgrade if my side project takes off?',

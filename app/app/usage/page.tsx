@@ -200,7 +200,7 @@ export default function UsagePage() {
               <KitCard className="mt-4">
                 <KitCardHeader
                   title="Autonomy"
-                  description="Company-funded, never drawn from your credits"
+                  description="Deterministic — runs no model, so it never draws your credits"
                   actions={
                     <span className="inline-flex items-baseline gap-1.5">
                       <span className="font-mono text-[20px] font-medium tabular-nums leading-none text-white">{fmtNum(activity.runsThisCycle)}</span>
@@ -217,7 +217,7 @@ export default function UsagePage() {
             <div className="mt-5">
               <KitNote tone="info" title="Usage refreshes periodically">
                 Counters can take up to an hour to reflect the latest activity. Autonomy runs never draw from your credits;
-                keeping backends alive is company-funded.
+                keeping backends alive costs no credits — the loop is deterministic.
               </KitNote>
             </div>
 

@@ -32,7 +32,7 @@ export default function BillingPage() {
       <div className="mx-auto w-full max-w-[1100px] px-6 py-8 lg:px-10">
         <SectionTitle
           title="Billing"
-          description="Your plan and usage. Autonomy, the loop that keeps your backend alive, is company-funded on every tier."
+          description="Your plan and usage. Autonomy, the loop that keeps your backend alive, is deterministic — it draws no AI credits on any tier."
         />
         <BillingPanel />
       </div>

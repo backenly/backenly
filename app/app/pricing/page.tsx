@@ -33,7 +33,7 @@ const plans: PlanDef[] = [
     icon: Shield,
     limits: [
       '1 project, permanently live, no expiry',
-      'Autonomous self-healing every 30 minutes, safe fixes applied, company-funded',
+      'Autonomous self-healing every 30 minutes, safe fixes applied, no AI credits used',
       '200 AI credits / month (1 credit = 1,000 tokens)',
       'Build over MCP with your own coding agent — typed tools carry no AI charge',
       'Up to 50,000 monthly active users',
@@ -64,7 +64,7 @@ const plans: PlanDef[] = [
     icon: Rocket,
     popular: true,
     limits: [
-      'Self-healing every minute: full autonomy dial, unlimited fixes, company-funded',
+      'Self-healing every minute: full autonomy dial, unlimited fixes, no AI credits used',
       '3,000 AI credits / month, token-backed with a published stable ratio',
       'Unlimited projects + unlimited API requests',
       'Up to 200,000 monthly active users',

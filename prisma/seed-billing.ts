@@ -2,7 +2,7 @@
  * Billing Seed Script — Backenly 3-Plan Architecture (v4)
  *
  * Plans (internal code → display name):
- *   SANDBOX → Free        $0/mo    — 200 AI credits/mo, bounded daily autonomy
+ *   SANDBOX → Free        $0/mo    — 200 AI credits/mo, autonomy every 30 min
  *   BUILDER → Pro         $25/mo   — 3,000 AI credits/mo, 30-min funded autonomy
  *   SCALE   → Enterprise  Custom   — sales-led, custom limits, SSO + SLA
  *
@@ -84,7 +84,7 @@ const PLANS = [
   // ─── PRO (BUILDER) — $25/mo flat rate, the single self-serve paid tier ─────
   // Priced against the standard BaaS Pro tier ($25). Where they
   // meter overages per GB/MAU, this stays flat — and includes the two things
-  // they don't have: the 30-min autonomous self-healing loop (company-funded)
+  // they don't have: the 30-min autonomous self-healing loop (deterministic — no model, no credits)
   // and token-backed AI credits with a published, stable ratio.
   {
     name: 'BUILDER',
@@ -96,7 +96,7 @@ const PLANS = [
     maxAiBuildActionsPerMonth: 300,           // legacy display only — superseded by monthlyAiCredits
     monthlyAiCredits: 3_000,                  // 3,000 token-backed AI credits/month
 
-    // Autonomy: company-funded, ALL four dial modes (OFF → AGGRESSIVE),
+    // Autonomy: deterministic (spends no tokens), ALL four dial modes (OFF → AGGRESSIVE),
     // effectively continuous — the loop may run every minute.
     autonomyScanIntervalMin: 1,               // every minute (effectively always-on)
     autonomyMonthlyScanBudget: null,          // unlimited (fair-use within cadence)
@@ -224,7 +224,7 @@ async function main() {
 
   console.log('\n✨ Billing seed complete.')
   console.log('\nPlan summary:')
-  console.log('  Free (SANDBOX):        $0/mo   — 200 AI credits/mo, daily autonomy (~30/mo then detect-only), 50k MAU')
+  console.log('  Free (SANDBOX):        $0/mo   — 200 AI credits/mo, autonomy every 30 min (~30/mo then detect-only), 50k MAU')
   console.log('  Pro (BUILDER):         $25/mo  — 3,000 AI credits/mo, 30-min funded autonomy (full dial), 200k MAU, 10 GB PG + 100 GB files')
   console.log('  Enterprise (SCALE):    Custom  — custom limits, SSO, 12h SLA, sales-led (no self-serve checkout)')
 }

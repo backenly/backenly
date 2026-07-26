@@ -83,7 +83,7 @@ const COMPARISONS: Record<string, ComparisonData> = {
     faq: [
       { q: 'Does Backenly use the same database as Supabase?', a: 'Yes — PostgreSQL, served through PostgREST, the same engine Supabase runs. The query grammar is identical: ?price=gte.100, ?or=(a.eq.1,b.eq.2), ?order=created_at.desc, and embedded resources like ?select=*,author(*). What differs is that structural changes go through governed, reversible actions instead of hand-written migrations, and a monitoring loop operates the backend after launch.' },
       { q: 'Can I migrate from Supabase to Backenly?', a: 'Because both run PostgreSQL and PostgREST, your queries and client code carry over largely unchanged — the filter grammar and embedded resources are the same. Migration is a pg_dump of your data plus describing your schema to Backenly, and your row-level security model maps onto Postgres grants and RLS the same way. The Backenly team can assist with complex migrations.' },
-      { q: 'Is Backenly cheaper than Supabase?', a: "Both Pro plans cost $25/month. The difference is what the $25 buys: Supabase Pro raises capacity; Backenly Pro raises capacity and includes the autonomous self-healing loop (every minute, company-funded — it never draws from your AI credits). Backenly's free plan is permanent and includes 1 project." },
+      { q: 'Is Backenly cheaper than Supabase?', a: "Both Pro plans cost $25/month. The difference is what the $25 buys: Supabase Pro raises capacity; Backenly Pro raises capacity and includes the autonomous self-healing loop (every minute; it is deterministic, so it never draws from your AI credits). Backenly's free plan is permanent and includes 1 project." },
     ],
   },
   'backenly-vs-firebase': {
