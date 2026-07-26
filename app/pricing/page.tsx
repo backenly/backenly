@@ -47,7 +47,7 @@ const plans: Plan[] = [
       { label: 'AI credits', value: '200 monthly' },
     ],
     features: [
-      'Autonomous self-healing every minute, finding and fixing safe issues while you sleep',
+      'Self-healing every minute, fixing up to 5 safe issues at a time, about 120 times a month',
       'PostgreSQL, auth, storage, realtime, and REST APIs — the full runtime, not a trial',
       'Build over MCP with your own coding agent — the typed tools are never metered as AI',
     ],
@@ -67,7 +67,7 @@ const plans: Plan[] = [
       { label: 'Database + storage', value: '10 GB Postgres · 100 GB files' },
     ],
     features: [
-      'Self-healing every minute with unlimited healing windows and up to 20 fixes each',
+      'Self-healing every minute, fixing up to 20 issues at a time with no monthly limit',
       'Unlimited projects and API requests, 2M function runs, triggers, webhooks, custom domains',
       '5 team seats with org roles, full deployment history and rollback, 30-day logs',
     ],
@@ -139,7 +139,7 @@ const faqs = [
   },
   {
     q: 'Does autonomy spend my credits?',
-    a: 'Never. The loop is deterministic: probes detect drift, and each finding maps to a typed repair that compiles to SQL. It runs no model, so there is nothing to bill. Every plan gets the same every-minute cadence, including Free. Pro raises how much it may fix (20 changes per window instead of 5) and removes the monthly cap on healing windows.',
+    a: 'Never. The loop is deterministic: probes detect drift, and each finding maps to a typed repair that compiles to SQL. It runs no model, so there is nothing to bill. Every plan checks every minute, Free included. The difference is how much it may fix on its own: Free repairs up to 5 issues at a time and does that about 120 times a month, then keeps watching and reporting until the month resets. Pro repairs up to 20 at a time with no monthly limit.',
   },
   {
     q: 'Are database, auth, storage, and realtime paid add-ons?',
