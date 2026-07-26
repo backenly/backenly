@@ -354,6 +354,34 @@ interface OperatorData {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+/**
+ * Read an admin API response as JSON without assuming it IS JSON.
+ *
+ * Every /api/admin route is supposed to answer JSON, but the two failure modes
+ * that matter most on this page do not: a route that dies before its handler
+ * runs (a chunk missing because a build overwrote `.next` under the running
+ * server, a module that throws at import) gets Next's plain-text "Internal
+ * Server Error", and anything nginx rejects on its own gets an HTML page.
+ * Calling r.json() on those throws `Unexpected token 'I'` / `'<'`, and that
+ * parser message is what the operator sees instead of the status code — which
+ * is the one piece of information that would have told them what broke.
+ *
+ * So: read the body once as text, parse if it parses, and otherwise synthesise
+ * an { error } shaped like the real ones, carrying the status and a snippet of
+ * whatever the server actually said.
+ */
+async function readJson(r: Response): Promise<any> {
+  const text = await r.text()
+  if (!text.trim()) return {}
+  try {
+    return JSON.parse(text)
+  } catch {
+    const snippet = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120)
+    const status = `HTTP ${r.status}${r.statusText ? ` ${r.statusText}` : ''}`
+    return { error: snippet ? `${status} — ${snippet}` : status }
+  }
+}
+
 const n = (v: number | null | undefined) => (v ?? 0).toLocaleString()
 const percent = (v: number | null | undefined) => {
   const value = Number(v ?? 0)
@@ -577,10 +605,87 @@ export default function AdminPage() {
     setTimeout(() => setCopiedEmail(null), 1500)
   }
 
+  // ── Step-up ("sudo") state ─────────────────────────────────────────────────
+  // Admin reads need only the founder session. Admin WRITES need a second
+  // factor, earned by re-entering a password/TOTP at /api/admin/reauth and
+  // good for 15 minutes. See lib/auth/adminStepUp.ts.
+  const [sudoOpen, setSudoOpen] = useState(false)
+  const [sudoMethods, setSudoMethods] = useState<{ password: boolean; totp: boolean }>({ password: false, totp: false })
+  const [sudoSecret, setSudoSecret] = useState('')
+  const [sudoErr, setSudoErr] = useState<string | null>(null)
+  const [sudoBusy, setSudoBusy] = useState(false)
+  const sudoResolverRef = useRef<((granted: boolean) => void) | null>(null)
+
   const fetchedRef = useRef<Set<string>>(new Set())
   const setLoad = (t: Tab, v: boolean) => setLoading(p => ({ ...p, [t]: v }))
   const setErr  = (t: Tab, e: string)  => setErrors(p => ({ ...p, [t]: e }))
   const markFetched = (t: Tab) => setLastFetched(p => ({ ...p, [t]: Date.now() }))
+
+  /** Open the step-up prompt and resolve once the founder confirms or cancels. */
+  const promptForSudo = useCallback(async (): Promise<boolean> => {
+    const info = await fetch('/api/admin/reauth').then(readJson).catch(() => ({}))
+    setSudoMethods({ password: !!info?.methods?.password, totp: !!info?.methods?.totp })
+    setSudoSecret('')
+    setSudoErr(null)
+    setSudoOpen(true)
+    return new Promise<boolean>(resolve => { sudoResolverRef.current = resolve })
+  }, [])
+
+  /**
+   * Every admin mutation goes through here. A write that comes back
+   * 401 SUDO_REQUIRED is not an error to show the operator — it means the
+   * 15-minute window lapsed, so prompt, then replay the exact same request
+   * once. Bodies are plain JSON strings, so the init object is replayable.
+   */
+  const adminMutate = useCallback(async (
+    url: string,
+    init: RequestInit,
+  ): Promise<{ r: Response; d: any }> => {
+    let r = await fetch(url, init)
+    let d = await readJson(r)
+    if (r.status === 401 && d?.code === 'SUDO_REQUIRED') {
+      const granted = await promptForSudo()
+      if (!granted) return { r, d: { ...d, error: 'Admin change cancelled.' } }
+      r = await fetch(url, init)
+      d = await readJson(r)
+    }
+    return { r, d }
+  }, [promptForSudo])
+
+  const submitSudo = useCallback(async () => {
+    const secret = sudoSecret.trim()
+    if (!secret) return
+    setSudoBusy(true)
+    setSudoErr(null)
+    try {
+      // A 6-digit string is a TOTP code; anything else is a password. Sending
+      // the right field matters — the server prefers TOTP when 2FA is on.
+      const payload = sudoMethods.totp && /^\d{6}$/.test(secret) ? { totp: secret } : { password: secret }
+      const r = await fetch('/api/admin/reauth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      const d = await readJson(r)
+      if (!r.ok) throw new Error(d.error || `${r.status}`)
+      setSudoOpen(false)
+      setSudoSecret('')
+      sudoResolverRef.current?.(true)
+      sudoResolverRef.current = null
+    } catch (e: any) {
+      setSudoErr(e.message)
+    } finally {
+      setSudoBusy(false)
+    }
+  }, [sudoSecret, sudoMethods.totp])
+
+  const cancelSudo = useCallback(() => {
+    setSudoOpen(false)
+    setSudoSecret('')
+    setSudoErr(null)
+    sudoResolverRef.current?.(false)
+    sudoResolverRef.current = null
+  }, [])
 
   // ── Fetch functions ────────────────────────────────────────────────────────
 
@@ -594,7 +699,7 @@ export default function AdminPage() {
         fetch('/api/admin/dashboard'),
       ])
       if (!r1.ok) throw new Error(`${r1.status}`)
-      const [d1, d2] = await Promise.all([r1.json(), r2.ok ? r2.json() : null])
+      const [d1, d2] = await Promise.all([readJson(r1), r2.ok ? readJson(r2) : null])
       setOverview(d1)
       if (d2) setDashboard(d2)
       markFetched('overview')
@@ -613,7 +718,7 @@ export default function AdminPage() {
     try {
       const r = await fetch('/api/admin/payments')
       if (!r.ok) throw new Error(`${r.status}`)
-      setPayments(await r.json())
+      setPayments(await readJson(r))
       markFetched('billing')
     } catch (e: any) {
       setErr('billing', e.message)
@@ -629,7 +734,7 @@ export default function AdminPage() {
     try {
       const r = await fetch('/api/admin/analytics/users')
       if (!r.ok) throw new Error(`${r.status}`)
-      const d = await r.json()
+      const d = await readJson(r)
       setUsers(d.users ?? [])
       markFetched('users')
     } catch (e: any) {
@@ -646,7 +751,7 @@ export default function AdminPage() {
     try {
       const r = await fetch('/api/admin/insights')
       if (!r.ok) throw new Error(`${r.status}`)
-      setInsights(await r.json())
+      setInsights(await readJson(r))
       markFetched('insights'); markFetched('funnel'); markFetched('projects')
     } catch (e: any) {
       setErr('insights', e.message); setErr('funnel', e.message); setErr('projects', e.message)
@@ -664,8 +769,8 @@ export default function AdminPage() {
         fetch('/api/admin/health'),
         fetch(`/api/admin/jobs?status=${jobsStatus}&limit=20`),
       ])
-      if (r1.ok) setHealth(await r1.json())
-      if (r2.ok) setJobs(await r2.json())
+      if (r1.ok) setHealth(await readJson(r1))
+      if (r2.ok) setJobs(await readJson(r2))
       markFetched('health')
     } catch (e: any) {
       setErr('health', e.message)
@@ -681,7 +786,7 @@ export default function AdminPage() {
     try {
       const r = await fetch('/api/admin/webhooks')
       if (!r.ok) throw new Error(`${r.status}`)
-      setWebhooks(await r.json())
+      setWebhooks(await readJson(r))
       markFetched('webhooks')
     } catch (e: any) {
       setErr('webhooks', e.message)
@@ -697,7 +802,7 @@ export default function AdminPage() {
     try {
       const r = await fetch('/api/admin/growth')
       if (!r.ok) throw new Error(`${r.status}`)
-      setGrowth(await r.json())
+      setGrowth(await readJson(r))
       markFetched('growth')
     } catch (e: any) {
       setErr('growth', e.message)
@@ -711,7 +816,7 @@ export default function AdminPage() {
     try {
       const r = await fetch('/api/admin/dashboard')
       if (!r.ok) throw new Error(`${r.status}`)
-      setDashboard(await r.json())
+      setDashboard(await readJson(r))
       markFetched('audit')
     } catch (e: any) {
       setErr('audit', e.message)
@@ -730,7 +835,7 @@ export default function AdminPage() {
       if (actQueryDebounced) qs.set('q', actQueryDebounced)
       const r = await fetch(`/api/admin/activity?${qs.toString()}`)
       if (!r.ok) throw new Error(`${r.status}`)
-      const d = await r.json()
+      const d = await readJson(r)
       setActivity(d.items ?? [])
       markFetched('activity')
     } catch (e: any) {
@@ -749,7 +854,7 @@ export default function AdminPage() {
       if (buildsQueryDebounced) qs.set('q', buildsQueryDebounced)
       const r = await fetch(`/api/admin/builds?${qs.toString()}`)
       if (!r.ok) throw new Error(`${r.status}`)
-      setBuilds(await r.json())
+      setBuilds(await readJson(r))
       markFetched('builds')
     } catch (e: any) {
       setErr('builds', e.message)
@@ -765,7 +870,7 @@ export default function AdminPage() {
     try {
       const r = await fetch('/api/admin/system')
       if (!r.ok) throw new Error(`${r.status}`)
-      setSystem(await r.json())
+      setSystem(await readJson(r))
       markFetched('system')
     } catch (e: any) {
       setErr('system', e.message)
@@ -781,7 +886,7 @@ export default function AdminPage() {
     try {
       const r = await fetch('/api/admin/revenue')
       if (!r.ok) throw new Error(`${r.status}`)
-      setRevenue(await r.json())
+      setRevenue(await readJson(r))
       markFetched('revenue')
     } catch (e: any) {
       setErr('revenue', e.message)
@@ -797,7 +902,7 @@ export default function AdminPage() {
     try {
       const r = await fetch(`/api/admin/agent-ops?days=${agentDays}`)
       if (!r.ok) throw new Error(`${r.status}`)
-      setAgentOps(await r.json())
+      setAgentOps(await readJson(r))
       markFetched('agents')
     } catch (e: any) {
       setErr('agents', e.message)
@@ -809,12 +914,11 @@ export default function AdminPage() {
   const billingAction = useCallback(async (payload: Record<string, any>, busyKey: string) => {
     setRevBusy(busyKey); setRevActionMsg(null)
     try {
-      const r = await fetch('/api/admin/billing-actions', {
+      const { r, d } = await adminMutate('/api/admin/billing-actions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       })
-      const d = await r.json()
       if (!r.ok) throw new Error(d.error || `${r.status}`)
       if (d.url) window.open(d.url, '_blank', 'noopener')
       setRevActionMsg(d.message || d.note || 'Done')
@@ -827,7 +931,7 @@ export default function AdminPage() {
     } finally {
       setRevBusy(null)
     }
-  }, [fetchRevenue])
+  }, [fetchRevenue, adminMutate])
 
   const fetchFeedback = useCallback(async (force = false) => {
     if (!force && fetchedRef.current.has('feedback')) return
@@ -836,7 +940,7 @@ export default function AdminPage() {
     try {
       const r = await fetch('/api/admin/feedback')
       if (!r.ok) throw new Error(`${r.status}`)
-      setFeedback(await r.json())
+      setFeedback(await readJson(r))
       markFetched('feedback')
     } catch (e: any) {
       setErr('feedback', e.message)
@@ -855,7 +959,7 @@ export default function AdminPage() {
       if (secResolvedFilter === 'open') qs.set('resolved', 'false')
       const r = await fetch(`/api/admin/security?${qs.toString()}`)
       if (!r.ok) throw new Error(`${r.status}`)
-      setSecurity(await r.json())
+      setSecurity(await readJson(r))
       markFetched('security')
     } catch (e: any) {
       setErr('security', e.message)
@@ -866,7 +970,7 @@ export default function AdminPage() {
 
   const resolveSecurityEvent = useCallback(async (id: string, resolved: boolean) => {
     try {
-      const r = await fetch('/api/admin/security', {
+      const { r } = await adminMutate('/api/admin/security', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id, resolved }),
@@ -878,7 +982,7 @@ export default function AdminPage() {
         summary: { ...prev.summary, unresolved: prev.summary.unresolved + (resolved ? -1 : 1) },
       } : prev)
     } catch {}
-  }, [])
+  }, [adminMutate])
 
   const fetchControl = useCallback(async (force = false) => {
     if (!force && fetchedRef.current.has('control')) return
@@ -890,11 +994,11 @@ export default function AdminPage() {
         fetch('/api/admin/blocklist'),
       ])
       if (r1.ok) {
-        const j = await r1.json()
+        const j = await readJson(r1)
         setControls(j.controls ?? null)
       }
       if (r2.ok) {
-        const j = await r2.json()
+        const j = await readJson(r2)
         setBlocklist(j.entries ?? [])
       }
       markFetched('control')
@@ -909,12 +1013,11 @@ export default function AdminPage() {
     setControlBusy(Object.keys(patch)[0] ?? 'patch')
     setControlActionMsg(null)
     try {
-      const r = await fetch('/api/admin/controls', {
+      const { r, d } = await adminMutate('/api/admin/controls', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(patch),
       })
-      const d = await r.json()
       if (!r.ok) throw new Error(d.error || `${r.status}`)
       setControls(d.controls)
       setControlActionMsg('Saved')
@@ -924,14 +1027,14 @@ export default function AdminPage() {
     } finally {
       setControlBusy(null)
     }
-  }, [])
+  }, [adminMutate])
 
   const addBlocklist = useCallback(async () => {
     if (!blockForm.value.trim()) return
     setControlBusy('block-add')
     setControlActionMsg(null)
     try {
-      const r = await fetch('/api/admin/blocklist', {
+      const { r, d } = await adminMutate('/api/admin/blocklist', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -940,7 +1043,6 @@ export default function AdminPage() {
           reason: blockForm.reason.trim() || undefined,
         }),
       })
-      const d = await r.json()
       if (!r.ok) throw new Error(d.error || `${r.status}`)
       setBlocklist(prev => [d.entry, ...prev.filter(e => e.id !== d.entry.id)])
       setBlockForm({ kind: blockForm.kind, value: '', reason: '' })
@@ -951,35 +1053,31 @@ export default function AdminPage() {
     } finally {
       setControlBusy(null)
     }
-  }, [blockForm])
+  }, [blockForm, adminMutate])
 
   const removeBlocklist = useCallback(async (id: string) => {
     setControlBusy('block-remove')
     try {
-      const r = await fetch(`/api/admin/blocklist?id=${encodeURIComponent(id)}`, { method: 'DELETE' })
-      if (!r.ok) {
-        const d = await r.json().catch(() => ({}))
-        throw new Error(d.error || `${r.status}`)
-      }
+      const { r, d } = await adminMutate(`/api/admin/blocklist?id=${encodeURIComponent(id)}`, { method: 'DELETE' })
+      if (!r.ok) throw new Error(d.error || `${r.status}`)
       setBlocklist(prev => prev.filter(e => e.id !== id))
     } catch (e: any) {
       setControlActionMsg(`Error: ${e.message}`)
     } finally {
       setControlBusy(null)
     }
-  }, [])
+  }, [adminMutate])
 
   const lockProject = useCallback(async (lock: boolean) => {
     if (!lockForm.projectId.trim()) return
     setControlBusy('lock')
     setControlActionMsg(null)
     try {
-      const r = await fetch(`/api/admin/projects/${encodeURIComponent(lockForm.projectId.trim())}/lockdown`, {
+      const { r, d } = await adminMutate(`/api/admin/projects/${encodeURIComponent(lockForm.projectId.trim())}/lockdown`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ lock, reason: lockForm.reason.trim() || undefined }),
       })
-      const d = await r.json()
       if (!r.ok) throw new Error(d.error || `${r.status}`)
       setControlActionMsg(lock ? 'Project locked down' : 'Lockdown lifted')
       setTimeout(() => setControlActionMsg(null), 2500)
@@ -988,17 +1086,16 @@ export default function AdminPage() {
     } finally {
       setControlBusy(null)
     }
-  }, [lockForm])
+  }, [lockForm, adminMutate])
 
   const forceLogoutUser = useCallback(async (userId: string) => {
     if (!userId.trim()) return
     setControlBusy('logout')
     setControlActionMsg(null)
     try {
-      const r = await fetch(`/api/admin/users/${encodeURIComponent(userId.trim())}/force-logout`, {
+      const { r, d } = await adminMutate(`/api/admin/users/${encodeURIComponent(userId.trim())}/force-logout`, {
         method: 'POST',
       })
-      const d = await r.json()
       if (!r.ok) throw new Error(d.error || `${r.status}`)
       setControlActionMsg(`Logged out ${d.email} (${d.sessionsRevoked} session${d.sessionsRevoked === 1 ? '' : 's'})`)
       setTimeout(() => setControlActionMsg(null), 3000)
@@ -1007,7 +1104,7 @@ export default function AdminPage() {
     } finally {
       setControlBusy(null)
     }
-  }, [])
+  }, [adminMutate])
 
   const fetchOperator = useCallback(async (win?: '1h' | '24h' | '7d') => {
     const w = win ?? operatorWindow
@@ -1020,7 +1117,7 @@ export default function AdminPage() {
     try {
       const r = await fetch(`/api/admin/operator?since=${encodeURIComponent(since)}`)
       if (!r.ok) throw new Error(`${r.status}`)
-      setOperatorData(await r.json())
+      setOperatorData(await readJson(r))
       markFetched('ops')
     } catch (e: any) {
       setErr('ops', e.message)
@@ -1033,7 +1130,7 @@ export default function AdminPage() {
   useEffect(() => {
     if (fetchedRef.current.has('health')) {
       fetch(`/api/admin/jobs?status=${jobsStatus}&limit=20`)
-        .then(r => r.ok ? r.json() : null)
+        .then(r => r.ok ? readJson(r) : null)
         .then(d => d && setJobs(d))
     }
   }, [jobsStatus])
@@ -1133,8 +1230,8 @@ export default function AdminPage() {
         fetch(`/api/admin/users/${userId}/credits`),
       ])
       if (!r1.ok) throw new Error(`${r1.status}`)
-      const d1 = await r1.json()
-      const d2 = r2.ok ? await r2.json() : null
+      const d1 = await readJson(r1)
+      const d2 = r2.ok ? await readJson(r2) : null
       setDetail({ ...d1, credits: d2 })
     } catch (e: any) {
       setDetailError(e.message || 'Failed to load user')
@@ -1154,7 +1251,7 @@ export default function AdminPage() {
     try {
       const r = await fetch(`/api/admin/analytics/users/${userId}/conversations`)
       if (!r.ok) throw new Error(`${r.status}`)
-      const d: ConversationsData = await r.json()
+      const d: ConversationsData = await readJson(r)
       setConvos(d)
       // Auto-open the first project so the founder sees a transcript immediately.
       if (d.projects.length > 0) setOpenConvoProjects(new Set([d.projects[0].projectId]))
@@ -1195,12 +1292,11 @@ export default function AdminPage() {
   const adminAction = useCallback(async (payload: Record<string, any>) => {
     setActionLoading(true); setActionMsg(null)
     try {
-      const r = await fetch('/api/admin/actions', {
+      const { r, d } = await adminMutate('/api/admin/actions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       })
-      const d = await r.json()
       if (!r.ok) throw new Error(d.error || `${r.status}`)
       setActionMsg(d.message ?? 'Done')
       if (payload.userId && detail) await openUser(payload.userId)
@@ -1215,28 +1311,27 @@ export default function AdminPage() {
     } finally {
       setActionLoading(false)
     }
-  }, [detail, openUser, fetchUsers, tab])
+  }, [detail, openUser, fetchUsers, tab, adminMutate])
 
   const opsAction = useCallback(async (action: string) => {
     setOpsLoading(p => ({ ...p, [action]: true }))
     try {
-      const r = await fetch('/api/admin/actions', {
+      const { d } = await adminMutate('/api/admin/actions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action }),
       })
-      const d = await r.json()
       setOpsResults(p => ({ ...p, [action]: d }))
     } catch (e: any) {
       setOpsResults(p => ({ ...p, [action]: { error: e.message } }))
     } finally {
       setOpsLoading(p => ({ ...p, [action]: false }))
     }
-  }, [])
+  }, [adminMutate])
 
   const retryJob = useCallback(async (job: JobsData['jobs'][number]) => {
     try {
-      await fetch('/api/admin/jobs', {
+      await adminMutate('/api/admin/jobs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ projectId: job._projectId, table: job._table, jobId: job.id, action: 'retry' }),
@@ -1244,7 +1339,7 @@ export default function AdminPage() {
       fetchedRef.current.delete('health')
       fetchHealth(true)
     } catch {}
-  }, [fetchHealth])
+  }, [fetchHealth, adminMutate])
 
   // ESC closes detail
   useEffect(() => {
@@ -4119,6 +4214,80 @@ export default function AdminPage() {
                 </div>
               </div>
             )}
+          </div>
+        </>
+      )}
+
+      {/* ══════ ADMIN STEP-UP ("sudo") ══════ */}
+      {sudoOpen && (
+        <>
+          <div className="fixed inset-0 bg-black/70 z-40" onClick={cancelSudo} />
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Confirm admin change"
+            className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-sm bg-[#0e0f13] border border-white/[0.08] rounded-2xl overflow-hidden"
+          >
+            <div className="flex items-center gap-2 px-5 py-3.5 border-b border-white/[0.06]">
+              <ShieldCheck className="w-4 h-4 text-violet-400" />
+              <span className="text-sm font-semibold text-white">Confirm admin change</span>
+            </div>
+
+            <div className="px-5 py-4 space-y-3">
+              <p className="text-xs text-zinc-400 leading-relaxed">
+                Admin writes need a second factor. Your session alone can read this
+                dashboard but cannot change it. Confirmation lasts 15 minutes.
+              </p>
+
+              {!sudoMethods.password && !sudoMethods.totp ? (
+                <p className="text-xs text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
+                  This account has neither a password nor TOTP configured, so admin
+                  changes cannot be confirmed. Set one up first.
+                </p>
+              ) : (
+                <input
+                  autoFocus
+                  type={sudoMethods.totp && !sudoMethods.password ? 'text' : 'password'}
+                  inputMode={sudoMethods.totp && !sudoMethods.password ? 'numeric' : undefined}
+                  value={sudoSecret}
+                  onChange={e => setSudoSecret(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') submitSudo()
+                    if (e.key === 'Escape') cancelSudo()
+                  }}
+                  placeholder={
+                    sudoMethods.totp && sudoMethods.password
+                      ? 'Password or 6-digit code'
+                      : sudoMethods.totp ? '6-digit code' : 'Password'
+                  }
+                  className="w-full px-3 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-sm text-white placeholder:text-zinc-600 outline-none focus:border-white/20"
+                />
+              )}
+
+              {sudoErr && (
+                <div className="flex items-start gap-2 text-xs text-red-300 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
+                  <XCircle className="w-3.5 h-3.5 flex-shrink-0 mt-px" />
+                  <span>{sudoErr}</span>
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-white/[0.06]">
+              <button
+                onClick={cancelSudo}
+                className="px-3 py-1.5 rounded-lg text-xs text-zinc-400 hover:text-white hover:bg-white/[0.06] transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={submitSudo}
+                disabled={sudoBusy || !sudoSecret.trim()}
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-white text-black hover:bg-zinc-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
+              >
+                {sudoBusy && <Loader2 className="w-3 h-3 animate-spin" />}
+                Confirm
+              </button>
+            </div>
           </div>
         </>
       )}

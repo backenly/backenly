@@ -47,7 +47,17 @@ global.Response = class Response {
     this.statusText = init?.statusText || 'OK'
     this.headers = new Headers(init?.headers)
   }
-  
+
+  // NextResponse.json() delegates to this static. Without it any route helper
+  // that returns NextResponse.json(...) throws "Response.json is not a
+  // function" in tests, which reads like a bug in the code under test.
+  static json(data, init) {
+    return new Response(JSON.stringify(data), {
+      ...init,
+      headers: { 'content-type': 'application/json', ...(init?.headers || {}) },
+    })
+  }
+
   json() {
     return Promise.resolve(JSON.parse(this.body))
   }

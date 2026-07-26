@@ -102,10 +102,14 @@ export async function requireAdminSignature(
     )
   }
 
-  // Read body to hash it — clone the request so the body can be consumed again
+  // Read body to hash it. This MUST go through request.clone() — the comment
+  // here used to say "clone the request" while the code read the original,
+  // which consumed the single-use body stream and made the route handler's
+  // own `await request.json()` throw on every signed request that carried a
+  // body. Cloning tees the stream so the handler still gets its copy.
   let bodyHash: string
   try {
-    const bodyBuffer = await request.arrayBuffer()
+    const bodyBuffer = await request.clone().arrayBuffer()
     bodyHash = sha256Hex(Buffer.from(bodyBuffer).toString('utf8') || 'empty')
   } catch {
     bodyHash = sha256Hex('empty')
