@@ -21,6 +21,14 @@ interface ModelPricing {
 }
 
 const MODEL_PRICING: Record<string, ModelPricing> = {
+  // gpt-4.1 family — the brain's actual smart model (see lib/ai/model-router).
+  // Absent from this table until 2026-07-26, which made every brain call fall
+  // through the prefix loop below onto legacy 'gpt-4' at $30/$60 and report
+  // ~12x the real cost. 326,874 recorded tokens were billed at $9.87 when the
+  // true figure was $0.85.
+  'gpt-4.1':         { inputPer1M: 2.00,  outputPer1M: 8.00  },
+  'gpt-4.1-mini':    { inputPer1M: 0.40,  outputPer1M: 1.60  },
+  'gpt-4.1-nano':    { inputPer1M: 0.10,  outputPer1M: 0.40  },
   'gpt-4o':          { inputPer1M: 2.50,  outputPer1M: 10.00 },
   'gpt-4o-mini':     { inputPer1M: 0.15,  outputPer1M: 0.60  },
   'gpt-4-turbo':     { inputPer1M: 10.00, outputPer1M: 30.00 },
@@ -178,12 +186,28 @@ export async function getRecentUsage(projectId: string, limit = 20): Promise<Arr
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
+/**
+ * Prefix keys, LONGEST FIRST. Object insertion order is not a pricing decision,
+ * but the old loop treated it as one: it returned the first key that matched, so
+ * 'gpt-4' (a 5-char prefix of nearly every OpenAI model name) shadowed every
+ * longer, more specific entry that happened to sit after it. 'gpt-4.1-2025-04-14'
+ * resolved to legacy gpt-4 at $30/$60 instead of $2/$8.
+ *
+ * Sorting by length makes the match specific-before-general regardless of how
+ * the table is written, so adding a model can no longer be silently defeated by
+ * where it lands in the literal. Computed once at module load.
+ */
+const PRICING_PREFIXES = Object.entries(MODEL_PRICING).sort(
+  ([a], [b]) => b.length - a.length,
+)
+
 function resolvePricing(model: string): ModelPricing {
   // Exact match
   if (MODEL_PRICING[model]) return MODEL_PRICING[model]
 
-  // Prefix match (e.g. "gpt-4o-mini-2025-04-14" → "gpt-4o-mini")
-  for (const [key, pricing] of Object.entries(MODEL_PRICING)) {
+  // Longest-prefix match (e.g. "gpt-4.1-mini-2025-04-14" → "gpt-4.1-mini",
+  // never the shorter "gpt-4.1" and never bare "gpt-4").
+  for (const [key, pricing] of PRICING_PREFIXES) {
     if (model.startsWith(key)) return pricing
   }
 

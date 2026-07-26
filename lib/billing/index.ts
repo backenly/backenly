@@ -261,8 +261,30 @@ export function creditsFromTokens(tokens: number): number {
  * FAIL-OPEN: a billing infra hiccup must never block a paying customer's
  * build. Only a real, measured budget breach blocks.
  */
+/**
+ * The month enforcement went live. Usage recorded before this point accrued
+ * under a contract that did not meter it — `chargeAiCredits` had no callers, so
+ * every token spent through the brain was free by construction. Enforcing that
+ * history retroactively locks people out for activity that cost them nothing at
+ * the time, which is exactly what happened on the cutover: one SANDBOX user was
+ * sitting at 245 credits against a 200 cap and was refused the moment the gate
+ * shipped.
+ *
+ * `UserAiUsage` aggregates by month, so the cutover month has no per-event
+ * timestamps to split on — there is no way to charge only the post-cutover
+ * portion of it. Skipping the month entirely is the honest resolution: it costs
+ * at most one month of enforcement, applies uniformly rather than to whoever
+ * happened to be over, and needs no retroactive edit to anyone's billing rows.
+ *
+ * This is self-expiring. From the following month the meter is real for
+ * everyone, and this branch is dead code that can be deleted.
+ */
+const ENFORCEMENT_EPOCH_MONTH = '2026-07'
+
 export async function enforceAiCredits(userId: string): Promise<true | LimitViolation> {
   try {
+    if (getThisMonth() === ENFORCEMENT_EPOCH_MONTH) return true
+
     const sub = await getUserSubscription(userId)
     if (!sub) return noSubscription()
 

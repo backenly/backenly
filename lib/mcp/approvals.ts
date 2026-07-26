@@ -203,6 +203,20 @@ export async function decideApproval(input: {
   let summary = ''
   let ok = false
   let timedOut = false
+
+  // Same abort-survival accounting as the chat route: an approved replay that
+  // overruns EXECUTE_CAP_MS has still spent the tokens, and the rejected race
+  // means `result` is never readable on that path.
+  let spentTokens = 0
+  let charged = false
+  const chargeOnce = () => {
+    if (charged || spentTokens <= 0) return
+    charged = true
+    import('@/lib/billing')
+      .then(({ chargeAiCredits }) => chargeAiCredits(input.approverUserId, spentTokens))
+      .catch(() => {})
+  }
+
   try {
     const timeout = new Promise<never>((_, reject) => {
       setTimeout(() => {
@@ -218,6 +232,7 @@ export async function decideApproval(input: {
           message: row.message,
           sessionToken: undefined,
           destructiveConfirmed: true,
+          onTokens: (n) => { spentTokens += n },
         },
         (e) => events.push(e),
       ),
@@ -228,12 +243,11 @@ export async function decideApproval(input: {
     // Approval replay runs the brain again — a second full model loop on our
     // key — so it is charged like any other turn. Without this, escalating a
     // destructive request through the Review Queue would be a free way to spend
-    // our OpenAI budget. Fire-and-forget: never fail an applied change on a
-    // billing write. (Same timeout gap as the chat route: a run that exceeds
-    // EXECUTE_CAP_MS burns tokens this branch never sees.)
-    const { chargeAiCredits } = await import('@/lib/billing')
-    chargeAiCredits(input.approverUserId, result.tokensUsed).catch(() => {})
+    // our OpenAI budget.
+    spentTokens = Math.max(spentTokens, result.tokensUsed)
+    chargeOnce()
   } catch (err: any) {
+    chargeOnce()
     ok = false
     summary = err?.message ?? 'Execution failed'
   }

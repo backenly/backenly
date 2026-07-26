@@ -120,6 +120,18 @@ export async function POST(request: NextRequest) {
   const events: BrainEvent[] = []
   let timedOut = false
 
+  // Accumulated as the brain spends them, so the timeout path can still bill.
+  // `result.tokensUsed` is unreachable when the race below rejects, and a run
+  // that burned 80s of model time before hitting the cap is precisely the one
+  // worth charging for.
+  let spentTokens = 0
+  let charged = false
+  const chargeOnce = () => {
+    if (charged || spentTokens <= 0) return
+    charged = true
+    chargeAiCredits(auth.userId, spentTokens).catch(() => {})
+  }
+
   const timeoutPromise = new Promise<never>((_, reject) => {
     setTimeout(() => {
       timedOut = true
@@ -148,25 +160,20 @@ export async function POST(request: NextRequest) {
           // "reached its time budget during final verification", i.e. the
           // operations that most needed proof were the only ones without any.
           deadlineAt: startedAt + MAX_BRAIN_MS,
+          onTokens: (n) => { spentTokens += n },
         },
         (e) => events.push(e),
       ),
       timeoutPromise,
     ])
 
-    // ── Charge the credits this turn actually burned ─────────────────────────
-    //
-    // `result.tokensUsed` is measured, not estimated: the brain sums
-    // `completion.usage.total_tokens` across every model round trip it made.
+    // Charge what the turn actually burned. Measured, not estimated: the brain
+    // reports `completion.usage.total_tokens` after every round trip. Prefer the
+    // returned total (authoritative) but never charge less than we observed.
     // Fire-and-forget — a billing write must never turn a completed backend
     // change into an error response.
-    //
-    // KNOWN GAP: the 90s-timeout branch below never reaches here, because
-    // runBrain does not return when the race rejects. Those tokens are burned
-    // but uncharged. Fixing it properly means threading a token accumulator out
-    // of runBrain so it survives an abort; charging a guessed number instead
-    // would be worse than under-charging.
-    chargeAiCredits(auth.userId, result.tokensUsed).catch(() => {})
+    spentTokens = Math.max(spentTokens, result.tokensUsed)
+    chargeOnce()
 
     // Escalation instead of a dead end. Two ways a destructive request surfaces:
     //   1. `danger` event — the brain actually attempted the destructive tool
@@ -306,6 +313,12 @@ export async function POST(request: NextRequest) {
 
     return withCors(NextResponse.json(body))
   } catch (err) {
+    // The turn burned model time before it timed out or threw. `onTokens` has
+    // been accumulating it all along, so this path can finally bill it — it
+    // used to be the single biggest uncharged leak, since a 90s run is the most
+    // expensive shape a turn can have.
+    chargeOnce()
+
     const msg = err instanceof Error ? err.message : 'Brain failed'
     const status = timedOut ? 504 : 500
 

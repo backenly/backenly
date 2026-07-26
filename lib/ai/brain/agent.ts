@@ -124,6 +124,23 @@ export interface BrainInput {
    * cap, only the MCP transport does.
    */
   deadlineAt?: number
+  /**
+   * ── Token reporting that survives an abort ─────────────────────────────────
+   *
+   * `BrainResult.tokensUsed` is only readable when the turn RETURNS. Callers
+   * that race this function against a wall clock (the MCP transport caps at
+   * 90s) never see it on the timeout path, because the race rejects and the
+   * result is discarded — so a run that spent 80s of model time was billed
+   * nothing at all. That is the most expensive kind of turn to lose.
+   *
+   * This fires after every completion, as the tokens are actually consumed, so
+   * a caller can accumulate them itself and charge what was spent even when the
+   * turn never finishes. Reporting incrementally is the only way to make the
+   * number survive; returning it cannot, by construction.
+   *
+   * Must not throw — it is invoked inside the model loop.
+   */
+  onTokens?: (tokens: number) => void
 }
 
 export type BrainEvent =
@@ -1356,7 +1373,13 @@ async function runAgentLoop(
     }
 
     if (input.projectId) trackCompletionCost(completion, input.projectId, 'brain-agent')
-    tokensUsed += completion.usage?.total_tokens ?? 0
+    const turnTokens = completion.usage?.total_tokens ?? 0
+    tokensUsed += turnTokens
+    // Report as spent, not as returned — see BrainInput.onTokens. A caller
+    // racing a wall clock only ever sees this.
+    if (turnTokens > 0) {
+      try { input.onTokens?.(turnTokens) } catch { /* billing must never break the loop */ }
+    }
 
     const choice = completion.choices[0]
     const msg = choice?.message
