@@ -261,6 +261,10 @@ interface CreditInfo {
   history: { month: string; intentCount: number; tokenCount: number; apiRequestCount: number }[]
 }
 
+interface ChatMessage { id: string; role: 'user' | 'ai'; content: string; createdAt: string }
+interface ProjectConversation { projectId: string; projectName: string; createdAt: string; messageCount: number; messages: ChatMessage[] }
+interface ConversationsData { projects: ProjectConversation[]; totalMessages: number; truncated: boolean }
+
 interface PaymentsData {
   subscriptions: PaymentRow[]
   revenueBreakdown: { plan: string; priceCents: number; status: string; count: number; estimatedMRRCents: number }[]
@@ -504,6 +508,14 @@ export default function AdminPage() {
   const [detailError, setDetailError]     = useState<string | null>(null)
   const [actionLoading, setActionLoading] = useState(false)
   const [actionMsg, setActionMsg]         = useState<string | null>(null)
+
+  // AI conversations (lazy-loaded on section expand)
+  const [convos, setConvos]             = useState<ConversationsData | null>(null)
+  const [convosLoading, setConvosLoading] = useState(false)
+  const [convosError, setConvosError]   = useState<string | null>(null)
+  const [convosOpen, setConvosOpen]     = useState(false)
+  const [openConvoProjects, setOpenConvoProjects] = useState<Set<string>>(new Set())
+  const [convoSearch, setConvoSearch]   = useState('')
 
   // Users tab filters
   const [userSearch, setUserSearch] = useState('')
@@ -1114,6 +1126,7 @@ export default function AdminPage() {
 
   const openUser = useCallback(async (userId: string) => {
     setDetail(null); setDetailError(null); setActionMsg(null); setLoadingDetail(true)
+    setConvos(null); setConvosError(null); setConvosOpen(false); setOpenConvoProjects(new Set()); setConvoSearch('')
     try {
       const [r1, r2] = await Promise.all([
         fetch(`/api/admin/analytics/users/${userId}`),
@@ -1132,7 +1145,52 @@ export default function AdminPage() {
 
   const closeDetail = useCallback(() => {
     setDetail(null); setDetailError(null); setLoadingDetail(false); setActionMsg(null); setCreditModal(false)
+    setConvos(null); setConvosError(null); setConvosOpen(false); setOpenConvoProjects(new Set()); setConvoSearch('')
   }, [])
+
+  // Lazily load AI chat transcripts when the founder expands the section.
+  const loadConversations = useCallback(async (userId: string) => {
+    setConvosLoading(true); setConvosError(null)
+    try {
+      const r = await fetch(`/api/admin/analytics/users/${userId}/conversations`)
+      if (!r.ok) throw new Error(`${r.status}`)
+      const d: ConversationsData = await r.json()
+      setConvos(d)
+      // Auto-open the first project so the founder sees a transcript immediately.
+      if (d.projects.length > 0) setOpenConvoProjects(new Set([d.projects[0].projectId]))
+    } catch (e: any) {
+      setConvosError(e.message || 'Failed to load conversations')
+    } finally {
+      setConvosLoading(false)
+    }
+  }, [])
+
+  const toggleConvos = useCallback((userId: string) => {
+    setConvosOpen(prev => {
+      const next = !prev
+      if (next && !convos && !convosLoading) loadConversations(userId)
+      return next
+    })
+  }, [convos, convosLoading, loadConversations])
+
+  const toggleConvoProject = useCallback((projectId: string) => {
+    setOpenConvoProjects(prev => {
+      const next = new Set(prev)
+      if (next.has(projectId)) next.delete(projectId); else next.add(projectId)
+      return next
+    })
+  }, [])
+
+  // When a search is active, filter down to matching messages and hide empty
+  // projects. Otherwise show every project's full transcript.
+  const filteredConvoProjects = useMemo(() => {
+    if (!convos) return []
+    const q = convoSearch.trim().toLowerCase()
+    if (!q) return convos.projects
+    return convos.projects
+      .map(p => ({ ...p, messages: p.messages.filter(m => m.content.toLowerCase().includes(q)) }))
+      .filter(p => p.messages.length > 0)
+  }, [convos, convoSearch])
 
   const adminAction = useCallback(async (payload: Record<string, any>) => {
     setActionLoading(true); setActionMsg(null)
@@ -3898,20 +3956,126 @@ export default function AdminPage() {
                   )}
                 </div>
 
-                {/* ── Deliberately absent: an AI Conversations transcript ──────────
-                    Backenly has no in-product chat door any more. /api/ai/chat
-                    was deleted with the ChatDock, and the surviving agent path
-                    (/api/mcp/chat → backend_chat) never persists a
-                    ConversationMessage. So the section could only ever render
-                    "No AI chat history", which reads as "this user did nothing"
-                    rather than "this drawer measures a door that no longer
-                    exists".
+                {/* Agent Messages — what a coding agent SENT to backend_chat.
+                    There is no in-product chat door any more, so these rows can
+                    only come from an agent over MCP: /api/mcp/chat → runBrain →
+                    saveTurn → ConversationMessage.
 
-                    It cannot be rewired to show what someone types in Claude
-                    Code either: that text goes to Anthropic's model, not to us.
-                    We only ever see what the agent chose to send — a typed tool
-                    call, or a backend_chat message the model composed. What the
-                    agent DID is on the Agents tab, sourced from ApiKeyUsage. */}
+                    Deliberately NOT labelled as what the user typed. What
+                    someone types in Claude Code goes to Anthropic's model and
+                    never reaches us; what lands here is the message the model
+                    composed and sent on their behalf. Those differ, and the old
+                    "User / Backenly AI" framing asserted the stronger claim. */}
+                <div className="px-6 py-5 border-b border-white/[0.06]">
+                  <button
+                    onClick={() => toggleConvos(detail.user.id)}
+                    className="w-full flex items-center gap-2 group"
+                  >
+                    <MessageSquare className="w-3.5 h-3.5 text-violet-400" />
+                    <h3 className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest group-hover:text-zinc-300 transition-colors">Agent Messages</h3>
+                    {convos && (
+                      <span className="text-[10px] text-zinc-600 font-mono">
+                        {n(convos.totalMessages)} msg{convos.truncated ? '+' : ''}
+                      </span>
+                    )}
+                    <ChevronRight className={`w-3.5 h-3.5 text-zinc-600 ml-auto transition-transform ${convosOpen ? 'rotate-90' : ''}`} />
+                  </button>
+
+                  {convosOpen && (
+                    <div className="mt-3">
+                      {convosLoading && (
+                        <div className="flex items-center justify-center py-8">
+                          <Loader2 className="w-4 h-4 text-zinc-600 animate-spin" />
+                        </div>
+                      )}
+
+                      {convosError && (
+                        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-500/10 text-red-300 border border-red-500/20 text-xs">
+                          <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
+                          <span>{convosError}</span>
+                        </div>
+                      )}
+
+                      {convos && !convosLoading && convos.projects.length === 0 && (
+                        <p className="text-zinc-600 text-xs py-2 leading-relaxed">
+                          No agent has used <span className="font-mono text-zinc-500">backend_chat</span> on this
+                          user&rsquo;s projects. Typed tool calls (
+                          <span className="font-mono text-zinc-500">apply_migration</span>,{' '}
+                          <span className="font-mono text-zinc-500">db_insert</span>, …) carry no message and are
+                          counted on the Agents tab instead.
+                        </p>
+                      )}
+
+                      {convos && !convosLoading && convos.projects.length > 0 && (
+                        <>
+                          <div className="relative mb-3">
+                            <Search className="w-3.5 h-3.5 text-zinc-600 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                            <input
+                              value={convoSearch}
+                              onChange={e => setConvoSearch(e.target.value)}
+                              placeholder="Search prompts & answers…"
+                              className="w-full bg-white/[0.04] border border-white/[0.08] rounded-lg pl-8 pr-3 py-2 text-xs text-white placeholder:text-zinc-600 outline-none focus:border-violet-500/50"
+                            />
+                          </div>
+
+                          {convos.truncated && (
+                            <div className="mb-3 px-3 py-1.5 rounded-lg bg-amber-500/10 text-amber-500/80 border border-amber-500/20 text-[11px]">
+                              Showing the most recent {n(convos.totalMessages)} messages. Older history is truncated.
+                            </div>
+                          )}
+
+                          {filteredConvoProjects.length === 0 ? (
+                            <p className="text-zinc-600 text-xs py-2">No messages match “{convoSearch}”.</p>
+                          ) : (
+                            <div className="space-y-2">
+                              {filteredConvoProjects.map(p => {
+                                const isOpen = convoSearch.trim() ? true : openConvoProjects.has(p.projectId)
+                                return (
+                                  <div key={p.projectId} className="rounded-xl border border-white/[0.06] overflow-hidden">
+                                    <button
+                                      onClick={() => toggleConvoProject(p.projectId)}
+                                      className="w-full flex items-center gap-2 px-3 py-2.5 bg-white/[0.03] hover:bg-white/[0.05] transition-colors text-left"
+                                    >
+                                      <ChevronRight className={`w-3.5 h-3.5 text-zinc-600 flex-shrink-0 transition-transform ${isOpen ? 'rotate-90' : ''}`} />
+                                      <span className="text-xs font-semibold text-white truncate flex-1">{p.projectName}</span>
+                                      <span className="text-[10px] text-zinc-500 font-mono flex-shrink-0">{n(p.messages.length)} msg</span>
+                                    </button>
+                                    {isOpen && (
+                                      <div className="px-3 py-3 space-y-3 bg-black/20">
+                                        {p.messages.map(m => (
+                                          <div key={m.id} className={`flex flex-col ${m.role === 'user' ? 'items-end' : 'items-start'}`}>
+                                            <div className="flex items-center gap-1.5 mb-1 px-0.5">
+                                              <span
+                                                className={`text-[9px] font-bold uppercase tracking-wider ${m.role === 'user' ? 'text-violet-300' : 'text-zinc-400'}`}
+                                                title={m.role === 'user'
+                                                  ? 'Message the coding agent sent to backend_chat, not necessarily what the user typed'
+                                                  : "Backenly brain's reply to the agent"}
+                                              >
+                                                {m.role === 'user' ? 'Agent' : 'Backenly'}
+                                              </span>
+                                              <span className="text-[9px] text-zinc-600 tabular-nums" title={fmtDate(m.createdAt) + ' ' + fmtTime(m.createdAt)}>{ago(m.createdAt)}</span>
+                                            </div>
+                                            <div className={`max-w-[88%] rounded-xl px-3 py-2 text-[11px] leading-relaxed whitespace-pre-wrap break-words ${
+                                              m.role === 'user'
+                                                ? 'bg-violet-500/15 text-violet-100 border border-violet-500/20 rounded-tr-sm'
+                                                : 'bg-white/[0.04] text-zinc-300 border border-white/[0.06] rounded-tl-sm'
+                                            }`}>
+                                              {m.content}
+                                            </div>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
 
                 <div className="px-6 py-5">
                   <h3 className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-3">Activity Timeline</h3>
