@@ -30,6 +30,12 @@ import { parseMigration, MigrationParseError } from '@/lib/mcp/migration-parser'
 import { prisma } from '@/lib/db/prisma'
 import { createHash } from 'crypto'
 
+/**
+ * Tools on this route that spend Backenly's model budget. See the gate in POST
+ * for how this set was derived and why everything else stays ungated.
+ */
+const MODEL_BACKED_TOOLS = new Set(['answer_question', 'generate_function'])
+
 const ENDPOINT = '/api/mcp/tool'
 
 const HEAVY_TOOLS = new Set([
@@ -71,6 +77,49 @@ export async function POST(request: NextRequest) {
   }
 
   const { tool, args } = parsed
+
+  // ── Credit gate for the model-backed tools ────────────────────────────────
+  //
+  // Most of this route is deterministic — the typed tools compile to SQL via
+  // executeAction and cost us no model spend, so they stay open even for a user
+  // with no credits left. Two do call OpenAI on our key and must be gated, or
+  // an exhausted agent could simply route around /api/mcp/chat and keep
+  // spending through here:
+  //
+  //   • answer_question   — direct completion (lib/ai/brain/tools.ts)
+  //   • generate_function — executeAction → lib/ai/function-generator +
+  //                         lib/services/ai-functions/generator
+  //
+  // Derived by tracing every dynamic import reachable from executeAction; those
+  // two modules are the only OpenAI callers on the path. GENERATE_API, by
+  // contrast, is pure SQL generation and is deliberately NOT gated. Keep this
+  // set in sync when a new model-backed tool lands.
+  if (MODEL_BACKED_TOOLS.has(tool)) {
+    const { enforceAiCredits } = await import('@/lib/billing')
+    const credits = await enforceAiCredits(auth.userId)
+    if (credits !== true) {
+      recordMcpCall(
+        { ...auth, endpoint: ENDPOINT, startedAt },
+        { statusCode: 402, tool, error: 'AI_CREDITS_EXHAUSTED' },
+      )
+      return withCors(NextResponse.json(
+        {
+          ok: false,
+          error: credits.message,
+          code: 'AI_CREDITS_EXHAUSTED',
+          currentPlan: credits.currentPlan,
+          requiredPlan: credits.requiredPlan,
+          upgradeRequired: true,
+          remedy:
+            `\`${tool}\` uses Backenly's model budget and this month's credits are spent. ` +
+            `Every other tool on this route is deterministic and still works. ` +
+            `Credits reset on the 1st, or upgrade the plan.`,
+          retryable: false,
+        },
+        { status: 402 },
+      ))
+    }
+  }
 
   // `read_backend_state({section})` resolves to a different underlying tool.
   // The call is still RECORDED as read_backend_state — that is what the agent

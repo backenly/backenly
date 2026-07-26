@@ -122,8 +122,12 @@ export async function runWorkspaceObserver(): Promise<{
  * persist the results. Runs far more often than the full observer.
  *
  * Split out because the two have opposite cost profiles. The full observer
- * does LLM-backed verification and schema analysis — minutes of work, fine
- * once a day. The contract probes are five HTTP calls, ~1s per project, and
+ * does deep schema, RLS, drift and workflow analysis — dozens of workspace
+ * queries per project, minutes of work, fine once a day. It is deterministic:
+ * nothing in this module or its dependencies calls a model, so its cost is DB
+ * time, not tokens. (An earlier version of this note said "LLM-backed"; that
+ * was never true of this path and it misled a cost investigation.)
+ * The contract probes are five HTTP calls, ~1s per project, and
  * they are the only detector that answers "is this backend answering its
  * users right now?". At daily cadence a total outage could run 24 hours
  * before anything noticed; that is the gap that let a signup outage last

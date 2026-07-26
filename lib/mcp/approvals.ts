@@ -225,6 +225,14 @@ export async function decideApproval(input: {
     ])
     ok = result.success
     summary = result.summary
+    // Approval replay runs the brain again — a second full model loop on our
+    // key — so it is charged like any other turn. Without this, escalating a
+    // destructive request through the Review Queue would be a free way to spend
+    // our OpenAI budget. Fire-and-forget: never fail an applied change on a
+    // billing write. (Same timeout gap as the chat route: a run that exceeds
+    // EXECUTE_CAP_MS burns tokens this branch never sees.)
+    const { chargeAiCredits } = await import('@/lib/billing')
+    chargeAiCredits(input.approverUserId, result.tokensUsed).catch(() => {})
   } catch (err: any) {
     ok = false
     summary = err?.message ?? 'Execution failed'

@@ -16,7 +16,7 @@
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { Database, HardDrive, Bot, Activity, Users, ArrowUpRight, Loader2, AlertTriangle, ShieldCheck } from 'lucide-react'
+import { Database, HardDrive, Bot, Activity, Users, ArrowUpRight, Loader2, AlertTriangle, ShieldCheck, Sparkles } from 'lucide-react'
 import { OrgShell } from '@/components/shell/OrgShell'
 import { SectionTitle, KitButton, KitNote, KitCard, KitCardHeader, KitCardBody } from '@/components/inspector/kit'
 
@@ -175,6 +175,13 @@ export default function UsagePage() {
         ) : usage ? (
           <>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {/*
+                AI credits are enforced (a spent budget returns 402 on backend_chat
+                and generate_function), so they must be visible here. The page
+                already fetched them and rendered nothing, which meant the first
+                signal a user got was their agent being refused.
+              */}
+              <Meter icon={Sparkles} label="AI credits" used={usage.aiCreditsUsed} max={usage.monthlyAiCredits} format={fmtNum} resetNote={resetNote} />
               <Meter icon={Bot} label="Function invocations" used={usage.aiFunctionInvocationsUsed} max={usage.maxAiFunctionInvocationsPerMonth} format={fmtNum} resetNote={resetNote} />
               <Meter
                 icon={Activity}

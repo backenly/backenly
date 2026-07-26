@@ -44,12 +44,12 @@ const plans: Plan[] = [
       { label: 'Projects', value: '1 live project' },
       { label: 'Users', value: '50,000 MAU' },
       { label: 'Autonomy', value: 'Self-healing every 30 min' },
-      { label: 'Assistant credits', value: '200 monthly' },
+      { label: 'AI credits', value: '200 monthly' },
     ],
     features: [
-      'Autonomous self-healing: a daily loop finds and fixes safe issues — company-funded, never your credits',
+      'Autonomous self-healing every 30 minutes — finds and fixes safe issues, company-funded, never your credits',
       'PostgreSQL, auth, storage, realtime, and REST APIs — the full runtime, not a trial',
-      'Build over MCP with your own coding agent — never metered as AI',
+      'Build over MCP with your own coding agent — the typed tools are never metered as AI',
     ],
   },
   {
@@ -63,7 +63,7 @@ const plans: Plan[] = [
     limits: [
       { label: 'Users', value: '200,000 MAU' },
       { label: 'Autonomy', value: 'Every minute, full dial' },
-      { label: 'Assistant credits', value: '3,000 monthly' },
+      { label: 'AI credits', value: '3,000 monthly' },
       { label: 'Database + storage', value: '10 GB Postgres · 100 GB files' },
     ],
     features: [
@@ -83,7 +83,7 @@ const plans: Plan[] = [
     limits: [
       { label: 'Users', value: 'Custom MAU' },
       { label: 'Autonomy', value: 'Custom cadence' },
-      { label: 'Assistant credits', value: 'Custom pool' },
+      { label: 'AI credits', value: 'Custom pool' },
       { label: 'Database', value: 'Dedicated capacity' },
     ],
     features: [
@@ -102,15 +102,15 @@ const included: { icon: LucideIcon; label: string; body: string }[] = [
   { icon: Zap, label: 'Triggers', body: 'Event workflows for inserts, updates, schedules, and integrations.' },
   { icon: RefreshCcw, label: 'Rollback', body: 'Deployment history and restore paths when changes need reversing.' },
   { icon: Bot, label: 'Autonomy', body: 'Detects and fixes issues on a cadence — company-funded on every tier, never your credits.' },
-  { icon: Terminal, label: 'Bring your own agent', body: 'Drive the backend from Claude Code or Cursor over MCP. No AI charge — your agent, your tokens.' },
+  { icon: Terminal, label: 'Bring your own agent', body: 'Drive the backend from Claude Code or Cursor over MCP. Typed tools carry no AI charge — your agent, your tokens.' },
 ]
 
 const comparisonRows = [
   ['Monthly active users', '50,000', '200,000', 'Custom'],
   ['Autonomy cadence', 'Every 30 minutes', 'Every minute', 'Custom'],
   ['Autonomous fixing', 'Included — company-funded', 'Included — company-funded', 'Included — company-funded'],
-  ['Assistant credits', '200 / mo', '3,000 / mo', 'Custom pool'],
-  ['Bring your own agent (MCP)', 'No AI charge', 'No AI charge', 'No AI charge'],
+  ['AI credits', '200 / mo', '3,000 / mo', 'Custom pool'],
+  ['Bring your own agent (MCP)', 'Typed tools: no AI charge', 'Typed tools: no AI charge', 'Typed tools: no AI charge'],
   ['Database', '512 MB Postgres', '10 GB Postgres', 'Dedicated capacity'],
   ['File storage', '1 GB', '100 GB', 'Custom'],
   ['API requests', '100k total', 'Unlimited', 'Unlimited'],
@@ -130,12 +130,12 @@ const faqs = [
     a: 'Yes. The platform is open source under Apache-2.0 and free to self-host: you bring the servers, the Postgres, and the OpenAI key that powers the self-healing loop. The plans on this page are Backenly Cloud, where we run the infrastructure, handle backups and upgrades, and fund the autonomy tokens on every tier. It is the same codebase either way, and pg_dump moves your data between the two.',
   },
   {
-    q: 'What counts as an assistant credit?',
-    a: 'Assistant credits meter the convenience door: building through Backenly’s chat or the natural-language MCP route, and LLM-powered tools like the architect. They are a small included line, not the headline. Building through your own coding agent over MCP uses your agent’s intelligence and carries no AI charge at all.',
+    q: 'What counts as an AI credit?',
+    a: 'One credit is 1,000 tokens of Backenly’s own model usage. Credits are spent when Backenly does the thinking: its chat, the natural-language MCP tool (backend_chat), and LLM-powered tools like the architect and function generation. They are a small included line, not the headline — the typed MCP tools cost nothing, and autonomy is company-funded on every tier.',
   },
   {
     q: 'Does driving the backend from my coding agent cost credits?',
-    a: 'No. When Claude Code, Cursor, or Codex call Backenly’s MCP tools directly, your agent supplies the intelligence and you pay your own provider — Backenly meters only infrastructure (users, database, storage, function runs), never AI. The assistant-credit meter applies only to Backenly’s own chat and natural-language routes.',
+    a: 'Almost never — it depends which tool your agent calls. The typed MCP tools (create_table, add_column, set_rls, generate_types, run_query and the rest) compile straight to SQL with no model call, so they are free on every plan: your agent supplies the intelligence and you pay your own provider. The exception is the natural-language tools — backend_chat and generate_function — where Backenly runs its own model on your behalf, and those draw credits. Point your agent at the typed tools and the AI meter stays at zero.',
   },
   {
     q: 'Does autonomy spend my credits?',

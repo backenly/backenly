@@ -11,10 +11,20 @@ export const dynamic = 'force-dynamic'
  * A wait of 5-30s for a multi-step build is fine — MCP hosts block on the
  * tool call.
  *
- * Billing: runBrain itself tracks model spend via `trackCompletionCost`
- * (per-completion → `UserAiUsage`) — so backend_chat over MCP is accounted
- * against the user's monthly AI-credit ledger same as dashboard chat. The
- * `mcpGuard` here additionally counts the request against `apiRequestCount`.
+ * Billing — two separate ledgers, do not confuse them:
+ *   1. PLATFORM COST. `runBrain` calls `trackCompletionCost` per completion,
+ *      which writes `ai_usage` (model, tokens, cost, endpoint). That is our
+ *      OpenAI spend, for our own accounting. It charges the user nothing.
+ *   2. USER CREDITS. `enforceAiCredits` gates the turn and `chargeAiCredits`
+ *      debits the tokens the turn actually burned (`result.tokensUsed`).
+ *
+ * (2) was written but never called — for a long time `backend_chat` ran a full
+ * multi-step model loop on our key with no user-facing cap at all, on any plan.
+ * The header here previously claimed the ledger was charged "same as dashboard
+ * chat"; it was not, and the claim is what hid the hole. Both halves are wired
+ * now: the pre-gate below, and the charge after the brain returns.
+ *
+ * `mcpGuard` additionally counts the request against `apiRequestCount`.
  *
  * Hard wall-clock cap at 90s so an MCP host never hangs forever.
  */
@@ -26,6 +36,7 @@ import { corsHeaders, optionsResponse } from '@/lib/mcp/cors'
 import { runBrain, type BrainEvent } from '@/lib/ai/brain/agent'
 import { assertAiAllowed } from '@/lib/platform/controls'
 import { createApprovalRequest } from '@/lib/mcp/approvals'
+import { enforceAiCredits, chargeAiCredits } from '@/lib/billing'
 
 const MAX_BRAIN_MS = 90_000
 const ENDPOINT = '/api/mcp/chat'
@@ -56,6 +67,38 @@ export async function POST(request: NextRequest) {
     return withCors(NextResponse.json(
       { ok: false, error: aiGuard.reason, code: 'AI_DISABLED' },
       { status: aiGuard.status },
+    ))
+  }
+
+  // Credit pre-gate. Read-only and FAIL-OPEN (see enforceAiCredits): only a
+  // real, measured budget breach blocks, so a billing infra blip can never
+  // wedge a paying user's agent. Placed before the body parse so an exhausted
+  // user gets the same answer regardless of what they asked for.
+  const credits = await enforceAiCredits(auth.userId)
+  if (credits !== true) {
+    recordMcpCall(
+      { ...auth, endpoint: ENDPOINT, startedAt },
+      { statusCode: 402, tool: 'backend_chat', error: 'AI_CREDITS_EXHAUSTED' },
+    )
+    return withCors(NextResponse.json(
+      {
+        ok: false,
+        error: credits.message,
+        code: 'AI_CREDITS_EXHAUSTED',
+        // Structured so the calling agent can tell its human what to do rather
+        // than retry into the same wall.
+        currentPlan: credits.currentPlan,
+        requiredPlan: credits.requiredPlan,
+        upgradeRequired: true,
+        // The typed tools are deterministic and cost us no model spend, so they
+        // stay open. Only the natural-language door is gated.
+        remedy:
+          'Natural-language building is out of credits for this month. The typed tools ' +
+          '(create_table, add_column, set_rls, generate_types, …) still work and are never ' +
+          'metered — drive those directly. Credits reset on the 1st, or upgrade the plan.',
+        retryable: false,
+      },
+      { status: 402 },
     ))
   }
 
@@ -110,6 +153,20 @@ export async function POST(request: NextRequest) {
       ),
       timeoutPromise,
     ])
+
+    // ── Charge the credits this turn actually burned ─────────────────────────
+    //
+    // `result.tokensUsed` is measured, not estimated: the brain sums
+    // `completion.usage.total_tokens` across every model round trip it made.
+    // Fire-and-forget — a billing write must never turn a completed backend
+    // change into an error response.
+    //
+    // KNOWN GAP: the 90s-timeout branch below never reaches here, because
+    // runBrain does not return when the race rejects. Those tokens are burned
+    // but uncharged. Fixing it properly means threading a token accumulator out
+    // of runBrain so it survives an abort; charging a guessed number instead
+    // would be worse than under-charging.
+    chargeAiCredits(auth.userId, result.tokensUsed).catch(() => {})
 
     // Escalation instead of a dead end. Two ways a destructive request surfaces:
     //   1. `danger` event — the brain actually attempted the destructive tool

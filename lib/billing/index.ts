@@ -279,8 +279,8 @@ export async function enforceAiCredits(userId: string): Promise<true | LimitViol
       return violation(
         sub.plan.name,
         bonus > 0
-          ? `You've used all ${effectiveMax.toLocaleString()} assistant credits available this month (${maxCredits.toLocaleString()} plan + ${bonus.toLocaleString()} bonus) on the ${planDisplayName(sub.plan.name)} plan. Credits reset on the 1st — or upgrade for more.`
-          : `You've used all ${maxCredits.toLocaleString()} assistant credits this month on the ${planDisplayName(sub.plan.name)} plan. Credits reset on the 1st — or upgrade for more.`,
+          ? `You've used all ${effectiveMax.toLocaleString()} AI credits available this month (${maxCredits.toLocaleString()} plan + ${bonus.toLocaleString()} bonus) on the ${planDisplayName(sub.plan.name)} plan. Credits reset on the 1st — or upgrade for more.`
+          : `You've used all ${maxCredits.toLocaleString()} AI credits this month on the ${planDisplayName(sub.plan.name)} plan. Credits reset on the 1st — or upgrade for more.`,
       )
     }
     return true

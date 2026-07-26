@@ -35,7 +35,7 @@ const plans: PlanDef[] = [
       '1 project, permanently live, no expiry',
       'Autonomous self-healing every 30 minutes, safe fixes applied, company-funded',
       '200 AI credits / month (1 credit = 1,000 tokens)',
-      'Build over MCP with your own coding agent, no AI charge',
+      'Build over MCP with your own coding agent — typed tools carry no AI charge',
       'Up to 50,000 monthly active users',
       '100,000 API requests total',
       '10,000 function invocations / month',

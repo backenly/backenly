@@ -502,12 +502,17 @@ export async function runReconcilerLive(projectId: string): Promise<LiveReconcil
  *   1. FLAGS.ENABLE_AUTONOMY_RECONCILER — master on/off. Off ⇒ the loop does
  *      not run at all (the explicit, reversible production lever).
  *   2. The owner's plan cadence (autonomyScanIntervalMin) — Free 30 min,
- *      Pro/Enterprise 30m. The cron itself fires every 30 min for everyone; this gate
- *      is what makes the plan tier actually mean something. Without it, every
- *      Free project ticks 48× a day and the autonomy bill scales with sign-ups,
- *      not revenue. Resolved cadence is the floor — if the plan read fails we
- *      clamp to the SAFE fallback (24h) so a transient DB blip can never widen
- *      the loop past Free's pace.
+ *      Pro/Enterprise 1 min (see prisma/seed-billing.ts; the schema default of
+ *      360 is a fallback, not a live value). The cron itself fires every minute
+ *      for everyone; this gate is what makes the plan tier actually mean
+ *      something. Without it, every Free project would tick 1440× a day and the
+ *      autonomy bill would scale with sign-ups, not revenue. Resolved cadence is
+ *      the floor — if the plan read fails we clamp to the SAFE fallback (24h) so
+ *      a transient DB blip can never widen the loop past Free's pace.
+ *
+ *      This loop is deterministic: runReconciler → auto-fix-engine →
+ *      executeAction, none of which call a model. A Pro project reconciling
+ *      every minute costs DB work and audit rows, not tokens.
  *   3. The per-project autonomy dial — OFF ⇒ observe only (shadow); any other
  *      level ⇒ the loop executes, bounded by tier + breaker + change-freeze.
  */

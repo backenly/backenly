@@ -481,9 +481,11 @@ export function BillingPanel() {
         </div>
 
         <div className="mt-5">
-          <KitNote tone="info" title="Building over MCP has no AI charge">
-            Driving your backend from Claude Code / Cursor over MCP uses your agent's intelligence. Assistant credits only
-            meter Backenly's own LLM work (natural-language builds and AI-powered tools). Need a custom plan?{' '}
+          <KitNote tone="info" title="Typed MCP tools have no AI charge">
+            Driving your backend from Claude Code / Cursor over MCP uses your agent's intelligence — the typed tools
+            (create_table, set_rls, run_query and the rest) compile straight to SQL and cost no credits. AI credits meter
+            Backenly's own LLM work: the natural-language <code className="text-zinc-300">backend_chat</code> tool,
+            function generation, and AI-powered tools. Need a custom plan?{' '}
             <a href="mailto:sales@backenly.com" className="text-violet-300 underline underline-offset-2 hover:text-violet-200">Contact sales</a>.
           </KitNote>
         </div>

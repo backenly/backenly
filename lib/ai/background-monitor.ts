@@ -47,7 +47,11 @@ export async function runMonitoredHealthScan(
     // levers that bound that cost are now Plan-driven, not single global envs:
     //
     //   • autonomyScanIntervalMin   — how often the expensive multi-agent scan
-    //     may run (Free 24h, Pro/Enterprise 30m).
+    //     may run (Free 30m, Pro/Enterprise 1m — see prisma/seed-billing.ts).
+    //     This is a FLOOR, not a schedule: it only rejects scans that come too
+    //     soon. What actually triggers a scan is the daily 01:00 UTC cron in
+    //     instrumentation.ts and the post-build orchestrator, so in practice a
+    //     project scans about once a day on every tier.
     //   • autonomyMonthlyScanBudget — a hard monthly cap on expensive scans
     //     (Free ~30; paid = null = unlimited / fair-use).
     //
