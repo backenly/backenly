@@ -86,48 +86,25 @@ export async function getCurrentProjectId(request: NextRequest): Promise<string>
 }
 
 /**
- * Require project ID - throws if not provided
+ * Resolve the request's project ID, or throw.
+ *
+ * Ownership enforcement lives entirely in `getCurrentProjectId`: every value it
+ * returns is already matched against `userId`, and anything else — unauthenticated
+ * caller, project owned by someone else, user with no projects — throws
+ * `TenantIsolationError` there, after recording the cross-tenant event.
+ *
+ * So there is nothing left to validate here. This wrapper re-ran
+ * `authenticateRequest` and repeated the same `{ id, userId }` lookup, which cost
+ * a second user row read and a second (unprojected) project read on every
+ * project-scoped request while being unable to reach a different verdict: same
+ * request, same token, same identity, same predicate. The re-check is gone.
+ *
+ * Kept as a named export because `withTenantIsolation` and existing callers read
+ * better with it, and it is the intended place to hang any future requirement
+ * that is genuinely stricter than "caller owns this project".
  */
 export async function requireProjectId(request: NextRequest): Promise<string> {
-  const projectId = await getCurrentProjectId(request)
-  
-  if (!projectId) {
-    throw new TenantIsolationError('Project ID is required')
-  }
-
-  // Validate that the project exists and user has access
-  const auth = await authenticateRequest(request)
-  if (auth.authenticated && auth.userId) {
-    const project = await prisma.project.findFirst({
-      where: {
-        id: projectId,
-        userId: auth.userId, // Ensure user owns the project
-      },
-    })
-
-    if (!project) {
-      // A logged-in user asked for a project they don't own. This is the
-      // single highest-value tenant-isolation signal — surface it loudly on
-      // the Security tab. Fire-and-forget; never block the throw.
-      const ip =
-        request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
-        request.headers.get('x-real-ip') ||
-        null
-      recordSecurityEvent({
-        kind: 'cross_tenant',
-        severity: 'high',
-        userId: auth.userId,
-        userEmail: auth.userEmail ?? null,
-        projectId,
-        ip,
-        summary: `User ${auth.userEmail ?? auth.userId} requested a project they do not own`,
-        detail: { requestedProjectId: projectId, path: request.nextUrl.pathname, method: request.method },
-      })
-      throw new TenantIsolationError('Project not found or access denied')
-    }
-  }
-
-  return projectId
+  return getCurrentProjectId(request)
 }
 
 /**
