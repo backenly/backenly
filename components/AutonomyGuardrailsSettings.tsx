@@ -28,6 +28,7 @@ import { InspectorPageHeader } from '@/components/inspector/InspectorPageHeader'
 import { KIT, StatTile } from '@/components/inspector/kit'
 import { VersionHistory } from '@/components/workspace/VersionHistory'
 import { ReviewQueuePanel } from '@/components/ReviewQueuePanel'
+import { DetectedFindingsPanel } from '@/components/DetectedFindingsPanel'
 
 type Level = 'OFF' | 'CONSERVATIVE' | 'BALANCED' | 'AGGRESSIVE'
 
@@ -238,12 +239,22 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
           </div>
         )}
 
-        {/* ── 0. Waiting on you — the Review Queue, folded in (2026-07-18).
-               One surface for everything the loop did or is holding: the
-               standalone /review-queue page duplicated this page's data and
-               now permanently redirects here. The panel is a self-headed card
-               (its own "Waiting on you" title), so no section label above it. ── */}
+        {/* ── 0. The one queue, in two halves ─────────────────────────────
+               Waiting on you = findings HELD for a human (pending_approval).
+               Detected      = findings the loop owns and has not cleared yet
+                               (open). Both are self-headed cards, so no
+                               section label above either.
+
+               The second card is not a duplicate surface, it is the missing
+               one. Overview's loop counts `open + pending_approval` on its
+               Detect node and its hero fires on open findings alone — but
+               from 2026-07-21 until this panel existed, Autonomy rendered only
+               the approval half, so "DETECT 2 need attention → Open inspector"
+               landed on "Nothing waiting on you". Detect's number is now the
+               sum of these two cards, which is the only arrangement in which
+               the dashboard and the page it links to can both be true. ── */}
         <ReviewQueuePanel projectId={projectId} />
+        <DetectedFindingsPanel projectId={projectId} level={data.level} />
 
         {/* ── 1. Autonomy ladder ─────────────────────────────────────────── */}
         <section className={`overflow-hidden ${KIT.radius} border ${KIT.border} ${KIT.surface} ${KIT.inset}`}>

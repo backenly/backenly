@@ -866,7 +866,10 @@ function SelfHealingLoop({
       unit: 'guarantees',
     },
     detect: {
-      // The same set the Backend health list below renders, so the two agree.
+      // open + pending_approval. Autonomy renders exactly this set across its
+      // two cards — Detected (open) + Waiting on you (held) — so this number is
+      // the sum of what that page shows, never larger than it. The Backend
+      // health list this used to point at was deleted on 2026-07-21.
       value: stats.actionableFindings == null ? '—' : String(stats.actionableFindings),
       unit: 'need attention',
     },
