@@ -242,7 +242,7 @@ async function main() {
   console.log('\n✨ Billing seed complete.')
   console.log('\nPlan summary:')
   console.log('  Free (SANDBOX):        $0/mo   — 200 AI credits/mo, autonomy every minute (~120 windows/mo then detect-only), 50k MAU')
-  console.log('  Pro (BUILDER):         $25/mo  — 3,000 AI credits/mo, 30-min funded autonomy (full dial), 200k MAU, 10 GB PG + 100 GB files')
+  console.log('  Pro (BUILDER):         $25/mo  — 3,000 AI credits/mo, autonomy every minute (unlimited windows, full dial), 200k MAU, 10 GB PG + 100 GB files')
   console.log('  Enterprise (SCALE):    Custom  — custom limits, SSO, 12h SLA, sales-led (no self-serve checkout)')
 }
 

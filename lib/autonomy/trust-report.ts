@@ -57,8 +57,9 @@ export interface ActivityItem {
   /**
    * How many consecutive occurrences this row stands for (1 = just itself).
    *
-   * The loop re-escalates a finding it may not fix on every tick, so one
-   * unresolved finding writes one audit row every 30 minutes forever. Rendered
+   * The loop re-escalates a finding it may not fix on every tick, and the tick
+   * is every minute on every plan — so one unresolved finding writes an audit
+   * row every minute, indefinitely, until someone decides on it. Rendered
    * one-per-row that is a feed of the same sentence repeated down the page —
    * it reads as a system thrashing, when it is a system correctly refusing to
    * touch auth without permission. The count says "still this, N times" in one

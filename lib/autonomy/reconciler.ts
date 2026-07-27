@@ -501,14 +501,20 @@ export async function runReconcilerLive(projectId: string): Promise<LiveReconcil
  *
  *   1. FLAGS.ENABLE_AUTONOMY_RECONCILER — master on/off. Off ⇒ the loop does
  *      not run at all (the explicit, reversible production lever).
- *   2. The owner's plan cadence (autonomyScanIntervalMin) — Free 30 min,
- *      Pro/Enterprise 1 min (see prisma/seed-billing.ts; the schema default of
- *      360 is a fallback, not a live value). The cron itself fires every minute
- *      for everyone; this gate is what makes the plan tier actually mean
- *      something. Without it, every Free project would tick 1440× a day and the
- *      autonomy bill would scale with sign-ups, not revenue. Resolved cadence is
- *      the floor — if the plan read fails we clamp to the SAFE fallback (24h) so
- *      a transient DB blip can never widen the loop past Free's pace.
+ *   2. The owner's plan cadence (autonomyScanIntervalMin) — 1 minute on EVERY
+ *      plan including Free (see prisma/seed-billing.ts; the schema default of
+ *      360 is a fallback, not a live value). The cron fires every minute and
+ *      no plan is throttled below it: "self-healing every minute" is what the
+ *      pricing page promises on the Free tier, so the gate must not contradict
+ *      it. Free↔Pro is separated by scan BUDGET and actions per window, not by
+ *      how often the loop is allowed to look.
+ *
+ *      The gate stays because the field is per-plan and live-editable — an
+ *      Enterprise contract can widen it, and a future plan could throttle —
+ *      but with today's values it is a no-op for every real subscriber.
+ *      Resolved cadence is a floor: if the plan read fails we clamp to the
+ *      SAFE fallback (24h), so a transient DB blip degrades to slow rather
+ *      than to unbounded.
  *
  *      This loop is deterministic: runReconciler → auto-fix-engine →
  *      executeAction, none of which call a model. A Pro project reconciling
@@ -526,13 +532,13 @@ export async function runReconciler(
   // marker is needed because both the shadow path (empty plan) and the live
   // path (nothing to apply) intentionally skip their own audit write to keep
   // the precision dataset signal-dense. Without the marker, those silent runs
-  // would never register and the gate would let the next 30-min cron tick
-  // straight through.
+  // would never register and the gate would let the next cron tick straight
+  // through.
   if (await isWithinCadenceCooldown(projectId)) return null
 
   // Record the tick BEFORE doing per-mode work so even an exception inside
   // shadow/live still counts toward cadence (preventing a poisoned project
-  // from hammering the loop every 30 min).
+  // from re-entering the loop on every tick).
   await prisma.auditLog
     .create({
       data: {
@@ -554,8 +560,8 @@ export async function runReconciler(
 }
 
 /**
- * The plan cadence floor in minutes. Falls back to 24h on any failure — never
- * widens the loop past Free's pace if we can't resolve the owner's plan.
+ * The plan cadence floor in minutes. Falls back to 24h on any failure — an
+ * unresolvable plan must degrade to slow, never to unbounded.
  */
 const SAFE_CADENCE_MIN = 1_440
 
@@ -580,8 +586,9 @@ async function getProjectAutonomyCadenceMin(projectId: string): Promise<number> 
 
 async function isWithinCadenceCooldown(projectId: string): Promise<boolean> {
   const cadenceMin = await getProjectAutonomyCadenceMin(projectId)
-  // Subtract a small jitter floor so a 30-min cadence project hitting a 30-min
-  // cron schedule doesn't drift into 60 min on clock skew (≈1 min slop).
+  // Subtract a small jitter floor so a project whose cadence equals the cron
+  // period doesn't drift to double it on clock skew (≈1 min slop). At the
+  // current 1-min cadence this clamps to 0, i.e. every tick runs.
   const since = new Date(Date.now() - Math.max(0, cadenceMin - 1) * 60_000)
   const lastTick = await prisma.auditLog
     .findFirst({

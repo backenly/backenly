@@ -51,7 +51,11 @@ export const GET = withAuth(async (request: NextRequest, { user }) => {
       subscriptionStatus: sub?.status ?? 'FREE',
       nextBillingDate,
       ...(planName === 'SANDBOX' && {
-        message: 'Free plan — one permanently live project. Upgrade to Pro for more capacity and 30-minute autonomy.',
+        // Do NOT sell Pro on autonomy cadence: Free already self-heals every
+        // minute with the full dial, and the pricing page says so. Pro's real
+        // deltas are capacity, the unlimited scan budget, and 20 autonomous
+        // actions per window vs 5.
+        message: 'Free plan — one permanently live project, self-healing every minute. Upgrade to Pro for more capacity and unmetered autonomy.',
       }),
     })
   } catch (error: any) {

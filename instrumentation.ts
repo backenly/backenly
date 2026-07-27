@@ -173,17 +173,20 @@ export async function register() {
       // dial + breaker + change-freeze, applies Tier-0/Tier-1 fixes through
       // the existing deterministic kernel.
       //
-      // Cadence (2026-07-23): the cron TICKS every minute, but the dispatcher
-      // (runReconciler) enforces the OWNER'S plan cadence floor
-      // (Plan.autonomyScanIntervalMin):
-      //   • Free       → 30 min between reconciler runs
-      //   • Pro        → 1 min — effectively continuous (every tick)
-      //   • Enterprise → 1 min floor, custom per contract
-      // It also exits early for OFF dial settings (shadow only). Cost scales
-      // with revenue, not sign-ups. Event-driven kicks (after mutations) flow
-      // through the same dispatcher, so they honor the cadence too — a Free
-      // project that creates 30 tables in an hour still runs the loop at most
-      // twice in that hour. The cron is the backstop for drift detection.
+      // Cadence: the cron ticks every minute and EVERY plan reconciles on
+      // every tick — Free, Pro and Enterprise all seed
+      // Plan.autonomyScanIntervalMin = 1 (prisma/seed-billing.ts). The pricing
+      // page sells "self-healing every minute" on the Free tier, so throttling
+      // Free here would make the product contradict its own price list.
+      //
+      // The dispatcher (runReconciler) still reads the plan's cadence floor,
+      // because the field is per-plan and live-editable — but with today's
+      // values that gate is a no-op. Free↔Pro is separated by scan budget and
+      // actions per window, not by how often the loop may look.
+      //
+      // It also exits early for OFF dial settings (shadow only). Event-driven
+      // kicks (after mutations) flow through the same dispatcher, so they
+      // honor the same rules. The cron is the backstop for drift detection.
       cron.schedule('* * * * *', async () => {
         const { prisma } = await import('./lib/db/prisma')
         const { runReconciler } = await import('./lib/autonomy/reconciler')
@@ -204,9 +207,9 @@ export async function register() {
         }).catch(() => [])
 
         // Per-project failure isolation — one bad project never stalls the
-        // whole tick. Concurrency 5; the per-plan cadence gate inside
-        // runReconciler keeps most ticks to a cheap audit-row lookup, so the
-        // every-minute tick stays flat on DB load.
+        // whole tick. Concurrency 5; the reconciler is deterministic (no model
+        // calls), so an every-minute pass costs DB work and audit rows rather
+        // than tokens.
         const CONCURRENCY = 5
         let applied = 0
         let frozen = 0
@@ -241,7 +244,7 @@ export async function register() {
 
       console.log(
         '[CronScheduler] Started — user cron jobs + system tasks every minute, ' +
-        'autonomy reconciler tick every minute (plan cadence floors: Free 30m / Pro 1m), ' +
+        'autonomy reconciler tick every minute (1-min cadence on every plan), ' +
         'DB storage snapshot hourly, ' +
         'all AI background scans once daily (staggered 00:10–04:30 UTC)'
       )

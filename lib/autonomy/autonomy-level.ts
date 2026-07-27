@@ -56,9 +56,14 @@ const LEVEL_RANK: Record<AutonomyLevel, number> = {
 /**
  * Clamp the owner's requested dial to the plan's ceiling. The dial can always
  * go LOWER (OFF is the floor and always allowed — opting out is never gated),
- * but never above what the plan permits (Free → CONSERVATIVE, Pro/Enterprise →
- * AGGRESSIVE; the cadence — Free 30 min, Pro every minute — is the Free↔Pro
- * differentiator alongside the cap).
+ * but never above what the plan permits.
+ *
+ * The ceiling is whatever `Plan.autonomyMaxLevel` says — read live, never
+ * hardcoded here. Every plan including Free currently seeds AGGRESSIVE
+ * (prisma/seed-billing.ts): self-healing is the product, so it is not the
+ * thing we withhold. Free↔Pro is separated by scan budget and actions per
+ * window, NOT by the dial and NOT by cadence — every plan reconciles every
+ * minute.
  *
  * Exported because both the write paths (PATCH /autonomy + brain
  * set_autonomy_level) MUST clamp before persisting — otherwise the UI / chat
@@ -184,8 +189,12 @@ export async function getProjectPlanName(projectId: string): Promise<string | nu
 
 /**
  * Read the autonomy ceiling allowed by the project owner's current plan.
- * Free's cap is CONSERVATIVE (only OFF + CONSERVATIVE are usable); paid plans
- * uncap to AGGRESSIVE so the full dial is available on a 30-minute cadence.
+ * Comes from `Plan.autonomyMaxLevel`; every seeded plan including Free is
+ * AGGRESSIVE today, so in practice the full dial is available on every plan,
+ * at an every-minute cadence.
+ *
+ * The CONSERVATIVE fallback below is defence in depth for an unresolvable
+ * plan, not a description of Free.
  *
  * Falls back to DEFAULT_LEVEL on any read failure so a transient DB blip
  * cannot accidentally widen what the user is allowed to enable.

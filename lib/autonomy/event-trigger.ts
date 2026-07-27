@@ -2,10 +2,9 @@
  * AUTONOMY EVENT TRIGGER — close the perception gap between cron and reality
  * ==========================================================================
  *
- * The reconciler is cron-driven (30 min on Pro/Enterprise, 24 h on Free).
- * That cadence is correct for drift detection but wrong for the "Backenly
- * noticed and acted" moment: a user creates a table, gets nothing for the
- * whole cadence window, and is gone.
+ * The reconciler is cron-driven, every minute, on every plan. Even a one-minute
+ * window is the wrong shape for the "Backenly noticed and acted" moment: a user
+ * creates a table and watches an empty dashboard until the next tick.
  *
  * This module fires the reconciler IMMEDIATELY after Tier-0 mutations that
  * typically open new gaps (missing FK index, missing API, missing RLS). The
