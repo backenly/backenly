@@ -3,9 +3,7 @@
 import { useParams } from 'next/navigation'
 import { useEffect } from 'react'
 import { setCurrentProjectId } from '@/lib/api/client'
-import MonitoringPageContent from '@/app/app/monitoring/page'
-import { InspectorPageHeader } from '@/components/inspector/InspectorPageHeader'
-import { Activity } from 'lucide-react'
+import { MonitoringWorkbench } from '@/components/monitoring/MonitoringWorkbench'
 
 export default function ProjectMonitoringPage() {
   const params = useParams()
@@ -15,17 +13,5 @@ export default function ProjectMonitoringPage() {
     if (projectId) setCurrentProjectId(projectId)
   }, [projectId])
 
-  return (
-    <div className="min-h-screen bg-[#101116] flex flex-col">
-      <InspectorPageHeader
-        icon={Activity}
-        title="Monitoring"
-        description="Runtime metrics, anomaly detection, and incident timeline"
-        badge={{ label: 'Live', variant: 'live' }}
-      />
-      <div className="flex-1">
-        <MonitoringPageContent projectId={projectId} />
-      </div>
-    </div>
-  )
+  return <MonitoringWorkbench projectId={projectId} />
 }
