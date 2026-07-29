@@ -92,7 +92,7 @@ export default function ProjectConnectPage() {
             />
             {/* Full-width split like the Direct tab: setup funnel on the left,
                 capabilities + key management/live activity on the right. */}
-            <div className="px-8 py-6 pb-24">
+            <div className="px-8 py-6 pb-10">
               <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 items-start">
                 <AgentInstallGuide
                   projectId={projectId}
@@ -150,7 +150,7 @@ function DirectTab({ projectId }: { projectId: string }) {
         description="REST and Postgres coordinates for anything that doesn't speak MCP."
         badge={{ label: 'Managed', variant: 'managed' }}
       />
-      <div className="px-8 py-6 pb-24">
+      <div className="px-8 py-6 pb-10">
         <KitCard>
           <KitCardHeader
             title="REST API"

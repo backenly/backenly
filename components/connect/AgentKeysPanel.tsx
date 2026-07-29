@@ -255,7 +255,10 @@ export function AgentKeysPanel({
               disabled={creating}
               className="w-44 disabled:opacity-50"
             />
-            <KitButton onClick={createKey} disabled={creating}>
+            {/* whitespace-nowrap: the label wrapped to two lines at the panel's
+                narrow column width, which made the button taller than the input
+                beside it. */}
+            <KitButton onClick={createKey} disabled={creating} className="whitespace-nowrap">
               {creating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plug2 className="w-3.5 h-3.5" />}
               New key
             </KitButton>
