@@ -45,7 +45,11 @@ const capabilities: Capability[] = [
   },
   {
     title: 'REST APIs',
-    body: 'PostgREST serves every table straight from the catalog, so the API is the schema. Filters, ordering, pagination, and embedded resources, with OpenAPI and typed clients from the CLI.',
+    // Trimmed to the same three lines as its neighbours: it was the one
+    // four-line paragraph in the row, and since the diagrams are
+    // bottom-aligned, that fourth line spent itself as dead air over the other
+    // five drawings.
+    body: 'PostgREST serves every table from the catalog, so the API is the schema: filters, ordering, pagination, and embedded resources, plus OpenAPI and typed clients.',
     diagram: RestApiDiagram,
   },
   {
@@ -376,7 +380,13 @@ function CapabilityCard({ capability, index }: { capability: Capability; index: 
         className="pointer-events-none absolute inset-x-0 top-0 h-px origin-left scale-x-0 bg-[linear-gradient(to_right,transparent,rgba(255,255,255,0.35),transparent)] transition-transform duration-500 ease-out group-hover:scale-x-100 motion-reduce:transition-none"
       />
       <h3 className="text-xl font-semibold tracking-tight text-white">{capability.title}</h3>
-      <p className="mt-2.5 max-w-[46ch] text-[15px] leading-7 text-zinc-400">{capability.body}</p>
+      {/* Three-line floor from md up (3 × leading-7). The diagrams are
+          bottom-aligned, so the dead air above one is the row's tallest cell
+          minus this one; a floor keeps a paragraph that wraps one line further
+          from spending that line as space over its neighbours' drawings. */}
+      <p className="mt-2.5 max-w-[46ch] text-[15px] leading-7 text-zinc-400 md:min-h-[84px]">
+        {capability.body}
+      </p>
       <div className="mt-auto">
         <Diagram />
       </div>
