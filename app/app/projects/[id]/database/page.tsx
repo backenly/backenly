@@ -40,7 +40,7 @@ import {
   Maximize2, Minimize2, HelpCircle, AlertCircle
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { KitNote } from '@/components/inspector/kit'
+import { KIT, KitNote } from '@/components/inspector/kit'
 import {
   getSchemas,
   getTables,
@@ -1135,7 +1135,7 @@ export default function ProjectDatabasePage() {
     : tables
 
   return (
-    <div className="flex h-[calc(100vh-48px)] flex-col overflow-hidden bg-[#101116]">
+    <div className={`flex h-full flex-col overflow-hidden ${KIT.bg}`}>
 
       {/* ── Command bar ─────────────────────────────────────────
           A data grid needs vertical room far more than it needs a hero
@@ -1219,7 +1219,7 @@ export default function ProjectDatabasePage() {
 
         {/* Sidebar - Table List (Hidden in visualization mode) */}
         {showVisualization !== 'visualization' && (
-          <div className="flex w-[248px] flex-shrink-0 flex-col border-r border-white/[0.06] bg-[#131419]">
+          <div className={`flex w-[248px] flex-shrink-0 flex-col border-r border-white/[0.06] ${KIT.rail}`}>
 
             {/* Workspace row */}
             <div className="flex h-10 flex-shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] px-3">
@@ -1537,7 +1537,7 @@ export default function ProjectDatabasePage() {
                             <tr>
                               {/* Row-number gutter — pins left so the row you are
                                   reading stays identifiable when scrolled wide. */}
-                              <th className="sticky left-0 z-30 w-[52px] border-b border-r border-white/[0.06] bg-[#15161c] px-3 py-2.5 text-right text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
+                              <th className={`sticky left-0 z-30 w-[52px] border-b border-r border-white/[0.06] ${KIT.gridHead} px-3 py-2.5 text-right text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600`}>
                                 #
                               </th>
                               {columns.map((col) => {
@@ -1546,7 +1546,7 @@ export default function ProjectDatabasePage() {
                                   <th
                                     key={col.name}
                                     onClick={() => handleSort(col.name)}
-                                    className="min-w-[150px] max-w-[380px] cursor-pointer select-none border-b border-white/[0.06] bg-[#15161c] px-4 py-2.5 text-left transition-colors hover:bg-white/[0.03] group/th"
+                                    className={`min-w-[150px] max-w-[380px] cursor-pointer select-none border-b border-white/[0.06] ${KIT.gridHead} px-4 py-2.5 text-left transition-colors hover:bg-white/[0.03] group/th`}
                                     title={isSorted ? (sortDirection === 'asc' ? 'Sorted ascending. Click for descending' : 'Sorted descending. Click to clear') : 'Click to sort'}
                                   >
                                     <div className="flex items-center gap-1.5">
@@ -1575,10 +1575,10 @@ export default function ProjectDatabasePage() {
                             {rows.map((row, idx) => (
                               <tr
                                 key={idx}
-                                className="group/row cursor-pointer transition-colors hover:bg-[#17181e]"
+                                className={`group/row cursor-pointer transition-colors ${KIT.rowHoverOn}`}
                                 onClick={() => openRowEditor(row)}
                               >
-                                <td className="sticky left-0 z-10 border-b border-r border-white/[0.04] bg-[#101116] px-3 py-[9px] text-right font-mono text-[11px] tabular-nums text-zinc-700 transition-colors group-hover/row:bg-[#17181e] group-hover/row:text-zinc-500">
+                                <td className={`sticky left-0 z-10 border-b border-r border-white/[0.04] ${KIT.bg} px-3 py-[9px] text-right font-mono text-[11px] tabular-nums text-zinc-700 transition-colors ${KIT.rowHoverGroup} group-hover/row:text-zinc-500`}>
                                   {(currentPage - 1) * PAGE_SIZE + idx + 1}
                                 </td>
                                 {columns.map((col) => {

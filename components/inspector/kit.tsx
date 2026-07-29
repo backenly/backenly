@@ -26,6 +26,30 @@ export const KIT = {
   surfaceAlt:  'bg-white/[0.04]',
   surfaceSoft: 'bg-white/[0.03]',
 
+  // Dense-surface rungs (2026-07-29). A full-height workbench (a data grid, a
+  // flush side rail) needs steps the panel ladder does not have: it stacks
+  // opaque regions directly against each other with no gap or shadow between
+  // them, so each one has to read as a distinct plane on its own. Extracted
+  // from the Tables inspector rather than invented — reach for these instead of
+  // eyeballing a new shade.
+  //
+  // The full ladder, dark → light:
+  //   well #0f1015 · bg #101116 · rail #131419 · chrome #141519
+  //   · gridHead #15161c · surface #16171d · rowHover #17181e · popover #1c1d23
+  well:        'bg-[#0f1015]',   // sunken input wells inside a panel
+  rail:        'bg-[#131419]',   // flush full-height side column
+  gridHead:    'bg-[#15161c]',   // sticky grid header + pinned gutter head
+  rowHover:    'bg-[#17181e]',   // grid row hover, opaque so sticky cells match
+
+  // Tailwind scans source statically, so an arbitrary value only compiles where
+  // it appears literally — a variant cannot be derived from `rowHover` at
+  // runtime. Hence the explicit pair. `rowHoverGroup` repaints a sticky cell in
+  // step with its row: sticky cells must be opaque or the scrolled-under
+  // content shows through, which also means they do not inherit the row's
+  // hover. It is coupled to the `group/row` name on the <tr>.
+  rowHoverOn:    'hover:bg-[#17181e]',
+  rowHoverGroup: 'group-hover/row:bg-[#17181e]',
+
   border:      'border-white/[0.07]',
   borderHover: 'hover:border-white/[0.14]',
   borderStrong:'border-white/[0.12]',

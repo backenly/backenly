@@ -1,5 +1,27 @@
 'use client'
 
+/**
+ * The page hero for DOCUMENT surfaces.
+ *
+ * When to use this vs. a command bar (settled 2026-07-29, after Tables dropped
+ * this header and became the only section without it):
+ *
+ *   Document surface — scrolls the window, read top to bottom, orientation
+ *   matters more than density. Settings, Connect, Integrations, Deploy,
+ *   Monitoring, Auth, Storage, Functions, Branches. USE THIS HEADER.
+ *
+ *   Instrument surface — owns the viewport, scrolls internally, the data IS
+ *   the page and every pixel of height is working area. Tables today; a log
+ *   viewer or query console would qualify. USE A COMMAND BAR: one ~44px row
+ *   carrying identity (section · name · state · count) next to the view
+ *   switch. See app/app/projects/[id]/database/page.tsx.
+ *
+ * This is a rule about the surface, not a migration. The 22px title and
+ * description earn their space wherever the reader needs orienting, and stop
+ * earning it the moment the page becomes an instrument. Do not port the other
+ * sections to command bars, and do not add this header back to an instrument.
+ */
+
 import { Lock } from 'lucide-react'
 
 interface BadgeProps {
