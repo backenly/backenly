@@ -40,7 +40,6 @@ import {
   Maximize2, Minimize2, HelpCircle, AlertCircle
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { InspectorPageHeader } from '@/components/inspector/InspectorPageHeader'
 import { KitNote } from '@/components/inspector/kit'
 import {
   getSchemas,
@@ -147,6 +146,10 @@ export default function ProjectDatabasePage() {
   const [totalPages, setTotalPages] = useState(0)
   const [selectedRow, setSelectedRow] = useState<Row | null>(null)
   const [hoveredRow, setHoveredRow] = useState<number | null>(null)
+
+  // Filters the sidebar table list only. Purely client-side — the full list is
+  // already loaded, so this never refetches.
+  const [tableFilter, setTableFilter] = useState('')
 
   // Committed search term (what's actually sent to the server). `searchTerm` is
   // the live input; a debounce effect promotes it to `committedSearch`.
@@ -1127,207 +1130,239 @@ export default function ProjectDatabasePage() {
     return 'text-zinc-400'
   }
 
+  const visibleTables = tableFilter.trim()
+    ? tables.filter((t) => t.name.toLowerCase().includes(tableFilter.trim().toLowerCase()))
+    : tables
+
   return (
-    <div className="min-h-screen bg-[#101116] flex flex-col">
+    <div className="flex h-[calc(100vh-48px)] flex-col overflow-hidden bg-[#101116]">
 
-      {/* ── Page header ─────────────────────────────────────── */}
-      <InspectorPageHeader
-        icon={DatabaseIcon}
-        title="Tables"
-        description="Database tables, schema, relationships, and rows"
-        badge={{ label: 'Managed', variant: 'managed' }}
-        stat={tables.length > 0 ? `${tables.length}` : undefined}
-      />
-
-      {/* ── Content area ────────────────────────────────────── */}
-      <div className="flex-1 p-7">
-        <div className="max-w-[1800px] mx-auto">
+      {/* ── Command bar ─────────────────────────────────────────
+          A data grid needs vertical room far more than it needs a hero
+          header, so page identity collapses into this single row. */}
+      <div className="flex h-11 flex-shrink-0 items-center justify-between gap-4 border-b border-white/[0.06] px-4">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-600">
+            <DatabaseIcon className="h-3 w-3" />
+            Inspector
+          </span>
+          <span className="h-3 w-px bg-white/10" />
+          <h1 className="text-[13px] font-semibold text-zinc-100">Tables</h1>
+          <span className="inline-flex items-center gap-1.5 font-mono text-[10.5px] font-medium text-zinc-400">
+            <span className="h-[5px] w-[5px] rounded-full bg-zinc-500" />
+            Managed
+          </span>
+          {tables.length > 0 && (
+            <span className="font-mono text-[10.5px] tabular-nums text-zinc-500">{tables.length}</span>
+          )}
+        </div>
 
         {/* View Switcher */}
         {selectedSchema && (
-          <div className="mb-4 flex items-center">
-            <div className="flex items-center gap-0.5 rounded-lg border border-white/[0.07] bg-white/[0.02] p-0.5">
-              <button
-                onClick={() => setShowVisualization('tables')}
-                className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] font-medium transition-colors focus:outline-none ${
-                  showVisualization === 'tables'
-                    ? 'bg-white/[0.06] text-zinc-100'
-                    : 'text-zinc-500 hover:text-zinc-300'
-                }`}
-              >
-                <Table2 className="w-3.5 h-3.5" />
-                Tables
-              </button>
-              <button
-                onClick={() => setShowVisualization('visualization')}
-                className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] font-medium transition-colors focus:outline-none ${
-                  showVisualization === 'visualization'
-                    ? 'bg-white/[0.06] text-zinc-100'
-                    : 'text-zinc-500 hover:text-zinc-300'
-                }`}
-              >
-                <Network className="w-3.5 h-3.5" />
-                Schema
-              </button>
-            </div>
-          </div>
-        )}
-        
-        {/* Setup Success/Error Message - only show for actual success (tables created) or real errors */}
-        {setupMessage && setupSuccess && (
-          <div className="mb-4">
-            <KitNote
-              tone="success"
-              icon={CheckCircle2}
-              title="Data ready"
-              actions={
-                <button
-                  onClick={() => {
-                    setSetupSuccess(false)
-                    setSetupMessage(null)
-                  }}
-                  className="text-zinc-500 hover:text-zinc-200 transition-colors focus:outline-none"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              }
+          <div className="flex flex-shrink-0 items-center gap-0.5 rounded-lg border border-white/[0.07] bg-white/[0.02] p-0.5">
+            <button
+              onClick={() => setShowVisualization('tables')}
+              className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11.5px] font-medium transition-colors focus:outline-none ${
+                showVisualization === 'tables'
+                  ? 'bg-white/[0.06] text-zinc-100'
+                  : 'text-zinc-500 hover:text-zinc-300'
+              }`}
             >
-              {setupMessage}
-            </KitNote>
+              <Table2 className="w-3 h-3" />
+              Tables
+            </button>
+            <button
+              onClick={() => setShowVisualization('visualization')}
+              className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11.5px] font-medium transition-colors focus:outline-none ${
+                showVisualization === 'visualization'
+                  ? 'bg-white/[0.06] text-zinc-100'
+                  : 'text-zinc-500 hover:text-zinc-300'
+              }`}
+            >
+              <Network className="w-3 h-3" />
+              Schema
+            </button>
           </div>
         )}
+      </div>
 
-        {/* Main Content */}
-        <div className="flex gap-4">
-          {/* Sidebar - Schema & Table List (Hidden in visualization mode) */}
-          {showVisualization !== 'visualization' && (
-            <div className="w-64 flex-shrink-0">
-              <div className="rounded-xl border border-white/[0.07] bg-[#16171d] shadow-[0_16px_44px_-28px_rgba(0,0,0,0.9)] overflow-hidden" style={{ maxHeight: 'calc(100vh - 220px)' }}>
+      {/* Setup Success/Error Message - only show for actual success (tables created) or real errors */}
+      {setupMessage && setupSuccess && (
+        <div className="flex-shrink-0 border-b border-white/[0.06] px-4 py-2.5">
+          <KitNote
+            tone="success"
+            icon={CheckCircle2}
+            title="Data ready"
+            actions={
+              <button
+                onClick={() => {
+                  setSetupSuccess(false)
+                  setSetupMessage(null)
+                }}
+                className="text-zinc-500 hover:text-zinc-200 transition-colors focus:outline-none"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            }
+          >
+            {setupMessage}
+          </KitNote>
+        </div>
+      )}
 
-                {/* Sidebar Header */}
-                <div className="px-4 pt-3.5 pb-3 border-b border-white/[0.06]">
-                  <div className="flex items-center justify-between mb-2.5">
-                    <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">Tables</span>
-                    <div className="flex items-center gap-0.5">
-                      <button
-                        onClick={handleRefresh}
-                        className="p-1.5 text-zinc-600 hover:text-zinc-200 hover:bg-white/[0.04] rounded-md transition-colors"
-                        title="Refresh"
-                      >
-                        <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
-                      </button>
-                      <button
-                        onClick={() => setShowCreateTableModal(true)}
-                        className="p-1.5 text-zinc-600 hover:text-violet-300 hover:bg-white/[0.06] rounded-md transition-colors"
-                        title="New table"
-                      >
-                        <Plus className="w-3 h-3" />
-                      </button>
-                    </div>
-                  </div>
-                  {/* Workspace label */}
-                  {schemas.map((schema) => (
-                    <div key={schema} className="flex items-center gap-2 px-2.5 py-1.5 bg-white/[0.02] rounded-md border border-white/[0.05]">
-                      <div className="w-[5px] h-[5px] rounded-full bg-violet-300 flex-shrink-0" />
-                      <span className="text-[11.5px] font-medium text-zinc-300 truncate">{displayProjectName || 'workspace'}</span>
-                      {tables.length > 0 && (
-                        <span className="ml-auto font-mono text-[10.5px] tabular-nums text-zinc-500 flex-shrink-0">{tables.length}</span>
-                      )}
-                    </div>
-                  ))}
-                  {error && (
-                    <div className="mt-2 p-2.5 bg-rose-500/[0.06] border border-rose-500/15 rounded-md text-[11px] leading-4 text-rose-300/90">
-                      {error}
-                    </div>
-                  )}
-                </div>
+      {/* ── Workbench ─────────────────────────────────────────
+          The inner layer is absolutely positioned so a wide grid sizes
+          itself against this box instead of pushing the app shell's flex
+          chain wider than the viewport. */}
+      <div className="relative min-h-0 flex-1">
+      <div className="absolute inset-0 flex">
 
-                {/* Table List */}
-                <div className="overflow-y-auto overflow-x-hidden py-2" style={{ maxHeight: 'calc(100vh - 340px)' }}>
-                  {loading && tables.length === 0 ? (
-                    <div className="flex items-center justify-center py-8">
-                      <Loader2 className="w-4 h-4 text-white/30 animate-spin" />
-                    </div>
-                  ) : tables.length === 0 ? (
-                    <div className="px-4 py-6 text-center space-y-3">
-                      <DatabaseIcon className="w-4 h-4 text-zinc-600 mx-auto" />
-                      <div>
-                        <p className="text-[12px] font-semibold text-zinc-200 mb-0.5">No tables yet</p>
-                        <p className="text-[11px] text-zinc-500 leading-relaxed">Connect your coding agent and it builds your schema here.</p>
-                      </div>
-                      <button
-                        onClick={checkAndSetupDatabase}
-                        disabled={loading || setupSuccess}
-                        className="w-full h-7 px-3 border border-white/10 bg-white/[0.04] text-zinc-300 hover:border-white/20 hover:bg-white/[0.08] rounded-lg text-[11.5px] font-medium flex items-center justify-center gap-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        {loading ? (
-                          <><Loader2 className="w-3 h-3 animate-spin" /><span>Preparing…</span></>
-                        ) : setupSuccess ? (
-                          <><CheckCircle2 className="w-3 h-3" /><span>Done</span></>
-                        ) : (
-                          <span>Prepare workspace</span>
-                        )}
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="px-2 space-y-px">
-                      {tables.map((table) => (
-                        <div
-                          key={table.name}
-                          className={`group relative flex items-center gap-2 px-2.5 py-[7px] rounded-md cursor-pointer transition-colors ${
-                            selectedTable === table.name
-                              ? 'bg-white/[0.05] text-zinc-50'
-                              : 'text-zinc-400 hover:text-zinc-100 hover:bg-white/[0.03]'
-                          }`}
-                          onClick={() => setSelectedTable(table.name)}
-                        >
-                          {/* Active indicator */}
-                          <div className={`w-[5px] h-[5px] rounded-full flex-shrink-0 transition-colors ${
-                            selectedTable === table.name ? 'bg-violet-300' : 'bg-white/[0.12] group-hover:bg-white/25'
-                          }`} />
+        {/* Sidebar - Table List (Hidden in visualization mode) */}
+        {showVisualization !== 'visualization' && (
+          <div className="flex w-[248px] flex-shrink-0 flex-col border-r border-white/[0.06] bg-[#131419]">
 
-                          {/* Table name */}
-                          <span className={`flex-1 text-[12px] font-mono truncate transition-colors ${
-                            selectedTable === table.name ? 'text-zinc-50' : ''
-                          }`}>
-                            {table.name}
-                          </span>
-
-                          {/* Row count — hidden on hover to show delete */}
-                          <span className={`font-mono text-[10.5px] tabular-nums flex-shrink-0 transition-all ${
-                            selectedTable === table.name ? 'text-zinc-400' : 'text-zinc-600'
-                          } group-hover:opacity-0`}>
-                            {table.rows ?? 0}
-                          </span>
-
-                          {/* Delete — appears on hover */}
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              setTableToDelete(table.name)
-                              setShowDeleteModal(true)
-                            }}
-                            className="absolute right-2 opacity-0 group-hover:opacity-100 p-1 hover:bg-rose-500/15 rounded-md transition-all"
-                            title="Delete table"
-                          >
-                            <Trash2 className="w-3 h-3 text-rose-300/70" />
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
+            {/* Workspace row */}
+            <div className="flex h-10 flex-shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] px-3">
+              <div className="flex min-w-0 items-center gap-2">
+                <div className="h-[5px] w-[5px] flex-shrink-0 rounded-full bg-violet-300" />
+                <span className="truncate text-[11.5px] font-medium text-zinc-300">{displayProjectName || 'workspace'}</span>
+              </div>
+              <div className="flex flex-shrink-0 items-center gap-0.5">
+                <button
+                  onClick={handleRefresh}
+                  className="p-1.5 text-zinc-600 hover:text-zinc-200 hover:bg-white/[0.04] rounded-md transition-colors"
+                  title="Refresh"
+                >
+                  <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
+                </button>
+                <button
+                  onClick={() => setShowCreateTableModal(true)}
+                  className="p-1.5 text-zinc-600 hover:text-violet-300 hover:bg-white/[0.06] rounded-md transition-colors"
+                  title="New table"
+                >
+                  <Plus className="w-3 h-3" />
+                </button>
               </div>
             </div>
-          )}
 
-          {/* Main Panel - Table Data / Visualization */}
-          <div className={showVisualization === 'visualization' ? 'flex-1 w-full' : 'flex-1 min-w-0'}>
-            <div className="rounded-xl border border-white/[0.07] bg-[#16171d] shadow-[0_16px_44px_-28px_rgba(0,0,0,0.9)] overflow-hidden">
+            {/* Table filter */}
+            {tables.length > 0 && (
+              <div className="flex-shrink-0 border-b border-white/[0.06] p-2">
+                <div className="relative">
+                  <Search className="absolute left-2.5 top-1/2 h-3 w-3 -translate-y-1/2 text-zinc-600" />
+                  <input
+                    type="text"
+                    placeholder="Search tables…"
+                    value={tableFilter}
+                    onChange={(e) => setTableFilter(e.target.value)}
+                    className="h-7 w-full rounded-lg border border-white/[0.07] bg-[#0f1015] pl-7 pr-3 text-[11.5px] text-zinc-300 transition-colors placeholder:text-zinc-600 focus:border-violet-400/40 focus:outline-none focus:ring-2 focus:ring-violet-400/15"
+                  />
+                </div>
+              </div>
+            )}
+
+            {error && (
+              <div className="m-2 flex-shrink-0 rounded-md border border-rose-500/15 bg-rose-500/[0.06] p-2.5 text-[11px] leading-4 text-rose-300/90">
+                {error}
+              </div>
+            )}
+
+            {/* Table List */}
+            <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden py-1.5">
+              {loading && tables.length === 0 ? (
+                <div className="flex items-center justify-center py-8">
+                  <Loader2 className="w-4 h-4 text-white/30 animate-spin" />
+                </div>
+              ) : tables.length === 0 ? (
+                <div className="px-4 py-6 text-center space-y-3">
+                  <DatabaseIcon className="w-4 h-4 text-zinc-600 mx-auto" />
+                  <div>
+                    <p className="text-[12px] font-semibold text-zinc-200 mb-0.5">No tables yet</p>
+                    <p className="text-[11px] text-zinc-500 leading-relaxed">Connect your coding agent and it builds your schema here.</p>
+                  </div>
+                  <button
+                    onClick={checkAndSetupDatabase}
+                    disabled={loading || setupSuccess}
+                    className="w-full h-7 px-3 border border-white/10 bg-white/[0.04] text-zinc-300 hover:border-white/20 hover:bg-white/[0.08] rounded-lg text-[11.5px] font-medium flex items-center justify-center gap-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {loading ? (
+                      <><Loader2 className="w-3 h-3 animate-spin" /><span>Preparing…</span></>
+                    ) : setupSuccess ? (
+                      <><CheckCircle2 className="w-3 h-3" /><span>Done</span></>
+                    ) : (
+                      <span>Prepare workspace</span>
+                    )}
+                  </button>
+                </div>
+              ) : visibleTables.length === 0 ? (
+                <p className="px-4 py-6 text-center text-[11.5px] leading-relaxed text-zinc-600">
+                  No table matches “{tableFilter}”.
+                </p>
+              ) : (
+                <div className="px-2 space-y-px">
+                  {visibleTables.map((table) => (
+                    <div
+                      key={table.name}
+                      className={`group relative flex items-center gap-2 px-2.5 py-[7px] rounded-md cursor-pointer transition-colors ${
+                        selectedTable === table.name
+                          ? 'bg-white/[0.05] text-zinc-50'
+                          : 'text-zinc-400 hover:text-zinc-100 hover:bg-white/[0.03]'
+                      }`}
+                      onClick={() => setSelectedTable(table.name)}
+                    >
+                      {/* Active indicator */}
+                      <div className={`w-[5px] h-[5px] rounded-full flex-shrink-0 transition-colors ${
+                        selectedTable === table.name ? 'bg-violet-300' : 'bg-white/[0.12] group-hover:bg-white/25'
+                      }`} />
+
+                      {/* Table name */}
+                      <span className={`flex-1 text-[12px] font-mono truncate transition-colors ${
+                        selectedTable === table.name ? 'text-zinc-50' : ''
+                      }`}>
+                        {table.name}
+                      </span>
+
+                      {/* Row count — hidden on hover to show delete */}
+                      <span className={`font-mono text-[10.5px] tabular-nums flex-shrink-0 transition-all ${
+                        selectedTable === table.name ? 'text-zinc-400' : 'text-zinc-600'
+                      } group-hover:opacity-0`}>
+                        {table.rows ?? 0}
+                      </span>
+
+                      {/* Delete — appears on hover */}
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setTableToDelete(table.name)
+                          setShowDeleteModal(true)
+                        }}
+                        className="absolute right-2 opacity-0 group-hover:opacity-100 p-1 hover:bg-rose-500/15 rounded-md transition-all"
+                        title="Delete table"
+                      >
+                        <Trash2 className="w-3 h-3 text-rose-300/70" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {tables.length > 0 && (
+              <div className="flex h-7 flex-shrink-0 items-center border-t border-white/[0.06] px-3 font-mono text-[10.5px] tabular-nums text-zinc-600">
+                {tableFilter.trim()
+                  ? `${visibleTables.length} of ${tables.length}`
+                  : `${tables.length} table${tables.length === 1 ? '' : 's'}`}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Main Panel - Table Data / Visualization */}
+          <div className="flex min-w-0 flex-1 flex-col">
               {showVisualization === 'visualization' && activeDb === 'postgresql' && selectedSchema ? (
                 <>
                   {/* Visualization Header */}
-                  <div className="flex items-center justify-between gap-3 border-b border-white/[0.06] px-4 py-3">
+                  <div className="flex h-10 flex-shrink-0 items-center justify-between gap-3 border-b border-white/[0.06] px-4">
                     <div className="flex items-baseline gap-2 min-w-0">
                       <h2 className="text-[12.5px] font-semibold text-zinc-100">Schema graph</h2>
                       <span className="truncate font-mono text-[11px] text-zinc-500">{selectedSchema}</span>
@@ -1349,7 +1384,7 @@ export default function ProjectDatabasePage() {
                       </button>
                     </div>
                   </div>
-                  <div className="flex-1 overflow-hidden" style={{ height: 'calc(100vh - 250px)' }}>
+                  <div className="min-h-0 flex-1 overflow-hidden">
                     <EnhancedSchemaVisualizer
                       schema={selectedSchema}
                       databaseType={activeDb}
@@ -1361,7 +1396,7 @@ export default function ProjectDatabasePage() {
               ) : selectedTable && selectedSchema ? (
                 <>
                   {/* Table Toolbar */}
-                  <div className="flex items-center justify-between gap-3 border-b border-white/[0.06] px-4 py-3">
+                  <div className="flex h-10 flex-shrink-0 items-center justify-between gap-3 border-b border-white/[0.06] px-4">
                     <div className="flex items-baseline gap-2 min-w-0">
                       <h2 className="truncate font-mono text-[13px] font-medium text-zinc-100">{selectedTable}</h2>
                       <span className="whitespace-nowrap font-mono text-[11px] text-zinc-500 tabular-nums">
@@ -1416,7 +1451,7 @@ export default function ProjectDatabasePage() {
 
                   {/* Filter bar — above the grid, always visible */}
                   {viewMode === 'data' && (
-                    <div className="flex items-center gap-2 px-4 py-2 border-b border-white/[0.05]">
+                    <div className="flex h-10 flex-shrink-0 items-center gap-2 px-4 border-b border-white/[0.05]">
                       <div className="relative flex-1 max-w-xs">
                         <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-zinc-600" />
                         <input
@@ -1452,14 +1487,14 @@ export default function ProjectDatabasePage() {
                   {/* Table Content */}
                   {viewMode === 'data' ? (
                     <>
-                    <div className="overflow-auto" style={{ maxHeight: 'calc(100vh - 410px)' }}>
+                    <div className="min-h-0 flex-1 overflow-auto">
                       {loading ? (
-                        <div className="p-8 text-center">
-                          <Loader2 className="w-4 h-4 text-zinc-500 animate-spin mx-auto mb-2" />
+                        <div className="flex h-full flex-col items-center justify-center">
+                          <Loader2 className="w-4 h-4 text-zinc-500 animate-spin mb-2" />
                           <p className="text-[12px] text-zinc-500">Loading data…</p>
                         </div>
                       ) : rows.length === 0 && committedSearch ? (
-                        <div className="flex flex-col items-center justify-center px-8" style={{ minHeight: 'calc(100vh - 410px)' }}>
+                        <div className="flex h-full flex-col items-center justify-center px-8">
                           <Search className="w-4 h-4 text-zinc-600 mb-3" />
                           <p className="text-[13px] font-semibold text-zinc-200 mb-1">No matching rows</p>
                           <p className="text-[12px] text-zinc-500 text-center max-w-xs mb-5 leading-relaxed">
@@ -1474,7 +1509,7 @@ export default function ProjectDatabasePage() {
                           </button>
                         </div>
                       ) : rows.length === 0 ? (
-                        <div className="flex flex-col items-center justify-center px-8" style={{ minHeight: 'calc(100vh - 410px)' }}>
+                        <div className="flex h-full flex-col items-center justify-center px-8">
                           <Table2 className="w-4 h-4 text-zinc-600 mb-3" />
                           <p className="text-[13px] font-semibold text-zinc-200 mb-1">Table is empty</p>
                           <p className="text-[12px] text-zinc-500 text-center max-w-xs mb-5 leading-relaxed">
@@ -1497,16 +1532,21 @@ export default function ProjectDatabasePage() {
                           </div>
                         </div>
                       ) : (
-                        <table className="w-full">
-                          <thead className="sticky top-0 z-10">
-                            <tr className="bg-[#16171d] border-b border-white/[0.06]">
+                        <table className="w-max min-w-full border-separate border-spacing-0">
+                          <thead className="sticky top-0 z-20">
+                            <tr>
+                              {/* Row-number gutter — pins left so the row you are
+                                  reading stays identifiable when scrolled wide. */}
+                              <th className="sticky left-0 z-30 w-[52px] border-b border-r border-white/[0.06] bg-[#15161c] px-3 py-2.5 text-right text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
+                                #
+                              </th>
                               {columns.map((col) => {
                                 const isSorted = sortColumn === col.name
                                 return (
                                   <th
                                     key={col.name}
                                     onClick={() => handleSort(col.name)}
-                                    className="px-4 py-2.5 text-left cursor-pointer select-none hover:bg-white/[0.03] transition-colors group/th"
+                                    className="min-w-[150px] max-w-[380px] cursor-pointer select-none border-b border-white/[0.06] bg-[#15161c] px-4 py-2.5 text-left transition-colors hover:bg-white/[0.03] group/th"
                                     title={isSorted ? (sortDirection === 'asc' ? 'Sorted ascending. Click for descending' : 'Sorted descending. Click to clear') : 'Click to sort'}
                                   >
                                     <div className="flex items-center gap-1.5">
@@ -1531,13 +1571,16 @@ export default function ProjectDatabasePage() {
                               })}
                             </tr>
                           </thead>
-                          <tbody className="divide-y divide-white/[0.04]">
+                          <tbody>
                             {rows.map((row, idx) => (
                               <tr
                                 key={idx}
-                                className="hover:bg-white/[0.025] transition-colors cursor-pointer"
+                                className="group/row cursor-pointer transition-colors hover:bg-[#17181e]"
                                 onClick={() => openRowEditor(row)}
                               >
+                                <td className="sticky left-0 z-10 border-b border-r border-white/[0.04] bg-[#101116] px-3 py-[9px] text-right font-mono text-[11px] tabular-nums text-zinc-700 transition-colors group-hover/row:bg-[#17181e] group-hover/row:text-zinc-500">
+                                  {(currentPage - 1) * PAGE_SIZE + idx + 1}
+                                </td>
                                 {columns.map((col) => {
                                   const value = row[col.name]
                                   const displayValue = value === null || value === undefined
@@ -1547,15 +1590,16 @@ export default function ProjectDatabasePage() {
                                     : String(value)
 
                                   return (
-                                    <td key={col.name} className="px-4 py-[9px]">
-                                      <span className={`font-mono text-[12px] ${
-                                        value === null || value === undefined
-                                          ? 'text-zinc-700 italic'
-                                          : getDataTypeColor(col.type)
-                                      }`}>
-                                        {displayValue.length > 60
-                                          ? `${displayValue.substring(0, 60)}…`
-                                          : displayValue}
+                                    <td key={col.name} className="max-w-[380px] border-b border-white/[0.04] px-4 py-[9px]">
+                                      <span
+                                        title={displayValue}
+                                        className={`block truncate font-mono text-[12px] ${
+                                          value === null || value === undefined
+                                            ? 'text-zinc-700 italic'
+                                            : getDataTypeColor(col.type)
+                                        }`}
+                                      >
+                                        {displayValue}
                                       </span>
                                     </td>
                                   )
@@ -1569,7 +1613,7 @@ export default function ProjectDatabasePage() {
 
                     {/* Pagination footer — only when there is at least one row */}
                     {totalRows > 0 && (
-                      <div className="flex items-center justify-between gap-3 border-t border-white/[0.06] px-4 py-2.5">
+                      <div className="flex h-10 flex-shrink-0 items-center justify-between gap-3 border-t border-white/[0.06] px-4">
                         <span className="font-mono text-[11px] text-zinc-500 tabular-nums">
                           {`${((currentPage - 1) * PAGE_SIZE) + 1}–${Math.min(currentPage * PAGE_SIZE, totalRows)} of ${totalRows.toLocaleString()}`}
                           {committedSearch && <span className="ml-1.5 text-zinc-600">· filtered by “{committedSearch}”</span>}
@@ -1601,7 +1645,7 @@ export default function ProjectDatabasePage() {
                     )}
                     </>
                   ) : (
-                    <div className="p-6 overflow-auto" style={{ maxHeight: 'calc(100vh - 380px)' }}>
+                    <div className="min-h-0 flex-1 overflow-auto p-6">
                       {/* Column Structure */}
                       <div className="mb-6">
                         <div className="flex items-center justify-between mb-3">
@@ -1737,7 +1781,7 @@ export default function ProjectDatabasePage() {
                   )}
                 </>
               ) : (
-                <div className="flex flex-col items-center justify-center py-24 px-8">
+                <div className="flex flex-1 flex-col items-center justify-center px-8">
                   <DatabaseIcon className="w-4 h-4 text-zinc-600 mb-3" />
                   <p className="text-[13px] font-semibold text-zinc-200 mb-1">No tables yet</p>
                   <p className="text-[12px] text-zinc-500 text-center max-w-xs leading-relaxed">
@@ -1745,11 +1789,10 @@ export default function ProjectDatabasePage() {
                   </p>
                 </div>
               )}
-            </div>
           </div>
-        </div>
       </div>
-      
+      </div>
+
       {/* Fullscreen Visualization Modal */}
       <AnimatePresence>
         {isVisualizationExpanded && selectedSchema && (
@@ -2323,7 +2366,6 @@ export default function ProjectDatabasePage() {
         )}
       </AnimatePresence>
 
-        </div>
-      </div>
+    </div>
   )
 }
