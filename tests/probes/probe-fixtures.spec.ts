@@ -113,47 +113,37 @@ describe('detectStaleDataOverflow', () => {
 
 // ── every_table_has_an_api / api_coverage_is_complete ────────────────────────
 
-describe('detectTablesWithNoApiDefinition', () => {
-  it('FIRES for a table with no API definition', async () => {
+/**
+ * missing_api_definition is RETIRED and must stay silent.
+ *
+ * These used to assert the probe fires for a table with no ApiDefinition. That
+ * contract is gone: executeGenerateAPI no longer writes ApiDefinition rows, and
+ * exposure is decided by the catalog and the grants (lib/postgrest/exposure.ts),
+ * so a probe keyed on their absence would flag every table on every healthy
+ * project forever — exactly what the finding-evidence policy forbids. See the
+ * block comment on detectTablesWithNoApiDefinition for the full history.
+ *
+ * The probe has already been stubbed → revived → stubbed again, so these are
+ * kept as a revival guard rather than deleted, and are deliberately built from
+ * the exact fixture that used to fire.
+ */
+describe('detectTablesWithNoApiDefinition (retired — silence is the contract)', () => {
+  it('stays silent for a table with no ApiDefinition, the shape that used to fire', async () => {
     await q(`CREATE TABLE "${schema}"."widgets" (id serial PRIMARY KEY, name text)`)
 
-    const findings = await detectTablesWithNoApiDefinition(projectId)
-    const hit = findings.find((f) => (f.details as any)?.tableName === 'widgets')
+    // Precondition: if the probe were live, the absence of a definition for
+    // this table is precisely what it would key on.
+    await expect(
+      prisma.apiDefinition.count({ where: { projectId, name: 'widgets' } }),
+    ).resolves.toBe(0)
 
-    expect(hit).toBeDefined()
-    expect(hit!.type).toBe('missing_api_definition')
+    expect(await detectTablesWithNoApiDefinition(projectId)).toEqual([])
   }, 60_000)
 
-  it('goes QUIET once the table has an API definition', async () => {
-    const table = await prisma.table.create({
-      data: { projectId, name: 'widgets', schema, description: 'fixture' },
-    })
-    await prisma.apiDefinition.create({
-      data: {
-        projectId,
-        tableId: table.id,
-        name: 'widgets',
-        basePath: '/widgets',
-        enabled: true,
-        operations: { get: true, list: true, create: true, update: true, delete: true },
-        endpoints: [
-          { method: 'GET', path: '/widgets' },
-          { method: 'POST', path: '/widgets' },
-          { method: 'PUT', path: '/widgets/:id' },
-          { method: 'DELETE', path: '/widgets/:id' },
-        ],
-      },
-    })
-
-    const findings = await detectTablesWithNoApiDefinition(projectId)
-    expect(findings.find((f) => (f.details as any)?.tableName === 'widgets')).toBeUndefined()
-  }, 60_000)
-
-  it('never flags the platform-managed users table — /db/users is locked by design', async () => {
+  it('stays silent for the platform-managed users table', async () => {
     await q(`CREATE TABLE "${schema}"."users" (id uuid PRIMARY KEY, email text)`)
 
-    const findings = await detectTablesWithNoApiDefinition(projectId)
-    expect(findings.find((f) => (f.details as any)?.tableName === 'users')).toBeUndefined()
+    expect(await detectTablesWithNoApiDefinition(projectId)).toEqual([])
   }, 60_000)
 })
 
@@ -178,6 +168,31 @@ describe('detectApiCoverageGaps', () => {
     const findings = await detectApiCoverageGaps(projectId)
     expect(findings.length).toBeGreaterThan(0)
     expect(JSON.stringify(findings)).toContain('partials')
+  }, 60_000)
+
+  it('goes QUIET for a definition with complete CRUD', async () => {
+    const table = await prisma.table.create({
+      data: { projectId, name: 'complete', schema, description: 'fixture' },
+    })
+    await prisma.apiDefinition.create({
+      data: {
+        projectId,
+        tableId: table.id,
+        name: 'complete',
+        basePath: '/complete',
+        enabled: true,
+        operations: { get: true, list: true, create: true, update: true, delete: true },
+        endpoints: [
+          { method: 'GET', path: '/complete' },
+          { method: 'POST', path: '/complete' },
+          { method: 'PUT', path: '/complete/:id' },
+          { method: 'DELETE', path: '/complete/:id' },
+        ],
+      },
+    })
+
+    const findings = await detectApiCoverageGaps(projectId)
+    expect(findings.find((f) => (f.details as any)?.tableName === 'complete')).toBeUndefined()
   }, 60_000)
 })
 
