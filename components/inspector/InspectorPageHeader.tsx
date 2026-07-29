@@ -8,18 +8,20 @@
  *
  *   Document surface — scrolls the window, read top to bottom, orientation
  *   matters more than density. Settings, Connect, Integrations, Deploy,
- *   Monitoring, Auth, Storage, Functions, Branches. USE THIS HEADER.
+ *   Autonomy, Branches. USE THIS HEADER.
  *
  *   Instrument surface — owns the viewport, scrolls internally, the data IS
- *   the page and every pixel of height is working area. Tables today; a log
- *   viewer or query console would qualify. USE A COMMAND BAR: one ~44px row
- *   carrying identity (section · name · state · count) next to the view
- *   switch. See app/app/projects/[id]/database/page.tsx.
+ *   the page and every pixel of height is working area. Tables, Storage, and
+ *   (in progress) Functions, Realtime, Monitoring, Auth's Users tab. USE A
+ *   COMMAND BAR: one ~44px row carrying identity (section · name · state ·
+ *   count) next to the view switch, then a full-height workbench below it.
+ *   See app/app/projects/[id]/database/page.tsx and
+ *   components/storage/StorageWorkbench.tsx.
  *
- * This is a rule about the surface, not a migration. The 22px title and
- * description earn their space wherever the reader needs orienting, and stop
- * earning it the moment the page becomes an instrument. Do not port the other
- * sections to command bars, and do not add this header back to an instrument.
+ * The 22px title and description earn their space wherever the reader needs
+ * orienting, and stop earning it the moment the page becomes a browser over
+ * its own data. Classify by what the surface IS, not by which list it is on
+ * today: a page that gained a grid has become an instrument.
  */
 
 import { Lock } from 'lucide-react'
