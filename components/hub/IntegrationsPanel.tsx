@@ -128,6 +128,12 @@ interface Provider {
   id: string
   name: string
   tagline: string
+  /**
+   * Catalog-card body. A tagline names the provider; this says what connecting
+   * it actually gets you, drawn from `provisions` so the card never promises
+   * something the activation does not build.
+   */
+  description: string
   /** Official brand mark — falls back to the category icon if omitted */
   logo?: React.ComponentType<{ className?: string; style?: React.CSSProperties }>
   /** Official brand hex — applied to the logo glyph only. */
@@ -166,6 +172,8 @@ const INTEGRATION_CATALOG: IntegrationCategory[] = [
         id: 'stripe',
         name: 'Stripe',
         tagline: 'Payment processing',
+        description:
+          'Subscriptions, one-time checkout, and usage billing. Backenly provisions the webhook endpoint, the plan schema, and a payment event log.',
         logo: StripeLogo,
         brandColor: '#635BFF',
         enabled: false,
@@ -206,6 +214,8 @@ const INTEGRATION_CATALOG: IntegrationCategory[] = [
         id: 'resend',
         name: 'Resend',
         tagline: 'Developer-first email',
+        description:
+          'Transactional email that reaches inboxes. Welcome flows, receipts, and password resets, each with a delivery event log.',
         logo: ResendLogo,
         brandColor: '#FFFFFF',
         enabled: false,
@@ -238,6 +248,8 @@ const INTEGRATION_CATALOG: IntegrationCategory[] = [
         id: 'openai',
         name: 'OpenAI',
         tagline: 'GPT-4 & embeddings',
+        description:
+          'GPT models and embeddings behind a governed endpoint, with request quotas and stored responses so a runaway loop cannot drain your key.',
         logo: OpenAILogo,
         brandColor: '#10A37F',
         enabled: false,
@@ -262,6 +274,8 @@ const INTEGRATION_CATALOG: IntegrationCategory[] = [
         id: 'anthropic',
         name: 'Anthropic',
         tagline: 'Claude models',
+        description:
+          'Claude models behind a governed endpoint, with request quotas and stored responses so a runaway loop cannot drain your key.',
         logo: AnthropicLogo,
         brandColor: '#D97757',
         enabled: false,
@@ -294,6 +308,8 @@ const INTEGRATION_CATALOG: IntegrationCategory[] = [
         id: 'posthog',
         name: 'PostHog',
         tagline: 'Product analytics & feature flags',
+        description:
+          'Funnels, feature flags, and session replay captured server-side, so your events survive ad blockers and client failures.',
         logo: PostHogLogo,
         brandColor: '#F9BD2B',
         enabled: false,
@@ -648,9 +664,13 @@ function ActivationModal({
   )
 }
 
-// ─── Connector row ────────────────────────────────────────────────────────────
+// ─── Connector card ───────────────────────────────────────────────────────────
+// A directory is browsed, not scanned down a column: each connector gets a card
+// with room for the logo, the name, and enough prose to decide, with the
+// category and connection state pinned to a footer strip so every card in the
+// grid ends on the same line.
 
-function ConnectorRow({
+function ConnectorCard({
   provider,
   category,
   onOpen,
@@ -663,20 +683,24 @@ function ConnectorRow({
     <button
       type="button"
       onClick={onOpen}
-      className="group w-full flex items-center gap-3 px-4 py-[11px] text-left transition-colors hover:bg-white/[0.025] focus:outline-none"
+      className={`group flex h-full flex-col overflow-hidden text-left ${KIT.surface} border ${KIT.border} ${KIT.radius} ${KIT.inset} transition-colors ${KIT.borderHover} focus:outline-none focus:ring-2 focus:ring-violet-400/35`}
     >
-      <ProviderMark provider={provider} category={category} />
-      <div className="flex-1 min-w-0">
-        <div className="text-[12.5px] font-medium text-zinc-200 truncate">{provider.name}</div>
-        <div className="text-[11.5px] text-zinc-500 mt-0.5 truncate">{provider.tagline}</div>
+      <div className="flex flex-1 flex-col p-4">
+        <div className="mb-3 flex items-start justify-between gap-3">
+          <ProviderMark provider={provider} category={category} size="lg" />
+          {provider.enabled && <KitBadge tone="operational">connected</KitBadge>}
+        </div>
+
+        <h3 className="text-[13px] font-semibold leading-tight text-zinc-50">{provider.name}</h3>
+        <p className="mt-1.5 text-[12px] leading-5 text-zinc-500">{provider.description}</p>
       </div>
-      <div className="flex items-center gap-3 flex-shrink-0">
-        <span className="font-mono text-[10.5px] text-zinc-600">{category.title}</span>
-        {provider.enabled ? (
-          <KitBadge tone="operational">connected</KitBadge>
-        ) : (
-          <ChevronRight className="w-3.5 h-3.5 text-zinc-600 group-hover:text-zinc-300 transition-colors" />
-        )}
+
+      <div className={`flex items-center justify-between gap-3 border-t ${KIT.hairline} px-4 py-2.5`}>
+        <span className="truncate font-mono text-[10.5px] text-zinc-600">{category.title}</span>
+        <span className="flex flex-shrink-0 items-center gap-1 text-[11px] font-medium text-zinc-600 transition-colors group-hover:text-zinc-200">
+          {provider.enabled ? 'Manage' : 'Connect'}
+          <ChevronRight className="h-3 w-3 transition-transform group-hover:translate-x-0.5" />
+        </span>
       </div>
     </button>
   )
@@ -860,7 +884,9 @@ export function IntegrationsPanel() {
           onAddConnection={() => setModalOpen(true)}
         />
       ) : (
-        <div className="max-w-4xl">
+        // Wider than a reading column: a browseable grid wants three cards
+        // across on a laptop, and max-w-4xl only ever fit two.
+        <div className="max-w-6xl">
           {fetchError && (
             <div className="mb-4">
               <KitNote
@@ -916,19 +942,16 @@ export function IntegrationsPanel() {
           </KitTabs>
 
           {loading ? (
-            <KitCard>
-              <div className={`divide-y ${KIT.divide}`}>
-                {Array.from({ length: 4 }).map((_, i) => (
-                  <div key={i} className="flex items-center gap-3 px-4 py-[11px]">
-                    <div className={`w-8 h-8 ${KIT.radiusSm} bg-white/[0.03] animate-pulse`} />
-                    <div className="flex-1 space-y-1.5">
-                      <div className="h-3 w-28 rounded bg-white/[0.04] animate-pulse" />
-                      <div className="h-2.5 w-44 rounded bg-white/[0.03] animate-pulse" />
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </KitCard>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              {Array.from({ length: 6 }).map((_, i) => (
+                <div key={i} className={`${KIT.surface} border ${KIT.border} ${KIT.radius} p-4`}>
+                  <div className={`h-10 w-10 ${KIT.radiusSm} animate-pulse bg-white/[0.03]`} />
+                  <div className="mt-3 h-3 w-24 animate-pulse rounded bg-white/[0.04]" />
+                  <div className="mt-2 h-2.5 w-full animate-pulse rounded bg-white/[0.03]" />
+                  <div className="mt-1.5 h-2.5 w-3/4 animate-pulse rounded bg-white/[0.03]" />
+                </div>
+              ))}
+            </div>
           ) : visible.length === 0 ? (
             <KitCard>
               <EmptyState
@@ -944,18 +967,16 @@ export function IntegrationsPanel() {
               />
             </KitCard>
           ) : (
-            <KitCard>
-              <div className={`divide-y ${KIT.divide}`}>
-                {visible.map(({ provider, category }) => (
-                  <ConnectorRow
-                    key={provider.id}
-                    provider={provider}
-                    category={category}
-                    onOpen={() => setDetail({ provider, category })}
-                  />
-                ))}
-              </div>
-            </KitCard>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              {visible.map(({ provider, category }) => (
+                <ConnectorCard
+                  key={provider.id}
+                  provider={provider}
+                  category={category}
+                  onOpen={() => setDetail({ provider, category })}
+                />
+              ))}
+            </div>
           )}
         </div>
       )}
