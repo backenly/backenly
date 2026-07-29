@@ -33,7 +33,7 @@ export default function OverviewPage() {
   }, [projectId])
 
   return (
-    <div className="h-[calc(100vh-48px)] flex flex-col overflow-y-auto">
+    <div className="h-full flex flex-col overflow-y-auto">
       <MainWorkspace projectId={projectId} projectName={projectName} />
     </div>
   )

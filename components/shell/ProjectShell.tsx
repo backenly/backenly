@@ -41,7 +41,13 @@ export function ProjectShell({ children }: { children: ReactNode }) {
           assistantOpen ? 'lg:pr-[380px]' : ''
         }`}
       >
-        <div className="relative min-h-[calc(100vh-48px)]">
+        {/* Column, not a plain block, so the welcome-back banner and the page
+            share the viewport instead of stacking past it. The banner is
+            in-flow chrome of variable height; a page that pins itself to the
+            viewport (`h-full` below) cannot know that height, so it used to
+            overflow by exactly the banner while it was showing. Here the banner
+            takes its natural height and the page gets whatever is left. */}
+        <div className="relative flex min-h-[calc(100vh-48px)] flex-col">
           {/* One violet hairline along the content's top edge (kept from the
               inspector frame — reads as an instrument, not decoration). */}
           <div
@@ -49,7 +55,10 @@ export function ProjectShell({ children }: { children: ReactNode }) {
             className="pointer-events-none absolute inset-x-0 top-0 z-0 h-px bg-[linear-gradient(to_right,transparent,rgba(196,181,253,0.30),transparent)]"
           />
           <AutonomyWelcomeBackBanner />
-          {children}
+          {/* min-h-0 lets a full-height child actually shrink to this box;
+              without it the flex item floors at its content size and the
+              overflow comes straight back. */}
+          <div className="flex min-h-0 flex-1 flex-col">{children}</div>
           <AutonomyToaster />
         </div>
       </div>
