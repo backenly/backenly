@@ -1135,7 +1135,7 @@ export default function ProjectDatabasePage() {
     : tables
 
   return (
-    <div className={`flex h-full flex-col overflow-hidden ${KIT.bg}`}>
+    <div className={`flex h-[calc(100vh-48px)] flex-col overflow-hidden ${KIT.bg}`}>
 
       {/* ── Command bar ─────────────────────────────────────────
           A data grid needs vertical room far more than it needs a hero
