@@ -192,9 +192,9 @@ export function summariseFinding(type: string, details: Details): string {
     }
   }
 
-  // contract_surface_broken is canonical but intentionally not in the
-  // normalizer's fix map — handle it directly.
-  if (type === 'contract_surface_broken') {
+  // contract_surface_broken has no `case` in the switch above because its
+  // sentence is built from `details.surface` rather than from the type alone.
+  if (norm?.base === 'contract_surface_broken') {
     const surface = str(d.surface)
     const detail = sentence(d.detail)
     return surface

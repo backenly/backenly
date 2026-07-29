@@ -1,0 +1,371 @@
+/**
+ * FIX ACTIONS — the single answer to "can this finding actually be repaired?"
+ *
+ * ── Why this is its own module ──────────────────────────────────────────────
+ *
+ * This mapping used to live inside `auto-fix-engine.ts`, which imports prisma
+ * and therefore cannot be imported by a client component. So the Autonomy queue
+ * rendered its "Approve & fix" button without ever being able to ask whether a
+ * fix existed — and rendered it for EVERY row, including the ones the engine
+ * would answer with "Backenly flagged this but has no automatic repair for it
+ * yet". A user clicked a button the code already knew would fail.
+ *
+ * Splitting the mapping out (pure: no prisma, no server-only imports, the same
+ * contract as `finding-summaries` and `finding-groups`) means the button and the
+ * engine read the SAME function. The UI cannot promise a repair the executor
+ * does not have, because both sides compute it from one switch.
+ *
+ * `auto-fix-engine` re-exports `buildFixAction` / `getManualRemediationHint` so
+ * every existing import keeps working — this is a move, not a fork. Do not
+ * re-add a copy of the switch anywhere else; a second copy drifts, and the drift
+ * is invisible until it reaches a user as a dead button.
+ */
+
+import { normalizeFindingType } from './types'
+import type { AIAction } from '@/lib/ai/minimal-executor'
+
+// ── Data-plane outage discrimination ─────────────────────────────────────────
+
+/**
+ * Is this `contract_surface_broken` finding a DATA-PLANE outage (PostgREST down
+ * or wedged) rather than some other probe failure?
+ *
+ * The distinction decides whether an executable repair exists, so it is made on
+ * evidence rather than on the surface name alone:
+ *
+ *   • `db` is the only surface PostgREST serves. `auth`/`functions` run on the
+ *     Express runtime and `storage`/`healthz` on the Next app — both are the
+ *     processes executing this code, and a process cannot autonomously restart
+ *     itself mid-request without dropping the very request doing the healing.
+ *   • Only upstream-failure statuses qualify. A 404 from `/db/x` means no API
+ *     definition; a 403 means RLS. Restarting the data plane for either would
+ *     be a guess dressed up as a repair.
+ *
+ * `httpStatus: null` DOES qualify — the probe's fetch threw before any response
+ * (connection refused / DNS / socket hangup), which is the most common shape of
+ * a genuinely dead PostgREST.
+ */
+export function isDataPlaneOutage(details: Record<string, unknown> | null | undefined): boolean {
+  const d = (details ?? {}) as Record<string, unknown>
+  if (d.surface !== 'db') return false
+
+  const status = d.httpStatus
+  if (status === null || status === undefined) return true
+  const code = Number(status)
+  return code === 502 || code === 503 || code === 504
+}
+
+// ── Fix action mapping ────────────────────────────────────────────────────────
+
+/**
+ * Maps a FindingType + its details to the concrete AIAction(s) that repair it.
+ * Returns null only when there is genuinely no executable repair (e.g. the
+ * remediation requires user input that we surface elsewhere — Stripe webhook
+ * secret modal, OAuth credentials flow, etc.).
+ *
+ * Goal: every detected finding either flows through an executable action or
+ * has a clearly documented manual remediation path. No silent dead ends.
+ */
+export function buildFixAction(
+  type: string,
+  rawDetails: Record<string, unknown>,
+): Pick<AIAction, 'action' | 'params'> | null {
+  const norm = normalizeFindingType(type, rawDetails)
+  if (!norm) return null
+
+  // Resolve the target table from explicit details first, then the table
+  // recovered from a `${category}_${location}` dynamic type.
+  const details: Record<string, unknown> = {
+    ...rawDetails,
+    tableName: rawDetails.tableName ?? norm.tableName,
+  }
+
+  switch (norm.base) {
+    // ── RLS / Permissions ───────────────────────────────────────────────────
+    case 'missing_rls':
+    case 'rls_denies_everything':
+    case 'unprotected_user_data':
+    case 'rls_expression_invalid':
+      // `'auto'` resolves against the live schema at execution time rather than
+      // asserting a policy here. The previous hardcoded
+      // `own_rows` + `userIdColumn: 'user_id'` was correct only for tables that
+      // happened to carry that exact column: on `order_items` (owned through
+      // `orders`) it failed with `column "user_id" does not exist`, and on a
+      // public catalog it would have locked reads that are meant to be open.
+      // Both surfaced to the user as an escalated, un-repaired critical.
+      //
+      // `details.rlsTemplate` is what the detector already inferred; honouring it
+      // keeps the approve modal's description and the executed repair identical.
+      // Anything else falls through to inference. See lib/services/rls-ownership.ts.
+      return {
+        action: 'SET_PERMISSION',
+        params: {
+          tableName: details.tableName,
+          template: (typeof details.rlsTemplate === 'string' && details.rlsTemplate) || 'auto',
+          ...(details.userIdColumn ? { userIdColumn: details.userIdColumn } : {}),
+        },
+      }
+
+    // ── API coverage ────────────────────────────────────────────────────────
+    case 'api_drift':
+    case 'missing_api_definition':
+    case 'missing_api_crud':
+    case 'dead_api_endpoint':
+      return {
+        action: 'FIX_API',
+        params: { tableName: details.tableName },
+      }
+
+    // ── Schema integrity ────────────────────────────────────────────────────
+    case 'missing_fk':
+      return {
+        action: 'ADD_CONSTRAINT',
+        params: {
+          tableName: details.tableName,
+          columnName: details.columnName,
+          referencedTable: details.referencedTable,
+          referencedColumn: details.referencedColumn ?? 'id',
+        },
+      }
+
+    case 'missing_fk_index':
+      return {
+        action: 'CREATE_INDEX',
+        params: {
+          tableName: details.tableName,
+          // executeCreateIndex reads `columnName` — emitting `columns: [...]`
+          // here silently failed every FK-index fix with "Missing parameters".
+          columnName: details.columnName,
+        },
+      }
+
+    case 'missing_rate_limit':
+      return {
+        action: 'SET_RATE_LIMIT',
+        params: { tableName: details.tableName },
+      }
+
+    case 'shadow_mutation':
+      // Schema was edited outside the AI — re-run API generation to reconcile.
+      return {
+        action: 'FIX_API',
+        params: { tableName: details.tableName },
+      }
+
+    // ── PostgREST registration ──────────────────────────────────────────────
+    // The detector self-heals this at detection time via its own `fix` closure
+    // (lib/autonomy/schema-registration.ts). That closure can FAIL — PostgREST
+    // unreachable, the SQL function erroring — and a failed detector fix demotes
+    // the finding to `pending_approval`, which puts it in front of the user with
+    // an approve button. Without this case that button hit `default: return
+    // null` and answered "this issue needs your manual review" for a repair the
+    // platform performs automatically everywhere else. The classifier has rated
+    // it AUTO since it shipped; this is the executable action that rating always
+    // implied. Idempotent and additive — see lib/postgrest/registration.ts.
+    case 'schema_not_registered':
+      return {
+        action: 'REGISTER_SCHEMA',
+        params: {},
+      }
+
+    // ── Runtime contract — a live probe of an advertised surface failed ─────
+    // Only the data-plane outage shape has an executable repair; see
+    // `isDataPlaneOutage` for why the other surfaces deliberately do not.
+    case 'contract_surface_broken':
+      return isDataPlaneOutage(rawDetails)
+        ? { action: 'HEAL_DATA_PLANE', params: { surface: 'db' } }
+        : null
+
+    // ── Realtime ────────────────────────────────────────────────────────────
+    case 'realtime_gap':
+      return {
+        action: 'FIX_REALTIME',
+        params: { tableName: details.tableName },
+      }
+
+    // ── Auth ────────────────────────────────────────────────────────────────
+    case 'auth_jwt_missing':
+    case 'auth_users_table_missing':
+    case 'broken_auth':
+      return {
+        action: 'FIX_AUTH',
+        params: { issue: type },
+      }
+
+    case 'oauth_config_invalid':
+    case 'oauth_redirect_uri_missing':
+      return {
+        action: 'FIX_AUTH',
+        params: { issue: type, provider: details.provider },
+      }
+
+    case 'auth_spike':
+      // Auth-spike anomalies are diagnostic, not actionable — but FIX_AUTH at
+      // minimum re-validates the auth subsystem (jwtSecret, users table, etc.)
+      // so any concurrent corruption gets repaired. We still surface the anomaly.
+      return {
+        action: 'FIX_AUTH',
+        params: { issue: 'auth_spike' },
+      }
+
+    // ── Integrations ────────────────────────────────────────────────────────
+    case 'integration_key_invalid':
+    case 'integration_webhook_failing':
+    case 'integration_smtp_unreachable':
+    case 'broken_webhook':
+      return {
+        action: 'FIX_INTEGRATION',
+        params: {
+          integrationId: details.integration ?? details.integrationId,
+          host: details.host,
+          port: details.port,
+        },
+      }
+
+    // ── Workflow ────────────────────────────────────────────────────────────
+    case 'workflow_broken':
+    case 'verification_failed':
+      return {
+        action: 'FIX_WORKFLOW',
+        params: {
+          workflow: details.workflow,
+          missingComponents: details.missingComponents ?? [],
+          details,
+        },
+      }
+
+    // ── Deploy ──────────────────────────────────────────────────────────────
+    case 'deploy_failure':
+      return {
+        action: 'FIX_DEPLOY',
+        params: { reason: details.reason },
+      }
+
+    // ── Orphan / cleanup ────────────────────────────────────────────────────
+    case 'orphan_table':
+      // The safe, non-destructive repair is to ADOPT the table: register its
+      // platform metadata + generate its REST API + protect it with RLS. This
+      // never touches the table's data. (Dropping it is the destructive path and
+      // stays a manual action in the Database section.)
+      return {
+        action: 'REGISTER_TABLE',
+        params: { tableName: details.tableName },
+      }
+
+    // ── Open loop — DDL observed over a direct database connection ──────────
+    case 'external_schema_change':
+      // Bookkeeping-only reconciliation (register/refresh/prune metadata,
+      // re-baseline snapshot, re-sync grants). Never executes DDL — see
+      // lib/autonomy/drift-watch.ts.
+      return {
+        action: 'ADOPT_EXTERNAL_SCHEMA',
+        params: {},
+      }
+
+    // ── Phase 4 — risk-flagged action queued from AI chat / orchestration ───
+    // Unlike every other case, this one carries the exact already-decided
+    // AIAction to re-run once approved — there is nothing to infer from type.
+    //
+    // CRITICAL: inject `confirmed: true`. buildFixAction is only ever reached
+    // on a human-approved path (dashboard approve, or resolve-from-chat), and
+    // the executor's medium/high-risk gate (executeSingleAction) re-fires on
+    // `!params.confirmed`. Without this flag, approving a gated finding would
+    // re-trip the gate, fail with APPROVAL_REQUIRED, and spawn a duplicate
+    // pending finding on every attempt — i.e. the action could never actually
+    // be approved. The approval IS the confirmation.
+    case 'ai_action_pending': {
+      const executorAction = rawDetails.executorAction as string | undefined
+      if (!executorAction) return null
+      const executorParams = (rawDetails.executorParams as Record<string, unknown>) ?? {}
+      return {
+        action: executorAction as AIAction['action'],
+        params: { ...executorParams, confirmed: true },
+      }
+    }
+
+    default:
+      return null
+  }
+}
+
+// ── Friendly remediation hints for findings without an executable fix ─────────
+
+/**
+ * Returns a human-readable next-step hint for findings that can't be auto-fixed
+ * because they require user input or external action. Surfaced in the approve
+ * modal so the user knows what to do instead of seeing a generic error.
+ */
+export function getManualRemediationHint(
+  type: string,
+  details?: Record<string, unknown> | null,
+): string | null {
+  const norm = normalizeFindingType(type, details ?? null)
+  switch (norm?.base) {
+    case 'orphan_table':
+      // Registration is handled by buildFixAction (REGISTER_TABLE), so this hint
+      // is only a fallback. It describes the safe path, not dropping.
+      return 'This table exists in your database but is not yet managed by the platform. Click Register to generate its REST API and adopt it — your data is untouched. (To remove it instead, drop it from the Database section.)'
+    case 'missing_archival_job':
+      return 'This table will keep growing without bound. In the AI chat, say "schedule a nightly cleanup on <table> older than 90 days" — Backenly will create the cron + the cleanup function with the retention you pick.'
+    case 'missing_token_cleanup_cron':
+      return 'Expired tokens are accumulating. In the AI chat, say "schedule a daily cron to delete expired rows from <table>" — Backenly will create the cleanup job.'
+
+    // Informational by design: an integration you connected has no code path
+    // using it yet. There is nothing to repair — the finding exists so a
+    // half-finished setup does not sit forgotten.
+    case 'integration_connected_unused':
+      return 'This integration is connected but nothing calls it yet. Use it from a function (ctx.integrations), or disconnect it in Integrations if it was set up by mistake.'
+
+    // A gated action re-runs from the exact AIAction recorded in its details.
+    // Without that payload there is nothing to re-run, and inventing one from
+    // the type would execute something the user never approved.
+    case 'ai_action_pending':
+      return 'The details of this queued change were not recorded, so it cannot be replayed automatically. Dismiss it and ask the AI chat to make the change again — it will re-queue with a full record.'
+
+    // Surface probes that are NOT a data-plane outage. Named per surface,
+    // because "check your dashboard" is useless for a fault whose cause is in
+    // the serving chain rather than in the user's backend. The data-plane shape
+    // never reaches here — it maps to HEAL_DATA_PLANE above.
+    case 'contract_surface_broken': {
+      const surface = (details ?? {})['surface']
+      switch (surface) {
+        case 'auth':
+          return 'The live signup → signin round-trip is failing. Open Auth & Users and confirm a provider is enabled and the JWT secret is set. This is a runtime fault, not a schema one — Backenly does not change auth configuration on its own.'
+        case 'storage':
+          return 'The storage endpoints are not answering. Backenly has detected this and is monitoring it; storage is served by the platform, so there is nothing to change in your project. It will clear automatically once the surface recovers.'
+        case 'functions':
+          return 'The functions dispatcher did not answer as expected. Open Functions and re-deploy the most recently changed function — a failed deploy is the usual cause.'
+        default:
+          return 'A live probe of this API surface failed. Backenly re-checks every reconcile pass and will clear this automatically the moment the surface answers correctly again.'
+      }
+    }
+
+    default:
+      // Unrecognized type with no executable fix — give a generic, non-dev
+      // friendly next step instead of a silent dead end.
+      if (!norm) {
+        return 'Backenly flagged this but has no automatic repair for it yet. Open the relevant section of your dashboard, or describe the problem in the AI chat and it will help you resolve it.'
+      }
+      return null
+  }
+}
+
+// ── The predicate the UI reads ────────────────────────────────────────────────
+
+/**
+ * Does this finding have a repair the executor can actually run?
+ *
+ * The ONE question the Autonomy queue must ask before rendering a fix button.
+ * Pure and side-effect free, so the client can call it per row on every render.
+ *
+ * Deliberately derived from `buildFixAction` rather than from a parallel list of
+ * types: a list would be a second copy of the switch, and the whole reason this
+ * module exists is that a second copy is how the button and the engine came to
+ * disagree in the first place.
+ */
+export function hasExecutableFix(
+  type: string,
+  details: Record<string, unknown> | null | undefined,
+): boolean {
+  return buildFixAction(type, (details ?? {}) as Record<string, unknown>) !== null
+}

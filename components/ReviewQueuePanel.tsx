@@ -42,6 +42,7 @@ import {
   ChevronDown, ClipboardCopy, Check,
 } from 'lucide-react'
 import { groupFindings, CATEGORY_LABEL, type FindingGroup } from '@/lib/core/finding-groups'
+import { hasExecutableFix } from '@/lib/core/fix-actions'
 
 interface PendingApproval {
   id: string
@@ -263,10 +264,17 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
    * "6 of 9 applied" means the first six really are applied.
    */
   const approveGroup = async (g: FindingGroup<PendingApproval>) => {
+    // Only walk members the executor can actually repair. Sending the rest would
+    // spend a round trip to be told there is no fix mapping, and — worse — a
+    // group that is mostly unfixable would report a partial failure for work
+    // that was never going to run. The button is labelled with this same count.
+    const targets = g.members.filter(m => hasExecutableFix(m.type, m.details))
+    if (targets.length === 0) return
+
     setRow(g.key, { phase: 'applying' })
     let applied = 0
     let firstError: string | undefined
-    for (const m of g.members) {
+    for (const m of targets) {
       const r = await approveOne(m.id)
       if (r.ok) applied += 1
       else if (!firstError) firstError = r.error
@@ -282,12 +290,12 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
 
     setRow(g.key, { phase: 'verified' })
     flashBanner(
-      applied === g.members.length
-        ? `Fix applied${g.members.length > 1 ? ` to ${applied} tables` : ''}`
-        : `Applied to ${applied} of ${g.members.length}`,
-      applied === g.members.length
+      applied === targets.length
+        ? `Fix applied${targets.length > 1 ? ` to ${applied} tables` : ''}`
+        : `Applied to ${applied} of ${targets.length}`,
+      applied === targets.length
         ? 'schema verified · rollback snapshot captured'
-        : `${g.members.length - applied} left in the queue — ${firstError ?? 'see details'}`,
+        : `${targets.length - applied} left in the queue — ${firstError ?? 'see details'}`,
     )
     const t = setTimeout(async () => {
       await fetchReport(true)
@@ -745,6 +753,16 @@ function ApprovalRow({
             </div>
           )}
 
+          {/* No auto-repair exists for this row. Say so HERE, before the user
+              spends a click discovering it — and say what to do instead. The
+              hint is the same sentence the approve route would have returned,
+              read from the one fix mapping (lib/core/fix-actions.ts). */}
+          {!g.actionable && state.phase !== 'error' && g.manualHint && (
+            <p className="mt-2 border-l border-white/[0.08] pl-3 text-[11.5px] leading-snug text-zinc-400">
+              {g.manualHint}
+            </p>
+          )}
+
           {state.phase === 'error' && (
             <div className="mt-2 flex items-start gap-2">
               <XCircle className="mt-px size-3.5 shrink-0 text-rose-400" />
@@ -759,13 +777,18 @@ function ApprovalRow({
             </PrimaryAction>
           ) : (
             <>
-              <PrimaryAction
-                onClick={onApprove}
-                busy={state.phase === 'applying'}
-                busyLabel={many ? `Applying ${g.members.length}…` : 'Applying…'}
-              >
-                {many ? `Approve & fix all ${g.members.length}` : 'Approve & fix'}
-              </PrimaryAction>
+              {/* The fix button exists only when a fix does. `fixableCount` is
+                  computed from the executor's own action mapping, so this can
+                  never promise a repair the engine does not have. */}
+              {g.actionable && (
+                <PrimaryAction
+                  onClick={onApprove}
+                  busy={state.phase === 'applying'}
+                  busyLabel={g.fixableCount > 1 ? `Applying ${g.fixableCount}…` : 'Applying…'}
+                >
+                  {g.fixableCount > 1 ? `Approve & fix all ${g.fixableCount}` : 'Approve & fix'}
+                </PrimaryAction>
+              )}
               <GhostAction onClick={handToAgent} disabled={busy}>
                 {copied ? <Check className="size-3.5 text-emerald-400" /> : <ClipboardCopy className="size-3.5" />}
                 {copied ? 'Copied' : 'Hand to my agent'}

@@ -31,6 +31,7 @@
 
 import { normalizeFindingType } from './types'
 import { summariseFinding } from './finding-summaries'
+import { hasExecutableFix, getManualRemediationHint } from './fix-actions'
 
 // ── Shape ────────────────────────────────────────────────────────────────────
 
@@ -61,6 +62,25 @@ export interface FindingGroup<T extends GroupableFinding = GroupableFinding> {
   findingIds: string[]
   /** Distinct table/resource names across members, in first-seen order. */
   subjects: string[]
+  /**
+   * How many members the executor can actually repair.
+   *
+   * The queue used to render "Approve & fix" on every row without being able to
+   * ask this question — `buildFixAction` lived in a prisma-importing module the
+   * client could not touch. So a finding the engine would answer with "no
+   * automatic repair for it yet" got a button that dead-ended on click, and the
+   * product looked like it was lying about self-healing. Read from the SAME
+   * mapping the executor uses (lib/core/fix-actions.ts).
+   */
+  fixableCount: number
+  /** `fixableCount > 0` — whether a fix button may be rendered at all. */
+  actionable: boolean
+  /**
+   * What to tell the user when nothing here is auto-repairable. Non-null only
+   * when `actionable` is false, so the row can offer guidance in place of a
+   * button rather than nothing at all.
+   */
+  manualHint: string | null
 }
 
 // ── Classification (the single copy) ─────────────────────────────────────────
@@ -187,9 +207,9 @@ const GROUP_TITLES: Record<string, (n: number, d: Record<string, unknown>) => st
 }
 
 /**
- * `contract_surface_broken` is canonical but carries no fix mapping, so it
- * never reaches the normalizer's base map — same convention `finding-summaries`
- * uses. Titled here because it is one of the two families that fans out most.
+ * `contract_surface_broken` is titled here rather than in GROUP_TITLES because
+ * its subject is a probe surface, not a table — it is one of the two families
+ * that fans out most.
  */
 function titleForBase(
   base: string,
@@ -201,6 +221,41 @@ function titleForBase(
     return `${n} live API ${plural(n, 'surface')} ${plural(n, 'is', 'are')} failing${detail ? `: ${detail}` : ''}`
   }
   return GROUP_TITLES[base]?.(n, details) ?? null
+}
+
+// ── Repairability ────────────────────────────────────────────────────────────
+
+/**
+ * Can the executor repair these findings, and if not, what do we tell the user?
+ *
+ * Counted per member rather than decided for the group, because a group is a
+ * root-cause fold and members can still differ in what their details carry —
+ * `ai_action_pending` is repairable only when it recorded an `executorAction`,
+ * so two findings of the same base type can genuinely disagree. Stating the
+ * fixable count lets the button say how many of the N it will actually apply
+ * instead of promising all of them.
+ */
+function repairability<T extends GroupableFinding>(
+  members: T[],
+): Pick<FindingGroup<T>, 'fixableCount' | 'actionable' | 'manualHint'> {
+  const fixableCount = members.reduce(
+    (n, m) => n + (hasExecutableFix(m.type, m.details) ? 1 : 0),
+    0,
+  )
+  if (fixableCount > 0) {
+    return { fixableCount, actionable: true, manualHint: null }
+  }
+  // Nothing here is auto-repairable. A row with no button and no explanation is
+  // a dead end of a quieter kind, so carry the same hint the approve route would
+  // have returned had the user clicked.
+  const head = members[0]
+  return {
+    fixableCount: 0,
+    actionable: false,
+    manualHint:
+      getManualRemediationHint(head.type, head.details) ??
+      'This one needs your judgement — open the relevant section of your dashboard, or ask the AI chat to walk through it with you.',
+  }
 }
 
 // ── The fold ─────────────────────────────────────────────────────────────────
@@ -255,6 +310,7 @@ export function groupFindings<T extends GroupableFinding>(findings: T[]): Findin
           members: [m],
           findingIds: [m.id],
           subjects: [subjectOf(m)].filter((s): s is string => !!s),
+          ...repairability([m]),
         })
       }
       continue
@@ -274,6 +330,7 @@ export function groupFindings<T extends GroupableFinding>(findings: T[]): Findin
       members: sorted,
       findingIds: sorted.map((m) => m.id),
       subjects,
+      ...repairability(sorted),
     })
   }
 

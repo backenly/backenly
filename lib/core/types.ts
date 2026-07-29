@@ -121,8 +121,18 @@ interface NormalizedFinding {
   wasAliased: boolean
 }
 
-// Canonical types — exact matches pass through untouched.
-const CANONICAL: ReadonlySet<string> = new Set<FindingType>([
+/**
+ * Every canonical FindingType, as runtime data.
+ *
+ * EXPORTED because a TypeScript union cannot be enumerated at runtime, so the
+ * conformance guard that checks "every finding type has a repair path" had to
+ * hand-copy this list into the test file — and a hand-copy is a list that goes
+ * stale silently. It did: `contract_surface_broken` and `schema_not_registered`
+ * were both absent from the copy, and both shipped with a broken repair path
+ * that no test could see. Add new types HERE and the guard covers them
+ * automatically. See tests/core/finding-repair-conformance.test.ts.
+ */
+export const ALL_FINDING_TYPES = [
   'missing_rls', 'missing_fk', 'api_drift', 'broken_webhook', 'broken_auth',
   'orphan_table', 'auth_spike', 'deploy_failure', 'missing_fk_index',
   'missing_api_definition', 'shadow_mutation', 'auth_jwt_missing',
@@ -134,7 +144,16 @@ const CANONICAL: ReadonlySet<string> = new Set<FindingType>([
   'missing_api_crud', 'dead_api_endpoint', 'missing_rate_limit', 'realtime_gap',
   'missing_archival_job', 'missing_token_cleanup_cron', 'ai_action_pending',
   'external_schema_change', 'schema_not_registered', 'rls_denies_everything',
-])
+  // Added 2026-07-29. Its absence here made `normalizeFindingType` return null,
+  // which sent every runtime-contract finding down `buildFixAction`'s
+  // "unrecognized type" path — so the data-plane outage shape (PostgREST down,
+  // which IS repairable) could never reach a repair, and the approve route
+  // answered with the generic "no automatic repair for it yet" string.
+  'contract_surface_broken',
+] as const satisfies ReadonlyArray<FindingType>
+
+// Canonical types — exact matches pass through untouched.
+const CANONICAL: ReadonlySet<string> = new Set<string>(ALL_FINDING_TYPES)
 
 // Category prefix → canonical base. Most-specific first.
 const PREFIX_MAP: ReadonlyArray<readonly [string, FindingType]> = [

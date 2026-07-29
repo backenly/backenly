@@ -26,6 +26,7 @@
 
 import { prisma } from '@/lib/db'
 import { purgeSyntheticAuthArtifacts } from '@/lib/services/end-user-auth-table'
+import { isDataPlaneOutage } from '@/lib/core/fix-actions'
 import type { RawFinding } from '@/lib/core/types'
 
 const PROBE_TIMEOUT_MS = 8_000
@@ -306,11 +307,8 @@ export async function detectContractViolations(projectId: string): Promise<RawFi
     }).catch(() => {})
   }
 
-  return broken.map((r): RawFinding => ({
-    type: 'contract_surface_broken',
-    severity: r.critical ? 'critical' : 'warning',
-    autoFixable: false,
-    details: {
+  return broken.map((r): RawFinding => {
+    const details = {
       surface: r.surface,
       detail: r.detail,
       response: r.response?.slice(0, 300) ?? null,
@@ -321,6 +319,39 @@ export async function detectContractViolations(projectId: string): Promise<RawFi
         r.surface === 'storage' || r.surface === 'healthz'
           ? 'This surface is served by the Next.js app behind the Express proxy — check that both PM2 processes are running and the proxy route is mounted.'
           : 'This surface is served by the Express runtime — check backenly-runtime logs.',
-    },
-  }))
+    }
+
+    // A broken surface is usually a symptom whose cause is outside this
+    // project's schema — a process down, a route unmounted, a proxy
+    // misconfigured — and inventing a schema repair for it would be a guess.
+    //
+    // The DATA-PLANE shape is the exception, and it is not a small one: a 502
+    // from /db/* means the gateway could not reach PostgREST, which is a
+    // separate supervised process with a real, verifiable repair. Leaving that
+    // un-healed is what put a critical "GET /db/profiles returned 502" in a
+    // human approval queue while every one of that project's data endpoints
+    // was down. See lib/postgrest/supervisor.ts for why the restart is safe to
+    // automate; the decision to act is re-verified there against an
+    // independent platform probe, never taken on this finding alone.
+    const healable = isDataPlaneOutage(details)
+
+    return {
+      type: 'contract_surface_broken',
+      severity: r.critical ? 'critical' : 'warning',
+      autoFixable: healable,
+      details,
+      fix: healable
+        ? async () => {
+            const { healDataPlane, describeHeal } = await import('@/lib/postgrest/supervisor')
+            const result = await healDataPlane(projectId)
+            // Only `healthy` counts. Throwing on anything else is deliberate:
+            // the observer records a non-throwing fix as auto_fixed, and a
+            // data plane recorded as repaired while it is still serving 502s
+            // is worse than an open finding, because the queue stops showing
+            // it. Recoveries auto-resolve at the top of this function anyway.
+            if (!result.healthy) throw new Error(describeHeal(result))
+          }
+        : undefined,
+    }
+  })
 }

@@ -29,17 +29,15 @@ import { classifyFix } from '@/lib/core/fix-classifier'
 import { normalizeFindingType } from '@/lib/core/types'
 import type { FindingType } from '@/lib/core/types'
 
-// Every FindingType the platform can emit (mirrors lib/core/types.ts).
-const ALL_FINDING_TYPES: FindingType[] = [
-  'missing_rls', 'missing_fk', 'api_drift', 'broken_webhook', 'broken_auth',
-  'orphan_table', 'auth_spike', 'deploy_failure', 'missing_fk_index',
-  'missing_api_definition', 'shadow_mutation', 'auth_jwt_missing',
-  'auth_users_table_missing', 'oauth_redirect_uri_missing',
-  'rls_expression_invalid', 'unprotected_user_data', 'integration_key_invalid',
-  'integration_webhook_failing', 'integration_smtp_unreachable',
-  'oauth_config_invalid', 'workflow_broken', 'verification_failed',
-  'missing_api_crud', 'dead_api_endpoint', 'missing_rate_limit', 'realtime_gap',
-]
+
+// Every FindingType the platform can emit.
+//
+// This used to be a hand-copied mirror of lib/core/types.ts, and the copy went
+// stale: `contract_surface_broken` and `schema_not_registered` were both absent,
+// and both shipped with a broken repair path this file could not see. It now
+// reads the platform's own enumeration. Do not re-inline the list.
+// Full invariant coverage lives in tests/core/finding-repair-conformance.test.ts.
+import { ALL_FINDING_TYPES } from '@/lib/core/types'
 
 // ─── Part 1: every finding type has a fix path (pure, fast) ───────────────────
 

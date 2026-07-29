@@ -160,11 +160,27 @@ export async function runContractSweep(): Promise<{
       batch.map(async (p) => {
         const findings = await detectContractViolations(p.id)
         for (const finding of findings) {
-          // Never auto-fixable: a broken surface is a symptom whose cause is
-          // outside this project's schema (process down, route unmounted,
-          // proxy misconfigured). Queue it for a human rather than inventing
-          // a repair.
-          await writeFinding(p.id, finding, 'pending_approval', false)
+          // Most broken surfaces are symptoms whose cause is outside this
+          // project's schema (process down, route unmounted, proxy
+          // misconfigured), and those go straight to a human rather than
+          // getting an invented repair.
+          //
+          // The data-plane shape carries a real `fix` (see contract-verifier),
+          // and this sweep is the path that runs OFTEN — hardcoding
+          // `pending_approval` here meant the frequent probe could only ever
+          // file the finding, never act on it, so the one detector that notices
+          // an outage within a minute was also the one that could not heal it.
+          if (finding.autoFixable && finding.fix) {
+            try {
+              await finding.fix()
+              await writeFinding(p.id, finding, 'auto_fixed', true, new Date())
+            } catch (err: any) {
+              finding.details.fixError = err?.message ?? String(err)
+              await writeFinding(p.id, finding, 'pending_approval', false)
+            }
+          } else {
+            await writeFinding(p.id, finding, 'pending_approval', false)
+          }
         }
         return findings.length
       }),

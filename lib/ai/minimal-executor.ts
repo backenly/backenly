@@ -68,6 +68,8 @@ export interface AIAction {
     | 'FIX_WORKFLOW'      // Fix broken end-to-end workflow (auth flow, checkout flow, etc.)
     | 'REGISTER_TABLE'    // Adopt an existing DB table into the platform (metadata + API + RLS)
     | 'ADOPT_EXTERNAL_SCHEMA' // Adopt ALL drift observed over a direct DB connection (drift-watch)
+    | 'REGISTER_SCHEMA'   // Re-register this project's workspace schema with PostgREST (fixes PGRST106)
+    | 'HEAL_DATA_PLANE'   // Diagnose + repair a down/wedged PostgREST (verified, single-flight)
     // Schema versioning (#13)
     | 'LIST_SCHEMA_VERSIONS' | 'ROLLBACK_TO_VERSION'
     // Integrations — store API keys + manage webhook receivers
@@ -3652,6 +3654,12 @@ async function executeSingleAction(
 
       case 'ADOPT_EXTERNAL_SCHEMA':
         return await executeAdoptExternalSchema(projectId)
+
+      case 'REGISTER_SCHEMA':
+        return await executeRegisterSchema(projectId)
+
+      case 'HEAL_DATA_PLANE':
+        return await executeHealDataPlane(projectId)
 
       default:
         return {
@@ -11741,6 +11749,88 @@ async function executeAdoptExternalSchema(projectId: string): Promise<ExecutionR
     return { success: true, message: lines.join('\n'), data: result }
   } catch (error: any) {
     return { success: false, message: `Could not adopt external schema changes: ${error.message}`, error: error.message }
+  }
+}
+
+// ============================================================================
+// REGISTER_SCHEMA — make this project's workspace schema servable by PostgREST.
+//
+// The repair for `schema_not_registered`: an existing schema that PostgREST was
+// never told about, so every /db/* request answers PGRST106 ("Invalid schema")
+// and the project's entire REST data plane is dead while auth and functions —
+// which run on the Express runtime — keep working and make it look healthy.
+//
+// The classifier has rated this AUTO since it shipped, but its suggestedAction
+// named an executor verb that did not exist, so any finding that reached the
+// approve route dead-ended. This is that verb.
+//
+// Idempotent and additive: registration grants the data-plane roles, re-revokes
+// the credential tables, applies soft-delete parity and owner defaults, then
+// appends to the exposed list. It restores exactly the state a correctly
+// created project is already in and cannot widen access beyond it.
+// ============================================================================
+
+async function executeRegisterSchema(projectId: string): Promise<ExecutionResult> {
+  try {
+    const { ensureSchemaRegistered } = await import('@/lib/postgrest/registration')
+    const result = await ensureSchemaRegistered(projectId)
+
+    if (!result.registered) {
+      // ensureSchemaRegistered never throws — a silent `false` reported as
+      // success would mark the finding auto_fixed with the plane still dead.
+      return {
+        success: false,
+        message: `Could not register \`${result.schema}\` with PostgREST: ${result.error ?? 'unknown error'}`,
+        error: result.error ?? 'registration failed',
+      }
+    }
+
+    return {
+      success: true,
+      message: `✅ **Registered \`${result.schema}\` with the data plane.** Every \`/db/*\` endpoint for this project is served again.`,
+      data: result,
+    }
+  } catch (error: any) {
+    return { success: false, message: `Could not register the workspace schema: ${error.message}`, error: error.message }
+  }
+}
+
+// ============================================================================
+// HEAL_DATA_PLANE — repair a PostgREST that is down or wedged.
+//
+// The repair for the `contract_surface_broken` data-plane shape: the runtime
+// contract probe got a 502 from `/db/*` because the gateway could not reach
+// PostgREST at all. No schema action can fix that — this delegates to the
+// supervisor, which re-verifies the outage against its own platform probe,
+// prunes dangling registrations, and restarts the process only when a verified
+// diagnosis says that is what it needs. See lib/postgrest/supervisor.ts for why
+// a shared-process restart is safe to automate.
+//
+// projectId is passed for audit traceability only; the decision is platform-wide.
+// ============================================================================
+
+async function executeHealDataPlane(projectId: string): Promise<ExecutionResult> {
+  try {
+    const { healDataPlane, describeHeal } = await import('@/lib/postgrest/supervisor')
+    const result = await healDataPlane(projectId)
+    const message = describeHeal(result)
+
+    // `healthy` is the only success signal. Every other outcome — cooling down,
+    // no configured restart channel, still unrecovered — is a real failure and
+    // must escalate rather than be recorded as a fix that did not happen.
+    return {
+      success: result.healthy,
+      message: result.healthy ? `✅ ${message}` : message,
+      ...(result.healthy ? {} : { error: message }),
+      data: {
+        outcome: result.outcome,
+        prunedSchemas: result.prunedSchemas,
+        restarted: result.restarted,
+        notes: result.notes,
+      },
+    }
+  } catch (error: any) {
+    return { success: false, message: `Could not heal the data plane: ${error.message}`, error: error.message }
   }
 }
 

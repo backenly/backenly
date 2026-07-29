@@ -15,6 +15,7 @@
  */
 
 import { normalizeFindingType } from './types'
+import { isDataPlaneOutage } from './fix-actions'
 import type { FindingType } from './types'
 
 export type FixDecision = 'auto' | 'approval' | 'notify_only'
@@ -87,6 +88,36 @@ export function classifyFix(
   const norm = normalizeFindingType(rawType, details)
   const type = (norm?.base ?? rawType) as FindingType
 
+  // ── Runtime contract: decided on evidence, not on the type alone ───────────
+  //
+  // The same finding type covers a repairable fault and an unrepairable one, so
+  // this is the one family the type cannot classify by itself. Only the
+  // data-plane shape (PostgREST down or wedged) has an executable repair.
+  //
+  // AUTO is deliberate for that shape. The data plane being down means every
+  // /db/* request for the project is ALREADY failing, and the repair
+  // (lib/postgrest/supervisor.ts) re-verifies the outage against an independent
+  // platform probe before it touches anything, no-ops when PostgREST answers,
+  // and is single-flighted platform-wide. Waiting for a human here is what left
+  // a critical sitting in a queue while the customer's backend served 502s.
+  if (type === 'contract_surface_broken') {
+    if (isDataPlaneOutage(details)) {
+      return {
+        decision: 'auto',
+        reason:
+          'The REST data plane is not answering. Backenly re-verifies the outage and restarts ' +
+          'the data plane itself — the backend is already down, so the repair can only improve it.',
+        suggestedAction: 'HEAL_DATA_PLANE',
+      }
+    }
+    return {
+      decision: 'notify_only',
+      reason:
+        'This surface is served by the platform runtime, not by your project\'s schema — ' +
+        'Backenly is monitoring it and will clear the finding automatically when it recovers.',
+    }
+  }
+
   if (AUTO_SAFE.has(type)) {
     return {
       decision: 'auto',
@@ -124,7 +155,11 @@ const AUTO_ACTION_MAP: Partial<Record<FindingType, string>> = {
   unprotected_user_data:    'SET_PERMISSION (own_rows)',
   rls_expression_invalid:   'SET_PERMISSION (own_rows)',
   realtime_gap:             'FIX_REALTIME',
-  schema_not_registered:    'REGISTER_POSTGREST_SCHEMA',
+  // Was 'REGISTER_POSTGREST_SCHEMA' — an action name that never existed in the
+  // executor. The rating was right and the label was fiction, so an approval
+  // that reached buildFixAction found no mapping and dead-ended.
+  schema_not_registered:    'REGISTER_SCHEMA',
+  contract_surface_broken:  'HEAL_DATA_PLANE',
 }
 
 const APPROVAL_REASON_MAP: Partial<Record<FindingType, string>> = {
