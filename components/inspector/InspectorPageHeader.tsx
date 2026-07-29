@@ -11,12 +11,19 @@
  *   Autonomy, Branches. USE THIS HEADER.
  *
  *   Instrument surface — owns the viewport, scrolls internally, the data IS
- *   the page and every pixel of height is working area. Tables, Storage, and
- *   (in progress) Functions, Realtime, Monitoring, Auth's Users tab. USE A
- *   COMMAND BAR: one ~44px row carrying identity (section · name · state ·
- *   count) next to the view switch, then a full-height workbench below it.
- *   See app/app/projects/[id]/database/page.tsx and
- *   components/storage/StorageWorkbench.tsx.
+ *   the page and every pixel of height is working area. Tables, Storage,
+ *   Functions, Realtime, Monitoring, Auth. USE A COMMAND BAR: one ~44px row
+ *   carrying identity (section · name · state · count) next to the view
+ *   switch, then a full-height workbench below it. The workbench's inner
+ *   layer is absolutely positioned inside a `relative min-h-0 flex-1` box, or
+ *   a wide grid pushes the app shell sideways. See
+ *   app/app/projects/[id]/database/page.tsx and the Workbench components under
+ *   components/storage, components/functions, components/realtime,
+ *   components/monitoring and components/auth.
+ *
+ *   A section can be BOTH: Auth's Configuration tab is a document that scrolls
+ *   inside the instrument shell, while its Users tab is a grid. Tab, don't
+ *   split the page.
  *
  * The 22px title and description earn their space wherever the reader needs
  * orienting, and stop earning it the moment the page becomes a browser over

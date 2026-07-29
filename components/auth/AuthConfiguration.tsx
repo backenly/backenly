@@ -135,7 +135,7 @@ function CopyValue({ value, mono = true }: { value: string; mono?: boolean }) {
   )
 }
 
-export default function AuthPage() {
+export function AuthConfiguration() {
   const router = useRouter()
   const [toast, setToast] = useState<{ message: string, type: 'success' | 'error' | 'info' | 'warning' } | null>(null)
   const [showWorkspaceOAuthModal, setShowWorkspaceOAuthModal] = useState<ProviderId | null>(null)
