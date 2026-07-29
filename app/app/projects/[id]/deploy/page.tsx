@@ -6,7 +6,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
   CheckCircle2, Loader2, Rocket, Copy, Check, AlertCircle, RotateCcw,
   Layers, ExternalLink, Database, Shield, HardDrive, Code2, ArrowRight,
-  Globe, ShieldCheck,
+  Globe, ShieldCheck, Info,
 } from 'lucide-react'
 import { GlobalLoading } from '@/components/ui/GlobalLoading'
 import { InspectorPageHeader, InspectorGovernanceFooter } from '@/components/inspector/InspectorPageHeader'
@@ -436,6 +436,22 @@ export default function PublishPage() {
                       title="Version history"
                       actions={<span className="font-mono text-[11px] text-zinc-500 tabular-nums">{publishedVersions.length}</span>}
                     />
+                    {/* A version is "active" only while its snapshot still equals
+                        the live graph (see app/api/projects/[id]/rollback). Every
+                        agent edit and every autonomous fix moves the live graph,
+                        so a published project drifts off its last version and no
+                        row is marked active. Say that, rather than showing a
+                        table where nothing is live under a header that says
+                        something is. */}
+                    {!publishedVersions.some((v) => v.isActive) && (
+                      <div className="px-5 pt-3">
+                        <KitNote tone="info" icon={Info}>
+                          The live backend has changed since v{publishedVersions[0]?.version} was
+                          published. Publish an update to snapshot the current state as a version you
+                          can roll back to.
+                        </KitNote>
+                      </div>
+                    )}
                     {/* A deployment list, not a timeline. The dotted rail read
                         fine at one version and turns into a wall at twenty;
                         columns stay scannable however long the history gets. */}
@@ -448,10 +464,14 @@ export default function PublishPage() {
                           <th className="border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
                             Change
                           </th>
-                          <th className="w-40 border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
+                          {/* Both columns are sized for their widest real
+                              content and set nowrap: at w-40/w-28 the date and
+                              the Roll back label each broke onto two lines and
+                              made the row twice as tall as it needed to be. */}
+                          <th className="w-44 whitespace-nowrap border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
                             Published
                           </th>
-                          <th className="w-28 border-b border-white/[0.06] px-4 py-2 text-right text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
+                          <th className="w-36 whitespace-nowrap border-b border-white/[0.06] px-4 py-2 text-right text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
                             State
                           </th>
                         </tr>
@@ -473,11 +493,11 @@ export default function PublishPage() {
                               <td className="border-b border-white/[0.04] px-3 py-2.5">
                                 <span className="text-[12.5px] text-zinc-200">{version.changeSummary}</span>
                               </td>
-                              <td className="border-b border-white/[0.04] px-3 py-2.5 font-mono text-[10.5px] tabular-nums text-zinc-600">
+                              <td className="whitespace-nowrap border-b border-white/[0.04] px-3 py-2.5 font-mono text-[10.5px] tabular-nums text-zinc-600">
                                 {formatDate(version.publishedAt)}
                                 <span className="text-zinc-700"> · {formatTimeAgo(version.publishedAt)}</span>
                               </td>
-                              <td className="border-b border-white/[0.04] px-4 py-2.5 text-right">
+                              <td className="whitespace-nowrap border-b border-white/[0.04] px-4 py-2.5 text-right">
                                 {version.isActive ? (
                                   <KitBadge tone="operational">active</KitBadge>
                                 ) : version.canRollback ? (
@@ -487,7 +507,7 @@ export default function PublishPage() {
                                     icon={isRollingBack ? Loader2 : RotateCcw}
                                     onClick={() => handleRollback(version.id, version.version)}
                                     disabled={!!rollingBackId}
-                                    className={isRollingBack ? '[&_svg]:animate-spin' : ''}
+                                    className={`whitespace-nowrap ${isRollingBack ? '[&_svg]:animate-spin' : ''}`}
                                   >
                                     {isRollingBack ? 'Rolling back…' : 'Roll back'}
                                   </KitButton>
