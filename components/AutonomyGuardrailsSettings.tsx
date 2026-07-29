@@ -25,7 +25,7 @@ import {
   AlertTriangle, RefreshCw, Sparkles, ArrowUpRight, Zap, Wrench,
 } from 'lucide-react'
 import { InspectorPageHeader } from '@/components/inspector/InspectorPageHeader'
-import { KIT, StatTile } from '@/components/inspector/kit'
+import { KIT } from '@/components/inspector/kit'
 import { VersionHistory } from '@/components/workspace/VersionHistory'
 import { ReviewQueuePanel } from '@/components/ReviewQueuePanel'
 import { DetectedFindingsPanel } from '@/components/DetectedFindingsPanel'
@@ -106,7 +106,7 @@ function Shell({ level, children }: { level?: Level; children: React.ReactNode }
         description="Your backend keeps working when nobody is asking. Control what Backenly can change on its own and what always needs your approval. The safety floor below never moves, at any mode."
         badge={level ? { label: labelFor(level), variant: level === 'OFF' ? 'governed' : 'beta' } : undefined}
       />
-      <div className="px-8 pb-24 pt-6">{children}</div>
+      <div className="px-8 pb-10 pt-6">{children}</div>
     </div>
   )
 }
@@ -341,37 +341,41 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
           </div>
         </section>
 
-        {/* ── 2. Trust scoreboard ────────────────────────────────────────── */}
+        {/* ── 2. Trust scoreboard ────────────────────────────────────────
+            A flush three-column strip, not three floating tiles. These are
+            counters read at a glance, and tiles gave each one a whole card. */}
         <section>
           <SectionLabel icon={Sparkles}>Trust scoreboard · last {data.scoreboard.windowDays} days</SectionLabel>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <StatTile
-              icon={Wrench}
-              tone="violet"
-              value={data.scoreboard.autonomousFixes.toLocaleString()}
-              label="Autonomous fixes"
-            />
-            <StatTile
-              icon={Undo2}
-              tone="neutral"
-              value={data.scoreboard.rollbacks.toLocaleString()}
-              label="Rollbacks"
-            />
-            <StatTile
-              icon={Zap}
-              tone="emerald"
-              value={verified === null ? '—' : `${Math.round(verified * 100)}%`}
-              label="Verified rate"
-            />
+          <div className={`grid grid-cols-3 overflow-hidden ${KIT.radius} border ${KIT.border} ${KIT.surface} ${KIT.inset}`}>
+            {[
+              { icon: Wrench, label: 'Autonomous fixes', value: data.scoreboard.autonomousFixes.toLocaleString(), tone: 'text-violet-300' },
+              { icon: Undo2, label: 'Rollbacks', value: data.scoreboard.rollbacks.toLocaleString(), tone: 'text-white' },
+              { icon: Zap, label: 'Verified rate', value: verified === null ? '—' : `${Math.round(verified * 100)}%`, tone: 'text-emerald-300' },
+            ].map((m, i) => (
+              <div key={m.label} className={`px-4 py-3 ${i < 2 ? 'border-r border-white/[0.06]' : ''}`}>
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">{m.label}</p>
+                  <m.icon className="size-3 text-zinc-700" />
+                </div>
+                <p className={`mt-2 font-mono text-[19px] font-medium leading-none tabular-nums ${m.tone}`}>{m.value}</p>
+              </div>
+            ))}
           </div>
         </section>
 
-        {/* ── 3. Recent guardrail actions ───────────────────────────────── */}
+        {/* ── 3. Recent guardrail actions ───────────────────────────────
+            An audit log, so it reads as a table: when, what kind, what
+            happened. `kind` was already on the wire and nothing rendered it.
+            Capped height with internal scroll so a busy week does not push
+            Restore points off the bottom of the page. */}
         <section className={`overflow-hidden ${KIT.radius} border ${KIT.border} ${KIT.surface} ${KIT.inset}`}>
           <div className="flex items-center justify-between border-b border-white/[0.06] px-5 py-3.5">
             <div className="flex items-center gap-2">
               <Activity className="size-3.5 text-zinc-400" />
               <h3 className="text-[13px] font-semibold tracking-tight text-zinc-100">Recent guardrail actions</h3>
+              {data.recentActivity.length > 0 && (
+                <span className="font-mono text-[11px] tabular-nums text-zinc-600">{data.recentActivity.length}</span>
+              )}
             </div>
             <span className="text-[11px] tabular-nums text-zinc-500">last {data.scoreboard.windowDays} days</span>
           </div>
@@ -380,26 +384,45 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
               <p className="text-[13px] text-zinc-500">Nothing yet. Backenly hasn&apos;t needed to act.</p>
             </div>
           ) : (
-            <ul className="divide-y divide-white/[0.04]">
-              {data.recentActivity.slice(0, 12).map((a, i) => (
-                <li key={i} className="flex items-start gap-3 px-5 py-3 transition-colors hover:bg-white/[0.015]">
-                  <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-violet-400/60" />
-                  <span className="flex-1 text-[13px] leading-snug text-zinc-300">
-                    {a.summary}
-                    {/* An unresolved finding is re-escalated every tick, so one
-                        decision you haven't made writes one row every 30
-                        minutes. Folded server-side; the count is what makes the
-                        fold honest rather than a truncation. */}
-                    {(a.repeat ?? 1) > 1 && (
-                      <span className="ml-2 font-mono text-[11px] tabular-nums text-zinc-600">
-                        ×{a.repeat}
-                      </span>
-                    )}
-                  </span>
-                  <span className="shrink-0 pt-px text-[11px] tabular-nums text-zinc-600">{timeAgo(a.at)}</span>
-                </li>
-              ))}
-            </ul>
+            <div className="max-h-[380px] overflow-y-auto">
+              <table className="w-full border-collapse">
+                <thead className="sticky top-0 z-10">
+                  <tr className={KIT.gridHead}>
+                    <th className="w-24 border-b border-white/[0.06] px-4 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
+                      When
+                    </th>
+                    <th className="w-32 border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
+                      Kind
+                    </th>
+                    <th className="border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
+                      Action
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.recentActivity.map((a, i) => (
+                    <tr key={i} className={`transition-colors ${KIT.rowHoverOn}`}>
+                      <td className="border-b border-white/[0.04] px-4 py-2.5 align-top font-mono text-[10.5px] tabular-nums text-zinc-600">
+                        {timeAgo(a.at)}
+                      </td>
+                      <td className="border-b border-white/[0.04] px-3 py-2.5 align-top">
+                        <span className="font-mono text-[10.5px] text-zinc-500">{a.kind || a.action || '—'}</span>
+                      </td>
+                      <td className="border-b border-white/[0.04] px-3 py-2.5 text-[12px] leading-5 text-zinc-300">
+                        {a.summary}
+                        {/* An unresolved finding is re-escalated every tick, so one
+                            decision you haven't made writes one row every minute.
+                            Folded server-side; the count is what makes the fold
+                            honest rather than a truncation. */}
+                        {(a.repeat ?? 1) > 1 && (
+                          <span className="ml-2 font-mono text-[10.5px] tabular-nums text-zinc-600">×{a.repeat}</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </section>
 
