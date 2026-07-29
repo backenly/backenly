@@ -90,18 +90,22 @@ export default function ProjectConnectPage() {
               description="One scoped key, one pasted prompt."
               badge={{ label: 'MCP', variant: 'beta' }}
             />
-            {/* Full-width split like the Direct tab: setup funnel on the left,
-                capabilities + key management/live activity on the right. */}
+            {/* Full-width split: setup on the left, live state on the right.
+                Capabilities sits under the funnel rather than above the keys —
+                "what your agent gets" answers the question the pasted prompt
+                just raised, and the three-step funnel alone left the left
+                column roughly half the height of the right one, which read as
+                a hole in the page rather than a column. */}
             <div className="px-8 py-6 pb-10">
               <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 items-start">
-                <AgentInstallGuide
-                  projectId={projectId}
-                  onKeyMinted={() => setKeysVersion((v) => v + 1)}
-                />
                 <div className="min-w-0 space-y-6">
+                  <AgentInstallGuide
+                    projectId={projectId}
+                    onKeyMinted={() => setKeysVersion((v) => v + 1)}
+                  />
                   <AgentCapabilitiesCard />
-                  <AgentKeysPanel projectId={projectId} refreshSignal={keysVersion} />
                 </div>
+                <AgentKeysPanel projectId={projectId} refreshSignal={keysVersion} />
               </div>
             </div>
           </>
