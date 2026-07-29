@@ -13,6 +13,7 @@ import { InspectorPageHeader, InspectorGovernanceFooter } from '@/components/ins
 import { EnvVarsPanel } from '@/components/inspector/EnvVarsPanel'
 import { FrontendConnectionPill } from '@/components/inspector/FrontendConnectionPill'
 import {
+  KIT,
   KitCard, KitCardHeader,
   KitButton, KitBadge, KitNote,
   EmptyState,
@@ -435,46 +436,70 @@ export default function PublishPage() {
                       title="Version history"
                       actions={<span className="font-mono text-[11px] text-zinc-500 tabular-nums">{publishedVersions.length}</span>}
                     />
-                    <div className="px-5 py-4">
-                      <div className="border-l border-white/[0.07] pl-6 space-y-4 ml-1">
+                    {/* A deployment list, not a timeline. The dotted rail read
+                        fine at one version and turns into a wall at twenty;
+                        columns stay scannable however long the history gets. */}
+                    <table className="w-full border-collapse">
+                      <thead>
+                        <tr className={KIT.gridHead}>
+                          <th className="w-16 border-b border-white/[0.06] px-4 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
+                            Ver
+                          </th>
+                          <th className="border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
+                            Change
+                          </th>
+                          <th className="w-40 border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
+                            Published
+                          </th>
+                          <th className="w-28 border-b border-white/[0.06] px-4 py-2 text-right text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
+                            State
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
                         {publishedVersions.map((version) => {
                           const isRollingBack = rollingBackId === version.id
                           return (
-                            <div key={version.id} className="relative flex items-start justify-between gap-3">
-                              <div className={`absolute -left-[28px] top-[5px] w-[7px] h-[7px] rounded-full ring-4 ring-[#16171d] flex-shrink-0 ${
-                                version.isActive ? 'bg-violet-300' : 'bg-zinc-600'
-                              }`} />
-                              <div className="min-w-0 flex-1">
-                                <div className="flex items-center gap-2 flex-wrap">
-                                  <span className={`font-mono text-[11px] font-medium tabular-nums ${
+                            <tr key={version.id} className={`group/row transition-colors ${KIT.rowHoverOn}`}>
+                              <td className="border-b border-white/[0.04] px-4 py-2.5">
+                                <span
+                                  className={`font-mono text-[11.5px] font-medium tabular-nums ${
                                     version.isActive ? 'text-violet-300' : 'text-zinc-500'
-                                  }`}>
-                                    v{version.version}
-                                  </span>
-                                  <p className="text-[12.5px] font-medium text-zinc-200 truncate">{version.changeSummary}</p>
-                                  {version.isActive && <KitBadge tone="operational">active</KitBadge>}
-                                </div>
-                                <span className="font-mono text-[10.5px] text-zinc-600 mt-1 block tabular-nums">
-                                  {formatDate(version.publishedAt)} · {formatTimeAgo(version.publishedAt)}
-                                </span>
-                              </div>
-                              {version.canRollback && !version.isActive && (
-                                <KitButton
-                                  variant="ghost"
-                                  size="sm"
-                                  icon={isRollingBack ? Loader2 : RotateCcw}
-                                  onClick={() => handleRollback(version.id, version.version)}
-                                  disabled={!!rollingBackId}
-                                  className={isRollingBack ? '[&_svg]:animate-spin' : ''}
+                                  }`}
                                 >
-                                  {isRollingBack ? 'Rolling back…' : 'Roll back'}
-                                </KitButton>
-                              )}
-                            </div>
+                                  v{version.version}
+                                </span>
+                              </td>
+                              <td className="border-b border-white/[0.04] px-3 py-2.5">
+                                <span className="text-[12.5px] text-zinc-200">{version.changeSummary}</span>
+                              </td>
+                              <td className="border-b border-white/[0.04] px-3 py-2.5 font-mono text-[10.5px] tabular-nums text-zinc-600">
+                                {formatDate(version.publishedAt)}
+                                <span className="text-zinc-700"> · {formatTimeAgo(version.publishedAt)}</span>
+                              </td>
+                              <td className="border-b border-white/[0.04] px-4 py-2.5 text-right">
+                                {version.isActive ? (
+                                  <KitBadge tone="operational">active</KitBadge>
+                                ) : version.canRollback ? (
+                                  <KitButton
+                                    variant="ghost"
+                                    size="sm"
+                                    icon={isRollingBack ? Loader2 : RotateCcw}
+                                    onClick={() => handleRollback(version.id, version.version)}
+                                    disabled={!!rollingBackId}
+                                    className={isRollingBack ? '[&_svg]:animate-spin' : ''}
+                                  >
+                                    {isRollingBack ? 'Rolling back…' : 'Roll back'}
+                                  </KitButton>
+                                ) : (
+                                  <span className="font-mono text-[10.5px] text-zinc-700">archived</span>
+                                )}
+                              </td>
+                            </tr>
                           )
                         })}
-                      </div>
-                    </div>
+                      </tbody>
+                    </table>
                   </KitCard>
                 )}
 
