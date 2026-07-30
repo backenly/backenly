@@ -101,8 +101,6 @@ const KNOWN_READERS = new Set<string>([
   // ── User-visible: these show "no APIs" on a working backend ──────────────
   // (converted 2026-07-30: server/routes/dynamic.ts and
   //  app/api/v1/[projectId]/route.ts now read listExposedTables)
-  'lib/services/openapi-generator.ts',        // dashboard OpenAPI download
-  'app/api/projects/[id]/state/route.ts',     // dashboard state
   // ── Internal decisions taken on a count that is always 0 ─────────────────
   'lib/ai/minimal-executor.ts',
   // serverless-warmup is UNREACHABLE, not just stale: its only entry is

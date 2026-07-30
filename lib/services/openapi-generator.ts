@@ -41,13 +41,24 @@ function titleCase(s: string): string {
 export async function generateOpenApiSpec(projectId: string, baseUrl?: string): Promise<Record<string, any>> {
   // Fetch all API definitions + tables + AI functions
   const [apiDefs, aiFunctions, project] = await Promise.all([
-    prisma.apiDefinition.findMany({
-      where: { projectId },
-      include: {
-        table: { select: { id: true, name: true, schema: true } },
-      },
-      orderBy: { createdAt: 'asc' },
-    }),
+    // The CATALOG, not ApiDefinition. That table has had no create path since
+    // the PostgREST cutover, so this spec came back with zero paths on every
+    // project built after it - an OpenAPI document describing a backend as
+    // having no endpoints while it served traffic. Columns come from
+    // information_schema via getTableSchema, which is also what the runtime
+    // resolves against, so the spec cannot drift from what is actually served.
+    (async () => {
+      const { listExposedTables, getTableSchema } = await import('@/lib/mcp/schema-introspection')
+      const exposed = await listExposedTables(projectId).catch(() => [] as Array<{ name: string }>)
+      return Promise.all(
+        exposed.map(async t => ({
+          table: {
+            name: t.name,
+            schema: await getTableSchema(projectId, t.name).catch(() => null),
+          },
+        })),
+      )
+    })(),
     prisma.aiFunction.findMany({
       where: { projectId, status: 'active' },
       orderBy: { createdAt: 'asc' },
@@ -122,7 +133,7 @@ export async function generateOpenApiSpec(projectId: string, baseUrl?: string): 
 
   // ── Standard CRUD API definitions ───────────────────────────────────────────
   for (const def of apiDefs) {
-    if (!def.table) continue
+    if (!def.table || !def.table.schema) continue
 
     const tableName = def.table.name
     const tag = titleCase(tableName)
@@ -132,8 +143,15 @@ export async function generateOpenApiSpec(projectId: string, baseUrl?: string): 
     spec.tags.push({ name: tag, description: `Operations on the ${tableName} table` })
 
     // Build schema from table columns
+    // getTableSchema returns live information_schema columns:
+    // { name, type, nullable, default, primaryKey, maxLength }. `required` is
+    // derived from nullability rather than a stored flag.
     const tableSchema = (def.table.schema as any) || {}
-    const columns: any[] = tableSchema.columns || []
+    const columns: any[] = (tableSchema.columns || []).map((c: any) => ({
+      name: c.name,
+      type: c.type,
+      required: c.nullable === false && c.default == null && !c.primaryKey,
+    }))
     const properties: Record<string, any> = {}
     const required: string[] = []
 
@@ -165,11 +183,17 @@ export async function generateOpenApiSpec(projectId: string, baseUrl?: string): 
       ),
     }
 
-    const endpoints = Array.isArray(def.endpoints) ? def.endpoints as any[] : []
-    const hasSearch = endpoints.some((e: any) => e.path === '/search')
+    // Every exposed table serves the same CRUD set: the /db/* route registers
+    // GET/POST/PUT/PATCH/DELETE and PostgREST resolves the table per request.
+    // These used to be gated on a stored `endpoints` array, which is why the
+    // spec listed nothing once that table stopped being written.
+    //
+    // `/search` is deliberately absent: handleViaPostgrest refuses sub-resource
+    // paths, so advertising it would document an endpoint that 404s.
+    const hasSearch = false
 
     // GET /db/{table} — list
-    if (endpoints.some((e: any) => e.method === 'GET' && (e.path === '/' || e.path === ''))) {
+    if (true) {
       spec.paths[basePath] = spec.paths[basePath] || {}
       spec.paths[basePath].get = {
         tags: [tag],
@@ -201,7 +225,7 @@ export async function generateOpenApiSpec(projectId: string, baseUrl?: string): 
       }
 
       // POST /db/{table} — create
-      if (endpoints.some((e: any) => e.method === 'POST')) {
+      if (true) {
         spec.paths[basePath].post = {
           tags: [tag],
           summary: `Create ${tableName.slice(0, -1) || tableName}`,
@@ -226,7 +250,7 @@ export async function generateOpenApiSpec(projectId: string, baseUrl?: string): 
     spec.paths[byIdPath] = spec.paths[byIdPath] || {}
     const idParam = { name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }
 
-    if (endpoints.some((e: any) => e.method === 'GET' && e.path === '/:id')) {
+    if (true) {
       spec.paths[byIdPath].get = {
         tags: [tag],
         summary: `Get ${tableName.slice(0, -1) || tableName} by ID`,
@@ -239,7 +263,7 @@ export async function generateOpenApiSpec(projectId: string, baseUrl?: string): 
         },
       }
     }
-    if (endpoints.some((e: any) => e.method === 'PUT' && e.path === '/:id')) {
+    if (true) {
       spec.paths[byIdPath].put = {
         tags: [tag],
         summary: `Update ${tableName.slice(0, -1) || tableName}`,
@@ -253,7 +277,7 @@ export async function generateOpenApiSpec(projectId: string, baseUrl?: string): 
         },
       }
     }
-    if (endpoints.some((e: any) => e.method === 'DELETE' && e.path === '/:id')) {
+    if (true) {
       spec.paths[byIdPath].delete = {
         tags: [tag],
         summary: `Delete ${tableName.slice(0, -1) || tableName}`,

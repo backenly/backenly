@@ -48,15 +48,10 @@ export async function GET(
     // Always use prisma.table as ground truth for entities.
     // The dynamic build loop writes to prisma.table but does NOT update BackendStateGraph,
     // so reading graph.entities gives stale/partial counts. Graph is used only for field metadata.
-    const [prismaTablesRaw, prismaApiDefs, functionCount, triggerCount, projectRow, prismaBucketCount] = await Promise.all([
+    const [prismaTablesRaw, functionCount, triggerCount, projectRow, prismaBucketCount] = await Promise.all([
       prisma.table.findMany({
         where: { projectId },
         select: { name: true },
-        orderBy: { createdAt: 'asc' },
-      }),
-      prisma.apiDefinition.findMany({
-        where: { projectId },
-        select: { basePath: true, name: true, endpoints: true },
         orderBy: { createdAt: 'asc' },
       }),
       prisma.aiFunction.count({ where: { projectId } }).catch(() => 0),
@@ -149,6 +144,9 @@ export async function GET(
     const authStatus = await getProjectAuthStatus(projectId)
     const authEnabled = authStatus.status !== 'none'
 
+    const { listExposedResources } = await import('@/lib/api/exposed-resources')
+    const exposedResources = await listExposedResources(projectId)
+
     // Extract APIs — prefer graph (has per-path method info), fall back to prisma.apiDefinition.
     // The dynamic build loop writes to prisma.apiDefinition but not to graph.apis.
     let apis: Array<{ method: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH'; path: string; description?: string }>
@@ -159,21 +157,20 @@ export async function GET(
         return { method, path, description: api.reason }
       })
     } else {
-      // Fallback: prisma.apiDefinition is populated by the dynamic build loop.
-      // Deduplicate by basePath to match the table deduplication above.
-      const seenApiPaths = new Set<string>()
-      apis = prismaApiDefs
-        .filter(a => {
-          const p = a.basePath || `/${(a.name || '').toLowerCase()}`
-          if (seenApiPaths.has(p)) return false
-          seenApiPaths.add(p)
-          return true
-        })
-        .map(a => ({
-          method: 'GET' as const,
-          path: a.basePath || `/${(a.name || '').toLowerCase()}`,
-          description: `REST API for ${a.name}`,
-        }))
+      // Fallback: the CATALOG, which is what decides reachability.
+      //
+      // The comment this replaces said "prisma.apiDefinition is populated by the
+      // dynamic build loop". It is not, and has not been since the PostgREST
+      // cutover - there is no create path. So on any project whose graph has no
+      // `apis` entries (which is every agent-built backend, since the MCP path
+      // does not write graph.apis) this fallback produced an empty list and the
+      // dashboard reported zero APIs.
+      const seenApiPaths = new Set<string>(exposedResources.map(r => r.basePath))
+      apis = exposedResources.map(r => ({
+        method: 'GET' as const,
+        path: r.basePath,
+        description: `REST resource: ${r.name}`,
+      }))
 
       // Include the Auth API group and Business Logic API group in the count so
       // the dashboard "APIS" number matches the inspector's view.
@@ -192,14 +189,11 @@ export async function GET(
     // This is what the API Builder page counts (164), as opposed to `apis.length`
     // which counts resource groups (23). We return both so every page can display
     // the correct number with a clear label.
-    let endpointCount = prismaApiDefs.reduce((sum, def) => {
-      const eps = (def as any).endpoints as any[] | null
-      if (Array.isArray(eps)) {
-        return sum + eps.filter((e: any) => e.enabled !== false).length
-      }
-      // Fallback: standard CRUD = 5 methods (list, get, create, update, delete)
-      return sum + 5
-    }, 0)
+    // 5 methods per exposed resource - list, get, create, update, delete - the
+    // set the /db/* route registers. This summed a stored `endpoints` array
+    // that is never written, over a list that is always empty, so endpointCount
+    // was auth + functions and nothing else on every modern project.
+    let endpointCount = exposedResources.length * 5
     // Built-in auth routes count only once auth is genuinely enabled
     if (authEnabled) endpointCount += 6 // signup, signin, refresh-token, logout, forgot-password, reset-password
     // AI functions each expose 1 callable route
@@ -305,7 +299,7 @@ export async function GET(
     const realTables = entities.filter(e => e.name.toLowerCase() !== 'users')
     const hasContent =
       realTables.length > 0 ||
-      prismaApiDefs.length > 0 ||
+      exposedResources.length > 0 ||
       authEnabled ||
       functionCount > 0 ||
       bucketCount > 0 ||
