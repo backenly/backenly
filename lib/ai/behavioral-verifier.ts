@@ -397,7 +397,28 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
   }
 
   if (!candidate) {
-    return { ...base, skipped: true, skipReason: 'No testable tables exist yet (all candidates are system or async-job tables with FK constraints)' }
+    // Say what was actually true. "No testable tables exist yet" reads as an
+    // empty project, and it was being returned for a fully-built relational
+    // schema where every table simply has a foreign key — which is most real
+    // schemas. That phrasing turned a KNOWN COVERAGE GAP into what looked like
+    // a project with nothing in it.
+    //
+    // The gap is closable: checkRlsIsolation already seeds FK parents from
+    // pg_constraint metadata (loadFkColumnMappings → buildInsertParts) and
+    // unwinds them in its `finally`, so the machinery this check calls
+    // impossible at line 382 exists a few hundred lines below. Reusing it here
+    // means this check would start writing to and deleting from customer tables
+    // it currently only reads, so it wants its own pass with cleanup verified
+    // against a scratch project — not a change bolted onto an unrelated one.
+    const skipped = base.details.filter(d => d.startsWith('⏭')).length
+    return {
+      ...base,
+      skipped: true,
+      skipReason:
+        skipped > 0
+          ? `CRUD lifecycle not exercised: all ${skipped} candidate table(s) carry foreign keys, and this check does not yet seed parent rows. This is a coverage gap, not an empty project.`
+          : 'No application tables exist yet to exercise a CRUD lifecycle against.',
+    }
   }
 
   const tableName = candidate.name.toLowerCase()
