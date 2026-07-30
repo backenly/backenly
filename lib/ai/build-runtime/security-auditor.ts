@@ -119,11 +119,9 @@ export async function auditGeneratedAPIs(
   // ── Load all generated endpoints ───────────────────────────────────────────
   const { prisma } = await import('@/lib/db/prisma')
 
-  const [apiDefs, aiFunctions, tables] = await Promise.all([
-    prisma.apiDefinition.findMany({
-      where: { projectId },
-      select: { id: true, name: true, basePath: true, operations: true, endpoints: true, authRequired: true },
-    }).catch(() => []),
+  const { listExposedTables } = await import('@/lib/mcp/schema-introspection')
+  const [exposedTables, aiFunctions, tables] = await Promise.all([
+    listExposedTables(projectId).catch(() => []),
     prisma.aiFunction.findMany({
       where: { projectId },
       select: { id: true, name: true, generatedCode: true },
@@ -134,36 +132,24 @@ export async function auditGeneratedAPIs(
     }).catch(() => []),
   ])
 
-  // ── Audit REST API definitions ─────────────────────────────────────────────
-  for (const api of apiDefs) {
-    // operations + endpoints are Json fields containing the endpoint config and any embedded code
-    const code = JSON.stringify(api.operations ?? '') + JSON.stringify(api.endpoints ?? '')
-    const location = `REST ${api.basePath ?? '/' + api.name}`
-    const methods = extractMethodsFromOperations(api.operations)
-    endpointsAudited++
-
-    // Check authRequired flag first — if false on a sensitive operation, that's a finding.
-    // When authRequired=true, the runtime enforces JWT auth before reaching any handler.
-    // Do NOT run the code-level auth pattern check for authRequired=true APIs — the
-    // operations JSON blob (e.g. { list: true, create: true }) never contains auth code,
-    // so that check produces false positives (48 HIGH findings from correct APIs).
-    if (!api.authRequired) {
-      findings.push({
-        severity: 'high',
-        category: 'Missing Authentication',
-        location,
-        description: 'authRequired=false on this API definition — all operations are publicly accessible.',
-        recommendation: 'Set authRequired=true and add authentication middleware to protect this endpoint.',
-      })
-      // Still audit code block for SQL injection, mass assignment, etc. but pass
-      // isAuthEnforced=false so missing-auth check also fires from code patterns.
-      findings.push(...auditCodeBlock(code, location, methods, false))
-    } else {
-      // authRequired=true — runtime handles auth. Audit for SQL injection,
-      // mass assignment, path traversal, and sensitive data exposure only.
-      findings.push(...auditCodeBlock(code, location, methods, true))
-    }
-  }
+  // RETIRED 2026-07-30 - this branch audited a projection that is both empty
+  // and incapable of holding what it searched for.
+  //
+  // It read each ApiDefinition's `authRequired` flag and grepped the
+  // operations/endpoints JSON for insecure code patterns. Under PostgREST there
+  // is no per-API auth flag: every /db/* request is authenticated and RLS
+  // decides which rows come back. And the JSON never contained code - the
+  // comment this replaces said so itself, after that check produced 48 HIGH
+  // findings against correct APIs.
+  //
+  // The table also has no create path since the cutover, so on every modern
+  // project the loop iterated zero rows and `endpointsAudited` stayed 0 while
+  // the audit reported a clean pass.
+  //
+  // Real API-surface security is enforced structurally now: the cutover blocker
+  // refuses any schema containing a client-reachable table with RLS disabled,
+  // and detectMissingRls / detectRlsDeniesEverything cover the rest. AI function
+  // code is still audited below, where there is genuine code to read.
 
   // ── Audit AI functions ─────────────────────────────────────────────────────
   // AI functions are invoked via the /fn/:name route which requires a valid
@@ -178,7 +164,7 @@ export async function auditGeneratedAPIs(
   }
 
   // ── Audit table-level auth requirements ───────────────────────────────────
-  findings.push(...auditTableAuthCoverage(tables, apiDefs))
+  findings.push(...auditTableAuthCoverage(tables, exposedTables))
 
   // ── Compute score ──────────────────────────────────────────────────────────
   const criticalCount = findings.filter(f => f.severity === 'critical').length
@@ -354,46 +340,58 @@ function auditCodeBlock(
 
 // ── Table-level auth coverage ─────────────────────────────────────────────────
 
+/**
+ * Sensitive tables must not be reachable without row-level security.
+ *
+ * REWRITTEN 2026-07-30. This matched each sensitive table against an
+ * ApiDefinition row and reported "Missing API Definition — access control
+ * cannot be verified" when it found none, recommending that one be generated.
+ * With no create path since the cutover there is never one to find, so every
+ * sensitive table on every modern project drew that finding, and the
+ * recommendation pointed at an executor that cannot produce the row.
+ *
+ * The question it was reaching for is answerable, just from somewhere else. A
+ * sensitive table is dangerous when it is REACHABLE and NOT RLS-protected —
+ * `authRequired` never decided that, because every /db/* request is
+ * authenticated and RLS is what chooses the rows. The catalog carries both
+ * facts, so this now asks them directly:
+ *
+ *   not exposed                 → no finding; unreachable data is not exposed data
+ *   exposed with RLS            → no finding; the policy decides the rows
+ *   exposed without RLS         → HIGH; every authenticated caller reads every row
+ */
 function auditTableAuthCoverage(
   tables: Array<{ name: string }>,
-  apiDefs: Array<{ name: string; basePath: string; operations: any; authRequired: boolean }>,
+  exposed: Array<{ name: string; rlsEnabled: boolean }>,
 ): SecurityFinding[] {
   const findings: SecurityFinding[] = []
 
-  // Tables that store sensitive data should always have auth
   const SENSITIVE_TABLE_PATTERNS = [
     /^users?$/, /^accounts?$/, /^payments?$/, /^orders?$/,
     /^wallets?$/, /^credits?$/, /^subscriptions?$/, /^invoices?$/,
     /^secrets?$/, /^tokens?$/, /^sessions?$/, /^api_keys?$/,
   ]
 
+  const exposedByName = new Map(exposed.map(t => [t.name.toLowerCase(), t]))
+
   for (const table of tables) {
-    const isSensitive = SENSITIVE_TABLE_PATTERNS.some(p => p.test(table.name))
-    if (!isSensitive) continue
+    if (!SENSITIVE_TABLE_PATTERNS.some(p => p.test(table.name))) continue
 
-    // Match by basePath or name heuristic
-    const api = apiDefs.find(a =>
-      (a.basePath ?? '').includes(table.name) || a.name.toLowerCase().includes(table.name.toLowerCase())
-    )
+    const live = exposedByName.get(table.name.toLowerCase())
+    if (!live) continue // not reachable over REST — nothing to protect here
 
-    if (!api) {
-      findings.push({
-        severity: 'medium',
-        category: 'Missing API Definition',
-        location: `table/${table.name}`,
-        description: `Sensitive table "${table.name}" has no generated API definition — access control cannot be verified.`,
-        recommendation: `Generate an API definition for ${table.name} with explicit authentication requirements.`,
-      })
-      continue
-    }
-
-    if (!api.authRequired) {
+    if (!live.rlsEnabled) {
       findings.push({
         severity: 'high',
-        category: 'Sensitive Table Without Auth',
-        location: `REST ${api.basePath ?? '/' + api.name}`,
-        description: `The API for sensitive table "${table.name}" has authRequired=false. All records may be accessible to anonymous users.`,
-        recommendation: `Set authRequired=true on the API definition for ${table.name}. Sensitive data must never be publicly accessible.`,
+        category: 'Sensitive Table Without RLS',
+        location: `REST /db/${table.name}`,
+        description:
+          `Sensitive table "${table.name}" is reachable over the REST API with row-level ` +
+          `security disabled. Every authenticated caller can read and write every row, ` +
+          `including rows belonging to other users.`,
+        recommendation:
+          `Enable RLS on "${table.name}" and install an ownership policy. Under PostgREST ` +
+          `RLS is the only thing standing between one caller and another caller's rows.`,
       })
     }
   }

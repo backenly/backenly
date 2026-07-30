@@ -104,7 +104,6 @@ const KNOWN_READERS = new Set<string>([
   'lib/services/openapi-generator.ts',        // dashboard OpenAPI download
   'app/api/projects/[id]/state/route.ts',     // dashboard state
   // ── Internal decisions taken on a count that is always 0 ─────────────────
-  'lib/ai/build-runtime/security-auditor.ts',
   'lib/ai/minimal-executor.ts',
   'lib/ai/production-intelligence.ts',
   'lib/services/serverless-warmup.ts',
