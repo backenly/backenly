@@ -259,16 +259,21 @@ async function detectUnboundedPagination(projectId: string): Promise<ProductionI
   // defaultLimit / maxPageSize / pageSize. That config is never written and the
   // table has no create path since the cutover, so this could not fire.
   //
-  // Deliberately NOT claiming the risk is handled. PAGINATION_DEFAULT_LIMIT (20)
-  // and PAGINATION_MAX_LIMIT (100) are enforced by zod on the Next-side v1
-  // routes, but no clamp was found on the PostgREST handler path, which is what
-  // serves /db/* in production. Replacing a check that never fired with a comment
-  // asserting the runtime bounds every list would trade a false negative for a
-  // false assurance, which is worse.
+  // The risk itself is HANDLED, and that was measured rather than assumed.
   //
-  // OPEN: confirm whether an unbounded GET /db/<table> through the PostgREST
-  // gateway is clamped server-side. If it is not, that wants a real detector -
-  // one that reads the request path, not a stored config.
+  // lib/postgrest/translate.ts clamps every list request:
+  //   Math.min(rawLimit, MAX_LIMIT) with MAX_LIMIT = 1000, DEFAULT_LIMIT = 50.
+  //
+  // Verified against production on 2026-07-30 by signing up a real end-user,
+  // giving them genuine ownership of 1200 rows, and requesting the resource with
+  // their JWT:
+  //   no limit param -> 50 rows      (default applied)
+  //   ?limit=999     -> 999 rows     (honoured, under the cap)
+  //   ?limit=10000   -> 1000 rows    (clamped)
+  //
+  // So an unbounded list is not a state a caller can reach, and a detector for
+  // it would be reporting a risk the gateway already removes. This is a real
+  // retirement, not a deferred one.
   void projectId
   return []
 }

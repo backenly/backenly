@@ -126,6 +126,30 @@ export async function register() {
         }
       })
 
+      // ── Billing grace periods, 03:10 UTC ───────────────────────────────────
+      //
+      // Also previously unscheduled. `runDailyGraceCheck` downgrades
+      // subscriptions whose GRACE window has expired back to FREE, and it lives
+      // behind /api/cron/grace-check (and its duplicate,
+      // /api/cron/process-grace-periods). No /api/cron/* route is invoked on
+      // this host — no crontab entry, no systemd timer, zero hits in the nginx
+      // access log — so it had never run.
+      //
+      // Impact today is nil: there are no GRACE subscriptions, because there are
+      // no paid ones. It is wired up now because the day that stops being true
+      // is exactly the day nobody thinks to check, and the failure is silent in
+      // the direction that costs money — a lapsed payer keeps their paid plan.
+      cron.schedule('10 3 * * *', async () => {
+        const { runDailyGraceCheck } = await import('./lib/billing/grace')
+        const res = await runDailyGraceCheck().catch((err: any) => {
+          console.error('[GraceCheck] Cron error:', err?.message)
+          return null
+        })
+        if (res && res.processed > 0) {
+          console.log(`[GraceCheck] Downgraded ${res.processed} expired grace period(s) to FREE`)
+        }
+      })
+
       // Daily backup at 02:05 UTC (staggered from cleanup at 02:00)
       cron.schedule('5 2 * * *', async () => {
         const { runDailyBackups } = await import('./lib/services/workspace-backup')

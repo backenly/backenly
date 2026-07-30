@@ -22,10 +22,6 @@
       "schedule": "0 3 * * 0"
     },
     {
-      "path": "/api/cron/serverless-warmup",
-      "schedule": "0 4 * * *"
-    },
-    {
       "path": "/api/cron/cleanup-graphs",
       "schedule": "0 5 * * *"
     },
@@ -40,6 +36,10 @@
     {
       "path": "/api/cron/snapshot-db-storage",
       "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/cron/reap-abandoned-signups",
+      "schedule": "30 4 * * *"
     }
   ]
 }
