@@ -35,6 +35,7 @@ import {
 } from '@/lib/core/drift-detector'
 import { detectMissingRls } from '@/lib/services/workspace-observer'
 import { classifyFix } from '@/lib/core/fix-classifier'
+import { checksFromDesiredState, type CheckState } from './fix-acceptance'
 import { normalizeFindingType } from '@/lib/core/types'
 import type { FindingType, FindingSeverity, RawFinding } from '@/lib/core/types'
 import {
@@ -449,6 +450,135 @@ export async function recheckGap(
     (i) => owningIds.has(i.id) && !i.satisfied && i.gaps.length === 0,
   )
   return owningProbeFailed ? 'unknown' : 'resolved'
+}
+
+/**
+ * Invariant ids that can emit this finding type. Empty when nothing probes it.
+ */
+export function owningInvariantIds(type: string, details?: Record<string, unknown> | null): string[] {
+  const base = normalizeFindingType(type, details ?? null)?.base ?? type
+  return INVARIANTS.filter((inv) =>
+    (INVARIANT_EMITS[inv.id] ?? []).includes(base as FindingType),
+  ).map((inv) => inv.id)
+}
+
+export interface FixOutcome {
+  /** Did the SPECIFIC gap close? Identity-precise. */
+  recheck: 'resolved' | 'unresolved' | 'unknown'
+  /**
+   * Invariants that were passing before the fix and are failing after it,
+   * EXCLUDING the invariant the fix targeted.
+   */
+  regressions: string[]
+  /** Safe to record as a verified fix. */
+  accepted: boolean
+  reason: string
+}
+
+/**
+ * POST-FIX ACCEPTANCE — the full contract, not just "did the target close".
+ *
+ * `recheckGap` answers half the question. The other half is collateral damage:
+ * a fix that closes its own gap while breaking a previously-passing invariant is
+ * not a fix, and nothing in the live loop was checking for that. The gate that
+ * does (lib/autonomy/fix-acceptance.ts) was written, unit-tested, and never
+ * wired into any production path — `evaluateFixAcceptance` had zero callers
+ * outside its own spec file.
+ *
+ * The two halves use DIFFERENT granularities, and that is deliberate:
+ *
+ *   • The TARGET is checked by gap identity (type + table.column), because an
+ *     invariant covers many locations. Fixing RLS on `orders` while `invoices`
+ *     is still unprotected leaves `user_data_is_rls_protected` failing — reading
+ *     that as "the fix didn't work" would escalate every correct fix on any
+ *     project with more than one gap.
+ *   • REGRESSIONS are checked at invariant level, which is the right grain for
+ *     "something that used to hold no longer does", and the owning invariant is
+ *     excluded for exactly the reason above.
+ */
+export async function evaluateFixOutcome(
+  projectId: string,
+  gapType: string,
+  gapDetails: Record<string, unknown>,
+  before: readonly CheckState[] | null,
+): Promise<FixOutcome> {
+  const base = normalizeFindingType(gapType, gapDetails)?.base ?? gapType
+  const owning = new Set(owningInvariantIds(gapType, gapDetails))
+
+  // One diff serves both halves — the after-state is expensive, so it is
+  // computed once here rather than once per check.
+  const after = await computeDesiredStateDiff(projectId)
+
+  // ── Target half ────────────────────────────────────────────────────────────
+  let recheck: FixOutcome['recheck']
+  if (!probeCoveredTypes().has(base)) {
+    recheck = 'unknown'
+  } else {
+    const key = gapIdentity(gapType, gapDetails)
+    const stillPresent = after.violations.some(
+      (v) => gapIdentity(v.type, v.details as Record<string, unknown>) === key,
+    )
+    if (stillPresent) {
+      recheck = 'unresolved'
+    } else {
+      const owningProbeFailed = after.invariants.some(
+        (i) => owning.has(i.id) && !i.satisfied && i.gaps.length === 0,
+      )
+      recheck = owningProbeFailed ? 'unknown' : 'resolved'
+    }
+  }
+
+  // ── Regression half ────────────────────────────────────────────────────────
+  const regressions: string[] = []
+  if (before) {
+    const afterChecks = new Map(
+      checksFromDesiredState(after).map((c) => [c.id, c.passing]),
+    )
+    for (const b of before) {
+      if (owning.has(b.id)) continue
+      if (b.passing && afterChecks.get(b.id) === false) regressions.push(b.id)
+    }
+  }
+
+  if (recheck === 'unresolved') {
+    return {
+      recheck,
+      regressions,
+      accepted: false,
+      reason:
+        'Fix ran and reported success but the issue is still present on re-check — ' +
+        'escalated for review instead of recorded as fixed.',
+    }
+  }
+  if (regressions.length > 0) {
+    return {
+      recheck,
+      regressions,
+      accepted: false,
+      reason:
+        `Fix closed its own gap but broke ${regressions.length} previously passing ` +
+        `guarantee(s): ${regressions.join(', ')}. Escalated instead of recorded as fixed.`,
+    }
+  }
+  return {
+    recheck,
+    regressions: [],
+    accepted: recheck === 'resolved',
+    reason:
+      recheck === 'resolved'
+        ? 'Gap re-probed and confirmed closed, with no regressions.'
+        : 'Fix applied. No probe covers this type, so closure could not be confirmed.',
+  }
+}
+
+/**
+ * Snapshot the current invariant pass/fail state, for use as the `before` half
+ * of `evaluateFixOutcome`. Cheap to call once per reconcile tick; the caller
+ * should reuse one snapshot across a batch rather than recomputing per fix.
+ */
+export async function captureCheckBaseline(projectId: string): Promise<CheckState[]> {
+  const report = await computeDesiredStateDiff(projectId)
+  return checksFromDesiredState(report)
 }
 
 /**

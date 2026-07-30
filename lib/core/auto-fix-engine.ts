@@ -25,7 +25,7 @@ import { executeAction } from '@/lib/ai/minimal-executor'
 import { captureSchemaSnapshot, rollbackToSchemaVersion } from '@/lib/services/workspace-schema-snapshot'
 import { classifyFix } from './fix-classifier'
 import { checkBreaker, auditBreakerTrip } from '@/lib/autonomy/circuit-breaker'
-import { recheckGap } from '@/lib/autonomy/desired-state'
+import { evaluateFixOutcome, captureCheckBaseline } from '@/lib/autonomy/desired-state'
 import { FLAGS } from '@/lib/config/flags'
 import { withBuildLock } from '@/lib/ai/build-runtime/build-lock'
 import { normalizeFindingType } from './types'
@@ -257,6 +257,9 @@ export async function executeApprovedFix(
   // PRE-FIX capture — the state one-click undo restores (see capturePreFixState).
   const pre = await capturePreFixState(projectId, baseType, fixAction)
 
+  // Baseline for the acceptance gate below (see the autonomous path for why).
+  const baseline = await captureCheckBaseline(projectId).catch(() => null)
+
   // Retry on transient lock contention. A human clicked Approve — the right
   // behaviour is to WAIT for the lock, not bounce the wait back to the user.
   // The common holders (a Re-scan observer pass, the reconciler batch-applying
@@ -337,8 +340,9 @@ export async function executeApprovedFix(
   {
     const gapLoc = (details.location ?? details.tableName ?? details.table) as string | undefined
     if (gapLoc) {
-      const recheck = await recheckGap(projectId, finding.type, details).catch(() => 'unknown' as const)
-      if (recheck === 'unresolved') {
+      const outcome = await evaluateFixOutcome(projectId, finding.type, details, baseline)
+        .catch(() => null)
+      if (outcome && outcome.recheck === 'unresolved') {
         return {
           success: false,
           message:
@@ -347,7 +351,17 @@ export async function executeApprovedFix(
           verification: 'unverified',
         }
       }
-      if (recheck === 'resolved') verification = 'confirmed'
+      if (outcome && outcome.regressions.length > 0) {
+        return {
+          success: false,
+          message:
+            `The fix closed the issue it targeted but broke ${outcome.regressions.length} ` +
+            `guarantee(s) that were holding before it ran, so it was not recorded as fixed. ` +
+            `Use Undo in History to restore the pre-fix snapshot.`,
+          verification: 'unverified',
+        }
+      }
+      if (outcome?.recheck === 'resolved') verification = 'confirmed'
     }
   }
 
@@ -741,6 +755,13 @@ async function _executeAutoFix(
   // the mutation; the post-fix snapshot below is version history only.
   const pre = await capturePreFixState(projectId, baseType, fixAction)
 
+  // Baseline of which guarantees currently HOLD, so the acceptance gate below
+  // can tell "this fix broke something" from "this was already broken". Without
+  // a before-state there is nothing to compare against and a regression is
+  // indistinguishable from a pre-existing failure, so the gate degrades to
+  // target-only verification rather than guessing.
+  const baseline = await captureCheckBaseline(projectId).catch(() => null)
+
   let result
   try {
     const governed = await withBuildLock(
@@ -793,17 +814,18 @@ async function _executeAutoFix(
   {
     const gapLoc = (details.location ?? details.tableName ?? details.table) as string | undefined
     if (gapLoc) {
-      const recheck = await recheckGap(projectId, type, details).catch(() => 'unknown' as const)
-      if (recheck === 'unresolved') {
-        return _escalate(
-          findingId,
-          projectId,
-          type,
-          details,
-          'Fix ran and reported success but the issue is still present on re-check — escalated for review instead of recorded as fixed.',
-        )
+      const outcome = await evaluateFixOutcome(projectId, type, details, baseline)
+        .catch(() => null)
+      if (outcome && !outcome.accepted && outcome.recheck !== 'unknown') {
+        return _escalate(findingId, projectId, type, details, outcome.reason)
       }
-      if (recheck === 'resolved') verification = 'confirmed'
+      // A regression is disqualifying even when closure could not be confirmed:
+      // "I could not prove I helped, and something that used to hold now fails"
+      // is the worst outcome to record as a fix.
+      if (outcome && outcome.regressions.length > 0) {
+        return _escalate(findingId, projectId, type, details, outcome.reason)
+      }
+      if (outcome?.recheck === 'resolved') verification = 'confirmed'
     }
   }
 

@@ -9,7 +9,8 @@
  * of test that passes vacuously against a stub.
  */
 
-import { gapIdentity, probeCoveredTypes, INVARIANTS } from '@/lib/autonomy/desired-state'
+import { gapIdentity, probeCoveredTypes, INVARIANTS, owningInvariantIds } from '@/lib/autonomy/desired-state'
+import { evaluateFixAcceptance, checksFromDesiredState } from '@/lib/autonomy/fix-acceptance'
 import { normalizeFindingType, ALL_FINDING_TYPES } from '@/lib/core/types'
 import { classifyFix } from '@/lib/core/fix-classifier'
 import { buildFixAction } from '@/lib/core/fix-actions'
@@ -154,5 +155,78 @@ describe('no finding type is classified auto without an executable repair', () =
       const action = buildFixAction(t, { tableName: 'probe_table' })
       expect(action).not.toBeNull()
     }
+  })
+})
+
+describe('fix acceptance is wired into the kernel', () => {
+  // The gate existed, was unit-tested, and had zero production callers. These
+  // pin the contract the kernel now depends on.
+  it('rejects a fix whose target check never flipped', () => {
+    const r = evaluateFixAcceptance(
+      'user_data_is_rls_protected',
+      [{ id: 'user_data_is_rls_protected', passing: false }],
+      [{ id: 'user_data_is_rls_protected', passing: false }],
+    )
+    expect(r.accepted).toBe(false)
+    expect(r.verdict).toBe('not_fixed')
+  })
+
+  it('rejects a fix that fixed its target but broke something else', () => {
+    const r = evaluateFixAcceptance(
+      'relationships_have_fk_constraints',
+      [
+        { id: 'relationships_have_fk_constraints', passing: false },
+        { id: 'user_data_is_rls_protected', passing: true },
+      ],
+      [
+        { id: 'relationships_have_fk_constraints', passing: true },
+        { id: 'user_data_is_rls_protected', passing: false },
+      ],
+    )
+    expect(r.accepted).toBe(false)
+    expect(r.verdict).toBe('regression')
+    expect(r.regressions).toEqual(['user_data_is_rls_protected'])
+  })
+
+  it('never accepts a target that could not be evaluated after the fix', () => {
+    const r = evaluateFixAcceptance(
+      'relationships_are_indexed',
+      [{ id: 'relationships_are_indexed', passing: false }],
+      [],
+    )
+    expect(r.accepted).toBe(false)
+    expect(r.verdict).toBe('unverifiable')
+  })
+
+  it('projects a desired-state report onto check states', () => {
+    const checks = checksFromDesiredState({
+      invariants: [
+        { id: 'a', satisfied: true, gaps: [] },
+        { id: 'b', satisfied: false, gaps: [{}] },
+      ],
+    })
+    expect(checks).toEqual([
+      { id: 'a', passing: true },
+      { id: 'b', passing: false },
+    ])
+  })
+})
+
+describe('regression detection excludes the targeted invariant', () => {
+  // The trap this design had to avoid: an invariant spans many locations, so
+  // fixing RLS on one table leaves user_data_is_rls_protected failing for the
+  // others. Judging the TARGET at invariant level would escalate every correct
+  // fix on any project with more than one gap. So the target is judged by gap
+  // identity and only OTHER invariants are checked for regressions.
+  it('maps a finding type to the invariant that owns it', () => {
+    expect(owningInvariantIds('missing_rls', { tableName: 'x' }))
+      .toContain('user_data_is_rls_protected')
+    // and through an alias, which is the case that used to fall through
+    expect(owningInvariantIds('missing_rls_orders', { tableName: 'orders' }))
+      .toContain('user_data_is_rls_protected')
+  })
+
+  it('returns no owner for a type nothing probes', () => {
+    expect(owningInvariantIds('contract_surface_broken', { surface: 'storage' })).toEqual([])
   })
 })
