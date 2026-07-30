@@ -15,6 +15,8 @@ export interface RegisterRequest {
   name?: string
   /** Referral code captured from ?ref= on the signup page. */
   ref?: string
+  /** Cloudflare Turnstile solve. Required once the server has a secret key. */
+  turnstileToken?: string
 }
 
 export interface AuthResponse {

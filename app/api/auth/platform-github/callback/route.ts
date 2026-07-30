@@ -169,6 +169,12 @@ export async function GET(request: NextRequest) {
           providerId: String(githubUser.id),
           lastLogin: signedInAt,
           lastActiveAt: signedInAt,
+          // GitHub already proved control of the mailbox, so an OAuth signup is
+          // never held as untrusted. The score is still recorded — a challenge
+          // verdict here is worth being able to see later.
+          signupScore: guard.trust?.score ?? null,
+          signupSignals: guard.trust?.signals ?? [],
+          signupIp: oauthIp,
         },
         include: { role: true },
       })

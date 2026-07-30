@@ -127,6 +127,12 @@ export async function GET(request: NextRequest) {
         providerId: googleUser.id,
         lastLogin: signedInAt,
         lastActiveAt: signedInAt,
+        // Google already proved control of the mailbox, so an OAuth signup is
+        // never held as untrusted. The score is still recorded — a challenge
+        // verdict here is worth being able to see later.
+        signupScore: guard.trust?.score ?? null,
+        signupSignals: guard.trust?.signals ?? [],
+        signupIp: ipForBlock,
       },
       include: { role: true },
     })

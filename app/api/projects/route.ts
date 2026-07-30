@@ -10,6 +10,7 @@ import { enforceProjectCreation, createFreeSubscription, getUserSubscription } f
 import { logEvent } from '@/lib/analytics/logger'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import { assertWritable } from '@/lib/platform/controls'
+import { assertAccountCanConsume } from '@/lib/auth/account-standing'
 import { ensureSchemaRegistered } from '@/lib/postgrest/registration'
 
 // Validation schemas
@@ -156,6 +157,16 @@ export const POST = withAuth(async (request: NextRequest, { user }) => {
     const writeGuard = await assertWritable()
     if (!writeGuard.ok) {
       return NextResponse.json({ error: writeGuard.reason }, { status: writeGuard.status })
+    }
+
+    // Anti-abuse: an account flagged untrusted at signup provisions nothing
+    // until it verifies its mailbox. No-op for every normal user.
+    const standing = await assertAccountCanConsume(user.userId)
+    if (!standing.ok) {
+      return NextResponse.json(
+        { success: false, error: standing.reason, code: standing.code },
+        { status: standing.status },
+      )
     }
 
     const body = await request.json()

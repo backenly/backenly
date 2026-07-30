@@ -19,6 +19,10 @@ const customJestConfig = {
     // The SDK sources carry explicit `.js` extensions so the published ESM build
     // is resolvable by Node. Strip them for ts-jest, which reads the .ts.
     '^(\\.{1,2}/.*)\\.js$': '$1',
+    // `server-only` throws by design outside a React Server Component graph.
+    // Jest runs plain Node, so map it to a no-op — the modules that import it
+    // are still server modules, we just want to be able to unit test them.
+    '^server-only$': '<rootDir>/tests/__mocks__/server-only.js',
     '^@/(.*)$': '<rootDir>/$1',
   },
   collectCoverageFrom: [

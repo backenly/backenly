@@ -17,7 +17,7 @@
  * hot paths don't pay a DB round-trip per request.
  */
 
-import { checkSignupEmailEligibility } from '@/lib/auth/email-eligibility'
+import { assessEmailTrust, type EmailTrustResult } from '@/lib/auth/email-trust'
 import { prisma } from '@/lib/db/prisma'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -208,10 +208,21 @@ export async function assertWritable(): Promise<Guard> {
 }
 
 /**
- * Guard for signup paths. Blocks when signupsDisabled or maintenanceMode is
- * on, and when the email/domain is blocklisted.
+ * Signup guard result. Carries the trust assessment forward so the caller can
+ * persist *how* the account arrived — a `challenge` verdict is allowed through
+ * but must land as an untrusted account that has to verify its mailbox before
+ * it can consume anything.
  */
-export async function assertSignupAllowed(email: string, ip?: string | null): Promise<Guard> {
+export interface SignupGuard extends Guard {
+  trust?: EmailTrustResult
+}
+
+/**
+ * Guard for signup paths. Blocks when signupsDisabled or maintenanceMode is
+ * on, when the email/domain/MX is blocklisted, and when the email trust
+ * assessment returns a `deny` verdict.
+ */
+export async function assertSignupAllowed(email: string, ip?: string | null): Promise<SignupGuard> {
   const c = await getPlatformControls()
   if (c.signupsDisabled) {
     return { ok: false, reason: 'New sign-ups are temporarily disabled.', status: 503 }
@@ -220,23 +231,8 @@ export async function assertSignupAllowed(email: string, ip?: string | null): Pr
     return { ok: false, reason: 'The platform is in maintenance mode. Try again shortly.', status: 503 }
   }
 
-  const emailEligibility = checkSignupEmailEligibility(email)
-  if (!emailEligibility.ok) {
-    await recordSecurityEvent({
-      kind: 'blocklist_hit',
-      severity: 'warn',
-      userEmail: email,
-      ip: ip ?? null,
-      summary: `Blocked signup attempt - email trust gate: ${emailEligibility.code ?? 'UNKNOWN'}`,
-      detail: { email, ip, reason: emailEligibility.code },
-    }).catch(() => {})
-    return {
-      ok: false,
-      reason: emailEligibility.reason ?? 'Sign-up is not allowed for this email address.',
-      status: emailEligibility.code === 'INVALID_EMAIL' ? 400 : 403,
-    }
-  }
-
+  // Operator blocklist runs before the heuristics: a hand-added entry is an
+  // explicit decision and should never be second-guessed by a score.
   const hit = await isBlocked({ email, ip })
   if (hit) {
     await recordSecurityEvent({
@@ -249,7 +245,39 @@ export async function assertSignupAllowed(email: string, ip?: string | null): Pr
     }).catch(() => {})
     return { ok: false, reason: 'Sign-up is not allowed for this account.', status: 403 }
   }
-  return ok
+
+  const trust = await assessEmailTrust(email)
+  if (trust.verdict === 'deny') {
+    await recordSecurityEvent({
+      kind: 'signup_denied',
+      severity: 'warn',
+      userEmail: email,
+      ip: ip ?? null,
+      summary: `Blocked signup — email trust ${trust.score}/100 (${trust.signals.join(', ')})`,
+      detail: { email, ip, score: trust.score, signals: trust.signals },
+    }).catch(() => {})
+    return {
+      ok: false,
+      reason: trust.reason ?? 'Sign-up is not allowed for this email address.',
+      status: trust.signals.includes('invalid_email') ? 400 : 403,
+      trust,
+    }
+  }
+
+  if (trust.verdict === 'challenge') {
+    // Not refused — recorded. These are the accounts worth watching, and the
+    // caller marks them untrusted so they stay inert until verified.
+    await recordSecurityEvent({
+      kind: 'signup_untrusted',
+      severity: 'info',
+      userEmail: email,
+      ip: ip ?? null,
+      summary: `Untrusted signup allowed — email trust ${trust.score}/100 (${trust.signals.join(', ')})`,
+      detail: { email, ip, score: trust.score, signals: trust.signals },
+    }).catch(() => {})
+  }
+
+  return { ...ok, trust }
 }
 
 // ─── Blocklist ────────────────────────────────────────────────────────────────

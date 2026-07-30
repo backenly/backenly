@@ -25,6 +25,10 @@ export async function GET(request: NextRequest) {
       lastLogin: true,
       lastActiveAt: true,
       tier: true,
+      emailVerified: true,
+      trustLevel: true,
+      signupScore: true,
+      signupSignals: true,
       _count: {
         select: { projects: true },
       },
@@ -52,6 +56,12 @@ export async function GET(request: NextRequest) {
     lastActive: u.lastActiveAt ?? u.lastLogin,
     tier: u.tier,
     projectCount: u._count.projects,
+    // Signup provenance, so the Users tab can separate customers from noise
+    // instead of showing one undifferentiated list.
+    emailVerified: u.emailVerified,
+    trustLevel: u.trustLevel,
+    signupScore: u.signupScore,
+    signupSignals: u.signupSignals,
     usage: usageMap.get(u.id) ?? {
       apiCalls: 0,
       dbReads: 0,

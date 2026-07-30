@@ -38,9 +38,15 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ message: 'Email already verified', emailVerified: true })
     }
 
+    // Proving control of the mailbox both verifies the address and clears an
+    // `untrusted` standing set at signup — so a real person caught by a
+    // heuristic unblocks themselves in one click, with no support round-trip.
     await prisma.user.update({
       where: { id: user.id },
-      data: { emailVerified: true },
+      data: {
+        emailVerified: true,
+        ...(user.trustLevel === 'untrusted' ? { trustLevel: 'trusted' } : {}),
+      },
     })
 
     await prisma.auditLog.create({

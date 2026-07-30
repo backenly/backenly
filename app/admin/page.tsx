@@ -9,7 +9,7 @@ import {
   Settings, Minus, Plus, Ban, RotateCcw,
   MessageSquare, Package, Copy, Check, Mail, ArrowDownRight,
   Sparkles, DollarSign, UserPlus, ExternalLink, Inbox, Loader2,
-  TrendingDown, Server, Wrench, Bot, ShieldCheck, GitCommitHorizontal,
+  TrendingDown, Server, Wrench, Bot, ShieldCheck, ShieldAlert, GitCommitHorizontal,
 } from 'lucide-react'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -236,6 +236,12 @@ interface UserRow {
   id: string; name: string | null; email: string; createdAt: string; lastActive: string | null
   tier: string; projectCount: number
   usage: { apiCalls: number | null; dbReads: number | null; dbWrites: number | null; aiCalls: number | null }
+  // Signup provenance (lib/auth/email-trust.ts). Older rows predate these
+  // columns, so every field is optional and absence reads as "trusted".
+  emailVerified?: boolean
+  trustLevel?: string
+  signupScore?: number | null
+  signupSignals?: string[]
 }
 
 interface ProjectDetail {
@@ -548,6 +554,9 @@ export default function AdminPage() {
   // Users tab filters
   const [userSearch, setUserSearch] = useState('')
   const [tierFilter, setTierFilter] = useState('all')
+  // 'all' | 'real' | 'flagged' | 'unverified' — lets the Users tab separate
+  // customers from signup noise instead of showing one undifferentiated list.
+  const [trustFilter, setTrustFilter] = useState('all')
   const [userSort, setUserSort]     = useState<'recent' | 'active' | 'projects' | 'ai'>('recent')
 
   // Credits modal
@@ -1366,14 +1375,19 @@ export default function AdminPage() {
     let list = users.filter(u => {
       const matchSearch = !userSearch || u.email.toLowerCase().includes(userSearch.toLowerCase()) || (u.name ?? '').toLowerCase().includes(userSearch.toLowerCase())
       const matchTier = tierFilter === 'all' || u.tier === tierFilter
-      return matchSearch && matchTier
+      const matchTrust =
+        trustFilter === 'all' ||
+        (trustFilter === 'flagged' && u.trustLevel === 'untrusted') ||
+        (trustFilter === 'unverified' && u.emailVerified === false) ||
+        (trustFilter === 'real' && u.trustLevel !== 'untrusted' && u.projectCount > 0)
+      return matchSearch && matchTier && matchTrust
     })
     if (userSort === 'recent') list = [...list].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
     else if (userSort === 'active') list = [...list].sort((a, b) => new Date(b.lastActive ?? 0).getTime() - new Date(a.lastActive ?? 0).getTime())
     else if (userSort === 'projects') list = [...list].sort((a, b) => b.projectCount - a.projectCount)
     else if (userSort === 'ai') list = [...list].sort((a, b) => (b.usage.aiCalls ?? 0) - (a.usage.aiCalls ?? 0))
     return list
-  }, [users, userSearch, tierFilter, userSort])
+  }, [users, userSearch, tierFilter, trustFilter, userSort])
 
   const auditLogs: AuditEntry[] = dashboard?.recentAuditLogs ?? []
 
@@ -1835,6 +1849,19 @@ export default function AdminPage() {
                 </select>
               </div>
               <div className="flex items-center gap-1.5 bg-white/[0.04] border border-white/[0.08] rounded-lg px-3 py-2">
+                <ShieldAlert className="w-3.5 h-3.5 text-zinc-500" />
+                <select
+                  value={trustFilter}
+                  onChange={e => setTrustFilter(e.target.value)}
+                  className="bg-transparent text-xs text-zinc-200 outline-none cursor-pointer pr-1"
+                >
+                  <option value="all" className="bg-zinc-900">All signups</option>
+                  <option value="real" className="bg-zinc-900">Real users</option>
+                  <option value="flagged" className="bg-zinc-900">Flagged at signup</option>
+                  <option value="unverified" className="bg-zinc-900">Unverified email</option>
+                </select>
+              </div>
+              <div className="flex items-center gap-1.5 bg-white/[0.04] border border-white/[0.08] rounded-lg px-3 py-2">
                 <BarChart2 className="w-3.5 h-3.5 text-zinc-500" />
                 <select
                   value={userSort}
@@ -1878,7 +1905,10 @@ export default function AdminPage() {
                                 {(u.name || u.email)[0].toUpperCase()}
                               </div>
                               <div className="min-w-0">
-                                <div className="font-semibold text-white text-xs truncate">{u.name || u.email.split('@')[0]}</div>
+                                <div className="flex items-center gap-1.5">
+                                  <span className="font-semibold text-white text-xs truncate">{u.name || u.email.split('@')[0]}</span>
+                                  <SignupTrustFlag user={u} />
+                                </div>
                                 <div className="flex items-center gap-1 group/email">
                                   <span className="text-zinc-500 text-[11px] truncate">{u.email}</span>
                                   <button
@@ -4374,6 +4404,49 @@ function Card({
       </div>
       {children}
     </div>
+  )
+}
+
+/**
+ * Signup provenance marker.
+ *
+ * Only renders when there is something to say — a clean, verified account shows
+ * nothing, so the table stays quiet and a flag actually means something. The
+ * title attribute carries the score and the reason codes, which is what you
+ * need to tell a false positive from a real catch.
+ */
+function SignupTrustFlag({ user }: { user: UserRow }) {
+  const flagged = user.trustLevel === 'untrusted'
+  const unverified = user.emailVerified === false
+
+  if (!flagged && !unverified) return null
+
+  if (flagged) {
+    const detail = [
+      `Flagged at signup — score ${user.signupScore ?? '?'}/100`,
+      user.signupSignals?.length ? user.signupSignals.join(', ') : null,
+      'Cannot create projects until the email is verified.',
+    ]
+      .filter(Boolean)
+      .join('\n')
+    return (
+      <span
+        title={detail}
+        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-amber-500/25 bg-amber-500/10 text-[9px] font-bold uppercase tracking-wider text-amber-400 flex-shrink-0"
+      >
+        <ShieldAlert className="w-2.5 h-2.5" />
+        Flagged
+      </span>
+    )
+  }
+
+  return (
+    <span
+      title="Email never verified."
+      className="inline-flex items-center px-1.5 py-0.5 rounded border border-white/[0.10] bg-white/[0.04] text-[9px] font-bold uppercase tracking-wider text-zinc-500 flex-shrink-0"
+    >
+      Unverified
+    </span>
   )
 }
 

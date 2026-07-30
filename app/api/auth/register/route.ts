@@ -8,8 +8,10 @@ import { logAuthEvent } from '@/lib/services/logging'
 import { createFreeSubscription } from '@/lib/billing'
 import { logEvent } from '@/lib/analytics/logger'
 import { sendVerificationEmail } from '@/lib/auth/email'
-import { assertSignupAllowed } from '@/lib/platform/controls'
+import { assertSignupAllowed, recordSecurityEvent } from '@/lib/platform/controls'
 import { applyReferralOnSignup } from '@/lib/billing/referral'
+import { consume, AUTH_LIMITS, clientIp } from '@/lib/security/auth-rate-limit'
+import { verifyBotChallenge } from '@/lib/auth/bot-defense'
 import { z } from 'zod'
 import jwt from 'jsonwebtoken'
 
@@ -19,6 +21,9 @@ const registerSchema = z.object({
   name: z.string().optional(),
   // Referral code captured from ?ref= on the signup page (optional).
   ref: z.string().max(32).optional(),
+  // Cloudflare Turnstile solve. Required once TURNSTILE_SECRET_KEY is set;
+  // ignored before that so shipping this never locks real users out.
+  turnstileToken: z.string().max(4096).optional(),
 })
 
 export async function POST(request: NextRequest) {
@@ -28,15 +33,50 @@ export async function POST(request: NextRequest) {
     const email = parsed.email.trim().toLowerCase()
     const { password, name } = parsed
 
-    // Founder kill switches: signupsDisabled / maintenanceMode + blocklist.
-    const ip =
-      request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
-      request.headers.get('x-real-ip') ||
-      null
+    const ip = clientIp(request)
+
+    // Rate limit before anything expensive. The policy already existed in
+    // AUTH_LIMITS but this route never consumed it, so a script could register
+    // unlimited accounts from one address at full speed.
+    const ipLimit = consume(`signup:ip:${ip}`, AUTH_LIMITS.signup.ip.limit, AUTH_LIMITS.signup.ip.windowMs)
+    if (!ipLimit.allowed) {
+      await recordSecurityEvent({
+        kind: 'signup_rate_limited',
+        severity: 'warn',
+        userEmail: email,
+        ip,
+        summary: `Signup rate limit tripped for ${ip}`,
+        detail: { ip, email, retryAfter: ipLimit.retryAfter },
+      }).catch(() => {})
+      return NextResponse.json(
+        { error: 'Too many sign-up attempts. Please try again later.' },
+        { status: 429, headers: { 'Retry-After': String(ipLimit.retryAfter) } },
+      )
+    }
+
+    // Proof of humanity. This is the control that actually stops scripted
+    // signups — the domain heuristics below are a second layer, because a bot
+    // operator can register a fresh domain faster than any list can grow.
+    const botCheck = await verifyBotChallenge(parsed.turnstileToken, ip)
+    if (!botCheck.ok) {
+      await recordSecurityEvent({
+        kind: 'bot_challenge_failed',
+        severity: 'warn',
+        userEmail: email,
+        ip,
+        summary: `Signup blocked — Turnstile ${botCheck.code}`,
+        detail: { ip, email, code: botCheck.code },
+      }).catch(() => {})
+      return NextResponse.json({ error: botCheck.reason }, { status: 403 })
+    }
+
+    // Founder kill switches: signupsDisabled / maintenanceMode + blocklist,
+    // plus the email trust assessment.
     const signupGuard = await assertSignupAllowed(email, ip)
     if (!signupGuard.ok) {
       return NextResponse.json({ error: signupGuard.reason }, { status: signupGuard.status })
     }
+    const untrusted = signupGuard.trust?.verdict === 'challenge'
 
     // Validate password strength
     const passwordValidation = validatePasswordStrength(password)
@@ -95,6 +135,10 @@ export async function POST(request: NextRequest) {
         roleId: defaultRole.id,
         lastLogin: now,
         lastActiveAt: now,
+        trustLevel: untrusted ? 'untrusted' : 'trusted',
+        signupScore: signupGuard.trust?.score ?? null,
+        signupSignals: signupGuard.trust?.signals ?? [],
+        signupIp: ip === 'unknown' ? null : ip,
       },
       include: {
         role: true,

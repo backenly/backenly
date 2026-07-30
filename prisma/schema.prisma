@@ -42,6 +42,17 @@ model User {
   bonusReconciledThrough  String?
   // Referral attribution — who referred this user (set at signup from ?ref=).
   referredById            String?
+  // ── Signup trust (anti-abuse) ────────────────────────────────────────────
+  // How this account arrived. "trusted" is the normal path. "untrusted" is set
+  // when the signup email landed in the challenge band (see lib/auth/email-trust.ts)
+  // and must verify its mailbox before it can consume any resources. Existing
+  // accounts default to trusted so this can never retroactively lock anyone out.
+  trustLevel              String                   @default("trusted")
+  // Score and reason codes recorded at signup, so a false positive can be
+  // diagnosed later instead of guessed at.
+  signupScore             Int?
+  signupSignals           String[]                 @default([])
+  signupIp                String?
   apiKeys                 ApiKey[]
   apiRequestLogs          ApiRequestLog[]
   auditLogs               AuditLog[]
@@ -2765,7 +2776,11 @@ model PlatformControl {
 // edge. Domains match the suffix of the email after '@', e.g. "spambot.com".
 model Blocklist {
   id        String   @id @default(uuid())
-  kind      String // "ip" | "email" | "domain"
+  // "ip" | "email" | "domain" | "mx"
+  // "mx" blocks every domain whose mail routes through that host, which is how
+  // a throwaway-domain farm gets retired as a farm instead of one domain at a
+  // time (see lib/auth/email-trust.ts).
+  kind      String
   value     String // lowercased; ip in CIDR or plain
   reason    String?
   createdAt DateTime @default(now())

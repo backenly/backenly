@@ -2,13 +2,24 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/postgres'
-import { requireAuth } from '@/lib/auth/middleware'
-import {
-  checkSignupEmailEligibility,
-  SIGNUP_EMAIL_REJECTION_MESSAGE,
-} from '@/lib/auth/email-eligibility'
+import { requireFounder } from '@/lib/auth/requireFounder'
+import { assessEmailTrust, SIGNUP_DENIED_MESSAGE } from '@/lib/auth/email-trust'
 import { z } from 'zod'
 
+/**
+ * Platform user administration.
+ *
+ * Both handlers are founder/admin-only. They were previously behind
+ * `requireAuth`, i.e. ANY authenticated user could call them — which made GET a
+ * full email dump of every account on the platform, and made POST a complete
+ * bypass of the signup pipeline: no Turnstile, no rate limit, no trust
+ * assessment, and a caller-supplied `emailVerified` flag. One throwaway account
+ * was enough to mint unlimited pre-verified ones.
+ *
+ * Nothing in the codebase calls either handler, so tightening them breaks no
+ * caller; the surface is kept because it is the natural home for admin user
+ * management, not deleted.
+ */
 const createUserSchema = z.object({
   email: z.string().email(),
   name: z.string().optional(),
@@ -22,8 +33,9 @@ const createUserSchema = z.object({
 
 export async function GET(request: NextRequest) {
   try {
-    await requireAuth(request)
-    
+    const authError = await requireFounder(request)
+    if (authError) return authError
+
     const searchParams = request.nextUrl.searchParams
     const search = searchParams.get('search') || ''
     const page = parseInt(searchParams.get('page') || '1')
@@ -84,18 +96,23 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    await requireAuth(request)
+    const authError = await requireFounder(request)
+    if (authError) return authError
+
     const body = await request.json()
     const data = createUserSchema.parse(body)
     const email = data.email.trim().toLowerCase()
-    const emailEligibility = checkSignupEmailEligibility(email)
-    if (!emailEligibility.ok) {
+
+    // Same trust engine the public signup path uses, so an admin-created
+    // account cannot be a back door around it.
+    const trust = await assessEmailTrust(email)
+    if (trust.verdict === 'deny') {
       return NextResponse.json(
-        { error: emailEligibility.reason || SIGNUP_EMAIL_REJECTION_MESSAGE },
-        { status: emailEligibility.code === 'INVALID_EMAIL' ? 400 : 403 }
+        { error: trust.reason || SIGNUP_DENIED_MESSAGE, signals: trust.signals },
+        { status: trust.signals.includes('invalid_email') ? 400 : 403 }
       )
     }
-    
+
     // Check if user already exists
     const existingUser = await prisma.user.findUnique({
       where: { email },
@@ -125,6 +142,9 @@ export async function POST(request: NextRequest) {
         emailVerified: data.emailVerified,
         twoFactorEnabled: data.twoFactorEnabled,
         roleId: data.roleId,
+        trustLevel: trust.verdict === 'challenge' ? 'untrusted' : 'trusted',
+        signupScore: trust.score,
+        signupSignals: trust.signals,
       },
       include: {
         role: true,

@@ -22,6 +22,7 @@ import {
   PrimaryButton,
   GoogleSvg,
 } from '@/components/site/AuthShell'
+import { TurnstileWidget, isTurnstileEnabled, resetTurnstile } from '@/components/site/TurnstileWidget'
 
 registerSiteIcons()
 
@@ -54,6 +55,7 @@ function SignupForm() {
   const [showEmailForm, setShowEmailForm] = useState(false)
   const [oauthProviders, setOauthProviders] = useState<{ google: boolean; github: boolean } | null>(null)
   const [refCode, setRefCode] = useState<string | null>(null)
+  const [turnstileToken, setTurnstileToken] = useState<string | null>(null)
 
   // Honor ?redirect= (e.g. an org-invite accept page) — sanitized the same way
   // as login so we never loop back into /auth/*.
@@ -105,14 +107,27 @@ function SignupForm() {
       setErrors({ email: emailError || undefined, password: passwordError || undefined })
       return
     }
+    // Turnstile issues single-use tokens, so a failed submit must not be
+    // retried with the same one — the server would reject it as a duplicate.
+    if (isTurnstileEnabled && !turnstileToken) {
+      setErrors({ email: 'Please complete the verification check below.' })
+      return
+    }
     setErrors({})
     setIsSubmitting(true)
     try {
-      await register({ email, password, ...(refCode ? { ref: refCode } : {}) })
+      await register({
+        email,
+        password,
+        ...(refCode ? { ref: refCode } : {}),
+        ...(turnstileToken ? { turnstileToken } : {}),
+      })
       router.push(redirectUrl)
     } catch (error) {
       setErrors({ password: error instanceof Error ? error.message : 'Registration failed' })
       setIsSubmitting(false)
+      setTurnstileToken(null)
+      resetTurnstile()
     }
   }
 
@@ -195,6 +210,8 @@ function SignupForm() {
                   </button>
                 }
               />
+
+              <TurnstileWidget onToken={setTurnstileToken} className="mt-1" />
 
               <PrimaryButton type="submit" disabled={isSubmitting} loading={isSubmitting}>
                 {isSubmitting ? 'Creating account…' : 'Create account'}
