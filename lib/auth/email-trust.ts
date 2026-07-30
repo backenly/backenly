@@ -35,8 +35,21 @@
  * own two-week-old company domain from being turned away.
  */
 
-import 'server-only'
-
+// NO `import 'server-only'` here — it took the Express runtime down.
+//
+// `server-only` throws on import outside a Next.js server context, and this
+// module is reached by the standalone Express runtime through a chain it cannot
+// avoid: server/lib/auth.ts and server/routes/bootstrap.ts import
+// lib/platform/controls.ts, which imports assessEmailTrust from here. So
+// `backenly-runtime` crashed at module load, entered a restart loop (66
+// restarts), and every /api/v1/* route answered 502 while the Next app kept
+// serving 200 — the split that makes this look like a routing problem rather
+// than a crash.
+//
+// Client safety is unaffected: nothing in components/ or app/ client code
+// imports this, and the expensive/private checks stay behind
+// assertSignupAllowed. The Next-only bundler guard is what had to go, not the
+// server-side boundary it was standing in for.
 import dns from 'dns'
 import { prisma } from '@/lib/db/prisma'
 import { checkSignupEmailEligibility } from '@/lib/auth/email-eligibility'
