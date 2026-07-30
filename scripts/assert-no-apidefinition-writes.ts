@@ -70,6 +70,79 @@ const BANNED = [
   { re: /\bensureApiDefinition\s*\(/, label: 'ensureApiDefinition(...)' },
 ]
 
+// ── The READ side ────────────────────────────────────────────────────────────
+//
+// Banning writes stopped the table growing. It did not stop code from BELIEVING
+// it. With no create path, every project built after 2026-07-21 has zero rows,
+// so any file that asks this table what exists gets "nothing" for a healthy
+// backend — and cannot tell that apart from a genuinely empty project.
+//
+// That is not theoretical. checkLiveApiEndpoints picked its test table by
+// filtering through these rows, found none, and skipped with "build tables and
+// APIs first" on projects full of working tables — so the only check exercising
+// the real HTTP stack never ran, on any modern project, for nine days.
+//
+// The remaining readers are PINNED below rather than banned outright. Fixing 36
+// call sites with different semantics (count vs list vs config lookup) in one
+// sweep is how you trade a visible bug for an invisible one. The rule is: this
+// list may shrink, never grow. A new reader fails the build and has to justify
+// itself; each existing one gets converted deliberately, with its own testing.
+//
+// Convert by asking the catalog instead — lib/mcp/schema-introspection.ts
+// (`listExposedTables`, `getTableSchema`), which is what actually decides
+// reachability under PostgREST.
+const READ_RE = /prisma\s*\.\s*apiDefinition\s*\./
+
+/**
+ * Files known to read the dead projection, as of 2026-07-30. Ordered by how
+ * user-visible the staleness is, so the top of the list is the work queue.
+ */
+const KNOWN_READERS = new Set<string>([
+  // ── User-visible: these show "no APIs" on a working backend ──────────────
+  'lib/services/openapi-generator.ts',        // dashboard OpenAPI download
+  'server/routes/dynamic.ts',                 // API discovery response
+  'app/api/v1/[projectId]/route.ts',          // project API listing
+  'app/api/cli/overview/route.ts',            // CLI overview counts
+  'app/api/projects/[id]/state/route.ts',     // dashboard state
+  'app/api/debug/[projectId]/route.ts',
+  'app/api/ai-workspace/detect-new-tables/route.ts',
+  // ── Internal decisions taken on a count that is always 0 ─────────────────
+  'lib/ai/build-mode-router.ts',
+  'lib/ai/build-runtime/verifier.ts',
+  'lib/ai/build-runtime/security-auditor.ts',
+  'lib/ai/action-validator.ts',
+  'lib/ai/architecture-evolution.ts',
+  'lib/ai/background-agent.ts',
+  'lib/ai/context-reader.ts',
+  'lib/ai/memory-hierarchy.ts',
+  'lib/ai/minimal-executor.ts',
+  'lib/ai/production-intelligence.ts',
+  'lib/ai/project-status-resolvers.ts',
+  'lib/ai/schema-tools.ts',
+  'lib/ai/smart-answerer.ts',
+  'lib/autonomy/hypothesis/probes.ts',
+  'lib/deployment/readiness-scorer.ts',
+  'lib/reports/change-report.ts',
+  'lib/services/deploymentValidator.ts',
+  'lib/services/schema-impact-analyzer.ts',
+  'lib/services/serverless-warmup.ts',
+  'lib/services/workspace-observer.ts',
+  // ── Legitimate: unwinding rows earlier fixes left behind ─────────────────
+  // Detection must never ask this table what exists; a REVERT may still ask
+  // what it left behind, or the undo for fixes already in the ledger strands.
+  'lib/core/auto-fix-engine.ts',
+  // ── Maintenance scripts that delete legacy rows ──────────────────────────
+  'scripts/clean-test-data.ts',
+  'scripts/cleanup-harness-debris.ts',
+  'scripts/cleanup-phantom-tables.ts',
+  'scripts/mixed-eval.ts',
+  'scripts/run-stress-test.ts',
+  'scripts/verify-autonomy-tier1.ts',
+  'tests/probes/probe-fixtures.spec.ts',
+].map(p => p.split('/').join(path.sep)))
+
+const newReaders: Violation[] = []
+
 interface Violation {
   file: string
   line: number
@@ -97,12 +170,24 @@ function checkFile(absPath: string) {
   if (rel === SELF || ALLOWLIST.has(rel)) return
 
   const lines = fs.readFileSync(absPath, 'utf8').split('\n')
+  let readReported = false
   lines.forEach((line, i) => {
     if (isCommentLine(line)) return
     for (const { re, label } of BANNED) {
       if (re.test(line)) {
         violations.push({ file: rel, line: i + 1, label, code: line.trim() })
       }
+    }
+    // One report per file: the point is "this file believes the dead table",
+    // not how many times it says so.
+    if (!readReported && READ_RE.test(line) && !KNOWN_READERS.has(rel)) {
+      readReported = true
+      newReaders.push({
+        file: rel,
+        line: i + 1,
+        label: 'NEW reader of the dead ApiDefinition projection',
+        code: line.trim(),
+      })
     }
   })
 }
@@ -144,4 +229,37 @@ if (violations.length > 0) {
   process.exit(1)
 }
 
+if (newReaders.length > 0) {
+  console.error(`\n✖ ApiDefinition READ gate FAILED — ${newReaders.length} new reader(s)\n`)
+  for (const v of newReaders) {
+    console.error(`  ${v.file}:${v.line}`)
+    console.error(`    ${v.code}\n`)
+  }
+  console.error(
+    'This table has no create path, so on every project built after the PostgREST\n' +
+      'cutover it is EMPTY. Asking it what exists returns "nothing" for a healthy\n' +
+      'backend, and the caller cannot tell that apart from a genuinely empty project.\n' +
+      'That is what silently disabled the live HTTP behavioral check for nine days.\n\n' +
+      'Ask the catalog instead: lib/mcp/schema-introspection.ts → listExposedTables /\n' +
+      'getTableSchema. Do NOT add yourself to KNOWN_READERS — that list may shrink,\n' +
+      'never grow.\n',
+  )
+  process.exit(1)
+}
+
+// Surface entries that no longer read, so the list cannot rot into fiction.
+const stale = [...KNOWN_READERS].filter(rel => {
+  try {
+    const src = fs.readFileSync(path.join(ROOT, rel), 'utf8')
+    return !src.split('\n').some(l => !isCommentLine(l) && READ_RE.test(l))
+  } catch {
+    return true // file gone — the entry is stale either way
+  }
+})
+if (stale.length > 0) {
+  console.log(`\n· ${stale.length} KNOWN_READERS entry/entries no longer read ApiDefinition — remove them:`)
+  for (const s of stale) console.log(`    ${s}`)
+}
+
 console.log('✓ ApiDefinition write gate: no create paths in app/, lib/, server/, components/, packages/, scripts/, tests/')
+console.log(`✓ ApiDefinition read gate: no new readers (${KNOWN_READERS.size - stale.length} known, pinned to shrink)`)
