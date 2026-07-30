@@ -139,7 +139,13 @@ export async function runAgenticFixLoop(
       .then(h => h.candidates.length)
       .catch(() => 0)
     if (initialScanCandidates === 0) {
-      const summary = 'Backend already passes behavioral verification — nothing to fix.'
+      // Do not claim verification that did not happen. `passed` is true when
+      // every check skipped (empty project: no tables, no auth, no triggers),
+      // and telling the user their backend "already passes" in that state is the
+      // same false confidence the loop is supposed to eliminate.
+      const summary = snapshot.verdict === 'nothing_to_verify'
+        ? 'Nothing to verify yet — no tables, auth or triggers exist to exercise, so no behavioral checks could run.'
+        : 'Backend already passes behavioral verification — nothing to fix.'
       emit({ type: 'fix_loop_complete', success: true, rounds: 0, reason: 'no_initial_failures', summary })
       return { passed: true, rounds: 0, reason: 'no_initial_failures' as const, finalCheckSnapshot: snapshot, appliedFixes: 0, summary }
     }
@@ -315,7 +321,9 @@ export async function runAgenticFixLoop(
     })
 
     if (snapshot.passed) {
-      const summary = `All checks pass. Fixed in ${round} round(s) by applying ${appliedTotal} fix(es).`
+      const summary = snapshot.verdict === 'nothing_to_verify'
+        ? `Applied ${appliedTotal} fix(es) in ${round} round(s). No behavioral checks were applicable, so this is not a confirmation that the backend behaves correctly.`
+        : `All ${snapshot.checksRun} applicable check(s) pass. Fixed in ${round} round(s) by applying ${appliedTotal} fix(es).`
       emit({ type: 'fix_loop_complete', success: true, rounds: round, reason: 'passed', summary })
       return { passed: true, rounds: round, reason: 'passed' as const, finalCheckSnapshot: snapshot, appliedFixes: appliedTotal, summary }
     }

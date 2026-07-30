@@ -276,12 +276,27 @@ async function executeFkRepair(projectId: string): Promise<AgentResult> {
     await repairForeignKeysGlobally(projectId).catch(() => {})
     const bvResult = await runBehavioralVerification(projectId)
 
-    if (bvResult.passed) {
-      emit('fix.applied', projectId, { action: 'full-schema-repair' })
+    // `passed` alone is true when every check skipped, which on an empty project
+    // meant reporting "All behavioral checks pass" after running none of them.
+    if (bvResult.verdict === 'nothing_to_verify') {
+      emit('fix.applied', projectId, { action: 'full-schema-repair', bvVerdict: bvResult.verdict })
       return {
         success: true,
         type: 'FIX',
-        message: 'Schema scan complete.\n\nAll behavioral checks pass.\nNo changes were required.',
+        message:
+          'Schema scan complete.\n\nNo behavioral checks were applicable yet — there are no ' +
+          'tables, auth config or triggers to exercise, so nothing could be verified.\n' +
+          'No changes were required.',
+        executed: false,
+      }
+    }
+
+    if (bvResult.passed) {
+      emit('fix.applied', projectId, { action: 'full-schema-repair', bvVerdict: bvResult.verdict })
+      return {
+        success: true,
+        type: 'FIX',
+        message: `Schema scan complete.\n\nAll ${bvResult.checksRun} applicable behavioral check(s) pass.\nNo changes were required.`,
         executed: false,
       }
     }

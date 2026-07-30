@@ -230,3 +230,33 @@ describe('regression detection excludes the targeted invariant', () => {
     expect(owningInvariantIds('contract_surface_broken', { surface: 'storage' })).toEqual([])
   })
 })
+
+describe('behavioral verification cannot pass vacuously', () => {
+  // `passed` is computed as `checks.every(c => c.skipped || c.passed)`, so an
+  // all-skipped run satisfies it having asserted nothing. Two callers read that
+  // as proof the backend behaves correctly — one of them printed "All
+  // behavioral checks pass" after running none. `verdict` is the honest signal.
+  type Check = { id: string; name: string; passed: boolean; skipped: boolean; details: string[] }
+  const verdictOf = (checks: Check[]) => {
+    const passed = checks.every(c => c.skipped || c.passed)
+    const checksRun = checks.filter(c => !c.skipped).length
+    return checksRun === 0 ? 'nothing_to_verify' : passed ? 'passed' : 'failed'
+  }
+  const mk = (skipped: boolean, passed: boolean): Check =>
+    ({ id: 'x', name: 'x', passed, skipped, details: [] })
+
+  it('reports nothing_to_verify when every check skipped', () => {
+    const checks = [mk(true, false), mk(true, false)]
+    // the legacy field still reads true — which is the trap
+    expect(checks.every(c => c.skipped || c.passed)).toBe(true)
+    expect(verdictOf(checks)).toBe('nothing_to_verify')
+  })
+
+  it('reports passed only when something actually ran', () => {
+    expect(verdictOf([mk(false, true), mk(true, false)])).toBe('passed')
+  })
+
+  it('reports failed when a check that ran did not pass', () => {
+    expect(verdictOf([mk(false, false), mk(true, false)])).toBe('failed')
+  })
+})

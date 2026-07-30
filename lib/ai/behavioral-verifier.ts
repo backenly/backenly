@@ -59,8 +59,26 @@ export interface BehavioralCheck {
 
 export interface BehavioralVerificationResult {
   projectId: string
-  /** true only when no non-skipped check failed */
+  /**
+   * true only when no non-skipped check failed.
+   *
+   * READ `verdict` INSTEAD unless you specifically mean that. This field is true
+   * when every check SKIPPED, because "nothing failed" is vacuously satisfied by
+   * "nothing ran" — and two callers read it as proof the backend behaves
+   * correctly. Kept for compatibility; `verdict` is the honest signal.
+   */
   passed: boolean
+  /** Checks that actually executed (not skipped). */
+  checksRun: number
+  /** Checks that were not applicable to this project. */
+  checksSkipped: number
+  /**
+   * What was actually established:
+   *   'passed'             — at least one check ran and none failed
+   *   'failed'             — at least one check ran and failed
+   *   'nothing_to_verify'  — every check skipped; NOT evidence of correctness
+   */
+  verdict: 'passed' | 'failed' | 'nothing_to_verify'
   checks: BehavioralCheck[]
   executedAt: string
 }
@@ -94,7 +112,23 @@ export async function runBehavioralVerification(
 
   const passed = checks.every(c => c.skipped || c.passed)
 
-  return { projectId, passed, checks, executedAt: new Date().toISOString() }
+  // A skipped check satisfies `every` above, so an all-skipped run reports
+  // passed=true having asserted nothing. Count what ran and say which of the
+  // three states this actually is.
+  const checksRun = checks.filter(c => !c.skipped).length
+  const checksSkipped = checks.length - checksRun
+  const verdict: BehavioralVerificationResult['verdict'] =
+    checksRun === 0 ? 'nothing_to_verify' : passed ? 'passed' : 'failed'
+
+  return {
+    projectId,
+    passed,
+    checksRun,
+    checksSkipped,
+    verdict,
+    checks,
+    executedAt: new Date().toISOString(),
+  }
 }
 
 /** Convert a settled promise result to a BehavioralCheck — absorbs unexpected throws. */
