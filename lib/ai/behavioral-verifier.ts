@@ -374,21 +374,32 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
     const lName = t.name.toLowerCase()
     if (SYSTEM_TABLES.has(lName)) continue
 
-    // Skip any table with FK constraints pointing to other tables — those FKs can't be
-    // satisfied during a synthetic CRUD test without creating parent rows first.
-    // This applies to all tables, not just async-job-pattern ones.
+    // A foreign key is no longer disqualifying — parents get seeded below, the
+    // same way checkRlsIsolation already does it.
+    //
+    // This used to `continue` on any FK to another table, with the reasoning
+    // "we can't create a real user in a CRUD test". On a normal relational
+    // schema that is every table, so the check tested nothing and reported it
+    // as though the project were empty. The capability it called impossible
+    // lives a few hundred lines below in this same file.
+    //
+    // Only ONE case still disqualifies: a FK referencing a non-id parent column
+    // (compound PK, unusual target). Synthetic seeding cannot satisfy those, and
+    // guessing produces a confusing 23503 instead of an honest skip — the same
+    // line checkRlsIsolation draws.
     try {
-      const fkRefs = await loadFkReferences(schemaName, lName)
-      // Any FK to an external table is blocking (even to users — we can't create a real user in a CRUD test)
-      const blockingFks = fkRefs.filter(ref => ref !== lName)
-      if (blockingFks.length > 0) {
-        const label = ASYNC_JOB_PATTERN.test(lName) ? 'async job table' : 'table'
-        base.details.push(`⏭ Skipping '${lName}' — ${label} has FK dependency on [${blockingFks.join(', ')}]`)
+      const fkMaps = await loadFkColumnMappings(schemaName, lName)
+      const unseedable = fkMaps.filter(m => m.foreignColumn !== 'id' && m.foreignTable !== lName)
+      if (unseedable.length > 0) {
+        base.details.push(
+          `⏭ Skipping '${lName}' — FK(s) reference non-id parent columns ` +
+          `(${unseedable.map(m => `${m.column}→${m.foreignTable}.${m.foreignColumn}`).join(', ')})`,
+        )
         continue
       }
     } catch {
-      // FK query failed — be conservative and skip this table
-      base.details.push(`⏭ Skipping '${lName}' — could not verify FK constraints`)
+      // FK metadata query failed — be conservative and skip this table.
+      base.details.push(`⏭ Skipping '${lName}' — could not read FK constraints`)
       continue
     }
 
@@ -423,6 +434,9 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
 
   const tableName = candidate.name.toLowerCase()
   let testId: string | null = null
+  // Every row this check creates, newest last. The `finally` unwinds it in
+  // reverse so a child never outlives the parent it references.
+  const seededParentRows: Array<{ table: string; id: string }> = []
 
   try {
     const cols = await loadColumns(schemaName, tableName)
@@ -430,9 +444,68 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
       return { ...base, skipped: true, skipReason: `Table '${tableName}' has no columns in information_schema` }
     }
 
+    // ── Seed FK parents ───────────────────────────────────────────────────────
+    // Authoritative mapping from pg_constraint, not column-name heuristics:
+    // `author_id → users.id` and `parent_comment_id → comments.id` both need the
+    // exact target, and guessing is what produced 23503 in the field.
+    const fkMappings = await loadFkColumnMappings(schemaName, tableName)
+    const fkOverrides: Record<string, string> = {}
+    const mappingsByParent = new Map<string, FkColumnMapping[]>()
+    for (const m of fkMappings) {
+      // A self-referencing FK is satisfied by leaving the column null; seeding a
+      // parent in the same table would just create a second row to clean up.
+      if (m.foreignTable === tableName) continue
+      const arr = mappingsByParent.get(m.foreignTable) ?? []
+      arr.push(m)
+      mappingsByParent.set(m.foreignTable, arr)
+    }
+
+    for (const [refTable, mappings] of mappingsByParent) {
+      const refCols = await loadColumns(schemaName, refTable)
+      if (refCols.length === 0) continue
+
+      const seedId = crypto.randomUUID()
+      const refCheckOverrides = await loadCheckConstraintValues(schemaName, refTable)
+      // buildInsertParts skips 'id', so prepend it — the seeded parent must land
+      // on a known id, which is the value written into every FK pointing at it.
+      const { insertCols: refInsertCols, insertVals: refInsertVals, colInfoMap: refColInfoMap } =
+        buildInsertParts(refCols, {
+          ...refCheckOverrides,
+          email: `__bv_crud_${seedId.slice(0, 8)}@test.internal`,
+        })
+      const allRefCols = ['id', ...refInsertCols]
+      const allRefVals: any[] = [seedId, ...refInsertVals]
+      const allRefColInfoMap = new Map<string, string>([['id', 'uuid'], ...refColInfoMap])
+      const { sql: refSql, params: refParams } =
+        buildInsertSql(schemaName, refTable, allRefCols, allRefVals, allRefColInfoMap)
+
+      try {
+        const refInserted = await executeWithUserContext<any>('', true, refSql, refParams)
+        if (!refInserted[0]) continue
+        const parentId = String(refInserted[0].id ?? refInserted[0][Object.keys(refInserted[0])[0]])
+        // Recorded BEFORE anything else can fail, so cleanup can always find it.
+        seededParentRows.push({ table: refTable, id: parentId })
+        for (const m of mappings) fkOverrides[m.column] = parentId
+        base.details.push(
+          `✓ Seeded "${refTable}" id=${parentId.slice(0, 8)}… (FK${mappings.length === 1 ? '' : 's'}: ${mappings.map(m => m.column).join(', ')})`,
+        )
+      } catch (err: any) {
+        // Skip rather than fail: an unseedable parent says nothing about whether
+        // CRUD works, and the `finally` still unwinds whatever did get seeded.
+        return {
+          ...base,
+          skipped: true,
+          skipReason:
+            `CRUD lifecycle skipped — could not seed parent table "${refTable}" required by a FK on ` +
+            `"${tableName}": ${sanitizeDiagnostic(err)}`,
+          details: base.details,
+        }
+      }
+    }
+
     // ── INSERT ────────────────────────────────────────────────────────────────
     const checkOverrides = await loadCheckConstraintValues(schemaName, tableName)
-    const { insertCols, insertVals, colInfoMap } = buildInsertParts(cols, checkOverrides)
+    const { insertCols, insertVals, colInfoMap } = buildInsertParts(cols, { ...checkOverrides, ...fkOverrides })
     const { sql: insertSql, params: insertParams } = buildInsertSql(schemaName, tableName, insertCols, insertVals, colInfoMap)
 
     const inserted = await executeWithUserContext<any>('', true, insertSql, insertParams)
@@ -492,7 +565,15 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
   } catch (err: any) {
     return { ...base, error: sanitizeDiagnostic(err), details: base.details }
   } finally {
-    // Always attempt cleanup — even if DELETE succeeded earlier, belt-and-suspenders
+    // ── Unwind everything this check created ──────────────────────────────────
+    //
+    // Order matters and is not cosmetic: the test row references the seeded
+    // parents, so deleting a parent first fails on the FK and strands BOTH rows
+    // in a customer's table. Child first, then parents in reverse seed order.
+    //
+    // Service-role context first in each case. A seeded parent is often a row in
+    // `users`, which is RLS-FORCED — a plain DELETE there matches zero rows and
+    // silently leaks the row rather than erroring.
     if (testId) {
       try {
         await executeWithUserContext('', true, `DELETE FROM "${schemaName}"."${tableName}" WHERE id = $1::uuid`, [testId])
@@ -501,6 +582,15 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
         try {
           await prisma.$executeRawUnsafe(`DELETE FROM "${schemaName}"."${tableName}" WHERE id = $1::uuid`, testId)
         } catch { /* truly non-fatal at this point */ }
+      }
+    }
+
+    for (const parent of [...seededParentRows].reverse()) {
+      const delSql = `DELETE FROM "${schemaName}"."${parent.table}" WHERE id = $1::uuid`
+      try {
+        await executeWithUserContext('', true, delSql, [parent.id])
+      } catch {
+        try { await prisma.$executeRawUnsafe(delSql, parent.id) } catch { /* non-fatal */ }
       }
     }
   }
