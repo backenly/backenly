@@ -67,7 +67,10 @@ export async function scoreReadiness(
   const { autoFix = true } = options
 
   // Load everything we need in one round-trip
-  const [project, apiDefs, triggers, policies] = await Promise.all([
+  // `apiDefs` was destructured here and never referenced again in this file —
+  // a query fetching rows nobody read, from a table nothing writes. Removed
+  // 2026-07-30 rather than converted: there was no consumer to convert.
+  const [project, triggers, policies] = await Promise.all([
     prisma.project.findUnique({
       where: { id: projectId },
       select: {
@@ -77,16 +80,6 @@ export async function scoreReadiness(
         activeGraphId: true,
         projectStatus: true,
         activeGraph: { select: { graphData: true } },
-      },
-    }),
-    prisma.apiDefinition.findMany({
-      where: { projectId },
-      select: {
-        id: true,
-        name: true,
-        authRequired: true,
-        operations: true,
-        enabled: true,
       },
     }),
     prisma.appTrigger.findMany({

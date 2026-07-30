@@ -107,8 +107,6 @@ const KNOWN_READERS = new Set<string>([
   'lib/ai/build-runtime/security-auditor.ts',
   'lib/ai/minimal-executor.ts',
   'lib/ai/production-intelligence.ts',
-  'lib/deployment/readiness-scorer.ts',
-  'lib/services/schema-impact-analyzer.ts',
   'lib/services/serverless-warmup.ts',
   // ── Legitimate: unwinding rows earlier fixes left behind ─────────────────
   // Detection must never ask this table what exists; a REVERT may still ask

@@ -111,58 +111,20 @@ async function findImpactedAPIs(
   results: ImpactedArtifact[],
 ): Promise<void> {
   try {
-    const { prisma } = await import('@/lib/db/prisma')
-    const apis = await prisma.apiDefinition.findMany({
-      where: { projectId },
-      select: { id: true, name: true, basePath: true, operations: true, endpoints: true },
-    })
-
-    for (const api of apis) {
-      // operations + endpoints are the JSON fields that contain any embedded field refs
-      const code = JSON.stringify(api.operations ?? '') + JSON.stringify(api.endpoints ?? '')
-      const location = `REST ${api.basePath ?? '/' + api.name}`
-
-      // Check if this API relates to the changed table (by basePath or name heuristic)
-      const isOnTable = (api.basePath ?? '').includes(tableName)
-        || api.name.toLowerCase().includes(tableName.toLowerCase())
-        || codeReferences(code, tableName)
-
-      if (isOnTable) {
-        if (fieldName) {
-          const fieldRef = findFieldReference(code, fieldName)
-          if (fieldRef) {
-            results.push({
-              artifactType: 'api_endpoint',
-              artifactId: api.id,
-              artifactName: location,
-              severity: 'breaking',
-              description: `Endpoint operations reference field "${fieldName}" which will be renamed/removed`,
-              matchedText: fieldRef,
-              updateInstruction: `Update all references to "${fieldName}" in the API definition for ${location}`,
-            })
-          } else {
-            results.push({
-              artifactType: 'api_endpoint',
-              artifactId: api.id,
-              artifactName: location,
-              severity: 'advisory',
-              description: `Endpoint is on table "${tableName}" — verify schema change is compatible`,
-              updateInstruction: `Review ${location} after schema change`,
-            })
-          }
-        } else {
-          // Table-level change (rename/drop table)
-          results.push({
-            artifactType: 'api_endpoint',
-            artifactId: api.id,
-            artifactName: location,
-            severity: 'breaking',
-            description: `Endpoint targets table "${tableName}" which will be renamed/dropped`,
-            updateInstruction: `This endpoint will stop working. Update the API definition to use the new table name.`,
-          })
-        }
-      }
-    }
+    // RETIRED 2026-07-30 for the REST surface.
+    //
+    // This searched each ApiDefinition's `operations` and `endpoints` JSON for
+    // references to the column being changed, to warn "this change breaks these
+    // endpoints". Under PostgREST there is no stored API code that can hold a
+    // stale field reference: the REST surface is DERIVED from the schema on
+    // every request, so renaming a column changes the API in the same instant.
+    // The analysis is not stale here, it is inexpressible.
+    //
+    // It also read a table with no create path since the cutover, so the loop
+    // iterated nothing on every modern project regardless.
+    //
+    // Impact on code that genuinely embeds field names — AI functions, triggers
+    // — is analysed elsewhere in this file and is unaffected.
   } catch {
     // Non-fatal — impact analysis is best-effort
   }
