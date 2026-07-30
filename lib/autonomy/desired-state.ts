@@ -33,7 +33,12 @@ import {
   detectApiCoverageGaps,
   detectOverPermissiveRls,
 } from '@/lib/core/drift-detector'
-import { detectMissingRls } from '@/lib/services/workspace-observer'
+import {
+  detectMissingRls,
+  detectRlsDeniesEverything,
+  detectOrphanTables,
+} from '@/lib/services/workspace-observer'
+import { verifyWorkflows } from '@/lib/core/workflow-verifier'
 import { classifyFix } from '@/lib/core/fix-classifier'
 import { checksFromDesiredState, type CheckState } from './fix-acceptance'
 import { normalizeFindingType } from '@/lib/core/types'
@@ -149,6 +154,34 @@ export const INVARIANTS: readonly Invariant[] = [
     rationale:
       'Partial CRUD or endpoints pointing at dropped tables cause runtime failures in the deployed app.',
     probe: detectApiCoverageGaps,
+  },
+  // ── Registered 2026-07-30 so their auto-applied fixes can be verified ───────
+  //
+  // These three probes already existed and were already read-only; they were
+  // simply absent from this catalogue. The consequence was specific: their
+  // finding types are classified `auto`, so the loop applied their fixes without
+  // asking, and `recheckGap` had no probe to re-run afterwards — every one was
+  // recorded as fixed on the executor's word alone.
+  {
+    id: 'rls_is_not_deny_all',
+    title: 'No table is protected by a policy that denies everyone, including its owner',
+    rationale:
+      'RLS enabled with no permissive policy is not protection, it is an outage: every query matches zero rows and the API answers 200 with an empty array. It looks identical to "the user has no data" from every surface except the one that matters.',
+    probe: detectRlsDeniesEverything,
+  },
+  {
+    id: 'live_tables_are_adopted',
+    title: 'Every table in the database is known to the platform',
+    rationale:
+      'A READ_WRITE connection string is a product feature, so tables created from psql or a migration tool are expected, not anomalous. Until one is adopted it has no RLS, no API contract and no backup entry in the platform metadata — it is real data the platform cannot see. This is the most likely finding on any project that uses the direct-connection escape hatch.',
+    probe: detectOrphanTables,
+  },
+  {
+    id: 'declared_workflows_still_work',
+    title: 'Every declared workflow still has all of its components',
+    rationale:
+      'A workflow (signup → verify → login, checkout → webhook → fulfil) breaks when any one component is removed, and the individual pieces all still look healthy on their own. This is the check that sees the seam rather than the parts.',
+    probe: verifyWorkflows,
   },
   {
     id: 'live_schema_matches_intent',
@@ -372,6 +405,9 @@ const INVARIANT_EMITS: Readonly<Record<string, readonly FindingType[]>> = {
   // looks for it), and certify every fix as verified.
   every_table_has_an_api: [],
   api_coverage_is_complete: [],
+  rls_is_not_deny_all: ['rls_denies_everything'],
+  live_tables_are_adopted: ['orphan_table'],
+  declared_workflows_still_work: ['workflow_broken'],
   live_schema_matches_intent: ['shadow_mutation'],
   auth_subsystem_is_intact: [
     'auth_jwt_missing',

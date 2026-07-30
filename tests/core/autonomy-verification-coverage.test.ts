@@ -118,23 +118,27 @@ describe('no finding type is classified auto without an executable repair', () =
     // Pinned, not asserted-empty: closing these needs real probes, and a
     // failing suite would hide the ones already closed. Shrinking this list is
     // the measurable definition of the loop becoming trustworthy.
-    // Alphabetical (from .sort()). Two groups are mixed together here:
-    //   retired vocabulary, now unreachable because the ApiDefinition detectors
-    //     are no-ops — api_drift, missing_api_crud, missing_api_definition,
-    //     missing_rate_limit, realtime_gap
-    //   live and genuinely unverifiable, each needing a probe before it can
-    //     honestly claim a verified fix — orphan_table, rls_denies_everything,
-    //     verification_failed, workflow_broken
+    // Everything left is RETIRED vocabulary: the ApiDefinition detectors are
+    // no-ops, so nothing produces these types and none is reachable. They stay
+    // classified until the vocabulary itself is retired in its own pass.
+    //
+    // orphan_table, rls_denies_everything and workflow_broken were removed from
+    // this list on 2026-07-30 by registering their existing probes in the
+    // desired-state catalogue — the probes were already read-only and already
+    // written, just never wired in, so their auto-applied fixes were recorded on
+    // the executor's word alone.
+    //
+    // verification_failed is deliberately NOT here and deliberately not probed:
+    // it is produced by EXECUTING verification scenarios, so re-running it after
+    // every fix would make the recheck path side-effecting and expensive. It is
+    // covered by the acceptance gate's regression half instead.
     expect(unverifiable.sort()).toEqual([
       'api_drift',
       'missing_api_crud',
       'missing_api_definition',
       'missing_rate_limit',
-      'orphan_table',
       'realtime_gap',
-      'rls_denies_everything',
       'verification_failed',
-      'workflow_broken',
     ])
   })
 

@@ -93,7 +93,10 @@ describe('summarizeDesiredState — non-technical, crash-free', () => {
       errors: [],
     }
     const s = summarizeDesiredState(report)
-    expect(s).toContain('2 gap(s)')
+    // Updated 2026-07-30: summarizeDesiredState was rewritten to speak plainly
+    // for non-engineer founders ('2 issues found — ...'). The assertion still
+    // pins the COUNT and the absence of jargon, which is what it was for.
+    expect(s).toContain('2 issues found')
     expect(s).toMatch(/auto-repair/i)
     expect(s).toMatch(/approval/i)
     // no raw finding-type identifiers in the user-facing summary

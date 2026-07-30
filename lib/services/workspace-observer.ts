@@ -952,14 +952,23 @@ export async function detectRlsDeniesEverything(projectId: string): Promise<RawF
 /**
  * Detect tables that exist in the database but have no ApiDefinition (orphaned).
  */
-async function detectOrphanTables(projectId: string): Promise<RawFinding[]> {
+export async function detectOrphanTables(projectId: string): Promise<RawFinding[]> {
   const schemaName = `workspace_${projectId}`
 
+  // Exported (2026-07-30) so the desired-state catalogue can re-run it after a
+  // REGISTER_TABLE fix. orphan_table is applied automatically but had no probe
+  // registered, so `recheckGap` could never confirm the adoption held — and
+  // adoption is the single most likely fix on a platform that hands out a direct
+  // connection string and invites psql.
+  //
+  // `probeQueryFailed` rather than `.catch(() => ({ rows: [] }))`: swallowing the
+  // error turned "I could not look" into "I looked and found nothing", which is
+  // exactly how detectMissingRls stayed silently dead for months.
   const liveRows = await queryWorkspaceSchema(
     projectId,
     `SELECT tablename FROM pg_tables WHERE schemaname = $1 AND ${notReservedTableSql('tablename')}`,
     schemaName
-  ).catch(() => ({ rows: [] }))
+  ).catch(probeQueryFailed('detectOrphanTables'))
 
   const liveTables: string[] = (liveRows?.rows ?? liveRows ?? []).map((r: any) => r.tablename)
   if (!liveTables.length) return []

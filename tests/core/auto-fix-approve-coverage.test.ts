@@ -114,9 +114,15 @@ describe('normalizeFindingType — real production dynamic types', () => {
     expect(deadEnds).toEqual([])
   })
 
-  test('schema_drift (353 in prod) classifies as approval, not silent notify_only', () => {
+  // Updated 2026-07-30. schema_drift normalizes to shadow_mutation, which became
+  // auto-safe on 2026-07-18: FIX_API re-syncs the API layer to the schema that
+  // is already live and snapshots first — it adopts the observed state, it never
+  // reverts the user's DDL. The point the test was defending (it must not be
+  // SILENT notify_only) still holds and is asserted directly.
+  test('schema_drift (353 in prod) is actionable, never silent notify_only', () => {
     const c = classifyFix('schema_drift', { description: 'column added outside AI' })
-    expect(c.decision).toBe('approval')
+    expect(c.decision).not.toBe('notify_only')
+    expect(c.decision).toBe('auto')
   })
 
   test('an entirely unknown type still returns a friendly hint, never a hard dead end', () => {

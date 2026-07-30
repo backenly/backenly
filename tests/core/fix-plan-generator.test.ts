@@ -205,10 +205,14 @@ describe('generateFixPlansFromRawFindings', () => {
     expect(plans[0].autoFixable).toBe(false)
   })
 
-  test('orphan_table → requiresApproval (approval-classified by fix-classifier)', () => {
+  // Updated 2026-07-30. orphan_table became auto-safe on 2026-07-18: the repair
+  // is the ADOPT path (REGISTER_TABLE) which adds metadata, an API and RLS
+  // around data that already exists and never drops anything. Dropping remains a
+  // manual action in the Database section. The test predated that change.
+  test('orphan_table → auto-safe (ADOPT path never drops data)', () => {
     const plans = generateFixPlansFromRawFindings([makeRaw('orphan_table')])
-    expect(plans[0].requiresApproval).toBe(true)
-    expect(plans[0].autoFixable).toBe(false)
+    expect(plans[0].requiresApproval).toBe(false)
+    expect(plans[0].autoFixable).toBe(true)
   })
 
   test('auth_spike → requiresApproval', () => {
@@ -222,10 +226,17 @@ describe('generateFixPlansFromRawFindings', () => {
     expect(plans[0].autoFixable).toBe(true)
   })
 
-  test('auth_jwt_missing → autoFixable (fix_auth)', () => {
+  // Updated 2026-07-30. This asserted autoFixable=true, which contradicts the
+  // classifier's safety floor: auth mutations are never auto-executed, because
+  // restoring or rotating a JWT secret invalidates every end-user session at
+  // once. fix-classifier puts auth_jwt_missing in NEEDS_APPROVAL with that exact
+  // reason and a risk note. The code is right and the test was stale; asserting
+  // the old behaviour would have pressured someone into weakening the floor.
+  test('auth_jwt_missing → fix_auth, gated on approval (auth safety floor)', () => {
     const plans = generateFixPlansFromRawFindings([makeRaw('auth_jwt_missing')])
     expect(plans[0].action).toBe('fix_auth')
-    expect(plans[0].autoFixable).toBe(true)
+    expect(plans[0].autoFixable).toBe(false)
+    expect(plans[0].requiresApproval).toBe(true)
   })
 
   test('uses tableName from finding.details as target', () => {
