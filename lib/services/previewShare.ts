@@ -8,11 +8,12 @@
 import jwt from 'jsonwebtoken';
 import { PrismaClient } from '@prisma/client';
 import crypto from 'crypto';
+import { requirePreviewTokenSecret } from '@/lib/auth/jwt-secret';
 
 const prisma = new PrismaClient();
 
 // JWT secret for preview tokens (use dedicated secret in production)
-const PREVIEW_TOKEN_SECRET = process.env.PREVIEW_TOKEN_SECRET || process.env.JWT_SECRET || 'preview-secret-change-in-production';
+// Resolved per call — see lib/auth/jwt-secret.ts (no published fallback).
 
 export interface PreviewShareOptions {
   projectId: string;
@@ -92,7 +93,7 @@ export async function createPreviewShare(options: PreviewShareOptions): Promise<
     exp: Math.floor(expiresAt.getTime() / 1000),
   };
 
-  const token = jwt.sign(tokenPayload, PREVIEW_TOKEN_SECRET);
+  const token = jwt.sign(tokenPayload, requirePreviewTokenSecret('sign a preview-share token'));
 
   // Update share with actual token
   await prisma.previewShare.update({
@@ -118,7 +119,7 @@ export async function createPreviewShare(options: PreviewShareOptions): Promise<
 export async function validatePreviewToken(token: string): Promise<ShareValidationResult> {
   try {
     // Verify JWT signature and expiration
-    const decoded = jwt.verify(token, PREVIEW_TOKEN_SECRET) as PreviewTokenPayload;
+    const decoded = jwt.verify(token, requirePreviewTokenSecret('verify a preview-share token')) as PreviewTokenPayload;
 
     // Check if share exists and isn't revoked
     const share = await prisma.previewShare.findUnique({

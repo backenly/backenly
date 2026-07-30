@@ -11,11 +11,12 @@ import fs from 'fs';
 import path from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { requireJwtSecret } from '@/lib/auth/jwt-secret';
 
 const execAsync = promisify(exec);
 const prisma = new PrismaClient();
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
+// Resolved per call — see lib/auth/jwt-secret.ts (no published fallback).
 
 // 🚨 SECURITY: Single-flight migration lock to prevent concurrent migrations
 const migrationLocks = new Map<string, Promise<any>>();
@@ -267,7 +268,7 @@ export async function registerUser(
     // Generate JWT token
     const token = jwt.sign(
       { userId: user.id, email: user.email },
-      JWT_SECRET,
+      requireJwtSecret('sign a workspace token'),
       { expiresIn: '7d' }
     );
     
@@ -337,7 +338,7 @@ export async function loginUser(
     // Generate JWT token
     const token = jwt.sign(
       { userId: user.id, email: user.email },
-      JWT_SECRET,
+      requireJwtSecret('sign a workspace token'),
       { expiresIn: '7d' }
     );
     

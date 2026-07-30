@@ -6,6 +6,7 @@ import { prisma } from '@/lib/db'
 import { logger } from '@/lib/logger'
 import { verifyOAuthState, validateStateProvider } from '@/lib/auth/oauth-state'
 import { assertSignupAllowed } from '@/lib/platform/controls'
+import { requireJwtSecret } from '@/lib/auth/jwt-secret'
 
 export async function GET(request: NextRequest) {
   try {
@@ -180,7 +181,9 @@ export async function GET(request: NextRequest) {
     })
 
     // ✅ SECURITY: Create JWT with projectId in payload
-    const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production'
+    // No `||` fallback: this signs an account session, and a published default
+    // would let anyone mint one. See lib/auth/jwt-secret.ts.
+    const JWT_SECRET = requireJwtSecret('sign a GitHub OAuth session token')
     const token = sign(
       {
         userId: user.id,

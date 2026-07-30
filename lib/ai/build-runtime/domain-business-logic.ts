@@ -1670,6 +1670,16 @@ const IMPERSONATION_DURATION = 3600 // 1 hour max
 
 export async function POST(req: NextRequest) {
   try {
+    // This endpoint mints a token that ACTS AS another user, so both secrets must
+    // be genuinely configured. Unset ADMIN_KEY would otherwise be compared
+    // against a caller-supplied value, and an unset JWT_SECRET would surface as
+    // a jsonwebtoken stack trace instead of a refusal.
+    if (!ADMIN_KEY || ADMIN_KEY.length < 16) {
+      return NextResponse.json({ error: 'Impersonation is not configured (ADMIN_API_KEY missing)' }, { status: 503 })
+    }
+    if (!JWT_SECRET || JWT_SECRET.length < 32) {
+      return NextResponse.json({ error: 'Impersonation is not configured (JWT_SECRET missing or too short)' }, { status: 503 })
+    }
     const key = req.headers.get('x-admin-key') ?? req.headers.get('authorization')?.replace('Bearer ', '')
     if (!key || key !== ADMIN_KEY) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 

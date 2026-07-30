@@ -3,6 +3,7 @@ import { promises as fs } from 'fs'
 import path from 'path'
 import crypto from 'crypto'
 import { S3StorageService } from './s3Storage'
+import { requireStorageSecret } from '@/lib/auth/jwt-secret'
 
 export interface StorageService {
   // Bucket operations
@@ -775,7 +776,7 @@ class LocalStorageService implements StorageService {
 
   private async generateAccessToken(fileId: string, expiresIn?: number): Promise<string> {
     // Simple token generation (in production, use JWT or similar)
-    const secret = process.env.STORAGE_SECRET || 'default-secret-change-in-production'
+    const secret = requireStorageSecret('sign a storage access token')
     const expires = expiresIn ? Date.now() + expiresIn * 1000 : Date.now() + 3600000 // 1 hour default
     const data = `${fileId}:${expires}`
     const token = crypto.createHmac('sha256', secret).update(data).digest('hex')
@@ -783,7 +784,7 @@ class LocalStorageService implements StorageService {
   }
 
   private generateAccessTokenSync(fileId: string, expiresIn?: number): string {
-    const secret = process.env.STORAGE_SECRET || 'default-secret-change-in-production'
+    const secret = requireStorageSecret('sign a storage access token')
     const expires = expiresIn ? Date.now() + expiresIn * 1000 : Date.now() + 3600000
     const data = `${fileId}:${expires}`
     const token = crypto.createHmac('sha256', secret).update(data).digest('hex')

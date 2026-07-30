@@ -51,7 +51,16 @@ import jwt from 'jsonwebtoken';
 import { PrismaClient } from '@prisma/client';
 
 const prisma = new PrismaClient();
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET || JWT_SECRET.length < 32) {
+  // Fail closed. A default here would mean this server signs AND verifies
+  // tokens with a value published in Backenly's open-source templates, so
+  // anyone could forge a session. Refusing to boot is the safe outcome.
+  throw new Error(
+    'JWT_SECRET must be set to at least 32 random characters before this server can start. '
+    + 'Generate one with: openssl rand -base64 48'
+  );
+}
 const PROJECT_ID = process.env.PROJECT_ID; // Cross-project isolation
 
 export interface AuthRequest extends Request {
@@ -115,7 +124,16 @@ import { PrismaClient } from '@prisma/client';
 const prisma = new PrismaClient();
 const router = express.Router();
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET || JWT_SECRET.length < 32) {
+  // Fail closed. A default here would mean this server signs AND verifies
+  // tokens with a value published in Backenly's open-source templates, so
+  // anyone could forge a session. Refusing to boot is the safe outcome.
+  throw new Error(
+    'JWT_SECRET must be set to at least 32 random characters before this server can start. '
+    + 'Generate one with: openssl rand -base64 48'
+  );
+}
 const PROJECT_ID = process.env.PROJECT_ID; // For cross-project isolation
 const JWT_EXPIRY = '30d'; // 30 days with sliding expiration
 
@@ -318,7 +336,16 @@ import { PrismaClient } from '@prisma/client';
 const prisma = new PrismaClient();
 const router = express.Router();
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET || JWT_SECRET.length < 32) {
+  // Fail closed. A default here would mean this server signs AND verifies
+  // tokens with a value published in Backenly's open-source templates, so
+  // anyone could forge a session. Refusing to boot is the safe outcome.
+  throw new Error(
+    'JWT_SECRET must be set to at least 32 random characters before this server can start. '
+    + 'Generate one with: openssl rand -base64 48'
+  );
+}
 const PROJECT_ID = process.env.PROJECT_ID;
 const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID;
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET;
@@ -487,7 +514,16 @@ import { PrismaClient } from '@prisma/client';
 const prisma = new PrismaClient();
 const router = express.Router();
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET || JWT_SECRET.length < 32) {
+  // Fail closed. A default here would mean this server signs AND verifies
+  // tokens with a value published in Backenly's open-source templates, so
+  // anyone could forge a session. Refusing to boot is the safe outcome.
+  throw new Error(
+    'JWT_SECRET must be set to at least 32 random characters before this server can start. '
+    + 'Generate one with: openssl rand -base64 48'
+  );
+}
 const PROJECT_ID = process.env.PROJECT_ID;
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;

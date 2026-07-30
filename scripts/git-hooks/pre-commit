@@ -42,7 +42,22 @@ echo "$added" | grep -qE '\bAKIA[0-9A-Z]{16}\b'                                 
 echo "$added" | grep -qE -- '-----BEGIN [A-Z ]*PRIVATE KEY-----'                           && hit "private key block"
 echo "$added" | grep -qE '\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}' && hit "JWT (eyJ...)"
 # secret-name = long value (hex or base64), the shape of JWT_SECRET / MASTER_ENCRYPTION_KEY / etc.
-echo "$added" | grep -qE '(JWT_SECRET|SESSION_SECRET|MASTER_ENCRYPTION_KEY|INTERNAL_API_TOKEN|CRON_SECRET|SECRET_KEY|PRIVATE_KEY|CLIENT_SECRET)[A-Z_]*\s*[=:]\s*["'\'']?[A-Za-z0-9+/_-]{16,}' \
+#
+# The second filter removes CODE that merely mentions a secret name, which the
+# bare pattern cannot distinguish from a literal. `const JWT_SECRET =
+# requireJwtSecret(...)` matched because "requireJwtSecret" is 16+ characters of
+# [A-Za-z0-9_], and a guard that cries wolf on ordinary code is a guard people
+# learn to pass with --no-verify. Excluded shapes, none of which can carry a
+# literal secret:
+#   = someFunction(...)      a call
+#   = process.env.NAME       reading configuration, the correct pattern
+#   = await ...              an async resolver
+#   : string / : number      a type annotation in an interface
+# A real hardcoded value is a bare quoted string or bare token, so it survives
+# every one of these exclusions.
+echo "$added" \
+  | grep -E '(JWT_SECRET|SESSION_SECRET|MASTER_ENCRYPTION_KEY|INTERNAL_API_TOKEN|CRON_SECRET|SECRET_KEY|PRIVATE_KEY|CLIENT_SECRET|STORAGE_SECRET|OAUTH_ENCRYPTION_KEY|PREVIEW_TOKEN_SECRET)[A-Z_]*\s*[=:]\s*["'\'']?[A-Za-z0-9+/_-]{16,}' \
+  | grep -qvE '[=:]\s*(await\s+)?([A-Za-z_$][A-Za-z0-9_$]*\s*\(|process\.env\.|string\b|number\b|boolean\b)' \
   && hit "hardcoded secret assignment (NAME=<long value>)"
 # connection string carrying real credentials (not localhost / placeholder)
 echo "$added" | grep -qE '(mongodb(\+srv)?|postgres(ql)?)://[^\s:/@]+:[^@\s]+@' \

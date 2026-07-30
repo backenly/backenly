@@ -7,8 +7,11 @@
 
 import jwt from 'jsonwebtoken'
 import { ExecutionContext } from '@/lib/context/execution-context'
+import { requireJwtSecret } from '@/lib/auth/jwt-secret'
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key'
+// Resolved per call, never a module constant with a published default.
+// See lib/auth/jwt-secret.ts for why the old published-constant fallback was
+// an authentication bypass waiting for a missing env var.
 const TOKEN_EXPIRY = '7d'
 
 /**
@@ -59,7 +62,7 @@ export function generateProjectScopedToken(
     email,
   }
   
-  const token = jwt.sign(payload, JWT_SECRET, {
+  const token = jwt.sign(payload, requireJwtSecret('sign a project-scoped token'), {
     expiresIn: TOKEN_EXPIRY,
   })
   
@@ -75,7 +78,7 @@ export function generateProjectScopedToken(
  */
 export function verifyProjectScopedToken(token: string): ProjectScopedTokenPayload {
   try {
-    const payload = jwt.verify(token, JWT_SECRET) as ProjectScopedTokenPayload
+    const payload = jwt.verify(token, requireJwtSecret('verify a project-scoped token')) as ProjectScopedTokenPayload
     
     // Validate required fields
     if (!payload.userId || !payload.projectId) {

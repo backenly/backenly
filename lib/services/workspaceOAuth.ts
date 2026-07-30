@@ -7,15 +7,17 @@
 
 import { prisma } from '@/lib/db'
 import * as crypto from 'crypto'
+import { requireOAuthEncryptionKey } from '@/lib/auth/jwt-secret'
 
-const ENCRYPTION_KEY = process.env.OAUTH_ENCRYPTION_KEY || 'default-key-change-in-production'
+// Resolved per call — see lib/auth/jwt-secret.ts. A published default here
+// meant every stored OAuth client secret was decryptable by anyone.
 const ALGORITHM = 'aes-256-cbc'
 
 /**
  * Encrypt sensitive data (client secrets)
  */
 function encrypt(text: string): string {
-  const key = crypto.scryptSync(ENCRYPTION_KEY, 'salt', 32)
+  const key = crypto.scryptSync(requireOAuthEncryptionKey(), 'salt', 32)
   const iv = crypto.randomBytes(16)
   const cipher = crypto.createCipheriv(ALGORITHM, key, iv)
   
@@ -30,7 +32,7 @@ function encrypt(text: string): string {
  */
 function decrypt(encryptedText: string): string {
   const [ivHex, encrypted] = encryptedText.split(':')
-  const key = crypto.scryptSync(ENCRYPTION_KEY, 'salt', 32)
+  const key = crypto.scryptSync(requireOAuthEncryptionKey(), 'salt', 32)
   const iv = Buffer.from(ivHex, 'hex')
   const decipher = crypto.createDecipheriv(ALGORITHM, key, iv)
   
