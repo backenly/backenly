@@ -105,7 +105,12 @@ const KNOWN_READERS = new Set<string>([
   'app/api/projects/[id]/state/route.ts',     // dashboard state
   // ── Internal decisions taken on a count that is always 0 ─────────────────
   'lib/ai/minimal-executor.ts',
-  'lib/ai/production-intelligence.ts',
+  // serverless-warmup is UNREACHABLE, not just stale: its only entry is
+  // app/api/cron/serverless-warmup, and no /api/cron/* route is invoked on
+  // this host (no crontab entry, no systemd timer, zero hits in the nginx
+  // access log). It also warms per-ApiDefinition 'execution plans', a concept
+  // PostgREST does not have. Converting dead code that models a retired
+  // architecture is waste - it wants deleting or wiring up, as a decision.
   'lib/services/serverless-warmup.ts',
   // ── Legitimate: unwinding rows earlier fixes left behind ─────────────────
   // Detection must never ask this table what exists; a REVERT may still ask

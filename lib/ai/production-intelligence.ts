@@ -156,75 +156,21 @@ async function detectMissingIndexes(projectId: string): Promise<ProductionIssue[
 // ---------------------------------------------------------------------------
 
 async function detectN1Risk(projectId: string): Promise<ProductionIssue[]> {
-  try {
-    const schema = `workspace_${projectId}`
-
-    const apiDefs = await prisma.apiDefinition.findMany({
-      where: { projectId },
-      select: {
-        id: true,
-        name: true,
-        basePath: true,
-        operations: true,
-        config: true,
-        table: { select: { name: true } },
-      },
-    })
-
-    if (apiDefs.length === 0) return []
-
-    // Columns with FK pattern in the workspace schema
-    const fkColumns = await pgQuery<{ table_name: string; column_name: string }>(
-      `SELECT table_name, column_name
-       FROM information_schema.columns
-       WHERE table_schema = $1
-         AND column_name LIKE '%_id'
-         AND column_name != 'id'`,
-      [schema],
-    )
-
-    const fkTableSet = new Set(fkColumns.map((r) => r.table_name))
-
-    const issues: ProductionIssue[] = []
-
-    for (const api of apiDefs) {
-      const tableName = api.table?.name
-      if (!tableName) continue
-      if (!fkTableSet.has(tableName)) continue
-
-      // Check if this API has a list (GET /) operation
-      const ops = (api.operations as Record<string, unknown>) ?? {}
-      const hasListOp =
-        (ops['list'] !== undefined && ops['list'] !== false) ||
-        (ops['GET'] !== undefined)
-
-      if (!hasListOp) continue
-
-      // Check if config hints at an explicit JOIN strategy
-      const cfg = (api.config as Record<string, unknown>) ?? {}
-      if (cfg['joinStrategy'] || cfg['expand'] || cfg['include']) continue
-
-      const fksOnTable = fkColumns
-        .filter((c) => c.table_name === tableName)
-        .map((c) => c.column_name)
-
-      issues.push({
-        type: 'n_plus_one_risk',
-        severity: 'medium',
-        table: tableName,
-        location: `GET /v1/${projectId}/${api.basePath}`,
-        description: `List endpoint for "${tableName}" returns rows with FK column(s) [${fksOnTable.join(', ')}] but no JOIN strategy is configured — client code may issue one query per row to resolve relations.`,
-        recommendation:
-          'Add a "joinStrategy" or "expand" configuration to the API definition so related records are fetched in a single query instead of N individual lookups.',
-        autoFixable: false,
-      })
-    }
-
-    return issues
-  } catch (err: unknown) {
-    console.warn('[ProductionIntelligence] detectN1Risk error:', (err as Error).message)
-    return []
-  }
+  // RETIRED 2026-07-30 - vacuous as written.
+  //
+  // It flagged a table with FK columns whose ApiDefinition had a list operation
+  // and no `config.joinStrategy | expand | include`. Under PostgREST there is no
+  // stored per-API join strategy: related data is embedded per REQUEST via
+  // `?select=...`, chosen by the caller. The config it looked for is not a
+  // property this architecture has, and the table has had no create path since
+  // the cutover, so the loop ran zero times on every modern project.
+  //
+  // Still covered: the index half of the risk, by the `relationships_are_indexed`
+  // invariant (detectMissingFkIndexes), which is live and auto-fixed. Whether
+  // request-level over-fetching deserves its own detector is an open question
+  // this function was not answering.
+  void projectId
+  return []
 }
 
 // ---------------------------------------------------------------------------
@@ -307,64 +253,24 @@ async function detectWeakRLS(projectId: string): Promise<ProductionIssue[]> {
 // ---------------------------------------------------------------------------
 
 async function detectUnboundedPagination(projectId: string): Promise<ProductionIssue[]> {
-  try {
-    const apiDefs = await prisma.apiDefinition.findMany({
-      where: { projectId },
-      select: {
-        id: true,
-        name: true,
-        basePath: true,
-        operations: true,
-        config: true,
-        table: { select: { name: true } },
-      },
-    })
-
-    const issues: ProductionIssue[] = []
-
-    for (const api of apiDefs) {
-      const ops = (api.operations as Record<string, unknown>) ?? {}
-      const hasListOp =
-        (ops['list'] !== undefined && ops['list'] !== false) ||
-        (ops['GET'] !== undefined)
-
-      if (!hasListOp) continue
-
-      const cfg = (api.config as Record<string, unknown>) ?? {}
-      const hasPaginationConfig =
-        cfg['defaultLimit'] !== undefined ||
-        cfg['maxPageSize'] !== undefined ||
-        cfg['pageSize'] !== undefined
-
-      if (hasPaginationConfig) continue
-
-      // Also check inside the operations config
-      const listOpConfig =
-        (ops['list'] as Record<string, unknown>) ?? {}
-      if (
-        listOpConfig['defaultLimit'] !== undefined ||
-        listOpConfig['maxPageSize'] !== undefined
-      ) {
-        continue
-      }
-
-      issues.push({
-        type: 'unbounded_pagination',
-        severity: 'high',
-        table: api.table?.name,
-        location: `GET /v1/${projectId}/${api.basePath}`,
-        description: `List endpoint for "${api.table?.name ?? api.name}" has no enforced pagination limit — could return 10,000+ rows in a single response, causing memory exhaustion and slow responses.`,
-        recommendation:
-          'Set a "maxPageSize" (recommended: 100) and a "defaultLimit" (recommended: 20) in the API definition config to prevent runaway queries.',
-        autoFixable: false,
-      })
-    }
-
-    return issues
-  } catch (err: unknown) {
-    console.warn('[ProductionIntelligence] detectUnboundedPagination error:', (err as Error).message)
-    return []
-  }
+  // RETIRED 2026-07-30 - vacuous as written, and the underlying risk is UNVERIFIED.
+  //
+  // It flagged any list endpoint whose ApiDefinition `config` lacked
+  // defaultLimit / maxPageSize / pageSize. That config is never written and the
+  // table has no create path since the cutover, so this could not fire.
+  //
+  // Deliberately NOT claiming the risk is handled. PAGINATION_DEFAULT_LIMIT (20)
+  // and PAGINATION_MAX_LIMIT (100) are enforced by zod on the Next-side v1
+  // routes, but no clamp was found on the PostgREST handler path, which is what
+  // serves /db/* in production. Replacing a check that never fired with a comment
+  // asserting the runtime bounds every list would trade a false negative for a
+  // false assurance, which is worse.
+  //
+  // OPEN: confirm whether an unbounded GET /db/<table> through the PostgREST
+  // gateway is clamped server-side. If it is not, that wants a real detector -
+  // one that reads the request path, not a stored config.
+  void projectId
+  return []
 }
 
 // ---------------------------------------------------------------------------
