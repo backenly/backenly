@@ -120,7 +120,6 @@ const KNOWN_READERS = new Set<string>([
   'lib/ai/project-status-resolvers.ts',
   'lib/ai/schema-tools.ts',
   'lib/ai/smart-answerer.ts',
-  'lib/autonomy/hypothesis/probes.ts',
   'lib/deployment/readiness-scorer.ts',
   'lib/reports/change-report.ts',
   'lib/services/deploymentValidator.ts',

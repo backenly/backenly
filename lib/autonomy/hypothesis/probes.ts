@@ -141,14 +141,31 @@ export const tableExists: ProbeFn = async ctx => {
   return { outcome: Number(rows[0]?.n ?? 0) > 0 ? 'exists' : 'missing' }
 }
 
+/**
+ * Is this table reachable as a REST resource?
+ *
+ * Asks the CATALOG. It used to ask `ApiDefinition`, which has had no create
+ * path since the PostgREST cutover, so on every project built after it this
+ * probe answered 'absent' for EVERY table — always, regardless of reality.
+ *
+ * That is not a cosmetic wrong answer here. 'absent' is the sole prediction of
+ * the `missing_api_definition` hypothesis, whose remedy is GENERATE_API with
+ * autoApplicable: true — and GENERATE_API cannot create the row this probe was
+ * looking for. Left alone it would have confirmed that hypothesis on every
+ * table of every modern project, auto-applied a repair that changes nothing,
+ * and re-diagnosed it on the next tick: the same false-fix loop the
+ * ApiDefinition detectors produced, rebuilt inside the diagnosis engine.
+ *
+ * 'present_disabled' is no longer reachable and that is correct: per-resource
+ * enable/disable was a property of the projection. Under PostgREST a table is
+ * reachable or it is not, decided by the catalog plus the role's grants.
+ */
 export const apiDefinition: ProbeFn = async ctx => {
   const table = requireTable(ctx)
-  const api = await prisma.apiDefinition.findFirst({
-    where: { projectId: ctx.projectId, name: table },
-    select: { enabled: true },
-  })
-  if (!api) return { outcome: 'absent' }
-  return { outcome: api.enabled ? 'present_enabled' : 'present_disabled' }
+  const { listExposedTables } = await import('@/lib/mcp/schema-introspection')
+  const exposed = await listExposedTables(ctx.projectId)
+  const found = exposed.some(t => t.name.toLowerCase() === table.toLowerCase())
+  return { outcome: found ? 'present_enabled' : 'absent' }
 }
 
 /**

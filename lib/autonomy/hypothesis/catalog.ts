@@ -193,34 +193,46 @@ const ENDPOINT_404: SymptomDefinition = {
       },
     },
     {
-      id: 'missing_api_definition',
-      statement: 'The table exists but no API was ever generated for it',
+      // Restated 2026-07-30. Was "no API was ever generated for it", remedied by
+      // GENERATE_API with autoApplicable: true.
+      //
+      // Under PostgREST nothing "generates" an API — a table is reachable
+      // because it exists and the role holds a grant on it. GENERATE_API cannot
+      // affect that, so the old remedy was a repair that could never change the
+      // condition it was predicted from, applied automatically. Paired with a
+      // probe that answered 'absent' for every table, it was a false-fix loop
+      // waiting for the engine to be switched on.
+      //
+      // The state is real, but it is an EXPOSURE problem: the table exists and
+      // is not reachable, which means a missing grant or a schema absent from
+      // PostgREST's exposed list. Not auto-applicable, because widening access
+      // is exactly the decision that must not be taken unattended — the cutover
+      // script's blanket GRANT is what exposed password hashes.
+      id: 'table_not_exposed',
+      statement: 'The table exists but is not reachable through the REST API (missing grant or unexposed schema)',
       prior: 0.3,
       predicts: {
         table_exists: 'exists',
         api_definition: 'absent',
       },
       remedy: {
-        summary: 'Generate the REST API for this table.',
-        autoApplicable: true,
-        action: 'GENERATE_API',
-      },
-    },
-    {
-      id: 'api_definition_disabled',
-      statement: 'An API exists for this table but is disabled',
-      prior: 0.2,
-      predicts: {
-        table_exists: 'exists',
-        api_definition: 'present_disabled',
-      },
-      remedy: {
         summary:
-          'The resource was disabled deliberately. Re-enabling it is a policy ' +
-          'decision, not a repair.',
+          'The table is not exposed over REST. Check that its schema is on the PostgREST ' +
+          'exposed list and that the API role holds a grant on the table. Widening access is ' +
+          'a policy decision, so it is surfaced rather than applied.',
         autoApplicable: false,
       },
     },
+    // `api_definition_disabled` was removed on 2026-07-30. It carried prior 0.2
+    // on the sole prediction `api_definition: 'present_disabled'` — an outcome
+    // the probe can no longer produce, because per-resource enable/disable was a
+    // property of the ApiDefinition projection. Under PostgREST a table is
+    // reachable or it is not; there is no third "exists but switched off" state.
+    //
+    // A hypothesis that can never be confirmed is not harmless: it holds prior
+    // mass that belongs to the explanations that CAN be true, so every real
+    // diagnosis was competing against 0.2 of probability reserved for a state
+    // this architecture cannot be in.
     {
       id: 'table_does_not_exist',
       statement: 'The table does not exist — it was dropped, renamed, or never created',

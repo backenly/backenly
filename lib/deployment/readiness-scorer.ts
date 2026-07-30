@@ -845,15 +845,24 @@ async function checkSecurityAudit(projectId: string): Promise<ReadinessCheck> {
   }
 
   try {
-    // Skip if no API definitions exist — nothing to audit yet
-    const apiCount = await prisma.apiDefinition.count({ where: { projectId } })
-    if (apiCount === 0) {
+    // Skip only when there is genuinely nothing exposed.
+    //
+    // This counted ApiDefinition rows, which have had no create path since the
+    // PostgREST cutover. So on every project built after it the count was 0 and
+    // this returned `skip` — "Generate APIs first to enable security scanning" —
+    // meaning the security scan has not run on any modern project, and said so
+    // in words that read like ordinary setup advice rather than a gap.
+    //
+    // Reachability is the catalog's answer, so ask it.
+    const { listExposedTables } = await import('@/lib/mcp/schema-introspection')
+    const exposedCount = (await listExposedTables(projectId).catch(() => [])).length
+    if (exposedCount === 0) {
       return {
         ...base,
         severity: 'warning',
         status: 'skip',
-        message: 'No API definitions to audit — security scan skipped',
-        details: ['⏭ Generate APIs first to enable security scanning'],
+        message: 'No tables are exposed over REST yet — security scan skipped',
+        details: ['⏭ Create a table to enable security scanning'],
         fixApplied: false,
       }
     }
