@@ -366,7 +366,12 @@ function LoopPanelMini() {
             Running
           </span>
         </div>
-        <span className="font-mono text-[10px] text-zinc-600">checked 23h ago</span>
+        {/* The real panel reads the reconciler's own clock, which ticks every
+            minute on every plan (lib/autonomy/loop-tick.ts). "23h" was left here
+            from when this label was wired to the daily observer sweep, so the
+            page selling self-healing every minute showed a day-old timestamp
+            beside a RUNNING badge. The mock mirrors the real surface. */}
+        <span className="font-mono text-[10px] text-zinc-600">checked 1m ago</span>
       </div>
 
       <div className="px-4 pb-3 pt-4 sm:px-6">

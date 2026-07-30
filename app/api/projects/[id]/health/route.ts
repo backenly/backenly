@@ -13,6 +13,7 @@ import { prisma } from '@/lib/db/prisma'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import { resolvePendingActionMemory } from '@/lib/operational-memory/ledger'
 import { summariseFinding } from '@/lib/core/finding-summaries'
+import { getLastLoopTickAt } from '@/lib/autonomy/loop-tick'
 
 /**
  * How many findings the summary payload carries. A preview, not the truth —
@@ -104,7 +105,7 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
     }
 
     // Default: health summary for the dashboard widget
-    const [findings, recentAutoFixes, lastScan, project] = await Promise.all([
+    const [findings, recentAutoFixes, lastScan, project, lastLoopTick] = await Promise.all([
       prisma.healthFinding.findMany({
         where: { projectId, status: { in: ['open', 'pending_approval'] } },
         orderBy: [{ severity: 'asc' }, { detectedAt: 'desc' }],
@@ -135,6 +136,10 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
         where: { id: projectId },
         select: { lastObservedAt: true },
       }),
+      // The per-minute loop's own clock. Deliberately NOT folded into
+      // lastObservedAt below — see lib/autonomy/loop-tick.ts for why conflating
+      // the daily observer with the per-minute reconciler is the bug this fixes.
+      getLastLoopTickAt(projectId),
     ])
 
     const critical = findings.filter(f => f.severity === 'critical')
@@ -157,7 +162,12 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
     return NextResponse.json({
       success: true,
       data: {
+        // Last DEEP observer sweep (daily). Not the self-healing cadence.
         lastCheckedAt: project?.lastObservedAt ?? lastScan?.detectedAt ?? null,
+        // Last self-healing loop pass (per-minute on every plan). null means the
+        // loop has not run for this project inside the lookback — surface that,
+        // never substitute lastCheckedAt for it.
+        lastReconciledAt: lastLoopTick ? lastLoopTick.toISOString() : null,
         autoFixedThisWeek: recentAutoFixes,
         needsAttention: needsAction.length,
         criticalCount: critical.length,
@@ -198,7 +208,7 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
     }
 
     // Return a fresh health summary after the scan
-    const [findings, recentAutoFixes, project] = await Promise.all([
+    const [findings, recentAutoFixes, project, lastLoopTick] = await Promise.all([
       prisma.healthFinding.findMany({
         where: { projectId, status: { in: ['open', 'pending_approval'] } },
         orderBy: [{ severity: 'asc' }, { detectedAt: 'desc' }],
@@ -216,6 +226,9 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
         where: { id: projectId },
         select: { lastObservedAt: true },
       }),
+      // Unchanged by this scan: running the observer on demand does not tick the
+      // reconciler. Same field as GET so the two responses share one contract.
+      getLastLoopTickAt(projectId),
     ])
 
     return NextResponse.json({
@@ -223,6 +236,7 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
       data: {
         scannedAt: new Date().toISOString(),
         lastCheckedAt: project?.lastObservedAt ?? new Date().toISOString(),
+        lastReconciledAt: lastLoopTick ? lastLoopTick.toISOString() : null,
         autoFixedThisWeek: recentAutoFixes,
         criticalCount: findings.filter(f => f.severity === 'critical').length,
         warningCount: findings.filter(f => f.severity === 'warning').length,

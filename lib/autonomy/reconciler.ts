@@ -34,6 +34,7 @@ import {
 } from './autonomy-level'
 import { checkBreaker } from './circuit-breaker'
 import { computeHealthSignal } from './telemetry'
+import { LOOP_TICK_ACTIONS } from './loop-tick'
 import { runAutoFix } from '@/lib/core/auto-fix-engine'
 import { FLAGS } from '@/lib/config/flags'
 
@@ -632,14 +633,9 @@ async function isWithinCadenceCooldown(projectId: string): Promise<boolean> {
     .findFirst({
       where: {
         projectId,
-        action: {
-          in: [
-            'AUTONOMY_TICK',
-            'AUTONOMY_LIVE_RUN',
-            'AUTONOMY_SHADOW_DECISION',
-            'AUTONOMY_CHANGE_FREEZE',
-          ],
-        },
+        // Shared with the dashboard's "checked N ago" reader so the cadence gate
+        // and the displayed timestamp cannot disagree about what a tick is.
+        action: { in: [...LOOP_TICK_ACTIONS] },
         timestamp: { gte: since },
       },
       orderBy: { timestamp: 'desc' },

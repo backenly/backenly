@@ -54,7 +54,9 @@
  *
  * Data sources:
  *   • /api/projects/[id]/build-status        verdict / blocked / failed
- *   • /api/projects/[id]/health              lastCheckedAt, weekly fixes
+ *   • /api/projects/[id]/health              lastReconciledAt (loop cadence),
+ *                                            lastCheckedAt (daily sweep),
+ *                                            weekly fixes
  *   • /api/projects/[id]/dashboard-stats     tables, buckets, summary
  *                                            (end-users, db bytes)
  *   • useAutonomyStatus                      level, pending, trust scoreboard
@@ -89,7 +91,15 @@ interface BuildStatus {
 }
 
 interface HealthData {
+  /** Last DEEP observer sweep — daily cron. NOT the self-healing cadence. */
   lastCheckedAt: string | null
+  /**
+   * Last self-healing loop pass — per-minute on every plan. null = the loop has
+   * not run for this project inside the lookback window. Never fall back to
+   * lastCheckedAt here: showing the daily sweep under the loop's header is the
+   * bug this field exists to fix (see lib/autonomy/loop-tick.ts).
+   */
+  lastReconciledAt: string | null
   autoFixedThisWeek: number
   /** Uncapped count of findings held for approval. */
   needsAttention: number
@@ -354,9 +364,13 @@ export function WorkspaceHome({
     : lastActionFresh ? 'verify'
     : 'observe'
 
-  // null = no completed scan yet (the health route kicks one off in the
-  // background when it sees this) — show "first check running", not a fake time
-  const lastCheckedIso = health?.lastCheckedAt ?? null
+  // The loop's OWN clock — the per-minute reconciler pass, not the daily
+  // observer sweep. These were the same field until the loop header ended up
+  // advertising "checked 11h ago" on a backend the loop had reconciled a minute
+  // earlier, because lastCheckedAt is stamped by the 00:10 UTC observer and the
+  // reconciler stamps nothing. null = no pass inside the lookback; show "first
+  // check running", never a fake time and never the observer's timestamp.
+  const lastReconciledIso = health?.lastReconciledAt ?? null
 
   // ── Resource counters ─────────────────────────────────────────────────────
   const functionsCount = extras.find(x => /function/i.test(x.name))?.count ?? 0
@@ -447,7 +461,7 @@ export function WorkspaceHome({
           actionableFindings={actionableFindings}
           loopPhase={loopPhase}
           healSignal={healSignal}
-          lastCheckedIso={lastCheckedIso}
+          lastReconciledIso={lastReconciledIso}
           onReview={() => router.push(`/app/projects/${projectId}/autonomy`)}
         />
       </div>
@@ -674,7 +688,7 @@ function AgentPanel({
 
 function LoopPanel({
   autonomy, autonomyOff, pending, openFindings, actionableFindings,
-  loopPhase, healSignal, lastCheckedIso, onReview,
+  loopPhase, healSignal, lastReconciledIso, onReview,
 }: {
   autonomy: ReturnType<typeof useAutonomyStatus>['status']
   autonomyOff: boolean
@@ -683,7 +697,8 @@ function LoopPanel({
   actionableFindings: number | null
   loopPhase: LoopPhase
   healSignal: number
-  lastCheckedIso: string | null
+  /** Last reconciler pass — the loop's cadence, not the daily observer's. */
+  lastReconciledIso: string | null
   onReview: () => void
 }) {
   const loopStats: LoopStats = {
@@ -711,7 +726,7 @@ function LoopPanel({
         <span className="font-mono text-[10.5px] text-zinc-600 tabular-nums">
           {autonomyOff
             ? 'records & suggests only'
-            : lastCheckedIso ? `checked ${formatRelative(lastCheckedIso)}` : 'first check running…'}
+            : lastReconciledIso ? `checked ${formatRelative(lastReconciledIso)}` : 'first check running…'}
         </span>
       </div>
 
