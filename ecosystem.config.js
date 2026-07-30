@@ -55,8 +55,15 @@ module.exports = {
       restart_delay: 4000,
       // Memory — restart before OOM kills the process
       max_memory_restart: '350M',
-      // Scheduled restart every 12h to prevent slow memory leaks
-      cron_restart: '30 */12 * * *',
+      // Scheduled restart every 12h to prevent slow memory leaks.
+      //
+      // NOT on a :00/:15/:30/:45 boundary. The contract probe sweep runs
+      // `*/15 * * * *` (instrumentation.ts) and probes this process over
+      // loopback, so a restart at :30 landed inside the sweep and every probe
+      // got ECONNREFUSED. That filed four critical "your live API surfaces are
+      // failing" findings against every project with tables, twice a day, with
+      // a hint telling the owner to go check whether PM2 was running.
+      cron_restart: '37 */12 * * *',
       // Logs
       error_file: './logs/runtime-error.log',
       out_file: './logs/runtime-out.log',

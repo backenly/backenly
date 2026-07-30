@@ -316,6 +316,19 @@ export function getManualRemediationHint(
     case 'integration_connected_unused':
       return 'This integration is connected but nothing calls it yet. Use it from a function (ctx.integrations), or disconnect it in Integrations if it was set up by mistake.'
 
+    // The one fault that is invisible to every other instrument, so the hint has
+    // to carry the whole explanation. A policy written against the legacy app.*
+    // GUCs evaluates against an identity PostgREST never sets: it matches no
+    // rows, the API answers 200 with an empty array, and nothing errors or logs.
+    // Monitoring sees healthy traffic while the customer sees their data gone.
+    //
+    // Deliberately NOT auto-fixed: rewriting a live RLS policy is a security
+    // mutation on the exact code path that decides who can read what, and
+    // getting it wrong the other way exposes rows. It states the repair
+    // precisely instead, so the user (or their coding agent) can apply it.
+    case 'runtime_engine_mismatch':
+      return 'One or more RLS policies on this project read the legacy app.* session variables, which the current data plane never sets — so those policies match no rows and the API returns an empty list instead of an error. Nothing looks broken from the outside, which is why this is flagged rather than waited on. Ask your coding agent to rewrite the affected policies to the claim form (current_setting(\'request.jwt.claims\', true)::json ->> \'sub\'), or say "fix my RLS identity" in the AI chat. Backenly does not rewrite live policies on its own.'
+
     // A gated action re-runs from the exact AIAction recorded in its details.
     // Without that payload there is nothing to re-run, and inventing one from
     // the type would execute something the user never approved.

@@ -35,6 +35,7 @@ import {
 } from '@/lib/core/drift-detector'
 import { detectMissingRls } from '@/lib/services/workspace-observer'
 import { classifyFix } from '@/lib/core/fix-classifier'
+import { normalizeFindingType } from '@/lib/core/types'
 import type { FindingType, FindingSeverity, RawFinding } from '@/lib/core/types'
 import {
   detectMissingHotPathIndexes,
@@ -318,6 +319,17 @@ export async function computeDesiredStateDiff(projectId: string): Promise<Desire
  * finding escalated anyway). Every consumer — recheckGap, the reconciler's
  * dedupe, the reaper — must derive identity through here so the definition
  * cannot fork again.
+ *
+ * The TYPE half is normalized to its canonical base, and that is load-bearing.
+ * Findings reach this function under three vocabularies: canonical
+ * (`missing_api_crud`), bare category (`missing_api`, from the scan agents),
+ * and `${category}_${location}` (`missing_api_email_verifications`). The probes
+ * only ever emit canonical. Comparing raw against raw meant an aliased finding's
+ * identity could not match the probe that re-detects it, so `recheckGap` scored
+ * every aliased fix 'resolved' without ever looking — which is how a fix that
+ * changed nothing got certified `auto_fixed`, counted toward the trust
+ * scoreboard, and re-appeared on the next cadence tick. Normalize both sides or
+ * the post-fix verification is decorative.
  */
 export function gapIdentity(
   type: string,
@@ -329,7 +341,61 @@ export function gapIdentity(
   const loc =
     (d.location as string | undefined) ??
     (table && column ? `${table}.${column}` : table)
-  return `${type}::${loc}`
+  const base = normalizeFindingType(type, d)?.base ?? type
+  return `${base}::${loc}`
+}
+
+/**
+ * Which canonical types each invariant's probe can actually emit.
+ *
+ * This exists so `recheckGap` can tell "I re-probed and the gap is gone" apart
+ * from "nothing in this catalogue probes that type at all". It used to collapse
+ * both into 'resolved', which meant every fix for an unprobed type
+ * (contract_surface_broken, broken_webhook, deploy_failure, integration_*) was
+ * certified as verified without a single check running.
+ *
+ * Keyed by invariant id and asserted complete by
+ * tests/core/autonomy-verification-coverage.test.ts, so adding or retiring a
+ * probe cannot silently leave a false claim of coverage behind.
+ */
+const INVARIANT_EMITS: Readonly<Record<string, readonly FindingType[]>> = {
+  user_data_is_rls_protected: ['missing_rls'],
+  rls_policies_are_not_wide_open: ['rls_expression_invalid'],
+  relationships_have_fk_constraints: ['missing_fk'],
+  relationships_are_indexed: ['missing_fk_index'],
+  data_plane_is_registered: ['schema_not_registered'],
+  // Both satisfied by construction under PostgREST — these probes are no-ops,
+  // so they verify nothing and must not claim to. Listing a type here that no
+  // probe can actually re-detect is the exact failure this map exists to stop:
+  // recheckGap would read the type as covered, find it absent (because nothing
+  // looks for it), and certify every fix as verified.
+  every_table_has_an_api: [],
+  api_coverage_is_complete: [],
+  live_schema_matches_intent: ['shadow_mutation'],
+  auth_subsystem_is_intact: [
+    'auth_jwt_missing',
+    'auth_users_table_missing',
+    'oauth_redirect_uri_missing',
+    'rls_expression_invalid',
+    'unprotected_user_data',
+  ],
+  hot_path_columns_are_indexed: ['missing_fk_index'],
+  growing_tables_have_archival_plan: ['missing_archival_job'],
+  expired_tokens_get_cleaned_up: ['missing_token_cleanup_cron'],
+  external_schema_changes_are_adopted: ['external_schema_change'],
+  runtime_engine_matches_rls_contract: ['runtime_engine_mismatch'],
+}
+
+let _probedTypeCache: ReadonlySet<string> | null = null
+
+/** Canonical base types this module can positively re-verify after a fix. */
+export function probeCoveredTypes(): ReadonlySet<string> {
+  if (!_probedTypeCache) {
+    _probedTypeCache = new Set<string>(
+      INVARIANTS.flatMap((inv) => INVARIANT_EMITS[inv.id] ?? []),
+    )
+  }
+  return _probedTypeCache
 }
 
 /**
@@ -352,13 +418,37 @@ export async function recheckGap(
   gapType: string,
   gapDetails: Record<string, unknown>,
 ): Promise<'resolved' | 'unresolved' | 'unknown'> {
+  const base = normalizeFindingType(gapType, gapDetails)?.base ?? gapType
+
+  // No probe in this catalogue can re-detect this type, so absence from the
+  // report is meaningless — it would have been absent before the fix too.
+  // Returning 'resolved' here is the difference between a verified fix and an
+  // unverified one being recorded identically.
+  if (!probeCoveredTypes().has(base)) return 'unknown'
+
   const key = gapIdentity(gapType, gapDetails)
   const report = await computeDesiredStateDiff(projectId)
   const stillPresent = report.violations.some(
     (v) => gapIdentity(v.type, v.details as Record<string, unknown>) === key,
   )
   if (stillPresent) return 'unresolved'
-  return report.errors.length > 0 ? 'unknown' : 'resolved'
+
+  // A probe that ERRORED this pass cannot be read as proof the gap closed, and
+  // the only probe whose silence matters here is the one that owns this type.
+  // Blanket-checking `errors.length` let an unrelated probe failure downgrade a
+  // genuinely verified fix, while a failure of the RELEVANT probe was
+  // indistinguishable from success once any other probe also failed.
+  const owningIds = new Set(
+    INVARIANTS.filter((inv) =>
+      (INVARIANT_EMITS[inv.id] ?? []).includes(base as FindingType),
+    ).map((inv) => inv.id),
+  )
+  // A probe that threw is recorded as `satisfied: false, gaps: []` (see
+  // computeDesiredStateDiff) — the one shape a clean pass can never produce.
+  const owningProbeFailed = report.invariants.some(
+    (i) => owningIds.has(i.id) && !i.satisfied && i.gaps.length === 0,
+  )
+  return owningProbeFailed ? 'unknown' : 'resolved'
 }
 
 /**

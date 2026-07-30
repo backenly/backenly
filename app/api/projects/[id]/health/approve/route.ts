@@ -150,6 +150,8 @@ export const POST = withProjectAccess(async (req: NextRequest, { user, project, 
         findingType: finding.type,
         message: result.message,
         snapshotId: result.snapshotId ?? null,
+        // Drives the ledger copy: only 'confirmed' may claim re-verification.
+        verification: result.verification ?? 'unverified',
       }),
       timestamp: new Date(),
     },

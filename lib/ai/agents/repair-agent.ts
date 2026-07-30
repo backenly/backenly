@@ -2,7 +2,6 @@
 /** Repair specialist agent: finds API-less tables, missing realtime triggers, and orphaned FK references. */
 
 import { Pool } from 'pg'
-import { prisma } from '@/lib/db/prisma'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
 import type { AgentInput, AgentResult, AgentFinding } from './types'
 
@@ -25,39 +24,33 @@ export async function runRepairAgent(input: AgentInput): Promise<AgentResult> {
   const pool = new Pool({ connectionString: process.env.DATABASE_URL })
 
   try {
-    // ── 1. Tables with no corresponding API definition ────────────────────
-    try {
-      const apiDefs = await prisma.apiDefinition.findMany({
-        where: { projectId },
-        select: { name: true },
-      })
-      const apiTableNames = new Set(apiDefs.map((a: { name: string }) => a.name.toLowerCase()))
-
-      const noApiTables = tables.filter(
-        t => t !== 'users' && !apiTableNames.has(t.toLowerCase()),
-      )
-
-      for (const tbl of noApiTables) {
-        findings.push({
-          id: makeId(),
-          agentType: 'repair',
-          category: 'missing_api',
-          severity: 'high',
-          title: `Table "${tbl}" has no REST API`,
-          description: `Table "${tbl}" exists in the workspace schema but has no generated REST endpoints. It cannot be accessed from the SDK or any frontend.`,
-          location: tbl,
-          fix: {
-            description: `Generate REST API endpoints (list, create, get, update, delete) for table "${tbl}".`,
-            executorAction: 'GENERATE_API',
-            executorParams: { tableName: tbl },
-            reversible: true,
-            requiresApproval: false,
-          },
-        })
-      }
-    } catch {
-      // Non-fatal — Prisma may fail if DB not ready
-    }
+    // ── 1. Tables with no corresponding API definition — REMOVED 2026-07-30 ──
+    //
+    // This block was the producer of the `missing_api` findings that the loop
+    // "fixed" on the same tables once every 24 hours, forever. Three compounding
+    // faults, all in ~8 lines:
+    //
+    //   1. It asked `ApiDefinition` whether a table has a REST API. Nothing has
+    //      written that table since the PostgREST cutover on 2026-07-21 — there
+    //      is no `.create`/`.update`/`.upsert` for it left in the repo — so on
+    //      any project built after that date the set was EMPTY and every table
+    //      was reported as having no REST API, at severity `high`. Projects
+    //      built by a coding agent over MCP are exactly the empty-set case.
+    //   2. It compared `ApiDefinition.name` (an API display name) against table
+    //      names, so the match was wrong even where rows did exist.
+    //   3. `requiresApproval: false` + `executorAction: 'GENERATE_API'` sent it
+    //      straight through the auto path, and GENERATE_API cannot write
+    //      ApiDefinition either — so the gap it claimed to close was untouched
+    //      and re-detected on the next tick.
+    //
+    // It also had no reserved-table filter (only a literal `users` exclusion),
+    // which is how auth plumbing like `email_verifications` ended up with a
+    // "generate a public REST API for this" recommendation on a table holding
+    // single-use verification tokens.
+    //
+    // Reachability is not a drift-able state any more: a table is served because
+    // it is in the catalog and the role holds a grant. If this check comes back
+    // it must read lib/postgrest/exposure.ts, never a projection.
 
     // ── 2. Realtime triggers: tables present but no DB triggers defined ────
     try {

@@ -37,7 +37,11 @@ export interface TrustScoreboard {
   breakerTrips: number
   /** Rollbacks of autonomous actions (the trust-critical "0" we want). */
   rollbacks: number
-  /** Share of autonomous fixes not later rolled back, 0..1 (null if none). */
+  /**
+   * Share of autonomous fixes whose gap was re-probed after the fix and
+   * confirmed gone, 0..1 (null if there were no fixes). NOT "share not rolled
+   * back" — that number could never fall and so measured nothing.
+   */
   verifiedRate: number | null
 }
 
@@ -213,9 +217,17 @@ function humanize(action: string, details: string | null): string {
       return `Safety circuit tripped — autonomous actions paused (${d.reason ?? 'rate ceiling reached'})`
     case 'applied': {
       const what = d.title || (d.findingType ? d.findingType.replace(/_/g, ' ') : null)
+      // Only claim verification when the kernel actually re-probed and confirmed
+      // it. This row asserted "verified & snapshotted" on every applied fix,
+      // including the ones whose type no probe can re-check — the ledger was
+      // vouching for work nothing had looked at.
+      const suffix =
+        d.verification === 'confirmed'
+          ? ' — re-checked and confirmed, snapshot captured'
+          : ' — applied and snapshotted (not independently re-checked)'
       return what
-        ? `Applied your approved fix: ${what} — verified & snapshotted`
-        : 'Applied your approved fix — schema verified & rollback snapshot captured'
+        ? `Applied your approved fix: ${what}${suffix}`
+        : `Applied your approved fix${suffix}`
     }
     case 'failed':
       return `Approved fix could not be applied${d.findingType ? ` (${d.findingType.replace(/_/g, ' ')})` : ''} — left for your review`
@@ -313,6 +325,7 @@ export async function buildTrustReport(
     escalations,
     breakerTrips,
     rollbacks,
+    confirmedFixes,
     activityRows,
     pending,
     lastShadow,
@@ -331,6 +344,18 @@ export async function buildTrustReport(
     }),
     prisma.auditLog.count({
       where: { projectId, timestamp: { gte: since }, action: { startsWith: ROLLBACK_PREFIX } },
+    }),
+    // Fixes whose gap was re-probed after the fix and confirmed gone. The
+    // kernel stamps `verification` into the HEALTH_AUTO_FIXED payload
+    // (auto-fix-engine → recheckGap); `details` is a JSON string column, so
+    // this matches on the serialised field rather than a JSON path.
+    prisma.auditLog.count({
+      where: {
+        projectId,
+        timestamp: { gte: since },
+        action: 'HEALTH_AUTO_FIXED',
+        details: { contains: '"verification":"confirmed"' },
+      },
     }),
     prisma.auditLog.findMany({
       where: {
@@ -359,9 +384,21 @@ export async function buildTrustReport(
     }),
   ])
 
+  // VERIFIED means re-probed and confirmed gone — nothing else.
+  //
+  // This was `(autonomousFixes - rollbacks) / autonomousFixes`, i.e. the share
+  // of fixes nobody had undone. With zero rollbacks it read 100% unconditionally
+  // while the loop was re-"fixing" the same five tables every 24 hours, so the
+  // one number a founder is asked to trust the autonomy dial on was structurally
+  // incapable of falling. It now counts only fixes the kernel positively
+  // re-verified (see recheckGap + auto-fix-engine's `verification` stamp).
+  //
+  // HEALTH_AUTO_FIXED rows are a subset of AUTONOMOUS_AUDIT_ACTIONS, so the
+  // ratio is clamped: older rows predate the stamp and read as unverified,
+  // which is the honest reading — they were never verified.
   const verifiedRate =
     autonomousFixes > 0
-      ? Math.max(0, Math.min(1, (autonomousFixes - rollbacks) / autonomousFixes))
+      ? Math.max(0, Math.min(1, confirmedFixes / autonomousFixes))
       : null
 
   // Rows are newest-first, so folding CONSECUTIVE identical summaries keeps

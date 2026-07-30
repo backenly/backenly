@@ -150,6 +150,18 @@ export const ALL_FINDING_TYPES = [
   // which IS repairable) could never reach a repair, and the approve route
   // answered with the generic "no automatic repair for it yet" string.
   'contract_surface_broken',
+  // Added 2026-07-30, for the same omission `contract_surface_broken` was added
+  // for one day earlier — and with worse consequences. It is declared in the
+  // FindingType union and emitted by detectRuntimeEngineMismatch, but was never
+  // registered here and has no PREFIX_MAP entry, so `normalizeFindingType`
+  // returned null for it. That routed the invariant this codebase itself calls
+  // "the only failure invisible to every other instrument" (an RLS policy
+  // reading a GUC the data plane never sets, so the API answers 200 with an
+  // empty array and the customer's data looks gone) into the unrecognised-type
+  // path: permanently notify_only, no fix action, no group summary, and
+  // unverifiable by recheckGap. Two identical registration misses in two days is
+  // what tests/core/finding-type-registry.test.ts now prevents.
+  'runtime_engine_mismatch',
 ] as const satisfies ReadonlyArray<FindingType>
 
 // Canonical types — exact matches pass through untouched.

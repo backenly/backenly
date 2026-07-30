@@ -224,7 +224,14 @@ export async function runAutoFix(
 export async function executeApprovedFix(
   findingId: string,
   projectId: string,
-): Promise<{ success: boolean; message: string; snapshotId?: string; rollbackData?: Record<string, unknown> }> {
+): Promise<{
+  success: boolean
+  message: string
+  snapshotId?: string
+  rollbackData?: Record<string, unknown>
+  /** Whether the gap was re-probed after the fix and confirmed gone. */
+  verification?: 'confirmed' | 'unverified'
+}> {
   const finding = await prisma.healthFinding.findUnique({ where: { id: findingId } })
   if (!finding) return { success: false, message: 'Finding not found.' }
 
@@ -319,6 +326,31 @@ export async function executeApprovedFix(
     return { success: false, message: result.error ?? result.message }
   }
 
+  // ── Same trust guarantee the autonomous path enforces ──────────────────────
+  // This path had NO post-fix verification: it reported success on the
+  // executor's own say-so, and the ledger then rendered every approved fix as
+  // "verified & snapshotted". A user who clicks Approve is extending more trust
+  // than the loop takes on its own, so this is the last place that check should
+  // have been missing. 'unresolved' is reported as a failure rather than a
+  // success, which leaves the finding in the queue where the user can see it.
+  let verification: 'confirmed' | 'unverified' = 'unverified'
+  {
+    const gapLoc = (details.location ?? details.tableName ?? details.table) as string | undefined
+    if (gapLoc) {
+      const recheck = await recheckGap(projectId, finding.type, details).catch(() => 'unknown' as const)
+      if (recheck === 'unresolved') {
+        return {
+          success: false,
+          message:
+            'The fix ran but the issue is still present on re-check, so it was not recorded as fixed. ' +
+            'Nothing was lost — the finding stays in your queue with the details.',
+          verification: 'unverified',
+        }
+      }
+      if (recheck === 'resolved') verification = 'confirmed'
+    }
+  }
+
   // Post-fix snapshot: version history only — never the undo target.
   const postSnapshot = SCHEMA_TOUCHING.has(baseType)
     ? await captureSchemaSnapshot(projectId, 'post_migration').catch(() => null)
@@ -334,6 +366,7 @@ export async function executeApprovedFix(
     preMetadata: pre.preMetadata,
     schemaTouching: pre.schemaTouching,
     fixedAt: new Date().toISOString(),
+    verification,
   }
 
   return {
@@ -341,6 +374,7 @@ export async function executeApprovedFix(
     message: result.message,
     snapshotId: pre.preSnapshotId ?? undefined,
     rollbackData,
+    verification,
   }
 }
 
@@ -749,6 +783,13 @@ async function _executeAutoFix(
   // gap; certify auto_fixed only when it is genuinely gone. If it is still
   // positively present, escalate instead of recording a fix that did not happen.
   // This single check makes every fix path honest regardless of its own quirks.
+  //
+  // The verdict is CARRIED, not discarded. 'unknown' (no probe covers this type,
+  // or the owning probe errored) is still allowed to record a fix — refusing
+  // would bury auto-safe work — but it must not be counted as verified. The
+  // trust scoreboard reads `verification` so "100% verified" means "re-probed
+  // and confirmed gone", not "nobody rolled it back".
+  let verification: 'confirmed' | 'unverified' = 'unverified'
   {
     const gapLoc = (details.location ?? details.tableName ?? details.table) as string | undefined
     if (gapLoc) {
@@ -762,6 +803,7 @@ async function _executeAutoFix(
           'Fix ran and reported success but the issue is still present on re-check — escalated for review instead of recorded as fixed.',
         )
       }
+      if (recheck === 'resolved') verification = 'confirmed'
     }
   }
 
@@ -781,6 +823,7 @@ async function _executeAutoFix(
     preMetadata: pre.preMetadata,
     schemaTouching: pre.schemaTouching,
     fixedAt: new Date().toISOString(),
+    verification,
   }
 
   await prisma.healthFinding.update({
@@ -806,6 +849,8 @@ async function _executeAutoFix(
     message: result.message,
     snapshotId: pre.preSnapshotId,
     postSnapshotId: postSnapshot?.id ?? null,
+    // Read by the trust scoreboard: only 'confirmed' fixes count as verified.
+    verification,
   })
 
   return { findingId, outcome: 'auto_fixed', message: result.message, rollbackData }

@@ -298,13 +298,40 @@ async function ensureFinding(projectId: string, gap: DesiredStateGap): Promise<s
       f => gapIdentity(gap.type, (f.details ?? {}) as Record<string, unknown>) === key,
     )
 
-    if (recurrences.length > 0) {
+    // Suppressions count toward the escalation threshold, and without this the
+    // threshold was UNREACHABLE.
+    //
+    // `recurrences` counts prior auto_fixed rows — but the suppression branch
+    // below deliberately creates no finding and therefore no new auto_fixed row.
+    // So the count froze at 1 no matter how many times the gap came back, never
+    // reached RECURRENCE_ESCALATE_AFTER, and the escalate-on-flap path was dead
+    // code. The observable result on prod: the same five tables were re-"fixed"
+    // once every 24 hours (one window roll-off apart) for as long as the gap
+    // existed, each pass logged as a successful autonomous fix, and no human was
+    // ever told the fix wasn't holding.
+    const suppressedCount = await prisma.auditLog.count({
+      where: {
+        projectId,
+        action: 'AUTONOMY_RECURRENCE_SUPPRESSED',
+        timestamp: { gte: since },
+        // details is a JSON string column; the gap key is matched on the two
+        // fields the suppression row records.
+        AND: [
+          { details: { contains: `"findingType":"${gap.type}"` } },
+          { details: { contains: `"gapKey":"${key}"` } },
+        ],
+      },
+    }).catch(() => 0)
+
+    const recurrenceCount = recurrences.length + suppressedCount
+
+    if (recurrenceCount > 0) {
       // Threshold reached → the fix demonstrably isn't holding. Stop auto-acting
       // on it; open ONE pending_approval finding so a human can investigate the
       // detector or the fix path. This is the "escalate on flap" pattern every
       // serious autonomous system uses (K8s pod-restart loops, AWS Auto Scaling
       // cooldown, SRE error-budget burn alerts).
-      if (recurrences.length >= RECURRENCE_ESCALATE_AFTER) {
+      if (recurrenceCount >= RECURRENCE_ESCALATE_AFTER) {
         const created = await prisma.healthFinding.create({
           data: {
             projectId,
@@ -314,8 +341,10 @@ async function ensureFinding(projectId: string, gap: DesiredStateGap): Promise<s
               ...(gap.details as Record<string, unknown>),
               recurrence: {
                 priorAutoFixCount: recurrences.length,
+                suppressedCount,
+                recurrenceCount,
                 windowHours: RECURRENCE_WINDOW_HOURS,
-                lastFixAt: recurrences[0].fixAppliedAt?.toISOString() ?? null,
+                lastFixAt: recurrences[0]?.fixAppliedAt?.toISOString() ?? null,
                 note: 'Same gap re-detected after auto-fix — fix did not hold. Escalated for review.',
               },
             } as any,
@@ -332,8 +361,11 @@ async function ensureFinding(projectId: string, gap: DesiredStateGap): Promise<s
             details: JSON.stringify({
               findingId: created.id,
               findingType: gap.type,
+              gapKey: key,
               tableName: (gap.details as Record<string, unknown>)?.tableName ?? null,
               priorAutoFixCount: recurrences.length,
+              suppressedCount,
+              recurrenceCount,
               windowHours: RECURRENCE_WINDOW_HOURS,
             }),
             timestamp: new Date(),
@@ -354,8 +386,14 @@ async function ensureFinding(projectId: string, gap: DesiredStateGap): Promise<s
           type: 'autonomy',
           details: JSON.stringify({
             findingType: gap.type,
+            // The identity this suppression is FOR. Recorded because the next
+            // tick counts these rows toward the escalation threshold — without
+            // the key it could not tell one gap's suppressions from another's.
+            gapKey: key,
             tableName: (gap.details as Record<string, unknown>)?.tableName ?? null,
             priorAutoFixCount: recurrences.length,
+            suppressedSoFar: suppressedCount,
+            recurrenceCount,
             windowHours: RECURRENCE_WINDOW_HOURS,
           }),
           timestamp: new Date(),

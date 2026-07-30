@@ -538,160 +538,53 @@ export async function checkAuthIntegrity(
 
 // ─── 3.5 API Coverage ────────────────────────────────────────────────────────
 
-const REQUIRED_CRUD = ['list', 'get', 'create', 'update', 'delete'] as const
-
 /**
- * Check that every table has a complete CRUD ApiDefinition, that no endpoint
- * references a table that no longer exists, that public endpoints have rate
- * limits, and that tables with AppTriggers have realtime-ready configuration.
+ * RETIRED 2026-07-30 — every check here read `ApiDefinition`, a table with no
+ * writers left in the codebase.
+ *
+ * `executeGenerateAPI` stopped writing ApiDefinition rows on 2026-07-21 when the
+ * PostgreSQL catalog became the source of truth for exposure (see
+ * lib/postgrest/exposure.ts and the note on `detectTablesWithNoApiDefinition`
+ * above, which was stubbed for exactly this reason). `prisma.apiDefinition`
+ * has no `.create` / `.update` / `.upsert` call anywhere in the repo. What was
+ * left was a frozen projection that three separate branches still treated as
+ * the truth about a project's REST surface:
+ *
+ *   • missing_api_crud    — read `operations` on rows nothing can update, so the
+ *                           condition was IMMUTABLE. It is classified `auto`
+ *                           with GENERATE_API as its repair, and GENERATE_API
+ *                           cannot touch ApiDefinition, so every "fix" was a
+ *                           guaranteed no-op recorded as a success. On prod this
+ *                           re-fired on the same five tables once every 24 hours
+ *                           (the reconciler's recurrence window) and reported
+ *                           five autonomous fixes each time.
+ *   • dead_api_endpoint   — the inverse, from the same frozen rows.
+ *   • realtime_gap        — fired when a trigger-bearing table had no
+ *                           ApiDefinition row. Since nothing writes those rows,
+ *                           that is now EVERY trigger-bearing table on every
+ *                           project created after the cutover. Subscribing never
+ *                           needed an ApiDefinition (see the LISTEN hub), and
+ *                           FIX_REALTIME installs a NOTIFY trigger — it cannot
+ *                           create the row this branch demanded either.
+ *
+ * The mirror-image bug matters just as much: for a project created AFTER the
+ * cutover there are no rows at all, so `apiDefByTable` is empty and all three
+ * loops iterate nothing. The invariant reported "every table has full CRUD and
+ * no dead endpoints" as SATISFIED on every new project regardless of its real
+ * API state. Agent-built backends are exactly the projects with zero rows, so
+ * the loop was simultaneously loud about fake API problems on legacy projects
+ * and blind to real ones on new projects.
+ *
+ * Anything genuinely re-added here must read the catalog + grants (the runtime's
+ * own source of truth), never a projection of them. Legacy ApiDefinition rows
+ * are inert once nothing reads them; purging them is a separate one-shot sweep,
+ * in the shape of scripts/purge-internal-table-metadata.ts.
  */
 export async function detectApiCoverageGaps(
-  projectId: string,
+  _projectId: string,
 ): Promise<RawFinding[]> {
-  const findings: RawFinding[] = []
-
-  type ApiDefRow = {
-    id: string
-    basePath: string
-    name: string
-    authRequired: boolean
-    rateLimit: number | null
-    operations: import('@prisma/client').Prisma.JsonValue
-    table: { name: string }
-  }
-
-  const [apiDefs, triggers, tables] = await Promise.all([
-    prisma.apiDefinition
-      .findMany({
-        where: { projectId },
-        select: {
-          id: true,
-          basePath: true,
-          name: true,
-          authRequired: true,
-          rateLimit: true,
-          operations: true,
-          table: { select: { name: true } },
-        },
-      })
-      .catch(() => [] as ApiDefRow[]),
-    prisma.appTrigger
-      .findMany({
-        where: { projectId, enabled: true },
-        select: { sourceTable: true },
-      })
-      .catch(() => [] as Array<{ sourceTable: string }>),
-    prisma.table
-      .findMany({ where: { projectId }, select: { name: true } })
-      .catch(() => [] as Array<{ name: string }>),
-  ])
-
-  // Reserved internal tables are not product surface — never flag them for
-  // dead-endpoint / missing-CRUD / realtime-gap findings (they carry their own
-  // specialized handling and must stay invisible to the API layer).
-  const registeredTableNames = new Set(
-    tables.map((t) => t.name).filter((n) => !isReservedWorkspaceTable(n)),
-  )
-  const apiDefByTable = new Map(
-    apiDefs.filter((d) => !isReservedWorkspaceTable(d.table.name)).map((d) => [d.table.name, d]),
-  )
-  const triggerTables = new Set(
-    triggers.map((t) => t.sourceTable).filter((n) => !isReservedWorkspaceTable(n)),
-  )
-
-  // 1. Tables with no CRUD endpoint coverage
-  for (const [tableName, def] of apiDefByTable) {
-    const ops = def.operations as Record<string, unknown> | null
-    if (!ops) continue
-
-    const opsNorm = normaliseOps(ops)
-    const missingOps = REQUIRED_CRUD.filter((op) => !opsNorm.has(op))
-    if (missingOps.length > 0) {
-      findings.push({
-        type: 'missing_api_crud',
-        severity: 'warning',
-        details: {
-          tableName,
-          missingOperations: missingOps,
-          reason: `Table "${tableName}" is missing API operations: ${missingOps.join(', ')}`,
-        },
-        autoFixable: false,
-      })
-    }
-  }
-
-  // 2. Tables with no ApiDefinition at all (catches tables that also have no ops)
-  for (const tableName of registeredTableNames) {
-    if (!apiDefByTable.has(tableName)) {
-      // Already covered by detectTablesWithNoApiDefinition — skip to avoid duplication
-    }
-  }
-
-  // 3. Dead endpoints — ApiDefinition for a table that no longer exists in the platform
-  for (const def of apiDefs) {
-    const tableName = def.table.name
-    if (isReservedWorkspaceTable(tableName)) continue // reserved tables are excluded from registeredTableNames by design — not "dead"
-    if (!registeredTableNames.has(tableName)) {
-      findings.push({
-        type: 'dead_api_endpoint',
-        severity: 'warning',
-        details: {
-          apiDefinitionId: def.id,
-          tableName,
-          basePath: def.basePath,
-          reason: `API definition "${def.name}" references table "${tableName}" which no longer exists`,
-        },
-        autoFixable: false,
-      })
-    }
-  }
-
-  // 4. (removed 2026-07-21) Public endpoints without a rate limit.
-  //
-  // Read `ApiDefinition.rateLimit`, a column no request path consults. Rate
-  // limiting is per API key (enforceRateLimitByKeyId), and `ApiKey.rateLimit`
-  // is `Int @default(1000)` — it cannot be unset, so an "unlimited public
-  // endpoint" is not a state this system can be in. Reporting it anyway meant
-  // a permanent warning per table describing a risk that did not exist.
-  // The sibling detector in lib/autonomy/invariant-probes.ts is gone for the
-  // same reason; the note there has the full account.
-
-  // 5. Tables with triggers but no ApiDefinition (realtime events will fire but clients
-  //    cannot subscribe via the SDK since there's no endpoint to attach to)
-  for (const triggerTable of triggerTables) {
-    if (!apiDefByTable.has(triggerTable)) {
-      findings.push({
-        type: 'realtime_gap',
-        severity: 'info',
-        details: {
-          tableName: triggerTable,
-          reason: `Table "${triggerTable}" has active triggers but no API definition — realtime events fire but clients cannot subscribe`,
-        },
-        autoFixable: false,
-      })
-    }
-  }
-
-  return findings
+  return []
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function normaliseOps(ops: Record<string, unknown>): Set<string> {
-  const out = new Set<string>()
-  // Handle array form: ['list', 'get', 'create', 'update', 'delete']
-  if (Array.isArray(ops)) {
-    for (const v of ops) typeof v === 'string' && out.add(v.toLowerCase())
-    return out
-  }
-  // Handle object form: { list: true, GET: true, POST: '/posts', ... }
-  for (const [k, v] of Object.entries(ops)) {
-    if (v) out.add(k.toLowerCase())
-  }
-  // Map HTTP methods → CRUD names
-  if (out.has('get')) out.add('list')
-  if (out.has('post')) out.add('create')
-  if (out.has('patch') || out.has('put')) out.add('update')
-  if (out.has('delete')) out.add('delete')
-  return out
-}

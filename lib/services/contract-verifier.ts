@@ -31,6 +31,13 @@ import type { RawFinding } from '@/lib/core/types'
 
 const PROBE_TIMEOUT_MS = 8_000
 
+/**
+ * How long to wait before re-probing when EVERY surface failed to connect.
+ * Sized to outlast a PM2 restart of the runtime (restart_delay 4s + tsx boot),
+ * which is the common cause and is not an outage anyone should be paged for.
+ */
+const TRANSPORT_RETRY_DELAY_MS = 12_000
+
 export interface ProbeResult {
   surface: 'auth' | 'db' | 'storage' | 'functions' | 'healthz'
   ok: boolean
@@ -278,6 +285,16 @@ export async function runContractVerification(projectId: string): Promise<ProbeR
  * Workspace-observer detector: probe the runtime contract, resolve recovered
  * findings, and return RawFindings for surfaces that are broken right now.
  */
+/**
+ * A probe that never got an HTTP response at all — the TCP connect failed
+ * (ECONNREFUSED / ENOTFOUND / abort). `status` is undefined and the detail is
+ * the fetch error, not a status line. This is categorically different from a
+ * surface answering wrongly: nothing about the project can cause it.
+ */
+function isTransportFailure(r: ProbeResult): boolean {
+  return !r.ok && r.status === undefined && r.detail.startsWith('probe error:')
+}
+
 export async function detectContractViolations(projectId: string): Promise<RawFinding[]> {
   // Never return "no findings" when the probe run itself could not complete.
   // An empty result is indistinguishable from a healthy backend — that is
@@ -285,14 +302,74 @@ export async function detectContractViolations(projectId: string): Promise<RawFi
   // calls every detector inside Promise.allSettled, so throwing here is
   // isolated to this detector and surfaces as a scan error instead of being
   // laundered into "all surfaces OK".
-  const results: ProbeResult[] = await runContractVerification(projectId)
+  let results: ProbeResult[] = await runContractVerification(projectId)
 
   // A genuinely empty run (project gone, no anonKey, no jwtSecret) is a
   // configuration state, not a health signal — distinct from the throw above.
   if (results.length === 0) return []
 
+  // ── The runtime was unreachable, not the surfaces ───────────────────────────
+  //
+  // When EVERY probe fails at the transport level, the one thing that has been
+  // proven is that the probe could not open a connection to its own origin. That
+  // is a platform-runtime state (restarting, crashed, wrong port) and it is the
+  // same single fault N times, not N independent broken surfaces.
+  //
+  // Reporting it per-surface is what produced "4 live API surfaces are failing"
+  // criticals against a project whose backend was answering fine 15 minutes
+  // later — the probe had fired 157ms into a scheduled PM2 restart of the
+  // Express runtime. A restart window is seconds (restart_delay 4s plus tsx
+  // boot), so one bounded retry absorbs it entirely; anything that survives the
+  // retry is a real outage worth reporting, and still worth reporting as ONE
+  // fault rather than as a per-surface fan-out.
+  const allTransportFailed = results.length > 0 && results.every(isTransportFailure)
+  if (allTransportFailed) {
+    await new Promise(resolve => setTimeout(resolve, TRANSPORT_RETRY_DELAY_MS))
+    results = await runContractVerification(projectId)
+    if (results.length === 0) return []
+
+    if (results.every(isTransportFailure)) {
+      // Still nothing listening. Resolve nothing (a surface that cannot be
+      // probed has not been proven healthy) and report the single real fault.
+      return [{
+        type: 'contract_surface_broken',
+        severity: 'critical',
+        autoFixable: false,
+        details: {
+          surface: 'runtime',
+          detail: `runtime unreachable at ${probeOrigin()} — ${results[0].detail}`,
+          response: null,
+          httpStatus: null,
+          durationMs: results.reduce((n, r) => n + r.durationMs, 0),
+          probedAt: new Date().toISOString(),
+          surfacesAffected: results.map(r => r.surface),
+          retried: true,
+          hint:
+            'Every advertised surface failed to accept a connection, twice, ' +
+            `${Math.round(TRANSPORT_RETRY_DELAY_MS / 1000)}s apart. This is the platform runtime ` +
+            'being down rather than anything in your project — nothing in your schema, ' +
+            'RLS or API can cause it, and there is nothing for you to change. It clears ' +
+            'automatically as soon as the runtime answers again.',
+        },
+      }]
+    }
+  }
+
   const broken = results.filter(r => !r.ok)
   const recovered = results.filter(r => r.ok)
+
+  // At least one surface accepted a connection, so the runtime is up. Close any
+  // aggregate runtime-unreachable finding — no per-surface probe carries the
+  // 'runtime' marker, so the loop below can never resolve it.
+  await prisma.healthFinding.updateMany({
+    where: {
+      projectId,
+      type: 'contract_surface_broken',
+      status: { in: ['open', 'pending_approval'] },
+      details: { path: ['surface'], equals: 'runtime' },
+    },
+    data: { status: 'auto_fixed', autoFixed: true, fixAppliedAt: new Date() },
+  }).catch(() => {})
 
   // Auto-resolve open findings for surfaces that answer correctly again.
   for (const r of recovered) {
