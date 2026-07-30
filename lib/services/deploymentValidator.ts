@@ -8,6 +8,7 @@
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import { prisma } from '@/lib/db'
+import { countExposedResources } from '@/lib/api/exposed-resources'
 
 export type ProjectType = 'express' | 'nextjs' | 'worker'
 
@@ -194,12 +195,11 @@ export class DeploymentValidator {
    */
   private static async checkApiDefinitions(projectId: string): Promise<boolean> {
     try {
-      const apiDefinitions = await prisma.apiDefinition.findMany({
-        where: { projectId },
-        select: { id: true }
-      })
-      
-      return apiDefinitions.length > 0
+      // "Does this project expose anything over REST?" — the catalog decides.
+      // Counting ApiDefinition rows made this permanently false after the
+      // PostgREST cutover, so deployment validation judged every modern
+      // project as having no API surface.
+      return (await countExposedResources(projectId)) > 0
     } catch (error) {
       console.error('[DeploymentValidator] Failed to check API Definitions:', error)
       return false

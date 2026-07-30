@@ -16,6 +16,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
+import { listExposedResources } from '@/lib/api/exposed-resources'
 
 export interface BackgroundFinding {
   severity: 'critical' | 'warning' | 'info'
@@ -141,11 +142,12 @@ export async function runBackgroundAgent(projectId: string): Promise<BackgroundC
     // ── 4. Tables without REST APIs ─────────────────────────────────────────
     if (hasTables) {
       try {
-        const apis = await prisma.apiDefinition.findMany({
-          where: { projectId, enabled: true },
-          select: { name: true },
-        })
-        const apiSet = new Set(apis.map((a: any) => a.name))
+        // Exposed tables, from the catalog. This read ApiDefinition, which has
+        // had no create path since the PostgREST cutover, so the set was empty
+        // and EVERY table fell into `noApiTables` below — the same false
+        // positive the repair agent produced, from the same source.
+        const apis = await listExposedResources(projectId)
+        const apiSet = new Set(apis.map(a => a.name))
         const noApiTables = tableNames.filter(
           t => !apiSet.has(t) && t !== 'users'
         )

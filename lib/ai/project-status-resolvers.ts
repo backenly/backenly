@@ -15,6 +15,7 @@
 import { prisma } from '@/lib/db/prisma'
 import { loadActiveBuildJob } from '@/lib/ai/build-runtime/continuation-store'
 import { reconcileBlockedCredentials } from '@/lib/ai/credential-reconciler'
+import { countExposedResources } from '@/lib/api/exposed-resources'
 
 // ── Auth Status ───────────────────────────────────────────────────────────────
 
@@ -210,11 +211,14 @@ export async function getProjectBuildStatus(projectId: string): Promise<ProjectB
     const [job, tables, apis] = await Promise.all([
       loadActiveBuildJob(projectId),
       prisma.table.findMany({ where: { projectId }, select: { id: true } }),
-      prisma.apiDefinition.findMany({ where: { projectId }, select: { id: true } }),
+      // Catalog count. Counting ApiDefinition rows returned 0 for every project
+      // built after the PostgREST cutover, so project status reported no APIs
+      // on backends that were serving them.
+      countExposedResources(projectId),
     ])
 
     const tablesCount = tables.length
-    const apisCount = apis.length
+    const apisCount = apis
 
     if (!job) {
       if (tablesCount === 0) return empty
