@@ -264,3 +264,45 @@ describe('behavioral verification cannot pass vacuously', () => {
     expect(verdictOf([mk(false, false), mk(true, false)])).toBe('failed')
   })
 })
+
+describe('verification surfaces do not read the dead ApiDefinition table', () => {
+  // ApiDefinition has had no CREATE path since the PostgREST cutover
+  // (2026-07-21): no .create, .createMany, .upsert or nested create exists
+  // anywhere in the repo. Existing rows can still be updated or deleted (the
+  // rollback path does), but no row is ever born. So on any project created
+  // after that date the table is permanently EMPTY, and any code gating on it
+  // silently treats a healthy backend as having nothing.
+  //
+  // That is what disabled checkLiveApiEndpoints: it filtered candidate tables
+  // through ApiDefinition, found none, and skipped with "build tables and APIs
+  // first" on projects full of working tables — so the only check exercising the
+  // real HTTP stack never ran, while a skipped check counted toward `passed`.
+  //
+  // These files decide whether the backend WORKS. They must read the catalog.
+  const fs = require('fs') as typeof import('fs')
+  const path = require('path') as typeof import('path')
+  const REPO_ROOT = path.resolve(__dirname, '../..')
+
+  // DETECTION surfaces only. auto-fix-engine is deliberately excluded: its
+  // ApiDefinition reads are in the ROLLBACK path, unwinding SET_RATE_LIMIT and
+  // FIX_API fixes recorded before that vocabulary was retired. Those rows are
+  // legacy state a revert legitimately has to touch, and refusing to read them
+  // would strand the undo for fixes already in the ledger. Detection must never
+  // ask the table what exists; revert may still ask it what it left behind.
+  const VERIFICATION_SURFACES = [
+    'lib/ai/behavioral-verifier.ts',
+    'lib/core/drift-detector.ts',
+    'lib/ai/agents/repair-agent.ts',
+    'lib/autonomy/desired-state.ts',
+  ]
+
+  it.each(VERIFICATION_SURFACES)('%s does not query ApiDefinition', (rel) => {
+    const src = fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8')
+    // Comments explaining WHY it was removed are fine; a live query is not.
+    const live = src
+      .split('\n')
+      .filter(l => !l.trim().startsWith('*') && !l.trim().startsWith('//'))
+      .filter(l => /prisma\.apiDefinition\s*\./.test(l))
+    expect(live).toEqual([])
+  })
+})

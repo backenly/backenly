@@ -855,11 +855,20 @@ async function checkRlsIsolation(projectId: string): Promise<BehavioralCheck> {
       )
       for (const policy of policyRows) {
         const qual = policy.qual ?? ''
-        // A correct own_rows policy always references current_setting('app.user_id')
-        if (qual && !qual.includes('app.user_id') && !qual.includes('current_setting')) {
+        // A correct own_rows policy reads the caller identity through
+        // current_setting — either the claim form
+        // (request.jwt.claims ->> 'sub') or the GUC form (app.current_user_id).
+        // rls-session.ts sets BOTH, so either dialect evaluates correctly here.
+        //
+        // The old check looked for the literal 'app.user_id', a GUC name nothing
+        // sets — rlsSessionSql writes 'app.current_user_id'. Combined with the
+        // second clause it could effectively never fire, so it was a guard in
+        // name only.
+        if (qual && !qual.includes('current_setting')) {
           base.details.push(
-            `⚠ RLS policy on '${targetTable}' (cmd=${policy.cmd}) does not reference app.user_id — ` +
-            `expression: ${qual.slice(0, 120)}. Column name mismatch may cause silent isolation failure.`,
+            `⚠ RLS policy on '${targetTable}' (cmd=${policy.cmd}) never reads current_setting, so it ` +
+            `does not depend on the caller identity at all — expression: ${qual.slice(0, 120)}. ` +
+            `A policy that ignores the caller either denies everyone or exposes every row.`,
           )
         }
       }
@@ -1233,14 +1242,28 @@ async function checkLiveApiEndpoints(projectId: string): Promise<BehavioralCheck
     take: 15,
   })
 
-  // Pre-load the set of tables that actually have a generated API endpoint.
-  // Filter the candidate to ONLY those — anything else would 404.
-  // ApiDefinition.name is the API/table name (also used as the URL segment).
-  const apiDefs = await prisma.apiDefinition.findMany({
-    where: { projectId, enabled: true },
-    select: { name: true },
-  })
-  const tablesWithApi = new Set(apiDefs.map(a => a.name.toLowerCase()))
+  // Which tables are actually reachable over HTTP.
+  //
+  // This read `ApiDefinition` until 2026-07-30, and that table has had no
+  // writers since the PostgREST cutover on 2026-07-21 — no `.create`, `.update`
+  // or `.upsert` anywhere in the repo. On every project created after the
+  // cutover the set was EMPTY, so both candidate loops below hit `continue` on
+  // every table, `candidate` stayed undefined, and this check returned
+  //
+  //   skipped: "No testable application tables with a generated API yet"
+  //
+  // on projects that had plenty of tables and perfectly working APIs. This is
+  // the ONLY check that exercises the real HTTP stack end to end — signup → JWT
+  // → GET list → POST create, through routing, auth and the handler — and it has
+  // silently not run on any modern project. Until the aggregate verdict was
+  // fixed earlier today, a skipped check also counted toward `passed`, so the
+  // whole verification reported green on the strength of a check that never ran.
+  //
+  // The catalog is the source of truth for reachability under PostgREST: a table
+  // is served because it exists and the role holds a grant on it. Ask it.
+  const { listExposedTables } = await import('@/lib/mcp/schema-introspection')
+  const exposed = await listExposedTables(projectId).catch(() => [] as Array<{ name: string }>)
+  const tablesWithApi = new Set(exposed.map(t => t.name.toLowerCase()))
 
   const httpSchemaName = `workspace_${projectId}`
   let candidate: (typeof tables)[number] | undefined
@@ -1268,7 +1291,17 @@ async function checkLiveApiEndpoints(projectId: string): Promise<BehavioralCheck
     }
   }
   if (!candidate) {
-    return { ...base, skipped: true, skipReason: 'No testable application tables with a generated API yet — build tables and APIs first' }
+    // Name which of the two states this is. "Build tables and APIs first" was
+    // wrong and unactionable on a project full of working tables — it described
+    // a stale projection, not the backend.
+    return {
+      ...base,
+      skipped: true,
+      skipReason:
+        tablesWithApi.size === 0
+          ? 'No tables are exposed over the REST API yet — create a table to enable live HTTP verification'
+          : `No testable application table found (${tables.length} table(s) present, all either system tables or excluded)`,
+    }
   }
   const tableName = candidate.name
 
