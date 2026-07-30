@@ -1290,10 +1290,13 @@ export async function introspectSchema(projectId: string): Promise<string> {
 
     // Add existing API awareness so AI doesn't regenerate APIs that already exist
     try {
-      const existingApis = await prisma.apiDefinition.findMany({
-        where: { projectId },
-        select: { name: true },
-      })
+      // Exposed tables from the catalog. This read ApiDefinition, which has had
+      // no create path since the PostgREST cutover, so the list was empty and
+      // this "do NOT regenerate these" block never rendered - the model was told
+      // nothing existed and duly regenerated APIs for tables already serving
+      // traffic.
+      const { listExposedResources } = await import('@/lib/api/exposed-resources')
+      const existingApis = await listExposedResources(projectId)
       if (existingApis.length > 0) {
         schemaGraph += '\n**EXISTING REST APIs (do NOT regenerate these):**\n'
         schemaGraph += existingApis.map(a => `- ${a.name} (already has CRUD endpoints)`).join('\n') + '\n'
@@ -2923,19 +2926,34 @@ async function verifyExecution(
       }
 
       case 'GENERATE_API': {
-        // Verify API definition exists
-        const apiCheck = await prisma.apiDefinition.findFirst({
-          where: { projectId, name: action.params.tableName }
-        })
-        
-        if (!apiCheck) {
-          console.error(`[Verify] API definition for "${action.params.tableName}" not found!`)
-          // Self-heal: Try generating again
-          console.log(`[Self-Heal] Retrying API generation...`)
-          return await executeGenerateAPI(action.params, projectId)
+        // Verify the table is REACHABLE, which is what "the API exists" means
+        // under PostgREST.
+        //
+        // This checked for an ApiDefinition row and, not finding one, re-ran
+        // executeGenerateAPI as a "self-heal". Nothing creates that row since
+        // the cutover, so the check could never pass - and the repair it
+        // triggered could never make it pass either. A verification step whose
+        // only possible outcome was to retry an operation that cannot satisfy it.
+        const { listExposedResources } = await import('@/lib/api/exposed-resources')
+        const exposedNow = await listExposedResources(projectId)
+        const reachable = exposedNow.some(
+          r => r.name.toLowerCase() === String(action.params.tableName ?? '').toLowerCase(),
+        )
+
+        if (!reachable) {
+          // A table that exists but is not exposed is a grant or schema-exposure
+          // problem. Re-running generation cannot fix that, so report it rather
+          // than loop.
+          console.error(`[Verify] "${action.params.tableName}" is not reachable over REST`)
+          return {
+            success: false,
+            message:
+              `Table "${action.params.tableName}" is not reachable over the REST API. ` +
+              `Check that its schema is registered with PostgREST and that the API role holds a grant on it.`,
+          }
         }
-        
-        console.log(`[Verify] API "${action.params.tableName}" verified ✓`)
+
+        console.log(`[Verify] "${action.params.tableName}" is reachable over REST`)
         result = { ...result, verifiedAt: new Date().toISOString() }
         break
       }
@@ -5967,7 +5985,9 @@ async function executeInfo(params: any, projectId?: string): Promise<ExecutionRe
 
     const [tables, apiDefs, triggers, permissions, aiFunctions, buckets, projectConfig] = await Promise.all([
       prisma.table.findMany({ where: { projectId }, select: { name: true, schema: true }, orderBy: { name: 'asc' } }),
-      prisma.apiDefinition.findMany({ where: { projectId }, include: { table: { select: { name: true } } }, orderBy: { createdAt: 'asc' } }),
+      // Catalog, not the dead projection: this feeds the model's picture of the
+      // backend, and an empty list told it the project had no REST surface.
+      import('@/lib/api/exposed-resources').then(m => m.listExposedResources(projectId)),
       prisma.appTrigger.findMany({ where: { projectId }, select: { name: true, sourceTable: true, event: true, actionType: true, enabled: true } }),
       prisma.permissionPolicy.findMany({ where: { projectId }, select: { tableName: true, policyName: true, operation: true } }),
       prisma.aiFunction.findMany({ where: { projectId, status: 'active' }, select: { name: true, description: true, triggerType: true, triggerTable: true, runCount: true } }),
@@ -5997,9 +6017,8 @@ async function executeInfo(params: any, projectId?: string): Promise<ExecutionRe
     if (apiDefs.length > 0) {
       lines.push(`### REST APIs (${apiDefs.length} resource${apiDefs.length !== 1 ? 's' : ''})`)
       for (const def of apiDefs) {
-        const endpoints = Array.isArray(def.endpoints) ? def.endpoints as any[] : []
-        const methods = endpoints.filter((e: any) => e.enabled).map((e: any) => e.method)
-        lines.push(`- **${def.table?.name || def.name}** — ${methods.join(' · ')} — base: \`/api/v1/${projectId}/db/${def.table?.name || ''}\``)
+        // Every exposed table serves the CRUD set the /db/* route registers.
+        lines.push(`- **${def.name}** - GET · POST · PUT · PATCH · DELETE - base: \`/api/v1/${projectId}/db/${def.name}\``)
       }
       lines.push('')
     }
@@ -7557,9 +7576,10 @@ async function executeGetUsage(projectId: string): Promise<ExecutionResult> {
     })
     
     // Get API count
-    const apis = await prisma.apiDefinition.count({
-      where: { projectId }
-    })
+    // Catalog count - the row count was permanently 0 after the cutover, so
+    // this status reported "Active APIs: 0" on backends serving traffic.
+    const { countExposedResources } = await import('@/lib/api/exposed-resources')
+    const apis = await countExposedResources(projectId)
     
     return {
       success: true,
@@ -10866,10 +10886,15 @@ async function executeFixApi(params: any, projectId: string): Promise<ExecutionR
       }
     }
 
+    const { listExposedResources } = await import('@/lib/api/exposed-resources')
+    const exposedForFix = await listExposedResources(projectId)
+
     for (const table of tables) {
-      const existing = await prisma.apiDefinition.findFirst({
-        where: { projectId, table: { name: table.name } },
-      })
+      // Reachability, from the catalog. Asking ApiDefinition meant `existing`
+      // was always null, so every table took the regenerate path on every run.
+      const existing = exposedForFix.some(
+        r => r.name.toLowerCase() === table.name.toLowerCase(),
+      )
 
       if (existing) {
         alreadyOk.push(table.name)
@@ -11099,8 +11124,13 @@ async function executeFixDeploy(params: any, projectId: string): Promise<Executi
       }
     }
 
-    // "No APIs" → regenerate them all
-    const apiCount = await prisma.apiDefinition.count({ where: { projectId } })
+    // "Nothing reachable over REST" → regenerate.
+    //
+    // This counted ApiDefinition rows, which are permanently 0 since the
+    // cutover, so the condition was ALWAYS true and a full API regeneration ran
+    // on every pass regardless of the project's actual state.
+    const { countExposedResources: countExposedForRepair } = await import('@/lib/api/exposed-resources')
+    const apiCount = await countExposedForRepair(projectId)
     if (apiCount === 0) {
       const regenResult = await executeFixApi({}, projectId)
       if (regenResult.success && regenResult.data?.fixed?.length > 0) {
@@ -12628,6 +12658,12 @@ async function executeSetRateLimit(params: any, projectId: string): Promise<Exec
 async function executeListRateLimits(projectId: string): Promise<ExecutionResult> {
   try {
     const { prisma } = await import('@/lib/db')
+    // Per-endpoint rate limits were a column on ApiDefinition. Under PostgREST
+    // limiting is per API KEY (ApiKey.rateLimit, Int @default(1000), which
+    // cannot be unset) and is enforced on every serving surface - the same
+    // reason the missing_rate_limit probe was retired on 2026-07-21. Listing
+    // this from a table nothing writes reported "no API definitions yet" on
+    // projects whose keys were being rate-limited the whole time.
     const defs = await prisma.apiDefinition.findMany({
       where: { projectId },
       include: { table: { select: { name: true } } },
@@ -12635,7 +12671,12 @@ async function executeListRateLimits(projectId: string): Promise<ExecutionResult
     })
 
     if (defs.length === 0) {
-      return { success: true, message: 'No API definitions yet. Generate APIs first.' }
+      return {
+        success: true,
+        message:
+          'Rate limits are enforced per API key on this project, not per endpoint. ' +
+          'See Connect → your agent keys for the limit on each key.',
+      }
     }
 
     const list = defs
