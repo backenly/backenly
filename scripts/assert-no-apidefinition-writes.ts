@@ -99,9 +99,9 @@ const READ_RE = /prisma\s*\.\s*apiDefinition\s*\./
  */
 const KNOWN_READERS = new Set<string>([
   // ── User-visible: these show "no APIs" on a working backend ──────────────
+  // (converted 2026-07-30: server/routes/dynamic.ts and
+  //  app/api/v1/[projectId]/route.ts now read listExposedTables)
   'lib/services/openapi-generator.ts',        // dashboard OpenAPI download
-  'server/routes/dynamic.ts',                 // API discovery response
-  'app/api/v1/[projectId]/route.ts',          // project API listing
   'app/api/cli/overview/route.ts',            // CLI overview counts
   'app/api/projects/[id]/state/route.ts',     // dashboard state
   'app/api/debug/[projectId]/route.ts',

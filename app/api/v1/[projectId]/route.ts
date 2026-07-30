@@ -51,27 +51,33 @@ export async function GET(
     // no cart was told it had one. For an agent reading this document to decide
     // what to call, a confident wrong answer is worse than no answer: it turns a
     // missing feature into a 404 the agent has to reverse-engineer.
-    const apis = await prisma.apiDefinition.findMany({
-      where: { projectId, enabled: true },
-      select: { name: true, operations: true, authRequired: true },
-      orderBy: { name: 'asc' },
-    })
+    // Read the CATALOG, which is what actually decides reachability.
+    //
+    // This read ApiDefinition until 2026-07-30. That table has no create path
+    // since the PostgREST cutover, so on every project built after it the list
+    // came back EMPTY — and this document is the first thing an agent fetches to
+    // decide what it can call. The comment above warns that a confident wrong
+    // answer is worse than no answer; "you have no resources" on a backend with
+    // seven working tables is exactly that, reached from the other direction.
+    //
+    // Under PostgREST a table is reachable because it exists and the role holds
+    // a grant, and the runtime registers the full verb set on /db/* (see
+    // server/routes/dynamic.ts). So the methods are the standard CRUD set for
+    // every exposed table rather than a per-row projection nothing maintains.
+    const { listExposedTables } = await import('@/lib/mcp/schema-introspection')
+    const exposed = await listExposedTables(projectId).catch(() => [] as Array<{ name: string }>)
 
-    const resources = apis.map(api => {
-      const ops: string[] = Array.isArray(api.operations)
-        ? (api.operations as unknown[])
-            .map(o => (typeof o === 'string' ? o : ((o as Record<string, unknown>)?.method as string) ?? ''))
-            .filter(Boolean)
-        : api.operations && typeof api.operations === 'object'
-          ? Object.keys(api.operations as Record<string, unknown>)
-          : []
-      return {
-        resource: api.name,
-        url: `${baseUrl}/db/${api.name}`,
-        methods: ops.map(o => o.toUpperCase()),
-        authRequired: api.authRequired,
-      }
-    })
+    const resources = exposed
+      .map(t => t.name)
+      .sort((a, b) => a.localeCompare(b))
+      .map(name => ({
+        resource: name,
+        url: `${baseUrl}/db/${name}`,
+        methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+        // Every /db/* request is key- or JWT-authenticated; row visibility is
+        // then decided by RLS rather than by a per-endpoint flag.
+        authRequired: true,
+      }))
 
     return NextResponse.json({
       // projectId was absent, which made the document unusable as the single

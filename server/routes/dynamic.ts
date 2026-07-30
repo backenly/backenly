@@ -491,28 +491,27 @@ async function serveProjectDiscovery(projectId: string, req: Request, res: Respo
               || 'backenly.com'
     const baseUrl = project.publicUrl || `${proto}://${host}/api/v1/${projectId}`
 
-    // Pull the live ApiDefinition catalogue so the response reflects what was
-    // actually generated — not a hardcoded shape. Disabled definitions are
-    // excluded so the doc never advertises something that 404s.
-    const apis = await prisma.apiDefinition.findMany({
-      where: { projectId, enabled: true },
-      select: { name: true, operations: true, authRequired: true },
-      orderBy: { name: 'asc' },
-    })
+    // Read the CATALOG — the twin of the Next-side document in
+    // app/api/v1/[projectId]/route.ts, and it had the same defect.
+    //
+    // This pulled from ApiDefinition, which has had no create path since the
+    // PostgREST cutover, so on every project built after it the resource list
+    // was EMPTY. The comment claimed the response "reflects what was actually
+    // generated"; it reflected a projection nothing writes. This router itself
+    // registers GET/POST/PUT/PATCH/DELETE on /* a few lines below, so the verb
+    // set is a property of the runtime, not of a stored row.
+    const { listExposedTables } = await import('@/lib/mcp/schema-introspection')
+    const exposed = await listExposedTables(projectId).catch(() => [] as Array<{ name: string }>)
 
-    const resources = apis.map(api => {
-      const ops: string[] = Array.isArray(api.operations)
-        ? (api.operations as any[]).map(o => (typeof o === 'string' ? o : o?.method ?? '')).filter(Boolean)
-        : typeof api.operations === 'object' && api.operations !== null
-          ? Object.keys(api.operations)
-          : []
-      return {
-        resource: api.name,
-        url: `${baseUrl}/db/${api.name}`,
-        methods: ops.map(o => o.toUpperCase()),
-        authRequired: api.authRequired,
-      }
-    })
+    const resources = exposed
+      .map(t => t.name)
+      .sort((a, b) => a.localeCompare(b))
+      .map(name => ({
+        resource: name,
+        url: `${baseUrl}/db/${name}`,
+        methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+        authRequired: true,
+      }))
 
     res.status(200).json({
       project: project.name,
