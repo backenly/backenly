@@ -7,7 +7,8 @@ import { AppSidebar } from '@/components/app/AppSidebar'
 import { Logo } from '@/components/Logo'
 import { GlobalLoading } from '@/components/ui/GlobalLoading'
 import { getProjects } from '@/lib/api/projects'
-import { isAuthenticated } from '@/lib/api/auth'
+import { isAuthenticated, logout } from '@/lib/api/auth'
+import { VerifyEmailWall } from '@/components/app/VerifyEmailWall'
 
 // Inner component for layout
 function AppLayoutContent({ children }: { children: React.ReactNode }) {
@@ -57,6 +58,9 @@ function AppLayoutInternal({
   const searchParams = useSearchParams()
   const [sidebarWidth, setSidebarWidth] = useState(256) // 64 * 4 = 256px (w-64)
   const [isCheckingProject, setIsCheckingProject] = useState(true)
+  // Signup-trust standing. `null` until /api/auth/me answers; the wall must
+  // never flash before we know, and must never block if the check itself fails.
+  const [standing, setStanding] = useState<{ walled: boolean; email: string } | null>(null)
 
   // Handle OAuth token sync to localStorage
   useEffect(() => {
@@ -122,6 +126,38 @@ function AppLayoutInternal({
     checkProject()
   }, [router, pathname])
 
+  // Signup-trust standing. Only accounts flagged untrusted at signup AND still
+  // unverified are walled — 21 pre-existing accounts are unverified but trusted,
+  // and gating on `emailVerified` alone would lock every one of them out.
+  //
+  // Fails OPEN on any error: a flaky /me must never wall a paying customer out
+  // of their own dashboard. The real boundary is the server gate in
+  // lib/auth/account-standing.ts, which this only mirrors for UX.
+  useEffect(() => {
+    let cancelled = false
+    const checkStanding = async () => {
+      if (!isAuthenticated()) return
+      try {
+        const token = localStorage.getItem('auth-token')
+        const res = await fetch('/api/auth/me', {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          cache: 'no-store',
+        })
+        if (!res.ok) return
+        const me = await res.json()
+        if (cancelled) return
+        setStanding({
+          walled: me?.trustLevel === 'untrusted' && me?.emailVerified === false,
+          email: me?.email ?? '',
+        })
+      } catch {
+        // Leave `standing` null — renders the app, never the wall.
+      }
+    }
+    checkStanding()
+    return () => { cancelled = true }
+  }, [pathname])
+
   // Sync with sidebar state from localStorage
   useEffect(() => {
     const updateSidebarWidth = () => {
@@ -163,6 +199,24 @@ function AppLayoutInternal({
   // Show loading state while checking for projects
   if (isCheckingProject) {
     return <GlobalLoading />
+  }
+
+  // Verification wall. Replaces the old behaviour where an untrusted account
+  // roamed the dashboard freely and only hit a 403 once it tried to create a
+  // project — an error at the worst moment, with no way to resolve it.
+  if (standing?.walled) {
+    return (
+      <VerifyEmailWall
+        email={standing.email}
+        onLogout={async () => {
+          try {
+            await logout()
+          } finally {
+            router.push('/auth/login')
+          }
+        }}
+      />
+    )
   }
 
   return (

@@ -20,6 +20,10 @@ export const GET = withAuth(async (request: NextRequest, { user }) => {
         name: true,
         provider: true,
         emailVerified: true,
+        // Drives the verification wall in the app shell. Only accounts flagged
+        // untrusted at signup are walled, so the 21 pre-existing unverified
+        // accounts (all trusted) are untouched.
+        trustLevel: true,
         twoFactorEnabled: true,
         createdAt: true,
         lastLogin: true,
@@ -51,6 +55,7 @@ export const GET = withAuth(async (request: NextRequest, { user }) => {
       name: userDetails.name,
       provider: userDetails.provider,
       emailVerified: userDetails.emailVerified,
+      trustLevel: userDetails.trustLevel,
       twoFactorEnabled: userDetails.twoFactorEnabled,
       createdAt: userDetails.createdAt,
       lastLogin: userDetails.lastLogin,
