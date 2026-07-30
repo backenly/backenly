@@ -102,26 +102,21 @@ export async function readProjectContext(projectId: string): Promise<ProjectCont
       })
     )
     
-    // Get API definitions
-    const apiDefinitions = await prisma.apiDefinition.findMany({
-      where: { 
-        table: {
-          projectId,
-        },
-      },
-      include: {
-        table: {
-          select: { name: true },
-        },
-      },
-    })
-    
-    const apis = apiDefinitions.map(api => ({
-      tableName: api.table.name,
-      basePath: api.basePath,
-      operations: Object.entries(api.operations as any)
-        .filter(([_, enabled]) => enabled)
-        .map(([op, _]) => op),
+    // REST surface, from the catalog.
+    //
+    // This read ApiDefinition, which has no create path since the PostgREST
+    // cutover, so the AI's context said the project had no APIs on every modern
+    // project. An assistant reasoning from that will tell the user to build
+    // what already exists.
+    //
+    // Operations are the CRUD set the /db/* route serves for any exposed table;
+    // per-operation toggles were a property of the projection, and restriction
+    // is a Postgres grant now.
+    const { listExposedResources } = await import('@/lib/api/exposed-resources')
+    const apis = (await listExposedResources(projectId)).map(a => ({
+      tableName: a.name,
+      basePath: a.basePath,
+      operations: ['list', 'get', 'create', 'update', 'delete'],
     }))
     
     const context: ProjectContext = {

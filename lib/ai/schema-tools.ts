@@ -87,30 +87,25 @@ export async function describeTable(projectId: string, tableName: string): Promi
 }
 
 export async function listApis(projectId: string): Promise<ApiInfo[]> {
-  const { prisma } = await import('@/lib/db/prisma')
+  // Agent-facing: this is what a coding agent is told the backend exposes.
+  // It read ApiDefinition, which has had no create path since the PostgREST
+  // cutover, so agents building against any modern project were told the
+  // backend had no APIs at all.
   try {
-    const apis = await prisma.apiDefinition.findMany({
-      where: { projectId, enabled: true },
-      select: { basePath: true, name: true },
-      orderBy: { name: 'asc' },
-    })
-    return apis.map((a: { basePath: string; name: string }) => ({
-      basePath: a.basePath,
-      tableName: a.name,
-    }))
+    const { listExposedResources } = await import('@/lib/api/exposed-resources')
+    const apis = await listExposedResources(projectId)
+    return apis.map(a => ({ basePath: a.basePath, tableName: a.name }))
   } catch {
     return []
   }
 }
 
 export async function apiExistsForTable(projectId: string, tableName: string): Promise<boolean> {
-  const { prisma } = await import('@/lib/db/prisma')
+  // "Is this table reachable over REST?" is a catalog question.
   try {
-    const api = await prisma.apiDefinition.findFirst({
-      where: { projectId, name: tableName },
-      select: { id: true },
-    })
-    return !!api
+    const { listExposedResources } = await import('@/lib/api/exposed-resources')
+    const apis = await listExposedResources(projectId)
+    return apis.some(a => a.name.toLowerCase() === tableName.toLowerCase())
   } catch {
     return false
   }
@@ -142,29 +137,35 @@ export interface ApiImplementation {
 }
 
 export async function readApiImplementation(projectId: string, tableName: string): Promise<ApiImplementation | null> {
-  const { prisma } = await import('@/lib/db/prisma')
+  // Per-operation flags were a property of the ApiDefinition projection. Under
+  // PostgREST an exposed table serves the full CRUD set through the /db/* route
+  // (which registers GET/POST/PUT/PATCH/DELETE), and restriction is expressed
+  // as a Postgres grant rather than a JSON flag. The old code already defaulted
+  // every CRUD op to true when the JSON was absent, so this reports the same
+  // shape from the source that actually decides it.
   try {
-    const api = await prisma.apiDefinition.findFirst({
-      where: { projectId, name: tableName },
-    })
-    if (!api) return null
+    const { listExposedResources } = await import('@/lib/api/exposed-resources')
+    const apis = await listExposedResources(projectId)
+    const match = apis.find(a => a.name.toLowerCase() === tableName.toLowerCase())
+    if (!match) return null
 
-    const ops = (api.operations as any) || {}
     return {
-      tableName: api.name,
-      basePath: api.basePath,
+      tableName: match.name,
+      basePath: match.basePath,
       operations: {
-        list: ops.list ?? true,
-        get: ops.get ?? true,
-        create: ops.create ?? true,
-        update: ops.update ?? true,
-        delete: ops.delete ?? true,
-        search: ops.search ?? false,
-        bulk: ops.bulk ?? false,
+        list: true,
+        get: true,
+        create: true,
+        update: true,
+        delete: true,
+        // Not plain CRUD: these have no PostgREST equivalent in this shape and
+        // are refused by the data plane (see handleViaPostgrest).
+        search: false,
+        bulk: false,
       },
-      authStrategy: (api as any).authStrategy || 'jwt',
-      rateLimit: (api as any).rateLimit || 100,
-      enabled: api.enabled,
+      authStrategy: 'jwt',
+      rateLimit: 100,
+      enabled: true,
     }
   } catch {
     return null
@@ -198,14 +199,13 @@ export async function getProjectSnapshot(projectId: string): Promise<ProjectSnap
         select: { name: true },
         orderBy: { name: 'asc' },
       }),
-      prisma.apiDefinition.findMany({
-        where: { projectId, enabled: true },
-        select: { name: true, basePath: true },
-      }),
+      // Catalog, not the dead projection - otherwise every table in this
+      // snapshot reports hasApi:false to whatever reads it.
+      import('@/lib/api/exposed-resources').then(m => m.listExposedResources(projectId)),
       checkAuthStatus(projectId),
     ])
 
-    const apiByTable = new Map(apis.map((a: { name: string; basePath: string }) => [a.name, a.basePath]))
+    const apiByTable = new Map(apis.map(a => [a.name, a.basePath]))
 
     return {
       tables: tables.map((t: { name: string }) => ({

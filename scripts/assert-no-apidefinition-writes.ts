@@ -105,10 +105,8 @@ const KNOWN_READERS = new Set<string>([
   'app/api/projects/[id]/state/route.ts',     // dashboard state
   // ── Internal decisions taken on a count that is always 0 ─────────────────
   'lib/ai/build-runtime/security-auditor.ts',
-  'lib/ai/context-reader.ts',
   'lib/ai/minimal-executor.ts',
   'lib/ai/production-intelligence.ts',
-  'lib/ai/schema-tools.ts',
   'lib/deployment/readiness-scorer.ts',
   'lib/services/schema-impact-analyzer.ts',
   'lib/services/serverless-warmup.ts',
