@@ -41,6 +41,91 @@ export async function register() {
         ])
       })
 
+      // ── Tier B: diagnose what Tier A escalated ─────────────────────────────
+      //
+      // This was MISSING here, and that is why no escalated finding has ever
+      // carried a root-cause explanation in production.
+      //
+      // GET /api/cron/autonomy runs two passes: runReconciler (Tier A, acts) and
+      // diagnoseEscalatedFindings (Tier B, explains). This in-process scheduler
+      // is what actually runs on the box — the HTTP route is invoked by nothing
+      // (no crontab entry, no systemd timer, zero hits in the nginx access log)
+      // because Vercel-style cron declarations do not fire on a Hetzner VPS. So
+      // Tier A was scheduled below and Tier B was simply left behind, and the
+      // whole hypothesis/diagnosis engine under lib/autonomy/hypothesis/ never
+      // executed. ReviewQueuePanel renders a diagnosis block for exactly this
+      // data; it has always been empty.
+      //
+      // Slower cadence than the reconciler on purpose: this is the one autonomy
+      // path that calls a model. It is self-capping (MAX_PER_TICK = 2 per
+      // project) and skips findings that already carry a diagnosis, so a tick
+      // with nothing escalated costs one indexed query per project.
+      cron.schedule('*/10 * * * *', async () => {
+        const { prisma } = await import('./lib/db/prisma')
+        const { diagnoseEscalatedFindings } = await import('./lib/autonomy/escalation-diagnosis')
+        const { activeProjectsWhere } = await import('./lib/autonomy/activity-gate')
+
+        const activeProjects = await prisma.project.findMany({
+          where: activeProjectsWhere(),
+          select: { id: true },
+        }).catch(() => [])
+        if (activeProjects.length === 0) return
+
+        const CONCURRENCY = 5
+        let diagnosed = 0
+        for (let i = 0; i < activeProjects.length; i += CONCURRENCY) {
+          const batch = activeProjects.slice(i, i + CONCURRENCY)
+          const results = await Promise.allSettled(
+            batch.map(p => diagnoseEscalatedFindings(p.id)),
+          )
+          for (const r of results) {
+            if (r.status === 'fulfilled') diagnosed += r.value
+          }
+        }
+        if (diagnosed > 0) {
+          console.log(`[EscalationDiagnosis] Wrote ${diagnosed} diagnosis/diagnoses`)
+        }
+      })
+
+      // ── Sensor health: can the instruments still detect anything? ───────────
+      //
+      // Also previously unscheduled — checkSensorHealth was reachable only when
+      // an agent called the MCP tool, so the loop never checked its own probes.
+      // The failure it exists to catch is a probe returning [] because it is
+      // BROKEN: detectMissingRls did that in every environment for months while
+      // the dashboard rendered green, because "no findings" and "cannot detect
+      // findings" are the same value. Running it records first-firings, which is
+      // what promotes a probe from `unverified` to `clean` and makes its silence
+      // mean something later.
+      //
+      // Daily, and after the observer's own pass, because it runs the full
+      // desired-state diff per project.
+      cron.schedule('40 0 * * *', async () => {
+        const { prisma } = await import('./lib/db/prisma')
+        const { checkSensorHealth, summariseSensorHealth } = await import('./lib/autonomy/sensor-health')
+        const { activeProjectsWhere } = await import('./lib/autonomy/activity-gate')
+
+        const activeProjects = await prisma.project.findMany({
+          where: activeProjectsWhere(),
+          select: { id: true },
+        }).catch(() => [])
+
+        for (const p of activeProjects) {
+          try {
+            const report = await checkSensorHealth(p.id)
+            // Only shout when the instruments are not trustworthy. A fully
+            // instrumented project is not news.
+            if (!report.fullyInstrumented) {
+              console.warn(
+                `[SensorHealth] project=${p.id} ${summariseSensorHealth(report)}`,
+              )
+            }
+          } catch (err: any) {
+            console.error(`[SensorHealth] project=${p.id} failed:`, err?.message)
+          }
+        }
+      })
+
       // Daily backup at 02:05 UTC (staggered from cleanup at 02:00)
       cron.schedule('5 2 * * *', async () => {
         const { runDailyBackups } = await import('./lib/services/workspace-backup')
