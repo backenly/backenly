@@ -993,51 +993,28 @@ export async function detectOrphanTables(projectId: string): Promise<RawFinding[
 }
 
 /**
- * Detect tables that have an ApiDefinition but the definition is missing
- * required fields relative to the live schema (API drift).
+ * RETIRED 2026-07-30 — this detector could never emit a finding, on any project,
+ * at any point in its life.
+ *
+ * It loaded ApiDefinition rows and then read `def.columns ?? def.fields` to
+ * decide whether the stored definition referenced columns the live schema no
+ * longer has. Neither field exists on the model — ApiDefinition carries
+ * operations, endpoints, validation and config, and never carried a column
+ * list. So `defColumns` was always [], `staleColumns` was always [], and the
+ * `if (staleColumns.length > 0)` branch was unreachable.
+ *
+ * Two independent reasons it reported nothing, which is why it survived: the
+ * cast to `any` on line 1021 removed the type error that would have caught the
+ * wrong field names, and the PostgREST cutover later emptied the table it read
+ * anyway. Either alone is enough to silence it. Together they made a detector
+ * that looked maintained and had never once fired.
+ *
+ * `api_drift` is retired vocabulary regardless: under PostgREST the API is the
+ * schema, so an API cannot reference a column the schema does not have. There
+ * is nothing here to reinstate.
  */
-async function detectApiDrift(projectId: string): Promise<RawFinding[]> {
-  const findings: RawFinding[] = []
-  const schemaName = `workspace_${projectId}`
-
-  const apiDefs = await prisma.apiDefinition.findMany({
-    where: { table: { projectId } },
-    include: { table: { select: { name: true } } },
-  }).catch(() => [])
-
-  for (const def of apiDefs) {
-    const tableName = def.table.name
-    const liveColumns = await queryWorkspaceSchema(
-      projectId,
-      `SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2`,
-      schemaName,
-      tableName
-    ).catch(() => ({ rows: [] }))
-
-    const cols: string[] = (liveColumns?.rows ?? liveColumns ?? []).map((r: any) => r.column_name)
-    if (!cols.length) continue
-
-    // Check if the stored definition references columns that no longer exist
-    const defData = def as any
-    const defColumns: string[] = defData.columns ?? defData.fields ?? []
-    const staleColumns = defColumns.filter((c: string) => !cols.includes(c))
-
-    if (staleColumns.length > 0) {
-      findings.push({
-        type: 'api_drift',
-        severity: 'warning',
-        details: {
-          tableName,
-          staleColumns,
-          liveColumns: cols,
-          reason: 'API definition references columns no longer present in live schema',
-        },
-        autoFixable: false, // Regenerating an API definition requires AI intent — queue for approval
-      })
-    }
-  }
-
-  return findings
+async function detectApiDrift(_projectId: string): Promise<RawFinding[]> {
+  return []
 }
 
 /**

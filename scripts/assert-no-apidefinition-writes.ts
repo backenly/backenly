@@ -103,7 +103,6 @@ const KNOWN_READERS = new Set<string>([
   //  app/api/v1/[projectId]/route.ts now read listExposedTables)
   'lib/services/openapi-generator.ts',        // dashboard OpenAPI download
   'app/api/projects/[id]/state/route.ts',     // dashboard state
-  'app/api/ai-workspace/detect-new-tables/route.ts',
   // ── Internal decisions taken on a count that is always 0 ─────────────────
   'lib/ai/build-runtime/security-auditor.ts',
   'lib/ai/context-reader.ts',
@@ -113,7 +112,6 @@ const KNOWN_READERS = new Set<string>([
   'lib/deployment/readiness-scorer.ts',
   'lib/services/schema-impact-analyzer.ts',
   'lib/services/serverless-warmup.ts',
-  'lib/services/workspace-observer.ts',
   // ── Legitimate: unwinding rows earlier fixes left behind ─────────────────
   // Detection must never ask this table what exists; a REVERT may still ask
   // what it left behind, or the undo for fixes already in the ledger strands.

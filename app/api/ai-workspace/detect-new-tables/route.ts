@@ -66,23 +66,23 @@ export async function POST(request: NextRequest) {
     // Check which tables have API Definitions
     console.log(`🔍 [${requestId}] Checking for API Definitions...`)
     
-    const apiDefinitions = await prisma.apiDefinition.findMany({
-      where: { projectId },
-      select: { name: true, tableId: true },
-    })
+    // Which tables are actually reachable over REST, from the catalog.
+    //
+    // This read ApiDefinition, which has had no create path since the PostgREST
+    // cutover. On every project built after it the set was empty, so EVERY
+    // table came back as "needs an API" - and NewTablesSuggestionWidget
+    // auto-expands on a non-empty result and offers a "Generate API" button per
+    // table. Every modern project was permanently prompted to generate APIs for
+    // tables already serving traffic, behind a button whose executor cannot
+    // change the condition.
+    //
+    // A table that IS exposed needs nothing. One that is not is worth
+    // surfacing, which is what this widget is for.
+    const { listExposedResources } = await import('@/lib/api/exposed-resources')
+    const exposed = await listExposedResources(projectId)
+    const exposedNames = new Set(exposed.map(r => r.name.toLowerCase()))
 
-    // Build a set of table IDs that have API Definitions
-    const tableIdsWithApis = new Set(apiDefinitions.map(api => api.tableId))
-    
-    console.log(`📊 [${requestId}] Found ${apiDefinitions.length} API Definitions`)
-    console.log(`🔍 [${requestId}] API names:`, apiDefinitions.map(a => a.name))
-
-    // Find tables without API Definitions
-    const newTables = tables.filter(table => {
-      const hasApi = tableIdsWithApis.has(table.id)
-      console.log(`  - ${table.name}: ${hasApi ? 'HAS API' : 'NO API'}`)
-      return !hasApi
-    })
+    const newTables = tables.filter(t => !exposedNames.has(t.name.toLowerCase()))
 
     console.log(`✨ [${requestId}] Found ${newTables.length} tables without APIs`)
 
@@ -96,7 +96,7 @@ export async function POST(request: NextRequest) {
           name: table.name,
           description: table.description,
           createdAt: table.createdAt,
-          suggestedPrompt: `Create a complete CRUD API for the ${table.name} table with GET (list with pagination/filtering/search), GET by ID, POST (create), PUT (update), and DELETE endpoints. Include proper validation, error handling, and authentication middleware.`,
+          suggestedPrompt: `Make the ${table.name} table reachable over the REST API - check that its schema is registered with PostgREST and that the API role holds a grant on it.`,
         })),
         totalTables: tables.length,
         tablesWithAPIs: tables.length - newTables.length,
