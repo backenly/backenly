@@ -26,6 +26,7 @@
 
 import { prisma } from '@/lib/db/prisma'
 import { Pool } from 'pg'
+import { countExposedResources } from '@/lib/api/exposed-resources'
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -136,7 +137,7 @@ async function collectEvidence(projectId: string): Promise<StageEvidence> {
   const [tableCount, integrationCount, apiCount, rlsCount, auditTableExists] = await Promise.all([
     prisma.table.count({ where: { projectId } }).catch(() => 0),
     prisma.projectIntegrationKey.count({ where: { projectId } }).catch(() => 0),
-    prisma.apiDefinition.count({ where: { projectId } }).catch(() => 0),
+    countExposedResources(projectId).catch(() => 0),
     prisma.permissionPolicy.count({ where: { projectId } }).catch(() => 0),
     prisma.table.findFirst({ where: { projectId, name: { in: ['audit_log', 'audit_logs', 'audit'] } } })
       .then(r => !!r).catch(() => false),

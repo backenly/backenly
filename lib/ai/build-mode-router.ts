@@ -21,6 +21,7 @@
 
 import { getOpenAIClient } from './openai-service'
 import { getModel } from './model-router'
+import { countExposedResources } from '@/lib/api/exposed-resources'
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -292,12 +293,14 @@ export async function verifyProjectReadiness(
 
   // ── Check 2: APIs generated ────────────────────────────────────────────────
   try {
-    const { prisma } = await import('@/lib/db/prisma')
-    const apiCount = await prisma.apiDefinition.count({ where: { projectId } })
+    // Counts EXPOSED tables, not ApiDefinition rows. The old count was 0 on
+    // every project built after the PostgREST cutover, so this check reported
+    // "No APIs generated yet" on backends serving traffic.
+    const apiCount = await countExposedResources(projectId)
     if (apiCount > 0) {
-      checks.push({ label: 'REST APIs', status: 'ok', detail: `${apiCount} endpoint${apiCount !== 1 ? 's' : ''} generated` })
+      checks.push({ label: 'REST APIs', status: 'ok', detail: `${apiCount} resource${apiCount !== 1 ? 's' : ''} exposed` })
     } else {
-      checks.push({ label: 'REST APIs', status: 'missing', detail: 'No APIs generated yet' })
+      checks.push({ label: 'REST APIs', status: 'missing', detail: 'No tables exposed over REST yet' })
     }
   } catch {
     checks.push({ label: 'REST APIs', status: 'partial', detail: 'Could not check API status' })

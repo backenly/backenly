@@ -36,6 +36,7 @@
 import { prisma } from '@/lib/db/prisma'
 import { getSessionState } from './workflow-session-state'
 import { getLastBuildIntent } from './sticky-intent-store'
+import { countExposedResources } from '@/lib/api/exposed-resources'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -179,7 +180,7 @@ async function loadProjectMemory(projectId: string): Promise<ProjectMemory> {
         }),
         prisma.storageBucket.findMany({ where: { projectId }, select: { name: true } }),
         prisma.projectIntegrationKey.findMany({ where: { projectId }, select: { integrationId: true } }),
-        prisma.apiDefinition.count({ where: { projectId } }),
+        countExposedResources(projectId),
         prisma.deployment.findFirst({ where: { projectId, status: 'active' } }),
         prisma.agentMemory.findFirst({ where: { fingerprint: `arch:${projectId}` } }),
       ])

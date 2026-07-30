@@ -15,6 +15,7 @@
 import crypto from 'crypto'
 import { prisma } from '@/lib/db/prisma'
 import { buildActivityFeed } from '@/lib/activity/feed'
+import { countExposedResources } from '@/lib/api/exposed-resources'
 
 export interface ChangeReport {
   project: { name: string }
@@ -50,7 +51,7 @@ export async function buildChangeReport(projectId: string): Promise<ChangeReport
   const [tables, endpoints, functions, autoFixes, approved, rollbacks, agentChanges, feed] =
     await Promise.all([
       prisma.table.count({ where: { projectId } }),
-      prisma.apiDefinition.count({ where: { projectId } }),
+      countExposedResources(projectId),
       prisma.aiFunction.count({ where: { projectId } }),
       prisma.auditLog.count({
         where: { projectId, timestamp: { gte: since }, action: { contains: 'AUTO_FIXED' } },

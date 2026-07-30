@@ -14,6 +14,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/prisma'
 import { mcpGuard, recordMcpCall } from '@/lib/mcp/guard'
 import { readWorkspaceSchema } from '@/lib/typegen/schema-reader'
+import { countExposedResources } from '@/lib/api/exposed-resources'
 
 const ENDPOINT = '/api/cli/overview'
 
@@ -37,7 +38,7 @@ export async function GET(request: NextRequest) {
         },
       }),
       readWorkspaceSchema(auth.projectId),
-      prisma.apiDefinition.count({ where: { projectId: auth.projectId } }),
+      countExposedResources(auth.projectId),
       prisma.aiFunction.count({ where: { projectId: auth.projectId } }),
     ])
 

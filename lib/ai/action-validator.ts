@@ -22,6 +22,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
+import { countExposedResources } from '@/lib/api/exposed-resources'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -68,7 +69,7 @@ export interface ValidationResult {
 export async function captureSnapshot(projectId: string): Promise<ProjectSnapshot> {
   const [tables, apis, project, buckets, integrations, functions] = await Promise.allSettled([
     prisma.table.findMany({ where: { projectId }, select: { name: true } }),
-    prisma.apiDefinition.count({ where: { projectId } }),
+    countExposedResources(projectId),
     prisma.project.findUnique({
       where: { id: projectId },
       select: { jwtSecret: true, authManifest: true },

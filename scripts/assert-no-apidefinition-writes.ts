@@ -102,26 +102,17 @@ const KNOWN_READERS = new Set<string>([
   // (converted 2026-07-30: server/routes/dynamic.ts and
   //  app/api/v1/[projectId]/route.ts now read listExposedTables)
   'lib/services/openapi-generator.ts',        // dashboard OpenAPI download
-  'app/api/cli/overview/route.ts',            // CLI overview counts
   'app/api/projects/[id]/state/route.ts',     // dashboard state
-  'app/api/debug/[projectId]/route.ts',
   'app/api/ai-workspace/detect-new-tables/route.ts',
   // ── Internal decisions taken on a count that is always 0 ─────────────────
-  'lib/ai/build-mode-router.ts',
-  'lib/ai/build-runtime/verifier.ts',
   'lib/ai/build-runtime/security-auditor.ts',
-  'lib/ai/action-validator.ts',
-  'lib/ai/architecture-evolution.ts',
   'lib/ai/background-agent.ts',
   'lib/ai/context-reader.ts',
-  'lib/ai/memory-hierarchy.ts',
   'lib/ai/minimal-executor.ts',
   'lib/ai/production-intelligence.ts',
   'lib/ai/project-status-resolvers.ts',
   'lib/ai/schema-tools.ts',
-  'lib/ai/smart-answerer.ts',
   'lib/deployment/readiness-scorer.ts',
-  'lib/reports/change-report.ts',
   'lib/services/deploymentValidator.ts',
   'lib/services/schema-impact-analyzer.ts',
   'lib/services/serverless-warmup.ts',

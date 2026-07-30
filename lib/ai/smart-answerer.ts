@@ -14,6 +14,7 @@ import { getModel } from './model-router'
 import { introspectSchema } from './minimal-executor'
 import { prisma } from '@/lib/db/prisma'
 import type { ConversationTurn } from './intent-classifier'
+import { countExposedResources } from '@/lib/api/exposed-resources'
 
 export interface EvaluationResult {
   /** Full formatted gap analysis message for display */
@@ -34,7 +35,7 @@ interface ProjectSnapshot {
 async function getProjectSnapshot(projectId: string): Promise<ProjectSnapshot> {
   const [tables, apiCount, backendGraph, functions, triggers] = await Promise.all([
     prisma.table.findMany({ where: { projectId }, select: { name: true } }).catch(() => []),
-    prisma.apiDefinition.count({ where: { projectId } }).catch(() => 0),
+    countExposedResources(projectId).catch(() => 0),
     prisma.backendGraph.findFirst({ where: { projectId } }).catch(() => null),
     prisma.aiFunction.count({ where: { projectId } }).catch(() => 0),
     prisma.appTrigger.count({ where: { projectId } }).catch(() => 0),

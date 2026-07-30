@@ -21,6 +21,7 @@ import { withProjectValidation } from '@/lib/middleware/projectValidation'
 import { getMessageDebugLogs } from '@/lib/ai/message-debug-logger'
 import { getRecentExecutions, getExecutionStats } from '@/lib/observability/execution-logger'
 import { prisma } from '@/lib/db/prisma'
+import { countExposedResources } from '@/lib/api/exposed-resources'
 
 export async function GET(request: NextRequest) {
   return withProjectValidation<any>(request, async (validated) => {
@@ -63,7 +64,7 @@ export async function GET(request: NextRequest) {
       }).catch(() => null),
 
       // API count
-      prisma.apiDefinition.count({ where: { projectId } }).catch(() => 0),
+      countExposedResources(projectId).catch(() => 0),
 
       // AI function count
       prisma.aiFunction.count({ where: { projectId } }).catch(() => 0),

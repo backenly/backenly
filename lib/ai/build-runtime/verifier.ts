@@ -17,6 +17,7 @@ import { runBehavioralScenarios } from './behavioral-verifier'
 import { auditGeneratedAPIs } from './security-auditor'
 import { runLoadTestBaseline, clearLoadTestCache } from './load-tester'
 import { analyzeProductionReadiness } from '@/lib/ai/production-intelligence'
+import { countExposedResources } from '@/lib/api/exposed-resources'
 
 export interface VerificationCheck {
   label: string
@@ -252,24 +253,28 @@ async function verifyAPIs(nodeId: string, projectId: string): Promise<Verificati
 
   try {
     const { prisma } = await import('@/lib/db/prisma')
-    const apiCount = await prisma.apiDefinition.count({ where: { projectId } })
+    const apiCount = await countExposedResources(projectId)
 
+    // Counts EXPOSED tables. This counted ApiDefinition rows, which are never
+    // created any more, so a successful build was verified as
+    // "No API definitions found in DB" — a build verifier reporting failure on
+    // work that had in fact succeeded.
     checks.push({
-      label: 'REST endpoints generated',
+      label: 'REST resources exposed',
       status: apiCount > 0 ? 'pass' : 'fail',
       detail: apiCount > 0
-        ? `${apiCount} endpoint${apiCount !== 1 ? 's' : ''} created`
-        : 'No API definitions found in DB',
+        ? `${apiCount} resource${apiCount !== 1 ? 's' : ''} reachable over REST`
+        : 'No tables are exposed over REST',
     })
 
     const tableCount = await prisma.table.count({ where: { projectId } })
     checks.push({
-      label: 'Tables have corresponding APIs',
+      label: 'Tables are reachable over REST',
       status: tableCount > 0 && apiCount > 0 ? 'pass' : 'warn',
-      detail: `${tableCount} tables, ${apiCount} API definitions`,
+      detail: `${tableCount} table(s) registered, ${apiCount} exposed`,
     })
   } catch {
-    checks.push({ label: 'REST endpoints generated', status: 'warn', detail: 'Could not query API definitions' })
+    checks.push({ label: 'REST resources exposed', status: 'warn', detail: 'Could not read the catalog' })
   }
 
   const passed = checks.every(c => c.status !== 'fail')
