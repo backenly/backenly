@@ -31,8 +31,16 @@
  * and the other layers still apply.
  */
 
-import 'server-only'
-
+// No `import 'server-only'` here, deliberately, for the same reason it was
+// removed from lib/auth/email-trust.ts: it throws on import outside a Next.js
+// server context, and this module imports lib/platform/controls.ts, which the
+// standalone Express runtime already pulls in. Nothing under server/ reaches
+// this file today, so the guard was not firing, but it was the identical
+// landmine one import away from crash-looping `backenly-runtime` again.
+//
+// The secret is read from process.env at call time and never returned to a
+// caller, so there is nothing here for a client bundle to leak even if one
+// somehow imported it.
 import { recordSecurityEvent } from '@/lib/platform/controls'
 
 const SITEVERIFY_URL = 'https://challenges.cloudflare.com/turnstile/v0/siteverify'
