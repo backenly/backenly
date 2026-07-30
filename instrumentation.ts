@@ -126,6 +126,34 @@ export async function register() {
         }
       })
 
+      // ── Graph retention, 05:20 UTC ─────────────────────────────────────────
+      //
+      // Declared in vercel.json since forever and never once executed, because
+      // no /api/cron/* route is invoked on this host. 1339 graphs had
+      // accumulated across six projects.
+      //
+      // Scheduled only AFTER making retention entitlement-aware. The flat
+      // RETENTION_COUNT of 20 contradicted plans.maxDeploymentHistory, which is
+      // NULL (unlimited) for BUILDER and SCALE — so running this as it stood
+      // would have silently deleted history those plans are sold as keeping,
+      // and only for paying customers. See lib/orchestration/graph-cleanup.ts.
+      //
+      // Safe by construction: per-project transaction, never deletes the active
+      // graph or sequence 1, and both FKs onto backend_graphs are
+      // ON DELETE SET NULL so a severed lineage cannot fail the delete.
+      cron.schedule('20 5 * * *', async () => {
+        const { cleanupAllProjectGraphs } = await import('./lib/orchestration/graph-cleanup')
+        const res = await cleanupAllProjectGraphs().catch((err: any) => {
+          console.error('[GraphCleanup] Cron error:', err?.message)
+          return null
+        })
+        if (res && res.totalDeleted > 0) {
+          console.log(
+            `[GraphCleanup] Pruned ${res.totalDeleted} graph(s) across ${res.projectsProcessed} project(s), kept ${res.totalKept}`,
+          )
+        }
+      })
+
       // ── Billing grace periods, 03:10 UTC ───────────────────────────────────
       //
       // Also previously unscheduled. `runDailyGraceCheck` downgrades
