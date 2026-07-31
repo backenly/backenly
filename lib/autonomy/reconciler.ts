@@ -87,12 +87,21 @@ export async function computeReconciliationPlan(projectId: string): Promise<Reco
     checkBreaker(projectId),
   ])
 
-  // Effective budget for THIS window: the breaker's remaining headroom scaled
-  // by the owner's dial. Floor at 0 — the dial can tighten, never bypass.
-  const autoBudget = Math.max(
-    0,
-    Math.floor(breaker.remaining * breakerMultiplier(level)),
-  )
+  // Effective budget for THIS window.
+  //
+  // On an unlimited plan (the norm — healing is not metered) the loop repairs
+  // everything it legitimately can, so the budget is simply "every gap we
+  // found". The dial still decides WHICH tiers auto-apply via isTierAutoAllowed
+  // below; it must not re-impose a count quota that the plan does not have.
+  // A zero multiplier (OFF) still floors the budget at 0.
+  //
+  // Kept finite deliberately: this value is serialised into the trust report,
+  // and Infinity would round-trip through JSON as null.
+  const multiplier = breakerMultiplier(level)
+  const autoBudget =
+    breaker.unlimited && multiplier > 0
+      ? report.violations.length
+      : Math.max(0, Math.floor(breaker.remaining * multiplier))
 
   let spent = 0
   const decisions: ReconcileDecision[] = []

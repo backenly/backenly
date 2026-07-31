@@ -1749,7 +1749,7 @@ model Plan {
   autonomyScanIntervalMin          Int     @default(360) // Min minutes between expensive multi-agent scans for a project
   autonomyMonthlyScanBudget        Int? // Hard cap on expensive scans/project/month (null = unlimited / fair-use)
   autonomyMaxLevel                 String  @default("CONSERVATIVE") // Ceiling for the owner's risk dial: CONSERVATIVE | BALANCED | AGGRESSIVE
-  autonomyMaxActionsPerWindow      Int     @default(3) // Circuit-breaker ceiling: autonomous mutations/project/rolling-window
+  autonomyMaxActionsPerWindow      Int? // Circuit-breaker ceiling: autonomous mutations/project/rolling-window (null = unlimited — healing is never a paywall)
   maxApiRequestsPerMonth           BigInt? // API request cap — monthly OR lifetime (see apiQuotaIsLifetime)
   apiQuotaIsLifetime               Boolean @default(false) // true = maxApiRequestsPerMonth is a lifetime total that never resets (Free)
   maxPostgresStorageMb             Int? // PostgreSQL storage in MB

@@ -55,15 +55,17 @@ export async function runMonitoredHealthScan(
     //     near binding. Not to be confused with the deterministic reconciler
     //     loop, which really does run every minute; THIS is the model-backed
     //     scan, and it is the expensive one.
-    //   • autonomyMonthlyScanBudget — a hard monthly cap on expensive scans
-    //     (Free 120; paid = null = unlimited / fair-use). With cadence equal
-    //     across plans, this budget and autonomyMaxActionsPerWindow are what
-    //     actually separate Free from Pro.
+    //   • autonomyMonthlyScanBudget — a hard monthly cap on expensive scans.
+    //     NULL (unlimited) on every plan today, Free included: healing is not
+    //     a conversion lever, so neither this nor autonomyMaxActionsPerWindow
+    //     bounds it any more. Free↔Pro separates on capacity — projects, MAU,
+    //     storage, AI credits — never on whether the loop keeps working.
     //
-    // When a bounded (Free) project exhausts its monthly budget it does NOT go
-    // silent and does NOT keep spending: it degrades to cheap detect-only and
-    // surfaces a single "issues found — upgrade to auto-repair" prompt. The
-    // limit itself becomes the conversion lever.
+    // The bounded-plan path below is therefore dormant, not dead: it stays as
+    // the mechanism for pinning a specific project during an incident, or for
+    // any future plan that genuinely needs a ceiling. When a bounded project
+    // does exhaust its budget it never goes silent and never keeps spending —
+    // it degrades to cheap detect-only and surfaces one prompt.
     const ownerPlan = (await getUserSubscription(userId).catch(() => null))?.plan ?? null
     const intervalMin =
       ownerPlan?.autonomyScanIntervalMin ??

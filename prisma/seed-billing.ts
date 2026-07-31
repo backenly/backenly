@@ -53,19 +53,21 @@ const PLANS = [
     // backend heals itself every minute, free forever" is the sharpest thing we
     // can say — and gating it behind $25 blunted our own best argument.
     //
-    // Free↔Pro now converts on what autonomy is ALLOWED TO DO, not how often it
-    // looks: fixes per window (5 vs 20) and healing windows per month (120 then
-    // detect-only, vs unlimited). That is a more honest axis anyway — Pro is not
-    // "we check more", it is "we keep fixing".
+    // Healing is NOT a conversion lever. A backend that stops repairing itself
+    // after N fixes is a broken backend, and metering that would sell exactly
+    // the failure mode the product exists to remove. Every plan — Free included
+    // — scans every minute and repairs without limit. Free↔Pro converts on
+    // capacity (projects, MAU, storage, AI credits), never on whether the loop
+    // is allowed to keep working.
     //
     // The real cost of this change is audit volume, not compute: every tick
     // writes an AUTONOMY_TICK row, so a project goes from ~1.4k to ~43k rows a
     // month. Fine at current scale (audit_logs was 1 MB total when this landed);
     // needs a retention policy before free signups reach the thousands.
     autonomyScanIntervalMin: 1,                // every minute — same as Pro
-    autonomyMonthlyScanBudget: 120,            // ~120 healing windows/mo, then detect-only (a Free↔Pro lever)
+    autonomyMonthlyScanBudget: null,           // unlimited healing windows — never degrades to detect-only
     autonomyMaxLevel: 'AGGRESSIVE',            // full dial — Autopilot available
-    autonomyMaxActionsPerWindow: 5,            // vs Pro 20 — the other conversion lever
+    autonomyMaxActionsPerWindow: null,         // unlimited fixes per window — same as every other plan
     maxApiRequestsPerMonth: BigInt(100_000),   // 100k API requests TOTAL (lifetime — see apiQuotaIsLifetime)
     apiQuotaIsLifetime: true,                  // Free's API cap is a lifetime total, never resets
     maxPostgresStorageMb: 512,                 // 512 MB PostgreSQL
@@ -118,7 +120,7 @@ const PLANS = [
     autonomyScanIntervalMin: 1,               // every minute (effectively always-on)
     autonomyMonthlyScanBudget: null,          // unlimited (fair-use within cadence)
     autonomyMaxLevel: 'AGGRESSIVE',           // full dial
-    autonomyMaxActionsPerWindow: 20,
+    autonomyMaxActionsPerWindow: null,        // unlimited — healing is never metered on any plan
     maxApiRequestsPerMonth: null,             // unlimited API requests (fair use)
     apiQuotaIsLifetime: false,
     maxPostgresStorageMb: 10_240,             // 10 GB PostgreSQL
@@ -170,7 +172,7 @@ const PLANS = [
     autonomyScanIntervalMin: 1,
     autonomyMonthlyScanBudget: null,
     autonomyMaxLevel: 'AGGRESSIVE',
-    autonomyMaxActionsPerWindow: 50,
+    autonomyMaxActionsPerWindow: null,        // unlimited — healing is never metered on any plan
     maxApiRequestsPerMonth: null,             // unlimited
     apiQuotaIsLifetime: false,
     maxPostgresStorageMb: null,               // custom / dedicated capacity
@@ -241,8 +243,8 @@ async function main() {
 
   console.log('\n✨ Billing seed complete.')
   console.log('\nPlan summary:')
-  console.log('  Free (SANDBOX):        $0/mo   — 200 AI credits/mo, autonomy every minute (~120 windows/mo then detect-only), 50k MAU')
-  console.log('  Pro (BUILDER):         $25/mo  — 3,000 AI credits/mo, autonomy every minute (unlimited windows, full dial), 200k MAU, 10 GB PG + 100 GB files')
+  console.log('  Free (SANDBOX):        $0/mo   — 200 AI credits/mo, autonomy every minute (uncapped, full dial), 50k MAU')
+  console.log('  Pro (BUILDER):         $25/mo  — 3,000 AI credits/mo, autonomy every minute (uncapped, full dial — identical to Free), 200k MAU, 10 GB PG + 100 GB files')
   console.log('  Enterprise (SCALE):    Custom  — custom limits, SSO, 12h SLA, sales-led (no self-serve checkout)')
 }
 

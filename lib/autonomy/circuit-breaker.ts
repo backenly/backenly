@@ -26,19 +26,31 @@ import { prisma } from '@/lib/db/prisma'
 
 // ── Configuration (env-overridable without a deploy) ──────────────────────────
 
-/** Env fallback when the plan can't be resolved. */
-function envMaxActions(): number {
-  const v = Number(process.env.AUTONOMY_MAX_ACTIONS_PER_WINDOW)
-  return Number.isFinite(v) && v > 0 ? v : 10
+/**
+ * Env fallback when the plan can't be resolved. `null` = unlimited, which is
+ * also the default: healing is not metered on any plan, so an unresolvable
+ * plan must not invent a ceiling that silently stops a backend repairing itself.
+ */
+function envMaxActions(): number | null {
+  const raw = process.env.AUTONOMY_MAX_ACTIONS_PER_WINDOW
+  if (raw === undefined || raw === '') return null
+  const v = Number(raw)
+  return Number.isFinite(v) && v > 0 ? v : null
 }
 
 /**
- * Max autonomous mutations per project per rolling window — Plan-driven
- * (Free 3 / Pro 20 / Enterprise 50), falling back to the env default if the
- * owner's plan can't be resolved. Config-resolution failure falls back
- * (it is not the ledger read — that still fails closed below).
+ * Max autonomous mutations per project per rolling window.
+ *
+ * `null` means UNLIMITED and is the norm — every plan (Free included) heals
+ * every minute without a per-window fix cap. A finite value only exists as an
+ * ops escape hatch (AUTONOMY_MAX_ACTIONS_PER_WINDOW, or a per-plan override)
+ * for pinning a project during an incident.
+ *
+ * Config-resolution failure falls back to unlimited. That is deliberate: the
+ * ledger read below still fails closed, so a genuine storm is bounded by the
+ * absolute ceiling — but a flaky plan lookup must never quietly stop healing.
  */
-async function maxActionsForProject(projectId: string): Promise<number> {
+async function maxActionsForProject(projectId: string): Promise<number | null> {
   try {
     const project = await prisma.project.findUnique({
       where: { id: projectId },
@@ -55,6 +67,21 @@ async function maxActionsForProject(projectId: string): Promise<number> {
   } catch {
     return envMaxActions()
   }
+}
+
+/**
+ * Absolute anti-storm ceiling, independent of plan and never a pricing lever.
+ *
+ * Unlimited healing means no user ever hits a fix cap in normal operation. It
+ * does NOT mean a flapping detector may rewrite a project forever: a probe that
+ * "fixes" the same gap every minute would otherwise mutate real user data
+ * unboundedly. This ceiling exists only to catch that pathology, so it is set
+ * far above any legitimate workload — a project needing 500 autonomous repairs
+ * in an hour is broken, not busy.
+ */
+function stormCeiling(): number {
+  const v = Number(process.env.AUTONOMY_STORM_CEILING)
+  return Number.isFinite(v) && v > 0 ? v : 500
 }
 
 /** Rolling window length in minutes. */
@@ -80,6 +107,12 @@ export const AUTONOMOUS_AUDIT_ACTIONS = [
 export interface BreakerDecision {
   /** True when another autonomous action is permitted in this window. */
   allowed: boolean
+  /**
+   * True when this project has no per-window fix cap — the normal state on
+   * every plan. Callers must treat `remaining` as advisory when this is set:
+   * it reports headroom to the anti-storm ceiling, not a budget to ration.
+   */
+  unlimited: boolean
   /** Actions already taken in the current window. */
   used: number
   /** Actions still permitted in the current window (0 when tripped). */
@@ -97,7 +130,11 @@ export interface BreakerDecision {
  * Fails closed: any error reading the ledger denies the action.
  */
 export async function checkBreaker(projectId: string): Promise<BreakerDecision> {
-  const max = await maxActionsForProject(projectId)
+  const planMax = await maxActionsForProject(projectId)
+  const unlimited = planMax === null
+  // Unlimited plans are still bounded by the anti-storm ceiling — a number no
+  // real project reaches, so it never reads as a quota to the user.
+  const max = planMax ?? stormCeiling()
   const win = windowMinutes()
   const since = new Date(Date.now() - win * 60 * 1000)
 
@@ -113,6 +150,7 @@ export async function checkBreaker(projectId: string): Promise<BreakerDecision> 
   } catch (err: any) {
     return {
       allowed: false,
+      unlimited,
       used: max,
       remaining: 0,
       windowMinutes: win,
@@ -123,14 +161,17 @@ export async function checkBreaker(projectId: string): Promise<BreakerDecision> 
   if (used >= max) {
     return {
       allowed: false,
+      unlimited,
       used,
       remaining: 0,
       windowMinutes: win,
-      reason: `autonomy circuit breaker open: ${used}/${max} autonomous actions already taken in the last ${win} min for this project`,
+      reason: unlimited
+        ? `autonomy anti-storm ceiling reached: ${used} autonomous actions in the last ${win} min for this project — this indicates a flapping detector, not a plan limit`
+        : `autonomy circuit breaker open: ${used}/${max} autonomous actions already taken in the last ${win} min for this project`,
     }
   }
 
-  return { allowed: true, used, remaining: max - used, windowMinutes: win }
+  return { allowed: true, unlimited, used, remaining: max - used, windowMinutes: win }
 }
 
 /**

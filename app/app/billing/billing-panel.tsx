@@ -64,7 +64,7 @@ const PLAN_DEFS: PlanDef[] = [
     recommended: false,
     limits: [
       '1 project, permanently live, no expiry',
-      'Self-healing every minute, up to 5 issues at a time, about 120 times a month',
+      'Self-healing every minute, uncapped — never metered on any plan',
       'Up to 50,000 monthly active users',
       '10,000 function invocations / month',
       '512 MB Postgres + 1 GB storage',
@@ -78,7 +78,7 @@ const PLAN_DEFS: PlanDef[] = [
     description: 'A backend that heals itself',
     recommended: true,
     limits: [
-      'Self-healing every minute, up to 20 issues at a time, no monthly limit',
+      'The same uncapped self-healing loop as Free — you pay for capacity, not uptime',
       'Unlimited projects + unlimited API requests',
       'Up to 200,000 monthly active users',
       '2M function invocations / month',

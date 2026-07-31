@@ -114,10 +114,11 @@ The MAPE-K closed-loop runtime that powers self-repair:
 
 **Autopilot is the default on every tier.** The loop auto-applies only the *reversible safe band* (additive, snapshotted changes). Auth, external-credential, destructive, and irreversible operations always require human approval — that floor is not a setting. Owners can dial autonomy down to Review-only or Off at any time.
 
-Cadence and budget by tier:
-- **Free** — checks every minute, same as Pro. Repairs up to 5 issues at a time, about 120 times a month; after that it keeps watching and reporting until the month resets. Included: the loop runs no model, so it never draws AI credits.
-- **Pro** — checks every minute. Repairs up to 20 issues at a time, with no monthly limit. Included.
-- **Enterprise** — custom cadence + guardrail policies, higher per-window limits, audit-log export.
+**Healing is never metered.** Every tier runs the identical loop: checks every minute, repairs everything inside the safe band, with no per-window cap and no monthly limit. A backend that stops repairing itself when you hit a quota is the failure mode this product exists to remove, so it is not a paywall on any plan. Tiers differ on capacity — projects, users, storage, AI credits — never on whether the loop is allowed to keep working.
+
+- **Free** — checks every minute, repairs without limit. Included: the loop runs no model, so it never draws AI credits.
+- **Pro** — the identical loop to Free. You pay for capacity, not for uptime.
+- **Enterprise** — the identical loop, plus custom guardrail policies and audit-log export.
 
 Anything the loop won't auto-apply lands in the **Review Queue** (the "Waiting on you" section of the Autonomy tab) with a one-click approve/reject and a full receipt.
 
@@ -310,7 +311,7 @@ Backenly is priced on **AI credits + monthly active users + storage** — not pe
 
 - 1 project — permanently live, no expiry
 - 200 AI credits per month (1 credit = 1,000 tokens — published, stable ratio)
-- Self-healing every minute, repairing up to 5 issues at a time, about 120 times a month, included
+- Self-healing every minute, uncapped — the same loop paid tiers get, included
 - Up to 50,000 monthly active users
 - 512 MB PostgreSQL + 1 GB file storage
 - Auth, realtime, storage, functions — all included
@@ -322,7 +323,7 @@ Backenly is priced on **AI credits + monthly active users + storage** — not pe
 ### Pro — $25 / month *(most popular; $20/mo billed annually)*
 *Production capacity, plus a backend that heals itself every minute.*
 
-- Self-healing every minute, repairing up to 20 issues at a time, no monthly limit, included
+- Self-healing every minute, uncapped — identical to Free; you pay for capacity, not uptime
 - 3,000 AI credits per month
 - Unlimited projects + unlimited API requests
 - Up to 200,000 monthly active users
