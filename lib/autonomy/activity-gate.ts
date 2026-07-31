@@ -62,11 +62,30 @@ export function activeProjectsWhere(
   const cutoff = new Date(now.getTime() - windowDays * 24 * 60 * 60 * 1000)
 
   return {
-    // No tables means no backend to reconcile — nothing to be right or wrong about.
-    tables: { some: {} },
     deletedAt: null,
     OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
     AND: [
+      {
+        OR: [
+          // No tables means no backend to reconcile — nothing to be right or
+          // wrong about.
+          { tables: { some: {} } },
+          // ...UNLESS the project already carries an open finding. Findings are
+          // also written by on-demand scans (the dashboard's deep scan, the
+          // health re-check), which are NOT gated on this predicate. A
+          // table-less project could therefore accumulate a finding that the
+          // loop was structurally forbidden from ever re-evaluating, so the row
+          // sat in "Waiting on you" permanently even after the condition healed
+          // — the reaper runs inside the reconciler, and the reconciler never
+          // selected the project. An open finding IS something to reconcile:
+          // either it still reproduces, or it gets withdrawn.
+          {
+            healthFindings: {
+              some: { status: { in: ['open', 'pending_approval'] } },
+            },
+          },
+        ],
+      },
       {
         OR: [
           // Live end-user traffic: the strongest signal a backend is real.
