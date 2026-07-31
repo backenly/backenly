@@ -15,7 +15,15 @@
  * are fully offline.
  */
 
-import { describe, test, expect, jest, beforeEach, afterEach } from '@jest/globals'
+// `jest` is deliberately NOT imported from '@jest/globals' here. ts-jest hoists
+// `jest.mock(...)` above the imports only when `jest` is the global; importing
+// the identifier shadows it, the hoist does not happen, and the real modules get
+// imported before the mock factories are registered. That is what broke this
+// suite: `queryWorkspaceSchema` arrived as the real function, `mockImplementation
+// is not a function` cascaded through 24 of its 25 cases, and the Phase-13 safety
+// gates below — the assertion that billing/webhook/storage/admin/runtime
+// verification NEVER executes live — silently stopped being checked at all.
+import { describe, test, expect, beforeEach, afterEach } from '@jest/globals'
 import {
   executeVerificationScenarios,
   runBuiltInVerification,
