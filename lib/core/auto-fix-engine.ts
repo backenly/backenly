@@ -336,33 +336,34 @@ export async function executeApprovedFix(
   // than the loop takes on its own, so this is the last place that check should
   // have been missing. 'unresolved' is reported as a failure rather than a
   // success, which leaves the finding in the queue where the user can see it.
+  // Unconditional, for the reason given on the autonomous path: gating this on a
+  // table-shaped location exempted exactly the finding types a human is most
+  // likely to be approving by hand — the auth pair, whose fix rewires sign-in for
+  // every end-user of the project.
   let verification: 'confirmed' | 'unverified' = 'unverified'
   {
-    const gapLoc = (details.location ?? details.tableName ?? details.table) as string | undefined
-    if (gapLoc) {
-      const outcome = await evaluateFixOutcome(projectId, finding.type, details, baseline)
-        .catch(() => null)
-      if (outcome && outcome.recheck === 'unresolved') {
-        return {
-          success: false,
-          message:
-            'The fix ran but the issue is still present on re-check, so it was not recorded as fixed. ' +
-            'Nothing was lost — the finding stays in your queue with the details.',
-          verification: 'unverified',
-        }
+    const outcome = await evaluateFixOutcome(projectId, finding.type, details, baseline)
+      .catch(() => null)
+    if (outcome && outcome.recheck === 'unresolved') {
+      return {
+        success: false,
+        message:
+          'The fix ran but the issue is still present on re-check, so it was not recorded as fixed. ' +
+          'Nothing was lost — the finding stays in your queue with the details.',
+        verification: 'unverified',
       }
-      if (outcome && outcome.regressions.length > 0) {
-        return {
-          success: false,
-          message:
-            `The fix closed the issue it targeted but broke ${outcome.regressions.length} ` +
-            `guarantee(s) that were holding before it ran, so it was not recorded as fixed. ` +
-            `Use Undo in History to restore the pre-fix snapshot.`,
-          verification: 'unverified',
-        }
-      }
-      if (outcome?.recheck === 'resolved') verification = 'confirmed'
     }
+    if (outcome && outcome.regressions.length > 0) {
+      return {
+        success: false,
+        message:
+          `The fix closed the issue it targeted but broke ${outcome.regressions.length} ` +
+          `guarantee(s) that were holding before it ran, so it was not recorded as fixed. ` +
+          `Use Undo in History to restore the pre-fix snapshot.`,
+        verification: 'unverified',
+      }
+    }
+    if (outcome?.recheck === 'resolved') verification = 'confirmed'
   }
 
   // Post-fix snapshot: version history only — never the undo target.
@@ -810,23 +811,37 @@ async function _executeAutoFix(
   // would bury auto-safe work — but it must not be counted as verified. The
   // trust scoreboard reads `verification` so "100% verified" means "re-probed
   // and confirmed gone", not "nobody rolled it back".
+  //
+  // This runs for EVERY fix. It used to be gated on
+  // `details.location ?? tableName ?? table` being present, which silently
+  // exempted every finding type that is not located by a table — and those are
+  // not the harmless ones. `schema_not_registered` is `auto`-rated, is covered by
+  // the `data_plane_is_registered` probe, and means one customer's entire /db/*
+  // plane is dead; its details carry `{ reason, schema, tableCount }` and no
+  // location, so its fix was recorded `auto_fixed` without a single re-probe.
+  // `workflow_broken` was exempted the same way even though `gapIdentity` was
+  // deliberately taught to locate workflows by `details.workflow`, and the
+  // approval path exempted `auth_jwt_missing` / `auth_users_table_missing` — the
+  // fixes a human extends the MOST trust to.
+  //
+  // The guard was also redundant: `evaluateFixOutcome` already answers 'unknown'
+  // for any type no probe covers, which is precisely the case the location check
+  // was reaching for. Deleting it costs nothing (the baseline diff above is
+  // already computed unconditionally) and closes the hole.
   let verification: 'confirmed' | 'unverified' = 'unverified'
   {
-    const gapLoc = (details.location ?? details.tableName ?? details.table) as string | undefined
-    if (gapLoc) {
-      const outcome = await evaluateFixOutcome(projectId, type, details, baseline)
-        .catch(() => null)
-      if (outcome && !outcome.accepted && outcome.recheck !== 'unknown') {
-        return _escalate(findingId, projectId, type, details, outcome.reason)
-      }
-      // A regression is disqualifying even when closure could not be confirmed:
-      // "I could not prove I helped, and something that used to hold now fails"
-      // is the worst outcome to record as a fix.
-      if (outcome && outcome.regressions.length > 0) {
-        return _escalate(findingId, projectId, type, details, outcome.reason)
-      }
-      if (outcome?.recheck === 'resolved') verification = 'confirmed'
+    const outcome = await evaluateFixOutcome(projectId, type, details, baseline)
+      .catch(() => null)
+    if (outcome && !outcome.accepted && outcome.recheck !== 'unknown') {
+      return _escalate(findingId, projectId, type, details, outcome.reason)
     }
+    // A regression is disqualifying even when closure could not be confirmed:
+    // "I could not prove I helped, and something that used to hold now fails"
+    // is the worst outcome to record as a fix.
+    if (outcome && outcome.regressions.length > 0) {
+      return _escalate(findingId, projectId, type, details, outcome.reason)
+    }
+    if (outcome?.recheck === 'resolved') verification = 'confirmed'
   }
 
   // Post-fix snapshot: version history / diff surface only — NEVER the undo
@@ -896,7 +911,17 @@ async function _escalate(
       // mislabel made Autopilot look like it asks permission for safe fixes.
       details: {
         ...details,
-        escalation: { reason, at: new Date().toISOString() },
+        escalation: {
+          // Carry the retry bookkeeping the reconciler wrote before handing this
+          // finding back (lib/autonomy/reconciler.ts → reopenIfRetryable).
+          // Overwriting it would reset the attempt counter on every failure, and
+          // a fix that can never succeed would then be retried forever on the
+          // shortest rung of the backoff ladder — turning a bounded recovery
+          // path into the unbounded one it replaced.
+          ...((details.escalation ?? {}) as Record<string, unknown>),
+          reason,
+          at: new Date().toISOString(),
+        },
       } as any,
     },
   })

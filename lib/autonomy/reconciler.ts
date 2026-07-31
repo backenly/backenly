@@ -33,6 +33,7 @@ import {
   type AutonomyLevel,
 } from './autonomy-level'
 import { checkBreaker } from './circuit-breaker'
+import { classifyFix } from '@/lib/core/fix-classifier'
 import { computeHealthSignal } from './telemetry'
 import { LOOP_TICK_ACTIONS } from './loop-tick'
 import { runAutoFix } from '@/lib/core/auto-fix-engine'
@@ -263,6 +264,181 @@ const RECURRENCE_WINDOW_HOURS = 24
 const RECURRENCE_ESCALATE_AFTER = 3
 
 /**
+ * How long to wait before re-attempting a fix that FAILED, by attempt number.
+ *
+ * A failure escalation is a diagnosis, not a verdict: it says "this fix did not
+ * work against the backend as it stood at that moment". Backends move. The
+ * ladder starts short enough to catch a condition that clears within the hour
+ * and ends long enough that a genuinely unfixable gap stops costing anything.
+ * After the last rung the finding stays with the human for good.
+ */
+export const ESCALATION_RETRY_BACKOFF_HOURS = [1, 6, 24, 72] as const
+
+/** What a stuck `pending_approval` row carries about its last failed attempt. */
+export interface EscalationRecord {
+  reason?: unknown
+  at?: unknown
+  retryCount?: unknown
+  lastRetryAt?: unknown
+}
+
+export interface RetryDecision {
+  retry: boolean
+  /** 1-based attempt number this retry would be. 0 when not retrying. */
+  attempt: number
+  reason: string
+}
+
+/**
+ * Should a failed fix be attempted again? Pure, so the rule is provable without
+ * a database — the same discipline fix-acceptance.ts and sensor-health.ts hold
+ * themselves to, and the reason this lives in `tests/unit` where CI runs it.
+ *
+ * `isAutoFixable` is the classifier's verdict for the finding. It is the safety
+ * floor: a fix a human must approve is never retried by the loop, no matter how
+ * old the escalation is.
+ */
+export function shouldRetryEscalation(
+  isAutoFixable: boolean,
+  escalation: EscalationRecord | null | undefined,
+  now: Date = new Date(),
+): RetryDecision {
+  if (!isAutoFixable) {
+    return { retry: false, attempt: 0, reason: 'Policy escalation — a human owns this decision.' }
+  }
+
+  const e = escalation ?? {}
+  const attempts = typeof e.retryCount === 'number' ? e.retryCount : 0
+  if (attempts >= ESCALATION_RETRY_BACKOFF_HOURS.length) {
+    return {
+      retry: false,
+      attempt: 0,
+      reason: `Retried ${attempts} time(s) without success — left for review permanently.`,
+    }
+  }
+
+  const lastRaw = (e.lastRetryAt ?? e.at) as string | undefined
+  const lastMs = typeof lastRaw === 'string' ? Date.parse(lastRaw) : NaN
+
+  // No usable timestamp means the row predates the bookkeeping (every stuck
+  // production row is in this shape). Retry it now rather than stranding it —
+  // but the write below stamps `lastRetryAt`, so it enters the ladder and cannot
+  // retry again until the first rung elapses.
+  if (Number.isFinite(lastMs)) {
+    const waitMs = ESCALATION_RETRY_BACKOFF_HOURS[attempts] * 60 * 60 * 1000
+    const elapsed = now.getTime() - lastMs
+    if (elapsed < waitMs) {
+      return {
+        retry: false,
+        attempt: 0,
+        reason: `Backing off — ${ESCALATION_RETRY_BACKOFF_HOURS[attempts]}h has not elapsed since the last attempt.`,
+      }
+    }
+  }
+
+  return {
+    retry: true,
+    attempt: attempts + 1,
+    reason: `Failure escalation is stale — re-attempting (${attempts + 1}/${ESCALATION_RETRY_BACKOFF_HOURS.length}).`,
+  }
+}
+
+/**
+ * Decide whether a `pending_approval` finding may be handed back to the kernel.
+ *
+ * ── The bug this closes ─────────────────────────────────────────────────────
+ *
+ * `pending_approval` was treated as terminal: matched it, returned null, done.
+ * That conflates two states that are not the same thing.
+ *
+ *   • POLICY escalation — the classifier rated the fix `approval` or
+ *     `notify_only` (auth, external credentials, destructive). A human decides.
+ *     Retrying would be the loop acting behind someone's back. Still returns
+ *     null, forever, exactly as before.
+ *
+ *   • FAILURE escalation — an `auto`-rated fix RAN and did not work, so
+ *     `_escalate` parked it. Nothing about that is a human decision; it is a
+ *     record of one failed attempt against one moment in time.
+ *
+ * Only the second kind was mishandled, and it was mishandled completely: there
+ * was no path back. Production proved the cost. On 2026-07-18 seven `missing_fk`
+ * fixes failed with `42P17 — infinite recursion detected in policy for relation
+ * "organization_members"`. The recursive policy was repaired days later. The
+ * findings never moved. For the thirteen days after, the loop re-detected all
+ * seven every sixty seconds, wrote an AUTONOMY_LIVE_RUN row that reads like
+ * work, and logged `applied=0 escalated=0 deferred=0 attempted=0` — 7,636 times.
+ * The fixes succeed on the current schema; nothing was retrying them.
+ *
+ * Bounded on purpose: the backoff ladder above, a hard attempt cap, and the
+ * classifier gate mean the worst case is four extra attempts spread over four
+ * days before the finding is left alone permanently.
+ */
+async function reopenIfRetryable(
+  findingId: string,
+  projectId: string,
+  gap: DesiredStateGap,
+  rawDetails: unknown,
+): Promise<string | null> {
+  const details = (rawDetails ?? {}) as Record<string, unknown>
+  const escalation = (details.escalation ?? {}) as EscalationRecord
+
+  // The safety floor comes from the classifier rather than the gap tier: the
+  // classifier is the single source of truth the kernel itself re-checks, so
+  // disagreeing with it here would let the two gates drift.
+  const isAutoFixable =
+    classifyFix(gap.type, gap.details as Record<string, unknown>).decision === 'auto'
+
+  const decision = shouldRetryEscalation(isAutoFixable, escalation)
+  if (!decision.retry) return null
+
+  // Hand it back to the kernel. The retry bookkeeping is written BEFORE the
+  // attempt so a fix that crashes the process still burns its attempt — the
+  // alternative is a poisoned finding that retries every tick forever, which is
+  // the failure mode this whole function exists to end.
+  const updated = await prisma.healthFinding
+    .update({
+      where: { id: findingId, status: 'pending_approval' },
+      data: {
+        status: 'open',
+        details: {
+          ...details,
+          escalation: {
+            ...escalation,
+            retryCount: decision.attempt,
+            lastRetryAt: new Date().toISOString(),
+          },
+        } as any,
+      },
+      select: { id: true },
+    })
+    .catch(() => null)
+  if (!updated) return null
+
+  await prisma.auditLog
+    .create({
+      data: {
+        projectId,
+        action: 'AUTONOMY_ESCALATION_RETRIED',
+        type: 'autonomy',
+        details: JSON.stringify({
+          findingId,
+          findingType: gap.type,
+          gapKey: gapKey(gap),
+          tableName: (gap.details as Record<string, unknown>)?.tableName ?? null,
+          attempt: decision.attempt,
+          maxAttempts: ESCALATION_RETRY_BACKOFF_HOURS.length,
+          priorFailure:
+            typeof escalation.reason === 'string' ? escalation.reason.slice(0, 300) : null,
+        }),
+        timestamp: new Date(),
+      },
+    })
+    .catch(() => {})
+
+  return findingId
+}
+
+/**
  * Find an existing actionable HealthFinding for this gap, or create one. The
  * live path then delegates execution entirely to runAutoFix — reusing the
  * deterministic kernel (classification gate, circuit breaker, pre-snapshot,
@@ -278,12 +454,21 @@ async function ensureFinding(projectId: string, gap: DesiredStateGap): Promise<s
       select: { id: true, status: true, details: true },
       take: 50,
     })
-    const matchOpen = open.find(
+    // Prefer an `open` row over a `pending_approval` one for the SAME identity.
+    // Both can exist: a fix that failed leaves a pending_approval row, and a
+    // later scan path (the observer, a deep scan) can mint a fresh `open` row
+    // for the same gap because it does not consult this dedupe. Taking whichever
+    // Prisma returned first meant the actionable row was permanently shadowed by
+    // the stuck one — prod carried `missing_fk::prompts.user_id` in BOTH states,
+    // and the open one was never once attempted.
+    const matches = open.filter(
       f => gapIdentity(gap.type, (f.details ?? {}) as Record<string, unknown>) === key,
     )
+    const matchOpen = matches.find(f => f.status === 'open') ?? matches[0]
     if (matchOpen) {
-      // Already queued for a human — respect that, don't auto-act behind them.
-      if (matchOpen.status === 'pending_approval') return null
+      if (matchOpen.status === 'pending_approval') {
+        return reopenIfRetryable(matchOpen.id, projectId, gap, matchOpen.details)
+      }
       return matchOpen.id
     }
 
