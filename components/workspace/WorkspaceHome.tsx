@@ -1132,7 +1132,7 @@ function SelfHealingLoop({
       {/* ── Clock axis ───────────────────────────────────────────────────
           Observe/Detect/Propose read the backend right now; Apply/Verify are a
           30-day track record, not the next two steps those same items take.
-          Without this split, "15 need attention" beside "100% verified" reads
+          Without this split, "15 broken" beside "100% proven fixed" reads
           as the loop contradicting itself instead of two different clocks —
           one instant snapshot, one rolling window. It used to be two 9px words
           in zinc-700 that nobody saw; it is now a ruled axis under the

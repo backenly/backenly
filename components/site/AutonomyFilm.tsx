@@ -145,12 +145,16 @@ export function AutonomyFilm() {
   // without a human — the whole point of the section.
   const open = step >= 1 && step <= 3 ? '1' : '0'
   const fixed = step >= 3 ? '13' : '12'
+  // Units are the dashboard's, word for word (`readings` in WorkspaceHome, and
+  // LOOP in HeroConsole). This is the third depiction of the same instrument on
+  // the site; a visitor who watches this film, reads the hero, then signs up
+  // must not be shown three different vocabularies for one loop.
   const readings: { value: string; unit: string; tone?: 'bad' }[] = [
-    { value: '13', unit: 'guarantees' },
-    { value: open, unit: 'need attention', ...(open === '1' ? { tone: 'bad' as const } : {}) },
-    { value: '0', unit: 'held for you' },
-    { value: fixed, unit: 'fixed · 30d' },
-    { value: '100%', unit: 'verified · 30d' },
+    { value: '13', unit: 'guarantees · every minute' },
+    { value: open, unit: 'broken guarantees', ...(open === '1' ? { tone: 'bad' as const } : {}) },
+    { value: '0', unit: 'waiting on you' },
+    { value: fixed, unit: 'fixed on its own · 30d' },
+    { value: '100%', unit: 'proven fixed · 30d' },
   ]
 
   return (
