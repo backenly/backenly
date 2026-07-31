@@ -16,6 +16,7 @@
 import { prisma } from '@/lib/db/prisma'
 import { hasIntegrationKey } from '@/lib/services/integrationKeyStore'
 import { queryWorkspaceSchema } from '@/lib/services/workspaceDatabase'
+import { getEndUserAuthUsage } from '@/lib/services/auth-status'
 import { notReservedTableSql } from '@/lib/security/workspace-schema'
 import type { RawFinding } from './types'
 
@@ -172,33 +173,23 @@ async function verifyUserAuthFlow(projectId: string): Promise<WorkflowVerifyResu
     return ok
   }
 
-  // Anchor: the workspace users table. The runtime creates it lazily on the
-  // first real signup (ensureAuthUsersTable), so its absence means end-user
-  // auth is simply not in use yet — not a broken workflow. Without this gate
-  // every empty project was flagged, because the vacuously-true user_data_rls
-  // check below counted as a "present component".
-  const schema = `workspace_${projectId}`
-  const usersRows = await queryWorkspaceSchema(
-    projectId,
-    `SELECT 1 FROM information_schema.tables
-     WHERE table_schema = $1 AND table_name = 'users' LIMIT 1`,
-    schema,
-  ).catch(() => ({ rows: [] as unknown[] }))
-  const usersTable: unknown[] = (usersRows as any)?.rows ?? usersRows ?? []
-  if (usersTable.length === 0) {
+  // Anchor: is end-user auth actually IN USE? Delegated to the shared evidence
+  // helper so every detector answers this question the same way — this check
+  // previously hand-rolled a "does the users table exist" probe, which is not
+  // evidence: `users` ships as scaffolding on every freshly-named project, so
+  // the probe matched universally and this workflow was reported broken on
+  // brand-new backends before their owner had connected an agent.
+  //
+  // Deliberately NOT anchored on jwtSecret either: it is seeded at project
+  // creation, so it is provisioning state, not something anybody built.
+  const usage = await getEndUserAuthUsage(projectId)
+  if (!usage.inUse) {
     // Workflow not in use — healthy with empty components so observer skips it
     return { healthy: true, missingComponents: [], presentComponents: [] }
   }
   present.push('users_table')
 
-  // jwtSecret set on project
-  await check('jwt_secret', async () => {
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-      select: { jwtSecret: true },
-    })
-    return !!project?.jwtSecret
-  })
+  const schema = `workspace_${projectId}`
 
   // At least one PermissionPolicy on the users table (RLS enabled)
   await check('rls_on_users', async () => {
