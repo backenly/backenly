@@ -74,6 +74,24 @@ jobs:
       - name: Unit tests
         run: npx jest tests/unit --ci --verbose
 
+      # The self-healing guards. These are database-free too and were simply
+      # never listed, so nothing ran them on push — and two had gone red in the
+      # tree without anyone finding out:
+      #
+      #   • autonomy-is-model-free was reading auto-fix-engine.ts for a repair
+      #     map that had moved to fix-actions.ts. It failed its own
+      #     "did the regex match anything" guard, and while it failed it was also
+      #     no longer watching the file where a model call could actually enter
+      #     the repair path.
+      #   • tests/core holds the trust guarantees — post-fix verification
+      #     coverage, fix classification, repair conformance. All passing, all
+      #     unenforced.
+      #
+      # Autonomy is the product's differentiator. Its guards belong on the
+      # blocking path, not in a directory someone remembers to run by hand.
+      - name: Autonomy guards
+        run: npx jest tests/core __tests__/autonomy --ci --verbose
+
   # ── MCP server package ──────────────────────────────────────────────────────
   secrets:
     name: no credentials in committed content

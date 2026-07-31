@@ -42,7 +42,24 @@ import * as fs from 'fs'
 import * as path from 'path'
 
 const ROOT = path.resolve(__dirname, '..', '..')
-const FIX_ENGINE = path.join(ROOT, 'lib/core/auto-fix-engine.ts')
+
+/**
+ * BOTH halves of the repair surface, because it is split across two files and
+ * this guard was reading only one of them.
+ *
+ * `buildFixAction` — the map from a finding to the action that repairs it, i.e.
+ * the entire hot path — was moved out of auto-fix-engine.ts into fix-actions.ts
+ * so the Autonomy queue could ask "does a repair exist?" without importing
+ * Prisma. This test kept pointing at the old file. What it found there was the
+ * residual `_fixPlanToAiAction` mapping, so the count assertion below went red
+ * (4, not >5) and — far worse — the model-backed-action assertions were passing
+ * against a file that no longer contains the repair vocabulary at all. A
+ * GENERATE_FUNCTION added to `buildFixAction` would not have tripped a thing.
+ */
+const REPAIR_SURFACE = [
+  path.join(ROOT, 'lib/core/auto-fix-engine.ts'),
+  path.join(ROOT, 'lib/core/fix-actions.ts'),
+]
 
 /**
  * The one repair that can spend tokens. `provision_runtime` maps to
@@ -54,15 +71,26 @@ const FIX_ENGINE = path.join(ROOT, 'lib/core/auto-fix-engine.ts')
 const KNOWN_MODEL_BACKED_ACTIONS = ['GENERATE_FUNCTION']
 
 describe('autonomy repair actions stay deterministic', () => {
-  const source = fs.readFileSync(FIX_ENGINE, 'utf8')
+  const source = REPAIR_SURFACE.map(f => fs.readFileSync(f, 'utf8')).join('\n')
   const emitted = [...source.matchAll(/action:\s*'([A-Z_]+)'/g)].map(m => m[1])
 
   it('reads a meaningful set of actions (guards against a regex that matches nothing)', () => {
     // Without this, a refactor that renamed the field would make every
     // assertion below pass vacuously — the most dangerous way for a guard to
-    // fail.
+    // fail. It is also what caught the file split above: the count fell to 4
+    // when `buildFixAction` moved and this test did not follow it.
     expect(emitted.length).toBeGreaterThan(5)
     expect(emitted).toContain('SET_PERMISSION')
+  })
+
+  it('pins the repair map to the file it actually lives in', () => {
+    // The count assertion alone cannot tell "the surface shrank" from "the
+    // surface moved". Naming the entry point keeps this guard anchored to the
+    // hot path rather than to whichever file still happens to hold an
+    // `action:` literal.
+    const map = fs.readFileSync(path.join(ROOT, 'lib/core/fix-actions.ts'), 'utf8')
+    expect(map).toContain('export function buildFixAction')
+    expect([...map.matchAll(/action:\s*'([A-Z_]+)'/g)].length).toBeGreaterThan(10)
   })
 
   it('emits exactly one model-backed action, and it is the known one', () => {
@@ -84,6 +112,11 @@ describe('autonomy repair actions stay deterministic', () => {
       'SET_PERMISSION', 'FIX_API', 'ADD_CONSTRAINT', 'CREATE_INDEX', 'SET_RATE_LIMIT',
       'FIX_REALTIME', 'FIX_AUTH', 'FIX_INTEGRATION', 'FIX_WORKFLOW', 'FIX_DEPLOY',
       'REGISTER_TABLE', 'ADOPT_EXTERNAL_SCHEMA', 'GENERATE_API',
+      // Both compile to SQL / a supervised process restart, no model involved:
+      // REGISTER_SCHEMA re-adds the workspace schema to PostgREST's exposed list
+      // (lib/postgrest/registration.ts), HEAL_DATA_PLANE restarts a wedged
+      // PostgREST after re-verifying the outage (lib/postgrest/supervisor.ts).
+      'REGISTER_SCHEMA', 'HEAL_DATA_PLANE',
     ])
     const unknown = [...new Set(emitted)].filter(
       a => !DETERMINISTIC.has(a) && !KNOWN_MODEL_BACKED_ACTIONS.includes(a),
