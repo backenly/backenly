@@ -16,6 +16,8 @@
  * Pure. No DB. No side effects.
  */
 
+import { normalizeFindingType } from '../core/types'
+
 /**
  * Union of every detail shape that can land in AuditLog.details for an
  * autonomy-fix row. There are three writers in the codebase:
@@ -49,14 +51,65 @@ export interface AutonomyEventDetails {
 }
 
 /**
+ * Raw types that MUST NOT be normalized before the switch below sees them,
+ * because this module has a branch that describes what the detector actually
+ * saw and the canonical base's branch would misdescribe it. The registry maps
+ * these onto a base so the FIX ENGINE knows which repair to run — a different
+ * question from what the sentence should say.
+ *
+ *   unbounded_pagination → missing_rate_limit  ("added a rate limit" — no, it
+ *                                               capped an unbounded list)
+ *   missing_index        → missing_fk_index    (calls a hot-path index a
+ *                                               foreign-key index)
+ *   arch_migration       → shadow_mutation     ("a change made outside the AI
+ *                                               flow" — the exact opposite of
+ *                                               a migration Backenly proposed)
+ *
+ * lib/core/finding-summaries.ts carves out the same families for the same
+ * reason ("Aliased families first"), but the two lists are NOT identical and
+ * should not be forced to be: each module carves out the aliases IT has a
+ * better branch for. `n_plus_one_risk` is on that list and not this one because
+ * there is no N+1 branch here, and the index sentence it normalizes to
+ * describes that repair correctly.
+ */
+const ALIAS_SAYS_IT_BETTER: readonly string[] = [
+  'unbounded_pagination',
+  'missing_index',
+  'query_pattern_missing_index',
+  'arch_migration',
+]
+
+/**
  * Resolve the canonical finding-type key from any of the writer shapes above.
  * Tries `findingType`/`type` first, then falls back to:
  *   • `category` (agent path) — categories are already named after finding types
  *   • the executor `action` name (plan path) — CREATE_INDEX → missing_fk_index, etc.
+ *
+ * The raw value is put through `normalizeFindingType` before the switch below
+ * sees it. Without that step this module ran its own private alias vocabulary
+ * and only matched types spelled exactly as its `case` labels: the detectors
+ * emit `missing_api`, which the registry has aliased to `missing_api_definition`
+ * since forever, but the switch had no `missing_api` case — so every one of
+ * those fixes fell to the default and rendered on the dashboard as
+ *
+ *     Backenly fixed missing api on "connections" because it would have
+ *     caused silent damage from going unnoticed.
+ *
+ * — a humanised type where the WHAT should be, and the generic neglect clause
+ * where the WHY should be. Every suffixed multi-agent type (`missing_rls_users`)
+ * had the same problem. Normalizing means adding an alias to the registry now
+ * teaches this module too, instead of silently costing one type its sentence.
  */
 function resolveKind(d: AutonomyEventDetails): string {
   const direct = (d.findingType ?? d.type ?? d.category ?? '').toString().toLowerCase()
-  if (direct) return direct
+  if (direct) {
+    // Suffixed forms count too: the multi-agent path emits `${type}_${table}`,
+    // and returning the bare alias is what lets `unbounded_pagination_orders`
+    // reach the `unbounded_pagination` branch instead of the default.
+    const alias = ALIAS_SAYS_IT_BETTER.find((a) => direct.startsWith(a))
+    if (alias) return alias
+    return normalizeFindingType(direct, d as Record<string, unknown>)?.base ?? direct
+  }
   // Map plan-executor action names to the closest finding-type concept so the
   // copy module's switch can route them through the same branches.
   const action = (d.action ?? '').toString().toUpperCase()
@@ -90,6 +143,18 @@ function tableOf(d: AutonomyEventDetails): string | null {
   return (d.tableName ?? d.table ?? d.target ?? d.location ?? null) as string | null
 }
 
+/**
+ * Last-resort table name, recovered from the TYPE rather than the details.
+ * Multi-agent findings encode the location in the type itself
+ * (`missing_rls_users`) and often carry no table field at all, which is how a
+ * sentence about a specific table ends up reading "on a table".
+ */
+function normalizedTable(d: AutonomyEventDetails): string | null {
+  const raw = (d.findingType ?? d.type ?? d.category ?? '').toString().toLowerCase()
+  if (!raw) return null
+  return normalizeFindingType(raw, d as Record<string, unknown>)?.tableName ?? null
+}
+
 function colOf(d: AutonomyEventDetails): string | null {
   return (d.columnName ?? d.column ?? null) as string | null
 }
@@ -109,7 +174,7 @@ function pretty(name: string | null): string {
 export function explainAutonomyEvent(details: AutonomyEventDetails | null | undefined): BecauseSentence {
   const d = details ?? {}
   const kind = resolveKind(d)
-  const table = tableOf(d)
+  const table = tableOf(d) ?? normalizedTable(d)
   const col = colOf(d)
   const t = pretty(table)
 
@@ -185,6 +250,23 @@ export function explainAutonomyEvent(details: AutonomyEventDetails | null | unde
       const why =
         `endpoints were missing or out of sync with the live schema — the ` +
         `frontend would have hit 404s and dead routes against shipped code.`
+      return { what, why, full: `${what} because ${why}`, kind }
+    }
+
+    // Kept OFF the shadow_mutation branch deliberately (see
+    // ALIAS_SAYS_IT_BETTER): both end in the same repair, but a migration
+    // Backenly proposed and a change someone made behind its back are opposite
+    // stories, and telling the second about the first is how a user concludes
+    // the loop does not know what it did.
+    case 'arch_migration': {
+      const title = d.title ?? d.description
+      const what = title
+        ? `Backenly applied a schema migration: ${title}`
+        : `Backenly applied a planned schema migration to "${t}"`
+      const why =
+        `the design called for a structure the live database did not have yet — ` +
+        `left unapplied, every feature built on it would have failed against the ` +
+        `real backend.`
       return { what, why, full: `${what} because ${why}`, kind }
     }
 
