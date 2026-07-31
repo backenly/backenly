@@ -118,3 +118,29 @@ describe('hasContent must not flip true on scaffolding alone', () => {
     expect(hasContent({ tableNames: ['users', 'notes'], exposedResources: 1 })).toBe(true)
   })
 })
+
+describe('a healed workflow finding is identified per workflow, so it can be reaped', () => {
+  // The stale finding this guards: `workflow_broken` details carry no
+  // tableName, so gapIdentity collapsed every workflow onto `workflow_broken::`.
+  // One still-broken workflow kept that identity present in the reaper's
+  // `detected` set and masked a second workflow that had genuinely healed,
+  // pinning its finding in "Waiting on you" indefinitely.
+  const { gapIdentity } = require('@/lib/autonomy/desired-state')
+
+  it('distinguishes two different workflows', () => {
+    const auth = gapIdentity('workflow_broken', { workflow: 'user_auth_flow' })
+    const stripe = gapIdentity('workflow_broken', { workflow: 'stripe_checkout' })
+
+    expect(auth).not.toBe(stripe)
+    expect(auth).toContain('user_auth_flow')
+  })
+
+  it('is stable for the same workflow across ticks', () => {
+    expect(gapIdentity('workflow_broken', { workflow: 'user_auth_flow' }))
+      .toBe(gapIdentity('workflow_broken', { workflow: 'user_auth_flow' }))
+  })
+
+  it('still keys table-scoped findings by table', () => {
+    expect(gapIdentity('missing_rls', { tableName: 'notes' })).toContain('notes')
+  })
+})

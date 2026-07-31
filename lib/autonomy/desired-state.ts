@@ -374,6 +374,13 @@ export function gapIdentity(
   const column = (d.columnName ?? d.column ?? '') as string
   const loc =
     (d.location as string | undefined) ??
+    // Workflow findings are located by WORKFLOW, not by table — their details
+    // carry no tableName at all. Without this every workflow_broken row shared
+    // the identity `workflow_broken::`, so one still-broken workflow kept that
+    // identity "detected" and masked a second workflow that had genuinely
+    // healed, pinning its finding open. Discriminating here lets the reaper
+    // withdraw each workflow independently.
+    (d.workflow as string | undefined) ??
     (table && column ? `${table}.${column}` : table)
   const base = normalizeFindingType(type, d)?.base ?? type
   return `${base}::${loc}`

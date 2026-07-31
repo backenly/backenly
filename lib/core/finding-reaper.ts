@@ -220,11 +220,23 @@ export async function reapArchFindings(projectId: string): Promise<number> {
  * separate AI-report pipeline this reaper never re-runs. Including the type
  * here would make every one of those findings vanish on the next autonomy
  * tick, mistaking "the invariant probe doesn't emit this" for "the gap
- * closed". Also excluded for the same reason: workflow_broken, orphan_table,
- * integrations, deploys, performance `${category}_${location}` families, and
+ * closed". Also excluded for the same reason: orphan_table, integrations,
+ * deploys, performance `${category}_${location}` families, and
  * external_schema_change (which owns its own adopted/ignored reaper).
+ *
+ * `workflow_broken` WAS excluded alongside them, and that was wrong. The
+ * exclusion applies to types whose probe cannot testify — `missing_api_crud`'s
+ * sibling probe is a stub returning `[]`, so its silence proves nothing. But
+ * `verifyWorkflows` IS the `declared_workflows_still_work` invariant probe, it
+ * is the ONLY producer of this type, and it reports current state on every
+ * tick — exactly the criterion above. A reap did exist for it, but only inside
+ * `runObserverForProject`, which is the DAILY cron. So a workflow finding that
+ * had genuinely healed sat in "Waiting on you" for up to 24 hours while the
+ * dashboard next to it said the loop checks every minute. Reaping it here puts
+ * the withdrawal on the same cadence as the claim.
  */
 const INVARIANT_REAPABLE_TYPES = [
+  'workflow_broken',
   'missing_rls',
   'unprotected_user_data',
   'rls_expression_invalid',
