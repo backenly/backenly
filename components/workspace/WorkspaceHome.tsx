@@ -544,6 +544,31 @@ const LOOP_STAGES: Array<{ key: LoopPhase; label: string }> = [
   { key: 'verify',  label: 'Verify'  },
 ]
 
+/**
+ * What each phase MEANS, in one plain sentence.
+ *
+ * No other backend ships this loop, so its five stage names are vocabulary
+ * nobody arrives already knowing. The readings say how MUCH and never WHAT —
+ * "0 waiting on you" only reads as good news once you know the loop stops
+ * there deliberately, and a first-time visitor reads it as a dead column.
+ *
+ * Deliberately number-free. The numerals sit directly above these lines and
+ * change every minute; restating them here would only give them a second place
+ * to drift out of sync.
+ */
+const LOOP_EXPLAIN: Record<LoopPhase, string> = {
+  observe:
+    'The rules your backend must always hold to. Backenly re-checks every one of them, every minute, on every plan.',
+  detect:
+    'How many of those rules it is failing right now. Backenly probes the live database instead of waiting for a bug report.',
+  propose:
+    'Backenly writes the exact repair before touching anything. Safe ones ship themselves; risky ones wait for your approval.',
+  apply:
+    'Repairs Backenly made on its own in the last 30 days, each behind a restore point taken before the change.',
+  verify:
+    'Of those repairs, the share whose original probe ran again and came back clean. Not “nobody undid it”.',
+}
+
 /** Live per-phase readings for the loop instrument. null → render '—'. */
 interface LoopStats {
   invariants: number | null
@@ -837,11 +862,16 @@ function ReceiptRow({ item }: { item: AutonomyLastAction }) {
  * product: verification feeds the next observation, forever, with no human at
  * the top of the loop.
  *
- * Every node carries its REAL reading (invariants watched, findings needing
- * attention, held for review, fixes 30d, verified rate) and the axis beneath
- * says which clock each reading is on — Observe/Detect/Propose are an instant
- * snapshot, Apply/Verify a 30-day track record. Without that split "15 need
- * attention" beside "100% verified" reads as the loop contradicting itself.
+ * Every node carries its REAL reading (guarantees watched, guarantees broken,
+ * held for approval, fixes 30d, proven-fixed rate) and the axis beneath says
+ * which clock each reading is on — Observe/Detect/Propose are an instant
+ * snapshot, Apply/Verify a 30-day track record. Without that split "15 broken"
+ * beside "100% proven fixed" reads as the loop contradicting itself.
+ *
+ * Each node also carries a one-sentence LOOP_EXPLAIN on hover. The stage names
+ * are this product's own vocabulary — no other backend has a loop to name —
+ * so the readings answer "how much" for a reader who has not yet been told
+ * "of what", and the zero columns in particular are unreadable without it.
  *
  * Motion is telemetry, never theater: the lit node is the real derived phase,
  * the heal sweep fires only when a finding genuinely closed, OFF freezes the
@@ -878,7 +908,11 @@ function SelfHealingLoop({
   const readings: Record<LoopPhase, { value: string; unit: string; accent?: boolean }> = {
     observe: {
       value: stats.invariants == null ? '—' : String(stats.invariants),
-      unit: 'guarantees',
+      // The cadence belongs ON the reading, not only in the header's "checked
+      // just now". It is the whole claim — a linter runs when you invoke it,
+      // this runs whether or not anyone is looking — and it holds for every
+      // plan including Free, which is why the unit can state it flatly.
+      unit: 'guarantees · every minute',
     },
     detect: {
       // open + pending_approval. Autonomy renders exactly this set across its
@@ -886,26 +920,39 @@ function SelfHealingLoop({
       // the sum of what that page shows, never larger than it. The Backend
       // health list this used to point at was deleted on 2026-07-21.
       value: stats.actionableFindings == null ? '—' : String(stats.actionableFindings),
-      unit: 'need attention',
+      // Was 'need attention', which named the wrong subject: the loop attends
+      // to these, not the reader — and Propose is the column that actually
+      // needs them. Naming the same population Observe counts ("guarantees")
+      // is what makes the first two columns read as one measurement.
+      unit: 'broken guarantees',
     },
     propose: {
       value: stats.pending == null ? '—' : String(stats.pending),
-      // A SUBSET of `detect`, not a separate population. The units say so.
-      unit: 'of those, held for you',
+      // Still a SUBSET of `detect`, but no longer said as a back-reference:
+      // "of those, held for you" only parses if you read left-to-right and are
+      // still holding the previous column in your head. The subset relationship
+      // moved into LOOP_EXPLAIN, where there is room to state it.
+      unit: 'waiting on you',
       accent: (stats.pending ?? 0) > 0,
     },
     apply: {
       value: stats.fixes30d == null ? '—' : String(stats.fixes30d),
-      unit: 'fixed · 30d',
+      // 'fixed' alone is what every monitoring tool claims; 'on its own' is the
+      // word that separates this product from all of them.
+      unit: 'fixed on its own · 30d',
     },
     verify: {
       value: stats.verifiedRate == null ? '—' : `${Math.round(stats.verifiedRate * 100)}%`,
       // Matches Apply's '· 30d' on purpose: this is the hold-up rate of THOSE
       // 30-day fixes, not a live score against what Detect shows right now.
-      // Without the matching window label, "15 need attention" next to "100%
-      // verified" reads as a straight contradiction instead of two different
-      // clocks — the single biggest source of "this makes no sense" reports.
-      unit: 'verified · 30d',
+      // Without the matching window label, "15 broken" next to "100% verified"
+      // reads as a straight contradiction instead of two different clocks —
+      // the single biggest source of "this makes no sense" reports.
+      //
+      // 'proven' rather than 'verified' because the scoreboard means something
+      // stricter than the everyday word: re-probed and confirmed gone, never
+      // "nobody rolled it back" (see trust-report's verifiedRate).
+      unit: 'proven fixed · 30d',
     },
   }
 
@@ -1032,6 +1079,32 @@ function SelfHealingLoop({
                 <span className="mt-1.5 max-w-[132px] px-1 text-center text-[10px] leading-[1.35] text-zinc-600">
                   {r.unit}
                 </span>
+
+                {/* What the phase MEANS, on hover. Opens DOWNWARD: the panel
+                    clips (overflow-hidden) and the nodes sit 24px under the
+                    header, so there is no room above. Edge columns anchor to
+                    their own edge instead of centring, which keeps the widest
+                    popover inside the panel at every viewport. Always in the
+                    accessibility tree, so it is never a mouse-only
+                    explanation. */}
+                <span className="sr-only">{LOOP_EXPLAIN[s.key]}</span>
+                <span
+                  aria-hidden="true"
+                  // 240px, not narrower: the space below the readings is the
+                  // axis + the return arc + the panel's own padding, ~107px
+                  // before `overflow-hidden` clips. At 220px the longest of
+                  // these sentences wraps to five lines and lands ~1px inside
+                  // that. One more line of width buys a whole line of height.
+                  className={`pointer-events-none absolute top-full z-20 mt-2 w-[min(240px,calc(100vw-3rem))] rounded-lg border ${HAIRLINE} bg-[#1c1d23] ${PANEL_SHADOW} px-3 py-2 text-left text-[11px] leading-[1.5] text-zinc-400 opacity-0 transition-opacity duration-150 group-hover/node:opacity-100 group-focus-visible/node:opacity-100 ${
+                    idx === 0
+                      ? 'left-0'
+                      : idx === LOOP_STAGES.length - 1
+                        ? 'right-0'
+                        : 'left-1/2 -translate-x-1/2'
+                  }`}
+                >
+                  {LOOP_EXPLAIN[s.key]}
+                </span>
               </>
             )
             if (clickable) {
@@ -1041,14 +1114,14 @@ function SelfHealingLoop({
                   type="button"
                   onClick={onReview}
                   title={`${stats.pending} change${stats.pending === 1 ? '' : 's'} waiting on your approval`}
-                  className="group/loop flex flex-col items-center rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-400/30"
+                  className="group/node group/loop relative flex flex-col items-center rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-400/30"
                 >
                   {node}
                 </button>
               )
             }
             return (
-              <div key={s.key} className="flex flex-col items-center">
+              <div key={s.key} className="group/node relative flex flex-col items-center">
                 {node}
               </div>
             )

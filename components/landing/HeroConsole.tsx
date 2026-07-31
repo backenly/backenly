@@ -61,9 +61,11 @@
  *      cadence for every plan, Free included.
  *
  * What deliberately does NOT animate: the readings themselves. 14 guarantees,
- * 3 held, 4 fixed, 100% verified are one live project's real numbers, so the
- * traversal moves and the values stay put. Animating them would be inventing
- * data on the one surface whose whole job is to be an honest projection.
+ * 0 broken, 0 waiting, 15 fixed, 100% proven fixed are one live project's real
+ * numbers, so the traversal moves and the values stay put. Animating them would
+ * be inventing data on the one surface whose whole job is to be an honest
+ * projection. (The counts here were stale against LOOP itself — "3 held, 4
+ * fixed" described neither the array below nor any live project.)
  *
  * Hydration: the first client render is byte-identical to the server's — the
  * cycle starts inside an effect and the motion preference is read there too,
@@ -160,13 +162,16 @@ const NAV: {
   { items: [{ title: 'Settings', icon: Settings }] },
 ]
 
-/* Mirrors the SelfHealingLoop readings. */
+/* Mirrors the SelfHealingLoop readings. The units are the dashboard's, word
+   for word (see LOOP_EXPLAIN / `readings` in WorkspaceHome) — a visitor who
+   signs up should meet the same five sentences they were sold on, so these
+   two lists change together or not at all. */
 const LOOP = [
-  { label: 'Observe', value: '14', unit: 'guarantees' },
-  { label: 'Detect', value: '0', unit: 'need attention' },
-  { label: 'Propose', value: '0', unit: 'of those, held for you' },
-  { label: 'Apply', value: '15', unit: 'fixed · 30d' },
-  { label: 'Verify', value: '100%', unit: 'verified · 30d' },
+  { label: 'Observe', value: '14', unit: 'guarantees · every minute' },
+  { label: 'Detect', value: '0', unit: 'broken guarantees' },
+  { label: 'Propose', value: '0', unit: 'waiting on you' },
+  { label: 'Apply', value: '15', unit: 'fixed on its own · 30d' },
+  { label: 'Verify', value: '100%', unit: 'proven fixed · 30d' },
 ] as const
 
 /** One phase per 1.5s: slow enough to read the label, quick enough that a
@@ -233,7 +238,10 @@ function useLoopWalk() {
  * top one is the emphasised row on the live surface; the rest sit dimmer.
  */
 const RECEIPTS = [
-  { text: 'Applied your approved fix: contract surface broken — verified & snapshotted', bright: true },
+  // Was '— verified & snapshotted', a suffix trust-report stopped emitting on
+  // 2026-07-30 (it now distinguishes re-checked fixes from merely applied ones)
+  // — so the hero was quoting the product saying something it no longer says.
+  { text: 'Applied your approved fix: contract surface broken — re-checked and confirmed, snapshot captured', bright: true },
   { text: 'data plane heal verified', bright: false },
   { text: 'You approved a fix — applying it now', bright: false },
 ]
