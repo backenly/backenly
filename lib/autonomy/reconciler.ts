@@ -378,7 +378,7 @@ async function reopenIfRetryable(
   projectId: string,
   gap: DesiredStateGap,
   rawDetails: unknown,
-): Promise<string | null> {
+): Promise<EnsureFindingResult> {
   const details = (rawDetails ?? {}) as Record<string, unknown>
   const escalation = (details.escalation ?? {}) as EscalationRecord
 
@@ -389,7 +389,18 @@ async function reopenIfRetryable(
     classifyFix(gap.type, gap.details as Record<string, unknown>).decision === 'auto'
 
   const decision = shouldRetryEscalation(isAutoFixable, escalation)
-  if (!decision.retry) return null
+  if (!decision.retry) {
+    // Three different situations, reported as three different reasons — a policy
+    // gate a human owns, a backoff that will clear itself, and a ladder that has
+    // run out. Collapsing them into one silent `null` is the ambiguity that hid
+    // the original stall.
+    const skip: GapSkipReason = !isAutoFixable
+      ? 'awaiting_human'
+      : decision.reason.includes('permanently')
+        ? 'retry_exhausted'
+        : 'retry_backoff'
+    return { findingId: null, skip }
+  }
 
   // Hand it back to the kernel. The retry bookkeeping is written BEFORE the
   // attempt so a fix that crashes the process still burns its attempt — the
@@ -412,7 +423,9 @@ async function reopenIfRetryable(
       select: { id: true },
     })
     .catch(() => null)
-  if (!updated) return null
+  // Lost a race with another writer (the row is no longer pending_approval).
+  // Not an error and not a stall — the next tick re-reads whatever it became.
+  if (!updated) return { findingId: null, skip: 'retry_backoff' }
 
   await prisma.auditLog
     .create({
@@ -435,7 +448,54 @@ async function reopenIfRetryable(
     })
     .catch(() => {})
 
-  return findingId
+  return { findingId, skip: null }
+}
+
+/**
+ * Why a gap the loop WOULD have auto-applied did not reach the kernel.
+ *
+ * These exist because `ensureFinding` used to answer `null` for five different
+ * situations, and the caller could not tell them apart. The tick then logged
+ * `attempted=0` with no further explanation, which is indistinguishable from
+ * "nothing was wrong" on every surface that reads it. That ambiguity is what let
+ * a fully stalled loop look healthy for thirteen days: the one number that would
+ * have exposed it was the one number nobody could interpret.
+ *
+ * Two of these are SELF-CLEARING holds — the loop is working as designed and the
+ * gap will be retried without anyone doing anything. The rest are not.
+ */
+export type GapSkipReason =
+  /** Policy escalation — a human owns this decision. Correct, and not a stall. */
+  | 'awaiting_human'
+  /** A failed fix inside its retry backoff. Self-clears when the rung elapses. */
+  | 'retry_backoff'
+  /** Retry ladder exhausted — left with the human permanently. */
+  | 'retry_exhausted'
+  /** Recently auto-fixed and re-detected. Self-clears at the window roll-off. */
+  | 'recurrence_suppressed'
+  /** Fix demonstrably not holding — one finding opened for review instead. */
+  | 'recurrence_escalated'
+  /** The bookkeeping itself failed. Always worth shouting about. */
+  | 'error'
+
+/** Holds that resolve on their own. Anything else means work is genuinely parked. */
+const SELF_CLEARING_SKIPS: ReadonlySet<GapSkipReason> = new Set<GapSkipReason>([
+  'retry_backoff',
+  'recurrence_suppressed',
+])
+
+/**
+ * Flat rather than a discriminated union on purpose: this project compiles with
+ * `strict: false`, under which TypeScript will not narrow `{ok:true}|{ok:false}`
+ * reliably, and a union the compiler cannot narrow is just a cast with extra
+ * steps. One nullable field each, with the invariant stated here: exactly one of
+ * `findingId` / `skip` is ever non-null.
+ */
+export interface EnsureFindingResult {
+  /** The finding for the kernel to act on, or null when the gap was skipped. */
+  findingId: string | null
+  /** Why it was skipped. Null when `findingId` is set. */
+  skip: GapSkipReason | null
 }
 
 /**
@@ -443,8 +503,14 @@ async function reopenIfRetryable(
  * live path then delegates execution entirely to runAutoFix — reusing the
  * deterministic kernel (classification gate, circuit breaker, pre-snapshot,
  * audit ledger, escalate-on-failure). No second execution path is introduced.
+ *
+ * Returns the reason on every non-actionable outcome so the caller can report
+ * WHY a tick did nothing rather than merely that it did nothing.
  */
-async function ensureFinding(projectId: string, gap: DesiredStateGap): Promise<string | null> {
+async function ensureFinding(
+  projectId: string,
+  gap: DesiredStateGap,
+): Promise<EnsureFindingResult> {
   try {
     const key = gapKey(gap)
 
@@ -469,7 +535,7 @@ async function ensureFinding(projectId: string, gap: DesiredStateGap): Promise<s
       if (matchOpen.status === 'pending_approval') {
         return reopenIfRetryable(matchOpen.id, projectId, gap, matchOpen.details)
       }
-      return matchOpen.id
+      return { findingId: matchOpen.id, skip: null }
     }
 
     // ── 2) Recurrence suppression ────────────────────────────────────────────
@@ -566,9 +632,9 @@ async function ensureFinding(projectId: string, gap: DesiredStateGap): Promise<s
             timestamp: new Date(),
           },
         }).catch(() => {})
-        // Returning null keeps the live loop from also running this on the
-        // same tick — the row is in pending_approval, awaiting the human.
-        return null
+        // Not running it on this tick is deliberate — the row is in
+        // pending_approval, awaiting the human.
+        return { findingId: null, skip: 'recurrence_escalated' }
       }
 
       // Below escalation threshold → suppress silently. One low-noise audit
@@ -594,7 +660,7 @@ async function ensureFinding(projectId: string, gap: DesiredStateGap): Promise<s
           timestamp: new Date(),
         },
       }).catch(() => {})
-      return null
+      return { findingId: null, skip: 'recurrence_suppressed' }
     }
 
     // ── 3) Fresh gap → mint a finding for the kernel to act on ───────────────
@@ -609,10 +675,10 @@ async function ensureFinding(projectId: string, gap: DesiredStateGap): Promise<s
       },
       select: { id: true },
     })
-    return created.id
+    return { findingId: created.id, skip: null }
   } catch (err: any) {
     console.warn(`[Reconciler:live] ensureFinding failed for ${projectId}/${gap.type}:`, err?.message)
-    return null
+    return { findingId: null, skip: 'error' }
   }
 }
 
@@ -675,9 +741,17 @@ export async function runReconcilerLive(projectId: string): Promise<LiveReconcil
     let deferred = 0
     let attempted = 0
 
+    // Why each un-attempted gap was skipped, tallied by reason. This is what
+    // turns `attempted=0` from a mystery into a sentence.
+    const skips: Partial<Record<GapSkipReason, number>> = {}
+
     for (const decision of toApply) {
-      const findingId = await ensureFinding(projectId, decision.gap)
-      if (!findingId) continue
+      const { findingId, skip } = await ensureFinding(projectId, decision.gap)
+      if (!findingId) {
+        const reason = skip ?? 'error'
+        skips[reason] = (skips[reason] ?? 0) + 1
+        continue
+      }
       attempted++
       // The kernel re-checks the classifier (defence in depth) and the circuit
       // breaker, captures a pre-snapshot for schema-touching fixes, writes the
@@ -710,15 +784,61 @@ export async function runReconcilerLive(projectId: string): Promise<LiveReconcil
           escalated,
           deferred,
           autoBudget: plan.autoBudget,
+          // The gaps this tick declined to act on, by reason. Persisted (not
+          // just logged) because diagnosing the thirteen-day stall required
+          // reading the ledger, and the ledger did not carry the answer.
+          gapsFound: toApply.length,
+          skipped: skips,
         }),
         timestamp: new Date(),
       },
     }).catch(() => {})
 
+    const skipSummary = Object.entries(skips)
+      .map(([reason, n]) => `${reason}=${n}`)
+      .join(' ')
+
     console.log(
       `[Reconciler:live] project=${projectId} level=${plan.level} ` +
-      `applied=${applied} escalated=${escalated} deferred=${deferred} attempted=${attempted}`,
+      `applied=${applied} escalated=${escalated} deferred=${deferred} attempted=${attempted}` +
+      (skipSummary ? ` skipped(${skipSummary})` : ''),
     )
+
+    // ── The loop watching itself ─────────────────────────────────────────────
+    //
+    // It found work it was allowed to auto-apply, and acted on none of it, for a
+    // reason that will NOT clear on its own. That is the exact shape of the
+    // stall that ran for thirteen days and 7,636 ticks while every dashboard
+    // read the AUTONOMY_LIVE_RUN rows as activity.
+    //
+    // A policy escalation is excluded because a human genuinely owns it and the
+    // approval queue is already the surface for that — this fires only when the
+    // loop is parked on work nobody is waiting on.
+    if (attempted === 0 && toApply.length > 0) {
+      const stalled = (Object.keys(skips) as GapSkipReason[]).filter(
+        r => !SELF_CLEARING_SKIPS.has(r) && r !== 'awaiting_human',
+      )
+      if (stalled.length > 0) {
+        console.warn(
+          `[Reconciler:live] STALLED project=${projectId} — ${toApply.length} auto-applicable ` +
+          `gap(s), none attempted. Reasons: ${skipSummary}.`,
+        )
+        await prisma.auditLog.create({
+          data: {
+            projectId,
+            action: 'AUTONOMY_LOOP_STALLED',
+            type: 'autonomy',
+            details: JSON.stringify({
+              gapsFound: toApply.length,
+              skipped: skips,
+              stalledReasons: stalled,
+              level: plan.level,
+            }),
+            timestamp: new Date(),
+          },
+        }).catch(() => {})
+      }
+    }
 
     return { ...base, frozen: false, attempted, applied, escalated, deferred }
   } catch (err: any) {
