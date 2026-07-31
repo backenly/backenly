@@ -21,3 +21,22 @@ The client libraries published from this repository under packages/ — the
 JavaScript SDK (@backenly/sdk), the CLI (@backenly/cli), and the MCP server
 (@backenly/mcp-server) — are licensed under the MIT License. See the LICENSE
 file in each package directory.
+
+--------------------------------------------------------------------------------
+
+TRADEMARK NOTICE
+
+"Backenly" and the Backenly logo are trademarks of Adarsh Chiriyamkandath Jose.
+
+As stated in Section 6 of the Apache License, Version 2.0, this License does not
+grant permission to use the trade names, trademarks, service marks, or product
+names of the Licensor, except as required for reasonable and customary use in
+describing the origin of the Work and reproducing the content of this NOTICE
+file.
+
+Redistribution of this software, modified or unmodified, does not confer any
+right to use these marks. Modified versions must be distributed under a
+different name and a different logo. Descriptive references such as "built on
+Backenly" or "derived from Backenly" remain permitted.
+
+See TRADEMARK.md for the full policy.

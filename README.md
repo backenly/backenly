@@ -162,3 +162,14 @@ The platform is licensed under the [Apache License 2.0](LICENSE).
 
 The client libraries under [`packages/`](packages/), the SDK, CLI, and MCP
 server, are MIT, so they impose nothing on the applications that embed them.
+
+## Trademark
+
+Apache-2.0 §6 grants no rights to the Backenly name or logo, and this project
+does not grant them separately. You may fork, modify, self-host, and
+commercialise the software. Distributing it under the Backenly name requires
+written permission.
+
+Describing your project as "built on Backenly" or "a fork of Backenly" is
+accurate and always welcome. See [TRADEMARK.md](TRADEMARK.md) for the full
+policy, including what you may do without asking.
