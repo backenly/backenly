@@ -62,8 +62,29 @@ async function maxActionsForProject(projectId: string): Promise<number | null> {
       include: { plan: { select: { autonomyMaxActionsPerWindow: true } } },
       orderBy: { createdAt: 'desc' },
     })
-    const planMax = sub?.plan?.autonomyMaxActionsPerWindow
-    return typeof planMax === 'number' && planMax > 0 ? planMax : envMaxActions()
+    // No subscription row at all ⇒ the plan is UNRESOLVED, and the env fallback
+    // is what this function's contract promises for that case.
+    if (!sub?.plan) return envMaxActions()
+
+    const planMax = sub.plan.autonomyMaxActionsPerWindow
+    if (typeof planMax === 'number' && planMax > 0) return planMax
+
+    // The plan resolved and its ceiling is NULL. That is not a missing value —
+    // it is every seeded plan's deliberate "unlimited" (prisma/seed-billing.ts,
+    // `autonomyMaxActionsPerWindow: null` on SANDBOX, BUILDER and SCALE alike).
+    //
+    // This branch used to fall through to `envMaxActions()`, which meant the env
+    // var stopped being the documented fallback-when-unresolvable and became a
+    // silent global cap. Production runs `AUTONOMY_MAX_ACTIONS_PER_WINDOW=10`, so
+    // every project on every plan was capped at ten autonomous fixes an hour and
+    // `unlimited` was reported false — quietly undoing the plan change that set
+    // healing free on every tier, and making `computeReconciliationPlan` ration
+    // its auto-budget instead of repairing everything it legitimately could.
+    //
+    // The anti-storm ceiling (stormCeiling) is what bounds a flapping detector.
+    // That is a safety limit and stays; this one was a pricing lever that is no
+    // longer supposed to exist.
+    return null
   } catch {
     return envMaxActions()
   }
