@@ -32,11 +32,33 @@ import crypto from 'crypto'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
+/**
+ * Placeholder for a value about to be bound by PRISMA.
+ *
+ * The cast is not cosmetic — on this transport it is mandatory. Prisma's
+ * `$queryRawUnsafe` sends string parameters explicitly typed as `text`, so
+ * `INSERT INTO t (uuid_col) VALUES ($1)` is rejected with
+ * `42804 column "…" is of type uuid but expression is of type text` EVEN WHEN
+ * the value is a well-formed uuid. (node-postgres sends parameters untyped and
+ * lets Postgres infer from the target column, which is why the same SQL works
+ * there — a difference that made this look like a bad value rather than a
+ * transport rule.)
+ *
+ * So the COLUMN TYPE decides, exactly as it already did for timestamp and json.
+ * It previously decided from the VALUE's shape for uuid alone, which meant any
+ * uuid column whose bound value was not a canonical uuid string got a bare
+ * placeholder and failed every single time. That ran 641 times against one
+ * production table over six days, swallowed, reported as a passing check.
+ *
+ * The value-shape test is kept as a last resort for callers that genuinely do
+ * not know the column type (dataType defaults to '').
+ */
 function typedPlaceholder(val: any, idx: number, dataType: string = ''): string {
-  if (typeof val === 'string' && UUID_RE.test(val)) return `$${idx}::uuid`
   const t = dataType.toLowerCase()
+  if (t === 'uuid') return `$${idx}::uuid`
   if (t.includes('timestamp') || t === 'date' || t.includes('time')) return `$${idx}::timestamp`
   if (t.includes('json')) return `$${idx}::jsonb`
+  if (typeof val === 'string' && UUID_RE.test(val)) return `$${idx}::uuid`
   return `$${idx}`
 }
 
