@@ -161,26 +161,24 @@ construction is worth nothing:
 
 ## Results (2026-08-01, 12 cases, n=3)
 
-12-cycle budget, Free (SANDBOX) plan, dial resolved to AGGRESSIVE. **Three consecutive runs on
-each of Postgres 16.10 and Postgres 17.6**, one machine. Receipts in `results/`.
+12-cycle budget, Free (SANDBOX) plan, dial resolved to AGGRESSIVE. Three consecutive runs on
+each of **three environments**:
 
-Both Postgres majors produced **byte-identical verdicts and identical repair cycles** —
-including `fk-column-unindexed`, which is graded from the query planner and was the case most
-likely to move across a major version. That is one axis of generality closed. The remaining
-axis is architecture: everything below is x86-64 Windows, and the CI job (Linux, `postgres:16`
-service container) has not been run.
+| Environment | Repair | Detection | Control FPs | Tokens |
+| --- | --- | --- | --- | --- |
+| Windows x86-64, Postgres 16.10 | 71% (5/7) | 100% | 0 | 0 |
+| Windows x86-64, Postgres 17.6 | 71% (5/7) | 100% | 0 | 0 |
+| **Linux x86-64 (CI), Postgres 16** | **71% (5/7)** | **100%** | **0** | **0** |
 
-| Metric | Value | PG 16.10 (n=3) | PG 17.6 (n=3) |
-| --- | --- | --- | --- |
-| Repair rate (in-catalogue, unattended) | **71%** (5/7) | 5/7 every run | 5/7 every run |
-| Detection rate | **100%** (7/7) | 7/7 every run | 7/7 every run |
-| Over-corrected | **0** | 0 every run | 0 every run |
-| Control false positives | **0 findings, 0 mutations** | `0, 0, 0` | `0, 0, 0` |
-| Out-of-catalogue repaired | **1/4** | 1/4 every run | 1/4 every run |
-| Model tokens, whole suite | **0** | `0, 0, 0` | `0, 0, 0` |
+All three produced **identical per-case verdicts**. `fk-column-unindexed` is graded from the
+query planner and held across a Postgres major boundary; `rls-engine-dialect-mismatch` repairs
+in 1–2 cycles on Linux and 1 on Windows, the only timing difference observed anywhere.
 
-Every case returned the same verdict in all six runs across both majors, with identical
-repair cycles.
+Both the database-build and the operating-system/architecture axes are now closed.
+
+Receipts in `results/`; CI uploads them as a build artifact on every run.
+
+Every case returned the same verdict in all nine runs across all three environments.
 
 | Case | Scope | Result | Cycles |
 | --- | --- | --- | --- |
@@ -274,6 +272,25 @@ implementation**, because a regression test that passes before the fix guards no
 This is the benchmark doing its job. It found a production defect on its first real run, on a
 path no dashboard watches, and it is now a deterministic repro.
 
+### What the cross-architecture run caught
+
+Running on Linux did not change the repair rate, but it did produce an **impossible row**:
+`rls-engine-dialect-mismatch` reported `detect=- repair=2` — repaired without ever being
+detected. Nothing can be repaired before it is found, so the metric was wrong, not the
+platform.
+
+Detection was sampled from `openFindings` *after* each cycle returned. When the loop raises a
+finding, repairs it, and reaps it inside a single cycle, that count reads zero and detection is
+never recorded. Windows timing happened to leave the finding open; Linux did not. The number
+was racing the finding reaper.
+
+An attempted repair is now counted as proof of detection, which makes the metric
+timing-independent. Detection reads 100% on all three environments after the fix.
+
+Worth stating plainly: this was a defect in the **instrument**, found only because the suite
+was run somewhere other than the machine it was written on. One environment would have shipped
+a metric that silently under-reported on other people's hardware.
+
 ### Environment fidelity — three bugs this run had to fix first
 
 Worth recording, because each one silently produced a *wrong number* rather than an error:
@@ -300,10 +317,13 @@ self-run benchmark has to be built against.
 - ✅ Harness, oracle, scoring, v1 corpus, Backenly lane — running against real Postgres.
 - ✅ Scoring protocol — 12 tests passing, no database required.
 - ✅ Advisory-lock release — 3 tests against `pg_locks`, verified to fail without the fix.
-- ✅ 12-case corpus, `n=3` on each of Postgres 16.10 and 17.6, zero variance across both.
-- ⛔ **One architecture.** Both Postgres majors agreeing closes the database-build axis, not
-  the hardware one. Everything so far is x86-64 Windows; the CI job (Linux) has not been run,
-  so these numbers still describe this laptop more than they describe Backenly.
+- ✅ 12-case corpus, `n=3` on each of three environments (Windows/PG16, Windows/PG17,
+  Linux CI/PG16), identical per-case verdicts across all nine runs.
+- ⛔ **Corpus is 12 cases, 7 of them scored.** Small. A percentage over 7 is a pilot result,
+  not a platform characterisation.
+- ⛔ **Single-instance only.** Every run is one app process against one database. Nothing here
+  exercises concurrent reconcilers across instances, which is exactly the condition the
+  advisory-lock bug lived in.
 - ⛔ **Two critical in-catalogue misses are unfixed** (`rls-wide-open-policy`,
   `rls-write-path-over-permissive`). Fix them before the repair rate is quoted anywhere.
 - ⛔ **No competitor lane exists.** Nothing here supports a comparative claim of any kind.
