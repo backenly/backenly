@@ -50,8 +50,30 @@ export async function resolveEndUserFromToken(
         payload.jti,
       )
       if (rows.length > 0) return null
-    } catch {
-      // Blacklist table doesn't exist yet — treat as not revoked.
+    } catch (err: any) {
+      // A project that has never revoked a token has no `_token_blacklist`
+      // table, so 42P01 genuinely means "nothing can have been revoked" and
+      // accepting the token is correct.
+      //
+      // ANY OTHER failure means revocation status could not be determined, and
+      // the token is accepted anyway. That is a deliberate FAIL-OPEN policy, not
+      // an accident: failing closed would reject every token during a transient
+      // database error, turning a blip into a total auth outage for every
+      // end user of every project. Accepting a small revocation window is the
+      // better trade at this scale — but it IS a trade, and it was previously
+      // made by an empty `catch {}` that nobody could see or revisit.
+      //
+      // So the unexpected case is now loud. If this ever fires, a revoked token
+      // was honoured, and that is a security event worth a human reading.
+      const text = String(err?.message ?? err)
+      const tableMissing = err?.code === '42P01' || text.includes('42P01')
+      if (!tableMissing) {
+        console.error(
+          `[EndUserIdentity] token revocation check FAILED OPEN for project ${projectId} ` +
+          `(jti=${String(payload.jti).slice(0, 8)}…): ${text}. ` +
+          `A revoked token would have been accepted.`,
+        )
+      }
     }
   }
   return { userId: String(payload.userId), role: payload.role ?? 'user' }
