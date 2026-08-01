@@ -102,3 +102,33 @@ describe('requiredParamCount — how many parameters will Postgres demand', () =
     expect(requiredParamCount(`SELECT * FROM t WHERE a = 'it''s $1' AND b = $1`)).toBe(1)
   })
 })
+
+describe('the two historical outages, as arity arithmetic', () => {
+  // Both reduce to one subtraction. Neither was caught for months, because the
+  // only signal either produced was a detector saying nothing.
+
+  it('detectMissingRls — one placeholder, two arguments supplied', () => {
+    const sql = `SELECT t.tablename FROM pg_tables t WHERE t.schemaname = $1`
+    const suppliedArgs = ['workspace_abc', 'workspace_abc'] // schemaName passed twice
+    expect(requiredParamCount(sql)).toBe(1)
+    expect(suppliedArgs.length).not.toBe(requiredParamCount(sql))
+  })
+
+  it('getEndUserAuthUsage — no placeholders, one argument supplied', () => {
+    // The schema cannot be a placeholder (Postgres takes no parameter for an
+    // identifier), so it is interpolated — and the parameter was passed anyway.
+    const sql = `SELECT 1 FROM "workspace_abc"."users" LIMIT 1`
+    const suppliedArgs = ['workspace_abc']
+    expect(requiredParamCount(sql)).toBe(0)
+    expect(suppliedArgs.length).not.toBe(requiredParamCount(sql))
+  })
+
+  it('the corrected forms both balance', () => {
+    expect(requiredParamCount(`SELECT t.tablename FROM pg_tables t WHERE t.schemaname = $1`)).toBe(
+      ['workspace_abc'].length,
+    )
+    expect(requiredParamCount(`SELECT 1 FROM "workspace_abc"."users" LIMIT 1`)).toBe(
+      ([] as unknown[]).length,
+    )
+  })
+})
