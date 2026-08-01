@@ -1998,6 +1998,23 @@ export async function executeWithUserContext<T = any>(
   values: unknown[] = [],
   userRole: string = 'user'
 ): Promise<T[]> {
+  // ── TEMPORARY DIAGNOSTIC — REMOVE AFTER THE profiles CALLER IS IDENTIFIED ──
+  //
+  // A bare-placeholder INSERT into `profiles` fails 42804 every 15 minutes and
+  // five rounds of static analysis have each named a different, wrong caller.
+  // Log-only: no behaviour change, no extra query. Prints the stack so the
+  // actual caller is read from evidence instead of inferred again.
+  //
+  // Tracked in memory: project_contract_sweep_recurring_errors.md
+  if (process.env.DIAG_PROFILES_CALLER === '1' && /INSERT INTO[^;]*"profiles"/i.test(sql)) {
+    console.error(
+      '[DIAG profiles-insert] caller stack:\n' +
+      (new Error('profiles INSERT').stack ?? '(no stack)') +
+      `\n[DIAG profiles-insert] sql=${sql.slice(0, 200)}` +
+      `\n[DIAG profiles-insert] userId=${userId || '(none)'} serviceRole=${isServiceRole}`,
+    )
+  }
+
   return prisma.$transaction(async (tx) => {
     await tx.$executeRawUnsafe(
       rlsSessionSql(),
