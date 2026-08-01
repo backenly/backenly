@@ -28,6 +28,7 @@ import { prisma } from '@/lib/db/prisma'
 import { classifyFix } from '@/lib/core/fix-classifier'
 import { activeProjectsWhere } from '@/lib/autonomy/activity-gate'
 import { getProjectAutonomyLevel } from '@/lib/autonomy/autonomy-level'
+import { readContractLiveness, isHeartbeatStale } from '@/lib/autonomy/data-plane-liveness'
 
 const HOURS = Number(process.argv.find(a => a.startsWith('--hours='))?.split('=')[1] ?? 24)
 
@@ -87,10 +88,35 @@ async function main() {
     const level = await getProjectAutonomyLevel(p.id)
     const tickAge = lastTick ? (Date.now() - lastTick.timestamp.getTime()) / 60000 : null
 
+    // Contract-sweep heartbeat. The `data_plane_is_answering` invariant reads
+    // this rather than probing (five HTTP calls per project do not belong in a
+    // per-minute loop), which makes the 15-minute sweep a single point of
+    // failure for the platform's most valuable check. When it stops, every
+    // project's liveness invariant correctly reports "unknown" — but the
+    // operator sees a vague "could not be checked" and has to infer the cause.
+    // Naming it here turns that inference into a sentence.
+    const beat = await readContractLiveness(p.id)
+    const beatAge = beat ? (Date.now() - Date.parse(beat.verifiedAt)) / 60000 : null
+
     console.log(`\n${label}`)
     console.log(c.dim(`  tables=${p._count.tables}  dial=${level}  eligible=${eligible.has(p.id)}` +
       `  lastTick=${tickAge === null ? 'never' : `${tickAge.toFixed(0)}m ago`}` +
+      `  sweep=${beatAge === null ? 'never' : `${beatAge.toFixed(0)}m ago`}` +
       `  fixed(${HOURS}h)=${fixes}  retried=${retries}`))
+
+    // Only meaningful for projects the sweep actually covers — it selects
+    // `tables: { some: {} }`, so an unbuilt project having no heartbeat is
+    // correct, not a fault.
+    if (p._count.tables > 0 && isHeartbeatStale(beat)) {
+      problems.push({
+        project: label,
+        detail:
+          beat
+            ? `contract sweep has not run for this project since ${beat.verifiedAt} — ` +
+              `data-plane liveness is UNKNOWN, so "healthy" cannot be trusted`
+            : 'contract sweep has NEVER verified this project — data-plane liveness is UNKNOWN',
+      })
+    }
 
     // ── The defect this script was written for ───────────────────────────────
     // A finding the classifier rates `auto`, sitting in the human queue. The
