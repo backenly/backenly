@@ -238,13 +238,18 @@ jobs:
       # schema fails outright and every case dies before it is measured. The
       # bench must run against a production-shaped database or it is grading an
       # approximation of the data plane.
+      # psql reads the connection from DATABASE_URL (already defined above)
+      # rather than an inline password. `export PGPASSWORD=postgres` was the
+      # obvious way to write this and the preflight scanner correctly rejected
+      # it: an inline password is the shape of a real leak even when the value
+      # is a throwaway container credential. Suppressing that check to keep a
+      # convenience would teach everyone to ignore it.
       - name: Install PostgREST data-plane SQL
         run: |
-          export PGPASSWORD=postgres
-          psql -h localhost -U postgres -d backenly_bench -c \
+          psql "$DATABASE_URL" -c \
             "DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='backenly_user') THEN CREATE ROLE backenly_user NOLOGIN; END IF; END \$\$;"
-          psql -h localhost -U postgres -d backenly_bench -f scripts/sql/postgrest-schema-registry.sql
-          psql -h localhost -U postgres -d backenly_bench -f scripts/sql/postgrest-ddl-sync.sql
+          psql "$DATABASE_URL" -f scripts/sql/postgrest-schema-registry.sql
+          psql "$DATABASE_URL" -f scripts/sql/postgrest-ddl-sync.sql
       # The build lock is on every mutation path in the product, and its release
       # bug was invisible to every application-level check — only pg_locks could
       # see it. These assert against pg_locks directly.

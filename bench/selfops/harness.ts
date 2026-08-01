@@ -153,11 +153,25 @@ export async function runCase(
       escalations += tick.escalated
       tokensSpent += tick.tokensSpent
 
-      // Detection is "the platform is holding an open finding for this project",
-      // which is the same thing the customer would see in the dashboard. It is
-      // recorded independently of repair so a platform that reliably sees the
-      // problem and cannot fix it scores honestly on detection.
-      if (ticksToDetect === null && tick.openFindings > 0) ticksToDetect = cycle
+      // Detection = the platform demonstrably located the fault this cycle.
+      //
+      // This was originally `openFindings > 0` alone, and that was a measurement
+      // bug, caught only by running on a second architecture. `openFindings` is
+      // sampled AFTER the cycle returns, so when the loop raises a finding,
+      // repairs it, and reaps it all within one cycle, the count reads zero and
+      // detection is never recorded — for a fault that was visibly repaired.
+      //
+      // It produced an impossible row: `rls-engine-dialect-mismatch` reported
+      // `detect=- repair=2` on Linux while reporting `detect=1` on Windows, from
+      // the same code against the same corpus. Nothing can be repaired without
+      // first being found, so a metric that says otherwise is measuring its own
+      // sampling window.
+      //
+      // An attempted repair is proof of detection, so it counts. This makes the
+      // detection number timing-independent rather than a race against the
+      // finding reaper.
+      const located = tick.openFindings > 0 || tick.attempted > 0 || tick.applied > 0
+      if (ticksToDetect === null && located) ticksToDetect = cycle
 
       after = await fault.observe(ctx)
       if (healthy(after)) {
