@@ -238,12 +238,16 @@ jobs:
       # schema fails outright and every case dies before it is measured. The
       # bench must run against a production-shaped database or it is grading an
       # approximation of the data plane.
-      # psql reads the connection from DATABASE_URL (already defined above)
-      # rather than an inline password. `export PGPASSWORD=postgres` was the
-      # obvious way to write this and the preflight scanner correctly rejected
-      # it: an inline password is the shape of a real leak even when the value
-      # is a throwaway container credential. Suppressing that check to keep a
-      # convenience would teach everyone to ignore it.
+      # psql reads its connection from DATABASE_URL (already defined above)
+      # rather than from an exported password variable. Exporting one was the
+      # obvious way to write this step, and the preflight scanner correctly
+      # rejected it: an inline password is the shape of a real leak even when
+      # the value is a throwaway container credential. Suppressing that check to
+      # keep the convenience would teach everyone to ignore it.
+      #
+      # The scanner also rejected the first version of THIS comment, which
+      # quoted the offending line verbatim. It cannot tell a comment from code,
+      # and it should not try — so the pattern is described, never written.
       - name: Install PostgREST data-plane SQL
         run: |
           psql "$DATABASE_URL" -c \
