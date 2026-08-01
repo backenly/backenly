@@ -199,8 +199,17 @@ repair cycles.
 
 ### The two in-catalogue misses
 
-Both are **critical, both are security, and both are detected and then not repaired** — the
-worst combination, because the finding is raised and the dashboard shows the loop working.
+**What these are, precisely:** gaps in *automated remediation*, not exploitable holes in
+Backenly. In both cases the fault is a misconfiguration inside a project's own schema, the
+detector fires, and the finding is surfaced to the owner. What is missing is the automatic
+repair. Nothing here describes a way to attack Backenly or a Backenly-hosted project; the
+"unauthenticated read" below happens inside a fixture this suite deliberately breaks.
+
+They are published unfixed because that is what an honest instrument reports, and because the
+gap is on the axis this platform claims to own.
+
+Both are **critical, both are security-shaped, and both are detected and then not repaired** —
+the worst combination, because the finding is raised and the dashboard shows the loop working.
 
 - **`rls-wide-open-policy`** — RLS on, a policy present, `USING (true)`, and `anon` holding
   SELECT. An unauthenticated request reads every user's phone number. The
