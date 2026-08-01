@@ -159,11 +159,77 @@ export async function acquireWorkspaceClient(projectId: string): Promise<PoolCli
  * Run a parameterised query in the project's workspace schema.
  * Handles connection acquisition, search_path, timeout, and release.
  */
+/**
+ * Highest `$n` placeholder in a statement — the number of parameters Postgres
+ * will demand. Placeholders inside string literals and line comments do not
+ * count, because Postgres does not treat them as parameters either; a probe
+ * whose WHERE clause searches for the literal text '$1' must not be read as
+ * taking a parameter.
+ */
+export function requiredParamCount(sql: string): number {
+  const stripped = sql
+    .replace(/--[^\n]*/g, ' ')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/'(?:[^']|'')*'/g, "''")
+    .replace(/\$([A-Za-z_]\w*)\$[\s\S]*?\$\1\$/g, ' ') // dollar-quoted bodies
+  const found = stripped.match(/\$(\d+)/g)
+  if (!found) return 0
+  return Math.max(...found.map((p) => Number(p.slice(1))))
+}
+
+/**
+ * THE SILENT-PROBE GUARD.
+ *
+ * A statement whose parameter count disagrees with the arguments handed to it is
+ * rejected by Postgres before it runs — "bind message supplies N parameters, but
+ * prepared statement requires M". That error is correct and immediate, and it
+ * has still cost this codebase three separate outages, because every caller that
+ * makes this mistake is a PROBE, and probes wrap their queries in a fail-soft
+ * catch. The rejection becomes an empty result, an empty result reads as "I
+ * looked and found nothing", and a detector reports healthy forever without ever
+ * having run:
+ *
+ *   detectMissingRls       passed `schemaName` twice to a one-placeholder query.
+ *                          The flagship security probe was dead in EVERY
+ *                          environment for months while the dashboard was green.
+ *   getEndUserAuthUsage    passed a parameter to a statement with none, so
+ *                          `hasIdentities` was false on every project ever, and
+ *                          the auth evidence gate ran on half its evidence.
+ *
+ * Postgres already catches this; what it cannot do is stop the caller swallowing
+ * it. So the check moves to where the swallow cannot reach — before the query is
+ * issued — and throws a message that names the mismatch instead of a generic
+ * bind error. A fail-soft catch will still swallow THIS throw, which is why the
+ * companion guard (tests/unit/probe-query-contract.spec.ts) asserts the message
+ * shape: any probe fixture exercising a mismatched call now fails loudly with a
+ * sentence that says exactly what is wrong, rather than silently returning [].
+ *
+ * Deliberately not a lint rule. The SQL in this codebase is assembled from
+ * template literals and helper fragments (`notReservedTableSql`), so a static
+ * pass cannot count placeholders without evaluating them — and a linter that is
+ * wrong about a third of the call sites gets suppressed, which is worse than no
+ * linter. Counting at runtime is exact, needs no allowlist, and the probe
+ * fixtures now execute every one of these paths in CI.
+ */
+function assertParamArity(projectId: string, sql: string, params: unknown[]): void {
+  const required = requiredParamCount(sql)
+  if (required === params.length) return
+  const preview = sql.trim().replace(/\s+/g, ' ').slice(0, 120)
+  throw new Error(
+    `[workspace-query] parameter arity mismatch for project ${projectId}: ` +
+      `the statement uses ${required} placeholder(s) but ${params.length} argument(s) were supplied. ` +
+      `Postgres would reject this bind, and a fail-soft catch would turn that into an empty ` +
+      `result — i.e. a probe that reports "nothing found" without ever running. ` +
+      `Statement: ${preview}${sql.trim().length > 120 ? '…' : ''}`,
+  )
+}
+
 export async function queryWorkspace<T extends Record<string, unknown> = Record<string, unknown>>(
   projectId: string,
   sql: string,
   params: unknown[] = []
 ): Promise<T[]> {
+  assertParamArity(projectId, sql, params)
   const client = await acquireWorkspaceClient(projectId)
   try {
     const result: QueryResult<T> = await client.query(sql, params)
@@ -201,6 +267,7 @@ export async function queryWorkspaceAsOwner<T extends Record<string, unknown> = 
   sql: string,
   params: unknown[] = []
 ): Promise<T[]> {
+  assertParamArity(projectId, sql, params)
   const { rlsSessionSql, rlsSessionParams } = await import('./rls-session')
   const client = await acquireWorkspaceClient(projectId)
   try {
@@ -233,6 +300,7 @@ export async function executeWorkspace(
   sql: string,
   params: unknown[] = []
 ): Promise<number> {
+  assertParamArity(projectId, sql, params)
   const client = await acquireWorkspaceClient(projectId)
   try {
     const result = await client.query(sql, params)
