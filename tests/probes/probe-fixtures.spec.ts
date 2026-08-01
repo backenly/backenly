@@ -147,8 +147,32 @@ describe('detectTablesWithNoApiDefinition (retired — silence is the contract)'
   }, 60_000)
 })
 
-describe('detectApiCoverageGaps', () => {
-  it('FIRES for an API definition missing CRUD operations', async () => {
+/**
+ * detectApiCoverageGaps is RETIRED and must stay silent — same contract, and the
+ * same reasoning, as detectTablesWithNoApiDefinition above.
+ *
+ * It read `operations` off ApiDefinition rows. Nothing has written those rows
+ * since executeGenerateAPI stopped on 2026-07-21 (there is no `.create` /
+ * `.update` / `.upsert` on `prisma.apiDefinition` left in the repo, and
+ * scripts/assert-no-apidefinition-writes.ts keeps it that way). That made the
+ * condition IMMUTABLE on legacy projects — `missing_api_crud` is classified
+ * `auto` with GENERATE_API as its repair, GENERATE_API cannot touch those rows,
+ * so every "fix" was a guaranteed no-op recorded as a success, re-firing on the
+ * same five prod tables every 24 hours. On projects created after the cutover
+ * there are no rows at all, so it reported full CRUD coverage as satisfied
+ * regardless of the real API state.
+ *
+ * `desired-state.ts` already encodes the retirement — `api_coverage_is_complete`
+ * maps to an empty emit list, so nothing claims this type is re-verifiable. This
+ * assertion was the last place still expecting the old behaviour, and it had
+ * been failing in CI ever since.
+ *
+ * Kept, not deleted, and built from the exact fixture that used to fire: anything
+ * genuinely re-added here must read the catalog and the grants, never a frozen
+ * projection of them.
+ */
+describe('detectApiCoverageGaps (retired — silence is the contract)', () => {
+  it('stays silent for a definition missing CRUD, the shape that used to fire', async () => {
     const table = await prisma.table.create({
       data: { projectId, name: 'partials', schema, description: 'fixture' },
     })
@@ -159,18 +183,16 @@ describe('detectApiCoverageGaps', () => {
         name: 'partials',
         basePath: '/partials',
         enabled: true,
-        // Read-only: no create/update/delete — a real coverage gap.
+        // Read-only: no create/update/delete — what used to be a coverage gap.
         operations: { get: true, list: true },
         endpoints: [{ method: 'GET', path: '/partials' }],
       },
     })
 
-    const findings = await detectApiCoverageGaps(projectId)
-    expect(findings.length).toBeGreaterThan(0)
-    expect(JSON.stringify(findings)).toContain('partials')
+    expect(await detectApiCoverageGaps(projectId)).toEqual([])
   }, 60_000)
 
-  it('goes QUIET for a definition with complete CRUD', async () => {
+  it('stays silent for a definition with complete CRUD', async () => {
     const table = await prisma.table.create({
       data: { projectId, name: 'complete', schema, description: 'fixture' },
     })

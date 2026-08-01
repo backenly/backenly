@@ -37,7 +37,7 @@ So the control that matters is proof-of-humanity, not domain reputation.
 
 Because the customers who pay are the ones on their own company domains.
 Restricting signup to Gmail/Outlook/etc. would turn away exactly the segment
-Backenly is built for while doing nothing about `tempemailburner@gmail.com`.
+Backenly is built for while doing nothing about `<burner-account>@<major-provider>`.
 Domain trust is a supporting signal here, never the gate.
 
 ## The layers
@@ -102,9 +102,16 @@ backenly.com@gravik.org      DENY       100  brand_in_local_part
 mrej6qi3ucj1@cropimg.com     DENY        85  unknown_domain, catchall_forwarder_mx, random_local_part
 nehafic171@aganseo.com       CHALLENGE   45  unknown_domain, generated_local_part
 neliyit144@dysonc.com        CHALLENGE   45  unknown_domain, generated_local_part
-sandranair1661@gmail.com     ALLOW        0  major_provider
-adarshcj@hanyang.ac.kr       ALLOW       15  institutional_domain
+<ordinary-mailbox>@<major-provider>  ALLOW   0  major_provider
+<founder>@<university.ac.kr>        ALLOW  15  institutional_domain
 ```
+
+The two ALLOW rows are redacted because they were real mailboxes belonging to
+real people, and this repository is public. The abuse addresses above them are
+left intact: those are attacker-controlled disposable domains, which is the
+subject matter, not somebody's inbox. The scores and reason codes are the
+measured ones either way — what the redaction removes is an identity, not a
+result.
 
 DNS is capped at 2.5 s with a 6-hour cache, and a resolver timeout is scored as
 **unknown, never as bad** — our infrastructure problem must not lock out a real
