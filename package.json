@@ -38,7 +38,8 @@
     "mixed-eval:flows": "MODES=B tsx scripts/mixed-eval.ts",
     "mixed-eval:chaos": "MODES=C tsx scripts/mixed-eval.ts",
     "migrate:api-keys": "tsx scripts/migrate-api-keys-to-hash.ts",
-    "cleanup:tokens": "tsx scripts/cleanup-expired-tokens.ts"
+    "cleanup:tokens": "tsx scripts/cleanup-expired-tokens.ts",
+    "bench:selfops": "tsx bench/selfops/run.ts"
   },
   "dependencies": {
     "@amplitude/unified": "^1.1.21",
