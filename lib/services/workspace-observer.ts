@@ -40,6 +40,7 @@ import {
 import { checkIntegrationHealth } from '@/lib/core/integration-health'
 import { verifyWorkflows } from '@/lib/core/workflow-verifier'
 import { detectContractViolations } from '@/lib/services/contract-verifier'
+import { recordContractSweepResult } from '@/lib/autonomy/data-plane-liveness'
 import { writeFixHistory, checkEscalation, buildResolutionText } from '@/lib/memory/fix-history'
 import { generateFixPlansFromRawFindings, type FixPlan } from '@/lib/core/fix-plan-generator'
 import { runBuiltInVerification, type VerificationExecutionResult } from '@/lib/verification/verification-executor'
@@ -159,6 +160,22 @@ export async function runContractSweep(): Promise<{
     const settled = await Promise.allSettled(
       batch.map(async (p) => {
         const findings = await detectContractViolations(p.id)
+
+        // The heartbeat, written on EVERY pass including clean ones.
+        //
+        // Before this, a clean sweep recorded nothing at all, so "no open
+        // contract_surface_broken finding" was ambiguous between "verified
+        // answering" and "never checked". The data-plane invariant
+        // (lib/autonomy/data-plane-liveness.ts) cannot tell those apart from the
+        // findings table alone, and reading the second as the first is exactly
+        // how detectMissingRls reported green while dead. Written before the
+        // per-finding handling below so a failure while WRITING findings still
+        // leaves an accurate record of when the probe last ran.
+        await recordContractSweepResult(
+          p.id,
+          findings.map(f => String((f.details as Record<string, unknown>)?.surface ?? 'unknown')),
+        )
+
         for (const finding of findings) {
           // Most broken surfaces are symptoms whose cause is outside this
           // project's schema (process down, route unmounted, proxy

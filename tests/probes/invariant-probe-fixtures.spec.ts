@@ -37,6 +37,11 @@ import { detectOrphanTables } from '@/lib/services/workspace-observer'
 import { detectRuntimeEngineMismatch, compareEngineToPolicies } from '@/lib/autonomy/engine-conformance'
 import { verifyWorkflows } from '@/lib/core/workflow-verifier'
 import { captureSchemaSnapshot } from '@/lib/services/workspace-schema-snapshot'
+import {
+  detectDataPlaneNotAnswering,
+  recordContractSweepResult,
+} from '@/lib/autonomy/data-plane-liveness'
+import { computeDesiredStateDiff, summarizeDesiredState } from '@/lib/autonomy/desired-state'
 
 const prisma = new PrismaClient()
 
@@ -357,4 +362,104 @@ describe('verifyWorkflows', () => {
     )
     expect(hit).toBeUndefined()
   }, 120_000)
+})
+
+// ── data_plane_is_answering ──────────────────────────────────────────────────
+
+describe('detectDataPlaneNotAnswering', () => {
+  // The invariant added because contract_surface_broken was ~80% of every real
+  // production fault and was not in the catalogue at all — so the health verdict
+  // could read "all guarantees hold" during a customer-facing outage.
+
+  it('stays silent for a project with no tables', async () => {
+    // runContractSweep selects `tables: { some: {} }`, so an unbuilt project is
+    // never swept and never gets a heartbeat. That is a correct state, not an
+    // unknown one. Without this branch every unbuilt project would report
+    // "could not be checked" forever — and because reapInvariantFindings
+    // refuses to reap when any probe errored, it would also freeze their
+    // finding cleanup permanently.
+    const ghost = randomUUID()
+    const ghostUser = randomUUID()
+    await prisma.user.create({
+      data: {
+        id: ghostUser,
+        email: `dp-ghost+${ghostUser.slice(0, 8)}@backenly.test`,
+        name: 'dp ghost',
+        password: 'not-a-real-hash',
+      },
+    })
+    await prisma.project.create({ data: { id: ghost, name: 'dp-ghost', userId: ghostUser } })
+
+    expect(await detectDataPlaneNotAnswering(ghost)).toEqual([])
+
+    await prisma.project.deleteMany({ where: { id: ghost } })
+    await prisma.user.deleteMany({ where: { id: ghostUser } })
+  }, 120_000)
+
+  it('THROWS rather than reporting healthy when the sweep has never run', async () => {
+    // This project has tables (created by the fixtures above) and no heartbeat.
+    // Returning [] here would mean "verified answering", which is a claim
+    // nothing supports — the exact laundering of silence into health that this
+    // invariant exists to stop.
+    await expect(detectDataPlaneNotAnswering(projectId)).rejects.toThrow(/never verified|unknown/i)
+  }, 120_000)
+
+  it('THROWS when the heartbeat is too old to mean anything', async () => {
+    await recordContractSweepResult(projectId, [])
+    await prisma.projectPreference.updateMany({
+      where: { projectId, type: 'contract_liveness' },
+      data: {
+        value: JSON.stringify({
+          verifiedAt: new Date(Date.now() - 4 * 3600_000).toISOString(),
+          ok: true,
+          brokenSurfaces: [],
+        }),
+      },
+    })
+
+    await expect(detectDataPlaneNotAnswering(projectId)).rejects.toThrow(/older than|unknown/i)
+  }, 120_000)
+
+  it('goes QUIET on a fresh heartbeat that says every surface answered', async () => {
+    await recordContractSweepResult(projectId, [])
+
+    expect(await detectDataPlaneNotAnswering(projectId)).toEqual([])
+  }, 120_000)
+
+  it('FIRES when the sweep recorded a broken surface, surfacing the rows it wrote', async () => {
+    // The sweep is the single writer. This probe reads back what it recorded
+    // rather than re-deriving gaps, so two components can never author the same
+    // finding with identities that disagree.
+    await prisma.healthFinding.create({
+      data: {
+        projectId,
+        type: 'contract_surface_broken',
+        severity: 'critical',
+        status: 'pending_approval',
+        autoFixed: false,
+        details: { surface: 'db', detail: 'probe error: ECONNREFUSED', httpStatus: null },
+      },
+    })
+    await recordContractSweepResult(projectId, ['db'])
+
+    const findings = await detectDataPlaneNotAnswering(projectId)
+
+    expect(findings.length).toBeGreaterThan(0)
+    expect(findings[0].type).toBe('contract_surface_broken')
+    expect((findings[0].details as any).surface).toBe('db')
+    // Repair belongs to the sweep, which is single-flighted platform-wide.
+    // A second fix closure here would be a second execution path.
+    expect(findings[0].autoFixable).toBe(false)
+  }, 120_000)
+
+  it('makes the overall verdict refuse to say "healthy" during an outage', async () => {
+    // The end-to-end point of the whole change.
+    const report = await computeDesiredStateDiff(projectId)
+    expect(report.satisfied).toBe(false)
+    expect(summarizeDesiredState(report)).not.toContain('all guarantees hold')
+
+    const liveness = report.invariants.find((i) => i.id === 'data_plane_is_answering')
+    expect(liveness).toBeDefined()
+    expect(liveness!.satisfied).toBe(false)
+  }, 180_000)
 })

@@ -51,6 +51,7 @@ import {
 import { detectRuntimeEngineMismatch } from './engine-conformance'
 import { detectUnregisteredSchema } from './schema-registration'
 import { detectPendingSchemaDrift } from './drift-watch'
+import { detectDataPlaneNotAnswering } from './data-plane-liveness'
 
 // ── Bounded-autonomy tiers (graded by blast radius) ───────────────────────────
 //
@@ -234,6 +235,14 @@ export const INVARIANTS: readonly Invariant[] = [
       'A READ_WRITE connection string lets developers run DDL from psql or a migration tool. Until adopted, the stored contract (APIs, snapshot baseline, access grants) disagrees with the live schema — the exact drift a schema-mirror platform structurally cannot have, and the one this loop exists to close.',
     probe: detectPendingSchemaDrift,
   },
+  // ── The one that was missing, and the one that happens most ─────────────────
+  {
+    id: 'data_plane_is_answering',
+    title: 'The backend is actually answering its API',
+    rationale:
+      "Measured over two months of production, contract_surface_broken is ~80% of every real fault ever recorded here — 298 findings against 29 for the next most common. It means a customer cannot reach their backend, and it was the one thing this catalogue did not check. Every other invariant asks whether the backend is SHAPED correctly; this asks whether it RESPONDS. Without it computeDesiredStateDiff could return satisfied and the dashboard could print \"Backend is healthy — all guarantees hold\" while the project's REST API returned 502s. Reads the 15-minute contract sweep's recorded result rather than probing, because the reconciler runs this set every minute and live HTTP probing does not belong in that loop.",
+    probe: detectDataPlaneNotAnswering,
+  },
   // ── Phase 3 — data-plane engine matches the identity its policies read ───────
   {
     id: 'runtime_engine_matches_rls_contract',
@@ -381,6 +390,14 @@ export function gapIdentity(
     // healed, pinning its finding open. Discriminating here lets the reaper
     // withdraw each workflow independently.
     (d.workflow as string | undefined) ??
+    // Runtime-contract findings are located by SURFACE (auth / db / storage /
+    // functions / healthz / runtime), and carry no table either. Same collapse,
+    // already live: `reapObserverFindings` keys contract_surface_broken rows
+    // through this function, so with two surfaces down they shared the identity
+    // `contract_surface_broken::` and one recovering could withdraw the other's
+    // finding. The contract sweep's own auto-resolve is per-surface and was
+    // unaffected, which is why this stayed hidden.
+    (d.surface as string | undefined) ??
     (table && column ? `${table}.${column}` : table)
   const base = normalizeFindingType(type, d)?.base ?? type
   return `${base}::${loc}`
@@ -428,6 +445,11 @@ const INVARIANT_EMITS: Readonly<Record<string, readonly FindingType[]>> = {
   expired_tokens_get_cleaned_up: ['missing_token_cleanup_cron'],
   external_schema_changes_are_adopted: ['external_schema_change'],
   runtime_engine_matches_rls_contract: ['runtime_engine_mismatch'],
+  // Re-detectable: the probe reads the sweep's recorded result, so a repaired
+  // data plane genuinely disappears from the report on the next sweep. Listing
+  // it makes `recheckGap` treat a HEAL_DATA_PLANE fix as verifiable instead of
+  // recording it 'unknown'.
+  data_plane_is_answering: ['contract_surface_broken'],
 }
 
 let _probedTypeCache: ReadonlySet<string> | null = null
@@ -505,6 +527,27 @@ export function owningInvariantIds(type: string, details?: Record<string, unknow
   ).map((inv) => inv.id)
 }
 
+/**
+ * Invariants a fix cannot be held responsible for breaking.
+ *
+ * Regression attribution assumes a causal link: this guarantee held before the
+ * fix ran and fails after it, therefore the fix broke it. That inference is only
+ * sound for properties the fix could plausibly affect.
+ *
+ * `data_plane_is_answering` reflects whether the platform's Express runtime was
+ * answering HTTP on the last contract sweep. A CREATE INDEX cannot cause a PM2
+ * restart. Leaving it in scope would mean any autonomous fix that happened to
+ * overlap a runtime bounce got recorded as having "broken a previously passing
+ * guarantee" and escalated to a human — turning an unrelated platform event into
+ * a permanent black mark against a fix that worked, and re-creating the noise the
+ * escalation-retry ladder exists to drain.
+ *
+ * Kept deliberately tiny. Every entry is a promise that this invariant's state is
+ * environmental rather than caused by the change under test, and a wrong entry
+ * silently disables real collateral-damage detection.
+ */
+const ENVIRONMENTAL_INVARIANTS: ReadonlySet<string> = new Set(['data_plane_is_answering'])
+
 export interface FixOutcome {
   /** Did the SPECIFIC gap close? Identity-precise. */
   recheck: 'resolved' | 'unresolved' | 'unknown'
@@ -579,6 +622,7 @@ export async function evaluateFixOutcome(
     )
     for (const b of before) {
       if (owning.has(b.id)) continue
+      if (ENVIRONMENTAL_INVARIANTS.has(b.id)) continue
       if (b.passing && afterChecks.get(b.id) === false) regressions.push(b.id)
     }
   }

@@ -231,7 +231,26 @@ describe('regression detection excludes the targeted invariant', () => {
   })
 
   it('returns no owner for a type nothing probes', () => {
-    expect(owningInvariantIds('contract_surface_broken', { surface: 'storage' })).toEqual([])
+    // `broken_webhook` is repaired through an external dashboard and has no
+    // invariant probe, so its absence from a report proves nothing and
+    // `recheckGap` must answer 'unknown' rather than certifying a fix it never
+    // verified. This assertion used to name `contract_surface_broken`, which was
+    // accurate until that type got a probe — see the case below.
+    expect(owningInvariantIds('broken_webhook', { integration: 'stripe' })).toEqual([])
+  })
+
+  it('DOES now own contract_surface_broken — the invariant that was missing', () => {
+    // Measured over two months of production, contract_surface_broken is ~80% of
+    // every real fault ever recorded (298 findings; the next most common is 29).
+    // It had no invariant, so `computeDesiredStateDiff` could return satisfied
+    // and the dashboard could print "Backend is healthy — all guarantees hold"
+    // while a customer's REST API returned 502s.
+    //
+    // Owning the type is what makes a HEAL_DATA_PLANE fix verifiable instead of
+    // recorded 'unknown': `probeCoveredTypes` now includes it, so `recheckGap`
+    // re-reads the contract sweep's result rather than assuming.
+    expect(owningInvariantIds('contract_surface_broken', { surface: 'storage' }))
+      .toEqual(['data_plane_is_answering'])
   })
 })
 
