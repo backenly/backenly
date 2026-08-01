@@ -118,7 +118,12 @@ async function detectHotTables(pool: Pool, schemaName: string): Promise<HotTable
       n_live_tup: string
       n_dead_tup: string
     }>(
-      `SELECT tablename, seq_scan, COALESCE(idx_scan, 0) AS idx_scan,
+      // `relname AS tablename`, not `tablename`. pg_stat_user_tables exposes
+      // (schemaname, relname); `tablename` is a pg_tables column. Selecting it
+      // here raised 42703 on EVERY call, the module's "never throws" contract
+      // swallowed it, and this detector returned [] — reported as "no hot
+      // tables" rather than "the query is wrong". It had never once run.
+      `SELECT relname AS tablename, seq_scan, COALESCE(idx_scan, 0) AS idx_scan,
               n_live_tup, n_dead_tup
          FROM pg_stat_user_tables
         WHERE schemaname = $1
@@ -229,7 +234,8 @@ async function detectPartitioningCandidates(
 ): Promise<PartitioningFinding[]> {
   try {
     const rows = await pool.query<{ tablename: string; n_live_tup: string }>(
-      `SELECT tablename, n_live_tup::int
+      // relname, not tablename — see detectHotTables. Same 42703, same swallow.
+      `SELECT relname AS tablename, n_live_tup::int
          FROM pg_stat_user_tables
         WHERE schemaname = $1
           AND n_live_tup > 100000
@@ -387,7 +393,8 @@ async function detectWebSocketPressure(
   try {
     // High write tables drive NOTIFY volume, which drives websocket fan-out
     const rows = await pool.query<{ tablename: string; n_tup_ins: string; n_tup_upd: string }>(
-      `SELECT tablename,
+      // relname, not tablename — see detectHotTables. Same 42703, same swallow.
+      `SELECT relname AS tablename,
               n_tup_ins, n_tup_upd
          FROM pg_stat_user_tables
         WHERE schemaname = $1
