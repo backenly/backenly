@@ -26,6 +26,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
+import { Pool, type PoolClient } from 'pg'
 
 // ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -84,22 +85,118 @@ function projectToLockKey(projectId: string): number {
 }
 
 // ── PostgreSQL advisory locks ─────────────────────────────────────────────────
+//
+// THE POOL BUG THIS EXISTS TO FIX
+// -------------------------------
+// `pg_advisory_lock` is SESSION-scoped. These two calls used to go through
+// `prisma.$queryRaw`, which draws an arbitrary connection from the pool — so the
+// lock could be taken on connection A and the unlock issued on connection B.
+// `pg_advisory_unlock` on a session that does not hold the lock does not throw:
+// it logs a warning and returns FALSE. The return value was discarded, so the
+// failure was completely silent and the lock stayed held on connection A until
+// that connection happened to be recycled.
+//
+// The old code knew: "if Prisma happens to reuse the original connection, this
+// will succeed." Correctness rested on pool luck.
+//
+// The consequence was not theoretical. selfops-bench reproduces it on demand:
+// after a repair, later repairs for that project fail with "Another auto-fix is
+// in progress" while ZERO BackgroundJobs are running — so `reapStaleJobs` finds
+// nothing to reap (release had already marked the job `completed`), gives up,
+// and the project loses autonomous repair entirely until the connection
+// recycles. That is the same silent-stall shape as the thirteen-day
+// `attempted=0` outage: every ledger row looks like activity.
+//
+// So the lock now holds a DEDICATED connection for its whole lifetime. Acquire
+// and release are provably the same session, and the unlock result is checked
+// rather than assumed. If the process dies the connection dies with it, which
+// releases the lock — the correct behaviour for an advisory lock.
 
+/**
+ * Connections used solely to hold advisory locks. Separate from Prisma's pool
+ * because a connection parked holding a lock must not be handed to unrelated
+ * queries, and because Prisma gives no API to pin one.
+ */
+const lockPool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  // Locks are held briefly and one at a time per project. This ceiling bounds
+  // how many projects can mutate concurrently on one instance.
+  max: 10,
+})
+
+/** lockKey → the connection holding it. The pin that makes unlock correct. */
+const _heldLockClients = new Map<number, PoolClient>()
+
+/**
+ * Take the advisory lock on a connection we keep checked out.
+ * Returns false without leaking the connection when the lock is already held.
+ */
 async function pgTryAdvisoryLock(key: number): Promise<boolean> {
+  // Already held by this process — do not double-acquire. pg advisory locks are
+  // re-entrant per session and would then need matching unlocks to release.
+  if (_heldLockClients.has(key)) return false
+
+  let client: PoolClient
   try {
-    const rows = await prisma.$queryRaw<[{ acquired: boolean }]>`
-      SELECT pg_try_advisory_lock(${key}::bigint) AS acquired
-    `
-    return rows[0]?.acquired === true
+    client = await lockPool.connect()
   } catch {
+    return false
+  }
+
+  try {
+    const res = await client.query<{ acquired: boolean }>(
+      'SELECT pg_try_advisory_lock($1::bigint) AS acquired',
+      [key],
+    )
+    if (res.rows[0]?.acquired === true) {
+      _heldLockClients.set(key, client)
+      return true
+    }
+    client.release()
+    return false
+  } catch {
+    client.release()
     return false
   }
 }
 
+/**
+ * Release the advisory lock on the SAME connection that took it.
+ *
+ * Loud on failure: a silent false here is precisely the bug above, and a lock
+ * that fails to release costs the project its autonomous repairs.
+ */
 async function pgAdvisoryUnlock(key: number): Promise<void> {
+  const client = _heldLockClients.get(key)
+  if (!client) {
+    // Nothing pinned for this key. Either the lock was never taken by this
+    // process, or it was taken by another instance — in which case stealing it
+    // would be wrong. Both are no-ops, not errors.
+    return
+  }
+
+  _heldLockClients.delete(key)
   try {
-    await prisma.$queryRaw`SELECT pg_advisory_unlock(${key}::bigint)`
-  } catch { /* non-fatal — lock will expire with session */ }
+    const res = await client.query<{ released: boolean }>(
+      'SELECT pg_advisory_unlock($1::bigint) AS released',
+      [key],
+    )
+    if (res.rows[0]?.released !== true) {
+      console.error(
+        `[BuildLock] pg_advisory_unlock(${key}) returned false on the session that ` +
+        `holds it. This should be impossible; the connection is being destroyed so ` +
+        `the lock cannot leak.`,
+      )
+      // Destroying the connection guarantees the lock is dropped server-side.
+      client.release(new Error('advisory unlock failed'))
+      return
+    }
+    client.release()
+  } catch (err: any) {
+    console.error(`[BuildLock] advisory unlock error for ${key}: ${err?.message}`)
+    // Destroy rather than return a possibly-locked connection to the pool.
+    client.release(new Error('advisory unlock threw'))
+  }
 }
 
 // ── In-memory fallback lock ────────────────────────────────────────────────────
@@ -150,9 +247,10 @@ async function reapStaleJobs(projectId: string, lockKey: number): Promise<boolea
 
     if (reaped.count === 0) return false
 
-    // Best-effort: try to release the advisory lock from any session that may hold it.
-    // pg_advisory_unlock returns false if the calling session does not hold the lock,
-    // but if Prisma happens to reuse the original connection, this will succeed.
+    // Release the advisory lock if THIS process is the one pinning it. When the
+    // holder is another instance, `pgAdvisoryUnlock` is a no-op by design —
+    // forcibly stealing a lock held elsewhere is how two workers end up mutating
+    // one project at once, which is the exact race the lock exists to prevent.
     await pgAdvisoryUnlock(lockKey)
 
     return true
