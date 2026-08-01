@@ -144,10 +144,26 @@ export async function getEndUserAuthUsage(projectId: string): Promise<EndUserAut
     // One real signup is the strongest evidence there is. Fails soft: if the
     // table does not exist yet the query errors and we read it as "no
     // identities", which is the correct conclusion anyway.
+    //
+    // The schema is interpolated into the identifier (it cannot be a bind
+    // parameter — Postgres does not accept placeholders for table names), so
+    // this statement takes NO parameters. It used to be passed `schema` anyway.
+    // Postgres rejects that bind outright — "bind message supplies 1 parameters,
+    // but prepared statement requires 0" — the fail-soft catch above turned the
+    // error into an empty result, and `hasIdentities` was therefore FALSE on
+    // every project in every environment, however many users had signed up.
+    //
+    // That mattered because `inUse` is `hasIdentities || configuredEvidence`:
+    // the whole evidence gate rested on the weaker half. A project with real
+    // signed-up users but no OAuth provider, no policy on `users` and no
+    // configured auth status read as "auth not in use", so checkAuthIntegrity
+    // and verifyWorkflows both stayed silent about an auth subsystem that was
+    // genuinely broken. Same shape as the detectMissingRls outage: a duplicate
+    // bind parameter, a swallowing catch, and a probe that reported healthy
+    // because it never ran.
     queryWorkspaceSchema(
       projectId,
       `SELECT 1 FROM "${schema}"."users" LIMIT 1`,
-      schema,
     ).catch(() => ({ rows: [] as unknown[] })),
     prisma.workspaceOAuthConfig
       .count({ where: { projectId, enabled: true } })

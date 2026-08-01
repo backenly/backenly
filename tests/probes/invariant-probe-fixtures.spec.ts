@@ -277,7 +277,13 @@ describe('checkAuthIntegrity', () => {
 
   it('FIRES oauth_redirect_uri_missing for a provider with no redirect URI', async () => {
     await prisma.workspaceOAuthConfig.create({
-      data: { projectId, provider: 'google', clientId: 'fixture-client-id', enabled: true },
+      data: {
+        projectId,
+        provider: 'google',
+        clientId: 'fixture-client-id',
+        clientSecret: 'fixture-client-secret-not-real',
+        enabled: true,
+      },
     })
 
     const hit = (await checkAuthIntegrity(projectId)).find(
@@ -336,11 +342,11 @@ describe('verifyWorkflows', () => {
       data: {
         projectId,
         tableName: 'users',
-        name: 'users_own_rows',
+        policyName: 'users_own_rows',
+        operation: 'SELECT',
+        role: 'authenticated',
+        using: `id::text = current_setting('request.jwt.claims', true)::json->>'sub'`,
         enabled: true,
-        operation: 'select',
-        effect: 'allow',
-        condition: { template: 'own_rows' },
       },
     })
 
