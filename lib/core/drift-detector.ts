@@ -332,15 +332,31 @@ export async function detectOverPermissiveRls(
   const rows = await queryWorkspaceSchema(
     projectId,
     `
-    SELECT DISTINCT p.tablename, p.policyname
+    SELECT DISTINCT p.tablename, p.policyname, p.cmd
     FROM pg_policies p
     JOIN pg_class c     ON c.relname = p.tablename
     JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = $1
     WHERE p.schemaname = $1
       AND c.relrowsecurity
       AND ${notReservedTableSql('p.tablename')}
-      AND (p.qual IS NULL OR btrim(lower(p.qual)) IN ('true', '(true)'))
-      AND p.cmd IN ('ALL', 'SELECT', '*')
+      -- Reads AND writes. This used to test p.cmd IN (ALL, SELECT, *) against
+      -- qual alone, which made a whole class of exposure invisible: a
+      -- FOR UPDATE USING (true) policy lets tenant A overwrite tenant B's row
+      -- with an unqualified UPDATE while reads stay correctly scoped, so every
+      -- read-based audit reports the table healthy. FOR INSERT WITH CHECK
+      -- (true) was equally unreachable, because with_check was never read.
+      --
+      -- coalesce(..., '') rather than qual IS NULL: an INSERT policy always
+      -- has a NULL qual, so the old NULL test would have flagged every one of
+      -- them the moment the cmd filter came off.
+      --
+      -- PERMISSIVE only. RESTRICTIVE policies AND with everything else, so a
+      -- restrictive USING (true) cannot widen access and is not an exposure.
+      AND p.permissive = 'PERMISSIVE'
+      AND (
+        btrim(lower(coalesce(p.qual, ''))) IN ('true', '(true)')
+        OR btrim(lower(coalesce(p.with_check, ''))) IN ('true', '(true)')
+      )
       -- Role scope matters: a USING(true) policy is only an exposure if it
       -- applies to a principal the runtime request path can run as. The
       -- platform's own direct-access pass-throughs (bkn_direct_read/write,
@@ -367,7 +383,7 @@ export async function detectOverPermissiveRls(
     schema,
   ).catch(probeQueryFailed('detectOverPermissiveRls'))
 
-  const hits: Array<{ tablename: string; policyname: string }> =
+  const hits: Array<{ tablename: string; policyname: string; cmd: string }> =
     rows?.rows ?? rows ?? []
 
   // One finding per table (collapse multiple permissive policies).
@@ -376,14 +392,23 @@ export async function detectOverPermissiveRls(
   for (const r of hits) {
     if (seen.has(r.tablename)) continue
     seen.add(r.tablename)
+    // Name the command. "exposes every row" reads as a read leak, and for a
+    // write-path hole that is the wrong mental model: reads can be correctly
+    // isolated while any tenant overwrites any row.
+    const cmd = (r.cmd ?? 'ALL').toUpperCase()
+    const surface =
+      cmd === 'SELECT' ? 'every row is readable by every caller'
+      : cmd === 'ALL'  ? 'every row is readable and writable by every caller'
+      : `every row is open to ${cmd} by every caller`
     out.push({
       type: 'rls_expression_invalid' as const,
       severity: 'warning' as const,
       details: {
         tableName: r.tablename,
         policyName: r.policyname,
+        policyCommand: cmd,
         schemaName: schema,
-        reason: `RLS is enabled on "${r.tablename}" but a policy exposes every row (USING true) — protection is effectively off`,
+        reason: `RLS is enabled on "${r.tablename}" but policy "${r.policyname}" (FOR ${cmd}) matches unconditionally — ${surface}, so protection is effectively off`,
       },
       autoFixable: true,
     })

@@ -21,7 +21,7 @@
  */
 
 import { prisma } from '@/lib/db'
-import { executeInWorkspaceSchema } from './workspaceDatabase'
+import { executeInWorkspaceSchema, queryWorkspaceSchema } from './workspaceDatabase'
 import { rlsSessionSql, rlsSessionParams } from './rls-session'
 import {
   jwtClaimFunctionSql,
@@ -682,6 +682,11 @@ export async function applyPermissionPolicy(
     // Step 2: Remove existing Backenly-managed policies on this table
     await dropBackenlyPolicies(projectId, schemaName, tableName)
 
+    // Step 2b: Remove foreign policies that would OR the new one away. Without
+    // this, installing own_rows beside a surviving `USING (true)` leaves the
+    // table exactly as exposed as it was and reports success.
+    await dropExposingPolicies(projectId, schemaName, tableName)
+
     // Step 3: Install the policy based on template
     // CRITICAL: each installer runs multiple DDL statements. If any fails,
     // we catch below and restore RLS to its pre-state so the table doesn't
@@ -900,6 +905,80 @@ async function dropBackenlyPolicies(
     $$;
     `,
   )
+}
+
+/**
+ * Drop foreign policies that expose every row, so the policy we are about to
+ * install actually takes effect.
+ *
+ * PostgreSQL combines PERMISSIVE policies with OR. Installing `own_rows` beside
+ * a surviving `USING (true)` therefore evaluates to `true OR user_id = sub`,
+ * which is `true` — the table stays wide open while every dashboard reports a
+ * Backenly-managed policy on it. `dropBackenlyPolicies` cannot reach these,
+ * because it matches `backenly_%` by name and the dangerous policy is by
+ * definition one we did not create. That is why the autonomy loop could detect
+ * `rls_expression_invalid`, run SET_PERMISSION, report success, and leave the
+ * exposure exactly as it found it.
+ *
+ * Scope is deliberately narrow — this is not "drop user policies":
+ *   - PERMISSIVE only. A RESTRICTIVE `USING (true)` ANDs with everything else
+ *     and cannot widen access, so it is left alone.
+ *   - Literal `true` in USING or WITH CHECK only. Any real predicate is a
+ *     considered decision and is never touched.
+ *   - `coalesce(..., '')` rather than `IS NULL`: an INSERT policy always has a
+ *     NULL qual, and reading that as wide-open would match every one of them.
+ *   - The platform's own direct-access pass-throughs (`backenly_external`,
+ *     `bkn_%`, created by scripts/setup-direct-access.sql) are exempt, matching
+ *     the carve-out in detectOverPermissiveRls. Flagging those queued repairs
+ *     that could never remove them and escalated 9 false approvals in prod on
+ *     2026-07-20; dropping them here would be the same mistake with teeth.
+ *
+ * Callers snapshot pre-state first, so this is restorable on partial failure.
+ */
+async function dropExposingPolicies(
+  projectId: string,
+  schemaName: string,
+  tableName: string,
+  commands?: RlsCommand[],
+): Promise<string[]> {
+  const cmdFilter = commands?.length
+    ? `AND upper(cmd) IN (${commands.map((c) => `'${c.toUpperCase()}'`).join(', ')})`
+    : ''
+  const rows = await queryWorkspaceSchema(
+    projectId,
+    `
+    SELECT policyname FROM pg_policies
+    WHERE schemaname = '${schemaName}'
+      AND tablename = '${tableName}'
+      AND policyname NOT LIKE 'backenly_%'
+      AND permissive = 'PERMISSIVE'
+      AND (
+        btrim(lower(coalesce(qual, ''))) IN ('true', '(true)')
+        OR btrim(lower(coalesce(with_check, ''))) IN ('true', '(true)')
+      )
+      AND EXISTS (
+        SELECT 1 FROM unnest(roles) AS pr(role)
+        WHERE pr.role <> 'backenly_external'
+          AND pr.role NOT LIKE 'bkn\\_%' ESCAPE '\\'
+      )
+      ${cmdFilter}
+    `,
+  )
+
+  const names = (rows as any)?.rows?.map((r: any) => r.policyname)
+    ?? (Array.isArray(rows) ? rows.map((r: any) => r.policyname) : [])
+
+  for (const name of names) {
+    await executeInWorkspaceSchema(
+      projectId,
+      `DROP POLICY IF EXISTS "${name}" ON "${schemaName}"."${tableName}";`,
+    )
+    console.warn(
+      `[RLS] dropped exposing policy "${name}" on ${schemaName}.${tableName} — ` +
+      `PERMISSIVE with a literal true predicate, which would OR away the policy being installed`,
+    )
+  }
+  return names
 }
 
 // ── RLS state helpers (Phase 14.1 — install-or-restore safety) ────────────────
@@ -1263,6 +1342,9 @@ async function installCustomPolicySet(
     // Drop only what this edit replaces. A full replacement targets all four and
     // therefore still clears everything Backenly owns.
     await dropBackenlyPolicies(projectId, schemaName, tableName, plan.scoped ? targeted : undefined)
+    // Same OR-away problem as the template path: a foreign `USING (true)`
+    // survives a Backenly-only drop and neutralises whatever we install here.
+    await dropExposingPolicies(projectId, schemaName, tableName, plan.scoped ? targeted : undefined)
 
     const svc = serviceRoleClause(schemaName)
     const statements: string[] = [

@@ -263,8 +263,14 @@ jobs:
         run: npx jest tests/bench --ci --runInBand --forceExit
       # Repeated so the headline is a claim rather than an anecdote. Any case
       # that is not unanimous across runs is named in the output.
+      # --require-healed turns the in-catalogue cases into a regression gate.
+      # Without it a case can go PASS -> FAIL and this job still reports green.
+      # Only cases that actually heal today are listed; the out-of-catalogue
+      # ones are expected to fail and stay ungated.
       - name: Run selfops-bench
-        run: npm run bench:selfops -- --cycles 12 --repeat 3
+        run: >-
+          npm run bench:selfops -- --cycles 12 --repeat 3
+          --require-healed rls-cross-tenant-read,rls-deny-all-lockout,rls-engine-dialect-mismatch,fk-column-unindexed,rls-wide-open-policy,fk-constraint-dropped,rls-write-path-over-permissive
       - name: Publish receipts
         if: always()
         uses: actions/upload-artifact@v4

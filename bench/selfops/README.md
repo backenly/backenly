@@ -84,21 +84,41 @@ The scoring protocol is tested without a database in
 [`tests/bench/selfops-harness.spec.ts`](../../tests/bench/selfops-harness.spec.ts) — the lane
 there is a stub on purpose, since a stubbed loop that "heals" would prove nothing.
 
-## Known unrepaired faults
+## The two wide-open-RLS faults it found (fixed 2026-08-02)
 
-These are the standing TODO this rig exists to track. Both are detected and then **not**
-repaired, which is the worst shape: the finding fires, the dashboard looks busy, nothing is
-fixed.
+Both were detected and then **not** repaired — the worst shape, because the finding fires and
+the dashboard looks busy while nothing is fixed. One root cause sat behind both.
 
-- **`rls-wide-open-policy`** — RLS on, policy present, `USING (true)`, `anon` holding SELECT.
-  The `rls_policies_are_not_wide_open` invariant fires; no repair lands.
-- **`rls-write-path-over-permissive`** — reads isolated, writes not. Tenant A cannot see
-  tenant B's row and can still overwrite it with an unqualified UPDATE. Every read-based audit
-  reports the table healthy.
+`dropBackenlyPolicies` in `lib/services/workspace-rls.ts` matched `policyname LIKE 'backenly_%'`,
+so a policy the platform did not create survived the repair. **PostgreSQL combines PERMISSIVE
+policies with OR**, so installing `own_rows` beside a surviving `USING (true)` evaluated to
+`true OR user_id = sub` — still `true`. The table stayed exactly as exposed as before, now
+with a Backenly-managed policy on it, and `SET_PERMISSION` reported success.
+
+`dropExposingPolicies` now removes PERMISSIVE policies with a literal `true` in USING or
+WITH CHECK before installing, exempting the platform's own `backenly_external` / `bkn_%`
+pass-throughs.
+
+The second fault needed a detector fix too: `detectOverPermissiveRls` filtered
+`p.cmd IN ('ALL','SELECT','*')` and read only `qual`, so `FOR UPDATE USING (true)` and
+`FOR INSERT WITH CHECK (true)` were structurally invisible. It now covers all four commands
+and both predicates, PERMISSIVE only.
+
+Both cases are named in `--require-healed` in CI, so a regression fails the build.
 
 A `WHERE`-qualified UPDATE cannot exploit an open write policy — Postgres applies SELECT
 policies when locating rows, so the read policy hides the victim. Only an **unqualified**
-UPDATE reaches another tenant's rows.
+UPDATE reaches another tenant's rows, which is why the fixture uses one.
+
+## Still unrepaired
+
+Out-of-catalogue by design — no invariant names them, and they are in the corpus so it cannot
+be accused of being drawn around the detector set:
+
+- **`column-type-narrowed`** — a `timestamptz` column migrated to `bigint` under live data.
+- **`grant-revoked-unreachable`** — the end-user role loses its grant and the table becomes
+  unreachable rather than unprotected.
+- **`check-constraint-dropped`** — a dropped CHECK lets a negative-amount payment through.
 
 ## Why there are no results here
 

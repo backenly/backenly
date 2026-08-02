@@ -110,6 +110,42 @@ async function main(): Promise<void> {
     console.error(`${card.errors} case(s) failed to run. The suite did not measure them.`)
     process.exitCode = 1
   }
+
+  // `--require-healed` turns the suite from a report into a regression gate.
+  //
+  // Without it a case can go from PASS to FAIL and CI still reports green,
+  // because an unrepaired fault is deliberately a result rather than a broken
+  // build. That is the right default while a corpus still contains known
+  // misses. It is the wrong default once a case passes: the two wide-open-RLS
+  // repairs were shipped precisely because they were broken, and nothing would
+  // have told us if they broke again.
+  //
+  // Named cases rather than a rate, so that widening the corpus with new
+  // expected-to-fail cases can never silently lower the bar.
+  const required = arg('require-healed')
+  if (required) {
+    const want = required.split(',').map((s) => s.trim()).filter(Boolean)
+    const byId = new Map(results.map((r) => [r.caseId, r]))
+    const regressed = want.filter((id) => byId.get(id)?.verdict !== 'healed')
+    const unknown = want.filter((id) => !byId.has(id))
+
+    if (unknown.length) {
+      console.error(`--require-healed names case(s) this run did not execute: ${unknown.join(', ')}`)
+      process.exitCode = 1
+    }
+    if (regressed.length) {
+      for (const id of regressed) {
+        console.error(
+          `REGRESSION: ${id} is required to heal but returned ` +
+          `${byId.get(id)?.verdict ?? 'no result'}.`,
+        )
+      }
+      process.exitCode = 1
+    }
+    if (!regressed.length && !unknown.length) {
+      console.log(`  ✓ all ${want.length} required case(s) healed\n`)
+    }
+  }
 }
 
 main()
