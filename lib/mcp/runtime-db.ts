@@ -72,7 +72,7 @@ async function assertTable(projectId: string, tableName: string): Promise<void> 
  * Map of column name → PostgreSQL data_type for a workspace table. Read from the
  * live catalog so casts always match reality.
  */
-async function columnTypes(schema: string, table: string): Promise<Map<string, string>> {
+export async function columnTypes(schema: string, table: string): Promise<Map<string, string>> {
   const rows = await prisma.$queryRawUnsafe<Array<{ column_name: string; data_type: string }>>(
     `SELECT column_name, data_type FROM information_schema.columns
       WHERE table_schema = $1 AND table_name = $2`,

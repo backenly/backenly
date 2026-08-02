@@ -31,6 +31,9 @@ import { generateFixedFunctionCode } from './generator'
 import { isRouteModuleFunction, executeRouteModuleFunction, validateRouteModule } from './route-module-runner'
 import { enforceAiFunctionInvocation, trackAiFunctionInvocation } from '@/lib/billing'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
+// One cast table for the whole codebase. Duplicating it is how the MCP path and
+// this one would drift, and a drifted cast table is invisible until 42804.
+import { castTarget, coerceValue, columnTypes } from '@/lib/mcp/runtime-db'
 
 export interface FunctionEvent {
   type: string
@@ -103,8 +106,32 @@ function isTransientError(err: unknown): boolean {
 // ─── DB proxy handlers (executed in parent, called from worker) ───────────────
 
 const _DB_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-function dbUuidCast(val: any, idx: number): string {
-  return typeof val === 'string' && _DB_UUID_RE.test(val) ? `$${idx}::uuid` : `$${idx}`
+
+/**
+ * Cast a placeholder from the COLUMN's declared type, falling back to the
+ * value's shape only when the catalog could not tell us the type.
+ *
+ * Why this is not optional, and why value-shape alone was never enough:
+ * Prisma's $queryRawUnsafe binds every string parameter explicitly as `text`,
+ * so PostgreSQL refuses the implicit text -> uuid/timestamp/numeric assignment
+ * REGARDLESS of how well-formed the value is. A perfect crypto.randomUUID()
+ * bound into a uuid column with a bare `$1` still raises 42804. That is what
+ * made this the error firing in production every 15 minutes for six days:
+ * `db.insert` built bare placeholders, so behavioural verification of the
+ * profiles table had never once succeeded.
+ *
+ * Keying off the value (the old dbUuidCast) also silently did nothing for
+ * timestamp, numeric and boolean columns, which meant an AI function could not
+ * write to them at all. Reuses castTarget/coerceValue so there is ONE cast
+ * table in the codebase rather than a second one drifting from it.
+ */
+function dbCast(dataType: string | undefined, val: any, idx: number): string {
+  const target = castTarget(dataType)
+  if (target) return `$${idx}::${target}`
+  if (dataType === undefined && typeof val === 'string' && _DB_UUID_RE.test(val)) {
+    return `$${idx}::uuid`
+  }
+  return `$${idx}`
 }
 
 function buildDbProxy(projectId: string, caller: FunctionCallerContext = {}) {
@@ -117,13 +144,15 @@ function buildDbProxy(projectId: string, caller: FunctionCallerContext = {}) {
     async 'db.query'([table, where]: [string, Record<string, any> | undefined]) {
       const safeName = table.replace(/[^a-z0-9_]/gi, '')
       if (where && Object.keys(where).length > 0) {
-        const keys = Object.keys(where)
-        const conditions = keys.map((k, i) => `"${k.replace(/[^a-z0-9_]/gi, '')}" = ${dbUuidCast(where[k], i + 1)}`).join(' AND ')
+        const keys = Object.keys(where).map(k => k.replace(/[^a-z0-9_]/gi, ''))
+        const raw = Object.keys(where)
+        const types = await columnTypes(schemaName, safeName)
+        const conditions = keys.map((c, i) => `"${c}" = ${dbCast(types.get(c), where[raw[i]], i + 1)}`).join(' AND ')
         return executeWithUserContext<any>(
           endUserId,
           serviceRole,
           `SELECT * FROM "${schemaName}"."${safeName}" WHERE ${conditions} LIMIT 100`,
-          keys.map(k => where[k]),
+          keys.map((c, i) => coerceValue(types.get(c), where[raw[i]])),
           endUserRole
         )
       }
@@ -141,12 +170,13 @@ function buildDbProxy(projectId: string, caller: FunctionCallerContext = {}) {
       const cols = Object.keys(data).filter(c => /^[a-z_][a-z0-9_]*$/i.test(c))
       if (cols.length === 0) throw new Error('No valid columns to insert')
       const colList = cols.map(c => `"${c}"`).join(', ')
-      const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ')
+      const types = await columnTypes(schemaName, safeName)
+      const placeholders = cols.map((c, i) => dbCast(types.get(c), data[c], i + 1)).join(', ')
       const result = await executeWithUserContext<any>(
         endUserId,
         serviceRole,
         `INSERT INTO "${schemaName}"."${safeName}" (${colList}) VALUES (${placeholders}) RETURNING *`,
-        cols.map(c => data[c]),
+        cols.map(c => coerceValue(types.get(c), data[c])),
         endUserRole
       )
       return result[0]
@@ -158,13 +188,17 @@ function buildDbProxy(projectId: string, caller: FunctionCallerContext = {}) {
       const whereCols = Object.keys(where).filter(c => /^[a-z_][a-z0-9_]*$/i.test(c))
       if (setCols.length === 0) throw new Error('No valid columns to update')
       if (whereCols.length === 0) throw new Error('WHERE clause required for update')
-      const setClause = setCols.map((c, i) => `"${c}" = $${i + 1}`).join(', ')
-      const whereClause = whereCols.map((c, i) => `"${c}" = ${dbUuidCast(where[c], setCols.length + i + 1)}`).join(' AND ')
+      const types = await columnTypes(schemaName, safeName)
+      const setClause = setCols.map((c, i) => `"${c}" = ${dbCast(types.get(c), data[c], i + 1)}`).join(', ')
+      const whereClause = whereCols.map((c, i) => `"${c}" = ${dbCast(types.get(c), where[c], setCols.length + i + 1)}`).join(' AND ')
       return executeWithUserContext<any>(
         endUserId,
         serviceRole,
         `UPDATE "${schemaName}"."${safeName}" SET ${setClause} WHERE ${whereClause} RETURNING *`,
-        [...setCols.map(c => data[c]), ...whereCols.map(c => where[c])],
+        [
+          ...setCols.map(c => coerceValue(types.get(c), data[c])),
+          ...whereCols.map(c => coerceValue(types.get(c), where[c])),
+        ],
         endUserRole
       )
     },
@@ -173,12 +207,13 @@ function buildDbProxy(projectId: string, caller: FunctionCallerContext = {}) {
       const safeName = table.replace(/[^a-z0-9_]/gi, '')
       const cols = Object.keys(where).filter(c => /^[a-z_][a-z0-9_]*$/i.test(c))
       if (cols.length === 0) throw new Error('WHERE clause required for delete')
-      const conditions = cols.map((c, i) => `"${c}" = ${dbUuidCast(where[c], i + 1)}`).join(' AND ')
+      const types = await columnTypes(schemaName, safeName)
+      const conditions = cols.map((c, i) => `"${c}" = ${dbCast(types.get(c), where[c], i + 1)}`).join(' AND ')
       await executeWithUserContext<any>(
         endUserId,
         serviceRole,
         `DELETE FROM "${schemaName}"."${safeName}" WHERE ${conditions}`,
-        cols.map(c => where[c]),
+        cols.map(c => coerceValue(types.get(c), where[c])),
         endUserRole
       )
       return null
