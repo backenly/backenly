@@ -2080,23 +2080,18 @@ export async function executeWithUserContext<T = any>(
   values: unknown[] = [],
   userRole: string = 'user'
 ): Promise<T[]> {
-  // ── TEMPORARY DIAGNOSTIC — REMOVE AFTER THE profiles CALLER IS IDENTIFIED ──
+  // The temporary DIAG_PROFILES_CALLER stack logger that lived here is removed:
+  // it did its job. It identified the caller of the bare-placeholder `profiles`
+  // INSERT that failed 42804 every 15 minutes for six days as the AI-function
+  // db proxy (lib/services/ai-functions/executor.ts), after five rounds of
+  // static analysis had each named a different, wrong caller. Fixed by casting
+  // placeholders from the column type; pinned by
+  // tests/bench/ai-function-db-casts.spec.ts.
   //
-  // A bare-placeholder INSERT into `profiles` fails 42804 every 15 minutes and
-  // five rounds of static analysis have each named a different, wrong caller.
-  // Log-only: no behaviour change, no extra query. Prints the stack so the
-  // actual caller is read from evidence instead of inferred again.
-  //
-  // Tracked in memory: project_contract_sweep_recurring_errors.md
-  if (process.env.DIAG_PROFILES_CALLER === '1' && /INSERT INTO[^;]*"profiles"/i.test(sql)) {
-    console.error(
-      '[DIAG profiles-insert] caller stack:\n' +
-      (new Error('profiles INSERT').stack ?? '(no stack)') +
-      `\n[DIAG profiles-insert] sql=${sql.slice(0, 200)}` +
-      `\n[DIAG profiles-insert] userId=${userId || '(none)'} serviceRole=${isServiceRole}`,
-    )
-  }
-
+  // Worth keeping as method rather than code: when a Prisma raw-query error
+  // hides its SQL, the verbatim statement is in the Postgres server log
+  // (/var/log/postgresql/postgresql-16-main.log) on the STATEMENT: line, and a
+  // stack log at the shared choke point beats another round of grepping.
   return prisma.$transaction(async (tx) => {
     await tx.$executeRawUnsafe(
       rlsSessionSql(),

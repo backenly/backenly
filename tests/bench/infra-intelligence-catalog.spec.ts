@@ -94,3 +94,57 @@ describe('infra-intelligence pg_stat queries', () => {
     expect(columnErrors).toEqual([])
   }, 60_000)
 })
+
+/**
+ * The same failure class one layer up: not a wrong catalog column, but
+ * GENERATED SQL referencing a column the target table does not have.
+ *
+ * detectHotTables emitted `CREATE INDEX ... (created_at DESC)` for every hot
+ * table unconditionally. On a table without created_at that raises 42703 inside
+ * _applyAutoFixes, whose catch logs "Auto-fix failed (non-fatal)" and continues.
+ * It fired nine times per pass in production — an auto-fix that had never once
+ * applied, visible only as a warning.
+ */
+describe('infra-intelligence — created_at index suggestion', () => {
+  const pool = new Pool({ connectionString: CONN, max: 2 })
+  const schema = 'infrahot_' + Math.random().toString(16).slice(2, 10)
+
+  beforeAll(async () => {
+    await pool.query(`CREATE SCHEMA "${schema}"`)
+    await pool.query(`CREATE TABLE "${schema}"."with_ts" (id serial PRIMARY KEY, created_at timestamptz)`)
+    await pool.query(`CREATE TABLE "${schema}"."no_ts"   (id serial PRIMARY KEY, label text)`)
+  }, 60_000)
+
+  afterAll(async () => {
+    await pool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`).catch(() => {})
+    await pool.end().catch(() => {})
+  }, 60_000)
+
+  it('the ungated CREATE INDEX really does fail on a table without created_at', async () => {
+    // Verified to fail: this is the production warning, reproduced. Without it
+    // the gate below could be deleted and nothing would notice.
+    await expect(
+      pool.query(
+        `CREATE INDEX IF NOT EXISTS idx_no_ts_created_at ON "${schema}"."no_ts" ("created_at" DESC)`,
+      ),
+    ).rejects.toMatchObject({ code: '42703' })
+  }, 30_000)
+
+  it('the gating query selects only tables that actually have created_at', async () => {
+    const res = await pool.query<{ table_name: string }>(
+      `SELECT table_name FROM information_schema.columns
+        WHERE table_schema = $1 AND column_name = 'created_at'
+          AND table_name = ANY($2::text[])`,
+      [schema, ['with_ts', 'no_ts']],
+    )
+    expect(res.rows.map((r) => r.table_name)).toEqual(['with_ts'])
+  }, 30_000)
+
+  it('the index is valid on a table that does have created_at', async () => {
+    await expect(
+      pool.query(
+        `CREATE INDEX IF NOT EXISTS idx_with_ts_created_at ON "${schema}"."with_ts" ("created_at" DESC)`,
+      ),
+    ).resolves.toBeDefined()
+  }, 30_000)
+})

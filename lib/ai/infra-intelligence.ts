@@ -133,6 +133,33 @@ async function detectHotTables(pool: Pool, schemaName: string): Promise<HotTable
       [schemaName],
     )
 
+    // Which of these tables actually HAVE a created_at column.
+    //
+    // The suggestion below used to be emitted for every hot table unconditionally,
+    // so on any table without created_at the generated
+    // `CREATE INDEX ... (created_at DESC)` failed 42703 inside _applyAutoFixes,
+    // whose catch logs "Auto-fix failed (non-fatal)" and moves on. In production
+    // that fired nine times per pass, every pass — an auto-fix that had never
+    // once applied, reported only as a warning nobody reads. Same species as the
+    // pg_stat_user_tables.tablename bug two functions up: generated SQL that
+    // references a column the table does not have, swallowed by a catch.
+    //
+    // No fallback to "some other timestamp column" on purpose: indexing a column
+    // the user did not ask about is a guess, and a wrong index costs write
+    // throughput forever. When created_at is absent the textual recommendation
+    // still reaches the owner; only the auto-applicable SQL is withheld.
+    const tableNames = rows.rows.map(r => r.tablename)
+    const withCreatedAt = new Set<string>()
+    if (tableNames.length) {
+      const cols = await pool.query<{ table_name: string }>(
+        `SELECT table_name FROM information_schema.columns
+          WHERE table_schema = $1 AND column_name = 'created_at'
+            AND table_name = ANY($2::text[])`,
+        [schemaName, tableNames],
+      )
+      for (const c of cols.rows) withCreatedAt.add(c.table_name)
+    }
+
     return rows.rows.map(r => {
       const seqScans = Number(r.seq_scan)
       const idxScans = Number(r.idx_scan)
@@ -149,8 +176,8 @@ async function detectHotTables(pool: Pool, schemaName: string): Promise<HotTable
         (deadRatio > 20)                        ? 'low' :
         'none'
 
-      const suggestedIndex = idxHitPct < 50
-        ? `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${r.tablename}_created_at ON "${schemaName}"."${r.tablename}" (created_at DESC);`
+      const suggestedIndex = idxHitPct < 50 && withCreatedAt.has(r.tablename)
+        ? `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${r.tablename}_created_at ON "${schemaName}"."${r.tablename}" ("created_at" DESC);`
         : undefined
 
       return {
