@@ -140,7 +140,16 @@ async function detectHotTables(pool: Pool, schemaName: string): Promise<HotTable
           -- (_email_verifications, _token_blacklist, …). Surfacing them told the
           -- owner their backend had a problem they neither created nor can act
           -- on. Every other detector already excludes them; this one did not.
-          AND relname NOT LIKE E'\\_%'
+          --
+          -- left() rather than a LIKE pattern, deliberately. This was first
+          -- written as NOT LIKE E'\\_%', which a JS template literal collapses to
+          -- SQL E'\_%'; an E-string drops the unrecognised escape, leaving the
+          -- pattern '_%' where _ is a LIKE WILDCARD. That excluded every table
+          -- with at least one character, so the detector returned [] for every
+          -- project and its catch reported "no hot tables". Same silent shape as
+          -- the pg_stat_user_tables.tablename bug it sits next to. left() has no
+          -- escaping semantics to get wrong.
+          AND left(relname, 1) <> '_'
         ORDER BY seq_scan DESC
         LIMIT 20`,
       [schemaName],

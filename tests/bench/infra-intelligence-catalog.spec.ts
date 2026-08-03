@@ -148,3 +148,84 @@ describe('infra-intelligence — created_at index suggestion', () => {
     ).resolves.toBeDefined()
   }, 30_000)
 })
+
+/**
+ * The hot-table filter must exclude platform internals and NOTHING ELSE.
+ *
+ * Asserting the query merely "runs" is not enough — that is what the suite above
+ * does, and it would pass a WHERE clause that matches zero rows. The underscore
+ * exclusion was first written as `NOT LIKE E'\\_%'`, which a JS template literal
+ * collapses to SQL `E'\_%'`; an E-string drops the unrecognised escape, leaving
+ * the pattern `_%` where `_` is a LIKE wildcard. That excluded every table with
+ * at least one character. detectHotTables' `catch { return [] }` then reported
+ * "no hot tables" for every project on the platform — a detector silently
+ * switched off by a one-character escaping mistake.
+ *
+ * So this test runs the REAL query from the source against real tables and
+ * asserts on WHICH rows come back.
+ */
+/**
+ * Turn the SOURCE TEXT of a template literal into the string the running code
+ * actually sends to Postgres.
+ *
+ * This distinction is not academic — it is why the first version of this test
+ * passed against the very bug it was written to catch. In the file, the escape
+ * reads `E'\\_%'` (backslash, backslash, underscore). A template literal
+ * collapses that at RUNTIME to `E'\_%'`, and Postgres then drops the
+ * unrecognised escape, leaving the LIKE wildcard pattern `_%`. Feeding the raw
+ * file text to Postgres skips the collapse, produces a correctly-escaped
+ * pattern, and reports healthy on broken code.
+ *
+ * The queries here contain no `${}` interpolation, so evaluating the captured
+ * text as a template literal reproduces exactly what the module sends.
+ */
+function asRuntimeSql(sourceText: string): string {
+  return new Function('return `' + sourceText.replace(/`/g, '\\`') + '`')() as string
+}
+
+describe('infra-intelligence — hot-table filter selectivity', () => {
+  const pool = new Pool({ connectionString: CONN, max: 2 })
+  const schema = 'infrafilt_' + Math.random().toString(16).slice(2, 10)
+
+  beforeAll(async () => {
+    await pool.query(`CREATE SCHEMA "${schema}"`)
+    // Both tables are made equally "hot" so the ONLY thing that can separate
+    // them is the underscore rule. n_live_tup > 5000 is the cheap trigger.
+    for (const t of ['notes', '_email_verifications']) {
+      await pool.query(`CREATE TABLE "${schema}"."${t}" (id serial PRIMARY KEY, body text)`)
+      await pool.query(
+        `INSERT INTO "${schema}"."${t}" (body) SELECT 'x' FROM generate_series(1, 6000)`,
+      )
+      await pool.query(`ANALYZE "${schema}"."${t}"`)
+    }
+  }, 120_000)
+
+  afterAll(async () => {
+    await pool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`).catch(() => {})
+    await pool.end().catch(() => {})
+  }, 60_000)
+
+  it('returns the user table and drops only the underscore-prefixed one', async () => {
+    const src = fs.readFileSync(SOURCE, 'utf8')
+    // Pull the real hot-table query rather than restating it here, so a future
+    // edit to the WHERE clause is covered by this assertion.
+    const m = src.match(/`(SELECT relname AS tablename[\s\S]*?LIMIT 20)`/)
+    expect(m).toBeTruthy()
+    const query = asRuntimeSql(m![1])
+
+    const res = await pool.query<{ tablename: string }>(query, [schema])
+    const names = res.rows.map((r) => r.tablename).sort()
+
+    expect(names).toContain('notes')
+    expect(names).not.toContain('_email_verifications')
+  }, 60_000)
+
+  it('the filter is not vacuously empty', async () => {
+    // Guards the failure mode directly: a WHERE clause that excludes everything
+    // would satisfy "does not contain _email_verifications" too.
+    const src = fs.readFileSync(SOURCE, 'utf8')
+    const query = asRuntimeSql(src.match(/`(SELECT relname AS tablename[\s\S]*?LIMIT 20)`/)![1])
+    const res = await pool.query(query, [schema])
+    expect(res.rows.length).toBeGreaterThan(0)
+  }, 60_000)
+})
