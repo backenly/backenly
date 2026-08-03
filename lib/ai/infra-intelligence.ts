@@ -794,19 +794,30 @@ export async function runAndStoreInfraIntelligence(
 
     if (toCreate.length > 0) {
       await prisma.healthFinding.createMany({ data: toCreate as any, skipDuplicates: true }).catch(() => {})
+    }
 
-      // Auto-apply safe index additions — MUST go through the build lock so cron
-      // fixes never race with an active user build on the same project.
-      if (report.autoApplicableFixes.length > 0) {
-        const { withBuildLock } = await import('@/lib/ai/build-runtime/build-lock')
-        const lockResult = await withBuildLock(projectId, 'modify', async () => {
-          await _applyAutoFixes(projectId, report.autoApplicableFixes)
-        })
-        if (lockResult.error) {
-          console.log(`[InfraIntelligence] Skipping auto-fixes for ${projectId} — ${lockResult.error}`)
-        }
+    // Auto-apply safe index additions — MUST go through the build lock so cron
+    // fixes never race with an active user build on the same project.
+    //
+    // Deliberately OUTSIDE the `toCreate.length > 0` guard it used to sit in.
+    // Nested there, a repair could only ever run on the one scan that first
+    // raised the finding: on every later pass the finding already existed,
+    // toCreate was empty, and the whole block was skipped. So a fix that failed
+    // — or was never attempted because the finding predated the fix being
+    // possible — could never be retried, and the finding sat open forever with
+    // an index that was reported as auto-applicable and never applied.
+    // Detected-but-never-repaired, the same shape as the wide-open RLS bug.
+    if (report.autoApplicableFixes.length > 0) {
+      const { withBuildLock } = await import('@/lib/ai/build-runtime/build-lock')
+      const lockResult = await withBuildLock(projectId, 'modify', async () => {
+        await _applyAutoFixes(projectId, report.autoApplicableFixes)
+      })
+      if (lockResult.error) {
+        console.log(`[InfraIntelligence] Skipping auto-fixes for ${projectId} — ${lockResult.error}`)
       }
+    }
 
+    if (toCreate.length > 0) {
       // Notify
       await prisma.platformNotification.create({
         data: {
