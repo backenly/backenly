@@ -173,7 +173,18 @@ async function detectHotTables(pool: Pool, schemaName: string): Promise<HotTable
     //
     // Columns already leading an existing index are excluded — re-indexing them
     // would not reduce a single sequential scan.
-    const INDEX_CANDIDATES = ['created_at', 'user_id', 'owner_id', 'updated_at'] as const
+    // Both naming conventions, interleaved by priority rather than grouped by
+    // convention. Workspace schemas are a mix: a table built through the
+    // builder gets camelCase (createdAt), one written by hand or imported gets
+    // snake_case. Listing only snake_case made every camelCase project look
+    // unfixable — `users` in the reported case had an unindexed `createdAt` and
+    // was reported as having no indexable column at all.
+    const INDEX_CANDIDATES = [
+      'created_at', 'createdAt',
+      'user_id', 'userId',
+      'owner_id', 'ownerId',
+      'updated_at', 'updatedAt',
+    ] as const
     const tableNames = rows.rows.map(r => r.tablename)
     const indexColumn = new Map<string, string>()
 
