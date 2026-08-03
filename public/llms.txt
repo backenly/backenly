@@ -47,7 +47,7 @@ Every table is served by **PostgREST** — the same engine Supabase runs — rea
 Two surfaces, one engine, one authorization path:
 
 - **`/api/v1/{projectId}/db/{table}`** — Backenly's stable REST contract: `list`, `create`, `get`, `update`, `delete` with filtering, sorting, pagination, full-text search and typed responses. Unchanged and supported.
-- **`/api/v2/{projectId}/{table}`** — PostgREST's native grammar, passed through untouched: `?price=gte.100`, `?or=(a.eq.1,b.eq.2)`, `?order=created_at.desc`, and **embedded resources** — `?select=*,author(*)` returns a post and its author in one round trip. If you know Supabase or PostgREST, you already know this API.
+- **`/api/v2/{projectId}/{table}`** — PostgREST's native grammar, passed through untouched: `?price=gte.100`, `?or=(a.eq.1,b.eq.2)`, `?order=createdAt.desc`, and **embedded resources** — `?select=*,author(*)` returns a post and its author in one round trip. If you know Supabase or PostgREST, you already know this API.
 
 Authorization is enforced by **PostgreSQL grants and row-level security**, not by application code. A request for another tenant's data, or for the auth table, fails on a missing database privilege rather than on a check somebody remembered to write — including through an embedded resource, where a `?select=*,users(*)` is refused by Postgres itself. Generate OpenAPI and typed clients from the CLI; a live API-key tester is built into the dashboard.
 
@@ -184,7 +184,9 @@ Everything the SDK does is plain HTTP. `{projectId}` is your project id; the bas
 **Data endpoints** — two grammars over one engine (see "APIs" above):
 
 - `/db/{table}` — Backenly's stable REST contract: `GET` (list), `POST` (create), `GET /db/{table}/{id}`, `PATCH /db/{table}/{id}`, `DELETE /db/{table}/{id}`.
-- `/api/v2/{projectId}/{table}` — PostgREST grammar verbatim: `?price=gte.100`, `?or=(a.eq.1,b.eq.2)`, `?order=created_at.desc`, `?select=*,author(*)`.
+- `/api/v2/{projectId}/{table}` — PostgREST grammar verbatim: `?price=gte.100`, `?or=(a.eq.1,b.eq.2)`, `?order=createdAt.desc`, `?select=*,author(*)`.
+
+**Auto-added columns, and their naming wart.** Every table created through Backenly gets `id` (uuid pk), `"createdAt"` and `"updatedAt"` (camelCase, timestamptz) and `"deleted_at"` (snake_case, soft delete). The two conventions on one table are a known wart, not a rule you can infer — so order by `createdAt`, filter soft-deletes on `deleted_at`, quote camelCase identifiers in raw SQL (unquoted folds to lowercase and will not resolve), and treat `get_table_schema` as the authority rather than guessing. A column you declared yourself exists exactly as you wrote it.
 
 `/db/users` is deliberately never served — that table holds password hashes and is reached only through `/auth/*`.
 

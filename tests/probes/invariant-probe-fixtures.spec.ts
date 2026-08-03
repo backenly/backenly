@@ -143,6 +143,38 @@ describe('detectMissingHotPathIndexes', () => {
     )
     expect(hit).toBeUndefined()
   }, 120_000)
+
+  // Regression: the candidate list was snake_case only, so this probe was
+  // structurally incapable of firing on the platform's OWN tables — every table
+  // created through the builder gets quoted camelCase "createdAt"/"updatedAt"
+  // (lib/ai/minimal-executor.ts), and reported no indexable column forever. The
+  // sibling detector in lib/ai/infra-intelligence.ts was fixed for this in
+  // 7851f40e; this copy was missed.
+  describe('camelCase timestamps (builder-created tables)', () => {
+    const camel = 'camel_articles'
+
+    it('FIRES for an unindexed "createdAt"', async () => {
+      await q(`CREATE TABLE "${schema}"."${camel}" (
+        id uuid PRIMARY KEY, "createdAt" timestamptz, "updatedAt" timestamptz)`)
+
+      const columns = (await detectMissingHotPathIndexes(projectId))
+        .filter((f) => (f.details as any)?.tableName === camel)
+        .map((f) => (f.details as any).columnName)
+
+      expect(columns).toEqual(expect.arrayContaining(['createdAt']))
+    }, 120_000)
+
+    it('goes QUIET once the camelCase column is indexed', async () => {
+      // Quoted on purpose — unquoted createdAt folds to lowercase and would
+      // index a column that does not exist.
+      await q(`CREATE INDEX idx_${camel}_created ON "${schema}"."${camel}" ("createdAt")`)
+
+      const hit = (await detectMissingHotPathIndexes(projectId)).find(
+        (f) => (f.details as any)?.tableName === camel && (f.details as any)?.columnName === 'createdAt',
+      )
+      expect(hit).toBeUndefined()
+    }, 120_000)
+  })
 })
 
 // ── live_tables_are_adopted ──────────────────────────────────────────────────

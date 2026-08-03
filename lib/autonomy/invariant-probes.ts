@@ -46,7 +46,34 @@ async function pgQuery<T extends Record<string, unknown> = Record<string, unknow
 
 // ── 1. Hot-path index gaps (common filter columns: created_at, status, …) ─────
 
-const HOT_FILTER_COLS = ['created_at', 'updated_at', 'status', 'slug', 'email', 'handle']
+/**
+ * Common filter columns worth an index.
+ *
+ * BOTH conventions are listed on purpose. Workspace schemas genuinely mix them:
+ * a table created through the builder gets `"createdAt"` / `"updatedAt"`
+ * (camelCase, quoted — see the CREATE TABLE in lib/ai/minimal-executor.ts),
+ * while one written by hand, imported, or migrated in gets `created_at` /
+ * `updated_at`.
+ *
+ * Listing only snake_case made this probe structurally incapable of firing on
+ * the platform's OWN output: every builder-created table reported no indexable
+ * column, forever. That is the `detectMissingRls` failure again — a probe whose
+ * empty result is indistinguishable from a healthy backend.
+ *
+ * The sibling detector in lib/ai/infra-intelligence.ts was fixed for exactly
+ * this in 7851f40e (`INDEX_CANDIDATES`); this copy was missed. Keep the two
+ * lists in step.
+ *
+ * `deleted_at` is deliberately NOT here despite being filtered by most list
+ * queries: adding it would mint a finding against essentially every table in
+ * every project at once, and a fleet-wide storm is not how a new candidate
+ * column should be introduced.
+ */
+const HOT_FILTER_COLS = [
+  'created_at', 'createdAt',
+  'updated_at', 'updatedAt',
+  'status', 'slug', 'email', 'handle',
+]
 
 /**
  * Find common filter columns that have no index. Distinct from

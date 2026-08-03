@@ -120,6 +120,17 @@ For typed access, run `npx @backenly/cli types --client` and import from the gen
 1. **Learn the backend first**: `read_backend_state`, then `get_table_schema` on any table you are about to touch. Never guess table or column names — read them.
 2. **Need a backend change** (new table, column, RLS rule, function, trigger)? `apply_migration` for DDL, `set_rls` for policies, or `backend_chat` to describe the outcome. Do not simulate the change client-side.
 3. **Read the schema back after every migration.** Do not assume the column names you asked for survived verbatim — call `get_table_schema` and use what is actually there. Types generated from a name you assumed will compile and then fail at runtime.
+
+   In particular, **every new table gets four columns you did not ask for**, and they do not share one naming convention:
+
+   | Column | Type |
+   | --- | --- |
+   | `id` | `UUID PRIMARY KEY DEFAULT gen_random_uuid()` |
+   | `"createdAt"` | `TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP` — **camelCase** |
+   | `"updatedAt"` | `TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP` — **camelCase** |
+   | `"deleted_at"` | `TIMESTAMPTZ NULL` — **snake_case**, soft delete |
+
+   So on a table whose timestamps came from this default, `?order=createdAt.desc` is correct and `?order=created_at.desc` resolves to nothing — while `deleted_at` is the opposite. If you explicitly declared a `created_at` column in your own migration, that one exists as written; both can be present on the same table. **Quote camelCase columns in SQL** — unquoted `createdAt` folds to lowercase and will not resolve. This is a known wart; `get_table_schema` is always the authority.
 4. **Generate types**: `generate_types` (or `npx @backenly/cli types --client`), commit them, and import them instead of hand-writing interfaces. Regenerate after every schema change.
 5. **Build frontend/app code** against the REST API or SDK.
 6. **Guard your CI**: add `npx @backenly/cli diff` to the pipeline. It exits 1 when the live schema no longer matches your committed types — catching contract drift before your users do.
