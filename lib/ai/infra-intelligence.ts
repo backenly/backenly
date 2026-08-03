@@ -36,6 +36,14 @@ export interface HotTableFinding {
   pressure: InfraPressure
   recommendation: string
   suggestedIndex?: string
+  /**
+   * The column `suggestedIndex` targets, verified to exist on the table.
+   * Carried separately because the repair path builds CREATE_INDEX from
+   * {tableName, columnName} — parsing it back out of the SQL string would
+   * reintroduce exactly the guessing this detector was fixed to stop.
+   * Absent when no safe candidate exists, which makes the finding notify-only.
+   */
+  indexColumn?: string
 }
 
 export interface IndexFinding {
@@ -128,36 +136,71 @@ async function detectHotTables(pool: Pool, schemaName: string): Promise<HotTable
          FROM pg_stat_user_tables
         WHERE schemaname = $1
           AND (seq_scan > 100 OR n_live_tup > 5000)
+          -- Underscore-prefixed tables are Backenly's own platform internals
+          -- (_email_verifications, _token_blacklist, …). Surfacing them told the
+          -- owner their backend had a problem they neither created nor can act
+          -- on. Every other detector already excludes them; this one did not.
+          AND relname NOT LIKE E'\\_%'
         ORDER BY seq_scan DESC
         LIMIT 20`,
       [schemaName],
     )
 
-    // Which of these tables actually HAVE a created_at column.
+    // Pick a column that ACTUALLY EXISTS to index, per table.
     //
-    // The suggestion below used to be emitted for every hot table unconditionally,
-    // so on any table without created_at the generated
-    // `CREATE INDEX ... (created_at DESC)` failed 42703 inside _applyAutoFixes,
-    // whose catch logs "Auto-fix failed (non-fatal)" and moves on. In production
-    // that fired nine times per pass, every pass — an auto-fix that had never
-    // once applied, reported only as a warning nobody reads. Same species as the
-    // pg_stat_user_tables.tablename bug two functions up: generated SQL that
-    // references a column the table does not have, swallowed by a catch.
+    // This used to hardcode `created_at` for every hot table, so on any table
+    // without that column the generated `CREATE INDEX ... (created_at DESC)`
+    // failed 42703 inside _applyAutoFixes, whose catch logs "Auto-fix failed
+    // (non-fatal)" and moves on. It fired nine times per pass in production —
+    // an auto-fix that had never once applied. Same species as the
+    // pg_stat_user_tables.tablename bug above: generated SQL naming a column the
+    // table does not have, swallowed by a catch.
     //
-    // No fallback to "some other timestamp column" on purpose: indexing a column
-    // the user did not ask about is a guess, and a wrong index costs write
-    // throughput forever. When created_at is absent the textual recommendation
-    // still reaches the owner; only the auto-applicable SQL is withheld.
+    // Candidates are ordered by how likely they are to be the filter/sort key of
+    // the scans being counted, and NOTHING outside this list is ever chosen: an
+    // index on a guessed column costs write throughput permanently, so when none
+    // of these exists the table is reported with no automatic repair rather than
+    // with an invented one.
+    //
+    // Columns already leading an existing index are excluded — re-indexing them
+    // would not reduce a single sequential scan.
+    const INDEX_CANDIDATES = ['created_at', 'user_id', 'owner_id', 'updated_at'] as const
     const tableNames = rows.rows.map(r => r.tablename)
-    const withCreatedAt = new Set<string>()
+    const indexColumn = new Map<string, string>()
+
     if (tableNames.length) {
-      const cols = await pool.query<{ table_name: string }>(
-        `SELECT table_name FROM information_schema.columns
-          WHERE table_schema = $1 AND column_name = 'created_at'
-            AND table_name = ANY($2::text[])`,
+      const cols = await pool.query<{ table_name: string; column_name: string }>(
+        `SELECT table_name, column_name FROM information_schema.columns
+          WHERE table_schema = $1
+            AND table_name = ANY($2::text[])
+            AND column_name = ANY($3::text[])`,
+        [schemaName, tableNames, [...INDEX_CANDIDATES]],
+      )
+
+      // Leading column of every existing index, so we never propose a duplicate.
+      const indexed = await pool.query<{ tablename: string; leading: string }>(
+        `SELECT c.relname AS tablename,
+                a.attname  AS leading
+           FROM pg_index i
+           JOIN pg_class c     ON c.oid = i.indrelid
+           JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = $1
+           JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = i.indkey[0]
+          WHERE c.relname = ANY($2::text[])`,
         [schemaName, tableNames],
       )
-      for (const c of cols.rows) withCreatedAt.add(c.table_name)
+      const alreadyIndexed = new Set(indexed.rows.map(r => `${r.tablename}.${r.leading}`))
+
+      const available = new Map<string, Set<string>>()
+      for (const c of cols.rows) {
+        if (!available.has(c.table_name)) available.set(c.table_name, new Set())
+        available.get(c.table_name)!.add(c.column_name)
+      }
+      for (const [table, present] of available) {
+        const pick = INDEX_CANDIDATES.find(
+          c => present.has(c) && !alreadyIndexed.has(`${table}.${c}`),
+        )
+        if (pick) indexColumn.set(table, pick)
+      }
     }
 
     return rows.rows.map(r => {
@@ -176,8 +219,9 @@ async function detectHotTables(pool: Pool, schemaName: string): Promise<HotTable
         (deadRatio > 20)                        ? 'low' :
         'none'
 
-      const suggestedIndex = idxHitPct < 50 && withCreatedAt.has(r.tablename)
-        ? `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${r.tablename}_created_at ON "${schemaName}"."${r.tablename}" ("created_at" DESC);`
+      const idxCol = indexColumn.get(r.tablename)
+      const suggestedIndex = idxHitPct < 50 && idxCol
+        ? `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${r.tablename}_${idxCol} ON "${schemaName}"."${r.tablename}" ("${idxCol}" DESC);`
         : undefined
 
       return {
@@ -187,10 +231,16 @@ async function detectHotTables(pool: Pool, schemaName: string): Promise<HotTable
         deadTupRatio: deadRatio,
         liveRows: live,
         pressure,
+        // Name the actual column when there is one. "add indexes on commonly
+        // filtered columns" told the owner nothing they could act on and did not
+        // match what the repair would do.
         recommendation: idxHitPct < 50
-          ? `Table "${r.tablename}" is read ${seqScans.toLocaleString()}× with only ${idxHitPct}% index coverage — add indexes on commonly filtered columns.`
+          ? idxCol
+            ? `Table "${r.tablename}" is read ${seqScans.toLocaleString()}× with only ${idxHitPct}% index coverage — indexing "${idxCol}" should absorb most of those scans.`
+            : `Table "${r.tablename}" is read ${seqScans.toLocaleString()}× with only ${idxHitPct}% index coverage — add an index on whichever column your queries filter or sort by.`
           : `Table "${r.tablename}" has ${deadRatio}% dead-tuple bloat — VACUUM ANALYZE will recover space.`,
         suggestedIndex,
+        indexColumn: idxCol,
       }
     }).filter(f => f.pressure !== 'none')
   } catch {
@@ -566,8 +616,12 @@ export async function runAndStoreInfraIntelligence(
 ): Promise<void> {
   try {
     const report = await runInfraIntelligence(projectId)
-    if (report.overallPressure === 'none') return
 
+    // NOTE: the `overallPressure === 'none'` early return used to sit here, and
+    // it made auto-resolve impossible: a project that had just been fixed
+    // reported no pressure, returned immediately, and left its old findings open
+    // forever. Healthy is precisely when stale findings must be withdrawn, so
+    // the gate now sits after the resolve pass below.
     const { prisma } = await import('@/lib/db/prisma')
 
     // Deduplicate against open findings
@@ -588,6 +642,59 @@ export async function runAndStoreInfraIntelligence(
 
     const toCreate: PrismaFindingCreate[] = []
 
+    // ── Refresh details on hot-table findings that already exist ──────────────
+    //
+    // Creation is guarded by `!existingTypes.has(type)`, so a finding raised
+    // before this detector learned to name its index column would keep the old
+    // details forever — including the `created_at` SQL that could not run. The
+    // fix would be deployed and the finding would still be dead.
+    //
+    // Only `details` is touched. Status, severity and detectedAt are the
+    // finding's own history and are not rewritten by a re-scan.
+    const hotByType = new Map(report.hotTables.map(f => [`infra_hot_table_${f.table}`, f]))
+    for (const [type, f] of hotByType) {
+      if (!existingTypes.has(type)) continue
+      await prisma.healthFinding.updateMany({
+        where: { projectId, type, status: 'open' },
+        data: {
+          details: {
+            title: `Hot table: ${f.table}`,
+            description: f.recommendation,
+            source: 'infra_intelligence',
+            table: f.table,
+            tableName: f.table,
+            columnName: f.indexColumn ?? null,
+            idxHitPct: f.idxHitPct,
+            seqScans: f.seqScans,
+            fix: f.suggestedIndex ?? null,
+            requiresApproval: false,
+            detectedAt: report.scannedAt,
+          } as any,
+        },
+      }).catch(() => {})
+    }
+
+    // ── Auto-resolve hot-table findings the scan no longer reports ────────────
+    //
+    // Without this a finding outlives its cause: add the index and the row stays
+    // open forever, so the dashboard keeps showing a problem that no longer
+    // exists. It is also how the platform-internal `_email_verifications` rows
+    // clear now that underscore tables are excluded from detection.
+    const staleHotTypes = [...existingTypes].filter(
+      t => t.startsWith('infra_hot_table_') && !hotByType.has(t),
+    )
+    if (staleHotTypes.length) {
+      await prisma.healthFinding.updateMany({
+        where: { projectId, status: 'open', type: { in: staleHotTypes } },
+        data: { status: 'resolved' },
+      }).catch(() => {})
+      console.log(`[InfraIntelligence] resolved ${staleHotTypes.length} hot-table finding(s) no longer detected`)
+    }
+
+    // Nothing under pressure — the resolve pass above has already withdrawn
+    // anything stale, so there is nothing left to raise.
+    if (report.overallPressure === 'none') return
+
     // Hot tables → HealthFinding
     for (const f of report.hotTables) {
       const type = `infra_hot_table_${f.table}`
@@ -601,6 +708,11 @@ export async function runAndStoreInfraIntelligence(
             description: f.recommendation,
             source: 'infra_intelligence',
             table: f.table,
+            // buildFixAction reads tableName/columnName. `table` alone left the
+            // repair path with nothing to build CREATE_INDEX from, so every
+            // "Fix now" click on a hot-table finding failed.
+            tableName: f.table,
+            columnName: f.indexColumn ?? null,
             idxHitPct: f.idxHitPct,
             seqScans: f.seqScans,
             fix: f.suggestedIndex ?? null,

@@ -139,6 +139,22 @@ export function buildFixAction(
         },
       }
 
+    // A hot table is repairable only when the detector could name a column that
+    // actually exists to index. When it could not, returning null here is the
+    // honest answer and getManualRemediationHint explains it — emitting
+    // CREATE_INDEX with an undefined columnName would fail in the executor with
+    // "Missing parameters", which is the dead-end shape this file exists to
+    // prevent. Never reconstruct the column from the type suffix: the whole
+    // production bug was SQL naming a column the table does not have.
+    case 'infra_hot_table': {
+      const table = details.tableName ?? details.table
+      if (!table || !details.columnName) return null
+      return {
+        action: 'CREATE_INDEX',
+        params: { tableName: table, columnName: details.columnName },
+      }
+    }
+
     case 'missing_rate_limit':
       return {
         action: 'SET_RATE_LIMIT',
@@ -305,6 +321,20 @@ export function getManualRemediationHint(
       // Registration is handled by buildFixAction (REGISTER_TABLE), so this hint
       // is only a fallback. It describes the safe path, not dropping.
       return 'This table exists in your database but is not yet managed by the platform. Click Register to generate its REST API and adopt it — your data is untouched. (To remove it instead, drop it from the Database section.)'
+    // Only reached when the detector found no indexable column, since
+    // buildFixAction handles the repairable case. Names the real numbers so the
+    // owner can judge it, and asks for the column instead of guessing one — an
+    // index on the wrong column costs write throughput permanently.
+    case 'infra_hot_table': {
+      const t = (details?.tableName ?? details?.table ?? 'this table') as string
+      const scans = details?.seqScans as number | undefined
+      const pct = details?.idxHitPct as number | undefined
+      const measured = scans !== undefined && pct !== undefined
+        ? ` It was read ${scans.toLocaleString()}× with ${pct}% index coverage.`
+        : ''
+      return `"${t}" is taking heavy sequential scans and Backenly could not find a column it is safe to index automatically.${measured} Add an index on whichever column your queries filter or sort by — in the AI chat, say "add an index on <table>.<column>".`
+    }
+
     case 'missing_archival_job':
       return 'This table will keep growing without bound. In the AI chat, say "schedule a nightly cleanup on <table> older than 90 days" — Backenly will create the cron + the cleanup function with the retention you pick.'
     case 'missing_token_cleanup_cron':

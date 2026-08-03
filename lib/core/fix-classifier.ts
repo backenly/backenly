@@ -35,6 +35,7 @@ const AUTO_SAFE = new Set<FindingType>([
   'api_drift',              // Re-generating a missing API is additive
   'missing_fk',             // Adding a FK constraint (safe when data is consistent)
   'missing_fk_index',       // Adding an index — performance only, no data change
+  'infra_hot_table',        // Same shape: CREATE INDEX on a verified column, additive
   'missing_api_definition', // Generating a missing API definition
   'missing_api_crud',       // Generating missing CRUD endpoints
   'missing_rate_limit',     // Applying rate limit — additive protection
@@ -118,6 +119,26 @@ export function classifyFix(
     }
   }
 
+  // ── Hot table: also decided on evidence, for the same reason ───────────────
+  //
+  // The repair is CREATE_INDEX, which needs a column. The detector only supplies
+  // one when it verified the column exists on the table and is not already the
+  // leading column of an index; when it cannot, there is genuinely nothing to
+  // apply. Rating that `auto` anyway is what produced the reported bug: the
+  // dashboard drew an enabled "Fix now" button under copy promising Backenly
+  // "can fix them itself", and every click returned a failure.
+  //
+  // Guessing a column instead is not an option — an index on the wrong column
+  // costs write throughput for as long as it exists.
+  if (type === 'infra_hot_table' && !details?.columnName) {
+    return {
+      decision: 'notify_only',
+      reason:
+        'This table is taking heavy sequential scans, but Backenly could not identify a column ' +
+        'it is safe to index on its own. Pick the column your queries filter or sort by.',
+    }
+  }
+
   if (AUTO_SAFE.has(type)) {
     return {
       decision: 'auto',
@@ -148,6 +169,7 @@ const AUTO_ACTION_MAP: Partial<Record<FindingType, string>> = {
   api_drift:                'FIX_API',
   missing_fk:               'ADD_CONSTRAINT',
   missing_fk_index:         'CREATE_INDEX',
+  infra_hot_table:          'CREATE_INDEX',
   missing_api_definition:   'GENERATE_API',
   missing_api_crud:         'GENERATE_API',
   missing_rate_limit:       'SET_RATE_LIMIT',

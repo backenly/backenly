@@ -44,6 +44,12 @@ export type FindingType =
   // ── 3.6 Long-running hygiene (notify_only — needs user input on retention) ─
   | 'missing_archival_job'
   | 'missing_token_cleanup_cron'
+  // ── Phase 6 Infra Intelligence — a table taking heavy sequential scans with
+  // low index coverage. Emitted per table as `infra_hot_table_<table>`; the
+  // repair is CREATE_INDEX on a column the detector verified exists, carried in
+  // details.columnName. Findings with no indexable column carry no columnName
+  // and are correctly notify-only.
+  | 'infra_hot_table'
   // ── Phase 4 — medium/high-risk action queued from AI chat or orchestration
   // before it applies. details.executorAction/executorParams carry the exact
   // AIAction to run once approved — see lib/core/auto-fix-engine.ts's
@@ -162,6 +168,14 @@ export const ALL_FINDING_TYPES = [
   // unverifiable by recheckGap. Two identical registration misses in two days is
   // what tests/core/finding-type-registry.test.ts now prevents.
   'runtime_engine_mismatch',
+  // Added 2026-08-03 — the THIRD instance of this same omission, and the first
+  // one a user reported rather than a test. infra-intelligence emits
+  // `infra_hot_table_<table>`, which matched nothing here and nothing in
+  // PREFIX_MAP, so normalizeFindingType returned null and buildFixAction fell
+  // through to "no automatic repair for it yet". The dashboard rendered a
+  // "Fix now" button on all three anyway, and every click failed — while the
+  // panel copy promised "Backenly found these and can fix them itself".
+  'infra_hot_table',
 ] as const satisfies ReadonlyArray<FindingType>
 
 // Canonical types — exact matches pass through untouched.
@@ -169,6 +183,10 @@ const CANONICAL: ReadonlySet<string> = new Set<string>(ALL_FINDING_TYPES)
 
 // Category prefix → canonical base. Most-specific first.
 const PREFIX_MAP: ReadonlyArray<readonly [string, FindingType]> = [
+  // infra-intelligence emits one type per table (`infra_hot_table_users`), so
+  // it can only be recognised by prefix. Must stay ABOVE any shorter prefix it
+  // could be confused with.
+  ['infra_hot_table', 'infra_hot_table'],
   ['missing_fk_index', 'missing_fk_index'],
   ['missing_api_definition', 'missing_api_definition'],
   ['missing_api_crud', 'missing_api_crud'],
