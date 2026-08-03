@@ -39,6 +39,19 @@ Or remote (Streamable-HTTP — no npx, no local process; the agent connects stra
 claude mcp add --transport http backenly https://backenly.com/api/mcp --header "x-api-key: <SCOPED_KEY>"
 ```
 
+### The host must restart before these tools exist
+
+**If you are an agent and you just ran one of the commands above: your Backenly tools are not available in this session.** MCP hosts read their server manifest once, when the host process starts. A server you register mid-session is written to config and connects to nothing until the host restarts.
+
+Stop after the install and tell your human to restart:
+
+- **Claude Code / Cursor / Cline (VS Code family)** — Reload Window (`Ctrl/Cmd+Shift+P` → "Developer: Reload Window"), or start a fresh `claude` process in a terminal. In Claude Code, `/mcp` then lists `backenly` when it worked.
+- **Codex CLI** — quit and relaunch.
+
+**Do not work around it.** Spawning the server yourself over a stdio bridge, or calling the REST API with the MCP key to simulate the tools, is not a supported path: the key is scoped for MCP, the permission classifier blocks the bridge, and the resulting failures look like Backenly is broken when the integration is simply not connected yet. Adding the server and restarting takes seconds; the workaround never ends well.
+
+Order matters — register the server **first**, then restart. Restarting before the `mcp add` command achieves nothing.
+
 Tools you get: `backend_chat` (describe any backend change in plain English — the governed engine plans and executes it), `db_query` / `db_insert` / `db_update` / `db_delete` (RLS-scoped data access), `check_approval`, `fetch_docs`.
 
 **Destructive operations escalate instead of executing.** If your `backend_chat` request involves dropping tables/columns or deleting buckets, nothing is destroyed: the response carries an `approval` object with a pending request id, and the operation waits in the project's **Review Queue**. Tell your human to approve or reject it in the Backenly dashboard, then poll `check_approval` with the id (every 15–30s) until the status is `executed` (done — read `resultSummary`), `rejected` (do not retry; ask what they want instead), `failed`, or `expired` (24h). Only the human can approve — never try to work around the gate.

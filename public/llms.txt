@@ -234,6 +234,12 @@ Or remote (Streamable-HTTP — no npx, nothing to install; the host connects str
 claude mcp add --transport http backenly https://backenly.com/api/mcp --header "x-api-key: <scoped-key>"
 ```
 
+**The host must restart before these tools exist.** MCP hosts read their server manifest once, at process start. A server registered mid-session is written to config and connects to nothing until the host restarts — so if you are an agent that just ran one of the commands above, your Backenly tools are **not** in this session's tool list, and no amount of retrying will change that.
+
+Stop after the install and ask your human to restart: Reload Window in the VS Code family (Claude Code, Cursor, Cline), quit and relaunch for the Codex CLI. In Claude Code, `/mcp` then lists `backenly`.
+
+Do **not** route around it. Spawning the server yourself over a stdio bridge, or calling the REST API with the MCP key to imitate the tools, is unsupported: the key is scoped for MCP, the permission classifier blocks the bridge, and the failures read as a broken product when the integration simply has not connected yet. Register first, restart second — restarting before the `mcp add` accomplishes nothing.
+
 ### The advertised tools
 
 Exactly **20** tools are advertised to the host. That number is deliberate: tool-selection accuracy degrades as a catalog grows, so the surface is an allowlist where every request has one obvious door, not a projection of everything the brain can do. `GET /api/mcp/manifest` returns this list, and `tools/list` on the MCP server is the authority — trust it over any document, including this one.

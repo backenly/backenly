@@ -38,9 +38,17 @@ const AGENTS: { id: string; name: string }[] = [
 function buildPrompt(projectId?: string, apiKey?: string): string {
   const project = projectId ?? '<PROJECT_ID>'
   const key = apiKey ?? '<SCOPED_KEY>'
+  // The restart paragraph is load-bearing — see the long note on
+  // quickStartPrompt in AgentInstallGuide.tsx. MCP hosts read their server
+  // manifest once at process start, so "install it then call the tool" asks
+  // for something impossible and the agent improvises a bridge that the
+  // permission classifier blocks. Keep these two prompts in step.
   return `I'm using Backenly as my backend. Install its MCP server:
 claude mcp add backenly -- npx -y @backenly/mcp-server --project ${project} --key ${key}
-Then call \`read_backend_state\` to confirm it works, and use Backenly's tools for all backend work. Docs: https://backenly.com/llms.txt`
+
+MCP servers only connect when the host process starts, so Backenly's tools will NOT appear in this session. Once the command succeeds, stop and tell me to restart. Do not try to reach Backenly another way in the meantime — a stdio bridge or a raw HTTP call is not the supported path and will just fail on permissions.
+
+After I restart, call \`read_backend_state\` to confirm the connection, then use Backenly's tools for all backend work. Docs: https://backenly.com/llms.txt`
 }
 
 export function AgentSetupCard({

@@ -162,11 +162,30 @@ const AGENTS: Agent[] = [
  * which the catalog rewrite left dispatchable but un-advertised (lib/mcp/
  * catalog.ts MCP_SURFACE). Telling an agent to call a tool absent from its own
  * manifest is a failed first impression on the one step that has to work.
+ *
+ * ── Why the restart paragraph is load-bearing ───────────────────────────────
+ *
+ * This prompt used to say "install it, then call read_backend_state" in one
+ * breath. Every MCP host connects its servers at PROCESS START and reads the
+ * manifest once, so a server added by the running agent is registered in config
+ * and absent from that session's tool list. The agent then does the reasonable
+ * thing and improvises a way to reach us anyway — a stdio bridge, a raw curl —
+ * which the permission classifier blocks, and the user watches three failures
+ * scroll past on what is supposed to be the first thirty seconds of the
+ * product. Nothing is broken; the instructions asked for something impossible.
+ *
+ * So the prompt now states the lifecycle, tells the agent to STOP after the
+ * install, and explicitly forecloses the improvisation. Naming the wrong path
+ * matters as much as naming the right one: a capable agent will invent the
+ * bridge unless told not to.
  */
 function quickStartPrompt(projectId: string, key: string): string {
   return `I'm using Backenly as my backend. Install its MCP server:
 claude mcp add backenly -- npx -y @backenly/mcp-server --project ${projectId} --key ${key}
-Then call \`read_backend_state\` to confirm it works, and use Backenly's tools for all backend work. Docs: ${MCP_DOCS}`
+
+MCP servers only connect when the host process starts, so Backenly's tools will NOT appear in this session. Once the command succeeds, stop and tell me to restart. Do not try to reach Backenly another way in the meantime — a stdio bridge or a raw HTTP call is not the supported path and will just fail on permissions.
+
+After I restart, call \`read_backend_state\` to confirm the connection, then use Backenly's tools for all backend work. Docs: ${MCP_DOCS}`
 }
 
 export function AgentInstallGuide({
@@ -331,9 +350,43 @@ export function AgentInstallGuide({
               {variant.kind === 'json' ? <JsonText text={command} /> : <CliText text={command} />}
             </CodeSurface>
             {variant.note && <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">{variant.note}</p>}
+            <RestartNotice agentName={agent.name} hint={RESTART_HINT[agent.id]} />
           </>
         )}
       </Section>
+    </div>
+  )
+}
+
+/**
+ * Per-host restart instruction. Every MCP host reads its server manifest once,
+ * at process start, so the install command above has NO effect on a session
+ * that is already running. This is the single most common "Backenly doesn't
+ * work" report and it is never a Backenly fault — which is exactly why it has
+ * to be on screen next to the command rather than in docs somebody already
+ * skipped.
+ *
+ * Each hint names the cheapest real action for that host, not a generic
+ * "restart your editor": in VS Code-family hosts reloading the window is both
+ * faster and more reliable than hunting for the right process to kill.
+ */
+const RESTART_HINT: Record<string, string> = {
+  'claude-code': 'Reload Window (Ctrl/Cmd+Shift+P) in the VS Code extension, or start a new `claude` process in the terminal. Then run /mcp — backenly should be listed.',
+  cursor: 'Reload Window (Ctrl/Cmd+Shift+P), then check Settings → MCP for a green backenly entry.',
+  cline: 'Reload Window (Ctrl/Cmd+Shift+P), then reopen the Cline panel and check its MCP Servers list.',
+  codex: 'Quit and relaunch the Codex CLI.',
+  other: 'Restart the host process — MCP manifests are read once at startup.',
+}
+
+function RestartNotice({ agentName, hint }: { agentName: string; hint?: string }) {
+  return (
+    <div className="mt-3 flex items-start gap-2.5 rounded-lg border border-amber-400/20 bg-amber-400/[0.04] px-3 py-2.5">
+      <RefreshCw className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-amber-300/80" />
+      <p className="text-[11.5px] leading-relaxed text-zinc-400">
+        <span className="font-semibold text-amber-200/90">Restart {agentName} after this.</span>{' '}
+        MCP servers connect when the host starts, so the tools stay invisible in any session that was
+        already open. {hint ?? RESTART_HINT.other}
+      </p>
     </div>
   )
 }
