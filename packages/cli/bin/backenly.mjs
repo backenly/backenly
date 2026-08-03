@@ -14,6 +14,7 @@
  *   backenly openapi [--out <file>]                   download OpenAPI 3.0 spec
  *   backenly diff                                     exit 1 if local types drifted from live schema
  *   backenly logs [--limit n] [--status 4xx] [--path /posts] [--follow]
+ *   backenly query "select …"                         read-only SQL (SELECT/WITH/EXPLAIN)
  *
  * Auth resolution order: --key flag → BACKENLY_API_KEY env → .backenly/config.json
  * Keys are the same scoped, revocable keys the dashboard's Connect → Agents
