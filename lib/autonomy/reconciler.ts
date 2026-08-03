@@ -507,7 +507,7 @@ export interface EnsureFindingResult {
  * Returns the reason on every non-actionable outcome so the caller can report
  * WHY a tick did nothing rather than merely that it did nothing.
  */
-async function ensureFinding(
+export async function ensureFinding(
   projectId: string,
   gap: DesiredStateGap,
 ): Promise<EnsureFindingResult> {
