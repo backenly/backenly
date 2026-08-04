@@ -68,6 +68,14 @@ async function main() {
     console.log(`\n[${p.name ?? '(unnamed)'} · ${p.id}]  level=${level}`)
     console.log(`   ${plan.summary}`)
     console.log(`   counts: ${JSON.stringify(plan.counts)}`)
+    // Name every gap. "2 issues found" without saying which two is not a
+    // diagnostic — it is the same shape as the attempted=0 ambiguity the
+    // reconciler's skip-reason tally exists to end.
+    for (const d of plan.decisions) {
+      const det = (d.gap.details ?? {}) as Record<string, unknown>
+      const loc = det.tableName ?? det.table ?? det.location ?? det.surface ?? det.workflow ?? ''
+      console.log(`      • ${d.action.padEnd(18)} ${d.type}${loc ? `::${loc}` : ''}  [${d.invariantId}]`)
+    }
     if (plan.report.errors.length) console.log(`   probeErrors: ${JSON.stringify(plan.report.errors)}`)
     if (!firstApplicable && plan.counts.WOULD_AUTO_APPLY > 0) firstApplicable = p.id
   }
