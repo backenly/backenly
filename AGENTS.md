@@ -40,11 +40,9 @@ Each project gets its own PostgreSQL schema: `workspace_{projectId}`.
 
 ### 3. Feature Placement Rule (Do Not Violate)
 
-From `lib/config/QUICK_REFERENCE.ts`:
-
 > Only the **Database Management** section creates new backend reality (tables, APIs). All other sections (monitoring, auth settings, billing) manage *existing* reality.
 
-**Never** add "quick create" or "AI generate" buttons outside the Database/AI chat flow.
+**Never** add "quick create" or "AI generate" buttons outside the Database section. Creation happens there or through an agent over MCP.
 
 ---
 
@@ -98,7 +96,6 @@ From `lib/config/QUICK_REFERENCE.ts`:
 │   ├── services/                 # Workspace DB, triggers, RLS, etc.
 │   ├── middleware/               # Express middleware (20+ files)
 │   ├── orchestration/            # 9-phase orchestration system
-│   ├── non-features/             # Patterns the AI must refuse
 │   ├── config/                   # Engine modes, safety rails, references
 │   ├── capabilities/             # Feature orchestrator (webhooks, exports, etc.)
 │   ├── monitoring/               # Metrics, anomaly detection
@@ -125,23 +122,24 @@ From `lib/config/QUICK_REFERENCE.ts`:
 
 ## AI Orchestration — The Core of the Product
 
-All AI logic lives in `lib/ai/`. The entry point is `app/api/ai/chat/route.ts`.
+All AI logic lives in `lib/ai/`. The engine is the brain loop in
+`lib/ai/brain/agent.ts`, reached over MCP via `app/api/mcp/route.ts`. There is
+no in-product chat door; agents (Claude Code, Cursor, Codex) are the client.
 
 ### Two-Brain Architecture
 
 | Brain | File | Role |
 |-------|------|------|
-| Brain 1 | `lib/ai/intent-planner.ts` | Extracts intent graph (entities, relations, actions) from natural language — no SQL |
+| Brain 1 | `lib/ai/brain/classifier.ts` | Classifies the turn once (BUILD / MODIFY / FIX / DESTRUCTIVE / QUESTION / CHAT) and routes it |
 | Brain 2 | `lib/ai/minimal-executor.ts` | Converts intent graph into executable API calls (`CREATE_TABLE`, `GENERATE_API`, etc.) |
 
 ### Supporting Files
 
 | File | Purpose |
 |------|---------|
-| `lib/ai/multi-step-planner.ts` | Handles complex multi-step requests |
 | `lib/ai/execution-engine.ts` | Orchestrates plan execution with MAX_STEPS + checkpointing |
-| `lib/ai/approval-system.ts` | Gates destructive operations behind user confirmation |
-| `lib/ai/execution-contracts.ts` | Zod schemas for every action + `AIExplanation` type |
+| `lib/ai/brain/pending-destructive.ts` | Gates destructive operations behind user confirmation |
+| `lib/ai/brain/tools.ts` | Tool vocabulary; `DESTRUCTIVE_TOOLS` marks what needs confirming |
 
 ### 9-Phase Orchestration System
 
@@ -165,16 +163,6 @@ Triggers: `CREATE_TRIGGER`, `LIST_TRIGGERS`, `DELETE_TRIGGER`
 Permissions: `SET_PERMISSION`, `LIST_PERMISSIONS`, `REMOVE_PERMISSION`
 Monitoring: `SET_ALERT`
 Functions: `GENERATE_FUNCTION`
-
-### Non-Features System
-
-`lib/non-features/index.ts` defines patterns the AI must always refuse:
-- Raw SQL execution requests
-- Manual schema editing
-- Webhooks as a manual config surface
-- Others defined in the file
-
-When AI detects a non-feature request, return `refusalMessage` and `alternative` from that system.
 
 ---
 
@@ -365,10 +353,6 @@ npm test             # Setup test DB + run Jest
 npm run test:watch   # Jest watch mode
 npm run test:coverage
 npx jest path/to/file.spec.ts    # Single file
-
-# Scripts
-npm run evals        # AI evaluation suite (scripts/run-ai-evals.ts)
-npm run stress-test  # Load test
 ```
 
 ---
@@ -433,10 +417,11 @@ your own environment, never in this repository. Configure them through `.env`
 
 ### Adding a New AI Action
 
-1. Add the action type + Zod schema to `lib/ai/execution-contracts.ts`
-2. Handle it in `lib/ai/minimal-executor.ts`
+1. Add the action type + its `case` handler in `lib/ai/minimal-executor.ts`
+2. Expose it to the brain as a tool in `lib/ai/brain/tools.ts`
 3. Add to executor vocabulary comments above
-4. If destructive, gate it through `lib/ai/approval-system.ts`
+4. If destructive, add it to `DESTRUCTIVE_TOOLS` in `lib/ai/brain/tools.ts` so
+   `lib/ai/brain/pending-destructive.ts` gates it behind confirmation
 
 ### Adding a New End-User Runtime Route
 

@@ -30,16 +30,8 @@
     "db:migrate": "prisma migrate dev",
     "db:studio": "prisma studio",
     "db:test:setup": "tsx scripts/setup-test-db.ts",
-    "evals": "tsx scripts/run-ai-evals.ts",
-    "evals:core": "tsx scripts/run-ai-evals.ts",
-    "stress-test": "tsx scripts/run-stress-test.ts",
-    "mixed-eval": "tsx scripts/mixed-eval.ts",
-    "mixed-eval:isolated": "MODES=A tsx scripts/mixed-eval.ts",
-    "mixed-eval:flows": "MODES=B tsx scripts/mixed-eval.ts",
-    "mixed-eval:chaos": "MODES=C tsx scripts/mixed-eval.ts",
     "migrate:api-keys": "tsx scripts/migrate-api-keys-to-hash.ts",
-    "cleanup:tokens": "tsx scripts/cleanup-expired-tokens.ts",
-    "bench:selfops": "tsx bench/selfops/run.ts"
+    "cleanup:tokens": "tsx scripts/cleanup-expired-tokens.ts"
   },
   "dependencies": {
     "@amplitude/unified": "^1.1.21",

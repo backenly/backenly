@@ -218,8 +218,8 @@ function checkSecurityBestPractices() {
     },
     {
       name: 'Rate Limiting',
-      file: 'lib/middleware/authRateLimit.ts',
-      required: ['rateLimit', 'checkRateLimit'],
+      file: 'lib/security/auth-rate-limit.ts',
+      required: ['consume', 'AUTH_LIMITS', 'clientIp'],
     },
     {
       name: 'Session Management',
@@ -228,8 +228,8 @@ function checkSecurityBestPractices() {
     },
     {
       name: 'CORS Configuration',
-      file: 'lib/middleware/index.ts',
-      required: ['withCORS'],
+      file: 'middleware.ts',
+      required: ['Access-Control-Allow-Origin'],
     },
   ]
   

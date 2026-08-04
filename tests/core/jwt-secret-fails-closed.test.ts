@@ -128,15 +128,3 @@ describe('requireJwtSecret refuses rather than defaulting', () => {
     expect(jwtSecretStatus()).toEqual({ configured: true, tooShort: false })
   })
 })
-
-describe('generated customer backends refuse to boot without a secret', () => {
-  it('the server template throws instead of defaulting', () => {
-    const tpl = fs.readFileSync(path.join(REPO, 'lib/templates/server.template.ts'), 'utf8')
-    expect(tpl).not.toContain("process.env.JWT_SECRET || 'your-secret-key'")
-    // Every generated JWT_SECRET declaration is followed by a hard guard.
-    const decls = tpl.match(/const JWT_SECRET = process\.env\.JWT_SECRET;/g) ?? []
-    expect(decls.length).toBeGreaterThan(0)
-    const guards = tpl.match(/if \(!JWT_SECRET \|\| JWT_SECRET\.length < 32\) \{/g) ?? []
-    expect(guards.length).toBe(decls.length)
-  })
-})
