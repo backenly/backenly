@@ -111,8 +111,6 @@ const KNOWN_READERS = new Set<string>([
   'scripts/clean-test-data.ts',
   'scripts/cleanup-harness-debris.ts',
   'scripts/cleanup-phantom-tables.ts',
-  'scripts/mixed-eval.ts',
-  'scripts/run-stress-test.ts',
   'scripts/verify-autonomy-tier1.ts',
   'tests/probes/probe-fixtures.spec.ts',
 ].map(p => p.split('/').join(path.sep)))
