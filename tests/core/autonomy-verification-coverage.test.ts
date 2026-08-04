@@ -325,3 +325,53 @@ describe('verification surfaces do not read the dead ApiDefinition table', () =>
     expect(live).toEqual([])
   })
 })
+
+/**
+ * A finding the loop can RAISE every minute but only WITHDRAW once a day is a
+ * stale row in the review queue, and the user cannot tell it apart from a real
+ * one.
+ *
+ * The reaper runs inside the reconciler tick and withdraws invariant findings
+ * the probes no longer support — but only for types named in
+ * INVARIANT_REAPABLE_TYPES, matched exactly. Adding a probe to the catalogue
+ * without adding its type there creates precisely that asymmetry, and it is
+ * silent: nothing fails, findings just accumulate.
+ *
+ * This nearly shipped with `infra_table_bloat` on 2026-08-04. Its repair is
+ * VACUUM, which autovacuum can also perform seconds later on its own, so the
+ * window for a stale row is not theoretical — it is the common case.
+ */
+describe('every invariant-probe type can also be withdrawn', () => {
+  // Scoped locally: `fs`/`path`/`REPO_ROOT` above belong to another describe.
+  const nodeFs = require('node:fs') as typeof import('node:fs')
+  const nodePath = require('node:path') as typeof import('node:path')
+  const REAPER_SRC = nodeFs.readFileSync(
+    nodePath.join(process.cwd(), 'lib/core/finding-reaper.ts'),
+    'utf8',
+  )
+
+  it('names every probe-covered type in INVARIANT_REAPABLE_TYPES', () => {
+    const block = REAPER_SRC.slice(
+      REAPER_SRC.indexOf('INVARIANT_REAPABLE_TYPES'),
+      REAPER_SRC.indexOf('] as const', REAPER_SRC.indexOf('INVARIANT_REAPABLE_TYPES')),
+    )
+    const reapable = new Set([...block.matchAll(/'([a-z0-9_]+)'/g)].map(m => m[1]))
+
+    // Types the catalogue can positively re-detect are exactly the types whose
+    // findings the reaper is able to prove stale.
+    const missing = [...probeCoveredTypes()].filter(t => !reapable.has(t))
+
+    // Three types are withdrawn by a DEDICATED reaper instead, and adding them
+    // here would let a reconcile tick withdraw a finding their owner is still
+    // asserting:
+    //   contract_surface_broken → the contract sweep's per-surface auto-resolve
+    //   orphan_table            → reapObserverFindings
+    //   external_schema_change  → reapDriftFindings (drift-watch)
+    const OWNED_ELSEWHERE = new Set([
+      'contract_surface_broken',
+      'orphan_table',
+      'external_schema_change',
+    ])
+    expect(missing.filter(t => !OWNED_ELSEWHERE.has(t))).toEqual([])
+  })
+})

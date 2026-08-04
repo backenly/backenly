@@ -252,6 +252,30 @@ const INVARIANT_REAPABLE_TYPES = [
   'missing_archival_job',
   'missing_token_cleanup_cron',
   'runtime_engine_mismatch',
+  // Registered here the moment `tables_are_not_bloated` joined the invariant
+  // catalogue. A probe in that catalogue whose type is missing from this list is
+  // a finding the loop can raise every minute and only withdraw once a day —
+  // so a table vacuumed by autovacuum three seconds later keeps a stale row in
+  // the review queue until the next infra scan.
+  'infra_table_bloat',
+  // Both were probe-covered by the invariant catalogue and named in NO reaper,
+  // so neither had any path back to healthy. Each has exactly one write site,
+  // and that write site IS the invariant probe, so this reaper is the correct
+  // owner and cannot delete another pipeline's findings:
+  //
+  //   schema_not_registered  ← lib/autonomy/schema-registration.ts
+  //                            (the data_plane_is_registered probe)
+  //   rls_denies_everything  ← lib/services/workspace-observer.ts
+  //                            (the rls_is_not_deny_all probe)
+  //
+  // Both are auto-rated, so they normally repair rather than linger — but a fix
+  // that fails parks the row in pending_approval, and with no reaper it stayed
+  // there permanently even once the condition had cleared. schema_not_registered
+  // is the one that matters most: it means a customer's entire /db/* plane is
+  // dead, and the row outliving the outage is how a resolved incident keeps
+  // showing as broken.
+  'schema_not_registered',
+  'rls_denies_everything',
 ] as const
 
 /**

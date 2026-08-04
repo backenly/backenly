@@ -741,16 +741,25 @@ export async function runAndStoreInfraIntelligence(
     //
     // Only `details` is touched. Status, severity and detectedAt are the
     // finding's own history and are not rewritten by a re-scan.
-    // Type follows `kind`, so a bloat finding gets the type whose repair is
-    // VACUUM and an index finding gets the type whose repair is CREATE INDEX.
-    // Both prefixes are handled everywhere below; a table that changes from one
-    // to the other is withdrawn under its old type by the stale pass and raised
-    // under the new one, which is how the four mis-typed production rows clear
-    // themselves without a migration.
-    const infraFindingType = (f: HotTableFinding) =>
-      f.kind === 'bloat' ? `infra_table_bloat_${f.table}` : `infra_hot_table_${f.table}`
+    // ── Bloat findings are NOT raised here ───────────────────────────────────
+    //
+    // Bloat is owned by the per-minute invariant probe (detectTableBloat), which
+    // emits the canonical type `infra_table_bloat`. This daily scan emits
+    // per-table types (`infra_hot_table_<table>`), and the two cannot both file
+    // the same logical finding: `ensureFinding` dedupes on an EXACT type match,
+    // so `infra_table_bloat` and `infra_table_bloat_users` would never recognise
+    // each other and every bloated table would carry two rows — one per source,
+    // neither able to resolve the other.
+    //
+    // Bloat stays in `report.hotTables` because the infra report surface still
+    // shows it. It simply no longer mints findings. One producer per finding
+    // type is the rule; the alternative is the duplicate-row bug this codebase
+    // has already paid for once with `missing_fk::prompts.user_id`.
+    const indexPressureTables = report.hotTables.filter(f => f.kind === 'index_pressure')
 
-    const hotByType = new Map(report.hotTables.map(f => [infraFindingType(f), f]))
+    const hotByType = new Map(
+      indexPressureTables.map(f => [`infra_hot_table_${f.table}`, f]),
+    )
     for (const [type, f] of hotByType) {
       if (!existingTypes.has(type)) continue
       await prisma.healthFinding.updateMany({
@@ -798,8 +807,8 @@ export async function runAndStoreInfraIntelligence(
     if (report.overallPressure === 'none') return
 
     // Hot tables → HealthFinding
-    for (const f of report.hotTables) {
-      const type = infraFindingType(f)
+    for (const f of indexPressureTables) {
+      const type = `infra_hot_table_${f.table}`
       if (!existingTypes.has(type)) {
         toCreate.push({
           projectId,
