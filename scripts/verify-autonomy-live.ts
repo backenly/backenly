@@ -20,6 +20,7 @@ import { prisma } from '@/lib/db/prisma'
 import { FLAGS } from '@/lib/config/flags'
 import { computeReconciliationPlan, runReconcilerLive } from '@/lib/autonomy/reconciler'
 import { getProjectAutonomyLevel } from '@/lib/autonomy/autonomy-level'
+import { activeProjectsWhere } from '@/lib/autonomy/activity-gate'
 
 async function main() {
   const apply = process.argv.includes('--apply')
@@ -41,14 +42,18 @@ async function main() {
   console.log('  ENABLE_AUTONOMY_RECONCILER     =', FLAGS.ENABLE_AUTONOMY_RECONCILER)
   console.log('  ENABLE_AUTONOMY_LIVE_EXECUTION =', FLAGS.ENABLE_AUTONOMY_LIVE_EXECUTION)
 
-  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
+  // Must be the SAME predicate the schedulers use, or this diagnostic reports a
+  // different fleet than the one being healed. It previously hand-rolled
+  // "has tables AND has chatted in 30 days", which is the gate the reconciler
+  // moved away from when the chat door was removed: an agent driving the MCP
+  // tools writes no conversation row. On production that made this script report
+  // 2 active projects while the loop was actually reconciling 4 — so the tool
+  // for answering "is autonomy covering my fleet?" was under-reporting coverage
+  // by half, in the direction that hides a project being missed.
   const projects = await prisma.project.findMany({
     where: {
+      ...activeProjectsWhere(),
       ...(projectArg ? { id: projectArg } : {}),
-      tables: { some: {} },
-      conversationMessages: { some: { createdAt: { gte: thirtyDaysAgo } } },
-      deletedAt: null,
-      OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
     },
     select: { id: true, name: true },
   })
