@@ -321,3 +321,94 @@ export async function detectExpiredTokenBuildup(projectId: string): Promise<RawF
     throw new Error(`[detectExpiredTokenBuildup] probe failed: ${err?.message ?? String(err)}`)
   }
 }
+
+// ── Dead-tuple bloat that autovacuum is not keeping up with ──────────────────
+
+/**
+ * Minimum dead-tuple RATIO before a table counts as bloated.
+ *
+ * The number matters more than it looks. PostgreSQL's own autovacuum triggers
+ * at `autovacuum_vacuum_scale_factor = 0.2` — twenty percent dead tuples IS the
+ * point where the database starts cleaning up, i.e. the normal operating point
+ * of every healthy write-heavy table. The infra scan flagged at exactly that
+ * ratio, so it reported healthy tables doing exactly what they should be doing:
+ * four such rows sat open in the production queue against tables with 91% and
+ * 96% index coverage, and the only reason they were not noisier is that nobody
+ * could act on them.
+ *
+ * Forty percent means autovacuum has run or should have run and the table is
+ * still dirty — the shape of a genuinely starved or disabled autovacuum, which
+ * a manual VACUUM does resolve. Between 20 and 40 is Postgres's business, and
+ * the platform should stay out of it.
+ */
+const BLOAT_RATIO_PCT = 40
+
+/**
+ * Floor on absolute dead tuples, so a tiny table cannot flap.
+ *
+ * Without it a 5-row table with 3 dead rows is 60% "bloated" and would be
+ * detected, vacuumed, re-detected on the next insert, and eventually escalated
+ * to a human by the recurrence guard — a permanent nuisance finding generated
+ * entirely by rounding.
+ */
+const BLOAT_MIN_DEAD_TUPLES = 1_000
+
+/**
+ * Tables carrying enough dead rows that autovacuum is demonstrably behind.
+ *
+ * Exists so the loop can VERIFY its own VACUUM. The bloat repair is applied
+ * automatically (it changes no data and takes no exclusive lock), and an
+ * auto-applied fix with no probe to re-run afterwards is recorded on the
+ * executor's word alone — the exact failure mode
+ * tests/core/autonomy-verification-coverage.test.ts exists to keep out of this
+ * catalogue. With this probe registered, a VACUUM that did not actually reclaim
+ * anything is caught and escalated instead of being logged as a repair.
+ */
+export async function detectTableBloat(projectId: string): Promise<RawFinding[]> {
+  try {
+    const schema = `workspace_${projectId}`
+
+    const rows = await pgQuery<{
+      relname: string
+      dead: string
+      live: string
+      ratio: string
+    }>(
+      `SELECT relname,
+              n_dead_tup::text AS dead,
+              n_live_tup::text AS live,
+              round(
+                (n_dead_tup::numeric * 100)
+                / NULLIF(n_live_tup + n_dead_tup, 0)
+              )::text AS ratio
+         FROM pg_stat_user_tables
+        WHERE schemaname = $1
+          AND n_dead_tup >= $2
+          AND (n_dead_tup::numeric * 100) / NULLIF(n_live_tup + n_dead_tup, 0) >= $3
+          AND ${notReservedTableSql('relname')}`,
+      [schema, BLOAT_MIN_DEAD_TUPLES, BLOAT_RATIO_PCT],
+    )
+
+    return rows.map(r => ({
+      type: 'infra_table_bloat' as const,
+      severity: 'warning' as const,
+      autoFixable: true,
+      details: {
+        tableName: r.relname,
+        location: r.relname,
+        findingType: 'infra_table_bloat',
+        deadTupRatio: Number(r.ratio),
+        deadTuples: Number(r.dead),
+        liveRows: Number(r.live),
+        reason:
+          `"${r.relname}" is carrying ${Number(r.dead).toLocaleString()} dead rows ` +
+          `(${r.ratio}% of the table) — autovacuum has not kept up, so reads scan ` +
+          `space that holds nothing.`,
+      },
+    }))
+  } catch (err: any) {
+    // Same contract as every probe here: an empty result must never stand in
+    // for "could not check".
+    throw new Error(`[detectTableBloat] probe failed: ${err?.message ?? String(err)}`)
+  }
+}

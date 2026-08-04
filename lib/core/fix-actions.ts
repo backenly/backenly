@@ -155,6 +155,17 @@ export function buildFixAction(
       }
     }
 
+    // Dead-tuple bloat. Unlike infra_hot_table this needs no column — the whole
+    // table is the target — so it is always repairable and never dead-ends.
+    case 'infra_table_bloat': {
+      const table = details.tableName ?? details.table
+      if (!table) return null
+      return {
+        action: 'VACUUM_TABLE',
+        params: { tableName: table },
+      }
+    }
+
     case 'missing_rate_limit':
       return {
         action: 'SET_RATE_LIMIT',

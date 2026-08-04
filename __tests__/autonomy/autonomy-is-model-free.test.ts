@@ -117,6 +117,9 @@ describe('autonomy repair actions stay deterministic', () => {
       // (lib/postgrest/registration.ts), HEAL_DATA_PLANE restarts a wedged
       // PostgREST after re-verifying the outage (lib/postgrest/supervisor.ts).
       'REGISTER_SCHEMA', 'HEAL_DATA_PLANE',
+      // VACUUM (ANALYZE) on one named table — a single SQL statement built from
+      // a validated identifier, no model anywhere near it.
+      'VACUUM_TABLE',
     ])
     const unknown = [...new Set(emitted)].filter(
       a => !DETERMINISTIC.has(a) && !KNOWN_MODEL_BACKED_ACTIONS.includes(a),

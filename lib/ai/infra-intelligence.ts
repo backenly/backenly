@@ -34,6 +34,21 @@ export interface HotTableFinding {
   deadTupRatio: number // 0-100: dead tuple bloat ratio
   liveRows: number
   pressure: InfraPressure
+  /**
+   * WHICH problem this is, and therefore which repair applies.
+   *
+   * These were one type with one remedy, and it produced un-actionable rows in
+   * production: a table with 96% index coverage and 265 sequential scans is not
+   * index-starved, but it tripped the dead-tuple branch, was filed as a hot
+   * table, and arrived at the repair path with no column to index. The
+   * classifier correctly refused to guess a column, so it sat notify-only
+   * forever next to a recommendation telling the owner to run VACUUM.
+   *
+   * 'index_pressure' → CREATE_INDEX on `indexColumn` (may be absent, in which
+   *                    case the finding is honestly notify-only)
+   * 'bloat'          → VACUUM (ANALYZE) on the table, which always applies
+   */
+  kind: 'index_pressure' | 'bloat'
   recommendation: string
   suggestedIndex?: string
   /**
@@ -232,15 +247,37 @@ async function detectHotTables(pool: Pool, schemaName: string): Promise<HotTable
       const idxHitPct = total > 0 ? Math.round((idxScans / total) * 100) : 0
       const deadRatio = live + dead > 0 ? Math.round((dead / (live + dead)) * 100) : 0
 
-      const pressure: InfraPressure =
+      // Index pressure and bloat are evaluated separately, because they are
+      // different faults with different repairs. Collapsing them into one
+      // ternary chain is what let a healthy, well-indexed table be reported as
+      // a "hot table" on the strength of its dead-tuple ratio alone.
+      const indexPressure: InfraPressure =
         (idxHitPct < 20 && seqScans > 10_000) ? 'critical' :
         (idxHitPct < 50 && seqScans > 1_000)  ? 'high' :
         (idxHitPct < 70 && seqScans > 100)     ? 'medium' :
-        (deadRatio > 20)                        ? 'low' :
         'none'
+      // Must agree with lib/autonomy/invariant-probes.ts (BLOAT_RATIO_PCT /
+      // BLOAT_MIN_DEAD_TUPLES), or the daily scan raises a finding the
+      // per-minute probe cannot re-detect and the reaper withdraws it minutes
+      // later, forever. 20% was Postgres's own autovacuum trigger point, i.e.
+      // the normal operating state of a healthy write-heavy table.
+      const bloatPressure: InfraPressure =
+        deadRatio >= 40 && dead >= 1_000 ? 'low' : 'none'
+
+      // Index pressure wins when both are present: a table that is both
+      // under-indexed and bloated is hurting from the scans first, and the
+      // bloat finding will be raised on the next pass once the index lands.
+      const kind: 'index_pressure' | 'bloat' =
+        indexPressure !== 'none' ? 'index_pressure' : 'bloat'
+      const pressure: InfraPressure =
+        indexPressure !== 'none' ? indexPressure : bloatPressure
 
       const idxCol = indexColumn.get(r.tablename)
-      const suggestedIndex = idxHitPct < 50 && idxCol
+      // Gated on `kind`, not on a second independent threshold. These used to
+      // disagree: a table at 60% coverage was rated 'medium' index pressure but
+      // described as a bloat problem and offered no index, because the pressure
+      // chain cut at 70 and the recommendation cut at 50.
+      const suggestedIndex = kind === 'index_pressure' && idxCol
         ? `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${r.tablename}_${idxCol} ON "${schemaName}"."${r.tablename}" ("${idxCol}" DESC);`
         : undefined
 
@@ -251,14 +288,15 @@ async function detectHotTables(pool: Pool, schemaName: string): Promise<HotTable
         deadTupRatio: deadRatio,
         liveRows: live,
         pressure,
+        kind,
         // Name the actual column when there is one. "add indexes on commonly
         // filtered columns" told the owner nothing they could act on and did not
         // match what the repair would do.
-        recommendation: idxHitPct < 50
+        recommendation: kind === 'index_pressure'
           ? idxCol
             ? `Table "${r.tablename}" is read ${seqScans.toLocaleString()}× with only ${idxHitPct}% index coverage — indexing "${idxCol}" should absorb most of those scans.`
             : `Table "${r.tablename}" is read ${seqScans.toLocaleString()}× with only ${idxHitPct}% index coverage — add an index on whichever column your queries filter or sort by.`
-          : `Table "${r.tablename}" has ${deadRatio}% dead-tuple bloat — VACUUM ANALYZE will recover space.`,
+          : `Table "${r.tablename}" is carrying ${deadRatio}% dead rows — Backenly runs VACUUM ANALYZE to reclaim the space and refresh planner statistics.`,
         suggestedIndex,
         indexColumn: idxCol,
       }
@@ -671,14 +709,23 @@ export async function runAndStoreInfraIntelligence(
     //
     // Only `details` is touched. Status, severity and detectedAt are the
     // finding's own history and are not rewritten by a re-scan.
-    const hotByType = new Map(report.hotTables.map(f => [`infra_hot_table_${f.table}`, f]))
+    // Type follows `kind`, so a bloat finding gets the type whose repair is
+    // VACUUM and an index finding gets the type whose repair is CREATE INDEX.
+    // Both prefixes are handled everywhere below; a table that changes from one
+    // to the other is withdrawn under its old type by the stale pass and raised
+    // under the new one, which is how the four mis-typed production rows clear
+    // themselves without a migration.
+    const infraFindingType = (f: HotTableFinding) =>
+      f.kind === 'bloat' ? `infra_table_bloat_${f.table}` : `infra_hot_table_${f.table}`
+
+    const hotByType = new Map(report.hotTables.map(f => [infraFindingType(f), f]))
     for (const [type, f] of hotByType) {
       if (!existingTypes.has(type)) continue
       await prisma.healthFinding.updateMany({
         where: { projectId, type, status: 'open' },
         data: {
           details: {
-            title: `Hot table: ${f.table}`,
+            title: f.kind === 'bloat' ? `Table bloat: ${f.table}` : `Hot table: ${f.table}`,
             description: f.recommendation,
             source: 'infra_intelligence',
             table: f.table,
@@ -686,6 +733,7 @@ export async function runAndStoreInfraIntelligence(
             columnName: f.indexColumn ?? null,
             idxHitPct: f.idxHitPct,
             seqScans: f.seqScans,
+            deadTupRatio: f.deadTupRatio,
             fix: f.suggestedIndex ?? null,
             requiresApproval: false,
             detectedAt: report.scannedAt,
@@ -701,7 +749,9 @@ export async function runAndStoreInfraIntelligence(
     // exists. It is also how the platform-internal `_email_verifications` rows
     // clear now that underscore tables are excluded from detection.
     const staleHotTypes = [...existingTypes].filter(
-      t => t.startsWith('infra_hot_table_') && !hotByType.has(t),
+      t =>
+        (t.startsWith('infra_hot_table_') || t.startsWith('infra_table_bloat_')) &&
+        !hotByType.has(t),
     )
     if (staleHotTypes.length) {
       await prisma.healthFinding.updateMany({
@@ -717,14 +767,14 @@ export async function runAndStoreInfraIntelligence(
 
     // Hot tables → HealthFinding
     for (const f of report.hotTables) {
-      const type = `infra_hot_table_${f.table}`
+      const type = infraFindingType(f)
       if (!existingTypes.has(type)) {
         toCreate.push({
           projectId,
           type,
           severity: mapPressureToSeverity(f.pressure),
           details: {
-            title: `Hot table: ${f.table}`,
+            title: f.kind === 'bloat' ? `Table bloat: ${f.table}` : `Hot table: ${f.table}`,
             description: f.recommendation,
             source: 'infra_intelligence',
             table: f.table,
@@ -735,6 +785,7 @@ export async function runAndStoreInfraIntelligence(
             columnName: f.indexColumn ?? null,
             idxHitPct: f.idxHitPct,
             seqScans: f.seqScans,
+            deadTupRatio: f.deadTupRatio,
             fix: f.suggestedIndex ?? null,
             requiresApproval: false,
             detectedAt: report.scannedAt,

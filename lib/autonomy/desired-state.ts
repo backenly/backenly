@@ -47,6 +47,7 @@ import {
   detectMissingHotPathIndexes,
   detectStaleDataOverflow,
   detectExpiredTokenBuildup,
+  detectTableBloat,
 } from './invariant-probes'
 import { detectRuntimeEngineMismatch } from './engine-conformance'
 import { detectUnregisteredSchema } from './schema-registration'
@@ -219,6 +220,13 @@ export const INVARIANTS: readonly Invariant[] = [
     rationale:
       'Tables that grow without bound slow every query against them and inflate storage cost month over month — and the bigger the table, the riskier the eventual cleanup.',
     probe: detectStaleDataOverflow,
+  },
+  {
+    id: 'tables_are_not_bloated',
+    title: 'No table is carrying more dead rows than autovacuum can clear',
+    rationale:
+      'A table whose dead rows outnumber its live ones makes every read scan space that holds nothing, and skews the planner into choosing worse plans. The repair is a plain VACUUM ANALYZE, which changes no data and takes no exclusive lock, so it is safe to apply automatically. It is registered here rather than left to the daily infra scan for one specific reason: the repair is auto-applied, and an auto-applied fix with no probe to re-run afterwards gets recorded as a success on the executor\'s word alone. With this probe the loop can tell a VACUUM that reclaimed space from one that did nothing.',
+    probe: detectTableBloat,
   },
   {
     id: 'expired_tokens_get_cleaned_up',
@@ -443,6 +451,7 @@ const INVARIANT_EMITS: Readonly<Record<string, readonly FindingType[]>> = {
   hot_path_columns_are_indexed: ['missing_fk_index'],
   growing_tables_have_archival_plan: ['missing_archival_job'],
   expired_tokens_get_cleaned_up: ['missing_token_cleanup_cron'],
+  tables_are_not_bloated: ['infra_table_bloat'],
   external_schema_changes_are_adopted: ['external_schema_change'],
   runtime_engine_matches_rls_contract: ['runtime_engine_mismatch'],
   // Re-detectable: the probe reads the sweep's recorded result, so a repaired

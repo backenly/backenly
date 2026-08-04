@@ -70,6 +70,7 @@ export interface AIAction {
     | 'ADOPT_EXTERNAL_SCHEMA' // Adopt ALL drift observed over a direct DB connection (drift-watch)
     | 'REGISTER_SCHEMA'   // Re-register this project's workspace schema with PostgREST (fixes PGRST106)
     | 'HEAL_DATA_PLANE'   // Diagnose + repair a down/wedged PostgREST (verified, single-flight)
+    | 'VACUUM_TABLE'      // Reclaim dead-tuple bloat on one table (VACUUM ANALYZE, never FULL)
     // Schema versioning (#13)
     | 'LIST_SCHEMA_VERSIONS' | 'ROLLBACK_TO_VERSION'
     // Integrations — store API keys + manage webhook receivers
@@ -3254,7 +3255,10 @@ async function executeSingleAction(
       // 🎯 FIX #2: Idempotent schema operations
       case 'CREATE_INDEX':
         return await executeCreateIndex(action.params, projectId)
-      
+
+      case 'VACUUM_TABLE':
+        return await executeVacuumTable(action.params, projectId)
+
       case 'RENAME_COLUMN':
         return await executeRenameColumn(action.params, projectId)
       
@@ -7684,6 +7688,107 @@ async function executeSetAlert(params: any, projectId: string): Promise<Executio
  * conflict, not a success, and saying so is the difference between an agent that
  * can fix its migration and one that believes a lie.
  */
+// ============================================================================
+// VACUUM_TABLE — reclaim dead-tuple bloat on one table.
+//
+// Repairs an `infra_table_bloat` finding. Until this existed, bloat was
+// detected, described ("VACUUM ANALYZE will recover space"), filed under the
+// hot-table type whose only remedy is an index, and then classified notify_only
+// because there was no column to index. Four such rows sat open in production
+// telling the owner to run a command the platform would not run itself.
+//
+// Safe to auto-apply, which is why it is Tier 0:
+//   • plain VACUUM, never VACUUM FULL. VACUUM FULL takes an ACCESS EXCLUSIVE
+//     lock and rewrites the whole table — it blocks every read and write for
+//     the duration, which is categorically not something to do to a live
+//     backend without asking. Plain VACUUM runs concurrently with reads and
+//     writes and only marks reusable space.
+//   • it changes no row and no schema, so there is nothing to snapshot and
+//     nothing an undo would restore.
+//   • ANALYZE refreshes planner statistics, which is the other half of why a
+//     bloated table got slow.
+//   • idempotent and cheap to repeat.
+// ============================================================================
+
+async function executeVacuumTable(params: any, projectId: string): Promise<ExecutionResult> {
+  const tableName = params?.tableName ?? params?.table
+  if (!tableName) {
+    return {
+      success: false,
+      message: 'tableName is required to vacuum a table',
+      error: 'Missing parameters',
+      code: 'VALIDATION',
+    }
+  }
+
+  try {
+    const { prisma } = await import('@/lib/db')
+    const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
+    const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
+
+    // The identifier reaches raw DDL. Validate rather than strip — stripping is
+    // how `user-id` silently became `userid` on the index path.
+    const { SAFE_IDENT } = await import('@/lib/db/sql-expression')
+    if (!SAFE_IDENT.test(String(tableName))) {
+      return {
+        success: false,
+        message: `"${tableName}" is not a valid PostgreSQL identifier.`,
+        error: 'Invalid identifier',
+        code: 'VALIDATION',
+      }
+    }
+
+    // Must still exist. A finding can outlive its table, and VACUUM on a missing
+    // relation is an error rather than a no-op.
+    const exists = await prisma.$queryRawUnsafe<Array<{ one: number }>>(
+      `SELECT 1 AS one FROM information_schema.tables
+        WHERE table_schema = $1 AND table_name = $2 LIMIT 1`,
+      postgresSchema, tableName,
+    ).catch(() => [])
+    if (exists.length === 0) {
+      return {
+        success: false,
+        message: `Table "${tableName}" no longer exists — nothing to vacuum.`,
+        error: 'Table not found',
+        code: 'VALIDATION',
+      }
+    }
+
+    const before = await prisma.$queryRawUnsafe<Array<{ dead: string; live: string }>>(
+      `SELECT n_dead_tup::text AS dead, n_live_tup::text AS live
+         FROM pg_stat_user_tables WHERE schemaname = $1 AND relname = $2`,
+      postgresSchema, tableName,
+    ).catch(() => [])
+    const deadBefore = Number(before[0]?.dead ?? 0)
+
+    // VACUUM cannot run inside a transaction block, so this must go through
+    // $executeRawUnsafe (autocommit) and never $transaction.
+    await prisma.$executeRawUnsafe(`VACUUM (ANALYZE) "${postgresSchema}"."${tableName}"`)
+
+    const after = await prisma.$queryRawUnsafe<Array<{ dead: string }>>(
+      `SELECT n_dead_tup::text AS dead
+         FROM pg_stat_user_tables WHERE schemaname = $1 AND relname = $2`,
+      postgresSchema, tableName,
+    ).catch(() => [])
+    const deadAfter = Number(after[0]?.dead ?? 0)
+    const reclaimed = Math.max(0, deadBefore - deadAfter)
+
+    return {
+      success: true,
+      message:
+        `Vacuumed "${tableName}" — ${reclaimed.toLocaleString()} dead row(s) reclaimed ` +
+        `(${deadBefore.toLocaleString()} → ${deadAfter.toLocaleString()}) and planner statistics refreshed.`,
+      data: { tableName, deadBefore, deadAfter, reclaimed },
+    }
+  } catch (err: any) {
+    return {
+      success: false,
+      message: `Vacuum failed on "${tableName}": ${err.message}`,
+      error: err.message,
+    }
+  }
+}
+
 async function executeCreateIndex(params: any, projectId: string): Promise<ExecutionResult> {
   const { tableName } = params
   // Accept { columnName } (autonomy buildFixAction) or { columns: [...] } (chat,

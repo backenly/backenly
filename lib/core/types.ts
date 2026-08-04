@@ -50,6 +50,17 @@ export type FindingType =
   // details.columnName. Findings with no indexable column carry no columnName
   // and are correctly notify-only.
   | 'infra_hot_table'
+  // ── Dead-tuple bloat. Split out from `infra_hot_table` on 2026-08-04 because
+  // the two were being reported as one type with one remedy, and only one of
+  // them was an index problem. A table with 96% index coverage and 265 scans is
+  // not taking heavy sequential scans; it tripped the bloat branch, inherited
+  // the hot-table type, arrived with no columnName (there is no column to
+  // index), and was therefore classified notify_only and parked forever. Four
+  // such rows were sitting in the production queue with a recommendation that
+  // said "VACUUM ANALYZE will recover space" and no way to run it.
+  // The repair is VACUUM ANALYZE on the named table: no data change, no
+  // exclusive lock (never VACUUM FULL), and safe to repeat.
+  | 'infra_table_bloat'
   // ── Phase 4 — medium/high-risk action queued from AI chat or orchestration
   // before it applies. details.executorAction/executorParams carry the exact
   // AIAction to run once approved — see lib/core/auto-fix-engine.ts's
@@ -176,6 +187,11 @@ export const ALL_FINDING_TYPES = [
   // "Fix now" button on all three anyway, and every click failed — while the
   // panel copy promised "Backenly found these and can fix them itself".
   'infra_hot_table',
+  // Added 2026-08-04 alongside its split from infra_hot_table. Registered in the
+  // same commit that introduced it, which is the point of this list: the three
+  // omissions above were each found in production, and each one routed a real
+  // finding into "no automatic repair for it yet".
+  'infra_table_bloat',
 ] as const satisfies ReadonlyArray<FindingType>
 
 // Canonical types — exact matches pass through untouched.
@@ -187,6 +203,9 @@ const PREFIX_MAP: ReadonlyArray<readonly [string, FindingType]> = [
   // it can only be recognised by prefix. Must stay ABOVE any shorter prefix it
   // could be confused with.
   ['infra_hot_table', 'infra_hot_table'],
+  // Same per-table emission shape (`infra_table_bloat_<table>`), so it can only
+  // be recognised by prefix too.
+  ['infra_table_bloat', 'infra_table_bloat'],
   ['missing_fk_index', 'missing_fk_index'],
   ['missing_api_definition', 'missing_api_definition'],
   ['missing_api_crud', 'missing_api_crud'],
