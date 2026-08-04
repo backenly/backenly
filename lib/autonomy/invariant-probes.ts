@@ -28,6 +28,7 @@ import { Pool } from 'pg'
 import { prisma } from '@/lib/db/prisma'
 import type { RawFinding } from '@/lib/core/types'
 import { notReservedTableSql } from '@/lib/security/workspace-schema'
+import { HOT_TABLE_MIN_LIVE_ROWS } from '@/lib/ai/infra-intelligence'
 
 const pgPool = new Pool({ connectionString: process.env.DATABASE_URL })
 
@@ -85,17 +86,38 @@ export async function detectMissingHotPathIndexes(projectId: string): Promise<Ra
   try {
     const schema = `workspace_${projectId}`
 
+    // ── Only tables with enough rows for an index to be worth its cost ───────
+    //
+    // This probe fires on SCHEMA SHAPE — "the column is called created_at" —
+    // with no runtime evidence behind it, and its findings are autoFixable, so
+    // the loop acted on them immediately. On a freshly built backend that meant
+    // creating an index on every hot-path column of every table before a single
+    // row existed: speculative work, reported as a repair, on a scan that was
+    // already free because the table was empty.
+    //
+    // That is the shape the evidence policy exists to prevent — a finding
+    // against the builder's own fresh output, with nothing measured to justify
+    // it — and an index is not free to carry. Every one is write amplification
+    // paid on every INSERT and UPDATE for the life of the table.
+    //
+    // The row count is the evidence: at HOT_TABLE_MIN_LIVE_ROWS the table is
+    // genuinely in use and a filter column genuinely benefits. Below it the
+    // planner would pick a sequential scan regardless of what we built.
     const columns = await pgQuery<{ table_name: string; column_name: string }>(
       `SELECT c.table_name, c.column_name
        FROM information_schema.columns c
        JOIN information_schema.tables t
          ON t.table_schema = c.table_schema
         AND t.table_name = c.table_name
+       JOIN pg_stat_user_tables s
+         ON s.schemaname = c.table_schema
+        AND s.relname = c.table_name
        WHERE c.table_schema = $1
          AND t.table_type = 'BASE TABLE'
          AND ${notReservedTableSql('c.table_name')}
-         AND c.column_name = ANY($2::text[])`,
-      [schema, HOT_FILTER_COLS],
+         AND c.column_name = ANY($2::text[])
+         AND s.n_live_tup >= $3`,
+      [schema, HOT_FILTER_COLS, HOT_TABLE_MIN_LIVE_ROWS],
     )
 
     if (columns.length === 0) return []

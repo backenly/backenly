@@ -120,11 +120,28 @@ describe('detectMissingFkIndexes', () => {
 describe('detectMissingHotPathIndexes', () => {
   const table = 'articles'
 
-  it('FIRES for unindexed common filter columns', async () => {
-    // These look fast on day one and turn every request into a full table scan
-    // once the table has real data.
+  it('stays QUIET on an empty table, however unindexed it is', async () => {
+    // The evidence rule, and the reason seven findings sat open on production
+    // against tables holding between 0 and 19 rows. A scan of an empty table is
+    // already the cheapest plan; an index there is write overhead paid forever
+    // to speed up nothing. This probe is autoFixable, so firing here does not
+    // just add noise — the loop builds the useless index.
     await q(`CREATE TABLE "${schema}"."${table}" (
       id uuid PRIMARY KEY, status text, slug text, created_at timestamptz)`)
+
+    const hits = (await detectMissingHotPathIndexes(projectId)).filter(
+      (f) => (f.details as any)?.tableName === table,
+    )
+    expect(hits).toEqual([])
+  }, 120_000)
+
+  it('FIRES for unindexed common filter columns once the table holds real data', async () => {
+    // These look fast on day one and turn every request into a full table scan
+    // once the table has real data.
+    await q(`INSERT INTO "${schema}"."${table}" (id, status, slug, created_at)
+             SELECT gen_random_uuid(), 'draft', 'slug-' || g, now()
+             FROM generate_series(1, 600) g`)
+    await q(`ANALYZE "${schema}"."${table}"`)
 
     const hits = (await detectMissingHotPathIndexes(projectId)).filter(
       (f) => (f.details as any)?.tableName === table,
@@ -156,6 +173,11 @@ describe('detectMissingHotPathIndexes', () => {
     it('FIRES for an unindexed "createdAt"', async () => {
       await q(`CREATE TABLE "${schema}"."${camel}" (
         id uuid PRIMARY KEY, "createdAt" timestamptz, "updatedAt" timestamptz)`)
+      // Seeded past the size floor for the same reason as above — this asserts
+      // the camelCase candidate is recognised, not that empty tables fire.
+      await q(`INSERT INTO "${schema}"."${camel}" (id, "createdAt", "updatedAt")
+               SELECT gen_random_uuid(), now(), now() FROM generate_series(1, 600)`)
+      await q(`ANALYZE "${schema}"."${camel}"`)
 
       const columns = (await detectMissingHotPathIndexes(projectId))
         .filter((f) => (f.details as any)?.tableName === camel)

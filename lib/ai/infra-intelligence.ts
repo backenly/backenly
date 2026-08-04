@@ -27,6 +27,17 @@ let _pgStatStatementsWarned = false
 
 export type InfraPressure = 'none' | 'low' | 'medium' | 'high' | 'critical'
 
+/**
+ * Live rows a table needs before a sequential scan is worth complaining about.
+ *
+ * A seq scan is not evidence of a missing index on its own — on a table small
+ * enough to sit in a couple of pages it is the CHEAPEST plan, and the planner
+ * would ignore an index there anyway. Shared with the hot-path index probe in
+ * lib/autonomy/invariant-probes.ts so the daily scan and the per-minute loop
+ * cannot disagree about what counts as a table worth indexing.
+ */
+export const HOT_TABLE_MIN_LIVE_ROWS = 500
+
 export interface HotTableFinding {
   table: string
   seqScans: number
@@ -251,7 +262,28 @@ async function detectHotTables(pool: Pool, schemaName: string): Promise<HotTable
       // different faults with different repairs. Collapsing them into one
       // ternary chain is what let a healthy, well-indexed table be reported as
       // a "hot table" on the strength of its dead-tuple ratio alone.
+      //
+      // ── The size floor, and why its absence produced every stuck finding ──
+      //
+      // Sequential-scan COUNT says nothing without table SIZE. Scanning a table
+      // that fits in one or two 8KB pages costs less than descending a B-tree,
+      // which is why the planner picks a seq scan there and would keep picking
+      // it even if an index existed.
+      //
+      // Without this floor the detector was reporting exactly that situation as
+      // a problem. Every one of the seven index-pressure findings sitting open
+      // on production was a table with between 0 and 19 LIVE ROWS — including a
+      // `users` table with zero rows credited with 13,255 sequential scans. None
+      // of them had anything wrong. They could not be auto-repaired either,
+      // because there was no sane column to index, so they sat in the review
+      // queue permanently telling the owner to fix a table that was empty.
+      //
+      // 500 rows is where a scan starts to cost more than a lookup on typical
+      // row widths. Below it an index is pure write overhead, paid forever, to
+      // speed up a scan that was already free — so proposing one is worse than
+      // saying nothing.
       const indexPressure: InfraPressure =
+        live < HOT_TABLE_MIN_LIVE_ROWS ? 'none' :
         (idxHitPct < 20 && seqScans > 10_000) ? 'critical' :
         (idxHitPct < 50 && seqScans > 1_000)  ? 'high' :
         (idxHitPct < 70 && seqScans > 100)     ? 'medium' :
