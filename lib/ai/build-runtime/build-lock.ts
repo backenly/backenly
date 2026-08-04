@@ -99,7 +99,8 @@ function projectToLockKey(projectId: string): number {
 // The old code knew: "if Prisma happens to reuse the original connection, this
 // will succeed." Correctness rested on pool luck.
 //
-// The consequence was not theoretical. selfops-bench reproduces it on demand:
+// The consequence was not theoretical. It reproduced on demand under repeated
+// repair cycles against a real database:
 // after a repair, later repairs for that project fail with "Another auto-fix is
 // in progress" while ZERO BackgroundJobs are running — so `reapStaleJobs` finds
 // nothing to reap (release had already marked the job `completed`), gives up,

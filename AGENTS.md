@@ -353,9 +353,6 @@ npm test             # Setup test DB + run Jest
 npm run test:watch   # Jest watch mode
 npm run test:coverage
 npx jest path/to/file.spec.ts    # Single file
-
-# Scripts
-npm run bench:selfops   # Self-healing benchmark (bench/selfops/run.ts)
 ```
 
 ---

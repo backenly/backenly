@@ -129,8 +129,3 @@ __pycache__/
 public/backenly-sdk.js
 public/backenly-sdk.esm.js
 public/backenly-supabase.esm.js
-
-# selfops-bench receipts are produced per run and uploaded by CI as build
-# artifacts. A hand-committed one goes stale the moment the corpus changes, and
-# a stale receipt that contradicts the README is worse than no receipt.
-bench/selfops/results/

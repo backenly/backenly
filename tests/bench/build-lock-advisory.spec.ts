@@ -13,8 +13,8 @@
  * `reapStaleJobs` could not rescue it: release had already marked the
  * BackgroundJob `completed`, so there was nothing stale to reap.
  *
- * selfops-bench reproduced it on demand (fk-column-unindexed never repaired in
- * 12 cycles). This pins it shut at the primitive.
+ * It reproduced on demand under repeated repair cycles: an unindexed-foreign-key
+ * repair never landed across 12 of them. This pins it shut at the primitive.
  *
  * Mocking is pointless here — what is being tested IS the interaction between
  * pg session semantics and a connection pool, so it needs a real database.

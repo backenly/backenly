@@ -31,8 +31,7 @@
     "db:studio": "prisma studio",
     "db:test:setup": "tsx scripts/setup-test-db.ts",
     "migrate:api-keys": "tsx scripts/migrate-api-keys-to-hash.ts",
-    "cleanup:tokens": "tsx scripts/cleanup-expired-tokens.ts",
-    "bench:selfops": "tsx bench/selfops/run.ts"
+    "cleanup:tokens": "tsx scripts/cleanup-expired-tokens.ts"
   },
   "dependencies": {
     "@amplitude/unified": "^1.1.21",
