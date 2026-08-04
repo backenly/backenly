@@ -375,3 +375,41 @@ describe('every invariant-probe type can also be withdrawn', () => {
     expect(missing.filter(t => !OWNED_ELSEWHERE.has(t))).toEqual([])
   })
 })
+
+/**
+ * Every workspace-schema probe must exclude the platform's own tables.
+ *
+ * Backenly provisions plumbing into each workspace schema — `_email_verifications`,
+ * `_token_blacklist`, `_backenly_presence` — and manages it itself. A probe that
+ * scans `information_schema` without `notReservedTableSql` reports those tables
+ * to the project owner, who did not create them, cannot see them in the
+ * dashboard, and has no way to act on them.
+ *
+ * It is a false positive that can never be resolved, on every project, forever.
+ * Two of them were live in production (`missing_token_cleanup_cron` on
+ * `_email_verifications` and `_token_blacklist`, on all four active projects)
+ * while sibling probes in the very same file applied the filter correctly.
+ */
+describe('workspace probes exclude platform-internal tables', () => {
+  const nodeFs2 = require('node:fs') as typeof import('node:fs')
+  const nodePath2 = require('node:path') as typeof import('node:path')
+
+  const PROBE_FILES = [
+    'lib/autonomy/invariant-probes.ts',
+  ]
+
+  it.each(PROBE_FILES)('%s filters reserved tables in every information_schema scan', (rel) => {
+    const src = nodeFs2.readFileSync(nodePath2.join(process.cwd(), rel), 'utf8')
+
+    // Each template-literal SQL block that reads the workspace catalog must
+    // name the shared filter. Checked per query rather than per file so adding
+    // one unfiltered query beside three filtered ones still fails.
+    const queries = src.split('`').filter(
+      chunk => /information_schema\.(tables|columns)|pg_stat_user_tables/.test(chunk),
+    )
+    expect(queries.length).toBeGreaterThan(0)
+
+    const unfiltered = queries.filter(qy => !/notReservedTableSql\(/.test(qy))
+    expect(unfiltered).toEqual([])
+  })
+})

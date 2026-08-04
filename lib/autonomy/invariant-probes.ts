@@ -204,9 +204,13 @@ export async function detectStaleDataOverflow(projectId: string): Promise<RawFin
     const schema = `workspace_${projectId}`
 
     const tables = await pgQuery<{ table_name: string }>(
+      // Reserved tables excluded for the same reason as the token-cleanup probe
+      // below: platform plumbing is not the owner's to schedule an archival job
+      // for, so reporting it is a gap nobody can close.
       `SELECT table_name
        FROM information_schema.tables
-       WHERE table_schema = $1 AND table_type = 'BASE TABLE'`,
+       WHERE table_schema = $1 AND table_type = 'BASE TABLE'
+         AND ${notReservedTableSql('table_name')}`,
       [schema],
     )
 
@@ -287,6 +291,15 @@ export async function detectExpiredTokenBuildup(projectId: string): Promise<RawF
     const schema = `workspace_${projectId}`
 
     const candidates = await pgQuery<{ table_name: string; column_name: string }>(
+      // Reserved tables excluded, like every sibling probe in this file.
+      //
+      // `_email_verifications` and `_token_blacklist` are Backenly's own auth
+      // plumbing, provisioned into every workspace schema and cleaned up by the
+      // platform. Without this filter the probe reported them on EVERY project,
+      // permanently, asking the owner to schedule a cleanup cron for two tables
+      // they did not create, cannot see in the dashboard, and do not control.
+      // Two guaranteed false positives per project, on all four production
+      // projects, for as long as the probe has existed.
       `SELECT c.table_name, c.column_name
        FROM information_schema.columns c
        JOIN information_schema.tables t
@@ -294,6 +307,7 @@ export async function detectExpiredTokenBuildup(projectId: string): Promise<RawF
         AND t.table_name = c.table_name
        WHERE c.table_schema = $1
          AND t.table_type = 'BASE TABLE'
+         AND ${notReservedTableSql('c.table_name')}
          AND c.column_name IN ('expires_at', 'expiry', 'expired_at')`,
       [schema],
     )
