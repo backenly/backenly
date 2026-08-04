@@ -85,6 +85,17 @@ describe('no cadence throttle survives anywhere', () => {
     expect(sweepBlock).not.toMatch(/cron\.schedule\('\*\/\d+ \* \* \* \*'/)
   })
 
+  it('the infra scan fires every minute — it is the only writer that can withdraw an infra finding', () => {
+    const src = read('instrumentation.ts')
+    const idx = src.indexOf('runAndStoreInfraIntelligence')
+    const block = src.slice(Math.max(0, idx - 2200), idx + 200)
+    expect(block).toContain("cron.schedule('* * * * *'")
+    // Any daily/interval schedule here is a floor on how long a stale infra
+    // finding sits in the review queue, and the module contains no model call
+    // that would justify one.
+    expect(block).not.toMatch(/cron\.schedule\('[\d*\/ ]*\d+ \* \* \*'/)
+  })
+
   it('the background monitor does not fall back to an hourly floor', () => {
     const src = read('lib/ai/background-monitor.ts')
     const m = src.match(/AUTONOMY_SCAN_INTERVAL_MIN\)\s*\|\|\s*(\d+)\)/)

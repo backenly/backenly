@@ -250,30 +250,55 @@ export async function register() {
         console.log(`[BackgroundHealth] Cron run complete — ${activeProjects.length} projects scanned`)
       })
 
-      // ── Phase 6: Infra Intelligence — once daily ────────────────────────────
-      // Queries pg_stat_* views (not user data). Detects hot tables, index
-      // fragmentation, partitioning candidates, connection saturation.
-      // Auto-applies safe index additions; queues structural changes for approval.
-      cron.schedule('30 2 * * *', async () => {
-        const { prisma } = await import('./lib/db/prisma')
-        const { runAndStoreInfraIntelligence } = await import('./lib/ai/infra-intelligence')
+      // ── Phase 6: Infra Intelligence — every minute ──────────────────────────
+      //
+      // Queries pg_stat_* views (not user data). Detects hot tables, dead-tuple
+      // bloat, index fragmentation, partitioning candidates, connection
+      // saturation. Auto-applies safe index additions; queues structural
+      // changes for approval.
+      //
+      // It ran once a day, and that was a 24-hour floor on something the loop
+      // cannot do without: this pass owns the `infra_*` finding types, so it is
+      // the ONLY thing that can WITHDRAW one. A hot-table finding whose table was
+      // indexed a minute later stayed in the review queue until the next 02:30
+      // UTC sweep, and the user has no way to tell a stale row from a live one.
+      //
+      // Daily was never justified by cost. Unlike the neighbouring background
+      // scans, this module contains no model call of any kind — it is pure SQL
+      // over statistics views, cheaper per project than the reconciler pass that
+      // already runs every minute beside it.
+      //
+      // Same self-limiting guard as the contract sweep: if a pass is still
+      // running when the next minute fires, skip. Degrades to "as often as it
+      // can finish" under load rather than stacking overlapping sweeps.
+      cron.schedule('* * * * *', async () => {
+        const g = globalThis as any
+        if (g.__infraScanRunning) return
+        g.__infraScanRunning = true
+        try {
+          const { prisma } = await import('./lib/db/prisma')
+          const { runAndStoreInfraIntelligence } = await import('./lib/ai/infra-intelligence')
 
-        const { activeProjectsWhere } = await import('./lib/autonomy/activity-gate')
-        const loadedProjects = await prisma.project.findMany({
-          where: activeProjectsWhere(),
-          select: { id: true, userId: true },
-        }).catch(() => [])
+          const { activeProjectsWhere } = await import('./lib/autonomy/activity-gate')
+          const loadedProjects = await prisma.project.findMany({
+            where: activeProjectsWhere(),
+            select: { id: true, userId: true },
+          }).catch(() => [])
 
-        const CONCURRENCY = 5
-        for (let i = 0; i < loadedProjects.length; i += CONCURRENCY) {
-          const batch = loadedProjects.slice(i, i + CONCURRENCY)
-          await Promise.allSettled(
-            batch.map(p => runAndStoreInfraIntelligence(p.id, p.userId ?? '').catch((err: any) =>
-              console.error(`[InfraIntelligence] project=${p.id} error:`, err?.message)
-            ))
-          )
+          const CONCURRENCY = 5
+          for (let i = 0; i < loadedProjects.length; i += CONCURRENCY) {
+            const batch = loadedProjects.slice(i, i + CONCURRENCY)
+            await Promise.allSettled(
+              batch.map(p => runAndStoreInfraIntelligence(p.id, p.userId ?? '').catch((err: any) =>
+                console.error(`[InfraIntelligence] project=${p.id} error:`, err?.message)
+              ))
+            )
+          }
+        } catch (err: any) {
+          console.error('[InfraIntelligence] Cron error:', err?.message)
+        } finally {
+          g.__infraScanRunning = false
         }
-        console.log(`[InfraIntelligence] Cron run complete — ${loadedProjects.length} projects scanned`)
       })
 
       // ── Phase 6: Architecture Evolution — every 24 hours ───────────────────
