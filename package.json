@@ -28,6 +28,7 @@
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
     "db:migrate": "prisma migrate dev",
+    "db:seed": "tsx prisma/seed-billing.ts",
     "db:studio": "prisma studio",
     "db:test:setup": "tsx scripts/setup-test-db.ts",
     "migrate:api-keys": "tsx scripts/migrate-api-keys-to-hash.ts",

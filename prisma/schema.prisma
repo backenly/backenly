@@ -1746,9 +1746,17 @@ model Plan {
 
   // Autonomy entitlements — the always-on monitor/self-repair loop is funded by
   // the platform for paid tiers; Free gets a bounded taste that converts.
-  autonomyScanIntervalMin          Int     @default(360) // Min minutes between expensive multi-agent scans for a project
+  // Autonomy defaults are the PRODUCT defaults, not cautious placeholders.
+  // Every seeded plan (SANDBOX/BUILDER/SCALE) sets 1 / AGGRESSIVE / null, and
+  // these defaults now agree with the seed. They previously did not — 360 and
+  // CONSERVATIVE — which meant any Plan row created outside prisma/seed-billing.ts
+  // silently throttled healing to once every six hours and capped the dial at
+  // Tier 0, where `missing_rls` is unreachable. A default that contradicts every
+  // real row is not a safe default, it is a trap that only springs when the seed
+  // is skipped, and it springs silently.
+  autonomyScanIntervalMin          Int     @default(1) // Min minutes between reconcile passes. 1 = every minute, on every plan.
   autonomyMonthlyScanBudget        Int? // Hard cap on expensive scans/project/month (null = unlimited / fair-use)
-  autonomyMaxLevel                 String  @default("CONSERVATIVE") // Ceiling for the owner's risk dial: CONSERVATIVE | BALANCED | AGGRESSIVE
+  autonomyMaxLevel                 String  @default("AGGRESSIVE") // Ceiling for the owner's risk dial: CONSERVATIVE | BALANCED | AGGRESSIVE. Tier-2+ still always needs a human, at every level.
   autonomyMaxActionsPerWindow      Int? // Circuit-breaker ceiling: autonomous mutations/project/rolling-window (null = unlimited — healing is never a paywall)
   maxApiRequestsPerMonth           BigInt? // API request cap — monthly OR lifetime (see apiQuotaIsLifetime)
   apiQuotaIsLifetime               Boolean @default(false) // true = maxApiRequestsPerMonth is a lifetime total that never resets (Free)

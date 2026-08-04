@@ -11608,6 +11608,24 @@ async function executeFixWorkflow(params: any, projectId: string): Promise<Execu
         continue
       }
 
+      // ── Integration credential components (cannot auto-fix; surface to user) ─
+      //
+      // MUST be tested before the generic substring branches below, because the
+      // component names overlap and the first match wins. `stripe_webhook_handler`
+      // contains "handler" and `status_update_trigger` contains "trigger", so with
+      // this branch last they fell into the API and realtime repairs instead:
+      // a missing Stripe credential regenerated EVERY REST API on the project,
+      // and a missing status trigger reinstalled EVERY realtime trigger — both
+      // as an autonomous background action, neither of which brings a Stripe key
+      // any closer to existing. The repair then reported success (it "applied"
+      // something), the gap re-probed as still broken, and the finding escalated
+      // anyway — so the only lasting effect was project-wide churn nobody asked
+      // for. Credentials are a human's to supply; say so first.
+      if (key.includes('key') || key.includes('secret') || key.includes('stripe') || key.includes('webhook')) {
+        remaining.push(`${key} — needs your API key. Paste it in the chat: e.g. "Connect Stripe with key sk_live_..."`)
+        continue
+      }
+
       // ── API / endpoint components ────────────────────────────────────────
       if (key.includes('endpoint') || key.includes('api') || key.includes('handler')) {
         const r = await executeFixApi({}, projectId)
@@ -11619,12 +11637,6 @@ async function executeFixWorkflow(params: any, projectId: string): Promise<Execu
       if (key.includes('realtime') || key.includes('trigger') || key === 'status_update_trigger') {
         const r = await executeFixRealtime({}, projectId)
         r.success ? applied.push(`Realtime triggers reinstalled (component: ${key})`) : remaining.push(`${key}: ${r.error ?? r.message}`)
-        continue
-      }
-
-      // ── Integration credential components (cannot auto-fix; surface to user) ─
-      if (key.includes('key') || key.includes('secret') || key.includes('stripe') || key.includes('webhook')) {
-        remaining.push(`${key} — needs your API key. Paste it in the chat: e.g. "Connect Stripe with key sk_live_..."`)
         continue
       }
 

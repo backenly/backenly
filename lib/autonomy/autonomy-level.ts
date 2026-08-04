@@ -37,13 +37,34 @@ const VALID: ReadonlySet<string> = new Set(['OFF', 'CONSERVATIVE', 'BALANCED', '
 export const DEFAULT_LEVEL: AutonomyLevel = 'AGGRESSIVE'
 
 /**
- * Safe ceiling used when we genuinely cannot resolve the plan cap (DB blip,
- * missing subscription row). Never widens what a user is allowed beyond
- * CONSERVATIVE so a transient outage cannot accidentally enable Tier-1 mutations
- * on a Free project. Use this instead of DEFAULT_LEVEL anywhere the answer
- * means "the safest level we can permit when we don't know the plan".
+ * Ceiling used when we genuinely cannot resolve the plan cap (DB blip, missing
+ * subscription row).
+ *
+ * This was CONSERVATIVE, to avoid "accidentally enabling Tier-1 mutations on a
+ * Free project". That protects against a plan that does not exist: SANDBOX,
+ * BUILDER and SCALE all seed `autonomyMaxLevel: 'AGGRESSIVE'`, because
+ * self-healing is the product rather than the upsell. There is no tier whose
+ * ceiling this fallback was keeping anyone under.
+ *
+ * What it did instead was withdraw Tier 1 whenever a Subscription row could not
+ * be read — and Tier 1 is where `missing_rls` and `unprotected_user_data` live.
+ * So the failure mode of a transient database hiccup was: the loop keeps
+ * running, keeps reporting itself healthy, keeps adding indexes, and quietly
+ * stops closing row-level-security holes. Silent, and in the dangerous
+ * direction, which is the opposite of what a "safe" fallback is for.
+ *
+ * Raising it does not widen the blast radius. Tier 2 and above — auth, external
+ * credentials, destructive, irreversible — are hard-denied in isTierAutoAllowed
+ * at EVERY level, including AGGRESSIVE; that floor is not a dial and this does
+ * not touch it. The only band this unlocks is Tier 1: additive, snapshotted
+ * before it runs, re-probed after, and rolled into human review if it breaks a
+ * guarantee that was previously holding.
+ *
+ * If a future plan genuinely needs a lower ceiling, the seed sets it and the
+ * clamp enforces it normally. The fallback should describe the product, not the
+ * most cautious number available.
  */
-export const SAFE_FALLBACK_LEVEL: AutonomyLevel = 'CONSERVATIVE'
+export const SAFE_FALLBACK_LEVEL: AutonomyLevel = 'AGGRESSIVE'
 
 /** Ordering for clamping a requested level down to a plan's ceiling. */
 const LEVEL_RANK: Record<AutonomyLevel, number> = {

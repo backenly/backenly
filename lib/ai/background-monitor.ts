@@ -67,9 +67,14 @@ export async function runMonitoredHealthScan(
     // does exhaust its budget it never goes silent and never keeps spending —
     // it degrades to cheap detect-only and surfaces one prompt.
     const ownerPlan = (await getUserSubscription(userId).catch(() => null))?.plan ?? null
+    // Falls back to 1, matching every seeded plan, so an unresolvable plan lands
+    // on the product's cadence rather than on an env default nobody sets
+    // deliberately. Production carried AUTONOMY_SCAN_INTERVAL_MIN=60, which
+    // applied only to projects whose owner had no readable subscription — a
+    // silent 60-minute floor on exactly the projects least likely to be noticed.
     const intervalMin =
       ownerPlan?.autonomyScanIntervalMin ??
-      (Number(process.env.AUTONOMY_SCAN_INTERVAL_MIN) || 60)
+      (Number(process.env.AUTONOMY_SCAN_INTERVAL_MIN) || 1)
     const lastScan = await prisma.autonomousAction.findFirst({
       where: { projectId },
       orderBy: { createdAt: 'desc' },

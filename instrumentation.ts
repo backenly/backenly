@@ -194,16 +194,37 @@ export async function register() {
         )
       })
 
-      // Live API contract probes every 15 minutes. Deliberately separate from
-      // the daily observer above: five HTTP calls per project (~1s) versus
-      // minutes of LLM-backed analysis. This is the detector that answers "is
-      // this backend answering its users right now?", so it runs on a cadence
-      // that bounds an outage to minutes instead of a day.
-      cron.schedule('*/15 * * * *', async () => {
-        const { runContractSweep } = await import('./lib/services/workspace-observer')
-        await runContractSweep().catch((err: any) =>
+      // Live API contract probes every minute. Deliberately separate from the
+      // daily observer above: five HTTP calls per project (~1s) versus minutes
+      // of LLM-backed analysis. This is the detector that answers "is this
+      // backend answering its users right now?" — measured over two months of
+      // production, contract_surface_broken is ~80% of every real fault ever
+      // recorded here.
+      //
+      // It ran every 15 minutes, which put a 15-minute floor under the detection
+      // of the single most common way a customer's backend breaks, on a product
+      // that sells minute-by-minute healing. The reconciler reads this sweep's
+      // recorded result rather than probing itself (live HTTP does not belong in
+      // a per-minute loop), so the sweep's cadence WAS the data plane's
+      // detection latency no matter how often the reconciler ran.
+      //
+      // Self-limiting rather than rate-limited: if a sweep is still running when
+      // the next minute fires, this one skips. Under normal load that never
+      // happens (five projects in parallel, ~1s each); under enough load to
+      // matter it degrades to "as often as it can finish" instead of piling
+      // overlapping sweeps onto the same projects. A guard, not a quota.
+      cron.schedule('* * * * *', async () => {
+        const g = globalThis as any
+        if (g.__contractSweepRunning) return
+        g.__contractSweepRunning = true
+        try {
+          const { runContractSweep } = await import('./lib/services/workspace-observer')
+          await runContractSweep()
+        } catch (err: any) {
           console.error('[ContractSweep] Cron error:', err?.message)
-        )
+        } finally {
+          g.__contractSweepRunning = false
+        }
       })
 
       // Autonomous background health scan once daily — 01:00 UTC
@@ -331,6 +352,31 @@ export async function register() {
 
         if (!FLAGS.ENABLE_AUTONOMY_RECONCILER) {
           return
+        }
+
+        // ── Say out loud when the loop cannot actually repair anything ───────
+        //
+        // ENABLE_AUTONOMY_LIVE_EXECUTION defaults to false, and with it unset
+        // every project silently runs in shadow: the loop evaluates, decides,
+        // and writes an AUTONOMY_SHADOW_DECISION row that looks like work, but
+        // applies nothing. Nothing else says so. The dashboard still shows the
+        // dial the owner set, the cron still reports projects scanned, and the
+        // audit ledger still fills up — so a deployment that heals nothing is
+        // indistinguishable from one that heals everything.
+        //
+        // Throttled to once an hour: this is a configuration fact, not an
+        // event, and a per-minute warning would train everyone to filter it.
+        if (!FLAGS.ENABLE_AUTONOMY_LIVE_EXECUTION) {
+          const g = globalThis as any
+          const lastWarn = g.__autonomyShadowWarnAt ?? 0
+          if (Date.now() - lastWarn > 60 * 60 * 1000) {
+            g.__autonomyShadowWarnAt = Date.now()
+            console.warn(
+              '[AutonomyReconciler] SHADOW MODE — ENABLE_AUTONOMY_LIVE_EXECUTION is not set, ' +
+              'so the loop is evaluating every project but repairing NOTHING. Self-healing is off. ' +
+              'Set ENABLE_AUTONOMY_LIVE_EXECUTION=true to enable it (see .env.example).',
+            )
+          }
         }
 
         // Only scan projects that have shown signs of life recently — the

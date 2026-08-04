@@ -102,8 +102,46 @@ async function verifyStripeCheckout(projectId: string): Promise<WorkflowVerifyRe
     return ok
   }
 
-  // Stripe API key stored
-  await check('stripe_key', () => hasIntegrationKey(projectId, 'stripe'))
+  // ── Anchor: is a Stripe checkout actually being BUILT here? ────────────────
+  //
+  // This gate is the same one `verifyUserAuthFlow` and `verifyRealtimeNotifications`
+  // already apply, and its absence here was a live false positive.
+  //
+  // The old code had no anchor: it ran all three component checks and reported
+  // the workflow broken whenever ANY component was present. The component that
+  // tripped it was `orders_or_payments_table` — a table named `orders`,
+  // `payments` or `subscriptions`. Those are three of the most common table
+  // names there are, and none of them says anything about Stripe. So every
+  // project with an `orders` table got a permanent "Stripe Checkout is
+  // incomplete" finding for a payment flow its owner had never asked for.
+  //
+  // It was not merely noise. `workflow_broken` is classified `auto`, so the
+  // reconciler spent a mutation slot trying to repair it, could never succeed
+  // (the missing piece is a Stripe API key only the owner can supply), and
+  // parked a nonsense row in the human review queue after the retry ladder ran
+  // out — on every project with an `orders` table.
+  //
+  // Stripe intent is evidenced by a stored Stripe credential or by something
+  // named for Stripe that the user actually created. A table name is not
+  // evidence, so it can no longer switch this workflow on.
+  const hasKey = await hasIntegrationKey(projectId, 'stripe').catch(() => false)
+  const hasStripeArtifact = await (async () => {
+    const fn = await prisma.aiFunction
+      .findFirst({ where: { projectId, name: { contains: 'stripe' } }, select: { id: true } })
+      .catch(() => null)
+    if (fn) return true
+    const trigger = await prisma.appTrigger
+      .findFirst({ where: { projectId, webhookUrl: { contains: 'stripe' } }, select: { id: true } })
+      .catch(() => null)
+    return !!trigger
+  })()
+
+  if (!hasKey && !hasStripeArtifact) {
+    // Not in use — healthy with empty components, so nothing downstream reports it.
+    return { healthy: true, missingComponents: [], presentComponents: [] }
+  }
+
+  await check('stripe_key', async () => hasKey)
 
   // orders or payments table exists in the workspace DB
   const schema = `workspace_${projectId}`

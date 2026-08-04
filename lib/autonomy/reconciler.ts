@@ -274,6 +274,29 @@ const RECURRENCE_ESCALATE_AFTER = 3
  */
 export const ESCALATION_RETRY_BACKOFF_HOURS = [1, 6, 24, 72] as const
 
+/**
+ * How many fixes one tick may apply to one project.
+ *
+ * This is the loop's own pacing, and it replaces an inherited one that was never
+ * meant for it (see the `skipCooldown` note in runReconcilerLive). The value is
+ * a compromise between two real failure modes: too low and a backend with a
+ * dozen unprotected tables stays exposed for many minutes after detection; too
+ * high and a single tick could run an unbounded DDL batch against live user data
+ * on the strength of one scan.
+ *
+ * Ten per tick at a one-minute cadence converges essentially any real backend
+ * within a couple of passes, while still sitting far under the breaker's
+ * 500/hour anti-storm ceiling — so a flapping detector is caught by the breaker
+ * rather than by this, which is the division of responsibility both were
+ * designed for.
+ */
+const DEFAULT_MAX_FIXES_PER_TICK = 10
+
+function maxFixesPerTick(): number {
+  const v = Number(process.env.AUTONOMY_MAX_FIXES_PER_TICK)
+  return Number.isFinite(v) && v > 0 ? v : DEFAULT_MAX_FIXES_PER_TICK
+}
+
 /** What a stuck `pending_approval` row carries about its last failed attempt. */
 export interface EscalationRecord {
   reason?: unknown
@@ -475,6 +498,8 @@ export type GapSkipReason =
   | 'recurrence_suppressed'
   /** Fix demonstrably not holding — one finding opened for review instead. */
   | 'recurrence_escalated'
+  /** This tick hit its per-project fix ceiling. The next tick continues. */
+  | 'tick_batch_full'
   /** The bookkeeping itself failed. Always worth shouting about. */
   | 'error'
 
@@ -482,6 +507,10 @@ export type GapSkipReason =
 const SELF_CLEARING_SKIPS: ReadonlySet<GapSkipReason> = new Set<GapSkipReason>([
   'retry_backoff',
   'recurrence_suppressed',
+  // The loop did as much as one pass is allowed to; the remainder is queued for
+  // the next minute. Excluded from the stall alarm for the same reason the other
+  // two are: nobody needs to do anything for it to clear.
+  'tick_batch_full',
 ])
 
 /**
@@ -746,6 +775,14 @@ export async function runReconcilerLive(projectId: string): Promise<LiveReconcil
     const skips: Partial<Record<GapSkipReason, number>> = {}
 
     for (const decision of toApply) {
+      // Per-tick bound. The loop may repair a whole backend in one pass, but
+      // never without a ceiling — see MAX_FIXES_PER_TICK for why this is the
+      // right governor and the build budget was the wrong one.
+      if (applied >= maxFixesPerTick()) {
+        skips['tick_batch_full'] = (skips['tick_batch_full'] ?? 0) + 1
+        continue
+      }
+
       const { findingId, skip } = await ensureFinding(projectId, decision.gap)
       if (!findingId) {
         const reason = skip ?? 'error'
@@ -756,16 +793,45 @@ export async function runReconcilerLive(projectId: string): Promise<LiveReconcil
       // The kernel re-checks the classifier (defence in depth) and the circuit
       // breaker, captures a pre-snapshot for schema-touching fixes, writes the
       // HEALTH_AUTO_FIXED ledger row, escalates genuine failures, and DEFERS
-      // transient timing conditions (mutation cooldown / lock / breaker).
-      const res = await runAutoFix(findingId, projectId)
+      // transient timing conditions (lock contention / breaker).
+      //
+      // `skipCooldown` bypasses checkBuildBudget — NOT the circuit breaker, and
+      // NOT the advisory lock. Both still run, per fix, exactly as before.
+      //
+      // Why: checkBuildBudget enforces MAX_OPS_PER_HOUR = 10 and a 2-minute
+      // pause between mutations. Those numbers pace *AI builds* — a human or an
+      // agent iterating on a schema — and the autonomy loop was silently
+      // inheriting them. The effect was a hard cap of ten autonomous repairs per
+      // project per hour, which contradicts every other statement the system
+      // makes about itself: the circuit breaker documents healing as unlimited
+      // on every plan, seed-billing sets autonomyMaxActionsPerWindow = null on
+      // all three tiers, and computeReconciliationPlan above sets autoBudget to
+      // "every gap we found" on that basis. The kernel then rejected everything
+      // past the tenth with "Hourly mutation budget reached", which classifies
+      // as transient and defers — so a project with thirty gaps healed ten of
+      // them and then logged attempted=1 deferred=1 every minute for the rest of
+      // the hour, which reads as a working loop from every surface.
+      //
+      // It mattered most where it hurt most. missing_rls is a critical security
+      // gap; at one fix per two minutes a freshly built backend with ten
+      // unprotected tables stayed readable by every signed-in end-user for
+      // twenty minutes after the platform had already detected the problem.
+      //
+      // The circuit breaker is the ceiling that was actually designed for this:
+      // per-project, per-window, fails closed, with a 500/hour anti-storm bound
+      // to catch a flapping detector. Combined with the per-tick cap above,
+      // every safety property is preserved — classifier gate, pre-fix snapshot,
+      // post-fix re-probe, regression check, change-freeze — while a backend
+      // converges in a tick or two instead of an afternoon.
+      const res = await runAutoFix(findingId, projectId, { skipCooldown: true })
       if (res.outcome === 'auto_fixed') {
         applied++
       } else if (res.outcome === 'deferred') {
         deferred++
-        // The mutation kernel enforces a cooldown between writes. Hammering it
-        // would just defer the rest too. Stop now — the remaining gaps stay
-        // OPEN and the next tick picks them up. This is what makes the loop
-        // genuinely autonomous instead of piling work into the approval queue.
+        // Still a real stop condition: what remains after the budget is removed
+        // is advisory-lock contention and an open breaker, and neither clears
+        // by trying the next gap immediately. The remaining gaps stay OPEN and
+        // the next tick picks them up.
         break
       } else if (res.outcome === 'escalated' || res.outcome === 'pending_approval') {
         escalated++
@@ -913,10 +979,31 @@ export async function runReconciler(
 }
 
 /**
- * The plan cadence floor in minutes. Falls back to 24h on any failure — an
- * unresolvable plan must degrade to slow, never to unbounded.
+ * The plan cadence floor in minutes, used when the plan cannot be resolved.
+ *
+ * This used to be 1,440 — a full day — on the reasoning that an unresolvable
+ * plan should "degrade to slow, never to unbounded". That reasoning imported a
+ * safety argument into a place where none applies, and it is worth being exact
+ * about why, because the same instinct produced the 360-minute schema default
+ * and the CONSERVATIVE level fallback alongside it.
+ *
+ * Cadence is not a safety property. Reconciling too often costs a handful of
+ * indexed queries; nothing it decides gets less careful because it was decided
+ * sooner. Every actual safety gate — the tier classifier, the circuit breaker,
+ * the pre-fix snapshot, the post-fix re-probe, the change-freeze — runs per
+ * ATTEMPT and is completely unaffected by how frequently the loop looks.
+ *
+ * So the degradation was all cost and no protection, and the cost was the
+ * product: every plan sells healing every minute, and a transient failure to
+ * read a Subscription row silently moved a customer to once a day. Nothing
+ * surfaced it, because a slow loop and a fast loop are the same loop from every
+ * dashboard.
+ *
+ * One minute is now the floor in every direction: it matches what all three
+ * plans seed, and an unresolvable plan lands on the cadence the product
+ * promises rather than on the most cautious number available.
  */
-const SAFE_CADENCE_MIN = 1_440
+const SAFE_CADENCE_MIN = 1
 
 async function getProjectAutonomyCadenceMin(projectId: string): Promise<number> {
   try {
