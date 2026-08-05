@@ -433,19 +433,25 @@ function AutonomySection() {
           />
         </Reveal>
 
-        <Reveal delay={0.06}>
-          {/* Drawn, not filmed. A screen recording of this exact claim shipped
-              and was pulled once already: the product moved and the footage
-              showed a dashboard that no longer existed. This renders the same
-              instrument the Overview does, so it cannot go stale behind us. */}
-          <AutonomyFilm />
-        </Reveal>
+        {/* One column for the film and the row beneath it. They used to sit at
+            different widths — the film at max-w-7xl inside a 100rem section —
+            so the rule above the three points ran wider than the frame it was
+            meant to close off. Keep both on this container. */}
+        <div className="mx-auto mt-12 w-full max-w-7xl">
+          <Reveal delay={0.06}>
+            {/* Drawn, not filmed. A screen recording of this exact claim shipped
+                and was pulled once already: the product moved and the footage
+                showed a dashboard that no longer existed. This renders the same
+                instrument the Overview does, so it cannot go stale behind us. */}
+            <AutonomyFilm />
+          </Reveal>
 
-        <Stagger className="mt-12 grid gap-8 border-t border-white/[0.06] pt-10 md:grid-cols-3 md:gap-6">
-          {autonomyItems.map((item) => (
-            <IconRow key={item.title} item={item} />
-          ))}
-        </Stagger>
+          <Stagger className="mt-14 grid gap-8 border-t border-white/[0.06] pt-10 md:grid-cols-3 md:gap-8">
+            {autonomyItems.map((item) => (
+              <IconRow key={item.title} item={item} />
+            ))}
+          </Stagger>
+        </div>
       </div>
     </section>
   )

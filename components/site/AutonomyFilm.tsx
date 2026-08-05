@@ -18,6 +18,13 @@
  *
  * Motion runs only while the frame is on screen and is replaced by the final
  * resolved state under prefers-reduced-motion.
+ *
+ * Layout: three bands — chrome, instrument, ledger — divided by hairlines, one
+ * frame, one padding rhythm. Do not put the frame back on a 16:9 aspect ratio.
+ * It carried `md:aspect-video` from the recording it replaced, and a drawing
+ * that stands about 440px tall does not fill 720px: `justify-between` spent the
+ * difference as two black voids, which read as a panel that failed to load.
+ * Height comes from the content now.
  */
 
 import { useEffect, useRef, useState } from 'react'
@@ -149,58 +156,64 @@ export function AutonomyFilm() {
   // LOOP in HeroConsole). This is the third depiction of the same instrument on
   // the site; a visitor who watches this film, reads the hero, then signs up
   // must not be shown three different vocabularies for one loop.
-  const readings: { value: string; unit: string; tone?: 'bad' }[] = [
-    { value: '13', unit: 'guarantees · every minute' },
-    { value: open, unit: 'broken guarantees', ...(open === '1' ? { tone: 'bad' as const } : {}) },
-    { value: '0', unit: 'waiting on you' },
-    { value: fixed, unit: 'fixed on its own · 30d' },
-    { value: '100%', unit: 'proven fixed · 30d' },
+  // `short` is the phone variant, for the same reason LEDGER carries one: five
+  // columns across 360px leaves ~62px each, and the full units wrapped to three
+  // ragged lines that pushed every column to a different height. The short form
+  // is always a subset of the full phrase — never a second vocabulary for the
+  // same reading.
+  const readings: { value: string; unit: string; short: string; tone?: 'bad' }[] = [
+    { value: '13', unit: 'guarantees · every minute', short: 'guarantees' },
+    { value: open, unit: 'broken guarantees', short: 'broken', ...(open === '1' ? { tone: 'bad' as const } : {}) },
+    { value: '0', unit: 'waiting on you', short: 'waiting' },
+    { value: fixed, unit: 'fixed on its own · 30d', short: 'fixed alone' },
+    { value: '100%', unit: 'proven fixed · 30d', short: 'proven' },
   ]
 
   return (
-    // max-w tracks the landing's 88rem sections: at 4xl the instrument
-    // floated in the band's dead space instead of holding it.
-    <div className="mx-auto mt-12 w-full max-w-7xl">
+    // Width and top margin belong to the page, not to this component: the film
+    // and the three-column row under it have to share an edge, and only the
+    // section knows where that edge is. See AutonomySection.
+    <div className="w-full">
       <div
         ref={frameRef}
-        className="relative overflow-hidden rounded-xl border border-white/[0.08] bg-[#0a0a0c] md:aspect-video"
+        className="relative overflow-hidden rounded-xl border border-white/[0.08] bg-[#0a0a0c]"
         role="img"
         aria-label="The resident loop detecting missing row-level security on the invoices table at 03:14, capturing a restore point, applying the policy, and verifying it with a live request, with nobody at the keyboard."
       >
+        {/* One edge-light along the top. The violet radial that used to wash
+            the top-right corner is gone: at this size it read as a smudge on
+            the panel, not as light. */}
         <span
           aria-hidden
-          className="absolute inset-x-0 top-0 h-px bg-[linear-gradient(to_right,transparent,rgba(167,139,250,0.55),transparent)]"
-        />
-        <span
-          aria-hidden
-          className="absolute right-0 top-0 h-64 w-[28rem] max-w-full bg-[radial-gradient(closest-side,rgba(139,92,246,0.06),transparent)]"
+          className="absolute inset-x-0 top-0 h-px bg-[linear-gradient(to_right,transparent,rgba(167,139,250,0.45),transparent)]"
         />
 
-        <div className="relative flex h-full flex-col justify-between gap-7 p-5 sm:p-7 md:gap-0 md:p-8">
-          <Header clock={clock} live={live} />
+        {/* ── Chrome ───────────────────────────────────────────────────── */}
+        <Header clock={clock} live={live} />
 
-          {/* ── The instrument ─────────────────────────────────────────── */}
-          <div>
-            <Rail
-              live={live}
-              healing={healing}
-              activeNode={activeNode}
-              readings={readings}
-              healKey={step}
-            />
-            <ReturnArc live={live} />
-          </div>
+        {/* ── The instrument ───────────────────────────────────────────── */}
+        <div className="px-5 py-10 sm:px-8 sm:py-14">
+          <Rail
+            live={live}
+            healing={healing}
+            activeNode={activeNode}
+            readings={readings}
+            healKey={step}
+          />
+          <ReturnArc live={live} />
+        </div>
 
-          {/* ── The incident, as it is written ─────────────────────────── */}
-          <div className="rounded-lg border border-white/[0.07] bg-white/[0.015]">
-            <IncidentHeader card={card} beat={beat} reduced={!!reduced} />
-            <Ledger step={step} reduced={!!reduced} />
-          </div>
+        {/* ── The incident, as it is written ───────────────────────────── */}
+        {/* A band of this frame, not a card inside it: the ledger is the same
+            instrument's output, and boxing it made two nested panels. */}
+        <div className="border-t border-white/[0.06] bg-white/[0.015]">
+          <IncidentHeader card={card} beat={beat} reduced={!!reduced} />
+          <Ledger step={step} reduced={!!reduced} />
         </div>
       </div>
 
       {/* The clip this replaced was real footage; this is drawn. Say so. */}
-      <p className="mt-3 text-center text-[11px] leading-5 text-zinc-600">
+      <p className="mt-3.5 text-center text-[11px] leading-5 text-zinc-500">
         One pass of the resident loop, drawn to scale of the real instrument. Timings compressed.
       </p>
     </div>
@@ -209,9 +222,14 @@ export function AutonomyFilm() {
 
 /* ── Header ─────────────────────────────────────────────────────────────── */
 
+/**
+ * A title bar, not a floating line of text. Ruled off from the instrument so
+ * the frame reads as one panel with a top strip — the same chrome the
+ * dashboard puts over its own surfaces.
+ */
 function Header({ clock, live }: { clock: string; live: boolean }) {
   return (
-    <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+    <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-white/[0.06] px-5 py-3 sm:px-8">
       <div className="flex items-center gap-2.5">
         <span className="relative flex h-[5px] w-[5px]">
           {live && (
@@ -245,18 +263,18 @@ function Rail({
   live: boolean
   healing: boolean
   activeNode: number
-  readings: { value: string; unit: string; tone?: 'bad' }[]
+  readings: { value: string; unit: string; short: string; tone?: 'bad' }[]
   healKey: number
 }) {
   return (
     <div className="relative">
       {/* One hairline through the node centers (top = node height / 2). */}
-      <div className="absolute left-[10%] right-[10%] top-[13px] h-px bg-white/[0.08]" />
+      <div className="absolute left-[10%] right-[10%] top-[14px] h-px bg-white/[0.08]" />
 
       {/* The signal: comets on the rail, clipped so they enter and leave at
           the first and last node rather than at the frame edge. */}
       {live && (
-        <div className="pointer-events-none absolute left-[10%] right-[10%] top-[12px] h-[3px] overflow-hidden">
+        <div className="pointer-events-none absolute left-[10%] right-[10%] top-[13px] h-[3px] overflow-hidden">
           <motion.span
             className="absolute top-[1px] h-px w-28 bg-[linear-gradient(to_right,transparent,rgba(196,181,253,0.85),transparent)]"
             animate={{ left: ['-18%', '104%'] }}
@@ -272,7 +290,7 @@ function Rail({
 
       {/* The fix itself, driven down the rail on the Apply beat. */}
       {healing && (
-        <div className="pointer-events-none absolute left-[10%] right-[10%] top-[12px] h-[3px] overflow-hidden">
+        <div className="pointer-events-none absolute left-[10%] right-[10%] top-[13px] h-[3px] overflow-hidden">
           <motion.span
             key={healKey}
             className="absolute top-[1px] h-[1.5px] w-24 rounded-full bg-[linear-gradient(to_right,transparent,rgba(196,181,253,1),transparent)]"
@@ -293,7 +311,7 @@ function Rail({
           return (
             <div key={s.key} className="flex min-w-0 flex-col items-center">
               <span
-                className={`relative flex h-[26px] w-[26px] items-center justify-center rounded-full border bg-[#0a0a0c] transition-colors duration-300 ${
+                className={`relative flex h-[28px] w-[28px] items-center justify-center rounded-full border bg-[#0a0a0c] transition-colors duration-300 ${
                   active ? 'border-violet-400/45' : 'border-white/[0.09]'
                 }`}
               >
@@ -321,7 +339,7 @@ function Rail({
               </span>
 
               <span
-                className={`mt-2.5 text-[9px] font-semibold uppercase tracking-[0.14em] transition-colors duration-300 sm:text-[9.5px] ${
+                className={`mt-3 text-[9.5px] font-semibold uppercase tracking-[0.16em] transition-colors duration-300 sm:text-[10px] ${
                   active ? 'text-violet-200' : 'text-zinc-500'
                 }`}
               >
@@ -332,8 +350,11 @@ function Rail({
                   instead of five value+unit clumps of differing width. */}
               <Reading value={r.value} tone={r.tone} active={active} />
 
-              <span className="mt-1.5 max-w-[132px] px-1 text-center text-[9px] leading-[1.35] text-zinc-600 sm:text-[10px]">
-                {r.unit}
+              {/* zinc-500, not 600: at 10px on #0a0a0c the dimmer step fell
+                  under the contrast floor and the row lost its labels. */}
+              <span className="mt-2 max-w-[136px] px-1 text-center text-[10px] leading-[1.4] text-zinc-500">
+                <span className="sm:hidden">{r.short}</span>
+                <span className="hidden sm:inline">{r.unit}</span>
               </span>
             </div>
           )
@@ -345,20 +366,20 @@ function Rail({
 
 function Reading({ value, tone, active }: { value: string; tone?: 'bad'; active: boolean }) {
   const reduced = useReducedMotion()
-  const cls = `font-mono text-[17px] font-medium tabular-nums leading-none tracking-[-0.01em] transition-colors duration-300 sm:text-[21px] ${
+  const cls = `font-mono text-[19px] font-medium tabular-nums leading-none tracking-[-0.01em] transition-colors duration-300 sm:text-[24px] ${
     tone === 'bad' ? 'text-rose-300' : active ? 'text-white' : 'text-zinc-300'
   }`
 
   if (reduced) {
     return (
-      <span className="mt-2 flex h-[21px] items-center">
+      <span className="mt-2.5 flex h-[24px] items-center">
         <span className={cls}>{value}</span>
       </span>
     )
   }
 
   return (
-    <span className="mt-2 flex h-[21px] items-center">
+    <span className="mt-2.5 flex h-[24px] items-center">
       <span className="relative inline-flex leading-none">
         <AnimatePresence initial={false} mode="popLayout">
           <motion.span
@@ -417,7 +438,7 @@ function ReturnArc({ live }: { live: boolean }) {
     : ''
 
   return (
-    <div ref={ref} className="relative mt-3.5" style={{ height: ARC_H }}>
+    <div ref={ref} className="relative mt-5" style={{ height: ARC_H }}>
       {w > 0 && (
         <svg width={w} height={ARC_H} viewBox={`0 0 ${w} ${ARC_H}`} fill="none" className="absolute inset-0" aria-hidden="true">
           <path d={d} stroke="rgba(255,255,255,0.13)" strokeWidth={1} />
@@ -444,7 +465,7 @@ function ReturnArc({ live }: { live: boolean }) {
         </svg>
       )}
 
-      <span className="pointer-events-none absolute bottom-0 left-1/2 -translate-x-1/2 translate-y-1/2 whitespace-nowrap bg-[#0a0a0c] px-3 text-[9.5px] leading-none text-zinc-600 sm:text-[10px]">
+      <span className="pointer-events-none absolute bottom-0 left-1/2 -translate-x-1/2 translate-y-1/2 whitespace-nowrap bg-[#0a0a0c] px-3 text-[10px] leading-none text-zinc-500">
         Verify feeds the next Observe
         <span className="hidden sm:inline">. No human at the top of the loop</span>
       </span>
@@ -467,7 +488,7 @@ function IncidentHeader({
       : 'bg-zinc-600'
 
   return (
-    <div className="flex items-center justify-between gap-4 border-b border-white/[0.06] px-3.5 py-2.5 sm:px-4">
+    <div className="flex items-center justify-between gap-4 border-b border-white/[0.05] px-5 py-3 sm:px-8">
       <div className="flex min-w-0 items-center gap-2.5">
         <span className="flex h-4 w-4 shrink-0 items-center justify-center">
           {card.tone === 'good' ? (
@@ -537,14 +558,14 @@ function Swap({
  */
 function Ledger({ step, reduced }: { step: number; reduced: boolean }) {
   return (
-    <ul className="px-3.5 py-2 sm:px-4">
+    <ul className="px-5 py-3 sm:px-8 sm:py-3.5">
       {LEDGER.map(row => {
         const written = reduced || step >= row.from
         return (
-          <li key={row.tag} className="flex items-baseline gap-2.5 py-[3px] sm:gap-3">
+          <li key={row.tag} className="flex items-baseline gap-2.5 py-[3.5px] sm:gap-3.5">
             <span
               className={`shrink-0 font-mono text-[9.5px] tabular-nums transition-colors duration-500 ${
-                written ? 'text-zinc-600' : 'text-zinc-800'
+                written ? 'text-zinc-500' : 'text-zinc-700'
               }`}
             >
               {written ? row.at : '--:--'}
