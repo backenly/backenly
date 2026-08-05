@@ -3070,6 +3070,20 @@ export async function executeAction(
       'CREATE_TABLE', 'CREATE_JUNCTION_TABLE', 'ADD_COLUMN', 'RENAME_COLUMN',
     ])
 
+    // Actions after which "who owns a row in this table?" can have a NEW answer,
+    // for this table or for one created earlier. Deliberately wider than the
+    // action's own target: adding `orders` is what makes `order_items` — a table
+    // this action never mentions — inferrable. See the reconcile call below.
+    const OWNERSHIP_AFFECTING_ACTIONS = new Set([
+      'CREATE_TABLE',      // may be the parent an earlier child was waiting for
+      'CREATE_JUNCTION_TABLE', // never applied RLS on its own path at all
+      'ADD_COLUMN',        // may introduce user_id / owner_id
+      'RENAME_COLUMN',     // may rename a column INTO or out of owner shape
+      'ADD_CONSTRAINT',    // may introduce the FK that implies ownership
+      'REGISTER_TABLE',    // adopts a pre-existing table into the platform
+      'ENABLE_AUTH',       // creates `users`, the anchor every plan resolves against
+    ])
+
     for (const act of finalActions) {
       // Phase 8: wrap each action with timeline tracking
       lastResult = await trackAction(
@@ -3122,6 +3136,49 @@ export async function executeAction(
 
       if (!lastResult.success) {
         return lastResult
+      }
+
+      // ── Re-derive protection for every table the change made decidable ──────
+      //
+      // Ownership is not knowable at the moment a table is created. An agent
+      // writes `order_items` before `orders` exists in half the plans it emits,
+      // so when `autoApplyRlsIfNeeded` ran inside create_table there was no FK
+      // to `orders` yet, ownership came back `undecidable`, and the table was
+      // deliberately left with RLS OFF. Creating `orders` one step later fires
+      // `repairForeignKeysGlobally`, which installs exactly the FK that makes
+      // `order_items` decidable — and nothing re-asked the question.
+      //
+      // The result was a table left world-readable by the builder and then
+      // reported back to the owner as `critical | missing_rls` on a backend with
+      // no users and no deployment. `reconcileAutoRls` was written for precisely
+      // this and had ZERO callers in the repo, so the retroactive half of the
+      // design never ran anywhere.
+      //
+      // It belongs here rather than in create_table because create_table is not
+      // the only mutation that changes the answer: ADD_COLUMN can introduce the
+      // `user_id` that names an owner, ADD_CONSTRAINT can introduce the FK that
+      // implies one, and CREATE_JUNCTION_TABLE never applied RLS at all. Every
+      // one of those funnels through here, including Supabase import and the
+      // migration parser, which compile to these same actions.
+      //
+      // AWAITED on purpose. `schema.changed` triggers an observer scan, and a
+      // fire-and-forget repair races it — the finding gets filed and then
+      // silently resolved, which is the same bad experience one tick later.
+      // Only touches tables with no Backenly-managed policy, so it can never
+      // overwrite a rule the agent or the user stated explicitly.
+      if (OWNERSHIP_AFFECTING_ACTIONS.has(act.action)) {
+        try {
+          const { reconcileAutoRls } = await import('@/lib/services/workspace-rls')
+          await reconcileAutoRls(projectId)
+        } catch (rlsErr: any) {
+          // Non-fatal: the mutation succeeded and must not be reported as failed.
+          // Loud, because the fallback is the watchdog telling the owner about a
+          // gap the builder was supposed to have closed.
+          console.error(
+            `[AutoRLS] post-${act.action} reconcile failed for ${projectId}:`,
+            rlsErr?.message,
+          )
+        }
       }
 
       // Update context memory after successful execution
