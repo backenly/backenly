@@ -31,6 +31,7 @@ import { generateFixedFunctionCode } from './generator'
 import { isRouteModuleFunction, executeRouteModuleFunction, validateRouteModule } from './route-module-runner'
 import { enforceAiFunctionInvocation, trackAiFunctionInvocation } from '@/lib/billing'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
+import { isReservedTestEmail } from '@/lib/services/end-user-auth-table'
 // One cast table for the whole codebase. Duplicating it is how the MCP path and
 // this one would drift, and a drifted cast table is invisible until 42804.
 import { castTarget, coerceValue, columnTypes } from '@/lib/mcp/runtime-db'
@@ -804,11 +805,38 @@ export async function fireAiFunctions(
   }
 }
 
+/**
+ * Run a project's `on_signup` handlers for a newly created end user.
+ *
+ * ── Synthetic accounts are excluded, and that is load-bearing ────────────────
+ *
+ * The contract sweep signs up a throwaway `…@*.internal` user every minute to
+ * check that signup/signin/logout still answer their contract, then deletes it
+ * in a `finally` the moment the round-trip returns. These handlers are dispatched
+ * fire-and-forget by both signup routes, so they were still running against that
+ * user when it was purged — and lost the race roughly half the time. The live
+ * symptom was `insert or update on "profiles" violates foreign key constraint
+ * "fk_profiles_user"` in the Postgres log, intermittently, indefinitely.
+ *
+ * Awaiting the handlers before the purge would be the wrong repair. The probe
+ * exists to verify the auth SURFACE, not to execute the developer's business
+ * automations. Running those against a user with a two-second lifetime writes
+ * half-finished rows into their tables and bills every run against their
+ * function invocation quota — 2,735 invocations on one live project, not one of
+ * which could ever have completed.
+ *
+ * The filter lives HERE rather than at the call sites because there are two
+ * signup routes (`server/routes/auth.ts` serves production, the Next.js
+ * `app/api/v1/.../signup/route.ts` the other path) and a guard written at one
+ * call site silently leaves the other firing.
+ */
 export async function fireAiFunctionsOnSignup(
   projectId: string,
   user: Record<string, any>
 ): Promise<void> {
   try {
+    if (typeof user?.email === 'string' && isReservedTestEmail(user.email)) return
+
     const functions = await prisma.aiFunction.findMany({
       where: { projectId, status: 'active', triggerType: 'on_signup' },
       select: { id: true },

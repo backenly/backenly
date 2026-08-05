@@ -195,7 +195,9 @@ async function handleSignUp(req: Request, res: Response) {
       { expiresIn: '7d', algorithm: 'HS256' }
     )
 
-    // Non-blocking: fire on_signup AI functions
+    // Non-blocking: fire on_signup AI functions. Synthetic verifier accounts are
+    // filtered inside fireAiFunctionsOnSignup, not here — two signup routes call
+    // it and a guard at the call site only ever covers one of them.
     import('@/lib/services/ai-functions/executor').then(({ fireAiFunctionsOnSignup }) => {
       fireAiFunctionsOnSignup(projectId, { id: user.id, email: user.email, name: user.name }).catch(
         (err: any) => console.warn('[AiFunctions] on_signup failed (non-fatal):', err?.message)
