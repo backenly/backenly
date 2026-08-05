@@ -92,7 +92,6 @@ const publicApiRoutes = [
   '/api/auth/platform-github',
   '/api/auth/platform-providers',
   '/api/health',
-  '/api/github-stars',              // Public read-only GitHub star count for the landing navbar
   '/api/internal/',                 // Internal middleware-to-server endpoints
   '/api/v1/',                       // Project runtime API — API key auth
   '/api/mcp',                       // MCP server — scope='mcp' API key auth at route level.

@@ -5,7 +5,7 @@ import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { Icon } from '@iconify/react'
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
-import { Menu, X, Star } from 'lucide-react'
+import { Menu, X } from 'lucide-react'
 import { registerSiteIcons } from '@/lib/icons/registry'
 import { BrandMark } from '@/components/site/BrandMark'
 import { SmoothScroll } from '@/components/site/SmoothScroll'
@@ -32,48 +32,11 @@ export const ROUTES = {
   founder: 'https://calendly.com/adarsh-c-jose/30min',
   x: 'https://x.com/Backenly',
   linkedin: 'https://www.linkedin.com/company/117034579',
-  // The flagship open-source platform repo. Its live star count is shown in the
-  // navbar (see useGitHubStars). Must be public for the count and this link to
-  // resolve for anonymous visitors.
+  // The flagship open-source platform repo. Must be public for this link to
+  // resolve for anonymous visitors. The navbar links to it with a bare icon:
+  // the star count used to be rendered beside it and was deliberately removed.
   github: 'https://github.com/backenly/backenly',
 } as const
-
-/* Live GitHub star count for the navbar. Reads the cached /api/github-stars
-   route, refreshes every 60s and whenever the tab regains focus, so the number
-   tracks real stars without hammering GitHub. Returns null until the first load
-   succeeds (or when the repo is private / unavailable), and the navbar hides the
-   count in that case rather than showing a placeholder. */
-function useGitHubStars() {
-  const [stars, setStars] = useState<number | null>(null)
-  useEffect(() => {
-    let alive = true
-    const load = async () => {
-      try {
-        const res = await fetch('/api/github-stars', { cache: 'no-store' })
-        const data = await res.json()
-        if (alive && typeof data.stars === 'number') setStars(data.stars)
-      } catch {
-        /* keep the last known value on a transient failure */
-      }
-    }
-    load()
-    const id = window.setInterval(load, 60_000)
-    const onFocus = () => load()
-    window.addEventListener('focus', onFocus)
-    return () => {
-      alive = false
-      window.clearInterval(id)
-      window.removeEventListener('focus', onFocus)
-    }
-  }, [])
-  return stars
-}
-
-function formatStars(n: number) {
-  if (n < 1000) return String(n)
-  const k = n / 1000
-  return `${k.toFixed(k < 10 ? 1 : 0)}k`
-}
 
 const NAV_LINKS = [
   { label: 'Product', href: '/#capabilities', activePath: '/' },
@@ -114,7 +77,6 @@ export function NavBar() {
   const [mobileOpen, setMobileOpen] = useState(false)
   const pathname = usePathname()
   const reduceMotion = useReducedMotion()
-  const stars = useGitHubStars()
 
   useEffect(() => {
     if (!mobileOpen) return
@@ -173,25 +135,10 @@ export function NavBar() {
             href={ROUTES.github}
             target="_blank"
             rel="noopener noreferrer"
-            aria-label={stars != null ? `Backenly on GitHub, ${stars} stars` : 'Backenly on GitHub'}
-            className="group flex h-9 items-center gap-2 rounded-full border border-white/[0.08] bg-white/[0.03] px-2.5 text-zinc-400 transition-colors hover:border-white/[0.16] hover:text-white"
+            aria-label="Backenly on GitHub"
+            className="group flex h-9 w-9 items-center justify-center rounded-full border border-white/[0.08] bg-white/[0.03] text-zinc-400 transition-colors hover:border-white/[0.16] hover:text-white"
           >
             <Icon icon="ri:github-fill" width={17} />
-            <AnimatePresence mode="popLayout" initial={false}>
-              {stars != null && (
-                <motion.span
-                  key={stars}
-                  initial={reduceMotion ? false : { opacity: 0, y: -6 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: 6 }}
-                  transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
-                  className="flex items-center gap-1 pr-0.5 text-[13px] font-medium tabular-nums"
-                >
-                  <Star size={11} className="text-violet-400/90" fill="currentColor" strokeWidth={0} />
-                  {formatStars(stars)}
-                </motion.span>
-              )}
-            </AnimatePresence>
           </a>
           <span className="h-6 w-px bg-white/[0.12]" aria-hidden />
           <Link
@@ -257,15 +204,7 @@ export function NavBar() {
                 onClick={() => setMobileOpen(false)}
                 className="flex items-center justify-between rounded-full px-4 py-3 text-sm text-zinc-300 transition-colors hover:bg-white/[0.05] hover:text-white"
               >
-                <span className="flex items-center gap-2">
-                  GitHub
-                  {stars != null && (
-                    <span className="flex items-center gap-1 text-xs font-medium tabular-nums text-zinc-500">
-                      <Star size={10} className="text-violet-400/90" fill="currentColor" strokeWidth={0} />
-                      {formatStars(stars)}
-                    </span>
-                  )}
-                </span>
+                <span className="flex items-center gap-2">GitHub</span>
                 <Icon icon="solar:arrow-right-up-linear" width={13} className="text-zinc-500" />
               </a>
 
