@@ -477,6 +477,21 @@ const EXTERNAL_ID_PREFIXES = new Set([
   'segment', 'mixpanel', 'amplitude', 'posthog', 'datadog', 'sentry',
 ])
 
+/**
+ * Qualifiers that mark a FK as pointing FORWARD in time — at a row that does not
+ * exist yet when this row is created.
+ *
+ * `apps.current_version_id` is the canonical shape and it was a live deadlock:
+ * an app cannot be inserted before its first version exists, and a version
+ * cannot be inserted before the app it belongs to. NOT NULL on either side makes
+ * both inserts impossible, so the table can never hold a row. These columns are
+ * always "set once the thing it points at exists", which is what NULL means.
+ */
+const FORWARD_POINTER_PREFIXES = [
+  'current', 'latest', 'active', 'primary', 'default', 'featured',
+  'selected', 'preferred', 'pinned', 'winning',
+]
+
 /** True when an `*_id` column names a third-party identifier rather than a local FK. */
 function isExternalIdColumn(lowerName: string): boolean {
   if (!lowerName.endsWith('id') || lowerName === 'id') return false
@@ -540,7 +555,36 @@ function deriveConstraints(columnName: string, columnType: string, tableName: st
   const constraints: ColumnConstraints = {
     isPrimaryKey: lower === 'id',
     isUnique: lower.includes('email') || lower.includes('username') || lower.includes('slug'),
-    isRequired: !lower.includes('optional') && !lower.startsWith('is_') && !lower.startsWith('has_'),
+    // ── Nullable unless something below gives a POSITIVE reason to require it ──
+    //
+    // This read `!lower.includes('optional') && !startsWith('is_'/'has_')`, i.e.
+    // NOT NULL for every column whose name did not literally contain the word
+    // "optional". Nothing an agent or a human writes names columns that way, so
+    // in practice every scalar column Backenly generated was mandatory.
+    //
+    // Measured on a live project: `profiles` came out with display_name,
+    // avatar_url, role, bio, website AND location all NOT NULL with no default.
+    // Backenly then generated the signup handler for that same table, and it
+    // correctly passed `avatar_url: null` for a user who has not uploaded one.
+    // The table rejected the row its own generated code was written to insert.
+    // That function ran 2,735 times, swallowed the 23502 in its try/catch, and
+    // reported healthy while `profiles` sat at zero rows.
+    //
+    // The same schema also produced `billing_invoices.paid_at NOT NULL` (an
+    // unpaid invoice is unrepresentable), `organization_invitations.accepted_at
+    // NOT NULL` (so is a pending invitation) and `feedback.comment NOT NULL`
+    // (so is a rating without one). These are not edge cases; requiredness is a
+    // domain fact and guessing it from a column name is wrong more often than
+    // right, in the direction that makes a table un-insertable.
+    //
+    // Postgres itself defaults to nullable, and this file already settled the
+    // identical argument for DEFAULTs: "No default is honest: the caller
+    // supplies the state, or declares one." An explicit `notNull` /
+    // `nullable: false` from the caller still wins, via applyExplicitColumnFlags
+    // — that is a statement rather than a guess. The positive reasons that
+    // remain are below: primary keys, foreign keys, and the identity anchors
+    // (email / username).
+    isRequired: false,
     hasDefault: lower.startsWith('is_') || lower.startsWith('has_') || lower.includes('status') || lower.includes('created') || lower.includes('updated'),
     foreignKey: undefined
   }
@@ -578,6 +622,16 @@ function deriveConstraints(columnName: string, columnType: string, tableName: st
       // (fk_<table>_sellerId, fk_<table>_buyerId) — no collision.
       constraints.foreignKey = 'users.id'
       constraints.isRequired = true
+    } else if (FORWARD_POINTER_PREFIXES.some(p => refLower.startsWith(p))) {
+      // A pointer to a row that does not exist yet at INSERT time.
+      // `apps.current_version_id` is the shape: you cannot create the app before
+      // its first version, and you cannot create the version before the app it
+      // belongs to. Marking it NOT NULL makes both inserts impossible, which is
+      // exactly how the live `apps` table ended up unwritable. Same for
+      // latest_/active_/primary_/default_/featured_ pointers — they are all
+      // "set once something else exists", so they must start NULL.
+      constraints.foreignKey = `${refTable}s.id`
+      constraints.isRequired = false
     } else {
       constraints.foreignKey = `${refTable}s.id` // users, products, workspaces, etc.
       constraints.isRequired = true // FK usually required
