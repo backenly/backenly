@@ -135,7 +135,13 @@ async function fetchTableStats(schemaName: string): Promise<TableStat[]> {
   const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 3 })
   try {
     const result = await pool.query<TableStat>(
-      `SELECT tablename, n_live_tup::int
+      // `relname AS tablename`, not `tablename`: pg_stat_user_tables exposes
+      // (schemaname, relname) — `tablename` is a pg_tables column. The bare form
+      // raises 42703 on every call, and this function's caller treats a failure
+      // as "no tables", so the simulator silently sized every project at zero
+      // rows. Same mistake, same view, as the three detectors fixed in
+      // lib/ai/infra-intelligence.ts.
+      `SELECT relname AS tablename, n_live_tup::int
          FROM pg_stat_user_tables
         WHERE schemaname = $1`,
       [schemaName],

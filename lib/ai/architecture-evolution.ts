@@ -150,7 +150,12 @@ async function collectEvidence(projectId: string): Promise<StageEvidence> {
     const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 2 })
     try {
       const rows = await pool.query<{ tablename: string; n_live_tup: string }>(
-        `SELECT tablename, n_live_tup::int
+        // `relname AS tablename`, not `tablename` — pg_stat_user_tables exposes
+        // (schemaname, relname). The bare form raised 42703 on every call and the
+        // enclosing try/catch swallowed it, so `totalRows` stayed 0 and
+        // `hasRealtime` stayed false for every project: the evolution advisor was
+        // reasoning about an empty backend regardless of what was really there.
+        `SELECT relname AS tablename, n_live_tup::int
            FROM pg_stat_user_tables
           WHERE schemaname = $1`,
         [schemaName],

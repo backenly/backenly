@@ -30,6 +30,45 @@ const SOURCE = path.join(process.cwd(), 'lib', 'ai', 'infra-intelligence.ts')
 const CONN = process.env.BENCH_DATABASE_URL || process.env.DATABASE_URL || ''
 
 /**
+ * Every source file, not just this one.
+ *
+ * The first version of this suite pointed at `infra-intelligence.ts` alone,
+ * because that is where the three dead detectors lived. It therefore guarded the
+ * FILE that had been fixed rather than the MISTAKE, and two siblings carrying the
+ * identical query survived it:
+ *
+ *   lib/ai/arch-simulator.ts        SELECT tablename, n_live_tup::int …
+ *   lib/ai/architecture-evolution.ts  (same)
+ *
+ * Both kept raising 42703 in production for three more days, on the same view,
+ * for the same reason. A test scoped to one file cannot catch a copy-paste into
+ * the next one, so the sweep below reads the whole tree.
+ */
+function sourceFiles(): string[] {
+  const roots = ['lib', 'server', 'app', 'scripts']
+  const out: string[] = []
+  const walk = (dir: string) => {
+    let entries: fs.Dirent[]
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const e of entries) {
+      const full = path.join(dir, e.name)
+      if (e.isDirectory()) {
+        if (e.name === 'node_modules' || e.name === '.next') continue
+        walk(full)
+      } else if (e.name.endsWith('.ts') || e.name.endsWith('.tsx')) {
+        out.push(full)
+      }
+    }
+  }
+  for (const r of roots) walk(path.join(process.cwd(), r))
+  return out
+}
+
+/**
  * Pull every template-literal SQL string that reads a pg_stat_* view.
  * Deliberately greps the real file rather than a fixture: the point is to catch
  * a query somebody adds tomorrow.
@@ -57,6 +96,23 @@ describe('infra-intelligence pg_stat queries', () => {
     // is the specific mistake that cost three detectors six days of silence.
     const offenders = queries.filter((q) => /select[\s\S]*?\btablename\b(?!\s*=)/i.test(q) &&
       !/relname\s+AS\s+tablename/i.test(q))
+    expect(offenders).toEqual([])
+  })
+
+  it('NO source file anywhere selects `tablename` from a pg_stat_* view', () => {
+    // The whole-tree version of the assertion above. Scoping it to this one file
+    // is what let arch-simulator.ts and architecture-evolution.ts keep the bare
+    // form and keep raising 42703 in production after the "fix".
+    const offenders: string[] = []
+    for (const file of sourceFiles()) {
+      const text = fs.readFileSync(file, 'utf8')
+      if (!/pg_stat_/i.test(text)) continue
+      for (const q of extractPgStatQueries(text)) {
+        if (!/select[\s\S]*?\btablename\b(?!\s*=)/i.test(q)) continue
+        if (/relname\s+AS\s+tablename/i.test(q)) continue
+        offenders.push(`${path.relative(process.cwd(), file)} :: ${q.slice(0, 70).replace(/\s+/g, ' ')}`)
+      }
+    }
     expect(offenders).toEqual([])
   })
 
