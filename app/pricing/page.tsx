@@ -82,12 +82,12 @@ const plans: Plan[] = [
     ctaHref: `mailto:support@backenly.com?subject=Backenly%20Enterprise`,
     limits: [
       { label: 'Users', value: 'Custom MAU' },
-      { label: 'Autonomy', value: 'Custom cadence' },
+      { label: 'Autonomy', value: 'Every minute, full dial' },
       { label: 'AI credits', value: 'Custom pool' },
-      { label: 'Database', value: 'Dedicated capacity' },
+      { label: 'Database', value: 'Custom capacity' },
     ],
     features: [
-      'Custom autonomy cadence and guardrail policies for your compliance posture',
+      'Custom guardrail policies for your compliance posture',
       'SSO (OIDC), RBAC, and priority incident response with a 12-hour SLA',
       'Onboarding and migration help, invoicing, procurement-friendly billing',
     ],
@@ -107,11 +107,11 @@ const included: { icon: LucideIcon; label: string; body: string }[] = [
 
 const comparisonRows = [
   ['Monthly active users', '50,000', '200,000', 'Custom'],
-  ['Autonomy cadence', 'Every minute', 'Every minute', 'Custom'],
+  ['Autonomy cadence', 'Every minute', 'Every minute', 'Every minute'],
   ['Autonomous fixing', 'Included', 'Included', 'Included'],
   ['AI credits', '200 / mo', '3,000 / mo', 'Custom pool'],
   ['Bring your own agent (MCP)', 'Typed tools: no AI charge', 'Typed tools: no AI charge', 'Typed tools: no AI charge'],
-  ['Database', '512 MB Postgres', '10 GB Postgres', 'Dedicated capacity'],
+  ['Database', '512 MB Postgres', '10 GB Postgres', 'Custom capacity'],
   ['File storage', '1 GB', '100 GB', 'Custom'],
   ['API requests', '100k total', 'Unlimited', 'Unlimited'],
   ['Function runs', '10,000 / mo', '2M / mo', 'Custom'],
@@ -131,15 +131,15 @@ const faqs = [
   },
   {
     q: 'What counts as an AI credit?',
-    a: 'One credit is 1,000 tokens of Backenly’s own model usage. Credits are spent when Backenly does the thinking: its chat, the natural-language MCP tool (backend_chat), and LLM-powered tools like the architect and function generation. They are a small included line, not the headline — the typed MCP tools cost nothing, and autonomy never draws credits because the loop runs no model.',
+    a: 'One credit is 1,000 tokens of Backenly’s own model usage. Credits are spent when Backenly runs its own model on your behalf: the natural-language MCP tool (backend_chat), including the LLM-powered steps inside that turn such as the architect and function generation. They are a small included line, not the headline — the dashboard assistant answers questions free, the typed MCP tools cost nothing, and autonomy never draws credits.',
   },
   {
     q: 'Does driving the backend from my coding agent cost credits?',
-    a: 'Almost never — it depends which tool your agent calls. The typed MCP tools (create_table, add_column, set_rls, generate_types, run_query and the rest) compile straight to SQL with no model call, so they are free on every plan: your agent supplies the intelligence and you pay your own provider. The exception is the natural-language tools — backend_chat and generate_function — where Backenly runs its own model on your behalf, and those draw credits. Point your agent at the typed tools and the AI meter stays at zero.',
+    a: 'Almost never — it depends which tool your agent calls. The typed MCP tools (create_table, add_column, set_rls, generate_types, run_query and the rest) compile straight to SQL with no model call, so they are free on every plan: your agent supplies the intelligence and you pay your own provider. The exception is the natural-language tools — backend_chat and generate_function — where Backenly runs its own model on your behalf, and those draw credits: you are billed the tokens the call actually burned, nothing more. Point your agent at the typed tools and the AI meter stays at zero.',
   },
   {
     q: 'Does autonomy spend my credits?',
-    a: 'Never. The loop is deterministic: probes detect drift, and each finding maps to a typed repair that compiles to SQL. It runs no model, so there is nothing to bill. Every plan gets the identical loop — checks every minute, repairs everything it safely can, with no per-window cap and no monthly limit, Free included. We do not meter healing: a backend that stops repairing itself once you hit a quota is the exact failure we built this to remove. Plans differ on capacity — projects, users, storage, AI credits — never on whether your backend is allowed to stay healthy.',
+    a: 'Never. Detection and repair are deterministic: probes find drift, and each finding maps to a typed repair that compiles to SQL — no model in the repair path, so there is nothing to bill you for. When the loop cannot fix something and escalates it to you, a model may write up the diagnosis you read; that pass is on us, never your credits. Every plan gets the identical loop — checks every minute, repairs everything it safely can, with no per-window cap and no monthly limit, Free included. We do not meter healing: a backend that stops repairing itself once you hit a quota is the exact failure we built this to remove. Plans differ on capacity — projects, users, storage, AI credits — never on whether your backend is allowed to stay healthy.',
   },
   {
     q: 'Are database, auth, storage, and realtime paid add-ons?',
@@ -153,16 +153,11 @@ const faqs = [
     q: 'Can I cancel anytime?',
     a: 'Yes. Paid access continues until the end of the billing period, then the account returns to the Free plan.',
   },
-  {
-    q: 'What does the Enterprise plan include?',
-    a: 'Custom user, credit, and storage limits, dedicated project isolation, onboarding and migration help, priority incident response with an SLA, and invoicing. Email support@backenly.com with what you are running and we will scope it around your product.',
-  },
 ]
 
 export default function PricingPage() {
   const router = useRouter()
   const [isLoggedIn, setIsLoggedIn] = useState(false)
-  const [currentProjectId, setCurrentProjectId] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -181,10 +176,6 @@ export default function PricingPage() {
         if (cancelled) return
 
         setIsLoggedIn(response.ok)
-        if (response.ok) {
-          const projectId = localStorage.getItem('current-project-id')
-          if (projectId) setCurrentProjectId(projectId)
-        }
       } catch {
         if (!cancelled) setIsLoggedIn(false)
       }
@@ -203,12 +194,11 @@ export default function PricingPage() {
       return
     }
 
-    if (currentProjectId) {
-      router.push('/app/settings?tab=billing')
-      return
-    }
-
-    router.push('/app/settings?tab=billing')
+    // Billing was promoted out of settings into its own org page. The legacy
+    // `?tab=billing` deep link still works, but only because settings/page.tsx
+    // catches it and redirects — so sending people through it costs a needless
+    // client-side bounce. Go straight to the real page.
+    router.push('/app/billing')
   }
 
   return (
@@ -311,8 +301,8 @@ export default function PricingPage() {
                 <h2 className="mt-3 text-3xl font-semibold text-white">Capacity changes. Core runtime stays.</h2>
               </div>
               <p className="max-w-xl text-sm leading-6 text-zinc-500">
-                Running at company scale? Enterprise adds custom limits, dedicated isolation,
-                onboarding help, and an SLA — email support and we will scope it with you.
+                Running at company scale? Enterprise adds custom limits, SSO, onboarding and
+                migration help, and a 12-hour SLA — email support and we will scope it with you.
               </p>
             </div>
 

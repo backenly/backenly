@@ -45,7 +45,7 @@ export const POST = withAuth(async (request: NextRequest, { user }) => {
     if (planName === 'SCALE') {
       return NextResponse.json(
         {
-          error: 'Enterprise is sales-led — email sales@backenly.com and we will scope it around your product.',
+          error: 'Enterprise is sales-led — email support@backenly.com and we will scope it around your product.',
           code: 'ENTERPRISE_SALES_LED',
         },
         { status: 400 }

@@ -39,6 +39,16 @@ const nextConfig = {
       // Standalone mock Service Keys page deleted 2026-07-17 — IAM = access,
       // and the live access surface is the org Members page.
       { source: '/app/iam', destination: '/app/members', permanent: true },
+
+      // Second in-app pricing page deleted 2026-08-07. Nothing ever linked to
+      // it — it was not in the nav, the sitemap, or either guard list in
+      // app/app/layout.tsx, so it rendered chrome-less and bounced anyone with
+      // zero projects back to /app. It still cost real maintenance: three
+      // separate pricing commits had to edit it in parallel with the billing
+      // panel, and it drifted anyway (dead sales@ CTA, a "dedicated isolation"
+      // claim nothing in the codebase provides, the superseded #080A0F
+      // palette). The live plan chooser is the one in /app/billing.
+      { source: '/app/pricing', destination: '/app/billing', permanent: true },
       { source: `${P}/mcp`, destination: `${P}/connect`, permanent: true },
       { source: `${P}/inspector/connected-apps`, destination: `${P}/connect`, permanent: true },
       { source: `${P}/inspector/deployment-status`, destination: `${P}/deploy`, permanent: true },

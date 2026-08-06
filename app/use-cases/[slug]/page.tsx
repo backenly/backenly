@@ -74,7 +74,7 @@ const USE_CASES: Record<string, UseCaseData> = {
       },
       {
         heading: 'Ship on Friday, sleep on Saturday',
-        body: "After you deploy, the platform's autonomy loop watches real traffic — requests, latency, error rates — and reacts on a plan-based cadence. Safe fixes are applied and written up (what was detected, what changed, how the fix was verified); anything risky waits in a review queue for your approval. Every change carries a restore point. This is the difference between 'my agent built a backend' and 'my product has a backend': someone is on call, and it isn't you.",
+        body: "After you deploy, the platform's autonomy loop watches real traffic — requests, latency, error rates — and reacts every minute, on every plan including Free. Safe fixes are applied and written up (what was detected, what changed, how the fix was verified); anything risky waits in a review queue for your approval. Every change carries a restore point. This is the difference between 'my agent built a backend' and 'my product has a backend': someone is on call, and it isn't you.",
       },
     ],
     faq: [
@@ -242,7 +242,7 @@ const USE_CASES: Record<string, UseCaseData> = {
       },
       {
         heading: 'Your attention is the scarce resource',
-        body: "An AI product lives or dies on model behavior, prompt quality, and iteration speed — the parts only you can do. The autonomy loop takes the part anyone shouldn't have to do: it watches request traffic and error rates on a fixed cadence, repairs what is safe to repair, queues risky changes for approval, and writes receipts for everything. Rate limits on the runtime API keep a hot user or leaked key from turning into an inference bill. The backend defends itself, so your best hours go to the AI layer.",
+        body: "An AI product lives or dies on model behavior, prompt quality, and iteration speed — the parts only you can do. The autonomy loop takes the part anyone shouldn't have to do: it watches request traffic and error rates every minute, repairs what is safe to repair, queues risky changes for approval, and writes receipts for everything. Rate limits on the runtime API keep a hot user or leaked key from turning into an inference bill. The backend defends itself, so your best hours go to the AI layer.",
       },
     ],
     faq: [
@@ -298,7 +298,7 @@ const USE_CASES: Record<string, UseCaseData> = {
       },
       {
         heading: 'If it takes off, nothing gets rebuilt',
-        body: "The upgrade path is a plan change, not a migration: the same PostgreSQL database, the same REST API, the same auth — with higher limits and a faster monitoring cadence. Side projects that become products keep their data and their URL. And because the backend is standard infrastructure with a full change history, the moment your weekend project becomes a company, a hired developer can read exactly what exists and why.",
+        body: "The upgrade path is a plan change, not a migration: the same PostgreSQL database, the same REST API, the same auth — with higher limits. The monitoring cadence does not change, because it is already every minute on Free. Side projects that become products keep their data and their URL. And because the backend is standard infrastructure with a full change history, the moment your weekend project becomes a company, a hired developer can read exactly what exists and why.",
       },
     ],
     faq: [

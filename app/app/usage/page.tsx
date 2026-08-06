@@ -200,7 +200,7 @@ export default function UsagePage() {
               <KitCard className="mt-4">
                 <KitCardHeader
                   title="Autonomy"
-                  description="Included on every plan. Runs no model, so it never draws your credits"
+                  description="Included on every plan. Detection and repair run no model, so it never draws your credits"
                   actions={
                     <span className="inline-flex items-baseline gap-1.5">
                       <span className="font-mono text-[20px] font-medium tabular-nums leading-none text-white">{fmtNum(activity.runsThisCycle)}</span>

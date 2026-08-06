@@ -11,14 +11,17 @@
  * Honesty (§5.4): credits are shown as balance + this-cycle burn. A per-event
  * credit *ledger history* tab needs the `CreditLedgerEntry` model, which is
  * Phase 3 data-model work (not yet in schema) — so it is intentionally absent
- * rather than faked. Autonomy runs no model, so it is never metered here.
+ * rather than faked. Autonomy is never metered here: its detection and repair
+ * path runs no model at all, and the one model call it can make (writing a
+ * diagnosis onto an escalated finding for a human to read) is company-funded
+ * and never touches `chargeAiCredits`.
  */
 
 import { useState, useEffect } from 'react'
 import Script from 'next/script'
 import Link from 'next/link'
 import {
-  Crown, Check, Loader2, AlertTriangle, Zap, ArrowRight, ArrowUpRight, Bot, Activity,
+  Crown, Check, Loader2, AlertTriangle, Zap, ArrowRight, ArrowUpRight, Bot, Activity, Sparkles,
 } from 'lucide-react'
 import { KitCard, KitCardHeader, KitCardBody, KitButton, KitBadge, KitNote, KitConfirmDialog } from '@/components/inspector/kit'
 
@@ -91,15 +94,15 @@ const PLAN_DEFS: PlanDef[] = [
     monthly: null,
     annual: null,
     tagline: 'Enterprise',
-    description: 'Custom limits, isolation, SLA',
+    description: 'Custom limits, SSO, SLA',
     recommended: false,
-    ctaHref: 'mailto:sales@backenly.com?subject=Backenly%20Enterprise',
+    ctaHref: 'mailto:support@backenly.com?subject=Backenly%20Enterprise',
     limits: [
       'Custom MAU + storage pools',
-      'Custom autonomy cadence + guardrail policies',
+      'Custom guardrail policies',
       'SSO (OIDC) + RBAC',
       'Priority support with a 12-hour SLA',
-      'Dedicated isolation + migration help',
+      'Onboarding + migration help',
       'Invoicing & procurement-friendly billing',
     ],
   },
@@ -349,6 +352,16 @@ export function BillingPanel() {
             }
           />
           <KitCardBody className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            {/*
+              AI credits belong on the BILLING page above all others: they are the
+              only meter here that is enforced by refusing work. A spent budget
+              returns 402 on backend_chat and generate_function, so a user whose
+              agent just got blocked comes here first to find out why. The panel
+              header claimed credits were shown as "balance + this-cycle burn"
+              while rendering no credit meter at all — the number was fetched and
+              silently dropped, exactly like /app/usage did before it was fixed.
+            */}
+            <Meter icon={Sparkles} label="AI credits" used={usage.aiCreditsUsed} max={usage.monthlyAiCredits} resetNote={`Resets ${resetDate}`} />
             <Meter icon={Bot} label="Function invocations" used={usage.aiFunctionInvocationsUsed} max={usage.maxAiFunctionInvocationsPerMonth} />
             <Meter icon={Activity} label={usage.apiQuotaIsLifetime ? 'API requests (total)' : 'API requests'} used={apiReqUsed} max={apiReqMax} />
           </KitCardBody>
@@ -486,7 +499,7 @@ export function BillingPanel() {
             (create_table, set_rls, run_query and the rest) compile straight to SQL and cost no credits. AI credits meter
             Backenly's own LLM work: the natural-language <code className="text-zinc-300">backend_chat</code> tool,
             function generation, and AI-powered tools. Need a custom plan?{' '}
-            <a href="mailto:sales@backenly.com" className="text-violet-300 underline underline-offset-2 hover:text-violet-200">Contact sales</a>.
+            <a href="mailto:support@backenly.com" className="text-violet-300 underline underline-offset-2 hover:text-violet-200">Contact sales</a>.
           </KitNote>
         </div>
       </div>
