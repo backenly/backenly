@@ -563,13 +563,25 @@ export function FunctionsDiagram() {
       {/* A grid, not four flex rows: every source chip shares one column width
           and every function chip shares another, so the leaders run in a single
           clean channel. Four independent flex rows left both inner edges ragged,
-          which is the difference between a figure and a list. */}
-      <div className="grid grid-cols-[max-content_minmax(24px,1fr)_max-content] items-center gap-x-2.5 gap-y-2.5">
+          which is the difference between a figure and a list.
+
+          Below lg the columns are `minmax(0,max-content)` and the labels
+          truncate. Bare `max-content` sized them off their mono labels no
+          matter how narrow the cell got, and at 360px the pair plus the channel
+          between them ran 10px past it — the one element on the page that
+          pushed a phone into horizontal scroll.
+
+          At lg the original `max-content` is restored untouched, three-column
+          layout and all. It does overflow its cell at exactly 1024, where the
+          card's `overflow-hidden` crops the run times off the right-hand chips;
+          that is worth fixing on its own terms, not as a side effect of a
+          phone-width repair. */}
+      <div className="grid grid-cols-[minmax(0,max-content)_minmax(16px,1fr)_minmax(0,max-content)] items-center gap-x-2 gap-y-2.5 sm:gap-x-2.5 lg:grid-cols-[max-content_minmax(24px,1fr)_max-content]">
         {flows.map((flow) => (
           <Fragment key={flow.fn}>
-            <motion.span variants={step} className={`${CHIP} justify-between`}>
-              <span className={`${MONO} ${TEXT}`}>{flow.source}</span>
-              <span className={TAG}>{flow.tag}</span>
+            <motion.span variants={step} className={`${CHIP} min-w-0 justify-between`}>
+              <span className={`${MONO} truncate ${TEXT}`}>{flow.source}</span>
+              <span className={`${TAG} shrink-0`}>{flow.tag}</span>
             </motion.span>
             <motion.span
               variants={drawX}
@@ -578,10 +590,10 @@ export function FunctionsDiagram() {
             />
             <motion.span
               variants={step}
-              className={`${flow.bright ? CHIP_BRIGHT : CHIP} justify-between`}
+              className={`${flow.bright ? CHIP_BRIGHT : CHIP} min-w-0 justify-between`}
             >
-              <span className={`${MONO} ${flow.bright ? BRIGHT : TEXT}`}>{flow.fn}</span>
-              <span className={`${MONO} ${MUTED}`}>{flow.meta}</span>
+              <span className={`${MONO} truncate ${flow.bright ? BRIGHT : TEXT}`}>{flow.fn}</span>
+              <span className={`${MONO} shrink-0 ${MUTED}`}>{flow.meta}</span>
             </motion.span>
           </Fragment>
         ))}

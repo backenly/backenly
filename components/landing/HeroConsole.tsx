@@ -55,7 +55,10 @@
  *   1. The sidebar is a real tour. Sections with a panel are buttons; visitors
  *      click through to see inside. Only sections whose contents were verified
  *      against a live screenshot get a panel — the rest stay inert rather than
- *      shipping a guess, which is what got two earlier mocks pulled.
+ *      shipping a guess, which is what got two earlier mocks pulled. Below md,
+ *      where the sidebar itself is hidden, the tour rides the horizontal tab
+ *      row instead (see SectionTabs) — the panels ship on every width, so the
+ *      way in has to as well.
  *   2. The self-healing loop runs continuously, walking Observe → Verify and
  *      back. This is a truthful depiction: the real loop reconciles on a
  *      cadence for every plan, Free included.
@@ -165,13 +168,20 @@ const NAV: {
 /* Mirrors the SelfHealingLoop readings. The units are the dashboard's, word
    for word (see LOOP_EXPLAIN / `readings` in WorkspaceHome) — a visitor who
    signs up should meet the same five sentences they were sold on, so these
-   two lists change together or not at all. */
+   two lists change together or not at all.
+
+   `short` is the phone variant, carried for the same reason AutonomyFilm
+   carries one: five columns across 360px leave ~62px each, and the full units
+   wrap to three ragged lines. The units used to be dropped outright below sm,
+   which left a phone visitor five bare numerals with nothing saying what they
+   counted. Every short form is a subset of its full phrase — never a second
+   vocabulary for the same reading. */
 const LOOP = [
-  { label: 'Observe', value: '14', unit: 'guarantees · every minute' },
-  { label: 'Detect', value: '0', unit: 'broken guarantees' },
-  { label: 'Propose', value: '0', unit: 'waiting on you' },
-  { label: 'Apply', value: '15', unit: 'fixed on its own · 30d' },
-  { label: 'Verify', value: '100%', unit: 'proven fixed · 30d' },
+  { label: 'Observe', value: '14', unit: 'guarantees · every minute', short: 'guarantees' },
+  { label: 'Detect', value: '0', unit: 'broken guarantees', short: 'broken' },
+  { label: 'Propose', value: '0', unit: 'waiting on you', short: 'waiting' },
+  { label: 'Apply', value: '15', unit: 'fixed on its own · 30d', short: 'fixed alone' },
+  { label: 'Verify', value: '100%', unit: 'proven fixed · 30d', short: 'proven' },
 ] as const
 
 /** One phase per 1.5s: slow enough to read the label, quick enough that a
@@ -282,20 +292,24 @@ function TopBar() {
           </span>
         </span>
         <span className="hidden text-zinc-700 sm:inline">/</span>
-        <span className="flex items-center gap-1.5 text-[12px] font-medium text-zinc-200">
-          <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-          CofounderConnect
-          <ChevronDown className="h-3 w-3 text-zinc-600" />
+        <span className="flex min-w-0 items-center gap-1.5 text-[12px] font-medium text-zinc-200">
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400" />
+          <span className="truncate">CofounderConnect</span>
+          <ChevronDown className="h-3 w-3 shrink-0 text-zinc-600" />
         </span>
-        <span className="text-zinc-700">/</span>
-        <span className="inline-flex items-center gap-1.5 rounded-md border border-white/[0.09] px-2 py-0.5 font-mono text-[10px] text-zinc-400">
+        {/* The breadcrumb tail drops at the same width the sidebar does. Left
+            in, it was the segment flex chose to crush: the chip collapsed past
+            its own padding until only its status dot survived, which read as a
+            stray green pixel wedged against the inbox button. */}
+        <span className="hidden text-zinc-700 md:inline">/</span>
+        <span className="hidden shrink-0 items-center gap-1.5 rounded-md border border-white/[0.09] px-2 py-0.5 font-mono text-[10px] text-zinc-400 md:inline-flex">
           <span className="h-1 w-1 rounded-full bg-emerald-400" />
           Production
         </span>
       </div>
       <div className="flex shrink-0 items-center gap-2">
         {/* No count badge, mirroring the real TopBar (no-badges rule). */}
-        <span className="relative rounded-md border border-white/[0.14] bg-white/[0.06] p-1.5">
+        <span className="relative hidden rounded-md border border-white/[0.14] bg-white/[0.06] p-1.5 sm:block">
           <Inbox className="h-3.5 w-3.5 text-zinc-300" />
         </span>
         <span className="hidden items-center gap-1.5 rounded-md border border-white/[0.09] px-2 py-1 text-[11px] font-medium text-zinc-300 sm:inline-flex">
@@ -418,8 +432,9 @@ function LoopPanelMini() {
                   >
                     {stage.value}
                   </span>
-                  <span className="mt-1 hidden px-1 text-[9px] leading-tight text-zinc-600 sm:block">
-                    {stage.unit}
+                  <span className="mt-1 px-0.5 text-[9px] leading-tight text-zinc-600 sm:px-1">
+                    <span className="sm:hidden">{stage.short}</span>
+                    <span className="hidden sm:inline">{stage.unit}</span>
                   </span>
                 </div>
               )
@@ -444,36 +459,57 @@ function LoopPanelMini() {
             <span className="h-px flex-1 bg-white/[0.05]" />
           </div>
         </div>
-        <div className="relative mx-[10%] mt-2 hidden h-4 rounded-b-lg border-b border-l border-r border-white/[0.06] sm:block">
-          <span className="absolute left-1/2 top-2 -translate-x-1/2 whitespace-nowrap bg-[#16171d] px-2 text-[9px] text-zinc-600">
+        {/* The return arc used to drop below sm along with the two window
+            labels above it. Those labels can go — they annotate columns that
+            are already cramped — but the arc is the loop's whole argument, and
+            a phone visitor was shown five phases in a row with nothing closing
+            them into a circuit. It stays, with the tail of its caption behind
+            the same breakpoint AutonomyFilm uses. */}
+        <div className="relative mx-[10%] mt-2 h-4 rounded-b-lg border-b border-l border-r border-white/[0.06]">
+          {/* Two whole captions rather than a shared stem plus a tail: the
+              tail split the sm+ sentence into two text runs, which reshaped
+              its glyphs a subpixel off where they have always sat. */}
+          <span className="absolute left-1/2 top-2 -translate-x-1/2 whitespace-nowrap bg-[#16171d] px-2 text-[9px] text-zinc-600 sm:hidden">
+            Verify feeds the next Observe
+          </span>
+          <span className="absolute left-1/2 top-2 hidden -translate-x-1/2 whitespace-nowrap bg-[#16171d] px-2 text-[9px] text-zinc-600 sm:block">
             Verify feeds the next Observe. No human at the top of the loop
           </span>
         </div>
       </div>
 
       <div className="divide-y divide-white/[0.05] border-t border-white/[0.06]">
+        {/* The receipts wrap on a phone rather than truncating. They are the
+            agent saying what it did — "contract surface br…" is the one thing
+            on this panel that proves nothing, and a mock that cuts its own
+            evidence off mid-word is worse than one that runs to three lines. */}
         {RECEIPTS.map((receipt) => (
-          <div key={receipt.text} className="flex items-center gap-2.5 px-5 py-2">
+          <div
+            key={receipt.text}
+            className="flex items-start gap-2.5 px-4 py-2 sm:items-center sm:px-5"
+          >
             <span
-              className={`h-1 w-1 shrink-0 rounded-full ${
+              className={`mt-2 h-1 w-1 shrink-0 rounded-full sm:mt-0 ${
                 receipt.bright ? 'bg-violet-400' : 'bg-zinc-700'
               }`}
             />
             <span
-              className={`min-w-0 flex-1 truncate text-[11px] leading-5 ${
+              className={`min-w-0 flex-1 text-[11px] leading-5 sm:truncate ${
                 receipt.bright ? 'text-zinc-300' : 'text-zinc-500'
               }`}
             >
               {receipt.text}
             </span>
-            <span className="shrink-0 font-mono text-[9.5px] text-zinc-600">9h ago</span>
+            <span className="mt-[3px] shrink-0 font-mono text-[9.5px] text-zinc-600 sm:mt-0">
+              9h ago
+            </span>
           </div>
         ))}
-        <div className="flex items-center justify-between px-5 py-2">
-          <span className="text-[11px] text-zinc-500">
+        <div className="flex items-center justify-between gap-3 px-4 py-2 sm:px-5">
+          <span className="min-w-0 text-[11px] text-zinc-500">
             Full guardrail log, restore points and approvals
           </span>
-          <ChevronRight className="h-3 w-3 text-zinc-600" />
+          <ChevronRight className="h-3 w-3 shrink-0 text-zinc-600" />
         </div>
       </div>
     </div>
@@ -495,11 +531,22 @@ function OverviewCanvas() {
 
           <div className="space-y-2">
             <p className={LABEL}>Runtime · last 24 hours</p>
+            {/* `sm:divide-x` left the 2×2 phone grid with no rules at all —
+                four readings floating in one box. The mobile rules are drawn
+                per tile instead of by divide-*, which walks document order and
+                would put one down the left edge of the third tile, where no
+                column boundary exists. Both are dropped at sm so the 4-up row
+                is still divide-x's, to the pixel. */}
             <div className={`${PANEL} grid grid-cols-2 divide-white/[0.06] sm:grid-cols-4 sm:divide-x`}>
-              {RUNTIME.map((tile) => {
+              {RUNTIME.map((tile, i) => {
                 const Icon = tile.icon
                 return (
-                  <div key={tile.label} className="px-4 py-3">
+                  <div
+                    key={tile.label}
+                    className={`px-4 py-3 ${
+                      i < 2 ? 'border-b border-white/[0.06] sm:border-b-0' : ''
+                    } ${i % 2 === 0 ? 'border-r border-white/[0.06] sm:border-r-0' : ''}`}
+                  >
                     <div className="flex items-center gap-1.5">
                       <Icon className="h-3 w-3 text-zinc-600" />
                       <span className={LABEL}>{tile.label}</span>
@@ -647,9 +694,13 @@ function DatabaseCanvas() {
         </span>
       </InspectorHeader>
 
-      <div className="flex min-h-0 flex-1">
-        {/* Left rail: the schema and its tables. */}
-        <div className="hidden w-[184px] shrink-0 flex-col border-r border-white/[0.07] lg:flex">
+      <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
+        {/* Left rail: the schema and its tables. Stacked above the grid below
+            lg rather than dropped, which is what it used to do: `connections`
+            is two rows tall, so with the rail gone the panel's floor left a
+            phone visitor ~450px of black under them — an empty box where the
+            schema should be, on the one section whose subject IS the schema. */}
+        <div className="flex shrink-0 flex-col border-b border-white/[0.07] lg:w-[184px] lg:border-b-0 lg:border-r">
           <div className="flex items-center justify-between px-3 py-2.5">
             <span className="flex items-center gap-1.5 text-[11px] text-zinc-300">
               <span className="h-1 w-1 rounded-full bg-violet-300" />
@@ -819,9 +870,18 @@ function AuthCanvas() {
         </span>
       </div>
 
-      <div className="grid grid-cols-2 divide-x divide-white/[0.06] border-b border-white/[0.07] sm:grid-cols-4">
-        {AUTH_STATS.map((stat) => (
-          <div key={stat.unit} className="flex items-baseline gap-1.5 px-4 py-3">
+      {/* divide-x ran at every width, so the 2-column phone grid got a rule
+          down the left edge of the third tile — a column boundary that is not
+          there. It is held back to sm, where the 4-up row it was written for
+          starts, and the phone grid draws its own. */}
+      <div className="grid grid-cols-2 border-b border-white/[0.07] divide-white/[0.06] sm:grid-cols-4 sm:divide-x">
+        {AUTH_STATS.map((stat, i) => (
+          <div
+            key={stat.unit}
+            className={`flex items-baseline gap-1.5 px-4 py-3 ${
+              i < 2 ? 'border-b border-white/[0.06] sm:border-b-0' : ''
+            } ${i % 2 === 0 ? 'border-r border-white/[0.06] sm:border-r-0' : ''}`}
+          >
             <span className="font-mono text-[16px] font-medium tabular-nums leading-none text-zinc-100">
               {stat.value}
             </span>
@@ -1036,6 +1096,68 @@ const SECTION_LABEL: Record<SectionId, string> = {
   storage: 'Storage',
 }
 
+/**
+ * The tour, flattened out of NAV — same sections, same order, same icons, so a
+ * section added to one surface cannot go missing from the other.
+ */
+const TOUR = NAV.flatMap((group) => group.items).filter(
+  (item): item is typeof item & { section: SectionId } =>
+    !!item.section && !!SECTION_PANELS[item.section],
+)
+
+/**
+ * The tour on a phone.
+ *
+ * The sidebar is the tour, and the sidebar is `hidden md:flex` — so below md
+ * the one behaviour this console was made interactive for did not exist. The
+ * panels were all still shipping, just unreachable: a phone visitor got the
+ * Overview and no way to see inside anything.
+ *
+ * Drawn as the product's horizontal tab row (see AuthCanvas: violet bottom
+ * border on the active tab), not as a second vertical nav, because that is the
+ * idiom the real dashboard uses when nav runs sideways. It scrolls rather than
+ * wrapping — four tabs cross 360px by a few pixels, and a row that reflows to
+ * two lines mid-tour reads as a layout accident.
+ */
+function SectionTabs({
+  section,
+  onSelect,
+}: {
+  section: SectionId
+  onSelect: (next: SectionId) => void
+}) {
+  return (
+    <nav
+      className="flex gap-4 overflow-x-auto border-b border-white/[0.07] bg-[#141519] px-3.5 [-ms-overflow-style:none] [scrollbar-width:none] md:hidden [&::-webkit-scrollbar]:hidden"
+      aria-label="Dashboard sections"
+    >
+      {/* `aria-current`, not role=tab/tablist: the sidebar marks the same state
+          the same way, and a tablist without matching tabpanels is worse than
+          no roles at all. */}
+      {TOUR.map((item) => {
+        const Icon = item.icon
+        const active = item.section === section
+        return (
+          <button
+            key={item.title}
+            type="button"
+            aria-current={active ? 'true' : undefined}
+            onClick={() => onSelect(item.section)}
+            className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap border-b py-2.5 text-[11.5px] font-medium transition-colors duration-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-violet-300/60 ${
+              active
+                ? 'border-violet-400 text-zinc-50'
+                : 'border-transparent text-zinc-400'
+            }`}
+          >
+            <Icon className="h-3 w-3 shrink-0" />
+            {item.title}
+          </button>
+        )
+      })}
+    </nav>
+  )
+}
+
 export function HeroConsole() {
   const [section, setSection] = useState<SectionId>('overview')
   const Panel = SECTION_PANELS[section] ?? OverviewCanvas
@@ -1049,6 +1171,7 @@ export function HeroConsole() {
       aria-label="Backenly dashboard tour"
     >
       <TopBar />
+      <SectionTabs section={section} onSelect={setSection} />
 
       <div className="flex items-stretch">
         {/* Sidebar — the real shell's nav, verbatim, nav-first like the real one. */}
