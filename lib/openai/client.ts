@@ -1,6 +1,7 @@
 import OpenAI from 'openai'
 import type { ChatCompletion } from 'openai/resources/chat/completions'
 import { log } from '../logger'
+import { attachTokenMeter } from '../ai/token-meter'
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini'
@@ -17,6 +18,14 @@ export const openai = OPENAI_API_KEY
       maxRetries: 1,
     })
   : null
+
+// The platform's SECOND model boundary. It exists because this client and the
+// one in lib/ai/openai-service.ts grew up separately; both are metered so that
+// "is this path billed?" is answered by the route that opens a scope, never by
+// which client a module happened to import. Callers here (the free dashboard
+// assistant, orchestration helpers) open no scope and so remain free — the
+// meter only makes them *countable*, not chargeable.
+if (openai) attachTokenMeter(openai)
 
 // Check if AI features are enabled
 export function isAIEnabled(): boolean {

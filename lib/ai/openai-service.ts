@@ -1,5 +1,6 @@
 import OpenAI from 'openai'
 import { getModel } from './model-router'
+import { attachTokenMeter } from './token-meter'
 
 // Initialize OpenAI client (singleton)
 let openaiClient: OpenAI | null = null
@@ -15,6 +16,11 @@ export function getOpenAIClient(): OpenAI {
       timeout: 30_000,   // 30s hard timeout — prevents indefinite hangs
       maxRetries: 1,      // 1 retry on transient failures (default is 2)
     })
+    // Billing boundary. Every completion issued through this client reports its
+    // usage into the active token scope, so a metered route bills what actually
+    // ran instead of what its author remembered to charge for. Inert outside a
+    // scope — see lib/ai/token-meter.ts.
+    attachTokenMeter(openaiClient)
   }
   return openaiClient
 }

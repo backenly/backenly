@@ -28,11 +28,24 @@ import { dbQuery, dbInsert, dbUpdate, dbDelete } from '@/lib/mcp/runtime-db'
 import { dbErrorBody } from '@/lib/db/query-errors'
 import { parseMigration, MigrationParseError } from '@/lib/mcp/migration-parser'
 import { prisma } from '@/lib/db/prisma'
+import { createTokenScope, runInTokenScope } from '@/lib/ai/token-meter'
 import { createHash } from 'crypto'
 
 /**
  * Tools on this route that spend Backenly's model budget. See the gate in POST
  * for how this set was derived and why everything else stays ungated.
+ *
+ * Membership means BOTH halves apply: the pre-gate below refuses the call when
+ * the month's credits are spent, and the token scope around dispatch debits
+ * what the call actually burned. A tool that gates without charging is not a
+ * cheaper tool — it is an unlimited one, because a meter that never moves never
+ * reaches the cap. That was the live state of `generate_function` until the
+ * charge below was added.
+ *
+ * `answer_question` is currently unreachable here — MCP_EXCLUDE in
+ * lib/mcp/catalog.ts keeps the brain's control-loop tools off this surface, so
+ * the 404 fires before either half runs. It stays listed deliberately: if it is
+ * ever exposed, it arrives already metered rather than repeating this bug.
  */
 const MODEL_BACKED_TOOLS = new Set(['answer_question', 'generate_function'])
 
@@ -563,8 +576,21 @@ export async function POST(request: NextRequest) {
   const heavy = HEAVY_TOOLS.has(dispatchName)
   const isMutation = !READ_ONLY_TOOLS.has(dispatchName as any)
 
+  // ── Charge half of the credit contract ────────────────────────────────────
+  //
+  // Opened only for the model-backed tools, and only around dispatch. Every
+  // completion issued underneath — the generator's write pass, its repair pass,
+  // any model call a future model-backed tool makes — lands in `scope.tokens`
+  // without that code knowing billing exists (lib/ai/token-meter.ts).
+  //
+  // Billed in `finally` because a dispatch that threw still burned the tokens
+  // it burned. Fire-and-forget, mirroring the chat route: a billing write must
+  // never turn a completed backend change into an error response.
+  const metered = MODEL_BACKED_TOOLS.has(tool)
+  const tokenScope = createTokenScope()
+
   try {
-    const result = await dispatchTool(dispatchName, dispatchArgs, {
+    const result = await runInTokenScope(tokenScope, () => dispatchTool(dispatchName, dispatchArgs, {
       projectId: auth.projectId,
       userId: auth.userId,
       sessionToken: undefined,
@@ -575,7 +601,7 @@ export async function POST(request: NextRequest) {
       // dead-ending them on an opaque APPROVAL_REQUIRED.
       mcpOwnerConfirmed: true,
       createdThisTurn: new Set<string>(),
-    })
+    }))
 
     // Structured failure code so an MCP agent can branch without parsing prose
     // (agent-native ergonomics). Explicit code from the tool wins; otherwise a
@@ -629,6 +655,12 @@ export async function POST(request: NextRequest) {
       { ok: false, error: msg, code: 'DISPATCH_FAILED' },
       { status: 500 },
     ))
+  } finally {
+    if (metered && tokenScope.tokens > 0) {
+      import('@/lib/billing')
+        .then(({ chargeAiCredits }) => chargeAiCredits(auth.userId, tokenScope.tokens))
+        .catch(() => {})
+    }
   }
 }
 
