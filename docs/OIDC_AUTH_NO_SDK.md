@@ -44,7 +44,7 @@ async function connectToBackendly(projectId) {
   sessionStorage.setItem('pkce_verifier', codeVerifier)
   
   // Build authorization URL (RFC 6749 Section 4.1.1)
-  const authUrl = new URL('https://backenly.app/api/oidc/authorize')
+  const authUrl = new URL('https://backenly.com/api/oidc/authorize')
   authUrl.searchParams.set('response_type', 'code')
   authUrl.searchParams.set('client_id', 'your-app-name')  // replit, lovable, etc.
   authUrl.searchParams.set('project_id', projectId)
@@ -79,7 +79,7 @@ async function handleCallback() {
   sessionStorage.removeItem('pkce_verifier')
   
   // Exchange code for access token (RFC 6749 Section 4.1.3)
-  const response = await fetch('https://backenly.app/api/oidc/token', {
+  const response = await fetch('https://backenly.com/api/oidc/token', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
@@ -148,13 +148,13 @@ async function callBackendAPI(endpoint, options = {}) {
 
 // Example: Fetch schema
 async function getSchema() {
-  const response = await callBackendAPI('https://backenly.app/api/v1/schema')
+  const response = await callBackendAPI('https://backenly.com/api/v1/schema')
   return response.json()
 }
 
 // Example: Create record
 async function createUser(data) {
-  const response = await callBackendAPI('https://backenly.app/api/v1/users', {
+  const response = await callBackendAPI('https://backenly.com/api/v1/users', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
@@ -174,7 +174,7 @@ async function disconnect() {
   
   if (token) {
     // Revoke token (RFC 7009)
-    await fetch('https://backenly.app/api/oidc/revoke', {
+    await fetch('https://backenly.com/api/oidc/revoke', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
@@ -251,19 +251,19 @@ function connectViaIframe(projectId) {
     iframe.style.display = 'none'
     
     // Build authorization URL
-    const authUrl = new URL('https://backenly.app/api/oidc/authorize')
+    const authUrl = new URL('https://backenly.com/api/oidc/authorize')
     authUrl.searchParams.set('response_type', 'code')
     authUrl.searchParams.set('client_id', 'your-app-name')
     authUrl.searchParams.set('project_id', projectId)
     authUrl.searchParams.set('scope', 'read:schema read:endpoints call:apis')
-    authUrl.searchParams.set('redirect_uri', 'https://backenly.app/api/oidc/iframe-callback')
+    authUrl.searchParams.set('redirect_uri', 'https://backenly.com/api/oidc/iframe-callback')
     authUrl.searchParams.set('display', 'iframe')
     
     iframe.src = authUrl.toString()
     
     // Listen for token message
     window.addEventListener('message', function handler(event) {
-      if (event.origin !== 'https://backenly.app') return
+      if (event.origin !== 'https://backenly.com') return
       
       if (event.data.type === 'oidc_token') {
         sessionStorage.setItem('backenly_token', event.data.access_token)

@@ -14,8 +14,8 @@ This guide shows how to configure Replit OAuth so users can connect their Replit
 3. Fill in the details:
    - **Name**: `Backenly`
    - **Description**: `Connect your Replit project to Backenly backend`
-   - **Homepage URL**: `https://backenly.app` (or your domain)
-   - **Callback URL**: `https://backenly.app/api/auth/replit/callback`
+   - **Homepage URL**: `https://backenly.com` (or your domain)
+   - **Callback URL**: `https://backenly.com/api/auth/replit/callback`
    - **Scopes**: Select:
      - ✅ `identity` (to identify the user)
      - ✅ `repl.read` (to read Repl information)
@@ -143,6 +143,6 @@ Set the environment variables according to your platform's documentation:
 
 ## Need Help?
 
-- **Documentation**: https://backenly.app/docs
-- **Support**: support@backenly.app
+- **Documentation**: https://backenly.com/docs
+- **Support**: support@backenly.com
 - **Discord**: https://discord.gg/backenly

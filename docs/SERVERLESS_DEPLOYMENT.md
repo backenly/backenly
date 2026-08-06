@@ -163,7 +163,7 @@ export class ServerlessDeploymentAdapter implements DeploymentProviderAdapter {
     
     // DONE - No external deployment needed
     return {
-      url: `https://${subdomain}.backenly.app`,
+      url: `https://${subdomain}.backenly.com`,
       buildId: `serverless-${Date.now()}`,
       success: true,
     }
@@ -256,7 +256,7 @@ Example: $0.10/month for 10,000 requests @ 100ms each
 **Deployment Flow (Identical):**
 1. User clicks "Make it live"
 2. Logs show: "🚀 Deploying with serverless runtime..."
-3. Logs show: "✅ Subdomain assigned: myproject.backenly.app"
+3. Logs show: "✅ Subdomain assigned: myproject.backenly.com"
 4. Logs show: "⚡ Enabling serverless execution..."
 5. Logs show: "🎉 Deployment complete! Your API is live."
 

@@ -45,7 +45,7 @@ When you connect, Backenly automatically adds these environment variables to you
 
 ```bash
 NEXT_PUBLIC_BACKENLY_PROJECT_ID=your-project-id
-NEXT_PUBLIC_BACKENLY_API_URL=https://backenly.app
+NEXT_PUBLIC_BACKENLY_API_URL=https://backenly.com
 BACKENLY_DELEGATION_TOKEN=del_xxxxxxxxxxxxx
 ```
 
@@ -92,7 +92,7 @@ const result = await backenly.uploadFile(file, 'uploads/')
 If auto-injection doesn't work, you can manually include the SDK:
 
 ```html
-<script src="https://backenly.app/backenly-sdk.js"></script>
+<script src="https://backenly.com/backenly-sdk.js"></script>
 <script>
   // SDK is automatically available as window.backenly
   backenly.signIn('user@example.com', 'password')
@@ -116,7 +116,7 @@ await backenly.query('users')
 
 ### API Reference
 
-See full API documentation at: https://backenly.app/docs
+See full API documentation at: https://backenly.com/docs
 
 ### Security
 
@@ -143,4 +143,4 @@ See full API documentation at: https://backenly.app/docs
 
 ### Support
 
-Questions? Email support@backenly.app
+Questions? Email support@backenly.com
