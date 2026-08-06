@@ -2,10 +2,10 @@
 
 /**
  * AgentBrandIcons — the coding-agent logomarks used on the Connect › Agents tab
- * (AgentInstallGuide) and the marketing AgentSetupCard chips. Self-contained
- * inline SVGs (no network fetch, no icon font) so they render on the dark
- * inspector surface with the brand's own accent, while everything around them
- * stays in the flat monochrome inspector language.
+ * (AgentInstallGuide). Self-contained inline SVGs (no network fetch, no icon
+ * font) so they render on the dark inspector surface with the brand's own
+ * accent, while everything around them stays in the flat monochrome inspector
+ * language.
  *
  * Each mark carries its brand color internally so callers just place it on a
  * neutral tile — no per-call theming. Marks are drawn on a 24×24 grid and

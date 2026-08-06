@@ -16,7 +16,6 @@ import {
 import type { LucideIcon } from 'lucide-react'
 import { getProjects, deleteProject, type Project } from '@/lib/api/projects'
 import { OrgShell } from '@/components/shell/OrgShell'
-import { AgentSetupCard } from '@/components/connect/AgentSetupCard'
 import { GlobalLoading } from '@/components/ui/GlobalLoading'
 import { KitConfirmDialog } from '@/components/inspector/kit'
 
@@ -182,13 +181,28 @@ export default function DashboardPage() {
 
   return (
     <OrgShell>
-      <main className="mx-auto w-full max-w-[1180px] px-6 pb-16 lg:px-10">
-        {/* ── Projects ──────────────────────────────────────────────────── */}
-        <section className="pt-10">
-          <h1 className="text-[1.75rem] font-semibold tracking-tight text-white">Projects</h1>
+      {/* Full-bleed inside the org frame: the page owns the whole content area,
+          top bar to bottom edge, so a one-project account reads as a dashboard
+          rather than a card stranded at the top of an empty screen. */}
+      <main className="flex min-h-[calc(100vh-48px)] w-full flex-col px-6 pb-10 lg:px-10">
+        {/* ── Header ────────────────────────────────────────────────────── */}
+        <header className="flex flex-wrap items-end justify-between gap-x-6 gap-y-4 pt-10">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2.5">
+              <h1 className="text-[1.75rem] font-semibold tracking-tight text-white">Projects</h1>
+              {projects.length > 0 && (
+                <span className="rounded-full border border-white/[0.08] bg-white/[0.04] px-2 py-0.5 font-mono text-[11px] tabular-nums text-zinc-400">
+                  {projects.length}
+                </span>
+              )}
+            </div>
+            <p className="mt-1.5 text-[13px] leading-5 text-zinc-500">
+              Every backend on this account. Open one to manage its data, functions and autonomy.
+            </p>
+          </div>
 
-          <div className="mt-6 flex items-center justify-between gap-3">
-            <div className="relative w-full max-w-sm">
+          <div className="flex w-full items-center gap-3 sm:w-auto">
+            <div className="relative w-full sm:w-[280px]">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" />
               <input
                 value={searchQuery}
@@ -206,65 +220,64 @@ export default function DashboardPage() {
               New project
             </button>
           </div>
+        </header>
 
-          <div className="mt-6">
-            {visibleProjects.length > 0 ? (
-              <div className="grid gap-4 sm:grid-cols-[repeat(auto-fill,minmax(280px,360px))]">
-                {visibleProjects.map((project) => (
-                  <ProjectCard
-                    key={project.id}
-                    project={project}
-                    editingProjectId={editingProjectId}
-                    editingName={editingName}
-                    editInputRef={editInputRef}
-                    onOpen={() => router.push(`/app/projects/${project.id}`)}
-                    onStartRename={handleStartRename}
-                    onRenameChange={setEditingName}
-                    onRenameSubmit={handleRenameSubmit}
-                    onCancelRename={() => setEditingProjectId(null)}
-                    onDelete={handleDeleteProject}
-                  />
-                ))}
+        {/* ── Project grid ──────────────────────────────────────────────── */}
+        <section className="mt-7 flex flex-1 flex-col">
+          {/* Grid sizes on auto-fill + 1fr, not viewport breakpoints: the content
+              area is the viewport minus the fixed 248px sidebar, so sm:/xl: would
+              size columns against a width this grid never gets. Cards stretch to
+              fill the row instead of stopping at a 360px cap. */}
+          {visibleProjects.length > 0 ? (
+            <div className="grid content-start gap-4 [grid-template-columns:repeat(auto-fill,minmax(min(100%,320px),1fr))]">
+              {visibleProjects.map((project) => (
+                <ProjectCard
+                  key={project.id}
+                  project={project}
+                  editingProjectId={editingProjectId}
+                  editingName={editingName}
+                  editInputRef={editInputRef}
+                  onOpen={() => router.push(`/app/projects/${project.id}`)}
+                  onStartRename={handleStartRename}
+                  onRenameChange={setEditingName}
+                  onRenameSubmit={handleRenameSubmit}
+                  onCancelRename={() => setEditingProjectId(null)}
+                  onDelete={handleDeleteProject}
+                />
+              ))}
+            </div>
+          ) : (
+            <div className="flex flex-1 flex-col items-center justify-center rounded-xl border border-dashed border-white/[0.1] bg-white/[0.02] px-6 py-16 text-center">
+              <div className="flex h-11 w-11 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.04]">
+                <Database className="h-5 w-5 text-zinc-400" />
               </div>
-            ) : (
-              <div className="flex min-h-[220px] flex-col items-center justify-center rounded-xl border border-dashed border-white/[0.1] bg-white/[0.02] px-6 text-center">
-                <div className="flex h-11 w-11 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.04]">
-                  <Database className="h-5 w-5 text-zinc-400" />
-                </div>
-                {isEmpty ? (
-                  <>
-                    <h3 className="mt-4 text-sm font-semibold text-white">No projects yet</h3>
-                    <p className="mt-2 max-w-sm text-sm leading-6 text-zinc-500">
-                      Create your first project to get started.
-                    </p>
-                    <button
-                      type="button"
-                      onClick={() => setShowNewModal(true)}
-                      className="mt-4 inline-flex h-9 items-center gap-1.5 rounded-lg bg-white px-3.5 text-[13px] font-semibold text-black transition-colors hover:bg-zinc-200"
-                    >
-                      <Plus className="h-4 w-4" />
-                      New project
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <h3 className="mt-4 text-sm font-semibold text-white">No matching projects</h3>
-                    <p className="mt-2 max-w-sm text-sm leading-6 text-zinc-500">
-                      No project matches "{searchQuery.trim()}".
-                    </p>
-                  </>
-                )}
-              </div>
-            )}
-          </div>
+              {isEmpty ? (
+                <>
+                  <h3 className="mt-4 text-sm font-semibold text-white">No projects yet</h3>
+                  <p className="mt-2 max-w-sm text-sm leading-6 text-zinc-500">
+                    Create a project, then wire your coding agent to it from the project&apos;s
+                    Connect page.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setShowNewModal(true)}
+                    className="mt-4 inline-flex h-9 items-center gap-1.5 rounded-lg bg-white px-3.5 text-[13px] font-semibold text-black transition-colors hover:bg-zinc-200"
+                  >
+                    <Plus className="h-4 w-4" />
+                    New project
+                  </button>
+                </>
+              ) : (
+                <>
+                  <h3 className="mt-4 text-sm font-semibold text-white">No matching projects</h3>
+                  <p className="mt-2 max-w-sm text-sm leading-6 text-zinc-500">
+                    No project matches "{searchQuery.trim()}".
+                  </p>
+                </>
+              )}
+            </div>
+          )}
         </section>
-
-        {/* ── Connect your coding agent (empty / new accounts) ──────────── */}
-        {isEmpty && (
-          <section className="mt-8">
-            <AgentSetupCard />
-          </section>
-        )}
       </main>
 
       {/* New Project modal */}

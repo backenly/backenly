@@ -2,10 +2,12 @@
 
 /**
  * AgentInstallGuide — the Connect page's Agents experience (PLATFORM_RESTRUCTURE
- * _REPORT §9.1 items 1–2). Richer than the marketing AgentSetupCard (§9.2/§5.1):
- * it mints a REAL scoped, revocable MCP key at generate time (never a root key
- * in a clipboard) and bakes it into a one-paste setup prompt + a per-agent
- * install command.
+ * _REPORT §9.1 items 1–2), and since 2026-08-06 the product's ONLY agent-setup
+ * surface: it mints a REAL scoped, revocable MCP key at generate time (never a
+ * root key in a clipboard) and bakes it into a one-paste setup prompt + a
+ * per-agent install command. The placeholder-key card that used to sit on the
+ * Projects page (AgentSetupCard) is deleted — setup belongs where a project,
+ * and therefore a real key, exists.
  *
  * Key minting:
  *   POST /api/projects/[id]/mcp/keys  →  { rawKey }
