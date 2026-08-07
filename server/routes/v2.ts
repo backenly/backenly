@@ -105,7 +105,13 @@ router.all('/:projectId/*', async (req: Request, res: Response) => {
 
   const auth = await getProjectIdFromAuth(req)
   if (!auth.success || auth.projectId !== projectId) {
-    return res.status(401).json({
+    // A service-role key refused because the request came from a browser is an
+    // AUTHORIZATION decision about a valid credential, not a failed one. 401
+    // would tell the developer their key is wrong and send them to re-issue it,
+    // which is the opposite of the fix — the key is fine, the place it is being
+    // used from is not.
+    const status = auth.code === 'SERVICE_ROLE_IN_BROWSER' ? 403 : 401
+    return res.status(status).json({
       code: auth.success ? 'PROJECT_MISMATCH' : (auth.code ?? 'UNAUTHORIZED'),
       message: auth.success ? 'This key does not belong to that project.' : (auth.error ?? 'Unauthorized'),
     })

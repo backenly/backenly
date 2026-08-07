@@ -21,6 +21,11 @@ import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { hashApiKey, resolveEndUserFromToken } from '../lib/end-user-identity'
 import { handleViaPostgrest } from './postgrest-handler'
 import { v1NotFoundBody } from '@/lib/api/v1/route-not-found'
+import {
+  detectBrowserOrigin,
+  recordServiceRoleBrowserBlock,
+  serviceRoleRefusalMessage,
+} from '@/lib/security/service-role-exposure'
 
 const router = Router()
 
@@ -50,11 +55,39 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
     const keyHash = hashApiKey(xApiKey)
     const key = await prisma.apiKey.findFirst({
       where: { keyHash },
-      select: { id: true, projectId: true, userId: true, permissions: true, rateLimit: true, expiresAt: true, serviceRole: true },
+      select: { id: true, name: true, keyPrefix: true, projectId: true, userId: true, permissions: true, rateLimit: true, expiresAt: true, serviceRole: true },
     })
     if (!key) return { success: false, error: 'Invalid API key', code: 'INVALID_API_KEY' }
     if (key.expiresAt && key.expiresAt < new Date()) return { success: false, error: 'API key has expired', code: 'API_KEY_EXPIRED' }
     if (!key.projectId) return { success: false, error: 'API key is not associated with a project', code: 'NO_PROJECT_ID' }
+
+    // ── A service-role key must never answer a browser ────────────────────────
+    //
+    // This is the path /api/v2 and the PostgREST handler authenticate through,
+    // so it is the one that actually serves tenant data — the guard belongs here
+    // as much as in v1AuthMiddleware, and putting it in only one of them is how a
+    // fix lands on one surface and not the other (see this function's own
+    // docstring). A service-role key short-circuits every RLS policy; from a
+    // browser that is every row of every table, exposed to anyone with devtools.
+    if (key.serviceRole) {
+      const verdict = detectBrowserOrigin(req.headers as Record<string, string | string[] | undefined>)
+      if (verdict.isBrowser) {
+        recordServiceRoleBrowserBlock({
+          projectId: key.projectId,
+          apiKeyId: key.id,
+          keyName: key.name ?? null,
+          keyPrefix: key.keyPrefix ?? null,
+          verdict,
+          method: req.method,
+          path: req.originalUrl ?? req.url ?? '',
+        }).catch(() => {})
+        return {
+          success: false,
+          error: serviceRoleRefusalMessage(key.name ?? null),
+          code: 'SERVICE_ROLE_IN_BROWSER',
+        }
+      }
+    }
     prisma.apiKey.update({ where: { id: key.id }, data: { lastUsed: new Date() } }).catch(console.error)
 
     // RLS identity:

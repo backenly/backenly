@@ -214,6 +214,16 @@ export function summariseFinding(type: string, details: Details): string {
     return 'Tables return no rows: some row-security policies still read the old identity setting, which the data plane never sets'
   }
 
+  // Leads with containment, because the first thing the owner needs to know is
+  // that nothing was served — panic here would push them toward revoking a key
+  // their server code is also using, turning a blocked incident into an outage.
+  // The key name is carried because a project can hold several and only one is
+  // in the wrong place.
+  if (type === 'service_role_key_exposed') {
+    const name = (details?.keyName as string | undefined) ?? 'A service-role key'
+    return `Blocked: the key "${name}" bypasses all row security and is being called from a browser — rotate it and use a client key there`
+  }
+
   // Unknown type — prefer the detector's own sentence over the raw type.
   return (
     sentence(d.reason) ??

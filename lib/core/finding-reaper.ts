@@ -258,6 +258,14 @@ const INVARIANT_REAPABLE_TYPES = [
   // so a table vacuumed by autovacuum three seconds later keeps a stale row in
   // the review queue until the next infra scan.
   'infra_table_bloat',
+  // Registered alongside `service_role_keys_stay_server_side`. This one MUST be
+  // reapable rather than left to age out: the probe is the sole writer, and its
+  // evidence is a rolling 24h window of refused requests plus a live re-read of
+  // the key. An owner who rotates the key has fixed the problem in that instant,
+  // and without a reap entry the critical would sit in their queue for the rest
+  // of the day — telling them, on the strength of yesterday's traffic, that a key
+  // they already revoked is still exposed.
+  'service_role_key_exposed',
   // Both were probe-covered by the invariant catalogue and named in NO reaper,
   // so neither had any path back to healthy. Each has exactly one write site,
   // and that write site IS the invariant probe, so this reaper is the correct

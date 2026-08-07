@@ -112,6 +112,17 @@ export type FindingType =
   // installing a policy restores service. Undecidable ownership escalates.
   | 'rls_denies_everything'
 
+  // ── A service-role key — the one credential that bypasses every RLS policy —
+  // is being called from a browser. Raised only from refusals the runtime
+  // actually recorded (lib/security/service-role-exposure.ts), never from the
+  // mere existence of such a key: a service-role key sitting correctly on a
+  // server is the intended configuration and must not be flagged.
+  //
+  // Deliberately NOT auto-fixable. The two candidate repairs are revoking the
+  // key, which trades a blocked breach for a certain outage, and editing the
+  // code that ships it, which Backenly does not own.
+  | 'service_role_key_exposed'
+
 export type FindingSeverity = 'critical' | 'warning' | 'info'
 export type FindingStatus = 'open' | 'auto_fixed' | 'pending_approval' | 'dismissed'
 
@@ -192,6 +203,9 @@ export const ALL_FINDING_TYPES = [
   // omissions above were each found in production, and each one routed a real
   // finding into "no automatic repair for it yet".
   'infra_table_bloat',
+  // Added 2026-08-07 in the same commit that introduced it — the discipline the
+  // four omissions above were each found in production for.
+  'service_role_key_exposed',
 ] as const satisfies ReadonlyArray<FindingType>
 
 // Canonical types — exact matches pass through untouched.

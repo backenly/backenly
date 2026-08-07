@@ -144,6 +144,30 @@ export function classifyFix(
     }
   }
 
+  // ── Service-role key reaching a browser ────────────────────────────────────
+  //
+  // notify_only, and deliberately not approval: an approval queue implies there
+  // is a repair waiting behind a yes, and here there is not. Revoking the key
+  // would stop a breach the runtime is ALREADY refusing and break whatever
+  // server code legitimately uses it — trading a blocked attack for a certain
+  // outage. The actual fix is in the owner's frontend bundle, which Backenly
+  // does not own and must not pretend it can edit.
+  //
+  // Critical severity with no auto-fix is the honest shape for this one: the
+  // platform has already contained it, and the owner still has to act.
+  if (type === 'service_role_key_exposed') {
+    return {
+      decision: 'notify_only',
+      reason:
+        'Backenly is already refusing these requests, so no data is being served. The remaining ' +
+        'fix is in your own code — move the service-role key to a server route, switch the ' +
+        'browser to a client key, then revoke and reissue the exposed one.',
+      riskNote:
+        'Revoking this key automatically would break any server code legitimately using it, so ' +
+        'Backenly will not do it without you.',
+    }
+  }
+
   if (AUTO_SAFE.has(type)) {
     return {
       decision: 'auto',

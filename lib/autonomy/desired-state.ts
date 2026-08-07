@@ -53,6 +53,7 @@ import { detectRuntimeEngineMismatch } from './engine-conformance'
 import { detectUnregisteredSchema } from './schema-registration'
 import { detectPendingSchemaDrift } from './drift-watch'
 import { detectDataPlaneNotAnswering } from './data-plane-liveness'
+import { detectServiceRoleKeyExposure } from '@/lib/security/service-role-exposure'
 
 // ── Bounded-autonomy tiers (graded by blast radius) ───────────────────────────
 //
@@ -121,6 +122,13 @@ export const INVARIANTS: readonly Invariant[] = [
     rationale:
       'A table can have RLS enabled but a policy of USING (true) — it looks protected in every dashboard while exposing every row to everyone. This is the misconfiguration a missing-RLS check structurally cannot catch.',
     probe: detectOverPermissiveRls,
+  },
+  {
+    id: 'service_role_keys_stay_server_side',
+    title: 'The key that bypasses row-level security is never called from a browser',
+    rationale:
+      'A service-role key short-circuits every policy in the project by design, which is correct on a server and a total breach in a browser — every row of every table, readable by anyone who opens developer tools. It is also the failure that gives no warning: the key works everywhere, so the mistake of importing a server module into a client component produces no error, no failed request, and nothing in any log that looks wrong. The runtime refuses these requests outright (lib/security/service-role-exposure.ts), so this invariant reports a contained incident rather than an open one — but the key is still in a shipped bundle until the owner rotates it, and that is the part only they can do.',
+    probe: detectServiceRoleKeyExposure,
   },
   {
     id: 'relationships_have_fk_constraints',
@@ -427,6 +435,11 @@ export function gapIdentity(
 const INVARIANT_EMITS: Readonly<Record<string, readonly FindingType[]>> = {
   user_data_is_rls_protected: ['missing_rls'],
   rls_policies_are_not_wide_open: ['rls_expression_invalid'],
+  // Genuinely re-detectable, which is why it is listed despite having no
+  // auto-fix: the probe reads a rolling 24h window of recorded refusals AND
+  // re-reads the key's current state, so revoking or downgrading the key clears
+  // the finding on the next tick rather than waiting the window out.
+  service_role_keys_stay_server_side: ['service_role_key_exposed'],
   relationships_have_fk_constraints: ['missing_fk'],
   relationships_are_indexed: ['missing_fk_index'],
   data_plane_is_registered: ['schema_not_registered'],

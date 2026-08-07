@@ -18,6 +18,11 @@ import { sendError, ErrorCodes } from './response'
 import { classifyKeyFailure, type ApiKeyFailureDiagnostic } from '@/lib/middleware/apiKeyFailureDiagnostic'
 import { recordSecurityEvent } from '@/lib/platform/controls'
 import { isInternalOrigin } from '@/lib/security/internal-origin'
+import {
+  detectBrowserOrigin,
+  recordServiceRoleBrowserBlock,
+  serviceRoleRefusalMessage,
+} from '@/lib/security/service-role-exposure'
 
 export interface V1ApiContext {
   projectId: string
@@ -294,6 +299,47 @@ export async function v1AuthMiddleware(req: Request, res: Response, next: NextFu
   if (apiKeyRecord.projectId !== projectId) {
     sendError(res, ErrorCodes.FORBIDDEN, 'API key does not have access to this project', 403)
     return
+  }
+
+  // ── A service-role key must never answer a browser ──────────────────────────
+  //
+  // This key bypasses every RLS policy in the project by design. That is correct
+  // on a server and a total breach in a browser: every row of every table,
+  // readable by anyone who opens developer tools, with no policy in the way.
+  //
+  // Refused rather than logged, because logging it reports a leak the owner
+  // cannot un-ship, while refusing it turns the mistake into a 403 on their own
+  // machine the first time they run the code. Placed BEFORE the rate-limit
+  // accounting on purpose — a refused request must not consume the caller's
+  // budget, or a leaked key in a deployed bundle would exhaust the quota of the
+  // server code legitimately sharing it.
+  if (apiKeyRecord.serviceRole) {
+    const verdict = detectBrowserOrigin(req.headers as Record<string, string | string[] | undefined>)
+    if (verdict.isBrowser) {
+      recordServiceRoleBrowserBlock({
+        projectId,
+        apiKeyId: apiKeyRecord.id,
+        keyName: apiKeyRecord.name ?? null,
+        keyPrefix: apiKeyRecord.keyPrefix ?? null,
+        verdict,
+        method: req.method,
+        path: req.originalUrl ?? req.url ?? '',
+      }).catch(() => {})
+
+      sendError(
+        res,
+        ErrorCodes.FORBIDDEN,
+        serviceRoleRefusalMessage(apiKeyRecord.name ?? null),
+        403,
+        {
+          kind: 'service_role_in_browser',
+          detectedVia: verdict.signal,
+          origin: verdict.origin,
+          fixUrl: `https://backenly.com/app/projects/${projectId}/connect`,
+        },
+      )
+      return
+    }
   }
 
   const project = await prisma.project.findUnique({ where: { id: projectId } })

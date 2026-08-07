@@ -346,6 +346,25 @@ export function getManualRemediationHint(
       return `"${t}" is taking heavy sequential scans and Backenly could not find a column it is safe to index automatically.${measured} Add an index on whichever column your queries filter or sort by — in the AI chat, say "add an index on <table>.<column>".`
     }
 
+    // Already contained by the runtime — every one of these requests was refused
+    // before it reached the database, so this hint describes cleanup, not an
+    // emergency. It still has to be explicit about rotation: refusing the browser
+    // calls stops Backenly serving the data, but the key itself is sitting in a
+    // shipped bundle where anyone can read it, and it will keep working from any
+    // non-browser client until it is revoked.
+    case 'service_role_key_exposed': {
+      const name = (details?.keyName as string | undefined) ?? 'this key'
+      const origins = Array.isArray(details?.origins) ? (details!.origins as string[]) : []
+      const where = origins.length > 0 ? ` It was called from ${origins.slice(0, 3).join(', ')}.` : ''
+      return (
+        `"${name}" is a service-role key and it is being called from a browser.${where} ` +
+        `Backenly refused those requests, so no rows were served — but the key is readable by ` +
+        `anyone who views your site's source, and it still works from curl or any server. ` +
+        `Three steps: swap the browser code to a client key (Project → API keys), move this key ` +
+        `to a server route or a Backenly function, then revoke and reissue it.`
+      )
+    }
+
     case 'missing_archival_job':
       return 'This table will keep growing without bound. In the AI chat, say "schedule a nightly cleanup on <table> older than 90 days" — Backenly will create the cron + the cleanup function with the retention you pick.'
     case 'missing_token_cleanup_cron':
