@@ -76,10 +76,20 @@ interface VerifiedCandidate extends IndexCandidate {
 export async function detectSlowQueryMissingIndexes(projectId: string): Promise<RawFinding[]> {
   const schema = `workspace_${projectId}`
 
+  // No bind parameters, so none are passed. queryWorkspaceSchema forwards its
+  // rest args straight to Postgres, and supplying an argument a statement has no
+  // placeholder for is rejected at bind time — which is what happened in
+  // production on 2026-08-07: this probe threw on every project on every tick.
+  //
+  // The damage was not the dead probe. computeDesiredStateDiff records the throw
+  // in `report.errors`, and reapInvariantFindings refuses to withdraw ANYTHING
+  // when that array is non-empty (unknown state is not "resolved"). So one
+  // mis-bound query disabled stale-finding withdrawal for the whole platform.
+  // The arity guard in workspace-pool is what surfaced it instead of a silent
+  // empty result.
   const ext = await queryWorkspaceSchema(
     projectId,
     `SELECT 1 AS present FROM pg_extension WHERE extname = 'pg_stat_statements' LIMIT 1`,
-    schema,
   ).catch(probeQueryFailed('detectSlowQueryMissingIndexes/extension'))
   const extRows = ext?.rows ?? ext ?? []
   if (extRows.length === 0) return []
