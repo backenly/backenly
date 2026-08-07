@@ -168,6 +168,10 @@ router.all('/:projectId/*', async (req: Request, res: Response) => {
     projectId,
     internalToken: token,
     method: req.method,
+    // v2 authenticates through getProjectIdFromAuth, so a branch-bound key must
+    // route here too. Omitting it would leave one surface on main and the other
+    // on the branch, using the same credential.
+    branchSchema: auth.branchSchema,
   })
 
   const sendUpstream = () =>

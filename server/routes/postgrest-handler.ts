@@ -19,6 +19,7 @@ import {
   internalClaimsFor,
   mintInternalToken,
   profileForProject,
+  profileForBranchSchema,
   upstreamUrl,
 } from '@/lib/postgrest/gateway'
 import {
@@ -34,6 +35,17 @@ export interface PostgrestCallerContext {
   projectId: string
   endUserId?: string
   isServiceRole?: boolean
+  /**
+   * Branch schema to serve instead of main, resolved from the API key during
+   * authentication. Undefined means main.
+   *
+   * It arrives here already validated by getProjectIdFromAuth and is validated
+   * AGAIN by profileForBranchSchema below. That is deliberate duplication: this
+   * value becomes the Accept-Profile header, and a header that selects a
+   * PostgreSQL schema is the one input in this file that must never be trusted
+   * from a caller, however trustworthy the caller looks.
+   */
+  branchSchema?: string
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -95,7 +107,11 @@ export async function handleViaPostgrest(
     return true
   }
 
-  const schema = profileForProject(ctx.projectId)
+  // Throws rather than falling back to main if the branch does not belong to
+  // this project. Silently serving main to a credential the owner scoped to a
+  // branch is worse than an error: staging writes would land in production and
+  // every request would report success.
+  const schema = profileForBranchSchema(ctx.projectId, ctx.branchSchema)
 
   let upstream: globalThis.Response
   let limit = 0
@@ -149,6 +165,7 @@ export async function handleViaPostgrest(
       projectId: ctx.projectId,
       internalToken: token,
       method: req.method,
+      branchSchema: ctx.branchSchema,
     })
     headers['content-type'] = 'application/json'
     // `count=exact` is what populates Content-Range, which the pagination

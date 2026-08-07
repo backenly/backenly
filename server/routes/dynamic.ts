@@ -40,6 +40,12 @@ interface AuthResolution {
   endUserId?: string
   isServiceRole?: boolean
   userRole?: string
+  /**
+   * Branch schema this credential is bound to, or undefined for main.
+   * Resolved from ApiKey.branchId during authentication and never from the
+   * request, because a client-settable value here selects a PostgreSQL schema.
+   */
+  branchSchema?: string
   error?: string
   code?: string
 }
@@ -55,7 +61,11 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
     const keyHash = hashApiKey(xApiKey)
     const key = await prisma.apiKey.findFirst({
       where: { keyHash },
-      select: { id: true, name: true, keyPrefix: true, projectId: true, userId: true, permissions: true, rateLimit: true, expiresAt: true, serviceRole: true },
+      select: {
+        id: true, name: true, keyPrefix: true, projectId: true, userId: true,
+        permissions: true, rateLimit: true, expiresAt: true, serviceRole: true,
+        branch: { select: { schemaName: true, status: true } },
+      },
     })
     if (!key) return { success: false, error: 'Invalid API key', code: 'INVALID_API_KEY' }
     if (key.expiresAt && key.expiresAt < new Date()) return { success: false, error: 'API key has expired', code: 'API_KEY_EXPIRED' }
@@ -107,6 +117,20 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
       }
     }
 
+    // A key bound to a branch that was merged or discarded must NOT silently
+    // fall back to main. That is the one failure mode branch routing can have
+    // that is worse than an error: a staging credential quietly starts reading
+    // and writing production, and every request succeeds while it does it.
+    if (key.branch && key.branch.status !== 'active') {
+      return {
+        success: false,
+        error:
+          'This key is bound to a branch that is no longer active. Issue a key for another ' +
+          'branch, or a main key, rather than letting it fall back to production data.',
+        code: 'BRANCH_INACTIVE',
+      }
+    }
+
     return {
       success: true,
       projectId: key.projectId,
@@ -115,6 +139,7 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
       endUserId,
       isServiceRole: !!key.serviceRole,
       userRole,
+      branchSchema: key.branch?.schemaName,
     }
   }
 
@@ -236,7 +261,7 @@ async function handleDynamicRequest(req: Request, res: Response) {
     return
   }
 
-  const { projectId, keyId, userId, endUserId, isServiceRole, userRole } = authResult
+  const { projectId, keyId, userId, endUserId, isServiceRole, userRole, branchSchema } = authResult
 
   // Strip the URL prefix that the SDK and verifier always include:
   //   /api/v1/{projectId}/db/{tableName}[/{id}]   →  pathSegments = [tableName, …]
@@ -438,6 +463,7 @@ async function handleDynamicRequest(req: Request, res: Response) {
     projectId: projectId!,
     endUserId,
     isServiceRole,
+    branchSchema,
   })
   if (handled) return
 

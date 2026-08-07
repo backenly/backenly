@@ -104,6 +104,25 @@ export async function createBranch(projectId: string, userId: string, rawName: s
     client.release()
   }
 
+  // ── Make the branch actually servable ─────────────────────────────────────
+  //
+  // PostgREST's exposed-schema list is static configuration read from the
+  // database; a schema that is not on it answers PGRST106 for EVERY table. A
+  // branch nobody registered is therefore a perfect clone of the data that the
+  // API cannot see at all, which is exactly the shape of the outage described in
+  // scripts/sql/postgrest-schema-registry.sql. Registering it here is what turns
+  // a cloned schema into an environment you can point a key at.
+  //
+  // Non-fatal on purpose: the clone succeeded and the branch row should exist
+  // either way. The runtime self-heals PGRST106 on first use, and the autonomy
+  // loop's schema-registration probe catches anything that slips past both.
+  try {
+    const { registerSchemaByName } = await import('@/lib/postgrest/registration')
+    await registerSchemaByName(schemaName)
+  } catch (e: any) {
+    console.warn(`[Branch] PostgREST registration failed for ${schemaName}:`, e?.message)
+  }
+
   const row = await prisma.workspaceBranch.create({
     data: { projectId, name, schemaName, createdBy: userId },
   })
@@ -199,6 +218,16 @@ export async function discardBranch(projectId: string, userId: string, branchId:
   // Registry-guarded: only schemas this table owns can be dropped.
   if (!branch.schemaName.startsWith(`workspace_${projectId}_br_`)) {
     return { ok: false as const, error: 'Refusing to drop a non-branch schema' }
+  }
+  // Unregister BEFORE dropping. A registered schema that no longer exists fails
+  // PostgREST's whole schema-cache rebuild, which 503s every tenant on the box,
+  // not just this project. The event trigger prunes dangling entries as a
+  // backstop, but ordering it correctly here means the backstop is never needed.
+  try {
+    const { unregisterSchema } = await import('@/lib/postgrest/registration')
+    await unregisterSchema(branch.schemaName)
+  } catch (e: any) {
+    console.warn(`[Branch] PostgREST unregister failed for ${branch.schemaName}:`, e?.message)
   }
   await pool.query(`DROP SCHEMA IF EXISTS "${branch.schemaName}" CASCADE`)
   await prisma.workspaceBranch.update({

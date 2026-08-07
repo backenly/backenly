@@ -711,6 +711,23 @@ model ApiKey {
   scope           String        @default("runtime")
   // Free-text label for MCP keys, e.g. "Claude Code laptop" / "Cursor work mac".
   mcpClientLabel  String?
+  // Branch this key reads and writes. Null = main, which is every existing key.
+  //
+  // The environment a request lands in is a property of the CREDENTIAL, never of
+  // the request. PostgREST picks its schema from Accept-Profile, so anything the
+  // client can influence to choose a schema is a cross-tenant bypass; see
+  // profileForBranchSchema in lib/postgrest/gateway.ts. Binding it here makes
+  // "point staging at the staging branch" an act of key issuance instead.
+  //
+  // onDelete: SetNull is the least-bad of two bad options and the runtime covers
+  // the gap. Cascade would silently DELETE a customer's API key when a branch is
+  // discarded; SetNull instead silently repoints a staging key at PRODUCTION,
+  // which is worse. So the column stays nullable for schema-level safety and the
+  // auth path refuses any key whose branch is not active (BRANCH_INACTIVE in
+  // server/routes/dynamic.ts). The row survives; it is made unusable rather than
+  // dangerous.
+  branchId        String?
+  branch          WorkspaceBranch? @relation(fields: [branchId], references: [id], onDelete: SetNull)
   usageLogs       ApiKeyUsage[]
   project         Project?      @relation(fields: [projectId], references: [id], onDelete: Cascade)
   user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -719,6 +736,7 @@ model ApiKey {
   @@index([projectId])
   @@index([keyPrefix])
   @@index([keyType])
+  @@index([branchId])
   @@index([resetAt])
   @@index([keyHash])
   @@index([scope])
@@ -1579,6 +1597,7 @@ model WorkspaceBranch {
   mergedAt    DateTime?
   discardedAt DateTime?
   project     Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  apiKeys     ApiKey[]
 
   @@unique([projectId, name])
   @@index([projectId, status])

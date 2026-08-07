@@ -13,6 +13,12 @@ const createApiKeySchema = z.object({
   permissions: z.array(z.string()).default([]),
   capabilities: z.array(z.enum(['database', 'auth', 'storage', 'functions', 'ai'])).default([]),
   serviceRole: z.boolean().default(false),
+  // Bind this key to a preview branch. Omit for main.
+  //
+  // The environment is chosen HERE, at issuance, and never by the request:
+  // PostgREST picks its schema from Accept-Profile, so a client-settable branch
+  // selector would be a cross-tenant bypass (see profileForBranchSchema).
+  branchId: z.string().uuid().optional(),
   expiresAt: z.string().datetime().optional(),
   rateLimit: z.number().int().positive().optional().default(1000),
   rateLimitWindow: z.number().int().positive().optional().default(3600), // seconds
@@ -174,6 +180,32 @@ export async function POST(request: NextRequest) {
       }
     }
     
+    // ── Branch scoping ────────────────────────────────────────────────────
+    //
+    // Verified against THIS project rather than trusted from the body. The
+    // resolved schema name eventually becomes the Accept-Profile header, so an
+    // unchecked branchId here would let a caller mint themselves a key pointing
+    // at another tenant's schema — the exact bypass the gateway strips headers
+    // to prevent, re-entered through key issuance.
+    if (data.branchId) {
+      if (!projectId) {
+        return NextResponse.json(
+          { error: 'A branch-scoped key must be scoped to a project.' },
+          { status: 400 },
+        )
+      }
+      const branch = await prisma.workspaceBranch.findFirst({
+        where: { id: data.branchId, projectId, status: 'active' },
+        select: { id: true },
+      })
+      if (!branch) {
+        return NextResponse.json(
+          { error: 'Branch not found on this project, or it is no longer active.' },
+          { status: 400 },
+        )
+      }
+    }
+
     const keyPrefix = getKeyPrefix(data.keyType, data.role)
     const fullKey = generateApiKey(keyPrefix)
     const keyHash = crypto.createHash('sha256').update(fullKey).digest('hex') // Hash for secure storage
@@ -196,6 +228,7 @@ export async function POST(request: NextRequest) {
         permissions,
         capabilities: data.capabilities,
         serviceRole: data.serviceRole,
+        branchId: data.branchId ?? null,
         userId: auth.userId,
         projectId: projectId || null, // Required for public, optional for dashboard
         expiresAt,
@@ -221,6 +254,7 @@ export async function POST(request: NextRequest) {
         permissions: apiKey.permissions,
         capabilities: apiKey.capabilities,
         serviceRole: apiKey.serviceRole,
+        branchId: apiKey.branchId,
         projectId: apiKey.projectId,
         createdAt: apiKey.createdAt,
         expiresAt: apiKey.expiresAt,

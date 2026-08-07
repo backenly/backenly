@@ -88,6 +88,23 @@ export async function ensureSchemaRegistered(projectId: string): Promise<Registr
     }
   }
 
+  return registerSchemaByName(schema)
+}
+
+/**
+ * Register a schema PostgREST must serve, by its literal name.
+ *
+ * Split out from ensureSchemaRegistered when preview branches arrived: a branch
+ * lives in `workspace_<id>_br_<name>`, which `workspaceSchemaName(projectId)`
+ * cannot produce, and an unregistered branch schema is a perfect clone of the
+ * data that answers PGRST106 for every table — the same silent per-project death
+ * this module was written for, reintroduced one feature later.
+ *
+ * The name is NOT derived from user input here. Callers pass a value built by
+ * `branchSchemaName()` from an already-validated slug, and the SQL function
+ * validates the identifier again before it reaches the role setting.
+ */
+export async function registerSchemaByName(schema: string): Promise<RegistrationResult> {
   const hit = recentlyRegistered.get(schema)
   if (hit && hit > Date.now()) {
     return { registered: true, schema, cached: true }

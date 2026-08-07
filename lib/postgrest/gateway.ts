@@ -64,6 +64,57 @@ export function profileForProject(projectId: string): string {
 }
 
 /**
+ * The schema a request is confined to, given an optional branch.
+ *
+ * ── Why the branch may only ever arrive from the API KEY ────────────────────
+ *
+ * The header note at the top of this file is the whole reason this function is
+ * shaped the way it is. `Accept-Profile` selects a PostgreSQL schema, so a
+ * client able to influence it can address another tenant's data. The gateway
+ * answers that by deriving the profile server-side and stripping any client
+ * copy.
+ *
+ * Branches reopen that question: something now has to say WHICH schema, and the
+ * obvious design — a `X-Backenly-Branch` request header — is precisely the
+ * bypass the stripping exists to prevent, rebuilt one layer up. A header the
+ * client controls, feeding the value that decides which schema is read, is the
+ * same vulnerability whatever it is called.
+ *
+ * So the branch is bound to the API KEY (`ApiKey.branchId`) and resolved from
+ * the database during authentication. A key issued against a branch reads that
+ * branch and nothing else; a key issued against main cannot be pointed at a
+ * branch by any request it sends. Choosing an environment becomes an act of
+ * credential issuance, which is what it already is everywhere else.
+ *
+ * `expectedProjectId` is not decoration. The branch schema name is read from a
+ * row keyed by the API key, and a mis-scoped or tampered row would otherwise
+ * name another project's schema. Verifying the prefix here means the check
+ * happens at the point of use rather than trusting whatever the caller resolved.
+ */
+export function profileForBranchSchema(
+  expectedProjectId: string,
+  branchSchema: string | null | undefined,
+): string {
+  const main = profileForProject(expectedProjectId)
+  if (!branchSchema) return main
+
+  const candidate = String(branchSchema).trim()
+  const prefix = `${main}_br_`
+  if (!candidate.startsWith(prefix) || candidate.length <= prefix.length) {
+    throw new Error(
+      `Refusing to serve branch schema "${branchSchema}": it does not belong to project ${expectedProjectId}.`,
+    )
+  }
+  // The remainder still reaches a header that names a schema, so it is validated
+  // rather than trusted, exactly as the projectId is above.
+  const suffix = candidate.slice(prefix.length)
+  if (!/^[a-z][a-z0-9_]{1,30}$/.test(suffix)) {
+    throw new Error(`Refusing to serve branch schema "${branchSchema}": invalid branch identifier.`)
+  }
+  return candidate
+}
+
+/**
  * Build the header set forwarded to PostgREST.
  *
  * Every reserved header is dropped from the incoming request FIRST and then set
@@ -72,7 +123,19 @@ export function profileForProject(projectId: string): string {
  */
 export function buildUpstreamHeaders(
   incoming: Headers | Record<string, string>,
-  opts: { projectId: string; internalToken: string; method: string },
+  opts: {
+    projectId: string
+    internalToken: string
+    method: string
+    /**
+     * Branch schema to serve instead of main. MUST come from the authenticated
+     * API key, never from the request — see profileForBranchSchema. It is
+     * re-validated against `projectId` here rather than assumed correct,
+     * because this is the last point before the value becomes a header that
+     * selects a schema.
+     */
+    branchSchema?: string | null
+  },
 ): Record<string, string> {
   // Duck-typed rather than `instanceof Headers`: this runs under the Next
   // runtime, Node, and Jest, which do not always share the same Headers class,
@@ -100,7 +163,7 @@ export function buildUpstreamHeaders(
     out[key] = value
   }
 
-  const profile = profileForProject(opts.projectId)
+  const profile = profileForBranchSchema(opts.projectId, opts.branchSchema)
   out['accept-profile'] = profile
   // PostgREST reads Content-Profile (not Accept-Profile) for writes, so a
   // gateway that set only the former would leave mutations pointed at the
