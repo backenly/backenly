@@ -23,6 +23,12 @@ import {
   upstreamUrl,
 } from '@/lib/postgrest/gateway'
 import {
+  classifyRequestOutcome,
+  resolveRequestId,
+  REQUEST_ID_HEADER,
+  LAYER_HEADER,
+} from '@/lib/observability/request-trace'
+import {
   toApiError,
   toListEnvelope,
   toRecordEnvelope,
@@ -49,6 +55,44 @@ export interface PostgrestCallerContext {
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/**
+ * Does this table have row-level security enabled?
+ *
+ * Needed only to tell an empty list that is CORRECT (an authenticated user with
+ * no rows) from one that is a silent auth failure (no identity, so RLS matched
+ * nothing). Without it the diagnosis would either be absent or fire on every
+ * genuinely empty table, and a warning that cries wolf is worse than none.
+ *
+ * Cached briefly and failing to `false`: this runs on the success path of every
+ * list request, so it must never add a round trip per request and must never
+ * turn a working response into an error. Guessing `false` when unknown means we
+ * stay quiet rather than accuse the auth layer without evidence.
+ */
+const rlsCache = new Map<string, { value: boolean; expires: number }>()
+const RLS_CACHE_TTL_MS = 30_000
+
+async function tableHasRls(schema: string, table: string): Promise<boolean> {
+  const key = `${schema}.${table}`
+  const hit = rlsCache.get(key)
+  if (hit && hit.expires > Date.now()) return hit.value
+  try {
+    const { prisma } = await import('@/lib/db/prisma')
+    const rows = await prisma.$queryRawUnsafe<Array<{ enabled: boolean }>>(
+      `SELECT c.relrowsecurity AS enabled
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = $1
+        WHERE c.relname = $2`,
+      schema,
+      table,
+    )
+    const value = Boolean(rows[0]?.enabled)
+    rlsCache.set(key, { value, expires: Date.now() + RLS_CACHE_TTL_MS })
+    return value
+  } catch {
+    return false
+  }
+}
 
 /**
  * Is this PostgREST telling us the schema is not in its exposed list?
@@ -99,12 +143,51 @@ export async function handleViaPostgrest(
   const secret = process.env.POSTGREST_JWT_SECRET
   if (!baseUrl || !secret) return false
 
+  // One id for this request, echoed to the caller and printed in our own logs,
+  // so "it failed at 14:03" becomes a single lookup instead of a search across
+  // the app's logs, the host's dashboard and Postgres.
+  const requestId = resolveRequestId(req.headers['x-request-id'] ?? req.headers[REQUEST_ID_HEADER])
+
+  /**
+   * Answer, with the layer attribution attached.
+   *
+   * Every exit from this handler goes through here so a response can never be
+   * sent without it. Routing each `res.json` individually is how one path ends
+   * up untraced, and the untraced one is always the rare failure nobody could
+   * reproduce.
+   */
+  const answer = (
+    status: number,
+    body: Record<string, unknown>,
+    facts: Partial<Parameters<typeof classifyRequestOutcome>[0]> = {},
+  ): true => {
+    const outcome = classifyRequestOutcome({
+      status,
+      endUserIdentityPresent: Boolean(ctx.endUserId),
+      serviceRole: Boolean(ctx.isServiceRole),
+      table,
+      ...facts,
+    })
+    res.setHeader(REQUEST_ID_HEADER, requestId)
+    res.setHeader(LAYER_HEADER, outcome.layer)
+    const enriched =
+      status >= 400 || outcome.silentFailure
+        ? {
+            ...body,
+            requestId,
+            layer: outcome.layer,
+            diagnosis: outcome.explanation,
+          }
+        : body
+    res.status(status).json(enriched)
+    return true
+  }
+
   // Authorization gate the legacy executor performed implicitly via
   // ApiDefinition lookup. Runs BEFORE anything is forwarded upstream.
   const exposure = await checkExposure(ctx.projectId, table, operation)
   if (!exposure.allowed) {
-    res.status(exposure.status ?? 404).json({ error: exposure.error, code: exposure.code })
-    return true
+    return answer(exposure.status ?? 404, { error: exposure.error, code: exposure.code })
   }
 
   // Throws rather than falling back to main if the branch does not belong to
@@ -196,11 +279,14 @@ export async function handleViaPostgrest(
       `[postgrest] ${req.method} ${ctx.projectId}/${table} failed:`,
       err instanceof Error ? err.message : err,
     )
-    res.status(aborted ? 504 : 502).json({
-      error: aborted ? 'The database did not respond in time' : 'Data plane unavailable',
-      code: aborted ? 'UPSTREAM_TIMEOUT' : 'UPSTREAM_UNAVAILABLE',
-    })
-    return true
+    return answer(
+      aborted ? 504 : 502,
+      {
+        error: aborted ? 'The database did not respond in time' : 'Data plane unavailable',
+        code: aborted ? 'UPSTREAM_TIMEOUT' : 'UPSTREAM_UNAVAILABLE',
+      },
+      { upstreamUnreachable: true },
+    )
   }
 
   let text = await upstream.text()
@@ -270,48 +356,59 @@ export async function handleViaPostgrest(
     // The full text goes to the log; the caller gets the sanitised mapping.
     console.error(`[postgrest] upstream ${upstream.status} for ${table}:`, text.slice(0, 500))
     const mapped = toApiError(upstream.status, parsed)
-    res.status(mapped.status).json(mapped.body)
-    return true
+    // The upstream CODE is passed through to the classifier (not to the caller):
+    // PGRST106 and PGRST205 are platform faults that look like the developer's
+    // missing table, and telling them apart is the entire point of this header.
+    const upstreamCode =
+      parsed && typeof parsed === 'object' && typeof (parsed as any).code === 'string'
+        ? (parsed as any).code
+        : null
+    return answer(mapped.status, mapped.body as unknown as Record<string, unknown>, { upstreamCode })
   }
 
   const rows = Array.isArray(parsed) ? parsed : parsed == null ? [] : [parsed]
 
   switch (operation) {
-    case 'list':
-      res.status(200).json(
-        toListEnvelope(rows, upstream.headers.get('content-range'), limit, offset),
-      )
-      return true
+    case 'list': {
+      // The one response that can be wrong while looking perfect. An empty list
+      // from an RLS-protected table, requested without an end-user token, is
+      // reported with a diagnosis naming the auth layer — see
+      // classifyRequestOutcome. A genuinely empty table for an authenticated
+      // caller passes through untouched.
+      const envelope = toListEnvelope(
+        rows, upstream.headers.get('content-range'), limit, offset,
+      ) as unknown as Record<string, unknown>
+      return answer(200, envelope, {
+        rowCount: rows.length,
+        tableHasRls: await tableHasRls(schema, table),
+      })
+    }
 
     case 'get':
       if (rows.length === 0) {
-        res.status(404).json({ error: 'Record not found', code: 'NOT_FOUND' })
-        return true
+        return answer(404, { error: 'Record not found', code: 'NOT_FOUND' })
       }
-      res.status(200).json(toRecordEnvelope(rows[0], 'fetched'))
-      return true
+      return answer(200, toRecordEnvelope(rows[0], 'fetched') as Record<string, unknown>)
 
     case 'create':
-      res.status(201).json(toRecordEnvelope(rows.length === 1 ? rows[0] : rows, 'created'))
-      return true
+      return answer(
+        201,
+        toRecordEnvelope(rows.length === 1 ? rows[0] : rows, 'created') as Record<string, unknown>,
+      )
 
     case 'update':
       if (rows.length === 0) {
         // PostgREST cannot distinguish "no such row" from "RLS hid it", and
         // neither can this layer. 404 is correct for both and leaks less.
-        res.status(404).json({ error: 'Record not found', code: 'NOT_FOUND' })
-        return true
+        return answer(404, { error: 'Record not found', code: 'NOT_FOUND' })
       }
-      res.status(200).json(toRecordEnvelope(rows[0], 'updated'))
-      return true
+      return answer(200, toRecordEnvelope(rows[0], 'updated') as Record<string, unknown>)
 
     case 'delete':
       if (rows.length === 0) {
-        res.status(404).json({ error: 'Record not found', code: 'NOT_FOUND' })
-        return true
+        return answer(404, { error: 'Record not found', code: 'NOT_FOUND' })
       }
-      res.status(200).json({ message: 'Record deleted successfully', data: rows[0] })
-      return true
+      return answer(200, { message: 'Record deleted successfully', data: rows[0] })
   }
 
   return false

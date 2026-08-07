@@ -51,6 +51,12 @@ function mockRes() {
   const res: any = {
     statusCode: 0,
     body: undefined,
+    // The handler now stamps x-backenly-request-id and x-backenly-layer on every
+    // response, so the double has to model setHeader. Captured rather than
+    // discarded: the layer header is a user-facing contract and worth asserting.
+    headers: {} as Record<string, string>,
+    setHeader(k: string, v: string) { this.headers[k.toLowerCase()] = v; return this },
+    getHeader(k: string) { return this.headers[k.toLowerCase()] },
     status(c: number) { this.statusCode = c; return this },
     json(b: unknown) { this.body = b; return this },
   }
