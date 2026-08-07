@@ -29,6 +29,7 @@ import { readWorkspaceSchema } from '@/lib/typegen/schema-reader'
 import { mapPgType } from '@/lib/import/supabase-map'
 import { computeSchemaDiff, validateBranchName, branchSchemaName, type SchemaDiff } from './diff'
 import { replicateRls, verifyRlsParity, type RlsCloneResult } from './rls-clone'
+import { isolateBranchSequences, verifySequenceIsolation } from './sequence-isolation'
 import { registerSchemaByName } from '@/lib/postgrest/registration'
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 4 })
@@ -109,6 +110,7 @@ export async function createBranch(
 
   const includeData = options.includeData === true
   let rls: RlsCloneResult = { policiesCreated: 0, tablesEnabled: 0, tablesForced: 0, failures: [] }
+  let sequencesIsolated = 0
 
   const client = await pool.connect()
   try {
@@ -139,6 +141,18 @@ export async function createBranch(
       )
     }
 
+    // ── Its own counters, before any write can happen ─────────────────────
+    //
+    // LIKE INCLUDING ALL copies a serial column's DEFAULT verbatim, so the clone
+    // has no sequence of its own and still reads nextval on MAIN's. Measured on
+    // PG 16: one insert into main and one into the branch produced ids 1 and 2
+    // from the same counter. A branch that advances production's sequence on
+    // every write is not isolated from production.
+    //
+    // Ordered before the data copy so the sequence is level with main before any
+    // row lands, and so the very first branch write already uses a local counter.
+    const seq = await isolateBranchSequences(client, schemaName)
+
     if (includeData) {
       for (const t of main.tables) {
         await client.query(
@@ -148,9 +162,13 @@ export async function createBranch(
     }
 
     // Belt and braces: assert against the live catalog that the branch is at
-    // least as protected as main, rather than trusting the return value above.
+    // least as protected as main, rather than trusting the return values above.
     const parity = await verifyRlsParity(client, mainSchema, schemaName)
     if (!parity.ok) throw new Error(parity.reason ?? 'row-security parity check failed')
+
+    const iso = await verifySequenceIsolation(client, schemaName)
+    if (!iso.ok) throw new Error(iso.reason ?? 'sequence isolation check failed')
+    sequencesIsolated = seq.isolated
 
     await client.query('COMMIT')
   } catch (e: any) {
@@ -193,6 +211,7 @@ export async function createBranch(
     includeData,
     policiesReplicated: rls.policiesCreated,
     tablesForced: rls.tablesForced,
+    sequencesIsolated,
   })
   return {
     ok: true as const,
@@ -200,6 +219,7 @@ export async function createBranch(
     tablesCloned: main.tables.length,
     dataCopied: includeData,
     policiesReplicated: rls.policiesCreated,
+    sequencesIsolated,
   }
 }
 

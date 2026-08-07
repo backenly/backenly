@@ -131,36 +131,28 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
       }
     }
 
-    // ── Branch keys stay refused: one blocker left, and it is measured ────────
+    // ── Branch routing is ON, and both hazards it had are closed ─────────────
     //
-    // Row security is now handled — lib/branches/rls-clone.ts replicates every
-    // policy plus ENABLE/FORCE before any data exists, verified on PG 16 (a
-    // non-privileged role went from seeing all 10 fixture rows to 0 without an
-    // identity and 1 with one, and the catalog's rendering of every policy is
-    // byte-identical between main and branch).
+    // Neither was assumed away; both were measured on PG 16 and then fixed.
     //
-    // What is NOT handled is sequence isolation. `CREATE TABLE ... (LIKE ...
-    // INCLUDING ALL)` copies a serial column's DEFAULT verbatim, so the branch
-    // has no sequence of its own and its default still reads
-    // nextval('workspace_<main>.orders_id_seq'). Measured: inserting one row
-    // into main and one into the branch produced ids 1 and 2 from the SAME
-    // counter. A staging environment whose every write advances production's
-    // sequence is not isolated, and that is the entire point of the feature.
+    //   ROW SECURITY — `LIKE ... INCLUDING ALL` copies no RLS. A clone had
+    //   relrowsecurity = false and zero policies, and a non-privileged role read
+    //   every fixture row. lib/branches/rls-clone.ts now replicates policies plus
+    //   ENABLE/FORCE before any data exists; after it, that role sees 0 rows
+    //   without an identity and 1 with one, and every policy's catalog rendering
+    //   matches main byte for byte.
     //
-    // Fix is to give each cloned table its own sequence, re-point the default,
-    // and setval it. Until then this stays off rather than shipping an
-    // environment that quietly mutates production state.
-    if (key.branch) {
-      return {
-        success: false,
-        error:
-          'Branch-scoped API keys are not served yet. Branch clones still share the project\'s ' +
-          'sequences, so writes against a branch would advance production counters. Use a key ' +
-          'without a branch until sequence isolation ships.',
-        code: 'BRANCH_ROUTING_UNAVAILABLE',
-      }
-    }
-
+    //   SEQUENCES — the same clone copied serial DEFAULTs verbatim, so the branch
+    //   shared main's counters: one insert either side produced ids 1 and 2 from
+    //   the same sequence. lib/branches/sequence-isolation.ts gives each cloned
+    //   column its own sequence, level with main and OWNED BY its table.
+    //
+    // Both are re-verified against the live catalog before a branch is ever
+    // registered (lib/postgrest/registration.ts), and that check fails CLOSED —
+    // an unverifiable branch is not a servable branch.
+    //
+    // The schema still comes from the KEY and never from a request header; see
+    // profileForBranchSchema for why a header would be a cross-tenant bypass.
     return {
       success: true,
       projectId: key.projectId,
