@@ -21,6 +21,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/prisma'
 import { hashApiKey, timingSafeCompare } from '@/lib/auth/apiKeyAuth'
+import { protectedResourceMetadataUrl, scopeAllowsWrite, verifyAccessToken } from '@/lib/mcp/oauth'
 
 export interface McpAuthResult {
   success: boolean
@@ -45,13 +46,22 @@ export interface McpAuthResult {
  *   - 200                 — projectId, userId, keyId returned
  */
 export async function authenticateMcp(request: NextRequest): Promise<McpAuthResult> {
+  // OAuth first. A host that completed the browser flow sends a Bearer token
+  // and has no x-api-key at all.
+  const authHeader = request.headers.get('authorization')
+  if (authHeader?.startsWith('Bearer ')) {
+    return authenticateBearer(authHeader.slice(7).trim())
+  }
+
   const rawKey = request.headers.get('x-api-key')
   if (!rawKey || rawKey.length < 16) {
     return {
       success: false,
       status: 401,
       code: 'NO_AUTH',
-      error: 'Missing or empty x-api-key header. Run `npx @backenly/mcp-server init` to set up.',
+      error:
+        'No credential. Either sign in through OAuth (your MCP host will prompt you) ' +
+        'or send an x-api-key header — run `npx @backenly/mcp-server init` to set one up.',
     }
   }
 
@@ -129,17 +139,91 @@ export async function authenticateMcp(request: NextRequest): Promise<McpAuthResu
 }
 
 /**
+ * Validate an OAuth access token.
+ *
+ * The token names its connection in `sub` — an ApiKey row created at consent
+ * time. Loading it here rather than trusting the token's own claims is what
+ * makes revocation instant: deleting the row kills every outstanding token
+ * without a blocklist, because there is nothing left to point at.
+ *
+ * Scope narrows but never widens. A token granted only `mcp:read` is treated as
+ * read-only even if the underlying row is read-write, so a future bug that
+ * mints an over-broad token still cannot mutate.
+ */
+async function authenticateBearer(token: string): Promise<McpAuthResult> {
+  const claims = verifyAccessToken(token)
+  if (!claims) {
+    return {
+      success: false,
+      status: 401,
+      code: 'INVALID_TOKEN',
+      error:
+        'This OAuth access token is invalid or expired. Refresh it, or re-authorize the MCP host.',
+    }
+  }
+
+  const record = await prisma.apiKey.findUnique({
+    where: { id: claims.sub },
+    select: { id: true, projectId: true, userId: true, scope: true, mcpReadOnly: true, expiresAt: true },
+  })
+
+  // The connection was revoked from the dashboard, so the token names nothing.
+  if (!record || !record.projectId) {
+    return {
+      success: false,
+      status: 401,
+      code: 'CONNECTION_REVOKED',
+      error: 'This connection was revoked. Re-authorize the MCP host to reconnect.',
+    }
+  }
+  if (record.expiresAt && record.expiresAt < new Date()) {
+    return { success: false, status: 401, code: 'KEY_EXPIRED', error: 'This connection expired.' }
+  }
+  if (record.scope !== 'mcp') {
+    return { success: false, status: 403, code: 'WRONG_SCOPE', error: 'Not an MCP connection.' }
+  }
+
+  prisma.apiKey.update({ where: { id: record.id }, data: { lastUsed: new Date() } }).catch(() => {})
+
+  return {
+    success: true,
+    projectId: record.projectId,
+    userId: record.userId,
+    keyId: record.id,
+    scope: record.scope,
+    readOnly: record.mcpReadOnly || !scopeAllowsWrite(claims.scope),
+  }
+}
+
+/**
  * Helper: short-circuit handler when auth fails. Returns the matching NextResponse,
  * or null when the caller may proceed. Stamps the standard MCP error envelope.
  */
 export function mcpAuthFailureResponse(result: McpAuthResult): NextResponse | null {
   if (result.success) return null
+  const status = result.status ?? 401
   return NextResponse.json(
     {
       ok: false,
       error: result.error,
       code: result.code,
     },
-    { status: result.status ?? 401 },
+    { status, headers: status === 401 ? { 'www-authenticate': wwwAuthenticate(result) } : undefined },
   )
+}
+
+/**
+ * The RFC 9728 challenge that turns a 401 into a browser login.
+ *
+ * An MCP host reads `resource_metadata`, fetches the protected-resource
+ * document, finds the authorization server, registers itself and opens a
+ * browser. Without this header none of that can start — which is precisely why
+ * pasting an API key by hand was the only install path we had.
+ */
+export function wwwAuthenticate(result?: McpAuthResult): string {
+  const parts = [`Bearer realm="backenly"`, `resource_metadata="${protectedResourceMetadataUrl()}"`]
+  if (result?.code === 'INVALID_TOKEN') {
+    parts.splice(1, 0, `error="invalid_token"`, `error_description="The access token is invalid or expired"`)
+  }
+  return parts.join(', ')
 }

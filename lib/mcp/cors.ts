@@ -19,10 +19,15 @@ export function corsHeaders(): Record<string, string> {
     'access-control-allow-methods': 'GET,POST,OPTIONS',
     // `mcp-session-id` / `mcp-protocol-version` / `accept` are sent by
     // Streamable-HTTP MCP hosts hitting the remote /api/mcp endpoint directly.
+    // `authorization` carries the OAuth access token; omitting it made the
+    // browser-login path unusable from any browser-based host, since the
+    // preflight would reject the only header that flow uses.
     'access-control-allow-headers':
-      'content-type,accept,x-api-key,x-correlation-id,mcp-session-id,mcp-protocol-version',
+      'content-type,accept,authorization,x-api-key,x-correlation-id,mcp-session-id,mcp-protocol-version',
+    // `www-authenticate` must be readable by the client or it cannot discover
+    // the authorization server from a 401 — the whole point of the challenge.
     'access-control-expose-headers':
-      'x-ratelimit-limit,x-ratelimit-remaining,x-ratelimit-reset,retry-after,mcp-session-id',
+      'x-ratelimit-limit,x-ratelimit-remaining,x-ratelimit-reset,retry-after,mcp-session-id,www-authenticate',
     'access-control-max-age': '86400',
   }
 }

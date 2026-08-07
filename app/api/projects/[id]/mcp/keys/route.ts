@@ -55,13 +55,14 @@ export async function GET(
     // into a cryptic `Unexpected token 'I'` on the client. Catch it here so the
     // dashboard always receives clean JSON with an actionable message.
     try {
-      const keys = await prisma.apiKey.findMany({
+      const rows = await prisma.apiKey.findMany({
         where: { projectId, scope: 'mcp' },
         orderBy: { createdAt: 'desc' },
         select: {
           id: true,
           name: true,
           keyPrefix: true,
+          keyType: true,
           mcpClientLabel: true,
           mcpReadOnly: true,
           createdAt: true,
@@ -69,6 +70,14 @@ export async function GET(
           expiresAt: true,
         },
       })
+
+      // OAuth connections are ApiKey rows too — that reuse is what lets quota,
+      // rate limiting, audit and read-only apply to them unchanged. But they are
+      // not keys: no plaintext was ever issued, so rendering one with a masked
+      // `mcp_live_…` prefix would show the user a credential that does not
+      // exist. They are split out and surfaced as revocable connections instead.
+      const keys = rows.filter((k) => k.keyType !== 'mcp_oauth')
+      const connections = rows.filter((k) => k.keyType === 'mcp_oauth')
 
       return NextResponse.json({
         keys: keys.map((k) => ({
@@ -80,6 +89,13 @@ export async function GET(
           createdAt: k.createdAt,
           lastUsed: k.lastUsed,
           expiresAt: k.expiresAt,
+        })),
+        connections: connections.map((k) => ({
+          id: k.id,
+          client: k.mcpClientLabel ?? k.name,
+          readOnly: k.mcpReadOnly,
+          createdAt: k.createdAt,
+          lastUsed: k.lastUsed,
         })),
       })
     } catch (err) {

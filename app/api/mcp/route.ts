@@ -24,7 +24,7 @@ export const runtime = 'nodejs'
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { authenticateMcp, type McpAuthResult } from '@/lib/mcp/auth'
+import { authenticateMcp, wwwAuthenticate, type McpAuthResult } from '@/lib/mcp/auth'
 import { buildCatalog } from '@/lib/mcp/catalog'
 import { corsHeaders, optionsResponse } from '@/lib/mcp/cors'
 import { prisma } from '@/lib/db/prisma'
@@ -86,13 +86,21 @@ export async function POST(request: NextRequest) {
       if (reply) out.push(reply)
     }
     if (out.length === 0) return withCors(new NextResponse(null, { status: 202 }))
+    // If anything in the batch failed auth, the whole batch is a 401 challenge —
+    // a host retrying after login is the only useful next step either way.
+    const challenge = out.map((r) => AUTH_CHALLENGE.get(r)).find(Boolean)
+    if (challenge) {
+      return withCors(
+        NextResponse.json(out, { status: 401, headers: { 'www-authenticate': challenge } }),
+      )
+    }
     return withCors(NextResponse.json(out))
   }
 
   const reply = await handleMessage(payload, request)
   // A notification (no id / notifications/*) gets an empty 202, not a JSON-RPC body.
   if (!reply) return withCors(new NextResponse(null, { status: 202 }))
-  return withCors(NextResponse.json(reply))
+  return rpcResponse(reply)
 }
 
 /**
@@ -256,8 +264,33 @@ function rpcError(id: any, code: number, message: string, data?: unknown): objec
 }
 
 /** Map an MCP auth failure onto a JSON-RPC error carrying the machine code. */
+/**
+ * Auth failures must leave as HTTP 401 carrying `WWW-Authenticate`, not as a
+ * 200 with a JSON-RPC error inside.
+ *
+ * This was the single reason no MCP host could offer browser login for
+ * Backenly. A host starts OAuth discovery on a 401 challenge; a 200 tells it
+ * the call succeeded and the error is the server's problem, so it never looks
+ * for an authorization server and the user is left pasting an API key.
+ *
+ * The handlers here return plain JSON-RPC objects, so the challenge is carried
+ * out-of-band on this map rather than by changing every handler's return type.
+ */
+const AUTH_CHALLENGE = new WeakMap<object, string>()
+
 function authRpcError(id: any, auth: McpAuthResult): object {
-  return rpcError(id, -32001, auth.error ?? 'Authentication failed.', { code: auth.code })
+  const reply = rpcError(id, -32001, auth.error ?? 'Authentication failed.', { code: auth.code })
+  AUTH_CHALLENGE.set(reply, wwwAuthenticate(auth))
+  return reply
+}
+
+/** Wrap a JSON-RPC reply, upgrading auth failures to a 401 challenge. */
+function rpcResponse(reply: object): NextResponse {
+  const challenge = AUTH_CHALLENGE.get(reply)
+  if (!challenge) return withCors(NextResponse.json(reply))
+  return withCors(
+    NextResponse.json(reply, { status: 401, headers: { 'www-authenticate': challenge } }),
+  )
 }
 
 function withCors(res: NextResponse): NextResponse {

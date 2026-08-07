@@ -746,6 +746,10 @@ model ApiKey {
   branchId        String?
   branch          WorkspaceBranch? @relation(fields: [branchId], references: [id], onDelete: SetNull)
   usageLogs       ApiKeyUsage[]
+  // Present only on keyType='mcp_oauth' rows, where this ApiKey IS the OAuth
+  // connection. Cascades so revoking the connection kills every issued token.
+  oauthCodes      McpOAuthCode[]
+  oauthRefreshes  McpOAuthRefresh[]
   project         Project?      @relation(fields: [projectId], references: [id], onDelete: Cascade)
   user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -2980,4 +2984,87 @@ model SchemaDriftEvent {
   @@index([projectId, status])
   @@index([capturedAt])
   @@map("schema_drift_events")
+}
+
+// ─── MCP OAuth ───────────────────────────────────────────────────────────────
+//
+// Why these exist: an MCP key had to be pasted into a config file by hand. Both
+// Supabase and InsForge answer a 401 with `WWW-Authenticate: Bearer
+// resource_metadata=…`, which is what makes a host pop a browser login, so
+// their install is one click and ours was a copy-paste of a live credential.
+//
+// The design decision that keeps this small: an OAuth authorization does NOT
+// invent a parallel credential system. It mints an ApiKey row (keyType =
+// 'mcp_oauth') and the access token is a short-lived JWT that points at it. So
+// quota, per-key rate limiting, usage logging, audit and the read-only mode all
+// keep working with zero changes — the ApiKey row IS the connection, and
+// revoking it kills every token issued against it.
+
+// A client registered via RFC 7591 Dynamic Client Registration.
+//
+// Public clients only: MCP hosts are installed applications that cannot keep a
+// secret, so no client_secret is ever issued and PKCE S256 is mandatory on
+// every authorization. A registration is therefore not a credential — it is a
+// declaration of redirect URIs, and the redirect URI allowlist plus PKCE are
+// what actually bind a code to the client that requested it.
+model McpOAuthClient {
+  id           String            @id @default(uuid())
+  clientId     String            @unique
+  clientName   String
+  redirectUris String[]
+  createdAt    DateTime          @default(now())
+  lastUsedAt   DateTime?
+  codes        McpOAuthCode[]
+  refreshes    McpOAuthRefresh[]
+
+  @@index([createdAt])
+  @@map("mcp_oauth_clients")
+}
+
+// A single-use authorization code. Stored hashed: a leaked database row must
+// not be redeemable, exactly as with api_keys.keyHash.
+model McpOAuthCode {
+  id            String         @id @default(uuid())
+  codeHash      String         @unique
+  clientId      String
+  client        McpOAuthClient @relation(fields: [clientId], references: [clientId], onDelete: Cascade)
+  // The connection this code redeems into. Created at consent time, so the
+  // human's project + read-only choice is fixed before any token exists.
+  apiKeyId      String
+  apiKey        ApiKey         @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+  redirectUri   String
+  codeChallenge String
+  scope         String
+  resource      String?
+  expiresAt     DateTime
+  // Set on redemption. Kept rather than deleted so a replay is detectable as a
+  // replay instead of looking like an unknown code.
+  consumedAt    DateTime?
+  createdAt     DateTime       @default(now())
+
+  @@index([expiresAt])
+  @@index([apiKeyId])
+  @@map("mcp_oauth_codes")
+}
+
+// A refresh token, rotated on every use (OAuth 2.1 for public clients).
+//
+// `rotatedToId` makes reuse detectable: presenting a token that has already
+// been rotated means the token was captured, so the whole chain is revoked
+// rather than just refused.
+model McpOAuthRefresh {
+  id          String         @id @default(uuid())
+  tokenHash   String         @unique
+  clientId    String
+  client      McpOAuthClient @relation(fields: [clientId], references: [clientId], onDelete: Cascade)
+  apiKeyId    String
+  apiKey      ApiKey         @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+  expiresAt   DateTime
+  revokedAt   DateTime?
+  rotatedToId String?
+  createdAt   DateTime       @default(now())
+
+  @@index([apiKeyId])
+  @@index([expiresAt])
+  @@map("mcp_oauth_refresh_tokens")
 }

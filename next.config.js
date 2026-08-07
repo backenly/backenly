@@ -86,6 +86,32 @@ const nextConfig = {
       // agents at /docs/llms.txt; the file is served from /llms.txt. Serve
       // it directly (no redirect) so naive fetchers get a 200.
       { source: '/docs/llms.txt', destination: '/llms.txt' },
+      // OAuth discovery must live at the RFC-mandated well-known paths, but the
+      // App Router will not route a literal `.well-known` directory. Rewrites
+      // (not redirects) so a client reading the metadata gets a 200 at the URL
+      // it derived, which is what the spec requires.
+      //
+      // Both the bare and the path-suffixed forms are served: RFC 9728 tells a
+      // client to insert the resource path, so a resource of
+      // `https://backenly.com/api/mcp` yields
+      // `/.well-known/oauth-protected-resource/api/mcp`, while some hosts try
+      // the bare path first. Answering only one strands the other.
+      {
+        source: '/.well-known/oauth-protected-resource',
+        destination: '/api/mcp/oauth/protected-resource',
+      },
+      {
+        source: '/.well-known/oauth-protected-resource/api/mcp',
+        destination: '/api/mcp/oauth/protected-resource',
+      },
+      {
+        source: '/.well-known/oauth-authorization-server',
+        destination: '/api/mcp/oauth/authorization-server',
+      },
+      {
+        source: '/.well-known/oauth-authorization-server/api/mcp',
+        destination: '/api/mcp/oauth/authorization-server',
+      },
     ]
     // Only proxy /api/v1/* when RUNTIME_API_URL is set. In production the
     // Next.js route handlers in app/api/v1/ serve these requests directly.
