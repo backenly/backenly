@@ -131,30 +131,32 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
       }
     }
 
-    // ── Branch keys are refused, and the refusal is the honest answer ─────────
+    // ── Branch keys stay refused: one blocker left, and it is measured ────────
     //
-    // The key binding, the ownership validation and the header plumbing are all
-    // in place, but the data plane cannot serve a branch yet and will not until
-    // branch clones carry row security.
+    // Row security is now handled — lib/branches/rls-clone.ts replicates every
+    // policy plus ENABLE/FORCE before any data exists, verified on PG 16 (a
+    // non-privileged role went from seeing all 10 fixture rows to 0 without an
+    // identity and 1 with one, and the catalog's rendering of every policy is
+    // byte-identical between main and branch).
     //
-    // Measured on Postgres 16, 2026-08-07: `CREATE TABLE ... (LIKE ... INCLUDING
-    // ALL)` does not copy RLS. A cloned branch has relrowsecurity = false and no
-    // policies, and a non-privileged end-user role reading it saw every row.
-    // Serving that would publish an unprotected copy of the project's data.
+    // What is NOT handled is sequence isolation. `CREATE TABLE ... (LIKE ...
+    // INCLUDING ALL)` copies a serial column's DEFAULT verbatim, so the branch
+    // has no sequence of its own and its default still reads
+    // nextval('workspace_<main>.orders_id_seq'). Measured: inserting one row
+    // into main and one into the branch produced ids 1 and 2 from the SAME
+    // counter. A staging environment whose every write advances production's
+    // sequence is not isolated, and that is the entire point of the feature.
     //
-    // Refused HERE rather than left to fail downstream because the downstream
-    // failure is PGRST106, which reads as "your table does not exist" — the exact
-    // misattribution that once cost a user their entire data layer. A developer
-    // who scoped a key to a branch deserves to be told the feature is not on,
-    // not sent to debug a table that is fine.
+    // Fix is to give each cloned table its own sequence, re-point the default,
+    // and setval it. Until then this stays off rather than shipping an
+    // environment that quietly mutates production state.
     if (key.branch) {
       return {
         success: false,
         error:
-          'Branch-scoped API keys are not served yet. A branch is currently a schema sandbox ' +
-          'for diff and merge, not a running environment: the clone carries no row-level ' +
-          'security, so serving it would expose an unprotected copy of your data. Use a key ' +
-          'without a branch until branch environments ship.',
+          'Branch-scoped API keys are not served yet. Branch clones still share the project\'s ' +
+          'sequences, so writes against a branch would advance production counters. Use a key ' +
+          'without a branch until sequence isolation ships.',
         code: 'BRANCH_ROUTING_UNAVAILABLE',
       }
     }

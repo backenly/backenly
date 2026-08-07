@@ -146,15 +146,37 @@ describe('buildUpstreamHeaders — the client cannot choose the schema', () => {
   })
 })
 
-describe('branch routing is not served yet, and says so', () => {
-  it('registerSchemaByName refuses a branch schema with the measured reason', async () => {
+describe('a branch is served only when its protection can be proven', () => {
+  // The registry only recognises a branch of a CANONICAL project schema, so the
+  // fixture has to be UUID-shaped. `workspace_abc123_br_x` deliberately does not
+  // match — see the sibling test below.
+  const UUID_BRANCH = 'workspace_11111111-2222-4333-8444-555555555555_br_staging'
+
+  it('never reports a branch as registered without a database to prove it', async () => {
+    // Scope note, so this test is not mistaken for more than it is: the harness
+    // stubs Prisma, so verifyBranchProtection's own query cannot be exercised
+    // here and the parity logic is NOT what this asserts. It asserts the outer
+    // contract — no path returns `registered: true` for a branch without a real
+    // catalog answering.
+    //
+    // The parity behaviour itself was verified against live PostgreSQL 16
+    // instead: a clone went from a non-privileged role seeing all 10 fixture
+    // rows to 0 without an identity and 1 with one, and every policy's catalog
+    // rendering matched main byte for byte.
     const { registerSchemaByName } = await import('@/lib/postgrest/registration')
-    const res = await registerSchemaByName(BRANCH)
+    const res = await registerSchemaByName(UUID_BRANCH)
     expect(res.registered).toBe(false)
-    // The refusal must name row security, because the next person to try this
-    // will otherwise "fix" it by widening the registry regex and ship an
-    // unprotected copy of a tenant's data.
-    expect(res.error).toMatch(/row/i)
+  })
+
+  it('does not treat a non-canonical name as a branch', () => {
+    // `_staging` is the migration dry-run schema: no owner, no key binding, no
+    // policy replication. It must never be mistaken for a branch and served.
+    const RE =
+      /^workspace_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(_br_[a-z][a-z0-9_]{1,30})?$/
+    expect(RE.test(UUID_BRANCH)).toBe(true)
+    expect(RE.test('workspace_11111111-2222-4333-8444-555555555555')).toBe(true)
+    expect(RE.test('workspace_11111111-2222-4333-8444-555555555555_staging')).toBe(false)
+    expect(RE.test(BRANCH)).toBe(false) // non-UUID project id
   })
 
   it('still registers an ordinary workspace schema unchanged', async () => {

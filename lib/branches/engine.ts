@@ -28,6 +28,8 @@ import { executeAction } from '@/lib/ai/minimal-executor'
 import { readWorkspaceSchema } from '@/lib/typegen/schema-reader'
 import { mapPgType } from '@/lib/import/supabase-map'
 import { computeSchemaDiff, validateBranchName, branchSchemaName, type SchemaDiff } from './diff'
+import { replicateRls, verifyRlsParity, type RlsCloneResult } from './rls-clone'
+import { registerSchemaByName } from '@/lib/postgrest/registration'
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 4 })
 const MAX_ACTIVE_BRANCHES = 5
@@ -64,7 +66,29 @@ async function readSchemaSnapshot(projectId: string, schemaName: string) {
   return { projectId, schemaName, tables: [...tables.values()], generatedAt: new Date().toISOString() }
 }
 
-export async function createBranch(projectId: string, userId: string, rawName: string) {
+export interface CreateBranchOptions {
+  /**
+   * Copy main's rows into the branch. OFF by default, and that default is the
+   * important part.
+   *
+   * Supabase ships the same feature with the same default and states the reason
+   * outright: "New branches do not start with any data from your main project.
+   * This is meant to better protect your sensitive production data." A branch is
+   * for testing a schema change, and a full copy of production multiplies the
+   * blast radius of every mistake made against it.
+   *
+   * When it IS requested, RLS is replicated first (see below), so the copy is
+   * governed by the same policies as the original rather than lying open.
+   */
+  includeData?: boolean
+}
+
+export async function createBranch(
+  projectId: string,
+  userId: string,
+  rawName: string,
+  options: CreateBranchOptions = {},
+) {
   // Normalize BEFORE validation and use the slug everywhere — the validator
   // lowercases internally, so "Add-Payments" must become "add-payments" here
   // or the schema identifier and registry would carry the un-normalized form.
@@ -83,6 +107,9 @@ export async function createBranch(projectId: string, userId: string, rawName: s
   const schemaName = branchSchemaName(projectId, name)
   const main = await readWorkspaceSchema(projectId)
 
+  const includeData = options.includeData === true
+  let rls: RlsCloneResult = { policiesCreated: 0, tablesEnabled: 0, tablesForced: 0, failures: [] }
+
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
@@ -91,10 +118,40 @@ export async function createBranch(projectId: string, userId: string, rawName: s
       await client.query(
         `CREATE TABLE "${schemaName}"."${t.tableName}" (LIKE "${mainSchema}"."${t.tableName}" INCLUDING ALL)`,
       )
-      await client.query(
-        `INSERT INTO "${schemaName}"."${t.tableName}" SELECT * FROM "${mainSchema}"."${t.tableName}"`,
+    }
+
+    // ── Row security, before any data exists ──────────────────────────────
+    //
+    // INCLUDING ALL does not copy RLS: not the flag, not FORCE, not one policy.
+    // Verified on PG 16, not read from the docs — a clone came up with
+    // relrowsecurity = false and a non-privileged role saw every fixture row.
+    //
+    // Ordered before the data copy on purpose. Replicating afterwards would
+    // leave a window, however short, in which a full copy of production sits in
+    // a schema with no policies on it.
+    rls = await replicateRls(client, mainSchema, schemaName)
+    if (rls.failures.length > 0) {
+      // A branch missing even one policy is a hole, and a hole reported as a
+      // ready branch is exactly the failure this ordering exists to prevent.
+      throw new Error(
+        `could not replicate ${rls.failures.length} row-security policy/policies ` +
+        `(${rls.failures[0].table}.${rls.failures[0].policy}: ${rls.failures[0].error})`,
       )
     }
+
+    if (includeData) {
+      for (const t of main.tables) {
+        await client.query(
+          `INSERT INTO "${schemaName}"."${t.tableName}" SELECT * FROM "${mainSchema}"."${t.tableName}"`,
+        )
+      }
+    }
+
+    // Belt and braces: assert against the live catalog that the branch is at
+    // least as protected as main, rather than trusting the return value above.
+    const parity = await verifyRlsParity(client, mainSchema, schemaName)
+    if (!parity.ok) throw new Error(parity.reason ?? 'row-security parity check failed')
+
     await client.query('COMMIT')
   } catch (e: any) {
     await client.query('ROLLBACK').catch(() => {})
@@ -104,27 +161,46 @@ export async function createBranch(projectId: string, userId: string, rawName: s
     client.release()
   }
 
-  // ── Deliberately NOT registered with PostgREST ────────────────────────────
+  // ── Make the branch servable ──────────────────────────────────────────────
   //
-  // A branch is a schema sandbox: you diff it and merge it. It is NOT served
-  // over the REST API, and that is a security position rather than an omission.
+  // PostgREST's exposed-schema list is static configuration; a schema missing
+  // from it answers PGRST106 for every table. Registration is what turns the
+  // clone from a sandbox into an environment a key can be pointed at.
   //
-  // Measured on Postgres 16, 2026-08-07: the `LIKE ... INCLUDING ALL` clone
-  // above copies indexes, defaults and constraints but NOT row security. The
-  // branch comes up with relrowsecurity = false and zero policies, and a
-  // non-privileged end-user role reading it saw every row. Serving that would
-  // publish an unprotected copy of the project's data under a schema name no
-  // dashboard shows.
-  //
-  // Making branches servable therefore requires replicating RLS into the clone
-  // first, and only then widening the registry's canonical-name check. See
-  // registerSchemaByName, which refuses branch schemas explicitly so the gap
-  // cannot be closed by accident.
+  // It is reached only because RLS was replicated and parity was verified above.
+  // registerSchemaByName re-checks that independently before it will accept a
+  // `_br_` schema, so this is a request rather than an assertion.
+  const reg = await registerSchemaByName(schemaName).catch((e: any) => ({
+    registered: false, schema: schemaName, error: e?.message ?? String(e),
+  }))
+  if (!reg.registered) {
+    // Refuse the whole branch rather than leave one that cannot be served. A
+    // branch whose API 404s is indistinguishable from a broken backend, and the
+    // user has no way to tell which they are looking at.
+    await pool.query(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`).catch(() => {})
+    return {
+      ok: false as const,
+      error: `Branch created but could not be served: ${reg.error ?? 'registration failed'}`,
+    }
+  }
+
   const row = await prisma.workspaceBranch.create({
     data: { projectId, name, schemaName, createdBy: userId },
   })
-  await audit(projectId, userId, 'BRANCH_CREATED', { branch: name, tables: main.tables.length })
-  return { ok: true as const, branch: row, tablesCloned: main.tables.length }
+  await audit(projectId, userId, 'BRANCH_CREATED', {
+    branch: name,
+    tables: main.tables.length,
+    includeData,
+    policiesReplicated: rls.policiesCreated,
+    tablesForced: rls.tablesForced,
+  })
+  return {
+    ok: true as const,
+    branch: row,
+    tablesCloned: main.tables.length,
+    dataCopied: includeData,
+    policiesReplicated: rls.policiesCreated,
+  }
 }
 
 export async function diffBranch(projectId: string, branchId: string): Promise<

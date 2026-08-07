@@ -349,8 +349,21 @@ BEGIN
   -- over the public API, RLS policies and all, under a name no dashboard shows.
   -- Nothing legitimate registers a non-UUID form: workspaceSchemaName() has
   -- always enforced exactly this shape.
-  IF target_schema !~ '^workspace_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' THEN
-    RAISE EXCEPTION 'Refusing to register schema %: not a canonical workspace schema', target_schema;
+  -- Preview branches (`_br_<slug>`) are permitted as of 2026-08-07, and ONLY
+  -- because the hazard named above is now closed rather than assumed away.
+  --
+  -- What changed: lib/branches/engine.ts replicates row security into the clone
+  -- BEFORE any data exists (INCLUDING ALL does not copy it — verified on PG 16,
+  -- where a fresh clone had relrowsecurity = false and a non-privileged role
+  -- read every fixture row), and lib/postgrest/registration.ts re-verifies
+  -- parity against the live catalog immediately before calling this function,
+  -- failing closed when it cannot.
+  --
+  -- `_staging` is still refused and must stay refused: the migration dry-run
+  -- schema has no owner, no key binding and no policy replication, so it is
+  -- exactly the unprotected copy this check was narrowed to stop.
+  IF target_schema !~ '^workspace_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(_br_[a-z][a-z0-9_]{1,30})?$' THEN
+    RAISE EXCEPTION 'Refusing to register schema %: not a canonical workspace or branch schema', target_schema;
   END IF;
 
   IF NOT EXISTS (

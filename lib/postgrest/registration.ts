@@ -43,6 +43,56 @@ import { prisma } from '@/lib/db'
 import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 
 /**
+ * A branch schema, and nothing else that merely contains `_br_`.
+ *
+ * Anchored on the canonical project form so `workspace_<uuid>_staging` — the
+ * migration dry-run schema, which has no key binding and no owner — can never
+ * match. Widening this to anything looser reintroduces the exposure the
+ * registry's own check was narrowed to close.
+ */
+const BRANCH_SCHEMA_RE =
+  /^workspace_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}_br_[a-z][a-z0-9_]{1,30}$/
+
+/**
+ * Is every table protected on the project also protected on the branch?
+ *
+ * Read-only, and one-directional: a branch may be MORE restrictive than main,
+ * never less. Uses the platform pool because it inspects the catalog only.
+ */
+async function verifyBranchProtection(
+  mainSchema: string,
+  branchSchema: string,
+): Promise<{ ok: boolean; reason?: string }> {
+  try {
+    const rows = await prisma.$queryRawUnsafe<Array<{ relname: string }>>(
+      `WITH main_protected AS (
+         SELECT c.relname FROM pg_class c
+           JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = $1
+          WHERE c.relkind = 'r' AND c.relrowsecurity
+       ), branch_protected AS (
+         SELECT c.relname FROM pg_class c
+           JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = $2
+          WHERE c.relkind = 'r' AND c.relrowsecurity
+       )
+       SELECT m.relname FROM main_protected m
+        WHERE m.relname NOT IN (SELECT relname FROM branch_protected)`,
+      mainSchema,
+      branchSchema,
+    )
+    if (rows.length > 0) {
+      return {
+        ok: false,
+        reason: `${rows.length} table(s) protected on the project are unprotected on the branch (${rows.slice(0, 3).map(r => r.relname).join(', ')})`,
+      }
+    }
+    return { ok: true }
+  } catch (e: any) {
+    // Fail CLOSED. An unverifiable branch is not a servable branch.
+    return { ok: false, reason: `protection could not be verified (${e?.message ?? e})` }
+  }
+}
+
+/**
  * Registration is idempotent but not free, and the self-heal path can be hit by
  * a burst of concurrent requests for the same project. This collapses that
  * burst into one round trip.
@@ -99,34 +149,28 @@ export async function ensureSchemaRegistered(projectId: string): Promise<Registr
  * every caller catches and logs. See the guard below for the measurement.
  */
 export async function registerSchemaByName(schema: string): Promise<RegistrationResult> {
-  // ── Branch schemas are NOT registrable, and this is measured, not cautious ──
+  // ── A branch may be served only once it is as protected as its project ────
   //
-  // `backenly_pgrst_register_schema` accepts only the canonical
-  // `workspace_<uuid>` form. That narrowness is a deliberate security fix and
-  // the SQL says why: a branch clone is a full copy of a tenant's tables, and
-  // registering one would serve a shadow of the entire dataset over the public
-  // API under a name no dashboard shows.
+  // The registry's canonical-name check exists because a branch clone is a copy
+  // of a tenant's tables, and `CREATE TABLE ... LIKE INCLUDING ALL` does not
+  // copy row security. Verified on PG 16: a fresh clone has relrowsecurity =
+  // false and zero policies, and a non-privileged role read every fixture row.
   //
-  // Verified against Postgres 16 on 2026-08-07 rather than assumed:
-  // `CREATE TABLE ... (LIKE ... INCLUDING ALL)` copies indexes, defaults and
-  // constraints but NOT row security. A cloned branch comes up with
-  // relrowsecurity = false and zero policies, and a non-privileged end-user role
-  // reading it saw all 10 fixture rows. Replicating the policies dropped that to
-  // 0 without an identity and 1 with one.
-  //
-  // So serving a branch requires replicating RLS FIRST, and only then widening
-  // the registry. Until both are done, refusing here is what keeps the failure
-  // honest: the SQL function would throw anyway, and a caught-and-warned throw
-  // reads as "branch created fine" while every request against it 404s.
-  if (/_br_/.test(schema)) {
-    return {
-      registered: false,
-      schema,
-      error:
-        'Branch schemas are not served by the REST data plane. A branch clone carries no row ' +
-        'security (CREATE TABLE ... LIKE does not copy policies), so exposing one would publish ' +
-        'an unprotected copy of the project data. Registering branches requires replicating ' +
-        'RLS into the clone first.',
+  // The answer is not to trust the caller to have fixed that. Parity is checked
+  // HERE, against the live catalog, immediately before the schema is published —
+  // so a branch that lost a policy after it was cloned, or gained a table that
+  // never had one, is refused even though createBranch succeeded.
+  if (BRANCH_SCHEMA_RE.test(schema)) {
+    const mainSchema = schema.replace(/_br_[a-z0-9_]+$/, '')
+    const parity = await verifyBranchProtection(mainSchema, schema)
+    if (!parity.ok) {
+      return {
+        registered: false,
+        schema,
+        error:
+          `Refusing to serve branch ${schema}: ${parity.reason}. A branch is only exposed once ` +
+          `every table protected on the project is protected on the branch.`,
+      }
     }
   }
 
