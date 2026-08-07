@@ -5,8 +5,17 @@
  *
  *   Host LLM ──stdio JSON-RPC──> this server ──HTTPS──> backenly.com
  *                                  │
- *                                  ├── tools/list, tools/call        (the 50+ brain tools)
+ *                                  ├── tools/list  (the advertised allowlist)
+ *                                  ├── tools/call  (wider: every dispatchable tool)
  *                                  └── resources/list, resources/read (live backend state)
+ *
+ * Those two are deliberately different sizes, and the gap is the design.
+ * `tools/list` returns the allowlist from lib/mcp/catalog.ts, capped because
+ * tool-selection accuracy degrades as a catalog grows. `tools/call` will still
+ * execute anything `buildDispatchable()` emits, so an agent pinned to an older
+ * manifest that still has `list_tables` in context does not get a 404. Neither
+ * number is hardcoded here on purpose: `tools/list` on this server is the
+ * authority, and lib/mcp/catalog.ts is the single definition behind it.
  *
  * The tool registry is fetched from /api/mcp/manifest on boot — so when
  * Backenly ships a new brain tool it lights up in every MCP host without
