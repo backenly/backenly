@@ -146,6 +146,28 @@ describe('buildUpstreamHeaders — the client cannot choose the schema', () => {
   })
 })
 
+describe('branch routing is not served yet, and says so', () => {
+  it('registerSchemaByName refuses a branch schema with the measured reason', async () => {
+    const { registerSchemaByName } = await import('@/lib/postgrest/registration')
+    const res = await registerSchemaByName(BRANCH)
+    expect(res.registered).toBe(false)
+    // The refusal must name row security, because the next person to try this
+    // will otherwise "fix" it by widening the registry regex and ship an
+    // unprotected copy of a tenant's data.
+    expect(res.error).toMatch(/row/i)
+  })
+
+  it('still registers an ordinary workspace schema unchanged', async () => {
+    // The guard must key on the branch marker, not on anything that could catch
+    // a normal schema and take the whole data plane down.
+    const { registerSchemaByName } = await import('@/lib/postgrest/registration')
+    const res = await registerSchemaByName(MAIN)
+    // Reaches the SQL path (which fails without a database here) rather than
+    // being short-circuited by the branch guard.
+    expect(res.error ?? '').not.toMatch(/row-level security/i)
+  })
+})
+
 describe('profileForProject is unchanged', () => {
   it('still returns the main schema and still validates', () => {
     expect(profileForProject(PROJECT)).toBe(MAIN)

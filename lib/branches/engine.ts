@@ -104,25 +104,22 @@ export async function createBranch(projectId: string, userId: string, rawName: s
     client.release()
   }
 
-  // ── Make the branch actually servable ─────────────────────────────────────
+  // ── Deliberately NOT registered with PostgREST ────────────────────────────
   //
-  // PostgREST's exposed-schema list is static configuration read from the
-  // database; a schema that is not on it answers PGRST106 for EVERY table. A
-  // branch nobody registered is therefore a perfect clone of the data that the
-  // API cannot see at all, which is exactly the shape of the outage described in
-  // scripts/sql/postgrest-schema-registry.sql. Registering it here is what turns
-  // a cloned schema into an environment you can point a key at.
+  // A branch is a schema sandbox: you diff it and merge it. It is NOT served
+  // over the REST API, and that is a security position rather than an omission.
   //
-  // Non-fatal on purpose: the clone succeeded and the branch row should exist
-  // either way. The runtime self-heals PGRST106 on first use, and the autonomy
-  // loop's schema-registration probe catches anything that slips past both.
-  try {
-    const { registerSchemaByName } = await import('@/lib/postgrest/registration')
-    await registerSchemaByName(schemaName)
-  } catch (e: any) {
-    console.warn(`[Branch] PostgREST registration failed for ${schemaName}:`, e?.message)
-  }
-
+  // Measured on Postgres 16, 2026-08-07: the `LIKE ... INCLUDING ALL` clone
+  // above copies indexes, defaults and constraints but NOT row security. The
+  // branch comes up with relrowsecurity = false and zero policies, and a
+  // non-privileged end-user role reading it saw every row. Serving that would
+  // publish an unprotected copy of the project's data under a schema name no
+  // dashboard shows.
+  //
+  // Making branches servable therefore requires replicating RLS into the clone
+  // first, and only then widening the registry's canonical-name check. See
+  // registerSchemaByName, which refuses branch schemas explicitly so the gap
+  // cannot be closed by accident.
   const row = await prisma.workspaceBranch.create({
     data: { projectId, name, schemaName, createdBy: userId },
   })

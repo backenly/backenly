@@ -131,6 +131,34 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
       }
     }
 
+    // ── Branch keys are refused, and the refusal is the honest answer ─────────
+    //
+    // The key binding, the ownership validation and the header plumbing are all
+    // in place, but the data plane cannot serve a branch yet and will not until
+    // branch clones carry row security.
+    //
+    // Measured on Postgres 16, 2026-08-07: `CREATE TABLE ... (LIKE ... INCLUDING
+    // ALL)` does not copy RLS. A cloned branch has relrowsecurity = false and no
+    // policies, and a non-privileged end-user role reading it saw every row.
+    // Serving that would publish an unprotected copy of the project's data.
+    //
+    // Refused HERE rather than left to fail downstream because the downstream
+    // failure is PGRST106, which reads as "your table does not exist" — the exact
+    // misattribution that once cost a user their entire data layer. A developer
+    // who scoped a key to a branch deserves to be told the feature is not on,
+    // not sent to debug a table that is fine.
+    if (key.branch) {
+      return {
+        success: false,
+        error:
+          'Branch-scoped API keys are not served yet. A branch is currently a schema sandbox ' +
+          'for diff and merge, not a running environment: the clone carries no row-level ' +
+          'security, so serving it would expose an unprotected copy of your data. Use a key ' +
+          'without a branch until branch environments ship.',
+        code: 'BRANCH_ROUTING_UNAVAILABLE',
+      }
+    }
+
     return {
       success: true,
       projectId: key.projectId,

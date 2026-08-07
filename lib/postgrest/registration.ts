@@ -94,17 +94,42 @@ export async function ensureSchemaRegistered(projectId: string): Promise<Registr
 /**
  * Register a schema PostgREST must serve, by its literal name.
  *
- * Split out from ensureSchemaRegistered when preview branches arrived: a branch
- * lives in `workspace_<id>_br_<name>`, which `workspaceSchemaName(projectId)`
- * cannot produce, and an unregistered branch schema is a perfect clone of the
- * data that answers PGRST106 for every table — the same silent per-project death
- * this module was written for, reintroduced one feature later.
- *
- * The name is NOT derived from user input here. Callers pass a value built by
- * `branchSchemaName()` from an already-validated slug, and the SQL function
- * validates the identifier again before it reaches the role setting.
+ * Split out from ensureSchemaRegistered so the branch case has somewhere to be
+ * refused explicitly rather than failing deep inside a SQL function whose error
+ * every caller catches and logs. See the guard below for the measurement.
  */
 export async function registerSchemaByName(schema: string): Promise<RegistrationResult> {
+  // ── Branch schemas are NOT registrable, and this is measured, not cautious ──
+  //
+  // `backenly_pgrst_register_schema` accepts only the canonical
+  // `workspace_<uuid>` form. That narrowness is a deliberate security fix and
+  // the SQL says why: a branch clone is a full copy of a tenant's tables, and
+  // registering one would serve a shadow of the entire dataset over the public
+  // API under a name no dashboard shows.
+  //
+  // Verified against Postgres 16 on 2026-08-07 rather than assumed:
+  // `CREATE TABLE ... (LIKE ... INCLUDING ALL)` copies indexes, defaults and
+  // constraints but NOT row security. A cloned branch comes up with
+  // relrowsecurity = false and zero policies, and a non-privileged end-user role
+  // reading it saw all 10 fixture rows. Replicating the policies dropped that to
+  // 0 without an identity and 1 with one.
+  //
+  // So serving a branch requires replicating RLS FIRST, and only then widening
+  // the registry. Until both are done, refusing here is what keeps the failure
+  // honest: the SQL function would throw anyway, and a caught-and-warned throw
+  // reads as "branch created fine" while every request against it 404s.
+  if (/_br_/.test(schema)) {
+    return {
+      registered: false,
+      schema,
+      error:
+        'Branch schemas are not served by the REST data plane. A branch clone carries no row ' +
+        'security (CREATE TABLE ... LIKE does not copy policies), so exposing one would publish ' +
+        'an unprotected copy of the project data. Registering branches requires replicating ' +
+        'RLS into the clone first.',
+    }
+  }
+
   const hit = recentlyRegistered.get(schema)
   if (hit && hit > Date.now()) {
     return { registered: true, schema, cached: true }
