@@ -565,8 +565,14 @@ export function buildDispatchable(): McpToolDescriptor[] {
     name: 'branch',
     tier: 'build',
     description:
-      'Work with preview branches: a full clone of this project\'s schema AND data in an isolated PostgreSQL schema. ' +
-      'Use one before any migration you are not certain about — build against the clone, diff it, then merge. ' +
+      'Work with preview branches: a clone of this project\'s SCHEMA in an isolated PostgreSQL schema, with its own ' +
+      'row-security policies and its own sequences. Use one before any migration you are not certain about — build ' +
+      'against the clone, diff it, then merge.\n' +
+      'A branch starts EMPTY. It does not copy production rows unless you pass includeData:true, which protects your ' +
+      'real data from whatever the experiment does to it. Seed what you need instead.\n' +
+      'To run an app against a branch, issue a key bound to it: create_api_key with that branchId. The environment is ' +
+      'a property of the KEY — no header switches it, and a key on a merged or discarded branch is refused rather ' +
+      'than falling back to production.\n' +
       'Actions: "list" (existing branches + their ids) · "create" (needs `name`, lowercase kebab-case, max 5 active) · ' +
       '"diff" (needs `branchId` — exactly what would land) · "merge" (needs `branchId` — new tables apply through the ' +
       'governed kernel; added columns, type changes and drops come back as review items rather than reshaping a live ' +
@@ -581,6 +587,12 @@ export function buildDispatchable(): McpToolDescriptor[] {
         },
         name: { type: 'string', description: 'For action:"create" — the branch name, e.g. "add-payments".' },
         branchId: { type: 'string', description: 'For action:"diff" / "merge" — the id from action:"list".' },
+        includeData: {
+          type: 'boolean',
+          description:
+            'For action:"create". Default false — the branch is schema-only. True copies every production row into ' +
+            'it, which is occasionally useful for reproducing a data-shaped bug and is otherwise a liability.',
+        },
       },
       required: ['action'],
       additionalProperties: false,

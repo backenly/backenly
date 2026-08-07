@@ -21,7 +21,7 @@ export const GET = withProjectAccess(async (_req: NextRequest, { projectId }) =>
 })
 
 export const POST = withProjectAccess(async (req: NextRequest, { user, projectId }) => {
-  let body: { name?: string }
+  let body: { name?: string; includeData?: boolean }
   try {
     body = await req.json()
   } catch {
@@ -31,7 +31,14 @@ export const POST = withProjectAccess(async (req: NextRequest, { user, projectId
     return NextResponse.json({ success: false, error: 'name is required' }, { status: 400 })
   }
 
-  const result = await createBranch(projectId, user.userId, body.name)
+  // Data copy is opt-in and stays opt-in through every caller. Defaulting it on
+  // here would quietly undo the protective default: a branch is for testing a
+  // schema change, and a full copy of production multiplies the blast radius of
+  // whatever the experiment does. Supabase ships the same feature with the same
+  // default, for the same stated reason.
+  const result = await createBranch(projectId, user.userId, body.name, {
+    includeData: body.includeData === true,
+  })
   // Explicit extracts — this tsconfig doesn't narrow boolean discriminants.
   if (!result.ok) {
     const fail = result as Extract<typeof result, { ok: false }>

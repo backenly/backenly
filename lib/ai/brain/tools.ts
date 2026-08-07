@@ -764,8 +764,20 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   // and every migration landed on live customer data — reported as the single
   // riskiest gap in the surface. lib/branches/engine.ts is the implementation.
   fn('create_branch',
-    'Create a preview branch: a full structural + data clone of this project\'s schema in an isolated PostgreSQL schema. Use it before any migration you are not certain about — experiment there, diff it against main, then merge. Max 5 active branches. Names are lowercase kebab-case.',
-    { name: { type: 'string', description: 'Branch name, e.g. "add-payments". Lowercase kebab-case.' } },
+    'Create a preview branch: a structural clone of this project\'s schema in an isolated PostgreSQL schema, carrying ' +
+    'its own row-security policies and its own sequences. Use it before any migration you are not certain about — ' +
+    'experiment there, diff it against main, then merge. Max 5 active branches. Names are lowercase kebab-case.\n' +
+    'The branch starts EMPTY: production rows are not copied unless you ask for them, so an experiment cannot damage ' +
+    'real data. To point an app at the branch, issue a key bound to it with create_api_key(branchId).',
+    {
+      name: { type: 'string', description: 'Branch name, e.g. "add-payments". Lowercase kebab-case.' },
+      includeData: {
+        type: 'boolean',
+        description:
+          'Default false (schema only). True copies every production row into the branch — useful for reproducing a ' +
+          'data-shaped bug, a liability otherwise.',
+      },
+    },
     ['name']),
   fn('list_branches',
     'List this project\'s preview branches with their status, schema name and creation time. Side-effect free.',
@@ -952,7 +964,11 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     'Supabase\'s anon key.\n' +
     '  • `serviceRole: true` — a SECRET key that BYPASSES ROW-LEVEL SECURITY ENTIRELY. Server-side only: ' +
     'cron jobs, backend workers, migrations. Never put one in a browser, a mobile binary, or a client repo. ' +
-    'The response says which kind was issued and where it may be used — read it before handing the key on.',
+    'The response says which kind was issued and where it may be used — read it before handing the key on.\n' +
+    'WHICH ENVIRONMENT IT READS: omit `branchId` for main (production). Pass a branchId from ' +
+    'branch(action:"list") to bind the key to that preview branch — every request it makes then reads and ' +
+    'writes the branch, never main. This is the ONLY way to point a client at a branch: the environment is ' +
+    'a property of the key, not of the request, so there is no header or parameter that switches it later.',
     {
       description: { type: 'string', description: 'Human label, e.g. "web frontend" or "cron worker".' },
       permissions: { type: 'array', items: { type: 'string' }, description: 'e.g. ["read:posts","write:posts"]. Default ["read:*"].' },
@@ -961,6 +977,13 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
         description:
           'False/omitted (default) issues a browser-safe publishable key. True issues an RLS-BYPASSING ' +
           'secret key for server-side use only — never ship one to a client.',
+      },
+      branchId: {
+        type: 'string',
+        description:
+          'Optional. Bind this key to a preview branch (id from branch(action:"list")) so it reads that ' +
+          'branch instead of production. Omit for main. A key whose branch is later merged or discarded ' +
+          'is refused rather than silently falling back to production.',
       },
     }),
   fn('revoke_api_key',
@@ -1446,7 +1469,11 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
   remove_permission: (a) => ({ action: 'REMOVE_PERMISSION', params: { tableName: a.tableName } }),
 
   // IAM (platform API keys)
-  create_api_key: (a) => ({ action: 'CREATE_KEY', params: { description: a.description, permissions: a.permissions, serviceRole: a.serviceRole === true } }),
+  // branchId is threaded through because key issuance is the ONLY place an
+  // environment can be chosen — the data plane reads its schema from the
+  // credential, never from the request. Dropping it here is what made branch
+  // routing unreachable from the agent lane.
+  create_api_key: (a) => ({ action: 'CREATE_KEY', params: { description: a.description, permissions: a.permissions, serviceRole: a.serviceRole === true, branchId: a.branchId } }),
   revoke_api_key: (a) => ({ action: 'REVOKE_KEY', params: { keyId: a.keyId } }),
   rotate_api_key: (a) => ({ action: 'ROTATE_KEY', params: { keyId: a.keyId } }),
   set_key_permissions: (a) => ({ action: 'SET_KEY_PERMISSIONS', params: { keyId: a.keyId, permissions: a.permissions } }),
@@ -1865,12 +1892,32 @@ export async function dispatchTool(
       if (name === 'create_branch') {
         const branchName = String(args.name ?? '').trim()
         if (!branchName) return finalize({ ok: false, summary: 'create_branch needs a `name`.' })
-        const res = await engine.createBranch(ctx.projectId, ctx.userId ?? '', branchName)
+        const res = await engine.createBranch(ctx.projectId, ctx.userId ?? '', branchName, {
+          includeData: args.includeData === true,
+        })
         if (!res.ok) return finalize({ ok: false, summary: res.error })
+        // The summary states what the branch actually CONTAINS and how to reach
+        // it. An agent told only "created" has no way to know the branch is
+        // empty, and no way to point a client at it — which is how a correct
+        // feature still ends up unusable from the agent lane.
         return finalize({
           ok: true,
-          summary: `Created preview branch "${branchName}" — ${res.tablesCloned} table(s) cloned. Diff it with diff_branch { branchId: "${res.branch.id}" } and merge when you are happy.`,
-          data: { branch: res.branch, tablesCloned: res.tablesCloned },
+          summary:
+            `Created preview branch "${branchName}" — ${res.tablesCloned} table(s) cloned, ` +
+            `${res.policiesReplicated} row-security policy/policies replicated, ` +
+            `${res.sequencesIsolated} sequence(s) isolated from main. ` +
+            (res.dataCopied
+              ? 'Production rows WERE copied into it.'
+              : 'It is EMPTY — production rows were not copied. Seed what you need.') +
+            ` Point an app at it with create_api_key { branchId: "${res.branch.id}" }. ` +
+            `Diff with diff_branch { branchId: "${res.branch.id}" } and merge when you are happy.`,
+          data: {
+            branch: res.branch,
+            tablesCloned: res.tablesCloned,
+            dataCopied: res.dataCopied,
+            policiesReplicated: res.policiesReplicated,
+            sequencesIsolated: res.sequencesIsolated,
+          },
         })
       }
 

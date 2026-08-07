@@ -6596,11 +6596,46 @@ async function executeCreateKey(params: any, projectId: string): Promise<Executi
   // the browser-safe publishable key, which is what a frontend needs and what
   // this tool is asked for most often.
   const serviceRole = params.serviceRole === true
+
+  // ── Branch scoping ─────────────────────────────────────────────────────────
+  //
+  // Which environment a key reads is a property of the CREDENTIAL, never of the
+  // request: PostgREST picks its schema from Accept-Profile, so a client-settable
+  // selector would be a cross-tenant bypass (see profileForBranchSchema). That
+  // makes key issuance the ONLY place an agent can choose an environment, and
+  // without this parameter branch routing is unreachable from the agent lane —
+  // an agent could create a branch and then never point anything at it.
+  //
+  // Verified against THIS project rather than trusted: the branch id arrives
+  // from a model, and an unchecked one would mint a key aimed at another
+  // tenant's schema.
+  let branchId: string | null = null
   
   try {
     const { prisma } = await import('@/lib/db')
     const crypto = await import('crypto')
-    
+
+    // Resolved against THIS project rather than trusted: the id arrives from a
+    // model, and an unchecked one would mint a key aimed at another tenant's
+    // schema. Refusing an unknown branch beats issuing a key that silently
+    // reads production instead of the branch the caller asked for.
+    if (params.branchId) {
+      const branch = await prisma.workspaceBranch.findFirst({
+        where: { id: String(params.branchId), projectId, status: 'active' },
+        select: { id: true },
+      })
+      if (!branch) {
+        return {
+          success: false,
+          message:
+            `No active branch "${params.branchId}" on this project. Call branch(action:"list") ` +
+            `for valid ids, or omit branchId to issue a key against main.`,
+          error: 'BRANCH_NOT_FOUND',
+        } as ExecutionResult
+      }
+      branchId = branch.id
+    }
+
     // Get project to find the owner userId
     const project = await prisma.project.findUnique({
       where: { id: projectId },
@@ -6644,6 +6679,7 @@ async function executeCreateKey(params: any, projectId: string): Promise<Executi
         keyPrefix,
         permissions: Array.isArray(permissions) ? permissions : ['read', 'write'],
         serviceRole,
+        branchId,
         role: serviceRole ? 'service' : 'custom',
         expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000), // 1 year
       }
