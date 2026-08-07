@@ -266,6 +266,11 @@ const INVARIANT_REAPABLE_TYPES = [
   // of the day — telling them, on the strength of yesterday's traffic, that a key
   // they already revoked is still exposed.
   'service_role_key_exposed',
+  // Its probe reads live planner statistics, so it reports current state on
+  // every tick and its silence is meaningful. An owner who runs the stated
+  // migration has their finding withdrawn on the next pass rather than looking
+  // at advice they already took.
+  'schema_design_defect',
   // Both were probe-covered by the invariant catalogue and named in NO reaper,
   // so neither had any path back to healthy. Each has exactly one write site,
   // and that write site IS the invariant probe, so this reaper is the correct

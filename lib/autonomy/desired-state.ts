@@ -54,6 +54,7 @@ import { detectUnregisteredSchema } from './schema-registration'
 import { detectPendingSchemaDrift } from './drift-watch'
 import { detectDataPlaneNotAnswering } from './data-plane-liveness'
 import { detectServiceRoleKeyExposure } from '@/lib/security/service-role-exposure'
+import { detectSchemaDesignDefects } from './schema-design'
 
 // ── Bounded-autonomy tiers (graded by blast radius) ───────────────────────────
 //
@@ -136,6 +137,13 @@ export const INVARIANTS: readonly Invariant[] = [
     rationale:
       'A *_id column with no FK constraint lets orphaned and inconsistent rows accumulate silently — corruption that is expensive to unwind later.',
     probe: detectFkColumnsMissingConstraints,
+  },
+  {
+    id: 'the_schema_matches_its_own_data',
+    title: 'Column types and constraints match what the data has proven about them',
+    rationale:
+      'The complaint experienced developers actually make about managed Postgres is not that the tool broke, it is that a schema which looked fine at ten rows became expensive to change at ten million. This invariant catches the four cases where the data itself contradicts the declaration: a foreign key marked optional that has never once been null, an email column whose values are already all distinct with nothing keeping them that way, a status column holding five repeated values in free text where one typo drops a row out of every filter, and money in binary floating point where totals drift by fractions of a cent. It reads the planner statistics autovacuum already maintains, so it costs no table scan, and a table that has never been analysed fails every threshold and is reported clean.',
+    probe: detectSchemaDesignDefects,
   },
   {
     id: 'relationships_are_indexed',
@@ -440,6 +448,7 @@ const INVARIANT_EMITS: Readonly<Record<string, readonly FindingType[]>> = {
   // re-reads the key's current state, so revoking or downgrading the key clears
   // the finding on the next tick rather than waiting the window out.
   service_role_keys_stay_server_side: ['service_role_key_exposed'],
+  the_schema_matches_its_own_data: ['schema_design_defect'],
   relationships_have_fk_constraints: ['missing_fk'],
   relationships_are_indexed: ['missing_fk_index'],
   data_plane_is_registered: ['schema_not_registered'],

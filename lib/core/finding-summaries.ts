@@ -219,6 +219,27 @@ export function summariseFinding(type: string, details: Details): string {
   // their server code is also using, turning a blocked incident into an outage.
   // The key name is carried because a project can hold several and only one is
   // in the wrong place.
+  // Names the specific defect rather than the family. "Schema design issue" is
+  // the kind of summary that makes an owner open the finding to learn nothing
+  // they could not have guessed; "money stored as a float" is actionable in the
+  // list itself.
+  if (type === 'schema_design_defect') {
+    const table = (details?.tableName as string | undefined) ?? 'a table'
+    const column = (details?.columnName as string | undefined) ?? 'a column'
+    switch (details?.kind as string | undefined) {
+      case 'money_as_float':
+        return `${table}.${column} stores money as a float, so totals drift by fractions of a cent`
+      case 'nullable_fk':
+        return `${table}.${column} is a required relationship the database still allows to be empty`
+      case 'missing_unique':
+        return `${table}.${column} is already unique in practice but nothing stops a duplicate`
+      case 'unconstrained_enum':
+        return `${table}.${column} is an enum in a free-text column, so a typo silently drops the row from filters`
+      default:
+        return `${table}.${column} is modelled in a way the data contradicts`
+    }
+  }
+
   if (type === 'service_role_key_exposed') {
     const name = (details?.keyName as string | undefined) ?? 'A service-role key'
     return `Blocked: the key "${name}" bypasses all row security and is being called from a browser — rotate it and use a client key there`

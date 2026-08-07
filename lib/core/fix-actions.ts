@@ -365,6 +365,27 @@ export function getManualRemediationHint(
       )
     }
 
+    // The hint IS the deliverable for this family: the probe already measured
+    // the defect against live statistics and derived the migration, so the only
+    // thing left to hand over is the SQL itself. Printing it beats describing it.
+    case 'schema_design_defect': {
+      const sql = details?.sql as string | undefined
+      const problem = details?.reason as string | undefined
+      // Must never answer null. A notify_only finding with no hint is the exact
+      // dead end this function exists to prevent ("No fix action mapped for
+      // finding type"), and the probe is not the only caller — the conformance
+      // guards ask for a hint with no details at all.
+      if (!sql && !problem) {
+        return (
+          'Backenly compared this column against your live data and found the declaration ' +
+          'does not match it. Open the finding for the measurement and the exact migration ' +
+          'to run. These change an existing column, so apply them during a quiet window.'
+        )
+      }
+      if (!sql) return problem!
+      return `${problem ? problem + ' ' : ''}Run this when you are ready:\n\n${sql}`
+    }
+
     case 'missing_archival_job':
       return 'This table will keep growing without bound. In the AI chat, say "schedule a nightly cleanup on <table> older than 90 days" — Backenly will create the cron + the cleanup function with the retention you pick.'
     case 'missing_token_cleanup_cron':

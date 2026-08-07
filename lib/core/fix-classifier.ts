@@ -168,6 +168,26 @@ export function classifyFix(
     }
   }
 
+  // ── Schema design ─────────────────────────────────────────────────────────
+  //
+  // notify_only for a reason that is specific rather than cautious: every repair
+  // here is a migration against live data. SET NOT NULL takes a lock, a UNIQUE
+  // index fails outright the moment a duplicate exists, a CHECK needs the
+  // owner's actual value list, and ALTER TYPE on money rounds. None of them is
+  // additive, and the platform's own rule is that non-additive schema change
+  // belongs to a human. The probe states the exact migration instead.
+  if (type === 'schema_design_defect') {
+    return {
+      decision: 'notify_only',
+      reason:
+        'Backenly measured this against your live data and can give you the exact migration, ' +
+        'but running it changes an existing column, so it is yours to apply.',
+      riskNote:
+        'Each of these locks or rewrites a column that already holds data. Apply them during ' +
+        'a quiet window, not automatically.',
+    }
+  }
+
   if (AUTO_SAFE.has(type)) {
     return {
       decision: 'auto',

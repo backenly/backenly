@@ -123,6 +123,15 @@ export type FindingType =
   // code that ships it, which Backenly does not own.
   | 'service_role_key_exposed'
 
+  // ── The schema is wired correctly but MODELLED wrongly: a foreign key the
+  // data says is mandatory left optional, an email column already unique with
+  // nothing enforcing it, an enum in a free-text column, money in a float.
+  //
+  // Gated on the planner's own statistics, so it cannot fire on a table the
+  // builder just created (never analysed, reltuples = -1). Never auto-fixable:
+  // every repair is a migration against live data.
+  | 'schema_design_defect'
+
 export type FindingSeverity = 'critical' | 'warning' | 'info'
 export type FindingStatus = 'open' | 'auto_fixed' | 'pending_approval' | 'dismissed'
 
@@ -206,6 +215,7 @@ export const ALL_FINDING_TYPES = [
   // Added 2026-08-07 in the same commit that introduced it — the discipline the
   // four omissions above were each found in production for.
   'service_role_key_exposed',
+  'schema_design_defect',
 ] as const satisfies ReadonlyArray<FindingType>
 
 // Canonical types — exact matches pass through untouched.
