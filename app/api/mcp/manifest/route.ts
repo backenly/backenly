@@ -29,7 +29,10 @@ export async function GET(request: NextRequest) {
   if (guard.response) return withCors(guard.response)
   const auth = guard.auth!
 
-  const tools = buildCatalog()
+  // A read-only key is served a read-only manifest. The stdio package caches
+  // this list as its tool registry, so filtering here is what stops a mutating
+  // tool from ever entering the host's context.
+  const tools = buildCatalog({ readOnly: auth.readOnly })
 
   const body = {
     ok: true as const,
@@ -38,6 +41,7 @@ export async function GET(request: NextRequest) {
       version: MANIFEST_VERSION,
       vendor: 'Backenly',
       projectId: auth.projectId,
+      readOnly: auth.readOnly,
     },
     counts: {
       total: tools.length,

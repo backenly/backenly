@@ -31,7 +31,7 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
-import { mcpGuard, recordMcpCall } from '@/lib/mcp/guard'
+import { mcpGuard, recordMcpCall, refuseIfReadOnly } from '@/lib/mcp/guard'
 import { corsHeaders, optionsResponse } from '@/lib/mcp/cors'
 import { runBrain, type BrainEvent } from '@/lib/ai/brain/agent'
 import { assertAiAllowed } from '@/lib/platform/controls'
@@ -55,6 +55,19 @@ export async function POST(request: NextRequest) {
   const guard = await mcpGuard(request)
   if (guard.response) return withCors(guard.response)
   const auth = guard.auth!
+
+  // The brain applies non-destructive changes (create_table and friends) without
+  // ever reaching the destructive gate, so a read-only key cannot be allowed to
+  // reach it at all. Refusing the whole door is the only honest read-only
+  // guarantee — a "read-only brain" would be a promise about model behaviour.
+  const ro = refuseIfReadOnly(auth, 'backend_chat')
+  if (ro) {
+    recordMcpCall(
+      { ...auth, endpoint: ENDPOINT, startedAt },
+      { statusCode: 403, tool: 'backend_chat', error: 'READ_ONLY_KEY' },
+    )
+    return withCors(ro)
+  }
 
   // Founder kill switch still applies to MCP. Without this, an MCP host could
   // bypass aiFrozen / maintenanceMode that the dashboard chat respects.

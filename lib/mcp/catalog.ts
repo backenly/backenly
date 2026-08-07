@@ -292,8 +292,38 @@ const MCP_SURFACE = new Set<string>([
  * LLM actually sees. Filtered from the full surface so there is exactly one
  * definition of every tool.
  */
-export function buildCatalog(): McpToolDescriptor[] {
-  return buildDispatchable().filter((t) => MCP_SURFACE.has(t.name))
+export function buildCatalog(opts?: { readOnly?: boolean }): McpToolDescriptor[] {
+  const advertised = buildDispatchable().filter((t) => MCP_SURFACE.has(t.name))
+  if (!opts?.readOnly) return advertised
+  return advertised.filter((t) => isReadOnlyTool(t.name))
+}
+
+/**
+ * Synthetic tools that are safe on a read-only key.
+ *
+ * `READ_ONLY_TOOLS` covers the brain's own vocabulary, but the catalog also
+ * hand-writes descriptors that have no BRAIN_TOOLS entry, so membership there
+ * cannot answer for them. Rather than infer from the tier — which is 'data' for
+ * both db_query and db_delete — each one is decided explicitly here.
+ *
+ * Deliberately excluded, with reasons:
+ *   • backend_chat    — the brain can apply non-destructive changes (create_table
+ *                       and friends) without ever reaching the destructive gate.
+ *                       A read-only key that can reach it is not read-only.
+ *   • branch          — `list`/`diff` are reads but `create`/`merge` are not, and
+ *                       the action is a runtime string. A tool that is
+ *                       conditionally safe is not safe to advertise as read-only.
+ *   • apply_migration — DDL by definition.
+ *   • db_insert/update/delete — writes by definition.
+ *   • get_database_credentials — provisions a Postgres role. It is in BUILD_TOOLS
+ *                       already; named here so the omission reads as deliberate
+ *                       rather than forgotten.
+ */
+const READ_ONLY_SYNTHETIC = new Set(['fetch_docs', 'generate_types', 'check_approval', 'db_query'])
+
+/** True when `name` may be served to a read-only key. */
+export function isReadOnlyTool(name: string): boolean {
+  return READ_ONLY_TOOLS.has(name as any) || READ_ONLY_SYNTHETIC.has(name)
 }
 
 /**

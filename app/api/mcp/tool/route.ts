@@ -20,9 +20,9 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
-import { mcpGuard, recordMcpCall } from '@/lib/mcp/guard'
+import { mcpGuard, recordMcpCall, refuseIfReadOnly } from '@/lib/mcp/guard'
 import { corsHeaders, optionsResponse } from '@/lib/mcp/cors'
-import { catalogByName, STATE_SECTIONS, BRANCH_ACTIONS } from '@/lib/mcp/catalog'
+import { catalogByName, STATE_SECTIONS, BRANCH_ACTIONS, isReadOnlyTool } from '@/lib/mcp/catalog'
 import { dispatchTool, isDestructiveTool, READ_ONLY_TOOLS } from '@/lib/ai/brain/tools'
 import { dbQuery, dbInsert, dbUpdate, dbDelete } from '@/lib/mcp/runtime-db'
 import { dbErrorBody } from '@/lib/db/query-errors'
@@ -90,6 +90,21 @@ export async function POST(request: NextRequest) {
   }
 
   const { tool, args } = parsed
+
+  // ── Read-only keys ────────────────────────────────────────────────────────
+  //
+  // Before anything else that could touch state. tools/list already hides every
+  // mutating tool from a read-only key, so reaching here means the client was
+  // pinned to an older manifest or is calling the dispatch surface directly —
+  // both of which must be refused rather than served.
+  if (auth.readOnly && !isReadOnlyTool(tool)) {
+    const res = refuseIfReadOnly(auth, tool)!
+    recordMcpCall(
+      { ...auth, endpoint: ENDPOINT, startedAt },
+      { statusCode: 403, error: 'READ_ONLY_KEY' },
+    )
+    return withCors(res)
+  }
 
   // ── Credit gate for the model-backed tools ────────────────────────────────
   //

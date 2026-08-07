@@ -246,6 +246,8 @@ Do **not** route around it. Spawning the server yourself over a stdio bridge, or
 
 Exactly **20** tools are advertised to the host. That number is deliberate: tool-selection accuracy degrades as a catalog grows, so the surface is an allowlist where every request has one obvious door, not a projection of everything the brain can do. `GET /api/mcp/manifest` returns this list, and `tools/list` on the MCP server is the authority — trust it over any document, including this one.
 
+A **read-only** MCP key is served a smaller list: the read tools only, with every write door — including `backend_chat` — withheld. If you are on a read-only key you will not see the mutating tools at all, and calling one anyway is refused with `READ_ONLY_KEY` before it runs. Nothing is partially applied. Read-only is chosen by a human when the key is issued (Backenly → Project → MCP); an agent cannot upgrade its own key, and there is no endpoint that flips an existing one.
+
 | Tool | What it is for |
 | --- | --- |
 | `backend_chat` | Natural-language fall-through to the brain. The agent does **not** need Backenly's tool vocabulary: it says *"add likes and comments to my posts table"* and the brain plans and executes. Everything not listed below is reached through here. |

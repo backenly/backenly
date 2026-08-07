@@ -28,6 +28,8 @@ export interface McpAuthResult {
   userId?: string
   keyId?: string
   scope?: string
+  /** Key was issued read-only: every mutating surface must refuse it. */
+  readOnly?: boolean
   error?: string
   code?: string
   status?: number
@@ -63,6 +65,7 @@ export async function authenticateMcp(request: NextRequest): Promise<McpAuthResu
       projectId: true,
       userId: true,
       scope: true,
+      mcpReadOnly: true,
       expiresAt: true,
     },
   })
@@ -121,6 +124,7 @@ export async function authenticateMcp(request: NextRequest): Promise<McpAuthResu
     userId: record.userId,
     keyId: record.id,
     scope: record.scope,
+    readOnly: record.mcpReadOnly,
   }
 }
 

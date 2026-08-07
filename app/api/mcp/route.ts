@@ -139,7 +139,7 @@ async function handleInitialize(id: any, params: any, request: NextRequest): Pro
     .findUnique({ where: { id: auth.projectId! }, select: { name: true } })
     .catch(() => null)
   const label = project?.name ?? auth.projectId!
-  const toolCount = buildCatalog().length
+  const toolCount = buildCatalog({ readOnly: auth.readOnly }).length
 
   const requested = typeof params?.protocolVersion === 'string' ? params.protocolVersion : null
   const protocolVersion = requested && SUPPORTED_PROTOCOLS.has(requested) ? requested : DEFAULT_PROTOCOL
@@ -156,7 +156,7 @@ async function handleToolsList(id: any, request: NextRequest): Promise<object> {
   const auth = await authenticateMcp(request)
   if (!auth.success) return authRpcError(id, auth)
 
-  const tools = buildCatalog().map((t) => ({
+  const tools = buildCatalog({ readOnly: auth.readOnly }).map((t) => ({
     name: t.name,
     description: t.description,
     inputSchema: t.inputSchema,

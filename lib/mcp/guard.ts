@@ -34,6 +34,8 @@ export interface McpGuardAuth {
   projectId: string
   userId: string
   scope: string
+  /** Key was issued read-only. Every mutating route MUST call `refuseIfReadOnly`. */
+  readOnly: boolean
 }
 
 /**
@@ -112,8 +114,42 @@ export async function mcpGuard(request: NextRequest): Promise<McpGuardResult> {
       projectId: auth.projectId!,
       userId: auth.userId!,
       scope: auth.scope ?? 'mcp',
+      readOnly: auth.readOnly === true,
     },
   }
+}
+
+/**
+ * Refuse a mutating call made with a read-only key.
+ *
+ * Returns the response to send, or null when the caller may proceed. Lives here
+ * rather than in each route so the two transports cannot disagree about what
+ * "read-only" means: stdio reaches /api/mcp/db/* directly and the remote
+ * transport reaches /api/mcp/tool, and both land on this one predicate.
+ *
+ * 403 rather than 401: the key is valid and the caller should not retry with a
+ * different credential unless a human deliberately issues one. `code` is the
+ * stable slug the stdio server surfaces to the agent.
+ */
+export function refuseIfReadOnly(
+  auth: McpGuardAuth,
+  toolName: string,
+): NextResponse | null {
+  if (!auth.readOnly) return null
+  return NextResponse.json(
+    {
+      ok: false,
+      code: 'READ_ONLY_KEY',
+      error:
+        `This MCP key is read-only, so "${toolName}" was refused before it ran. ` +
+        'Nothing was changed.',
+      hint:
+        'Reads still work — use run_query for SQL and read_backend_state for structure. ' +
+        'To make changes, a human must issue a read-write MCP key from ' +
+        'Backenly → Project → MCP. An agent cannot upgrade its own key.',
+    },
+    { status: 403 },
+  )
 }
 
 interface RateCheckResult {

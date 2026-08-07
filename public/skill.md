@@ -62,6 +62,8 @@ Order matters — register the server **first**, then restart. Restarting before
 
 Exactly **20** tools are advertised. `tools/list` on the server is the authority — trust it over this file if they ever disagree.
 
+On a **read-only key** you will see only the read tools; the write doors, `backend_chat` included, are not advertised and are refused with `READ_ONLY_KEY` if called anyway. Nothing is partially applied. Ask the human to issue a read-write key if you need to change anything — you cannot upgrade your own.
+
 **Read**
 - `read_backend_state` — the one read door for state: tables, endpoints, auth, buckets, RLS, integrations, realtime. Takes an optional `section`. Call it first to ground any decision.
 - `get_table_schema` — everything about ONE table: column types/nullability/defaults, foreign keys, indexes, and CHECK constraints **with their permitted values**. Read this before any write, or you will send an insert that looks correct and fails on a constraint you could not see.

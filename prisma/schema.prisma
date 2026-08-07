@@ -709,6 +709,23 @@ model ApiKey {
   // A leaked SDK key cannot drop tables; a leaked MCP key can. Splitting the
   // scope keeps that blast radius explicit and auditable.
   scope           String        @default("runtime")
+  // Read-only MCP key: the agent can inspect the backend but cannot change it.
+  //
+  // Scope alone was too blunt. `scope='mcp'` is all-or-nothing, so "let an agent
+  // explore production" and "let an agent rewrite production" were the same
+  // credential. This splits them at issuance, which is the only place the
+  // decision is actually made by a human.
+  //
+  // Enforcement is deliberately layered, and the DB layer is the real one:
+  //   • tools/list advertises only READ_ONLY_TOOLS, so a mutating tool is never
+  //     offered — the model cannot pick what it cannot see.
+  //   • /api/mcp/tool refuses any non-read tool, so a pinned client that still
+  //     remembers `drop_table` is refused rather than served.
+  //   • run_query already executes as the project's `bkn_ro_<hex>` SELECT-only
+  //     Postgres role, so a read that tries to write is refused by POSTGRES.
+  // The first two are ergonomics and defence in depth; only the grant is a
+  // security boundary. A parser is never the boundary — see lib/mcp/read-query.ts.
+  mcpReadOnly     Boolean       @default(false)
   // Free-text label for MCP keys, e.g. "Claude Code laptop" / "Cursor work mac".
   mcpClientLabel  String?
   // Branch this key reads and writes. Null = main, which is every existing key.

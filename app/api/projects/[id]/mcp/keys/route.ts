@@ -63,6 +63,7 @@ export async function GET(
           name: true,
           keyPrefix: true,
           mcpClientLabel: true,
+          mcpReadOnly: true,
           createdAt: true,
           lastUsed: true,
           expiresAt: true,
@@ -74,6 +75,7 @@ export async function GET(
           id: k.id,
           name: k.name,
           label: k.mcpClientLabel,
+          readOnly: k.mcpReadOnly,
           masked: maskKey('mcp_live_', k.keyPrefix),
           createdAt: k.createdAt,
           lastUsed: k.lastUsed,
@@ -95,11 +97,16 @@ export async function POST(
   { params }: { params: { id: string } },
 ) {
   return withProjectValidation<any>(req, async ({ projectId, userId }) => {
-    let body: { label?: string; name?: string } = {}
+    let body: { label?: string; name?: string; readOnly?: boolean } = {}
     try { body = await req.json() ?? {} } catch { /* allow empty */ }
 
     const label = (body.label || '').trim() || null
     const name = (body.name || '').trim() || 'MCP Key'
+    // Read-only is decided here, at issuance, by a human holding a platform
+    // session — never by the agent that will use the key. There is deliberately
+    // no endpoint that flips this on an existing key: changing a key's power
+    // should mean minting a new one, so the audit trail shows a decision.
+    const readOnly = body.readOnly === true
 
     const rawKey = generateMcpKey()
     const keyHash = hashApiKey(rawKey)
@@ -115,11 +122,12 @@ export async function POST(
         // MCP keys are project-owner-level — give them admin permission set
         // for the brain dispatch surface. The catalog filter on /api/mcp/tool
         // is what actually limits the blast radius (no destructive tools).
-        permissions: ['read', 'write', 'admin'],
+        permissions: readOnly ? ['read'] : ['read', 'write', 'admin'],
         rateLimit: 600, // 10 req/sec — host LLMs rarely exceed this
         keyType: 'mcp',
         scope: 'mcp',
         serviceRole: true,
+        mcpReadOnly: readOnly,
         mcpClientLabel: label,
       },
     })
@@ -135,6 +143,7 @@ export async function POST(
           keyId: record.id,
           label,
           name,
+          readOnly,
           at: new Date().toISOString(),
         }),
         timestamp: new Date(),
@@ -149,6 +158,7 @@ export async function POST(
         id: record.id,
         name: record.name,
         label,
+        readOnly,
         masked: maskKey(keyPrefix, keyPrefix),
         createdAt: record.createdAt,
       },

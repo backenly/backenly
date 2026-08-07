@@ -4,7 +4,7 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
-import { mcpGuard, recordMcpCall } from '@/lib/mcp/guard'
+import { mcpGuard, recordMcpCall, refuseIfReadOnly } from '@/lib/mcp/guard'
 import { corsHeaders, optionsResponse } from '@/lib/mcp/cors'
 import { dbInsert } from '@/lib/mcp/runtime-db'
 import { dbErrorBody } from '@/lib/db/query-errors'
@@ -24,6 +24,14 @@ export async function POST(request: NextRequest) {
   const guard = await mcpGuard(request)
   if (guard.response) return withCors(guard.response)
   const auth = guard.auth!
+
+  // A read-only key never reaches a write. stdio calls this route directly,
+  // so the check cannot live only in /api/mcp/tool.
+  const ro = refuseIfReadOnly(auth, 'db_insert')
+  if (ro) {
+    recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 403, tool: 'db_insert', error: 'READ_ONLY_KEY' })
+    return withCors(ro)
+  }
 
   const body = parseMcpBody(RequestSchema, await request.json().catch(() => null), 'db_insert')
   if (!body.ok) {
