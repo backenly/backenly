@@ -271,6 +271,11 @@ const INVARIANT_REAPABLE_TYPES = [
   // migration has their finding withdrawn on the next pass rather than looking
   // at advice they already took.
   'schema_design_defect',
+  // Its probe re-reads live statistics every tick, so once the index exists the
+  // candidate fails the not-already-indexed filter and the finding withdraws
+  // itself. Without an entry here the owner would keep seeing a slow-query
+  // warning for a query the loop had already fixed.
+  'slow_query_missing_index',
   // Both were probe-covered by the invariant catalogue and named in NO reaper,
   // so neither had any path back to healthy. Each has exactly one write site,
   // and that write site IS the invariant probe, so this reaper is the correct

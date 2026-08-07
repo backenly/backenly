@@ -98,6 +98,16 @@ export interface QueryFinding {
   avgRows: number
   pressure: InfraPressure
   recommendation: string
+  /**
+   * The table/column this query filters on, when it could be read unambiguously
+   * from the normalised query text. Absent means no index will be proposed —
+   * the finding stays advisory rather than guessing a column, which is the same
+   * contract `HotTableFinding.indexColumn` holds and for the same reason.
+   *
+   * Still UNVERIFIED at this point: whether the column exists and is not already
+   * indexed is decided against the catalog in verifyIndexCandidates().
+   */
+  indexCandidate?: IndexCandidate
 }
 
 export interface ConnectionFinding {
@@ -445,6 +455,75 @@ ALTER TABLE "${schemaName}"."${r.tablename}" RENAME TO "${r.tablename}_legacy";
 
 // ── Detection: Slow queries (pg_stat_statements) ──────────────────────────────
 
+/**
+ * The table and column a slow query filters on, when that is unambiguous.
+ *
+ * Pure and deliberately conservative. The consumer turns this into a CREATE
+ * INDEX, and this codebase has already paid once for a repair built from a
+ * guessed column (see the `infra_hot_table` split): an index on the wrong column
+ * costs write throughput for as long as it exists, and nothing ever tells you.
+ * So this recognises one shape — an equality predicate on a schema-qualified
+ * table — and answers null for everything else rather than approximating.
+ *
+ * pg_stat_statements has already normalised literals to $1, which is what makes
+ * the shape stable enough to match at all.
+ */
+export interface IndexCandidate {
+  table: string
+  column: string
+}
+
+export function extractIndexCandidate(
+  queryText: string,
+  schemaName: string,
+): IndexCandidate | null {
+  if (!queryText || !schemaName) return null
+
+  // The table must be named with THIS project's schema. A bare "orders" could
+  // belong to any tenant sharing the database.
+  const esc = schemaName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const fromRe = new RegExp(`(?:FROM|JOIN|UPDATE|INTO)\\s+"${esc}"\\."([A-Za-z_][A-Za-z0-9_]*)"`, 'i')
+  const fromMatch = fromRe.exec(queryText)
+  if (!fromMatch) return null
+  const table = fromMatch[1]
+
+  const whereIdx = queryText.search(/\bWHERE\b/i)
+  if (whereIdx === -1) return null
+  const predicate = queryText.slice(whereIdx)
+
+  // Qualified first ("orders"."status" = $1), then bare ("status" = $1). Only
+  // equality and IN: a range or a LIKE '%x' does not necessarily benefit from a
+  // plain btree index, and proposing one there would be cargo cult.
+  const qualified = /"([A-Za-z_][A-Za-z0-9_]*)"\."([A-Za-z_][A-Za-z0-9_]*)"\s*(?:=|IN)\s*/i.exec(predicate)
+  if (qualified) {
+    // The predicate named its table explicitly. If that is not the table we
+    // matched in FROM, this filter belongs to a JOINed relation and we know
+    // nothing about which column of OUR table is being filtered.
+    //
+    // Falling through to the bare branch here is a real bug and not a
+    // theoretical one: in `FROM "s"."orders" JOIN "s"."users" … WHERE
+    // "users"."email" = $1`, the bare pattern matches `email` (it is the
+    // identifier immediately before the `=`) and attributes it to `orders`,
+    // producing CREATE INDEX on a column `orders` does not have. Answering null
+    // is the honest result.
+    return qualified[1] === table ? sane(table, qualified[2]) : null
+  }
+  const bare = /"([A-Za-z_][A-Za-z0-9_]*)"\s*(?:=|IN)\s*/i.exec(predicate)
+  if (bare) return sane(table, bare[1])
+
+  return null
+}
+
+/**
+ * Reject candidates that are pointless rather than wrong. `id` is the primary
+ * key and already leads its own unique index, so proposing one is noise that
+ * would be filed, verified, discarded, and filed again on the next scan.
+ */
+function sane(table: string, column: string): IndexCandidate | null {
+  if (column === 'id') return null
+  return { table, column }
+}
+
 async function detectSlowQueries(pool: Pool, schemaName: string): Promise<QueryFinding[]> {
   try {
     // Check if pg_stat_statements is available
@@ -469,31 +548,49 @@ async function detectSlowQueries(pool: Pool, schemaName: string): Promise<QueryF
       avg_ms: string
       avg_rows: string
     }>(
-      `SELECT LEFT(query, 200) AS query,
+      // ── Scoped to THIS tenant's schema ─────────────────────────────────────
+      //
+      // pg_stat_statements is per-DATABASE, and every project on this server
+      // shares one. Without this filter the scan read every tenant's statements
+      // and attributed the slowest to whichever project happened to be scanned,
+      // so a customer could be shown someone else's query text as their own
+      // performance problem — a cross-tenant leak of query shapes, and advice
+      // about a table they do not have.
+      //
+      // `position()` rather than LIKE on purpose: in LIKE, the `_` in
+      // `workspace_<id>` is a single-character wildcard, so the pattern would
+      // also match schemas that merely resemble this one.
+      `SELECT LEFT(query, 400) AS query,
               calls,
               ROUND((total_exec_time / NULLIF(calls, 0))::numeric, 2) AS avg_ms,
               ROUND((rows / NULLIF(calls, 0))::numeric, 0) AS avg_rows
          FROM pg_stat_statements
-        WHERE query NOT LIKE '%pg_%'
+        WHERE position($1 in query) > 0
+          AND query NOT LIKE '%pg_catalog%'
           AND query NOT LIKE '%information_schema%'
           AND (total_exec_time / NULLIF(calls, 0)) > 100
         ORDER BY avg_ms DESC
         LIMIT 8`,
+      [schemaName],
     )
 
     return rows.rows.map(r => {
       const avgMs = Number(r.avg_ms)
       const calls = Number(r.calls)
       const avgRows = Number(r.avg_rows)
+      const candidate = extractIndexCandidate(r.query, schemaName)
       return {
         queryPattern: r.query.replace(/\$\d+/g, '?').replace(/\s+/g, ' ').trim(),
         avgMs,
         calls,
         avgRows,
+        indexCandidate: candidate ?? undefined,
         pressure: avgMs > 5000 ? 'critical' : avgMs > 1000 ? 'high' : avgMs > 500 ? 'medium' : 'low',
         recommendation: avgRows > 10000
-          ? `Query averaging ${Math.round(avgMs)}ms returns ${avgRows.toLocaleString()} rows on average — add a LIMIT or a covering index to reduce scan scope.`
-          : `Query averaging ${Math.round(avgMs)}ms called ${calls.toLocaleString()}× — add an index on the WHERE clause columns.`,
+          ? `Query averaging ${Math.round(avgMs)}ms returns ${avgRows.toLocaleString()} rows on average. Add a LIMIT or a covering index to reduce scan scope.`
+          : candidate
+            ? `Query averaging ${Math.round(avgMs)}ms called ${calls.toLocaleString()}x, filtering "${candidate.table}"."${candidate.column}" with no index on it.`
+            : `Query averaging ${Math.round(avgMs)}ms called ${calls.toLocaleString()}x. Add an index on the columns it filters by.`,
       }
     })
   } catch {

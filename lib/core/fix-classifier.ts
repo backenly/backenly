@@ -35,6 +35,11 @@ const AUTO_SAFE = new Set<FindingType>([
   'api_drift',              // Re-generating a missing API is additive
   'missing_fk',             // Adding a FK constraint (safe when data is consistent)
   'missing_fk_index',       // Adding an index — performance only, no data change
+  // Same repair, sourced from measured latency instead of a missing FK. The
+  // column is parsed from pg_stat_statements and then verified to exist and to
+  // be unindexed before the finding is ever raised, so by the time it reaches
+  // here it is the same additive CREATE INDEX.
+  'slow_query_missing_index',
   'infra_hot_table',        // Same shape: CREATE INDEX on a verified column, additive
   // Plain VACUUM (ANALYZE) on one table. Changes no row and no schema, holds no
   // exclusive lock, and is idempotent — the safest mutation in the catalogue.
@@ -135,6 +140,22 @@ export function classifyFix(
   //
   // Guessing a column instead is not an option — an index on the wrong column
   // costs write throughput for as long as it exists.
+  // Slow queries: decided on evidence for exactly the reason above. The probe
+  // only raises this with a column it verified against the catalog, so in
+  // practice the column is always there — but the rating must depend on the
+  // EVIDENCE rather than on the type, or a finding that arrived without one
+  // (an older row, a hand-written entry) would be rated auto, reach
+  // buildFixAction with nothing to build, and become a "Fix now" button that
+  // fails on every click. That is a bug this repo has already shipped once.
+  if (type === 'slow_query_missing_index' && !details?.columnName) {
+    return {
+      decision: 'notify_only',
+      reason:
+        'These queries are scanning instead of using an index, but Backenly could not confirm ' +
+        'which column to index safely. Naming the wrong one would slow every write to the table.',
+    }
+  }
+
   if (type === 'infra_hot_table' && !details?.columnName) {
     return {
       decision: 'notify_only',
@@ -218,6 +239,7 @@ const AUTO_ACTION_MAP: Partial<Record<FindingType, string>> = {
   api_drift:                'FIX_API',
   missing_fk:               'ADD_CONSTRAINT',
   missing_fk_index:         'CREATE_INDEX',
+  slow_query_missing_index: 'CREATE_INDEX',
   infra_hot_table:          'CREATE_INDEX',
   infra_table_bloat:        'VACUUM_TABLE',
   missing_api_definition:   'GENERATE_API',

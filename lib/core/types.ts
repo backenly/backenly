@@ -132,6 +132,13 @@ export type FindingType =
   // every repair is a migration against live data.
   | 'schema_design_defect'
 
+  // ── A column this project measurably spends time filtering on, verified
+  // against the catalog to exist and to have no index leading with it. Parsed
+  // from pg_stat_statements, never inferred: see lib/autonomy/slow-query-index.ts
+  // for the three filters a candidate has to survive. Auto-fixable, because what
+  // survives them is a plain additive CREATE INDEX.
+  | 'slow_query_missing_index'
+
 export type FindingSeverity = 'critical' | 'warning' | 'info'
 export type FindingStatus = 'open' | 'auto_fixed' | 'pending_approval' | 'dismissed'
 
@@ -216,6 +223,7 @@ export const ALL_FINDING_TYPES = [
   // four omissions above were each found in production for.
   'service_role_key_exposed',
   'schema_design_defect',
+  'slow_query_missing_index',
 ] as const satisfies ReadonlyArray<FindingType>
 
 // Canonical types — exact matches pass through untouched.

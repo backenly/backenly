@@ -55,6 +55,7 @@ import { detectPendingSchemaDrift } from './drift-watch'
 import { detectDataPlaneNotAnswering } from './data-plane-liveness'
 import { detectServiceRoleKeyExposure } from '@/lib/security/service-role-exposure'
 import { detectSchemaDesignDefects } from './schema-design'
+import { detectSlowQueryMissingIndexes } from './slow-query-index'
 
 // ── Bounded-autonomy tiers (graded by blast radius) ───────────────────────────
 //
@@ -151,6 +152,13 @@ export const INVARIANTS: readonly Invariant[] = [
     rationale:
       'An unindexed foreign key turns every join and filter into a full table scan. This is the classic silent-until-you-have-users performance cliff.',
     probe: detectMissingFkIndexes,
+  },
+  {
+    id: 'measured_slow_queries_are_indexed',
+    title: 'Columns the database measurably spends time filtering on are indexed',
+    rationale:
+      'The index probes above reason from SHAPE: a foreign key should be indexed, a column called created_at is probably filtered on. This one reasons from MEASUREMENT. It reads pg_stat_statements, finds the statements this project actually spends milliseconds in, parses the column each one filters by, and then verifies against the catalog that the column exists and has no index leading with it. Only what survives all three becomes a finding, because an index on a guessed column costs write throughput forever and nothing ever surfaces it. Scoped to this project schema: pg_stat_statements is per-database and every tenant shares one, so an unscoped read would hand a customer another customer query as their own performance problem.',
+    probe: detectSlowQueryMissingIndexes,
   },
   {
     id: 'data_plane_is_registered',
@@ -449,6 +457,7 @@ const INVARIANT_EMITS: Readonly<Record<string, readonly FindingType[]>> = {
   // the finding on the next tick rather than waiting the window out.
   service_role_keys_stay_server_side: ['service_role_key_exposed'],
   the_schema_matches_its_own_data: ['schema_design_defect'],
+  measured_slow_queries_are_indexed: ['slow_query_missing_index'],
   relationships_have_fk_constraints: ['missing_fk'],
   relationships_are_indexed: ['missing_fk_index'],
   data_plane_is_registered: ['schema_not_registered'],

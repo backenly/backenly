@@ -223,6 +223,17 @@ export function summariseFinding(type: string, details: Details): string {
   // the kind of summary that makes an owner open the finding to learn nothing
   // they could not have guessed; "money stored as a float" is actionable in the
   // list itself.
+  // Leads with the measurement. "Add an index" is advice; "queries on this
+  // column are averaging 900ms" is a reason, and it is the number the owner
+  // would have had to go and find for themselves.
+  if (type === 'slow_query_missing_index') {
+    const table = (details?.tableName as string | undefined) ?? 'a table'
+    const column = (details?.columnName as string | undefined) ?? 'a column'
+    const ms = details?.avgMs as number | undefined
+    const timing = typeof ms === 'number' ? ` averaging ${ms}ms` : ''
+    return `Queries filtering ${table}.${column} are${timing} with no index on that column`
+  }
+
   if (type === 'schema_design_defect') {
     const table = (details?.tableName as string | undefined) ?? 'a table'
     const column = (details?.columnName as string | undefined) ?? 'a column'

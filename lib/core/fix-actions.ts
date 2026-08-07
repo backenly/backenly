@@ -139,6 +139,22 @@ export function buildFixAction(
         },
       }
 
+    // Same repair as missing_fk_index, reached from measured latency instead of
+    // schema shape. Both fields are already verified by the probe (the column
+    // exists on the table and no index leads with it), but they are re-checked
+    // here rather than assumed: this function is the last gate before DDL, and
+    // an undefined columnName would reach executeCreateIndex as "Missing
+    // parameters" — a failure the user sees as a dead "Fix now" button.
+    case 'slow_query_missing_index':
+      if (!details.tableName || !details.columnName) return null
+      return {
+        action: 'CREATE_INDEX',
+        params: {
+          tableName: details.tableName,
+          columnName: details.columnName,
+        },
+      }
+
     // A hot table is repairable only when the detector could name a column that
     // actually exists to index. When it could not, returning null here is the
     // honest answer and getManualRemediationHint explains it — emitting
@@ -368,6 +384,21 @@ export function getManualRemediationHint(
     // The hint IS the deliverable for this family: the probe already measured
     // the defect against live statistics and derived the migration, so the only
     // thing left to hand over is the SQL itself. Printing it beats describing it.
+    // Only reached when the probe raised a finding without a verified column,
+    // which its own filters should prevent. Kept because a notify_only path with
+    // no hint is the dead end this function exists to close, and "should not
+    // happen" is not a reason to render an empty row.
+    case 'slow_query_missing_index': {
+      const t = (details?.tableName as string | undefined) ?? 'a table'
+      const ms = details?.avgMs as number | undefined
+      const timing = typeof ms === 'number' ? ` averaging ${ms}ms` : ''
+      return (
+        `Queries against "${t}"${timing} are scanning rather than using an index, and Backenly ` +
+        `could not confirm which column to index safely. Add an index on the column your ` +
+        `queries filter by, or say "add an index on ${t}.<column>" in the AI chat.`
+      )
+    }
+
     case 'schema_design_defect': {
       const sql = details?.sql as string | undefined
       const problem = details?.reason as string | undefined
