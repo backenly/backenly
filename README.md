@@ -199,13 +199,28 @@ moves your data between the two in either direction.
 
 ## Contributing
 
-**We are not merging external pull requests yet** while Backenly is in early
-access. The best way to help right now is to open an issue: bug reports, feature
-requests, and questions are all welcome. See [CONTRIBUTING.md](CONTRIBUTING.md)
-for the full guide, including the checklist for when pull requests open.
+**Pull requests are open and welcome.** Bug reports, feature requests, questions,
+and code all help. Good first places to look are open issues, the probe and
+detector suite under `lib/autonomy/`, and client library ergonomics in
+`packages/`. If a change is large or moves an architectural boundary, open an
+issue first so we can agree the approach before you spend the time.
 
-Tests run against a real PostgreSQL instance. The database is never mocked,
-because mocking it has caused production incidents here before.
+Before opening a PR:
+
+```bash
+npm run lint
+npx tsc --noEmit
+npm test
+npx tsx scripts/preflight-oss.ts --tree    # no credentials in what you committed
+```
+
+Two things worth knowing before you write code here. Tests run against a real
+PostgreSQL instance, and the database is never mocked, because mocking it has
+caused production incidents here before. And every schema mutation goes through
+`executeAction`; a patch that writes DDL around the kernel will be sent back, no
+matter how correct the SQL is.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide.
 
 ## Security
 
@@ -234,14 +249,6 @@ policy, including what you may do without asking.
 
 <div align="center">
 
-### Star history
-
-<a href="https://star-history.com/#backenly/backenly&Date">
-  <img src="https://api.star-history.com/svg?repos=backenly/backenly&type=Date" alt="Star history chart for backenly/backenly" width="640" />
-</a>
-
-<br/><br/>
-
-⭐ **[Star Backenly on GitHub](https://github.com/backenly/backenly)** to get notified about new releases.
+**[Star Backenly on GitHub](https://github.com/backenly/backenly)** to get notified about new releases.
 
 </div>
