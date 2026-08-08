@@ -22,12 +22,6 @@ verified, and reversible.
 
 **[backenly.com](https://backenly.com)** &nbsp;·&nbsp; [Quickstart](https://backenly.com/quickstart) &nbsp;·&nbsp; [Client libraries](https://github.com/backenly/backenly-js)
 
-<br/>
-
-<video src="https://github.com/backenly/backenly/raw/main/.github/assets/backenly-demo.mp4" width="100%" controls muted playsinline>
-  <a href="https://github.com/backenly/backenly/raw/main/.github/assets/backenly-demo.mp4">Watch the Backenly demo (66s)</a>
-</video>
-
 </div>
 
 > ⭐ **Star the repo** to follow releases and help other builders find Backenly.
