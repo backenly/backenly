@@ -1,0 +1,38 @@
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    required:
+      - backenlyApiKey
+    properties:
+      backenlyApiKey:
+        type: string
+        title: Backenly API key
+        description: >-
+          Scoped Backenly MCP key (mcp_live_...). Create one at backenly.com/app
+          under your project, then Connect, then MCP. Read-only keys are supported
+          and serve a reduced tool set.
+      backenlyProject:
+        type: string
+        title: Project id
+        description: >-
+          Optional. Used to detect a key/project mismatch and to label the
+          connection banner.
+      backenlyApiUrl:
+        type: string
+        title: Endpoint override
+        description: >-
+          Optional. Point at a self-hosted Backenly instance. Defaults to
+          https://backenly.com.
+  commandFunction: |-
+    (config) => ({
+      command: 'npx',
+      args: ['-y', '@backenly/mcp-server'],
+      env: Object.assign(
+        { BACKENLY_API_KEY: config.backenlyApiKey },
+        config.backenlyProject ? { BACKENLY_PROJECT: config.backenlyProject } : {},
+        config.backenlyApiUrl ? { BACKENLY_API_URL: config.backenlyApiUrl } : {}
+      )
+    })
+  exampleConfig:
+    backenlyApiKey: mcp_live_replace_with_your_own_key
