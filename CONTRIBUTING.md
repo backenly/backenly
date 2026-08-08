@@ -5,11 +5,9 @@ them, verifies the result, and keeps every change reviewable and reversible.
 That last property is the product. Most of the conventions below exist to
 protect it.
 
-> **Heads up: we are not merging external pull requests yet.** Backenly is in
-> early access and moving fast, so for now the best way to contribute is to
-> **open an issue**. Bug reports, feature requests, and questions are all
-> welcome and read. Everything below describes the workflow for when pull
-> requests open up.
+> **Pull requests are open.** Bug reports, feature requests, questions, and code
+> are all welcome. If a change is large or reshapes an architectural boundary,
+> open an issue first so we can agree the approach before you spend the time.
 
 ## Licensing
 
@@ -86,7 +84,7 @@ a wrong additive fix wastes a cycle, a wrong permissive fix is a breach.
 
 ## Before you open a pull request
 
-(When pull requests open, this is the checklist.)
+Run all four. The last one is not optional: this repository is public.
 
 ```bash
 npm run lint
