@@ -1,0 +1,50 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.backenly/backenly",
+  "title": "Backenly",
+  "description": "Autonomous backend platform. Your coding agent builds Postgres tables, REST APIs, auth, storage, realtime, and functions over MCP, and every change is planned, verified, and reversible.",
+  "version": "0.3.2",
+  "websiteUrl": "https://backenly.com",
+  "repository": {
+    "url": "https://github.com/backenly/backenly",
+    "source": "github",
+    "subfolder": "packages/mcp-server"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "@backenly/mcp-server",
+      "version": "0.3.2",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "BACKENLY_API_KEY",
+          "description": "Scoped Backenly MCP key (mcp_live_...). Create one at backenly.com/app under your project, Connect, MCP. Read-only keys are supported.",
+          "isRequired": true,
+          "isSecret": true
+        },
+        {
+          "name": "BACKENLY_PROJECT",
+          "description": "Optional project id. Used to detect a key/project mismatch.",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "BACKENLY_API_URL",
+          "description": "Optional endpoint override for self-hosted Backenly instances. Defaults to https://backenly.com.",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://backenly.com/api/mcp"
+    }
+  ]
+}
