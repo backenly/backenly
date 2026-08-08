@@ -74,18 +74,18 @@ are one command away.
 
 ## Core capabilities
 
-| | Capability | What you get |
-|---|---|---|
-| 🗄️ | **Database** | PostgreSQL with a schema per project, served through PostgREST |
-| 🔐 | **Auth & Users** | Email/password and social sign-in, JWT sessions, RLS-forced user tables |
-| 📦 | **Storage** | Public and private buckets with per-file access control |
-| ⚡ | **Realtime** | Shared `LISTEN`/`NOTIFY` hub for table change subscriptions |
-| ƒ | **Functions** | Serverless route modules, validated before they ship and self-healed if they break |
-| 🔌 | **Integrations** | One `ctx.integrations.<id>.request()` surface for third-party APIs |
-| 🤖 | **Autonomy** | MAPE-K loop that observes, detects, proposes, applies, and verifies repairs |
-| 📈 | **Monitoring** | Request logs with stability and reliability scoring |
-| 🌿 | **Branches** | Preview branches with their own sequences, plus diff and merge |
-| 🚀 | **Deploy** | Governed rollout with restore points and an audit ledger |
+| Capability | What you get |
+|---|---|
+| **Database** | PostgreSQL with a schema per project, served through PostgREST |
+| **Auth & Users** | Email/password and social sign-in, JWT sessions, RLS-forced user tables |
+| **Storage** | Public and private buckets with per-file access control |
+| **Realtime** | Shared `LISTEN`/`NOTIFY` hub for table change subscriptions |
+| **Functions** | Serverless route modules, validated before they ship and self-healed if they break |
+| **Integrations** | One `ctx.integrations.<id>.request()` surface for third-party APIs |
+| **Autonomy** | MAPE-K loop that observes, detects, proposes, applies, and verifies repairs |
+| **Monitoring** | Request logs with stability and reliability scoring |
+| **Branches** | Preview branches with their own sequences, plus diff and merge |
+| **Deploy** | Governed rollout with restore points and an audit ledger |
 
 ## What your agent can actually do
 
