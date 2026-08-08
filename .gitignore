@@ -129,3 +129,8 @@ __pycache__/
 public/backenly-sdk.js
 public/backenly-sdk.esm.js
 public/backenly-supabase.esm.js
+
+# Demo recording output. Raw takes are large, and a Playwright storageState is a
+# live session, so neither belongs in a public repo.
+.video-out/
+*.storageState.json
