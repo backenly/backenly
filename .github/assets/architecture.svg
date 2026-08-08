@@ -1,78 +1,102 @@
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 960 392" width="960" height="392" role="img" aria-label="Your coding agent drives Backenly over MCP: the Brain plans, executeAction governs the change, and it lands in PostgreSQL. A closed autonomy loop (MAPE-K) monitors the running backend and repairs it back through the Brain.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 400" width="960" height="400" role="img" aria-label="Your coding agent drives Backenly over MCP: the Brain plans the change, executeAction governs and verifies it, and it lands in PostgreSQL. A closed MAPE-K autonomy loop monitors the running backend and repairs it back through the Brain.">
   <defs>
     <style>
-      .title { font: 600 15px ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; fill: #ededf2; }
-      .sub   { font: 400 11px ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; fill: #8b8b99; }
-      .lbl   { font: 500 11px ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; fill: #8b8b99; letter-spacing: .04em; }
-      .acc   { fill: #a78bfa; }
-      @keyframes pulse { 0%,100% { opacity: .35 } 50% { opacity: 1 } }
-      .beat { animation: pulse 2.4s ease-in-out infinite; }
+      .title { font: 600 16px ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; fill: #ededf2 }
+      .sub   { font: 400 12px ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; fill: #8b8b99 }
+      .mono  { font: 500 11px ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; fill: #6f6f7d; letter-spacing: .06em }
+      /* Sized to stay inside the 176px node box. Do not raise without re-measuring. */
+      .monoIn { font: 500 9px ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; fill: #7c7490; letter-spacing: .04em }
+      .lbl   { font: 500 12px ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; fill: #a78bfa; letter-spacing: .06em }
+      .cap   { font: 400 12px ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; fill: #7b7b89 }
+
+      /* Motion is CSS, not SMIL, specifically so prefers-reduced-motion can turn
+         it off. SMIL animateMotion ignores that setting entirely. */
+      .dot { offset-rotate: 0deg; animation-iteration-count: infinite; animation-timing-function: linear }
+      .fwd { offset-path: path('M 212 128 L 748 128'); animation-name: flow; animation-duration: 3.6s }
+      .rtn { offset-path: path('M 836 168 C 836 252 836 302 772 302 L 440 302 C 392 302 362 274 362 172'); animation-name: flow; animation-duration: 4.8s }
+      .d2 { animation-delay: 1.2s } .d3 { animation-delay: 2.4s } .d4 { animation-delay: 2.6s }
+
+      @keyframes flow {
+        0%   { offset-distance: 0%;   opacity: 0 }
+        10%  { opacity: 1 }
+        88%  { opacity: 1 }
+        100% { offset-distance: 100%; opacity: 0 }
+      }
+      @keyframes breathe { 0%, 100% { opacity: .28 } 50% { opacity: .85 } }
+      .beat { animation: breathe 2.8s ease-in-out infinite }
+
+      @media (prefers-reduced-motion: reduce) {
+        .dot, .beat { animation: none }
+        .dot { opacity: .85 }
+        .fwd { offset-distance: 46% }
+        .rtn { offset-distance: 52% }
+        .beat { opacity: .6 }
+      }
     </style>
-    <path id="fwd" d="M212,128 L748,128" />
-    <path id="loop" d="M836,168 C836,250 836,300 772,300 L440,300 C392,300 362,272 362,170" />
-    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
-      <feGaussianBlur stdDeviation="2.4" result="b" />
+
+    <filter id="glow" x="-70%" y="-70%" width="240%" height="240%">
+      <feGaussianBlur stdDeviation="2.6" result="b" />
       <feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge>
     </filter>
+
     <marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0,0 L9,5 L0,10 z" fill="#6b6b7a" />
+      <path d="M0,0 L9,5 L0,10 z" fill="#5a5a68" />
+    </marker>
+    <marker id="ahv" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L9,5 L0,10 z" fill="#8b5cf6" fill-opacity=".55" />
     </marker>
   </defs>
 
-  <!-- card -->
-  <rect x="1" y="1" width="958" height="390" rx="16" fill="#0c0d11" stroke="#ffffff" stroke-opacity="0.06" />
+  <rect x="1" y="1" width="958" height="398" rx="16" fill="#0c0d11" stroke="#ffffff" stroke-opacity="0.06" />
 
-  <!-- connectors (faint rails, drawn under the nodes) -->
-  <line x1="212" y1="128" x2="271" y2="128" stroke="#4b4b58" stroke-width="1.4" marker-end="url(#ah)" />
-  <line x1="449" y1="128" x2="508" y2="128" stroke="#4b4b58" stroke-width="1.4" marker-end="url(#ah)" />
-  <line x1="686" y1="128" x2="745" y2="128" stroke="#4b4b58" stroke-width="1.4" marker-end="url(#ah)" />
-  <use xlink:href="#loop" fill="none" stroke="#8b5cf6" stroke-opacity="0.22" stroke-width="1.4" marker-end="url(#ah)" />
+  <!-- rails, drawn under the nodes so travelling dots read as passing between stages -->
+  <line x1="212" y1="128" x2="271" y2="128" stroke="#3f3f4a" stroke-width="1.4" marker-end="url(#ah)" />
+  <line x1="449" y1="128" x2="508" y2="128" stroke="#3f3f4a" stroke-width="1.4" marker-end="url(#ah)" />
+  <line x1="686" y1="128" x2="745" y2="128" stroke="#3f3f4a" stroke-width="1.4" marker-end="url(#ah)" />
+  <path d="M 836 168 C 836 252 836 302 772 302 L 440 302 C 392 302 362 274 362 172"
+        fill="none" stroke="#8b5cf6" stroke-opacity="0.20" stroke-width="1.4" marker-end="url(#ahv)" />
 
-  <!-- flowing data dots along the pipeline (hidden where they pass under a node) -->
-  <circle r="3.1" class="acc" filter="url(#glow)">
-    <animateMotion dur="3.4s" repeatCount="indefinite" begin="0s"><mpath xlink:href="#fwd" /></animateMotion>
-  </circle>
-  <circle r="3.1" class="acc" filter="url(#glow)">
-    <animateMotion dur="3.4s" repeatCount="indefinite" begin="1.13s"><mpath xlink:href="#fwd" /></animateMotion>
-  </circle>
-  <circle r="3.1" class="acc" filter="url(#glow)">
-    <animateMotion dur="3.4s" repeatCount="indefinite" begin="2.26s"><mpath xlink:href="#fwd" /></animateMotion>
-  </circle>
-  <!-- autonomy loop dots (feedback from the database back into the Brain) -->
-  <circle r="3" fill="#8b5cf6" filter="url(#glow)">
-    <animateMotion dur="4.6s" repeatCount="indefinite" begin="0.4s"><mpath xlink:href="#loop" /></animateMotion>
-  </circle>
-  <circle r="3" fill="#8b5cf6" filter="url(#glow)">
-    <animateMotion dur="4.6s" repeatCount="indefinite" begin="2.7s"><mpath xlink:href="#loop" /></animateMotion>
-  </circle>
+  <!-- forward flow: intent moving toward the database -->
+  <circle class="dot fwd"    r="3.2" fill="#a78bfa" filter="url(#glow)" />
+  <circle class="dot fwd d2" r="3.2" fill="#a78bfa" filter="url(#glow)" />
+  <circle class="dot fwd d3" r="3.2" fill="#a78bfa" filter="url(#glow)" />
+  <!-- return flow: what the running backend reports back into the Brain -->
+  <circle class="dot rtn"    r="3"   fill="#8b5cf6" filter="url(#glow)" />
+  <circle class="dot rtn d4" r="3"   fill="#8b5cf6" filter="url(#glow)" />
 
-  <!-- arrow label -->
-  <text x="242" y="114" text-anchor="middle" class="lbl acc">MCP</text>
+  <text x="242" y="113" text-anchor="middle" class="lbl">MCP</text>
 
-  <!-- nodes (opaque, drawn over the rails so dots read as flowing between stages) -->
   <g>
-    <rect x="36"  y="88" width="176" height="80" rx="13" fill="#16171d" stroke="#ffffff" stroke-opacity="0.09" />
-    <text x="124" y="124" text-anchor="middle" class="title">Coding agent</text>
+    <rect x="36" y="86" width="176" height="84" rx="13" fill="#16171d" stroke="#ffffff" stroke-opacity="0.09" />
+    <text x="124" y="123" text-anchor="middle" class="title">Coding agent</text>
     <text x="124" y="143" text-anchor="middle" class="sub">Claude Code · Cursor · Codex</text>
   </g>
+
   <g>
-    <rect x="273" y="88" width="176" height="80" rx="13" fill="#16171d" stroke="#ffffff" stroke-opacity="0.09" />
-    <text x="361" y="124" text-anchor="middle" class="title">Brain</text>
+    <rect x="273" y="86" width="176" height="84" rx="13" fill="#16171d" stroke="#ffffff" stroke-opacity="0.09" />
+    <text x="361" y="123" text-anchor="middle" class="title">Brain</text>
     <text x="361" y="143" text-anchor="middle" class="sub">plans the change</text>
   </g>
+
+  <!-- The governed kernel is the product's actual differentiator, so it carries
+       the accent border and the only sub-label naming its guarantees. -->
   <g>
-    <rect x="510" y="88" width="176" height="80" rx="13" fill="#16171d" stroke="#8b5cf6" stroke-opacity="0.30" />
-    <text x="598" y="124" text-anchor="middle" class="title">executeAction</text>
-    <text x="598" y="143" text-anchor="middle" class="sub">governs · verifies</text>
+    <rect x="510" y="86" width="176" height="84" rx="13" fill="#191622" stroke="#8b5cf6" stroke-opacity="0.42" />
+    <text x="598" y="119" text-anchor="middle" class="title">executeAction</text>
+    <text x="598" y="138" text-anchor="middle" class="sub">governs · verifies</text>
+    <text x="598" y="156" text-anchor="middle" class="monoIn">DRY-RUN · AUDIT · ROLLBACK</text>
   </g>
+
   <g>
-    <rect x="748" y="88" width="176" height="80" rx="13" fill="#16171d" stroke="#ffffff" stroke-opacity="0.09" />
-    <text x="836" y="124" text-anchor="middle" class="title">PostgreSQL</text>
+    <rect x="748" y="86" width="176" height="84" rx="13" fill="#16171d" stroke="#ffffff" stroke-opacity="0.09" />
+    <text x="836" y="123" text-anchor="middle" class="title">PostgreSQL</text>
     <text x="836" y="143" text-anchor="middle" class="sub">your data, exportable</text>
   </g>
 
-  <!-- autonomy loop caption: label above the line, MAPE-K stages below it -->
-  <circle cx="516" cy="286" r="3.2" class="acc beat" />
-  <text x="600" y="290" text-anchor="middle" class="lbl acc">Autonomy loop · MAPE-K</text>
-  <text x="606" y="346" text-anchor="middle" class="sub">monitor · analyze · plan · execute · knowledge</text>
+  <text x="600" y="196" text-anchor="middle" class="mono">NO RAW-SQL PATH FOR MUTATING STRUCTURE</text>
+
+  <circle cx="470" cy="286" r="3.2" fill="#a78bfa" class="beat" />
+  <text x="556" y="290" text-anchor="middle" class="lbl">Autonomy loop · MAPE-K</text>
+  <text x="600" y="348" text-anchor="middle" class="cap">monitor · analyze · plan · execute · knowledge</text>
+  <text x="600" y="370" text-anchor="middle" class="mono">HEALS WHAT IS REVERSIBLE · ESCALATES WHAT IS NOT</text>
 </svg>
