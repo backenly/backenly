@@ -6,21 +6,23 @@
 
 ### Your coding agent builds it. Backenly keeps it running.
 
-An autonomous backend platform: PostgreSQL, REST APIs, auth, storage, realtime,
-and functions, driven by your coding agent over MCP. Every change is planned,
-verified, and reversible.
+The autonomous backend platform for agentic coding. PostgreSQL, REST APIs, auth,
+storage, realtime, and functions, driven by your coding agent over MCP, with every
+change planned, verified, and reversible.
 
 <br/>
 
-[![License](https://img.shields.io/badge/license-Apache--2.0-3b82f6?style=flat-square)](LICENSE)
+[![License](https://img.shields.io/badge/platform-Apache--2.0-3b82f6?style=flat-square)](LICENSE)
 [![Clients](https://img.shields.io/badge/SDK%20%C2%B7%20CLI%20%C2%B7%20MCP-MIT-22c55e?style=flat-square)](packages/)
+[![npm downloads](https://img.shields.io/npm/dm/@backenly/mcp-server?style=flat-square&label=mcp%20server&color=f59e0b)](https://www.npmjs.com/package/@backenly/mcp-server)
+[![Contributors](https://img.shields.io/github/contributors/backenly/backenly?style=flat-square&color=64748b)](https://github.com/backenly/backenly/graphs/contributors)
 [![GitHub stars](https://img.shields.io/github/stars/backenly/backenly?style=flat-square&label=stars&color=8b5cf6)](https://github.com/backenly/backenly/stargazers)
 
 [![Follow on X](https://img.shields.io/badge/Follow-%40Backenly-0f0f0f?style=for-the-badge&logo=x&logoColor=white)](https://x.com/Backenly)
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-Backenly-0A66C2?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/company/117034579)
 [![Star on GitHub](https://img.shields.io/badge/Star-on%20GitHub-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/backenly/backenly)
 
-**[backenly.com](https://backenly.com)** &nbsp;·&nbsp; [Quickstart](https://backenly.com/quickstart) &nbsp;·&nbsp; [Client libraries](https://github.com/backenly/backenly-js)
+**[backenly.com](https://backenly.com)** &nbsp;·&nbsp; [Quickstart](https://backenly.com/quickstart) &nbsp;·&nbsp; [Resources](https://backenly.com/resources) &nbsp;·&nbsp; [Pricing](https://backenly.com/pricing) &nbsp;·&nbsp; [Client libraries](https://github.com/backenly/backenly-js)
 
 https://github.com/user-attachments/assets/2b215d72-4b1b-4a4c-8290-a94553be192d
 
@@ -70,7 +72,46 @@ are one command away.
 - **PostgREST data plane.** Tables are served through PostgREST, so the query
   grammar you already know works unchanged.
 
+## Core capabilities
+
+| | Capability | What you get |
+|---|---|---|
+| 🗄️ | **Database** | PostgreSQL with a schema per project, served through PostgREST |
+| 🔐 | **Auth & Users** | Email/password and social sign-in, JWT sessions, RLS-forced user tables |
+| 📦 | **Storage** | Public and private buckets with per-file access control |
+| ⚡ | **Realtime** | Shared `LISTEN`/`NOTIFY` hub for table change subscriptions |
+| ƒ | **Functions** | Serverless route modules, validated before they ship and self-healed if they break |
+| 🔌 | **Integrations** | One `ctx.integrations.<id>.request()` surface for third-party APIs |
+| 🤖 | **Autonomy** | MAPE-K loop that observes, detects, proposes, applies, and verifies repairs |
+| 📈 | **Monitoring** | Request logs with stability and reliability scoring |
+| 🌿 | **Branches** | Preview branches with their own sequences, plus diff and merge |
+| 🚀 | **Deploy** | Governed rollout with restore points and an audit ledger |
+
+## What your agent can actually do
+
+The MCP server advertises **20 tools**. The catalog is capped deliberately, because
+tool-selection accuracy degrades as it grows, while the dispatcher stays wider so an
+agent pinned to an older manifest never gets a 404.
+
+| Group | Tools |
+|---|---|
+| **Understand** | `read_backend_state` · `get_table_schema` · `run_query` · `fetch_docs` |
+| **Build** | `apply_migration` · `enable_auth` · `set_rls` · `create_bucket` · `generate_function` · `enable_realtime` |
+| **Data** | `db_insert` · `db_update` · `db_delete` |
+| **Operate** | `branch` · `create_api_key` · `set_env_var` · `get_database_credentials` · `check_approval` · `generate_types` |
+| **Natural language** | `backend_chat`, the fall-through for anything not named above |
+
+Agents can also browse live project state as MCP **resources** (`backenly://state`,
+`tables`, `apis`, `buckets`, `triggers`) instead of spending a tool call to ask.
+
 ## Quick start
+
+### Cloud
+
+Create a project at **[backenly.com](https://backenly.com)**, then point your agent
+at it. Nothing to install or operate.
+
+### Self-hosted
 
 Requires Node 20+, and Docker (or your own PostgreSQL 14+ instance).
 
@@ -107,6 +148,18 @@ Backenly is built to be driven over MCP. Point your agent at the MCP server:
 npx @backenly/mcp-server init
 ```
 
+Works with Claude Code, Cursor, Codex, Cline, and Claude Desktop. Keys are scoped
+and revocable, and read-only keys serve a reduced tool set.
+
+> **Restart your MCP host after installing.** Tools stay absent until it
+> reconnects, which looks like a broken install but is not one.
+
+Verify the connection by asking your agent:
+
+```
+Call Backenly's read_backend_state tool and tell me what exists in this project.
+```
+
 Then describe what you want. The SDK is for the app you ship:
 
 ```js
@@ -129,6 +182,7 @@ await backend.posts.list({ filter: { published: true } })
 | `packages/` | Client libraries: SDK, CLI, MCP server (MIT) |
 | `prisma/` | Platform schema: the `public` schema, not tenant data |
 | `server/` | Express runtime serving the end-user API |
+| `scripts/` | Operational tooling, probes, and the demo recording pipeline |
 
 [`AGENTS.md`](AGENTS.md) is the deeper architectural guide, and is written for
 coding agents working in this repo as much as for people.
@@ -175,3 +229,19 @@ written permission.
 Describing your project as "built on Backenly" or "a fork of Backenly" is
 accurate and always welcome. See [TRADEMARK.md](TRADEMARK.md) for the full
 policy, including what you may do without asking.
+
+---
+
+<div align="center">
+
+### Star history
+
+<a href="https://star-history.com/#backenly/backenly&Date">
+  <img src="https://api.star-history.com/svg?repos=backenly/backenly&type=Date" alt="Star history chart for backenly/backenly" width="640" />
+</a>
+
+<br/><br/>
+
+⭐ **[Star Backenly on GitHub](https://github.com/backenly/backenly)** to get notified about new releases.
+
+</div>
