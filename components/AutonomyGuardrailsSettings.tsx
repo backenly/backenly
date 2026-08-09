@@ -29,6 +29,7 @@ import { KIT } from '@/components/inspector/kit'
 import { VersionHistory } from '@/components/workspace/VersionHistory'
 import { ReviewQueuePanel } from '@/components/ReviewQueuePanel'
 import { DetectedFindingsPanel } from '@/components/DetectedFindingsPanel'
+import { AppliedChangesPanel, type AppliedChange } from '@/components/AppliedChangesPanel'
 
 type Level = 'OFF' | 'CONSERVATIVE' | 'BALANCED' | 'AGGRESSIVE'
 
@@ -45,6 +46,9 @@ interface TrustReport {
   }
   recentActivity: Array<{ at: string; action: string; kind: string; summary: string; repeat?: number }>
   pendingApprovals: Array<{ id: string }>
+  /** Optional on the wire so a response predating the field renders no panel
+   *  rather than crashing the page. */
+  appliedChanges?: AppliedChange[]
 }
 
 // TWO modes, not three (founder, 2026-07-18: "the off also not needed — just
@@ -363,7 +367,17 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
           </div>
         </section>
 
-        {/* ── 3. Recent guardrail actions ───────────────────────────────
+        {/* ── 3. Changes Backenly made, each with its way back ───────────
+            The `auto_fixed` half of the queue. Sits above the audit feed
+            because it is actionable and the feed is not: the feed says what
+            happened, this says what happened AND undoes it. */}
+        <AppliedChangesPanel
+          projectId={projectId}
+          changes={data.appliedChanges ?? []}
+          onReverted={fetchReport}
+        />
+
+        {/* ── 4. Recent guardrail actions ───────────────────────────────
             An audit log, so it reads as a table: when, what kind, what
             happened. `kind` was already on the wire and nothing rendered it.
             Capped height with internal scroll so a busy week does not push
@@ -426,7 +440,7 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
           )}
         </section>
 
-        {/* ── 4. Restore points ─────────────────────────────────────────── */}
+        {/* ── 5. Restore points ─────────────────────────────────────────── */}
         <section className={`overflow-hidden ${KIT.radius} border ${KIT.border} ${KIT.surface} ${KIT.inset}`}>
           <div className="border-b border-white/[0.06] px-5 py-3.5">
             <div className="flex items-center gap-2">
@@ -444,7 +458,15 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
 
         <div className="flex items-center gap-1.5 pt-1">
           <Lock className="size-3 text-zinc-600" />
-          <span className="text-[11.5px] text-zinc-500">Every autonomous action is snapshotted, reversible, and written to the audit log.</span>
+          {/* Says what the engine can actually back up. The previous wording
+              ("every autonomous action is ... reversible") was a blanket
+              guarantee, and a fix whose pre-fix snapshot capture failed is not
+              reversible — the Changes panel now names each of those instead of
+              the footer implying they cannot exist. */}
+          <span className="text-[11.5px] text-zinc-500">
+            Every autonomous action is written to the audit log and snapshotted before it runs.
+            Changes that captured a snapshot can be undone above.
+          </span>
         </div>
       </div>
     </Shell>

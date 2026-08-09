@@ -25,6 +25,7 @@ import {
 import { explainAutonomyEvent } from './because-copy'
 import { summariseFinding } from '@/lib/core/finding-summaries'
 import { classifyFix } from '@/lib/core/fix-classifier'
+import { revertEligibility } from '@/lib/core/auto-fix-engine'
 import { INVARIANTS } from './desired-state'
 
 export interface TrustScoreboard {
@@ -107,6 +108,38 @@ export interface PendingApproval {
   details: Record<string, unknown>
 }
 
+/**
+ * A change Backenly applied on its own, with whether it can still be undone.
+ *
+ * The product has told users on every autonomy surface that "every autonomous
+ * action is snapshotted, reversible, and written to the audit log". Two thirds
+ * of that was true: the snapshot and the ledger shipped, `revertAutoFix` was
+ * written and tested, `DELETE /health/approve` was wired to it — and nothing in
+ * the UI ever called it. The promise was accurate about the engine and false
+ * about the product, which is the worst shape for a trust claim.
+ *
+ * `revertible` is computed from the SAME predicate the engine gates on, so a
+ * row can never offer an undo the engine will refuse.
+ */
+export interface AppliedChange {
+  findingId: string
+  type: string
+  severity: string
+  /** When the fix was applied (falls back to detection time on legacy rows). */
+  at: string
+  /** "Backenly did X because Y" — the canonical sentence, same as the feed. */
+  summary: string
+  /** Table / column / surface the change landed on, for display only. */
+  resource?: string
+  /** True when the loop re-probed the gap afterwards and confirmed it closed. */
+  verified: boolean
+  revertible: boolean
+  /** Undo removes protection (RLS) and needs an explicit second confirmation. */
+  requiresConfirmation: boolean
+  /** Why it cannot be undone automatically. Present only when !revertible. */
+  revertBlockedReason?: string
+}
+
 export interface ShadowPreview {
   at: string
   level: string
@@ -139,6 +172,8 @@ export interface TrustReport {
   scoreboard: TrustScoreboard
   recentActivity: ActivityItem[]
   pendingApprovals: PendingApproval[]
+  /** Changes the loop applied on its own, newest first, each with its undo state. */
+  appliedChanges: AppliedChange[]
   /** What the closed loop would do right now (present only in shadow mode). */
   shadowPreview: ShadowPreview | null
 }
@@ -328,6 +363,7 @@ export async function buildTrustReport(
     confirmedFixes,
     activityRows,
     pending,
+    applied,
     lastShadow,
   ] = await Promise.all([
     getProjectAutonomyLevel(projectId),
@@ -376,6 +412,19 @@ export async function buildTrustReport(
       orderBy: [{ severity: 'asc' }, { detectedAt: 'desc' }],
       take: 25,
       select: { id: true, type: true, severity: true, detectedAt: true, details: true },
+    }),
+    // Ordered by fixAppliedAt, not detectedAt: a finding raised last week and
+    // healed a minute ago belongs at the top of "what just changed".
+    // `nulls: 'last'` keeps legacy rows (fixed before the column was stamped)
+    // from sorting above genuinely recent work.
+    prisma.healthFinding.findMany({
+      where: { projectId, status: 'auto_fixed', autoFixed: true },
+      orderBy: [{ fixAppliedAt: { sort: 'desc', nulls: 'last' } }, { detectedAt: 'desc' }],
+      take: 25,
+      select: {
+        id: true, type: true, severity: true,
+        detectedAt: true, fixAppliedAt: true, details: true,
+      },
     }),
     prisma.auditLog.findFirst({
       where: { projectId, action: 'AUTONOMY_SHADOW_DECISION' },
@@ -441,6 +490,27 @@ export async function buildTrustReport(
     }
   })
 
+  const appliedChanges: AppliedChange[] = applied.map(f => {
+    const det = (f.details ?? {}) as Record<string, any>
+    const eligibility = revertEligibility(f.type, det)
+    return {
+      findingId: f.id,
+      type: f.type,
+      severity: f.severity,
+      at: (f.fixAppliedAt ?? f.detectedAt).toISOString(),
+      // The same renderer the activity feed uses, so a change described one way
+      // in the feed is not described another way beside its Undo button.
+      summary: explainAutonomyEvent({ findingType: f.type, ...det }).full,
+      resource: det.location ?? det.tableName ?? undefined,
+      // Only the kernel's positive re-probe counts. `rollbackData.verification`
+      // is stamped by evaluateFixOutcome; anything else means nothing looked.
+      verified: (det.rollbackData as Record<string, unknown> | undefined)?.verification === 'confirmed',
+      revertible: eligibility.revertible,
+      requiresConfirmation: eligibility.requiresConfirmation,
+      revertBlockedReason: eligibility.reason,
+    }
+  })
+
   let shadowPreview: ShadowPreview | null = null
   if (lastShadow?.details) {
     try {
@@ -471,6 +541,7 @@ export async function buildTrustReport(
     },
     recentActivity,
     pendingApprovals,
+    appliedChanges,
     shadowPreview,
   }
 }

@@ -415,6 +415,82 @@ const RLS_PROTECTION_TYPES: ReadonlySet<string> = new Set([
 ])
 
 /**
+ * Can this recorded fix be undone, and does the undo need explicit consent?
+ *
+ * Deliberately a flat interface rather than a discriminated union: this repo
+ * compiles with `strict: false`, so narrowing on a boolean-literal discriminant
+ * does not happen and every consumer would need a cast. `reason` is populated
+ * exactly when `revertible` is false.
+ */
+export interface RevertEligibility {
+  revertible: boolean
+  /** Undo removes protection (RLS) — always needs a second, explicit yes. */
+  requiresConfirmation: boolean
+  /** Why the undo is impossible. Present only when `revertible` is false. */
+  reason?: string
+}
+
+/**
+ * Decide revertibility from the RECORDED fix alone — no I/O, no side effects.
+ *
+ * This exists so the UI can only ever render an Undo button that will actually
+ * work. The alternative was the failure this repo has already shipped once: a
+ * "Fix now" button drawn under copy promising Backenly could fix it, which
+ * returned an error on every click. An Undo button is worse to get wrong —
+ * clicking it is how a user finds out whether they can trust the loop at all.
+ *
+ * `revertAutoFix` calls this as its own first gate, so the button's precondition
+ * and the engine's precondition are one function and cannot drift.
+ *
+ * The three ways a fix is genuinely unrevertible are all knowable from the
+ * finding row:
+ *   • no rollbackData at all — the fix predates the undo contract entirely
+ *   • rollbackFormat !== 2  — its snapshot was captured AFTER the fix, so a
+ *     "revert" would restore the post-fix state and report success having done
+ *     nothing (this is the bug format 2 exists to close)
+ *   • schemaTouching with no snapshotId — capture failed at fix time, so there
+ *     is no pre-fix state to go back to
+ */
+export function revertEligibility(
+  findingType: string,
+  details: Record<string, unknown> | null | undefined,
+): RevertEligibility {
+  const det = (details ?? {}) as Record<string, unknown>
+  const rollbackData = det.rollbackData as Record<string, unknown> | undefined
+
+  if (!rollbackData) {
+    return {
+      revertible: false,
+      requiresConfirmation: false,
+      reason: 'No rollback data was recorded for this fix, so it cannot be undone automatically.',
+    }
+  }
+
+  if (rollbackData.rollbackFormat !== 2) {
+    return {
+      revertible: false,
+      requiresConfirmation: false,
+      reason:
+        'This fix was recorded before revert support existed — its snapshot captures the state ' +
+        'AFTER the fix, so an automatic undo would silently do nothing.',
+    }
+  }
+
+  if (rollbackData.schemaTouching === true && !rollbackData.snapshotId) {
+    return {
+      revertible: false,
+      requiresConfirmation: false,
+      reason:
+        'No pre-fix snapshot was captured when this fix ran, so there is no recorded state to ' +
+        'restore.',
+    }
+  }
+
+  const baseType = (normalizeFindingType(findingType, det)?.base ?? findingType) as string
+  return { revertible: true, requiresConfirmation: RLS_PROTECTION_TYPES.has(baseType) }
+}
+
+/**
  * Revert an auto-fixed finding to its recorded pre-fix state.
  *
  * The undo contract (rollbackFormat 2):
@@ -440,13 +516,26 @@ export async function revertAutoFix(
 
   const details = (finding.details ?? {}) as Record<string, unknown>
   const rollbackData = details.rollbackData as Record<string, unknown> | undefined
+
+  // One gate, shared with the UI (see revertEligibility). Checked BEFORE the
+  // confirmation prompt on purpose: asking a user to confirm re-exposing their
+  // data, and only then telling them the undo was never possible, is a worse
+  // interaction than refusing up front.
+  const eligibility = revertEligibility(finding.type, details)
+  if (!eligibility.revertible) {
+    return {
+      success: false,
+      message:
+        `${eligibility.reason} Undo it manually from the Database section, or ask your coding agent.`,
+    }
+  }
   if (!rollbackData) {
-    return { success: false, message: 'No rollback data recorded for this fix — cannot revert automatically.' }
+    // Unreachable: the predicate refuses a missing rollbackData above. Present
+    // so the narrowing below is the compiler's, not a human's assertion.
+    return { success: false, message: 'No rollback data recorded for this fix.' }
   }
 
-  const baseType = (normalizeFindingType(finding.type, details)?.base ?? finding.type) as string
-
-  if (RLS_PROTECTION_TYPES.has(baseType) && !opts.confirmed) {
+  if (eligibility.requiresConfirmation && !opts.confirmed) {
     const tbl = (details.tableName ?? details.table ?? 'this table') as string
     return {
       success: false,
@@ -457,29 +546,13 @@ export async function revertAutoFix(
     }
   }
 
-  if (rollbackData.rollbackFormat !== 2) {
-    return {
-      success: false,
-      message:
-        'This fix was recorded before revert support existed — its snapshot captures the state ' +
-        'AFTER the fix, so an automatic undo would silently do nothing. Undo it manually from the ' +
-        'Database section, or ask the AI chat.',
-    }
-  }
-
   // ── Schema-side revert (workspace schema = the enforcement truth) ──────────
   let appliedSteps = 0
   let schemaMessage = ''
   if (rollbackData.schemaTouching === true) {
-    const snapshotId = (rollbackData.snapshotId as string | null) ?? null
-    if (!snapshotId) {
-      return {
-        success: false,
-        message:
-          'No pre-fix snapshot was recorded (capture failed at fix time) — this schema change ' +
-          'cannot be reverted automatically.',
-      }
-    }
+    // Non-null by the eligibility gate above, which refuses schemaTouching
+    // fixes that never captured one.
+    const snapshotId = rollbackData.snapshotId as string
     const snapshot = await prisma.workspaceSchemaSnapshot.findUnique({
       where: { id: snapshotId },
       select: { versionNum: true },
