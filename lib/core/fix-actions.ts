@@ -155,6 +155,20 @@ export function buildFixAction(
         },
       }
 
+    // The inverse repair: remove an index the database has measurably never
+    // used. Gated on `approval` by the classifier, so this only ever builds
+    // after a human said yes. `indexName` is the required key — never derived
+    // from the table, because two indexes on one table are the normal case and
+    // guessing would drop the wrong one.
+    case 'unused_index': {
+      const table = details.tableName ?? details.table
+      if (!table || !details.indexName) return null
+      return {
+        action: 'DROP_INDEX',
+        params: { tableName: table, indexName: details.indexName },
+      }
+    }
+
     // A hot table is repairable only when the detector could name a column that
     // actually exists to index. When it could not, returning null here is the
     // honest answer and getManualRemediationHint explains it — emitting
@@ -360,6 +374,21 @@ export function getManualRemediationHint(
         ? ` It was read ${scans.toLocaleString()}× with ${pct}% index coverage.`
         : ''
       return `"${t}" is taking heavy sequential scans and Backenly could not find a column it is safe to index automatically.${measured} Add an index on whichever column your queries filter or sort by — in the AI chat, say "add an index on <table>.<column>".`
+    }
+
+    // Only reached when the finding arrived without the index name — an older
+    // row, or a hand-written one. buildFixAction refuses to derive it from the
+    // table, because two indexes on one table is the normal case and guessing
+    // would drop the wrong one; a wrong DROP INDEX is a rebuild on a table that
+    // may be very large. Ask for the name instead.
+    case 'unused_index': {
+      const t = (details?.tableName ?? details?.table ?? 'this table') as string
+      const idx = details?.indexName as string | undefined
+      const days = details?.observedDays as number | undefined
+      const window = days ? ` across ${days} days of observation` : ''
+      return idx
+        ? `PostgreSQL never used "${idx}" on "${t}"${window}, so it is being maintained on every write for nothing. Approve the drop above, or run it yourself: DROP INDEX CONCURRENTLY "${idx}";`
+        : `An index on "${t}" has gone unused${window}, but this finding does not name which one — Backenly will not guess, because dropping the wrong index means rebuilding it. Check pg_stat_user_indexes for "${t}" and drop the one with no scans.`
     }
 
     // Already contained by the runtime — every one of these requests was refused

@@ -75,6 +75,11 @@ const SCHEMA_TOUCHING = new Set<FindingType>([
   'workflow_broken',
   'verification_failed',
   'orphan_table',           // Adoption can enable RLS — snapshot for rollback parity
+  // The snapshot is the ONLY record of a dropped index's definition. Without it
+  // here, approving the drop would be irreversible in practice — the rollback
+  // engine restores indexes present in the target snapshot, and there would be
+  // no target snapshot taken before the drop.
+  'unused_index',
 ])
 
 // ── Pre-fix state capture (the undo contract) ────────────────────────────────

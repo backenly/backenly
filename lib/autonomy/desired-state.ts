@@ -56,6 +56,7 @@ import { detectDataPlaneNotAnswering } from './data-plane-liveness'
 import { detectServiceRoleKeyExposure } from '@/lib/security/service-role-exposure'
 import { detectSchemaDesignDefects } from './schema-design'
 import { detectSlowQueryMissingIndexes } from './slow-query-index'
+import { detectUnusedIndexes } from './unused-index'
 import { hasCapability, type PlatformCapability } from './platform-capabilities'
 
 // ── Bounded-autonomy tiers (graded by blast radius) ───────────────────────────
@@ -174,6 +175,13 @@ export const INVARIANTS: readonly Invariant[] = [
     // SERVER. Declared so its silence on a database without the extension is
     // reported as "not checked", never as "this guarantee holds".
     requires: 'pg_stat_statements',
+  },
+  {
+    id: 'no_index_is_pure_write_cost',
+    title: 'No index is being maintained on every write without ever being read',
+    rationale:
+      'The index probes above add indexes. This one is the other direction, and it is the half a platform usually skips because being wrong is expensive. Every index is written on every insert and update of its table forever, so one nothing reads is a permanent tax with no return. The evidence is a measured window rather than a counter: Backenly records each index\'s scan count the first time it sees it and raises nothing, then reports only an index whose count has not moved across at least fourteen days of observation — long enough that a weekly job has had two chances to run. It is reset-proof, because a counter that went backwards means the statistics were cleared and the window starts again. And it is never automatic: fourteen silent days is evidence, not proof, and only the person who wrote the application knows about the quarterly report.',
+    probe: detectUnusedIndexes,
   },
   {
     id: 'data_plane_is_registered',
@@ -523,6 +531,11 @@ const INVARIANT_EMITS: Readonly<Record<string, readonly FindingType[]>> = {
   service_role_keys_stay_server_side: ['service_role_key_exposed'],
   the_schema_matches_its_own_data: ['schema_design_defect'],
   measured_slow_queries_are_indexed: ['slow_query_missing_index'],
+  // Re-detectable by construction: the probe reads the live catalog, so an
+  // index that was dropped is simply absent on the next pass and the gap
+  // closes. Listing it is what lets evaluateFixOutcome certify the drop
+  // instead of recording it 'unknown'.
+  no_index_is_pure_write_cost: ['unused_index'],
   relationships_have_fk_constraints: ['missing_fk'],
   relationships_are_indexed: ['missing_fk_index'],
   data_plane_is_registered: ['schema_not_registered'],

@@ -27,6 +27,10 @@ export interface AIAction {
     // Database
     | 'CREATE_TABLE' | 'ADD_COLUMN' | 'INSERT_DATA' | 'LIST_TABLES'
     | 'CREATE_INDEX' | 'RENAME_COLUMN' | 'ADD_CONSTRAINT'  // 🎯 FIX #2: Schema ops
+    // Approval-gated. Reached only from an `unused_index` finding a human
+    // approved — never planned by the brain, because "which index is not
+    // needed" is a measurement, not an intent.
+    | 'DROP_INDEX'
     | 'DROP_COLUMN'
     | 'DROP_TABLE' | 'TRUNCATE_TABLE'
     // API
@@ -3369,6 +3373,9 @@ async function executeSingleAction(
 
       case 'VACUUM_TABLE':
         return await executeVacuumTable(action.params, projectId)
+
+      case 'DROP_INDEX':
+        return await executeDropIndex(action.params, projectId)
 
       case 'RENAME_COLUMN':
         return await executeRenameColumn(action.params, projectId)
@@ -7931,6 +7938,133 @@ async function executeVacuumTable(params: any, projectId: string): Promise<Execu
     return {
       success: false,
       message: `Vacuum failed on "${tableName}": ${err.message}`,
+      error: err.message,
+    }
+  }
+}
+
+/**
+ * Drop an index the database has measurably never used.
+ *
+ * Reached only from an `unused_index` finding a human approved — the classifier
+ * gates the type on `approval`, and nothing else emits DROP_INDEX.
+ *
+ * Every refusal below is a case where `DROP INDEX` either cannot work or would
+ * destroy something the finding never measured:
+ *
+ *   • a primary-key or unique index enforces a CONSTRAINT. Postgres refuses to
+ *     drop it and tells you to use ALTER TABLE ... DROP CONSTRAINT, which is a
+ *     different and far more destructive operation than the one approved.
+ *   • an index backing any constraint (EXCLUDE, deferred UNIQUE) — same reason.
+ *   • an index in another schema — the identifier is always qualified with THIS
+ *     project's workspace schema, so a name collision across tenants cannot
+ *     reach anyone else's catalog.
+ *
+ * CONCURRENTLY is deliberately NOT used, and the reason is not caution: it
+ * cannot run inside a transaction block, and every governed mutation here does.
+ * A plain DROP INDEX takes a brief ACCESS EXCLUSIVE lock on the table, which is
+ * the cost of the approved change and is stated in the result.
+ */
+async function executeDropIndex(params: any, projectId: string): Promise<ExecutionResult> {
+  const indexName = params?.indexName ?? params?.index
+  const tableName = params?.tableName ?? params?.table
+
+  if (!indexName) {
+    return {
+      success: false,
+      message: 'indexName is required to drop an index',
+      error: 'Missing parameters',
+      code: 'VALIDATION',
+    }
+  }
+
+  try {
+    const { prisma } = await import('@/lib/db')
+    const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
+    const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
+
+    const { SAFE_IDENT } = await import('@/lib/db/sql-expression')
+    if (!SAFE_IDENT.test(String(indexName))) {
+      return {
+        success: false,
+        message: `"${indexName}" is not a valid PostgreSQL identifier.`,
+        error: 'Invalid identifier',
+        code: 'VALIDATION',
+      }
+    }
+
+    // One catalog read answers every precondition at once, scoped to this
+    // project's schema so the name can only ever resolve inside this tenant.
+    const rows = await prisma.$queryRawUnsafe<Array<{
+      table_name: string
+      is_primary: boolean
+      is_unique: boolean
+      constraint_backed: boolean
+      definition: string
+    }>>(
+      `SELECT t.relname                AS table_name,
+              ix.indisprimary          AS is_primary,
+              ix.indisunique           AS is_unique,
+              EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conindid = i.oid) AS constraint_backed,
+              pg_get_indexdef(i.oid)   AS definition
+         FROM pg_index ix
+         JOIN pg_class i     ON i.oid = ix.indexrelid
+         JOIN pg_class t     ON t.oid = ix.indrelid
+         JOIN pg_namespace n ON n.oid = i.relnamespace
+        WHERE n.nspname = $1 AND i.relname = $2`,
+      postgresSchema, indexName,
+    ).catch(() => [] as any[])
+
+    if (rows.length === 0) {
+      // Already gone is the goal state, not a failure — a finding can outlive
+      // the index it names, and reporting an error here would escalate a change
+      // that has in fact been made.
+      return {
+        success: true,
+        message: `Index "${indexName}" no longer exists — nothing to drop.`,
+        data: { indexName, alreadyAbsent: true },
+      }
+    }
+
+    const idx = rows[0]
+
+    if (tableName && idx.table_name !== tableName) {
+      return {
+        success: false,
+        message:
+          `Index "${indexName}" belongs to "${idx.table_name}", not "${tableName}". ` +
+          `Nothing was dropped.`,
+        error: 'Index/table mismatch',
+        code: 'VALIDATION',
+      }
+    }
+
+    if (idx.is_primary || idx.is_unique || idx.constraint_backed) {
+      return {
+        success: false,
+        message:
+          `"${indexName}" enforces a ${idx.is_primary ? 'primary key' : 'uniqueness'} constraint ` +
+          `on "${idx.table_name}", so DROP INDEX cannot remove it and Backenly will not convert ` +
+          `this into a constraint drop — that is a different and far more destructive change ` +
+          `than the one measured.`,
+        error: 'Constraint-backed index',
+        code: 'VALIDATION',
+      }
+    }
+
+    await prisma.$executeRawUnsafe(`DROP INDEX "${postgresSchema}"."${indexName}"`)
+
+    return {
+      success: true,
+      message:
+        `Dropped index "${indexName}" on "${idx.table_name}". Writes to that table no longer ` +
+        `maintain it. The pre-fix snapshot holds its definition, so undo recreates it exactly.`,
+      data: { indexName, tableName: idx.table_name, definition: idx.definition },
+    }
+  } catch (err: any) {
+    return {
+      success: false,
+      message: `Could not drop index "${indexName}": ${err.message}`,
       error: err.message,
     }
   }

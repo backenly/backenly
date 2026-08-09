@@ -276,6 +276,11 @@ const INVARIANT_REAPABLE_TYPES = [
   // itself. Without an entry here the owner would keep seeing a slow-query
   // warning for a query the loop had already fixed.
   'slow_query_missing_index',
+  // Registered with the probe that emits it. Its evidence is a live catalog
+  // read plus an observation ledger, so an index the owner drops themselves —
+  // or one that finally gets used — disappears on the next pass. Without an
+  // entry here a "never used" finding would outlive the index it names.
+  'unused_index',
   // Both were probe-covered by the invariant catalogue and named in NO reaper,
   // so neither had any path back to healthy. Each has exactly one write site,
   // and that write site IS the invariant probe, so this reaper is the correct

@@ -72,6 +72,16 @@ const GENERIC_DETAILS: Record<string, unknown> = {
 const DETAILS_BY_TYPE: Partial<Record<string, Record<string, unknown>>> = {
   ai_action_pending: { executorAction: 'CREATE_INDEX', executorParams: { tableName: 'posts' } },
   contract_surface_broken: { surface: 'db', httpStatus: 502, detail: 'GET /db/profiles returned 502' },
+  // The repair is DROP INDEX, so it needs the index NAME. The generic fixture
+  // carries a column, and a column is not enough: a table normally has several
+  // indexes and deriving one from the table would drop an arbitrary one.
+  // detectUnusedIndexes always writes indexName, so this is its real shape.
+  unused_index: {
+    tableName: 'posts',
+    indexName: 'idx_posts_legacy_slug',
+    observedDays: 21,
+    sizeBytes: 4 * 1024 * 1024,
+  },
 }
 
 const detailsFor = (type: string): Record<string, unknown> =>

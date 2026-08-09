@@ -72,16 +72,27 @@ export interface HotTableFinding {
   indexColumn?: string
 }
 
-export interface IndexFinding {
-  indexName: string
-  table: string
-  kind: 'unused' | 'fragmented' | 'missing'
-  idxScans: number
-  sizeBytes: number
-  pressure: InfraPressure
-  recommendation: string
-  sqlFix?: string
-}
+// `IndexFinding` / `detectIndexIssues` were REMOVED on 2026-08-09.
+//
+// They found unused indexes, and their answer went into
+// `InfraReport.approvalRequired` — which nothing persisted, nothing rendered,
+// and no route returned. The query ran on every scan and its result was thrown
+// away every time.
+//
+// It could not simply be wired up, because the evidence was `idx_scan < 10`,
+// and idx_scan is a counter since the statistics were last reset with no notion
+// of elapsed time. An index created five minutes ago has zero scans; so does an
+// index serving a monthly job. Filing either as "safe to drop" is a claim about
+// runtime behaviour with no runtime observation behind it.
+//
+// The replacement is lib/autonomy/unused-index.ts, which measures a real
+// window: it records each index's scan count on first sight, raises nothing,
+// and reports only an index whose count has not moved across fourteen days of
+// observation. It is classified `approval`, never auto, and its repair is the
+// DROP_INDEX executor action.
+//
+// The `'fragmented'` and `'missing'` kinds declared here were never emitted by
+// anything.
 
 export interface PartitioningFinding {
   table: string
@@ -132,7 +143,6 @@ export interface InfraReport {
   scannedAt: string
   overallPressure: InfraPressure
   hotTables: HotTableFinding[]
-  indexIssues: IndexFinding[]
   partitioningCandidates: PartitioningFinding[]
   slowQueries: QueryFinding[]
   connectionPressure: ConnectionFinding | null
@@ -346,56 +356,6 @@ async function detectHotTables(pool: Pool, schemaName: string): Promise<HotTable
   } catch {
     return []
   }
-}
-
-// ── Detection: Index issues ───────────────────────────────────────────────────
-
-async function detectIndexIssues(pool: Pool, schemaName: string): Promise<IndexFinding[]> {
-  const findings: IndexFinding[] = []
-
-  try {
-    // Unused non-primary, non-unique indexes (negative ROI: write cost but never read)
-    const unused = await pool.query<{
-      index_name: string
-      table_name: string
-      idx_scan: string
-      size_bytes: string
-    }>(
-      `SELECT i.relname AS index_name, t.relname AS table_name,
-              COALESCE(s.idx_scan, 0) AS idx_scan,
-              pg_relation_size(i.oid) AS size_bytes
-         FROM pg_index ix
-         JOIN pg_class t ON t.oid = ix.indrelid
-         JOIN pg_class i ON i.oid = ix.indexrelid
-         LEFT JOIN pg_stat_user_indexes s ON s.indexrelid = ix.indexrelid
-        WHERE t.relkind = 'r'
-          AND t.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = $1)
-          AND ix.indisprimary = false
-          AND ix.indisunique = false
-          AND COALESCE(s.idx_scan, 0) < 10
-          AND pg_relation_size(i.oid) > 8192
-        ORDER BY pg_relation_size(i.oid) DESC
-        LIMIT 10`,
-      [schemaName],
-    )
-
-    for (const r of unused.rows) {
-      const sizeBytes = Number(r.size_bytes)
-      const scans = Number(r.idx_scan)
-      findings.push({
-        indexName: r.index_name,
-        table: r.table_name,
-        kind: 'unused',
-        idxScans: scans,
-        sizeBytes,
-        pressure: sizeBytes > 10 * 1024 * 1024 ? 'medium' : 'low',
-        recommendation: `Index "${r.index_name}" on "${r.table_name}" has only ${scans} scans and consumes ${fmtBytes(sizeBytes)} — consider dropping it to reduce write overhead.`,
-        sqlFix: `DROP INDEX CONCURRENTLY IF EXISTS "${schemaName}"."${r.index_name}";`,
-      })
-    }
-  } catch { /* pg_index not accessible in this context */ }
-
-  return findings
 }
 
 // ── Detection: Partitioning candidates ───────────────────────────────────────
@@ -707,10 +667,9 @@ export async function runInfraIntelligence(
 
   const pool = getPool()
   try {
-    const [hotTables, indexIssues, partitionCandidates, slowQueries, connPressure, wsPressure] =
+    const [hotTables, partitionCandidates, slowQueries, connPressure, wsPressure] =
       await Promise.allSettled([
         detectHotTables(pool, schema),
-        detectIndexIssues(pool, schema),
         detectPartitioningCandidates(pool, schema),
         detectSlowQueries(pool, schema),
         detectConnectionPressure(pool),
@@ -723,7 +682,6 @@ export async function runInfraIntelligence(
       scannedAt,
       overallPressure: 'none',
       hotTables: hotTables.status === 'fulfilled' ? hotTables.value : [],
-      indexIssues: indexIssues.status === 'fulfilled' ? indexIssues.value : [],
       partitioningCandidates: partitionCandidates.status === 'fulfilled' ? partitionCandidates.value : [],
       slowQueries: slowQueries.status === 'fulfilled' ? slowQueries.value : [],
       connectionPressure: connPressure.status === 'fulfilled' ? connPressure.value : null,
@@ -737,7 +695,6 @@ export async function runInfraIntelligence(
     const pressureRank: Record<InfraPressure, number> = { none: 0, low: 1, medium: 2, high: 3, critical: 4 }
     const allPressures: InfraPressure[] = [
       ...report.hotTables.map(f => f.pressure),
-      ...report.indexIssues.map(f => f.pressure),
       ...report.partitioningCandidates.map(f =>
         f.growthClass === 'critical' ? 'critical' : f.growthClass === 'very_high' ? 'high' : 'medium',
       ),
@@ -753,9 +710,6 @@ export async function runInfraIntelligence(
     // Top recommendations (critical + high first, max 6)
     const recs: Array<{ priority: number; text: string }> = []
     for (const f of report.hotTables.filter(f => f.pressure === 'critical' || f.pressure === 'high')) {
-      recs.push({ priority: pressureRank[f.pressure], text: f.recommendation })
-    }
-    for (const f of report.indexIssues.filter(f => f.pressure === 'critical' || f.pressure === 'high')) {
       recs.push({ priority: pressureRank[f.pressure], text: f.recommendation })
     }
     for (const f of report.partitioningCandidates) {
@@ -778,10 +732,9 @@ export async function runInfraIntelligence(
         report.autoApplicableFixes.push(f.suggestedIndex)
       }
     }
-    // Unused index removal requires approval (could break unknown application code)
-    for (const f of report.indexIssues.filter(f => f.kind === 'unused' && f.sqlFix)) {
-      report.approvalRequired.push(f.sqlFix!)
-    }
+    // Unused-index removal moved to lib/autonomy/unused-index.ts, which raises a
+    // real `unused_index` finding through the approval queue instead of pushing
+    // SQL into an array nothing reads.
     // Partitioning always requires approval (structural change)
     for (const f of report.partitioningCandidates) {
       report.approvalRequired.push(f.migrationSql)

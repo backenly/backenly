@@ -61,6 +61,17 @@ export type FindingType =
   // The repair is VACUUM ANALYZE on the named table: no data change, no
   // exclusive lock (never VACUUM FULL), and safe to repeat.
   | 'infra_table_bloat'
+  // ── An index PostgreSQL has not used once across a measured observation
+  // window (lib/autonomy/unused-index.ts). Every index is paid for on every
+  // insert and update of its table, so one nothing reads is pure write cost.
+  //
+  // Never auto-applied. "No reads in fourteen days" is evidence, not proof —
+  // only the application's author knows about the quarterly job — and rebuilding
+  // an index on a large table is slow enough that being wrong is expensive.
+  // Classified `approval`: Backenly states what it measured, the owner decides.
+  // Repair is DROP_INDEX, and the pre-fix snapshot carries the full definition
+  // so the undo recreates it exactly.
+  | 'unused_index'
   // ── Phase 4 — medium/high-risk action queued from AI chat or orchestration
   // before it applies. details.executorAction/executorParams carry the exact
   // AIAction to run once approved — see lib/core/auto-fix-engine.ts's
@@ -224,6 +235,8 @@ export const ALL_FINDING_TYPES = [
   'service_role_key_exposed',
   'schema_design_defect',
   'slow_query_missing_index',
+  // Added 2026-08-09 in the same commit that introduced it.
+  'unused_index',
 ] as const satisfies ReadonlyArray<FindingType>
 
 // Canonical types — exact matches pass through untouched.

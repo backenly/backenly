@@ -86,6 +86,15 @@ const NEEDS_APPROVAL = new Set<FindingType>([
   // Auth mutations are never auto-executed — safety contract
   'auth_jwt_missing',             // Restoring a JWT secret changes auth for all end-users
   'auth_users_table_missing',     // Creating the users table bootstraps the auth subsystem
+  // Dropping an index is the one performance repair where being wrong costs
+  // real money. "PostgreSQL never used it in 14 days" is strong evidence and
+  // still not proof: only the application's author knows about the job that
+  // runs quarterly. The drop is reversible (the pre-fix snapshot carries the
+  // full definition) but a rebuild on a large table is slow, and every query
+  // that needed the index is degraded for the whole rebuild. So Backenly
+  // states the measurement and the owner decides — exactly the line between
+  // "add an obviously missing index" and "decide an index is not needed".
+  'unused_index',
 ])
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -269,6 +278,7 @@ const APPROVAL_REASON_MAP: Partial<Record<FindingType, string>> = {
   auth_spike:                   'Anomalous authentication traffic requires human investigation before acting.',
   auth_jwt_missing:             'Restoring or rotating a JWT secret invalidates all existing end-user sessions — project owner must confirm.',
   auth_users_table_missing:     'Creating the users table bootstraps the entire auth subsystem — project owner must confirm before activation.',
+  unused_index:                 'Backenly measured that PostgreSQL never used this index, but only you know whether something that runs rarely still needs it.',
 }
 
 const RISK_NOTE_MAP: Partial<Record<FindingType, string>> = {
@@ -276,4 +286,5 @@ const RISK_NOTE_MAP: Partial<Record<FindingType, string>> = {
   dead_api_endpoint:            'Client apps calling this endpoint would receive 404 after removal.',
   auth_jwt_missing:             'An incorrect or premature JWT secret rotation locks all end-users out immediately.',
   auth_users_table_missing:     'Auto-creating the users table without owner confirmation may interfere with existing auth flows.',
+  unused_index:                 'If a rarely-run query does need it, that query gets slow until the index is rebuilt.',
 }

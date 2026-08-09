@@ -153,10 +153,20 @@ describe('no finding type is classified auto without an executable repair', () =
       'oauth_config_invalid',
       'oauth_redirect_uri_missing',
     ])
+    // The fixture carries every identifier a detector in this catalogue writes,
+    // not just a table name. `unused_index` is why: its repair is DROP INDEX,
+    // and a table name alone cannot name an index — a table normally has
+    // several. Excluding it instead of widening the fixture would have weakened
+    // the guard, since the type genuinely does have an executable repair.
+    const probeDetails = {
+      tableName: 'probe_table',
+      columnName: 'user_id',
+      indexName: 'idx_probe_table_legacy',
+    }
     for (const t of ALL_FINDING_TYPES) {
       const { decision } = classifyFix(t, null)
       if (decision !== 'approval' || needsUserInput.has(t)) continue
-      const action = buildFixAction(t, { tableName: 'probe_table' })
+      const action = buildFixAction(t, probeDetails)
       expect(action).not.toBeNull()
     }
   })
