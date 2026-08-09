@@ -121,16 +121,6 @@ export interface QueryFinding {
   indexCandidate?: IndexCandidate
 }
 
-export interface ConnectionFinding {
-  total: number
-  active: number
-  idleInTx: number
-  maxConnections: number
-  usagePct: number
-  pressure: InfraPressure
-  recommendation: string
-}
-
 export interface WebSocketFinding {
   highWriteTables: string[]
   estimatedSubscriberLoad: 'low' | 'medium' | 'high'
@@ -145,7 +135,6 @@ export interface InfraReport {
   hotTables: HotTableFinding[]
   partitioningCandidates: PartitioningFinding[]
   slowQueries: QueryFinding[]
-  connectionPressure: ConnectionFinding | null
   websocketPressure: WebSocketFinding | null
   /** Prioritised actionable recommendations, highest severity first */
   topRecommendations: string[]
@@ -558,55 +547,24 @@ async function detectSlowQueries(pool: Pool, schemaName: string): Promise<QueryF
   }
 }
 
-// ── Detection: Connection pressure ───────────────────────────────────────────
-
-async function detectConnectionPressure(pool: Pool): Promise<ConnectionFinding | null> {
-  try {
-    const rows = await pool.query<{
-      total: string
-      active: string
-      idle_in_tx: string
-      max_connections: string
-    }>(
-      `SELECT COUNT(*)                                            AS total,
-              COUNT(*) FILTER (WHERE state = 'active')           AS active,
-              COUNT(*) FILTER (WHERE state = 'idle in transaction') AS idle_in_tx,
-              (SELECT setting::int FROM pg_settings WHERE name = 'max_connections') AS max_connections
-         FROM pg_stat_activity
-        WHERE datname = current_database()`,
-    )
-
-    if (rows.rows.length === 0) return null
-    const r = rows.rows[0]
-    const total = Number(r.total)
-    const active = Number(r.active)
-    const idleInTx = Number(r.idle_in_tx)
-    const maxConn = Number(r.max_connections)
-    const usagePct = Math.round((total / maxConn) * 100)
-
-    const pressure: InfraPressure =
-      usagePct > 90 ? 'critical' :
-      usagePct > 75 ? 'high' :
-      idleInTx > 10 ? 'medium' :
-      usagePct > 50 ? 'low' : 'none'
-
-    if (pressure === 'none') return null
-
-    return {
-      total,
-      active,
-      idleInTx,
-      maxConnections: maxConn,
-      usagePct,
-      pressure,
-      recommendation: idleInTx > 10
-        ? `${idleInTx} connections are "idle in transaction" — check for missing transaction commits in application code. These hold locks and starve other connections.`
-        : `Connection usage at ${usagePct}% (${total}/${maxConn}). Deploy PgBouncer in transaction mode to multiplex connections.`,
-    }
-  } catch {
-    return null
-  }
-}
+// ── Connection pressure — REMOVED 2026-08-09 ─────────────────────────────────
+//
+// `detectConnectionPressure` counted every connection to the database, compared
+// it to max_connections, and filed the result as a per-PROJECT finding. On a
+// shared cluster that is one platform fact attributed to every tenant at once:
+// ten customers each told their backend is at 82% of max_connections, none of
+// them able to do anything about it, and the number moving for reasons that have
+// nothing to do with them.
+//
+// The attributable half moved to lib/autonomy/connection-health.ts, which reads
+// only the sessions opened with THIS project's own direct-access roles
+// (bkn_ro_<hex> and friends) and reports the one condition an owner can actually
+// fix: a connection sitting inside an open transaction, holding locks and
+// pinning the vacuum horizon.
+//
+// Cluster-wide saturation is a platform operations concern. It belongs on an
+// operator dashboard, not in a customer's review queue, and inventing a
+// per-project finding for it was how it ended up there.
 
 // ── Detection: WebSocket / Realtime pressure ──────────────────────────────────
 
@@ -667,12 +625,11 @@ export async function runInfraIntelligence(
 
   const pool = getPool()
   try {
-    const [hotTables, partitionCandidates, slowQueries, connPressure, wsPressure] =
+    const [hotTables, partitionCandidates, slowQueries, wsPressure] =
       await Promise.allSettled([
         detectHotTables(pool, schema),
         detectPartitioningCandidates(pool, schema),
         detectSlowQueries(pool, schema),
-        detectConnectionPressure(pool),
         detectWebSocketPressure(pool, schema),
       ])
 
@@ -684,7 +641,6 @@ export async function runInfraIntelligence(
       hotTables: hotTables.status === 'fulfilled' ? hotTables.value : [],
       partitioningCandidates: partitionCandidates.status === 'fulfilled' ? partitionCandidates.value : [],
       slowQueries: slowQueries.status === 'fulfilled' ? slowQueries.value : [],
-      connectionPressure: connPressure.status === 'fulfilled' ? connPressure.value : null,
       websocketPressure: wsPressure.status === 'fulfilled' ? wsPressure.value : null,
       topRecommendations: [],
       autoApplicableFixes: [],
@@ -699,7 +655,6 @@ export async function runInfraIntelligence(
         f.growthClass === 'critical' ? 'critical' : f.growthClass === 'very_high' ? 'high' : 'medium',
       ),
       ...report.slowQueries.map(f => f.pressure),
-      ...(report.connectionPressure ? [report.connectionPressure.pressure] : []),
     ]
     const maxPressure = allPressures.reduce<InfraPressure>(
       (best, p) => pressureRank[p] > pressureRank[best] ? p : best,
@@ -717,9 +672,6 @@ export async function runInfraIntelligence(
     }
     for (const f of report.slowQueries.filter(f => f.pressure === 'critical' || f.pressure === 'high')) {
       recs.push({ priority: pressureRank[f.pressure], text: f.recommendation })
-    }
-    if (report.connectionPressure) {
-      recs.push({ priority: pressureRank[report.connectionPressure.pressure], text: report.connectionPressure.recommendation })
     }
     report.topRecommendations = recs
       .sort((a, b) => b.priority - a.priority)
@@ -911,28 +863,10 @@ export async function runAndStoreInfraIntelligence(
       }
     }
 
-    // Connection pressure → HealthFinding
-    if (report.connectionPressure && report.connectionPressure.pressure !== 'low') {
-      const type = 'infra_connection_pressure'
-      if (!existingTypes.has(type)) {
-        toCreate.push({
-          projectId,
-          type,
-          severity: mapPressureToSeverity(report.connectionPressure.pressure),
-          details: {
-            title: 'Connection pool pressure',
-            description: report.connectionPressure.recommendation,
-            source: 'infra_intelligence',
-            usagePct: report.connectionPressure.usagePct,
-            idleInTx: report.connectionPressure.idleInTx,
-            requiresApproval: false,
-            detectedAt: report.scannedAt,
-          },
-          status: 'open',
-          autoFixed: false,
-        })
-      }
-    }
+    // `infra_connection_pressure` was raised here until 2026-08-09. It was a
+    // cluster-wide number filed against one tenant — see the tombstone above.
+    // The attributable condition is now `idle_in_transaction`, raised by the
+    // per-minute invariant probe in lib/autonomy/connection-health.ts.
 
     if (toCreate.length > 0) {
       await prisma.healthFinding.createMany({ data: toCreate as any, skipDuplicates: true }).catch(() => {})

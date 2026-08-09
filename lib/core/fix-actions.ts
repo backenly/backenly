@@ -383,6 +383,24 @@ export function getManualRemediationHint(
       return `"${t}" is taking heavy sequential scans and Backenly could not find a column it is safe to index automatically.${measured} Add an index on whichever column your queries filter or sort by — in the AI chat, say "add an index on <table>.<column>".`
     }
 
+    // No repair exists and none should. Terminating a backend rolls back
+    // whatever that session was doing, which Backenly cannot see and did not
+    // start. The hint gives the owner the exact query to find it themselves.
+    case 'idle_in_transaction': {
+      const n = (details?.sessions as number | undefined) ?? 1
+      const secs = (details?.maxIdleSeconds as number | undefined) ?? 0
+      const mins = Math.max(1, Math.round(secs / 60))
+      return (
+        `${n} of your direct database connection${n === 1 ? '' : 's'} ${n === 1 ? 'has' : 'have'} ` +
+        `been inside an open transaction for ${mins} minute${mins === 1 ? '' : 's'}. Commit or close ` +
+        `it — usually a psql window, a notebook, or a migration tool that ran BEGIN and stopped. ` +
+        `To find it: SELECT pid, usename, state_change, query FROM pg_stat_activity WHERE state = ` +
+        `'idle in transaction'; then COMMIT in that session, or pg_terminate_backend(pid) if you ` +
+        `are certain its work can be discarded. Backenly will not terminate it for you — it cannot ` +
+        `see what would be rolled back.`
+      )
+    }
+
     // Reached when the ownership inference answered "undecidable". The hint IS
     // the deliverable: there is no repair to run, only a question to answer, and
     // the probe already recorded exactly which columns it checked. Repeating

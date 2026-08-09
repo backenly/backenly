@@ -281,6 +281,10 @@ const INVARIANT_REAPABLE_TYPES = [
   // or one that finally gets used — disappears on the next pass. Without an
   // entry here a "never used" finding would outlive the index it names.
   'unused_index',
+  // Its probe reads pg_stat_activity live, so a committed or closed session
+  // clears the finding on the next tick rather than leaving the owner chasing a
+  // connection that is already gone.
+  'idle_in_transaction',
   // Both were probe-covered by the invariant catalogue and named in NO reaper,
   // so neither had any path back to healthy. Each has exactly one write site,
   // and that write site IS the invariant probe, so this reaper is the correct

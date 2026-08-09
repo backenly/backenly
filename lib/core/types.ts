@@ -72,6 +72,20 @@ export type FindingType =
   // Repair is DROP_INDEX, and the pre-fix snapshot carries the full definition
   // so the undo recreates it exactly.
   | 'unused_index'
+  // ── A direct database connection belonging to THIS project has been sitting
+  // inside an open transaction past the point where that can be intentional.
+  // It holds every lock it took, blocks DDL on those tables, and pins the
+  // vacuum horizon so dead rows cannot be reclaimed anywhere in the cluster.
+  //
+  // Attributable because direct-access roles are per project (bkn_ro_<hex> and
+  // friends), which is the whole reason this replaced the old
+  // `infra_connection_pressure` row — that one counted every connection to a
+  // shared cluster and told every tenant the same unactionable number.
+  //
+  // notify_only by construction: the remedy is to commit or close a session
+  // Backenly does not own, and terminating a backend would roll back work the
+  // platform cannot see. See lib/autonomy/connection-health.ts.
+  | 'idle_in_transaction'
   // ── Phase 4 — medium/high-risk action queued from AI chat or orchestration
   // before it applies. details.executorAction/executorParams carry the exact
   // AIAction to run once approved — see lib/core/auto-fix-engine.ts's
@@ -237,6 +251,7 @@ export const ALL_FINDING_TYPES = [
   'slow_query_missing_index',
   // Added 2026-08-09 in the same commit that introduced it.
   'unused_index',
+  'idle_in_transaction',
 ] as const satisfies ReadonlyArray<FindingType>
 
 // Canonical types — exact matches pass through untouched.

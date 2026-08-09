@@ -57,6 +57,7 @@ import { detectServiceRoleKeyExposure } from '@/lib/security/service-role-exposu
 import { detectSchemaDesignDefects } from './schema-design'
 import { detectSlowQueryMissingIndexes } from './slow-query-index'
 import { detectUnusedIndexes } from './unused-index'
+import { detectIdleInTransaction } from './connection-health'
 import { hasCapability, type PlatformCapability } from './platform-capabilities'
 
 // ── Bounded-autonomy tiers (graded by blast radius) ───────────────────────────
@@ -182,6 +183,13 @@ export const INVARIANTS: readonly Invariant[] = [
     rationale:
       'The index probes above add indexes. This one is the other direction, and it is the half a platform usually skips because being wrong is expensive. Every index is written on every insert and update of its table forever, so one nothing reads is a permanent tax with no return. The evidence is a measured window rather than a counter: Backenly records each index\'s scan count the first time it sees it and raises nothing, then reports only an index whose count has not moved across at least fourteen days of observation — long enough that a weekly job has had two chances to run. It is reset-proof, because a counter that went backwards means the statistics were cleared and the window starts again. And it is never automatic: fourteen silent days is evidence, not proof, and only the person who wrote the application knows about the quarterly report.',
     probe: detectUnusedIndexes,
+  },
+  {
+    id: 'no_connection_holds_the_database_hostage',
+    title: 'No direct connection is sitting inside an open transaction',
+    rationale:
+      'A psql window or migration tool that ran BEGIN and then stopped is not idle — it holds every lock it took, blocks schema changes on those tables, and pins the vacuum horizon so dead rows cannot be reclaimed anywhere in the cluster. It is one of the few database faults where one forgotten window degrades everything else, and it is invisible from the application: no error, no slow query, just a migration that hangs and bloat that will not clear. Scoped to the direct-access roles this project owns, which is the whole reason it replaced the previous connection check — that one counted every connection to a shared cluster and told every tenant the same number about a resource none of them controlled. Never repaired automatically: terminating a backend rolls back work Backenly cannot see.',
+    probe: detectIdleInTransaction,
   },
   {
     id: 'data_plane_is_registered',
@@ -536,6 +544,9 @@ const INVARIANT_EMITS: Readonly<Record<string, readonly FindingType[]>> = {
   // closes. Listing it is what lets evaluateFixOutcome certify the drop
   // instead of recording it 'unknown'.
   no_index_is_pure_write_cost: ['unused_index'],
+  // Instantaneous read of pg_stat_activity, so the finding withdraws itself the
+  // moment the session commits or disconnects.
+  no_connection_holds_the_database_hostage: ['idle_in_transaction'],
   relationships_have_fk_constraints: ['missing_fk'],
   relationships_are_indexed: ['missing_fk_index'],
   data_plane_is_registered: ['schema_not_registered'],
