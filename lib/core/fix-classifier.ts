@@ -77,6 +77,13 @@ const AUTO_SAFE = new Set<FindingType>([
   // Never VACUUM FULL; see executeVacuumTable for why that distinction is the
   // whole reason this can be automatic.
   'infra_table_bloat',
+  // REINDEX INDEX CONCURRENTLY. Same class as the VACUUM above: it changes no
+  // row, no schema and no semantics, holds no exclusive lock, and the rebuilt
+  // index is indistinguishable from the old one except for the empty space it
+  // no longer carries. The evidence is a real pgstatindex() density reading,
+  // not an estimate, and the finding closes on the next tick because the size
+  // change invalidates the measurement.
+  'index_bloat',
   'missing_api_definition', // Generating a missing API definition
   'missing_api_crud',       // Generating missing CRUD endpoints
   'missing_rate_limit',     // Applying rate limit — additive protection
@@ -323,6 +330,7 @@ const AUTO_ACTION_MAP: Partial<Record<FindingType, string>> = {
   slow_query_missing_index: 'CREATE_INDEX',
   infra_hot_table:          'CREATE_INDEX',
   infra_table_bloat:        'VACUUM_TABLE',
+  index_bloat:              'REINDEX_INDEX',
   missing_api_definition:   'GENERATE_API',
   missing_api_crud:         'GENERATE_API',
   missing_rate_limit:       'SET_RATE_LIMIT',

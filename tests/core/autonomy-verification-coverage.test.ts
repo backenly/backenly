@@ -96,10 +96,18 @@ describe('no finding type is classified auto without an executable repair', () =
   // repair while GENERATE_API could not affect the condition. A type that the
   // classifier will act on MUST map to an action the executor actually has.
   it('every auto-classified type maps to a fix action', () => {
+    // Carries every identifier a detector in this catalogue writes, not just a
+    // table name. `index_bloat` is why: its repair is REINDEX on one index, and
+    // a table normally has several, so a table name alone cannot name it.
+    const probeDetails = {
+      tableName: 'probe_table',
+      columnName: 'user_id',
+      indexName: 'idx_probe_table_legacy',
+    }
     for (const t of ALL_FINDING_TYPES) {
       const { decision } = classifyFix(t, null)
       if (decision !== 'auto') continue
-      const action = buildFixAction(t, { tableName: 'probe_table' })
+      const action = buildFixAction(t, probeDetails)
       expect(action).not.toBeNull()
     }
   })

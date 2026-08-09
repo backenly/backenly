@@ -45,7 +45,15 @@ describe('buildFixAction — full FindingType coverage', () => {
   test('every finding type resolves to an action OR a documented manual hint', () => {
     const deadEnds: string[] = []
     for (const type of ALL_FINDING_TYPES) {
-      const action = buildFixAction(type, { tableName: 'posts', integration: 'stripe' })
+      // `indexName` is part of the fixture because the index repairs
+      // (DROP_INDEX, REINDEX_INDEX) target one index and a table normally has
+      // several — a table name alone cannot name which, and neither repair will
+      // guess.
+      const action = buildFixAction(type, {
+        tableName: 'posts',
+        integration: 'stripe',
+        indexName: 'idx_posts_legacy',
+      })
       const hint = getManualRemediationHint(type)
       if (!action && !hint) deadEnds.push(type)
     }

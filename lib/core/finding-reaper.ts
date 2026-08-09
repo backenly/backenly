@@ -285,6 +285,10 @@ const INVARIANT_REAPABLE_TYPES = [
   // clears the finding on the next tick rather than leaving the owner chasing a
   // connection that is already gone.
   'idle_in_transaction',
+  // Its probe re-measures whenever the index size changes, so a successful
+  // REINDEX clears the finding on the next tick instead of leaving the owner
+  // looking at bloat that has already been reclaimed.
+  'index_bloat',
   // Both were probe-covered by the invariant catalogue and named in NO reaper,
   // so neither had any path back to healthy. Each has exactly one write site,
   // and that write site IS the invariant probe, so this reaper is the correct

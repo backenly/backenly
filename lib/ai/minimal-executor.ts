@@ -31,6 +31,8 @@ export interface AIAction {
     // approved — never planned by the brain, because "which index is not
     // needed" is a measurement, not an intent.
     | 'DROP_INDEX'
+    // Rebuild a bloated btree. Auto-applied: no data, schema or semantic change.
+    | 'REINDEX_INDEX'
     | 'DROP_COLUMN'
     | 'DROP_TABLE' | 'TRUNCATE_TABLE'
     // API
@@ -3376,6 +3378,9 @@ async function executeSingleAction(
 
       case 'DROP_INDEX':
         return await executeDropIndex(action.params, projectId)
+
+      case 'REINDEX_INDEX':
+        return await executeReindexIndex(action.params, projectId)
 
       case 'RENAME_COLUMN':
         return await executeRenameColumn(action.params, projectId)
@@ -8065,6 +8070,110 @@ async function executeDropIndex(params: any, projectId: string): Promise<Executi
     return {
       success: false,
       message: `Could not drop index "${indexName}": ${err.message}`,
+      error: err.message,
+    }
+  }
+}
+
+/**
+ * Rebuild an index that is mostly empty space.
+ *
+ * CONCURRENTLY, and that word is the whole reason this can be automatic: a plain
+ * REINDEX takes an ACCESS EXCLUSIVE lock and blocks every read and write to the
+ * table for its duration. CONCURRENTLY builds the replacement alongside the
+ * original and swaps them, so the table stays fully available. The same
+ * distinction as VACUUM vs VACUUM FULL, and for the same reason.
+ *
+ * It cannot run inside a transaction block. `$executeRawUnsafe` does not open
+ * one — verified against a live database, alongside the existing VACUUM path
+ * which has the same constraint.
+ *
+ * Reports the size before and after, because the whole claim is that space was
+ * reclaimed and "reindexed successfully" is not evidence of that.
+ */
+async function executeReindexIndex(params: any, projectId: string): Promise<ExecutionResult> {
+  const indexName = params?.indexName ?? params?.index
+
+  if (!indexName) {
+    return {
+      success: false,
+      message: 'indexName is required to rebuild an index',
+      error: 'Missing parameters',
+      code: 'VALIDATION',
+    }
+  }
+
+  try {
+    const { prisma } = await import('@/lib/db')
+    const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
+    const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
+
+    const { SAFE_IDENT } = await import('@/lib/db/sql-expression')
+    if (!SAFE_IDENT.test(String(indexName))) {
+      return {
+        success: false,
+        message: `"${indexName}" is not a valid PostgreSQL identifier.`,
+        error: 'Invalid identifier',
+        code: 'VALIDATION',
+      }
+    }
+
+    const before = await prisma.$queryRawUnsafe<Array<{ table_name: string; size_bytes: string }>>(
+      `SELECT t.relname AS table_name, pg_relation_size(i.oid)::text AS size_bytes
+         FROM pg_index ix
+         JOIN pg_class i     ON i.oid = ix.indexrelid
+         JOIN pg_class t     ON t.oid = ix.indrelid
+         JOIN pg_namespace n ON n.oid = i.relnamespace
+        WHERE n.nspname = $1 AND i.relname = $2`,
+      postgresSchema, indexName,
+    ).catch(() => [] as any[])
+
+    if (before.length === 0) {
+      // A finding can outlive the index it names. Nothing to rebuild is the goal
+      // state, not a failure.
+      return {
+        success: true,
+        message: `Index "${indexName}" no longer exists — nothing to rebuild.`,
+        data: { indexName, alreadyAbsent: true },
+      }
+    }
+
+    const sizeBefore = Number(before[0].size_bytes) || 0
+    await prisma.$executeRawUnsafe(
+      `REINDEX INDEX CONCURRENTLY "${postgresSchema}"."${indexName}"`,
+    )
+
+    const after = await prisma.$queryRawUnsafe<Array<{ size_bytes: string }>>(
+      `SELECT pg_relation_size(i.oid)::text AS size_bytes
+         FROM pg_class i
+         JOIN pg_namespace n ON n.oid = i.relnamespace
+        WHERE n.nspname = $1 AND i.relname = $2`,
+      postgresSchema, indexName,
+    ).catch(() => [] as any[])
+    const sizeAfter = Number(after[0]?.size_bytes ?? sizeBefore)
+    const reclaimed = Math.max(0, sizeBefore - sizeAfter)
+    const mb = (b: number) => `${(b / 1024 / 1024).toFixed(1)} MB`
+
+    return {
+      success: true,
+      message:
+        reclaimed > 0
+          ? `Rebuilt index "${indexName}" on "${before[0].table_name}" — ${mb(sizeBefore)} → ` +
+            `${mb(sizeAfter)}, ${mb(reclaimed)} reclaimed. No data changed and the table stayed available.`
+          : `Rebuilt index "${indexName}" on "${before[0].table_name}". It was already compact, ` +
+            `so no space was reclaimed.`,
+      data: {
+        indexName,
+        tableName: before[0].table_name,
+        sizeBefore,
+        sizeAfter,
+        reclaimedBytes: reclaimed,
+      },
+    }
+  } catch (err: any) {
+    return {
+      success: false,
+      message: `Could not rebuild index "${indexName}": ${err.message}`,
       error: err.message,
     }
   }

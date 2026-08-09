@@ -86,6 +86,19 @@ export type FindingType =
   // Backenly does not own, and terminating a backend would roll back work the
   // platform cannot see. See lib/autonomy/connection-health.ts.
   | 'idle_in_transaction'
+  // ── A btree carrying far more empty space than data. `IndexFinding.kind`
+  // declared a `'fragmented'` variant for years and nothing ever emitted it.
+  //
+  // An index does not shrink when rows are deleted or updated: VACUUM makes the
+  // heap reusable and the index keeps every page it allocated. Measured on a
+  // real table, deleting 90% of rows left the index at 9% leaf density and the
+  // same 4.5 MB on disk; REINDEX returned it to 89% and 467 KB.
+  //
+  // Auto-fixable: REINDEX INDEX CONCURRENTLY changes no data, holds no
+  // exclusive lock, and leaves the index semantically identical. Evidence is a
+  // real pgstatindex() reading, never an estimate.
+  // See lib/autonomy/index-bloat.ts.
+  | 'index_bloat'
   // ── Phase 4 — medium/high-risk action queued from AI chat or orchestration
   // before it applies. details.executorAction/executorParams carry the exact
   // AIAction to run once approved — see lib/core/auto-fix-engine.ts's
@@ -252,6 +265,7 @@ export const ALL_FINDING_TYPES = [
   // Added 2026-08-09 in the same commit that introduced it.
   'unused_index',
   'idle_in_transaction',
+  'index_bloat',
 ] as const satisfies ReadonlyArray<FindingType>
 
 // Canonical types — exact matches pass through untouched.

@@ -70,15 +70,26 @@ beforeAll(async () => {
 
   // Two sessions that ran BEGIN and stopped: one for this project, one for a
   // different project on the same cluster.
+  //
+  // BEGIN with NO query after it, deliberately. A session that has executed a
+  // statement inside its transaction registers an xmin and pins the cluster's
+  // vacuum horizon — which is one of the real harms this detector exists to
+  // report, and also exactly what it does to the rest of the suite: while these
+  // two sessions were open, VACUUM elsewhere could not reclaim dead rows, and
+  // the index-bloat fixture (delete 90%, vacuum, expect a sparse index) kept
+  // measuring a perfectly dense index and failed.
+  //
+  // A bare BEGIN still puts the backend in `idle in transaction`, which is the
+  // state this probe reads, without holding anything back from anyone. The
+  // suites are testing different properties and should not sabotage each other
+  // to do it.
   leaker = clientFor(roles.rw)
   await leaker.connect()
   await leaker.query('BEGIN')
-  await leaker.query('SELECT 1')
 
   neighbourLeaker = clientFor(neighbourRoles.rw)
   await neighbourLeaker.connect()
   await neighbourLeaker.query('BEGIN')
-  await neighbourLeaker.query('SELECT 1')
 
   pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 2 })
 }, 60_000)

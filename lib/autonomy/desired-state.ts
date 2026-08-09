@@ -58,6 +58,7 @@ import { detectSchemaDesignDefects } from './schema-design'
 import { detectSlowQueryMissingIndexes } from './slow-query-index'
 import { detectUnusedIndexes } from './unused-index'
 import { detectIdleInTransaction } from './connection-health'
+import { detectIndexBloat } from './index-bloat'
 import { hasCapability, type PlatformCapability } from './platform-capabilities'
 
 // ── Bounded-autonomy tiers (graded by blast radius) ───────────────────────────
@@ -183,6 +184,14 @@ export const INVARIANTS: readonly Invariant[] = [
     rationale:
       'The index probes above add indexes. This one is the other direction, and it is the half a platform usually skips because being wrong is expensive. Every index is written on every insert and update of its table forever, so one nothing reads is a permanent tax with no return. The evidence is a measured window rather than a counter: Backenly records each index\'s scan count the first time it sees it and raises nothing, then reports only an index whose count has not moved across at least fourteen days of observation — long enough that a weekly job has had two chances to run. It is reset-proof, because a counter that went backwards means the statistics were cleared and the window starts again. And it is never automatic: fourteen silent days is evidence, not proof, and only the person who wrote the application knows about the quarterly report.',
     probe: detectUnusedIndexes,
+  },
+  {
+    id: 'indexes_are_not_mostly_empty_space',
+    title: 'No index is carrying more empty space than data',
+    rationale:
+      'A btree never shrinks on its own. Delete or update most of a table and VACUUM makes the heap reusable while the index keeps every page it ever allocated, now mostly empty — so every scan of it reads several times more disk than it needs to and the space is never returned. Measured on a real 200k-row table, deleting 90% of the rows left the index at 9% leaf density and exactly the same 4.5 MB on disk; a rebuild returned it to 89% and 467 KB. The evidence is a real pgstatindex() reading rather than one of the well-known estimate queries, which are approximations that go wrong on precisely the schemas people ask about. Safe to apply automatically: REINDEX CONCURRENTLY changes no data, takes no exclusive lock, and leaves an index that is semantically identical.',
+    probe: detectIndexBloat,
+    requires: 'pgstattuple',
   },
   {
     id: 'no_connection_holds_the_database_hostage',
@@ -547,6 +556,10 @@ const INVARIANT_EMITS: Readonly<Record<string, readonly FindingType[]>> = {
   // Instantaneous read of pg_stat_activity, so the finding withdraws itself the
   // moment the session commits or disconnects.
   no_connection_holds_the_database_hostage: ['idle_in_transaction'],
+  // Re-detectable: a REINDEX changes the index size, which invalidates the
+  // cached density reading, so the next pass measures the rebuilt index and the
+  // gap closes. Without that the fix would be escalated as "did not hold".
+  indexes_are_not_mostly_empty_space: ['index_bloat'],
   relationships_have_fk_constraints: ['missing_fk'],
   relationships_are_indexed: ['missing_fk_index'],
   data_plane_is_registered: ['schema_not_registered'],

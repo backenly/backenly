@@ -41,7 +41,7 @@
 
 import { Pool } from 'pg'
 
-export type PlatformCapability = 'pg_stat_statements'
+export type PlatformCapability = 'pg_stat_statements' | 'pgstattuple'
 
 export interface CapabilityState {
   available: boolean
@@ -68,6 +68,14 @@ const REMEDIATION: Record<PlatformCapability, string> = {
     'installed. Add `shared_preload_libraries = \'pg_stat_statements\'` to postgresql.conf, ' +
     'restart PostgreSQL, then run `CREATE EXTENSION IF NOT EXISTS pg_stat_statements;`. ' +
     'Until then Backenly can see missing indexes by SHAPE but not by MEASUREMENT.',
+  // Unlike pg_stat_statements this needs no preload and no restart, which is
+  // worth stating: the remedy is one statement.
+  pgstattuple:
+    'Index bloat cannot be measured because the pgstattuple extension is not installed. Run ' +
+    '`CREATE EXTENSION IF NOT EXISTS pgstattuple;` — no restart needed. Leaf density is not in ' +
+    'any statistics view, and the estimate queries that approximate it go wrong on exactly the ' +
+    'schemas people ask about (wide text keys, partial indexes, non-default fillfactor), so ' +
+    'Backenly reports this unchecked rather than guessed.',
 }
 
 interface CacheEntry {

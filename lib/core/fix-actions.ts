@@ -162,6 +162,17 @@ export function buildFixAction(
         },
       }
 
+    // Rebuild a btree that is mostly empty space. Needs the index NAME for the
+    // same reason the drop does — a table normally has several.
+    case 'index_bloat': {
+      const table = details.tableName ?? details.table
+      if (!table || !details.indexName) return null
+      return {
+        action: 'REINDEX_INDEX',
+        params: { tableName: table, indexName: details.indexName },
+      }
+    }
+
     // The inverse repair: remove an index the database has measurably never
     // used. Gated on `approval` by the classifier, so this only ever builds
     // after a human said yes. `indexName` is the required key — never derived

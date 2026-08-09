@@ -82,6 +82,14 @@ const DETAILS_BY_TYPE: Partial<Record<string, Record<string, unknown>>> = {
     observedDays: 21,
     sizeBytes: 4 * 1024 * 1024,
   },
+  // Same reason as unused_index: the repair is REINDEX on one index, and a
+  // table name cannot name which.
+  index_bloat: {
+    tableName: 'posts',
+    indexName: 'idx_posts_legacy_slug',
+    leafDensityPct: 12.4,
+    sizeBytes: 40 * 1024 * 1024,
+  },
 }
 
 const detailsFor = (type: string): Record<string, unknown> =>

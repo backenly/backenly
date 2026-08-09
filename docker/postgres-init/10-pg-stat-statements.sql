@@ -19,3 +19,15 @@
 -- Runs once, on first initialisation of an empty data directory. On an existing
 -- database, run this statement by hand after adding the preload setting.
 CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+
+-- Enable measured index bloat.
+--
+-- `indexes_are_not_mostly_empty_space` reads avg_leaf_density from
+-- pgstatindex(). That number is in no statistics view, and the well-known
+-- "index bloat estimate" queries derive it from column widths and row counts —
+-- approximations that go wrong on wide text keys, partial indexes and
+-- non-default fillfactor, which is most of what anyone actually asks about.
+--
+-- Unlike pg_stat_statements this needs no preload and no restart, so it is
+-- safe to add to an existing database with exactly this statement.
+CREATE EXTENSION IF NOT EXISTS pgstattuple;
