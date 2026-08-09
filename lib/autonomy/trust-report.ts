@@ -138,6 +138,16 @@ export interface AppliedChange {
   requiresConfirmation: boolean
   /** Why it cannot be undone automatically. Present only when !revertible. */
   revertBlockedReason?: string
+  /**
+   * The statements this change actually ran.
+   *
+   * Empty for anything applied before the recorder existed, and for fixes whose
+   * mutation is entirely in platform metadata rather than SQL. Never fabricated
+   * from the finding type: an empty list means nothing was captured, not that
+   * nothing ran, and the UI says so rather than showing a plausible statement
+   * nobody executed.
+   */
+  statements: Array<{ sql: string; params?: string[] }>
 }
 
 export interface ShadowPreview {
@@ -508,6 +518,9 @@ export async function buildTrustReport(
       revertible: eligibility.revertible,
       requiresConfirmation: eligibility.requiresConfirmation,
       revertBlockedReason: eligibility.reason,
+      statements: Array.isArray((det.rollbackData as any)?.statements)
+        ? (det.rollbackData as any).statements
+        : [],
     }
   })
 

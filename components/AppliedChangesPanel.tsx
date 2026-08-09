@@ -40,7 +40,10 @@
  */
 
 import { useCallback, useMemo, useState } from 'react'
-import { History, Undo2, Loader2, XCircle, ShieldAlert, Lock } from 'lucide-react'
+import {
+  History, Undo2, Loader2, XCircle, ShieldAlert, Lock, ChevronDown,
+  ClipboardCopy, Check,
+} from 'lucide-react'
 import { KIT, KitButton } from '@/components/inspector/kit'
 
 export interface AppliedChange {
@@ -54,6 +57,8 @@ export interface AppliedChange {
   revertible: boolean
   requiresConfirmation: boolean
   revertBlockedReason?: string
+  /** The statements this change ran. Empty when nothing was captured. */
+  statements?: Array<{ sql: string; params?: string[] }>
 }
 
 type RowState =
@@ -199,6 +204,19 @@ function ChangeRow({
   onConfirmUndo: () => void
   onCancel: () => void
 }) {
+  const [showSql, setShowSql] = useState(false)
+  const [copied, setCopied] = useState<number | null>(null)
+  const statements = c.statements ?? []
+
+  const copySql = async (sql: string) => {
+    const i = statements.findIndex(s => s.sql === sql)
+    try {
+      await navigator.clipboard.writeText(sql)
+      setCopied(i)
+      setTimeout(() => setCopied(null), 1800)
+    } catch { /* clipboard blocked — no-op */ }
+  }
+
   if (state.phase === 'reverted') {
     return (
       <li className="flex items-start gap-3 px-5 py-3.5 animate-fade-in">
@@ -230,6 +248,52 @@ function ChangeRow({
               {c.verified ? 're-checked and confirmed' : 'not independently re-checked'}
             </span>
           </p>
+
+          {/* The exact statements, on demand. Collapsed by default because the
+              summary above is what most people want; expanded it is the answer
+              to "what did it actually run", which used to require diffing two
+              schema snapshots by hand. Absent when nothing was captured — a
+              change applied before the recorder existed shows no toggle rather
+              than an empty panel implying it ran nothing. */}
+          {statements.length > 0 && (
+            <div className="mt-2">
+              <button
+                onClick={() => setShowSql(v => !v)}
+                aria-expanded={showSql}
+                className="inline-flex items-center gap-1 text-[11.5px] font-medium text-zinc-500 transition-colors hover:text-zinc-300"
+              >
+                {statements.length === 1 ? '1 statement' : `${statements.length} statements`}
+                <ChevronDown className={`size-3 transition-transform ${showSql ? 'rotate-180' : ''}`} />
+              </button>
+              {showSql && (
+                <div className="mt-2 space-y-2">
+                  {statements.map((st, i) => (
+                    <div key={i} className="rounded-md border border-white/[0.07] bg-[#0f1015]">
+                      <div className="flex items-start gap-2 px-3 py-2">
+                        <pre className="min-w-0 flex-1 overflow-x-auto whitespace-pre-wrap break-words font-mono text-[10.5px] leading-relaxed text-zinc-300">
+{st.sql}
+                        </pre>
+                        <button
+                          onClick={() => copySql(st.sql)}
+                          className="shrink-0 text-zinc-600 transition-colors hover:text-zinc-300"
+                          aria-label="Copy statement"
+                        >
+                          {copied === i
+                            ? <Check className="size-3 text-emerald-400" />
+                            : <ClipboardCopy className="size-3" />}
+                        </button>
+                      </div>
+                      {st.params && st.params.length > 0 && (
+                        <p className="border-t border-white/[0.05] px-3 py-1.5 font-mono text-[10px] text-zinc-600">
+                          {st.params.map((p, j) => `$${j + 1} = ${p}`).join('  ·  ')}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {state.phase === 'confirming' && (
             <div className="mt-2 flex items-start gap-2 rounded-md border border-rose-500/20 bg-rose-500/[0.05] px-3 py-2">

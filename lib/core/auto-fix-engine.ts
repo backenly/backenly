@@ -23,6 +23,11 @@
 import { prisma } from '@/lib/db/prisma'
 import { executeAction } from '@/lib/ai/minimal-executor'
 import { captureSchemaSnapshot, rollbackToSchemaVersion } from '@/lib/services/workspace-schema-snapshot'
+import {
+  withSqlCapture,
+  installSqlRecorder,
+  type RecordedStatement,
+} from '@/lib/execution/sql-recorder'
 import { classifyFix } from './fix-classifier'
 import { checkBreaker, auditBreakerTrip } from '@/lib/autonomy/circuit-breaker'
 import { evaluateFixOutcome, captureCheckBaseline } from '@/lib/autonomy/desired-state'
@@ -274,10 +279,15 @@ export async function executeApprovedFix(
   const BACKOFFS_MS = [400, 1200, 3000, 5000, 8000, 12000]
   let result
   let lastLockError: string | null = null
+  // What the executor actually sent to PostgreSQL, for the audit row. Captured
+  // at the driver rather than reported by each executor, so a new repair cannot
+  // silently record nothing. See lib/execution/sql-recorder.ts.
+  installSqlRecorder(prisma as any)
+  let statements: RecordedStatement[] = []
 
   for (let attempt = 0; attempt <= BACKOFFS_MS.length; attempt++) {
     try {
-      const governed = await withBuildLock(
+      const captured = await withSqlCapture(() => withBuildLock(
         projectId,
         'modify',
         async () => executeAction(
@@ -290,7 +300,11 @@ export async function executeApprovedFix(
         ),
         // Human-approved: skip the autonomy cooldown/budget gate (see fn docs).
         { skipCooldown: true },
-      )
+      ))
+      const governed = captured.result
+      // Only the attempt that actually ran contributes statements; a lock-
+      // contention retry captured nothing and must not append an empty round.
+      if (captured.statements.length > 0) statements = captured.statements
       if (governed.error) {
         lastLockError = governed.error
         // Retry on lock-contention. cooldown/budget are skipped above for the
@@ -379,6 +393,11 @@ export async function executeApprovedFix(
   const rollbackData: Record<string, unknown> = {
     fixAction,
     fixResult: { message: result.message, data: result.data },
+    // The statements the executor actually sent, captured at the driver. This
+    // is the half of the audit trail that used to be missing: the change was
+    // derivable by diffing two schema snapshots, but the statement itself was
+    // never stored, so "show me what it ran" had no answer.
+    statements,
     // UNDO CONTRACT (rollbackFormat 2): snapshotId is the PRE-fix state.
     rollbackFormat: 2,
     snapshotId: pre.preSnapshotId,
@@ -842,8 +861,10 @@ async function _executeAutoFix(
   const baseline = await captureCheckBaseline(projectId).catch(() => null)
 
   let result
+  installSqlRecorder(prisma as any)
+  let statements: RecordedStatement[] = []
   try {
-    const governed = await withBuildLock(
+    const captured = await withSqlCapture(() => withBuildLock(
       projectId,
       'modify',
       async () => executeAction(
@@ -855,7 +876,9 @@ async function _executeAutoFix(
         false,     // allowReplan — deterministic autonomy fix, never LLM-replan
       ),
       { skipCooldown: opts.skipCooldown },
-    )
+    ))
+    const governed = captured.result
+    statements = captured.statements
     if (governed.error) {
       return _isTransientGovernanceError(governed.error)
         ? _deferred(findingId, projectId, type, details, governed.error)
@@ -931,6 +954,11 @@ async function _executeAutoFix(
   const rollbackData: Record<string, unknown> = {
     fixAction,
     fixResult: { message: result.message, data: result.data },
+    // The statements the executor actually sent, captured at the driver. This
+    // is the half of the audit trail that used to be missing: the change was
+    // derivable by diffing two schema snapshots, but the statement itself was
+    // never stored, so "show me what it ran" had no answer.
+    statements,
     // UNDO CONTRACT (rollbackFormat 2): snapshotId is the PRE-fix state.
     rollbackFormat: 2,
     snapshotId: pre.preSnapshotId,
@@ -964,6 +992,11 @@ async function _executeAutoFix(
     message: result.message,
     snapshotId: pre.preSnapshotId,
     postSnapshotId: postSnapshot?.id ?? null,
+    // The statements this fix actually ran. Duplicated onto the audit row rather
+    // than left only in finding.details, because the audit log is the record
+    // that survives the finding being dismissed or the project's queue being
+    // cleared — and "what did it run" is a question asked long after.
+    statements,
     // Read by the trust scoreboard: only 'confirmed' fixes count as verified.
     verification,
   })

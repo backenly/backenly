@@ -150,6 +150,11 @@ export const POST = withProjectAccess(async (req: NextRequest, { user, project, 
         findingType: finding.type,
         message: result.message,
         snapshotId: result.snapshotId ?? null,
+        // The statements the approved fix actually ran, captured at the driver
+        // (lib/execution/sql-recorder.ts). The audit row outlives the finding,
+        // so the record of what was executed belongs here as well as in
+        // finding.details.rollbackData.
+        statements: (result.rollbackData as Record<string, unknown> | undefined)?.statements ?? [],
         // Drives the ledger copy: only 'confirmed' may claim re-verification.
         verification: result.verification ?? 'unverified',
       }),
