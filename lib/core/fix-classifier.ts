@@ -20,6 +20,21 @@ import type { FindingType } from './types'
 
 export type FixDecision = 'auto' | 'approval' | 'notify_only'
 
+/**
+ * Every finding type whose repair is "install an RLS policy", and which
+ * therefore depends on ownership being derivable from the schema.
+ *
+ * `rls_denies_everything` belongs here despite being an OUTAGE rather than an
+ * exposure: its repair is the same SET_PERMISSION with an inferred template, so
+ * it fails in the same way on the same tables.
+ */
+const RLS_FAMILY: ReadonlySet<string> = new Set([
+  'missing_rls',
+  'unprotected_user_data',
+  'rls_expression_invalid',
+  'rls_denies_everything',
+])
+
 export interface FixClassification {
   decision: FixDecision
   reason: string
@@ -154,6 +169,45 @@ export function classifyFix(
       reason:
         'This surface is served by the platform runtime, not by your project\'s schema — ' +
         'Backenly is monitoring it and will clear the finding automatically when it recovers.',
+    }
+  }
+
+  // ── RLS with no derivable owner: decided on evidence, not on the type ──────
+  //
+  // The ownership inference (lib/services/rls-ownership.ts) can honestly answer
+  // "I cannot tell who owns a row in this table", and when it does, the detector
+  // records `rlsBasis: 'undecidable'` and marks the finding not auto-fixable.
+  // Nothing read that. `classifyFix` rated every RLS type `auto`, so the
+  // reconciler planned WOULD_AUTO_APPLY, called SET_PERMISSION with template
+  // 'auto', and applyPermissionPolicy refused — correctly, because enabling RLS
+  // with no derivable policy turns a data exposure into an outage where the
+  // table reads empty.
+  //
+  // The outcome was safe and the presentation was wrong: the user saw a fix that
+  // had been attempted and failed, re-attempted on a four-step backoff ladder
+  // over four days, rather than a clear "tell me the rule and I will enforce it"
+  // on the first tick. The refusal is the product's best behaviour; it was being
+  // reported as its worst.
+  //
+  // notify_only rather than approval, for the same reason as
+  // service_role_key_exposed: an approval queue implies a repair is waiting
+  // behind a yes, and here there is not one. What is missing is the rule itself,
+  // which only the owner can state.
+  //
+  // Keyed on the EXPLICIT basis, never on a missing template. A legacy row with
+  // no rlsBasis is decidable far more often than not, and routing those to
+  // notify_only would stop the loop healing real exposures.
+  if (RLS_FAMILY.has(type) && details?.rlsBasis === 'undecidable') {
+    return {
+      decision: 'notify_only',
+      reason:
+        'Backenly could not work out who owns a row in this table, and it will not guess. ' +
+        'Enabling row-level security without a correct policy makes the table read empty for ' +
+        'everyone, which replaces a data leak with an outage. Say what the rule is and Backenly ' +
+        'will enforce it.',
+      riskNote:
+        'The table is readable by any API client until a policy exists, so this is worth stating ' +
+        'a rule for rather than leaving.',
     }
   }
 

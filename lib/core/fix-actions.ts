@@ -97,6 +97,13 @@ export function buildFixAction(
       // `details.rlsTemplate` is what the detector already inferred; honouring it
       // keeps the approve modal's description and the executed repair identical.
       // Anything else falls through to inference. See lib/services/rls-ownership.ts.
+      //
+      // Except when the inference already answered "undecidable". Returning an
+      // action here produced a "Fix now" button whose only possible outcome was
+      // applyPermissionPolicy refusing — the dead-end button shape this file
+      // exists to prevent. getManualRemediationHint carries the real deliverable
+      // for this case: the question, with the columns already checked named.
+      if (details.rlsBasis === 'undecidable') return null
       return {
         action: 'SET_PERMISSION',
         params: {
@@ -374,6 +381,26 @@ export function getManualRemediationHint(
         ? ` It was read ${scans.toLocaleString()}× with ${pct}% index coverage.`
         : ''
       return `"${t}" is taking heavy sequential scans and Backenly could not find a column it is safe to index automatically.${measured} Add an index on whichever column your queries filter or sort by — in the AI chat, say "add an index on <table>.<column>".`
+    }
+
+    // Reached when the ownership inference answered "undecidable". The hint IS
+    // the deliverable: there is no repair to run, only a question to answer, and
+    // the probe already recorded exactly which columns it checked. Repeating
+    // that back is what makes the request answerable instead of accusatory.
+    case 'missing_rls':
+    case 'unprotected_user_data':
+    case 'rls_expression_invalid':
+    case 'rls_denies_everything': {
+      if (details?.rlsBasis !== 'undecidable') return null
+      const t = (details?.tableName ?? details?.table ?? 'this table') as string
+      const rationale = typeof details?.rlsRationale === 'string' ? ` ${details.rlsRationale}` : ''
+      return (
+        `Backenly will not enable row-level security on "${t}" until it knows who owns a row, ` +
+        `because a policy that matches nothing makes the table read empty for every user.${rationale} ` +
+        `Tell it the rule and it will install and verify the policy — in your coding agent, ` +
+        `something like: set_rls on ${t} so a row is visible when <column> equals the signed-in ` +
+        `user, or when it belongs to a <parent table> row that does.`
+      )
     }
 
     // Only reached when the finding arrived without the index name — an older
