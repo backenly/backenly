@@ -67,7 +67,7 @@ export async function detectFkColumnsMissingConstraints(
   const rows = await queryWorkspaceSchema(
     projectId,
     `
-    SELECT c.table_name, c.column_name
+    SELECT c.table_name, c.column_name, c.is_nullable
     FROM information_schema.columns c
     WHERE c.table_schema = $1
       AND c.column_name LIKE '%_id'
@@ -100,7 +100,7 @@ export async function detectFkColumnsMissingConstraints(
     schema,
   ).catch(probeQueryFailed('detectFkColumnsMissingConstraints'))
 
-  const hits: Array<{ table_name: string; column_name: string }> =
+  const hits: Array<{ table_name: string; column_name: string; is_nullable: string }> =
     rows?.rows ?? rows ?? []
 
   if (hits.length === 0) return []
@@ -110,7 +110,8 @@ export async function detectFkColumnsMissingConstraints(
   // once and reuse it across every hit. When a table can be inferred the finding
   // is auto-fixable (the loop adds the FK silently); when it can't, it is left
   // for human review rather than pointed at the wrong table.
-  const { buildWorkspaceTableNameMap, resolveReferencedTable } = await import('@/lib/ai/fk-repair')
+  const { buildWorkspaceTableNameMap, resolveReferencedTable, plannedCascadeRule } =
+    await import('@/lib/ai/fk-repair')
   const tableMap = await buildWorkspaceTableNameMap(projectId).catch(() => new Map<string, string>())
 
   // Only flag a *_id column as a missing FK when we can name the table it should
@@ -126,6 +127,26 @@ export async function detectFkColumnsMissingConstraints(
   return hits.flatMap((r) => {
     const referencedTable = resolveReferencedTable(r.column_name, tableMap, r.table_name) ?? undefined
     if (!referencedTable) return []
+
+    // State the cascade rule the repair would install, not just "a constraint".
+    //
+    // The repair picks ON DELETE CASCADE by default, and a finding that says
+    // only "has no FK constraint" gives the owner no way to see that approving
+    // it makes deleting a parent row silently delete every child. Computed with
+    // the same function the executor uses, so the preview and the DDL cannot
+    // disagree.
+    const selfRef = referencedTable.toLowerCase() === r.table_name.toLowerCase()
+    const cascade = plannedCascadeRule(r.column_name, r.table_name, {
+      selfRef,
+      nullable: r.is_nullable !== 'NO',
+    })
+    const consequence =
+      cascade.onDelete === 'CASCADE'
+        ? `Deleting a "${referencedTable}" row would then also delete every "${r.table_name}" row pointing at it.`
+        : cascade.onDelete === 'SET NULL'
+          ? `Deleting a "${referencedTable}" row would then blank "${r.column_name}" on the "${r.table_name}" rows pointing at it.`
+          : `Deleting a "${referencedTable}" row would then be refused while "${r.table_name}" rows still point at it.`
+
     return [{
       type: 'missing_fk' as const,
       severity: 'warning' as const,
@@ -135,9 +156,17 @@ export async function detectFkColumnsMissingConstraints(
         schemaName: schema,
         referencedTable,
         referencedColumn: 'id',
-        reason: `Column "${r.column_name}" references "${referencedTable}" but has no FK constraint`,
+        onDelete: cascade.onDelete,
+        onUpdate: cascade.onUpdate,
+        reason:
+          `Column "${r.column_name}" points at "${referencedTable}" but nothing enforces it, so ` +
+          `rows referencing a deleted "${referencedTable}" can accumulate unnoticed. Adding the ` +
+          `constraint would enforce it with ON DELETE ${cascade.onDelete}. ${consequence}`,
       },
-      autoFixable: true,
+      // Approval-gated by the classifier: adding a foreign key rewrites what
+      // writes and deletes are allowed to do from that moment on, and the
+      // cascade rule above is inferred from a column name.
+      autoFixable: false,
     }]
   })
 }

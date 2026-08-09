@@ -77,6 +77,30 @@ function stripLeadingQualifier(base: string): string | null {
   return null
 }
 
+/**
+ * Which cascade rule the repair WOULD apply, without applying anything.
+ *
+ * Exported so the detector can state it in the finding, and that matters more
+ * than it looks. `missing_fk` used to be classified `auto`, so this heuristic
+ * ran unattended — and its default branch is ON DELETE CASCADE. The autonomous
+ * repair was therefore deciding, from a column name, that deleting a user row
+ * should silently delete every row that references it. That is a destructive
+ * change to application semantics chosen by inference, which is exactly the
+ * class of change that has to be proposed rather than performed.
+ *
+ * The type is now approval-gated and the approval names the target table AND
+ * this rule, so the owner approves the actual behaviour rather than the word
+ * "constraint". Same function on both sides, so the preview cannot drift from
+ * what runs.
+ */
+export function plannedCascadeRule(
+  columnName: string,
+  tableName: string,
+  opts?: { selfRef?: boolean; nullable?: boolean },
+): { onDelete: string; onUpdate: string } {
+  return getCascadeRule(columnName, tableName, opts)
+}
+
 function getCascadeRule(
   columnName: string,
   tableName: string,

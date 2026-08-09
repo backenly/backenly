@@ -33,7 +33,23 @@ const AUTO_SAFE = new Set<FindingType>([
   'missing_rls',            // Adding RLS protection is always safe
   'rls_denies_everything',  // Installing a policy on a default-deny table RESTORES service
   'api_drift',              // Re-generating a missing API is additive
-  'missing_fk',             // Adding a FK constraint (safe when data is consistent)
+  // 'missing_fk' was here until 2026-08-09, described as "safe when data is
+  // consistent". Two things were wrong with that.
+  //
+  // First, a foreign key is not additive. It permanently changes which writes
+  // the database accepts: from that moment an INSERT naming a parent that does
+  // not exist is rejected. Application code that relied on writing the child
+  // first starts failing, and nothing in the schema says why.
+  //
+  // Second and worse, the repair also chooses a cascade rule, and
+  // getCascadeRule's default branch is ON DELETE CASCADE. So the autonomous fix
+  // was inferring, from a column name, that deleting one row should silently
+  // delete every row referencing it. That is a destructive semantic change made
+  // without asking, on the strength of a naming convention.
+  //
+  // It is still one click, and the approval now names the target table and the
+  // exact ON DELETE rule, so the owner approves the behaviour rather than the
+  // word "constraint".
   'missing_fk_index',       // Adding an index — performance only, no data change
   // Same repair, sourced from measured latency instead of a missing FK. The
   // column is parsed from pg_stat_statements and then verified to exist and to
@@ -73,6 +89,9 @@ const AUTO_SAFE = new Set<FindingType>([
 // The 1% that always gates on a human — auth, external credentials, and
 // anything destructive/irreversible. This is the safety floor, not a dial.
 const NEEDS_APPROVAL = new Set<FindingType>([
+  // Rewrites what writes and deletes the database will accept, with a cascade
+  // rule inferred from a column name. See the note in AUTO_SAFE above.
+  'missing_fk',
   'broken_webhook',               // Needs action in an external dashboard (e.g. Stripe)
   'broken_auth',                  // Auth changes risk locking all end-users out
   'integration_key_invalid',      // Replacing credentials needs explicit confirmation
@@ -246,7 +265,6 @@ const AUTO_ACTION_MAP: Partial<Record<FindingType, string>> = {
   missing_rls:              'SET_PERMISSION (own_rows template)',
   rls_denies_everything:    'SET_PERMISSION (schema-inferred template)',
   api_drift:                'FIX_API',
-  missing_fk:               'ADD_CONSTRAINT',
   missing_fk_index:         'CREATE_INDEX',
   slow_query_missing_index: 'CREATE_INDEX',
   infra_hot_table:          'CREATE_INDEX',
@@ -266,6 +284,7 @@ const AUTO_ACTION_MAP: Partial<Record<FindingType, string>> = {
 }
 
 const APPROVAL_REASON_MAP: Partial<Record<FindingType, string>> = {
+  missing_fk:                   'Adding a foreign key changes which writes the database accepts from that moment on, and the delete rule is inferred from the column name — so it is stated for you to approve rather than applied.',
   broken_webhook:               'Webhook repair requires action in an external dashboard (e.g. Stripe, GitHub).',
   broken_auth:                  'Auth configuration changes carry high risk of locking out all end-users.',
   integration_key_invalid:      'Replacing integration credentials requires explicit confirmation from the project owner.',
@@ -282,6 +301,7 @@ const APPROVAL_REASON_MAP: Partial<Record<FindingType, string>> = {
 }
 
 const RISK_NOTE_MAP: Partial<Record<FindingType, string>> = {
+  missing_fk:       'Under ON DELETE CASCADE, deleting a parent row also deletes every row referencing it. Existing rows pointing at a missing parent will make the constraint fail until they are cleaned up.',
   broken_auth:      'An incorrect fix could lock all end-users out of the application.',
   dead_api_endpoint:            'Client apps calling this endpoint would receive 404 after removal.',
   auth_jwt_missing:             'An incorrect or premature JWT secret rotation locks all end-users out immediately.',
