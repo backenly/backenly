@@ -28,6 +28,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
+import type { RawFinding, FindingSeverity } from '@/lib/core/types'
 
 export interface RequestedColumn {
   name?: string
@@ -293,4 +294,78 @@ export async function checkIntentConformance(projectId: string): Promise<Conform
   const hasFk = new Set(fkRows.map((r) => `${r.table_name}.${r.column_name}`))
 
   return compareIntentToActual(intents as RecordedIntent[], actualColumns, hasFk)
+}
+
+// ── Invariant-catalogue adapter ──────────────────────────────────────────────
+
+/**
+ * The conformance report, as findings the autonomy loop understands.
+ *
+ * ── Why this adapter exists ─────────────────────────────────────────────────
+ *
+ * `checkIntentConformance` was written, tested, and reachable from exactly one
+ * place: a single MCP tool. It was never in the invariant catalogue, so the
+ * per-minute loop never ran it, the reaper could not withdraw its findings, and
+ * the trust report never counted it. The module's own docstring describes a
+ * column requested as `timestamp` that was created as `integer` and stayed green
+ * for two months — and the mechanism written to catch that was itself only
+ * reachable if someone asked for it by hand.
+ *
+ * Everything below is projection. The comparison lives in
+ * `compareIntentToActual`, which stays pure and unit-testable.
+ *
+ * ── Why nothing here is auto-fixable ────────────────────────────────────────
+ *
+ * Every remedy is a migration against live data. `ALTER TYPE` rewrites a column
+ * and can lose precision, `SET NOT NULL` fails outright if a null exists and
+ * takes a lock if it does not, and a column recorded as requested but absent may
+ * have been dropped on purpose after the intent was written — the ledger records
+ * the REQUEST and is deliberately never reconciled to reality, so its
+ * disagreement with the catalog is evidence, not a verdict. Same rule as
+ * `schema_design_defect`: state the exact migration and let the owner run it.
+ */
+export async function detectIntentDrift(projectId: string): Promise<RawFinding[]> {
+  const report = await checkIntentConformance(projectId)
+  if (report.findings.length === 0) return []
+
+  return report.findings.map((f) => ({
+    type: 'intent_drift' as const,
+    // A column that is a different KIND of thing than requested silently
+    // corrupts every read of it; a missing FK or a widened nullability is a
+    // weaker guarantee than asked for but not a wrong value.
+    severity: (f.kind === 'type_drift' ? 'critical' : 'warning') as FindingSeverity,
+    autoFixable: false,
+    details: {
+      tableName: f.table,
+      columnName: f.column,
+      location: `${f.table}.${f.column}`,
+      driftKind: f.kind,
+      requested: f.requested,
+      actual: f.actual,
+      migration: intentDriftMigration(projectId, f),
+      reason:
+        `"${f.table}"."${f.column}" was asked for as ${f.requested} and the database has ` +
+        `${f.actual}. ${f.detail} Nothing in the catalog distinguishes a column that is wrong ` +
+        `from one that was always meant to be this way, which is why the request is recorded ` +
+        `separately — this is the only check that can see the difference.`,
+    },
+  }))
+}
+
+/** The statement that would close this drift, stated rather than executed. */
+function intentDriftMigration(projectId: string, f: ConformanceFinding): string {
+  const schema = `workspace_${projectId}`
+  const t = `"${schema}"."${f.table}"`
+  switch (f.kind) {
+    case 'type_drift':
+      return `ALTER TABLE ${t} ALTER COLUMN "${f.column}" TYPE ${f.requested} USING "${f.column}"::${f.requested};`
+    case 'nullability_drift':
+      return f.requested.includes('NOT NULL')
+        ? `ALTER TABLE ${t} ALTER COLUMN "${f.column}" SET NOT NULL;`
+        : `ALTER TABLE ${t} ALTER COLUMN "${f.column}" DROP NOT NULL;`
+    case 'missing_column':
+      return `ALTER TABLE ${t} ADD COLUMN "${f.column}" ${f.requested};`
+    case 'missing_fk':
+      return `ALTER TABLE ${t} ADD CONSTRAINT "fk_${f.table}_${f.column}" FOREIGN KEY ("${f.column}") REFERENCES "${schema}"."${f.requested}"(id);`
+  }
 }

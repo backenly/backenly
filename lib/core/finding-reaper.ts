@@ -289,6 +289,9 @@ const INVARIANT_REAPABLE_TYPES = [
   // REINDEX clears the finding on the next tick instead of leaving the owner
   // looking at bloat that has already been reclaimed.
   'index_bloat',
+  // Its probe compares the intent ledger to the live catalog on every tick, so
+  // a column the owner migrates back into shape clears on the next pass.
+  'intent_drift',
   // Both were probe-covered by the invariant catalogue and named in NO reaper,
   // so neither had any path back to healthy. Each has exactly one write site,
   // and that write site IS the invariant probe, so this reaper is the correct

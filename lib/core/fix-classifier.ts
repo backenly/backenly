@@ -298,6 +298,29 @@ export function classifyFix(
     }
   }
 
+  // ── Intent drift ──────────────────────────────────────────────────────────
+  //
+  // Same rule as schema_design_defect and for a sharper reason. The remedy is
+  // always a migration against live data (ALTER TYPE rewrites and can lose
+  // precision; SET NOT NULL fails outright if a null exists), and the intent
+  // ledger records what was REQUESTED and is deliberately never reconciled to
+  // reality — a ledger that self-heals to match the catalog agrees with it by
+  // construction and can never detect drift. So a disagreement is strong
+  // evidence and not a verdict: the column may have been changed on purpose
+  // after the request was recorded, and only the owner knows.
+  if (type === 'intent_drift') {
+    return {
+      decision: 'notify_only',
+      reason:
+        'This column is not the type or shape it was asked for. Backenly can give you the exact ' +
+        'migration, but changing a column that already holds data is yours to run — and if the ' +
+        'change was deliberate, the record of what was requested is what is out of date.',
+      riskNote:
+        'ALTER TYPE rewrites the column and can lose precision; SET NOT NULL fails if any row is ' +
+        'null. Apply during a quiet window.',
+    }
+  }
+
   if (AUTO_SAFE.has(type)) {
     return {
       decision: 'auto',

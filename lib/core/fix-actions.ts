@@ -394,6 +394,24 @@ export function getManualRemediationHint(
       return `"${t}" is taking heavy sequential scans and Backenly could not find a column it is safe to index automatically.${measured} Add an index on whichever column your queries filter or sort by — in the AI chat, say "add an index on <table>.<column>".`
     }
 
+    // The hint IS the deliverable, same as schema_design_defect: the probe has
+    // already derived the exact statement, so printing it beats describing it.
+    case 'intent_drift': {
+      const t = (details?.tableName ?? 'this table') as string
+      const col = (details?.columnName ?? 'the column') as string
+      const migration = typeof details?.migration === 'string' ? `
+
+${details.migration}` : ''
+      return (
+        `"${t}"."${col}" was asked for as ${details?.requested ?? 'one type'} and the database ` +
+        `has ${details?.actual ?? 'another'}. If the request is still what you want, run:${migration}` +
+        `
+
+If the column is deliberately different now, tell your coding agent to rebuild it ` +
+        `through Backenly so the recorded intent matches what you actually have.`
+      )
+    }
+
     // No repair exists and none should. Terminating a backend rolls back
     // whatever that session was doing, which Backenly cannot see and did not
     // start. The hint gives the owner the exact query to find it themselves.

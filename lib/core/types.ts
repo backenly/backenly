@@ -99,6 +99,21 @@ export type FindingType =
   // real pgstatindex() reading, never an estimate.
   // See lib/autonomy/index-bloat.ts.
   | 'index_bloat'
+  // ── A column exists and looks perfectly healthy in the catalog, but is not
+  // what was asked for. Nothing distinguishes a column that is `integer`
+  // from one that was SUPPOSED to be `timestamp` — the information was never
+  // written down, so no catalog-only probe can see it.
+  //
+  // lib/autonomy/intent-conformance.ts records the REQUEST at build time and
+  // compares it to reality. It caught a start_date created as INTEGER that
+  // stayed green for two months while the loop ran continuously; the mechanism
+  // existed and was reachable from exactly one MCP tool, never from the
+  // catalogue, so the loop never ran it.
+  //
+  // notify_only: every remedy is a migration against live data, and the ledger
+  // records the request rather than reconciling to reality, so a disagreement
+  // is evidence rather than a verdict.
+  | 'intent_drift'
   // ── Phase 4 — medium/high-risk action queued from AI chat or orchestration
   // before it applies. details.executorAction/executorParams carry the exact
   // AIAction to run once approved — see lib/core/auto-fix-engine.ts's
@@ -266,6 +281,7 @@ export const ALL_FINDING_TYPES = [
   'unused_index',
   'idle_in_transaction',
   'index_bloat',
+  'intent_drift',
 ] as const satisfies ReadonlyArray<FindingType>
 
 // Canonical types — exact matches pass through untouched.

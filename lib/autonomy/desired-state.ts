@@ -59,6 +59,7 @@ import { detectSlowQueryMissingIndexes } from './slow-query-index'
 import { detectUnusedIndexes } from './unused-index'
 import { detectIdleInTransaction } from './connection-health'
 import { detectIndexBloat } from './index-bloat'
+import { detectIntentDrift } from './intent-conformance'
 import { hasCapability, type PlatformCapability } from './platform-capabilities'
 
 // ── Bounded-autonomy tiers (graded by blast radius) ───────────────────────────
@@ -184,6 +185,13 @@ export const INVARIANTS: readonly Invariant[] = [
     rationale:
       'The index probes above add indexes. This one is the other direction, and it is the half a platform usually skips because being wrong is expensive. Every index is written on every insert and update of its table forever, so one nothing reads is a permanent tax with no return. The evidence is a measured window rather than a counter: Backenly records each index\'s scan count the first time it sees it and raises nothing, then reports only an index whose count has not moved across at least fourteen days of observation — long enough that a weekly job has had two chances to run. It is reset-proof, because a counter that went backwards means the statistics were cleared and the window starts again. And it is never automatic: fourteen silent days is evidence, not proof, and only the person who wrote the application knows about the quarterly report.',
     probe: detectUnusedIndexes,
+  },
+  {
+    id: 'the_schema_is_what_was_asked_for',
+    title: 'Every column is the type and shape it was requested as',
+    rationale:
+      'Every other invariant here can be evaluated from the live catalog, because correct is defined by the catalog itself. Type correctness is not like that: a column that is integer looks perfectly healthy, and nothing distinguishes it from one that was supposed to be a timestamp. The information needed to notice was never missing from the database — it was never written down. So the request is recorded at build time and compared against reality, which is how a start_date created as INTEGER in May was found after two months of a continuously-running loop reporting green. The ledger records the REQUEST and is never reconciled to the catalog: one that self-heals to match reality agrees with it by construction and can never detect anything.',
+    probe: detectIntentDrift,
   },
   {
     id: 'indexes_are_not_mostly_empty_space',
@@ -560,6 +568,9 @@ const INVARIANT_EMITS: Readonly<Record<string, readonly FindingType[]>> = {
   // cached density reading, so the next pass measures the rebuilt index and the
   // gap closes. Without that the fix would be escalated as "did not hold".
   indexes_are_not_mostly_empty_space: ['index_bloat'],
+  // Re-detectable: the comparison runs against the live catalog every tick, so
+  // a migrated column stops drifting and the finding withdraws itself.
+  the_schema_is_what_was_asked_for: ['intent_drift'],
   relationships_have_fk_constraints: ['missing_fk'],
   relationships_are_indexed: ['missing_fk_index'],
   data_plane_is_registered: ['schema_not_registered'],
