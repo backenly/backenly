@@ -394,6 +394,30 @@ export function getManualRemediationHint(
       return `"${t}" is taking heavy sequential scans and Backenly could not find a column it is safe to index automatically.${measured} Add an index on whichever column your queries filter or sort by — in the AI chat, say "add an index on <table>.<column>".`
     }
 
+    // The hint is the investigation, not a repair — there is no repair that
+    // follows from a deviation alone. What it can do is hand over the specific
+    // numbers and the specific changes, which is what the developer was about
+    // to go and look up.
+    case 'behavioural_regression': {
+      const measure = String(details?.measure ?? 'this measure').replace(/_/g, ' ')
+      const ratio = details?.ratio ? `${details.ratio}x` : 'well above'
+      const changes = Array.isArray(details?.changesBefore)
+        ? (details!.changesBefore as Array<{ summary: string; minutesBefore: number }>)
+        : []
+      const list = changes.length > 0
+        ? `\n\nWhat landed beforehand:\n${changes
+            .map(c => `  · ${c.minutesBefore} min before — ${c.summary}`)
+            .join('\n')}`
+        : '\n\nNothing Backenly records changed on this backend beforehand, so look at your own ' +
+          'application code and traffic for the same window.'
+      const sql = typeof details?.sql === 'string' ? `\n\nThe statement:\n  ${details.sql}` : ''
+      return (
+        `${measure} is ${ratio} this backend's own normal, measured across ` +
+        `${details?.observedHours ?? 'several'} hours of history.${sql}${list}` +
+        `\n\nBackenly is not claiming any of these caused it.`
+      )
+    }
+
     // The hint IS the deliverable, same as schema_design_defect: the probe has
     // already derived the exact statement, so printing it beats describing it.
     case 'intent_drift': {

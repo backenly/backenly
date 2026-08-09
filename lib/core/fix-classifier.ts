@@ -321,6 +321,28 @@ export function classifyFix(
     }
   }
 
+  // ── Behavioural regression ─────────────────────────────────────
+  //
+  // A deviation is a symptom, and the repair depends on a cause the measurement
+  // does not contain. A query that tripled might need an index, or might be
+  // scanning ten times more rows because the product got popular — the first
+  // deserves a CREATE INDEX and the second deserves nothing at all. Guessing
+  // between them would build indexes on healthy backends forever.
+  //
+  // The shape-based probes remain responsible for the repairable half: if the
+  // slowdown IS a missing index, `slow_query_missing_index` sees it from
+  // pg_stat_statements and proposes the exact column. This finding is what is
+  // left over, and what is left over is a question for the owner.
+  if (type === 'behavioural_regression') {
+    return {
+      decision: 'notify_only',
+      reason:
+        'This is measurably outside what is normal for your backend. Backenly is not guessing at ' +
+        'a repair, because the same measurement can mean a missing index or simply more traffic — ' +
+        'it has listed what changed here beforehand so you can tell which.',
+    }
+  }
+
   if (AUTO_SAFE.has(type)) {
     return {
       decision: 'auto',

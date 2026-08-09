@@ -166,6 +166,7 @@ model Project {
   incidents               Incident[]
   intentLogs              IntentLog[]
   schemaIntents           SchemaIntent[]
+  dbBaselineSamples       DbBaselineSample[]
   logs                    Log[]
   metrics                 Metric[]
   previewShares           PreviewShare[]
@@ -239,11 +240,11 @@ model ProjectIntegrationKey {
   // see lib/integrations/key-verification.ts. `unverifiable` is honest, not a
   // failure: some credentials (webhook signing secrets, write-only ingest keys)
   // have no endpoint that can confirm them.
-  verification       String   @default("unchecked")
+  verification       String    @default("unchecked")
   verificationDetail String?
   verifiedAt         DateTime?
 
-  project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
   @@unique([projectId, integrationId])
   @@index([projectId])
@@ -355,6 +356,50 @@ model IntentLog {
 /// always attributable — and deliberately never overwritten from the catalog,
 /// which would make the ledger agree with reality by construction and destroy
 /// its only purpose.
+/// ── Database behaviour baseline ──────────────────────────────────────────────
+///
+/// One row per (project, subject, hour). This is the time series every
+/// deviation claim is measured against, and it exists because the platform had
+/// no way to answer "is this NORMAL for this backend?".
+///
+/// Everything else in the autonomy catalogue reasons about SHAPE (is there an
+/// index, is RLS on) or about an absolute threshold (is this query over 100ms).
+/// Neither can see a query that went from 4ms to 60ms — still fast by any fixed
+/// threshold, fifteen times worse than this backend's own normal, and almost
+/// always the thing a developer actually noticed.
+///
+/// Deliberately COARSE. Hourly buckets, capped subjects per project, and a
+/// short retention: this is a baseline, not an observability product, and a
+/// per-request metrics store would cost more than everything it protects.
+model DbBaselineSample {
+  id        String   @id @default(uuid())
+  projectId String
+  /// What is being measured: query | table | connections.
+  kind      String
+  /// Stable identity within `kind` — a query fingerprint, a table name, or the
+  /// literal "project" for connection counts.
+  subject   String
+  /// Start of the hour this sample summarises (UTC).
+  bucket    DateTime
+  /// The measured value. Meaning depends on `kind` — see lib/autonomy/baseline.
+  value     Float
+  /// How many underlying observations the value averages, so a sample built
+  /// from three calls is never weighed like one built from thirty thousand.
+  samples   Int      @default(1)
+  /// Anything needed to render the finding: query text, table bytes, state mix.
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  /// One row per subject per hour. The collector upserts, so a re-run inside the
+  /// same hour refines the sample rather than duplicating it.
+  @@unique([projectId, kind, subject, bucket])
+  @@index([projectId, kind, bucket])
+  @@index([bucket])
+  @@map("db_baseline_samples")
+}
+
 model SchemaIntent {
   id         String @id @default(uuid())
   projectId  String
@@ -679,25 +724,25 @@ model WorkspaceOAuthConfig {
 }
 
 model ApiKey {
-  id              String        @id @default(uuid())
+  id              String            @id @default(uuid())
   name            String
   keyPrefix       String
-  role            String        @default("client")
+  role            String            @default("client")
   permissions     String[]
   userId          String
   lastUsed        DateTime?
   expiresAt       DateTime?
-  rateLimit       Int           @default(1000)
-  rateLimitWindow Int           @default(3600)
-  requestCount    Int           @default(0)
+  rateLimit       Int               @default(1000)
+  rateLimitWindow Int               @default(3600)
+  requestCount    Int               @default(0)
   resetAt         DateTime?
-  createdAt       DateTime      @default(now())
-  updatedAt       DateTime      @updatedAt
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
   capabilities    String[]
-  keyType         String        @default("public")
+  keyType         String            @default("public")
   projectId       String?
-  serviceRole     Boolean       @default(false)
-  keyHash         String        @unique
+  serviceRole     Boolean           @default(false)
+  keyHash         String            @unique
   key             String?
   // Scope decides which surfaces this key can call:
   //   "runtime" (default) — /api/v1/{projectId}/* runtime data API (SDK clients).
@@ -708,7 +753,7 @@ model ApiKey {
   //                         them in a public client.
   // A leaked SDK key cannot drop tables; a leaked MCP key can. Splitting the
   // scope keeps that blast radius explicit and auditable.
-  scope           String        @default("runtime")
+  scope           String            @default("runtime")
   // Read-only MCP key: the agent can inspect the backend but cannot change it.
   //
   // Scope alone was too blunt. `scope='mcp'` is all-or-nothing, so "let an agent
@@ -725,7 +770,7 @@ model ApiKey {
   //     Postgres role, so a read that tries to write is refused by POSTGRES.
   // The first two are ergonomics and defence in depth; only the grant is a
   // security boundary. A parser is never the boundary — see lib/mcp/read-query.ts.
-  mcpReadOnly     Boolean       @default(false)
+  mcpReadOnly     Boolean           @default(false)
   // Free-text label for MCP keys, e.g. "Claude Code laptop" / "Cursor work mac".
   mcpClientLabel  String?
   // Branch this key reads and writes. Null = main, which is every existing key.
@@ -744,14 +789,14 @@ model ApiKey {
   // server/routes/dynamic.ts). The row survives; it is made unusable rather than
   // dangerous.
   branchId        String?
-  branch          WorkspaceBranch? @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  branch          WorkspaceBranch?  @relation(fields: [branchId], references: [id], onDelete: SetNull)
   usageLogs       ApiKeyUsage[]
   // Present only on keyType='mcp_oauth' rows, where this ApiKey IS the OAuth
   // connection. Cascades so revoking the connection kills every issued token.
   oauthCodes      McpOAuthCode[]
   oauthRefreshes  McpOAuthRefresh[]
-  project         Project?      @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project         Project?          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([projectId])
@@ -1252,11 +1297,11 @@ model Organization {
 }
 
 model OrganizationMember {
-  id        String   @id @default(uuid())
-  orgId     String
-  userId    String
+  id         String   @id @default(uuid())
+  orgId      String
+  userId     String
   // OWNER | ADMIN | DEVELOPER | VIEWER
-  role      String   @default("DEVELOPER")
+  role       String   @default("DEVELOPER")
   // Project-scoped access (Pro+). When true, this member can only reach the
   // projects granted to them in ProjectMember — every other project in the org
   // is invisible and forbidden. OWNER/ADMIN ignore this flag (always org-wide).
@@ -1265,7 +1310,7 @@ model OrganizationMember {
   // regardless of plan; only *setting* a restriction requires a paid plan, so a
   // downgrade can never silently widen a restricted member's reach.
   restricted Boolean  @default(false)
-  createdAt DateTime @default(now())
+  createdAt  DateTime @default(now())
 
   organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
   user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -1298,23 +1343,23 @@ model ProjectMember {
 }
 
 model OrganizationInvite {
-  id          String    @id @default(uuid())
-  orgId       String
-  email       String
-  role        String    @default("DEVELOPER")
-  token       String    @unique
-  invitedById String
+  id               String    @id @default(uuid())
+  orgId            String
+  email            String
+  role             String    @default("DEVELOPER")
+  token            String    @unique
+  invitedById      String
   // Project-scoped invite (Pro+). If `restricted` is true, on accept the member
   // is created restricted and granted exactly `scopedProjectIds` — so they never
   // see the org's other projects, not even in the window right after joining.
   // Default false + empty = the original org-wide invite.
-  restricted       Boolean  @default(false)
-  scopedProjectIds String[] @default([])
+  restricted       Boolean   @default(false)
+  scopedProjectIds String[]  @default([])
   // pending | accepted | revoked | expired
-  status      String    @default("pending")
-  expiresAt   DateTime
-  acceptedAt  DateTime?
-  createdAt   DateTime  @default(now())
+  status           String    @default("pending")
+  expiresAt        DateTime
+  acceptedAt       DateTime?
+  createdAt        DateTime  @default(now())
 
   organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
@@ -1610,7 +1655,7 @@ model PaddleSubscription {
 model WorkspaceBranch {
   id          String    @id @default(uuid())
   projectId   String
-  name        String    // slug, e.g. "add-payments"
+  name        String // slug, e.g. "add-payments"
   schemaName  String    @unique // workspace_{projectId}_br_{name}
   status      String    @default("active") // active | merged | discarded
   createdBy   String
@@ -1652,11 +1697,11 @@ model AgentApprovalRequest {
   id            String    @id @default(uuid())
   projectId     String
   userId        String
-  apiKeyId      String?   // which scoped key asked — agent identity for receipts
-  message       String    // original natural-language request, replayed on approval
-  tool          String    // blocked destructive tool (e.g. drop_table)
-  target        String    // human description, e.g. "recipes table"
-  rowCount      Int?      // live rows affected when cheaply knowable
+  apiKeyId      String? // which scoped key asked — agent identity for receipts
+  message       String // original natural-language request, replayed on approval
+  tool          String // blocked destructive tool (e.g. drop_table)
+  target        String // human description, e.g. "recipes table"
+  rowCount      Int? // live rows affected when cheaply knowable
   reversible    Boolean   @default(false)
   status        String    @default("pending") // pending|approved|rejected|expired|executed|failed
   decidedBy     String?

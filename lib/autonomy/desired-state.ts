@@ -60,6 +60,7 @@ import { detectUnusedIndexes } from './unused-index'
 import { detectIdleInTransaction } from './connection-health'
 import { detectIndexBloat } from './index-bloat'
 import { detectIntentDrift } from './intent-conformance'
+import { detectBehaviouralRegression } from './baseline/detect'
 import { hasCapability, type PlatformCapability } from './platform-capabilities'
 
 // ── Bounded-autonomy tiers (graded by blast radius) ───────────────────────────
@@ -185,6 +186,13 @@ export const INVARIANTS: readonly Invariant[] = [
     rationale:
       'The index probes above add indexes. This one is the other direction, and it is the half a platform usually skips because being wrong is expensive. Every index is written on every insert and update of its table forever, so one nothing reads is a permanent tax with no return. The evidence is a measured window rather than a counter: Backenly records each index\'s scan count the first time it sees it and raises nothing, then reports only an index whose count has not moved across at least fourteen days of observation — long enough that a weekly job has had two chances to run. It is reset-proof, because a counter that went backwards means the statistics were cleared and the window starts again. And it is never automatic: fourteen silent days is evidence, not proof, and only the person who wrote the application knows about the quarterly report.',
     probe: detectUnusedIndexes,
+  },
+  {
+    id: 'the_backend_behaves_like_itself',
+    title: 'Nothing is running far outside the measured normal for this backend',
+    rationale:
+      'Every other check here compares against a fixed number — 100ms for a slow query, 40% dead tuples, 500 rows worth indexing. Fixed numbers answer whether something is bad in general. They cannot answer the question a developer actually asks, which is whether it is bad for THIS backend: a query that went from 4ms to 60ms is still fast by any threshold, fifteen times worse than it was, and almost always the thing they noticed. So an hourly collector records query latency, sequential scans and table size per project, and this compares the last complete hour against the trailing two weeks — median rather than mean, with a minimum history, an absolute floor and a stability check, because a ratio computed on three noisy data points is arithmetic rather than evidence. Never repaired automatically: a deviation is a symptom whose cause is not in the measurement, so the finding carries the numbers and the list of what changed on this backend just before, and leaves the inference to the person who knows the application.',
+    probe: detectBehaviouralRegression,
   },
   {
     id: 'the_schema_is_what_was_asked_for',
@@ -571,6 +579,9 @@ const INVARIANT_EMITS: Readonly<Record<string, readonly FindingType[]>> = {
   // Re-detectable: the comparison runs against the live catalog every tick, so
   // a migrated column stops drifting and the finding withdraws itself.
   the_schema_is_what_was_asked_for: ['intent_drift'],
+  // Re-detectable by construction: the probe judges the latest complete hour, so
+  // a subject that recovers simply stops appearing.
+  the_backend_behaves_like_itself: ['behavioural_regression'],
   relationships_have_fk_constraints: ['missing_fk'],
   relationships_are_indexed: ['missing_fk_index'],
   data_plane_is_registered: ['schema_not_registered'],

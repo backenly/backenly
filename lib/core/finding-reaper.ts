@@ -292,6 +292,11 @@ const INVARIANT_REAPABLE_TYPES = [
   // Its probe compares the intent ledger to the live catalog on every tick, so
   // a column the owner migrates back into shape clears on the next pass.
   'intent_drift',
+  // Its probe judges the most recent complete hour against the trailing window,
+  // so a subject that returns to normal stops being reported on the next hour
+  // and the finding withdraws itself. Without this a one-hour spike would sit in
+  // the queue forever describing a backend that recovered.
+  'behavioural_regression',
   // Both were probe-covered by the invariant catalogue and named in NO reaper,
   // so neither had any path back to healthy. Each has exactly one write site,
   // and that write site IS the invariant probe, so this reaper is the correct

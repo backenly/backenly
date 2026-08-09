@@ -439,6 +439,47 @@ export async function register() {
         )
       })
 
+      // ── Database behaviour baseline — hourly, on the hour ───────────────────
+      //
+      // Records query latency, sequential scans, table size and connection
+      // counts per project, so `the_backend_behaves_like_itself` has a history
+      // to measure the current hour against. Hourly is the cadence the whole
+      // design assumes: the samples ARE hour buckets, and running it more often
+      // would refine the current bucket repeatedly for no gain.
+      //
+      // Runs at :05 rather than :00 so it is not competing with every other
+      // hourly job for the same connections, and reads only pg_stat_* views and
+      // pg_class sizes — no user data, no model call.
+      cron.schedule('5 * * * *', async () => {
+        const g = globalThis as any
+        if (g.__baselineCollectorRunning) return
+        g.__baselineCollectorRunning = true
+        try {
+          const { prisma } = await import('./lib/db/prisma')
+          const { collectBaseline, pruneBaseline } = await import('./lib/autonomy/baseline/collector')
+          const { activeProjectsWhere } = await import('./lib/autonomy/activity-gate')
+
+          const projects = await prisma.project.findMany({
+            where: activeProjectsWhere(),
+            select: { id: true },
+          }).catch(() => [])
+
+          const CONCURRENCY = 5
+          for (let i = 0; i < projects.length; i += CONCURRENCY) {
+            const batch = projects.slice(i, i + CONCURRENCY)
+            await Promise.allSettled(batch.map(p => collectBaseline(p.id)))
+          }
+
+          // One indexed delete for the whole platform, not one per project.
+          const pruned = await pruneBaseline()
+          console.log(`[Baseline] sampled ${projects.length} project(s), pruned ${pruned} old sample(s)`)
+        } catch (err: any) {
+          console.error('[Baseline] Cron error:', err?.message)
+        } finally {
+          g.__baselineCollectorRunning = false
+        }
+      })
+
       // ── DB storage snapshot — hourly ────────────────────────────────────────
       // Measures actual pg_total_relation_size per workspace schema and writes
       // ProjectUsage.dbStorageUsedMb so the billing dashboard reflects real

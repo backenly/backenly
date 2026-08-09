@@ -114,6 +114,20 @@ export type FindingType =
   // records the request rather than reconciling to reality, so a disagreement
   // is evidence rather than a verdict.
   | 'intent_drift'
+  // ── This backend is behaving unlike itself: a query far slower than its own
+  // measured normal, a table taking far more sequential scans than usual, or
+  // one growing far outside its own pattern.
+  //
+  // Every other performance check compares against a fixed threshold, which
+  // answers "is this bad in general" and cannot see a query that went from 4ms
+  // to 60ms — still fast by any threshold, fifteen times worse than it was, and
+  // usually the thing the developer actually noticed. This one compares against
+  // the project's own history (lib/autonomy/baseline).
+  //
+  // notify_only, and not out of caution: a deviation is a SYMPTOM whose repair
+  // depends entirely on a cause that is not in the data. The finding carries the
+  // measurement and what changed on the backend just before it.
+  | 'behavioural_regression'
   // ── Phase 4 — medium/high-risk action queued from AI chat or orchestration
   // before it applies. details.executorAction/executorParams carry the exact
   // AIAction to run once approved — see lib/core/auto-fix-engine.ts's
@@ -282,6 +296,7 @@ export const ALL_FINDING_TYPES = [
   'idle_in_transaction',
   'index_bloat',
   'intent_drift',
+  'behavioural_regression',
 ] as const satisfies ReadonlyArray<FindingType>
 
 // Canonical types — exact matches pass through untouched.
