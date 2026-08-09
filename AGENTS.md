@@ -393,6 +393,27 @@ the ones people get wrong:
 - **Pass `--update-env` when restarting** if `.env` changed, or the process
   keeps the old environment.
 
+### Required PostgreSQL configuration
+
+One server-level setting is not optional if you want the full detector set:
+
+```conf
+shared_preload_libraries = 'pg_stat_statements'   # postgresql.conf, needs a restart
+```
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+```
+
+`docker-compose.dev.yml` and `docker/postgres-init/` do both for you. On a
+database without it, `measured_slow_queries_are_indexed` cannot run —
+`lib/autonomy/platform-capabilities.ts` detects that and the invariant is
+reported as UNCHECKED (`DesiredStateReport.disabled`), never as satisfied.
+
+If you add another probe that depends on a server-level capability, declare it
+as `requires` on the invariant rather than returning `[]` when it is absent. An
+empty result is indistinguishable from a healthy backend, which is how
+`detectMissingRls` read green for months while it was dead.
+
 ### Host-specific configuration
 
 Deployment details — hostnames, credentials, proxy config, log paths — belong in

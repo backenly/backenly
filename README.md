@@ -130,7 +130,22 @@ npm run dev                   # dashboard :3000 · runtime :3001
 ```
 
 `npm run dev` starts both processes together. If you already have PostgreSQL
-running, skip the Docker step and point `DATABASE_URL` at it instead.
+running, skip the Docker step and point `DATABASE_URL` at it instead — in which
+case enable `pg_stat_statements` yourself:
+
+```conf
+# postgresql.conf, then restart the server
+shared_preload_libraries = 'pg_stat_statements'
+```
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+```
+
+It is how Backenly finds indexes that are missing by *measurement* — the columns
+Postgres is actually spending milliseconds filtering on — rather than only by
+schema shape. Without it that check reports itself as unchecked rather than
+passing, so nothing claims a guarantee it never evaluated. The Docker stack
+above already sets both.
 
 Two variables are not optional:
 

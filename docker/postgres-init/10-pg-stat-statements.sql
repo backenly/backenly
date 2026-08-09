@@ -1,0 +1,21 @@
+-- Enable measured query latency.
+--
+-- Backenly's `measured_slow_queries_are_indexed` invariant reads
+-- pg_stat_statements to find the columns this database actually spends
+-- milliseconds filtering on, verifies them against the catalog, and proposes an
+-- index only for what survives. It is the one detector that reasons from
+-- MEASUREMENT rather than from schema shape.
+--
+-- Without the extension that detector cannot run. Backenly reports the
+-- invariant as UNCHECKED rather than satisfied (see
+-- lib/autonomy/platform-capabilities.ts), so nothing lies about it — but the
+-- capability is simply absent until this runs.
+--
+-- The library itself is preloaded via `shared_preload_libraries` in
+-- docker-compose.dev.yml; that part requires a server restart and cannot be
+-- done from SQL. This file only creates the extension, which is why both halves
+-- have to exist.
+--
+-- Runs once, on first initialisation of an empty data directory. On an existing
+-- database, run this statement by hand after adding the preload setting.
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;

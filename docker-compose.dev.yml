@@ -6,6 +6,21 @@ services:
     image: postgres:15-alpine
     container_name: backenly-postgres-dev
     restart: unless-stopped
+    # pg_stat_statements is the ONLY source of measured query latency in the
+    # platform. Without it the `measured_slow_queries_are_indexed` invariant
+    # cannot run at all, and Backenly can only find missing indexes by SHAPE
+    # (this column is a foreign key) rather than by MEASUREMENT (Postgres is
+    # spending 300ms per call filtering this column). It needs
+    # shared_preload_libraries, which needs a restart, which is why it is set
+    # here rather than left to a migration.
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=top
+      - -c
+      - pg_stat_statements.max=10000
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-backenly}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
@@ -14,6 +29,10 @@ services:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_dev_data:/var/lib/postgresql/data
+      # Runs once, on an empty data directory, as the superuser — the only
+      # context in which CREATE EXTENSION for a preloaded library succeeds
+      # without further grants.
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-backenly}"]
       interval: 10s

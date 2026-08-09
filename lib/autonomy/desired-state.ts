@@ -56,6 +56,7 @@ import { detectDataPlaneNotAnswering } from './data-plane-liveness'
 import { detectServiceRoleKeyExposure } from '@/lib/security/service-role-exposure'
 import { detectSchemaDesignDefects } from './schema-design'
 import { detectSlowQueryMissingIndexes } from './slow-query-index'
+import { hasCapability, type PlatformCapability } from './platform-capabilities'
 
 // ── Bounded-autonomy tiers (graded by blast radius) ───────────────────────────
 //
@@ -103,6 +104,16 @@ export interface Invariant {
   rationale: string
   /** Read-only probe. Returns the gaps (canonical RawFindings) if violated. */
   probe: (projectId: string) => Promise<RawFinding[]>
+  /**
+   * A SERVER-level capability this probe cannot see without.
+   *
+   * When it is absent the probe is not run at all and the invariant is reported
+   * UNCHECKED (see DesiredStateReport.disabled) rather than satisfied. Without
+   * this, a probe that answers `[]` because its data source does not exist is
+   * indistinguishable from one that looked and found nothing — the exact shape
+   * that let detectMissingRls read green while it was dead.
+   */
+  requires?: PlatformCapability
 }
 
 /**
@@ -159,6 +170,10 @@ export const INVARIANTS: readonly Invariant[] = [
     rationale:
       'The index probes above reason from SHAPE: a foreign key should be indexed, a column called created_at is probably filtered on. This one reasons from MEASUREMENT. It reads pg_stat_statements, finds the statements this project actually spends milliseconds in, parses the column each one filters by, and then verifies against the catalog that the column exists and has no index leading with it. Only what survives all three becomes a finding, because an index on a guessed column costs write throughput forever and nothing ever surfaces it. Scoped to this project schema: pg_stat_statements is per-database and every tenant shares one, so an unscoped read would hand a customer another customer query as their own performance problem.',
     probe: detectSlowQueryMissingIndexes,
+    // The one probe in this catalogue whose data source can be absent from the
+    // SERVER. Declared so its silence on a database without the extension is
+    // reported as "not checked", never as "this guarantee holds".
+    requires: 'pg_stat_statements',
   },
   {
     id: 'data_plane_is_registered',
@@ -303,6 +318,16 @@ export interface InvariantStatus {
   gaps: DesiredStateGap[]
 }
 
+/** An invariant whose probe was not run because a platform dependency is absent. */
+export interface DisabledInvariant {
+  id: string
+  title: string
+  /** Which server-level capability is missing. */
+  capability: PlatformCapability
+  /** Exactly what an operator has to do about it. */
+  remediation: string
+}
+
 export interface DesiredStateReport {
   projectId: string
   evaluatedAt: string
@@ -315,6 +340,15 @@ export interface DesiredStateReport {
   tierCounts: Record<AutonomyTier, number>
   /** Probe errors (isolated; one failed probe never fails the report). */
   errors: string[]
+  /**
+   * Invariants that could not be evaluated because a SERVER capability is
+   * missing. Deliberately NOT folded into `errors`: `reapInvariantFindings`
+   * refuses to withdraw any stale finding while `errors` is non-empty, so a
+   * permanently-absent extension there would freeze stale-finding withdrawal
+   * platform-wide (this exact failure happened on 2026-08-07). These are a
+   * standing configuration fact, not a transient fault.
+   */
+  disabled: DisabledInvariant[]
 }
 
 /**
@@ -326,12 +360,26 @@ export interface DesiredStateReport {
  */
 export async function computeDesiredStateDiff(projectId: string): Promise<DesiredStateReport> {
   const errors: string[] = []
+  const disabled: DisabledInvariant[] = []
+
+  // Resolve every declared capability ONCE per report. hasCapability caches for
+  // ten minutes, so this is a map lookup on all but the first call in a window.
+  const requiredCaps = [...new Set(INVARIANTS.map(i => i.requires).filter(Boolean))] as PlatformCapability[]
+  const capStates = new Map(
+    await Promise.all(
+      requiredCaps.map(async (c) => [c, await hasCapability(c)] as const),
+    ),
+  )
 
   const probed = await Promise.allSettled(
-    INVARIANTS.map(async (inv) => ({
-      inv,
-      findings: await inv.probe(projectId),
-    })),
+    INVARIANTS.map(async (inv) => {
+      // Skipped, not failed. Running a measurement probe with no measurement
+      // source available produces an empty result that reads exactly like a
+      // healthy backend, which is the failure this branch exists to prevent.
+      const cap = inv.requires ? capStates.get(inv.requires) : undefined
+      if (cap && !cap.available) return { inv, findings: null }
+      return { inv, findings: await inv.probe(projectId) }
+    }),
   )
 
   const invariants: InvariantStatus[] = []
@@ -340,6 +388,19 @@ export async function computeDesiredStateDiff(projectId: string): Promise<Desire
 
   probed.forEach((outcome, i) => {
     const inv = INVARIANTS[i]
+
+    if (outcome.status === 'fulfilled' && outcome.value.findings === null) {
+      const cap = capStates.get(inv.requires as PlatformCapability)
+      disabled.push({
+        id: inv.id,
+        title: inv.title,
+        capability: inv.requires as PlatformCapability,
+        remediation: cap?.remediation ?? '',
+      })
+      // Unchecked ≠ satisfied, for the same reason a thrown probe is not.
+      invariants.push({ id: inv.id, title: inv.title, satisfied: false, gaps: [] })
+      return
+    }
 
     if (outcome.status === 'rejected') {
       errors.push(`[${inv.id}] ${String(outcome.reason?.message ?? outcome.reason)}`)
@@ -374,11 +435,15 @@ export async function computeDesiredStateDiff(projectId: string): Promise<Desire
   return {
     projectId,
     evaluatedAt: new Date().toISOString(),
-    satisfied: violations.length === 0 && errors.length === 0,
+    // A report with an unchecked invariant is not a clean bill of health. Saying
+    // otherwise is how "Backend is healthy — all guarantees hold" got printed
+    // over a probe that had never run.
+    satisfied: violations.length === 0 && errors.length === 0 && disabled.length === 0,
     invariants,
     violations,
     tierCounts,
     errors,
+    disabled,
   }
 }
 
@@ -714,12 +779,25 @@ export async function captureCheckBaseline(projectId: string): Promise<CheckStat
  */
 export function summarizeDesiredState(report: DesiredStateReport): string {
   if (report.satisfied) return 'Backend is healthy — all guarantees hold.'
+
+  const unchecked = report.errors.length + report.disabled.length
+
+  // Everything the loop CAN check passes; the only reason this is not a clean
+  // report is that something could not be evaluated. Saying "0 issues found"
+  // would be technically true and read as an all-clear, which is the claim the
+  // unchecked invariant makes impossible to support.
+  if (report.violations.length === 0) {
+    return unchecked === 1
+      ? '1 guarantee could not be checked — everything else holds.'
+      : `${unchecked} guarantees could not be checked — everything else holds.`
+  }
+
   const { 0: t0, 1: t1, 2: t2, 3: t3 } = report.tierCounts
   const parts: string[] = []
   if (t0 + t1 > 0) parts.push(`${t0 + t1} safe to auto-repair`)
   if (t2 > 0) parts.push(`${t2} need${t2 === 1 ? 's' : ''} your approval`)
   if (t3 > 0) parts.push(`${t3} need${t3 === 1 ? 's' : ''} your attention`)
-  if (report.errors.length > 0) parts.push(`${report.errors.length} could not be checked`)
+  if (unchecked > 0) parts.push(`${unchecked} could not be checked`)
   const total = report.violations.length
   return `${total} ${total === 1 ? 'issue' : 'issues'} found — ${parts.join(', ')}.`
 }

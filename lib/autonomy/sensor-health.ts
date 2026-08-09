@@ -36,6 +36,14 @@ export type ProbeStatus =
   | 'unverified'
   /** Threw. Unknown state, never treated as healthy. */
   | 'errored'
+  /**
+   * Did not run: a SERVER capability it depends on is absent (see
+   * lib/autonomy/platform-capabilities.ts). Distinct from `errored` because
+   * nothing is broken, and distinct from `unverified` because the remedy is
+   * known and belongs to the operator, not to chance. A missing
+   * pg_stat_statements is the case this exists for.
+   */
+  | 'disabled'
 
 export interface ProbeOutcome {
   id: string
@@ -43,6 +51,8 @@ export interface ProbeOutcome {
   status: ProbeStatus
   findingCount: number
   error?: string
+  /** What an operator must install/configure to enable this probe. */
+  disabledReason?: string
   /** ISO timestamp of the last time this probe produced a finding, if ever. */
   lastFiredAt?: string
 }
@@ -54,10 +64,12 @@ export interface SensorHealthReport {
   errored: number
   /** Probes whose silence carries no evidence yet. */
   unverified: number
+  /** Probes that could not run because a server capability is missing. */
+  disabled: number
   /**
    * True only when every probe either fired or is verifiably clean. A report
-   * with unverified or errored probes is NOT a clean bill of health, and the
-   * field is named so it cannot be misread as one.
+   * with unverified, errored or disabled probes is NOT a clean bill of health,
+   * and the field is named so it cannot be misread as one.
    */
   fullyInstrumented: boolean
 }
@@ -68,6 +80,8 @@ export interface ProbeRun {
   title: string
   findingCount: number
   error?: string
+  /** Set when the probe was skipped for a missing platform capability. */
+  disabledReason?: string
 }
 
 /**
@@ -84,7 +98,13 @@ export function classifyProbeOutcomes(
     const lastFiredAt = lastFired.get(run.id)
 
     let status: ProbeStatus
-    if (run.error) {
+    if (run.disabledReason) {
+      // Checked FIRST: a probe that never ran has no findings and no error, so
+      // every branch below would misclassify it — as `unverified` at best, which
+      // reads as "might be broken" when the truth is "not installed, here is the
+      // command". The distinction is what makes it actionable.
+      status = 'disabled'
+    } else if (run.error) {
       status = 'errored'
     } else if (run.findingCount > 0) {
       status = 'fired'
@@ -102,19 +122,22 @@ export function classifyProbeOutcomes(
       status,
       findingCount: run.findingCount,
       ...(run.error ? { error: run.error } : {}),
+      ...(run.disabledReason ? { disabledReason: run.disabledReason } : {}),
       ...(lastFiredAt ? { lastFiredAt } : {}),
     }
   })
 
   const errored = probes.filter((p) => p.status === 'errored').length
   const unverified = probes.filter((p) => p.status === 'unverified').length
+  const disabled = probes.filter((p) => p.status === 'disabled').length
 
   return {
     evaluatedAt: new Date().toISOString(),
     probes,
     errored,
     unverified,
-    fullyInstrumented: errored === 0 && unverified === 0,
+    disabled,
+    fullyInstrumented: errored === 0 && unverified === 0 && disabled === 0,
   }
 }
 
@@ -134,6 +157,15 @@ export function summariseSensorHealth(report: SensorHealthReport): string {
   }
   if (report.errored > 0) {
     parts.push(`${report.errored} ERRORED — the loop is blind to those invariants`)
+  }
+  if (report.disabled > 0) {
+    // Named individually because the remedy is per-probe and belongs to whoever
+    // runs the database. A count alone would be one more number nobody can act
+    // on, which is the failure mode this whole module exists to avoid.
+    const names = report.probes
+      .filter((p) => p.status === 'disabled')
+      .map((p) => `${p.id} (${p.disabledReason ?? 'missing platform capability'})`)
+    parts.push(`${report.disabled} DISABLED — ${names.join('; ')}`)
   }
   return parts.join('. ') + '.'
 }
@@ -180,11 +212,14 @@ export async function checkSensorHealth(projectId: string): Promise<SensorHealth
     if (m) errorById.set(m[1], m[2])
   }
 
+  const disabledById = new Map(report.disabled.map((d) => [d.id, d.remediation]))
+
   const runs: ProbeRun[] = report.invariants.map((inv) => ({
     id: inv.id,
     title: inv.title,
     findingCount: inv.gaps.length,
     ...(errorById.has(inv.id) ? { error: errorById.get(inv.id) } : {}),
+    ...(disabledById.has(inv.id) ? { disabledReason: disabledById.get(inv.id) } : {}),
   }))
 
   const lastFired = await loadProbeLiveness(projectId)

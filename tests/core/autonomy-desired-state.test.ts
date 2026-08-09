@@ -75,6 +75,7 @@ describe('summarizeDesiredState — non-technical, crash-free', () => {
       violations: [],
       tierCounts: { 0: 0, 1: 0, 2: 0, 3: 0 },
       errors: [],
+      disabled: [],
     }
     expect(summarizeDesiredState(report)).toMatch(/healthy/i)
   })
@@ -91,6 +92,7 @@ describe('summarizeDesiredState — non-technical, crash-free', () => {
       ],
       tierCounts: { 0: 1, 1: 0, 2: 1, 3: 0 },
       errors: [],
+      disabled: [],
     }
     const s = summarizeDesiredState(report)
     // Updated 2026-07-30: summarizeDesiredState was rewritten to speak plainly
