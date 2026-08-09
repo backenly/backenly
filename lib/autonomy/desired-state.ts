@@ -61,6 +61,7 @@ import { detectIdleInTransaction } from './connection-health'
 import { detectIndexBloat } from './index-bloat'
 import { detectIntentDrift } from './intent-conformance'
 import { detectBehaviouralRegression } from './baseline/detect'
+import { detectMigrationResidue } from './migration-residue'
 import { hasCapability, type PlatformCapability } from './platform-capabilities'
 
 // ── Bounded-autonomy tiers (graded by blast radius) ───────────────────────────
@@ -186,6 +187,13 @@ export const INVARIANTS: readonly Invariant[] = [
     rationale:
       'The index probes above add indexes. This one is the other direction, and it is the half a platform usually skips because being wrong is expensive. Every index is written on every insert and update of its table forever, so one nothing reads is a permanent tax with no return. The evidence is a measured window rather than a counter: Backenly records each index\'s scan count the first time it sees it and raises nothing, then reports only an index whose count has not moved across at least fourteen days of observation — long enough that a weekly job has had two chances to run. It is reset-proof, because a counter that went backwards means the statistics were cleared and the window starts again. And it is never automatic: fourteen silent days is evidence, not proof, and only the person who wrote the application knows about the quarterly report.',
     probe: detectUnusedIndexes,
+  },
+  {
+    id: 'no_migration_was_left_half_finished',
+    title: 'No index, constraint or transaction was left half-applied by a migration',
+    rationale:
+      'A migration that FAILS is not directly observable here, and it is worth being exact about why: the event triggers that record external DDL fire on ddl_command_end and sql_drop, and PostgreSQL raises both only on success, so a failed statement leaves no row anywhere the platform can read. What it leaves instead is residue, and the residue is exactly detectable. An index whose concurrent build did not finish is maintained on every insert, never used by the planner, and looks identical to a working index in every listing — pure cost, invisible, potentially for years. A constraint added NOT VALID whose second step never ran means the schema claims a guarantee the existing rows were never checked against. An abandoned prepared transaction holds its locks and pins the vacuum horizon for the entire database, across restarts, until somebody resolves it. The first two have one-click repairs behind an approval; the third has none that Backenly may take, because committing applies work the owner may not want and rolling back discards work they may.',
+    probe: detectMigrationResidue,
   },
   {
     id: 'the_backend_behaves_like_itself',
@@ -582,6 +590,9 @@ const INVARIANT_EMITS: Readonly<Record<string, readonly FindingType[]>> = {
   // Re-detectable by construction: the probe judges the latest complete hour, so
   // a subject that recovers simply stops appearing.
   the_backend_behaves_like_itself: ['behavioural_regression'],
+  // Re-detectable: all three shapes are live catalog reads, so a completed
+  // rebuild, validation or transaction resolution closes the gap.
+  no_migration_was_left_half_finished: ['migration_residue'],
   relationships_have_fk_constraints: ['missing_fk'],
   relationships_are_indexed: ['missing_fk_index'],
   data_plane_is_registered: ['schema_not_registered'],

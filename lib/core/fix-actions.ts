@@ -162,6 +162,28 @@ export function buildFixAction(
         },
       }
 
+    // Two repairable residues and one that is not. `residueKind` decides, and
+    // an unknown kind returns null so the hint speaks instead of a button that
+    // has nothing behind it.
+    case 'migration_residue': {
+      const table = details.tableName ?? details.table
+      if (details.residueKind === 'invalid_index') {
+        if (!table || !details.indexName) return null
+        return {
+          action: 'REINDEX_INDEX',
+          params: { tableName: table, indexName: details.indexName },
+        }
+      }
+      if (details.residueKind === 'unvalidated_constraint') {
+        if (!table || !details.constraintName) return null
+        return {
+          action: 'VALIDATE_CONSTRAINT',
+          params: { tableName: table, constraintName: details.constraintName },
+        }
+      }
+      return null
+    }
+
     // Rebuild a btree that is mostly empty space. Needs the index NAME for the
     // same reason the drop does — a table normally has several.
     case 'index_bloat': {
@@ -392,6 +414,33 @@ export function getManualRemediationHint(
         ? ` It was read ${scans.toLocaleString()}× with ${pct}% index coverage.`
         : ''
       return `"${t}" is taking heavy sequential scans and Backenly could not find a column it is safe to index automatically.${measured} Add an index on whichever column your queries filter or sort by — in the AI chat, say "add an index on <table>.<column>".`
+    }
+
+    // Only the prepared-transaction kind reaches here — the other two have real
+    // repairs. It hands over the exact commands and refuses to pick between
+    // them, because the choice discards or applies work Backenly cannot see.
+    case 'migration_residue': {
+      if (details?.residueKind === 'invalid_index') {
+        return (
+          `"${details?.indexName}" on "${details?.tableName}" never finished building. ` +
+          `Approve the rebuild above, or drop it: DROP INDEX CONCURRENTLY "${details?.indexName}";`
+        )
+      }
+      if (details?.residueKind === 'unvalidated_constraint') {
+        return (
+          `"${details?.constraintName}" on "${details?.tableName}" was added NOT VALID and the ` +
+          `VALIDATE step never ran. Approve it above, or run: ALTER TABLE "${details?.tableName}" ` +
+          `VALIDATE CONSTRAINT "${details?.constraintName}";`
+        )
+      }
+      const gid = details?.gid ?? 'the transaction'
+      return (
+        `A prepared transaction ("${gid}") has been hanging for ${details?.ageMinutes ?? 'some'} ` +
+        `minutes, holding locks and blocking vacuum across the whole database. Find out what it ` +
+        `was doing — SELECT * FROM pg_prepared_xacts; — then either COMMIT PREPARED '${gid}'; to ` +
+        `apply that work or ROLLBACK PREPARED '${gid}'; to discard it. Backenly will not choose ` +
+        `for you: one applies changes you may not want and the other throws away changes you may.`
+      )
     }
 
     // The hint is the investigation, not a repair — there is no repair that

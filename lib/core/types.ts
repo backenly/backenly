@@ -128,6 +128,26 @@ export type FindingType =
   // depends entirely on a cause that is not in the data. The finding carries the
   // measurement and what changed on the backend just before it.
   | 'behavioural_regression'
+  // ── What a migration that did not finish left behind.
+  //
+  // A FAILED migration is not directly observable: the DDL event triggers
+  // fire on ddl_command_end and sql_drop, both of which PostgreSQL raises only
+  // on SUCCESS, and there is no error event to hook. The residue is precisely
+  // detectable though, and `details.residueKind` says which:
+  //
+  //   invalid_index          a CREATE INDEX CONCURRENTLY that did not finish.
+  //                          Maintained on every write, never used by the
+  //                          planner, and indistinguishable from a working
+  //                          index in any listing.
+  //   unvalidated_constraint ADD CONSTRAINT ... NOT VALID whose VALIDATE step
+  //                          never ran, so the schema claims a guarantee the
+  //                          existing rows were never checked against.
+  //   prepared_transaction   an abandoned two-phase commit. Holds its locks and
+  //                          pins the vacuum horizon indefinitely, across
+  //                          restarts.
+  //
+  // See lib/autonomy/migration-residue.ts.
+  | 'migration_residue'
   // ── Phase 4 — medium/high-risk action queued from AI chat or orchestration
   // before it applies. details.executorAction/executorParams carry the exact
   // AIAction to run once approved — see lib/core/auto-fix-engine.ts's
@@ -297,6 +317,7 @@ export const ALL_FINDING_TYPES = [
   'index_bloat',
   'intent_drift',
   'behavioural_regression',
+  'migration_residue',
 ] as const satisfies ReadonlyArray<FindingType>
 
 // Canonical types — exact matches pass through untouched.

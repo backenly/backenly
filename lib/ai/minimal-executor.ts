@@ -33,6 +33,9 @@ export interface AIAction {
     | 'DROP_INDEX'
     // Rebuild a bloated btree. Auto-applied: no data, schema or semantic change.
     | 'REINDEX_INDEX'
+    // Finish a constraint that was added NOT VALID. Approval-gated: it scans the
+    // whole table and fails if the existing rows do not satisfy it.
+    | 'VALIDATE_CONSTRAINT'
     | 'DROP_COLUMN'
     | 'DROP_TABLE' | 'TRUNCATE_TABLE'
     // API
@@ -3381,6 +3384,9 @@ async function executeSingleAction(
 
       case 'REINDEX_INDEX':
         return await executeReindexIndex(action.params, projectId)
+
+      case 'VALIDATE_CONSTRAINT':
+        return await executeValidateConstraint(action.params, projectId)
 
       case 'RENAME_COLUMN':
         return await executeRenameColumn(action.params, projectId)
@@ -8174,6 +8180,105 @@ async function executeReindexIndex(params: any, projectId: string): Promise<Exec
     return {
       success: false,
       message: `Could not rebuild index "${indexName}": ${err.message}`,
+      error: err.message,
+    }
+  }
+}
+
+/**
+ * Run step two of a two-step constraint addition.
+ *
+ * `ADD CONSTRAINT ... NOT VALID` enforces the rule for new rows without taking a
+ * long lock; `VALIDATE CONSTRAINT` then checks the rows that were already there.
+ * When only step one ran, the schema claims a guarantee the existing data has
+ * never been held to.
+ *
+ * Approval-gated rather than automatic for a specific reason: this reads every
+ * row in the table, and it FAILS if any of them violates the constraint. That
+ * failure is the most useful outcome it can have — it is the platform finding
+ * out, on the owner's behalf, that data they believe is constrained is not — so
+ * the error is returned verbatim rather than flattened into "could not apply".
+ *
+ * It takes a SHARE UPDATE EXCLUSIVE lock, which permits reads and writes and
+ * blocks only schema changes, so it is safe on a live table. On a very large one
+ * it is still a full scan.
+ */
+async function executeValidateConstraint(params: any, projectId: string): Promise<ExecutionResult> {
+  const tableName = params?.tableName ?? params?.table
+  const constraintName = params?.constraintName ?? params?.constraint
+
+  if (!tableName || !constraintName) {
+    return {
+      success: false,
+      message: 'tableName and constraintName are required to validate a constraint',
+      error: 'Missing parameters',
+      code: 'VALIDATION',
+    }
+  }
+
+  try {
+    const { prisma } = await import('@/lib/db')
+    const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
+    const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
+
+    const { SAFE_IDENT } = await import('@/lib/db/sql-expression')
+    for (const ident of [tableName, constraintName]) {
+      if (!SAFE_IDENT.test(String(ident))) {
+        return {
+          success: false,
+          message: `"${ident}" is not a valid PostgreSQL identifier.`,
+          error: 'Invalid identifier',
+          code: 'VALIDATION',
+        }
+      }
+    }
+
+    const rows = await prisma.$queryRawUnsafe<Array<{ convalidated: boolean; definition: string }>>(
+      `SELECT c.convalidated, pg_get_constraintdef(c.oid) AS definition
+         FROM pg_constraint c
+         JOIN pg_class rel   ON rel.oid = c.conrelid
+         JOIN pg_namespace n ON n.oid = rel.relnamespace
+        WHERE n.nspname = $1 AND rel.relname = $2 AND c.conname = $3`,
+      postgresSchema, tableName, constraintName,
+    ).catch(() => [] as any[])
+
+    if (rows.length === 0) {
+      // Already gone is the goal state, not a failure.
+      return {
+        success: true,
+        message: `Constraint "${constraintName}" no longer exists on "${tableName}" — nothing to validate.`,
+        data: { constraintName, tableName, alreadyAbsent: true },
+      }
+    }
+    if (rows[0].convalidated) {
+      return {
+        success: true,
+        message: `Constraint "${constraintName}" on "${tableName}" is already validated.`,
+        data: { constraintName, tableName, alreadyValidated: true },
+      }
+    }
+
+    await prisma.$executeRawUnsafe(
+      `ALTER TABLE "${postgresSchema}"."${tableName}" VALIDATE CONSTRAINT "${constraintName}"`,
+    )
+
+    return {
+      success: true,
+      message:
+        `Validated "${constraintName}" on "${tableName}" — every existing row satisfies ` +
+        `${rows[0].definition}. The guarantee the schema was claiming is now actually true.`,
+      data: { constraintName, tableName, definition: rows[0].definition },
+    }
+  } catch (err: any) {
+    // The error IS the finding. PostgreSQL names the violating row, and
+    // flattening that into a generic failure would throw away the one piece of
+    // information the owner needs.
+    return {
+      success: false,
+      message:
+        `"${constraintName}" could not be validated on "${tableName}" because the existing data ` +
+        `does not satisfy it: ${err.message}. The constraint is still in place for new rows; the ` +
+        `rows already there need fixing before it can be validated.`,
       error: err.message,
     }
   }

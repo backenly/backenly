@@ -343,6 +343,56 @@ export function classifyFix(
     }
   }
 
+  // ── Migration residue ─────────────────────────────────────────
+  //
+  // One type, three different residues, three different answers — decided on
+  // the evidence rather than the type, the same way contract_surface_broken is.
+  //
+  // Neither repair is automatic, and neither is merely cautious. Rebuilding an
+  // invalid index re-runs the operation that already failed once, and it fails
+  // again if the data that stopped it is still there. Validating a constraint
+  // scans the whole table. Both are one click, and both are the owner's call.
+  if (type === 'migration_residue') {
+    const kind = details?.residueKind
+    if (kind === 'invalid_index') {
+      return {
+        decision: 'approval',
+        reason:
+          'This index never finished building, so it costs a write on every insert and is ' +
+          'never used to answer a query. Rebuilding finishes what was started.',
+        suggestedAction: 'REINDEX_INDEX',
+        riskNote:
+          'The rebuild re-runs the operation that failed the first time. If the data that ' +
+          'stopped it is still there it will fail again — and say so.',
+      }
+    }
+    if (kind === 'unvalidated_constraint') {
+      return {
+        decision: 'approval',
+        reason:
+          'This constraint is enforced for new rows and the rows already in the table were ' +
+          'never checked. Validating it confirms whether the guarantee is actually true.',
+        suggestedAction: 'VALIDATE_CONSTRAINT',
+        riskNote:
+          'It reads every row in the table, and fails if any of them violates the constraint. ' +
+          'That failure is the useful outcome, not an error.',
+      }
+    }
+    // A prepared transaction. Committing applies work the owner may not want and
+    // rolling back discards work they may — there is no safe default, and an
+    // approval queue implying a repair waits behind a yes would be a lie.
+    return {
+      decision: 'notify_only',
+      reason:
+        'A two-phase commit was left hanging, and it is holding locks and blocking vacuum for ' +
+        'the whole database until it is resolved. Backenly will not resolve it: committing ' +
+        'applies work you may not want and rolling back discards work you may.',
+      riskNote:
+        'This does not clear on its own and survives a restart. It gets worse every hour it ' +
+        'is left.',
+    }
+  }
+
   if (AUTO_SAFE.has(type)) {
     return {
       decision: 'auto',

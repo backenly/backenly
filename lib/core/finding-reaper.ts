@@ -297,6 +297,10 @@ const INVARIANT_REAPABLE_TYPES = [
   // and the finding withdraws itself. Without this a one-hour spike would sit in
   // the queue forever describing a backend that recovered.
   'behavioural_regression',
+  // Every one of its three shapes is read live from the catalog or from
+  // pg_prepared_xacts, so a rebuilt index, a validated constraint or a
+  // resolved transaction clears the finding on the next tick.
+  'migration_residue',
   // Both were probe-covered by the invariant catalogue and named in NO reaper,
   // so neither had any path back to healthy. Each has exactly one write site,
   // and that write site IS the invariant probe, so this reaper is the correct
