@@ -172,7 +172,18 @@ const RULES: Rule[] = [
     // Excludes the private and reserved ranges, which are meaningless to a
     // remote attacker: 10/8, 127/8, 192.168/16, 172.16-31/12, 169.254/16,
     // 0.x, 224+/4 multicast+reserved, and 255.x.
-    pattern: /\b(?!0\.)(?!10\.)(?!127\.)(?!169\.254\.)(?!192\.168\.)(?!172\.(?:1[6-9]|2\d|3[01])\.)(?!22[4-9]\.)(?!2[3-5]\d\.)(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b/g,
+    //
+    // Also excludes `N.0.0.0`, and that trailing exclusion is load-bearing
+    // rather than tidy. A dotted quad whose last three octets are all zero is a
+    // NETWORK address, never a reachable host — no production server is ever
+    // named that way, so nothing this rule exists to catch can hide there.
+    //
+    // What DOES live in that shape is Chrome's reduced User-Agent, which since
+    // 2023 always reports `Chrome/<major>.0.0.0`. One such string in a test
+    // fixture (tests/unit/service-role-exposure.spec.ts) failed this gate on
+    // every push for weeks, and a gate that cries wolf on every commit is a gate
+    // people learn to ignore — which costs more than the false positive did.
+    pattern: /\b(?!0\.)(?!10\.)(?!127\.)(?!169\.254\.)(?!192\.168\.)(?!172\.(?:1[6-9]|2\d|3[01])\.)(?!22[4-9]\.)(?!2[3-5]\d\.)(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b(?<!\.0\.0\.0)/g,
     impact: 'Names the production host — the first step of any real attack is finding it.',
     treeOnly: true,
   },

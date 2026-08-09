@@ -120,6 +120,16 @@ describe('autonomy repair actions stay deterministic', () => {
       // VACUUM (ANALYZE) on one named table — a single SQL statement built from
       // a validated identifier, no model anywhere near it.
       'VACUUM_TABLE',
+      // The three index/constraint verbs. Each is ONE statement assembled from
+      // identifiers validated against SAFE_IDENT and re-checked against the
+      // catalog before it runs, with no model on any path:
+      //   DROP_INDEX          DROP INDEX, refused outright when the index backs
+      //                       a constraint (approval-gated, from unused_index)
+      //   REINDEX_INDEX       REINDEX INDEX CONCURRENTLY (index_bloat, and the
+      //                       invalid-index half of migration_residue)
+      //   VALIDATE_CONSTRAINT ALTER TABLE … VALIDATE CONSTRAINT (the NOT VALID
+      //                       half of migration_residue)
+      'DROP_INDEX', 'REINDEX_INDEX', 'VALIDATE_CONSTRAINT',
     ])
     const unknown = [...new Set(emitted)].filter(
       a => !DETERMINISTIC.has(a) && !KNOWN_MODEL_BACKED_ACTIONS.includes(a),

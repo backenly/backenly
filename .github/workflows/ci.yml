@@ -74,23 +74,21 @@ jobs:
       - name: Unit tests
         run: npx jest tests/unit --ci --verbose
 
-      # The self-healing guards. These are database-free too and were simply
-      # never listed, so nothing ran them on push — and two had gone red in the
-      # tree without anyone finding out:
+      # `tests/core` used to run HERE, and it could never have passed.
       #
-      #   • autonomy-is-model-free was reading auto-fix-engine.ts for a repair
-      #     map that had moved to fix-actions.ts. It failed its own
-      #     "did the regex match anything" guard, and while it failed it was also
-      #     no longer watching the file where a model call could actually enter
-      #     the repair path.
-      #   • tests/core holds the trust guarantees — post-fix verification
-      #     coverage, fix classification, repair conformance. All passing, all
-      #     unenforced.
+      # The step was added on the belief that tests/core was database-free. It
+      # never was: auto-fix-integration and auto-fix-approve-coverage each carry
+      # a "Part 2 (real DB)" section that seeds HealthFinding rows and drives the
+      # executor, and AGENTS.md forbids mocking the database at all ("mocks have
+      # caused prod incidents"). Pointed at the deliberately unroutable URL above,
+      # those suites could only ever fail.
       #
-      # Autonomy is the product's differentiator. Its guards belong on the
-      # blocking path, not in a directory someone remembers to run by hand.
-      - name: Autonomy guards
-        run: npx jest tests/core __tests__/autonomy --ci --verbose
+      # So CI went red on every single push, for weeks, on a failure nobody had
+      # introduced — which is worse than not running the guards at all. A red
+      # that is always red carries no information, and the emails train everyone
+      # to ignore the one push where something genuinely broke.
+      #
+      # They now run in the `autonomy` job below, against a real Postgres.
 
   # ── MCP server package ──────────────────────────────────────────────────────
   secrets:
@@ -187,3 +185,77 @@ jobs:
       # handles after a fully successful run.
       - name: Probe fixture suite
         run: npx jest tests/probes --ci --runInBand --verbose --forceExit
+
+  # ── The self-healing guards ─────────────────────────────────────────────────
+  # Autonomy is the product's differentiator, so its guards belong on the
+  # blocking path. They need a real database — see the note in `static`.
+  #
+  # Two PostgreSQL extensions are set up before the suite runs, and they are not
+  # optional decoration: several probes measure rather than infer, and their
+  # tests ASSERT the extension is present instead of skipping. That is
+  # deliberate. The hot-table suite first shipped green while every assertion in
+  # it was silently skipped for a missing extension — a test that cannot fail is
+  # worse than no test, because the suite spends its credibility vouching for it.
+  autonomy:
+    name: autonomy guards
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: backenly_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/backenly_test
+      DIRECT_URL: postgresql://postgres:postgres@localhost:5432/backenly_test
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/backenly_test
+      JWT_SECRET: ci-not-a-real-secret
+      PGPASSWORD: postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+
+      # pg_stat_statements needs shared_preload_libraries, which needs a server
+      # RESTART — a service container cannot be given a `command`, so the setting
+      # is written with ALTER SYSTEM and the container is bounced. pgstattuple
+      # needs neither and is created alongside it.
+      - name: Enable the measurement extensions
+        run: |
+          set -euo pipefail
+          psql "$DATABASE_URL" -c "ALTER SYSTEM SET shared_preload_libraries = 'pg_stat_statements';"
+          docker restart "${{ job.services.postgres.id }}"
+          for _ in $(seq 1 30); do
+            pg_isready -h localhost -p 5432 -U postgres && break
+            sleep 2
+          done
+          psql "$DATABASE_URL" -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;"
+          psql "$DATABASE_URL" -c "CREATE EXTENSION IF NOT EXISTS pgstattuple;"
+          # Assert rather than hope. If either is missing the suites below fail
+          # with a confusing measurement error instead of naming the real cause.
+          psql "$DATABASE_URL" -tAc \
+            "SELECT count(*) FROM pg_extension WHERE extname IN ('pg_stat_statements','pgstattuple')" \
+            | grep -qx 2 || { echo "measurement extensions missing"; exit 1; }
+
+      - name: Push schema to the test database
+        run: npx prisma db push --accept-data-loss --skip-generate
+      - run: npx prisma generate
+
+      # --runInBand: these suites share one database and several of them VACUUM.
+      # Run in parallel, one suite's open snapshot pins the vacuum horizon and a
+      # neighbour's "delete rows, vacuum, expect sparse" fixture legitimately
+      # cannot become sparse. Serial is also simply correct on a 2-core runner.
+      # --forceExit for the same Prisma-singleton reason as the probe suite.
+      - name: Autonomy guards
+        run: npx jest tests/core __tests__/autonomy --ci --runInBand --verbose --forceExit

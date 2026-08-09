@@ -55,9 +55,22 @@ echo "$added" | grep -qE '\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-
 #   : string / : number      a type annotation in an interface
 # A real hardcoded value is a bare quoted string or bare token, so it survives
 # every one of these exclusions.
+#
+# The third filter removes values that SAY they are placeholders. CI workflows
+# have to give these variables something, and `JWT_SECRET: ci-not-a-real-secret`
+# is twenty characters of [A-Za-z0-9_-] that trips the bare pattern exactly like
+# a real key would. Blocking it teaches the one habit this hook must never
+# teach — reaching for --no-verify — and the next commit to do that is the one
+# carrying a real credential.
+#
+# The vocabulary is deliberately narrow and matches what preflight-oss.ts
+# already treats as a placeholder. A real secret does not contain the string
+# "not-a-real" or "placeholder", so nothing this rule exists to catch can hide
+# behind it.
 echo "$added" \
   | grep -E '(JWT_SECRET|SESSION_SECRET|MASTER_ENCRYPTION_KEY|INTERNAL_API_TOKEN|CRON_SECRET|SECRET_KEY|PRIVATE_KEY|CLIENT_SECRET|STORAGE_SECRET|OAUTH_ENCRYPTION_KEY|PREVIEW_TOKEN_SECRET)[A-Z_]*\s*[=:]\s*["'\'']?[A-Za-z0-9+/_-]{16,}' \
-  | grep -qvE '[=:]\s*(await\s+)?([A-Za-z_$][A-Za-z0-9_$]*\s*\(|process\.env\.|string\b|number\b|boolean\b)' \
+  | grep -vE '[=:]\s*(await\s+)?([A-Za-z_$][A-Za-z0-9_$]*\s*\(|process\.env\.|string\b|number\b|boolean\b)' \
+  | grep -qviE 'not-a-real|placeholder|changeme|example|dummy|redacted|your-[a-z-]*secret' \
   && hit "hardcoded secret assignment (NAME=<long value>)"
 # connection string carrying real credentials (not localhost / placeholder)
 echo "$added" | grep -qE '(mongodb(\+srv)?|postgres(ql)?)://[^\s:/@]+:[^@\s]+@' \
