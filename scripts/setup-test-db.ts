@@ -52,13 +52,38 @@ try {
     }
   })
   
+  // pg_stat_statements is the data source for every measurement-driven detector
+  // (measured slow queries, the hot-table index column). Without it those tests
+  // have nothing to measure and their assertions pass vacuously — which is how
+  // the hot-table column test first shipped green while proving nothing.
+  //
+  // Non-fatal: the extension needs `shared_preload_libraries` and a server
+  // restart, so it cannot be created on a database that was not started with it.
+  // The tests that depend on it assert its presence themselves and fail loudly,
+  // which is the right place for that to surface.
+  console.log('📊 Enabling pg_stat_statements (needed by the measurement probes)...')
+  try {
+    // `prisma db execute` rather than a pg client: this file runs under tsx's
+    // CommonJS transform, which has no top-level await, and the surrounding
+    // block is already synchronous execSync.
+    execSync('npx prisma db execute --stdin --schema prisma/schema.prisma', {
+      input: 'CREATE EXTENSION IF NOT EXISTS pg_stat_statements;',
+      stdio: ['pipe', 'ignore', 'pipe'],
+      env: { ...process.env, DATABASE_URL: TEST_DATABASE_URL, DIRECT_URL: TEST_DATABASE_URL },
+    })
+    console.log('   enabled')
+  } catch (err: any) {
+    console.warn(`   skipped: ${String(err?.stderr ?? err?.message ?? err).trim().split('\n').pop()}`)
+    console.warn("   add shared_preload_libraries = 'pg_stat_statements' to postgresql.conf and restart")
+  }
+
   console.log('')
   console.log('✅ Test database setup complete!')
   console.log('')
   console.log('You can now run tests with:')
   console.log('  npm test')
   console.log('')
-  
+
 } catch (error) {
   console.error('')
   console.error('❌ Failed to setup test database')

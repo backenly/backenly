@@ -190,73 +190,36 @@ async function detectHotTables(pool: Pool, schemaName: string): Promise<HotTable
       [schemaName],
     )
 
-    // Pick a column that ACTUALLY EXISTS to index, per table.
+    // Which column are these sequential scans actually filtering on?
     //
-    // This used to hardcode `created_at` for every hot table, so on any table
-    // without that column the generated `CREATE INDEX ... (created_at DESC)`
-    // failed 42703 inside _applyAutoFixes, whose catch logs "Auto-fix failed
-    // (non-fatal)" and moves on. It fired nine times per pass in production —
-    // an auto-fix that had never once applied. Same species as the
-    // pg_stat_user_tables.tablename bug above: generated SQL naming a column the
-    // table does not have, swallowed by a catch.
+    // This used to answer from a hardcoded name list — created_at, user_id,
+    // owner_id, updated_at — picking the first one that existed on the table.
+    // Two revisions before that it hardcoded `created_at` outright and produced
+    // CREATE INDEX statements against columns the table did not have.
     //
-    // Candidates are ordered by how likely they are to be the filter/sort key of
-    // the scans being counted, and NOTHING outside this list is ever chosen: an
-    // index on a guessed column costs write throughput permanently, so when none
-    // of these exists the table is reported with no automatic repair rather than
-    // with an invented one.
+    // The name list fixed the crash and left the real defect in place. This
+    // detector MEASURES sequential scans and then indexed a column chosen by
+    // convention, so on a table whose queries filter `customer_ref` it would
+    // count the scans correctly and build the index on `created_at` — a
+    // permanent write-throughput cost on every insert and update, buying nothing,
+    // with the scans it was supposed to absorb still happening. And because
+    // `infra_hot_table` is classified auto, that index was APPLIED without asking
+    // whenever pressure reached high or critical.
     //
-    // Columns already leading an existing index are excluded — re-indexing them
-    // would not reduce a single sequential scan.
-    // Both naming conventions, interleaved by priority rather than grouped by
-    // convention. Workspace schemas are a mix: a table built through the
-    // builder gets camelCase (createdAt), one written by hand or imported gets
-    // snake_case. Listing only snake_case made every camelCase project look
-    // unfixable — `users` in the reported case had an unindexed `createdAt` and
-    // was reported as having no indexable column at all.
-    const INDEX_CANDIDATES = [
-      'created_at', 'createdAt',
-      'user_id', 'userId',
-      'owner_id', 'ownerId',
-      'updated_at', 'updatedAt',
-    ] as const
+    // The codebase's own rule, written three times in these files, is that an
+    // index on a guessed column is worse than no index because nothing ever
+    // surfaces it. The rule was simply never applied here.
+    //
+    // So the column now comes from the same place the scans do: measurement.
+    // pg_stat_statements records the statements this schema actually spends time
+    // in; extractIndexCandidate parses the equality predicate out of one; the
+    // catalog confirms the column exists and nothing already leads an index with
+    // it. A table that survives none of that is reported with NO column, which
+    // classifyFix already routes to notify_only with a hint asking the owner
+    // which column their queries filter by. Saying "I measured the scans but
+    // cannot tell you which column" is worth more than a confident wrong answer.
     const tableNames = rows.rows.map(r => r.tablename)
-    const indexColumn = new Map<string, string>()
-
-    if (tableNames.length) {
-      const cols = await pool.query<{ table_name: string; column_name: string }>(
-        `SELECT table_name, column_name FROM information_schema.columns
-          WHERE table_schema = $1
-            AND table_name = ANY($2::text[])
-            AND column_name = ANY($3::text[])`,
-        [schemaName, tableNames, [...INDEX_CANDIDATES]],
-      )
-
-      // Leading column of every existing index, so we never propose a duplicate.
-      const indexed = await pool.query<{ tablename: string; leading: string }>(
-        `SELECT c.relname AS tablename,
-                a.attname  AS leading
-           FROM pg_index i
-           JOIN pg_class c     ON c.oid = i.indrelid
-           JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = $1
-           JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = i.indkey[0]
-          WHERE c.relname = ANY($2::text[])`,
-        [schemaName, tableNames],
-      )
-      const alreadyIndexed = new Set(indexed.rows.map(r => `${r.tablename}.${r.leading}`))
-
-      const available = new Map<string, Set<string>>()
-      for (const c of cols.rows) {
-        if (!available.has(c.table_name)) available.set(c.table_name, new Set())
-        available.get(c.table_name)!.add(c.column_name)
-      }
-      for (const [table, present] of available) {
-        const pick = INDEX_CANDIDATES.find(
-          c => present.has(c) && !alreadyIndexed.has(`${table}.${c}`),
-        )
-        if (pick) indexColumn.set(table, pick)
-      }
-    }
+    const indexColumn = await measuredFilterColumns(pool, schemaName, tableNames)
 
     return rows.rows.map(r => {
       const seqScans = Number(r.seq_scan)
@@ -318,8 +281,13 @@ async function detectHotTables(pool: Pool, schemaName: string): Promise<HotTable
       // disagree: a table at 60% coverage was rated 'medium' index pressure but
       // described as a bloat problem and offered no index, because the pressure
       // chain cut at 70 and the recommendation cut at 50.
+      // No DESC. It was there because the column used to be picked from a list
+      // headed by `created_at`, where a descending index matches "newest first"
+      // ordering. The column is now parsed from an equality predicate, and a
+      // btree serves equality identically in either direction — leaving DESC
+      // would describe an intent the measurement never showed.
       const suggestedIndex = kind === 'index_pressure' && idxCol
-        ? `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${r.tablename}_${idxCol} ON "${schemaName}"."${r.tablename}" ("${idxCol}" DESC);`
+        ? `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${r.tablename}_${idxCol} ON "${schemaName}"."${r.tablename}" ("${idxCol}");`
         : undefined
 
       return {
@@ -335,8 +303,8 @@ async function detectHotTables(pool: Pool, schemaName: string): Promise<HotTable
         // match what the repair would do.
         recommendation: kind === 'index_pressure'
           ? idxCol
-            ? `Table "${r.tablename}" is read ${seqScans.toLocaleString()}× with only ${idxHitPct}% index coverage — indexing "${idxCol}" should absorb most of those scans.`
-            : `Table "${r.tablename}" is read ${seqScans.toLocaleString()}× with only ${idxHitPct}% index coverage — add an index on whichever column your queries filter or sort by.`
+            ? `Table "${r.tablename}" is read ${seqScans.toLocaleString()}× with only ${idxHitPct}% index coverage, and the statements doing it filter on "${idxCol}" — indexing that column should absorb most of those scans.`
+            : `Table "${r.tablename}" is read ${seqScans.toLocaleString()}× with only ${idxHitPct}% index coverage. Backenly could not measure which column those reads filter on, and will not guess — an index on the wrong column costs a write on every insert forever and nothing surfaces it. Name the column your queries filter or sort by.`
           : `Table "${r.tablename}" is carrying ${deadRatio}% dead rows — Backenly runs VACUUM ANALYZE to reclaim the space and refresh planner statistics.`,
         suggestedIndex,
         indexColumn: idxCol,
@@ -607,6 +575,100 @@ async function detectWebSocketPressure(
     }
   } catch {
     return null
+  }
+}
+
+/**
+ * The column each named table is measurably filtered by, verified indexable.
+ *
+ * Returns an empty map when pg_stat_statements is not installed — the honest
+ * result, and the reason `infra_hot_table` findings then carry no column and
+ * become notify_only rather than auto-applying a guess.
+ *
+ * Three filters, and a candidate has to survive all of them:
+ *   1. PARSED from a real statement, never inferred from a name
+ *   2. the column EXISTS on that table (a parse can produce a plausible name for
+ *      a column nobody has)
+ *   3. no existing index already LEADS with it — re-indexing removes no scans
+ */
+async function measuredFilterColumns(
+  pool: Pool,
+  schemaName: string,
+  tableNames: string[],
+): Promise<Map<string, string>> {
+  const picked = new Map<string, string>()
+  if (tableNames.length === 0) return picked
+
+  try {
+    const ext = await pool.query(
+      `SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements' LIMIT 1`,
+    )
+    if (ext.rows.length === 0) return picked
+
+    // Scoped to THIS schema: pg_stat_statements is per-database and every tenant
+    // shares one, so an unscoped read would index a column named in someone
+    // else's query. `position()` rather than LIKE, where `_` is a wildcard.
+    //
+    // No latency threshold here, deliberately. The evidence for a hot table is
+    // its scan count, which the caller already measured; this query only has to
+    // answer WHICH column, so a fast statement run ten thousand times is exactly
+    // as informative as a slow one. Ordered by total time so the column the
+    // table spends the most time filtering wins when several qualify.
+    const stmts = await pool.query<{ query: string }>(
+      `SELECT LEFT(query, 400) AS query
+         FROM pg_stat_statements
+        WHERE position($1 in query) > 0
+          AND query NOT LIKE '%pg_catalog%'
+          AND query NOT LIKE '%information_schema%'
+        ORDER BY total_exec_time DESC
+        LIMIT 100`,
+      [schemaName],
+    )
+
+    const wanted = new Set(tableNames)
+    const candidates = new Map<string, string>()
+    for (const row of stmts.rows) {
+      const cand = extractIndexCandidate(row.query, schemaName)
+      if (!cand || !wanted.has(cand.table)) continue
+      // First match wins: rows arrive worst-first, so this is the column the
+      // table spends the most time filtering on.
+      if (!candidates.has(cand.table)) candidates.set(cand.table, cand.column)
+    }
+    if (candidates.size === 0) return picked
+
+    const verified = await pool.query<{
+      table_name: string
+      column_name: string
+      already_indexed: boolean
+    }>(
+      `SELECT c.relname AS table_name,
+              a.attname AS column_name,
+              EXISTS (
+                SELECT 1 FROM pg_index i
+                 WHERE i.indrelid = c.oid AND i.indkey[0] = a.attnum
+              ) AS already_indexed
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+        WHERE n.nspname = $1
+          AND c.relkind = 'r'
+          AND c.relname = ANY($2::text[])`,
+      [schemaName, [...candidates.keys()]],
+    )
+
+    const indexable = new Map<string, boolean>()
+    for (const v of verified.rows) {
+      indexable.set(`${v.table_name}.${v.column_name}`, !v.already_indexed)
+    }
+
+    for (const [table, column] of candidates) {
+      if (indexable.get(`${table}.${column}`) === true) picked.set(table, column)
+    }
+    return picked
+  } catch {
+    // Never invent a column because a lookup failed. An empty map degrades the
+    // finding to notify_only, which is the correct answer under uncertainty.
+    return picked
   }
 }
 
