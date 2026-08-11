@@ -221,7 +221,7 @@ export default function DeployPage() {
                 <p className="text-sm text-gray-400 leading-relaxed">
                   It exists privately and safely.
                   <br />
-                  Deploy when you're ready to expose it.
+                  Deploy when you&apos;re ready to expose it.
                 </p>
               </div>
             </div>

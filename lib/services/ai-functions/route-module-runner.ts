@@ -65,7 +65,6 @@ let _esbuildTransformSync:
   | null = null
 function getEsbuildTransformSync() {
   if (_esbuildTransformSync) return _esbuildTransformSync
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
   const req = eval('require') as NodeRequire
   _esbuildTransformSync = req('esbuild').transformSync
   return _esbuildTransformSync!

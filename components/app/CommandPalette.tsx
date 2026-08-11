@@ -227,7 +227,7 @@ export function CommandPalette() {
                 ))}
                 {filteredCommands.length === 0 && (
                   <div className="px-4 py-10 text-center">
-                    <p className="text-[12.5px] text-zinc-500">Nothing matches "{search}".</p>
+                    <p className="text-[12.5px] text-zinc-500">Nothing matches &quot;{search}&quot;.</p>
                   </div>
                 )}
               </div>

@@ -120,7 +120,7 @@ export default function DatabaseRedirectPage() {
               </li>
               <li className="flex items-start gap-2">
                 <ArrowRight className="w-4 h-4 text-indigo-400 flex-shrink-0 mt-0.5" />
-                <span><strong className="text-white">Clear Context:</strong> You always know which project you're working on</span>
+                <span><strong className="text-white">Clear Context:</strong> You always know which project you&apos;re working on</span>
               </li>
               <li className="flex items-start gap-2">
                 <ArrowRight className="w-4 h-4 text-indigo-400 flex-shrink-0 mt-0.5" />

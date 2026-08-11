@@ -454,7 +454,7 @@ export default function SettingsPage() {
               <ModalHeader icon={ShieldCheck} title="Save your backup codes" subtitle="Each can be used once" onClose={closeTwoFAModal} />
               <div className="p-5">
                 <KitNote icon={AlertTriangle} tone="warn">
-                  Store these somewhere safe. We won't show them again.
+                  Store these somewhere safe. We won&apos;t show them again.
                 </KitNote>
                 <div className="mt-4 grid grid-cols-2 gap-2 rounded-lg border border-white/[0.07] bg-[#0f1015] p-4">
                   {twoFABackupCodes.map((code, i) => (
@@ -660,7 +660,7 @@ function SecuritySection({
               </div>
               <div className="min-w-0 flex-1">
                 <p className="text-[13px] font-medium text-zinc-100">Send password reset link</p>
-                <p className="mt-0.5 text-[11.5px] text-zinc-500">We'll email a secure link to {user?.email}.</p>
+                <p className="mt-0.5 text-[11.5px] text-zinc-500">We&apos;ll email a secure link to {user?.email}.</p>
               </div>
               <KitButton variant="secondary" size="sm" icon={resetLoading ? undefined : Mail} onClick={onPasswordReset} disabled={resetLoading}>
                 {resetLoading ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Sending…</> : 'Send link'}
@@ -668,7 +668,7 @@ function SecuritySection({
             </div>
           ) : (
             <p className="text-[12.5px] text-zinc-400">
-              Your password is managed by <span className="font-medium text-zinc-200">{providerLabel(user?.provider)}</span>. Update it in your provider's account settings.
+              Your password is managed by <span className="font-medium text-zinc-200">{providerLabel(user?.provider)}</span>. Update it in your provider&apos;s account settings.
             </p>
           )}
         </KitCardBody>
