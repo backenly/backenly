@@ -82,6 +82,38 @@ jobs:
       - name: Unit tests
         run: npx jest tests/unit --ci --verbose
 
+      # tests/unit was not the only database-free suite, it was just the only
+      # one anyone had pointed CI at. jest resolves 157 suites; the four paths
+      # this workflow names cover 92, and the remaining 65 were not excluded on
+      # purpose — no comment here mentions them either way (#7).
+      #
+      # 31 of those need no database, including the tenant-isolation,
+      # admin-step-up, ai-data-access, rbac, middleware, webhook-security and
+      # security-isolation suites. Every one of them guards a boundary this
+      # repository treats as non-negotiable, and none of them ran on any push.
+      # They cost ~22s against the unroutable URL above.
+      #
+      # The list lives in a file, not inline here, because the set is not a
+      # directory: several directories hold both kinds, so a path pattern would
+      # drag database-backed suites onto this job and make it permanently red —
+      # the exact failure the tests/core note below describes.
+      #
+      # The remaining 34 are still unrun. They need a real database or a live
+      # model provider, and each needs its own decision; #7 tracks that.
+      - name: Database-free suites outside tests/unit
+        run: |
+          set -euo pipefail
+          # A renamed or deleted suite must fail loudly here. Passed to jest as
+          # a bare path, it would simply match nothing and this step would stay
+          # green while testing less than it claims to.
+          SUITES=()
+          while IFS= read -r f; do
+            [ -f "$f" ] || { echo "listed suite no longer exists: $f"; exit 1; }
+            SUITES+=("$f")
+          done < <(grep -vE '^[[:space:]]*(#|$)' .github/database-free-suites.txt)
+          echo "running ${#SUITES[@]} database-free suites"
+          npx jest --runTestsByPath "${SUITES[@]}" --ci --verbose
+
       # `tests/core` used to run HERE, and it could never have passed.
       #
       # The step was added on the belief that tests/core was database-free. It
