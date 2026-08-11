@@ -60,6 +60,7 @@ next-env.d.ts
 # User-generated workspaces (IMPORTANT for production)
 /workspace/
 /tmp/
+/tmp-*
 
 # Storage
 /storage/
