@@ -1,0 +1,57 @@
+# Database-free test suites that CI runs in the `static` job.
+#
+# jest resolves 157 suites. CI ran 92 of them (tests/unit, tests/probes,
+# tests/core, __tests__/autonomy); the other 65 were never named anywhere,
+# which is how they stopped running without anyone deciding they should (#7).
+#
+# Every suite below was verified to need no database: pointed at the same
+# unroutable placeholder URL the `static` job already sets, all 31 pass, with
+# 530 assertions and none skipped. That last part matters — a suite that passes
+# by skipping everything spends the suite's credibility vouching for nothing.
+#
+# They are listed file by file rather than by directory because the directories
+# are mixed. Three of the six __tests__/security suites need a real database,
+# as do two of the five in tests/ai; adding the parent directory would put a
+# guaranteed failure on the blocking path.
+#
+# To re-verify this list, or to check a suite before adding one:
+#
+#   DATABASE_URL=postgresql://ci:ci@127.0.0.1:1/unused \
+#   TEST_DATABASE_URL=$DATABASE_URL DIRECT_URL=$DATABASE_URL \
+#   JWT_SECRET=ci-not-a-real-secret \
+#   npx jest --runTestsByPath <path> --ci
+#
+# A suite that fails with PrismaClientInitializationError needs a database and
+# belongs in the `autonomy` job instead, not here.
+
+__tests__/billing/model-backed-tools-are-charged.test.ts
+__tests__/integration/auth-flow.test.ts
+__tests__/lib/agent-ops.test.ts
+__tests__/lib/auth/middleware.test.ts
+__tests__/lib/auth/rbac.test.ts
+__tests__/lib/services/apiKeyUsage.test.ts
+__tests__/security/admin-step-up.test.ts
+__tests__/security/ai-data-access.test.ts
+__tests__/security/tenant-isolation.test.ts
+__tests__/suite1.basic-lifecycle.test.ts
+tests/ai/brain-build-signals.test.ts
+tests/ai/cross-turn-referential.test.ts
+tests/ai/updated-at-trigger-diagnosis.test.ts
+tests/auth/email-eligibility.test.ts
+tests/auth/email-trust.test.ts
+tests/blueprints/blueprint-routing.test.ts
+tests/blueprints/plan-coverage.test.ts
+tests/blueprints/resume-routing.test.ts
+tests/build-runs/flag.test.ts
+tests/build-runtime/build-runtime.test.ts
+tests/build-runtime/marketplace-regression.test.ts
+tests/build-runtime/reliability-regression.test.ts
+tests/chat-execution-pipeline.test.ts
+tests/concurrency/concurrency-hardening.test.ts
+tests/execution/route-module-runner-contract.test.ts
+tests/migration/upgrade-safety.test.ts
+tests/observability/operator-health.test.ts
+tests/qa/launch-hardening.test.ts
+tests/security-isolation.test.ts
+tests/security/webhook-security.test.ts
+tests/verification/execution.test.ts
