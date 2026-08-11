@@ -57,6 +57,14 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit -p tsconfig.json
 
+      # CONTRIBUTING.md and README.md both tell contributors to run this before
+      # a PR, but nothing enforced it, so main drifted to 17 lint errors and the
+      # first command a new contributor ran failed on code they never touched
+      # (#8). `next build` cannot catch it either: next.config.js sets
+      # eslint.ignoreDuringBuilds. Only running it here keeps it green.
+      - name: Lint
+        run: npm run lint
+
       # Under PostgREST the API IS the schema, so an ApiDefinition row decides
       # nothing — it is a second, writable copy of a fact the PostgreSQL catalog
       # already owns, and the only thing a second copy can do is disagree. It

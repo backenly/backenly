@@ -271,7 +271,7 @@ export default function DashboardPage() {
                 <>
                   <h3 className="mt-4 text-sm font-semibold text-white">No matching projects</h3>
                   <p className="mt-2 max-w-sm text-sm leading-6 text-zinc-500">
-                    No project matches "{searchQuery.trim()}".
+                    No project matches &quot;{searchQuery.trim()}&quot;.
                   </p>
                 </>
               )}
@@ -423,7 +423,7 @@ function NewProjectModal({
               <span className="h-[5px] w-[5px] rounded-full bg-emerald-400" />
               EU · Hetzner
             </span>
-            <span>Deployed to Backenly's single region.</span>
+            <span>Deployed to Backenly&apos;s single region.</span>
           </div>
 
           {error && (

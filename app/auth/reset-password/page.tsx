@@ -107,7 +107,7 @@ function ResetPasswordForm() {
               </div>
             </motion.div>
             <h2 className="text-4xl font-bold text-white mb-4">Choose a new<br />password</h2>
-            <p className="text-white/80 text-lg">Make it strong and something you'll remember.</p>
+            <p className="text-white/80 text-lg">Make it strong and something you&apos;ll remember.</p>
           </motion.div>
         </div>
       </div>
