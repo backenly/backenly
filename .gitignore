@@ -61,6 +61,11 @@ next-env.d.ts
 /workspace/
 /tmp/
 
+# Root-level scratch files (tmp-dbg.ts and friends were committed once; they
+# ran destructive SQL against DATABASE_URL and tsc picked them up as build
+# input). Rooted so only repo-root scratch files match.
+/tmp-*
+
 # Storage
 /storage/
 
