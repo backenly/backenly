@@ -21,7 +21,7 @@
     "test": "npm run test:setup && jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
-    "test:setup": "cross-env DATABASE_URL=%TEST_DATABASE_URL% prisma db push --accept-data-loss --skip-generate || echo 'Test DB setup skipped - ensure TEST_DATABASE_URL is set'",
+    "test:setup": "tsx scripts/setup-test-db.ts",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
     "test:e2e:debug": "playwright test --debug",
@@ -30,7 +30,7 @@
     "db:migrate": "prisma migrate dev",
     "db:seed": "tsx prisma/seed-billing.ts",
     "db:studio": "prisma studio",
-    "db:test:setup": "tsx scripts/setup-test-db.ts",
+    "db:test:setup": "npm run test:setup",
     "migrate:api-keys": "tsx scripts/migrate-api-keys-to-hash.ts",
     "cleanup:tokens": "tsx scripts/cleanup-expired-tokens.ts"
   },
