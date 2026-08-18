@@ -98,8 +98,15 @@ jobs:
       # drag database-backed suites onto this job and make it permanently red —
       # the exact failure the tests/core note below describes.
       #
-      # The remaining 34 are still unrun. They need a real database or a live
-      # model provider, and each needs its own decision; #7 tracks that.
+      # The rest were then measured against a real Postgres, individually. 10
+      # fail without a database and pass with one; they run in `integration`
+      # below. proposals.test.ts needed no database once its dead import was
+      # removed and joined this list. CI now runs 134 of 156 suites.
+      #
+      # The 22 still unrun are named, with the measured reason for each, in
+      # .github/suites-not-in-ci.txt. That file is the actual fix for #7: the
+      # defect was never that suites failed, it was that unrun suites were
+      # named nowhere, so nothing could report them missing.
       - name: Database-free suites outside tests/unit
         run: |
           set -euo pipefail
@@ -112,7 +119,9 @@ jobs:
             SUITES+=("$f")
           done < <(grep -vE '^[[:space:]]*(#|$)' .github/database-free-suites.txt)
           echo "running ${#SUITES[@]} database-free suites"
-          npx jest --runTestsByPath "${SUITES[@]}" --ci --verbose
+          npx jest --runTestsByPath "${SUITES[@]}" --ci --verbose \
+            --json --outputFile=jest-static.json
+          node scripts/assert-no-skipped-suites.js jest-static.json
 
       # `tests/core` used to run HERE, and it could never have passed.
       #
@@ -181,6 +190,74 @@ jobs:
           "
 
   # ── Database-backed ─────────────────────────────────────────────────────────
+  # The second half of #7: suites that were never named in any job and need a
+  # real database to run at all.
+  #
+  # Entry requirement is a measurement, not a judgement. Each suite here was run
+  # twice — against the unroutable placeholder the `static` job uses, and against
+  # a real PostgreSQL 16 — and appears in this job only because it FAILS without
+  # a database and PASSES with one. A suite that passes both ways belongs in
+  # `static`; putting it here would spend a service container proving nothing.
+  #
+  # Two of these could not have passed in ANY environment before this job
+  # existed. concurrency-convergence and pointer-swap-concurrency hardcoded
+  # postgresql://postgres:pass@localhost:5432/nexa — the pre-rename database
+  # name — and overwrote DATABASE_URL with it at module load. They failed with
+  # PrismaClientInitializationError everywhere, which reads as "needs a
+  # database" and is why #7 first filed them that way. They needed one specific
+  # dead database. They now use TEST_DATABASE_URL like everything else.
+  integration:
+    name: integration suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: backenly_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/backenly_test
+      DIRECT_URL: postgresql://postgres:postgres@localhost:5432/backenly_test
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/backenly_test
+      JWT_SECRET: ci-not-a-real-secret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Push schema to the test database
+        run: npx prisma db push --accept-data-loss --skip-generate
+      - run: npx prisma generate
+
+      # --runInBand: these share one database and several seed and delete the
+      # same User and Project rows. --forceExit for the same Prisma-singleton
+      # reason as the probe and autonomy suites.
+      - name: Database-backed suites
+        run: |
+          set -euo pipefail
+          # A renamed or deleted suite must fail loudly rather than silently
+          # matching nothing and leaving this job green while testing less than
+          # it claims to.
+          SUITES=()
+          while IFS= read -r f; do
+            [ -f "$f" ] || { echo "listed suite no longer exists: $f"; exit 1; }
+            SUITES+=("$f")
+          done < <(grep -vE '^[[:space:]]*(#|$)' .github/database-backed-suites.txt)
+          echo "running ${#SUITES[@]} database-backed suites"
+          npx jest --runTestsByPath "${SUITES[@]}" --ci --runInBand --verbose --forceExit \
+            --json --outputFile=jest-integration.json
+          node scripts/assert-no-skipped-suites.js jest-integration.json
+
   # Probe fixtures construct a violating state directly and assert the probe
   # FIRES. A probe that has never been observed producing a finding is presumed
   # broken, not healthy — detectMissingRls sat dead in every environment and

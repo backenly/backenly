@@ -10,23 +10,28 @@
  * - Measures retry behavior
  */
 
-// OVERRIDE Jest setup to use real database
+// Needs a REAL database, not integration mode.
+//
+// This used to hardcode postgresql://postgres:pass@localhost:5432/nexa and
+// overwrite DATABASE_URL with it. `nexa` is the pre-rename database name, so
+// the suite asked for a database that exists in no environment and failed with
+// PrismaClientInitializationError everywhere, which read as "needs a database"
+// when it actually needed one specific dead one (#7). It now uses whatever
+// TEST_DATABASE_URL points at, like every other database-backed suite.
 process.env.ENGINE_MODE = 'production'
-process.env.DATABASE_URL = 'postgresql://postgres:pass@localhost:5432/nexa'
-process.env.DIRECT_URL = 'postgresql://postgres:pass@localhost:5432/nexa'
 
 import { executeDeterministicMutationWithRetry } from '@/lib/orchestration/deterministic-mutation-executor'
 import { getActiveGraph } from '@/lib/orchestration/graph-pointer'
 import { PrismaClient } from '@prisma/client'
 import { CanonicalIntent } from '@/lib/orchestration/types'
 
-// Create Prisma client with local DB
+const TEST_DB_URL = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL
+if (!TEST_DB_URL) {
+  throw new Error('concurrency-convergence needs TEST_DATABASE_URL or DATABASE_URL')
+}
+
 const prisma = new PrismaClient({
-  datasources: {
-    db: {
-      url: 'postgresql://postgres:pass@localhost:5432/nexa',
-    },
-  },
+  datasources: { db: { url: TEST_DB_URL } },
 })
 
 // Test configuration

@@ -135,3 +135,7 @@ public/backenly-supabase.esm.js
 # live session, so neither belongs in a public repo.
 .video-out/
 *.storageState.json
+
+# jest --json reports written by CI for the no-vacuous-suites guard
+jest-static.json
+jest-integration.json

@@ -11,10 +11,13 @@
  * 5. Confirms final state convergence
  */
 
-// Force production mode for real transactions, but we'll bypass provisioning
+// Force production mode for real transactions, but we'll bypass provisioning.
+//
+// This used to hardcode postgresql://postgres:pass@localhost:5432/nexa and
+// overwrite DATABASE_URL with it. `nexa` is the pre-rename database name, so
+// the suite asked for a database that exists in no environment (#7). It now
+// uses whatever TEST_DATABASE_URL points at.
 process.env.ENGINE_MODE = 'production'
-process.env.DATABASE_URL = 'postgresql://postgres:pass@localhost:5432/nexa'
-process.env.DIRECT_URL = 'postgresql://postgres:pass@localhost:5432/nexa'
 // Skip isolated database provisioning
 process.env.SKIP_ISOLATED_DB_PROVISIONING = 'true'
 
@@ -22,13 +25,13 @@ import { PrismaClient } from '@prisma/client'
 import { saveNewGraph, getActiveGraph, createInitialGraph } from '@/lib/orchestration/graph-pointer'
 import { createEmptyGraph, BackendStateGraph } from '@/lib/orchestration/backend-state-graph'
 
-// Create Prisma client with local DB
+const TEST_DB_URL = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL
+if (!TEST_DB_URL) {
+  throw new Error('pointer-swap-concurrency needs TEST_DATABASE_URL or DATABASE_URL')
+}
+
 const prisma = new PrismaClient({
-  datasources: {
-    db: {
-      url: 'postgresql://postgres:pass@localhost:5432/nexa',
-    },
-  },
+  datasources: { db: { url: TEST_DB_URL } },
 })
 
 // Test configuration
@@ -56,7 +59,7 @@ describe('POINTER SWAP CONCURRENCY TEST', () => {
     console.log('\n' + '='.repeat(80))
     console.log('POINTER SWAP CONCURRENCY TEST')
     console.log('='.repeat(80))
-    console.log(`Database: postgresql://postgres:pass@localhost:5432/nexa`)
+    console.log(`Database: ${TEST_DB_URL.replace(/:[^:@]*@/, ':***@')}`)
     console.log(`Concurrent swaps: ${CONCURRENT_SWAPS}`)
     console.log('='.repeat(80) + '\n')
 

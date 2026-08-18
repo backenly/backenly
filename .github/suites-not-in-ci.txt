@@ -1,0 +1,84 @@
+# The test suites CI does NOT run, and the measured reason for each.
+#
+# This file exists because of the actual defect behind #7. 65 suites had
+# stopped running without anyone deciding they should; they were not excluded,
+# they were simply never named anywhere, so nothing could report them missing.
+# Naming them is what makes "not run" a decision with an owner instead of an
+# accident nobody can see.
+#
+# CI runs 134 of 156 suites, up from 92 before #13 and 123 after it. The 22
+# below are the remainder. Every one was measured against a real PostgreSQL 16
+# with the schema pushed, individually, not in a batch:
+#
+#   DATABASE_URL=postgresql://postgres:postgres@localhost:5432/backenly_test \
+#   TEST_DATABASE_URL=$DATABASE_URL DIRECT_URL=$DATABASE_URL \
+#   JWT_SECRET=ci-not-a-real-secret \
+#   npx jest --runTestsByPath <path> --ci --forceExit
+#
+# None of them are excluded for needing a database. A database is now provided
+# by the `integration` job and did not fix these. Do not re-file them as
+# "needs Postgres"; that was the wrong diagnosis once already.
+#
+# They are NOT on a blocking job because each one currently fails. ci.yml
+# already carries the lesson: `tests/core` was added on a false belief that it
+# was database-free, went red on every push for weeks, and a red that is always
+# red carries no information. A suite joins CI when it passes, not before.
+
+# ── Cannot run at all under the current jest setup ──────────────────────────
+# Both are gated on ENGINE_MODE=runtime and skip themselves otherwise. Nothing
+# can satisfy that gate: jest.setup.js line 29 assigns
+# ENGINE_MODE='integration' for every suite, deliberately, so that tests never
+# execute real DDL. Setting ENGINE_MODE=runtime in the environment does not
+# help — the setup file runs after it and overwrites it.
+#
+# They are dangerous rather than merely idle. jest exits 0 on a fully skipped
+# suite, so both report "pass" while running one skipped test and asserting
+# nothing. They were nearly added to database-free-suites.txt on exactly that
+# false green. Making them run means letting tests execute real DDL, which is
+# the guard jest.setup.js exists to enforce, so it is a real decision and not
+# CI wiring.
+__tests__/suite1.core-integration.test.ts
+__tests__/suite1.real-engine-integration.test.ts
+
+# ── Needs a live model provider ─────────────────────────────────────────────
+# Calls OpenAI for real. Cannot pass in CI without a key and a spend decision,
+# and would be nondeterministic even then.
+__tests__/lib/services/aiWorkspace.test.ts
+tests/validation/master-capability-validation.test.ts
+
+# ── Needs a running HTTP server ─────────────────────────────────────────────
+# Black-box suites that fetch against a live app on localhost. They need the
+# Next server and the Express runtime up, which no CI job currently starts.
+__tests__/security/auth-security.test.ts
+__tests__/security/auth-security-fixed.test.ts
+__tests__/security/oauth-security.test.ts
+
+# ── Genuine failures against a real database ────────────────────────────────
+# These connect fine and then fail on their own assertions. Each needs a person
+# to decide whether the test or the code is wrong. Two are worth singling out:
+#
+#   concurrency-convergence  9 of 10 concurrent mutations succeed where the
+#                            suite demands 10. This suite exists to prove no
+#                            mutation is lost under contention, so if the
+#                            assertion is right this is a real lost-mutation
+#                            bug in the retry path, not a flaky test. Unverified
+#                            either way: measured on one machine, once.
+#
+#   monitoring               expects 10, receives a different count from
+#                            ApiRequestLog aggregation.
+#
+__tests__/concurrency-convergence.test.ts
+__tests__/deterministic-executor.test.ts
+__tests__/invariants/mutation-safety.test.ts
+__tests__/lib/services/databaseBrain.test.ts
+__tests__/lib/services/monitoring.test.ts
+__tests__/load/concurrency.test.ts
+__tests__/load/execution-engine-performance.test.ts
+__tests__/suite2.relationships.test.ts
+__tests__/suite3.conflicts.test.ts
+__tests__/suite4.safety.test.ts
+__tests__/suite5.advisory.test.ts
+tests/error-communication.test.ts
+tests/field-extraction.test.ts
+tests/storage-provisioning.test.ts
+tests/timeline-granularity.test.ts

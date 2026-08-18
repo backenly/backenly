@@ -36,6 +36,7 @@ __tests__/security/tenant-isolation.test.ts
 __tests__/suite1.basic-lifecycle.test.ts
 tests/ai/brain-build-signals.test.ts
 tests/ai/cross-turn-referential.test.ts
+tests/ai/proposals.test.ts
 tests/ai/updated-at-trigger-diagnosis.test.ts
 tests/auth/email-eligibility.test.ts
 tests/auth/email-trust.test.ts

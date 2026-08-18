@@ -1,0 +1,38 @@
+# Test suites that CI runs in the `integration` job, against a real Postgres.
+#
+# These are the second half of #7. Every suite below was measured twice, once
+# against the unroutable placeholder the `static` job uses and once against a
+# real PostgreSQL 16: each one FAILS without a database and PASSES with one.
+# That is the whole entry requirement, and it is why they cannot live in
+# `static` and could never have passed there.
+#
+# To re-verify this list, or to check a suite before adding one:
+#
+#   # must FAIL
+#   DATABASE_URL=postgresql://ci:ci@127.0.0.1:1/unused \
+#   TEST_DATABASE_URL=$DATABASE_URL DIRECT_URL=$DATABASE_URL \
+#   JWT_SECRET=ci-not-a-real-secret npx jest --runTestsByPath <path> --ci
+#
+#   # must PASS
+#   DATABASE_URL=postgresql://postgres:postgres@localhost:5432/backenly_test \
+#   TEST_DATABASE_URL=$DATABASE_URL DIRECT_URL=$DATABASE_URL \
+#   JWT_SECRET=ci-not-a-real-secret npx jest --runTestsByPath <path> --ci
+#
+# A suite that passes BOTH ways belongs in database-free-suites.txt instead —
+# putting it here would burn a Postgres service container to prove nothing.
+#
+# Suites that fail even WITH a database are deliberately not here. They are
+# listed, with the measured reason, in suites-not-in-ci.txt. Adding a known-red
+# suite to a blocking job is how CI became permanently red before (see the note
+# on `tests/core` in ci.yml); a red that is always red carries no information.
+
+__tests__/architecture-hardening.test.ts
+__tests__/pointer-swap-concurrency.test.ts
+__tests__/retry-logic.test.ts
+tests/bench/ai-function-db-casts.spec.ts
+tests/bench/build-lock-advisory.spec.ts
+tests/bench/infra-intelligence-catalog.spec.ts
+tests/bench/prisma-uuid-binding.spec.ts
+tests/build-runs/build-run-service.test.ts
+tests/build-runs/hydration.test.ts
+tests/integration/mcp-oauth-flow.spec.ts
