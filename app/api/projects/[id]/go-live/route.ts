@@ -11,10 +11,8 @@ import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
  * - First publish: PRIVATE -> DEPLOYING -> LIVE (creates v1)
  * - Subsequent: Creates new versioned deployment snapshot (v2, v3, ...)
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const projectId = params.id
     const { user } = await getProjectContext(projectId)

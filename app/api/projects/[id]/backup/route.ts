@@ -10,7 +10,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
 import { backupWorkspace, listBackups, restoreWorkspace } from '@/lib/services/workspace-backup'
 
-export async function GET(request: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params
   return withProjectValidation<any>(request, async (validated) => {
     const { projectId } = validated
     const backups = await listBackups(projectId)
@@ -18,7 +19,8 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
   })
 }
 
-export async function POST(request: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params
   return withProjectValidation<any>(request, async (validated) => {
     const { projectId } = validated
     const result = await backupWorkspace(projectId)
@@ -29,7 +31,8 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
   })
 }
 
-export async function PUT(request: NextRequest, { params }: { params: { id: string } }) {
+export async function PUT(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params
   return withProjectValidation<any>(request, async (validated) => {
     const { projectId } = validated
     const body = await request.json().catch(() => ({}))

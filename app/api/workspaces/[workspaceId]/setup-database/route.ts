@@ -8,12 +8,10 @@ import { prisma } from '@/lib/db'
  * POST /api/workspaces/[id]/setup-database
  * Manually trigger database setup from Prisma schema for a workspace
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ workspaceId: string }> }) {
+  const params = await props.params;
   try {
-    const workspaceId = params.id
+    const workspaceId = params.workspaceId
     
     // Fetch workspace to get projectId
     const workspace = await prisma.workspace.findUnique({

@@ -21,10 +21,8 @@ import { prisma } from '@/lib/db'
  *   uptime:    number,   // process uptime in seconds
  * }
  */
-export async function GET(
-  _request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+export async function GET(_request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   const start = Date.now()
   const checks: Record<string, any> = {}
   let overallStatus: 'ok' | 'degraded' | 'down' = 'ok'

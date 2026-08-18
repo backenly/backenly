@@ -110,8 +110,9 @@ async function validateHmacSignature(
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: { projectId: string; integration: string } }
+  props: { params: Promise<{ projectId: string; integration: string }> }
 ) {
+  const params = await props.params;
   const { projectId, integration } = params
   const integrationLower = integration.toLowerCase()
 

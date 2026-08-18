@@ -223,7 +223,8 @@ export function generateStaticParams() {
   return Object.keys(COMPARISONS).map((slug) => ({ slug }))
 }
 
-export function generateMetadata({ params }: { params: { slug: string } }): Metadata {
+export async function generateMetadata(props: { params: Promise<{ slug: string }> }): Promise<Metadata> {
+  const params = await props.params;
   const c = COMPARISONS[params.slug]
   if (!c) return { title: 'Not Found' }
   return {
@@ -235,7 +236,8 @@ export function generateMetadata({ params }: { params: { slug: string } }): Meta
   }
 }
 
-export default function ComparisonSlugPage({ params }: { params: { slug: string } }) {
+export default async function ComparisonSlugPage(props: { params: Promise<{ slug: string }> }) {
+  const params = await props.params;
   const c = COMPARISONS[params.slug]
   if (!c) notFound()
 

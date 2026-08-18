@@ -10,10 +10,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { WorkspaceOAuthService } from '@/lib/services/workspaceOAuth'
 import { requireAuth } from '@/lib/auth/middleware'
 
-export async function DELETE(
-  request: NextRequest,
-  { params }: { params: { provider: string } }
-) {
+export async function DELETE(request: NextRequest, props: { params: Promise<{ provider: string }> }) {
+  const params = await props.params;
   try {
     const auth = await requireAuth(request)
     if (!auth.userId) {

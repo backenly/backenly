@@ -21,8 +21,9 @@ import { prisma } from '@/lib/db/prisma'
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { id: string } },
+  props: { params: Promise<{ id: string }> },
 ) {
+  const params = await props.params
   return withProjectValidation<any>(request, async (validated) => {
     const url = request.nextUrl
     const limit = Math.min(parseInt(url.searchParams.get('limit') ?? '100', 10), 500)

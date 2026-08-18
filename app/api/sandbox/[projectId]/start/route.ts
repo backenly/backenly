@@ -10,10 +10,8 @@ import { startSandbox } from '@/lib/sandbox-runtime'
  * 
  * Start sandbox runtime for project
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   try {
     // Authenticate user session
     const sessionToken = request.cookies.get('auth-token')?.value

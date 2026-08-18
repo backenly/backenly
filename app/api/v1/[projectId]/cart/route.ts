@@ -12,10 +12,8 @@ import { getCart, cartWithTotals, clearCart, resolveSessionId } from '@/lib/serv
  * Session identity: X-Cart-Session header (or ?cartSession= query param).
  * If omitted the API key ID is used as the session key.
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, params)
     if (middleware.response) return middleware.response
@@ -39,10 +37,8 @@ export async function GET(
  * Alias for clear — empties the cart completely.
  * Also accessible at /cart/clear for backwards compatibility.
  */
-export async function DELETE(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+export async function DELETE(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, params)
     if (middleware.response) return middleware.response

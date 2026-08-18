@@ -19,8 +19,9 @@ import { buildActivityFeed } from '@/lib/activity/feed'
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { id: string } },
+  props: { params: Promise<{ id: string }> },
 ) {
+  const params = await props.params
   return withProjectValidation<any>(request, async (validated) => {
     const url = new URL(request.url)
     const cursor = url.searchParams.get('cursor')

@@ -29,10 +29,8 @@ import { redeemRealtimeTicketParam } from '@/lib/realtime/ticket-auth'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   // ── Preferred: a short-lived single-use ticket ─────────────────────────────
   //
   // `EventSource` cannot send headers, so the credential has to be in the URL.

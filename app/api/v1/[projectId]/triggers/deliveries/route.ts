@@ -26,7 +26,8 @@ async function authenticate(req: NextRequest, projectId: string) {
 
 // GET — list delivery logs
 // ?status=DEAD|SUCCESS|FAILED  ?limit=50
-export async function GET(req: NextRequest, { params }: { params: { projectId: string } }) {
+export async function GET(req: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   const auth = await authenticate(req, params.projectId)
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: 401 })
 
@@ -43,7 +44,8 @@ export async function GET(req: NextRequest, { params }: { params: { projectId: s
 
 // POST — replay a dead delivery
 // Body: { id: string }
-export async function POST(req: NextRequest, { params }: { params: { projectId: string } }) {
+export async function POST(req: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   const auth = await authenticate(req, params.projectId)
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: 401 })
 

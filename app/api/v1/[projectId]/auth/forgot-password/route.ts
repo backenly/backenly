@@ -11,10 +11,8 @@ import { forgotEndUserPassword } from '@/lib/services/end-user-auth-flows'
  *
  * Body: { email }. Always 200 for unknown emails (no user enumeration).
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   let email: unknown
   try {
     const body = await request.json()

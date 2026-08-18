@@ -13,10 +13,8 @@ const createConnectionSchema = z.object({
  * POST /api/projects/:projectId/connections
  * Create a delegated connection token for one-click frontend integration
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     // Verify authentication
     const authHeader = request.headers.get('authorization')
@@ -129,10 +127,8 @@ export async function POST(
  * GET /api/projects/:projectId/connections
  * List active delegated connections for a project
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     // Try cookie-based auth first, then Bearer token
     const cookieToken = request.cookies.get('auth-token')?.value
@@ -196,10 +192,8 @@ export async function GET(
  * DELETE /api/projects/:projectId/connections
  * Revoke a delegated connection
  */
-export async function DELETE(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function DELETE(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     // Try cookie-based auth first, then Bearer token
     const cookieToken = request.cookies.get('auth-token')?.value

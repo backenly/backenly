@@ -14,10 +14,8 @@ import { v1ApiMiddleware } from '@/lib/api/v1/middleware'
 import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
 import { prisma } from '@/lib/db'
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, params)
     if (middleware.response) return middleware.response

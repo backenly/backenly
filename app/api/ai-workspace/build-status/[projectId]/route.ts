@@ -258,5 +258,8 @@ async function handler(
   }
 }
 
-export const GET = (req: NextRequest, ctx: { params: { projectId: string } }) =>
+// ctx is declared to satisfy the route signature but deliberately unused: the
+// projectId that reaches the handler is the VALIDATED one from
+// withProjectValidation, which checks ownership, rather than the raw segment.
+export const GET = (req: NextRequest, _ctx: { params: Promise<{ projectId: string }> }) =>
   withProjectValidation(req, (validated) => handler(req, validated.projectId))

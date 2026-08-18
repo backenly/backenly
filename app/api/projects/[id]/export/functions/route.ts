@@ -2,10 +2,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/prisma'
 import { verifySession } from '@/lib/auth/session'
 
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } },
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const token = request.cookies.get('auth-token')?.value
     if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })

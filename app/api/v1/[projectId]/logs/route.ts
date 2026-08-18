@@ -11,10 +11,8 @@ import { prisma } from '@/lib/db'
  * GET /v1/{projectId}/logs
  * Get logs (read-only)
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, params)
     if (middleware.response) {

@@ -11,7 +11,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
 import { prisma } from '@/lib/db'
 
-export async function GET(request: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params
   return withProjectValidation<any>(request, async (validated) => {
     const { projectId } = validated
     const { searchParams } = request.nextUrl
@@ -40,7 +41,8 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
  * DELETE /api/projects/:id/ai-functions/logs
  * Clear all logs for a project (or a specific function with ?functionId=xxx).
  */
-export async function DELETE(request: NextRequest, { params }: { params: { id: string } }) {
+export async function DELETE(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params
   return withProjectValidation<any>(request, async (validated) => {
     const { projectId } = validated
     const { searchParams } = request.nextUrl

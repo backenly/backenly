@@ -12,8 +12,9 @@ import { listKeyVaultStatuses } from '@/lib/services/integrationKeyStore'
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  props: { params: Promise<{ id: string }> }
 ) {
+  const params = await props.params
   return withProjectValidation<any>(request, async (validated) => {
     const [project, keyStatuses] = await Promise.all([
       prisma.project.findUnique({
@@ -38,8 +39,9 @@ export async function GET(
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  props: { params: Promise<{ id: string }> }
 ) {
+  const params = await props.params
   return withProjectValidation<any>(request, async (validated) => {
     const body = await request.json()
     const { integrationId, categoryId, name, provisions, activatedBy } = body

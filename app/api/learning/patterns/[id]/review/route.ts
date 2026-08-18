@@ -25,10 +25,8 @@ const STATUS_MAP: Record<string, string> = {
   archive: 'ARCHIVED',
 }
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { id: string } },
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const auth = await authenticateRequest(request)
   if (!auth.authenticated) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })

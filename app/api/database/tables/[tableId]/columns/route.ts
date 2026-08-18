@@ -11,10 +11,8 @@ import { requireAuth } from '@/lib/auth/middleware'
  * 🔒 Requires auth + project ownership. Previously this endpoint had no
  * ownership check — any authed user could read any project's table schema.
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { tableId: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ tableId: string }> }) {
+  const params = await props.params;
   try {
     const user = await requireAuth(request)
     const { searchParams } = new URL(request.url)

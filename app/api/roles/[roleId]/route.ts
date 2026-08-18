@@ -11,15 +11,13 @@ const updateRoleSchema = z.object({
   permissions: z.array(z.string()).optional(),
 })
 
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ roleId: string }> }) {
+  const params = await props.params;
   try {
     await requireAuth(request)
     
     const role = await prisma.role.findUnique({
-      where: { id: params.id },
+      where: { id: params.roleId },
       include: {
         _count: {
           select: { users: true },
@@ -52,17 +50,15 @@ export async function GET(
   }
 }
 
-export async function PUT(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function PUT(request: NextRequest, props: { params: Promise<{ roleId: string }> }) {
+  const params = await props.params;
   try {
     await requireAuth(request)
     const body = await request.json()
     const data = updateRoleSchema.parse(body)
     
     const role = await prisma.role.update({
-      where: { id: params.id },
+      where: { id: params.roleId },
       data,
       include: {
         _count: {
@@ -96,16 +92,14 @@ export async function PUT(
   }
 }
 
-export async function DELETE(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function DELETE(request: NextRequest, props: { params: Promise<{ roleId: string }> }) {
+  const params = await props.params;
   try {
     await requireAuth(request)
     
     // Check if role is in use
     const role = await prisma.role.findUnique({
-      where: { id: params.id },
+      where: { id: params.roleId },
       include: {
         _count: {
           select: { users: true },
@@ -128,7 +122,7 @@ export async function DELETE(
     }
     
     await prisma.role.delete({
-      where: { id: params.id },
+      where: { id: params.roleId },
     })
     
     return NextResponse.json({ message: 'Role deleted successfully' })

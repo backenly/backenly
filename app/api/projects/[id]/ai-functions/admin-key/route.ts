@@ -14,10 +14,8 @@ import { getProjectAdminKey } from '@/lib/services/ai-functions/project-fn-auth'
  * Owner-only: this key grants admin access to the project's OWN workspace
  * data — never to anything platform-level.
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const auth = await authenticateRequest(request)
     if (!auth.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })

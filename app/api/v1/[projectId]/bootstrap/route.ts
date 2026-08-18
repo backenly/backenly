@@ -66,10 +66,8 @@ setInterval(() => {
   for (const [k, b] of buckets) if (b.resetAt < now) buckets.delete(k)
 }, WINDOW_MS).unref?.()
 
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { projectId: string } },
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   const projectId = params.projectId
 
   // ── 0. Format guard so we don't hit the DB for obvious garbage ─────────────
@@ -218,8 +216,12 @@ export async function GET(
  */
 export async function POST(
   request: NextRequest,
-  ctx: { params: { projectId: string } },
+  ctx: { params: Promise<{ projectId: string }> },
 ) {
+  // ctx is forwarded whole, never destructured here. GET awaits ctx.params
+  // itself, which is the only place projectId is read, so there is nothing to
+  // await at this level. The Next 15 codemod flags any forwarded ctx because it
+  // cannot see that.
   return GET(request, ctx)
 }
 

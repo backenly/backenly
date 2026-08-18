@@ -18,10 +18,8 @@ export const dynamic = 'force-dynamic'
  * GET /api/projects/[projectId]/rollback/archives
  * List archived tables and PITR snapshots for recovery
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     // Verify authentication
     const authHeader = request.headers.get('authorization')
@@ -105,10 +103,8 @@ export async function GET(
  * 
  * INTERNAL USE ONLY - Not exposed to users
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     // Verify authentication
     const authHeader = request.headers.get('authorization')

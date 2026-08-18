@@ -6,10 +6,8 @@ import { loadArchitecturalMemory } from '@/lib/architecture-memory'
  * GET /api/projects/[id]/architecture-memory
  * Retrieve architectural memory for testing and debugging
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const sessionToken = request.cookies.get('auth-token')?.value
     const authHeader = request.headers.get('authorization')

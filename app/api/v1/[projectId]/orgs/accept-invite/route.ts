@@ -25,10 +25,8 @@ import jwt from 'jsonwebtoken'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { projectId: string } },
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   try {
     const projectId = params.projectId
 

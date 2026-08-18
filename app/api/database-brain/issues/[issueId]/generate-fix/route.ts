@@ -5,10 +5,8 @@ import { prisma } from '@/lib/db/postgres'
 import { chatCompletion, isAIEnabled } from '@/lib/openai/client'
 
 // POST /api/database-brain/issues/[id]/generate-fix - Generate SQL fix using OpenAI
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ issueId: string }> }) {
+  const params = await props.params;
   try {
     if (!isAIEnabled()) {
       return NextResponse.json(
@@ -21,7 +19,7 @@ export async function POST(
     }
 
     const issue = await prisma.databaseIssue.findUnique({
-      where: { id: params.id },
+      where: { id: params.issueId },
     })
 
     if (!issue) {
@@ -89,7 +87,7 @@ Format your response as JSON with the following structure:
 
     // Update issue with generated fix
     const updatedIssue = await prisma.databaseIssue.update({
-      where: { id: params.id },
+      where: { id: params.issueId },
       data: {
         sqlFix: generatedFix.sqlFix || null,
         migrationSteps: generatedFix.migrationSteps || null,

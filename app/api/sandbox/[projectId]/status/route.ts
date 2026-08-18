@@ -10,10 +10,8 @@ import { getSandboxStatus } from '@/lib/sandbox-runtime'
  * 
  * Get sandbox runtime status for project
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   try {
     // Authenticate user session
     const sessionToken = request.cookies.get('auth-token')?.value

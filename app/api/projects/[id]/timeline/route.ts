@@ -16,10 +16,8 @@ const QUOTA_DISABLED = process.env.DISABLE_QUOTA_ENFORCEMENT === 'true'
  *   GROWTH         : last 30 versions
  *   PRO            : full history (unlimited)
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     // Authenticate
     const sessionToken = request.cookies.get('auth-token')?.value

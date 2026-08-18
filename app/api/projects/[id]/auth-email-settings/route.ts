@@ -23,10 +23,8 @@ async function authorize(request: NextRequest, projectId: string) {
   return project
 }
 
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const project = await authorize(request, params.id)
     if (!project) {
@@ -62,10 +60,8 @@ const putSchema = z.object({
   magicLinksEnabled: z.boolean().optional(),
 })
 
-export async function PUT(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function PUT(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const project = await authorize(request, params.id)
     if (!project) {

@@ -9,10 +9,8 @@ import { recordIntegrationChoice } from '@/lib/architecture-memory'
 import { verifyToken } from '@/lib/auth/jwt'
 import { prisma } from '@/lib/db/prisma'
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     // Authenticate
     const sessionToken = request.cookies.get('auth-token')?.value

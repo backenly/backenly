@@ -14,10 +14,8 @@ import { listTablesWithRealtimeTriggers } from '@/lib/services/realtimeTriggers'
  * than rolled inline (which previously rejected callers whose Bearer
  * token had gone stale even when their session cookie was still valid).
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const auth = await authenticateRequest(request)
     if (!auth.authenticated || !auth.userId) {

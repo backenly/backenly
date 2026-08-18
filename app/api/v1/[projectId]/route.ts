@@ -9,9 +9,9 @@ import { prisma } from '@/lib/db/prisma'
  */
 export async function GET(
   _request: NextRequest,
-  context: { params: { projectId: string } }
+  context: { params: Promise<{ projectId: string }> }
 ) {
-  const { projectId } = context.params
+  const { projectId } = (await context.params)
 
   if (!projectId) {
     return NextResponse.json(

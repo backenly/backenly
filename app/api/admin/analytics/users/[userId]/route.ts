@@ -10,10 +10,8 @@ import { prisma } from '@/lib/db/prisma'
  * Returns full detail for a single user: projects, funnel status, usage.
  * FOUNDER-ONLY.
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { userId: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ userId: string }> }) {
+  const params = await props.params;
   const authError = await requireFounder(request)
   if (authError) return authError
 

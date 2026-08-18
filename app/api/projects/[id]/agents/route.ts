@@ -16,8 +16,9 @@ import { prisma } from '@/lib/db/prisma'
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: { id: string } },
+  props: { params: Promise<{ id: string }> },
 ) {
+  const params = await props.params
   return withProjectValidation<any>(request, async (validated) => {
     const autoFix = request.nextUrl.searchParams.get('fix') === 'auto'
 
@@ -73,8 +74,9 @@ export async function POST(
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { id: string } },
+  props: { params: Promise<{ id: string }> },
 ) {
+  const params = await props.params
   return withProjectValidation<any>(request, async (validated) => {
     const findings = await prisma.healthFinding.findMany({
       where: {

@@ -17,15 +17,13 @@ const updateProviderSchema = z.object({
   modifiedBy: z.enum(['ui', 'code']).optional(),
 })
 
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ providerId: string }> }) {
+  const params = await props.params;
   try {
     await requireAuth(request)
     
     const provider = await prisma.authProvider.findUnique({
-      where: { id: params.id },
+      where: { id: params.providerId },
     })
     
     if (!provider) {
@@ -45,17 +43,15 @@ export async function GET(
   }
 }
 
-export async function PUT(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function PUT(request: NextRequest, props: { params: Promise<{ providerId: string }> }) {
+  const params = await props.params;
   try {
     await requireAuth(request)
     const body = await request.json()
     const data = updateProviderSchema.parse(body)
     
     const provider = await prisma.authProvider.update({
-      where: { id: params.id },
+      where: { id: params.providerId },
       data: {
         ...data,
         lastModified: new Date(),
@@ -79,15 +75,13 @@ export async function PUT(
   }
 }
 
-export async function DELETE(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function DELETE(request: NextRequest, props: { params: Promise<{ providerId: string }> }) {
+  const params = await props.params;
   try {
     await requireAuth(request)
     
     await prisma.authProvider.delete({
-      where: { id: params.id },
+      where: { id: params.providerId },
     })
     
     return NextResponse.json({ message: 'Provider deleted successfully' })

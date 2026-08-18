@@ -13,10 +13,8 @@ import { validateInsertPayload } from '@/lib/services/workspace-validator'
  * POST /v1/{projectId}/database/insert
  * Insert data into the project's workspace schema table
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, params)
     if (middleware.response) {

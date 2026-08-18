@@ -286,7 +286,8 @@ export function generateStaticParams() {
   return Object.keys(FEATURES).map((slug) => ({ slug }))
 }
 
-export function generateMetadata({ params }: { params: { slug: string } }): Metadata {
+export async function generateMetadata(props: { params: Promise<{ slug: string }> }): Promise<Metadata> {
+  const params = await props.params;
   const f = FEATURES[params.slug]
   if (!f) return { title: 'Not Found' }
   return {
@@ -298,7 +299,8 @@ export function generateMetadata({ params }: { params: { slug: string } }): Meta
   }
 }
 
-export default function FeatureSlugPage({ params }: { params: { slug: string } }) {
+export default async function FeatureSlugPage(props: { params: Promise<{ slug: string }> }) {
+  const params = await props.params;
   const f = FEATURES[params.slug]
   if (!f) notFound()
 

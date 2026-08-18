@@ -12,10 +12,8 @@ import { logoutEndUser } from '@/lib/services/end-user-auth-flows'
  * Blacklists the token's jti server-side so revoked tokens are rejected
  * before their natural expiry. Idempotent — always 200.
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   let rawToken: string | null = null
   const authHeader = request.headers.get('authorization')
   if (authHeader?.startsWith('Bearer ')) {

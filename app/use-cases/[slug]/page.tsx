@@ -322,7 +322,8 @@ export function generateStaticParams() {
   return Object.keys(USE_CASES).map((slug) => ({ slug }))
 }
 
-export function generateMetadata({ params }: { params: { slug: string } }): Metadata {
+export async function generateMetadata(props: { params: Promise<{ slug: string }> }): Promise<Metadata> {
+  const params = await props.params;
   const uc = USE_CASES[params.slug]
   if (!uc) return { title: 'Not Found' }
 
@@ -344,7 +345,8 @@ export function generateMetadata({ params }: { params: { slug: string } }): Meta
   }
 }
 
-export default function UseCaseSlugPage({ params }: { params: { slug: string } }) {
+export default async function UseCaseSlugPage(props: { params: Promise<{ slug: string }> }) {
+  const params = await props.params;
   const uc = USE_CASES[params.slug]
   if (!uc) notFound()
 

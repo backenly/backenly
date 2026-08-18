@@ -10,8 +10,9 @@ import { executeAiFunction } from '@/lib/services/ai-functions/executor'
  */
 export async function POST(
   request: NextRequest,
-  { params }: { params: { id: string; functionId: string } }
+  props: { params: Promise<{ id: string; functionId: string }> }
 ) {
+  const params = await props.params;
   try {
     const auth = await authenticateRequest(request)
     if (!auth.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })

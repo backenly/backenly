@@ -8,10 +8,8 @@ import { prisma } from '@/lib/db'
  * POST /api/projects/[id]/sdk-test
  * Test SDK connection - verifies project exists and user has access
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const token = request.cookies.get('auth-token')?.value
     if (!token) {

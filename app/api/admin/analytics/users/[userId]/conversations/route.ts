@@ -33,10 +33,8 @@ import { prisma } from '@/lib/db/prisma'
 // Hard safety cap so a power user with a huge history can't blow up the drawer.
 const MAX_MESSAGES = 3000
 
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { userId: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ userId: string }> }) {
+  const params = await props.params;
   const authError = await requireFounder(request)
   if (authError) return authError
 

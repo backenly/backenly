@@ -6,10 +6,8 @@ import { verifyToken } from '@/lib/auth/jwt'
  * GET /api/projects/:projectId/audit-logs
  * Get delegation audit logs for a project (admin only)
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     // Verify authentication
     const authHeader = request.headers.get('authorization')
@@ -24,7 +22,7 @@ export async function GET(
       return NextResponse.json({ error: 'Invalid token' }, { status: 401 })
     }
 
-    const { projectId } = params
+    const { id: projectId } = params
     const { searchParams } = new URL(request.url)
     const limit = parseInt(searchParams.get('limit') || '50')
     const action = searchParams.get('action')

@@ -9,10 +9,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/prisma'
 import { undoToGraph, getPreviousGraphId, isProjectLive } from '@/lib/orchestration/graph-pointer'
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const projectId = params.id
 
   try {
