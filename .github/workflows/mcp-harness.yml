@@ -13,9 +13,35 @@ name: MCP reliability harness
 #
 # Because of (2), point BACKENLY_MCP_KEY at a DEDICATED THROWAWAY PROJECT, never
 # at a project with real data. The run prints the cleanup SQL for its own tables.
+# NOT scheduled, deliberately.
+#
+# This ran weekly on a cron from the day it was written and failed every single
+# Monday without executing one case, because BACKENLY_MCP_KEY was never set as a
+# repository secret. That is a cron firing into a guaranteed failure, and
+# ci.yml already states the cost: a red that is always red carries no
+# information, and the emails train everyone to ignore the one run where
+# something genuinely broke.
+#
+# So it runs on demand until the secret exists. To put the schedule back:
+#
+#   1. Create a project that exists ONLY for this. The harness creates tables
+#      and cannot drop them — destructive operations route to the human Review
+#      Queue by design — so every run leaves `hx_*` artefacts. Never point this
+#      at a project with real data.
+#   2. Mint an MCP key against it, NOT read-only; the harness writes.
+#   3. Add it as the repository secret BACKENLY_MCP_KEY.
+#   4. Run it once by hand, so the first real result is seen deliberately.
+#   5. Restore the two `schedule:` lines below.
+#
+#    schedule:
+#      - cron: '0 6 * * 1' # Mondays 06:00 UTC
+#
+# The harness itself is known-good: run against a local stack 2026-08-19, 13/15
+# guards and 1/1 golden passed with 0 blind errors. The two that failed were
+# stale cases in the harness, fixed in 00e854c1. Expect one genuine unknown on
+# the first production run — CONTRACT-4 checks GET /db/<table>, which needs
+# PostgREST and therefore could not be verified from a dev box.
 on:
-  schedule:
-    - cron: '0 6 * * 1' # Mondays 06:00 UTC
   workflow_dispatch:
     inputs:
       strict:
