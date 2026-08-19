@@ -371,6 +371,15 @@ export const CASES: Case[] = [
       }
       // Destructive tools are named in §5 precisely to say they are refused.
       for (const d of ['drop_table', 'truncate_table', 'drop_column', 'delete_bucket']) named.delete(d)
+      // Illustrative FUNCTION names, not tools. The functions section explains
+      // that a user's function name is normalised to kebab-case, and the only
+      // way to show that is to write one out: "`list_products` deploys as
+      // `list-products`". It matches the verb_noun shape, so the scraper reads
+      // it as a tool the agent was told to call. This is the third variant of
+      // the same over-broad-match bug (the pattern previously pulled `https`
+      // out of a URL and `approval` out of prose), so it is excluded by name
+      // rather than by loosening the pattern again.
+      for (const example of ['list_products']) named.delete(example)
 
       const missing = [...named].filter((n) => !available.has(n))
       if (missing.length > 0) {
@@ -524,9 +533,17 @@ export const CASES: Case[] = [
         fail(`documented base URL "${apiBase}" does not match this project`)
       }
 
-      // §4 says calls carry an sk_live runtime key.
-      if (!runtimeKey.startsWith('sk_live_')) {
-        fail(`§4 documents an sk_live_ runtime key; got "${runtimeKey.slice(0, 12)}…"`)
+      // §4 says calls carry a proj_live_ / proj_test_ runtime key.
+      //
+      // This asserted sk_live_ until 2026-08-19, which the product had already
+      // stopped issuing. get_instructions says so in as many words: "`sk_live_`
+      // is the Stripe prefix, NOT the Backenly one -- a Backenly project key
+      // always starts `proj_live_` or `proj_test_`". So the harness was failing
+      // the runtime contract for matching the documentation. It went stale
+      // unnoticed because BACKENLY_MCP_KEY was never set, so this case had
+      // never once executed.
+      if (!/^proj_(live|test)_/.test(runtimeKey)) {
+        fail(`§4 documents a proj_live_/proj_test_ runtime key; got "${runtimeKey.slice(0, 12)}…"`)
       }
       // The token itself was obtained by the bootstrap through POST /auth/signup,
       // which is §4's first claim — reaching this case at all proves it.
