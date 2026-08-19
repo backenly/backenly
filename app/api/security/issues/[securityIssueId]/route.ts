@@ -10,10 +10,8 @@ const updateSchema = z.object({
   fixed: z.boolean().optional(),
 })
 
-export async function PATCH(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function PATCH(request: NextRequest, props: { params: Promise<{ securityIssueId: string }> }) {
+  const params = await props.params;
   try {
     return await withTenantIsolation(request, async (projectId) => {
       const auth = await authenticateRequest(request)
@@ -27,7 +25,7 @@ export async function PATCH(
 
       // TenantPrisma.update automatically validates ownership
       const issue = await tenantPrisma.securityIssue.update({
-        where: { id: params.id },
+        where: { id: params.securityIssueId },
         data: {
           fixed: data.fixed,
           fixedAt: data.fixed ? new Date() : null,
@@ -52,17 +50,15 @@ export async function PATCH(
   }
 }
 
-export async function DELETE(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function DELETE(request: NextRequest, props: { params: Promise<{ securityIssueId: string }> }) {
+  const params = await props.params;
   try {
     return await withTenantIsolation(request, async (projectId) => {
       const tenantPrisma = createTenantPrisma(projectId)
 
       // TenantPrisma.delete automatically validates ownership
       await tenantPrisma.securityIssue.delete({
-        where: { id: params.id },
+        where: { id: params.securityIssueId },
       })
 
       return NextResponse.json({ success: true })

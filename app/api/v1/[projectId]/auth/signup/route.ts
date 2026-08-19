@@ -25,10 +25,8 @@ import crypto from 'crypto'
  * RETURNING clause are built from the live schema, so an AI-generated table
  * with a missing column (e.g. no `role`) can no longer 500 signup.
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   try {
     const projectId = params.projectId
 

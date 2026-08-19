@@ -17,10 +17,8 @@ const QUOTA_DISABLED = process.env.DISABLE_QUOTA_ENFORCEMENT === 'true'
  * Restore the backend to a specific previous state.
  * Requires Growth plan or higher (allowDeploymentRollback).
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const body = await request.json()
     const { graphId, sequenceNumber } = body

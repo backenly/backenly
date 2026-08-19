@@ -43,7 +43,7 @@ export async function GET(request: NextRequest) {
     }
 
     // Store state in secure HTTP-only cookie (expires in 10 minutes)
-    const cookieStore = cookies()
+    const cookieStore = await cookies()
     cookieStore.set('replit_oauth_state', JSON.stringify({ state, data: stateData }), {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',

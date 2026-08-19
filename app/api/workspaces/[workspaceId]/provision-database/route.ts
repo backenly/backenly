@@ -15,10 +15,12 @@ import { provisionWorkspaceDatabase } from '@/lib/services/databaseProvisioning'
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
+  { params }: { params: Promise<{ workspaceId: string }> }
 ) {
   try {
-    const { id } = await params
+    // Keyed by the folder segment, [workspaceId]. It was read as `id` before,
+    // which Next never supplied, so this was undefined at runtime (#9).
+    const { workspaceId: id } = await params
 
     // Get workspace
     const workspace = await prisma.workspace.findUnique({

@@ -9,10 +9,8 @@ import { clearCart, resolveSessionId } from '@/lib/services/cart-store'
  * DELETE /v1/{projectId}/cart/clear
  * Empties the current cart session completely.
  */
-export async function DELETE(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+export async function DELETE(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, params)
     if (middleware.response) return middleware.response

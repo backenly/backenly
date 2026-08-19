@@ -6,14 +6,12 @@ import { getCurrentProjectId } from '@/lib/tenant/isolation'
 import { requireAuth } from '@/lib/auth/middleware'
 
 // GET /api/database-brain/issues/[id] - Get issue details (project-scoped)
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ issueId: string }> }) {
+  const params = await props.params;
   const requestId = `issue-get-${Date.now()}`
   console.log(`🔵 [${requestId}] === GET ISSUE DETAILS REQUEST START ===`)
-  console.log(`🎯 [${requestId}] Issue ID: ${params.id}`)
-  
+  console.log(`🎯 [${requestId}] Issue ID: ${params.issueId}`)
+
   try {
     // Require authentication
     console.log(`🔐 [${requestId}] Authenticating request...`)
@@ -33,13 +31,13 @@ export async function GET(
     }
     
     console.log(`✅ [${requestId}] Project ID: ${projectId}`)
-    console.log(`🔍 [${requestId}] Fetching issue ${params.id} for project ${projectId}...`)
+    console.log(`🔍 [${requestId}] Fetching issue ${params.issueId} for project ${projectId}...`)
 
     // SECURITY: Verify issue belongs to current project
     const startTime = Date.now()
     const issue = await prisma.databaseIssue.findFirst({
       where: { 
-        id: params.id,
+        id: params.issueId,
         projectId, // CRITICAL: Project scope filter
       },
     })
@@ -85,14 +83,12 @@ export async function GET(
 }
 
 // PUT /api/database-brain/issues/[id] - Update issue (project-scoped)
-export async function PUT(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function PUT(request: NextRequest, props: { params: Promise<{ issueId: string }> }) {
+  const params = await props.params;
   const requestId = `issue-update-${Date.now()}`
   console.log(`🔵 [${requestId}] === UPDATE ISSUE REQUEST START ===`)
-  console.log(`🎯 [${requestId}] Issue ID: ${params.id}`)
-  
+  console.log(`🎯 [${requestId}] Issue ID: ${params.issueId}`)
+
   try {
     // Require authentication
     console.log(`🔐 [${requestId}] Authenticating request...`)
@@ -117,7 +113,7 @@ export async function PUT(
     console.log(`🔍 [${requestId}] Verifying issue ownership...`)
     const existingIssue = await prisma.databaseIssue.findFirst({
       where: { 
-        id: params.id,
+        id: params.issueId,
         projectId, // CRITICAL: Project scope filter
       },
     })
@@ -152,7 +148,7 @@ export async function PUT(
     console.log(`💾 [${requestId}] Updating issue in database...`)
     const startTime = Date.now()
     const issue = await prisma.databaseIssue.update({
-      where: { id: params.id },
+      where: { id: params.issueId },
       data: updateData,
     })
     const duration = Date.now() - startTime

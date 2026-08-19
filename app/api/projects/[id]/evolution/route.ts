@@ -17,8 +17,9 @@ import { loadEvolutionState, analyzeProjectEvolution } from '@/lib/ai/long-horiz
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { id: string } },
+  props: { params: Promise<{ id: string }> },
 ) {
+  const params = await props.params
   return withProjectValidation<any>(request, async (validated) => {
     const state = await loadEvolutionState(validated.projectId)
 
@@ -105,8 +106,9 @@ export async function GET(
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: { id: string } },
+  props: { params: Promise<{ id: string }> },
 ) {
+  const params = await props.params
   return withProjectValidation<any>(request, async (validated) => {
     const result = await analyzeProjectEvolution(validated.projectId)
 

@@ -12,8 +12,9 @@ import { updateCartItem, removeFromCart, cartWithTotals, resolveSessionId } from
  */
 export async function PATCH(
   request: NextRequest,
-  { params }: { params: { projectId: string; productId: string } }
+  props: { params: Promise<{ projectId: string; productId: string }> }
 ) {
+  const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, params)
     if (middleware.response) return middleware.response
@@ -52,8 +53,9 @@ export async function PATCH(
  */
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: { projectId: string; productId: string } }
+  props: { params: Promise<{ projectId: string; productId: string }> }
 ) {
+  const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, params)
     if (middleware.response) return middleware.response

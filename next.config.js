@@ -133,14 +133,17 @@ const nextConfig = {
   // reason backenly-nextjs has accumulated 300+ crash-restarts). scripts/
   // deploy.sh sets this, builds off to the side, then renames into place.
   distDir: process.env.NEXT_DIST_DIR || '.next',
-  eslint: {
-    ignoreDuringBuilds: true,
-  },
-  experimental: {
-    instrumentationHook: true,
-    outputFileTracingIncludes: {
-      '/api/**/*': ['./node_modules/.prisma/**/*'],
-    },
+  // No `eslint` key: Next 16 removed `next lint`, so the build no longer runs
+  // ESLint at all and rejects the option as unrecognised. Linting is its own
+  // step now, `npm run lint` -> eslint, enforced by the `static` CI job. That
+  // job is what actually keeps main green; ignoreDuringBuilds meant the build
+  // never enforced it anyway.
+  // instrumentation.ts is loaded unconditionally since Next 15, so the
+  // experimental.instrumentationHook flag that used to enable it is gone. It
+  // was not a no-op to leave in place: Next 16 rejects unrecognised keys under
+  // `experimental`.
+  outputFileTracingIncludes: {
+    '/api/**/*': ['./node_modules/.prisma/**/*'],
   },
   images: {
     remotePatterns: [

@@ -19,8 +19,9 @@ import { v1NotFoundBody } from '@/lib/api/v1/route-not-found'
 
 async function handler(
   _request: NextRequest,
-  { params }: { params: { projectId: string; unmatched?: string[] } },
+  props: { params: Promise<{ projectId: string; unmatched?: string[] }> },
 ) {
+  const params = await props.params
   return NextResponse.json(v1NotFoundBody(params.projectId, params.unmatched ?? []), { status: 404 })
 }
 

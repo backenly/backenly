@@ -8,10 +8,8 @@ import { Pool } from 'pg'
 // Executes insert / select / delete against workspace_{projectId} schema.
 // All queries are parameterised — no string interpolation of user-supplied values.
 // Table name is validated against information_schema before any query.
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   let pool: Pool | undefined
 
   try {

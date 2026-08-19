@@ -7,10 +7,8 @@ import { listSchemaVersions, getSchemaVersion, rollbackToVersion } from '@/lib/v
  * List all schema versions for a project (newest first).
  * Used by the UI to show "Schema History" timeline.
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const token = request.cookies.get('auth-token')?.value
       || request.headers.get('authorization')?.replace('Bearer ', '')
@@ -40,10 +38,8 @@ export async function GET(
  * Body: { versionId: string }
  * Rollback the project schema to a specific version.
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const token = request.cookies.get('auth-token')?.value
       || request.headers.get('authorization')?.replace('Bearer ', '')

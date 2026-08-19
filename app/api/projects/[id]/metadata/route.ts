@@ -43,10 +43,8 @@ import { extractMetadataFromIntent, validateMetadata, type ExtractedMetadata } f
  * GET /api/projects/[projectId]/metadata
  * Retrieve stored metadata for a project
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     // DEBUG: Log all cookies received
     const allCookies = request.cookies.getAll()
@@ -113,10 +111,8 @@ export async function GET(
  * POST /api/projects/[projectId]/metadata
  * Extract and store metadata from user's project prompt
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     // DEBUG: Log all cookies received
     const allCookies = request.cookies.getAll()

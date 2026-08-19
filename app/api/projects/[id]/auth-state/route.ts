@@ -9,10 +9,8 @@ import { getProjectAuthStatus } from '@/lib/services/auth-status'
  * (/api/projects/[id]/state), and the proof system always agree on
  * which providers are connected.
  */
-export async function GET(
-  _request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(_request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const projectId = params.id
     const status = await getProjectAuthStatus(projectId)

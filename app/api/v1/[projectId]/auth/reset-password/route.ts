@@ -12,10 +12,8 @@ import { resetEndUserPassword } from '@/lib/services/end-user-auth-flows'
  * Body: { token, password }. Returns a fresh JWT on success so the user is
  * immediately signed in after resetting.
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   let token: unknown
   let password: unknown
   try {

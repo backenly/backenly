@@ -12,10 +12,8 @@ import { executeWithUserContext } from '@/lib/services/workspace-rls'
  * GET /v1/{projectId}/database/query?table=<name>&limit=&offset=&sort=&order=
  * Query database tables in the project's workspace schema (browser-friendly)
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, params)
     if (middleware.response) return middleware.response
@@ -163,10 +161,8 @@ export async function GET(
  * POST /v1/{projectId}/database/query
  * Query database tables with filters/select/orderBy (advanced)
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, params)
     if (middleware.response) {

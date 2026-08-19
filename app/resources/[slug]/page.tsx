@@ -27,7 +27,8 @@ export function generateStaticParams() {
   return ALL_ARTICLES.map((a) => ({ slug: a.slug }))
 }
 
-export function generateMetadata({ params }: { params: { slug: string } }): Metadata {
+export async function generateMetadata(props: { params: Promise<{ slug: string }> }): Promise<Metadata> {
+  const params = await props.params;
   const a = ARTICLES_BY_SLUG[params.slug]
   if (!a) return { title: 'Not Found' }
   return {
@@ -86,7 +87,8 @@ function BlockRenderer({ block }: { block: ArticleBlock }) {
   }
 }
 
-export default function ResourceSlugPage({ params }: { params: { slug: string } }) {
+export default async function ResourceSlugPage(props: { params: Promise<{ slug: string }> }) {
+  const params = await props.params;
   const a = ARTICLES_BY_SLUG[params.slug]
   if (!a) notFound()
 

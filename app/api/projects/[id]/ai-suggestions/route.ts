@@ -7,10 +7,8 @@ import { runBackgroundAgent } from '@/lib/ai/background-agent'
  * Run the background audit agent and return findings.
  * Called by the sidebar on project load to surface proactive suggestions.
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const sessionToken = request.cookies.get('auth-token')?.value
     const authHeader = request.headers.get('authorization')

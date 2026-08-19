@@ -29,10 +29,8 @@ const MAX_PAYLOAD_BYTES = 6_000
 // Channel names: alphanumeric, hyphens, underscores — no SQL injection surface
 const CHANNEL_RE = /^[a-zA-Z0-9_-]{1,64}$/
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   const auth = await v1ApiMiddleware(request, params)
   if (auth.response) return auth.response
 

@@ -13,8 +13,9 @@ import { rollbackFix } from '@/lib/ai/approval-manager'
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: { id: string; findingId: string } },
+  props: { params: Promise<{ id: string; findingId: string }> }
 ) {
+  const params = await props.params;
   return withProjectValidation<any>(request, async (validated) => {
     const result = await rollbackFix(validated.projectId, params.findingId)
     return NextResponse.json(result, { status: result.success ? 200 : 422 })

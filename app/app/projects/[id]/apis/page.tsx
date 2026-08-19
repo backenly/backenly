@@ -24,6 +24,7 @@
 
 import { redirect } from 'next/navigation'
 
-export default function ApisPage({ params }: { params: { id: string } }) {
-  redirect(`/app/projects/${params.id}/database`)
+export default async function ApisPage(props: { params: Promise<{ id: string }> }) {
+ const params = await props.params;
+ redirect(`/app/projects/${params.id}/database`)
 }

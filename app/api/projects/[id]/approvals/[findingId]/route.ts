@@ -16,8 +16,9 @@ import { runMutation, mutationHttpStatus } from '@/lib/ai/build-runtime/mutate'
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { id: string; findingId: string } },
+  props: { params: Promise<{ id: string; findingId: string }> }
 ) {
+  const params = await props.params;
   return withProjectValidation<any>(request, async (validated) => {
     const preview = await getApprovalPreview(validated.projectId, params.findingId)
     if (!preview) {
@@ -29,8 +30,9 @@ export async function GET(
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: { id: string; findingId: string } },
+  props: { params: Promise<{ id: string; findingId: string }> }
 ) {
+  const params = await props.params;
   return withProjectValidation<any>(request, async (validated) => {
     const { projectId } = validated
 
@@ -61,8 +63,9 @@ export async function POST(
 
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: { id: string; findingId: string } },
+  props: { params: Promise<{ id: string; findingId: string }> }
 ) {
+  const params = await props.params;
   return withProjectValidation<any>(request, async (validated) => {
     await dismissFinding(validated.projectId, params.findingId)
     return NextResponse.json({ ok: true, findingId: params.findingId, status: 'dismissed' })

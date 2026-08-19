@@ -22,8 +22,9 @@ const MIN_SINCE_MS = 60 * 1000 // never look further forward than 1 min ago
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { id: string } },
+  props: { params: Promise<{ id: string }> },
 ) {
+  const params = await props.params
   return withProjectValidation<any>(request, async (validated) => {
     const url = new URL(request.url)
     const sinceParam = url.searchParams.get('since')

@@ -26,14 +26,16 @@ async function authenticate(req: NextRequest, projectId: string) {
   return { userId: decoded.userId }
 }
 
-export async function GET(req: NextRequest, { params }: { params: { projectId: string } }) {
+export async function GET(req: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   const auth = await authenticate(req, params.projectId)
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: 401 })
   const triggers = await listTriggers(params.projectId)
   return NextResponse.json({ triggers })
 }
 
-export async function POST(req: NextRequest, { params }: { params: { projectId: string } }) {
+export async function POST(req: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   const auth = await authenticate(req, params.projectId)
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: 401 })
 
@@ -67,7 +69,8 @@ export async function POST(req: NextRequest, { params }: { params: { projectId: 
   return NextResponse.json({ trigger }, { status: 201 })
 }
 
-export async function DELETE(req: NextRequest, { params }: { params: { projectId: string } }) {
+export async function DELETE(req: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   const auth = await authenticate(req, params.projectId)
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: 401 })
 

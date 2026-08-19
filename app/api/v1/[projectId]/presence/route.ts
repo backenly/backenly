@@ -125,10 +125,8 @@ async function ensurePresenceTable(projectId: string): Promise<void> {
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 /** GET — list users online right now */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   const auth = await v1ApiMiddleware(request, params)
   if (auth.response) return auth.response
 
@@ -154,10 +152,8 @@ export async function GET(
 }
 
 /** POST — join or heartbeat (upsert lastSeen) */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   const auth = await v1ApiMiddleware(request, params)
   if (auth.response) return auth.response
 
@@ -201,10 +197,8 @@ export async function POST(
 }
 
 /** DELETE — explicit leave */
-export async function DELETE(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+export async function DELETE(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   const auth = await v1ApiMiddleware(request, params)
   if (auth.response) return auth.response
 

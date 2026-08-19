@@ -31,10 +31,8 @@ const schema = z.object({
 
 const STORAGE_DIR = process.env.STORAGE_DIR || path.join(process.cwd(), 'storage')
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { uploadId: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ uploadId: string }> }) {
+  const params = await props.params;
   try {
     return await withTenantIsolation(request, async (projectId) => {
       const { uploadId } = params

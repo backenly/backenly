@@ -26,10 +26,8 @@ import { prisma } from '@/lib/db'
  *   ?lowStockThreshold=10   (default: 10)
  *   ?recentLimit=5          (default: 5, max 20)
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, params)
     if (middleware.response) return middleware.response

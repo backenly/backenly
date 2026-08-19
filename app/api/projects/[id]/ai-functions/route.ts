@@ -8,10 +8,8 @@ import { validateAiFunctionData } from '@/lib/ai/function-validation'
  * GET /api/projects/[id]/ai-functions
  * List all AI functions for a project
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const auth = await authenticateRequest(request)
     if (!auth.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
@@ -116,10 +114,8 @@ export async function GET(
  * Create a new AI function — describe it in natural language, AI generates the code
  * Body: { description, triggerType, triggerTable? }
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const auth = await authenticateRequest(request)
     if (!auth.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })

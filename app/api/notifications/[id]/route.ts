@@ -9,10 +9,8 @@ import { authenticateRequest } from '@/lib/auth/middleware'
  * Mark a single notification as read (or unread).
  * Body: { read: boolean }
  */
-export async function PATCH(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function PATCH(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const auth = await authenticateRequest(request)
   if (!auth.authenticated || !auth.userId) {
     return NextResponse.json({ error: auth.error ?? 'Unauthorized' }, { status: 401 })
@@ -47,10 +45,8 @@ export async function PATCH(
  * DELETE /api/notifications/:id
  * Delete a single notification.
  */
-export async function DELETE(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function DELETE(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const auth = await authenticateRequest(request)
   if (!auth.authenticated || !auth.userId) {
     return NextResponse.json({ error: auth.error ?? 'Unauthorized' }, { status: 401 })

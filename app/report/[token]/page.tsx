@@ -19,7 +19,8 @@ function timeAgo(iso: string): string {
   return `${Math.floor(s / 86400)}d ago`
 }
 
-export default async function ReportPage({ params }: { params: { token: string } }) {
+export default async function ReportPage(props: { params: Promise<{ token: string }> }) {
+  const params = await props.params;
   const resolved = await resolveShareToken(params.token)
   const report = resolved ? await buildChangeReport(resolved.projectId) : null
 

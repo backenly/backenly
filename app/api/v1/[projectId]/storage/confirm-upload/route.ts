@@ -23,10 +23,8 @@ import { storageService } from '@/lib/services/storage'
  *
  * Response: { id, path, url, size, status: 'complete' }
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, params)
     if (middleware.response) return middleware.response

@@ -27,10 +27,8 @@ import { recordApiUsageEvent, type ApiUsageEvent } from '@/lib/ai/frontend-coevo
 
 const MAX_EVENTS_PER_REQUEST = 50
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { projectId: string } },
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   const { projectId } = params
 
   // ── 1. Validate projectId ─────────────────────────────────────────────────

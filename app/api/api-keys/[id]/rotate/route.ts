@@ -24,10 +24,8 @@ function getKeyPrefix(role: string): string {
 /**
  * Rotate an API key - generates a new key while keeping the same settings
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const auth = await requireAuth(request)
 

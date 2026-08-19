@@ -28,7 +28,8 @@ const FINDINGS_PREVIEW_LIMIT = 50
 
 // ─── GET ──────────────────────────────────────────────────────────────────────
 
-export async function GET(request: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params
   return withProjectValidation<any>(request, async (validated) => {
     const { projectId } = validated
     const url = new URL(request.url)
@@ -194,7 +195,8 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
 // Useful when: user just fixed an issue and wants to confirm it without waiting
 // for the daily cron cycle.
 
-export async function PATCH(request: NextRequest, { params }: { params: { id: string } }) {
+export async function PATCH(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params
   return withProjectValidation<any>(request, async (validated) => {
     const { projectId } = validated
     try {
@@ -255,7 +257,8 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
 // action='approve' marks the finding as auto_fixed and records a CorrectionEvent
 // so the health widget and audit log stay consistent.
 
-export async function POST(request: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params
   return withProjectValidation<any>(request, async (validated) => {
     const { projectId } = validated
     const body = await request.json().catch(() => ({}))

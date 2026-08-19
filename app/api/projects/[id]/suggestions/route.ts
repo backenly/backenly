@@ -10,10 +10,8 @@ import { verifyToken } from '@/lib/auth/jwt'
  * Returns active suggestions for the current graph version.
  * Suggestions are non-mutating, advisory-only analysis.
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     // Authenticate
     const sessionToken = request.cookies.get('auth-token')?.value

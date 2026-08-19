@@ -34,7 +34,7 @@ export async function GET(request: NextRequest) {
     }
 
     // Verify state parameter (CSRF protection)
-    const cookieStore = cookies()
+    const cookieStore = await cookies()
     const stateCookie = cookieStore.get('replit_oauth_state')
     
     if (!stateCookie) {

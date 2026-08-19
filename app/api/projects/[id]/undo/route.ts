@@ -16,12 +16,10 @@ import { generateTraceId } from '@/lib/utils'
  * 
  * GUARANTEE: "Undo any change. Nothing breaks. Ever."
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const traceId = generateTraceId()
-  
+
   try {
     // 1. Authenticate user
     const sessionToken = request.cookies.get('auth-token')?.value

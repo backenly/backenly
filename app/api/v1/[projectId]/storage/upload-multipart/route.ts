@@ -351,10 +351,8 @@ async function handleComplete(request: NextRequest, uploadId: string, totalParts
 
 // ── Route dispatcher ───────────────────────────────────────────────────────────
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   const middleware = await v1ApiMiddleware(request, params)
   if (middleware.response) return middleware.response
   const { context } = middleware
@@ -376,10 +374,8 @@ export async function POST(
   return createErrorResponse(ErrorCodes.BAD_REQUEST, 'Use ?action=initiate or ?action=complete', 400)
 }
 
-export async function PUT(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+export async function PUT(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   const middleware = await v1ApiMiddleware(request, params)
   if (middleware.response) return middleware.response
   const { context } = middleware
@@ -393,10 +389,8 @@ export async function PUT(
   return handleUploadChunk(request, uploadId, partNumber, totalParts, context.projectId)
 }
 
-export async function DELETE(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+export async function DELETE(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   const middleware = await v1ApiMiddleware(request, params)
   if (middleware.response) return middleware.response
   const { context } = middleware

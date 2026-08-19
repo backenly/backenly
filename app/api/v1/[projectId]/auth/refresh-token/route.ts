@@ -12,10 +12,8 @@ import { refreshEndUserToken } from '@/lib/services/end-user-auth-flows'
  * The client passes the current token in the Authorization header
  * (Bearer <token>) or the body as { token }.
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   let rawToken: string | null = null
   const authHeader = request.headers.get('authorization')
   if (authHeader?.startsWith('Bearer ')) {

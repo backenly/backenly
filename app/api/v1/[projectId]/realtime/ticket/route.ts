@@ -23,10 +23,8 @@ import { mintSseTicket, SSE_TICKET_TTL_SECONDS } from '@/lib/realtime/sse-ticket
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { projectId: string } },
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   const middleware = await v1ApiMiddleware(request, params)
   if (middleware.response) return middleware.response
   const { context } = middleware

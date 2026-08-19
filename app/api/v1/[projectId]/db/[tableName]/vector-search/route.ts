@@ -29,8 +29,9 @@ const SAFE_IDENT = /^[a-zA-Z_][a-zA-Z0-9_]{0,62}$/
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { projectId: string; tableName: string } },
+  props: { params: Promise<{ projectId: string; tableName: string }> }
 ) {
+  const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, { projectId: params.projectId })
     if (middleware.response) return middleware.response

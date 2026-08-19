@@ -3,10 +3,8 @@ import { prisma } from '@/lib/db/prisma'
 import { verifySession } from '@/lib/auth/session'
 import { Pool } from 'pg'
 
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } },
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const token = request.cookies.get('auth-token')?.value
     if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
@@ -103,7 +101,7 @@ export async function GET(
 
     const format = new URL(request.url).searchParams.get('format') ?? 'sql'
     if (format === 'json') {
-      return NextResponse.json({ schema: schemaName, sql, tables: sql.match(/CREATE TABLE/g)?.length ?? 0 })
+      return NextResponse.json({ schema: schemaName, sql, tables: sql.match(/CREATE TABLE/g)?.length ?? 0 });
     }
 
     return new NextResponse(sql, {
@@ -111,7 +109,7 @@ export async function GET(
         'Content-Type': 'text/plain; charset=utf-8',
         'Content-Disposition': `attachment; filename="${project.name.replace(/[^a-z0-9]/gi, '-').toLowerCase()}-schema.sql"`,
       },
-    })
+    });
   } catch (err) {
     console.error('[ExportSchema] Failed:', err)
     return NextResponse.json({ error: 'Export failed' }, { status: 500 })

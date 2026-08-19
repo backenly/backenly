@@ -5,10 +5,8 @@ import { loadGraph } from '@/lib/orchestration/backend-state-graph'
  * Debug endpoint to view the complete backend state graph
  * This shows you exactly what was created: tables, auth, storage, APIs
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const projectId = params.id
 

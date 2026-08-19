@@ -12,10 +12,8 @@ import { getMongoDB } from '@/lib/db'
  * This is the magic that makes it a true BaaS platform!
  * Users don't need to know SQL - we handle it automatically.
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ issueId: string }> }) {
+  const params = await props.params;
   const requestId = `apply-fix-${Date.now()}`
   console.log(`🔵 [${requestId}] === AUTO-APPLY FIX REQUEST START ===`)
 
@@ -30,7 +28,7 @@ export async function POST(
     const projectId = await getCurrentProjectId(request)
     console.log(`✅ [${requestId}] Project ID: ${projectId}`)
 
-    const { id } = params
+    const { issueId: id } = params
 
     // Get the issue
     console.log(`🔍 [${requestId}] Fetching issue: ${id}`)

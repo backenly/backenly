@@ -13,10 +13,8 @@ import fs from 'fs/promises'
 import path from 'path'
 import os from 'os'
 
-export async function DELETE(
-  request: NextRequest,
-  { params }: { params: { uploadId: string } }
-) {
+export async function DELETE(request: NextRequest, props: { params: Promise<{ uploadId: string }> }) {
+  const params = await props.params;
   try {
     return await withTenantIsolation(request, async (projectId) => {
       const { uploadId } = params

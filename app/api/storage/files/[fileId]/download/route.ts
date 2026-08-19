@@ -18,10 +18,8 @@ import crypto from 'crypto'
  *   • private + ?token=  → HMAC signed URL (no login needed)
  *   • private, no token  → authenticated platform user who owns the project
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { fileId: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ fileId: string }> }) {
+  const params = await props.params;
   try {
     const fileId = params.fileId
     const token = request.nextUrl.searchParams.get('token')
