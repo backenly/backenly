@@ -139,17 +139,11 @@ export function NavBar() {
           </a>
           <span className="h-6 w-px bg-white/[0.12]" aria-hidden />
           <Link
-            href={ROUTES.login}
-            className="text-[15px] font-medium text-zinc-400 transition-colors hover:text-white"
+            href={ROUTES.signup}
+            className="rounded-full bg-white px-5 py-2.5 text-[15px] font-semibold text-black transition-colors hover:bg-zinc-200"
           >
-            Log in
+            Sign up
           </Link>
-            <Link
-              href={ROUTES.signup}
-              className="rounded-full bg-white px-5 py-2.5 text-[15px] font-semibold text-black transition-colors hover:bg-zinc-200"
-            >
-              Sign up
-            </Link>
           </motion.div>
         </div>
 
@@ -206,16 +200,9 @@ export function NavBar() {
               </a>
 
               <Link
-                href={ROUTES.login}
-                onClick={() => setMobileOpen(false)}
-                className="mt-4 flex items-center justify-center rounded-full border border-white/[0.1] bg-white/[0.03] py-3 text-sm font-medium text-zinc-200 transition-colors hover:bg-white/[0.06] hover:text-white"
-              >
-                Log in
-              </Link>
-              <Link
                 href={ROUTES.signup}
                 onClick={() => setMobileOpen(false)}
-                className="mt-2 flex items-center justify-center rounded-full bg-white py-3 text-sm font-semibold text-black transition-colors hover:bg-zinc-200"
+                className="mt-4 flex items-center justify-center rounded-full bg-white py-3 text-sm font-semibold text-black transition-colors hover:bg-zinc-200"
               >
                 Sign up
               </Link>
