@@ -5,7 +5,7 @@
   "description": "Backenly MCP server — gives Claude Code, Cursor, Codex, Cline, and Claude Desktop direct access to your Backenly backend (tables, APIs, brain chat, runtime data).",
   "license": "MIT",
   "author": "Backenly",
-  "homepage": "https://backenly.com/quickstart",
+  "homepage": "https://backenly.com/resources",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/backenly/backenly.git",

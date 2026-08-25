@@ -40,9 +40,6 @@ export const ROUTES = {
 
 const NAV_LINKS = [
   { label: 'Product', href: '/#capabilities', activePath: '/' },
-  // Quickstart IS the MCP page. The two were separate until they drifted apart
-  // and were merged. Do not re-add a second nav entry for it.
-  { label: 'Quickstart', href: '/quickstart', activePath: '/quickstart' },
   { label: 'Resources', href: ROUTES.resources, activePath: ROUTES.resources },
   { label: 'Use cases', href: ROUTES.useCases, activePath: ROUTES.useCases },
   { label: 'Pricing', href: ROUTES.pricing, activePath: ROUTES.pricing },
@@ -326,7 +323,6 @@ export function SiteFooter() {
     { label: 'Alternatives', href: ROUTES.alternatives },
   ]
   const developers = [
-    { label: 'Quickstart', href: '/quickstart' },
     { label: 'GitHub', href: ROUTES.github },
     { label: 'MCP server', href: 'https://www.npmjs.com/package/@backenly/mcp-server' },
     { label: 'CLI', href: 'https://www.npmjs.com/package/@backenly/cli' },

@@ -22,7 +22,7 @@ change planned, verified, and reversible.
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-Backenly-0A66C2?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/company/117034579)
 [![Star on GitHub](https://img.shields.io/badge/Star-on%20GitHub-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/backenly/backenly)
 
-**[backenly.com](https://backenly.com)** &nbsp;·&nbsp; [Quickstart](https://backenly.com/quickstart) &nbsp;·&nbsp; [Resources](https://backenly.com/resources) &nbsp;·&nbsp; [Pricing](https://backenly.com/pricing) &nbsp;·&nbsp; [Client libraries](https://github.com/backenly/backenly-js)
+**[backenly.com](https://backenly.com)** &nbsp;·&nbsp; [Resources](https://backenly.com/resources) &nbsp;·&nbsp; [Pricing](https://backenly.com/pricing) &nbsp;·&nbsp; [Client libraries](https://github.com/backenly/backenly-js)
 
 https://github.com/user-attachments/assets/2b215d72-4b1b-4a4c-8290-a94553be192d
 

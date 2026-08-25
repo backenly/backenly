@@ -36,12 +36,13 @@ import { CodeSurface, CliText, JsonText, PromptText } from './CodeSurface'
  * Two docs targets, and they are NOT interchangeable:
  *   MCP_DOCS  — llms.txt, written for a model. Only ever goes INSIDE the prompt
  *               the agent consumes.
- *   USER_DOCS — /quickstart, written for a person. Every link a human clicks in
+ *   USER_DOCS — /resources, written for a person. Every link a human clicks in
  *               this UI points here. Sending a developer to a plaintext dump
- *               addressed to their agent is a dead end.
+ *               addressed to their agent is a dead end. (Was /quickstart until
+ *               that page was removed; it now 301s here anyway.)
  */
 const MCP_DOCS = 'https://backenly.com/llms.txt'
-const USER_DOCS = '/quickstart'
+const USER_DOCS = '/resources'
 const KEY_PLACEHOLDER = '<SCOPED_KEY>'
 /** The remote (Streamable-HTTP) MCP endpoint — app/api/mcp/route.ts. No npx. */
 const REMOTE_URL = 'https://backenly.com/api/mcp'
@@ -443,7 +444,7 @@ function CommandGlyph({ className }: { className?: string }) {
  *
  * The four listed are the load-bearing quarter of MCP_SURFACE (lib/mcp/
  * catalog.ts) — read, migrate, query, escape hatch. Keep this list in step with
- * that set; /quickstart covers the rest for the human reading this card.
+ * that set; packages/mcp-server/README.md covers the rest.
  */
 const HEADLINE_TOOLS: { name: string; gloss: string }[] = [
   { name: 'read_backend_state', gloss: 'Schema, RLS, metrics, incidents' },

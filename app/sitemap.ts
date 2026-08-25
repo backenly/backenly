@@ -8,7 +8,6 @@ export default function sitemap(): MetadataRoute.Sitemap {
   // ── Core marketing pages ───────────────────────────────────────────────────
   const core: MetadataRoute.Sitemap = [
     { url: APP_URL,                          lastModified: now, changeFrequency: 'weekly',  priority: 1.0 },
-    { url: `${APP_URL}/quickstart`,          lastModified: now, changeFrequency: 'monthly', priority: 0.95 },
     { url: `${APP_URL}/pricing`,             lastModified: now, changeFrequency: 'monthly', priority: 0.9 },
     { url: `${APP_URL}/alternatives`,        lastModified: now, changeFrequency: 'monthly', priority: 0.8 },
     { url: `${APP_URL}/contact`,             lastModified: now, changeFrequency: 'monthly', priority: 0.6 },

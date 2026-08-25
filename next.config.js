@@ -65,11 +65,13 @@ const nextConfig = {
       { source: '/docs', destination: '/resources', permanent: false },
 
       // /mcp and /quickstart were two pages answering "how do I connect my
-      // agent", and they drifted: /mcp still advertised a 60-tool catalog long
-      // after it was cut to 18. Merged into /quickstart, which absorbed the MCP
-      // keywords. Permanent so the indexed /mcp URL passes its equity across —
-      // the npm package homepage and older install prompts still point at it.
-      { source: '/mcp', destination: '/quickstart', permanent: true },
+      // agent". /mcp was merged into /quickstart, then /quickstart itself was
+      // removed — the connect flow lives in the product, not on a marketing
+      // page. Both URLs are indexed and both are still printed as the homepage
+      // of the published @backenly/mcp-server and @backenly/sdk packages, so
+      // they must keep resolving. Permanent, pointing at the docs hub.
+      { source: '/mcp', destination: '/resources', permanent: true },
+      { source: '/quickstart', destination: '/resources', permanent: true },
 
       // Audience repositioning 2026-07-18: marketing slugs renamed away from
       // "vibe coders" / "non-technical founders" to agent-era audience names.

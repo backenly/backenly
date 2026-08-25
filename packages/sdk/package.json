@@ -4,7 +4,7 @@
   "description": "Official Backenly SDK — typed database, auth, storage, realtime and a supabase-js compatibility shim for any JavaScript or TypeScript project.",
   "license": "MIT",
   "author": "Backenly",
-  "homepage": "https://backenly.com/quickstart",
+  "homepage": "https://backenly.com/resources",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/backenly/backenly.git",

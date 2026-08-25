@@ -485,11 +485,11 @@ export function FrontendRuntimeCards({ projectId }: { projectId: string }) {
     <div className="mt-6">
       <SectionLabel>Frontend clients</SectionLabel>
       {/* Pointed a human at llms.txt, which is written for their agent. A
-          person reading this panel needs /quickstart. */}
+          person reading this panel needs the docs hub. */}
       <p className="mt-1.5 text-[12.5px] leading-relaxed text-zinc-500 max-w-2xl">
         Live SDK traffic and the optional origin allowlist. Your agent wires the SDK — see{' '}
-        <a href="/quickstart" target="_blank" rel="noreferrer" className="text-zinc-300 underline decoration-white/20 underline-offset-2 hover:text-zinc-100">
-          Quickstart
+        <a href="/resources" target="_blank" rel="noreferrer" className="text-zinc-300 underline decoration-white/20 underline-offset-2 hover:text-zinc-100">
+          Documentation
         </a>
         .
       </p>

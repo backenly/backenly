@@ -66,11 +66,11 @@ const publicPathPrefixes = [
   '/use-cases',
   '/resources',
   '/docs',
-  '/mcp',           // merged into /quickstart; next.config redirects it, but the
+  '/mcp',           // the page is gone and next.config redirects it, but the
                     // prefix stays public so an auth wall can never win the race
-  '/quickstart',    // the "how do I start" page — the one route that must never
-                    // require a session, since its whole job is to convert people
-                    // who do not have one yet
+  '/quickstart',    // same: the page was deleted and 301s to /resources. The
+                    // prefix stays public so the redirect always resolves for
+                    // anonymous visitors following an indexed or npm link
   '/report/',       // shared change reports — access IS the revocable token, no session
   '/.well-known/',  // security.txt etc.
 ]
