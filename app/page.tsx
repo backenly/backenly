@@ -17,7 +17,6 @@ import {
   Moon,
   Play,
   ShieldCheck,
-  Terminal,
   UsersRound,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
@@ -283,13 +282,6 @@ function Hero() {
             >
               Start free
               <ArrowRight className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
-            </Link>
-            <Link
-              href="/quickstart"
-              className="inline-flex h-12 items-center justify-center gap-2 whitespace-nowrap rounded-md border border-white/14 bg-white/[0.03] px-6 text-sm font-semibold text-white transition duration-200 hover:border-white/25 hover:bg-white/[0.06] active:scale-[0.985] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60 focus-visible:ring-offset-2 focus-visible:ring-offset-black md:text-[15px]"
-            >
-              <Terminal className="h-4 w-4" />
-              Connect your agent
             </Link>
           </motion.div>
         </div>
