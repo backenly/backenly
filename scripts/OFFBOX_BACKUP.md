@@ -45,7 +45,7 @@ source the whole file — so cron's bare environment is not a problem.
 Off-box pushes ran until 2026-07-23 and then silently stopped for seven days.
 `BACKUP_REMOTE` was correctly set in `.env` the whole time. The script defaulted
 `ENV_FILE` to `/opt/backenly/.env`, a path that does not exist on this host — the
-checkout is `/var/www/backenly/backenly` — so the `[ -f "$ENV_FILE" ]` guard was
+checkout sits elsewhere — so the `[ -f "$ENV_FILE" ]` guard was
 false, no `BACKUP_*` key was ever exported, and the off-box branch was skipped.
 
 The log line said:
@@ -62,7 +62,7 @@ script's own location, and the warning names the specific cause.
 
 1. `rclone lsl b2:backenly-backups | sort -k2 | tail -3` — how recent is the
    newest object? That dates the failure.
-2. `grep -c '^BACKUP_REMOTE=' /var/www/backenly/backenly/.env` — is it set?
+2. `grep -c '^BACKUP_REMOTE=' .env`, from the checkout root — is it set?
 3. `bash scripts/backup.sh` by hand and read the warning — it now distinguishes
    "no `.env` at that path", "no `BACKUP_REMOTE=` line", and "rclone missing".
 4. `command -v rclone` **as root under cron's PATH**, not just in your shell.

@@ -36,7 +36,7 @@ set -Eeuo pipefail
 #
 # Derived from this script's OWN location, not hardcoded. The previous default
 # was /opt/backenly/.env, a path that does not exist on this host — the live
-# checkout is /var/www/backenly/backenly. That is the identical bug the header
+# checkout sits elsewhere. That is the identical bug the header
 # above documents fixing for APP_DIR in deploy.sh; ENV_FILE was missed.
 #
 # It failed silently and expensively: `[ -f "$ENV_FILE" ]` was simply false, so

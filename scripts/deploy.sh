@@ -16,8 +16,8 @@ set -euo pipefail
 
 # Resolve the checkout from this script's OWN location rather than hardcoding a
 # path. The hardcoded /opt/backenly did not exist on the production host (the
-# live checkout is /var/www/backenly/backenly, which is where PM2 runs
-# backenly-nextjs and backenly-runtime from), so `set -e` aborted this script on
+# live checkout sits elsewhere, and is where PM2 runs backenly-nextjs and
+# backenly-runtime from), so `set -e` aborted this script on
 # its second line and the documented one-liner could never have worked there.
 # Deriving the directory makes the same script correct on every host; APP_DIR
 # still overrides it for unusual setups.
