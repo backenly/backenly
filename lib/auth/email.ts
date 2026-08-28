@@ -1,5 +1,6 @@
 import nodemailer from 'nodemailer'
 import { buildEnvSmtpTransport } from '@/lib/email/smtp-transport'
+import { observeSend, reportUnconfigured } from '@/lib/email/send-outcome'
 
 function getTransporter() {
   // Shared builder normalizes port 465 -> 587 (STARTTLS) so email works on
@@ -33,13 +34,11 @@ export async function sendVerificationEmail(email: string, verifyUrl: string): P
   const transporter = getTransporter()
 
   if (transporter) {
-    await transporter.sendMail({ from, to: email, subject, html })
+    await observeSend('verification', email, () =>
+      transporter.sendMail({ from, to: email, subject, html }),
+    )
   } else {
-    console.log('\n========== EMAIL VERIFICATION ==========')
-    console.log(`To: ${email}`)
-    console.log(`Subject: ${subject}`)
-    console.log(`Verify URL: ${verifyUrl}`)
-    console.log('========================================\n')
+    reportUnconfigured({ kind: 'verification', email, preview: { 'Verify URL': verifyUrl } })
   }
 }
 
@@ -70,12 +69,11 @@ export async function sendOrgInviteEmail(
   `
   const transporter = getTransporter()
   if (transporter) {
-    await transporter.sendMail({ from, to: email, subject, html })
+    await observeSend('org_invite', email, () =>
+      transporter.sendMail({ from, to: email, subject, html }),
+    )
   } else {
-    console.log('\n========== ORG INVITE ==========')
-    console.log(`To: ${email}`)
-    console.log(`Accept URL: ${opts.acceptUrl}`)
-    console.log('================================\n')
+    reportUnconfigured({ kind: 'org_invite', email, preview: { 'Accept URL': opts.acceptUrl } })
   }
 }
 
@@ -111,14 +109,15 @@ export async function sendAccountLockedEmail(email: string, lockedUntil: Date): 
   const transporter = getTransporter()
 
   if (transporter) {
-    await transporter.sendMail({ from, to: email, subject, html })
+    await observeSend('account_locked', email, () =>
+      transporter.sendMail({ from, to: email, subject, html }),
+    )
   } else {
-    console.log('\n========== ACCOUNT LOCKED EMAIL ==========')
-    console.log(`To: ${email}`)
-    console.log(`Subject: ${subject}`)
-    console.log(`Locked until: ${lockedUntilStr}`)
-    console.log(`Unlock URL: ${unlockUrl}`)
-    console.log('==========================================\n')
+    reportUnconfigured({
+      kind: 'account_locked',
+      email,
+      preview: { 'Locked until': lockedUntilStr, 'Unlock URL': unlockUrl },
+    })
   }
 }
 
@@ -147,13 +146,11 @@ export async function sendPasswordResetEmail(email: string, resetUrl: string): P
   const transporter = getTransporter()
 
   if (transporter) {
-    await transporter.sendMail({ from, to: email, subject, html })
+    await observeSend('password_reset', email, () =>
+      transporter.sendMail({ from, to: email, subject, html }),
+    )
   } else {
     // Development: log the reset link so you can test without SMTP
-    console.log('\n========== PASSWORD RESET EMAIL ==========')
-    console.log(`To: ${email}`)
-    console.log(`Subject: ${subject}`)
-    console.log(`Reset URL: ${resetUrl}`)
-    console.log('==========================================\n')
+    reportUnconfigured({ kind: 'password_reset', email, preview: { 'Reset URL': resetUrl } })
   }
 }
