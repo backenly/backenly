@@ -394,9 +394,15 @@ export function SiteFooter() {
 function FooterCol({ title, links }: { title: string; links: { label: string; href: string }[] }) {
   return (
     <div>
-      <h4 className="mb-4 font-mono text-[11px] font-medium uppercase tracking-[0.16em] text-zinc-500">
+      {/*
+        h2, not h4. These are the top-level groupings inside the footer landmark,
+        and every marketing page runs h1 → h2 sections above them, so an h4 here
+        produced an h2 → h4 skip on every page on the site. The level is the only
+        thing that changed; the type scale is set by the classes, not the tag.
+      */}
+      <h2 className="mb-4 font-mono text-[11px] font-medium uppercase tracking-[0.16em] text-zinc-500">
         {title}
-      </h4>
+      </h2>
       <ul className="space-y-2.5 text-sm text-zinc-400">
         {links.map((l) => {
           const external = l.href.startsWith('http') || l.href.startsWith('mailto')
