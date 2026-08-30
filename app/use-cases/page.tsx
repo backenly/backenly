@@ -1,154 +1,100 @@
 import { Metadata } from 'next'
-import { safeJsonLd } from "@/lib/security/safe-jsonld"
-import { BrainCircuit, Rocket, Sprout, UsersRound, Zap, type LucideIcon } from 'lucide-react'
+import { safeJsonLd } from '@/lib/security/safe-jsonld'
 import { SiteShell } from '@/components/site/SiteShell'
+import { useCaseCards } from './data'
 import {
-  Card,
-  IconTile,
   InlineArrow,
   PageHero,
   PrimaryButton,
+  SecondaryButton,
   Section,
   SectionIntro,
   SectionHeading,
-  Lead,
   LinkCard,
   FaqList,
   CtaSection,
 } from '@/components/site/kit'
 
+const APP_URL = 'https://backenly.com'
+
 export const metadata: Metadata = {
-  title: 'Use Cases — Who Backenly Is For',
+  title: 'Use Cases — Five workflows Backenly is built for',
   description:
-    'Backenly is the autonomous backend for teams shipping with coding agents: startup MVPs, AI apps, founders with real users, and ambitious side projects. See how each ships a production backend that runs itself.',
+    "Driving a backend from a coding agent over MCP, adopting a backend your AI tools generated, moving a supabase-js frontend, running an AI product's data layer, and multi-tenant SaaS isolation. Each with what Backenly does, what stays yours, and where it stops.",
   keywords: [
-    'AI backend use cases',
-    'backend for coding agents',
-    'startup MVP backend',
-    'AI app backend',
+    'MCP backend for coding agents',
+    'supabase migration',
+    'multi-tenant SaaS row level security',
+    'AI product backend',
     'autonomous backend platform',
-    'backend for founders with real users',
   ],
   openGraph: {
-    title: 'Backenly Use Cases — Who Is It For?',
+    title: 'Backenly Use Cases',
     description:
-      'Founders, AI app builders, and developers running coding agents use Backenly to ship production backends that plan, apply, verify, and heal themselves.',
-    url: 'https://backenly.com/use-cases',
+      'Five workflows, each with the problem, the mechanism, the division of labour, and the known limitations.',
+    url: `${APP_URL}/use-cases`,
     type: 'website',
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'Backenly Use Cases — Who Is It For?',
-    description: 'How founders, AI builders, and agent-driven developers ship self-running backends with Backenly.',
+    title: 'Backenly Use Cases',
+    description: 'Five workflows, with what Backenly does and what stays yours.',
   },
-  alternates: { canonical: 'https://backenly.com/use-cases' },
+  alternates: { canonical: `${APP_URL}/use-cases` },
 }
 
-const useCases = [
+/**
+ * FAQ answers here are the boundary questions — what it does not do, and who
+ * should not use it. A FAQ whose answers all say yes is not answering anything.
+ */
+const FAQ = [
   {
-    slug: 'startup-mvps',
-    label: 'Startup MVPs',
-    headline: 'Ship the MVP, keep it running',
-    description:
-      'Stop burning runway on backend boilerplate. Backenly stands up a production-grade backend from a description, then operates it while you focus on the product and the market.',
-    shortDescription:
-      'Move runway into product learning instead of schema setup, auth wiring, API routes, and deploy chores — with monitoring, rollback, and an audit trail from day one.',
-    icon: Rocket,
+    q: 'What does Backenly actually replace?',
+    a: 'The backend operator. Your coding agent still writes the frontend and the integration code; you still make the product decisions. What the platform takes over is designing and applying schema change safely, enforcing authorization in the database, proving it works after each change, and monitoring and repairing the running backend afterwards.',
   },
   {
-    slug: 'ai-app-builders',
-    label: 'AI App Builders',
-    headline: 'Give AI features a real backend',
-    description:
-      'AI products accumulate infrastructure fast — data, auth, vector search, event pipelines, streaming. Backenly runs all of it under one governed runtime so your best hours go to the model layer.',
-    shortDescription:
-      'Store users, prompts, files, jobs, outputs, and app state behind one runtime — with pgvector RAG, event functions, and realtime built in.',
-    icon: BrainCircuit,
+    q: 'How is this different from asking my agent to generate backend code?',
+    a: 'An agent can write backend code well. What it cannot do is persist: the session ends and its model of your schema ends with it, and it is not watching when error rates move at 2 a.m. It also has no structural limit — nothing stops a bad turn from dropping a table. Backenly keeps the schema, the change ledger, and the verification evidence, and destructive operations are absent from the agent-facing surface entirely.',
   },
   {
-    slug: 'founders',
-    label: 'Founders with Real Users',
-    headline: 'Run production without a backend team',
-    description:
-      'You shipped fast with AI tools and real users showed up. Backenly puts a real, operated backend under the product — monitoring, safe fixes, approval queues, and rollback — so production is not your second job.',
-    shortDescription:
-      'Put an operated backend under the product you shipped with AI tools — monitoring, safe repairs, approvals, and restore points, without a backend hire.',
-    icon: UsersRound,
+    q: 'When is Backenly the wrong choice?',
+    a: 'When the backend is the product — a database engine, a system with microsecond latency budgets, or one whose regulation requires owning every line. Also when your team wants to own infrastructure: structure mutates only through governed actions, there is no raw-SQL path for changing it, and Backenly exposes no SQL functions, so there is no rpc() surface.',
   },
   {
-    slug: 'ai-assisted-developers',
-    label: 'AI-Assisted Developers',
-    headline: 'Point your agent at a real backend',
-    description:
-      'Connect Claude Code or Cursor over MCP and let your agent read the live schema and drive tables, APIs, auth, and storage — through governed changes it cannot break, with a receipt for each one.',
-    shortDescription:
-      'Give your coding agent full backend reach over MCP, with structural guardrails: governed writes, human approval on destructive operations, and a change history.',
-    icon: Zap,
+    q: 'Do I have to build through an agent?',
+    a: 'For creating backend resources, yes — MCP is the build door and there is no in-product chat builder. The dashboard is where you inspect, approve, and operate. Everything else is standard: the runtime is REST over PostgREST, and you can take a direct PostgreSQL connection string for psql, an ORM, or a BI tool.',
   },
-  {
-    slug: 'side-projects',
-    label: 'Side Projects',
-    headline: 'A real backend, free forever',
-    description:
-      'One permanently free project, no credit card. Backenly gives your side project a real backend — not a toy — and a self-healing loop that runs every minute so it is still running when someone finds it months later.',
-    shortDescription:
-      'Use one permanent free project to launch a serious side project without infrastructure spend — and without maintenance being the reason it dies.',
-    icon: Sprout,
-  },
-] satisfies {
-  slug: string
-  label: string
-  headline: string
-  description: string
-  shortDescription: string
-  icon: LucideIcon
-}[]
-
-const operatingProof = [
-  'Generated PostgreSQL schema and REST APIs',
-  'Project-scoped auth, storage, and realtime',
-  'Health checks, rollback, and audit history',
-  'Clear SDK contract for any frontend',
 ]
 
 const faqSchema = {
   '@context': 'https://schema.org',
   '@type': 'FAQPage',
-  mainEntity: [
-    {
-      '@type': 'Question',
-      name: 'Who is Backenly for?',
-      acceptedAnswer: {
-        '@type': 'Answer',
-        text: 'Backenly is for founders shipping products with real users, teams building AI apps, startups shipping MVPs under real load, and developers who drive their backend from a coding agent over MCP. It suits anyone who needs a production backend without running the infrastructure themselves.',
-      },
-    },
-    {
-      '@type': 'Question',
-      name: 'How do coding agents work with Backenly?',
-      acceptedAnswer: {
-        '@type': 'Answer',
-        text: 'Backenly ships an MCP server. One command connects Claude Code, Cursor, Codex, or Cline, and your agent reads the live schema and applies governed changes to tables, APIs, auth, and storage — with destructive operations blocked at the key scope and routed to human approval.',
-      },
-    },
-    {
-      '@type': 'Question',
-      name: 'What kind of apps can I build with Backenly?',
-      acceptedAnswer: {
-        '@type': 'Answer',
-        text: 'You can build any app that needs a backend: SaaS products, marketplaces, mobile apps, AI-powered apps, internal tools, MVPs, and side projects.',
-      },
-    },
-    {
-      '@type': 'Question',
-      name: 'Is Backenly suitable for production apps?',
-      acceptedAnswer: {
-        '@type': 'Answer',
-        text: 'Yes. Backenly generates production-ready PostgreSQL databases, REST APIs with proper auth and row-level security, file storage, and realtime subscriptions. It is designed for real products, not prototypes.',
-      },
-    },
-  ],
+  mainEntity: FAQ.map((item) => ({
+    '@type': 'Question',
+    name: item.q,
+    acceptedAnswer: { '@type': 'Answer', text: item.a },
+  })),
 }
+
+/** The through-line, stated once here rather than repeated on every use case. */
+const SHARED = [
+  {
+    title: 'One governed path for every change',
+    body: 'Whether a change comes from you, your agent, or an automated repair, it goes through the same typed kernel — validated, audited, and applied all-or-nothing. There is deliberately no raw-SQL route around it.',
+  },
+  {
+    title: 'Authorization the database enforces',
+    body: 'Each project has its own PostgreSQL schema, and row access is decided by row-level security rather than by application filtering. A rule you cannot forget on one screen.',
+  },
+  {
+    title: 'Evidence instead of success messages',
+    body: 'After a build, checks run against the live runtime over real HTTP — including signing in as a second user to confirm isolation holds — and each returns its assertions. Checks that cannot run report as skipped, never as passed.',
+  },
+  {
+    title: 'A loop that keeps going after you stop',
+    body: 'One-minute cadence on every plan, applying only reversible snapshotted changes on its own. Auth, credentials, and anything destructive wait for a human at every autonomy level.',
+  },
+]
 
 export default function UseCasesPage() {
   return (
@@ -159,120 +105,76 @@ export default function UseCasesPage() {
       />
       <main className="relative z-20">
         <PageHero
-          align="center"
           eyebrow="Use Cases"
-          title="Built for teams with something to run"
-          subtitle="Backenly is the autonomous backend for people shipping real products — your coding agent drives it over MCP, your app builder pairs with it, your team ships an MVP under real load. It plans, applies, verifies, and heals the backend, so operating it isn’t your job."
+          title="Five workflows, and where each one stops"
+          subtitle="Each page below states the problem, what you would normally build, the sequence Backenly actually runs, what stays your responsibility, and the known limitations. If a page cannot name what it does not do, it is not a use case — it is a brochure."
           actions={
-            <PrimaryButton href="/auth/signup">
-              Start building free
-              <InlineArrow />
-            </PrimaryButton>
+            <>
+              <PrimaryButton href="/auth/signup">
+                Start free
+                <InlineArrow />
+              </PrimaryButton>
+              <SecondaryButton href="/resources">Read the docs</SecondaryButton>
+            </>
           }
-          proof={[
-            { label: 'Founders', value: 'A backend that runs itself' },
-            { label: 'AI apps', value: 'Data, auth, RAG, realtime' },
-            { label: 'Agent devs', value: 'Governed MCP access' },
-          ]}
         />
 
-        {/* Use Case Cards */}
-        <Section aria-label="Use cases" width="wide" className="!pt-0">
-          <div className="grid gap-6 sm:grid-cols-2">
-            {useCases.map((uc) => {
-              const Icon = uc.icon
-              return (
+        <Section aria-label="Use cases" width="wide-prose" className="!pt-0">
+          <div className="grid gap-5 md:grid-cols-2">
+            {useCaseCards.map((uc) => (
               <LinkCard key={uc.slug} href={`/use-cases/${uc.slug}`}>
-                <IconTile size={48}>
-                  <Icon size={22} className="text-zinc-200" strokeWidth={1.75} />
-                </IconTile>
-                <h2 className="text-lg font-normal text-white tracking-tight mb-1">{uc.label}</h2>
-                <p className="text-sm font-normal text-violet-300 mb-3">{uc.headline}</p>
-                <p className="text-sm text-neutral-400 font-extralight leading-relaxed flex-1">
-                  {uc.shortDescription}
+                <p className="font-mono text-[11px] uppercase tracking-[0.14em] text-neutral-500">
+                  {uc.who}
                 </p>
-                <p className="mt-5 text-sm font-semibold text-zinc-200 group-hover:text-white transition-colors">
-                  Learn more
+                <h2 className="mt-3 text-lg font-semibold leading-tight tracking-tight text-white">
+                  {uc.headline}
+                </h2>
+                <p className="mt-3 flex-1 text-sm font-light leading-relaxed text-neutral-400">
+                  {uc.summary}
+                </p>
+                <p className="mt-5 border-t border-white/[0.07] pt-4 text-xs font-light leading-6 text-neutral-500">
+                  <span className="font-medium text-neutral-400">Trade-off: </span>
+                  {uc.firstLimitation}
+                </p>
+                <p className="mt-4 text-sm font-semibold text-zinc-200 transition-colors group-hover:text-white">
+                  Read the workflow
                 </p>
               </LinkCard>
-              )
-            })}
+            ))}
           </div>
         </Section>
 
-        {/* What is Backenly — GEO / AI search section */}
-        <Section aria-label="Shared runtime" width="wide">
-          <div className="grid gap-8 lg:grid-cols-[0.95fr_1.05fr] lg:items-start">
-            <SectionIntro
-              eyebrow="Shared foundation"
-              title="Different builders, same serious backend"
-              body="Each use case starts from a different workflow, but the outcome is consistent: an inspectable backend with real runtime boundaries."
-            />
-            <Card>
-              <div className="grid gap-4 sm:grid-cols-2">
-                {operatingProof.map((item) => (
-                  <div key={item} className="flex gap-3 text-sm leading-6 text-zinc-400">
-                    <span aria-hidden className="mt-2.5 h-1 w-1 shrink-0 rounded-full bg-zinc-600" />
-                    <span>{item}</span>
-                  </div>
-                ))}
-              </div>
-            </Card>
-          </div>
-        </Section>
-
-        <Section aria-label="About Backenly" width="prose">
-          <SectionHeading className="mb-4">What is Backenly?</SectionHeading>
-          <Lead className="mb-4">
-            Backenly is an autonomous backend platform that turns product descriptions into running
-            backend infrastructure. It plans the backend, applies the infrastructure, verifies the
-            runtime, and keeps every change reviewable and reversible — database tables, REST APIs,
-            user authentication, file storage, and realtime subscriptions, ready to use immediately.
-          </Lead>
-          <Lead>
-            There is no backend code to write, no infrastructure to configure, and no DevOps
-            required. Backenly does not just generate resources — it manages backend change safely,
-            so you can focus on building your product.
-          </Lead>
-
-          <h3 className="text-lg font-normal text-white mt-8 mb-3">
-            What problem does Backenly solve?
-          </h3>
-          <Lead>
-            Building a backend from scratch takes weeks. You need to design a database schema, write
-            API endpoints, implement authentication, handle file storage, and set up monitoring —
-            before writing a single line of product logic. Backenly eliminates this by doing it all
-            automatically, in minutes, from a plain English description.
-          </Lead>
-
-          <h3 className="text-lg font-normal text-white mt-8 mb-3">
-            What makes Backenly different from other backend tools?
-          </h3>
-          <Lead>
-            Most backend tools require you to configure tables, write API code, and manage
-            deployments manually. Backenly is autonomous from the ground up — you describe what you
-            want and it plans, applies, and verifies the rest. It is not a drag-and-drop builder, and
-            it is not a code generator. It is an autonomous backend platform that understands intent
-            and manages every change safely.
-          </Lead>
-        </Section>
-
-        {/* FAQ */}
-        <Section aria-label="Frequently asked questions" width="prose">
-          <SectionHeading className="mb-8">Frequently asked questions</SectionHeading>
-          <FaqList
-            items={faqSchema.mainEntity.map((item) => ({
-              q: item.name,
-              a: item.acceptedAnswer.text,
-            }))}
+        <Section aria-label="What every use case shares" width="wide-prose">
+          <SectionIntro
+            eyebrow="Common ground"
+            title="What holds across all five"
+            body="The workflows differ. These four properties do not, and they are the reason the workflows are possible."
           />
+          <div className="grid gap-5 md:grid-cols-2">
+            {SHARED.map((item) => (
+              <div
+                key={item.title}
+                className="rounded-lg border border-white/10 bg-white/[0.02] p-6"
+              >
+                <h3 className="text-base font-medium text-white">{item.title}</h3>
+                <p className="mt-2.5 text-sm font-light leading-relaxed text-neutral-400">
+                  {item.body}
+                </p>
+              </div>
+            ))}
+          </div>
+        </Section>
+
+        <Section aria-label="Frequently asked questions" width="prose">
+          <SectionHeading className="mb-8">Before you pick one</SectionHeading>
+          <FaqList items={FAQ} />
         </Section>
 
         <CtaSection
-          title="Ready to ship your backend?"
-          body="One free project, no credit card required. Start in minutes."
+          title="One free project, no credit card"
+          body="Connect your agent, build something small, and read the verification evidence."
         >
-          <PrimaryButton href="/auth/signup">Get started free</PrimaryButton>
+          <PrimaryButton href="/auth/signup">Start free</PrimaryButton>
         </CtaSection>
       </main>
     </SiteShell>

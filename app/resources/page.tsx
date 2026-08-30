@@ -1,13 +1,13 @@
 import { Metadata } from 'next'
-import { safeJsonLd } from "@/lib/security/safe-jsonld"
-import { BookOpen, Compass, Layers3 } from 'lucide-react'
+import { safeJsonLd } from '@/lib/security/safe-jsonld'
 import { SiteShell } from '@/components/site/SiteShell'
 import { articles } from './data'
+import { LANES } from './content'
 import {
-  Card,
   InlineArrow,
   PageHero,
   PrimaryButton,
+  SecondaryButton,
   Section,
   SectionIntro,
   LinkCard,
@@ -19,27 +19,27 @@ import {
 const APP_URL = 'https://backenly.com'
 
 export const metadata: Metadata = {
-  title: 'Resources — Guides on Autonomous Backends & Agent-Native Development',
+  title: 'Documentation — Backenly',
   description:
-    'Practical guides on building production backends that run themselves: choosing an autonomous backend over no-code and traditional BaaS, designing for real users, and driving your backend from a coding agent over MCP.',
+    'How Backenly works and how to use it: connecting a coding agent over MCP, the build loop and its verification checks, the data API and its two grammars, the row-level security model, what the autonomy loop does after launch, and self-hosting.',
   keywords: [
+    'Backenly documentation',
+    'MCP backend server',
+    'PostgREST REST API',
+    'row-level security postgres',
     'autonomous backend platform',
-    'backend for coding agents',
-    'AI backend development guide',
-    'how to build a production backend',
-    'BaaS alternative',
   ],
   openGraph: {
-    title: 'Backenly Resources — Autonomous Backends & Agent-Native Development',
+    title: 'Backenly Documentation',
     description:
-      'Practical guides on building production backends that plan, apply, verify, and heal themselves — and connect cleanly to coding agents over MCP.',
+      'Connect an agent over MCP, build a backend, read the verification evidence, and understand what keeps operating it afterwards.',
     url: `${APP_URL}/resources`,
     type: 'website',
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'Backenly Resources — Autonomous Backends & Agent-Native Development',
-    description: 'Guides on building production backends that run themselves and connect to your coding agent.',
+    title: 'Backenly Documentation',
+    description: 'How Backenly works and how to use it.',
   },
   alternates: { canonical: `${APP_URL}/resources` },
 }
@@ -47,111 +47,141 @@ export const metadata: Metadata = {
 const collectionSchema = {
   '@context': 'https://schema.org',
   '@type': 'CollectionPage',
-  name: 'Backenly Resources',
-  description: 'Practical guides on building production backends that run themselves, choosing an autonomous backend over no-code and BaaS, and connecting coding agents cleanly.',
+  name: 'Backenly Documentation',
+  description:
+    'Guides covering agent setup over MCP, the governed build loop, the data API, the access-control model, post-launch autonomy, and self-hosting.',
   url: `${APP_URL}/resources`,
   publisher: { '@type': 'Organization', name: 'Backenly', url: APP_URL },
+  hasPart: articles.map((a) => ({
+    '@type': 'TechArticle',
+    headline: a.title,
+    url: `${APP_URL}/resources/${a.slug}`,
+    description: a.answers,
+  })),
 }
-
-const learningPaths = [
-  {
-    icon: Compass,
-    title: 'Choose the right backend',
-    body: 'Understand where an autonomous backend fits against no-code tools, traditional engineering, and BaaS platforms — and what "runs itself" actually means.',
-  },
-  {
-    icon: Layers3,
-    title: 'Design production-ready foundations',
-    body: 'Think through data models, auth boundaries, storage, realtime, and the operational surface — monitoring, rollback, and governance — before real users arrive.',
-  },
-  {
-    icon: BookOpen,
-    title: 'Build with coding agents',
-    body: 'Connect Claude Code or Cursor over MCP — your agent reads the live schema and builds against real tables, auth, and storage, never a throwaway mock.',
-  },
-]
 
 export default function ResourcesPage() {
   return (
     <SiteShell>
-      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: safeJsonLd(collectionSchema) }} />
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: safeJsonLd(collectionSchema) }}
+      />
       <main className="relative z-20">
         <PageHero
-          align="center"
-          eyebrow="Resources"
-          title="Guides for backends that run themselves"
-          subtitle="Practical guides on backend architecture, operating a backend with real users on it, and driving backend changes from a coding agent over MCP. Every claim in these guides describes the live product."
+          eyebrow="Documentation"
+          title="How Backenly works, and how to use it"
+          subtitle="Seven guides covering the whole path: connecting a coding agent over MCP, the build loop and the checks that run after it, the data API your frontend calls, the authorization model, what the autonomy loop does once you are live, and how to run all of it yourself."
           actions={
-            <PrimaryButton href="/auth/signup">
-              Start building free
-              <InlineArrow />
-            </PrimaryButton>
+            <>
+              <PrimaryButton href="/resources/connect-your-coding-agent">
+                Start here
+                <InlineArrow />
+              </PrimaryButton>
+              <SecondaryButton href="/llms.txt" external>
+                Full reference for agents
+              </SecondaryButton>
+            </>
           }
           proof={[
-            { label: 'Audience', value: 'Developers and founders' },
-            { label: 'Focus', value: 'Autonomous backends' },
-            { label: 'Code samples', value: 'Real SDK surface' },
+            { label: 'Guides', value: `${articles.length}` },
+            { label: 'MCP tools documented', value: '20 advertised' },
+            { label: 'Also available as', value: '/llms.txt · fetch_docs' },
           ]}
         />
 
-        <Section aria-label="Learning paths" width="wide" className="!pt-0">
-          <SectionIntro
-            align="center"
-            eyebrow="Learning paths"
-            title="Start with the decision, then go deeper"
-            body="The guides are organized around three decisions: which backend approach fits your product, what to get right before real users arrive, and how to wire your tools to it."
-          />
-          <div className="mt-10 grid gap-5 md:grid-cols-3">
-            {learningPaths.map((path) => {
-              const Icon = path.icon
+        {LANES.map((lane, laneIndex) => {
+          const inLane = articles.filter((a) => a.lane === lane.id)
+          if (inLane.length === 0) return null
 
-              return (
-                <Card key={path.title}>
-                  <div className="flex h-10 w-10 items-center justify-center rounded-md border border-white/10 bg-black/35">
-                    <Icon className="h-5 w-5 text-zinc-200" />
-                  </div>
-                  <h2 className="mt-5 text-lg font-semibold text-white">{path.title}</h2>
-                  <p className="mt-3 text-sm leading-6 text-zinc-400">{path.body}</p>
-                </Card>
-              )
-            })}
-          </div>
-        </Section>
+          return (
+            <Section
+              key={lane.id}
+              aria-label={lane.title}
+              width="wide-prose"
+              className={laneIndex === 0 ? '!pt-0' : ''}
+            >
+              {/*
+                The eyebrow carries the count, not the title — passing
+                lane.title to both rendered the same words twice, once as a
+                pill and once as the heading directly under it.
+              */}
+              <SectionIntro
+                eyebrow={`${inLane.length} guides`}
+                title={lane.title}
+                body={lane.body}
+              />
+              <div className="grid gap-5 md:grid-cols-2">
+                {inLane.map((a) => (
+                  <LinkCard key={a.slug} href={`/resources/${a.slug}`}>
+                    <div className="mb-3 flex flex-wrap items-center gap-3">
+                      <Tag>{a.category}</Tag>
+                      <span className="text-xs text-neutral-500">{a.readMinutes} min</span>
+                    </div>
+                    <h3 className="mb-2 text-lg font-semibold leading-tight text-white">
+                      {a.title}
+                    </h3>
+                    {/*
+                      The card carries the QUESTION the guide answers, not a
+                      summary of it. A reader scanning this page is holding a
+                      question, and matching it is the whole job of the card.
+                    */}
+                    <p className="text-sm font-light leading-relaxed text-neutral-400">
+                      {a.answers}
+                    </p>
+                    <p className="mt-5 text-sm font-semibold text-zinc-200 transition-colors group-hover:text-white">
+                      Read
+                    </p>
+                  </LinkCard>
+                ))}
+              </div>
+            </Section>
+          )
+        })}
 
-        {/* Article list */}
-        <Section aria-label="Articles and guides" width="wide">
+        <Section aria-label="Other references" width="wide-prose">
           <SectionIntro
-            eyebrow="Latest guides"
-            title="Practical reading for shipping teams"
-            body="Each guide covers one decision — with the trade-offs, the failure modes, and working code where it helps."
+            eyebrow="Elsewhere"
+            title="Reference that lives outside these pages"
+            body="Some of what you might want is better read at its source than paraphrased here."
           />
           <div className="grid gap-5 md:grid-cols-2">
-            {articles.map((article, index) => (
-              <LinkCard
-                key={article.slug}
-                href={`/resources/${article.slug}`}
-                className={index === 0 ? 'md:col-span-2 md:p-8' : ''}
-              >
-                <div className="flex flex-wrap items-center gap-3 mb-3">
-                  <Tag>{article.category}</Tag>
-                  <span className="text-xs text-neutral-500">{article.readTime}</span>
-                  <span className="text-xs text-neutral-600">{article.date}</span>
-                </div>
-                <h2 className={`${index === 0 ? 'text-2xl md:text-3xl' : 'text-lg'} font-semibold text-white leading-tight mb-3`}>
-                  {article.title}
-                </h2>
-                <p className="text-sm text-neutral-400 font-extralight leading-relaxed">
-                  {article.description}
-                </p>
-                <p className="mt-4 text-sm font-semibold text-zinc-200 group-hover:text-white transition-colors">
-                  Read article
-                </p>
+            {[
+              {
+                href: '/llms.txt',
+                external: true,
+                title: 'llms.txt',
+                body: 'The complete machine-readable reference: every endpoint, the full tool table, plan limits, and the architecture. Agents can also fetch it at run time with the fetch_docs tool.',
+              },
+              {
+                href: 'https://github.com/backenly/backenly',
+                external: true,
+                title: 'The source',
+                body: 'The platform is Apache-2.0 and the client libraries are MIT. Everything the hosted product runs is in the repository, including the autonomy engine.',
+              },
+              {
+                href: '/pricing',
+                external: false,
+                title: 'Plan limits',
+                body: 'Capacity per plan — projects, monthly active users, storage, AI credits, and which features are plan-gated. Kept in one place so no guide restates a number that can move.',
+              },
+              {
+                href: '/use-cases',
+                external: false,
+                title: 'Use cases',
+                body: 'Five workflows with the problem, what Backenly does, what stays yours, and the known limitations of each.',
+              },
+            ].map((item) => (
+              <LinkCard key={item.href} href={item.href} external={item.external}>
+                <h3 className="mb-2 text-lg font-semibold leading-tight text-white">
+                  {item.title}
+                </h3>
+                <p className="text-sm font-light leading-relaxed text-neutral-400">{item.body}</p>
               </LinkCard>
             ))}
           </div>
         </Section>
 
-        {/* Internal links */}
         <Section width="prose" className="!py-12">
           <ChipRow label="Explore Backenly:">
             {[

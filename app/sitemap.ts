@@ -39,9 +39,9 @@ export default function sitemap(): MetadataRoute.Sitemap {
   const useCaseSlugs = [
     'ai-assisted-developers',
     'founders',
-    'startup-mvps',
-    'ai-app-builders',
-    'side-projects',
+    'migrate-from-supabase',
+    'ai-product-backends',
+    'multi-tenant-saas',
   ]
 
   const useCases: MetadataRoute.Sitemap = [
@@ -74,11 +74,13 @@ export default function sitemap(): MetadataRoute.Sitemap {
 
   // ── Resources ─────────────────────────────────────────────────────────────
   const resourceSlugs = [
-    'what-is-ai-backend-generation',
-    'how-to-build-a-backend-without-coding',
-    'best-backend-tools-for-non-technical-founders',
-    'full-stack-development-with-ai-coding-agents',
-    'backend-development-for-ai-app-builders',
+    'connect-your-coding-agent',
+    'your-first-backend',
+    'the-data-api',
+    'how-backenly-works',
+    'access-control-and-rls',
+    'after-you-launch',
+    'self-hosting',
   ]
 
   const resources: MetadataRoute.Sitemap = [

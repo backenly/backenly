@@ -78,7 +78,40 @@ const nextConfig = {
       // Old URLs are indexed — keep permanent redirects.
       { source: '/use-cases/vibe-coders', destination: '/use-cases/ai-assisted-developers', permanent: true },
       { source: '/use-cases/non-technical-founders', destination: '/use-cases/founders', permanent: true },
-      { source: '/resources/how-vibe-coders-can-build-full-stack-apps-faster', destination: '/resources/full-stack-development-with-ai-coding-agents', permanent: true },
+      // Repointed 2026-08-29: this used to land on
+      // /resources/full-stack-development-with-ai-coding-agents, which is now
+      // itself redirected. Chaining two 301s costs a round trip and dilutes the
+      // signal, so it goes straight to the final destination.
+      { source: '/resources/how-vibe-coders-can-build-full-stack-apps-faster', destination: '/use-cases/ai-assisted-developers', permanent: true },
+
+      // ── Resources rebuilt as documentation 2026-08-29 ──────────────────────
+      //
+      // /resources is where /docs, /mcp and /quickstart already redirect and
+      // what the footer calls "Documentation", but it was shaped as an SEO blog
+      // and had no connect guide at all — three redirects landing on nothing.
+      // It is now seven task- and mechanism-shaped guides.
+      //
+      // Two of the retired articles duplicated sections that already exist
+      // (/features/ai-backend-generation, /comparisons/*) and two were written
+      // for the "non-technical founder" audience the rest of the site moved
+      // away from in the 2026-07-18 repositioning above. Every old slug is
+      // indexed, so each one points at its nearest real replacement.
+      { source: '/resources/what-is-ai-backend-generation', destination: '/features/ai-backend-generation', permanent: true },
+      { source: '/resources/how-to-build-a-backend-without-coding', destination: '/resources/your-first-backend', permanent: true },
+      { source: '/resources/best-backend-tools-for-non-technical-founders', destination: '/comparisons', permanent: true },
+      { source: '/resources/full-stack-development-with-ai-coding-agents', destination: '/use-cases/ai-assisted-developers', permanent: true },
+      { source: '/resources/backend-development-for-ai-app-builders', destination: '/use-cases/ai-product-backends', permanent: true },
+
+      // ── Use cases became workflows, not audience segments 2026-08-29 ───────
+      //
+      // "Startup MVPs" and "Side projects" are demographics, not use cases, and
+      // could only ever be filled with adjectives. They have no single honest
+      // successor, so they land on the index rather than being pointed at a
+      // workflow the visitor may not have come for. "AI app builders" does have
+      // a 1:1 replacement.
+      { source: '/use-cases/ai-app-builders', destination: '/use-cases/ai-product-backends', permanent: true },
+      { source: '/use-cases/startup-mvps', destination: '/use-cases', permanent: true },
+      { source: '/use-cases/side-projects', destination: '/use-cases', permanent: true },
     ]
   },
 

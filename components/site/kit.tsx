@@ -189,19 +189,45 @@ export function Card({
 export function LinkCard({
   href,
   className = '',
+  external = false,
   children,
 }: {
   href: string
   className?: string
+  /**
+   * Render a plain anchor instead of a client-side route. Required for anything
+   * the App Router does not own — an off-site URL, or a static file served from
+   * public/ such as /llms.txt, which `Link` would try to navigate to as a route.
+   * Mirrors the same prop on PrimaryButton / SecondaryButton.
+   */
+  external?: boolean
   children: ReactNode
 }) {
+  const inner = (
+    <article
+      className={`flex h-full flex-col rounded-lg border border-white/10 bg-white/[0.035] p-6 shadow-[0_28px_90px_-76px_rgba(255,255,255,0.22)] transition group-hover:-translate-y-1 group-hover:border-white/20 group-hover:bg-white/[0.055] ${className}`}
+    >
+      {children}
+    </article>
+  )
+
+  if (external) {
+    const opensNewTab = href.startsWith('http')
+    return (
+      <a
+        href={href}
+        target={opensNewTab ? '_blank' : undefined}
+        rel={opensNewTab ? 'noopener noreferrer' : undefined}
+        className="group block h-full"
+      >
+        {inner}
+      </a>
+    )
+  }
+
   return (
     <Link href={href} className="group block h-full">
-      <article
-        className={`flex h-full flex-col rounded-lg border border-white/10 bg-white/[0.035] p-6 shadow-[0_28px_90px_-76px_rgba(255,255,255,0.22)] transition group-hover:-translate-y-1 group-hover:border-white/20 group-hover:bg-white/[0.055] ${className}`}
-      >
-        {children}
-      </article>
+      {inner}
     </Link>
   )
 }
