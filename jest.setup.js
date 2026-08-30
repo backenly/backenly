@@ -3,12 +3,20 @@ import '@testing-library/jest-dom'
 import 'openai/shims/node'
 import { PrismaClient } from '@prisma/client'
 
-// Global Prisma instance for tests
-const prisma = new PrismaClient()
+// Global Prisma instance for tests.
+//
+// Skipped under jsdom. `@prisma/client` resolves to its browser build when the
+// test environment defines `window`, and that build throws on every property
+// access — including the `$disconnect()` in the afterAll below, which failed
+// the whole suite before any assertion ran. That made component tests
+// impossible to write in this repo: any file with `@jest-environment jsdom`
+// died in setup. Component suites never touch the database, so the client is
+// created only for the node-environment suites that do.
+const prisma = typeof window === 'undefined' ? new PrismaClient() : null
 
 // Cleanup after all tests
 afterAll(async () => {
-  await prisma.$disconnect()
+  if (prisma) await prisma.$disconnect()
 })
 
 // CRITICAL: Force test database - NEVER use production database
