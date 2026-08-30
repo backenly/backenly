@@ -205,7 +205,7 @@ export default function PricingPage() {
     <SiteShell>
       <main className="relative z-20">
         <section className="px-6 pt-12 pb-16 md:pt-20 md:pb-20">
-          <div className="mx-auto max-w-7xl">
+          <div className="mx-auto max-w-7xl 2xl:max-w-container">
             <div className="max-w-3xl">
               <p className="inline-flex items-center gap-2 rounded-md border border-white/10 bg-white/[0.035] px-3 py-1.5 text-xs font-semibold uppercase text-zinc-400">
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
@@ -257,7 +257,7 @@ export default function PricingPage() {
         </section>
 
         <section className="border-t border-white/[0.06] px-6 py-16 md:py-20">
-          <div className="mx-auto max-w-7xl">
+          <div className="mx-auto max-w-7xl 2xl:max-w-container">
             <div className="grid gap-10 lg:grid-cols-[360px_minmax(0,1fr)] lg:items-start">
               <div>
                 <p className="text-sm font-semibold text-zinc-500">Included runtime</p>
@@ -294,7 +294,7 @@ export default function PricingPage() {
         </section>
 
         <section className="border-t border-white/[0.06] px-6 py-16 md:py-20">
-          <div className="mx-auto max-w-6xl">
+          <div className="mx-auto max-w-6xl 2xl:max-w-7xl">
             <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
               <div>
                 <p className="text-sm font-semibold text-zinc-500">Compare plans</p>

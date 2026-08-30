@@ -2,12 +2,21 @@ import Link from 'next/link'
 import { ArrowRight } from 'lucide-react'
 import type { HTMLAttributes, ReactNode } from 'react'
 
-type Width = 'prose' | 'default' | 'wide'
+type Width = 'prose' | 'default' | 'wide' | 'wide-prose'
 
 const WIDTHS: Record<Width, string> = {
   prose: 'max-w-3xl',
   default: 'max-w-4xl',
-  wide: 'max-w-7xl',
+  // Card grids, tables and two-column layouts. Below 2xl (1536px) this is
+  // unchanged, so mobile, tablet and 13"/14" laptops render exactly as before.
+  // At 2xl and up it steps to the 1440px container token, because the site nav
+  // and the landing page already run at 100rem and a 1280px subpage under a
+  // 1600px navbar reads as a mis-set column on a 16" display.
+  wide: 'max-w-7xl 2xl:max-w-container',
+  // Same layout width, deliberately pinned at 7xl: for `wide` sections whose
+  // main column is long-form body copy, where extra width buys nothing and
+  // costs line length.
+  'wide-prose': 'max-w-7xl',
 }
 
 export type Crumb = { label: string; href?: string }

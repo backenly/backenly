@@ -186,7 +186,7 @@ export default function PrivacyPage() {
           ]}
         />
 
-        <Section width="wide" className="!pt-0">
+        <Section width="wide-prose" className="!pt-0">
           <div className="grid gap-8 lg:grid-cols-[320px_1fr]">
             <aside className="space-y-5 lg:sticky lg:top-8 lg:self-start">
               <Card>
