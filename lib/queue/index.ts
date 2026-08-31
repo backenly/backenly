@@ -32,7 +32,63 @@ const DEFAULT_JOB_TIMEOUT_MS = 10 * 60 * 1000 // 10 minutes
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-export type JobType = 'email' | 'webhook_delivery' | 'cleanup' | 'custom'
+// `purge_project` is the outbox record for deleting a project's files and
+// storage objects after its database rows are already gone. It is enqueued
+// inside the deletion transaction (lib/projects/delete.ts) rather than through
+// `enqueue()`, because it must commit atomically with the schema drops.
+export type JobType = 'email' | 'webhook_delivery' | 'cleanup' | 'custom' | 'purge_project'
+
+export const PURGE_JOB_TYPE = 'purge_project' as const
+
+/**
+ * Purge jobs use their own status vocabulary, and that is the whole point.
+ *
+ * ── THE ROLLBACK HAZARD ─────────────────────────────────────────────────────
+ *
+ * `processBackgroundJobs` completes an unrecognised job type immediately with
+ * `{ skipped: true }`, so that an unknown row cannot loop forever. For every
+ * existing type that is harmless. For a purge it is destruction: the row IS the
+ * durable instruction to delete a customer's backups and files, and a worker
+ * that marks it completed without performing it has thrown that instruction
+ * away with the data still on disk.
+ *
+ * The worker that would do this is the one already deployed. It cannot be
+ * fixed by editing this repository, so the fix has to make the job invisible to
+ * it rather than make it behave better.
+ *
+ * ── WHY A STATUS AND NOT A TYPE ─────────────────────────────────────────────
+ *
+ * Every query in the released code selects jobs by an explicit status:
+ *
+ *   claimNextJobs             status = 'queued'
+ *   detectAndTimeoutStuckJobs status = 'running' AND timeoutAt <= now
+ *   handleCleanupJob          status = 'dead_letter'
+ *   prune-background-jobs     status IN ('completed', 'failed')
+ *   build-lock reaper         type = 'build_lock'
+ *
+ * There is no catch-all sweep. So a row parked in a status outside that set is
+ * unreachable by any of them: an old worker cannot claim it, time it out,
+ * prune it, or dead-letter it. It simply waits.
+ *
+ * This is not a new trick. `build_lock` and `orchestration_lock` are already
+ * BackgroundJob types the generic worker has no handler for, and they have
+ * coexisted with it safely for exactly this reason — they never sit in
+ * 'queued'. This follows the same rule.
+ *
+ * `completed` is deliberately shared with the generic vocabulary: once the
+ * files are gone the row is ordinary history and the pruner should collect it.
+ * `purgeFailed` is deliberately NOT `dead_letter` or `failed`, both of which are
+ * swept on a timer — a purge that has exhausted its retries needs a human, and
+ * must not be deleted out from under them.
+ */
+export const PURGE_STATUS = {
+  /** Waiting to run. Invisible to every released query. */
+  pending: 'purge_pending',
+  /** Claimed by a worker that understands purges. */
+  running: 'purge_running',
+  /** Retries exhausted. Terminal, and never auto-pruned. */
+  failed: 'purge_failed',
+} as const
 export type JobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'dead_letter'
 
 export interface EnqueueOptions {
@@ -229,4 +285,111 @@ export async function detectAndTimeoutStuckJobs(): Promise<number> {
   }
 
   return stuck.length
+}
+
+// ─── Purge queue ──────────────────────────────────────────────────────────────
+//
+// A parallel claim/complete/fail trio for purge jobs. It mirrors the generic one
+// above — same backoff table, same conditional-updateMany claim so two workers
+// cannot take the same row — but moves rows between the PURGE_STATUS values so
+// they never enter a status a released worker selects. See PURGE_STATUS.
+
+/**
+ * Claim up to `limit` due purge jobs.
+ *
+ * Also reclaims jobs left in `purge_running` by a worker that died mid-purge:
+ * without this they would sit there forever, which is the same lost-instruction
+ * failure in a different costume.
+ */
+export async function claimPurgeJobs(limit = 5) {
+  const now = new Date()
+
+  await prisma.backgroundJob.updateMany({
+    where: {
+      type: PURGE_JOB_TYPE,
+      status: PURGE_STATUS.running,
+      timeoutAt: { lte: now },
+    },
+    data: { status: PURGE_STATUS.pending, startedAt: null, timeoutAt: null },
+  })
+
+  const candidates = await prisma.backgroundJob.findMany({
+    where: { type: PURGE_JOB_TYPE, status: PURGE_STATUS.pending, runAt: { lte: now } },
+    orderBy: { runAt: 'asc' },
+    take: limit,
+    select: { id: true },
+  })
+
+  if (candidates.length === 0) return []
+
+  const ids = candidates.map((c) => c.id)
+
+  await prisma.backgroundJob.updateMany({
+    where: { id: { in: ids }, status: PURGE_STATUS.pending },
+    data: {
+      status: PURGE_STATUS.running,
+      startedAt: now,
+      timeoutAt: new Date(now.getTime() + DEFAULT_JOB_TIMEOUT_MS),
+    },
+  })
+
+  return prisma.backgroundJob.findMany({
+    where: { id: { in: ids }, status: PURGE_STATUS.running },
+  })
+}
+
+/** The files are gone. `completed` is shared with the generic vocabulary on purpose. */
+export async function completePurgeJob(id: string, result?: Record<string, any>) {
+  await prisma.backgroundJob.update({
+    where: { id },
+    data: {
+      status: 'completed',
+      result: result ?? {},
+      completedAt: new Date(),
+      error: null,
+      timeoutAt: null,
+    },
+  })
+}
+
+/**
+ * Record a failed purge attempt and schedule the next one.
+ *
+ * On exhaustion the row lands in `purge_failed` rather than `dead_letter`: the
+ * data is still on disk, so the instruction must outlive every timer that
+ * collects finished work.
+ */
+export async function failPurgeJob(id: string, error: string) {
+  const job = await prisma.backgroundJob.findUnique({ where: { id } })
+  if (!job) return
+
+  const attempts = job.attempts + 1
+
+  if (attempts >= job.maxAttempts) {
+    await prisma.backgroundJob.update({
+      where: { id },
+      data: {
+        status: PURGE_STATUS.failed,
+        attempts,
+        error,
+        completedAt: new Date(),
+        timeoutAt: null,
+      },
+    })
+    return
+  }
+
+  const delayMs = RETRY_DELAYS_MS[attempts] ?? RETRY_DELAYS_MS[RETRY_DELAYS_MS.length - 1]
+
+  await prisma.backgroundJob.update({
+    where: { id },
+    data: {
+      status: PURGE_STATUS.pending,
+      attempts,
+      error,
+      runAt: new Date(Date.now() + delayMs),
+      startedAt: null,
+      timeoutAt: null,
+    },
+  })
 }

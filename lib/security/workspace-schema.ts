@@ -61,6 +61,45 @@ export function quoteIdent(name: string): string {
   return `"${name.replace(/"/g, '""')}"`
 }
 
+/**
+ * The prefix every schema belonging to a project shares: `workspace_<uuid>_`.
+ *
+ * A project owns more than its canonical schema. Branches live at
+ * `workspace_<id>_br_<name>` (lib/branches/diff.ts) and a staging copy at
+ * `workspace_<id>_staging` (executeCreateStaging in lib/ai/minimal-executor.ts),
+ * and both hold real customer rows. Deletion has to find all of them.
+ *
+ * Safe as a namespace boundary because a UUID is fixed-length: for two distinct
+ * ids A and B, `workspace_<A>_` can never prefix `workspace_<B>`, since the
+ * character following the id is `_` and a UUID contains no underscore. So a
+ * prefix match here cannot reach another project's data.
+ */
+export function projectSchemaPrefix(projectId: unknown): string {
+  assertValidProjectId(projectId)
+  return `workspace_${projectId}_`
+}
+
+/**
+ * True when `schemaName` is the canonical schema for this project, or one of
+ * its suffixed schemas (branch, staging, or any future variant).
+ *
+ * Deliberately a strict allowlist rather than a prefix check alone. Branch
+ * schema names are derived from a user-supplied branch name, so the catalog
+ * could in principle hold something with a quote or a space in it. Callers must
+ * treat a `false` here as a reason to abort, never as a reason to skip: a
+ * schema inside the project's namespace that does not match this pattern is
+ * something we do not understand, and dropping data we do not understand is
+ * worse than refusing to.
+ */
+export function isProjectOwnedSchema(projectId: unknown, schemaName: string): boolean {
+  assertValidProjectId(projectId)
+  if (typeof schemaName !== 'string') return false
+  if (schemaName === `workspace_${projectId}`) return true
+  if (!schemaName.startsWith(`workspace_${projectId}_`)) return false
+  const suffix = schemaName.slice(`workspace_${projectId}_`.length)
+  return suffix.length > 0 && /^[A-Za-z0-9_]+$/.test(suffix)
+}
+
 // ─── Reserved workspace tables — single source of truth ───────────────────────
 //
 // A workspace schema holds two kinds of tables:

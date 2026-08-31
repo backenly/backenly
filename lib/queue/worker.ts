@@ -13,7 +13,14 @@
  * pick it up without this worker knowing about the transport layer.
  */
 
-import { claimNextJobs, completeJob, failJob } from './index'
+import {
+  claimNextJobs,
+  claimPurgeJobs,
+  completeJob,
+  completePurgeJob,
+  failJob,
+  failPurgeJob,
+} from './index'
 import { emit } from '@/lib/events/bus'
 import { prisma } from '@/lib/db/prisma'
 
@@ -93,6 +100,73 @@ async function handleCleanupJob(payload: any): Promise<Record<string, any>> {
   return { cleanupType, skipped: true, reason: 'Unknown cleanup type' }
 }
 
+// ── Purge processor ───────────────────────────────────────────────────────────
+
+/**
+ * Finish deleting a project's files after its database rows are already gone.
+ *
+ * Deliberately NOT a case in `processBackgroundJobs`'s switch. Purge jobs never
+ * enter the `queued` status that `claimNextJobs` selects, because a released
+ * worker without this handler would complete them as unknown and destroy the
+ * only durable record that a customer's backups still need deleting. See
+ * PURGE_STATUS in lib/queue/index.ts for the full argument.
+ *
+ * Called every minute from `runSystemTasks`.
+ */
+export async function processPurgeJobs(): Promise<{
+  processed: number
+  succeeded: number
+  failed: number
+}> {
+  const jobs = await claimPurgeJobs(5)
+  if (jobs.length === 0) return { processed: 0, succeeded: 0, failed: 0 }
+
+  let succeeded = 0
+  let failed = 0
+
+  await Promise.allSettled(
+    jobs.map(async (job) => {
+      const payload = (job.payload ?? {}) as { projectId?: unknown; storageDriver?: unknown }
+      const projectId = payload.projectId
+
+      if (typeof projectId !== 'string' || projectId.length === 0) {
+        // Unrecoverable rather than transient: no amount of retrying finds a
+        // target that was never recorded. Close it out instead of burning
+        // attempts, and say so in the result.
+        await completePurgeJob(job.id, {
+          skipped: true,
+          reason: 'purge job carries no projectId',
+        })
+        succeeded++
+        return
+      }
+
+      try {
+        const { purgeProjectExternals } = await import('@/lib/projects/purge')
+        const report = await purgeProjectExternals(projectId, {
+          storageDriver: typeof payload.storageDriver === 'string' ? payload.storageDriver : undefined,
+        })
+        await completePurgeJob(job.id, {
+          projectId: report.projectId,
+          backups: report.backups,
+          storage: report.storage,
+          objectsDeleted: report.objectsDeleted,
+        })
+        succeeded++
+      } catch (err: any) {
+        // Message rather than the error object: it can name a path or a bucket,
+        // and it is written to a column an operator reads.
+        await failPurgeJob(job.id, String(err?.message ?? err).slice(0, 500))
+        failed++
+      }
+    }),
+  )
+
+  console.log(`[PurgeWorker] Processed ${jobs.length} purge job(s) — ${succeeded} ok, ${failed} failed`)
+
+  return { processed: jobs.length, succeeded, failed }
+}
+
 // ── Main Processor ────────────────────────────────────────────────────────────
 
 /**
@@ -125,6 +199,13 @@ export async function processBackgroundJobs(): Promise<{
           case 'cleanup':
             result = await handleCleanupJob(job.payload as any)
             break
+          case 'purge_project':
+            // Unreachable by design: purge rows never sit in 'queued', so
+            // claimNextJobs cannot return one. If that ever changes, throwing
+            // sends it back through failJob and keeps it retryable, instead of
+            // the default branch below completing it with the files still on
+            // disk. The one outcome this must never have is silent success.
+            throw new Error('purge_project must be processed by processPurgeJobs')
           default:
             // Unknown type — complete immediately with a note rather than loop forever
             result = { skipped: true, reason: `No handler for job type '${job.type}'` }

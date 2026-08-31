@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { z } from 'zod'
 import { withAuth } from '@/lib/auth/route-protection'
+import { deleteProjectCompletely } from '@/lib/projects/delete'
 
 const updateProjectSchema = z.object({
   name: z.string().min(1).max(100).optional(),
@@ -240,9 +241,11 @@ export const DELETE = withAuth(async (
       )
     }
 
-    await prisma.project.delete({
-      where: { id: projectId },
-    })
+    // Drops every schema this project owns and deletes its rows in one
+    // transaction, then removes its backups and storage objects. Previously
+    // this was a bare `prisma.project.delete`, which left workspace_<id> and
+    // every branch schema resident with nothing pointing at them.
+    await deleteProjectCompletely(projectId)
 
     return NextResponse.json({
       success: true,

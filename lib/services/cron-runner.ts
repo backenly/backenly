@@ -14,6 +14,7 @@
  *                         1. Retry failed outbound webhooks
  *                         2. Detect & fail stuck background jobs (timeout)
  *                         3. Process the background job queue
+ *                         3b. Finish external purges for deleted projects
  *                         4. Auto-provision system cleanup jobs (daily)
  *                       Called every minute by instrumentation.ts alongside
  *                       runDueCronJobs().
@@ -26,7 +27,7 @@ import { prisma } from '@/lib/db/prisma'
 import { executeAiFunction, FunctionEvent } from '@/lib/services/ai-functions/executor'
 import { retryFailedWebhooks } from '@/lib/webhooks/index'
 import { detectAndTimeoutStuckJobs, enqueue } from '@/lib/queue/index'
-import { processBackgroundJobs } from '@/lib/queue/worker'
+import { processBackgroundJobs, processPurgeJobs } from '@/lib/queue/worker'
 
 // ─── Cron Expression Matching ─────────────────────────────────────────────────
 
@@ -155,6 +156,14 @@ export async function runSystemTasks(): Promise<void> {
   // 3. Process the background job queue (up to 10 jobs per tick)
   await processBackgroundJobs().catch(err =>
     console.error('[SystemTasks] job processing failed:', err?.message)
+  )
+
+  // 3b. Finish deleting files for projects whose rows are already gone.
+  //     Separate from the queue above because purge jobs deliberately never
+  //     enter the 'queued' status a released worker would claim and complete
+  //     without a handler. See PURGE_STATUS in lib/queue/index.ts.
+  await processPurgeJobs().catch(err =>
+    console.error('[SystemTasks] purge processing failed:', err?.message)
   )
 
   // 4. Auto-provision daily cleanup jobs at 02:00 UTC
