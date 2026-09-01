@@ -28,7 +28,11 @@ export const GET = withAuth(async (request: NextRequest, { user }) => {
         statusDisplay: getSubscriptionStatusDisplay(subscription.status),
         paddleSubscriptionId: subscription.paddleSubscriptionId,
         currentPeriodEnd: subscription.currentPeriodEnd,
+        // Failed-payment recovery deadline. Null unless a payment failed.
         graceUntil: subscription.graceUntil,
+        // Provider-scheduled cancellation date. The plan stays fully entitled
+        // until this passes and the provider sends its terminal event.
+        cancelScheduledAt: subscription.cancelScheduledAt,
         planName: subscription.plan.name,
         priceCents: subscription.plan.priceCents,
       },

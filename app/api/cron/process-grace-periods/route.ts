@@ -1,13 +1,17 @@
 /**
  * POST /api/cron/process-grace-periods
  *
- * Runs daily. Finds every subscription in GRACE status whose graceUntil
- * has passed and downgrades it to the FREE plan.
+ * Runs daily. Finds every subscription whose failed-payment recovery window
+ * has run out and downgrades it to the canonical free plan.
  *
- * Timeline for a user whose plan expires:
- *   Day 0  — subscription.canceled / past_due fires → status = GRACE, graceUntil = +7d
+ * Timeline for a user whose payment fails:
+ *   Day 0  — subscription.past_due fires → status = GRACE, graceUntil = +7d
  *   Day 1–7 — user still has paid-plan features (GRACE is allowed by getUserSubscription)
- *   Day 8  — this cron runs, sees graceUntil < now → planId = FREE, status = FREE
+ *   Day 8  — this cron runs, sees graceUntil < now → downgraded to the free plan
+ *
+ * A voluntary cancellation never appears here. It stays ACTIVE and entitled
+ * until the provider's terminal subscription.canceled event, which does its own
+ * downgrade — this cron is not a second cancellation clock.
  *
  * Security: requires CRON_SECRET header.
  */

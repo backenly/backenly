@@ -80,12 +80,19 @@ export const POST = withAuth(async (request: NextRequest, { user }) => {
           { status: 409 }
         )
       }
-      // Trying to switch to a different paid plan — they must cancel first (or we handle via Paddle subscription update)
+      // Trying to switch to a different paid plan. Still blocked — a second
+      // subscription starting before the first one ends bills the customer
+      // twice — but the message has to match reality: a customer who has
+      // already scheduled a cancellation must not be told to cancel again.
+      const endsAt = existingSub.cancelScheduledAt ?? null
       return NextResponse.json(
         {
-          error: `You already have an active ${existingSub.plan.name} subscription. Cancel your current plan before switching, or contact support to upgrade.`,
+          error: endsAt
+            ? `Your ${existingSub.plan.name} subscription is scheduled to end on ${endsAt.toISOString().slice(0, 10)}. You can choose another plan once it ends.`
+            : `You already have an active ${existingSub.plan.name} subscription. Cancel your current plan before switching, or contact support to upgrade.`,
           code: 'ACTIVE_SUBSCRIPTION_EXISTS',
           currentPlan: existingSub.plan.name,
+          cancelScheduledAt: endsAt?.toISOString() ?? null,
         },
         { status: 409 }
       )

@@ -199,6 +199,30 @@ export async function notifyPaymentFailed(userId: string, graceUntil?: Date): Pr
 }
 
 /**
+ * Notify developer that their subscription is scheduled to end.
+ *
+ * A voluntary cancellation used to send notifyPaymentFailed, telling customers
+ * "We couldn't process your payment" about a payment that never failed and a
+ * grace period that no longer exists. `endsAt` is the provider's date, so this
+ * states when paid access actually stops.
+ *
+ * Deliberately typed `system` rather than adding a ninth notification type:
+ * the type union drives preference initialisation and the email template switch,
+ * and neither belongs in a billing-semantics change.
+ */
+export async function notifySubscriptionCanceled(userId: string, endsAt?: Date): Promise<void> {
+  await createPlatformNotification({
+    userId,
+    type: 'system',
+    title: 'Subscription cancelled',
+    body: endsAt
+      ? `Your subscription is cancelled and stays active until ${endsAt.toLocaleDateString()}. After that your account moves to the free plan. You can resubscribe any time.`
+      : `Your subscription is cancelled and stays active until the end of the period you have paid for. After that your account moves to the free plan.`,
+    metadata: { endsAt: endsAt?.toISOString() },
+  })
+}
+
+/**
  * Notify developer when their AI build action usage crosses 80% of plan limit.
  */
 export async function notifyCreditsLow(

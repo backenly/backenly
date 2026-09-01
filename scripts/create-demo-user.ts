@@ -3,10 +3,9 @@
  * Usage: npx ts-node scripts/create-demo-user.ts
  */
 
-import { PrismaClient } from '@prisma/client'
 import bcrypt from 'bcryptjs'
-
-const prisma = new PrismaClient()
+import { prisma } from '@/lib/db/prisma'
+import { resolveFreePlan } from '@/lib/billing'
 
 async function createDemoUser() {
   try {
@@ -41,21 +40,20 @@ async function createDemoUser() {
         }
       })
 
-      // Create FREE subscription
-      const freePlan = await prisma.plan.findUnique({
-        where: { name: 'FREE' }
-      })
+      // Free subscription, resolved through the one canonical rule
+      // (SANDBOX, then legacy FREE). This used to look up FREE directly, which
+      // prisma/seed-billing.ts does not create, so the demo user was silently
+      // left with no subscription at all.
+      const freePlan = await resolveFreePlan()
 
-      if (freePlan) {
-        await prisma.subscription.create({
-          data: {
-            userId: user.id,
-            planId: freePlan.id,
-            status: 'FREE'
-          }
-        })
-        console.log('✅ FREE subscription created')
-      }
+      await prisma.subscription.create({
+        data: {
+          userId: user.id,
+          planId: freePlan.id,
+          status: 'FREE'
+        }
+      })
+      console.log(`✅ ${freePlan.name} subscription created`)
 
       console.log('✅ Demo user created successfully')
     }

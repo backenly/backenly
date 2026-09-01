@@ -1900,7 +1900,18 @@ model Subscription {
   paddleSubscriptionId String?            @unique
   status               SubscriptionStatus @default(FREE)
   currentPeriodEnd     DateTime?
+  // Failed-payment recovery only. Set when the provider reports past_due, and
+  // cleared the moment payment recovers. A voluntary cancellation never writes
+  // it — see cancelScheduledAt.
   graceUntil           DateTime?
+  // The provider-scheduled cancellation date, copied verbatim from the Paddle
+  // scheduledChange.effectiveAt. Never computed here: this is a mirror of
+  // provider state, not a second billing clock. Null means no cancellation is
+  // scheduled, which is also the state after the provider reverses one.
+  // The subscription stays ACTIVE and fully entitled until the provider sends
+  // its own terminal subscription.canceled event, so entitlement resolution is
+  // deliberately unaware of this field.
+  cancelScheduledAt    DateTime?
   createdAt            DateTime           @default(now())
   updatedAt            DateTime           @updatedAt
   // Owning organization (Phase 6 billing). Nullable + backfilled lazily to the

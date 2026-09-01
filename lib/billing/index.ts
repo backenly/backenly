@@ -78,10 +78,35 @@ export async function getUserSubscription(userId: string): Promise<UserSubscript
   })
 }
 
-export async function createFreeSubscription(userId: string): Promise<Subscription> {
-  // Try SANDBOX plan first (new architecture), fall back to FREE (legacy)
+/**
+ * The one place that answers "which Plan row is the free tier?".
+ *
+ * SANDBOX is the seeded name (prisma/seed-billing.ts). FREE is not seeded and
+ * exists only on installations bootstrapped from scripts/add-billing-minimal.sql,
+ * so the fallback is what keeps those self-hosted databases working — it is not
+ * dead code, and removing it would strand them with no downgrade target.
+ *
+ * Throws rather than returning null on purpose. Every caller is either creating
+ * a subscription or downgrading one, and there is no sane way to finish either
+ * without a plan to point at. The previous code logged and moved on, which meant
+ * expired subscriptions were silently never downgraded: a lapsed payer kept
+ * their paid plan, the cron reported success, and nothing in the logs said so.
+ * Failing loudly is the whole point of this function.
+ */
+export async function resolveFreePlan(): Promise<Plan> {
   const plan = await getPlanByName('SANDBOX') ?? await getPlanByName('FREE')
-  if (!plan) throw new Error('SANDBOX/FREE plan not found — run: npx tsx prisma/seed-billing.ts')
+  if (!plan) {
+    throw new Error(
+      'No free plan found: neither SANDBOX nor legacy FREE exists in the plans table. ' +
+      'Billing cannot create or downgrade subscriptions without one. ' +
+      'Run: npx tsx prisma/seed-billing.ts',
+    )
+  }
+  return plan
+}
+
+export async function createFreeSubscription(userId: string): Promise<Subscription> {
+  const plan = await resolveFreePlan()
   return prisma.subscription.create({
     data: { userId, planId: plan.id, status: 'FREE' },
   })

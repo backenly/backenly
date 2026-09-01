@@ -5,9 +5,9 @@ export const dynamic = 'force-dynamic'
  *
  * Founder revenue-ops actions:
  *   comp          { userId, planName }     — grant a paid plan for free (no Paddle)
- *   uncomp        { userId }               — revert a comped user to FREE
- *   extend_grace  { userId, days }         — push graceUntil out N days
- *   cancel        { userId }               — cancel the user's Paddle sub (SDK) + grace
+ *   uncomp        { userId }               — revert a comped user to the free plan
+ *   extend_grace  { userId, days }         — push graceUntil out N days (payment recovery)
+ *   cancel        { userId }               — schedule Paddle cancellation at period end
  *   refund_link   { userId }               — returns the Paddle dashboard deep-link
  *                                            (refunds are issued in Paddle, not faked here)
  *
@@ -18,6 +18,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { requireFounder } from '@/lib/auth/requireFounder'
 import { authenticateRequest } from '@/lib/auth/middleware'
 import { prisma } from '@/lib/db/prisma'
+import { resolveFreePlan } from '@/lib/billing'
+import { recordScheduledCancellation } from '@/lib/billing/grace'
 
 export async function POST(request: NextRequest) {
   const authError = await requireFounder(request)
@@ -72,22 +74,46 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ success: true, message: `${user.email} comped to ${plan.name}` })
   }
 
-  // ── Uncomp: back to FREE ───────────────────────────────────────────────────
+  // ── Uncomp: back to the free plan ──────────────────────────────────────────
+  //
+  // This looked up the plan named FREE, which prisma/seed-billing.ts does not
+  // create. On a seeded install the lookup returned null, the subscription
+  // update was skipped by the `&& free` guard, and the action still set
+  // user.tier, wrote a success audit row and returned success — while the user
+  // stayed ACTIVE on their comped paid plan. resolveFreePlan throws instead, so
+  // a broken install fails visibly rather than reporting work it did not do.
   if (action === 'uncomp') {
-    const free = await prisma.plan.findUnique({ where: { name: 'FREE' } })
-    const existing = await prisma.subscription.findFirst({ where: { userId } })
-    if (existing && free) {
-      await prisma.subscription.update({
-        where: { id: existing.id },
-        data: { planId: free.id, status: 'FREE', currentPeriodEnd: null, graceUntil: null },
-      })
+    let free
+    try {
+      free = await resolveFreePlan()
+    } catch (err: any) {
+      return NextResponse.json({ error: err?.message ?? 'No free plan configured' }, { status: 500 })
     }
+
+    const existing = await prisma.subscription.findFirst({ where: { userId } })
+    if (!existing) {
+      return NextResponse.json({ error: 'No subscription for user' }, { status: 404 })
+    }
+
+    await prisma.subscription.update({
+      where: { id: existing.id },
+      data: {
+        planId: free.id,
+        status: 'FREE',
+        currentPeriodEnd: null,
+        graceUntil: null,
+        cancelScheduledAt: null,
+      },
+    })
     await prisma.user.update({ where: { id: userId }, data: { tier: 'free' } })
-    await audit('BILLING_UNCOMP', `Reverted ${user.email} → FREE`, { userId })
-    return NextResponse.json({ success: true, message: `${user.email} reverted to FREE` })
+    await audit('BILLING_UNCOMP', `Reverted ${user.email} → ${free.name}`, { userId, plan: free.name })
+    return NextResponse.json({ success: true, message: `${user.email} reverted to ${free.name}` })
   }
 
   // ── Extend grace ───────────────────────────────────────────────────────────
+  // A deliberate manual payment-recovery override, unchanged: it is how a
+  // founder gives a customer with a billing problem more time. It is not part
+  // of the cancellation lifecycle and must not be used for one.
   if (action === 'extend_grace') {
     const days = Math.max(1, Math.min(90, Number(body.days) || 7))
     const sub = await prisma.subscription.findFirst({ where: { userId } })
@@ -116,10 +142,35 @@ export async function POST(request: NextRequest) {
       const paddle = new Paddle(process.env.PADDLE_API_KEY, {
         environment: process.env.PADDLE_ENVIRONMENT === 'production' ? Environment.production : Environment.sandbox,
       })
-      await paddle.subscriptions.cancel(sub.paddleSubscriptionId, { effectiveFrom: 'next_billing_period' })
-      await prisma.subscription.update({ where: { id: sub.id }, data: { status: 'GRACE' } })
+      const updated = await paddle.subscriptions.cancel(sub.paddleSubscriptionId, { effectiveFrom: 'next_billing_period' })
+
+      // Same semantics as the customer-facing cancel: a scheduled cancellation
+      // is not a failed payment, so the subscription stays ACTIVE and entitled
+      // until the provider's terminal event. It used to be forced into GRACE,
+      // which cut a paying customer's access short by however many days were
+      // left in the period they had paid for.
+      // Persisted only from an explicit provider scheduled cancellation, same
+      // rule as the customer-facing route: never from a renewal date or the
+      // stored period end. If Paddle did not state a date the cancellation is
+      // still scheduled with them, and the subscription.updated webhook fills
+      // it in.
+      const scheduledChange = (updated as any)?.scheduledChange
+      const parsed =
+        scheduledChange?.action === 'cancel' && scheduledChange?.effectiveAt
+          ? new Date(scheduledChange.effectiveAt)
+          : null
+      const effectiveAt = parsed && !Number.isNaN(parsed.getTime()) ? parsed : null
+
+      if (effectiveAt) {
+        await recordScheduledCancellation(sub.paddleSubscriptionId, effectiveAt)
+      }
+
       await audit('BILLING_CANCELED', `Admin-canceled Paddle sub for ${user.email} (effective next period)`, { userId, paddleSubscriptionId: sub.paddleSubscriptionId })
-      return NextResponse.json({ success: true, message: `Cancellation scheduled for ${user.email} (next billing period)` })
+      return NextResponse.json({
+        success: true,
+        cancelScheduledAt: effectiveAt?.toISOString() ?? null,
+        message: `Cancellation scheduled for ${user.email} (next billing period)`,
+      })
     } catch (err: any) {
       return NextResponse.json({ error: `Paddle cancel failed: ${err?.message ?? 'unknown'}` }, { status: 502 })
     }

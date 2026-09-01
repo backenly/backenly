@@ -3,8 +3,17 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { Paddle, EventName, Environment } from '@paddle/paddle-node-sdk'
 import { prisma } from '@/lib/db/prisma'
-import { initiateGracePeriod } from '@/lib/billing/grace'
-import { notifyPaymentSuccess, notifyPaymentFailed } from '@/lib/notifications/platform'
+import {
+  startPaymentFailureGrace,
+  recordScheduledCancellation,
+  clearScheduledCancellation,
+  downgradeToFreePlan,
+} from '@/lib/billing/grace'
+import {
+  notifyPaymentSuccess,
+  notifyPaymentFailed,
+  notifySubscriptionCanceled,
+} from '@/lib/notifications/platform'
 
 // Initialize Paddle client for webhook verification
 const paddle = new Paddle(process.env.PADDLE_API_KEY!, {
@@ -154,7 +163,10 @@ async function handleSubscriptionCreated(data: any) {
     where: { paddleSubscriptionId: id },
     update: {
       status: 'ACTIVE',
-      currentPeriodEnd: new Date(data.currentBillingPeriod?.endsAt || Date.now() + 30 * 24 * 60 * 60 * 1000)
+      currentPeriodEnd: new Date(data.currentBillingPeriod?.endsAt || Date.now() + 30 * 24 * 60 * 60 * 1000),
+      // A newly created subscription cannot carry a pending cancellation from a
+      // previous life of the same provider id.
+      cancelScheduledAt: null,
     },
     create: {
       userId,
@@ -195,6 +207,16 @@ async function handleSubscriptionCreated(data: any) {
 
 /**
  * Handle subscription.updated event
+ *
+ * The convergence point for provider state we did not initiate. Paddle sends
+ * this when a cancellation is scheduled — including one made in Paddle's own
+ * customer portal, which our API never sees — and again when that scheduled
+ * change is removed. Reading `scheduledChange` here is what makes the provider
+ * authoritative rather than our own endpoint.
+ *
+ * A scheduled cancellation deliberately does NOT change status: the customer
+ * has paid through the period and stays ACTIVE and entitled until Paddle sends
+ * the terminal subscription.canceled event.
  */
 async function handleSubscriptionUpdated(data: any) {
   const { id, status, currentBillingPeriod } = data
@@ -208,63 +230,159 @@ async function handleSubscriptionUpdated(data: any) {
     return
   }
 
-  // Map Paddle status to our status
+  // A terminal state can arrive on this event as well as on subscription.canceled.
+  // Route it to the same handler so the two orderings cannot diverge.
+  if (status === 'canceled') {
+    await applyTerminalCancellation(id)
+    return
+  }
+
+  // Map Paddle status to our status. `canceled` is handled above.
+  //
+  // past_due needs care about ordering. Paddle sends subscription.updated
+  // alongside the lifecycle events, so this can arrive AFTER
+  // subscription.past_due has already opened the recovery window. Writing
+  // PAST_DUE over GRACE there would revoke access instantly — PAST_DUE is not
+  // in the entitlement filter — and strand a graceUntil that nothing reads.
+  // The recovery window is ours to close, so once it is open the provider
+  // repeating "past_due" changes nothing.
   let newStatus: string = subscription.status
   if (status === 'active') newStatus = 'ACTIVE'
-  else if (status === 'canceled') newStatus = 'CANCELED'
-  else if (status === 'past_due') newStatus = 'PAST_DUE'
+  else if (status === 'past_due') newStatus = subscription.status === 'GRACE' ? 'GRACE' : 'PAST_DUE'
 
   await prisma.subscription.update({
     where: { paddleSubscriptionId: id },
     data: {
       status: newStatus as any,
-      currentPeriodEnd: currentBillingPeriod?.endsAt 
+      currentPeriodEnd: currentBillingPeriod?.endsAt
         ? new Date(currentBillingPeriod.endsAt)
         : subscription.currentPeriodEnd,
       updatedAt: new Date()
     }
   })
 
+  await syncScheduledCancellation(id, data)
+
   console.log(`[Paddle Webhook] Subscription ${id} updated to ${newStatus}`)
+}
+
+/**
+ * Mirror the provider's scheduled-change state onto cancelScheduledAt.
+ *
+ * cancelScheduledAt means one thing: a date Paddle told us a cancellation
+ * takes effect. It is therefore written ONLY from
+ * scheduledChange.action === 'cancel' together with an explicit
+ * scheduledChange.effectiveAt. Never from currentBillingPeriod.endsAt, never
+ * from the stored currentPeriodEnd, never from a local clock — a renewal date
+ * is not a cancellation date, and storing one under this name would make the
+ * field a second billing clock again.
+ *
+ * Absence and null are different statements. The SDK normalises a missing
+ * scheduled_change to null (`subscription.scheduled_change ? new … : null`)
+ * and always defines the property, so on any unmarshalled payload null is the
+ * provider explicitly saying "nothing is scheduled" and is safe to act on. A
+ * payload with no such key at all has said nothing about cancellation, so it
+ * must leave the stored value alone rather than silently un-cancel someone.
+ *
+ * Only `cancel` is mirrored. `pause` and `resume` are separate lifecycle
+ * concepts this platform does not offer, and treating them as cancellations
+ * would schedule a downgrade the customer never asked for.
+ */
+async function syncScheduledCancellation(paddleSubscriptionId: string, data: any) {
+  // The payload never mentioned scheduled changes — not a statement about them.
+  if (!data || !('scheduledChange' in data)) return
+
+  const scheduledChange = data.scheduledChange
+
+  if (scheduledChange === null) {
+    // Explicit: nothing is scheduled. Reversal, or never scheduled at all.
+    // clearScheduledCancellation no-ops when nothing was recorded.
+    await clearScheduledCancellation(paddleSubscriptionId)
+    return
+  }
+
+  if (scheduledChange?.action !== 'cancel') {
+    // pause / resume / anything else — says nothing about a cancellation.
+    return
+  }
+
+  if (!scheduledChange.effectiveAt) {
+    // A cancel is scheduled but the provider did not say when. Inventing a date
+    // here is exactly the defect this field exists to avoid; a later update
+    // carries the real one.
+    console.warn(
+      `[Paddle Webhook] Scheduled cancellation without an effectiveAt for ${paddleSubscriptionId} — not persisting a date`
+    )
+    return
+  }
+
+  const at = new Date(scheduledChange.effectiveAt)
+  if (Number.isNaN(at.getTime())) {
+    console.warn(`[Paddle Webhook] Unparseable scheduled cancellation date for ${paddleSubscriptionId}`)
+    return
+  }
+
+  await recordScheduledCancellation(paddleSubscriptionId, at)
 }
 
 /**
  * Handle subscription.canceled event
  *
- * Sets the subscription to GRACE (not CANCELED) so the user still has
- * 7 days of access. getUserSubscription() looks for ['ACTIVE','FREE','GRACE']
- * so GRACE is the correct status for the grace window.
- * The daily cron calls processExpiredGracePeriods() to flip to FREE once
- * graceUntil has passed.
+ * This is terminal: Paddle sends it when paid access has actually ended, not
+ * when a cancellation is requested. A cancellation requested with
+ * `next_billing_period` arrives here at the period end, after the customer has
+ * used everything they paid for.
+ *
+ * It used to call initiateGracePeriod, which handed the customer a further
+ * seven days of a paid plan they had stopped paying for — and, because that
+ * function only matched ACTIVE or PAST_DUE rows, silently did nothing at all
+ * when the cancel endpoint had already moved them to GRACE.
  */
 async function handleSubscriptionCanceled(data: any) {
-  const { id } = data
+  await applyTerminalCancellation(data?.id)
+}
 
+/**
+ * The single terminal downgrade. Idempotent: downgradeToFreePlan leaves a
+ * subscription that is already on the free plan untouched, so a redelivered or
+ * duplicated provider event cannot double-apply or corrupt state.
+ */
+async function applyTerminalCancellation(paddleSubscriptionId: string) {
   const subscription = await prisma.subscription.findUnique({
-    where: { paddleSubscriptionId: id }
+    where: { paddleSubscriptionId },
+    select: { id: true, userId: true },
   })
 
   if (!subscription) {
-    console.error(`[Paddle Webhook] Subscription ${id} not found`)
+    console.error(`[Paddle Webhook] Subscription ${paddleSubscriptionId} not found`)
     return
   }
 
-  // initiateGracePeriod sets status='GRACE' + graceUntil=now+7d
-  await initiateGracePeriod(subscription.userId)
+  const changed = await downgradeToFreePlan(subscription.id, 'PROVIDER_CANCELED')
 
-  const graceUntil = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
-  notifyPaymentFailed(subscription.userId, graceUntil).catch(() => {})
-
-  console.log(`[Paddle Webhook] Subscription ${id} canceled — grace period started for user ${subscription.userId}`)
+  if (changed) {
+    notifySubscriptionCanceled(subscription.userId).catch(() => {})
+    console.log(
+      `[Paddle Webhook] Subscription ${paddleSubscriptionId} ended — user ${subscription.userId} moved to the free plan`
+    )
+  } else {
+    console.log(
+      `[Paddle Webhook] Subscription ${paddleSubscriptionId} already on the free plan — terminal event ignored`
+    )
+  }
 }
 
 /**
  * Handle subscription.past_due event
  *
- * Paddle fires this when payment fails. We start the 7-day grace period
- * immediately so the user keeps access while Paddle retries payment.
- * If Paddle succeeds, subscription.activated fires and clears the grace.
- * If Paddle ultimately cancels, subscription.canceled fires (also grace).
+ * Payment failure is the only customer lifecycle that opens an automatic grace
+ * window. Paddle retries the charge; if it succeeds subscription.activated
+ * clears the window, and if it never does the daily cron downgrades once
+ * graceUntil passes.
+ *
+ * One write, not two. The old handler set PAST_DUE and then immediately
+ * overwrote it with GRACE, so PAST_DUE never survived a statement while the
+ * admin UI still rendered a badge for it.
  */
 async function handleSubscriptionPastDue(data: any) {
   const { id } = data
@@ -278,25 +396,24 @@ async function handleSubscriptionPastDue(data: any) {
     return
   }
 
-  // Mark as PAST_DUE in DB for UI display, then start grace so user keeps access
-  await prisma.subscription.update({
-    where: { paddleSubscriptionId: id },
-    data: { status: 'PAST_DUE', updatedAt: new Date() }
-  })
+  const graceUntil = await startPaymentFailureGrace(subscription.userId)
 
-  // Start grace period — initiateGracePeriod will upgrade PAST_DUE → GRACE
-  await initiateGracePeriod(subscription.userId)
-
-  const graceUntil = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
   notifyPaymentFailed(subscription.userId, graceUntil).catch(() => {})
 
-  console.log(`[Paddle Webhook] Subscription ${id} past due — grace period started for user ${subscription.userId}`)
+  console.log(`[Paddle Webhook] Subscription ${id} past due — payment grace started for user ${subscription.userId}`)
 }
 
 /**
  * Handle subscription.activated event
  * Fires on both initial activation AND on each successful billing period renewal.
  * We reset the user's monthly usage counter here so limits refresh each cycle.
+ *
+ * This is payment recovery: it clears the failed-payment grace window and
+ * nothing else. It must not assume anything about a scheduled cancellation —
+ * a customer can cancel at period end and still have this month's payment
+ * succeed, and erasing cancelScheduledAt here would silently un-cancel them.
+ * The provider's own scheduledChange on this payload decides, via
+ * syncScheduledCancellation.
  */
 async function handleSubscriptionActivated(data: any) {
   const { id, currentBillingPeriod } = data
@@ -319,10 +436,12 @@ async function handleSubscriptionActivated(data: any) {
     data: {
       status: 'ACTIVE',
       currentPeriodEnd: newPeriodEnd,
-      graceUntil: null, // clear any grace period on successful payment
+      graceUntil: null, // clear the failed-payment window on successful payment
       updatedAt: new Date()
     }
   })
+
+  await syncScheduledCancellation(id, data)
 
   // Reset usage for the new billing period
   await resetUserMonthlyUsage(subscription.userId)
