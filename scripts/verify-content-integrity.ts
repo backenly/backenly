@@ -1,5 +1,6 @@
 /**
- * Content integrity gate for /resources and /use-cases.
+ * Content integrity gate for /resources, /use-cases, /comparisons,
+ * /alternatives and /privacy.
  *
  * WHY THIS EXISTS
  * ---------------
@@ -38,6 +39,21 @@
  * wrong trade, so the words are a review concern, not a build gate. Everything
  * that remains here is structural and cannot fail on a wording change.
  *
+ * WHY /privacy IS IN HERE RATHER THAN IN ITS OWN SCRIPT
+ * -----------------------------------------------------
+ * Because the machinery it needs already exists here. SURFACE_FILES,
+ * staticRouteExists and checkInternalLinks are generic, so listing the privacy
+ * page buys link resolution and redirect-source detection for free, and the
+ * sitemap helpers already cover an arbitrary route. A second script would also
+ * mean a second `verify:*` entry and a second link in the build command, for
+ * checks that are the same kind of check over the same kind of data.
+ *
+ * The same restraint applies as everywhere else in this file: the privacy
+ * checks below are STRUCTURAL. None of them can tell whether a legal statement
+ * is correct, lawful, or true of production, and a gate that appeared to would
+ * be worse than no gate — it would read as validation to the next person.
+ * Accuracy against the deployed system stays a human review step.
+ *
  * Deliberately DB-free, matching verify-v1-parity.ts and
  * assert-no-apidefinition-writes.ts, so it can run as a build gate.
  *
@@ -57,6 +73,13 @@ import {
   REASONS_TEAMS_LOOK,
   SWITCHING_COSTS,
 } from '../app/alternatives/data'
+import {
+  EFFECTIVE_DATE,
+  PRIVACY_EMAIL,
+  PRIVACY_SECTIONS,
+  PRIVACY_SUMMARY,
+  PROVIDERS,
+} from '../app/privacy/data'
 import sitemap from '../app/sitemap'
 
 const failures: string[] = []
@@ -239,6 +262,136 @@ for (const c of COMPARISON_LIST) {
   }
 }
 
+// ── 2d. Privacy policy: structure, anchors, and provider-table completeness ──
+//
+// STRUCTURAL ONLY. Nothing below can judge whether a legal statement is
+// correct — see the note at the top of this file. What these catch is the way
+// a legal page actually rots: a section quietly dropped, an anchor collision
+// that silently breaks every deep link into the policy, a stale effective
+// date, a contact address that drifts from the one the site uses, and a
+// provider added to the table with half its row filled in.
+//
+// That last one is the reason this section exists at all. The policy this
+// replaced named three third parties when ten could receive data, because
+// there was nothing anywhere that could notice an omission.
+
+/**
+ * Sections the policy must always contain.
+ *
+ * Not "sections it happens to have today". Each of these answers a question a
+ * reader arrives with, and a rewrite that drops one has removed an answer
+ * rather than tightened the prose. Reordering and retitling stay free; the
+ * anchors are slugs precisely so that reordering costs nothing.
+ */
+const REQUIRED_PRIVACY_SECTIONS = [
+  'who-we-are',
+  'information-we-collect',
+  'how-we-use-it',
+  'providers',
+  'international',
+  'retention',
+  'deletion',
+  'security',
+  'your-rights',
+  'changes',
+]
+
+const privacyIds = PRIVACY_SECTIONS.map((s) => s.id)
+
+for (const required of REQUIRED_PRIVACY_SECTIONS) {
+  if (!privacyIds.includes(required)) {
+    fail(`privacy: required section "${required}" is missing — a reader's question lost its answer`)
+  }
+}
+
+if (new Set(privacyIds).size !== privacyIds.length) {
+  fail('privacy: duplicate section id — the anchors collide and one section becomes unreachable')
+}
+
+for (const section of PRIVACY_SECTIONS) {
+  // Slug-shaped, and never ordinal. Two separate checks, because a shape test
+  // alone passes `section-2` — it is a perfectly well-formed slug and also
+  // exactly the pattern being retired. `#section-3` derives from array
+  // position, so reordering silently repoints every external link into the
+  // policy, which is what these anchors were before this rewrite.
+  if (!/^[a-z][a-z0-9-]*$/.test(section.id)) {
+    fail(`privacy/${section.id}: section id must be a lowercase slug, not free text`)
+  }
+  if (/^(section-?)?\d+$/.test(section.id)) {
+    fail(
+      `privacy/${section.id}: section id is positional — renumbering would break every ` +
+        `external link into the policy. Name the section, do not number it.`,
+    )
+  }
+  if (!section.title.trim()) fail(`privacy/${section.id}: has no title`)
+  if (!section.content.trim()) fail(`privacy/${section.id}: has no body text`)
+
+  for (const sub of section.subsections ?? []) {
+    if (sub.items.length === 0) fail(`privacy/${section.id}: subsection "${sub.label}" is empty`)
+    if (new Set(sub.items).size !== sub.items.length) {
+      fail(`privacy/${section.id}: duplicate items in "${sub.label}" (React key collision)`)
+    }
+  }
+  if (section.list && new Set(section.list).size !== section.list.length) {
+    fail(`privacy/${section.id}: duplicate list items (React key collision)`)
+  }
+}
+
+// Exactly one section renders the provider table. Two would duplicate it; none
+// would drop the disclosure while leaving the data in the file, which is the
+// failure that looks most like success.
+const providerSections = PRIVACY_SECTIONS.filter((s) => s.providers)
+if (providerSections.length !== 1) {
+  fail(
+    `privacy: expected exactly one section to render the provider table, found ${providerSections.length}`,
+  )
+}
+
+if (PROVIDERS.length === 0) fail('privacy: the provider table is empty')
+
+const providerNames = PROVIDERS.map((p) => p.name)
+if (new Set(providerNames).size !== providerNames.length) {
+  fail('privacy: duplicate provider name — one row is shadowing another')
+}
+
+for (const provider of PROVIDERS) {
+  const at = (m: string) => fail(`privacy/providers/${provider.name}: ${m}`)
+  if (!provider.name.trim()) at('has no name')
+  if (!provider.purpose.trim()) at('has no purpose — a provider nobody can explain should not be listed')
+  if (!provider.data.trim()) at('does not say what information it can receive')
+  if (!/^https:\/\//.test(provider.href)) at('must link to the provider’s own privacy documentation over https')
+}
+
+// Effective date must be real and parseable. A legal page whose date has gone
+// to "TBD" or drifted into a placeholder is worse than one with an old date.
+if (Number.isNaN(new Date(EFFECTIVE_DATE).getTime())) {
+  fail(`privacy: effective date "${EFFECTIVE_DATE}" does not parse as a date`)
+}
+
+if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(PRIVACY_EMAIL)) {
+  fail(`privacy: contact address "${PRIVACY_EMAIL}" is not a valid email address`)
+}
+
+// The policy's contact address and the site's must not drift apart. Read as
+// text rather than imported: SiteShell is a client component that pulls in
+// React, framer-motion and iconify, none of which belong in a build gate.
+{
+  const shellPath = path.join(process.cwd(), 'components/site/SiteShell.tsx')
+  if (!fs.existsSync(shellPath)) {
+    fail('privacy: components/site/SiteShell.tsx is missing, cannot verify the contact address')
+  } else if (!fs.readFileSync(shellPath, 'utf8').includes(PRIVACY_EMAIL)) {
+    fail(
+      `privacy: contact address ${PRIVACY_EMAIL} does not appear in SiteShell's ROUTES — ` +
+        `the policy and the site footer are pointing at different addresses`,
+    )
+  }
+}
+
+if (PRIVACY_SUMMARY.length === 0) fail('privacy: the summary has no entries')
+if (new Set(PRIVACY_SUMMARY).size !== PRIVACY_SUMMARY.length) {
+  fail('privacy: duplicate summary line (React key collision)')
+}
+
 // ── 3. Sitemap drift ─────────────────────────────────────────────────────────
 
 const urls = sitemap().map((e) => e.url.replace('https://backenly.com', '') || '/')
@@ -258,8 +411,19 @@ const comparisonCount = compare('comparison', '/comparisons/', [...COMPARISON_SL
 
 // The two index routes are hand-listed in the sitemap rather than derived, so
 // they are the ones that can silently go missing.
-for (const index of ['/comparisons', '/alternatives']) {
+for (const index of ['/comparisons', '/alternatives', '/privacy']) {
   if (!urls.includes(index)) fail(`${index} exists but is missing from the sitemap`)
+}
+
+// /privacy must stay crawlable. It is linked from the signup consent line and
+// from every auth screen, so a stray disallow makes the policy a user is being
+// asked to agree to unreachable to anything but a logged-in browser.
+{
+  const robotsSrc = fs.readFileSync(path.join(process.cwd(), 'app/robots.ts'), 'utf8')
+  const disallow = robotsSrc.slice(robotsSrc.indexOf('disallow'))
+  if (/['"]\/privacy\/?['"]/.test(disallow)) {
+    fail('robots.ts disallows /privacy, which is linked from signup as the policy users must accept')
+  }
 }
 
 // ── 4. Redirect hygiene ──────────────────────────────────────────────────────
@@ -319,6 +483,10 @@ const SURFACE_FILES = [
   'app/comparisons/data.ts',
   'app/alternatives/page.tsx',
   'app/alternatives/data.ts',
+  // The legal pages cross-link to each other. A retired or renamed legal route
+  // leaves a dead link in a document people are asked to accept at signup.
+  'app/privacy/page.tsx',
+  'app/privacy/data.ts',
 ]
 
 /** Resolve a static pathname against the App Router directory layout. */
@@ -417,6 +585,8 @@ checkRedirects()
       `✓ Content integrity: ${ALL_ARTICLES.length} guides + ${USE_CASE_LIST.length} use cases + ` +
         `${COMPARISON_LIST.length} comparisons · ${resourceCount} + ${useCaseCount} + ` +
         `${comparisonCount} sitemap URLs match · redirects unchained · internal links resolve · ` +
-        `every comparison concedes a case · competitor facts sourced · keys unique`,
+        `every comparison concedes a case · competitor facts sourced · keys unique · ` +
+        `privacy: ${PRIVACY_SECTIONS.length} sections, ${PROVIDERS.length} providers disclosed, ` +
+        `anchors unique, effective ${EFFECTIVE_DATE}`,
     )
   })
