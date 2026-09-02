@@ -44,12 +44,32 @@
  * Run: npx tsx scripts/verify-content-integrity.ts   (wired into `npm run build`)
  */
 
+import fs from 'fs'
+import path from 'path'
 import { ALL_ARTICLES, ARTICLES_BY_SLUG, LANES, READ_MINUTES } from '../app/resources/content'
 import { USE_CASE_LIST, USE_CASES } from '../app/use-cases/data'
+import { COMPARISON_LIST, COMPARISON_SLUGS } from '../app/comparisons/data'
+import {
+  CRITERIA,
+  DO_NOT_SWITCH,
+  FAQ as ALT_FAQ,
+  NOT_FOR,
+  REASONS_TEAMS_LOOK,
+  SWITCHING_COSTS,
+} from '../app/alternatives/data'
 import sitemap from '../app/sitemap'
 
 const failures: string[] = []
 const fail = (m: string) => failures.push(m)
+
+/**
+ * Non-fatal. A competitor fact whose source was last read a long time ago is a
+ * review task, not a broken build — failing a deploy because a date rolled past
+ * a threshold would train everyone to bump the date rather than re-read the
+ * page, which is the opposite of what the field is for.
+ */
+const warnings: string[] = []
+const warn = (m: string) => warnings.push(m)
 
 // ── 1. Guide cross-references, shape, and anchors ────────────────────────────
 
@@ -90,6 +110,135 @@ if (Object.keys(USE_CASES).length !== USE_CASE_LIST.length) {
   fail('use-cases: the slug map and the list disagree — a duplicate slug is shadowing an entry')
 }
 
+// ── 2b. Comparison shape: the fields that keep a comparison honest ───────────
+//
+// This section is independent of the Resources / Use Cases checks above and
+// shares none of their assumptions. It exists because /comparisons and
+// /alternatives had no test of any kind, and the two specific things that rot
+// on a comparison page are balance and sourcing.
+//
+// `competitorStrengths` and `chooseCompetitorWhen` are enforced rather than
+// reviewed for one reason: a comparison that cannot say why a reader should
+// pick the OTHER product is an advertisement wearing a table, and that is a
+// property a script can actually check. It cannot check whether the strengths
+// are any good — that stays a review concern — but it can refuse to ship a page
+// that does not have any.
+//
+// There is deliberately no banned-phrase list here, for the reasons recorded in
+// the header comment. Everything below is structural and cannot fail on a
+// wording change.
+
+const FACT_STALE_DAYS = 180
+
+for (const c of COMPARISON_LIST) {
+  const at = (m: string) => fail(`comparisons/${c.slug}: ${m}`)
+
+  if (c.competitorStrengths.length < 2) {
+    at(
+      `only ${c.competitorStrengths.length} competitor strength(s) — a comparison that cannot say ` +
+        `why someone should choose ${c.competitor} is an advertisement`,
+    )
+  }
+  if (c.chooseCompetitorWhen.length < 1) {
+    at(`no "choose ${c.competitor} when" entries — the page never concedes a case`)
+  }
+  if (c.backenlyStrengths.length < 2) at(`only ${c.backenlyStrengths.length} Backenly strength(s)`)
+  if (c.table.length < 4) at(`capability table has only ${c.table.length} rows`)
+  if (c.architecture.length < 1) at('no architecture section')
+  if (c.faq.length < 3) at(`only ${c.faq.length} FAQ entries`)
+
+  // Every row carries all four columns. The fourth is the whole reason these
+  // tables are not tick-versus-cross, so an empty one silently reverts the
+  // format it was introduced to replace.
+  for (const row of c.table) {
+    for (const field of ['aspect', 'competitor', 'backenly', 'practical'] as const) {
+      if (!row[field] || !row[field].trim()) {
+        at(`table row "${row.aspect || '(unnamed)'}" has an empty "${field}" cell`)
+      }
+    }
+  }
+
+  // Duplicate keys collide in React and, for the aspect column, mean the table
+  // is silently saying the same thing twice.
+  const dupe = (label: string, values: string[]) => {
+    if (new Set(values).size !== values.length) at(`duplicate ${label} (React key collision)`)
+  }
+  dupe('table aspects', c.table.map((r) => r.aspect))
+  dupe('architecture headings', c.architecture.map((s) => s.heading))
+  dupe('competitor strength titles', c.competitorStrengths.map((s) => s.title))
+  dupe('Backenly strength titles', c.backenlyStrengths.map((s) => s.title))
+  dupe('FAQ questions', c.faq.map((f) => f.q))
+
+  if (c.migration && c.migration.limits.length < 2) {
+    at('migration section names fewer than two things that stay the reader\'s work')
+  }
+
+  // Sourcing. A claim about a competitor with no URL and no date is one nobody
+  // can ever audit, and competitor pricing and capabilities move.
+  for (const fact of c.facts) {
+    if (!/^https:\/\//.test(fact.source)) {
+      at(`fact source "${fact.source}" is not an https URL`)
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(fact.verifiedOn)) {
+      at(`fact for ${fact.source} has no ISO verification date`)
+      continue
+    }
+    const ageDays = (Date.now() - new Date(fact.verifiedOn).getTime()) / 86_400_000
+    if (ageDays > FACT_STALE_DAYS) {
+      warn(
+        `comparisons/${c.slug}: ${fact.source} was last read ${Math.round(ageDays)} days ago — ` +
+          `re-read it before trusting the claim`,
+      )
+    }
+  }
+}
+
+if (new Set(COMPARISON_SLUGS).size !== COMPARISON_SLUGS.length) {
+  fail('comparisons: duplicate slug — one entry is shadowing another in the slug map')
+}
+
+// ── 2c. Alternatives must not become a second comparisons page ───────────────
+//
+// It already was one once: the same four competitors, the same capability
+// claims, and three of the four entries left on pre-rewrite copy, so the page
+// was both the duplicate and the stale half of it. The split is by reader, and
+// the way it regrows is someone pasting a comparison paragraph across. Checking
+// for verbatim reuse is enough to catch that without pretending to judge prose.
+
+if (CRITERIA.length < 4) fail('alternatives: fewer than four evaluation criteria')
+if (NOT_FOR.length < 3) fail('alternatives: fewer than three "not for" entries — the section that earns the page')
+if (DO_NOT_SWITCH.length < 3) fail('alternatives: fewer than three "should not switch" entries')
+if (SWITCHING_COSTS.length < 3) fail('alternatives: switching-cost list is too thin to be honest')
+if (ALT_FAQ.length < 3) fail(`alternatives: only ${ALT_FAQ.length} FAQ entries`)
+
+const altCorpus = [
+  ...CRITERIA.flatMap((c) => [c.question, c.why, c.backenly]),
+  ...NOT_FOR.flatMap((n) => [n.title, n.body]),
+  ...DO_NOT_SWITCH.flatMap((d) => [d.title, d.body]),
+  ...REASONS_TEAMS_LOOK.flatMap((r) => [r.title, r.body]),
+  ...SWITCHING_COSTS.flatMap((s) => [s.item, s.detail]),
+  ...ALT_FAQ.flatMap((f) => [f.q, f.a]),
+]
+
+const normalize = (s: string) => s.replace(/\s+/g, ' ').trim().toLowerCase()
+const altNormalized = altCorpus.map(normalize)
+
+for (const c of COMPARISON_LIST) {
+  for (const [label, text] of [
+    ['positioning', c.positioning],
+    ['summary', c.summary],
+    ['intro', c.intro],
+  ] as const) {
+    const needle = normalize(text)
+    if (altNormalized.some((a) => a === needle || a.includes(needle))) {
+      fail(
+        `alternatives duplicates the ${label} of comparisons/${c.slug} verbatim — ` +
+          `the two pages are for different readers, link instead of restating`,
+      )
+    }
+  }
+}
+
 // ── 3. Sitemap drift ─────────────────────────────────────────────────────────
 
 const urls = sitemap().map((e) => e.url.replace('https://backenly.com', '') || '/')
@@ -105,6 +254,13 @@ const compare = (label: string, prefix: string, real: string[]) => {
 
 const resourceCount = compare('resource', '/resources/', ALL_ARTICLES.map((a) => a.slug))
 const useCaseCount = compare('use-case', '/use-cases/', USE_CASE_LIST.map((u) => u.slug))
+const comparisonCount = compare('comparison', '/comparisons/', [...COMPARISON_SLUGS])
+
+// The two index routes are hand-listed in the sitemap rather than derived, so
+// they are the ones that can silently go missing.
+for (const index of ['/comparisons', '/alternatives']) {
+  if (!urls.includes(index)) fail(`${index} exists but is missing from the sitemap`)
+}
 
 // ── 4. Redirect hygiene ──────────────────────────────────────────────────────
 
@@ -143,11 +299,114 @@ async function checkRedirects(): Promise<void> {
   }
 }
 
+// ── 5. Internal links on the comparison and alternatives surfaces ────────────
+//
+// The defect this exists for: /alternatives linked to /use-cases/startup-mvps
+// with the label "Startup MVPs", long after that slug was retired and pointed
+// at the /use-cases index by a permanent redirect. Nothing 404'd, so nothing
+// noticed — the reader just landed somewhere other than the page they were
+// promised, one hop later.
+//
+// A filesystem check alone would not have caught it, because
+// app/use-cases/[slug]/page.tsx exists and matches any slug. So a link into one
+// of the three dynamic families is validated against that family's actual data,
+// and every link is checked against the redirect table. Static routes fall
+// through to the router's own resolution rules.
+
+const SURFACE_FILES = [
+  'app/comparisons/page.tsx',
+  'app/comparisons/[slug]/page.tsx',
+  'app/comparisons/data.ts',
+  'app/alternatives/page.tsx',
+  'app/alternatives/data.ts',
+]
+
+/** Resolve a static pathname against the App Router directory layout. */
+function staticRouteExists(pathname: string): boolean {
+  const segments = pathname.split('/').filter(Boolean)
+  let dir = path.join(process.cwd(), 'app')
+  for (const segment of segments) {
+    const literal = path.join(dir, segment)
+    if (fs.existsSync(literal) && fs.statSync(literal).isDirectory()) {
+      dir = literal
+      continue
+    }
+    const dynamic = fs
+      .readdirSync(dir, { withFileTypes: true })
+      .find((e) => e.isDirectory() && /^\[.+\]$/.test(e.name))
+    if (!dynamic) return false
+    dir = path.join(dir, dynamic.name)
+  }
+  return ['page.tsx', 'page.ts', 'page.jsx', 'page.js'].some((f) =>
+    fs.existsSync(path.join(dir, f)),
+  )
+}
+
+async function checkInternalLinks(): Promise<void> {
+  const config = require('../next.config.js')
+  const rules: { source: string; destination: string; has?: unknown }[] =
+    typeof config.redirects === 'function' ? await config.redirects() : []
+  const redirectSources = new Set(rules.filter((r) => !r.has).map((r) => r.source))
+
+  const dynamicFamilies: Record<string, Set<string>> = {
+    '/comparisons/': new Set(COMPARISON_SLUGS),
+    '/use-cases/': new Set(USE_CASE_LIST.map((u) => u.slug)),
+    '/resources/': new Set(ALL_ARTICLES.map((a) => a.slug)),
+  }
+
+  for (const file of SURFACE_FILES) {
+    const full = path.join(process.cwd(), file)
+    if (!fs.existsSync(full)) {
+      fail(`content integrity: ${file} is listed as a comparison surface but does not exist`)
+      continue
+    }
+    const source = fs.readFileSync(full, 'utf8')
+
+    // href="/x", href: '/x', href={`/x`} — string literals only. A computed
+    // href cannot be resolved here and is covered by the family checks above.
+    const hrefs = new Set<string>()
+    for (const m of source.matchAll(/href(?:=|:\s*)["'`](\/[^"'`${}\s]*)["'`]/g)) {
+      hrefs.add(m[1])
+    }
+
+    for (const href of hrefs) {
+      const pathname = href.split(/[?#]/)[0].replace(/\/$/, '') || '/'
+
+      if (redirectSources.has(pathname)) {
+        fail(
+          `${file}: links to ${pathname}, which is a redirect source — link to the final ` +
+            `destination, or remove the link if the page it promised is gone`,
+        )
+        continue
+      }
+
+      const family = Object.keys(dynamicFamilies).find((p) => pathname.startsWith(p))
+      if (family) {
+        const slug = pathname.slice(family.length)
+        if (slug && !dynamicFamilies[family].has(slug)) {
+          fail(`${file}: links to ${pathname}, which is not a live ${family.slice(1, -1)} slug`)
+        }
+        continue
+      }
+
+      if (!staticRouteExists(pathname)) {
+        fail(`${file}: links to ${pathname}, which does not resolve to a page`)
+      }
+    }
+  }
+}
+
 // ── Report ───────────────────────────────────────────────────────────────────
 
 checkRedirects()
+  .then(checkInternalLinks)
   .catch((e) => fail(`redirect check could not run: ${e?.message ?? e}`))
   .then(() => {
+    if (warnings.length > 0) {
+      console.warn(`\n! Content integrity: ${warnings.length} warning(s)\n`)
+      for (const w of warnings) console.warn(`  • ${w}`)
+      console.warn('')
+    }
     if (failures.length > 0) {
       console.error(`\n✗ Content integrity: ${failures.length} problem(s)\n`)
       for (const f of failures) console.error(`  • ${f}`)
@@ -155,7 +414,9 @@ checkRedirects()
       process.exit(1)
     }
     console.log(
-      `✓ Content integrity: ${ALL_ARTICLES.length} guides + ${USE_CASE_LIST.length} use cases · ` +
-        `${resourceCount} + ${useCaseCount} sitemap URLs match · redirects unchained · keys unique`,
+      `✓ Content integrity: ${ALL_ARTICLES.length} guides + ${USE_CASE_LIST.length} use cases + ` +
+        `${COMPARISON_LIST.length} comparisons · ${resourceCount} + ${useCaseCount} + ` +
+        `${comparisonCount} sitemap URLs match · redirects unchained · internal links resolve · ` +
+        `every comparison concedes a case · competitor facts sourced · keys unique`,
     )
   })

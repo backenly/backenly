@@ -1,9 +1,11 @@
 import { Metadata } from 'next'
+import { safeJsonLd } from '@/lib/security/safe-jsonld'
 import { SiteShell } from '@/components/site/SiteShell'
 import {
   InlineArrow,
   PageHero,
   PrimaryButton,
+  SecondaryButton,
   Section,
   SectionHeading,
   Lead,
@@ -13,132 +15,135 @@ import {
   ChipRow,
   ChipLink,
 } from '@/components/site/kit'
+import { COMPARISON_LIST } from './data'
 
 const APP_URL = 'https://backenly.com'
 
 export const metadata: Metadata = {
-  title: 'Backenly Comparisons — How We Compare to Other Backend Tools',
+  title: 'Backenly comparisons — how it differs from other backend platforms',
   description:
-    'See how Backenly compares to Supabase, Firebase, no-code builders, and traditional backend development. Fair, professional comparisons focused on what matters for each type of builder.',
+    'Four comparisons against Supabase, Firebase, integrated app builders, and building a backend yourself. Each one says where the other option is the better choice.',
   keywords: [
     'Backenly vs Supabase',
     'Backenly vs Firebase',
-    'AI backend comparison',
-    'backend as a service comparison',
-    'backend tool comparison 2025',
+    'backend platform comparison',
+    'Postgres backend platform',
   ],
   openGraph: {
-    title: 'Backenly Comparisons — AI Backend vs Traditional Tools',
+    title: 'Backenly comparisons — how it differs from other backend platforms',
     description:
-      'Detailed, fair comparisons of Backenly against Supabase, Firebase, no-code builders, and traditional backend development.',
+      'Comparisons against Supabase, Firebase, integrated app builders, and building it yourself. Each one says where the other option wins.',
     url: `${APP_URL}/comparisons`,
     type: 'website',
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'Backenly Comparisons — AI Backend vs Traditional Tools',
-    description: 'How does Backenly compare to Supabase, Firebase, and traditional backends?',
+    title: 'Backenly comparisons',
+    description: 'How Backenly differs from Supabase, Firebase, app builders, and building it yourself.',
   },
   alternates: { canonical: `${APP_URL}/comparisons` },
 }
 
-const comparisons = [
-  {
-    slug: 'backenly-vs-supabase',
-    title: 'Backenly vs. Supabase',
-    description: 'Both offer PostgreSQL, APIs, and auth — the key difference is how you configure them. Supabase requires manual setup; Backenly generates everything from a plain English description.',
-    tags: ['PostgreSQL', 'BaaS', 'Open-source'],
-  },
-  {
-    slug: 'backenly-vs-firebase',
-    title: 'Backenly vs. Firebase',
-    description: 'Firebase uses a NoSQL document model and requires manual configuration. Backenly uses PostgreSQL, generates a relational schema automatically, and includes a complete REST API.',
-    tags: ['Google Cloud', 'NoSQL vs SQL', 'Realtime'],
-  },
-  {
-    slug: 'backenly-vs-no-code-builders',
-    title: 'Backenly vs. No-Code Builders',
-    description: "No-code builders bundle frontend and backend in one tool. Backenly is backend-only — giving you a real database and REST API that works with any frontend stack.",
-    tags: ['Bubble', 'Webflow', 'No-code vs BaaS'],
-  },
-  {
-    slug: 'backenly-vs-traditional-backend-development',
-    title: 'Backenly vs. Traditional Backend Development',
-    description: 'Building a backend from scratch takes weeks of engineering. Backenly generates the same infrastructure — database, APIs, auth, deployment — automatically, in minutes.',
-    tags: ['Node.js', 'Django', 'Rails', 'Custom backend'],
-  },
-]
-
 export default function ComparisonsPage() {
+  /**
+   * An ItemList of exactly the four cards rendered below. No product, offer, or
+   * rating schema: none of it would correspond to anything on this page.
+   */
+  const itemListSchema = {
+    '@context': 'https://schema.org',
+    '@type': 'ItemList',
+    name: 'Backenly comparisons',
+    itemListElement: COMPARISON_LIST.map((c, i) => ({
+      '@type': 'ListItem',
+      position: i + 1,
+      name: c.headline,
+      url: `${APP_URL}/comparisons/${c.slug}`,
+    })),
+  }
+
   return (
     <SiteShell>
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: safeJsonLd(itemListSchema) }}
+      />
       <main className="relative z-20">
         <PageHero
           align="center"
           eyebrow="Comparisons"
-          title="Backenly vs. other backend tools"
-          subtitle="Detailed, fair comparisons to help you understand where Backenly fits and when another tool might be the better choice."
+          title="How Backenly differs from other backend platforms"
+          subtitle="Four comparisons, each one written to be useful to someone who might not pick us. Every page says where the other option is stronger."
           actions={
             <PrimaryButton href="/auth/signup">
               Try Backenly free
               <InlineArrow />
             </PrimaryButton>
           }
-          proof={[
-            { label: 'Backenly', value: 'AI-generated backend' },
-            { label: 'Others', value: 'Manual configuration' },
-            { label: 'Best for', value: 'Fast production launches' },
-          ]}
         />
 
-        {/* What makes Backenly different — GEO block */}
-        <Section aria-label="What makes Backenly different" width="prose" className="!pt-0">
-          <SectionHeading className="!text-xl mb-4">What makes Backenly different?</SectionHeading>
+        <Section width="prose" className="!pt-0">
+          <SectionHeading className="!text-xl mb-4">What is actually different</SectionHeading>
           <Lead className="mb-4">
-            Most backend tools — Supabase, Firebase, PlanetScale, Railway — require you to manually
-            design your schema, configure auth, set up storage, and manage deployments. They give
-            you the infrastructure; you still do the engineering work.
+            Backenly is a backend platform on PostgreSQL: a database, a REST API, authentication,
+            file storage, realtime, and functions. That list is fairly ordinary for this category,
+            and it is not where the difference is.
+          </Lead>
+          <Lead className="mb-4">
+            The difference is what happens around those parts. Structural changes go through one
+            audited path that records what changed and takes a restore point before schema-touching
+            work. Destructive operations stop for human approval rather than executing on request.
+            A loop reconciles the running backend against a set of declared invariants on a
+            schedule, repairing a narrow class of problems automatically and reporting the rest with
+            their evidence.
           </Lead>
           <Lead>
-            Backenly is autonomous from the ground up. You describe your backend in plain English.
-            Backenly understands your intent and plans, applies, and verifies everything: database
-            tables, REST API endpoints, authentication, file storage, realtime subscriptions,
-            row-level security, and deployment — keeping every change reviewable and reversible. No
-            manual configuration. No backend engineering work.
+            That is a trade rather than an upgrade. It suits a team that would rather not own
+            migrations, policy review, and incident response. It suits a team that wants direct
+            control over all three considerably less well. The pages below are written on that
+            basis.
           </Lead>
         </Section>
 
-        {/* Comparison cards */}
-        <Section aria-label="Comparison pages" width="wide">
+        <Section aria-label="Comparison pages" width="wide-prose">
+          <SectionHeading className="mb-8">Pick a comparison</SectionHeading>
           <div className="grid gap-6 sm:grid-cols-2">
-            {comparisons.map((comp) => (
-              <LinkCard key={comp.slug} href={`/comparisons/${comp.slug}`}>
-                <h2 className="text-lg font-normal text-white tracking-tight mb-3">{comp.title}</h2>
-                <p className="text-sm text-neutral-400 font-extralight leading-relaxed flex-1">
-                  {comp.description}
+            {COMPARISON_LIST.map((c) => (
+              <LinkCard key={c.slug} href={`/comparisons/${c.slug}`}>
+                <h3 className="mb-3 text-lg font-normal tracking-tight text-white">{c.headline}</h3>
+                <p className="flex-1 text-sm font-light leading-relaxed text-neutral-400">
+                  {c.positioning}
                 </p>
-                <div className="mt-5 flex flex-wrap gap-1.5">
-                  {comp.tags.map((tag) => (
-                    <Tag key={tag}>{tag}</Tag>
-                  ))}
+                <div className="mt-5">
+                  <Tag>{c.category}</Tag>
                 </div>
-                <p className="mt-5 text-sm font-semibold text-zinc-200 group-hover:text-white transition-colors">
-                  Read comparison
-                </p>
               </LinkCard>
             ))}
           </div>
         </Section>
 
-        {/* Internal links */}
+        <Section width="prose">
+          <SectionHeading className="!text-xl mb-4">
+            Not sure which one you are comparing against?
+          </SectionHeading>
+          <Lead className="mb-6">
+            These pages assume you already have a shortlist. If you are earlier than that — working
+            out whether to move at all, or what to weigh — the alternatives page covers the criteria
+            that decide it, where Backenly does not fit, and when the right answer is to stay where
+            you are.
+          </Lead>
+          <SecondaryButton href="/alternatives">
+            How to evaluate an alternative
+            <InlineArrow />
+          </SecondaryButton>
+        </Section>
+
         <Section width="prose" className="!py-12">
           <ChipRow label="Related:">
             {[
-              { href: '/alternatives', label: 'Alternatives overview' },
               { href: '/features', label: 'All features' },
               { href: '/use-cases', label: 'Use cases' },
+              { href: '/resources', label: 'Documentation' },
               { href: '/pricing', label: 'Pricing' },
-              { href: '/resources', label: 'Resources' },
             ].map((link) => (
               <ChipLink key={link.href} href={link.href}>
                 {link.label}
@@ -149,9 +154,10 @@ export default function ComparisonsPage() {
 
         <CtaSection
           title="Try Backenly yourself"
-          body="Free forever plan. No credit card. No infrastructure setup."
+          body="One free project, kept permanently. No credit card."
         >
           <PrimaryButton href="/auth/signup">Get started free</PrimaryButton>
+          <SecondaryButton href="/pricing">See pricing</SecondaryButton>
         </CtaSection>
       </main>
     </SiteShell>

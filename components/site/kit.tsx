@@ -398,3 +398,168 @@ export function ChipRow({ label, children }: { label?: ReactNode; children: Reac
 export function InlineArrow() {
   return <ArrowRight className="h-4 w-4" aria-hidden="true" />
 }
+
+/**
+ * Capability comparison table.
+ *
+ * Four columns on purpose. A three-column table invites a tick against a cross,
+ * which reduces a real difference to a verdict and flatters whoever wrote it;
+ * the fourth column has to say what the difference costs or buys, including
+ * when the honest answer is "nothing".
+ *
+ * Two renderings, never both in the accessibility tree at once. Below `md` the
+ * rows become a definition list, because four columns of sentence-length prose
+ * at 375px is either a horizontal scroll nobody finds or columns too narrow to
+ * read. Tailwind's `hidden` is `display: none`, which removes a subtree from the
+ * accessibility tree as well as from view, so a screen reader encounters
+ * exactly one of these.
+ *
+ * The table's scroll container is focusable on purpose. A scrollable region that
+ * only responds to a pointer is unreachable by keyboard, and the previous
+ * version of this table was a bare `overflow-x-auto` div.
+ */
+export function ComparisonTable({
+  caption,
+  competitor,
+  rows,
+}: {
+  /** Accessible name for the table and its scroll region. Not shown visually. */
+  caption: string
+  competitor: string
+  rows: { aspect: string; competitor: string; backenly: string; practical: string }[]
+}) {
+  const headings = ['Aspect', competitor, 'Backenly', 'In practice']
+
+  return (
+    <>
+      {/* ≥ md: the real table, scrollable and keyboard-reachable. */}
+      <div
+        role="region"
+        aria-label={caption}
+        tabIndex={0}
+        className="hidden md:block -mx-1 overflow-x-auto rounded-lg border border-white/10 focus:outline-none focus-visible:ring-1 focus-visible:ring-white/40"
+      >
+        <table className="w-full min-w-[52rem] border-collapse text-left">
+          <caption className="sr-only">{caption}</caption>
+          <thead>
+            <tr className="border-b border-white/10 bg-white/[0.03]">
+              {headings.map((h, i) => (
+                <th
+                  key={h}
+                  scope="col"
+                  className={`px-4 py-3 text-xs font-semibold uppercase tracking-[0.1em] ${
+                    i === 2 ? 'text-violet-300' : 'text-neutral-400'
+                  }`}
+                >
+                  {h}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.aspect} className="border-b border-white/[0.06] last:border-0">
+                <th
+                  scope="row"
+                  className="w-[16%] px-4 py-3.5 align-top text-sm font-medium text-zinc-200"
+                >
+                  {row.aspect}
+                </th>
+                <td className="w-[28%] px-4 py-3.5 align-top text-sm font-light leading-6 text-neutral-400">
+                  {row.competitor}
+                </td>
+                <td className="w-[28%] px-4 py-3.5 align-top text-sm font-light leading-6 text-neutral-400">
+                  {row.backenly}
+                </td>
+                <td className="w-[28%] px-4 py-3.5 align-top text-sm font-light leading-6 text-neutral-500">
+                  {row.practical}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* < md: the same rows, stacked, with no horizontal scroll anywhere. */}
+      <dl className="flex flex-col gap-3 md:hidden">
+        {rows.map((row) => (
+          <div key={row.aspect} className="rounded-lg border border-white/10 bg-white/[0.02] p-5">
+            <dt className="text-sm font-medium text-white">{row.aspect}</dt>
+            <dd className="mt-3 flex flex-col gap-3">
+              <div>
+                <p className="text-[11px] font-mono uppercase tracking-[0.15em] text-neutral-500">
+                  {competitor}
+                </p>
+                <p className="mt-1 text-sm font-light leading-6 text-neutral-400">{row.competitor}</p>
+              </div>
+              <div>
+                <p className="text-[11px] font-mono uppercase tracking-[0.15em] text-violet-300">
+                  Backenly
+                </p>
+                <p className="mt-1 text-sm font-light leading-6 text-neutral-400">{row.backenly}</p>
+              </div>
+              <div className="border-t border-white/[0.07] pt-3">
+                <p className="text-[11px] font-mono uppercase tracking-[0.15em] text-neutral-500">
+                  In practice
+                </p>
+                <p className="mt-1 text-sm font-light leading-6 text-neutral-500">{row.practical}</p>
+              </div>
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </>
+  )
+}
+
+/**
+ * The "choose one or the other" pair.
+ *
+ * Previously two unlabelled cards floating in a section with no heading and no
+ * accessible name, which left the most decision-relevant block on the page
+ * invisible to anyone navigating by landmark or heading. The section owns a real
+ * heading now, and each column is a list because that is what it is.
+ *
+ * The competitor column is rendered first, on the page as in the DOM. A
+ * comparison that puts its own case first and the other product's underneath
+ * reads as a rebuttal rather than an answer.
+ */
+export function SplitDecision({
+  heading,
+  competitor,
+  chooseCompetitor,
+  chooseBackenly,
+}: {
+  heading: string
+  competitor: string
+  chooseCompetitor: string[]
+  chooseBackenly: string[]
+}) {
+  return (
+    <>
+      <SectionHeading className="mb-8">{heading}</SectionHeading>
+      <div className="grid gap-5 sm:grid-cols-2">
+        <div className="rounded-lg border border-white/10 bg-white/[0.02] p-6">
+          <h3 className="text-sm font-medium text-white">Choose {competitor} when</h3>
+          <ul className="mt-4 flex flex-col gap-3">
+            {chooseCompetitor.map((item) => (
+              <li key={item} className="text-sm font-light leading-6 text-neutral-400">
+                {item}
+              </li>
+            ))}
+          </ul>
+        </div>
+        <div className="rounded-lg border border-violet-400/20 bg-white/[0.02] p-6">
+          <h3 className="text-sm font-medium text-violet-200">Choose Backenly when</h3>
+          <ul className="mt-4 flex flex-col gap-3">
+            {chooseBackenly.map((item) => (
+              <li key={item} className="text-sm font-light leading-6 text-neutral-400">
+                {item}
+              </li>
+            ))}
+          </ul>
+        </div>
+      </div>
+    </>
+  )
+}

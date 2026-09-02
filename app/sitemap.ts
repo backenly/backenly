@@ -1,4 +1,5 @@
 import { MetadataRoute } from 'next'
+import { COMPARISON_SLUGS } from './comparisons/data'
 
 const APP_URL = 'https://backenly.com'
 
@@ -55,12 +56,13 @@ export default function sitemap(): MetadataRoute.Sitemap {
   ]
 
   // ── Comparisons ───────────────────────────────────────────────────────────
-  const comparisonSlugs = [
-    'backenly-vs-supabase',
-    'backenly-vs-firebase',
-    'backenly-vs-no-code-builders',
-    'backenly-vs-traditional-backend-development',
-  ]
+  //
+  // Derived from the comparison data rather than hand-listed. The two used to be
+  // separate lists of the same four slugs with nothing tying them together,
+  // which is how a live page goes missing from the sitemap, or a retired one
+  // stays in it. verify-content-integrity.ts asserts the parity that this
+  // derivation makes true by construction.
+  const comparisonSlugs = COMPARISON_SLUGS
 
   const comparisons: MetadataRoute.Sitemap = [
     { url: `${APP_URL}/comparisons`,         lastModified: now, changeFrequency: 'monthly', priority: 0.85 },
