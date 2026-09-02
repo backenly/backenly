@@ -12,9 +12,17 @@
  *   - CREATE verification: POST a synthesised sample row, accept 201/401/403,
  *     fail on 400/500. 400 means schema mismatch — flagged for the brain.
  *
- * Auth: the brain reuses the project's first ApiKey if one exists, so tests
- * that need auth can actually execute. If no key exists, tests run unauthed
- * and an auth-required response is treated as PASS.
+ * Auth: the project's ANON key. It is public by design (Project.anonKey), so
+ * using it here does not require any secret credential to be recoverable from
+ * the database, and it is the same credential a real frontend would present.
+ *
+ * This previously read the first ApiKey row's persisted plaintext, which was
+ * the last thing in the codebase depending on secret keys being stored in the
+ * clear. See lib/auth/api-key-plaintext.ts.
+ *
+ * If no credential can be obtained, a 401/403 is NOT a pass: an unauthenticated
+ * request proves nothing about whether the endpoint works, and reporting it as
+ * verified is exactly the silent-success failure this module exists to end.
  *
  * Future: hook into the deployment URL once deployed; for now we hit the
  * platform-internal route at NEXT_PUBLIC_APP_URL.
@@ -39,7 +47,7 @@ export interface EndpointTestResult {
   /** Brief excerpt of the response body for the model to reason over. */
   bodyExcerpt: string
   /** When ok=false, why. */
-  failureKind?: 'not_found' | 'server_error' | 'bad_request' | 'no_endpoint' | 'no_app_url' | 'no_table' | 'fetch_failed'
+  failureKind?: 'not_found' | 'server_error' | 'bad_request' | 'no_endpoint' | 'no_app_url' | 'no_table' | 'fetch_failed' | 'unauthenticated'
 }
 
 const APP_URL_ENV = ['NEXT_PUBLIC_APP_URL', 'APP_URL'] as const
@@ -52,18 +60,13 @@ function resolveAppUrl(): string | null {
   return null
 }
 
-async function resolveApiKey(projectId: string): Promise<string | null> {
+async function resolveAnonKey(projectId: string): Promise<string | null> {
   try {
-    const key = await prisma.apiKey.findFirst({
-      where: {
-        projectId,
-        key: { not: null },
-        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
-      },
-      select: { key: true },
-      orderBy: { createdAt: 'asc' },
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { anonKey: true },
     })
-    return key?.key ?? null
+    return project?.anonKey ?? null
   } catch {
     return null
   }
@@ -190,9 +193,12 @@ export async function runEndpointTest(input: EndpointTestInput): Promise<Endpoin
 
   // Headers
   const headers: Record<string, string> = { 'content-type': 'application/json' }
-  const apiKey = await resolveApiKey(projectId)
-  if (apiKey) headers['x-api-key'] = apiKey
+  const anonKey = await resolveAnonKey(projectId)
+  if (anonKey) headers['x-api-key'] = anonKey
   else if (input.sessionToken) headers['authorization'] = `Bearer ${input.sessionToken}`
+  // Whether the request carried ANY credential. Load-bearing below: it decides
+  // whether a 401 means "the route enforces auth" or "this test never ran".
+  const authenticated = Boolean(anonKey) || Boolean(input.sessionToken)
 
   let res: Response
   try {
@@ -224,11 +230,30 @@ export async function runEndpointTest(input: EndpointTestInput): Promise<Endpoin
       bodyExcerpt: excerpt,
     }
   }
-  // 401 / 403 → endpoint exists and enforces auth — counts as wired
+  // 401 / 403
   if (status === 401 || status === 403) {
+    // No credential was sent, so this status is the expected answer to an
+    // anonymous request and says nothing about whether the endpoint works.
+    // Reporting it as verified is how a broken backend reads green.
+    if (!authenticated) {
+      return {
+        ok: false,
+        summary:
+          `${method} ${path} → ${status}, but the test had no credential to send, so nothing was verified. ` +
+          `The project has no anon key; generate one and re-run.${degradedNote}`,
+        endpoint: path,
+        method,
+        statusCode: status,
+        bodyExcerpt: excerpt,
+        failureKind: 'unauthenticated',
+      }
+    }
+    // Credentialed and still refused: the route is wired and enforcing access
+    // control beyond the anon key, which is a correct outcome for a table whose
+    // RLS requires an end-user identity.
     return {
       ok: true,
-      summary: `${method} ${path} → ${status}. Endpoint exists and enforces auth (test ran unauthed; this proves the route is wired).${degradedNote}`,
+      summary: `${method} ${path} → ${status}. Endpoint is wired and enforcing access control beyond the anon key.${degradedNote}`,
       endpoint: path,
       method,
       statusCode: status,
@@ -269,7 +294,7 @@ export async function runEndpointTest(input: EndpointTestInput): Promise<Endpoin
     if (rlsBlocked) {
       return {
         ok: true,
-        summary: `${method} ${path} → ${status} (RLS-denied). Endpoint exists and Row-Level Security blocked the unauthenticated test — that's correct behaviour.${degradedNote}`,
+        summary: `${method} ${path} → ${status} (RLS-denied). Endpoint exists and Row-Level Security blocked the test row — that's correct behaviour.${degradedNote}`,
         endpoint: path,
         method,
         statusCode: status,

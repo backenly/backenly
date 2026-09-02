@@ -1,6 +1,7 @@
 export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
+import { plaintextForStorage } from '@/lib/auth/api-key-plaintext'
 import { prisma } from '@/lib/db'
 import { z } from 'zod'
 import { generateUniqueSlug } from '@/lib/utils/slug'
@@ -309,7 +310,7 @@ export const POST = withAuth(async (request: NextRequest, { user }) => {
     }
 
     // Auto-generate default API key for the project
-    // Plaintext key returned once in the response — never stored in DB
+    // Plaintext key returned once in the response — never stored in DB.
     let generatedApiKey: string | null = null
     try {
       const apiKeyPrefix = 'sk_live_'
@@ -320,7 +321,13 @@ export const POST = withAuth(async (request: NextRequest, { user }) => {
       await prisma.apiKey.create({
         data: {
           name: `${project.name} Default Key`,
-          key: generatedApiKey, // Stored in plaintext — this is a PUBLIC key meant to be embedded in frontend code
+          // Never persisted. The comment here used to read "this is a PUBLIC
+          // key meant to be embedded in frontend code", which contradicted the
+          // comment four lines above ("never stored in DB") and was wrong on
+          // its own terms: this key is issued with an sk_live_ prefix and
+          // role 'admin'. The credential a frontend should embed is
+          // Project.anonKey. See lib/auth/api-key-plaintext.ts.
+          key: plaintextForStorage(),
           keyHash, // SHA-256 hash used for fast O(1) auth lookup
           keyPrefix: apiKeyPrefix,
           keyType: 'public',
