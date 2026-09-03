@@ -46,3 +46,11 @@ tests/integration/mcp-oauth-flow.spec.ts
 __tests__/billing/cancellation-and-grace.test.ts
 __tests__/projects/deletion-transaction.test.ts
 __tests__/projects/purge-outbox.test.ts
+
+# The ProjectResolver regression matrix (commit 2). Pins the behaviour the ~70
+# authorization call sites are being migrated TO, before they are migrated, so
+# the migration cannot quietly redefine it. Measured the same way as everything
+# above: fails against the unroutable placeholder, passes against a real
+# PostgreSQL. Every assertion lives in a `where` clause, which is exactly what a
+# mocked client cannot model.
+__tests__/auth/project-resolver.test.ts
