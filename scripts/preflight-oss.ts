@@ -183,7 +183,19 @@ const RULES: Rule[] = [
     // fixture (tests/unit/service-role-exposure.spec.ts) failed this gate on
     // every push for weeks, and a gate that cries wolf on every commit is a gate
     // people learn to ignore — which costs more than the false positive did.
-    pattern: /\b(?!0\.)(?!10\.)(?!127\.)(?!169\.254\.)(?!192\.168\.)(?!172\.(?:1[6-9]|2\d|3[01])\.)(?!22[4-9]\.)(?!2[3-5]\d\.)(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b(?<!\.0\.0\.0)/g,
+    //
+    // The RFC 5737 documentation ranges are excluded for that same reason, and
+    // it is not a hypothetical: 203.0.113.x in
+    // __tests__/observability/pgrst-clock-diagnostic.test.ts (a sample EXTERNAL
+    // address, testing that classifySource distinguishes it from loopback) made
+    // this gate the only red job on main, reported as "Names the production
+    // host". It named nothing. 192.0.2.0/24, 198.51.100.0/24 and 203.0.113.0/24
+    // exist precisely so examples and fixtures can show a routable-looking
+    // address without naming a real one, so a test using them is doing the
+    // correct thing and must not be punished for it. This gate guards the
+    // repository's single largest risk; its credibility is the asset, and every
+    // false positive spends some.
+    pattern: /\b(?!0\.)(?!10\.)(?!127\.)(?!169\.254\.)(?!192\.168\.)(?!192\.0\.2\.)(?!198\.51\.100\.)(?!203\.0\.113\.)(?!172\.(?:1[6-9]|2\d|3[01])\.)(?!22[4-9]\.)(?!2[3-5]\d\.)(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b(?<!\.0\.0\.0)/g,
     impact: 'Names the production host — the first step of any real attack is finding it.',
     treeOnly: true,
   },
