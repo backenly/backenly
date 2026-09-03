@@ -56,3 +56,20 @@ tests/qa/launch-hardening.test.ts
 tests/security-isolation.test.ts
 tests/security/webhook-security.test.ts
 tests/verification/execution.test.ts
+
+# Added 2026-09-04 by the suite-accounting reconciliation. These nine guard
+# recently shipped work (analytics posture, free-plan resolution, email outcome
+# categorisation, privacy-page integrity, the PGRST clock diagnostic and handler
+# response preservation, purge safety, API-key plaintext) and were in NO
+# manifest at all, so no job ran them and nothing could report them missing.
+# Each was measured against the unroutable placeholder URL and PASSES with no
+# database, which is what puts them here rather than in the integration job.
+__tests__/analytics/amplitude-config.test.tsx
+__tests__/analytics/amplitude-resilience.test.tsx
+__tests__/billing/free-plan-resolution.test.ts
+__tests__/email/send-outcome.test.ts
+__tests__/legal/privacy-integrity.test.ts
+__tests__/observability/pgrst-clock-diagnostic.test.ts
+__tests__/observability/pgrst-handler-response-preserved.test.ts
+__tests__/projects/purge-safety.test.ts
+__tests__/security/api-key-plaintext.test.ts

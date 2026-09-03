@@ -75,6 +75,20 @@ jobs:
       - name: No ApiDefinition write paths
         run: npx tsx scripts/assert-no-apidefinition-writes.ts
 
+      # The suite manifests below were written when the tree held 156 suites and
+      # nothing recomputed the arithmetic as it grew. By 2026-09-04 twelve suites
+      # belonged to NO category: not blocking, not baselined, not excluded with a
+      # reason. They guarded the billing grace lifecycle, project deletion, the
+      # purge outbox, privacy-page integrity and the API-key plaintext fix, and
+      # no job ran any of them.
+      #
+      # That is the same defect suites-not-in-ci.txt was created to fix, returning
+      # by decay: a hand-maintained list stops matching reality the moment someone
+      # adds a test without editing it. Naming them once was never going to hold.
+      # This makes the claim falsifiable on every push instead.
+      - name: Suite accounting balances
+        run: npx tsx scripts/verify-suite-accounting.ts
+
       # tests/unit is deliberately database-free so it runs on every push.
       # docs-install-command.spec.ts is the one that fails when public/llms.txt
       # and the MCP CLI parser drift apart — the defect that made the published
@@ -302,6 +316,79 @@ jobs:
       # handles after a fully successful run.
       - name: Probe fixture suite
         run: npx jest tests/probes --ci --runInBand --verbose --forceExit
+
+  # ── Known-failure baseline ──────────────────────────────────────────────────
+  # These 15 suites fail today. Until now that meant they could not be on any
+  # job at all: this file already carries the lesson that "a red that is always
+  # red carries no information", and suites-not-in-ci.txt states the rule it
+  # produced, that a suite joins CI when it passes and not before.
+  #
+  # A name-level baseline changes that calculus. tests/baseline-failures.json
+  # records every currently failing test BY NAME, so this job goes red only on a
+  # failure that is NEW. The known ones stay known, the suites finally run on
+  # every push, and a regression inside an already-failing suite stops being
+  # invisible. Comparing counts could not do this: 259 before and 259 after is
+  # equally true of a change that broke nothing and one that fixed nine tests
+  # while breaking nine others.
+  #
+  # EACH SUITE RUNS ALONE, and that is not a performance choice. Measured on
+  # 2026-09-04: run together against one shared database, these suites and the
+  # blocking ones invent failures wholesale — tests/probes/rls-isolation.spec.ts
+  # reported 11 failures in a combined run and passes 11/11 by itself, and three
+  # further suites reported 61 failures between them while passing completely
+  # alone. Several here create and drop schemas, seed findings and VACUUM. A
+  # baseline captured from a combined run would have recorded the RLS isolation
+  # probes and the autonomy engine as known-broken, which is exactly the
+  # coverage the baseline exists to protect.
+  baseline:
+    name: known-failure baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: backenly_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/backenly_test
+      DIRECT_URL: postgresql://postgres:postgres@localhost:5432/backenly_test
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/backenly_test
+      JWT_SECRET: ci-not-a-real-secret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Push schema to the test database
+        run: npx prisma db push --accept-data-loss --skip-generate
+      - run: npx prisma generate
+
+      - name: Baseline suites, one at a time
+        run: |
+          set -euo pipefail
+          mkdir -p .jest-baseline
+          i=0
+          while IFS= read -r f; do
+            [ -f "$f" ] || { echo "listed suite no longer exists: $f"; exit 1; }
+            i=$((i+1))
+            # `|| true`: jest exits non-zero on a failing suite, which is the
+            # NORMAL case here. The report is still written, and the baseline
+            # check below is what decides pass or fail.
+            npx jest --runTestsByPath "$f" --ci --runInBand --forceExit \
+              --json --outputFile=".jest-baseline/$i.json" || true
+          done < <(grep -vE '^[[:space:]]*(#|$)' .github/baseline-suites.txt)
+          echo "ran $i baseline suite(s) individually"
+          npx tsx scripts/test-baseline.ts check .jest-baseline/*.json
 
   # ── The self-healing guards ─────────────────────────────────────────────────
   # Autonomy is the product's differentiator, so its guards belong on the

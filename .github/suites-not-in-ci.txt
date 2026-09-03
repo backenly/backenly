@@ -6,23 +6,34 @@
 # Naming them is what makes "not run" a decision with an owner instead of an
 # accident nobody can see.
 #
-# CI runs 134 of 156 suites, up from 92 before #13 and 123 after it. The 22
-# below are the remainder. Every one was measured against a real PostgreSQL 16
-# with the schema pushed, individually, not in a batch:
+# CI runs 162 of 169 suites, up from 92 before #13, 123 after it, and 134
+# before the 2026-09-04 reconciliation. The 7 below are the remainder. Every one
+# was measured against a real PostgreSQL 16 with the schema pushed,
+# individually, not in a batch:
 #
 #   DATABASE_URL=postgresql://postgres:postgres@localhost:5432/backenly_test \
 #   TEST_DATABASE_URL=$DATABASE_URL DIRECT_URL=$DATABASE_URL \
 #   JWT_SECRET=ci-not-a-real-secret \
 #   npx jest --runTestsByPath <path> --ci --forceExit
 #
-# None of them are excluded for needing a database. A database is now provided
-# by the `integration` job and did not fix these. Do not re-file them as
-# "needs Postgres"; that was the wrong diagnosis once already.
+# "134 of 156" was true when it was written and quietly stopped being true as
+# the tree grew: by 2026-09-04 twelve suites were in no manifest at all. Do not
+# hand-maintain these totals. `scripts/verify-suite-accounting.ts` runs on every
+# push and proves that every suite jest resolves is categorised exactly once, so
+# the next drift fails CI instead of going unnoticed for months.
 #
-# They are NOT on a blocking job because each one currently fails. ci.yml
-# already carries the lesson: `tests/core` was added on a false belief that it
-# was database-free, went red on every push for weeks, and a red that is always
-# red carries no information. A suite joins CI when it passes, not before.
+# None of them are excluded for needing a database. A database is provided by
+# the `integration` and `baseline` jobs and did not fix these. Do not re-file
+# them as "needs Postgres"; that was the wrong diagnosis once already.
+#
+# Nor are they excluded merely for FAILING. That was the old rule, and the
+# reason for it was sound: `tests/core` was added on a false belief that it was
+# database-free, went red on every push for weeks, and a red that is always red
+# carries no information. The `baseline` job supersedes that rule for failing
+# suites, by recording known failures by NAME so a suite can run while red
+# without CI becoming uninformative. The 7 here are excluded for a stronger
+# reason than failing: they cannot run at all, need a live model provider, or
+# need an HTTP server no job starts.
 
 # ── Cannot run at all under the current jest setup ──────────────────────────
 # Both are gated on ENGINE_MODE=runtime and skip themselves otherwise. Nothing
@@ -53,32 +64,18 @@ __tests__/security/auth-security.test.ts
 __tests__/security/auth-security-fixed.test.ts
 __tests__/security/oauth-security.test.ts
 
-# ── Genuine failures against a real database ────────────────────────────────
-# These connect fine and then fail on their own assertions. Each needs a person
-# to decide whether the test or the code is wrong. Two are worth singling out:
+# ── Moved to the known-failure baseline, 2026-09-04 ─────────────────────────
+# The 15 "genuine failures against a real database" that used to be listed here
+# now run on the `baseline` CI job and are checked against
+# tests/baseline-failures.json. They are named in .github/baseline-suites.txt.
 #
-#   concurrency-convergence  9 of 10 concurrent mutations succeed where the
-#                            suite demands 10. This suite exists to prove no
-#                            mutation is lost under contention, so if the
-#                            assertion is right this is a real lost-mutation
-#                            bug in the retry path, not a flaky test. Unverified
-#                            either way: measured on one machine, once.
+# The rule this file states above ("a suite joins CI when it passes, not
+# before") was the right call when the only choice was green or red. A
+# name-level baseline gives a third option: run the suite, record its known
+# failures by name, and go red only on a NEW one. So a failing suite can finally
+# be on a blocking job without CI being permanently red and therefore ignored.
 #
-#   monitoring               expects 10, receives a different count from
-#                            ApiRequestLog aggregation.
-#
-__tests__/concurrency-convergence.test.ts
-__tests__/deterministic-executor.test.ts
-__tests__/invariants/mutation-safety.test.ts
-__tests__/lib/services/databaseBrain.test.ts
-__tests__/lib/services/monitoring.test.ts
-__tests__/load/concurrency.test.ts
-__tests__/load/execution-engine-performance.test.ts
-__tests__/suite2.relationships.test.ts
-__tests__/suite3.conflicts.test.ts
-__tests__/suite4.safety.test.ts
-__tests__/suite5.advisory.test.ts
-tests/error-communication.test.ts
-tests/field-extraction.test.ts
-tests/storage-provisioning.test.ts
-tests/timeline-granularity.test.ts
+# Each was re-measured INDIVIDUALLY on 2026-09-04, which materially changed the
+# numbers: run together they contaminate each other, and several reported more
+# failures in a combined run than they actually have (deterministic-executor 5
+# vs 1, monitoring 7 vs 4). The baseline records the isolated result.
