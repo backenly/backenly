@@ -179,6 +179,23 @@ beforeAll(async () => {
     update: {},
     create: { name: 'SANDBOX', priceCents: 0, maxProjects: 1, allowDeployment: false, isSandboxPlan: false },
   })
+
+  // BUILDER, on the same terms, because the checkout guard cases post
+  // { plan: 'BUILDER' } and create-checkout resolves the plan row BEFORE it
+  // reaches the duplicate-subscription guard. With no such row the route
+  // answers 404 'Plan not found' and the 409 assertions fail, which is what
+  // happened the first time this suite ran on CI against an empty database.
+  //
+  // Seeding it from prisma/seed-billing.ts in the workflow would also have made
+  // the job pass, and would have been wrong twice over: it makes a self-contained
+  // suite depend on ambient product data, and this suite passed locally only
+  // because the developer database happened to hold plans from earlier work.
+  // Every other row here is built by the suite; this one was the exception.
+  await prisma.plan.upsert({
+    where: { name: 'BUILDER' },
+    update: {},
+    create: { name: 'BUILDER', priceCents: 2500, allowDeployment: true },
+  })
 })
 
 beforeEach(() => {
