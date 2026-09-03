@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db/postgres'
 import { verifySession } from '@/lib/auth/session'
+import { canAccessProject } from '@/lib/edition/guard'
 
 export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
@@ -24,14 +24,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
     }
 
     // Verify project ownership
-    const project = await prisma.project.findFirst({
-      where: {
-        id: projectId,
-        userId: session.userId,
-      },
-    })
-
-    if (!project) {
+    if (!(await canAccessProject(session.userId, projectId))) {
       return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
 

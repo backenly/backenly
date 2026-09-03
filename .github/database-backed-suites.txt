@@ -61,3 +61,10 @@ __tests__/auth/project-resolver.test.ts
 # database and real signed sessions: the defect lived in a `where` clause and an
 # auth branch, neither of which a mocked client models.
 __tests__/auth/tenant-isolation-adapter.test.ts
+
+# Representative authorization matrix for app/api/projects/[id]/** (commit 2c).
+# One route per authentication pattern rather than 35 near-identical tests,
+# because the authorization decision is now identical across the family and only
+# the plumbing differs. Asserts the 404-for-both behaviour is preserved, so
+# migrating authorization did not start leaking project existence.
+__tests__/auth/project-routes-authorization.test.ts

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
 import { authenticateRequest } from '@/lib/auth/middleware'
 import { getProjectAdminKey } from '@/lib/services/ai-functions/project-fn-auth'
+import { canAccessProject } from '@/lib/edition/guard'
 
 /**
  * GET /api/projects/[id]/ai-functions/admin-key
@@ -20,11 +20,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
     const auth = await authenticateRequest(request)
     if (!auth.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-    const project = await prisma.project.findFirst({
-      where: { id: params.id, userId: auth.userId },
-      select: { id: true },
-    })
-    if (!project) return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+    if (!(await canAccessProject(auth.userId, params.id))) return NextResponse.json({ error: 'Project not found' }, { status: 404 })
 
     const adminKey = await getProjectAdminKey(params.id)
 

@@ -7,7 +7,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { recordIntegrationChoice } from '@/lib/architecture-memory'
 import { verifyToken } from '@/lib/auth/jwt'
-import { prisma } from '@/lib/db/prisma'
+import { canAccessProject } from '@/lib/edition/guard'
 
 export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
@@ -26,14 +26,7 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
     const projectId = params.id
 
     // Verify project ownership
-    const project = await prisma.project.findFirst({
-      where: {
-        id: projectId,
-        userId: userId,
-      },
-    })
-
-    if (!project) {
+    if (!(await canAccessProject(userId, projectId))) {
       return NextResponse.json(
         { error: 'Project not found' },
         { status: 404 }

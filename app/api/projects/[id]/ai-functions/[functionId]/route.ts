@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { authenticateRequest } from '@/lib/auth/middleware'
+import { canAccessProject } from '@/lib/edition/guard'
 
 /**
  * PUT /api/projects/[id]/ai-functions/[functionId]
@@ -16,10 +17,7 @@ export async function PUT(
     const auth = await authenticateRequest(request)
     if (!auth.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-    const project = await prisma.project.findFirst({
-      where: { id: params.id, userId: auth.userId },
-    })
-    if (!project) return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+    if (!(await canAccessProject(auth.userId, params.id))) return NextResponse.json({ error: 'Project not found' }, { status: 404 })
 
     const body = await request.json()
     const { status } = body
@@ -55,10 +53,7 @@ export async function DELETE(
     const auth = await authenticateRequest(request)
     if (!auth.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-    const project = await prisma.project.findFirst({
-      where: { id: params.id, userId: auth.userId },
-    })
-    if (!project) return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+    if (!(await canAccessProject(auth.userId, params.id))) return NextResponse.json({ error: 'Project not found' }, { status: 404 })
 
     await prisma.aiFunction.deleteMany({
       where: { id: params.functionId, projectId: params.id },

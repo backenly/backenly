@@ -4,6 +4,7 @@ import { verifyToken } from '@/lib/auth/jwt'
 import crypto from 'crypto'
 import { z } from 'zod'
 import { logAuditEvent } from '@/lib/middleware/delegation'
+import { canAccessProject } from '@/lib/edition/guard'
 
 const createConnectionSchema = z.object({
   provider: z.enum(['cursor', 'replit', 'web']),
@@ -150,14 +151,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
     const projectId = params.id
 
     // Verify project ownership
-    const project = await prisma.project.findFirst({
-      where: {
-        id: projectId,
-        userId: payload.userId,
-      },
-    })
-
-    if (!project) {
+    if (!(await canAccessProject(payload.userId, projectId))) {
       return NextResponse.json({ error: 'Project not found or access denied' }, { status: 404 })
     }
 
@@ -221,14 +215,7 @@ export async function DELETE(request: NextRequest, props: { params: Promise<{ id
     }
 
     // Verify project ownership
-    const project = await prisma.project.findFirst({
-      where: {
-        id: projectId,
-        userId: payload.userId,
-      },
-    })
-
-    if (!project) {
+    if (!(await canAccessProject(payload.userId, projectId))) {
       return NextResponse.json({ error: 'Project not found or access denied' }, { status: 404 })
     }
 

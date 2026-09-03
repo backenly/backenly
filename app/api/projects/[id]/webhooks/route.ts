@@ -4,7 +4,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { withAuth } from '@/lib/auth/route-protection'
 import { createWebhook, getProjectWebhooks, deleteWebhook, toggleWebhook } from '@/lib/webhooks'
 import { enforceWebhook } from '@/lib/billing'
-import { prisma } from '@/lib/db/prisma'
+import { canAccessProject } from '@/lib/edition/guard'
 
 /**
  * GET /api/projects/[id]/webhooks
@@ -16,11 +16,7 @@ export const GET = withAuth(async (request: NextRequest, { user, params }) => {
     const { id: projectId } = await params
 
     // Check if user owns this project
-    const project = await prisma.project.findFirst({
-      where: { id: projectId, userId: user.userId }
-    })
-
-    if (!project) {
+    if (!(await canAccessProject(user.userId, projectId))) {
       return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
 
@@ -98,11 +94,7 @@ export const POST = withAuth(async (request: NextRequest, { user, params }) => {
     }
 
     // Check if user owns this project
-    const project = await prisma.project.findFirst({
-      where: { id: projectId, userId: user.userId }
-    })
-
-    if (!project) {
+    if (!(await canAccessProject(user.userId, projectId))) {
       return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
 
@@ -159,11 +151,7 @@ export const DELETE = withAuth(async (request: NextRequest, { user, params }) =>
     }
 
     // Check if user owns this project
-    const project = await prisma.project.findFirst({
-      where: { id: projectId, userId: user.userId }
-    })
-
-    if (!project) {
+    if (!(await canAccessProject(user.userId, projectId))) {
       return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
 
@@ -211,11 +199,7 @@ export const PATCH = withAuth(async (request: NextRequest, { user, params }) => 
     }
 
     // Check if user owns this project
-    const project = await prisma.project.findFirst({
-      where: { id: projectId, userId: user.userId }
-    })
-
-    if (!project) {
+    if (!(await canAccessProject(user.userId, projectId))) {
       return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
 

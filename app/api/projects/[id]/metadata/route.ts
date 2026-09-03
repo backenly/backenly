@@ -38,6 +38,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { verifySession } from '@/lib/auth/session'
 import { prisma } from '@/lib/db/postgres'
 import { extractMetadataFromIntent, validateMetadata, type ExtractedMetadata } from '@/lib/ai/intent-extractor'
+import { canAccessProject } from '@/lib/edition/guard'
 
 /**
  * GET /api/projects/[projectId]/metadata
@@ -74,15 +75,8 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
     console.log('✅ [Metadata API GET] Session valid for user:', session.userId)
     const projectId = params.id
 
-    // Verify project ownership
-    const project = await prisma.project.findFirst({
-      where: {
-        id: projectId,
-        userId: session.userId,
-      },
-    })
-
-    if (!project) {
+    // Verify project access
+    if (!(await canAccessProject(session.userId, projectId))) {
       return NextResponse.json(
         { error: 'Project not found' },
         { status: 404 }
@@ -152,14 +146,7 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
     }
 
     // Verify project ownership
-    const project = await prisma.project.findFirst({
-      where: {
-        id: projectId,
-        userId: session.userId,
-      },
-    })
-
-    if (!project) {
+    if (!(await canAccessProject(session.userId, projectId))) {
       return NextResponse.json(
         { error: 'Project not found' },
         { status: 404 }

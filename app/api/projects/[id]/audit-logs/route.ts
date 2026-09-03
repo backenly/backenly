@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { verifyToken } from '@/lib/auth/jwt'
+import { canAccessProject } from '@/lib/edition/guard'
 
 /**
  * GET /api/projects/:projectId/audit-logs
@@ -28,14 +29,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
     const action = searchParams.get('action')
 
     // Verify project ownership
-    const project = await prisma.project.findFirst({
-      where: {
-        id: projectId,
-        userId: payload.userId,
-      },
-    })
-
-    if (!project) {
+    if (!(await canAccessProject(payload.userId, projectId))) {
       return NextResponse.json({ error: 'Project not found or access denied' }, { status: 404 })
     }
 
