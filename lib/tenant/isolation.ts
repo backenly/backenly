@@ -1,38 +1,74 @@
 /**
  * Tenant Isolation Service
- * 
- * Provides utilities for enforcing multi-tenant isolation in Backenly.
- * Ensures that all data operations are scoped to the current project/tenant.
+ *
+ * Request-level adapter over the ProjectResolver seam. This file used to be a
+ * SECOND definition of project access: `where: { id, userId }`, owner only,
+ * with no idea that organizations exist. lib/auth/project-access.ts said one
+ * thing and this said another, and this one won on volume — 36 files reach a
+ * project through here, against six that consult the organization-aware check.
+ *
+ * Two defects came from that, and both are fixed by delegating rather than
+ * deciding:
+ *
+ *   1. An invited organization member was denied everything routed through
+ *      here: storage, logs, monitoring, security issues, end-user auth,
+ *      workspace files, provider credentials.
+ *
+ *   2. Worse, a request that named NO project resolved to the caller's OLDEST
+ *      OWNED project. That is not a denial, it is a wrong answer with a 200 on
+ *      it. An organization member reading storage saw their own project's
+ *      buckets, so the organization's project rendered as empty rather than as
+ *      an error, and the bug looked like a working feature.
+ *
+ * Extraction still happens here, because it is request shaped. The DECISION
+ * belongs to lib/edition — one authority, per credential type, per edition.
  */
 
 import { NextRequest } from 'next/server'
-import { prisma } from '@/lib/db'
 import { authenticateRequest } from '@/lib/auth/middleware'
 import { recordSecurityEvent } from '@/lib/platform/controls'
-import { Prisma } from '@prisma/client'
+import {
+  getProjectResolver,
+  ProjectContextRequiredError,
+  ProjectResolutionError,
+} from '@/lib/edition'
 
+/**
+ * Thrown for every refusal on this path.
+ *
+ * Carries `status` and `code` from the resolver. Existing callers all do
+ * `instanceof TenantIsolationError` and answer 403, so their behaviour is
+ * unchanged by this commit; the richer fields are here so that surfacing a
+ * genuine 400 PROJECT_REQUIRED is a per-route edit later rather than a
+ * 22-file rewrite now.
+ */
 export class TenantIsolationError extends Error {
-  constructor(message: string) {
+  readonly status: number
+  readonly code: string
+
+  constructor(message: string, status = 403, code = 'PROJECT_FORBIDDEN') {
     super(message)
     this.name = 'TenantIsolationError'
+    this.status = status
+    this.code = code
   }
 }
 
 /**
- * Extract project ID from request, validating that the authenticated user
- * actually owns the requested project.
+ * Resolve the project this request may act on.
  *
- * Priority:
- * 1. X-Project-Id header (for API requests) — verified against caller's projects
- * 2. projectId query parameter — verified against caller's projects
- * 3. projectId from authenticated user's default project (always owned)
+ * Sources, in order: `X-Project-Id`, then `?projectId=`. Whatever is found is
+ * a REQUEST, never a grant — the resolver decides whether the caller may have
+ * it.
  *
- * SECURITY: previously this function returned whatever projectId the client
- * sent in the header/query without checking ownership — which made every
- * route that used it IDOR-vulnerable (auth/generate-code, storage/files/...,
- * database-brain/*, ai-workspace/*, workspace/files/...). The helper now
- * always enforces ownership, with the cross-tenant signal surfaced on the
- * Security tab.
+ * This path is human sessions only. `authenticateRequest` verifies a JWT from
+ * the bearer header or the auth cookie and has no API-key branch at all, so a
+ * machine credential cannot arrive here and be measured against organization
+ * membership. Keys are resolved by `resolveForApiKey`, which authorizes on the
+ * project the key was issued for.
+ *
+ * NO FALLBACK. When nothing names a project, Cloud refuses. Single-tenant
+ * resolves the one project that exists, which is correct there and only there.
  */
 export async function getCurrentProjectId(request: NextRequest): Promise<string> {
   const headerProjectId = request.headers.get('x-project-id')
@@ -42,73 +78,63 @@ export async function getCurrentProjectId(request: NextRequest): Promise<string>
 
   const auth = await authenticateRequest(request)
   if (!auth.authenticated || !auth.userId) {
-    throw new TenantIsolationError('Authentication required')
+    throw new TenantIsolationError('Authentication required', 401, 'UNAUTHENTICATED')
   }
 
-  if (requested) {
-    // Verify the caller actually owns the requested project.
-    const owned = await prisma.project.findFirst({
-      where: { id: requested, userId: auth.userId },
-      select: { id: true },
-    })
-    if (owned) return owned.id
-
-    // Cross-tenant probe — high-value signal for the Security tab.
-    const ip =
-      request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
-      request.headers.get('x-real-ip') ||
-      null
-    recordSecurityEvent({
-      kind: 'cross_tenant',
-      severity: 'high',
-      userId: auth.userId,
-      userEmail: auth.userEmail ?? null,
-      projectId: requested,
-      ip,
-      summary: `User ${auth.userEmail ?? auth.userId} requested a project they do not own`,
-      detail: { requestedProjectId: requested, path: request.nextUrl.pathname, method: request.method, via: 'getCurrentProjectId' },
-    }).catch(() => {})
-    throw new TenantIsolationError('Project not found or access denied')
+  try {
+    const project = await getProjectResolver().resolveForUser(auth.userId, requested)
+    return project.id
+  } catch (err) {
+    if (err instanceof ProjectResolutionError) {
+      // A caller asking for a project they may not have is a high-value signal
+      // and stays on the Security tab. Asking for NO project is a client bug,
+      // not an attack, so it is not reported as one.
+      if (!(err instanceof ProjectContextRequiredError) && requested) {
+        const ip =
+          request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
+          request.headers.get('x-real-ip') ||
+          null
+        recordSecurityEvent({
+          kind: 'cross_tenant',
+          severity: 'high',
+          userId: auth.userId,
+          userEmail: auth.userEmail ?? null,
+          projectId: requested,
+          ip,
+          summary: `User ${auth.userEmail ?? auth.userId} requested a project they may not access`,
+          detail: {
+            requestedProjectId: requested,
+            path: request.nextUrl.pathname,
+            method: request.method,
+            via: 'getCurrentProjectId',
+            code: err.code,
+          },
+        }).catch(() => {})
+      }
+      throw new TenantIsolationError(err.message, err.status, err.code)
+    }
+    throw err
   }
-
-  // No projectId provided — fall back to user's default project.
-  const userProject = await prisma.project.findFirst({
-    where: { userId: auth.userId },
-    select: { id: true },
-    orderBy: { createdAt: 'asc' },
-  })
-
-  if (userProject) {
-    return userProject.id
-  }
-
-  throw new TenantIsolationError('Project ID is required. Provide X-Project-Id header or projectId query parameter.')
 }
 
 /**
  * Resolve the request's project ID, or throw.
  *
- * Ownership enforcement lives entirely in `getCurrentProjectId`: every value it
- * returns is already matched against `userId`, and anything else — unauthenticated
- * caller, project owned by someone else, user with no projects — throws
- * `TenantIsolationError` there, after recording the cross-tenant event.
- *
- * So there is nothing left to validate here. This wrapper re-ran
- * `authenticateRequest` and repeated the same `{ id, userId }` lookup, which cost
- * a second user row read and a second (unprojected) project read on every
- * project-scoped request while being unable to reach a different verdict: same
- * request, same token, same identity, same predicate. The re-check is gone.
- *
- * Kept as a named export because `withTenantIsolation` and existing callers read
- * better with it, and it is the intended place to hang any future requirement
- * that is genuinely stricter than "caller owns this project".
+ * Kept as a named export because `withTenantIsolation` and existing callers
+ * read better with it. It adds nothing: authorization is entirely the
+ * resolver's, and re-checking here would cost a second identity lookup while
+ * being unable to reach a different verdict.
  */
 export async function requireProjectId(request: NextRequest): Promise<string> {
   return getCurrentProjectId(request)
 }
 
 /**
- * Validate that a resource belongs to the specified project
+ * Validate that a resource belongs to the specified project.
+ *
+ * Not an authorization check and must never be used as one: it compares two
+ * ids the caller already holds. It exists so a route that has authorized a
+ * project cannot then act on a row belonging to a different one.
  */
 export async function validateProjectOwnership(
   projectId: string,
@@ -125,39 +151,11 @@ export async function validateProjectOwnership(
 }
 
 /**
- * Create a Prisma where clause that enforces tenant isolation
- */
-export function withTenantScope(
-  projectId: string,
-  additionalWhere?: any
-): any {
-  return {
-    ...additionalWhere,
-    projectId: projectId,
-  }
-}
-
-/**
- * Create a Prisma where clause for models with optional projectId
- * (for system-wide resources that can optionally be scoped)
- */
-export function withOptionalTenantScope(
-  projectId: string | null | undefined,
-  additionalWhere?: any
-): any {
-  if (!projectId) {
-    return additionalWhere
-  }
-
-  return {
-    ...additionalWhere,
-    projectId: projectId,
-  }
-}
-
-/**
- * Middleware to extract and validate project ID from request
- * Adds projectId to request context
+ * Run a handler with the request's authorized project.
+ *
+ * The wrapper 22 routes use. It is deliberately the only ergonomic way to get
+ * a project id on this path, so that "which project may this caller act on" is
+ * answered in one place.
  */
 export async function withTenantIsolation<T>(
   request: NextRequest,
@@ -168,58 +166,27 @@ export async function withTenantIsolation<T>(
 }
 
 /**
- * Validate that an API key belongs to a project
- * API keys are user-scoped but should also be project-scoped for tenant isolation
+ * Deleted in the ProjectResolver consolidation, listed so nobody reintroduces
+ * them by reflex:
+ *
+ *   userHasProjectAccess     owner-only boolean access check
+ *   getUserProjectIds        owner-only project list
+ *   validateApiKeyProject    authorized a KEY by its creator's ownership
+ *   withTenantScope          `{ ...where, projectId }` helper
+ *   withOptionalTenantScope  the same, nullable
+ *
+ * All five had zero callers outside this file. That is exactly why they were
+ * worth removing rather than leaving: an unused authorization helper is a
+ * loaded gun for the next contributor who imports the wrong one, and these
+ * encoded the owner-only rule this commit exists to retire.
+ *
+ * `validateApiKeyProject` deserves its own note. It resolved a key by asking
+ * whether the key's OWNER owned the project, which is the wrong question in
+ * both directions: it revokes a live production key when its creator changes
+ * teams, and widens one when its creator is promoted. A key is authorized by
+ * the project it was issued for. Use `resolveForApiKey`.
+ *
+ * For a boolean access check use `hasProjectAccess` from
+ * lib/auth/project-access.ts. For a project list use the union query in
+ * app/api/projects/route.ts, which already counts organization membership.
  */
-export async function validateApiKeyProject(
-  apiKeyId: string,
-  projectId: string
-): Promise<void> {
-  const apiKey = await prisma.apiKey.findUnique({
-    where: { id: apiKeyId },
-    select: { userId: true },
-  })
-
-  if (!apiKey) {
-    throw new TenantIsolationError('API key not found')
-  }
-
-  // Check if the API key's user has access to this project
-  const project = await prisma.project.findFirst({
-    where: {
-      id: projectId,
-      userId: apiKey.userId,
-    },
-  })
-
-  if (!project) {
-    throw new TenantIsolationError('API key does not have access to this project')
-  }
-}
-
-/**
- * Get all project IDs that a user has access to
- */
-export async function getUserProjectIds(userId: string): Promise<string[]> {
-  const projects = await prisma.project.findMany({
-    where: { userId },
-    select: { id: true },
-  })
-
-  return projects.map(p => p.id)
-}
-
-/**
- * Check if user has access to a project
- */
-export async function userHasProjectAccess(userId: string, projectId: string): Promise<boolean> {
-  const project = await prisma.project.findFirst({
-    where: {
-      id: projectId,
-      userId,
-    },
-  })
-
-  return !!project
-}
-

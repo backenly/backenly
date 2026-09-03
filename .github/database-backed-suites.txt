@@ -54,3 +54,10 @@ __tests__/projects/purge-outbox.test.ts
 # PostgreSQL. Every assertion lives in a `where` clause, which is exactly what a
 # mocked client cannot model.
 __tests__/auth/project-resolver.test.ts
+
+# The tenant-isolation adapter (commit 2b). withTenantIsolation -> requireProjectId
+# -> getCurrentProjectId is now the single decision point for 36 route files, so
+# its contract is pinned directly and then again through a real route. Needs a
+# database and real signed sessions: the defect lived in a `where` clause and an
+# auth branch, neither of which a mocked client models.
+__tests__/auth/tenant-isolation-adapter.test.ts
