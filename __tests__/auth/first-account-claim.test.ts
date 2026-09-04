@@ -37,10 +37,13 @@ function assertSafeTestDatabase(): void {
 const created: string[] = []
 
 /**
- * The shared test database already holds users, so "is this the first account"
- * cannot be asked of it directly. These tests drive the claim function against a
- * table they control by scoping every assertion to rows they created, and by
- * running the zero-account case only where that is genuinely true.
+ * Every test here builds its own precondition and never assumes one.
+ *
+ * "Is this the first account" is a question about the WHOLE users table, and
+ * that table differs between a developer machine (accumulated rows) and a CI
+ * container (fresh). An earlier version asserted `count > 0` and passed locally
+ * while failing on CI for exactly that reason — the same ambient-state trap
+ * that had already broken the billing suite once.
  */
 const ORIGINAL_EDITION = process.env.BACKENLY_EDITION
 const ORIGINAL_ALLOW = process.env.BACKENLY_ALLOW_PUBLIC_SIGNUP
@@ -60,6 +63,15 @@ afterAll(async () => {
   if (created.length) await prisma.user.deleteMany({ where: { id: { in: created } } })
 })
 
+/** The state a self-hosted deployment is in once its operator has signed up. */
+async function seedOperator(): Promise<void> {
+  const u = await prisma.user.create({
+    data: { email: `operator-${randomUUID()}@test.invalid`, name: 'Operator' },
+    select: { id: true },
+  })
+  created.push(u.id)
+}
+
 function makeUser(tx: any) {
   return tx.user.create({
     data: { email: `claim-${randomUUID()}@test.invalid`, name: 'Claim Test' },
@@ -72,9 +84,11 @@ describe('self-hosted first-account claim', () => {
     process.env.BACKENLY_EDITION = 'single-tenant'
     delete process.env.BACKENLY_ALLOW_PUBLIC_SIGNUP
 
-    // The shared database already has users, which is exactly the state a
-    // self-hosted deployment is in after its operator signs up.
-    expect(await prisma.user.count()).toBeGreaterThan(0)
+    // Build the precondition rather than assuming it. A developer database has
+    // accumulated users and CI's is fresh, so asserting "some user exists"
+    // passes locally and fails on a clean container — the ambient-state trap
+    // that already bit the billing suite once.
+    await seedOperator()
 
     await expect(createUserClaimingSignupSlot(makeUser)).rejects.toBeInstanceOf(SignupSlotTakenError)
   })
@@ -83,6 +97,7 @@ describe('self-hosted first-account claim', () => {
     process.env.BACKENLY_EDITION = 'single-tenant'
     delete process.env.BACKENLY_ALLOW_PUBLIC_SIGNUP
 
+    await seedOperator()
     const before = await prisma.user.count()
 
     // Launched before either resolves, so they genuinely contend for the
@@ -93,10 +108,11 @@ describe('self-hosted first-account claim', () => {
       createUserClaimingSignupSlot(makeUser),
     ])
 
-    // This database is non-empty, so the honest assertion is that ALL of them
-    // lose, and lose the right way: to the recheck inside the transaction,
-    // rather than to a constraint violation, a deadlock, or a partial write.
-    // A refusal that rolled back cleanly is the property under test.
+    // The slot is taken by construction, so the honest assertion is that ALL
+    // of them lose, and lose the right way: to the recheck inside the
+    // transaction, rather than to a constraint violation, a deadlock, or a
+    // partial write. A refusal that rolled back cleanly is the property under
+    // test.
     expect(results.every(r => r.status === 'rejected')).toBe(true)
     for (const r of results) {
       expect((r as PromiseRejectedResult).reason).toBeInstanceOf(SignupSlotTakenError)
@@ -104,11 +120,11 @@ describe('self-hosted first-account claim', () => {
     expect(await prisma.user.count()).toBe(before)
 
     // NOTE on what this does NOT prove: "exactly one winner from an empty
-    // table" needs a database with zero users, and the shared test database
-    // has many. The empty-table path is covered by `refuses when accounts
-    // already exist` (the gate fires at all) plus this (contention resolves
-    // without partial writes); a dedicated-database race remains the one
-    // assertion not made here.
+    // table" needs a database with zero users, which cannot be arranged inside
+    // a shared suite without deleting other tests' rows. The empty-table path
+    // is covered by `refuses when accounts already exist` (the gate fires at
+    // all) plus this (contention resolves without partial writes); a
+    // dedicated-database race remains the one assertion not made here.
   })
 
   it('does not lock or refuse on Cloud, where there is no slot to contend for', async () => {
