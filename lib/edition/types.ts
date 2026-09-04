@@ -19,6 +19,30 @@
 export type Edition = 'single-tenant' | 'cloud'
 
 /**
+ * The caller's authority over a project, not merely whether they can see it.
+ *
+ * Mirrors OrgRole in lib/org, and is declared HERE rather than imported from
+ * there because the organization layer is Cloud control plane and moves to the
+ * private repository, while this seam stays public. Single-tenant has no
+ * organizations and reports OWNER for every authenticated operator.
+ */
+export type ProjectRole = 'OWNER' | 'ADMIN' | 'DEVELOPER' | 'VIEWER'
+
+const ROLE_RANK: Record<ProjectRole, number> = { OWNER: 3, ADMIN: 2, DEVELOPER: 1, VIEWER: 0 }
+
+/**
+ * True when `role` is at least `minimum`.
+ *
+ * Access and authority are separate questions. Being a member of the
+ * organization that owns a project answers the first and says nothing about the
+ * second, which is how a VIEWER came to be able to delete a webhook: every one
+ * of those routes had been owner-only, so nothing had ever needed to ask.
+ */
+export function roleAtLeast(role: ProjectRole, minimum: ProjectRole): boolean {
+  return ROLE_RANK[role] >= ROLE_RANK[minimum]
+}
+
+/**
  * The project a request is allowed to act on.
  *
  * Deliberately shaped like the return of `verifyProjectAccess`, workspaces
@@ -30,6 +54,8 @@ export interface ResolvedProject {
   name: string
   userId: string | null
   organizationId: string | null
+  /** What this caller may DO here, as distinct from whether they may see it. */
+  callerRole: ProjectRole
   workspaces: Array<{
     id: string
     postgresSchema: string | null

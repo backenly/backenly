@@ -3,7 +3,7 @@ import { prisma } from '@/lib/db'
 import { authenticateRequest } from '@/lib/auth/middleware'
 import { generateFunctionCode } from '@/lib/services/ai-functions/generator'
 import { validateAiFunctionData } from '@/lib/ai/function-validation'
-import { canAccessProject } from '@/lib/edition/guard'
+import { canAccessProject, canWriteProject } from '@/lib/edition/guard'
 
 /**
  * GET /api/projects/[id]/ai-functions
@@ -118,7 +118,7 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
     const auth = await authenticateRequest(request)
     if (!auth.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-    if (!(await canAccessProject(auth.userId, params.id))) return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+    if (!(await canWriteProject(auth.userId, params.id))) return NextResponse.json({ error: 'Project not found' }, { status: 404 })
 
     const body = await request.json()
     const { description, triggerType, triggerTable } = body

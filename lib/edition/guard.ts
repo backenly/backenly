@@ -30,7 +30,7 @@
  * Routes that should distinguish must not use this. They should call
  * `getProjectResolver().resolveForUser(...)` and map `err.status` themselves.
  */
-import { getProjectResolver, ProjectResolutionError } from './index'
+import { getProjectResolver, ProjectResolutionError, roleAtLeast, type ProjectRole } from './index'
 
 /**
  * True when this user may act on this project under the running edition.
@@ -45,9 +45,38 @@ import { getProjectResolver, ProjectResolutionError } from './index'
  * and hides it from the caller and the logs alike.
  */
 export async function canAccessProject(userId: string, projectId: string): Promise<boolean> {
+  return atLeast(userId, projectId, 'VIEWER')
+}
+
+/**
+ * May this user CHANGE this project? DEVELOPER and above.
+ *
+ * Membership is not authority. Before the ProjectResolver migration every one
+ * of these routes was owner-only, so the four roles had never had to constrain
+ * project work and "is a member of the organization" was never asked to mean
+ * anything narrower. Routing writes through `canAccessProject` would therefore
+ * have handed a VIEWER the ability to edit project settings and delete
+ * webhooks, domains and functions.
+ */
+export async function canWriteProject(userId: string, projectId: string): Promise<boolean> {
+  return atLeast(userId, projectId, 'DEVELOPER')
+}
+
+/**
+ * May this user perform an IRREVERSIBLE operation here? ADMIN and above.
+ *
+ * Deleting a project, a custom domain or a webhook is not undoable from the
+ * dashboard, so it is held one rank higher than ordinary writes. A DEVELOPER
+ * builds; removing the thing they built is an administrative act.
+ */
+export async function canAdministerProject(userId: string, projectId: string): Promise<boolean> {
+  return atLeast(userId, projectId, 'ADMIN')
+}
+
+async function atLeast(userId: string, projectId: string, minimum: ProjectRole): Promise<boolean> {
   try {
-    await getProjectResolver().resolveForUser(userId, projectId)
-    return true
+    const project = await getProjectResolver().resolveForUser(userId, projectId)
+    return roleAtLeast(project.callerRole, minimum)
   } catch (err) {
     if (err instanceof ProjectResolutionError) return false
     throw err

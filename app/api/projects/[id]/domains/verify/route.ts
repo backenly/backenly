@@ -9,7 +9,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth/middleware';
 import { SubdomainService } from '@/lib/services/subdomain';
-import { canAccessProject } from '@/lib/edition/guard'
+import { canWriteProject } from '@/lib/edition/guard'
 
 /**
  * POST /api/projects/:id/domains/verify
@@ -24,7 +24,7 @@ export async function POST(
     const { id: projectId } = await params;
 
     // Verify project ownership
-    if (!(await canAccessProject(user.userId, projectId))) {
+    if (!(await canWriteProject(user.userId, projectId))) {
       return NextResponse.json({ error: 'Project not found' }, { status: 404 });
     }
 

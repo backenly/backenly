@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { authenticateRequest } from '@/lib/auth/middleware'
 import { getProjectAdminKey } from '@/lib/services/ai-functions/project-fn-auth'
-import { canAccessProject } from '@/lib/edition/guard'
+import { canAdministerProject } from '@/lib/edition/guard'
 
 /**
  * GET /api/projects/[id]/ai-functions/admin-key
@@ -20,7 +20,11 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
     const auth = await authenticateRequest(request)
     if (!auth.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-    if (!(await canAccessProject(auth.userId, params.id))) return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+    // ADMIN, not VIEWER, even though this is a GET. The response IS an admin
+    // credential for the project's workspace, so reading it confers the
+    // authority rather than merely observing it. The header above has always
+    // said owner-only; a verb-shaped rule would have handed it to any member.
+    if (!(await canAdministerProject(auth.userId, params.id))) return NextResponse.json({ error: 'Project not found' }, { status: 404 })
 
     const adminKey = await getProjectAdminKey(params.id)
 

@@ -4,7 +4,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { withAuth } from '@/lib/auth/route-protection'
 import { addCustomDomain, getProjectDomains, deleteDomain, verifyDomain, isValidDomain, isReservedDomain } from '@/lib/domains'
 import { enforceCustomDomain } from '@/lib/billing'
-import { canAccessProject } from '@/lib/edition/guard'
+import { canAccessProject, canAdministerProject, canWriteProject } from '@/lib/edition/guard'
 
 /**
  * GET /api/projects/[id]/domains
@@ -81,7 +81,7 @@ export const POST = withAuth(async (request: NextRequest, { user, params }) => {
     }
 
     // Check if user owns this project
-    if (!(await canAccessProject(user.userId, projectId))) {
+    if (!(await canWriteProject(user.userId, projectId))) {
       return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
 
@@ -142,7 +142,7 @@ export const DELETE = withAuth(async (request: NextRequest, { user, params }) =>
     }
 
     // Check if user owns this project
-    if (!(await canAccessProject(user.userId, projectId))) {
+    if (!(await canAdministerProject(user.userId, projectId))) {
       return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
 

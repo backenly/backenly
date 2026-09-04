@@ -7,7 +7,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { recordIntegrationChoice } from '@/lib/architecture-memory'
 import { verifyToken } from '@/lib/auth/jwt'
-import { canAccessProject } from '@/lib/edition/guard'
+import { canWriteProject } from '@/lib/edition/guard'
 
 export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
@@ -26,7 +26,7 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
     const projectId = params.id
 
     // Verify project ownership
-    if (!(await canAccessProject(userId, projectId))) {
+    if (!(await canWriteProject(userId, projectId))) {
       return NextResponse.json(
         { error: 'Project not found' },
         { status: 404 }

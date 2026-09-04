@@ -4,7 +4,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { withAuth } from '@/lib/auth/route-protection'
 import { createWebhook, getProjectWebhooks, deleteWebhook, toggleWebhook } from '@/lib/webhooks'
 import { enforceWebhook } from '@/lib/billing'
-import { canAccessProject } from '@/lib/edition/guard'
+import { canAccessProject, canAdministerProject, canWriteProject } from '@/lib/edition/guard'
 
 /**
  * GET /api/projects/[id]/webhooks
@@ -94,7 +94,7 @@ export const POST = withAuth(async (request: NextRequest, { user, params }) => {
     }
 
     // Check if user owns this project
-    if (!(await canAccessProject(user.userId, projectId))) {
+    if (!(await canWriteProject(user.userId, projectId))) {
       return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
 
@@ -151,7 +151,7 @@ export const DELETE = withAuth(async (request: NextRequest, { user, params }) =>
     }
 
     // Check if user owns this project
-    if (!(await canAccessProject(user.userId, projectId))) {
+    if (!(await canAdministerProject(user.userId, projectId))) {
       return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
 
@@ -199,7 +199,7 @@ export const PATCH = withAuth(async (request: NextRequest, { user, params }) => 
     }
 
     // Check if user owns this project
-    if (!(await canAccessProject(user.userId, projectId))) {
+    if (!(await canWriteProject(user.userId, projectId))) {
       return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
 

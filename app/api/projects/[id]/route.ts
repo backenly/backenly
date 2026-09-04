@@ -5,7 +5,7 @@ import { prisma } from '@/lib/db'
 import { z } from 'zod'
 import { withAuth } from '@/lib/auth/route-protection'
 import { deleteProjectCompletely } from '@/lib/projects/delete'
-import { canAccessProject } from '@/lib/edition/guard'
+import { canWriteProject } from '@/lib/edition/guard'
 
 const updateProjectSchema = z.object({
   name: z.string().min(1).max(100).optional(),
@@ -112,7 +112,7 @@ export const PUT = withAuth(async (
     const validatedData = updateProjectSchema.parse(body)
 
     // Check if project exists and user owns it
-    if (!(await canAccessProject(user.userId, projectId))) {
+    if (!(await canWriteProject(user.userId, projectId))) {
       return NextResponse.json(
         {
           success: false,

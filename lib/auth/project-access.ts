@@ -1,4 +1,5 @@
 import { prisma } from '@/lib/db'
+import type { ProjectRole } from '@/lib/edition/types'
 
 /**
  * Verify user has access to a project
@@ -56,8 +57,10 @@ export async function verifyProjectAccess(projectId: string, userId: string) {
   // the project's organization (Phase 6). Org check only runs for non-owners
   // and only when the project has an org, so it is strictly additive — it can
   // never deny access that the owner-only rule would have granted.
+  let orgMember: { id: string; role: string; restricted: boolean } | null = null
+
   if (project.userId && project.userId !== userId) {
-    const orgMember = project.organizationId
+    orgMember = project.organizationId
       ? await prisma.organizationMember.findUnique({
           where: { orgId_userId: { orgId: project.organizationId, userId } },
           select: { id: true, role: true, restricted: true },
@@ -99,7 +102,24 @@ export async function verifyProjectAccess(projectId: string, userId: string) {
     projectName: project.name,
   });
 
-  return project;
+  // The caller's effective role, returned alongside the project so a route can
+  // gate a WRITE without asking a second time. No extra query: the membership
+  // row above is the same one this needs.
+  //
+  // Access and authority are not the same question, and conflating them is how
+  // an organization VIEWER became able to delete a webhook. These routes had
+  // only ever been owner-only, so the four roles had never had to constrain
+  // project work at all, and "is a member" silently became "may do anything".
+  //
+  // The project's own userId outranks any org role. A legacy project with no
+  // userId is owner-less by definition, and the code above already grants such
+  // a caller access, so OWNER is the role that matches what actually happens.
+  const callerRole: ProjectRole =
+    !project.userId || project.userId === userId
+      ? 'OWNER'
+      : ((orgMember?.role as ProjectRole | undefined) ?? 'OWNER')
+
+  return { ...project, callerRole };
 }
 
 /**

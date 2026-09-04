@@ -43,6 +43,11 @@ import {
   MultipleProjectsInSingleTenantError,
   resetSingleTenantCache,
 } from '@/lib/edition/single-tenant/project-resolver'
+import {
+  canAccessProject,
+  canWriteProject,
+  canAdministerProject,
+} from '@/lib/edition/guard'
 
 const DB_URL = process.env.TEST_DATABASE_URL
 
@@ -321,6 +326,99 @@ describe('trusted internal operations', () => {
 
     // So that "this skipped authorization" is always greppable and deliberate.
     await expect(getProjectResolver().resolveTrusted(projectId, '  ')).rejects.toThrow(/written reason/)
+  })
+})
+
+// ============================================================================
+// ROLE: ACCESS IS NOT AUTHORITY
+// ============================================================================
+
+describe('cloud: role gates what a member may DO', () => {
+  beforeEach(() => {
+    process.env.BACKENLY_EDITION = 'cloud'
+  })
+
+  it('reports the project owner as OWNER regardless of organization', async () => {
+    const userId = await makeUser()
+    const projectId = await makeProject(userId)
+
+    const resolved = await getProjectResolver().resolveForUser(userId, projectId)
+    expect(resolved.callerRole).toBe('OWNER')
+  })
+
+  it.each(['ADMIN', 'DEVELOPER', 'VIEWER'])('reports an org %s as that role', async role => {
+    const { memberId, projectId } = await orgFixture(role)
+
+    const resolved = await getProjectResolver().resolveForUser(memberId, projectId)
+    expect(resolved.callerRole).toBe(role)
+  })
+
+  it('lets a VIEWER read and stops them writing or deleting', async () => {
+    // The regression this section exists for. Every one of these routes was
+    // owner-only before the migration, so membership had never had to mean
+    // anything narrower than "may do everything" — and routing writes through
+    // the access check would have handed a VIEWER the ability to edit project
+    // settings and delete webhooks, domains and functions.
+    const { memberId, projectId } = await orgFixture('VIEWER')
+
+    expect(await canAccessProject(memberId, projectId)).toBe(true)
+    expect(await canWriteProject(memberId, projectId)).toBe(false)
+    expect(await canAdministerProject(memberId, projectId)).toBe(false)
+  })
+
+  it('lets a DEVELOPER write but not perform an irreversible operation', async () => {
+    const { memberId, projectId } = await orgFixture('DEVELOPER')
+
+    expect(await canAccessProject(memberId, projectId)).toBe(true)
+    expect(await canWriteProject(memberId, projectId)).toBe(true)
+    // Deleting a project, a domain or a webhook is not undoable from the
+    // dashboard. A DEVELOPER builds; removing what they built is administrative.
+    expect(await canAdministerProject(memberId, projectId)).toBe(false)
+  })
+
+  it.each(['ADMIN', 'OWNER'])('lets an org %s do all three', async role => {
+    const { memberId, projectId } = await orgFixture(role)
+
+    expect(await canAccessProject(memberId, projectId)).toBe(true)
+    expect(await canWriteProject(memberId, projectId)).toBe(true)
+    expect(await canAdministerProject(memberId, projectId)).toBe(true)
+  })
+
+  it('denies every level to someone outside the organization', async () => {
+    const ownerId = await makeUser()
+    const strangerId = await makeUser()
+    const projectId = await makeProject(ownerId)
+
+    expect(await canAccessProject(strangerId, projectId)).toBe(false)
+    expect(await canWriteProject(strangerId, projectId)).toBe(false)
+    expect(await canAdministerProject(strangerId, projectId)).toBe(false)
+  })
+
+  it('gives the project owner every level even as a VIEWER of the org', async () => {
+    // Project.userId outranks the org role: the owner of a project cannot be
+    // demoted out of their own project by an organization membership row.
+    const ownerId = await makeUser()
+    const orgId = await makeOrg(ownerId)
+    await addMember(orgId, ownerId, 'VIEWER')
+    const projectId = await makeProject(ownerId, orgId)
+
+    const resolved = await getProjectResolver().resolveForUser(ownerId, projectId)
+    expect(resolved.callerRole).toBe('OWNER')
+    expect(await canAdministerProject(ownerId, projectId)).toBe(true)
+  })
+})
+
+describe('single-tenant: every operator is an owner', () => {
+  it('reports OWNER, so no self-hosted route is gated by a role that cannot exist', async () => {
+    process.env.BACKENLY_EDITION = 'single-tenant'
+    resetSingleTenantCache()
+    const userId = await makeUser()
+    const projectId = await makeProject(userId)
+    process.env.BACKENLY_PROJECT_ID = projectId
+
+    const resolved = await getProjectResolver().resolveForUser(userId, projectId)
+    expect(resolved.callerRole).toBe('OWNER')
+    expect(await canAdministerProject(userId, projectId)).toBe(true)
   })
 })
 

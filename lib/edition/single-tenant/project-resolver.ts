@@ -109,7 +109,10 @@ async function loadTheProject(): Promise<ResolvedProject> {
     cachedProjectId = null
     throw new ProjectNotFoundError(id)
   }
-  return project as ResolvedProject
+  // Every authenticated account is an operator of a self-hosted deployment,
+  // so there is no lesser authority to represent. Organizations, roles and
+  // grants are Cloud control plane and do not exist here.
+  return { ...project, callerRole: 'OWNER' } as ResolvedProject
 }
 
 /**
