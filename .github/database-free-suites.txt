@@ -73,3 +73,8 @@ __tests__/observability/pgrst-clock-diagnostic.test.ts
 __tests__/observability/pgrst-handler-response-preserved.test.ts
 __tests__/projects/purge-safety.test.ts
 __tests__/security/api-key-plaintext.test.ts
+
+# Self-hosted runs without billing and refuses a second project (commit 3).
+# Database-free on purpose: both paths short-circuit on the edition before
+# touching Prisma, and asserting that they do is half the point.
+__tests__/edition/single-tenant-runtime.test.ts

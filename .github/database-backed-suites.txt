@@ -75,3 +75,11 @@ __tests__/auth/project-routes-authorization.test.ts
 # project owns and there is no undo, so the VIEWER/DEVELOPER/ADMIN/OWNER matrix
 # gets its own suite rather than being folded into the general route tests.
 __tests__/auth/project-delete-authorization.test.ts
+
+# Single-tenant bootstrap (commit 3). Runs the real script against a database it
+# creates and drops, because everything worth asserting is a side effect on
+# Postgres: a schema that exists, a row that was not duplicated, a refusal that
+# happened before anything was written. It cannot share this job's database:
+# bootstrap counts projects globally and the shared one holds many, which is
+# itself asserted as the incompatible-database case.
+__tests__/bootstrap/single-tenant-bootstrap.test.ts

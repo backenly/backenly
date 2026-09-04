@@ -19,6 +19,7 @@
 
 import { assessEmailTrust, type EmailTrustResult } from '@/lib/auth/email-trust'
 import { prisma } from '@/lib/db/prisma'
+import { currentEdition } from '@/lib/edition'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -223,6 +224,32 @@ export interface SignupGuard extends Guard {
  * assessment returns a `deny` verdict.
  */
 export async function assertSignupAllowed(email: string, ip?: string | null): Promise<SignupGuard> {
+  // Self-hosted is CLOSED after the first account.
+  //
+  // A self-hosted deployment is one team's infrastructure, usually reachable
+  // from the internet, and it has no abuse defence worth the name: Turnstile,
+  // the email-trust heuristics and the blocklist are all inert until an
+  // operator configures them. Leaving public signup open by default would mean
+  // anyone who finds the URL gets an account on it.
+  //
+  // The first account is allowed, because otherwise a fresh install has no way
+  // to create its operator and the only escape is editing the database by
+  // hand. After that, an operator who genuinely wants open registration sets
+  // BACKENLY_ALLOW_PUBLIC_SIGNUP=true, which is a decision someone made rather
+  // than a default nobody chose.
+  if (currentEdition() === 'single-tenant' && process.env.BACKENLY_ALLOW_PUBLIC_SIGNUP !== 'true') {
+    const existing = await prisma.user.count()
+    if (existing > 0) {
+      return {
+        ok: false,
+        reason:
+          'This is a self-hosted Backenly deployment and registration is closed. ' +
+          'The operator can open it with BACKENLY_ALLOW_PUBLIC_SIGNUP=true.',
+        status: 403,
+      }
+    }
+  }
+
   const c = await getPlatformControls()
   if (c.signupsDisabled) {
     return { ok: false, reason: 'New sign-ups are temporarily disabled.', status: 503 }

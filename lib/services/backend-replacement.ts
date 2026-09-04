@@ -11,6 +11,7 @@
 
 import { prisma } from '@/lib/db'
 import type { BackendBlueprint } from './intent-reconstruction'
+import { createProvisionedProject } from '@/lib/projects/provision'
 
 export interface BackendReplacementResult {
   projectId: string
@@ -84,14 +85,14 @@ async function provisionBackenlyBackend(
 ) {
   console.log('[Backend Replacement] Provisioning Backenly backend...')
   
-  // Create project in Backenly
-  const project = await prisma.project.create({
-    data: {
-      name: blueprint.appType,
-      description: `Connected from ${provider}`,
-      userId,
-      createdAt: new Date(),
-    },
+  // Create project in Backenly, fully provisioned. This used to be a bare
+  // prisma.project.create, so the project it handed back had no workspace
+  // schema and no PostgREST registration: its entire data plane answered
+  // PGRST106 from the moment the user connected their frontend.
+  const project = await createProvisionedProject({
+    name: blueprint.appType,
+    description: `Connected from ${provider}`,
+    userId,
   })
   
   // TODO: Store connection metadata

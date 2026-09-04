@@ -102,6 +102,13 @@ jobs:
       - name: One authority for project access
         run: npx tsx scripts/verify-project-authorization.ts
 
+      # A Project row is not a project. Two live connect routes created bare
+      # rows with no workspace schema and no PostgREST registration, so a user
+      # connecting a frontend got a project whose data plane answered PGRST106
+      # forever. One owned it to `userId: 'system'`, which is not a user id.
+      - name: One creation path for projects
+        run: npx tsx scripts/verify-project-provisioning.ts
+
       # tests/unit is deliberately database-free so it runs on every push.
       # docs-install-command.spec.ts is the one that fails when public/llms.txt
       # and the MCP CLI parser drift apart — the defect that made the published

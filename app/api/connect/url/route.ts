@@ -69,7 +69,7 @@ export async function POST(request: NextRequest) {
 
     // Step 2: Reconstruct backend intent (AI-powered)
     const { IntentReconstructor } = await import('@/lib/services/intent-reconstructor')
-    const reconstruction = await IntentReconstructor.reconstruct(inspection.data)
+    const reconstruction = await IntentReconstructor.reconstruct(inspection.data, decoded.userId)
 
     if (!reconstruction.success) {
       return NextResponse.json(
