@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { verifyToken } from '@/lib/auth/jwt'
 import { getUserEntitlements } from '@/lib/billing'
+import { canAccessProject } from '@/lib/edition/guard'
 
 const QUOTA_DISABLED = process.env.DISABLE_QUOTA_ENFORCEMENT === 'true'
 
@@ -33,8 +34,15 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
     const projectId = params.id
 
     // Verify project access
-    const project = await prisma.project.findFirst({
-      where: { id: projectId, userId },
+    if (!(await canAccessProject(userId, projectId))) {
+      return NextResponse.json(
+        { error: 'Project not found' },
+        { status: 404 }
+      )
+    }
+
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
       select: { id: true, activeGraphId: true },
     })
 

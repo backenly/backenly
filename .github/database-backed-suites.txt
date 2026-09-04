@@ -68,3 +68,10 @@ __tests__/auth/tenant-isolation-adapter.test.ts
 # the plumbing differs. Asserts the 404-for-both behaviour is preserved, so
 # migrating authorization did not start leaking project existence.
 __tests__/auth/project-routes-authorization.test.ts
+
+# Project deletion (commit 2c-2b). The only destructive operation the
+# authorization migration WIDENS: DELETE /api/projects/[id] was owner-only and
+# is now reachable by an organization ADMIN. It drops every workspace schema the
+# project owns and there is no undo, so the VIEWER/DEVELOPER/ADMIN/OWNER matrix
+# gets its own suite rather than being folded into the general route tests.
+__tests__/auth/project-delete-authorization.test.ts

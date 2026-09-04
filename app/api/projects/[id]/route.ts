@@ -5,7 +5,7 @@ import { prisma } from '@/lib/db'
 import { z } from 'zod'
 import { withAuth } from '@/lib/auth/route-protection'
 import { deleteProjectCompletely } from '@/lib/projects/delete'
-import { canWriteProject } from '@/lib/edition/guard'
+import { canAccessProject, canAdministerProject, canWriteProject } from '@/lib/edition/guard'
 
 const updateProjectSchema = z.object({
   name: z.string().min(1).max(100).optional(),
@@ -32,11 +32,22 @@ export const GET = withAuth(async (
   const projectId = pathParts[pathParts.length - 1]
 
   try {
-    const project = await prisma.project.findFirst({
-      where: { 
-        id: projectId,
-        userId: user.userId 
-      },
+    // Authorize first, then fetch. The fetch below deliberately carries no
+    // userId predicate: re-adding one would restore owner-only access after the
+    // organization-aware check has already granted it, which is the exact
+    // defect this migration exists to remove.
+    if (!(await canAccessProject(user.userId, projectId))) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Project not found or access denied',
+        },
+        { status: 404 }
+      )
+    }
+
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
       include: {
         // functions: true, // Commented out - functions feature removed
         tables: true,
@@ -218,11 +229,27 @@ export const DELETE = withAuth(async (
   const projectId = pathParts[pathParts.length - 1]
 
   try {
-    const project = await prisma.project.findFirst({
-      where: { 
-        id: projectId,
-        userId: user.userId 
-      },
+    // ADMIN, and the single most consequential widening in this migration:
+    // deleting a project was owner-only and is now reachable by an organization
+    // ADMIN or OWNER. It is irreversible and takes the workspace schemas,
+    // backups and storage objects with it, so it is held a full rank above an
+    // ordinary write and a DEVELOPER cannot reach it. Covered by a dedicated
+    // role matrix in __tests__/auth/project-delete-authorization.test.ts.
+    //
+    // The 404 is kept for a denial as well as a miss, so refusing to delete
+    // does not confirm to a stranger that the project exists.
+    if (!(await canAdministerProject(user.userId, projectId))) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Project not found or access denied',
+        },
+        { status: 404 }
+      )
+    }
+
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
     })
 
     if (!project) {

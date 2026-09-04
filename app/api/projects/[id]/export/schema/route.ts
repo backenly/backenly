@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/prisma'
 import { verifySession } from '@/lib/auth/session'
 import { Pool } from 'pg'
+import { canAccessProject } from '@/lib/edition/guard'
 
 export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
@@ -14,8 +15,12 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
 
     const projectId = params.id
 
-    const project = await prisma.project.findFirst({
-      where: { id: projectId, userId: session.userId },
+    if (!(await canAccessProject(session.userId, projectId))) {
+      return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+    }
+
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
       select: { id: true, name: true },
     })
     if (!project) return NextResponse.json({ error: 'Project not found' }, { status: 404 })

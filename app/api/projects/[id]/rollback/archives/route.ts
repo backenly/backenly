@@ -11,6 +11,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { verifyToken } from '@/lib/auth/jwt'
 import { listArchivedTables, listPITRSnapshots, restoreToPITRSnapshot } from '@/lib/rollback/non-destructive-restore'
 import { ExecutionContext } from '@/lib/context/execution-context'
+import { canAdministerProject } from '@/lib/edition/guard'
 
 export const dynamic = 'force-dynamic'
 
@@ -51,7 +52,16 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
       return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
 
-    if (project.userId !== payload.userId) {
+    // ADMIN for the read as well as the restore. This file's own header says
+    // "Used by support/admin only - not exposed to users", and listing PITR
+    // snapshots and archived tables is reconnaissance for a restore rather than
+    // ordinary project reading.
+    //
+    // The 404/403 split above is deliberately KEPT. Unlike the rest of this
+    // route family, this endpoint already distinguished a missing project from
+    // a forbidden one, so collapsing it into 404 here would be changing
+    // behaviour rather than preserving it.
+    if (!(await canAdministerProject(payload.userId, projectId))) {
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
     }
 
@@ -142,7 +152,16 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
       return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
 
-    if (project.userId !== payload.userId) {
+    // ADMIN for the read as well as the restore. This file's own header says
+    // "Used by support/admin only - not exposed to users", and listing PITR
+    // snapshots and archived tables is reconnaissance for a restore rather than
+    // ordinary project reading.
+    //
+    // The 404/403 split above is deliberately KEPT. Unlike the rest of this
+    // route family, this endpoint already distinguished a missing project from
+    // a forbidden one, so collapsing it into 404 here would be changing
+    // behaviour rather than preserving it.
+    if (!(await canAdministerProject(payload.userId, projectId))) {
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
     }
 

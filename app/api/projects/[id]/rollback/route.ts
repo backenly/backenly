@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { verifyToken } from '@/lib/auth/jwt'
 import { prisma } from '@/lib/db'
 import { rollbackDeploy } from '@/lib/deployment/rollback'
+import { canAccessProject } from '@/lib/edition/guard'
 
 /**
  * GET /api/projects/[id]/rollback
@@ -24,8 +25,12 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
     const projectId = params.id
 
     // Verify project access
-    const project = await prisma.project.findFirst({
-      where: { id: projectId, userId },
+    if (!(await canAccessProject(userId, projectId))) {
+      return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+    }
+
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
       select: { id: true, activeGraphId: true },
     })
 
