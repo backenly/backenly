@@ -40,6 +40,21 @@ function assertSafeTestDatabase(): void {
   if (!/test/i.test(dbName)) throw new Error(`Refusing: "${dbName}" is not a test database`)
 }
 
+/**
+ * Readiness is a state machine, so the tests below assert the STATE rather than
+ * a bare zero:
+ *
+ *   0  ready
+ *   2  refused, nothing written
+ *   3  core bootstrapped, prerequisites unmet
+ *
+ * CI has neither PostgREST nor the superuser-installed role helpers, so the
+ * healthy outcome here is 3. Asserting 0 would either fail on every run or
+ * force the script to lie about readiness, and the whole point of the state
+ * machine is that deployment automation can tell the two apart.
+ */
+const BOOTSTRAPPED = [0, 3]
+
 /** Run the real script. Returns stdout+stderr and the exit code. */
 function runBootstrap(env: Record<string, string> = {}): { out: string; code: number } {
   try {
@@ -106,7 +121,7 @@ async function schemaExists(schema: string): Promise<boolean> {
 describe('bootstrap', () => {
   it('provisions a working project on a fresh database', async () => {
     const r = runBootstrap()
-    expect(r.code).toBe(0)
+    expect(BOOTSTRAPPED).toContain(r.code)
 
     expect(await projectCount()).toBe(1)
     const p = await theProject()
@@ -129,7 +144,7 @@ describe('bootstrap', () => {
     const before = await theProject()
 
     const r = runBootstrap()
-    expect(r.code).toBe(0)
+    expect(BOOTSTRAPPED).toContain(r.code)
 
     expect(await projectCount()).toBe(1)
     const after = await theProject()
@@ -150,7 +165,7 @@ describe('bootstrap', () => {
     expect(await schemaExists(schema)).toBe(false)
 
     const r = runBootstrap()
-    expect(r.code).toBe(0)
+    expect(BOOTSTRAPPED).toContain(r.code)
 
     expect(await schemaExists(schema)).toBe(true)
     expect(await projectCount()).toBe(1)
@@ -164,7 +179,7 @@ describe('bootstrap', () => {
     await prisma!.project.update({ where: { id: before!.id }, data: { activeGraphId: null } })
 
     const r = runBootstrap()
-    expect(r.code).toBe(0)
+    expect(BOOTSTRAPPED).toContain(r.code)
 
     const after = await theProject()
     expect(after!.activeGraphId).toBeTruthy()
@@ -182,6 +197,19 @@ describe('bootstrap', () => {
     // silently produce a second project.
     expect(await projectCount()).toBe(1)
     expect((await theProject())!.id).toBe(before!.id)
+  }, 180_000)
+
+  it('reports NOT ready, with exit 3, while prerequisites are missing', async () => {
+    // The distinction that matters to deployment automation: a run that
+    // provisioned the core but could not register the data plane is not a
+    // successful install, and must not be readable as one.
+    const r = runBootstrap()
+
+    expect(r.code).toBe(3)
+    expect(r.out).toContain('NOT yet ready')
+    expect(r.out).toMatch(/PostgREST/)
+    // And it says what to do, rather than only what is wrong.
+    expect(r.out).toContain('npm run bootstrap')
   }, 180_000)
 
   it('refuses a database that holds more than one project, and writes nothing', async () => {

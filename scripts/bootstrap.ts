@@ -26,6 +26,11 @@
  *   anonKey              the credential a frontend embeds
  *   bkn_ro_/bkn_rw_      direct database roles
  *
+ * Exit codes:
+ *   0  ready
+ *   2  refused (incompatible database, or a pinned id that does not match)
+ *   3  core bootstrapped, prerequisites unmet — NOT ready
+ *
  * Usage:
  *   npm run bootstrap
  *   npm run bootstrap -- --owner you@example.com
@@ -48,6 +53,17 @@ const ownerEmail = (() => {
 type Outcome = 'created' | 'already present' | 'repaired' | 'skipped (see warning)'
 const log: Array<[string, Outcome]> = []
 const step = (what: string, outcome: Outcome) => log.push([what, outcome])
+
+/**
+ * Prerequisites bootstrap cannot install itself.
+ *
+ * Tracked rather than merely warned about, because "core bootstrapped" and
+ * "Backenly is ready" are different states and deployment automation must be
+ * able to tell them apart. A script that prints warnings and exits 0 reads as
+ * success to every CI runner on earth.
+ */
+const pending: Array<{ what: string; fix: string }> = []
+const needs = (what: string, fix: string) => pending.push({ what, fix })
 
 class BootstrapRefusal extends Error {
   constructor(code: string, detail: string) {
@@ -226,6 +242,10 @@ async function ensurePostgrestRegistration(projectId: string): Promise<void> {
         '    The data plane will answer PGRST106 until this succeeds. If PostgREST is not\n' +
         '    installed yet, see scripts/postgrest-install.sh and rerun bootstrap.'
     )
+    needs(
+      'PostgREST cannot be reached, so the data plane is not registered',
+      'Install and start PostgREST (scripts/postgrest-install.sh), then rerun: npm run bootstrap'
+    )
     step('postgrest registration', 'skipped (see warning)')
     return
   }
@@ -298,6 +318,10 @@ async function ensureDirectAccessRoles(projectId: string): Promise<void> {
               '    Everything else below is provisioned and the deployment is usable.'
             : message.split('\n')[0])
       )
+      needs(
+        `privileged role helpers are not installed, so ${mode} database access is unavailable`,
+        'psql -d <database> -f scripts/setup-direct-access.sql   (as a superuser), then rerun: npm run bootstrap'
+      )
       step(`direct access role (${mode})`, 'skipped (see warning)')
     }
   }
@@ -334,6 +358,28 @@ async function main(): Promise<void> {
   for (const [what, outcome] of log) console.log(`  ${what.padEnd(width)}   ${outcome}`)
   console.log('')
   console.log(`  Project: ${id}`)
+
+  // Readiness is a state machine with two terminal states, and they are not the
+  // same thing. Bootstrapping the core while PostgREST or the privileged role
+  // helpers are absent leaves a deployment whose data plane answers PGRST106,
+  // which is emphatically not "installed and ready". Saying so, and exiting
+  // non-zero, is what stops deployment automation reading a warning-laden
+  // success as a green light.
+  if (pending.length > 0) {
+    console.log('')
+    console.log('  Backenly core bootstrapped. NOT yet ready — unmet prerequisites:')
+    console.log('')
+    for (const p of pending) {
+      console.log(`    x  ${p.what}`)
+      console.log(`       ${p.fix}`)
+    }
+    console.log('')
+    console.log('  Rerun `npm run bootstrap` afterwards. It is idempotent and will')
+    console.log('  provision only what is still missing.')
+    console.log('')
+    process.exitCode = 3 // BACKENLY_BOOTSTRAP_INCOMPLETE
+    return
+  }
   if (!process.env.BACKENLY_PROJECT_ID) {
     console.log('')
     console.log('  Pin this in .env so the identity of this deployment cannot drift:')
@@ -345,7 +391,12 @@ async function main(): Promise<void> {
     console.log('')
     console.log('  No user account exists yet. Sign up, then rerun bootstrap to issue')
     console.log('  the anon key your frontend embeds.')
+    console.log('')
+    return
   }
+
+  console.log('')
+  console.log('  Backenly is ready.')
   console.log('')
 }
 

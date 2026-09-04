@@ -8,7 +8,12 @@ import { logAuthEvent } from '@/lib/services/logging'
 import { createFreeSubscription } from '@/lib/billing'
 import { logEvent } from '@/lib/analytics/logger'
 import { sendVerificationEmail } from '@/lib/auth/email'
-import { assertSignupAllowed, recordSecurityEvent } from '@/lib/platform/controls'
+import {
+  assertSignupAllowed,
+  createUserClaimingSignupSlot,
+  recordSecurityEvent,
+  SignupSlotTakenError,
+} from '@/lib/platform/controls'
 import { applyReferralOnSignup } from '@/lib/billing/referral'
 import { consume, AUTH_LIMITS, clientIp } from '@/lib/security/auth-rate-limit'
 import { verifyBotChallenge } from '@/lib/auth/bot-defense'
@@ -124,26 +129,35 @@ export async function POST(request: NextRequest) {
     }
     
     // Create user — signup is also a session start, so seed both timestamps.
+    //
+    // Wrapped so a self-hosted deployment's single account slot is claimed
+    // atomically. assertSignupAllowed above is a pre-flight, fifty lines back;
+    // relying on it alone lets two concurrent first signups both read zero
+    // accounts and both succeed, which is exactly the state a single-operator
+    // install must not reach. On Cloud this takes no lock and inserts directly.
     const now = new Date()
-    const user = await prisma.user.create({
-      data: {
-        email,
-        name: name || null,
-        password: hashedPassword,
-        provider: 'email',
-        emailVerified: false,
-        roleId: defaultRole.id,
-        lastLogin: now,
-        lastActiveAt: now,
-        trustLevel: untrusted ? 'untrusted' : 'trusted',
-        signupScore: signupGuard.trust?.score ?? null,
-        signupSignals: signupGuard.trust?.signals ?? [],
-        signupIp: ip === 'unknown' ? null : ip,
-      },
-      include: {
-        role: true,
-      },
-    })
+    const user = await createUserClaimingSignupSlot(tx =>
+      tx.user.create({
+        data: {
+          email,
+          name: name || null,
+          password: hashedPassword,
+          provider: 'email',
+          emailVerified: false,
+          roleId: defaultRole.id,
+          lastLogin: now,
+          lastActiveAt: now,
+          trustLevel: untrusted ? 'untrusted' : 'trusted',
+          signupScore: signupGuard.trust?.score ?? null,
+          signupSignals: signupGuard.trust?.signals ?? [],
+          signupIp: ip === 'unknown' ? null : ip,
+        },
+        include: {
+          role: true,
+        },
+      })
+    )
+
     
     // Create free subscription
     await createFreeSubscription(user.id).catch(() => {
@@ -209,6 +223,12 @@ export async function POST(request: NextRequest) {
       token,
     })
   } catch (error) {
+    // A concurrent request won the single self-hosted account slot. The
+    // transaction that raised this already rolled back, so nothing partial was
+    // written and the loser simply gets the closed-registration answer.
+    if (error instanceof SignupSlotTakenError) {
+      return NextResponse.json({ error: error.guard.reason }, { status: error.guard.status })
+    }
     if (error instanceof z.ZodError) {
       return NextResponse.json(
         { error: error.errors[0].message },

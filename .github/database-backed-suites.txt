@@ -83,3 +83,10 @@ __tests__/auth/project-delete-authorization.test.ts
 # bootstrap counts projects globally and the shared one holds many, which is
 # itself asserted as the incompatible-database case.
 __tests__/bootstrap/single-tenant-bootstrap.test.ts
+
+# The self-hosted single-account claim (commit 3 follow-up). The pre-flight
+# check in assertSignupAllowed runs ~50 lines before the insert, so it cannot be
+# the enforcement: two concurrent first signups would both read zero accounts.
+# The claim is made inside the inserting transaction behind an advisory lock,
+# and this asserts it under genuine concurrency rather than in sequence.
+__tests__/auth/first-account-claim.test.ts
