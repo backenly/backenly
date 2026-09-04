@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { withAuth } from '@/lib/auth/route-protection'
 import { checkUsage, shouldAutoScale } from '@/lib/scaling/usage-monitor'
 import { prisma } from '@/lib/db'
+import { canAccessProject } from '@/lib/edition/guard'
 
 /**
  * GET /api/monitoring/usage-alerts
@@ -21,11 +22,18 @@ export const GET = withAuth(async (request: NextRequest, { user }) => {
     }
 
     // Verify project access
-    const project = await prisma.project.findFirst({
-      where: {
-        id: projectId,
-        userId: user.userId,
-      },
+    if (!(await canAccessProject(user.userId, projectId))) {
+      return NextResponse.json(
+        { error: 'Project not found or access denied' },
+        { status: 404 }
+      )
+    }
+
+    // Fetched for the usage figures below, by id alone: authorization was
+    // answered above and re-adding a userId predicate here would quietly
+    // restore owner-only access.
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
     })
 
     if (!project) {

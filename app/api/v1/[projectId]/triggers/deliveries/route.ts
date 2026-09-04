@@ -10,26 +10,36 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { verifyToken } from '@/lib/auth/jwt'
-import { prisma } from '@/lib/db'
 import { listDeliveryLogs, replayDelivery } from '@/lib/services/trigger-service'
+import { canAccessProject, canWriteProject } from '@/lib/edition/guard'
 
-async function authenticate(req: NextRequest, projectId: string) {
+/**
+ * Authentication only: who is calling, or null.
+ *
+ * This was `authenticate(req, projectId)` and it did two jobs behind one shape:
+ * read the session AND check owner-only project access, with both failures
+ * answered 401. An organization member who simply lacked access was told to
+ * re-authenticate, which cannot help. Authorization now happens per handler,
+ * against the authority the operation actually needs.
+ */
+async function authenticate(req: NextRequest): Promise<string | null> {
   const token = req.cookies.get('auth-token')?.value
-  if (!token) return { error: 'Unauthorized' }
+  if (!token) return null
   let decoded: Awaited<ReturnType<typeof verifyToken>> | null = null
   try { decoded = await verifyToken(token) } catch { decoded = null }
-  if (!decoded) return { error: 'Invalid token' }
-  const project = await prisma.project.findFirst({ where: { id: projectId, userId: decoded.userId } })
-  if (!project) return { error: 'Project not found or access denied' }
-  return { userId: decoded.userId }
+  if (!decoded) return null
+  return decoded.userId
 }
 
 // GET — list delivery logs
 // ?status=DEAD|SUCCESS|FAILED  ?limit=50
 export async function GET(req: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
-  const auth = await authenticate(req, params.projectId)
-  if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: 401 })
+  const userId = await authenticate(req)
+  if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!(await canAccessProject(userId, params.projectId))) {
+    return NextResponse.json({ error: 'Project not found or access denied' }, { status: 404 })
+  }
 
   const status = req.nextUrl.searchParams.get('status') as 'SUCCESS' | 'FAILED' | 'DEAD' | null
   const limit = parseInt(req.nextUrl.searchParams.get('limit') ?? '50', 10)
@@ -46,8 +56,11 @@ export async function GET(req: NextRequest, props: { params: Promise<{ projectId
 // Body: { id: string }
 export async function POST(req: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
-  const auth = await authenticate(req, params.projectId)
-  if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: 401 })
+  const userId = await authenticate(req)
+  if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!(await canWriteProject(userId, params.projectId))) {
+    return NextResponse.json({ error: 'Project not found or access denied' }, { status: 404 })
+  }
 
   const body = await req.json()
   const { id } = body

@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { requireAuth } from '@/lib/auth/middleware'
 import { prisma } from '@/lib/db/postgres'
 import { workspaceSchemaName } from '@/lib/security/workspace-schema'
+import { canWriteProject } from '@/lib/edition/guard'
 
 /**
  * Add missing columns to login table
@@ -20,11 +21,7 @@ export async function POST(request: NextRequest) {
 
     // 🔒 IDOR fix — verify the caller owns the project. Previously any logged-in
     // user could ALTER any project's `login` table.
-    const owned = await prisma.project.findFirst({
-      where: { id: projectId, userId: user.userId },
-      select: { id: true },
-    })
-    if (!owned) {
+    if (!(await canWriteProject(user.userId, projectId))) {
       return NextResponse.json({ error: 'Project not found or access denied' }, { status: 403 })
     }
 

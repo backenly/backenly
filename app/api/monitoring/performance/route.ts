@@ -3,8 +3,8 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { withAuth } from '@/lib/auth/route-protection'
 import { getPerformanceBreakdown } from '@/lib/services/metrics'
-import { prisma } from '@/lib/db'
 import { z } from 'zod'
+import { canAccessProject } from '@/lib/edition/guard'
 
 const querySchema = z.object({
   timeRange: z.enum(['1h', '24h', '7d', '30d']).default('24h'),
@@ -25,15 +25,7 @@ export const GET = withAuth(async (request: NextRequest, { user }) => {
       projectId: searchParams.get('projectId') ?? undefined,
     })
 
-    const project = await prisma.project.findFirst({
-      where: {
-        id: parsed.projectId,
-        userId: user.userId,
-      },
-      select: { id: true },
-    })
-
-    if (!project) {
+    if (!(await canAccessProject(user.userId, parsed.projectId))) {
       return NextResponse.json(
         { error: 'Invalid project access' },
         { status: 403 }

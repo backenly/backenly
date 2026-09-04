@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { withAuth } from '@/lib/auth/route-protection'
 import { prisma } from '@/lib/db'
+import { canAccessProject } from '@/lib/edition/guard'
 
 /**
  * GET /api/security/stats - Get security statistics
@@ -15,14 +16,7 @@ export const GET = withAuth(async (request: NextRequest, { user }) => {
 
     // If projectId provided, verify ownership
     if (projectId) {
-      const project = await prisma.project.findFirst({
-        where: {
-          id: projectId,
-          userId: user.userId,
-        },
-      })
-      
-      if (!project) {
+      if (!(await canAccessProject(user.userId, projectId))) {
         return NextResponse.json(
           { error: 'Invalid project access' },
           { status: 403 }
