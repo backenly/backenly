@@ -269,8 +269,10 @@ async function ensurePostgrestRegistration(projectId: string): Promise<void> {
     needs(
       'PostgREST cannot register the workspace schema, so the data plane is not available',
       'As a superuser, in order:\n' +
+        '         0. if the role in your DATABASE_URL is NOT `backenly_user`:\n' +
+        "            psql -c \"ALTER DATABASE <db> SET backenly.app_role = '<your role>'\"\n" +
         '         1. bash scripts/postgrest-install.sh\n' +
-        '            (or: psql -f scripts/sql/postgrest-ddl-sync.sql, then postgrest-schema-registry.sql)\n' +
+        '            (or: psql -f scripts/sql/postgrest-schema-registry.sql, then postgrest-ddl-sync.sql)\n' +
         `         2. npx tsx scripts/setup-postgrest-roles.ts --project ${projectId} --apply\n` +
         '         3. start PostgREST against the connection string step 2 prints\n' +
         '       then rerun: npm run bootstrap'

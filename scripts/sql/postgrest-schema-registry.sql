@@ -44,6 +44,25 @@
 -- Run as superuser:
 --   psql -d backenly -f postgrest-schema-registry.sql
 
+-- ── App role resolution ──────────────────────────────────────────────────────
+--
+-- The role the Backenly application connects as. It is NOT the installer: these
+-- files are installed by a superuser, and the app then calls the SECURITY
+-- DEFINER functions below with far less privilege.
+--
+-- Resolved rather than hardcoded because nineteen sites across these files
+-- named `backenly_user` literally, so an install against a database whose app
+-- role is `postgres` — the default on a fresh Ubuntu PostgreSQL, and what CI
+-- uses — aborted with `role "backenly_user" does not exist` before creating a
+-- single function.
+--
+-- Override per database or per session:
+--   ALTER DATABASE mydb SET backenly.app_role = 'myrole';
+CREATE OR REPLACE FUNCTION public.backenly_app_role() RETURNS text
+LANGUAGE sql STABLE AS $fn$
+  SELECT coalesce(nullif(current_setting('backenly.app_role', true), ''), 'backenly_user')
+$fn$;
+
 -- ── Internal: read the current list ─────────────────────────────────────────
 CREATE OR REPLACE FUNCTION public.backenly_pgrst_current_schemas()
 RETURNS text
@@ -583,12 +602,20 @@ REVOKE ALL ON FUNCTION public.backenly_pgrst_current_schemas() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.backenly_pgrst_prune_schemas() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.backenly_pgrst_apply_owner_defaults(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.backenly_pgrst_revoke_internal(text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.backenly_pgrst_revoke_internal(text) TO backenly_user;
 REVOKE ALL ON FUNCTION public.backenly_pgrst_register_schema(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.backenly_pgrst_unregister_schema(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.backenly_pgrst_reload() FROM PUBLIC;
 
-GRANT EXECUTE ON FUNCTION public.backenly_pgrst_current_schemas() TO backenly_user;
-GRANT EXECUTE ON FUNCTION public.backenly_pgrst_register_schema(text) TO backenly_user;
-GRANT EXECUTE ON FUNCTION public.backenly_pgrst_unregister_schema(text) TO backenly_user;
-GRANT EXECUTE ON FUNCTION public.backenly_pgrst_reload() TO backenly_user;
+DO $grant$
+DECLARE r text := public.backenly_app_role();
+BEGIN
+  -- Skipped rather than failed when the role is absent: the functions are still
+  -- installed and a later run grants them, which is what makes this re-runnable.
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_pgrst_revoke_internal(text) TO %I', r);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_pgrst_current_schemas() TO %I', r);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_pgrst_register_schema(text) TO %I', r);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_pgrst_unregister_schema(text) TO %I', r);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_pgrst_reload() TO %I', r);
+  END IF;
+END $grant$;

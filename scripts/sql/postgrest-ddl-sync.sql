@@ -26,6 +26,25 @@
 -- Run as superuser:
 --   psql -d backenly -f postgrest-ddl-sync.sql
 
+-- ── App role resolution ──────────────────────────────────────────────────────
+--
+-- The role the Backenly application connects as. It is NOT the installer: these
+-- files are installed by a superuser, and the app then calls the SECURITY
+-- DEFINER functions below with far less privilege.
+--
+-- Resolved rather than hardcoded because nineteen sites across these files
+-- named `backenly_user` literally, so an install against a database whose app
+-- role is `postgres` — the default on a fresh Ubuntu PostgreSQL, and what CI
+-- uses — aborted with `role "backenly_user" does not exist` before creating a
+-- single function.
+--
+-- Override per database or per session:
+--   ALTER DATABASE mydb SET backenly.app_role = 'myrole';
+CREATE OR REPLACE FUNCTION public.backenly_app_role() RETURNS text
+LANGUAGE sql STABLE AS $fn$
+  SELECT coalesce(nullif(current_setting('backenly.app_role', true), ''), 'backenly_user')
+$fn$;
+
 -- ── Prepare a schema for PostgREST ──────────────────────────────────────────
 -- Grants + default privileges + internal-table revocation, idempotent. Called at
 -- cutover; safe to re-run at any time.
@@ -53,13 +72,13 @@ BEGIN
   -- both because tables arrive from the app connection and from migrations run
   -- as the owner, and a default set for only one of them leaves the other's
   -- tables unreachable.
-  EXECUTE format(
-    'ALTER DEFAULT PRIVILEGES FOR ROLE backenly_user IN SCHEMA %I
+  EXECUTE (
+    format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I
        GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO authenticated, service_role',
-    target_schema);
-  EXECUTE format(
-    'ALTER DEFAULT PRIVILEGES FOR ROLE backenly_user IN SCHEMA %I
-       GRANT SELECT ON TABLES TO anon', target_schema);
+      public.backenly_app_role(), target_schema));
+  EXECUTE (
+    format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I
+       GRANT SELECT ON TABLES TO anon', public.backenly_app_role(), target_schema));
 
   -- Runs LAST: the blanket grants above would otherwise have just handed out
   -- SELECT on the credential tables they are meant to exclude.
@@ -136,4 +155,13 @@ CREATE EVENT TRIGGER backenly_pgrst_ddl_sync
   EXECUTE FUNCTION public.backenly_pgrst_on_ddl();
 
 REVOKE ALL ON FUNCTION public.backenly_pgrst_prepare_schema(text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.backenly_pgrst_prepare_schema(text) TO backenly_user;
+
+DO $grant$
+DECLARE r text := public.backenly_app_role();
+BEGIN
+  -- Skipped rather than failed when the role is absent: the functions are still
+  -- installed and a later run grants them, which is what makes this re-runnable.
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_pgrst_prepare_schema(text) TO %I', r);
+  END IF;
+END $grant$;

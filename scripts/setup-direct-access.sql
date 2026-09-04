@@ -41,6 +41,25 @@
 -- for the first external DDL statement.
 -- ============================================================================
 
+-- ── App role resolution ──────────────────────────────────────────────────────
+--
+-- The role the Backenly application connects as. It is NOT the installer: these
+-- files are installed by a superuser, and the app then calls the SECURITY
+-- DEFINER functions below with far less privilege.
+--
+-- Resolved rather than hardcoded because nineteen sites across these files
+-- named `backenly_user` literally, so an install against a database whose app
+-- role is `postgres` — the default on a fresh Ubuntu PostgreSQL, and what CI
+-- uses — aborted with `role "backenly_user" does not exist` before creating a
+-- single function.
+--
+-- Override per database or per session:
+--   ALTER DATABASE mydb SET backenly.app_role = 'myrole';
+CREATE OR REPLACE FUNCTION public.backenly_app_role() RETURNS text
+LANGUAGE sql STABLE AS $fn$
+  SELECT coalesce(nullif(current_setting('backenly.app_role', true), ''), 'backenly_user')
+$fn$;
+
 -- ── 1. Remote-access group (pg_hba matches +backenly_external) ───────────────
 DO $$
 BEGIN
@@ -111,8 +130,6 @@ END
 $fn$;
 
 REVOKE ALL ON FUNCTION public.backenly_direct_create_role(text, text, text, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.backenly_direct_create_role(text, text, text, text) TO backenly_user;
-
 -- ── 3. Rotate password ────────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION public.backenly_direct_set_password(
   p_role     text,
@@ -135,8 +152,6 @@ END
 $fn$;
 
 REVOKE ALL ON FUNCTION public.backenly_direct_set_password(text, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.backenly_direct_set_password(text, text) TO backenly_user;
-
 -- ── 4. Drop a role cleanly ────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION public.backenly_direct_drop_role(
   p_role text
@@ -166,7 +181,7 @@ BEGIN
 
   -- Tables a READ_WRITE role created belong to it — hand them to the platform
   -- role so the backend they describe keeps working after revocation.
-  EXECUTE format('REASSIGN OWNED BY %I TO backenly_user', p_role);
+  EXECUTE format('REASSIGN OWNED BY %I TO %I', p_role, public.backenly_app_role());
   EXECUTE format('DROP OWNED BY %I', p_role); -- strips remaining grants
   EXECUTE format('DROP ROLE %I', p_role);
   RETURN true;
@@ -174,8 +189,6 @@ END
 $fn$;
 
 REVOKE ALL ON FUNCTION public.backenly_direct_drop_role(text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.backenly_direct_drop_role(text) TO backenly_user;
-
 -- ── 5. Idempotent grants / ownership / RLS-policy sync for one schema ────────
 --
 -- Called: at provision, after every governed DDL mutation, and on drift adopt.
@@ -223,7 +236,7 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = p_owner) THEN
       EXECUTE format('CREATE ROLE %I NOLOGIN', p_owner);
     END IF;
-    EXECUTE format('GRANT %I TO backenly_user', p_owner);
+    EXECUTE format('GRANT %I TO %I', p_owner, public.backenly_app_role());
     EXECUTE format('GRANT %I TO %I', p_owner, p_rw);
     EXECUTE format('ALTER SCHEMA %I OWNER TO %I', p_schema, p_owner);
     FOR t IN
@@ -295,8 +308,6 @@ END
 $fn$;
 
 REVOKE ALL ON FUNCTION public.backenly_direct_sync_schema(text, text, text, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.backenly_direct_sync_schema(text, text, text, text) TO backenly_user;
-
 -- ── 6. DDL drift capture — the observed-drift half of the open loop ──────────
 --
 -- Fires on EVERY DDL statement in the cluster, but returns immediately unless
@@ -379,3 +390,16 @@ CREATE EVENT TRIGGER backenly_drop_watch ON sql_drop
 -- Done. Verify with:
 --   \df public.backenly_direct_*
 --   SELECT evtname, evtevent FROM pg_event_trigger WHERE evtname LIKE 'backenly%';
+
+DO $grant$
+DECLARE r text := public.backenly_app_role();
+BEGIN
+  -- Skipped rather than failed when the role is absent: the functions are still
+  -- installed and a later run grants them, which is what makes this re-runnable.
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_direct_create_role(text, text, text, text) TO %I', r);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_direct_set_password(text, text) TO %I', r);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_direct_drop_role(text) TO %I', r);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_direct_sync_schema(text, text, text, text) TO %I', r);
+  END IF;
+END $grant$;
