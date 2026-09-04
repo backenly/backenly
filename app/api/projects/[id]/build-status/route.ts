@@ -5,7 +5,7 @@ import { verifyToken } from '@/lib/auth/jwt'
 import { loadBuildLedger, updateBuildLedger } from '@/lib/ai/build-ledger'
 import { collectProof } from '@/lib/ai/proof-system'
 import { hasIntegrationKey } from '@/lib/services/integrationKeyStore'
-import { prisma } from '@/lib/db/prisma'
+import { canAccessProject } from '@/lib/edition/guard'
 
 /**
  * GET /api/projects/[id]/build-status
@@ -29,11 +29,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
     const projectId = params.id
 
     // Verify ownership
-    const project = await prisma.project.findFirst({
-      where: { id: projectId, userId },
-      select: { id: true },
-    })
-    if (!project) {
+    if (!(await canAccessProject(userId, projectId))) {
       return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
 

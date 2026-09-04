@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
 import { authenticateRequest } from '@/lib/auth/middleware'
 import { listTablesWithRealtimeTriggers } from '@/lib/services/realtimeTriggers'
+import { canAccessProject } from '@/lib/edition/guard'
 
 /**
  * GET /api/projects/:id/realtime-status
@@ -27,11 +27,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
 
     const projectId = params.id
 
-    const project = await prisma.project.findFirst({
-      where: { id: projectId, userId: auth.userId },
-      select: { id: true },
-    })
-    if (!project) {
+    if (!(await canAccessProject(auth.userId, projectId))) {
       return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
 

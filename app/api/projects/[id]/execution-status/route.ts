@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { verifyToken } from '@/lib/auth/jwt'
 import { prisma } from '@/lib/db'
+import { canAccessProject } from '@/lib/edition/guard'
 
 /**
  * GET /api/projects/[projectId]/execution-status
@@ -27,11 +28,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
     const projectId = params.id
 
     // Verify project ownership
-    const project = await prisma.project.findFirst({
-      where: { id: projectId, userId },
-    })
-
-    if (!project) {
+    if (!(await canAccessProject(userId, projectId))) {
       return NextResponse.json(
         { error: 'Project not found', code: 'PROJECT_NOT_FOUND' },
         { status: 404 }

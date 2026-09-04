@@ -5,6 +5,7 @@ import { verifyToken } from '@/lib/auth/jwt'
 import { prisma } from '@/lib/db'
 import { markBackendGenerated } from '@/lib/analytics/logger'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
+import { canWriteProject } from '@/lib/edition/guard'
 
 /**
  * POST /api/projects/[projectId]/commit  (SSE streaming)
@@ -78,10 +79,7 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
         const projectId = params.id
 
         // ── Verify project ownership ─────────────────────────────────────────
-        const project = await prisma.project.findFirst({
-          where: { id: projectId, userId },
-        })
-        if (!project) {
+        if (!(await canWriteProject(userId, projectId))) {
           send('error', { error: 'Project not found' })
           try { streamController.close() } catch {}
           return

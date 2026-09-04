@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db/postgres'
 import { verifySession } from '@/lib/auth/session'
 import { Pool } from 'pg'
+import { canWriteProject } from '@/lib/edition/guard'
 
 // POST /api/projects/[id]/table-op — Real workspace table operations
 //
@@ -33,10 +33,7 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
     }
 
     // Verify project ownership
-    const project = await prisma.project.findFirst({
-      where: { id: projectId, userId: session.userId },
-    })
-    if (!project) {
+    if (!(await canWriteProject(session.userId, projectId))) {
       return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
 

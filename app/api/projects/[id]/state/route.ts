@@ -7,6 +7,7 @@ import { prisma } from '@/lib/db/prisma'
 import { isProjectLive } from '@/lib/orchestration/graph-pointer'
 import { getProjectAuthStatus } from '@/lib/services/auth-status'
 import { isReservedWorkspaceTable } from '@/lib/security/workspace-schema'
+import { canAccessProject } from '@/lib/edition/guard'
 
 /**
  * GET /api/projects/[projectId]/state
@@ -28,11 +29,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
 
     // Ownership gate — without this any authenticated user could read another
     // project's backend state (table names, APIs, capabilities) by id.
-    const owned = await prisma.project.findFirst({
-      where: { id: projectId, userId },
-      select: { id: true },
-    })
-    if (!owned) {
+    if (!(await canAccessProject(userId, projectId))) {
       return NextResponse.json({ error: 'Project not found or access denied' }, { status: 404 })
     }
 

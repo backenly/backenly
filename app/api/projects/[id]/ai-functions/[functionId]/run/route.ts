@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { authenticateRequest } from '@/lib/auth/middleware'
 import { executeAiFunction } from '@/lib/services/ai-functions/executor'
+import { canWriteProject } from '@/lib/edition/guard'
 
 /**
  * POST /api/projects/[id]/ai-functions/[functionId]/run
@@ -17,10 +18,7 @@ export async function POST(
     const auth = await authenticateRequest(request)
     if (!auth.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-    const project = await prisma.project.findFirst({
-      where: { id: params.id, userId: auth.userId },
-    })
-    if (!project) return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+    if (!(await canWriteProject(auth.userId, params.id))) return NextResponse.json({ error: 'Project not found' }, { status: 404 })
 
     const fn = await prisma.aiFunction.findFirst({
       where: { id: params.functionId, projectId: params.id },
