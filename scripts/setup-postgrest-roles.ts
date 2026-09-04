@@ -41,11 +41,30 @@ function arg(flag: string): string | undefined {
 async function main() {
   const projectId = arg('--project')
   const apply = process.argv.includes('--apply')
+  const rotatePassword = process.argv.includes('--rotate-password')
   const password = arg('--password') ?? randomBytes(24).toString('hex')
 
   if (!projectId) {
     console.error('Missing --project <projectId>')
     process.exit(2)
+  }
+
+  // Does the authenticator already exist? This decides whether a password is
+  // being SET for the first time or ROTATED out from under a running PostgREST.
+  const authenticatorRows = await prisma.$queryRawUnsafe<Array<{ n: bigint }>>(
+    `SELECT count(*)::bigint AS n FROM pg_roles WHERE rolname = $1`,
+    AUTHENTICATOR,
+  )
+  const authenticatorExists = Number(authenticatorRows[0]?.n ?? 0) > 0
+
+  if (authenticatorExists && rotatePassword) {
+    console.warn('')
+    console.warn(`  !  ROTATING the password of ${AUTHENTICATOR}.`)
+    console.warn('     This role is CLUSTER-WIDE. Every PostgREST instance on this cluster')
+    console.warn('     authenticates with it, including any you did not intend to touch.')
+    console.warn('     They will fail on their next reconnect until postgrest.conf is')
+    console.warn('     updated with the connection string printed below and restarted.')
+    console.warn('')
   }
   const schema = `workspace_${projectId}`
 
@@ -79,7 +98,25 @@ async function main() {
   )
   // Re-asserted every run: NOINHERIT is what keeps the authenticator powerless.
   statements.push(`ALTER ROLE ${AUTHENTICATOR} NOINHERIT`)
-  if (apply) statements.push(`ALTER ROLE ${AUTHENTICATOR} PASSWORD '${password}'`)
+
+  // The password is set when the role is CREATED, and otherwise only on an
+  // explicit --rotate-password.
+  //
+  // This used to be `if (apply)`, unconditionally, with a fresh random password
+  // every run. The script is documented as idempotent and operators are told to
+  // re-run it, so re-running it on any cluster with a live PostgREST silently
+  // rotated the credential that PostgREST authenticates with. Existing
+  // connections survive on cached auth, so nothing appears to break until the
+  // next reconnect or restart — at which point the entire /db/* data plane
+  // fails, with no way back, because the script prints the new password once
+  // and calls it unrecoverable.
+  //
+  // `--apply` now means "converge this cluster to the requested state", not
+  // "rotate live credentials". Rotation is a separate, deliberate act.
+  const willSetPassword = !authenticatorExists || rotatePassword
+  if (apply && willSetPassword) {
+    statements.push(`ALTER ROLE ${AUTHENTICATOR} PASSWORD '${password}'`)
+  }
   for (const role of ROLES) {
     statements.push(`GRANT ${role} TO ${AUTHENTICATOR}`)
   }
@@ -158,8 +195,22 @@ async function main() {
   }
 
   console.log('  Done.\n')
-  console.log('  Connection string for postgrest.conf (store it, it is not recoverable):')
-  console.log(`    postgres://${AUTHENTICATOR}:${password}@localhost:5432/backenly\n`)
+
+  if (willSetPassword) {
+    console.log('  Connection string for postgrest.conf (store it, it is not recoverable):')
+    console.log(`    postgres://${AUTHENTICATOR}:${password}@localhost:5432/<database>\n`)
+  } else {
+    // Saying nothing here would be worse than saying this. An operator who
+    // reran the command and saw no connection string could reasonably assume
+    // the run failed, and reach for --rotate-password to "fix" it.
+    console.log(`  ${AUTHENTICATOR} already existed, so its password was left ALONE and`)
+    console.log('  the grants were converged. Any running PostgREST keeps working.')
+    console.log('')
+    console.log('  If you genuinely need a new credential, and are ready to update')
+    console.log('  postgrest.conf and restart PostgREST:')
+    console.log('')
+    console.log(`    npx tsx scripts/setup-postgrest-roles.ts --project ${projectId} --apply --rotate-password\n`)
+  }
 
   await prisma.$disconnect()
 }

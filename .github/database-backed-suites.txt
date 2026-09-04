@@ -90,3 +90,10 @@ __tests__/bootstrap/single-tenant-bootstrap.test.ts
 # The claim is made inside the inserting transaction behind an advisory lock,
 # and this asserts it under genuine concurrency rather than in sequence.
 __tests__/auth/first-account-claim.test.ts
+
+# setup-postgrest-roles idempotency (commit 3 follow-up). --apply used to run
+# ALTER ROLE ... PASSWORD unconditionally with a fresh random password, so
+# re-running a command documented as repeatable rotated the credential a live
+# PostgREST authenticates with. Roles are CLUSTER-WIDE, so this suite uses a
+# throwaway authenticator and its own database.
+__tests__/bootstrap/postgrest-roles-idempotency.test.ts
