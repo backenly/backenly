@@ -15,6 +15,7 @@ import { emit } from '@/lib/events/bus'
 import { emitTrace } from '@/lib/ai/execution-tracer'
 import { getUserEntitlements } from '@/lib/billing'
 import { recordRollbackMemory } from '@/lib/operational-memory/ledger'
+import { canAdministerProject } from '@/lib/edition/guard'
 
 const QUOTA_DISABLED = process.env.DISABLE_QUOTA_ENFORCEMENT === 'true'
 
@@ -62,10 +63,21 @@ export async function rollbackDeploy(
     return { kind: 'error', success: false, error: 'Provide deploymentId or version to rollback to', code: 'INVALID' }
   }
 
-  // Ownership gate — the caller must own the project. Without this, any
-  // authenticated platform user could roll back any project by id.
-  const project = await prisma.project.findFirst({
-    where: { id: projectId, userId },
+  // ADMIN gate. Rolling back replaces the live backend graph, so it sits a
+  // rank above ordinary writes: a DEVELOPER deploys forward, an ADMIN reverts.
+  //
+  // The gate stays in the library rather than moving to the route, because the
+  // caller audit found TWO callers and one is internal:
+  // app/api/projects/[id]/rollback (user-facing) and lib/ai/minimal-executor
+  // (the agent, which looks up the project's owner and passes that id). Moving
+  // the check out would leave the agent path ungated, so the library keeps it
+  // and both callers are measured against the same authority.
+  if (!(await canAdministerProject(userId, projectId))) {
+    return { kind: 'error', success: false, error: 'Project not found', code: 'NOT_FOUND' }
+  }
+
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
     select: { activeGraphId: true },
   })
   if (!project) {

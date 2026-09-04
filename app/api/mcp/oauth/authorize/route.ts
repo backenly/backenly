@@ -44,6 +44,7 @@ import {
   SCOPE_READ,
   SCOPE_WRITE,
 } from '@/lib/mcp/oauth'
+import { canAdministerProject } from '@/lib/edition/guard'
 
 /** An error we must NOT send to the client's redirect_uri. */
 function localError(message: string, detail: string) {
@@ -172,8 +173,12 @@ export async function POST(request: NextRequest) {
     return redirectError(confirm.redirect_uri, 'access_denied', 'The user declined.', confirm.state)
   }
 
-  const project = await prisma.project.findFirst({
-    where: { id: projectId, userId: uid },
+  if (!(await canAdministerProject(uid, projectId))) {
+    return redirectError(confirm.redirect_uri, 'access_denied', 'Project not found.', confirm.state)
+  }
+
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
     select: { id: true, name: true },
   })
   if (!project) {

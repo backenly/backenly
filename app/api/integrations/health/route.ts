@@ -16,6 +16,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { authenticateRequest } from '@/lib/auth/middleware'
 import { prisma } from '@/lib/db'
 import { getIntegrationKey } from '@/lib/services/integrationKeyStore'
+import { canAccessProject } from '@/lib/edition/guard'
 
 // ── Integration probe definitions ──────────────────────────────────────────────
 
@@ -193,11 +194,7 @@ export async function GET(req: NextRequest) {
     }
 
     // Verify project ownership
-    const project = await prisma.project.findFirst({
-      where: { id: projectId, userId: auth.userId },
-      select: { id: true },
-    })
-    if (!project) {
+    if (!(await canAccessProject(auth.userId, projectId))) {
       return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
 

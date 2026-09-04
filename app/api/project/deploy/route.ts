@@ -25,6 +25,7 @@ import { withAuth } from '@/lib/auth/route-protection'
 import { prisma } from '@/lib/db/prisma'
 import { upgradeSandboxToProduction } from '@/lib/billing/sandbox'
 import { enforceDeployment } from '@/lib/billing'
+import { canWriteProject } from '@/lib/edition/guard'
 
 export const POST = withAuth(async (request: NextRequest, { user }) => {
   try {
@@ -40,9 +41,16 @@ export const POST = withAuth(async (request: NextRequest, { user }) => {
 
     const userId = user.userId
 
-    // Check user owns the project
-    const project = await prisma.project.findFirst({
-      where: { id: projectId, userId },
+    // Check the caller may deploy this project
+    if (!(await canWriteProject(userId, projectId))) {
+      return NextResponse.json(
+        { error: 'NOT_FOUND', message: 'Project not found or access denied' },
+        { status: 404 }
+      )
+    }
+
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
       select: { id: true, name: true, expiresAt: true, isDeployed: true, environment: true },
     })
 

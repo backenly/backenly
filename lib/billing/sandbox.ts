@@ -9,6 +9,7 @@
 
 import { prisma } from '@/lib/db/prisma'
 import { getUserSubscription } from '@/lib/billing'
+import { canWriteProject } from '@/lib/edition/guard'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -160,8 +161,15 @@ export async function upgradeSandboxToProduction(
   projectId: string,
   userId: string
 ): Promise<UpgradeResult> {
-  const project = await prisma.project.findFirst({
-    where: { id: projectId, userId },
+  // Audited: app/api/project/deploy is the only caller and already gates at
+  // DEVELOPER. Kept here too, because a library that performs a privileged
+  // action should not depend on every future caller remembering to ask.
+  if (!(await canWriteProject(userId, projectId))) {
+    return { success: false, error: 'Project not found', errorCode: 'PROJECT_NOT_FOUND' }
+  }
+
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
     select: { id: true, expiresAt: true, isDeployed: true },
   })
 

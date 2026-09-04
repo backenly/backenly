@@ -44,6 +44,7 @@ import { NextRequest } from 'next/server'
 import { prisma } from '@/lib/db/postgres'
 import { sign, verify } from 'jsonwebtoken'
 import crypto from 'crypto'
+import { canAdministerProject } from '@/lib/edition/guard'
 
 if (!process.env.JWT_SECRET) throw new Error('JWT_SECRET environment variable is not set')
 const JWT_SECRET = process.env.JWT_SECRET
@@ -128,15 +129,11 @@ export async function handleAuthorizationRequest(
     throw new OIDCError('invalid_request', 'Missing required parameters')
   }
   
-  // Verify project ownership (Backenly-specific authorization)
-  const project = await prisma.project.findFirst({
-    where: {
-      id: projectId,
-      userId: userId,
-    },
-  })
-  
-  if (!project) {
+  // ADMIN: this grants an external OIDC client standing access to the project,
+  // the same act as issuing an API key. Audited before changing:
+  // app/api/oidc/authorize is the only caller and it is user-facing, so the
+  // decision legitimately lives here rather than needing a trusted variant.
+  if (!(await canAdministerProject(userId, projectId))) {
     throw new OIDCError('access_denied', 'Project not found or access denied')
   }
   

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { authenticateRequest } from '@/lib/auth/middleware'
 import { prisma } from '@/lib/db'
 import crypto from 'crypto'
+import { canWriteProject } from '@/lib/edition/guard'
 
 /**
  * PROMPT 7 — URL-Based App Connection
@@ -47,14 +48,7 @@ export async function POST(request: NextRequest) {
 
     // Verify project ownership if projectId provided
     if (projectId) {
-      const project = await prisma.project.findFirst({
-        where: {
-          id: projectId,
-          userId: decoded.userId,
-        },
-      })
-
-      if (!project) {
+      if (!(await canWriteProject(decoded.userId, projectId))) {
         return NextResponse.json(
           { error: 'Something didn\'t work. Please try again.' },
           { status: 404 }

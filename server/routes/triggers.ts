@@ -12,10 +12,16 @@ import { verifyToken } from '@/lib/auth/jwt'
 import { prisma } from '@/lib/db'
 import { listTriggers, createTrigger, deleteTrigger } from '@/lib/services/trigger-service'
 import { enforceTriggerCreation } from '@/lib/billing'
+import { canAccessProject, canAdministerProject, canWriteProject } from '@/lib/edition/guard'
 
 const router = Router()
 
-async function authenticate(req: Request, projectId: string) {
+/**
+ * Authentication only. It used to also run an owner-only project check and
+ * answer 401 for both failures, so an organization member who merely lacked
+ * access was told to re-authenticate, which cannot help.
+ */
+async function authenticate(req: Request) {
   // Cookie-based platform JWT auth
   const cookieHeader = req.headers.cookie || ''
   const match = cookieHeader.match(/(?:^|;\s*)auth-token=([^;]+)/)
@@ -32,18 +38,17 @@ async function authenticate(req: Request, projectId: string) {
 
   if (!decoded) return { error: 'Invalid token' }
 
-  const project = await prisma.project.findFirst({
-    where: { id: projectId, userId: decoded.userId },
-  })
-  if (!project) return { error: 'Project not found or access denied' }
-
   return { userId: decoded.userId }
 }
 
 router.get('/:projectId/triggers', async (req: Request, res: Response) => {
-  const auth = await authenticate(req, req.params.projectId)
-  if ('error' in auth) {
-    res.status(401).json({ error: auth.error })
+  const auth = await authenticate(req)
+  if (!auth.userId) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+  if (!(await canAccessProject(auth.userId, req.params.projectId))) {
+    res.status(404).json({ error: 'Project not found or access denied' })
     return
   }
   const triggers = await listTriggers(req.params.projectId)
@@ -52,9 +57,13 @@ router.get('/:projectId/triggers', async (req: Request, res: Response) => {
 
 router.post('/:projectId/triggers', async (req: Request, res: Response) => {
   const { projectId } = req.params
-  const auth = await authenticate(req, projectId)
-  if ('error' in auth) {
-    res.status(401).json({ error: auth.error })
+  const auth = await authenticate(req)
+  if (!auth.userId) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+  if (!(await canWriteProject(auth.userId, projectId))) {
+    res.status(404).json({ error: 'Project not found or access denied' })
     return
   }
 
@@ -91,9 +100,13 @@ router.post('/:projectId/triggers', async (req: Request, res: Response) => {
 
 router.delete('/:projectId/triggers', async (req: Request, res: Response) => {
   const { projectId } = req.params
-  const auth = await authenticate(req, projectId)
-  if ('error' in auth) {
-    res.status(401).json({ error: auth.error })
+  const auth = await authenticate(req)
+  if (!auth.userId) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+  if (!(await canAdministerProject(auth.userId, projectId))) {
+    res.status(404).json({ error: 'Project not found or access denied' })
     return
   }
 

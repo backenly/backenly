@@ -5,6 +5,7 @@ import { storageService } from '@/lib/services/storage'
 import { authenticateRequest } from '@/lib/auth/middleware'
 import { prisma } from '@/lib/db'
 import crypto from 'crypto'
+import { canAccessProject } from '@/lib/edition/guard'
 
 /**
  * GET /api/storage/files/{fileId}/download — stream the file bytes.
@@ -71,11 +72,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ fileI
         if (!auth.authenticated || !auth.userId) {
           return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
         }
-        const owns = await prisma.project.findFirst({
-          where: { id: record.projectId, userId: auth.userId },
-          select: { id: true },
-        })
-        if (!owns) {
+        if (!(await canAccessProject(auth.userId, record.projectId))) {
           return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
         }
       }

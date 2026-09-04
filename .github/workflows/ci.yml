@@ -89,6 +89,19 @@ jobs:
       - name: Suite accounting balances
         run: npx tsx scripts/verify-suite-accounting.ts
 
+      # The repository had accumulated ~70 independent answers to "may this
+      # caller reach this project", and the owner-only one won on volume, so an
+      # invited organization member was denied storage, logs, monitoring,
+      # security issues and env vars. A request naming no project resolved to
+      # the caller's OLDEST OWNED one and answered 200 with another project's
+      # data.
+      #
+      # That will not come back as a rewrite. It comes back one route at a
+      # time, each looking locally reasonable. This fails the build on the
+      # shape itself.
+      - name: One authority for project access
+        run: npx tsx scripts/verify-project-authorization.ts
+
       # tests/unit is deliberately database-free so it runs on every push.
       # docs-install-command.spec.ts is the one that fails when public/llms.txt
       # and the MCP CLI parser drift apart — the defect that made the published

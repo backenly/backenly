@@ -6,6 +6,7 @@ import { requireAuth } from '@/lib/auth/middleware'
 import { z } from 'zod'
 import crypto from 'crypto'
 import { maskFromPrefix, plaintextForStorage } from '@/lib/auth/api-key-plaintext'
+import { canAdministerProject } from '@/lib/edition/guard'
 
 const createApiKeySchema = z.object({
   name: z.string().min(1, 'Name is required'),
@@ -161,14 +162,10 @@ export async function POST(request: NextRequest) {
     
     // Validate user has access to this project (if projectId provided)
     if (projectId) {
-      const project = await prisma.project.findFirst({
-        where: {
-          id: projectId,
-          userId: auth.userId,
-        },
-      })
-      
-      if (!project) {
+      // ADMIN: generateApiKey below mints a real credential granting access to
+      // this project. Issuing one is administration, the same rule applied to
+      // ai-functions admin-key, which is a GET that hands back a credential.
+      if (!(await canAdministerProject(auth.userId, projectId))) {
         return NextResponse.json(
           { error: 'Project not found or access denied' },
           { status: 403 }
