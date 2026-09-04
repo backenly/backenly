@@ -141,7 +141,8 @@ cp .env.example .env
 docker compose -f docker-compose.dev.yml up -d
 ```
 
-Then set these in `.env`:
+Then set these in `.env`, adding any line the template does not already carry —
+today that is `BACKENLY_EDITION` and `BACKENLY_PROJECT_ID`:
 
 ```bash
 DATABASE_URL=postgresql://<role>:<password>@<host>:5432/<db>
