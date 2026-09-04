@@ -45,6 +45,57 @@ LANGUAGE sql STABLE AS $fn$
   SELECT coalesce(nullif(current_setting('backenly.app_role', true), ''), 'backenly_user')
 $fn$;
 
+-- ── PostgREST roles ─────────────────────────────────────────────────────────
+--
+-- Established here rather than left to setup-postgrest-roles.ts, because the
+-- event triggers in these files GRANT to these roles, and a grant to a role
+-- that does not exist aborts the DDL that fired the trigger.
+--
+-- That deadlocked the documented install order on a fresh cluster. Found on CI:
+--
+--   1. install this SQL           the CREATE SCHEMA event trigger is now live
+--   2. npm run bootstrap          CREATE SCHEMA workspace_<uuid> fires it, which
+--                                 reaches backenly_pgrst_prepare_schema, which
+--                                 runs GRANT USAGE ON SCHEMA ... TO anon
+--                                 ERROR: role "anon" does not exist
+--   3. setup-postgrest-roles.ts   would create the roles, but it grants per
+--                                 workspace schema and so refuses to run until
+--                                 the schema from step 2 exists
+--
+-- Step 2 is unreachable and step 3 cannot precede it. The roles a trigger
+-- depends on are part of installing that trigger, so they are created here and
+-- step 3 keeps its real job: passwords, role membership and per-schema grants.
+--
+-- Guarded because roles are CLUSTER-WIDE. On a cluster already running Backenly
+-- every branch below is skipped. Nothing here ALTERs an existing role: doing so
+-- is what took the data plane down once already, pinned by
+-- __tests__/bootstrap/postgrest-roles-idempotency.test.ts.
+DO $roles$
+BEGIN
+  -- Powerless until something grants to them, which is per workspace schema.
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    CREATE ROLE anon NOLOGIN;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    CREATE ROLE authenticated NOLOGIN;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+    CREATE ROLE service_role NOLOGIN;
+  END IF;
+
+  -- The login role PostgREST authenticates as. backenly_pgrst_register_schema
+  -- stores the served-schema list in ALTER ROLE ... SET pgrst.db_schemas on it,
+  -- so registration needs it to exist just as much as the grants need anon.
+  --
+  -- Created with NO PASSWORD, so it cannot authenticate yet. NOINHERIT is
+  -- load-bearing: with INHERIT it would passively hold the union of every role
+  -- it can switch into, and a request that failed to SET ROLE would run with
+  -- service_role's reach.
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'backenly_authenticator') THEN
+    CREATE ROLE backenly_authenticator LOGIN NOINHERIT;
+  END IF;
+END $roles$;
+
 -- ── Prepare a schema for PostgREST ──────────────────────────────────────────
 -- Grants + default privileges + internal-table revocation, idempotent. Called at
 -- cutover; safe to re-run at any time.

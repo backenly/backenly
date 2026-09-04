@@ -258,9 +258,14 @@ async function ensurePostgrestRegistration(projectId: string): Promise<void> {
     )
     // The message names the WHOLE chain, because pointing only at
     // postgrest-install.sh sent an operator in a circle: running it alone still
-    // failed, first on a function defined in a different SQL file and then on a
-    // role no script in the repository creates. Measured by installing them one
-    // at a time against an empty database until registration succeeded.
+    // failed, first on a function defined in a different SQL file and then on
+    // roles nothing had created yet. Measured by installing them one at a time
+    // against an empty database until registration succeeded.
+    //
+    // Step 1 now creates the PostgREST roles itself, because its event triggers
+    // grant to them and a fresh cluster could otherwise never reach step 2 to
+    // create the schema step 2 requires. Step 2 keeps passwords, role
+    // membership and per-schema grants.
     //
     // The ordering is not arbitrary and cannot be collapsed into one step:
     // setup-postgrest-roles.ts grants per workspace schema, so it needs the

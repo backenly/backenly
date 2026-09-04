@@ -38,6 +38,41 @@ function arg(flag: string): string | undefined {
   return i === -1 ? undefined : process.argv[i + 1]
 }
 
+/**
+ * Whether `backenly_authenticator` already holds a password.
+ *
+ * The proxy used to be "does the role exist". That stopped being true once the
+ * prerequisite SQL began creating it, which it must: its event triggers store
+ * the served-schema list in `ALTER ROLE ... SET pgrst.db_schemas` on this role,
+ * and a CREATE SCHEMA that grants to a role nobody created aborts. So a first
+ * install now finds the role already present, and keying on existence would
+ * have skipped the password and produced an install with no credential at all.
+ *
+ * The honest question is whether there IS a password, and only pg_authid knows.
+ * It is superuser-only, so a caller that cannot read it gets `unknown`, which is
+ * treated exactly like `set`: leave it alone. That direction never rotates a
+ * live credential; the cost is that such an operator must ask for the first
+ * password explicitly, which the script says out loud.
+ */
+type CredentialState = 'absent' | 'set' | 'unknown'
+
+async function authenticatorCredential(): Promise<CredentialState> {
+  try {
+    const rows = await prisma.$queryRawUnsafe<Array<{ present: boolean }>>(
+      `SELECT (rolpassword IS NOT NULL) AS present FROM pg_authid WHERE rolname = $1`,
+      AUTHENTICATOR,
+    )
+    // No row at all means the role itself is absent, which is also "no password".
+    return rows.length === 0 ? 'absent' : rows[0].present ? 'set' : 'absent'
+  } catch {
+    const rows = await prisma.$queryRawUnsafe<Array<{ n: bigint }>>(
+      `SELECT count(*)::bigint AS n FROM pg_roles WHERE rolname = $1`,
+      AUTHENTICATOR,
+    )
+    return Number(rows[0]?.n ?? 0) > 0 ? 'unknown' : 'absent'
+  }
+}
+
 async function main() {
   const projectId = arg('--project')
   const apply = process.argv.includes('--apply')
@@ -49,15 +84,12 @@ async function main() {
     process.exit(2)
   }
 
-  // Does the authenticator already exist? This decides whether a password is
-  // being SET for the first time or ROTATED out from under a running PostgREST.
-  const authenticatorRows = await prisma.$queryRawUnsafe<Array<{ n: bigint }>>(
-    `SELECT count(*)::bigint AS n FROM pg_roles WHERE rolname = $1`,
-    AUTHENTICATOR,
-  )
-  const authenticatorExists = Number(authenticatorRows[0]?.n ?? 0) > 0
+  // Does the authenticator already hold a credential? This decides whether a
+  // password is being SET for the first time or ROTATED out from under a
+  // running PostgREST.
+  const credential = await authenticatorCredential()
 
-  if (authenticatorExists && rotatePassword) {
+  if (credential !== 'absent' && rotatePassword) {
     console.warn('')
     console.warn(`  !  ROTATING the password of ${AUTHENTICATOR}.`)
     console.warn('     This role is CLUSTER-WIDE. Every PostgREST instance on this cluster')
@@ -99,7 +131,7 @@ async function main() {
   // Re-asserted every run: NOINHERIT is what keeps the authenticator powerless.
   statements.push(`ALTER ROLE ${AUTHENTICATOR} NOINHERIT`)
 
-  // The password is set when the role is CREATED, and otherwise only on an
+  // The password is set when the role has none, and otherwise only on an
   // explicit --rotate-password.
   //
   // This used to be `if (apply)`, unconditionally, with a fresh random password
@@ -113,7 +145,7 @@ async function main() {
   //
   // `--apply` now means "converge this cluster to the requested state", not
   // "rotate live credentials". Rotation is a separate, deliberate act.
-  const willSetPassword = !authenticatorExists || rotatePassword
+  const willSetPassword = credential === 'absent' || rotatePassword
   if (apply && willSetPassword) {
     statements.push(`ALTER ROLE ${AUTHENTICATOR} PASSWORD '${password}'`)
   }
@@ -199,11 +231,21 @@ async function main() {
   if (willSetPassword) {
     console.log('  Connection string for postgrest.conf (store it, it is not recoverable):')
     console.log(`    postgres://${AUTHENTICATOR}:${password}@localhost:5432/<database>\n`)
+  } else if (credential === 'unknown') {
+    console.log(`  Could not read pg_authid, so whether ${AUTHENTICATOR} already has a`)
+    console.log('  password is unknown. It was left ALONE and the grants were converged.')
+    console.log('  That is the safe answer: any running PostgREST keeps working.')
+    console.log('')
+    console.log('  On a FIRST install there is no password yet and you do need one. Rerun')
+    console.log('  as a superuser, or, if you are certain nothing authenticates with this')
+    console.log('  role yet:')
+    console.log('')
+    console.log(`    npx tsx scripts/setup-postgrest-roles.ts --project ${projectId} --apply --rotate-password\n`)
   } else {
     // Saying nothing here would be worse than saying this. An operator who
     // reran the command and saw no connection string could reasonably assume
     // the run failed, and reach for --rotate-password to "fix" it.
-    console.log(`  ${AUTHENTICATOR} already existed, so its password was left ALONE and`)
+    console.log(`  ${AUTHENTICATOR} already had a password, so it was left ALONE and`)
     console.log('  the grants were converged. Any running PostgREST keeps working.')
     console.log('')
     console.log('  If you genuinely need a new credential, and are ready to update')

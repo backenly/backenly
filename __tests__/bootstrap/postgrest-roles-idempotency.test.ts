@@ -20,9 +20,18 @@
  * These assert the three states directly against pg_authid, because the whole
  * property is whether a specific hash on disk changed.
  *
- *   role absent  + --apply                     password is SET
- *   role present + --apply                     password is UNTOUCHED
- *   role present + --apply --rotate-password   password CHANGES
+ *   no password + --apply                     password is SET
+ *   password    + --apply                     password is UNTOUCHED
+ *   password    + --apply --rotate-password   password CHANGES
+ *
+ * Keyed on the PASSWORD, not on whether the role exists. The prerequisite SQL
+ * has to create the role itself — its event triggers grant to it — so existence
+ * stopped being able to tell a first install from a live one.
+ *
+ * The first test covers that install order rather than rotation: a fresh
+ * cluster could not create a workspace schema at all, because the trigger
+ * granted to roles nothing had created yet. It sits here because it is the same
+ * dependency seen from the other side.
  *
  * The role is cluster-wide here too, so these use a throwaway role name rather
  * than the real authenticator, and drop it afterwards.
@@ -130,17 +139,37 @@ beforeAll(async () => {
 
   await adminExec(`DROP DATABASE IF EXISTS ${DB_NAME}`)
   await adminExec(`CREATE DATABASE ${DB_NAME}`)
+  await adminExec(`DROP ROLE IF EXISTS ${TEST_AUTHENTICATOR}`)
+
+  // Step 0 of the prerequisite chain scripts/bootstrap.ts prints. A database
+  // whose application role is not literally `backenly_user` has to say so, or
+  // backenly_pgrst_prepare_schema aborts on ALTER DEFAULT PRIVILEGES FOR ROLE.
+  // CI connects as `postgres`. Done through the documented setting rather than
+  // by creating a `backenly_user` here, so a break in the documented path
+  // surfaces as a failure instead of being arranged around.
+  const appRole = new URL(ADMIN_URL!).username
+  await adminExec(`ALTER DATABASE ${DB_NAME} SET backenly.app_role = '${appRole}'`)
 
   // The two SQL files are MUTUALLY dependent: the registry calls
   // backenly_pgrst_prepare_schema (defined in ddl-sync) and ddl-sync calls
   // backenly_pgrst_current_schemas (defined in the registry). Function bodies
   // are not resolved at CREATE time, so either order installs successfully, but
   // only registry-first survives this client's stricter validation.
+  //
+  // Installed with the authenticator RETARGETED, for the same cluster-wide
+  // reason the script is. backenly_pgrst_register_schema stores the served
+  // schema list in `ALTER ROLE backenly_authenticator SET pgrst.db_schemas`,
+  // with no IN DATABASE clause, so creating a canonical workspace schema here
+  // would overwrite the REAL authenticator's list for every database on the
+  // cluster. A separate test database does not isolate a role setting.
   for (const f of ['postgrest-schema-registry.sql', 'postgrest-ddl-sync.sql']) {
+    const text = fs
+      .readFileSync(path.join(process.cwd(), 'scripts', 'sql', f), 'utf8')
+      .replace(/backenly_authenticator/g, TEST_AUTHENTICATOR)
     const client = new Client({ connectionString: DB_URL })
     await client.connect()
     try {
-      await client.query(fs.readFileSync(path.join(process.cwd(), 'scripts', 'sql', f), 'utf8'))
+      await client.query(text)
     } finally {
       await client.end()
     }
@@ -154,11 +183,14 @@ beforeAll(async () => {
   fs.writeFileSync(TEMP_SCRIPT, src, 'utf8')
 
   // The script requires the workspace schema to exist before it will grant on it.
+  //
+  // This statement is also the regression test for an install-order deadlock,
+  // so it is deliberately a CANONICAL workspace name that fires the CREATE
+  // SCHEMA event trigger, rather than a cheaper name that would slip past it.
+  // See the first test below.
   projectId = require('crypto').randomUUID()
   schema = `workspace_${projectId}`
   await sql(`CREATE SCHEMA IF NOT EXISTS "${schema}"`)
-
-  await sql(`DROP ROLE IF EXISTS ${TEST_AUTHENTICATOR}`)
 }, 120_000)
 
 afterAll(async () => {
@@ -171,13 +203,44 @@ afterAll(async () => {
 }, 120_000)
 
 describe('setup-postgrest-roles', () => {
-  it('creates the authenticator and sets its password on a cluster that lacks it', async () => {
-    expect(await roleExists(TEST_AUTHENTICATOR)).toBe(false)
+  it('installs the roles its own event triggers grant to', async () => {
+    // The documented install order deadlocked on a fresh cluster:
+    //
+    //   1. install the prerequisite SQL   the CREATE SCHEMA trigger is now live
+    //   2. npm run bootstrap              CREATE SCHEMA workspace_<uuid> fires it,
+    //                                     reaching GRANT USAGE ON SCHEMA ... TO anon
+    //                                     ERROR: role "anon" does not exist
+    //   3. setup-postgrest-roles.ts       would create the roles, but it grants
+    //                                     per workspace schema, so it refuses to
+    //                                     run until step 2's schema exists
+    //
+    // Step 2 was unreachable and step 3 could not precede it. Found on CI, the
+    // only environment here whose cluster has none of these roles already.
+    for (const role of ['anon', 'authenticated', 'service_role', TEST_AUTHENTICATOR]) {
+      expect(await roleExists(role)).toBe(true)
+    }
+
+    // beforeAll created a canonical workspace schema immediately after the
+    // install and before ever running the script. That statement succeeding is
+    // the proof; this asserts it landed rather than being silently skipped.
+    const rows = await sql<{ n: string }>(
+      `SELECT count(*) AS n FROM information_schema.schemata WHERE schema_name = $1`,
+      [schema],
+    )
+    expect(Number(rows[0]?.n ?? 0)).toBe(1)
+  }, 120_000)
+
+  it('sets the password on an authenticator that has none', async () => {
+    // The prerequisite SQL created this role, WITHOUT a password. That is the
+    // state a first install is genuinely in now, and it is why the script asks
+    // whether a password exists rather than whether the role does: keyed on
+    // existence, a first install would print no connection string at all.
+    expect(await roleExists(TEST_AUTHENTICATOR)).toBe(true)
+    expect(await passwordHash(TEST_AUTHENTICATOR)).toBeNull()
 
     const r = runSetup(['--project', projectId, '--apply'])
     expect(r.code).toBe(0)
 
-    expect(await roleExists(TEST_AUTHENTICATOR)).toBe(true)
     expect(await passwordHash(TEST_AUTHENTICATOR)).not.toBeNull()
     // A first run must hand the operator the credential; there is no other copy.
     expect(r.out).toContain('Connection string for postgrest.conf')
@@ -192,7 +255,9 @@ describe('setup-postgrest-roles', () => {
 
     // THE assertion this file exists for. A live PostgREST keeps working.
     expect(await passwordHash(TEST_AUTHENTICATOR)).toBe(before)
-    expect(r.out).toContain('password was left ALONE')
+    // The exact branch matters: "left alone because I could not read pg_authid"
+    // prints a similar sentence and is a DIFFERENT outcome.
+    expect(r.out).toContain('already had a password, so it was left ALONE')
     expect(r.out).not.toContain('Connection string for postgrest.conf')
 
     // Convergence still happened: the grants are re-asserted every run, which
@@ -226,7 +291,7 @@ describe('setup-postgrest-roles', () => {
     const broken = fs
       .readFileSync(TEMP_SCRIPT, 'utf8')
       .replace(
-        'const willSetPassword = !authenticatorExists || rotatePassword',
+        "const willSetPassword = credential === 'absent' || rotatePassword",
         'const willSetPassword = true',
       )
     expect(broken).toContain('const willSetPassword = true')
