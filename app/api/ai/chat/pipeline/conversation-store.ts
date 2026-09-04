@@ -150,7 +150,9 @@ export async function saveBuildMessages(
       const candidates = await prisma.conversationMessage.findMany({
         where: { projectId, role: 'ai' },
         select: { id: true, metadata: true, content: true },
-        orderBy: { createdAt: 'desc' },
+        // Which 20 are "the most recent" must not depend on a millisecond tie:
+        // these rows are deleted.
+        orderBy: { messageSeq: 'desc' },
         take: 20,
       })
       const toDelete = candidates

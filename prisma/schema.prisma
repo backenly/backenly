@@ -2074,11 +2074,27 @@ model ConversationMessage {
   metadata  Json? // Optional metadata like intent, executionId, etc.
   createdAt DateTime @default(now())
 
+  // WHEN a message happened is createdAt. In WHAT ORDER to render or replay the
+  // thread is this, and they are different questions.
+  //
+  // createdAt cannot answer the second one. It has millisecond resolution, so
+  // two messages written in the same millisecond tie, and `id` is a random v4
+  // UUID that carries no causality to break the tie with. Postgres then returns
+  // tied rows in whatever order it scans them, which made a follow-up question
+  // render above the answer it followed and failed the ordering test in 2 of 6
+  // runs.
+  //
+  // Assigned by the database, never by application code: a read-then-write of
+  // `max + 1` or `count + 1` has a race between the read and the insert, which
+  // is the same class of bug one level down.
+  messageSeq BigInt @unique @default(autoincrement())
+
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
   @@index([projectId])
   @@index([createdAt])
   @@index([projectId, createdAt])
+  @@index([projectId, messageSeq])
   @@map("conversation_messages")
 }
 

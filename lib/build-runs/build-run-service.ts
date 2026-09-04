@@ -186,51 +186,40 @@ export async function recordBuildSnapshot(
 /**
  * Load the conversation thread + compute current build state.
  *
- * `messages` is ordered by (createdAt ASC, snapshotSeq ASC) so the thread
- * renders deterministically across refreshes — no async-flush flicker.
+ * `messages` is ordered by messageSeq ASC, the database sequence assigned at
+ * insert, so the thread renders deterministically across refreshes — no
+ * async-flush flicker, and no dependence on two rows landing in different
+ * milliseconds.
  *
  * `currentBuildState` is the AI snapshot with the highest `snapshotSeq` for
  * which `supersededAt` is unset. When no build snapshots exist or all are
  * superseded, this is `null` and the UI should not show an "active build" card.
  */
 export async function loadConversation(projectId: string): Promise<LoadedConversation> {
+  // Ordered by the database, in one clause.
+  //
+  // This used to read `orderBy: createdAt` and then re-sort in JavaScript,
+  // falling back through snapshotSeq to break ties. It could not work.
+  // createdAt has millisecond resolution, so two messages written in the same
+  // millisecond tie; snapshotSeq only exists on build-snapshot messages, so two
+  // PLAIN messages tie again; and `id` is a random v4 UUID with no causal
+  // content. The comparator then returned 0 and kept whatever order Postgres
+  // scanned, which put a follow-up question above the answer it followed and
+  // failed the ordering test in 2 of 6 runs.
+  //
+  // messageSeq is assigned by a database sequence at insert, so it is a total
+  // order over messages and needs no tie-break at all.
+  //
+  // It is deliberately NOT selected: it is a BigInt, JSON.stringify throws on
+  // those, and a conversation travels through route handlers that serialize it.
+  // Nothing outside this ordering needs the value.
   const rows = await prisma.conversationMessage.findMany({
     where: { projectId },
-    orderBy: { createdAt: 'asc' },
+    orderBy: { messageSeq: 'asc' },
     select: { id: true, projectId: true, role: true, content: true, metadata: true, createdAt: true },
   })
 
-  // Stable secondary sort by snapshotSeq (when defined) preserves intra-second order.
-  //
-  // The default for a message that HAS no snapshotSeq is Infinity, not 0, and
-  // the difference is a real ordering bug rather than a style choice. With 0, a
-  // plain message sharing a millisecond with a snapshot sorted BEFORE it, so a
-  // follow-up question could appear above the answer it followed. Observed as
-  // an intermittent failure in tests/build-runs (2 of 5 runs) whenever
-  // recordBuildSnapshot and the next appendUserMessage landed in the same
-  // millisecond.
-  //
-  // Infinity is the causally correct default, not a nudge to make a test pass:
-  // recordBuildSnapshot writes its user and ai rows together in one call, so
-  // anything appended afterwards genuinely came later, and on a tie the
-  // snapshot pair belongs first.
-  //
-  // This narrows the ambiguity rather than removing it. ConversationMessage has
-  // no monotonic insertion column, so two PLAIN messages in the same
-  // millisecond remain unordered. Fixing that needs a sequence column and a
-  // migration.
-  const seqOf = (m: ConversationMessageRecord): number =>
-    (asMetadata(m.metadata) as BuildSnapshotMetadata).snapshotSeq ?? Number.POSITIVE_INFINITY
-
-  const messages = rows.map(toRecord).sort((a, b) => {
-    const ta = a.createdAt.getTime()
-    const tb = b.createdAt.getTime()
-    if (ta !== tb) return ta - tb
-    const sa = seqOf(a)
-    const sb = seqOf(b)
-    if (sa === sb) return 0 // both plain: keep the database's order
-    return sa - sb
-  })
+  const messages = rows.map(toRecord)
 
   // Pick the most recent non-superseded snapshot. Across different buildJobIds,
   // recency wins by createdAt; within the same job, supersededAt has already

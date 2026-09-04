@@ -44,7 +44,7 @@ export async function loadHistoryWithSummary(
     // Check for an existing summary
     const summaryRow = await prisma.conversationMessage.findFirst({
       where: { projectId, role: 'summary' },
-      orderBy: { createdAt: 'desc' },
+      orderBy: { messageSeq: 'desc' },
       select: { content: true, createdAt: true },
     })
 
@@ -56,7 +56,10 @@ export async function loadHistoryWithSummary(
     // chat panel shows the full step-by-step credential flow on refresh.
     const rawRows = await prisma.conversationMessage.findMany({
       where: { projectId, role: { in: ['user', 'ai'] } },
-      orderBy: { createdAt: 'desc' },
+      // messageSeq, not createdAt: this picks WHICH messages are the most
+      // recent and then reverses them into the history the model reads, so a
+      // millisecond tie here reorders the conversation it is shown.
+      orderBy: { messageSeq: 'desc' },
       take: rawLimit,
       select: { role: true, content: true, metadata: true },
     })
@@ -103,7 +106,7 @@ export async function maybeSummarizeConversation(projectId: string): Promise<voi
   // Check when the last summary was made
   const lastSummary = await prisma.conversationMessage.findFirst({
     where: { projectId, role: 'summary' },
-    orderBy: { createdAt: 'desc' },
+    orderBy: { messageSeq: 'desc' },
     select: { createdAt: true, content: true },
   })
 
@@ -125,7 +128,7 @@ export async function maybeSummarizeConversation(projectId: string): Promise<voi
   // a generic summary — doing so is what caused chat text to look different on refresh.
   const allMessages = await prisma.conversationMessage.findMany({
     where: { projectId, role: { in: ['user', 'ai'] } },
-    orderBy: { createdAt: 'asc' },
+    orderBy: { messageSeq: 'asc' },
     select: { role: true, content: true, metadata: true },
   })
 
