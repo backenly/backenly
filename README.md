@@ -113,25 +113,132 @@ at it. Nothing to install or operate.
 
 ### Self-hosted
 
-Requires Node 20+, and Docker (or your own PostgreSQL 14+ instance).
+One deployment is one project. `npm run bootstrap` provisions that project, and
+it is a reconciler rather than an installer: rerunning it repairs whatever is
+missing and changes nothing else. You will run it at least twice, and that is
+the intended path, not a failure.
+
+Requires Node 20+, PostgreSQL 14+, and PostgREST. Docker covers the first two.
+
+> **Use a PostgreSQL cluster dedicated to this deployment.**
+>
+> PostgREST authenticates through cluster-global roles, and the list of schemas
+> it serves is stored as a role setting with no `IN DATABASE` scope. Two
+> Backenly databases on one cluster therefore overwrite each other's
+> served-schema registry, and the loser's data plane answers `PGRST106` on every
+> table. This is a known limitation being redesigned, not something you can
+> configure around. A container or a separate instance is enough.
+
+#### 1. Install
 
 ```bash
 git clone https://github.com/backenly/backenly.git
 cd backenly
 npm install
+cp .env.example .env
 
-cp .env.example .env          # then set OPENAI_API_KEY and JWT_SECRET
-
-# PostgreSQL + Redis, matching the defaults already in .env.example
+# A dedicated PostgreSQL + Redis, matching the defaults already in .env.example
 docker compose -f docker-compose.dev.yml up -d
+```
 
+Then set these in `.env`:
+
+```bash
+DATABASE_URL=postgresql://<role>:<password>@<host>:5432/<db>
+BACKENLY_EDITION=single-tenant   # the default is still `cloud`; it flips in a later release
+BACKENLY_PROJECT_ID=<uuid>       # any UUID, e.g. `uuidgen`
+JWT_SECRET=<openssl rand -hex 32>
+OPENAI_API_KEY=<your key>
+```
+
+`BACKENLY_PROJECT_ID` is the identity of this deployment and must never change
+afterwards: it names the `workspace_<uuid>` schema your tables live in. Bootstrap
+refuses to run against a database that already holds a different one. You may
+leave it unset and pin the id bootstrap generates instead, but then step 4's
+command has to be copied from bootstrap's output rather than from here.
+
+`JWT_SECRET` signs every platform session; generate one per deployment.
+`OPENAI_API_KEY` powers planning and the autonomy loop. See
+[`.env.example`](.env.example) for the rest.
+
+#### 2. Tell the database which role Backenly connects as
+
+Only if the role in your `DATABASE_URL` is not literally `backenly_user`:
+
+```bash
+psql -c "ALTER DATABASE <db> SET backenly.app_role = '<your role>'"
+```
+
+Skipping it on a database whose role is `postgres` makes the next section fail
+with `role "backenly_user" does not exist`.
+
+#### 3. Create the tables and bootstrap
+
+```bash
 npm run db:generate && npm run db:push
+npm run bootstrap
+```
+
+**This first run is expected to exit 3.** Bootstrap creates the project row, its
+workspace schema and its signing secret, then reports what it cannot install
+itself. Its exit code is the state, and deployment automation should read it:
+
+| exit | meaning |
+| --- | --- |
+| `0` | ready |
+| `2` | refused. The database is in a state bootstrap will not touch, either more than one project or a `BACKENLY_PROJECT_ID` that does not match what is already there. Nothing was written. |
+| `3` | core bootstrapped, prerequisites still unmet. **Not** ready: the `/db/*` data plane will answer `PGRST106` until step 4 is done. |
+
+#### 4. Install the prerequisites bootstrap cannot install itself
+
+These need a PostgreSQL superuser. Bootstrap prints this same list, with your
+real project id filled in; run what it prints.
+
+```bash
+# 1. support objects: registry functions, DDL event triggers, and the
+#    anon / authenticated / service_role / backenly_authenticator roles.
+#    Uses PGDATABASE, which defaults to `backenly`.
+bash scripts/postgrest-install.sh
+
+# 2. passwords, role membership and the per-schema grants.
+#    Prints the connection string PostgREST authenticates with. Store it: it is
+#    not recoverable, and this command will not print it again.
+npx tsx scripts/setup-postgrest-roles.ts --project <PROJECT_ID> --apply
+
+# 3. optional. Only needed to hand out direct psql credentials to a project.
+#    Backenly is fully operational without it.
+psql -d <database> -f scripts/setup-direct-access.sql
+```
+
+That order is not arbitrary and cannot be collapsed into one command. The first
+command has to create the roles, because the event triggers it installs grant to
+them, and a `CREATE SCHEMA` that grants to a role nobody created aborts. The
+second grants per workspace schema, so it needs the schema that `npm run
+bootstrap` already created above. This is why bootstrap runs, reports NOT ready,
+and is rerun: it is a reconciler, and rerunning is the mechanism.
+
+Then start PostgREST against the connection string step 2 printed, and rerun:
+
+```bash
+npm run bootstrap
+```
+
+**Exit 0 means ready.** Anything else, read what it printed and fix that; it is
+safe to rerun as many times as you need.
+
+#### 5. Run it
+
+```bash
 npm run dev                   # dashboard :3000 · runtime :3001
 ```
 
-`npm run dev` starts both processes together. If you already have PostgreSQL
-running, skip the Docker step and point `DATABASE_URL` at it instead — in which
-case enable `pg_stat_statements` yourself:
+`npm run dev` starts both processes together. There is no account yet, so sign up
+in the dashboard, then run `npm run bootstrap` once more to issue the anon key
+your frontend embeds.
+
+#### pg_stat_statements
+
+If you brought your own PostgreSQL rather than the Docker stack above, enable it:
 
 ```conf
 # postgresql.conf, then restart the server
@@ -144,16 +251,7 @@ CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
 It is how Backenly finds indexes that are missing by *measurement* — the columns
 Postgres is actually spending milliseconds filtering on — rather than only by
 schema shape. Without it that check reports itself as unchecked rather than
-passing, so nothing claims a guarantee it never evaluated. The Docker stack
-above already sets both.
-
-Two variables are not optional:
-
-- `JWT_SECRET` signs every platform session. Generate one per deployment with
-  `openssl rand -hex 32`.
-- `OPENAI_API_KEY` powers planning and the autonomy loop.
-
-See [`.env.example`](.env.example) for the rest.
+passing, so nothing claims a guarantee it never evaluated.
 
 ## Connecting a coding agent
 

@@ -26,7 +26,8 @@
  *   anonKey              the credential a frontend embeds
  *   bkn_ro_/bkn_rw_      direct database roles
  *
- * Exit codes:
+ * Exit codes (BOOTSTRAP_EXIT in ./bootstrap-prerequisites, which is the value
+ * this script actually exits with, and what README.md is checked against):
  *   0  ready
  *   2  refused (incompatible database, or a pinned id that does not match)
  *   3  core bootstrapped, prerequisites unmet — NOT ready
@@ -42,6 +43,12 @@ import { ensureSchemaRegistered } from '@/lib/postgrest/registration'
 import { JWTSecretManager } from '@/lib/services/jwtSecretManager'
 import { getDirectAccessStatus, provisionDirectAccess } from '@/lib/services/direct-access'
 import { createEmptyGraph } from '@/lib/orchestration/backend-state-graph'
+import {
+  BOOTSTRAP_EXIT,
+  DIRECT_ACCESS_PREREQUISITE,
+  postgrestPrerequisiteSteps,
+  renderPrerequisiteSteps,
+} from './bootstrap-prerequisites'
 
 const args = process.argv.slice(2)
 const ownerEmail = (() => {
@@ -273,14 +280,7 @@ async function ensurePostgrestRegistration(projectId: string): Promise<void> {
     // and is rerun — which is exactly what a reconciler is for.
     needs(
       'PostgREST cannot register the workspace schema, so the data plane is not available',
-      'As a superuser, in order:\n' +
-        '         0. if the role in your DATABASE_URL is NOT `backenly_user`:\n' +
-        "            psql -c \"ALTER DATABASE <db> SET backenly.app_role = '<your role>'\"\n" +
-        '         1. bash scripts/postgrest-install.sh\n' +
-        '            (or: psql -f scripts/sql/postgrest-schema-registry.sql, then postgrest-ddl-sync.sql)\n' +
-        `         2. npx tsx scripts/setup-postgrest-roles.ts --project ${projectId} --apply\n` +
-        '         3. start PostgREST against the connection string step 2 prints\n' +
-        '       then rerun: npm run bootstrap'
+      renderPrerequisiteSteps(postgrestPrerequisiteSteps(projectId))
     )
     step('postgrest registration', 'skipped (see warning)')
     return
@@ -356,7 +356,7 @@ async function ensureDirectAccessRoles(projectId: string): Promise<void> {
       )
       needs(
         `privileged role helpers are not installed, so ${mode} database access is unavailable`,
-        'psql -d <database> -f scripts/setup-direct-access.sql   (as a superuser), then rerun: npm run bootstrap'
+        `${DIRECT_ACCESS_PREREQUISITE.command}   (as a superuser), then rerun: npm run bootstrap`
       )
       step(`direct access role (${mode})`, 'skipped (see warning)')
     }
@@ -413,7 +413,7 @@ async function main(): Promise<void> {
     console.log('  Rerun `npm run bootstrap` afterwards. It is idempotent and will')
     console.log('  provision only what is still missing.')
     console.log('')
-    process.exitCode = 3 // BACKENLY_BOOTSTRAP_INCOMPLETE
+    process.exitCode = BOOTSTRAP_EXIT.incomplete // BACKENLY_BOOTSTRAP_INCOMPLETE
     return
   }
   if (!process.env.BACKENLY_PROJECT_ID) {
@@ -444,7 +444,7 @@ main()
       console.error('')
       console.error(`  ${err.message}`)
       console.error('')
-      process.exit(2)
+      process.exit(BOOTSTRAP_EXIT.refused)
     }
     console.error(err)
     process.exit(1)

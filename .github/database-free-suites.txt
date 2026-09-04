@@ -78,3 +78,8 @@ __tests__/security/api-key-plaintext.test.ts
 # Database-free on purpose: both paths short-circuit on the edition before
 # touching Prisma, and asserting that they do is half the point.
 __tests__/edition/single-tenant-runtime.test.ts
+
+# README.md is the acceptance script for a self-hosted install, so it is checked
+# against the module bootstrap renders its prerequisite guidance from. Compares
+# committed text to committed code; no database.
+__tests__/bootstrap/readme-matches-bootstrap.test.ts

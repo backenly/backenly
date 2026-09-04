@@ -20,6 +20,7 @@ import { execFileSync } from 'child_process'
 import { randomUUID } from 'crypto'
 import { Client } from 'pg'
 import { PrismaClient } from '@prisma/client'
+import { BOOTSTRAP_EXIT, postgrestPrerequisiteSteps } from '../../scripts/bootstrap-prerequisites'
 
 const ADMIN_URL = process.env.TEST_DATABASE_URL
 const DB_NAME = 'backenly_bootstrap_jest'
@@ -205,11 +206,22 @@ describe('bootstrap', () => {
     // successful install, and must not be readable as one.
     const r = runBootstrap()
 
-    expect(r.code).toBe(3)
+    expect(r.code).toBe(BOOTSTRAP_EXIT.incomplete)
     expect(r.out).toContain('NOT yet ready')
     expect(r.out).toMatch(/PostgREST/)
     // And it says what to do, rather than only what is wrong.
     expect(r.out).toContain('npm run bootstrap')
+
+    // The commands it prints are the ones README.md documents. Asserted here,
+    // against a REAL run, because readme-matches-bootstrap.test.ts compares the
+    // README to the module these are defined in — and that comparison is only
+    // worth anything if the module is genuinely what the script emits.
+    const id = (await theProject())!.id
+    for (const command of postgrestPrerequisiteSteps(id)
+      .map(s => s.command)
+      .filter((c): c is string => Boolean(c))) {
+      expect(r.out).toContain(command)
+    }
   }, 180_000)
 
   it('refuses a database that holds more than one project, and writes nothing', async () => {
