@@ -231,10 +231,24 @@ async function ensureWorkspaceSchema(projectId: string, ownerId: string | null):
 }
 
 async function ensurePostgrestRegistration(projectId: string): Promise<void> {
-  // Idempotent by construction: the registry function appends only when the
-  // schema is absent from pgrst.db_schemas. Repaired rather than created is
-  // the honest label, since a CREATE SCHEMA IF NOT EXISTS against an existing
-  // schema fires no event trigger and so cannot self-register.
+  // RegistrationResult reports success, not whether anything CHANGED, so ask
+  // the registry first. Without this the step said "created" on every run,
+  // which quietly contradicts the property this script is built around: a
+  // rerun should visibly change nothing.
+  //
+  // Guarded, because the registry helpers may not be installed yet — that is
+  // the very condition this function exists to report.
+  const schema = workspaceSchemaName(projectId)
+  let alreadyRegistered = false
+  try {
+    const rows = await prisma.$queryRaw<Array<{ schemas: string | null }>>`
+      SELECT public.backenly_pgrst_current_schemas() AS schemas
+    `
+    alreadyRegistered = (rows[0]?.schemas ?? '').split(',').map(x => x.trim()).includes(schema)
+  } catch {
+    alreadyRegistered = false
+  }
+
   const result = await ensureSchemaRegistered(projectId)
   if (!result.registered) {
     console.warn(
@@ -242,14 +256,29 @@ async function ensurePostgrestRegistration(projectId: string): Promise<void> {
         '    The data plane will answer PGRST106 until this succeeds. If PostgREST is not\n' +
         '    installed yet, see scripts/postgrest-install.sh and rerun bootstrap.'
     )
+    // The message names the WHOLE chain, because pointing only at
+    // postgrest-install.sh sent an operator in a circle: running it alone still
+    // failed, first on a function defined in a different SQL file and then on a
+    // role no script in the repository creates. Measured by installing them one
+    // at a time against an empty database until registration succeeded.
+    //
+    // The ordering is not arbitrary and cannot be collapsed into one step:
+    // setup-postgrest-roles.ts grants per workspace schema, so it needs the
+    // project to already exist. Bootstrap therefore runs, reports NOT ready,
+    // and is rerun — which is exactly what a reconciler is for.
     needs(
-      'PostgREST cannot be reached, so the data plane is not registered',
-      'Install and start PostgREST (scripts/postgrest-install.sh), then rerun: npm run bootstrap'
+      'PostgREST cannot register the workspace schema, so the data plane is not available',
+      'As a superuser, in order:\n' +
+        '         1. bash scripts/postgrest-install.sh\n' +
+        '            (or: psql -f scripts/sql/postgrest-ddl-sync.sql, then postgrest-schema-registry.sql)\n' +
+        `         2. npx tsx scripts/setup-postgrest-roles.ts --project ${projectId} --apply\n` +
+        '         3. start PostgREST against the connection string step 2 prints\n' +
+        '       then rerun: npm run bootstrap'
     )
     step('postgrest registration', 'skipped (see warning)')
     return
   }
-  step('postgrest registration', 'created')
+  step('postgrest registration', alreadyRegistered ? 'already present' : 'created')
 }
 
 async function ensureJwtSecret(projectId: string): Promise<void> {

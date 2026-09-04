@@ -201,12 +201,34 @@ export async function loadConversation(projectId: string): Promise<LoadedConvers
   })
 
   // Stable secondary sort by snapshotSeq (when defined) preserves intra-second order.
+  //
+  // The default for a message that HAS no snapshotSeq is Infinity, not 0, and
+  // the difference is a real ordering bug rather than a style choice. With 0, a
+  // plain message sharing a millisecond with a snapshot sorted BEFORE it, so a
+  // follow-up question could appear above the answer it followed. Observed as
+  // an intermittent failure in tests/build-runs (2 of 5 runs) whenever
+  // recordBuildSnapshot and the next appendUserMessage landed in the same
+  // millisecond.
+  //
+  // Infinity is the causally correct default, not a nudge to make a test pass:
+  // recordBuildSnapshot writes its user and ai rows together in one call, so
+  // anything appended afterwards genuinely came later, and on a tie the
+  // snapshot pair belongs first.
+  //
+  // This narrows the ambiguity rather than removing it. ConversationMessage has
+  // no monotonic insertion column, so two PLAIN messages in the same
+  // millisecond remain unordered. Fixing that needs a sequence column and a
+  // migration.
+  const seqOf = (m: ConversationMessageRecord): number =>
+    (asMetadata(m.metadata) as BuildSnapshotMetadata).snapshotSeq ?? Number.POSITIVE_INFINITY
+
   const messages = rows.map(toRecord).sort((a, b) => {
     const ta = a.createdAt.getTime()
     const tb = b.createdAt.getTime()
     if (ta !== tb) return ta - tb
-    const sa = (asMetadata(a.metadata) as BuildSnapshotMetadata).snapshotSeq ?? 0
-    const sb = (asMetadata(b.metadata) as BuildSnapshotMetadata).snapshotSeq ?? 0
+    const sa = seqOf(a)
+    const sb = seqOf(b)
+    if (sa === sb) return 0 // both plain: keep the database's order
     return sa - sb
   })
 
