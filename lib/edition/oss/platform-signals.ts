@@ -31,3 +31,18 @@ export async function onSignupCompleted(event: SignupCompleted): Promise<void> {
   const { applyReferralOnSignup } = await import('@/lib/billing/referral')
   await applyReferralOnSignup(event.userId, event.email, event.referralCode)
 }
+
+/**
+ * Backenly's scheduled commercial maintenance.
+ *
+ * Dunning: expired payment-grace subscriptions are downgraded to free. The
+ * failure mode this guards is silent and costs money in the direction nobody
+ * checks, because a lapsed payer simply keeps their paid plan.
+ */
+export async function runScheduledBackOfficeMaintenance(): Promise<void> {
+  const { runDailyGraceCheck } = await import('@/lib/billing/grace')
+  const res = await runDailyGraceCheck()
+  if (res && res.processed > 0) {
+    console.log(`[GraceCheck] Downgraded ${res.processed} expired grace period(s) to FREE`)
+  }
+}

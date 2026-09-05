@@ -48,6 +48,19 @@ export interface SignupCompleted {
 
 export interface PlatformSignalsProvider {
   /**
+   * Run Backenly's own scheduled commercial maintenance.
+   *
+   * Dunning today: expired payment-grace subscriptions get downgraded. This
+   * is not a self-host job and must not become one. A single-tenant install
+   * has no subscriptions to dun, so there is nothing here for it to run.
+   *
+   * The public scheduler owns the CADENCE and the private half owns the
+   * WORK, which is what lets the billing cron routes move private without
+   * the public scheduler ever importing them.
+   */
+  runScheduledBackOfficeMaintenance(): Promise<void>
+
+  /**
    * React to a completed signup.
    *
    * Called after the account exists and before the session is issued. Must

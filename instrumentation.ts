@@ -176,15 +176,14 @@ export async function register() {
       // no paid ones. It is wired up now because the day that stops being true
       // is exactly the day nobody thinks to check, and the failure is silent in
       // the direction that costs money — a lapsed payer keeps their paid plan.
+      //
+      // The scheduler owns the cadence; what actually runs is Backenly's own
+      // business, and in single-tenant it is nothing at all. Going through the
+      // platform seam is what lets the billing implementation move to the
+      // private overlay without this file ever importing it.
       cron.schedule('10 3 * * *', async () => {
-        const { runDailyGraceCheck } = await import('./lib/billing/grace')
-        const res = await runDailyGraceCheck().catch((err: any) => {
-          console.error('[GraceCheck] Cron error:', err?.message)
-          return null
-        })
-        if (res && res.processed > 0) {
-          console.log(`[GraceCheck] Downgraded ${res.processed} expired grace period(s) to FREE`)
-        }
+        const { runScheduledBackOfficeMaintenance } = await import('./lib/platform-signals')
+        await runScheduledBackOfficeMaintenance()
       })
 
       // Daily backup at 02:05 UTC (staggered from cleanup at 02:00)

@@ -16,11 +16,13 @@
  *      successful registration into a 500.
  */
 const mockOnSignupCompleted = jest.fn()
+const mockRunBackOfficeMaintenance = jest.fn()
 jest.mock('@cloud/platform-signals', () => ({
   onSignupCompleted: (...a: unknown[]) => mockOnSignupCompleted(...a),
+  runScheduledBackOfficeMaintenance: (...a: unknown[]) => mockRunBackOfficeMaintenance(...a),
 }))
 
-import { onSignupCompleted } from '@/lib/platform-signals'
+import { onSignupCompleted, runScheduledBackOfficeMaintenance } from '@/lib/platform-signals'
 import type { SignupCompleted } from '@/lib/platform-signals'
 
 const SIGNUP: SignupCompleted = {
@@ -98,5 +100,50 @@ describe('the signup flows report rather than implement', () => {
     // into a public signup handler.
     expect(src).not.toMatch(/lib\/billing\/referral/)
     expect(src).toMatch(/onSignupCompleted\(/)
+  })
+})
+
+describe('scheduled back-office maintenance', () => {
+  it('runs nothing in single-tenant', async () => {
+    // Dunning is not a self-host job. A single-tenant install has no
+    // subscriptions to dun, so the scheduler must find nothing to do rather
+    // than call a stub that does nothing.
+    process.env.BACKENLY_EDITION = 'single-tenant'
+
+    await runScheduledBackOfficeMaintenance()
+
+    expect(mockRunBackOfficeMaintenance).not.toHaveBeenCalled()
+  })
+
+  it('delegates to the Cloud provider', async () => {
+    process.env.BACKENLY_EDITION = 'cloud'
+    mockRunBackOfficeMaintenance.mockResolvedValue(undefined)
+
+    await runScheduledBackOfficeMaintenance()
+
+    expect(mockRunBackOfficeMaintenance).toHaveBeenCalled()
+  })
+
+  it('survives a failing maintenance pass', async () => {
+    // This runs on the same node-cron scheduler as autonomy, backups and
+    // workspace observation. An unhandled rejection here would take down the
+    // tick that keeps a self-hoster's backend healed.
+    process.env.BACKENLY_EDITION = 'cloud'
+    mockRunBackOfficeMaintenance.mockRejectedValue(new Error('dunning exploded'))
+
+    await expect(runScheduledBackOfficeMaintenance()).resolves.toBeUndefined()
+  })
+})
+
+describe('the public scheduler does not import billing', () => {
+  it('instrumentation.ts schedules through the seam', () => {
+    const fs = require('fs') as typeof import('fs')
+    const path = require('path') as typeof import('path')
+    const src = fs.readFileSync(path.join(process.cwd(), 'instrumentation.ts'), 'utf8')
+
+    // The grace edge is the one that mattered: a public scheduler importing a
+    // module that is about to move private.
+    expect(src).not.toContain('lib/billing/grace')
+    expect(src).toMatch(/runScheduledBackOfficeMaintenance/)
   })
 })

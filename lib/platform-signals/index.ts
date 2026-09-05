@@ -19,7 +19,10 @@
  * even to call a stub. Returning before the provider is consulted is what makes
  * that true.
  */
-import { onSignupCompleted as cloudOnSignupCompleted } from '@cloud/platform-signals'
+import {
+  onSignupCompleted as cloudOnSignupCompleted,
+  runScheduledBackOfficeMaintenance as cloudRunBackOfficeMaintenance,
+} from '@cloud/platform-signals'
 import { currentEdition } from '@/lib/edition'
 import type { SignupCompleted } from './types'
 
@@ -39,5 +42,24 @@ export async function onSignupCompleted(event: SignupCompleted): Promise<void> {
     await cloudOnSignupCompleted(event)
   } catch {
     /* a business reaction cannot un-create the account */
+  }
+}
+
+/**
+ * Run Backenly's scheduled commercial maintenance, if there is any.
+ *
+ * The public scheduler in instrumentation.ts calls this on its daily tick. It
+ * decides WHEN; what runs is the private half's business. In single-tenant
+ * nothing runs, because a self-hosted install has no subscriptions to dun.
+ *
+ * Never throws. A failed maintenance pass must not take down the scheduler
+ * that also runs autonomy, backups and workspace observation.
+ */
+export async function runScheduledBackOfficeMaintenance(): Promise<void> {
+  if (currentEdition() === 'single-tenant') return
+  try {
+    await cloudRunBackOfficeMaintenance()
+  } catch (err: any) {
+    console.error('[BackOfficeMaintenance] Error:', err?.message)
   }
 }
