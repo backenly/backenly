@@ -12,7 +12,7 @@
  */
 
 import { prisma } from '@/lib/db/postgres'
-import { getFileStorageLimitBytes } from '@/lib/billing/quota-kernel'
+import { getFileStorageLimitBytes } from '@/lib/quota/kernel'
 
 /**
  * @deprecated Hardcoded tier table — NO LONGER the source of truth. The real

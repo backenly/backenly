@@ -2,7 +2,7 @@
  * Server-side signup email trust assessment.
  * ===========================================
  *
- * This is the *deep* check. `lib/auth/email-eligibility.ts` stays client-safe
+ * This is the *deep* check. `lib/trust/email-eligibility.ts` stays client-safe
  * and cheap (it renders inline form errors, so whatever it knows is public);
  * everything expensive or worth keeping private lives here and runs only on
  * the server, behind `assertSignupAllowed`.
@@ -22,7 +22,7 @@
  * about a dollar. No list will ever contain tomorrow's.
  *
  * So this module is deliberately *not* the primary control — Turnstile
- * (lib/auth/bot-defense.ts) is, because the shared property of these signups
+ * (lib/trust/bot-defense.ts) is, because the shared property of these signups
  * is that they were automated, not that the domain was cheap. What this
  * module adds is a second layer that (a) kills the classic disposable
  * services for free, (b) catches the form-filler fingerprints that no captcha
@@ -52,7 +52,7 @@
 // server-side boundary it was standing in for.
 import dns from 'dns'
 import { prisma } from '@/lib/db/prisma'
-import { checkSignupEmailEligibility } from '@/lib/auth/email-eligibility'
+import { checkSignupEmailEligibility } from '@/lib/trust/email-eligibility'
 
 // ─── Public shape ─────────────────────────────────────────────────────────────
 

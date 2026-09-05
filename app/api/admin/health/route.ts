@@ -21,7 +21,7 @@ export const dynamic = 'force-dynamic'
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { requireFounder } from '@/lib/auth/requireFounder'
+import { requireFounder } from '@/lib/admin/auth/requireFounder'
 import { getOperatorHealthSnapshot } from '@/lib/ai/stuck-execution-detector'
 
 export async function GET(request: NextRequest) {

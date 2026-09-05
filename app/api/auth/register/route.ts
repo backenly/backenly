@@ -16,7 +16,7 @@ import {
 } from '@/lib/platform/controls'
 import { applyReferralOnSignup } from '@/lib/billing/referral'
 import { consume, AUTH_LIMITS, clientIp } from '@/lib/security/auth-rate-limit'
-import { verifyBotChallenge } from '@/lib/auth/bot-defense'
+import { verifyBotChallenge } from '@/lib/trust/bot-defense'
 import { z } from 'zod'
 import jwt from 'jsonwebtoken'
 

@@ -132,7 +132,7 @@ function AppLayoutInternal({
   //
   // Fails OPEN on any error: a flaky /me must never wall a paying customer out
   // of their own dashboard. The real boundary is the server gate in
-  // lib/auth/account-standing.ts, which this only mirrors for UX.
+  // lib/trust/account-standing.ts, which this only mirrors for UX.
   useEffect(() => {
     let cancelled = false
     const checkStanding = async () => {

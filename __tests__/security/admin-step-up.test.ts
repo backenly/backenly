@@ -25,7 +25,7 @@ const {
   verifyAdminSudoToken,
   hasAdminSudo,
   requireAdminStepUp,
-} = require('@/lib/auth/adminStepUp')
+} = require('@/lib/admin/auth/adminStepUp')
 
 const USER_A = 'aaaaaaaa-0000-4000-8000-000000000001'
 const USER_B = 'bbbbbbbb-0000-4000-8000-000000000002'

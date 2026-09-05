@@ -1,8 +1,8 @@
 /**
  * Delete projects properly — Prisma rows AND the workspace schema.
  *
- *   npx tsx scripts/purge-projects.ts                 # dry run
- *   npx tsx scripts/purge-projects.ts --apply
+ *   npx tsx scripts/fleet/purge-projects.ts                 # dry run
+ *   npx tsx scripts/fleet/purge-projects.ts --apply
  *
  * scripts/delete-projects.ts (the older one) deletes only the Prisma row. That
  * leaves the `workspace_<id>` schema behind, and an orphaned schema is not a

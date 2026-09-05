@@ -17,8 +17,8 @@
  * stuck finding was one the platform claims it repairs automatically, rather
  * than hardcoding a list that will drift away from the classifier.
  *
- *   npx tsx scripts/autonomy-fleet-check.ts
- *   npx tsx scripts/autonomy-fleet-check.ts --hours=24
+ *   npx tsx scripts/fleet/autonomy-fleet-check.ts
+ *   npx tsx scripts/fleet/autonomy-fleet-check.ts --hours=24
  *
  * Exit code is 0 when the fleet is healthy and 1 when something needs a human,
  * so it can be wired to a cron or a deploy gate.

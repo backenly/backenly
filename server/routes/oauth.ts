@@ -12,7 +12,7 @@ import {
   stampLastLogin,
   isReservedTestEmail,
 } from '@/lib/services/end-user-auth-table'
-import { canAcceptNewEndUser, trackEndUserActive } from '@/lib/billing/quota-kernel'
+import { canAcceptNewEndUser, trackEndUserActive } from '@/lib/quota/kernel'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 
 /**

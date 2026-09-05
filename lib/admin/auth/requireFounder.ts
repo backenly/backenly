@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { authenticateRequest } from './middleware'
+import { authenticateRequest } from '@/lib/auth/middleware'
 import { requireAdminStepUp } from './adminStepUp'
 
 const FOUNDER_EMAIL = process.env.FOUNDER_EMAIL
@@ -56,7 +56,7 @@ export async function resolveFounder(request: NextRequest): Promise<FounderIdent
  *   2. Step-up check (mutating methods only): a sudo cookie earned by
  *      re-entering a password/TOTP at /api/admin/reauth, or — for scripted
  *      callers — an X-Admin-Timestamp + X-Admin-Signature HMAC pair.
- *      See lib/auth/adminStepUp.ts for why the HMAC alone was not enough.
+ *      See lib/admin/auth/adminStepUp.ts for why the HMAC alone was not enough.
  *
  * Returns a 401/403 response if not authorized, null if authorized.
  *

@@ -15,7 +15,7 @@
  * before the gate existed), and keying the wall on `!emailVerified` alone would
  * lock every one of them out of a product they already use.
  *
- * This is UX, not enforcement. The server gate in lib/auth/account-standing.ts
+ * This is UX, not enforcement. The server gate in lib/trust/account-standing.ts
  * stays exactly where it is — a wall rendered in the browser is trivially
  * skipped with a direct API call, which is precisely what a bot does.
  */

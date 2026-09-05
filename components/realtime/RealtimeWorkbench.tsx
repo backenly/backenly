@@ -43,7 +43,7 @@ const DB_EVENT_TYPES = new Set(['insert', 'update', 'delete', 'presence', 'broad
 // Errors we will not auto-retry on — retrying just burns connection slots until
 // the user changes something (paying plan, signing in again).
 const FATAL_PATTERNS = [
-  /reached its limit/i,   // realtime concurrency cap (quota-kernel)
+  /reached its limit/i,   // realtime concurrency cap (quota kernel)
   /unauthor/i,            // 401-shape
   /api key/i,             // auth failure
 ]

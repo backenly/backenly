@@ -2,8 +2,8 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/postgres'
-import { requireFounder } from '@/lib/auth/requireFounder'
-import { assessEmailTrust, SIGNUP_DENIED_MESSAGE } from '@/lib/auth/email-trust'
+import { requireFounder } from '@/lib/admin/auth/requireFounder'
+import { assessEmailTrust, SIGNUP_DENIED_MESSAGE } from '@/lib/trust/email-trust'
 import { z } from 'zod'
 
 /**

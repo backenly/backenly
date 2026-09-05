@@ -4,7 +4,7 @@
  * Periodically measures actual PostgreSQL bytes for every active project
  * and writes the result into ProjectUsage.dbStorageUsedMb for the current
  * month. That field powers:
- *   - the storage gate in lib/billing/quota-kernel.enforceDbStorage
+ *   - the storage gate in lib/quota/kernel.enforceDbStorage
  *   - the "PostgreSQL" meter shown on /app/settings (billing)
  *
  * Without this cron, dbStorageUsedMb only refreshes as a side-effect of AI

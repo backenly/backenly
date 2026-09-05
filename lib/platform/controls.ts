@@ -17,7 +17,7 @@
  * hot paths don't pay a DB round-trip per request.
  */
 
-import { assessEmailTrust, type EmailTrustResult } from '@/lib/auth/email-trust'
+import { assessEmailTrust, type EmailTrustResult } from '@/lib/trust/email-trust'
 import { prisma } from '@/lib/db/prisma'
 import { currentEdition } from '@/lib/edition'
 

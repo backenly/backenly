@@ -236,7 +236,7 @@ interface UserRow {
   id: string; name: string | null; email: string; createdAt: string; lastActive: string | null
   tier: string; projectCount: number
   usage: { apiCalls: number | null; dbReads: number | null; dbWrites: number | null; aiCalls: number | null }
-  // Signup provenance (lib/auth/email-trust.ts). Older rows predate these
+  // Signup provenance (lib/trust/email-trust.ts). Older rows predate these
   // columns, so every field is optional and absence reads as "trusted".
   emailVerified?: boolean
   trustLevel?: string
@@ -617,7 +617,7 @@ export default function AdminPage() {
   // ── Step-up ("sudo") state ─────────────────────────────────────────────────
   // Admin reads need only the founder session. Admin WRITES need a second
   // factor, earned by re-entering a password/TOTP at /api/admin/reauth and
-  // good for 15 minutes. See lib/auth/adminStepUp.ts.
+  // good for 15 minutes. See lib/admin/auth/adminStepUp.ts.
   const [sudoOpen, setSudoOpen] = useState(false)
   const [sudoMethods, setSudoMethods] = useState<{ password: boolean; totp: boolean }>({ password: false, totp: false })
   const [sudoSecret, setSudoSecret] = useState('')

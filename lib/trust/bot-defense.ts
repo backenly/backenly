@@ -32,7 +32,7 @@
  */
 
 // No `import 'server-only'` here, deliberately, for the same reason it was
-// removed from lib/auth/email-trust.ts: it throws on import outside a Next.js
+// removed from lib/trust/email-trust.ts: it throws on import outside a Next.js
 // server context, and this module imports lib/platform/controls.ts, which the
 // standalone Express runtime already pulls in. Nothing under server/ reaches
 // this file today, so the guard was not firing, but it was the identical

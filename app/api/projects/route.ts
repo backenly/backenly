@@ -11,7 +11,7 @@ import { enforceProjectCreation, createFreeSubscription, getUserSubscription } f
 import { logEvent } from '@/lib/analytics/logger'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import { assertWritable } from '@/lib/platform/controls'
-import { assertAccountCanConsume } from '@/lib/auth/account-standing'
+import { assertAccountCanConsume } from '@/lib/trust/account-standing'
 import { getProjectResolver } from '@/lib/edition'
 import { ensureSchemaRegistered } from '@/lib/postgrest/registration'
 

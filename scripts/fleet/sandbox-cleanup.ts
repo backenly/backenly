@@ -8,10 +8,10 @@
  *   2. Deletes the project record (cascades to all related platform data)
  *
  * Run via cron (every hour is recommended):
- *   0 * * * * cd /app && npx tsx scripts/sandbox-cleanup.ts >> /var/log/sandbox-cleanup.log 2>&1
+ *   0 * * * * cd /app && npx tsx scripts/fleet/sandbox-cleanup.ts >> /var/log/sandbox-cleanup.log 2>&1
  *
  * Or via PM2 cron mode:
- *   pm2 start scripts/sandbox-cleanup.ts --interpreter npx --interpreter-args tsx \
+ *   pm2 start scripts/fleet/sandbox-cleanup.ts --interpreter npx --interpreter-args tsx \
  *     --cron "0 * * * *" --no-autorestart --name sandbox-cleanup
  *
  * Also can be triggered via API:

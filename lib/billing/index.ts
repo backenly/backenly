@@ -547,7 +547,7 @@ export async function enforceAndTrackAiBuildAction(
 export const trackAiIntent = trackAiBuildAction
 
 // Note: the real API-request tracker is enforceAndTrackApiRequest in
-// lib/billing/quota-kernel.ts (called by lib/api/v1/middleware.ts). The
+// lib/quota/kernel.ts (called by lib/api/v1/middleware.ts). The
 // previous standalone trackApiRequest() here was dead code and was removed.
 
 export async function trackAiFunctionInvocation(userId: string, count = 1): Promise<void> {
@@ -631,7 +631,7 @@ export async function enforceAiFunctionInvocation(userId: string): Promise<true 
 
 /**
  * @deprecated Realtime connection caps are enforced by the ListenerHub
- * (lib/realtime/listener-hub.ts) via lib/billing/quota-kernel.ts
+ * (lib/realtime/listener-hub.ts) via lib/quota/kernel.ts
  * enforceRealtimeConnection. This wrapper delegates so any legacy caller
  * stays on the single kernel path.
  */
@@ -639,7 +639,7 @@ export async function enforceRealtimeConnection(
   projectId: string,
   currentConnections: number
 ): Promise<true | LimitViolation> {
-  const { enforceRealtimeConnection: kernelEnforce } = await import('./quota-kernel')
+  const { enforceRealtimeConnection: kernelEnforce } = await import('../quota/kernel')
   const decision = await kernelEnforce(projectId, currentConnections)
   if (decision.allowed) return true
   return violation(decision.plan ?? 'UNKNOWN', decision.message ?? 'Realtime connection limit reached')

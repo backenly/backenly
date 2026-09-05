@@ -5,7 +5,7 @@
  * The structural half of the anti-abuse work, and the half that does not depend
  * on correctly identifying an abusive domain.
  *
- * A signup whose email scored in the challenge band (lib/auth/email-trust.ts)
+ * A signup whose email scored in the challenge band (lib/trust/email-trust.ts)
  * is created as `untrusted`. It can sign in and look around, but it cannot
  * consume anything — no projects, no databases, no compute — until it proves it
  * controls the mailbox. That inverts the economics: minting an account stops

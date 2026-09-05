@@ -31,7 +31,7 @@
 
 import { Client } from 'pg'
 import { workspaceChannelName } from '@/lib/security/workspace-schema'
-import { enforceRealtimeConnection } from '@/lib/billing/quota-kernel'
+import { enforceRealtimeConnection } from '@/lib/quota/kernel'
 
 export type NotificationHandler = (payload: Record<string, unknown>) => void
 

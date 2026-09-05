@@ -18,7 +18,7 @@ import { withBuildLock, MutationKind } from './build-lock'
 import { emitTrace } from '@/lib/ai/execution-tracer'
 import { emit } from '@/lib/events/bus'
 import { prisma } from '@/lib/db/prisma'
-import { enforceDbStorage } from '@/lib/billing/quota-kernel'
+import { enforceDbStorage } from '@/lib/quota/kernel'
 import { snapshotProjectDbStorage } from '@/lib/billing/usage-tracker'
 
 // ── Types ─────────────────────────────────────────────────────────────────────

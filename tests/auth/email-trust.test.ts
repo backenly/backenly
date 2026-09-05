@@ -1,4 +1,4 @@
-import { assessEmailTrust } from '@/lib/auth/email-trust'
+import { assessEmailTrust } from '@/lib/trust/email-trust'
 
 // DNS is skipped throughout so the suite is deterministic and runs offline.
 // That makes these assertions a *floor*: with MX resolution enabled several of

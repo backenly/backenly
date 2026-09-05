@@ -27,7 +27,7 @@ import {
   mcpAuthFailureResponse,
   type McpAuthResult,
 } from './auth'
-import { enforceAndTrackApiRequest } from '@/lib/billing/quota-kernel'
+import { enforceAndTrackApiRequest } from '@/lib/quota/kernel'
 
 export interface McpGuardAuth {
   keyId: string

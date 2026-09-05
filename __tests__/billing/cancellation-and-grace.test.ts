@@ -76,7 +76,7 @@ jest.mock('@/lib/auth/server', () => ({
 // The founder gate is a separate concern with its own tests; these cases are
 // about what the billing actions DO once past it.
 let founderUserId = ''
-jest.mock('@/lib/auth/requireFounder', () => ({
+jest.mock('@/lib/admin/auth/requireFounder', () => ({
   requireFounder: () => Promise.resolve(null),
 }))
 jest.mock('@/lib/auth/middleware', () => ({

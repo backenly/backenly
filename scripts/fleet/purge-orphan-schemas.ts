@@ -1,8 +1,8 @@
 /**
  * Drop workspace schemas whose project no longer exists.
  *
- *   npx tsx scripts/purge-orphan-schemas.ts            # dry run
- *   npx tsx scripts/purge-orphan-schemas.ts --apply
+ *   npx tsx scripts/fleet/purge-orphan-schemas.ts            # dry run
+ *   npx tsx scripts/fleet/purge-orphan-schemas.ts --apply
  *
  * These are the residue of scripts/delete-projects.ts, which removed the Prisma
  * row and left `workspace_<id>` behind. 115 of them had accumulated by

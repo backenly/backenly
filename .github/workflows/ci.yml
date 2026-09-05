@@ -109,6 +109,21 @@ jobs:
       - name: One creation path for projects
         run: npx tsx scripts/verify-project-provisioning.ts
 
+      # Backenly ships as this public repository plus a private Cloud overlay
+      # that only ever ADDS files. The moment the overlay can overwrite a
+      # tracked public file, the public tree stops being a truthful description
+      # of what Cloud runs, and an OSS reader can no longer tell which behaviour
+      # is theirs. overlay-allowlist.json is the ownership map; this is what
+      # makes it falsifiable.
+      #
+      # It runs in transition mode: the subsystems the map names do not actually
+      # move private until Phases 6 and 7, so the public files still sitting
+      # under those paths are grandfathered BY NAME and anything new fails. A
+      # count would not do — Phase 1 established that the same number of
+      # failures is not evidence that the same things failed.
+      - name: Overlay ownership boundary
+        run: npx tsx scripts/verify-overlay-boundary.ts
+
       # An acceptance install on a clean Ubuntu 24.04 machine stopped here:
       # `psql -f <path>` makes the postgres user open the file, and Ubuntu home
       # directories are 0750, so a normal clone was unreadable. This builds that

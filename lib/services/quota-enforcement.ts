@@ -26,7 +26,7 @@ import { prisma } from '@/lib/db'
 // This module used a free/pro/enterprise Paddle taxonomy with hardcoded
 // numbers (10k API/mo, 1 GB, 10k rows…) that did NOT match the displayed
 // Plan (SANDBOX/BUILDER/SCALE). It is superseded by the single Plan-driven
-// kernel: `lib/billing/quota-kernel.ts` (API + MAU + realtime + DB storage)
+// kernel: `lib/quota/kernel.ts` (API + MAU + realtime + DB storage)
 // plus `lib/services/storageQuota.ts` (Plan-driven file storage). Every
 // check below now short-circuits to "allowed" so this engine can never
 // apply a contradictory limit again. Exports are kept so existing importers

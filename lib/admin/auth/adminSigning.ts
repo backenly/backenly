@@ -17,12 +17,12 @@
  *
  * Usage:
  *   // In route handler:
- *   import { requireAdminSignature } from '@/lib/auth/adminSigning'
+ *   import { requireAdminSignature } from '@/lib/admin/auth/adminSigning'
  *   const check = await requireAdminSignature(request)
  *   if (check) return check  // returns 401/403 NextResponse on failure
  *
  *   // In client code (TypeScript):
- *   import { signAdminRequest } from '@/lib/auth/adminSigning'
+ *   import { signAdminRequest } from '@/lib/admin/auth/adminSigning'
  *   const { timestamp, signature } = await signAdminRequest(method, path, body, ADMIN_SECRET)
  */
 

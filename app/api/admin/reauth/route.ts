@@ -13,7 +13,7 @@ export const dynamic = 'force-dynamic'
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { resolveFounder } from '@/lib/auth/requireFounder'
+import { resolveFounder } from '@/lib/admin/auth/requireFounder'
 import { verifyPassword } from '@/lib/auth/password'
 import { verifyTOTP } from '@/lib/auth/totp'
 import { prisma } from '@/lib/db/prisma'
@@ -23,7 +23,7 @@ import {
   hasAdminSudo,
   mintAdminSudoToken,
   setAdminSudoCookie,
-} from '@/lib/auth/adminStepUp'
+} from '@/lib/admin/auth/adminStepUp'
 import { recordSecurityEvent } from '@/lib/platform/controls'
 
 // ── Brute-force brake ─────────────────────────────────────────────────────────

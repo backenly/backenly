@@ -1,7 +1,7 @@
 export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
-import { requireFounder } from '@/lib/auth/requireFounder'
+import { requireFounder } from '@/lib/admin/auth/requireFounder'
 import { prisma } from '@/lib/db/prisma'
 
 interface RetentionRow {

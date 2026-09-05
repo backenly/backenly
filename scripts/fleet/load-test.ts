@@ -2,7 +2,7 @@
 /**
  * Standalone Load Test Script
  * 
- * Run: npx ts-node scripts/load-test.ts
+ * Run: npx ts-node scripts/fleet/load-test.ts
  * 
  * This script runs load tests outside of Jest for:
  * - Longer duration tests
@@ -10,9 +10,9 @@
  * - Production-like scenarios
  */
 
-import { orchestrateBackendChange, getActiveGraph } from '../lib/orchestration'
-import { generateSuggestions } from '../lib/suggestions/suggestion-engine'
-import { prisma } from '../lib/db/prisma'
+import { orchestrateBackendChange, getActiveGraph } from '../../lib/orchestration'
+import { generateSuggestions } from '../../lib/suggestions/suggestion-engine'
+import { prisma } from '../../lib/db/prisma'
 
 interface LoadTestConfig {
   sameProjectConcurrency: number
