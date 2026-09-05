@@ -132,12 +132,16 @@ describe('cloud with no Subscription row', () => {
       message: 'No active subscription found',
     })
 
-    // Reached WITHOUT a database read, which is new and correct. Phase 6 moved
-    // the commercial implementation to the private overlay, so a public
-    // checkout has nothing to look a subscription up in and the provider says
-    // so directly. The decision is what matters and it is unchanged: an
-    // unsubscribed Cloud account is still refused, and the self-host fix did
-    // not become a free pass.
-    expect(mockPrisma.subscription.findFirst).not.toHaveBeenCalled()
+    // HOW it was reached depends on the composition, and only the decision is
+    // invariant. Without the overlay there is no commercial implementation to
+    // consult, so the provider answers directly; with it, the provider reads
+    // the subscription and finds none. Asserting the read either way would make
+    // this suite report a failure for a correctly composed Cloud checkout.
+    const composed = require('fs').existsSync(
+      require('path').join(process.cwd(), 'lib/cloud/manifest.json'),
+    )
+    if (!composed) {
+      expect(mockPrisma.subscription.findFirst).not.toHaveBeenCalled()
+    }
   })
 })

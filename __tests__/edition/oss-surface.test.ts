@@ -9,12 +9,23 @@
  * So this asserts the SHAPE of the public tree: the back office is gone, the
  * product is not, and the Phase 7 surfaces are still here because Phase 7 has
  * not run.
+ *
+ * These are OSS contracts, and they are only meaningful in a checkout with no
+ * Cloud overlay applied. Composed Cloud restores every file this suite asserts
+ * is absent, and its db:seed really does run the billing seeder, so running
+ * these there would report failures for the composition working correctly. The
+ * suite states that precondition rather than leaving private CI to maintain an
+ * exclusion list.
  */
 import { execFileSync } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
 
 const ROOT = process.cwd()
+
+/** True when the Cloud overlay has been applied over this checkout. */
+const composed = fs.existsSync(path.join(process.cwd(), 'lib/cloud/manifest.json'))
+const describeOss = composed ? describe.skip : describe
 
 const tracked = new Set(
   execFileSync('git', ['ls-files'], { cwd: ROOT, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 })
@@ -25,7 +36,7 @@ const tracked = new Set(
 
 const trackedUnder = (prefix: string) => [...tracked].filter((p) => p.startsWith(prefix))
 
-describe('the back office is absent', () => {
+describeOss('the back office is absent', () => {
   it.each([
     ['app/admin/', 'admin console'],
     ['app/api/admin/', 'admin API'],
@@ -53,7 +64,7 @@ describe('the back office is absent', () => {
   })
 })
 
-describe('the product is still here', () => {
+describeOss('the product is still here', () => {
   it.each([
     'lib/entitlements/policy.ts',
     'lib/platform-controls/signup-slot.ts',
@@ -89,7 +100,7 @@ describe('the product is still here', () => {
   })
 })
 
-describe('Phase 7 has not happened', () => {
+describeOss('Phase 7 has not happened', () => {
   it('org and fleet surfaces are still public', () => {
     // Removing these here would be Phase 7 work done early and unannounced.
     expect(trackedUnder('app/api/org/').length).toBe(7)
@@ -111,7 +122,7 @@ describe('Phase 7 has not happened', () => {
   })
 })
 
-describe('db:seed on a public checkout', () => {
+describeOss('db:seed on a public checkout', () => {
   it('needs no billing seeder and no Plan row', () => {
     expect(tracked.has('prisma/seed-billing.ts')).toBe(false)
     expect(tracked.has('scripts/db-seed.ts')).toBe(true)
@@ -138,7 +149,7 @@ describe('db:seed on a public checkout', () => {
   })
 })
 
-describe('the Cloud-only environment template is gone', () => {
+describeOss('the Cloud-only environment template is gone', () => {
   const env = fs.readFileSync(path.join(ROOT, '.env.example'), 'utf8')
 
   it.each([
