@@ -37,13 +37,6 @@ tests/build-runs/build-run-service.test.ts
 tests/build-runs/hydration.test.ts
 tests/integration/mcp-oauth-flow.spec.ts
 
-# Added 2026-09-04 by the suite-accounting reconciliation. Same measurement as
-# every entry above: each FAILS against the unroutable placeholder and PASSES
-# against a real PostgreSQL (41/41, 8/8, 12/12 respectively, run individually).
-# They guard the billing cancellation and grace lifecycle, project data deletion
-# and the purge outbox, all shipped in the last four commits, and belonged to no
-# manifest.
-__tests__/billing/cancellation-and-grace.test.ts
 __tests__/projects/deletion-transaction.test.ts
 __tests__/projects/purge-outbox.test.ts
 

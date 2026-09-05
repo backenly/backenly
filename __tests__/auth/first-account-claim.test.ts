@@ -188,12 +188,26 @@ describe('first self-hosted operator admission', () => {
     expect(guard.status).toBe(403)
   })
 
-  it('does not relax anything on Cloud', async () => {
+  it('does not take the self-hosted bypass on Cloud', async () => {
     process.env.BACKENLY_EDITION = 'cloud'
 
-    // Syntactically invalid, so this is decided without a DNS lookup: the point
-    // is that the heuristics still RUN, not which verdict they reach.
-    const guard = await assertSignupAllowed('not-an-email')
-    expect(guard.ok).toBe(false)
+    // This used to assert that the heuristics still RUN by checking that a
+    // syntactically invalid address was refused. Phase 6 moved those heuristics
+    // to the private overlay, so a public checkout has none to run and the
+    // provider admits; the refusal is now a composed-Cloud property, checked
+    // where the implementation lives.
+    //
+    // What remains provable here, and what the test was really about, is that
+    // the first-operator exception is edition-gated: Cloud must not consult the
+    // user count and must not admit through that branch.
+    // With accounts already present, single-tenant is CLOSED and says so.
+    // Cloud must not reach that branch at all, whatever it then decides.
+    const cloud = await assertSignupAllowed('someone@acceptance.test')
+    expect(cloud.reason).not.toMatch(/BACKENLY_ALLOW_PUBLIC_SIGNUP/)
+
+    process.env.BACKENLY_EDITION = 'single-tenant'
+    const selfHosted = await assertSignupAllowed('someone@acceptance.test')
+    expect(selfHosted.ok).toBe(false)
+    expect(selfHosted.reason).toMatch(/BACKENLY_ALLOW_PUBLIC_SIGNUP/)
   })
 })

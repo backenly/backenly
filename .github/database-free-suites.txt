@@ -26,11 +26,11 @@
 
 __tests__/billing/model-backed-tools-are-charged.test.ts
 __tests__/integration/auth-flow.test.ts
-__tests__/lib/agent-ops.test.ts
+
 __tests__/lib/auth/middleware.test.ts
 __tests__/lib/auth/rbac.test.ts
 __tests__/lib/services/apiKeyUsage.test.ts
-__tests__/security/admin-step-up.test.ts
+
 __tests__/security/ai-data-access.test.ts
 __tests__/security/tenant-isolation.test.ts
 __tests__/suite1.basic-lifecycle.test.ts
@@ -39,7 +39,7 @@ tests/ai/cross-turn-referential.test.ts
 tests/ai/proposals.test.ts
 tests/ai/updated-at-trigger-diagnosis.test.ts
 tests/auth/email-eligibility.test.ts
-tests/auth/email-trust.test.ts
+
 tests/blueprints/blueprint-routing.test.ts
 tests/blueprints/plan-coverage.test.ts
 tests/blueprints/resume-routing.test.ts
@@ -57,16 +57,6 @@ tests/security-isolation.test.ts
 tests/security/webhook-security.test.ts
 tests/verification/execution.test.ts
 
-# Added 2026-09-04 by the suite-accounting reconciliation. These nine guard
-# recently shipped work (analytics posture, free-plan resolution, email outcome
-# categorisation, privacy-page integrity, the PGRST clock diagnostic and handler
-# response preservation, purge safety, API-key plaintext) and were in NO
-# manifest at all, so no job ran them and nothing could report them missing.
-# Each was measured against the unroutable placeholder URL and PASSES with no
-# database, which is what puts them here rather than in the integration job.
-__tests__/analytics/amplitude-config.test.tsx
-__tests__/analytics/amplitude-resilience.test.tsx
-__tests__/billing/free-plan-resolution.test.ts
 __tests__/email/send-outcome.test.ts
 __tests__/legal/privacy-integrity.test.ts
 __tests__/observability/pgrst-clock-diagnostic.test.ts
@@ -120,6 +110,12 @@ __tests__/edition/platform-controls-split.test.ts
 # compiles, passes every behavioural test and works in Cloud. This reads the
 # tracked import graph, which is the only thing that notices.
 __tests__/edition/public-private-boundary.test.ts
+
+# The shape of a public checkout after the Phase 6 ownership cut: the back
+# office is gone, the product is not, the Phase 7 surfaces are untouched, and
+# db:seed works with no billing seeder. A seventy-file removal can lose
+# something quietly in either direction; this is what notices.
+__tests__/edition/oss-surface.test.ts
 
 # README.md is the acceptance script for a self-hosted install, so it is checked
 # against the module bootstrap renders its prerequisite guidance from. Compares

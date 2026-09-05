@@ -5,7 +5,7 @@
 
 import bcrypt from 'bcryptjs'
 import { prisma } from '@/lib/db/prisma'
-import { resolveFreePlan } from '@/lib/billing'
+import { initializeAccountEntitlements } from '@/lib/entitlements'
 
 async function createDemoUser() {
   try {
@@ -40,20 +40,11 @@ async function createDemoUser() {
         }
       })
 
-      // Free subscription, resolved through the one canonical rule
-      // (SANDBOX, then legacy FREE). This used to look up FREE directly, which
-      // prisma/seed-billing.ts does not create, so the demo user was silently
-      // left with no subscription at all.
-      const freePlan = await resolveFreePlan()
-
-      await prisma.subscription.create({
-        data: {
-          userId: user.id,
-          planId: freePlan.id,
-          status: 'FREE'
-        }
-      })
-      console.log(`✅ ${freePlan.name} subscription created`)
+      // Entitle the account through the seam rather than resolving a Plan row
+      // here. A no-op in a public checkout, where there is nothing to bill;
+      // composed Cloud creates the free subscription it always did.
+      await initializeAccountEntitlements(user.id)
+      console.log('✅ Account entitlements initialised')
 
       console.log('✅ Demo user created successfully')
     }

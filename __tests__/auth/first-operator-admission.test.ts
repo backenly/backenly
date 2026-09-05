@@ -139,13 +139,27 @@ describe('first self-hosted operator admission', () => {
     expect(r.ok).toBe(false)
   }, 120_000)
 
-  it('does not relax anything on Cloud, even with an empty user table', async () => {
+  it('does not take the self-hosted bypass on Cloud, even with an empty user table', async () => {
     await sql(`DELETE FROM users`)
 
-    // Cloud has no first-operator concept, so the heuristics decide. This
-    // address is refused for deliverability — the very check being skipped
-    // above — which is what shows the bypass is edition-gated rather than global.
-    const r = admits('operator@acceptance.test', 'cloud')
-    expect(r.ok).toBe(false)
+    // What this proves in THIS repository is that the bypass is edition-gated:
+    // with zero users, single-tenant admits via the first-operator branch and
+    // Cloud does not take that branch at all. It reaches the admission seam
+    // instead.
+    //
+    // It used to assert the Cloud VERDICT (refused for deliverability), which
+    // it can no longer do here: Phase 6 moved the email heuristics to the
+    // private overlay, so a public checkout has no scoring to run and the
+    // provider admits. Asserting a refusal would now be asserting the absence
+    // of code this repository deliberately does not contain. The verdict is a
+    // composed-Cloud property and is checked in the private CI, which has the
+    // implementation to check.
+    const selfHosted = admits('operator@acceptance.test', 'single-tenant')
+    expect(selfHosted.ok).toBe(true)
+    expect(selfHosted.out).toMatch(/GUARD_OK=true/)
+
+    // Cloud is decided by the seam, not by the first-operator exception.
+    const cloud = admits('operator@acceptance.test', 'cloud')
+    expect(cloud.out).not.toMatch(/first[- ]operator/i)
   }, 120_000)
 })

@@ -44,7 +44,7 @@
  * Run: npx tsx scripts/verify-analytics-posture.ts   (wired into `npm run build`)
  */
 
-import { readFileSync, readdirSync, statSync } from 'fs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'fs'
 import { join, extname, sep } from 'path'
 
 const ROOT = join(__dirname, '..')
@@ -180,53 +180,72 @@ for (const dir of SCAN_DIRS) {
 }
 
 // ── 3 & 4. The initializer's own capture options ─────────────────────────────
+//
+// The initializer itself is Backenly's, and Phase 6 moved it to the private
+// Cloud overlay. These two checks moved with it, into the composed-Cloud CI
+// that has the component to check. Running them here would either fail on
+// every public checkout or, worse, be silently skipped and report a posture
+// nobody verified.
+//
+// Checks 1 and 2 above deliberately did NOT move. They are the load-bearing
+// ones and they are about THIS repository: with no session-replay package in
+// package.json or the lockfile, and no initAll call site anywhere in the tree,
+// replay cannot be switched on by any amount of configuration in either
+// edition. That is a property of the dependency graph, not of one component,
+// so it belongs to whichever repo owns the dependencies. That is this one.
 
-const initializer = stripComments(readFileSync(join(ROOT, INITIALIZER), 'utf8'))
+if (existsSync(join(ROOT, INITIALIZER))) {
+  const initializer = stripComments(readFileSync(join(ROOT, INITIALIZER), 'utf8'))
 
-if (/autocapture\s*:\s*(true|false)\b/.test(initializer)) {
-  fail(
-    `${INITIALIZER}: autocapture is a boolean. The SDK short-circuits every ` +
-      `capability gate on a boolean, enabling elementInteractions, ` +
-      `networkTracking, frustrationInteractions, webVitals and ` +
-      `performanceTracking. Pass an object with each option stated.`,
+  if (/autocapture\s*:\s*(true|false)/.test(initializer)) {
+    fail(
+      `${INITIALIZER}: autocapture is a boolean. The SDK short-circuits every ` +
+        `capability gate on a boolean, enabling elementInteractions, ` +
+        `networkTracking, frustrationInteractions, webVitals and ` +
+        `performanceTracking. Pass an object with each option stated.`,
+    )
+  }
+
+  if (/sessionReplay/.test(initializer)) {
+    fail(`${INITIALIZER}: mentions sessionReplay`)
+  }
+
+  // Every option that must be present AND false. Absent is not good enough: the
+  // SDK's defaults are upstream and can change, and an option that is merely
+  // omitted gives a reader no evidence the choice was made on purpose.
+  const MUST_BE_DISABLED = [
+    'attribution',
+    'elementInteractions',
+    'formInteractions',
+    'fileDownloads',
+    'frustrationInteractions',
+    'networkTracking',
+    'webVitals',
+    'performanceTracking',
+  ]
+
+  // Whitespace-insensitive without needing an escape-heavy regex: collapse the
+  // source once, then look for the literal `option:false`.
+  const compact = initializer.split(/\s+/).join('')
+
+  for (const option of MUST_BE_DISABLED) {
+    if (!compact.includes(`${option}:false`)) {
+      fail(`${INITIALIZER}: ${option} must be stated explicitly as false`)
+    }
+  }
+
+  // The two we do collect, so that a silent removal is also caught — this gate
+  // describes the agreed posture in both directions.
+  const MUST_BE_ENABLED = ['pageViews', 'sessions']
+  for (const option of MUST_BE_ENABLED) {
+    if (!compact.includes(`${option}:true`)) {
+      fail(`${INITIALIZER}: ${option} is no longer enabled — intended, or a mistake?`)
+    }
+  }
+} else {
+  console.log(
+    `  (${INITIALIZER} is not in this checkout — the initializer checks run in composed Cloud)`,
   )
-}
-
-if (/sessionReplay/.test(initializer)) {
-  fail(`${INITIALIZER}: mentions sessionReplay`)
-}
-
-// Every option that must be present AND false. Absent is not good enough: the
-// SDK's defaults are upstream and can change, and an option that is merely
-// omitted gives a reader no evidence the choice was made on purpose.
-const MUST_BE_DISABLED = [
-  'attribution',
-  'elementInteractions',
-  'formInteractions',
-  'fileDownloads',
-  'frustrationInteractions',
-  'networkTracking',
-  'webVitals',
-  'performanceTracking',
-]
-
-// Whitespace-insensitive without needing an escape-heavy regex: collapse the
-// source once, then look for the literal `option:false`.
-const compact = initializer.split(/\s+/).join('')
-
-for (const option of MUST_BE_DISABLED) {
-  if (!compact.includes(`${option}:false`)) {
-    fail(`${INITIALIZER}: ${option} must be stated explicitly as false`)
-  }
-}
-
-// The two we do collect, so that a silent removal is also caught — this gate
-// describes the agreed posture in both directions.
-const MUST_BE_ENABLED = ['pageViews', 'sessions']
-for (const option of MUST_BE_ENABLED) {
-  if (!compact.includes(`${option}:true`)) {
-    fail(`${INITIALIZER}: ${option} is no longer enabled — intended, or a mistake?`)
-  }
 }
 
 // ── Report ───────────────────────────────────────────────────────────────────
@@ -238,8 +257,10 @@ if (failures.length > 0) {
   process.exit(1)
 }
 
+const initializerChecked = existsSync(join(ROOT, INITIALIZER))
 console.log(
-  `✓ Analytics posture: no session-replay dependency · no initAll call site · ` +
-    `autocapture stated as an object · ${MUST_BE_ENABLED.length} option(s) on, ` +
-    `${MUST_BE_DISABLED.length} explicitly off`,
+  `✓ Analytics posture: no session-replay dependency · no initAll call site` +
+    (initializerChecked
+      ? ` · autocapture stated as an object · capture options explicitly stated`
+      : ` · initializer not in this checkout (checked in composed Cloud)`),
 )

@@ -131,6 +131,13 @@ describe('cloud with no Subscription row', () => {
       currentPlan: 'NONE',
       message: 'No active subscription found',
     })
-    expect(mockPrisma.subscription.findFirst).toHaveBeenCalled()
+
+    // Reached WITHOUT a database read, which is new and correct. Phase 6 moved
+    // the commercial implementation to the private overlay, so a public
+    // checkout has nothing to look a subscription up in and the provider says
+    // so directly. The decision is what matters and it is unchanged: an
+    // unsubscribed Cloud account is still refused, and the self-host fix did
+    // not become a free pass.
+    expect(mockPrisma.subscription.findFirst).not.toHaveBeenCalled()
   })
 })

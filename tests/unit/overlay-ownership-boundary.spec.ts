@@ -163,8 +163,14 @@ describe('MOVE 1: quota kernel is public', () => {
 describe('MOVE 2: admin auth primitives', () => {
   const ADMIN_AUTH = ['requireFounder.ts', 'adminStepUp.ts', 'adminSigning.ts']
 
-  it('are wholly under lib/admin/auth', () => {
-    for (const f of ADMIN_AUTH) expect(tracked.has(`lib/admin/auth/${f}`)).toBe(true)
+  it('left public tracking with the rest of the back office', () => {
+    // Phase 4 moved these under lib/admin/auth so the whole directory could go
+    // private in one piece. Phase 6 did that, so the assertion is now the
+    // opposite one: nothing admin remains publicly tracked. What Phase 4 was
+    // really guarding is the line below, that they never drifted back into
+    // lib/auth alongside the product's own authentication.
+    for (const f of ADMIN_AUTH) expect(tracked.has(`lib/admin/auth/${f}`)).toBe(false)
+    expect([...tracked].filter(p => p.startsWith('lib/admin/'))).toEqual([])
   })
 
   it('no longer sit in lib/auth', () => {
@@ -219,8 +225,12 @@ describe('MOVE 3: trust and admission intelligence', () => {
     'lib/platform-controls/account-standing.ts': 'lib/trust/account-standing.ts',
   } as const
 
-  it('is wholly under lib/trust', () => {
-    for (const f of TRUST) expect(tracked.has(`lib/trust/${f}`)).toBe(true)
+  it('left public tracking with the rest of the back office', () => {
+    // Same story as MOVE 2. Phase 4 gathered the scoring under lib/trust so it
+    // could leave in one piece; Phase 6 removed it. The two files Phase 6
+    // reclassified are asserted separately below, because those did NOT leave.
+    for (const f of TRUST) expect(tracked.has(`lib/trust/${f}`)).toBe(false)
+    expect([...tracked].filter(p => p.startsWith('lib/trust/'))).toEqual([])
   })
 
   it('no longer sits in lib/auth', () => {
@@ -325,29 +335,69 @@ describe('overlay-allowlist.json', () => {
   it('declares exactly the intended private destinations', () => {
     expect([...allowlist.private].sort()).toEqual(
       [
+        '__tests__/analytics/amplitude-config.test.tsx',
+        '__tests__/analytics/amplitude-resilience.test.tsx',
+        '__tests__/billing/cancellation-and-grace.test.ts',
+        '__tests__/billing/free-plan-resolution.test.ts',
+        '__tests__/lib/agent-ops.test.ts',
+        '__tests__/security/admin-step-up.test.ts',
         'app/admin/**',
         'app/api/admin/**',
         'app/api/billing/**',
+        'app/api/cron/grace-check/route.ts',
+        'app/api/cron/process-grace-periods/route.ts',
         'app/api/org/**',
         'app/api/referral/**',
+        'app/api/users/route.ts',
         'app/app/billing/**',
         'app/app/referral/**',
+        'components/app/AmplitudeAnalytics.tsx',
         'components/cloud/**',
         'config/cloud/**',
         'lib/admin/**',
+        'lib/analytics/**',
         'lib/billing/**',
         'lib/cloud/**',
         'lib/org/**',
+        'lib/platform/**',
         'lib/trust/**',
         'prisma/seed-billing.ts',
         'scripts/fleet/**',
+        'tests/auth/email-trust.test.ts',
       ].sort(),
     )
   })
 
-  it('is whole-directory ownership, with one named-file exception', () => {
+  it('uses a named file only where the directory is mixed', () => {
+    // Whole-directory ownership is the default because it means the overlay
+    // only ever ADDS files. Every exception below is a private file living in
+    // a directory that also holds public product, where claiming the directory
+    // would drag public code private with it:
+    //
+    //   app/api/users/         [userId] and stats are public product routes
+    //   app/api/cron/          ten of its routes are self-host jobs
+    //   components/app/        public product components
+    //   __tests__/billing/     model-backed-tools-are-charged tests a public contract
+    //   __tests__/lib/, __tests__/security/, tests/auth/, __tests__/analytics/
+    //                          public suites live alongside
+    //   prisma/                schema.prisma is public and single-copy
     const files = allowlist.private.filter(p => !p.endsWith('/**'))
-    expect(files).toEqual(['prisma/seed-billing.ts'])
+    expect(files.sort()).toEqual(
+      [
+      '__tests__/analytics/amplitude-config.test.tsx',
+      '__tests__/analytics/amplitude-resilience.test.tsx',
+      '__tests__/billing/cancellation-and-grace.test.ts',
+      '__tests__/billing/free-plan-resolution.test.ts',
+      '__tests__/lib/agent-ops.test.ts',
+      '__tests__/security/admin-step-up.test.ts',
+      'app/api/cron/grace-check/route.ts',
+      'app/api/cron/process-grace-periods/route.ts',
+      'app/api/users/route.ts',
+      'components/app/AmplitudeAnalytics.tsx',
+      'prisma/seed-billing.ts',
+      'tests/auth/email-trust.test.ts',
+      ].sort(),
+    )
   })
 
   it('owns no public product code', () => {
@@ -498,7 +548,11 @@ describe('verify-overlay-boundary', () => {
   it('fails when an overlay file would overwrite a tracked public file', () => {
     // The whole point of the boundary: the public repository must stay a
     // truthful description of what Cloud runs.
-    const run = withOverlay({ 'lib/billing/index.ts': '// clobbered\n' }, dir =>
+    // lib/org/index.ts is the right example now: allowlisted for the overlay
+    // AND still tracked publicly, because Phase 7 has not moved it yet. A path
+    // Phase 6 already removed would test nothing, since the overlay is meant
+    // to provide those.
+    const run = withOverlay({ 'lib/org/index.ts': '// clobbered\n' }, dir =>
       runVerifier(['--overlay', dir]),
     )
     expect(run.status).toBe(1)
