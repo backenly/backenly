@@ -538,13 +538,19 @@ jobs:
           # prerequisite step issues one, and starting it here would only prove
           # that it restarts in a loop.
           docker compose -f docker-compose.dev.yml up -d postgres redis
-          for i in $(seq 1 60); do
-            if docker compose -f docker-compose.dev.yml exec -T postgres pg_isready -U backenly_user >/dev/null 2>&1; then
-              echo "postgres healthy after ${i}s"; break
+          # Waits on a real query, not pg_isready. The entrypoint runs initdb
+          # against a TEMPORARY server on the unix socket, so a socket
+          # pg_isready reports ready seconds before the real server exists and
+          # the next step then fails with "rejecting connections".
+          for i in $(seq 1 90); do
+            if docker compose -f docker-compose.dev.yml exec -T postgres \
+                 psql -h 127.0.0.1 -U backenly_user -d backenly -tAc 'select 1' >/dev/null 2>&1; then
+              echo "postgres accepting queries after ${i}s"; break
             fi
             sleep 1
           done
-          docker compose -f docker-compose.dev.yml exec -T postgres pg_isready -U backenly_user
+          docker compose -f docker-compose.dev.yml exec -T postgres \
+            psql -h 127.0.0.1 -U backenly_user -d backenly -tAc 'select 1'
 
       # README step 3.
       - name: db:generate and db:push
@@ -603,8 +609,20 @@ jobs:
       - name: PostgREST is reachable and serving the workspace schema
         run: |
           set -euo pipefail
-          curl -fsS -o /dev/null -w "  postgrest / -> %{http_code}\n" http://127.0.0.1:3002/
           PID=$(grep -E '^BACKENLY_PROJECT_ID=' .env | cut -d= -f2)
+
+          # Ask PostgREST for the WORKSPACE schema, not just for a 200 on the
+          # default one. Accept-Profile is how a schema is selected, and one that
+          # is missing from the served list answers PGRST106 — the exact "data
+          # plane is up but serves nothing" state this job exists to catch. A
+          # healthy container proves only that a process is listening.
+          code=$(curl -s -o pgrst.json -w '%{http_code}' \
+            -H "Accept-Profile: workspace_${PID}" http://127.0.0.1:3002/)
+          echo "  postgrest workspace_${PID} -> ${code}"
+          if grep -q PGRST106 pgrst.json; then
+            echo "  PGRST106: the workspace schema is not exposed"; cat pgrst.json; exit 1
+          fi
+          [ "$code" = "200" ] || { cat pgrst.json; exit 1; }
           # The registry writes the served-schema list onto the authenticator
           # role. If registration silently did nothing, this is empty and every
           # table would answer PGRST106.

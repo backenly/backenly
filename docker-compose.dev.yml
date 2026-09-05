@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # PostgreSQL Database
   postgres:
@@ -34,7 +32,11 @@ services:
       # without further grants.
       - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-backenly_user}"]
+      # -h 127.0.0.1 is load-bearing. During initdb the entrypoint runs a
+      # TEMPORARY server on the unix socket only, so a socket pg_isready
+      # reports ready, the container is marked healthy, and the server then
+      # restarts. TCP is up only for the real one.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${POSTGRES_USER:-backenly_user}"]
       interval: 10s
       timeout: 5s
       retries: 5
