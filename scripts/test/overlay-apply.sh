@@ -79,6 +79,49 @@ expect_tracked_unchanged() {
 echo "overlay-apply: $ROOT"
 
 # ---------------------------------------------------------------------------
+# THE COLLISION FIXTURE
+# ---------------------------------------------------------------------------
+#
+# A collision needs a path that is BOTH allowlisted for the overlay AND tracked
+# publicly. In the real repository that combination is exactly what the split
+# exists to eliminate: Phase 4 had 73 such files, Phase 6 left 14, and Phase 7
+# left none. So this case has already lost its subject twice. It used
+# lib/billing/index.ts until Phase 6 moved billing, then lib/org/index.ts until
+# Phase 7 moved organizations, and on both occasions the overlay file became
+# perfectly legal and the case silently stopped testing a collision at all
+# while still reporting "ok".
+#
+# It therefore builds its own public checkout: a real git repository holding
+# apply-overlay.sh, the ownership verifier it calls, an ownership map claiming
+# one path, and a COMMITTED file at that path. Nothing about it depends on the
+# real repository's ownership decisions, so no future phase can hollow it out.
+#
+# node_modules is symlinked rather than copied because apply-overlay.sh runs
+# the verifier through tsx. A host that cannot make symlinks skips this case,
+# and CI sets OVERLAY_APPLY_REQUIRE=1 so that skip is a failure there.
+mkfixture() {
+  local dir="$WORK/fixture"
+  rm -rf "$dir"
+  mkdir -p "$dir/scripts" "$dir/lib/cloud"
+
+  cp "$ROOT/scripts/apply-overlay.sh" "$dir/scripts/apply-overlay.sh"
+  cp "$ROOT/scripts/verify-overlay-boundary.ts" "$dir/scripts/verify-overlay-boundary.ts"
+  ln -s "$ROOT/node_modules" "$dir/node_modules" 2>/dev/null || return 1
+
+  printf '%s
+' '{ "version": 1, "private": ["lib/cloud/**"] }' > "$dir/overlay-allowlist.json"
+  printf '%s
+' 'export const FIXTURE = 1' > "$dir/lib/cloud/collision-fixture.ts"
+  printf '%s
+' 'node_modules' > "$dir/.gitignore"
+
+  git -C "$dir" init -q
+  git -C "$dir" add -A -- .gitignore overlay-allowlist.json scripts lib
+  git -C "$dir" -c user.email=fixture@test.invalid -c user.name=fixture commit -qm fixture
+  echo "$dir"
+}
+
+# ---------------------------------------------------------------------------
 echo
 echo "1. an empty overlay is a no-op"
 # ---------------------------------------------------------------------------
@@ -127,16 +170,41 @@ echo "4. ATOMIC REFUSAL: one bad file means nothing is copied"
 # refusal raised AFTER the verifier has passed, which is the stage where a
 # write-as-you-go implementation would actually leak a file.
 reset_tree
-SRC="$(mkoverlay atomic)"
-put "$SRC/overlay/lib/cloud/aaa-good.ts" 'export const GOOD = 1'
-# lib/org/index.ts is allowlisted for the overlay AND still tracked publicly,
-# because Phase 7 has not moved it. lib/billing was the example until Phase 6
-# removed it, at which point an overlay file there became perfectly legal and
-# this case silently stopped testing a collision at all.
-put "$SRC/overlay/lib/org/index.ts" '// would clobber public source'
-if bash "$APPLY" "$SRC" >/dev/null 2>&1; then bad "collision should have been refused"; else ok "collision refused (non-zero exit)"; fi
-if [ ! -e "$ROOT/lib/cloud/aaa-good.ts" ]; then ok "NO PARTIAL COPY: the valid file was not written"
-else bad "PARTIAL COPY: a valid file was written before the refusal"; fi
+FIXTURE="$(mkfixture)" || FIXTURE=""
+if [ -z "$FIXTURE" ]; then
+  skip "collision refusal (this host cannot create the fixture symlink)"
+else
+  SRC="$(mkoverlay atomic)"
+  put "$SRC/overlay/lib/cloud/aaa-good.ts" 'export const GOOD = 1'
+  # Allowlisted for the overlay AND committed in the fixture repository, so the
+  # verifier passes it and the tracked-file preflight is what refuses.
+  put "$SRC/overlay/lib/cloud/collision-fixture.ts" '// would clobber public source'
+
+  if bash "$FIXTURE/scripts/apply-overlay.sh" "$SRC" >"$WORK/collision.log" 2>&1; then
+    bad "collision should have been refused"
+  else
+    ok "collision refused (non-zero exit)"
+  fi
+
+  # The refusal must be the ADD-ONLY one. An overlay rejected for some other
+  # reason -- a malformed map, a missing directory -- would also exit non-zero
+  # and would tell us nothing about collisions.
+  if grep -q "would overwrite a tracked public file: lib/cloud/collision-fixture.ts" "$WORK/collision.log"; then
+    ok "refused for the right reason, naming the colliding path"
+  else
+    bad "refusal did not name the tracked-file collision"
+    cat "$WORK/collision.log"
+  fi
+
+  if [ ! -e "$FIXTURE/lib/cloud/aaa-good.ts" ]; then ok "NO PARTIAL COPY: the valid file was not written"
+  else bad "PARTIAL COPY: a valid file was written before the refusal"; fi
+
+  if [ -z "$(git -C "$FIXTURE" status --porcelain --untracked-files=no)" ]; then
+    ok "collision fixture: tracked public files unchanged"
+  else
+    bad "collision fixture: TRACKED PUBLIC FILES CHANGED"
+  fi
+fi
 expect_tracked_unchanged "atomic refusal"
 
 # ---------------------------------------------------------------------------

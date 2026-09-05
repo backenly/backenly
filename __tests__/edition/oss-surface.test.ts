@@ -6,9 +6,9 @@
  * leaves quietly that should have stayed, or stays quietly that should have
  * left. Both are invisible in a diff of seventy files.
  *
- * So this asserts the SHAPE of the public tree: the back office is gone, the
- * product is not, and the Phase 7 surfaces are still here because Phase 7 has
- * not run.
+ * So this asserts the SHAPE of the public tree: the back office is gone
+ * (Phase 6), the organization and fleet control plane is gone (Phase 7), and
+ * the product is still here.
  *
  * These are OSS contracts, and they are only meaningful in a checkout with no
  * Cloud overlay applied. Composed Cloud restores every file this suite asserts
@@ -35,6 +35,20 @@ const tracked = new Set(
 )
 
 const trackedUnder = (prefix: string) => [...tracked].filter((p) => p.startsWith(prefix))
+
+/**
+ * A file with its comments blanked.
+ *
+ * These assertions are about what the code DOES. Several of the modules
+ * below explain in prose what used to live in them and why it left, and a
+ * raw-text `not.toMatch` would read that history as the thing itself.
+ */
+function code(rel: string): string {
+  return fs
+    .readFileSync(path.join(ROOT, rel), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '')
+}
 
 describeOss('the back office is absent', () => {
   it.each([
@@ -99,25 +113,79 @@ describeOss('the product is still here', () => {
   })
 })
 
-describeOss('Phase 7 has not happened', () => {
-  it('org and fleet surfaces are still public', () => {
-    // Removing these here would be Phase 7 work done early and unannounced.
-    expect(trackedUnder('app/api/org/').length).toBe(7)
-    expect(tracked.has('lib/org/index.ts')).toBe(true)
-    expect(tracked.has('components/cloud/OrgSwitcher.tsx')).toBe(true)
-    expect(trackedUnder('scripts/fleet/').length).toBe(5)
+describeOss('the org and fleet control plane is absent', () => {
+  it.each([
+    ['app/api/org/', 'organization APIs'],
+    ['lib/org/', 'organization implementation'],
+    ['components/cloud/', 'Cloud-only UI'],
+    ['scripts/fleet/', 'fleet operations tooling'],
+    ['lib/fleet/', 'fleet orchestration'],
+    ['app/app/members/', 'members page'],
+    ['app/app/invite/', 'invite acceptance page'],
+  ])('%s is no longer tracked (%s)', (prefix) => {
+    expect(trackedUnder(prefix)).toEqual([])
   })
 
-  it('the transition list holds exactly the Phase 7 remainder', () => {
-    const allowlist = JSON.parse(fs.readFileSync(path.join(ROOT, 'overlay-allowlist.json'), 'utf8'))
-    const remaining: string[] = allowlist.transition.grandfathered
+  it('the project access route left, and its per-project siblings stayed', () => {
+    // app/api/projects/[id] is a MIXED directory: one route is team management
+    // and roughly seventy are per-project product. Claiming the directory would
+    // have taken the product with it.
+    expect(tracked.has('app/api/projects/[id]/access/route.ts')).toBe(false)
+    expect(tracked.has('app/api/projects/[id]/route.ts')).toBe(true)
+    expect(tracked.has('app/api/projects/[id]/ai-functions/route.ts')).toBe(true)
+    expect(tracked.has('app/api/projects/[id]/audit-logs/route.ts')).toBe(true)
+  })
 
-    expect(remaining).toHaveLength(14)
-    // Every survivor must be an org, fleet or Cloud-UI path. Anything else
-    // means a Phase 6 file was left behind rather than moved.
-    for (const p of remaining) {
-      expect(p).toMatch(/^(app\/api\/org\/|lib\/org\/|components\/cloud\/|scripts\/fleet\/)/)
-    }
+  it('the public project route stayed, and stayed thin', () => {
+    // Explicit architecture: this route is public in both editions. What left
+    // is the Cloud logic inside it, not the route.
+    expect(tracked.has('app/api/projects/route.ts')).toBe(true)
+    const src = code('app/api/projects/route.ts')
+    expect(src).toMatch(/getProjectLifecycle/)
+    // No organization attachment, no inline provisioning, no fleet listing.
+    expect(src).not.toMatch(/ensurePersonalOrg/)
+    expect(src).not.toMatch(/project\.create/)
+    expect(src).not.toMatch(/project\.findMany/)
+  })
+
+  it('the transition list is empty, so nothing is grandfathered any more', () => {
+    const allowlist = JSON.parse(fs.readFileSync(path.join(ROOT, 'overlay-allowlist.json'), 'utf8'))
+    expect(allowlist.transition.grandfathered).toEqual([])
+  })
+
+  it('no public module imports the organization layer', () => {
+    const offenders = [...tracked]
+      .filter((p) => /\.tsx?$/.test(p))
+      .filter((p) => /from '(@\/lib\/org|\.\.?\/org)'/.test(fs.readFileSync(path.join(ROOT, p), 'utf8')))
+    expect(offenders).toEqual([])
+  })
+})
+
+describeOss('the per-project product stayed', () => {
+  it('per-project PostgREST registration is still public', () => {
+    // The cut line: registering ONE project schema is product, and the autonomy
+    // healer auto-fixes schema_not_registered with it. Asking the Project table
+    // which of every registered schema is still live is fleet, and moved.
+    const src = code('lib/postgrest/registration.ts')
+    expect(src).toMatch(/export async function ensureSchemaRegistered/)
+    expect(src).toMatch(/export async function unregisteredSchemas/)
+    expect(src).not.toMatch(/export async function reconcileAllSchemas/)
+    expect(src).not.toMatch(/export async function registeredOrphans/)
+  })
+
+  it('per-project DB storage measurement is still public', () => {
+    const src = code('lib/usage/db-storage.ts')
+    expect(src).toMatch(/export async function snapshotProjectDbStorage/)
+    // The sweep stayed too, but it enumerates nothing: it asks FleetScheduler.
+    expect(src).toMatch(/getFleetScheduler/)
+    expect(src).not.toMatch(/project\.findMany/)
+  })
+
+  it('the autonomy cron fans out without knowing how to find the fleet', () => {
+    const src = code('app/api/cron/autonomy/route.ts')
+    expect(src).toMatch(/getFleetScheduler\(\)\.activeTargets/)
+    expect(src).toMatch(/runReconciler/)
+    expect(src).not.toMatch(/project\.findMany/)
   })
 })
 

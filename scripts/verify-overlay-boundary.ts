@@ -17,18 +17,21 @@
  *
  * -- Why there is a transition mode ------------------------------------------
  *
- * The allowlist is written in Phase 4, but the subsystems it names do not move
- * private until Phase 6 (back office) and Phase 7 (org + fleet control plane).
- * So on the day this script lands, 73 public files sit under paths the overlay
- * will one day own. That is expected, not a violation.
+ * The allowlist was written in Phase 4, but the subsystems it names did not
+ * move private until Phase 6 (back office) and Phase 7 (org + fleet control
+ * plane). On the day this script landed, 73 public files sat under paths the
+ * overlay would one day own. That was expected, not a violation. Phase 6 took
+ * it to 14 and Phase 7 to 0.
  *
  * Enforcing strict no-collision immediately would have exactly one way to go
  * green: move all of admin, billing and org private right now, collapsing three
  * phases into one. So the default mode grandfathers that set BY NAME, from
  * `transition.grandfathered`, and fails on anything NEW. The list may shrink,
- * never grow. Phase 6/7 delete files and prune entries; when it empties, CI
- * switches to --strict and the transition key is deleted. The verifier does not
- * need to be rewritten for that to happen.
+ * never grow. Phases 6 and 7 deleted the files and pruned the entries. The list
+ * is now empty, which is already strictly enforced: any NEW public file under a
+ * private-owned path fails, and a stale entry cannot be re-added for a file
+ * that is not there. Moving CI to --strict and deleting the transition key is
+ * Phase 8, with its own acceptance; the verifier needs no rewrite for it.
  *
  * An exact file list, not a count: Phase 1 established that "the same number of
  * failures" is not evidence that the same things failed.
@@ -37,7 +40,8 @@
  *
  *   verify-overlay-boundary.ts
  *       Transition mode (what CI runs today). Allowlist shape + no NEW public
- *       file under a private-owned path.
+ *       file under a private-owned path. Since Phase 7 emptied the grandfather
+ *       list, this is equivalent to --strict in effect, but not yet in name.
  *
  *   verify-overlay-boundary.ts --strict
  *       Phase 8 mode. Ignores the grandfather list entirely: ANY public file
@@ -91,8 +95,12 @@ const SHARED_PUBLIC_FILES = [
  * be privately owned no matter how convenient it would be.
  *
  * lib/autonomy and lib/postgrest are here because the PER-PROJECT reconciler
- * and the data plane are OSS. Fleet fan-out ACROSS projects is control plane
- * and lives in scripts/fleet, which is allowlisted.
+ * and the data plane are OSS. Fan-out ACROSS projects is control plane and
+ * lives behind FleetScheduler, whose Cloud provider is in the overlay, with the
+ * fleet modules and scripts under the allowlisted lib/fleet and scripts/fleet.
+ *
+ * lib/edition is here because the seams themselves are public: the overlay
+ * supplies PROVIDERS behind them and never replaces the contract.
  */
 const PUBLIC_CORE_PREFIXES = [
   'lib/ai/brain/',

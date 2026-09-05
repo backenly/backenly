@@ -136,11 +136,24 @@ if [ ! -e "$ROOT/lib/cloud" ]; then ok "no overlay applied on mismatch"; else ba
 echo
 echo "E. cloud with an overlay that would clobber public source aborts"
 # ---------------------------------------------------------------------------
+# The subject here is the DEPLOY: an overlay that would modify public source
+# must stop the composition before the build starts, and must leave the working
+# tree exactly as it found it.
+#
+# The target is a tracked public file that no phase is going to move. It used to
+# be lib/billing/index.ts, then lib/org/index.ts, and each ownership cut turned
+# the overlay file legal and left this case quietly asserting nothing. lib/usage
+# holds the per-project storage measurement primitive, which is product and
+# stays.
+#
+# Which of apply-overlay's two refusal stages fires is not the point at this
+# level; the add-only stage specifically is proven in overlay-apply.sh case 4,
+# against a fixture repository built for it.
 reset_tree
 CLOBBER="$(make_private_repo clobber "$PUBLIC_SHA" \
   "lib/cloud/manifest.json=$VALID_MANIFEST" \
   "lib/cloud/extension.ts=export const CLOUD = true" \
-  "lib/org/index.ts=// clobbered")"
+  "lib/usage/db-storage.ts=// clobbered")"
 if run_compose cloud "file://$CLOBBER" "$WORK/clobber-dir"; then
   bad "clobbering overlay should have aborted"
 else
@@ -148,7 +161,7 @@ else
 fi
 if [ ! -e "$ROOT/lib/cloud/extension.ts" ]; then ok "atomic: the valid file was not applied either"
 else bad "PARTIAL COMPOSITION: a valid overlay file was applied"; fi
-if git -C "$ROOT" diff --quiet -- lib/org/index.ts; then ok "public source untouched"; else bad "PUBLIC SOURCE MODIFIED"; fi
+if git -C "$ROOT" diff --quiet -- lib/usage/db-storage.ts; then ok "public source untouched"; else bad "PUBLIC SOURCE MODIFIED"; fi
 
 # ---------------------------------------------------------------------------
 echo

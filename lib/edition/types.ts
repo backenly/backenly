@@ -21,10 +21,12 @@ export type Edition = 'single-tenant' | 'cloud'
 /**
  * The caller's authority over a project, not merely whether they can see it.
  *
- * Mirrors OrgRole in lib/org, and is declared HERE rather than imported from
- * there because the organization layer is Cloud control plane and moves to the
- * private repository, while this seam stays public. Single-tenant has no
- * organizations and reports OWNER for every authenticated operator.
+ * Mirrors the Cloud OrgRole, and is declared HERE rather than imported from the
+ * organization layer because that layer is Cloud control plane and now lives in
+ * the private repository, while this seam stays public. Declaring it here is
+ * what lets public code reason about authority without depending on a module it
+ * does not ship. Single-tenant has no organizations and reports OWNER for every
+ * authenticated operator.
  */
 export type ProjectRole = 'OWNER' | 'ADMIN' | 'DEVELOPER' | 'VIEWER'
 

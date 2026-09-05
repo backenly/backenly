@@ -212,6 +212,11 @@ export async function registerSchemaByName(schema: string): Promise<Registration
  * Every workspace schema that exists in Postgres but is missing from the
  * PostgREST registry.
  *
+ * A pure catalog read: it compares information_schema against PostgREST own
+ * exposed list and never consults the Project table, so it stays public and
+ * works identically on a one-project deployment. Deciding which of the results
+ * belong to a LIVE project is the fleet question, and that moved.
+ *
  * This is the probe that did not exist. `danglingRegistrations` asks the
  * opposite question (registered but absent), which catches an outage that takes
  * down every tenant at once — loud, and already covered. This one catches a
@@ -232,73 +237,6 @@ export async function unregisteredSchemas(): Promise<string[]> {
 }
 
 /**
- * Schemas that ARE registered but whose project no longer exists.
- *
- * ── The third state ─────────────────────────────────────────────────────────
- *
- * Two states were already covered: registered-but-absent (wedges the schema
- * cache for every tenant — loud, has a probe and an event trigger) and
- * exists-but-unregistered (per-project silent death — the one that shipped).
- *
- * This is the third, and it was invisible to both. The schema exists, so the
- * dangling probe is satisfied. It is registered, so the unregistered probe is
- * satisfied. But the `Project` row is gone, which means PostgREST is serving a
- * deleted project's schema.
- *
- * Found on production: `workspace_ce18214a` — deleted project, still in the
- * exposed list, still holding 10 end-user records with their password hashes.
- * Not reachable in practice (a deleted project's API keys cascade-delete, so
- * nothing can authenticate for it, and `users` is revoked from the client roles
- * anyway) — but "unreachable because of a chain of other facts" is not the same
- * as "not exposed", and it was in the list that the PGRST106 error used to leak.
- *
- * Unregistering is non-destructive and fully reversible: it removes the schema
- * from PostgREST's exposed list and touches no row. The DATA question — a
- * deleted project's users retained indefinitely — is separate, destructive, and
- * deliberately left to a human.
- */
-export async function registeredOrphans(): Promise<
-  Array<{ schema: string; projectId: string; tables: string[]; rows: number }>
-> {
-  const listRows = await prisma.$queryRawUnsafe<Array<{ list: string | null }>>(
-    `SELECT public.backenly_pgrst_current_schemas() AS list`,
-  )
-  const registered = (listRows[0]?.list ?? '').split(',').filter(Boolean)
-  if (registered.length === 0) return []
-
-  const ids = registered.map(s => s.replace(/^workspace_/, ''))
-  const live = new Set(
-    (await prisma.project.findMany({ where: { id: { in: ids } }, select: { id: true } })).map(p => p.id),
-  )
-
-  const out: Array<{ schema: string; projectId: string; tables: string[]; rows: number }> = []
-  for (const schema of registered) {
-    const projectId = schema.replace(/^workspace_/, '')
-    if (live.has(projectId)) continue
-
-    // Report how much data is being retained. "An empty shell" and "ten
-    // people's credentials" warrant very different urgency, and an operator
-    // deciding whether to drop needs to know which one this is.
-    const tables = await prisma.$queryRawUnsafe<Array<{ table_name: string }>>(
-      `SELECT table_name FROM information_schema.tables
-        WHERE table_schema = $1 AND table_type = 'BASE TABLE'`,
-      schema,
-    )
-    let rows = 0
-    for (const t of tables) {
-      const r = await prisma
-        .$queryRawUnsafe<Array<{ n: number }>>(
-          `SELECT count(*)::int AS n FROM "${schema}"."${t.table_name}"`,
-        )
-        .catch(() => [{ n: 0 }])
-      rows += r[0]?.n ?? 0
-    }
-    out.push({ schema, projectId, tables: tables.map(t => t.table_name), rows })
-  }
-  return out
-}
-
-/**
  * Remove a schema from PostgREST's exposed list. Non-destructive — no row is
  * read or written, and re-registering restores it exactly.
  */
@@ -308,60 +246,16 @@ export async function unregisterSchema(schema: string): Promise<void> {
 }
 
 /**
- * Register every workspace schema that is missing one AND belongs to a live
- * project.
+ * Note that a schema was just registered, so the short-lived skip cache knows.
  *
- * ── Why orphans are skipped rather than registered ──────────────────────────
- *
- * Production carries workspace schemas whose `Project` row is gone — projects
- * deleted without their schema being dropped. Registering one would publish a
- * deleted project's tables through the data plane. Nothing could reach them
- * today (a deleted project has no API keys, and the gateway derives the schema
- * from an authenticated projectId), but "currently unreachable" is a much weaker
- * property than "not exposed", and this function exists precisely because
- * something that should have been exposed silently was not. Being wrong in the
- * other direction is worse.
- *
- * They are reported instead: orphaned schemas are a real cleanup task, and one
- * that should be a deliberate DROP rather than a side effect of a repair run.
- *
- * Per-schema failures are collected rather than thrown — one project with a
- * broken schema must not stop the rest from being repaired.
+ * Exported for the fleet reconciler, which lives in the private overlay and
+ * registers schemas in bulk. Without this its repairs would be invisible to the
+ * cache and the very next `ensureSchemaRegistered` for the same schema would
+ * re-register it. The cache stays private to this module: a caller can record a
+ * registration but cannot read, clear or forge one.
  */
-export async function reconcileAllSchemas(): Promise<{
-  checked: number
-  repaired: string[]
-  failed: Array<{ schema: string; error: string }>
-  orphaned: string[]
-}> {
-  const missing = await unregisteredSchemas()
-  const repaired: string[] = []
-  const failed: Array<{ schema: string; error: string }> = []
-  const orphaned: string[] = []
-
-  const ids = missing.map(s => s.replace(/^workspace_/, ''))
-  const live = new Set(
-    ids.length
-      ? (await prisma.project.findMany({ where: { id: { in: ids } }, select: { id: true } }))
-          .map(p => p.id)
-      : [],
-  )
-
-  for (const schema of missing) {
-    if (!live.has(schema.replace(/^workspace_/, ''))) {
-      orphaned.push(schema)
-      continue
-    }
-    try {
-      await prisma.$executeRawUnsafe(`SELECT public.backenly_pgrst_register_schema($1)`, schema)
-      recentlyRegistered.set(schema, Date.now() + REGISTER_TTL_MS)
-      repaired.push(schema)
-    } catch (err) {
-      failed.push({ schema, error: err instanceof Error ? err.message : String(err) })
-    }
-  }
-
-  return { checked: missing.length, repaired, failed, orphaned }
+export function recordRecentlyRegistered(schema: string): void {
+  recentlyRegistered.set(schema, Date.now() + REGISTER_TTL_MS)
 }
 
 /** Test seam. */

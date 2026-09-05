@@ -16,9 +16,9 @@
  * Returning no targets here would be different: it would silently switch OFF
  * every scheduled pass in CI, in local development, and in any public checkout
  * running with the edition unset. Autonomy would report itself enabled and heal
- * nothing, which is the precise failure mode that went unnoticed in production
- * for thirteen days and is why scripts/fleet/autonomy-fleet-check.ts exists. A
- * seam must not be able to disable the product by being absent.
+ * nothing, which is the precise failure mode that ran unnoticed in production
+ * for thirteen days. A seam must not be able to disable the product by being
+ * absent.
  *
  * So the fallback enumerates the projects in ITS OWN database, which is what
  * this code has always done. What moved to the overlay is the Cloud fleet:

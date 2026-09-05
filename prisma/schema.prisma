@@ -1274,7 +1274,7 @@ model ReferralGrant {
 
 // ─── Organizations (Phase 6 — team accounts) ────────────────────────────────
 // A platform-level account that owns projects and (org-based) billing. Every
-// user gets one personal Organization lazily (lib/org). Teams are formed by
+// user gets one personal Organization lazily. Teams are formed by
 // inviting other users as members with a role. Access + billing resolve through
 // the org; the change is additive — a solo user's personal org behaves exactly
 // like today's owner-only model.
