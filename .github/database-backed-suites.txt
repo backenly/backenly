@@ -97,3 +97,9 @@ __tests__/auth/first-account-claim.test.ts
 # PostgREST authenticates with. Roles are CLUSTER-WIDE, so this suite uses a
 # throwaway authenticator and its own database.
 __tests__/bootstrap/postgrest-roles-idempotency.test.ts
+
+# Single-tenant ownership: THE project is created before anyone signs up, so it
+# starts owner-less and must adopt the first operator. Runs the real script
+# against its own database, because the failure was a state the database was
+# allowed to sit in.
+__tests__/bootstrap/single-tenant-ownership.test.ts

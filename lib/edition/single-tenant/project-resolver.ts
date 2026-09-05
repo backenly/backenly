@@ -153,6 +153,24 @@ export const singleTenantProjectResolver: ProjectResolver = {
     }
   },
 
+  /**
+   * THE project, or nothing at all before bootstrap has run.
+   *
+   * Deliberately not filtered by ownership. A self-hosted deployment has one
+   * project and every account on it is an operator, so an ownership filter here
+   * showed the operator an empty dashboard whenever the project had been
+   * created before they signed up — which is every fresh install.
+   */
+  async accessibleProjectsWhere(_userId: string): Promise<Record<string, unknown>> {
+    try {
+      return { id: await theProjectId() }
+    } catch {
+      // Not bootstrapped, or ambiguous. An empty list is the honest answer for
+      // a listing; the errors still surface on the paths that resolve a project.
+      return { id: { in: [] as string[] } }
+    }
+  },
+
   async resolveTrusted(projectId, reason) {
     if (!reason || !reason.trim()) {
       throw new Error('resolveTrusted requires a written reason: it bypasses authorization')

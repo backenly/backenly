@@ -12,8 +12,10 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
+
 import { requireAuth } from '@/lib/auth/middleware'
+import { getProjectResolver } from '@/lib/edition'
+import { ProjectResolutionError } from '@/lib/edition/types'
 
 export interface ValidatedProjectRequest {
   projectId: string
@@ -21,7 +23,12 @@ export interface ValidatedProjectRequest {
   project: {
     id: string
     name: string
-    userId: string
+    /**
+     * Null until an operator exists to own it. A self-hosted deployment
+     * bootstraps THE project before anyone has signed up, so callers must not
+     * assume this is set.
+     */
+    userId: string | null
   }
 }
 
@@ -53,41 +60,41 @@ export async function validateProjectAccess(
     )
   }
   
-  // Step 3: Verify project exists and user has access — owner OR a member of
-  // the project's organization (Phase 6). The org clause is additive: it matches
-  // nothing for org-less projects or non-members, so owner access is unchanged.
-  // Project-scoped members (Pro+): the org clause requires `restricted: false`,
-  // so a restricted member only passes via the explicit projectMembers grant —
-  // mirroring GET /api/projects and verifyProjectAccess.
-  const project = await prisma.project.findFirst({
-    where: {
-      id: projectId,
-      OR: [
-        { userId: user.userId },
-        { organization: { members: { some: { userId: user.userId, restricted: false } } } },
-        { projectMembers: { some: { userId: user.userId } } },
-      ],
-    },
-    select: {
-      id: true,
-      name: true,
-      userId: true,
-    },
-  })
-  
-  if (!project) {
-    console.error(`❌ Project access denied: userId=${user.userId}, projectId=${projectId}`)
-    throw NextResponse.json(
-      {
-        error: 'Project not found',
-        message: 'Project does not exist or you do not have access',
-        code: 'PROJECT_ACCESS_DENIED',
-        projectId,
-      },
-      { status: 403 }
-    )
+  // Step 3: ask the edition whether this caller may reach this project.
+  //
+  // This used to be a fourth hand-written copy of the ownership clause, and it
+  // is reached by 39 routes, so it decided access for most of the product. On a
+  // self-hosted deployment it was simply wrong: bootstrap creates THE project
+  // before anyone has signed up, so `Project.userId` is NULL, no clause matched,
+  // and the operator of a one-project install got 403 from their own MCP keys
+  // endpoint while other routes on the same project answered 200.
+  //
+  // Routing it through the resolver is what makes those answers agree. Cloud
+  // keeps the identical owner/organization/grant rule; single-tenant treats
+  // every authenticated account as the operator, which is what it already
+  // claimed to do everywhere else.
+  let project: { id: string; name: string; userId: string | null }
+  try {
+    const resolved = await getProjectResolver().resolveForUser(user.userId, projectId)
+    project = { id: resolved.id, name: resolved.name, userId: resolved.userId }
+  } catch (err) {
+    if (err instanceof ProjectResolutionError) {
+      console.error(`❌ Project access denied: userId=${user.userId}, projectId=${projectId}`)
+      throw NextResponse.json(
+        {
+          error: 'Project not found',
+          message: 'Project does not exist or you do not have access',
+          code: 'PROJECT_ACCESS_DENIED',
+          projectId,
+        },
+        { status: err.status === 400 ? 400 : 403 }
+      )
+    }
+    // Not an authorization answer — a dead database must not be reported as a
+    // denial, or an outage looks like a permissions bug.
+    throw err
   }
-  
+
   console.log(`✅ Project access validated: userId=${user.userId}, projectId=${projectId}, projectName=${project.name}`)
   
   return {

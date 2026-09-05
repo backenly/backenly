@@ -179,15 +179,46 @@ async function resolveOwnerId(): Promise<string | null> {
   return first?.id ?? null
 }
 
+/**
+ * THE project exists and, once an operator exists, belongs to them.
+ *
+ * A fresh install has no account — nobody has signed up yet — so the project is
+ * created owner-less and the deployment works fine that way. What was missing is
+ * the other half: nothing ever adopted the operator once they did sign up, so
+ * `Project.userId` stayed NULL forever and every path that keys off ownership
+ * quietly disagreed with every other one. On a real install that produced:
+ *
+ *   - `npm run bootstrap` CRASHING with exit 1 on the documented "sign up, then
+ *     rerun" step, because the anon key needs an owner to belong to
+ *   - GET /api/projects returning zero projects to the only account there is
+ *   - MCP key creation answering 403 to the operator of a one-project deployment
+ *
+ * Adoption is a conditional UPDATE rather than a read-then-write: `userId: null`
+ * in the WHERE means only an unowned project is ever claimed. So a second
+ * account cannot take ownership, a rerun cannot move it, and two bootstraps
+ * racing cannot disagree — the database decides, once.
+ */
 async function ensureProject(id: string, existed: boolean, ownerId: string | null): Promise<string> {
-  if (existed) {
-    step('project row', 'already present')
+  if (!existed) {
+    await prisma.project.create({
+      data: { id, name: 'Backenly', description: 'Self-hosted Backenly project', userId: ownerId },
+    })
+    step('project row', 'created')
     return id
   }
-  await prisma.project.create({
-    data: { id, name: 'Backenly', description: 'Self-hosted Backenly project', userId: ownerId },
-  })
-  step('project row', 'created')
+
+  if (ownerId) {
+    const adopted = await prisma.project.updateMany({
+      where: { id, userId: null },
+      data: { userId: ownerId },
+    })
+    if (adopted.count > 0) {
+      step('project row', 'repaired')
+      return id
+    }
+  }
+
+  step('project row', 'already present')
   return id
 }
 
@@ -319,7 +350,7 @@ async function ensureJwtSecret(projectId: string): Promise<void> {
   step('project jwt secret', before?.jwtSecret ? 'already present' : 'created')
 }
 
-async function ensureAnonKey(projectId: string): Promise<void> {
+async function ensureAnonKey(projectId: string, ownerId: string): Promise<void> {
   const project = await prisma.project.findUnique({ where: { id: projectId }, select: { anonKey: true } })
   if (project?.anonKey) return step('anon key', 'already present')
 
@@ -337,7 +368,16 @@ async function ensureAnonKey(projectId: string): Promise<void> {
         capabilities: ['database', 'auth', 'storage', 'functions'],
         serviceRole: false,
         projectId,
-        userId: (await prisma.project.findUnique({ where: { id: projectId }, select: { userId: true } }))!.userId!,
+        // The owner bootstrap already resolved, NOT a re-read of Project.userId.
+        //
+        // Re-reading it is what crashed the documented "sign up, then rerun"
+        // step on every fresh install: bootstrap creates the project before any
+        // account exists, so that column was NULL, and ApiKey.user is required.
+        // Prisma answered "Argument `user` is missing" and bootstrap exited 1.
+        // ensureProject adopts the operator now, so this is non-null by the time
+        // it runs, and passing it explicitly means this no longer depends on
+        // that having happened first.
+        userId: ownerId,
         rateLimit: 1000,
       },
     }),
@@ -406,7 +446,7 @@ async function main(): Promise<void> {
   await ensureWorkspaceSchema(id, ownerId)
   await ensurePostgrestRegistration(id)
   await ensureJwtSecret(id)
-  if (ownerId) await ensureAnonKey(id)
+  if (ownerId) await ensureAnonKey(id, ownerId)
   await ensureDirectAccessRoles(id)
 
   // Postcondition. If anything above created a second project this must fail

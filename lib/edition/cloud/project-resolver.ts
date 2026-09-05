@@ -79,6 +79,21 @@ export const cloudProjectResolver: ProjectResolver = {
     return loadProject(identity.projectId)
   },
 
+  /**
+   * Owner, unrestricted member of the project's organization, or an explicit
+   * project grant. Lifted verbatim out of GET /api/projects so that the listing
+   * rule lives beside the resolution rule instead of drifting from it.
+   */
+  async accessibleProjectsWhere(userId: string): Promise<Record<string, unknown>> {
+    return {
+      OR: [
+        { userId },
+        { organization: { members: { some: { userId, restricted: false } } } },
+        { projectMembers: { some: { userId } } },
+      ],
+    }
+  },
+
   async resolveTrusted(projectId, reason) {
     if (!reason || !reason.trim()) {
       throw new Error('resolveTrusted requires a written reason: it bypasses authorization')

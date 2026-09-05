@@ -157,4 +157,19 @@ export interface ProjectResolver {
   resolveForApiKey(identity: ApiKeyIdentity): Promise<ResolvedProject>
 
   resolveTrusted(projectId: string, reason: string): Promise<ResolvedProject>
+
+  /**
+   * A Prisma WHERE selecting every project this user may SEE in a list.
+   *
+   * Listing is a different question from resolving one project, and it was the
+   * one place still answering it with a hand-written clause. On a self-hosted
+   * deployment that clause required ownership, so the operator of a
+   * single-project install was shown ZERO projects while
+   * `GET /api/projects/<id>` on the very same project returned it. Two answers
+   * to one question, which is exactly what this seam exists to prevent.
+   *
+   * Returns a clause matching nothing when there is nothing to show, so a
+   * caller renders an empty list rather than handling an error.
+   */
+  accessibleProjectsWhere(userId: string): Promise<Record<string, unknown>>
 }

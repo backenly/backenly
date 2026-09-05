@@ -12,6 +12,7 @@ import { logEvent } from '@/lib/analytics/logger'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import { assertWritable } from '@/lib/platform/controls'
 import { assertAccountCanConsume } from '@/lib/auth/account-standing'
+import { getProjectResolver } from '@/lib/edition'
 import { ensureSchemaRegistered } from '@/lib/postgrest/registration'
 
 // Validation schemas
@@ -53,14 +54,13 @@ export const GET = withAuth(async (request: NextRequest, { user }) => {
     // user restricted in one org and org-wide in another resolves correctly.
     // ⚡ OPTIMIZATION: Use select instead of include to reduce queries
     // We already have user info from auth, no need to refetch it!
+    // Asked of the edition rather than hand-written here. This clause used to
+    // live inline, requiring ownership, which is correct for Cloud and wrong for
+    // a self-hosted deployment: bootstrap creates THE project before anyone has
+    // signed up, so the operator owned nothing and their dashboard listed zero
+    // projects while GET /api/projects/<id> returned that same project happily.
     const projects = await prisma.project.findMany({
-      where: {
-        OR: [
-          { userId: user.userId },
-          { organization: { members: { some: { userId: user.userId, restricted: false } } } },
-          { projectMembers: { some: { userId: user.userId } } },
-        ],
-      },
+      where: await getProjectResolver().accessibleProjectsWhere(user.userId),
       select: {
         id: true,
         name: true,
