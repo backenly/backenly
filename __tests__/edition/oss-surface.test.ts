@@ -181,6 +181,22 @@ describeOss('the per-project product stayed', () => {
     expect(src).not.toMatch(/project\.findMany/)
   })
 
+  it('no scheduled route enumerates projects without asking the scheduler', () => {
+    // The Phase 7 invariant, stated mechanically: the public product does not
+    // decide WHICH projects a background pass covers. A cron route may still
+    // read project rows -- several report names or storage -- but only for ids
+    // FleetScheduler handed it.
+    //
+    // Checked by import rather than by inspecting the `where`, because that is
+    // the part a future edit would forget. Adding a fan-out to a route that
+    // never imported the seam is the exact regression this catches.
+    const offenders = [...tracked]
+      .filter((p) => p.startsWith('app/api/cron/') && p.endsWith('.ts'))
+      .filter((p) => /project\.findMany/.test(code(p)))
+      .filter((p) => !/getFleetScheduler/.test(code(p)))
+    expect(offenders).toEqual([])
+  })
+
   it('the autonomy cron fans out without knowing how to find the fleet', () => {
     const src = code('app/api/cron/autonomy/route.ts')
     expect(src).toMatch(/getFleetScheduler\(\)\.activeTargets/)
