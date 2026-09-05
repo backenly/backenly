@@ -612,6 +612,8 @@ jobs:
           # because "ready" must not mean "silent about what is missing".
           grep -q "Optional, not installed" boot2.log || {
             echo "the optional piece was not reported at all"; exit 1; }
+          grep -q "database access is unavailable" boot2.log || {
+            echo "direct access was not reported as the missing optional piece"; exit 1; }
 
       - name: PostgREST is reachable and serving the workspace schema
         run: |
@@ -649,9 +651,15 @@ jobs:
           npm run bootstrap > boot3.log 2>&1
           cat boot3.log
           grep -q "Backenly is ready" boot3.log
-          if grep -q "Optional, not installed" boot3.log; then
-            echo "the advisory did not clear after installing it"; exit 1
+          # Only the DIRECT ACCESS advisory must clear. The anon-key one stays,
+          # because no human has signed up on a CI runner and a script cannot
+          # create an account. Asserting the whole block disappears would be
+          # asserting something untrue.
+          if grep -q "database access is unavailable" boot3.log; then
+            echo "the direct access advisory did not clear after installing it"; exit 1
           fi
+          grep -q "anon key" boot3.log || {
+            echo "the anon key advisory vanished; it should still be reported"; exit 1; }
           grep -q "direct access role" boot3.log || {
             echo "direct access roles were never provisioned"; exit 1; }
           echo "  direct access provisioned, advisory cleared"

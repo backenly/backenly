@@ -23,7 +23,8 @@
  *   PostgREST registered without this the whole /db/* plane answers PGRST106
  *   BackendGraph         the state the brain and autonomy reconcile against
  *   jwtSecret            per-project signing for end-user auth
- *   anonKey              the credential a frontend embeds
+ *   anonKey              the credential a frontend embeds, once an account
+ *                        exists to issue it against
  *
  * And what is NOT required for it to be ready:
  *
@@ -446,6 +447,21 @@ async function main(): Promise<void> {
     return
   }
 
+  // No account yet is the normal state of a fresh install, not a fault. A
+  // script cannot create one: somebody signs up in the dashboard, and only then
+  // can the anon key be issued against them.
+  //
+  // This used to print and `return`, so bootstrap exited 0 while refusing to say
+  // ready — exit 0 and "ready" have to mean the same thing or the exit code
+  // documents nothing. Rerunning after signup clears it, which is the same
+  // reconciler loop as every other step here.
+  if (!ownerId) {
+    advisory(
+      'no user account exists yet, so the anon key a frontend embeds is not issued',
+      'sign up in the dashboard, then rerun: npm run bootstrap',
+    )
+  }
+
   // Printed on the ready path too, because "ready" must not mean "silent about
   // what is missing". These do not change the exit code.
   if (advisories.length > 0) {
@@ -464,14 +480,6 @@ async function main(): Promise<void> {
     console.log(`    BACKENLY_EDITION=single-tenant`)
     console.log(`    BACKENLY_PROJECT_ID=${id}`)
   }
-  if (!ownerId) {
-    console.log('')
-    console.log('  No user account exists yet. Sign up, then rerun bootstrap to issue')
-    console.log('  the anon key your frontend embeds.')
-    console.log('')
-    return
-  }
-
   console.log('')
   console.log('  Backenly is ready.')
   console.log('')
