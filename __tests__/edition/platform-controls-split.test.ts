@@ -169,7 +169,7 @@ describe('signup admission: what a deployment decides for itself', () => {
 
   it('admits the first self-hosted operator', async () => {
     mockPrisma.user.count.mockResolvedValue(0)
-    await expect(assertSignupAllowed('operator@acceptance.test', '1.2.3.4')).resolves.toMatchObject({ ok: true })
+    await expect(assertSignupAllowed('operator@acceptance.test', '10.1.2.3')).resolves.toMatchObject({ ok: true })
   })
 
   it('closes registration after the first account', async () => {
@@ -230,9 +230,9 @@ describe('signup admission: what Cloud decides about a stranger', () => {
   })
 
   it('delegates to PlatformSignals once the public gates pass', async () => {
-    await assertSignupAllowed('stranger@example.com', '9.9.9.9')
+    await assertSignupAllowed('stranger@example.com', '10.9.9.9')
 
-    expect(mockAssessSignupAdmission).toHaveBeenCalledWith({ email: 'stranger@example.com', ip: '9.9.9.9' })
+    expect(mockAssessSignupAdmission).toHaveBeenCalledWith({ email: 'stranger@example.com', ip: '10.9.9.9' })
   })
 
   it('returns the private verdict unchanged', async () => {
