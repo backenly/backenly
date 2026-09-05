@@ -201,7 +201,23 @@ describe('MOVE 2: admin auth primitives', () => {
 // ---------------------------------------------------------------------------
 
 describe('MOVE 3: trust and admission intelligence', () => {
-  const TRUST = ['bot-defense.ts', 'email-trust.ts', 'email-eligibility.ts', 'account-standing.ts']
+  // Phase 4 put four files under lib/trust. Phase 6 then classified them by
+  // responsibility rather than by directory, and two legitimately left:
+  //
+  //   email-eligibility  -> lib/auth/signup-email-eligibility.ts
+  //        pure, deterministic, already in the browser bundle, and imported by
+  //        the public signup page. Client-safe validation, not intelligence.
+  //   account-standing   -> lib/platform-controls/account-standing.ts
+  //        suspension is an operator decision that public auth already enforces
+  //        in lib/auth/{middleware,server,session}; its untrusted branch is
+  //        inert in single-tenant because only Cloud scoring sets that level.
+  //
+  // What remains under lib/trust is the part that scores a stranger.
+  const TRUST = ['bot-defense.ts', 'email-trust.ts']
+  const LEFT_BY_CLASSIFICATION = {
+    'lib/auth/signup-email-eligibility.ts': 'lib/trust/email-eligibility.ts',
+    'lib/platform-controls/account-standing.ts': 'lib/trust/account-standing.ts',
+  } as const
 
   it('is wholly under lib/trust', () => {
     for (const f of TRUST) expect(tracked.has(`lib/trust/${f}`)).toBe(true)
@@ -212,18 +228,34 @@ describe('MOVE 3: trust and admission intelligence', () => {
   })
 
   it('is referenced by nothing at the old paths', () => {
-    expect(
-      trackedFilesMatching(/lib\/auth\/(bot-defense|email-trust|email-eligibility|account-standing)/),
-    ).toEqual([])
+    expect(trackedFilesMatching(/lib\/auth\/(bot-defense|email-trust)\./)).toEqual([])
+  })
+
+  it('the two reclassified files moved rather than being copied', () => {
+    // A copy would leave the public product depending on a module that is
+    // leaving, which is exactly what the reclassification was for.
+    for (const [now, before] of Object.entries(LEFT_BY_CLASSIFICATION)) {
+      expect(tracked.has(now)).toBe(true)
+      expect(tracked.has(before)).toBe(false)
+    }
   })
 
   it('keeps the single-tenant first-operator admission gate where it was', () => {
     // Phase 3's clean-machine acceptance turns on this exception staying
     // exactly as narrow as it was: single-tenant edition AND zero platform
-    // users. Phase 4 moved file paths, not admission policy.
-    const controls = fs.readFileSync(path.join(ROOT, 'lib/platform/controls.ts'), 'utf8')
-    expect(controls).toMatch(/@\/lib\/trust\/email-trust/)
-    expect(controls).toMatch(/single-tenant/)
+    // users. Phase 4 moved file paths; Phase 6 moved the gate into
+    // lib/platform-controls and handed only the SCORING to the private seam.
+    // The policy itself is unchanged and still public.
+    const admission = fs.readFileSync(path.join(ROOT, 'lib/platform-controls/signup-admission.ts'), 'utf8')
+    expect(admission).toMatch(/single-tenant|selfHostedRegistrationClosed/)
+    expect(admission).toMatch(/firstSelfHostedOperator/)
+    // The scoring is reached through the seam, never imported directly.
+    expect(admission).toMatch(/@\/lib\/platform-signals/)
+    expect(admission).not.toMatch(/@\/lib\/trust/)
+
+    const slot = fs.readFileSync(path.join(ROOT, 'lib/platform-controls/signup-slot.ts'), 'utf8')
+    expect(slot).toMatch(/BACKENLY_ALLOW_PUBLIC_SIGNUP/)
+    expect(slot).toMatch(/pg_advisory_xact_lock/)
   })
 })
 
