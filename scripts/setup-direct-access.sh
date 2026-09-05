@@ -4,8 +4,18 @@
 # ============================================================================
 # Idempotent companion to scripts/setup-direct-access.sql. Order matters:
 #   1. npm run db:push                (creates public.schema_drift_events)
-#   2. sudo -u postgres psql -d backenly -f scripts/setup-direct-access.sql
+#   2. bash scripts/install-sql.sh scripts/setup-direct-access.sql
 #   3. bash scripts/setup-direct-access.sh   (this file)
+#
+# Step 2 used to read `sudo -u postgres psql -d backenly -f <file>`. That failed
+# on any normal clone: Ubuntu home directories are 0750, so the postgres user
+# cannot traverse /home/<user> to reach the file, and psql exits "Permission
+# denied". install-sql.sh redirects the file on stdin instead, so the operator's
+# shell opens it. See scripts/lib/db-admin.sh.
+#
+# THIS script, unlike step 2, is genuinely local-only: it edits pg_hba.conf,
+# opens a firewall port and restarts the service, all on the database host. It
+# is not part of the Docker quickstart.
 #
 # Exposure model (deliberately narrow):
 #   • Postgres listens on all interfaces, BUT pg_hba only admits remote

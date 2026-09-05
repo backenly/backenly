@@ -350,7 +350,7 @@ async function ensureDirectAccessRoles(projectId: string): Promise<void> {
           (missingInstaller
             ? 'the privileged helpers are not installed.\n' +
               '    Run as a superuser, then rerun bootstrap:\n' +
-              '      psql -d <database> -f scripts/setup-direct-access.sql\n' +
+              `      ${DIRECT_ACCESS_PREREQUISITE.command}\n` +
               '    Everything else below is provisioned and the deployment is usable.'
             : message.split('\n')[0])
       )

@@ -118,7 +118,21 @@ it is a reconciler rather than an installer: rerunning it repairs whatever is
 missing and changes nothing else. You will run it at least twice, and that is
 the intended path, not a failure.
 
-Requires Node 20+, PostgreSQL 14+, and PostgREST. Docker covers the first two.
+**You install on the host:**
+
+- **Node.js 20+** — the app, the scripts and the CLI all run here, not in a
+  container
+- **Docker**, with Compose
+
+**The Compose stack provides:**
+
+- **PostgreSQL 15**, with `pg_stat_statements` preloaded
+- **Redis**
+- **PostgREST**, pinned — this is the `/db/*` data plane
+
+Docker does not provide Node. If you would rather run your own PostgreSQL or
+PostgREST, read [Bringing your own database](#bringing-your-own-database) first;
+the steps below describe the Compose path.
 
 > **Use a PostgreSQL cluster dedicated to this deployment.**
 >
@@ -127,7 +141,7 @@ Requires Node 20+, PostgreSQL 14+, and PostgREST. Docker covers the first two.
 > Backenly databases on one cluster therefore overwrite each other's
 > served-schema registry, and the loser's data plane answers `PGRST106` on every
 > table. This is a known limitation being redesigned, not something you can
-> configure around. A container or a separate instance is enough.
+> configure around. The Compose stack gives you a dedicated one.
 
 #### 1. Install
 
@@ -137,20 +151,25 @@ cd backenly
 npm install
 cp .env.example .env
 
-# A dedicated PostgreSQL + Redis, matching the defaults already in .env.example
 docker compose -f docker-compose.dev.yml up -d
 ```
+
+`postgrest` will restart in a loop until step 4 issues its password. That is
+expected, and it is deliberate that it serves nothing until then.
 
 Then set these in `.env`, adding any line the template does not already carry —
 today that is `BACKENLY_EDITION` and `BACKENLY_PROJECT_ID`:
 
 ```bash
-DATABASE_URL=postgresql://<role>:<password>@<host>:5432/<db>
 BACKENLY_EDITION=single-tenant   # the default is still `cloud`; it flips in a later release
 BACKENLY_PROJECT_ID=<uuid>       # any UUID, e.g. `uuidgen`
 JWT_SECRET=<openssl rand -hex 32>
+POSTGREST_JWT_SECRET=<openssl rand -hex 32>
 OPENAI_API_KEY=<your key>
 ```
+
+`DATABASE_URL` already matches the Compose stack, so leave it alone unless you
+changed `POSTGRES_USER` or `POSTGRES_PASSWORD`.
 
 `BACKENLY_PROJECT_ID` is the identity of this deployment and must never change
 afterwards: it names the `workspace_<uuid>` schema your tables live in. Bootstrap
@@ -158,20 +177,25 @@ refuses to run against a database that already holds a different one. You may
 leave it unset and pin the id bootstrap generates instead, but then step 4's
 command has to be copied from bootstrap's output rather than from here.
 
-`JWT_SECRET` signs every platform session; generate one per deployment.
-`OPENAI_API_KEY` powers planning and the autonomy loop. See
-[`.env.example`](.env.example) for the rest.
+`JWT_SECRET` signs every platform session. `POSTGREST_JWT_SECRET` is separate and
+must match the value Compose passes to PostgREST, because the gateway mints
+short-lived internal tokens with it. `OPENAI_API_KEY` powers planning and the
+autonomy loop. See [`.env.example`](.env.example) for the rest.
 
 #### 2. Tell the database which role Backenly connects as
 
-Only if the role in your `DATABASE_URL` is not literally `backenly_user`:
+**Skip this on the Compose path.** The stack already uses `backenly_user`, which
+is what the SQL defaults to.
+
+It applies only if you brought your own database and the role in your
+`DATABASE_URL` is something else, in which case run, as a superuser:
 
 ```bash
 psql -c "ALTER DATABASE <db> SET backenly.app_role = '<your role>'"
 ```
 
-Skipping it on a database whose role is `postgres` makes the next section fail
-with `role "backenly_user" does not exist`.
+Skipping it there makes the next section fail with
+`role "backenly_user" does not exist`.
 
 #### 3. Create the tables and bootstrap
 
@@ -192,13 +216,12 @@ itself. Its exit code is the state, and deployment automation should read it:
 
 #### 4. Install the prerequisites bootstrap cannot install itself
 
-These need a PostgreSQL superuser. Bootstrap prints this same list, with your
-real project id filled in; run what it prints.
+These reach the database as a superuser. Bootstrap prints this same list, with
+your real project id filled in; run what it prints.
 
 ```bash
 # 1. support objects: registry functions, DDL event triggers, and the
 #    anon / authenticated / service_role / backenly_authenticator roles.
-#    Uses PGDATABASE, which defaults to `backenly`.
 bash scripts/postgrest-install.sh
 
 # 2. passwords, role membership and the per-schema grants.
@@ -206,19 +229,32 @@ bash scripts/postgrest-install.sh
 #    not recoverable, and this command will not print it again.
 npx tsx scripts/setup-postgrest-roles.ts --project <PROJECT_ID> --apply
 
-# 3. optional. Only needed to hand out direct psql credentials to a project.
+# 3. put that password in .env as POSTGREST_AUTHENTICATOR_PASSWORD, then start
+#    the data plane. It has been restarting in a loop until now.
+docker compose -f docker-compose.dev.yml up -d postgrest
+
+# 4. optional. Only needed to hand out direct psql credentials to a project.
 #    Backenly is fully operational without it.
-psql -d <database> -f scripts/setup-direct-access.sql
+bash scripts/install-sql.sh scripts/setup-direct-access.sql
 ```
 
-That order is not arbitrary and cannot be collapsed into one command. The first
-command has to create the roles, because the event triggers it installs grant to
-them, and a `CREATE SCHEMA` that grants to a role nobody created aborts. The
-second grants per workspace schema, so it needs the schema that `npm run
-bootstrap` already created above. This is why bootstrap runs, reports NOT ready,
-and is rerun: it is a reconciler, and rerunning is the mechanism.
+Those scripts talk to PostgreSQL through one explicit mechanism, chosen by
+`BACKENLY_DB_ADMIN`, so the same command works wherever the database lives:
 
-Then start PostgREST against the connection string step 2 printed, and rerun:
+| `BACKENLY_DB_ADMIN` | how it connects |
+| --- | --- |
+| `docker` (default) | `psql` inside the Compose `postgres` service |
+| `url` | `psql "$BACKENLY_ADMIN_DATABASE_URL"` — any reachable database |
+| `local` | `sudo -u postgres psql` — a cluster installed on this host |
+
+That order is not arbitrary and cannot be collapsed into one command. The first
+has to create the roles, because the event triggers it installs grant to them,
+and a `CREATE SCHEMA` that grants to a role nobody created aborts. The second
+grants per workspace schema, so it needs the schema `npm run bootstrap` already
+created above. This is why bootstrap runs, reports NOT ready, and is rerun: it is
+a reconciler, and rerunning is the mechanism.
+
+Then rerun:
 
 ```bash
 npm run bootstrap
@@ -237,9 +273,22 @@ npm run dev                   # dashboard :3000 · runtime :3001
 in the dashboard, then run `npm run bootstrap` once more to issue the anon key
 your frontend embeds.
 
-#### pg_stat_statements
+#### Bringing your own database
 
-If you brought your own PostgreSQL rather than the Docker stack above, enable it:
+The Compose stack is the supported path. If you already operate PostgreSQL, or
+run PostgREST under your own service manager, the differences are:
+
+- Point `DATABASE_URL` and `DIRECT_URL` at your database, and do step 2 above.
+- Run the step 4 scripts with `BACKENLY_DB_ADMIN=url` and
+  `BACKENLY_ADMIN_DATABASE_URL` set to a superuser connection string, or with
+  `BACKENLY_DB_ADMIN=local` if PostgreSQL is on this machine.
+- Start your own PostgREST against the connection string step 4.2 prints, with
+  `POSTGREST_URL` in `.env` pointing at it and its JWT secret set to
+  `POSTGREST_JWT_SECRET`. Use the version pinned in
+  [`docker-compose.dev.yml`](docker-compose.dev.yml): PostgREST reads its
+  configuration out of the database, so a version difference changes what the
+  data plane serves.
+- Enable `pg_stat_statements` yourself:
 
 ```conf
 # postgresql.conf, then restart the server
@@ -252,7 +301,8 @@ CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
 It is how Backenly finds indexes that are missing by *measurement* — the columns
 Postgres is actually spending milliseconds filtering on — rather than only by
 schema shape. Without it that check reports itself as unchecked rather than
-passing, so nothing claims a guarantee it never evaluated.
+passing, so nothing claims a guarantee it never evaluated. The Compose stack sets
+it already.
 
 ## Connecting a coding agent
 

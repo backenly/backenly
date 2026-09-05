@@ -109,6 +109,18 @@ jobs:
       - name: One creation path for projects
         run: npx tsx scripts/verify-project-provisioning.ts
 
+      # An acceptance install on a clean Ubuntu 24.04 machine stopped here:
+      # `psql -f <path>` makes the postgres user open the file, and Ubuntu home
+      # directories are 0750, so a normal clone was unreadable. This builds that
+      # exact situation with two users and asserts the old form still fails.
+      # A jest test cannot do it — it needs POSIX permissions and a second user.
+      - name: SQL installs from a 0750 home directory
+        # REQUIRE=1 so a missing prerequisite fails here instead of skipping and
+        # leaving a green tick that checked nothing.
+        env:
+          SQL_FILE_ACCESS_REQUIRE: '1'
+        run: bash scripts/test/sql-file-access.sh
+
       # tests/unit is deliberately database-free so it runs on every push.
       # docs-install-command.spec.ts is the one that fails when public/llms.txt
       # and the MCP CLI parser drift apart — the defect that made the published
@@ -483,3 +495,136 @@ jobs:
       # --forceExit for the same Prisma-singleton reason as the probe suite.
       - name: Autonomy guards
         run: npx jest tests/core __tests__/autonomy --ci --runInBand --verbose --forceExit
+
+  # ── The documented self-host path, executed ────────────────────────────────
+  # Reading the README is not evidence that it works. Every self-host defect
+  # found so far — a rotated credential, a hardcoded application role, a
+  # fresh-cluster role deadlock, a quickstart that never reached a data plane,
+  # and a psql that could not read its own SQL under a 0750 home — was invisible
+  # to review and obvious the moment someone ran it.
+  #
+  # So this runs the quickstart the way the README writes it, on the Compose
+  # stack, up to a PostgREST that answers. MCP, end-user auth, storage and
+  # autonomy still need a real machine; everything before them no longer does.
+  self-host:
+    name: self-host quickstart
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+
+      # README step 1. `.env.example` already points DATABASE_URL at the Compose
+      # stack, so only the lines the README says to add are added here.
+      - name: Configure .env as the README directs
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+          {
+            echo "BACKENLY_EDITION=single-tenant"
+            echo "BACKENLY_PROJECT_ID=$(cat /proc/sys/kernel/random/uuid)"
+            echo "JWT_SECRET=$(openssl rand -hex 32)"
+            echo "POSTGREST_JWT_SECRET=$(openssl rand -hex 32)"
+          } >> .env
+
+      - name: docker compose up
+        run: |
+          set -euo pipefail
+          # postgrest is deliberately left down: it has no credential until the
+          # prerequisite step issues one, and starting it here would only prove
+          # that it restarts in a loop.
+          docker compose -f docker-compose.dev.yml up -d postgres redis
+          for i in $(seq 1 60); do
+            if docker compose -f docker-compose.dev.yml exec -T postgres pg_isready -U backenly_user >/dev/null 2>&1; then
+              echo "postgres healthy after ${i}s"; break
+            fi
+            sleep 1
+          done
+          docker compose -f docker-compose.dev.yml exec -T postgres pg_isready -U backenly_user
+
+      # README step 3.
+      - name: db:generate and db:push
+        run: npm run db:generate && npm run db:push
+
+      - name: bootstrap reports NOT ready, with exit 3
+        run: |
+          set -euo pipefail
+          set +e
+          npm run bootstrap > boot1.log 2>&1
+          code=$?
+          set -e
+          cat boot1.log
+          # 3 is the documented first-run outcome. 0 here would mean the
+          # prerequisites were somehow already met, which on a fresh stack would
+          # mean the check is not checking anything.
+          [ "$code" -eq 3 ] || { echo "expected exit 3, got $code"; exit 1; }
+
+      # README step 4, in order.
+      - name: install the support objects and the PostgREST roles
+        run: bash scripts/postgrest-install.sh
+
+      - name: issue the authenticator password and the per-schema grants
+        run: |
+          set -euo pipefail
+          PID=$(grep -E '^BACKENLY_PROJECT_ID=' .env | cut -d= -f2)
+          npx tsx scripts/setup-postgrest-roles.ts --project "$PID" --apply | tee roles.log
+          # The password is printed exactly once and is not recoverable, which is
+          # why it is captured here rather than regenerated.
+          PW=$(grep -oP 'postgres://backenly_authenticator:\K[^@]+' roles.log | head -1)
+          [ -n "$PW" ] || { echo "no authenticator password in the output"; exit 1; }
+          echo "POSTGREST_AUTHENTICATOR_PASSWORD=$PW" >> .env
+
+      - name: start the data plane
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose.dev.yml up -d postgrest
+          for i in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:3002/ 2>/dev/null; then
+              echo "postgrest answering after ${i}s"; break
+            fi
+            sleep 2
+          done
+
+      - name: bootstrap reports READY, with exit 0
+        run: |
+          set -euo pipefail
+          set +e
+          npm run bootstrap > boot2.log 2>&1
+          code=$?
+          set -e
+          cat boot2.log
+          [ "$code" -eq 0 ] || { echo "expected exit 0, got $code"; exit 1; }
+          grep -q "Backenly is ready" boot2.log || { echo "did not report ready"; exit 1; }
+
+      - name: PostgREST is reachable and serving the workspace schema
+        run: |
+          set -euo pipefail
+          curl -fsS -o /dev/null -w "  postgrest / -> %{http_code}\n" http://127.0.0.1:3002/
+          PID=$(grep -E '^BACKENLY_PROJECT_ID=' .env | cut -d= -f2)
+          # The registry writes the served-schema list onto the authenticator
+          # role. If registration silently did nothing, this is empty and every
+          # table would answer PGRST106.
+          SCHEMAS=$(docker compose -f docker-compose.dev.yml exec -T postgres \
+            psql -U backenly_user -d backenly -tAc \
+            'SELECT public.backenly_pgrst_current_schemas()' | tr -d '[:space:]')
+          echo "  served schemas: $SCHEMAS"
+          echo "$SCHEMAS" | grep -q "workspace_${PID}" || {
+            echo "workspace_${PID} is not registered"; exit 1; }
+
+      - name: a second bootstrap changes nothing
+        run: |
+          set -euo pipefail
+          npm run bootstrap > boot3.log 2>&1
+          cat boot3.log
+          grep -q "Backenly is ready" boot3.log
+          # The reconciler claim, asserted rather than described.
+          grep -q "created" boot3.log && { echo "a rerun created something"; exit 1; }
+          echo "  rerun created nothing"
+
+      - name: compose logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.dev.yml logs --tail=80

@@ -22,7 +22,7 @@ services:
       - -c
       - pg_stat_statements.max=10000
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-backenly}
+      POSTGRES_USER: ${POSTGRES_USER:-backenly_user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
       POSTGRES_DB: ${POSTGRES_DB:-backenly}
     ports:
@@ -34,7 +34,7 @@ services:
       # without further grants.
       - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-backenly}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-backenly_user}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -56,6 +56,48 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - backenly-dev-network
+
+  # PostgREST — the data plane. /db/* is served by this process, not by Next.
+  #
+  # Here because "Requires PostgREST" was the whole instruction: nothing in the
+  # repository installed it and there was no config to copy, so the documented
+  # quickstart could not produce a running data plane. An acceptance install on
+  # a clean Ubuntu machine got as far as bootstrap and stopped.
+  #
+  # Pinned to the version production runs. PostgREST reads schema-cache and role
+  # settings from the database, so a version drift between the two changes what
+  # the data plane will serve.
+  postgrest:
+    image: postgrest/postgrest:v14.15
+    container_name: backenly-postgrest-dev
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Connects as the authenticator, which is NOINHERIT and can do nothing
+      # except SET ROLE to anon / authenticated / service_role.
+      #
+      # The password does not exist yet on a first `up`: it is issued later by
+      # `setup-postgrest-roles.ts --apply`, which prints it once. Until it is put
+      # in .env this container restarts in a loop, which is the correct and
+      # visible behaviour — it must not serve anything before the role exists.
+      PGRST_DB_URI: postgres://backenly_authenticator:${POSTGREST_AUTHENTICATOR_PASSWORD:-unset}@postgres:5432/${POSTGRES_DB:-backenly}
+      PGRST_DB_ANON_ROLE: anon
+      # Must match POSTGREST_JWT_SECRET in .env. The gateway mints short-lived
+      # internal tokens with it; PostgREST holds exactly one JWT secret and so
+      # cannot validate Backenly's per-project end-user tokens directly.
+      PGRST_JWT_SECRET: ${POSTGREST_JWT_SECRET:-}
+      PGRST_SERVER_PORT: 3000
+      # Deliberately NOT setting PGRST_DB_SCHEMAS. The served-schema list lives
+      # in `ALTER ROLE backenly_authenticator SET pgrst.db_schemas`, written by
+      # backenly_pgrst_register_schema, and in-database config is what lets a
+      # newly provisioned project appear without editing this file.
+    ports:
+      # POSTGREST_URL in .env.example is http://127.0.0.1:3002.
+      - "${POSTGREST_PORT:-3002}:3000"
     networks:
       - backenly-dev-network
 

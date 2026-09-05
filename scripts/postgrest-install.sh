@@ -3,35 +3,42 @@
 # PHASE 3 — install every database-side piece the PostgREST data plane needs.
 #
 # Idempotent: safe to re-run after a deploy, and re-running is the intended way
-# to pick up changes to the SQL. Installs FUNCTIONS AND TRIGGERS ONLY — it does
-# not register a schema, does not grant a project anything, and does not move
-# any traffic. Cutover is a separate, explicit step.
+# to pick up changes to the SQL. Installs FUNCTIONS, TRIGGERS AND THE POSTGREST
+# ROLES ONLY — it does not register a schema, does not grant a project anything,
+# and does not move any traffic. Cutover is a separate, explicit step.
 #
-# Must run as a PostgreSQL superuser: the registry writes role-level settings
-# (ALTER ROLE ... SET), and event triggers can only be created by a superuser.
+# Must reach the database as a PostgreSQL superuser: the registry writes
+# role-level settings (ALTER ROLE ... SET), and event triggers can only be
+# created by a superuser.
 #
-#   bash scripts/postgrest-install.sh
+# WHERE the database is, is chosen explicitly. This script used to hardcode
+# `sudo -u postgres`, which meant the documented Docker quickstart could not run
+# its own prerequisite step, and a clone under a 0750 home directory failed with
+# "Permission denied" because the postgres OS user cannot traverse /home/<user>.
+# See scripts/lib/db-admin.sh.
+#
+#   bash scripts/postgrest-install.sh                        # Compose (default)
+#   BACKENLY_DB_ADMIN=url \
+#     BACKENLY_ADMIN_DATABASE_URL=postgresql://... \
+#     bash scripts/postgrest-install.sh                      # any reachable DB
+#   BACKENLY_DB_ADMIN=local bash scripts/postgrest-install.sh # local cluster
 #
 set -euo pipefail
 
-DB="${PGDATABASE:-backenly}"
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/sql"
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/db-admin.sh
+. "$DIR/lib/db-admin.sh"
 
-run() {
-  local file="$1"
-  echo "  → $(basename "$file")"
-  # ON_ERROR_STOP is the point of this wrapper. Without it psql reports failures
-  # on stderr and still exits 0, so a broken install looks like a successful one
-  # — and the first symptom would be a missing trigger during an outage.
-  sudo -u postgres psql -v ON_ERROR_STOP=1 -q -d "$DB" -f "$file"
-}
+db_admin_check
 
 echo
-echo "Installing PostgREST support objects into '$DB'"
+echo "Installing PostgREST support objects via $(db_admin_describe)"
 echo
 
-run "$DIR/postgrest-schema-registry.sql"
-run "$DIR/postgrest-ddl-sync.sql"
+for f in postgrest-schema-registry.sql postgrest-ddl-sync.sql; do
+  echo "  → $f"
+  db_admin_sql_file "$DIR/sql/$f"
+done
 
 echo
 echo "Verifying:"
@@ -48,7 +55,7 @@ for fn in \
   backenly_pgrst_prepare_schema \
   backenly_pgrst_reload
 do
-  if [ "$(sudo -u postgres psql -tAqd "$DB" -c "SELECT count(*) FROM pg_proc WHERE proname = '$fn'")" = "0" ]; then
+  if [ "$(db_admin_psql -tAqc "SELECT count(*) FROM pg_proc WHERE proname = '$fn'" | tr -d '[:space:]')" = "0" ]; then
     echo "  MISSING function: $fn"
     missing=1
   fi
@@ -56,8 +63,19 @@ done
 
 for trg in backenly_pgrst_schema_drop backenly_pgrst_ddl_sync
 do
-  if [ "$(sudo -u postgres psql -tAqd "$DB" -c "SELECT count(*) FROM pg_event_trigger WHERE evtname = '$trg'")" = "0" ]; then
+  if [ "$(db_admin_psql -tAqc "SELECT count(*) FROM pg_event_trigger WHERE evtname = '$trg'" | tr -d '[:space:]')" = "0" ]; then
     echo "  MISSING event trigger: $trg"
+    missing=1
+  fi
+done
+
+# The roles the event triggers GRANT to. A trigger that grants to a role nobody
+# created aborts the CREATE SCHEMA that fired it, which is what deadlocked a
+# fresh cluster before the SQL began creating these itself.
+for role in anon authenticated service_role backenly_authenticator
+do
+  if [ "$(db_admin_psql -tAqc "SELECT count(*) FROM pg_roles WHERE rolname = '$role'" | tr -d '[:space:]')" = "0" ]; then
+    echo "  MISSING role: $role"
     missing=1
   fi
 done
@@ -70,12 +88,10 @@ if [ "$missing" -ne 0 ]; then
   exit 1
 fi
 
-echo "  7 functions + 2 event triggers present."
+echo "  7 functions + 2 event triggers + 4 roles present."
 echo
-echo "  Registered schemas: $(sudo -u postgres psql -tAqd "$DB" -c 'SELECT public.backenly_pgrst_current_schemas()')"
+echo "  Registered schemas: $(db_admin_psql -tAqc 'SELECT public.backenly_pgrst_current_schemas()' | tr -d '[:space:]')"
 echo
-echo "Next — cut a project over (migrates policies AND flips the flag in one"
-echo "transaction; dry run first):"
-echo "  npx tsx scripts/cutover-postgrest.ts --project <id>"
-echo "  npx tsx scripts/cutover-postgrest.ts --project <id> --apply"
+echo "Next — give the roles passwords and per-schema grants:"
+echo "  npx tsx scripts/setup-postgrest-roles.ts --project <id> --apply"
 echo

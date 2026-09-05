@@ -72,18 +72,30 @@ export function postgrestPrerequisiteSteps(projectId: string): PrerequisiteStep[
       // triggers grant to them: on a cluster that lacks them, the CREATE SCHEMA
       // those triggers fire on aborts, and step 2 cannot run until that schema
       // exists. Installing them here is what breaks that cycle.
+      //
+      // No `sudo -u postgres` and no bare psql alternative any more. Both
+      // assumed a local cluster, so the documented Docker quickstart could not
+      // run its own prerequisite, and under Ubuntu's 0750 home directories the
+      // postgres user could not even read the file. scripts/lib/db-admin.sh
+      // takes the mode explicitly instead.
       note: 'install the support objects, which also creates the PostgREST roles',
       command: 'bash scripts/postgrest-install.sh',
-      alternative: 'psql -f scripts/sql/postgrest-schema-registry.sql, then postgrest-ddl-sync.sql',
+      alternative: 'BACKENLY_DB_ADMIN=url BACKENLY_ADMIN_DATABASE_URL=postgresql://... bash scripts/postgrest-install.sh',
     },
     {
       note: 'passwords, role membership and the per-schema grants',
       command: `npx tsx scripts/setup-postgrest-roles.ts --project ${projectId} --apply`,
     },
     {
-      // No command: the binary, its config file and its service manager are the
-      // operator's, and inventing one here would be guessing at their machine.
-      note: 'start PostgREST against the connection string step 2 prints',
+      // This step used to have no command, because the binary and its config
+      // were the operator's problem. That was the defect: "requires PostgREST"
+      // is not an installation path, nothing in the repo obtained it, and there
+      // was no config to copy, so an acceptance install reached this line and
+      // stopped. The Compose stack now ships a pinned PostgREST, and the only
+      // thing it is missing on a first run is the password step 2 just printed.
+      note: 'put the password from step 2 in .env as POSTGREST_AUTHENTICATOR_PASSWORD, then start the data plane',
+      command: 'docker compose -f docker-compose.dev.yml up -d postgrest',
+      alternative: 'point your own PostgREST at that connection string, with POSTGREST_URL matching',
     },
   ]
 }
@@ -98,7 +110,10 @@ export function postgrestPrerequisiteSteps(projectId: string): PrerequisiteStep[
  */
 export const DIRECT_ACCESS_PREREQUISITE: PrerequisiteStep = {
   note: 'privileged role helpers, for handing out direct database credentials',
-  command: 'psql -d <database> -f scripts/setup-direct-access.sql',
+  // Through install-sql.sh rather than a raw `psql -f`, for the same reason as
+  // above: the raw form only worked against a local cluster whose postgres user
+  // could read the operator's home directory.
+  command: 'bash scripts/install-sql.sh scripts/setup-direct-access.sql',
 }
 
 /** Every command in the chain, in order. The list the README is checked against. */
