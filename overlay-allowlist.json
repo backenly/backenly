@@ -21,6 +21,7 @@
     "__tests__/analytics/amplitude-resilience.test.tsx",
     "__tests__/billing/cancellation-and-grace.test.ts",
     "__tests__/billing/free-plan-resolution.test.ts",
+    "__tests__/cloud/**",
     "__tests__/lib/agent-ops.test.ts",
     "__tests__/security/admin-step-up.test.ts",
     "app/admin/**",

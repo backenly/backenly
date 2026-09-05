@@ -339,6 +339,7 @@ describe('overlay-allowlist.json', () => {
         '__tests__/analytics/amplitude-resilience.test.tsx',
         '__tests__/billing/cancellation-and-grace.test.ts',
         '__tests__/billing/free-plan-resolution.test.ts',
+        '__tests__/cloud/**',
         '__tests__/lib/agent-ops.test.ts',
         '__tests__/security/admin-step-up.test.ts',
         'app/admin/**',
@@ -364,6 +365,7 @@ describe('overlay-allowlist.json', () => {
         'prisma/seed-billing.ts',
         'scripts/fleet/**',
         'tests/auth/email-trust.test.ts',
+        'tests/core/autonomy-entitlements-are-seeded.test.ts',
       ].sort(),
     )
   })
@@ -381,21 +383,23 @@ describe('overlay-allowlist.json', () => {
     //   __tests__/lib/, __tests__/security/, tests/auth/, __tests__/analytics/
     //                          public suites live alongside
     //   prisma/                schema.prisma is public and single-copy
+    //   tests/core/            the rest of tests/core is public autonomy coverage
     const files = allowlist.private.filter(p => !p.endsWith('/**'))
     expect(files.sort()).toEqual(
       [
-      '__tests__/analytics/amplitude-config.test.tsx',
-      '__tests__/analytics/amplitude-resilience.test.tsx',
-      '__tests__/billing/cancellation-and-grace.test.ts',
-      '__tests__/billing/free-plan-resolution.test.ts',
-      '__tests__/lib/agent-ops.test.ts',
-      '__tests__/security/admin-step-up.test.ts',
-      'app/api/cron/grace-check/route.ts',
-      'app/api/cron/process-grace-periods/route.ts',
-      'app/api/users/route.ts',
-      'components/app/AmplitudeAnalytics.tsx',
-      'prisma/seed-billing.ts',
-      'tests/auth/email-trust.test.ts',
+        '__tests__/analytics/amplitude-config.test.tsx',
+        '__tests__/analytics/amplitude-resilience.test.tsx',
+        '__tests__/billing/cancellation-and-grace.test.ts',
+        '__tests__/billing/free-plan-resolution.test.ts',
+        '__tests__/lib/agent-ops.test.ts',
+        '__tests__/security/admin-step-up.test.ts',
+        'app/api/cron/grace-check/route.ts',
+        'app/api/cron/process-grace-periods/route.ts',
+        'app/api/users/route.ts',
+        'components/app/AmplitudeAnalytics.tsx',
+        'prisma/seed-billing.ts',
+        'tests/auth/email-trust.test.ts',
+        'tests/core/autonomy-entitlements-are-seeded.test.ts',
       ].sort(),
     )
   })
