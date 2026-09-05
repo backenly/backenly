@@ -28,7 +28,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/prisma'
-import { recordSecurityEvent } from '@/lib/platform/controls'
+import { recordSecurityEvent } from '@/lib/platform-controls'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 120

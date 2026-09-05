@@ -35,7 +35,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createHash, randomBytes } from 'crypto'
 import { prisma } from '@/lib/db'
 import { generateApiKey } from '@/lib/auth/apiKeyAuth'
-import { recordSecurityEvent, getPlatformControls } from '@/lib/platform/controls'
+import { recordSecurityEvent, getPlatformControls } from '@/lib/platform-controls'
 import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
 
 // ── In-memory rate limit (per IP, per project) ───────────────────────────────

@@ -8,7 +8,7 @@ import { scanRequest } from '@/lib/services/waf'
 import crypto from 'crypto'
 import { markFrontendConnected, markExternalUsage, trackUsage } from '@/lib/analytics/logger'
 import { enforceAndTrackApiRequest } from '@/lib/quota/kernel'
-import { getPlatformControls, recordSecurityEvent } from '@/lib/platform/controls'
+import { getPlatformControls, recordSecurityEvent } from '@/lib/platform-controls'
 import jwt from 'jsonwebtoken'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 

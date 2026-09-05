@@ -15,7 +15,11 @@
  * fallback: these modules are leaving, and a static edge from the public seam
  * into them would have to be unpicked rather than deleted.
  */
-import type { SignupCompleted } from '@/lib/platform-signals/types'
+import type {
+  SignupAdmission,
+  SignupAttempt,
+  SignupCompleted,
+} from '@/lib/platform-signals/types'
 
 /**
  * Backenly's reaction to a new account.
@@ -44,5 +48,64 @@ export async function runScheduledBackOfficeMaintenance(): Promise<void> {
   const res = await runDailyGraceCheck()
   if (res && res.processed > 0) {
     console.log(`[GraceCheck] Downgraded ${res.processed} expired grace period(s) to FREE`)
+  }
+}
+/**
+ * Backenly's judgement on a signup it has never seen.
+ *
+ * The email-trust assessment: MX and domain checks, disposable-provider
+ * detection, a score and the signals behind it. Reached only in cloud, and only
+ * after the deployment's own gates have already passed.
+ *
+ * A `challenge` verdict is not a refusal. The account is admitted and marked
+ * untrusted, so it exists but consumes nothing until its mailbox is verified.
+ * Recording that is what lets an operator see how an account arrived.
+ */
+export async function assessSignupAdmission(
+  attempt: SignupAttempt,
+): Promise<SignupAdmission> {
+  const { assessEmailTrust } = await import('@/lib/trust/email-trust')
+  const { recordSecurityEvent } = await import('@/lib/platform-controls/security-events')
+
+  const trust = await assessEmailTrust(attempt.email)
+
+  if (trust.verdict === 'deny') {
+    await recordSecurityEvent({
+      kind: 'signup_denied',
+      severity: 'warn',
+      userEmail: attempt.email,
+      ip: attempt.ip,
+      summary: `Blocked signup — email trust ${trust.score}/100 (${trust.signals.join(', ')})`,
+      detail: { email: attempt.email, ip: attempt.ip, score: trust.score, signals: trust.signals },
+    }).catch(() => {})
+    return {
+      ok: false,
+      reason: trust.reason ?? 'Sign-up is not allowed for this email address.',
+      status: trust.signals.includes('invalid_email') ? 400 : 403,
+      score: trust.score,
+      signals: trust.signals,
+    }
+  }
+
+  if (trust.verdict === 'challenge') {
+    // Not refused — recorded. These are the accounts worth watching, and the
+    // caller marks them untrusted so they stay inert until verified.
+    await recordSecurityEvent({
+      kind: 'signup_untrusted',
+      severity: 'info',
+      userEmail: attempt.email,
+      ip: attempt.ip,
+      summary: `Untrusted signup allowed — email trust ${trust.score}/100 (${trust.signals.join(', ')})`,
+      detail: { email: attempt.email, ip: attempt.ip, score: trust.score, signals: trust.signals },
+    }).catch(() => {})
+  }
+
+  return {
+    ok: true,
+    reason: '',
+    status: 200,
+    untrusted: trust.verdict === 'challenge',
+    score: trust.score,
+    signals: trust.signals,
   }
 }

@@ -16,7 +16,7 @@ import { prisma } from '@/lib/db'
 import { verifyPassword } from '@/lib/auth/password'
 import { sendError, ErrorCodes } from './response'
 import { classifyKeyFailure, type ApiKeyFailureDiagnostic } from '@/lib/middleware/apiKeyFailureDiagnostic'
-import { recordSecurityEvent } from '@/lib/platform/controls'
+import { recordSecurityEvent } from '@/lib/platform-controls'
 import { isInternalOrigin } from '@/lib/security/internal-origin'
 import {
   detectBrowserOrigin,

@@ -17,7 +17,7 @@ import { Router, Request, Response } from 'express'
 import { createHash } from 'crypto'
 import { prisma } from '@/lib/db'
 import { generateApiKey } from '@/lib/auth/apiKeyAuth'
-import { recordSecurityEvent, getPlatformControls } from '@/lib/platform/controls'
+import { recordSecurityEvent, getPlatformControls } from '@/lib/platform-controls'
 import { sendError, sendSuccess, ErrorCodes } from '../lib/response'
 
 const router = Router()

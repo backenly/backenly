@@ -5,7 +5,7 @@ import { verify } from 'jsonwebtoken'
 import { prisma } from '@/lib/db'
 import { onSignupCompleted } from '@/lib/platform-signals'
 import { createSession } from '@/lib/auth/session'
-import { assertSignupAllowed, isBlocked } from '@/lib/platform/controls'
+import { assertSignupAllowed, isBlocked } from '@/lib/platform-controls'
 import { consume, AUTH_LIMITS, clientIp } from '@/lib/security/auth-rate-limit'
 
 /**
@@ -131,8 +131,8 @@ export async function GET(request: NextRequest) {
         // Google already proved control of the mailbox, so an OAuth signup is
         // never held as untrusted. The score is still recorded — a challenge
         // verdict here is worth being able to see later.
-        signupScore: guard.trust?.score ?? null,
-        signupSignals: guard.trust?.signals ?? [],
+        signupScore: guard.score ?? null,
+        signupSignals: guard.signals ?? [],
         signupIp: ipForBlock,
       },
       include: { role: true },

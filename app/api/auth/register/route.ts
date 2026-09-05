@@ -13,7 +13,7 @@ import {
   createUserClaimingSignupSlot,
   recordSecurityEvent,
   SignupSlotTakenError,
-} from '@/lib/platform/controls'
+} from '@/lib/platform-controls'
 import { onSignupCompleted } from '@/lib/platform-signals'
 import { consume, AUTH_LIMITS, clientIp } from '@/lib/security/auth-rate-limit'
 import { verifyBotChallenge } from '@/lib/trust/bot-defense'
@@ -81,7 +81,7 @@ export async function POST(request: NextRequest) {
     if (!signupGuard.ok) {
       return NextResponse.json({ error: signupGuard.reason }, { status: signupGuard.status })
     }
-    const untrusted = signupGuard.trust?.verdict === 'challenge'
+    const untrusted = signupGuard.untrusted === true
 
     // Validate password strength
     const passwordValidation = validatePasswordStrength(password)
@@ -148,8 +148,8 @@ export async function POST(request: NextRequest) {
           lastLogin: now,
           lastActiveAt: now,
           trustLevel: untrusted ? 'untrusted' : 'trusted',
-          signupScore: signupGuard.trust?.score ?? null,
-          signupSignals: signupGuard.trust?.signals ?? [],
+          signupScore: signupGuard.score ?? null,
+          signupSignals: signupGuard.signals ?? [],
           signupIp: ip === 'unknown' ? null : ip,
         },
         include: {

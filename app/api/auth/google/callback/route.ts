@@ -5,7 +5,7 @@ import { sign } from 'jsonwebtoken'
 import { prisma } from '@/lib/db'
 import { logger } from '@/lib/logger'
 import { verifyOAuthState, validateStateProvider } from '@/lib/auth/oauth-state'
-import { assertSignupAllowed } from '@/lib/platform/controls'
+import { assertSignupAllowed } from '@/lib/platform-controls'
 
 export async function GET(request: NextRequest) {
   try {

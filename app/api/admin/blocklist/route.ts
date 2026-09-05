@@ -15,7 +15,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { requireFounder } from '@/lib/admin/auth/requireFounder'
 import { authenticateRequest } from '@/lib/auth/middleware'
 import { prisma } from '@/lib/db/prisma'
-import { invalidateBlocklistCache, recordSecurityEvent } from '@/lib/platform/controls'
+import { invalidateBlocklistCache, recordSecurityEvent } from '@/lib/platform-controls'
 
 const VALID_KINDS = ['ip', 'email', 'domain'] as const
 

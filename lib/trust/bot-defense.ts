@@ -41,7 +41,7 @@
 // The secret is read from process.env at call time and never returned to a
 // caller, so there is nothing here for a client bundle to leak even if one
 // somehow imported it.
-import { recordSecurityEvent } from '@/lib/platform/controls'
+import { recordSecurityEvent } from '@/lib/platform-controls'
 
 const SITEVERIFY_URL = 'https://challenges.cloudflare.com/turnstile/v0/siteverify'
 const VERIFY_TIMEOUT_MS = 4_000

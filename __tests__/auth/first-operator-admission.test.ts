@@ -98,7 +98,7 @@ beforeAll(async () => {
   fs.writeFileSync(
     probe,
     [
-      `import { assertSignupAllowed } from '@/lib/platform/controls'`,
+      `import { assertSignupAllowed } from '@/lib/platform-controls'`,
       `import { prisma } from '@/lib/db'`,
       `assertSignupAllowed(process.argv[2])`,
       `  .then(g => { console.log('GUARD_OK=' + g.ok + ' STATUS=' + g.status + ' REASON=' + g.reason) })`,

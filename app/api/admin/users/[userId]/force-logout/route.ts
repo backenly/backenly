@@ -15,7 +15,7 @@ import { requireFounder } from '@/lib/admin/auth/requireFounder'
 import { authenticateRequest } from '@/lib/auth/middleware'
 import { prisma } from '@/lib/db/prisma'
 import { deleteAllUserSessions } from '@/lib/auth/session'
-import { recordSecurityEvent } from '@/lib/platform/controls'
+import { recordSecurityEvent } from '@/lib/platform-controls'
 
 export async function POST(request: NextRequest, props: { params: Promise<{ userId: string }> }) {
   const params = await props.params;

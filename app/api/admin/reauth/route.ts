@@ -24,7 +24,7 @@ import {
   mintAdminSudoToken,
   setAdminSudoCookie,
 } from '@/lib/admin/auth/adminStepUp'
-import { recordSecurityEvent } from '@/lib/platform/controls'
+import { recordSecurityEvent } from '@/lib/platform-controls'
 
 // ── Brute-force brake ─────────────────────────────────────────────────────────
 // In-process and per-user. The founder surface has a handful of accounts, so a

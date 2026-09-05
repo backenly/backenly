@@ -20,13 +20,19 @@
  * that true.
  */
 import {
+  assessSignupAdmission as cloudAssessSignupAdmission,
   onSignupCompleted as cloudOnSignupCompleted,
   runScheduledBackOfficeMaintenance as cloudRunBackOfficeMaintenance,
 } from '@cloud/platform-signals'
 import { currentEdition } from '@/lib/edition'
-import type { SignupCompleted } from './types'
+import type { SignupAdmission, SignupAttempt, SignupCompleted } from './types'
 
-export type { SignupCompleted, PlatformSignalsProvider } from './types'
+export type {
+  PlatformSignalsProvider,
+  SignupAdmission,
+  SignupAttempt,
+  SignupCompleted,
+} from './types'
 
 /**
  * Report a completed signup.
@@ -62,4 +68,25 @@ export async function runScheduledBackOfficeMaintenance(): Promise<void> {
   } catch (err: any) {
     console.error('[BackOfficeMaintenance] Error:', err?.message)
   }
+}
+
+/**
+ * Judge a signup attempt.
+ *
+ * Single-tenant admits, without consulting the Cloud provider and without a
+ * verdict payload. That is not a weakened check: the gates that belong to a
+ * deployment (the self-hosted slot, the kill switches, the operator blocklist)
+ * have already run in lib/platform-controls before this is called. What does
+ * not run is Backenly's scoring of a stranger, which a self-hosted install has
+ * no funnel to need and no business performing.
+ *
+ * Unlike the other signals, this one does NOT swallow failures. It is an
+ * admission decision on the request path, and an error here must not become an
+ * implicit "allow" that opens Cloud signup to whatever just broke.
+ */
+export async function assessSignupAdmission(attempt: SignupAttempt): Promise<SignupAdmission> {
+  if (currentEdition() === 'single-tenant') {
+    return { ok: true, reason: '', status: 200 }
+  }
+  return cloudAssessSignupAdmission(attempt)
 }

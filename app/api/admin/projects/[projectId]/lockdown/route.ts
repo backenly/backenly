@@ -16,7 +16,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { requireFounder } from '@/lib/admin/auth/requireFounder'
 import { authenticateRequest } from '@/lib/auth/middleware'
-import { setProjectLockdown } from '@/lib/platform/controls'
+import { setProjectLockdown } from '@/lib/platform-controls'
 
 export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;

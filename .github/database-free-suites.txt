@@ -110,6 +110,12 @@ __tests__/edition/platform-signals-seam.test.ts
 # removing a gate is only safe if the caller really does gate.
 __tests__/edition/sandbox-lifecycle.test.ts
 
+# The lib/platform/controls split. Its public half is load-bearing: the Phase 3
+# self-hosted signup slot, the operator kill switches, the security audit log
+# and project lockdown all stay in OSS. Only the scoring of a stranger is
+# Cloud, and the ordering (slot, switches, blocklist, then Cloud) is pinned.
+__tests__/edition/platform-controls-split.test.ts
+
 # README.md is the acceptance script for a self-hosted install, so it is checked
 # against the module bootstrap renders its prerequisite guidance from. Compares
 # committed text to committed code; no database.

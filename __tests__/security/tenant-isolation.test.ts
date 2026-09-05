@@ -61,12 +61,12 @@ jest.mock('@/lib/edition', () => {
 jest.mock('@/lib/auth/middleware', () => ({
   authenticateRequest: jest.fn(),
 }))
-jest.mock('@/lib/platform/controls', () => ({
+jest.mock('@/lib/platform-controls', () => ({
   recordSecurityEvent: jest.fn(),
 }))
 
 import { authenticateRequest } from '@/lib/auth/middleware'
-import { recordSecurityEvent } from '@/lib/platform/controls'
+import { recordSecurityEvent } from '@/lib/platform-controls'
 import { requireProjectId, TenantIsolationError } from '@/lib/tenant/isolation'
 
 const authMock = authenticateRequest as unknown as jest.Mock

@@ -11,7 +11,8 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { requireFounder } from '@/lib/admin/auth/requireFounder'
 import { authenticateRequest } from '@/lib/auth/middleware'
-import { getPlatformControls, setPlatformControls, type ControlPatch } from '@/lib/platform/controls'
+import { getPlatformControls } from '@/lib/platform-controls'
+import { setPlatformControls, type ControlPatch } from '@/lib/platform/controls'
 
 export async function GET(request: NextRequest) {
   const authError = await requireFounder(request)

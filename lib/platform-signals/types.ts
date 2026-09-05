@@ -46,7 +46,44 @@ export interface SignupCompleted {
   referralCode?: string | null
 }
 
+/** Who is trying to create an account. */
+export interface SignupAttempt {
+  email: string
+  ip: string | null
+}
+
+/**
+ * The verdict on a signup attempt.
+ *
+ * Carries the OUTCOME, never the reasoning. `score` and `signals` are recorded
+ * against the account so an operator can see how it arrived, but how they were
+ * computed stays private: publishing the heuristics publishes them to the
+ * people they exist to catch.
+ */
+export interface SignupAdmission {
+  ok: boolean
+  reason: string
+  status: number
+  /** Allowed, but must verify its mailbox before it can consume anything. */
+  untrusted?: boolean
+  score?: number | null
+  signals?: string[]
+}
+
 export interface PlatformSignalsProvider {
+  /**
+   * Judge a signup Backenly has never seen before.
+   *
+   * Only reached in cloud, and only after the public gates have run: the
+   * self-hosted slot, the kill switches and the operator blocklist all come
+   * first, because those are decisions somebody made rather than a score
+   * computed about a stranger.
+   *
+   * Single-tenant admits without judging. A self-hosted deployment has no
+   * abuse funnel to defend and no reputation database to consult.
+   */
+  assessSignupAdmission(attempt: SignupAttempt): Promise<SignupAdmission>
+
   /**
    * Run Backenly's own scheduled commercial maintenance.
    *

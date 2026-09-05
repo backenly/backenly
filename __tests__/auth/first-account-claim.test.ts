@@ -22,7 +22,7 @@
 
 import { randomUUID } from 'crypto'
 import { prisma } from '@/lib/db/prisma'
-import { assertSignupAllowed, createUserClaimingSignupSlot, SignupSlotTakenError } from '@/lib/platform/controls'
+import { assertSignupAllowed, createUserClaimingSignupSlot, SignupSlotTakenError } from '@/lib/platform-controls'
 
 const DB_URL = process.env.TEST_DATABASE_URL
 

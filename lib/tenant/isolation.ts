@@ -26,7 +26,7 @@
 
 import { NextRequest } from 'next/server'
 import { authenticateRequest } from '@/lib/auth/middleware'
-import { recordSecurityEvent } from '@/lib/platform/controls'
+import { recordSecurityEvent } from '@/lib/platform-controls'
 import {
   getProjectResolver,
   ProjectContextRequiredError,
