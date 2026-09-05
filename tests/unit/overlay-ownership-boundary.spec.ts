@@ -393,6 +393,32 @@ describe('overlay-allowlist.json', () => {
     )
   })
 
+  it('every ownership path is also ignored by git', () => {
+    // A composed Cloud checkout writes the whole overlay into the working
+    // tree. Anything not ignored shows up as untracked, which puts the private
+    // control plane one `git add -A` away from a PUBLIC repository.
+    //
+    // Bracketed Next.js segments must be ESCAPED: unescaped, [id] is a
+    // gitignore character class matching a single 'i' or 'd', so the pattern
+    // silently matches nothing and the file is not ignored at all.
+    const ignore = fs.readFileSync(path.join(ROOT, '.gitignore'), 'utf8')
+    const patterns = new Set(
+      ignore
+        .split(/\r?\n/)
+        .map(l => l.trim())
+        .filter(l => l && !l.startsWith('#')),
+    )
+
+    const escape = (p: string) => p.replace(/\[/g, '\\[').replace(/\]/g, '\\]')
+    const missing = allowlist.private.filter(entry => {
+      const expected = entry.endsWith('/**')
+        ? `/${escape(entry.slice(0, -3))}/`
+        : `/${escape(entry)}`
+      return !patterns.has(expected)
+    })
+    expect(missing).toEqual([])
+  })
+
   it('uses a named file only where the directory is mixed', () => {
     // Whole-directory ownership is the default because it means the overlay
     // only ever ADDS files. Every exception below is a private file living in

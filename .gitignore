@@ -141,13 +141,58 @@ jest-static.json
 jest-integration.json
 
 # Private Cloud overlay, applied by scripts/apply-overlay.sh on a Cloud build.
-# These two directories are reserved for the overlay in overlay-allowlist.json
-# and hold ZERO tracked public files, so ignoring them wholesale hides no public
-# development. Without this, every Cloud checkout reports the composed overlay
-# as untracked changes and the next deploy's `git pull` has to reason about it.
+#
+# Every path below is reserved for the overlay in overlay-allowlist.json and
+# holds ZERO tracked public files. That was true of only lib/cloud and
+# config/cloud until Phase 7 emptied the transition list; it is now true of the
+# whole ownership map, which is why the list can be completed here.
+#
+# Without it, a composed Cloud checkout reports all hundred-odd overlay files as
+# untracked changes. That is not merely noise: it puts the private control plane
+# one `git add -A` away from being committed to a PUBLIC repository, on a box
+# where someone is most likely to be running git under time pressure.
+#
+# Bracketed Next.js segments are escaped. Unescaped, [id] is a gitignore
+# CHARACTER CLASS matching a single 'i' or 'd', so the pattern would silently
+# match nothing.
 #
 # This is bookkeeping, not a boundary. The ownership authority is
-# scripts/verify-overlay-boundary.ts, which asks git what is tracked; .gitignore
-# cannot make an overlay add-only and is not relied on to.
-/lib/cloud/
+# scripts/verify-overlay-boundary.ts, which asks git what is TRACKED; .gitignore
+# cannot make an overlay add-only and is not relied on to. Nor can it hide a
+# public file that belongs under one of these paths, because no such file may
+# exist -- that is what the verifier fails on.
+/__tests__/analytics/amplitude-config.test.tsx
+/__tests__/analytics/amplitude-resilience.test.tsx
+/__tests__/billing/cancellation-and-grace.test.ts
+/__tests__/billing/free-plan-resolution.test.ts
+/__tests__/cloud/
+/__tests__/lib/agent-ops.test.ts
+/__tests__/security/admin-step-up.test.ts
+/app/admin/
+/app/api/admin/
+/app/api/billing/
+/app/api/cron/grace-check/route.ts
+/app/api/cron/process-grace-periods/route.ts
+/app/api/org/
+/app/api/projects/\[id\]/access/route.ts
+/app/api/referral/
+/app/api/users/route.ts
+/app/app/billing/
+/app/app/invite/
+/app/app/members/
+/app/app/referral/
+/components/app/AmplitudeAnalytics.tsx
+/components/cloud/
 /config/cloud/
+/lib/admin/
+/lib/analytics/
+/lib/billing/
+/lib/cloud/
+/lib/fleet/
+/lib/org/
+/lib/platform/
+/lib/trust/
+/prisma/seed-billing.ts
+/scripts/fleet/
+/tests/auth/email-trust.test.ts
+/tests/core/autonomy-entitlements-are-seeded.test.ts
