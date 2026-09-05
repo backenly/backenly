@@ -198,3 +198,48 @@ describe('finding D — the README describes the autonomy that actually runs', (
     expect(read('lib/autonomy/activity-gate.ts')).toContain('tables: { some: {} }')
   })
 })
+
+/**
+ * ACCEPTANCE FINDING F — storage was configured but unusable
+ * =========================================================
+ * `.env.example` sets STORAGE_DRIVER=local and STORAGE_DIR, which reads as
+ * "storage is ready". It omitted the one variable that makes it work, so on a
+ * clean install every upload returned:
+ *
+ *   500  {"error":{"code":"INTERNAL_ERROR","message":"Failed to upload file"}}
+ *
+ * with the real reason visible only in the server log — STORAGE_SECRET unset,
+ * refusing to sign an access token. The refusal itself is right: a default
+ * baked into a public repository is a signing key everybody already knows.
+ * What was wrong is that nothing told the operator to set it.
+ *
+ * Same shape as BACKENLY_EDITION and BACKENLY_PROJECT_ID before it: the
+ * template configures a feature and leaves out what it needs.
+ */
+describe('finding F — storage names the secret it cannot run without', () => {
+  it('is in the env template, next to the driver it belongs to', () => {
+    const env = read('.env.example')
+    expect(env).toMatch(/^STORAGE_SECRET=/m)
+    // The section header called the whole thing optional, which is true of the
+    // feature and false of this variable once you use it.
+    expect(env).not.toContain('# STORAGE (Optional - for file uploads)')
+  })
+
+  it('is in the README, with the other secrets that have no default', () => {
+    expect(README).toContain('STORAGE_SECRET=<openssl rand -hex 32>')
+    expect(README).toContain('`STORAGE_SECRET` signs the access tokens')
+  })
+
+  it('still has no default in code, which is the part that must not change', () => {
+    // The bypass this prevents is the reason the variable exists. Documenting
+    // it would be beside the point if a fallback ever appeared, so assert the
+    // refusal rather than the wording: the message is built by a shared
+    // resolver, which is also what enforces the minimum length.
+    const secrets = read('lib/auth/jwt-secret.ts')
+    expect(secrets).toContain('requireStorageSecret')
+    expect(secrets).toContain('process.env.STORAGE_SECRET')
+    expect(secrets).toMatch(/authentication bypass/i)
+    // No `?? 'something'` or `|| 'something'` rescuing an unset value.
+    expect(secrets).not.toMatch(/STORAGE_SECRET\s*(\|\||\?\?)/)
+  })
+})

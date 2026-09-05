@@ -165,6 +165,7 @@ BACKENLY_EDITION=single-tenant   # the default is still `cloud`; it flips in a l
 BACKENLY_PROJECT_ID=<uuid>       # any UUID, e.g. `uuidgen`
 JWT_SECRET=<openssl rand -hex 32>
 POSTGREST_JWT_SECRET=<openssl rand -hex 32>
+STORAGE_SECRET=<openssl rand -hex 32>
 OPENAI_API_KEY=<your key>
 ```
 
@@ -179,8 +180,12 @@ command has to be copied from bootstrap's output rather than from here.
 
 `JWT_SECRET` signs every platform session. `POSTGREST_JWT_SECRET` is separate and
 must match the value Compose passes to PostgREST, because the gateway mints
-short-lived internal tokens with it. `OPENAI_API_KEY` powers planning and the
-autonomy loop. See [`.env.example`](.env.example) for the rest.
+short-lived internal tokens with it. `STORAGE_SECRET` signs the access tokens for
+stored files — without it every upload fails with a 500 whose only explanation is
+in the server log. None of the three has a default, deliberately: a fallback
+baked into a public repository is a key everybody already knows.
+`OPENAI_API_KEY` powers planning and the autonomy loop. See
+[`.env.example`](.env.example) for the rest.
 
 #### 2. Tell the database which role Backenly connects as
 
