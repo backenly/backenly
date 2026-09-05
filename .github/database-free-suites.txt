@@ -90,6 +90,14 @@ __tests__/edition/entitlements-seam.test.ts
 # maxMonthlyActiveUsers) and the fail-open path. Prisma and the seam are both
 # mocked, so no database.
 __tests__/edition/quota-kernel-entitlements.test.ts
+
+# REGRESSION: a self-hosted install may deploy, add a domain and create a
+# trigger. The enforcement family used to read Subscription directly, so with
+# no Subscription row it blocked all three while entitlements said allowed.
+# Database-free because the assertion is that no Plan or Subscription row is
+# ever read.
+__tests__/edition/self-host-enforcement.test.ts
+
 # README.md is the acceptance script for a self-hosted install, so it is checked
 # against the module bootstrap renders its prerequisite guidance from. Compares
 # committed text to committed code; no database.

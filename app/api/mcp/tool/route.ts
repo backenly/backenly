@@ -123,7 +123,7 @@ export async function POST(request: NextRequest) {
   // contrast, is pure SQL generation and is deliberately NOT gated. Keep this
   // set in sync when a new model-backed tool lands.
   if (MODEL_BACKED_TOOLS.has(tool)) {
-    const { enforceAiCredits } = await import('@/lib/billing')
+    const { enforceAiCredits } = await import('@/lib/entitlements/policy')
     const credits = await enforceAiCredits(auth.userId)
     if (credits !== true) {
       recordMcpCall(
@@ -672,7 +672,7 @@ export async function POST(request: NextRequest) {
     ))
   } finally {
     if (metered && tokenScope.tokens > 0) {
-      import('@/lib/billing')
+      import('@/lib/entitlements/policy')
         .then(({ chargeAiCredits }) => chargeAiCredits(auth.userId, tokenScope.tokens))
         .catch(() => {})
     }

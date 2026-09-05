@@ -36,7 +36,7 @@ import { corsHeaders, optionsResponse } from '@/lib/mcp/cors'
 import { runBrain, type BrainEvent } from '@/lib/ai/brain/agent'
 import { assertAiAllowed } from '@/lib/platform/controls'
 import { createApprovalRequest } from '@/lib/mcp/approvals'
-import { enforceAiCredits, chargeAiCredits } from '@/lib/billing'
+import { enforceAiCredits, chargeAiCredits } from '@/lib/entitlements/policy'
 
 const MAX_BRAIN_MS = 90_000
 const ENDPOINT = '/api/mcp/chat'

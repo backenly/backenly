@@ -212,7 +212,7 @@ export async function decideApproval(input: {
   const chargeOnce = () => {
     if (charged || spentTokens <= 0) return
     charged = true
-    import('@/lib/billing')
+    import('@/lib/entitlements/policy')
       .then(({ chargeAiCredits }) => chargeAiCredits(input.approverUserId, spentTokens))
       .catch(() => {})
   }

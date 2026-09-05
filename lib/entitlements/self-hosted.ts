@@ -39,6 +39,7 @@ export function selfHostedEntitlements(): UserEntitlements {
     maxTriggersPerProject: null,
     maxTeamSeats: 1,
     maxDeploymentHistory: null,
+    autonomyScanIntervalMin: null, // caller default; self-host is not throttled by a plan
 
     logRetentionDays: 365,
     supportResponseHours: null,

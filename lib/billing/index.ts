@@ -10,52 +10,25 @@
 
 import { prisma } from '@/lib/db/prisma'
 import { Plan, Subscription, SubscriptionStatus } from '@prisma/client'
-import crypto from 'crypto'
 import { getBonusCredits } from './credit-ledger'
-
-/**
- * Derive a stable 32-bit advisory lock key from a (userId, month) tuple.
- * pg_advisory_xact_lock takes a bigint but we use two int4s via the overload
- * pg_advisory_xact_lock(key1 int4, key2 int4) to stay within safe integer range.
- */
-function advisoryLockKeys(userId: string, month: string): [number, number] {
-  const hash = crypto.createHash('sha256').update(`${userId}:${month}`).digest()
-  // Read two signed 32-bit ints from the hash bytes (big-endian)
-  const k1 = hash.readInt32BE(0)
-  const k2 = hash.readInt32BE(4)
-  return [k1, k2]
-}
+import {
+  creditsFromTokens,
+  enforceAiBuildAction,
+  getMonthlyUsage,
+  noEntitlements,
+  nextMonthStart,
+  thisMonth,
+  violation,
+  type LimitViolation,
+} from '@/lib/entitlements/policy'
+import {
+  invalidateUsageCache,
+  readUsageCache,
+  writeUsageCache,
+} from '@/lib/entitlements/usage-cache'
 
 export type PlanWithLimits = Plan
 export type UserSubscription = Subscription & { plan: Plan }
-
-// ─── Next-tier lookup ────────────────────────────────────────────────────────
-// Current tiers (v4): SANDBOX (Free $0) → BUILDER (Pro $25) → SCALE (Enterprise, custom)
-// Legacy tiers (backward compat): FREE → STARTER → GROWTH → PRO
-const TIER_ORDER = ['SANDBOX', 'FREE', 'STARTER', 'BUILDER', 'GROWTH', 'PRO', 'SCALE'] as const
-type TierName = typeof TIER_ORDER[number]
-
-// Human-readable display names for plan codes
-const PLAN_DISPLAY: Record<string, string> = {
-  SANDBOX: 'Free',
-  BUILDER: 'Pro',
-  SCALE: 'Enterprise',
-  FREE: 'Free',
-  STARTER: 'Starter',
-  GROWTH: 'Growth',
-  PRO: 'Pro',
-}
-
-function planDisplayName(name: string): string {
-  return PLAN_DISPLAY[name.toUpperCase()] ?? name
-}
-
-function nextTier(current: string): string {
-  const upper = current.toUpperCase()
-  const idx = TIER_ORDER.indexOf(upper as TierName)
-  if (idx === -1) return 'BUILDER'
-  return TIER_ORDER[Math.min(idx + 1, TIER_ORDER.length - 1)]
-}
 
 // ─── Core subscription helpers ───────────────────────────────────────────────
 
@@ -112,157 +85,15 @@ export async function createFreeSubscription(userId: string): Promise<Subscripti
   })
 }
 
-// ─── Entitlements resolver ───────────────────────────────────────────────────
+// ─── What moved out ─────────────────────────────────────────────────────────
 //
-// Moved to lib/entitlements. The resolver is the seam between the product and
-// this file: public code asks lib/entitlements what a user may do, and only
-// the Cloud provider behind that seam reads the Plan and Subscription tables
-// below. Keeping a copy here would defeat the split, so there is none.
-// ─── Limit violation type ────────────────────────────────────────────────────
-
-export interface LimitViolation {
-  code: 'PLAN_LIMIT_EXCEEDED'
-  upgradeRequired: true
-  currentPlan: string
-  requiredPlan: string
-  message: string
-}
-
-function violation(currentPlan: string, message: string): LimitViolation {
-  return {
-    code: 'PLAN_LIMIT_EXCEEDED',
-    upgradeRequired: true,
-    currentPlan,
-    requiredPlan: nextTier(currentPlan),
-    message,
-  }
-}
-
-function noSubscription(): LimitViolation {
-  return {
-    code: 'PLAN_LIMIT_EXCEEDED',
-    upgradeRequired: true,
-    currentPlan: 'NONE',
-    requiredPlan: 'FREE',
-    message: 'No active subscription found',
-  }
-}
-
-// ─── Monthly date key ────────────────────────────────────────────────────────
-
-function getThisMonth(): string {
-  return new Date().toISOString().slice(0, 7) // YYYY-MM
-}
-
-function getNextMonthStart(): Date {
-  const d = new Date()
-  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1))
-}
-
-// ─── Monthly usage fetch ─────────────────────────────────────────────────────
-
-export interface MonthlyUsage {
-  aiBuildActions: number
-  /** Raw AI tokens consumed this month (the credit ledger). */
-  aiTokensUsed: number
-  apiRequests: bigint
-  aiFunctionInvocations: number
-}
-
-export async function getMonthlyUsage(userId: string): Promise<MonthlyUsage> {
-  const month = getThisMonth()
-  const record = await prisma.userAiUsage.findUnique({
-    where: { userId_date: { userId, date: month } },
-  })
-  return {
-    aiBuildActions: record?.intentCount ?? 0,
-    aiTokensUsed: record?.tokenCount ?? 0,
-    apiRequests: record?.apiRequestCount ?? BigInt(0),
-    aiFunctionInvocations: record?.aiFunctionInvocations ?? 0,
-  }
-}
-
-// ─── Token-backed AI credits ─────────────────────────────────────────────────
+// Entitlement resolution, the plan-limit enforcement family, the usage
+// trackers, the credit gate and the tier naming they share now live in
+// lib/entitlements. They answer "may this happen?", which is a product
+// question the public repository has to be able to answer on its own.
 //
-// WHY CREDITS, NOT ACTION COUNTS
-// ------------------------------
-// An "AI build action" was one chat message. One message can be "add a field"
-// or a 4,000-word spec that builds an entire backend — both cost 1 action, so
-// a user could extract ~the whole product on their first message. Credits are
-// token-backed: a turn costs credits proportional to the tokens the model
-// actually processed, so the cost tracks real work and the exploit is gone.
-//
-// The ratio is published and STABLE. Silently re-ratioing credits→tokens is
-// exactly what broke trust at other vendors — never change this without a
-// deliberate, announced pricing update.
-//
-// Autonomy (the always-on monitor/self-repair loop) NEVER deducts credits.
-// That cost is funded by the platform — see lib/autonomy/* and background-monitor.
-export const TOKENS_PER_CREDIT = 1_000
-
-/** Whole credits consumed for a given raw token count (rounded up). */
-export function creditsFromTokens(tokens: number): number {
-  if (tokens <= 0) return 0
-  return Math.ceil(tokens / TOKENS_PER_CREDIT)
-}
-
-/**
- * Pre-gate: may this user start an AI build turn? Blocks once the month's
- * credit budget is spent. Read-only — does NOT consume credits (a turn is
- * charged afterwards by chargeAiCredits, and only when it mutated state).
- *
- * FAIL-OPEN: a billing infra hiccup must never block a paying customer's
- * build. Only a real, measured budget breach blocks.
- */
-/**
- * The month enforcement went live. Usage recorded before this point accrued
- * under a contract that did not meter it — `chargeAiCredits` had no callers, so
- * every token spent through the brain was free by construction. Enforcing that
- * history retroactively locks people out for activity that cost them nothing at
- * the time, which is exactly what happened on the cutover: one SANDBOX user was
- * sitting at 245 credits against a 200 cap and was refused the moment the gate
- * shipped.
- *
- * `UserAiUsage` aggregates by month, so the cutover month has no per-event
- * timestamps to split on — there is no way to charge only the post-cutover
- * portion of it. Skipping the month entirely is the honest resolution: it costs
- * at most one month of enforcement, applies uniformly rather than to whoever
- * happened to be over, and needs no retroactive edit to anyone's billing rows.
- *
- * This is self-expiring. From the following month the meter is real for
- * everyone, and this branch is dead code that can be deleted.
- */
-const ENFORCEMENT_EPOCH_MONTH = '2026-07'
-
-export async function enforceAiCredits(userId: string): Promise<true | LimitViolation> {
-  try {
-    if (getThisMonth() === ENFORCEMENT_EPOCH_MONTH) return true
-
-    const sub = await getUserSubscription(userId)
-    if (!sub) return noSubscription()
-
-    const maxCredits = sub.plan.monthlyAiCredits
-    if (maxCredits === null || maxCredits === undefined) return true // unlimited (fair-use)
-
-    // Bonus credits (referral / promo grants) genuinely extend the monthly cap.
-    const bonus = await getBonusCredits(userId)
-    const effectiveMax = maxCredits + bonus
-
-    const usage = await getMonthlyUsage(userId)
-    const creditsUsed = creditsFromTokens(usage.aiTokensUsed)
-    if (creditsUsed >= effectiveMax) {
-      return violation(
-        sub.plan.name,
-        bonus > 0
-          ? `You've used all ${effectiveMax.toLocaleString()} AI credits available this month (${maxCredits.toLocaleString()} plan + ${bonus.toLocaleString()} bonus) on the ${planDisplayName(sub.plan.name)} plan. Credits reset on the 1st — or upgrade for more.`
-          : `You've used all ${maxCredits.toLocaleString()} AI credits this month on the ${planDisplayName(sub.plan.name)} plan. Credits reset on the 1st — or upgrade for more.`,
-      )
-    }
-    return true
-  } catch {
-    return true // never break a build because billing had a hiccup
-  }
-}
+// What stays here is commercial: Plan and Subscription rows, the credit
+// ledger write below, and the usage summary the billing page renders.
 
 /**
  * Charge a completed AI turn's actual token usage against the month's credit
@@ -275,14 +106,14 @@ export async function enforceAiCredits(userId: string): Promise<true | LimitViol
  */
 export async function chargeAiCredits(userId: string, tokensUsed: number): Promise<void> {
   if (!Number.isFinite(tokensUsed) || tokensUsed <= 0) return
-  const month = getThisMonth()
+  const month = thisMonth()
   try {
     await prisma.userAiUsage.upsert({
       where: { userId_date: { userId, date: month } },
       update: { tokenCount: { increment: tokensUsed }, intentCount: { increment: 1 } },
       create: { userId, date: month, tokenCount: tokensUsed, intentCount: 1 },
     })
-    usageCache.delete(`usage_${userId}`)
+    invalidateUsageCache(userId)
 
     const sub = await getUserSubscription(userId)
     const maxCredits = sub?.plan?.monthlyAiCredits
@@ -298,321 +129,6 @@ export async function chargeAiCredits(userId: string, tokensUsed: number): Promi
   } catch (err: any) {
     console.warn(`[Billing] chargeAiCredits failed for ${userId}:`, err?.message)
   }
-}
-
-// ─── Usage tracking ──────────────────────────────────────────────────────────
-
-export async function trackAiBuildAction(userId: string, tokenCount = 0): Promise<void> {
-  const month = getThisMonth()
-  await prisma.userAiUsage.upsert({
-    where: { userId_date: { userId, date: month } },
-    update: {
-      intentCount: { increment: 1 },
-      tokenCount: { increment: tokenCount },
-    },
-    create: { userId, date: month, intentCount: 1, tokenCount },
-  })
-  usageCache.delete(`usage_${userId}`)
-
-  // Fire credits-low notification when usage crosses 80% threshold
-  // Run asynchronously — never block the main execution path
-  try {
-    const sub = await getUserSubscription(userId)
-    const max = sub?.plan?.maxAiBuildActionsPerMonth
-    if (max) {
-      const usage = await getMonthlyUsage(userId)
-      const { checkAndNotifyCreditsLow } = await import('@/lib/notifications/platform')
-      checkAndNotifyCreditsLow(userId, month, usage.aiBuildActions, max).catch(() => {})
-    }
-  } catch { /* non-fatal */ }
-}
-
-/**
- * Atomically enforce the AI build action limit AND increment the counter
- * in a single database transaction protected by a PostgreSQL advisory lock.
- *
- * Why: A naive read-check-then-increment approach has a race condition — two
- * concurrent requests both read count=N, both pass the limit check, and both
- * increment, overshooting the limit by one or more.  The advisory lock on
- * (userId, month) serialises concurrent enforce+track calls for the same user
- * without blocking unrelated users.
- *
- * Returns true when the action is allowed and the counter has been incremented.
- * Returns a LimitViolation when the limit is already reached (counter NOT incremented).
- */
-export async function enforceAndTrackAiBuildAction(
-  userId: string,
-  tokenCount = 0
-): Promise<true | LimitViolation> {
-  const sub = await getUserSubscription(userId)
-  if (!sub) return noSubscription()
-
-  const max = sub.plan.maxAiBuildActionsPerMonth
-  if (max === null) {
-    // Unlimited plan — track asynchronously and immediately allow
-    trackAiBuildAction(userId, tokenCount).catch(() => {})
-    return true
-  }
-
-  const month = getThisMonth()
-  const [k1, k2] = advisoryLockKeys(userId, month)
-
-  const result = await prisma.$transaction(async (tx) => {
-    // Acquire a transaction-scoped advisory lock keyed to (userId, month).
-    // This blocks any other transaction attempting to take the same lock
-    // until this transaction commits or rolls back — no deadlock risk because
-    // each user+month pair maps to a unique key and we only ever lock one at a time.
-    await tx.$executeRawUnsafe(
-      `SELECT pg_advisory_xact_lock($1::int4, $2::int4)`,
-      k1, k2
-    )
-
-    // Read the current count inside the lock so the read is serialised
-    const record = await tx.userAiUsage.findUnique({
-      where: { userId_date: { userId, date: month } },
-      select: { intentCount: true },
-    })
-    const currentCount = record?.intentCount ?? 0
-
-    if (currentCount >= max) {
-      return { allowed: false as const, count: currentCount }
-    }
-
-    // Increment inside the lock — guaranteed to be the only writer right now
-    await tx.userAiUsage.upsert({
-      where: { userId_date: { userId, date: month } },
-      update: {
-        intentCount: { increment: 1 },
-        tokenCount: { increment: tokenCount },
-      },
-      create: { userId, date: month, intentCount: 1, tokenCount },
-    })
-
-    return { allowed: true as const, count: currentCount + 1 }
-  })
-
-  if (!result.allowed) {
-    return violation(
-      sub.plan.name,
-      `You've used all ${max.toLocaleString()} AI build actions this month on the ${planDisplayName(sub.plan.name)} plan. Resets on the 1st.`
-    )
-  }
-
-  usageCache.delete(`usage_${userId}`)
-
-  // Fire low-credit notification asynchronously — never block the response
-  try {
-    if (max) {
-      const { checkAndNotifyCreditsLow } = await import('@/lib/notifications/platform')
-      checkAndNotifyCreditsLow(userId, month, result.count, max).catch(() => {})
-    }
-  } catch { /* non-fatal */ }
-
-  return true
-}
-
-/** Track AI intent — alias for backward compatibility */
-export const trackAiIntent = trackAiBuildAction
-
-// Note: the real API-request tracker is enforceAndTrackApiRequest in
-// lib/quota/kernel.ts (called by lib/api/v1/middleware.ts). The
-// previous standalone trackApiRequest() here was dead code and was removed.
-
-export async function trackAiFunctionInvocation(userId: string, count = 1): Promise<void> {
-  const month = getThisMonth()
-  await prisma.userAiUsage.upsert({
-    where: { userId_date: { userId, date: month } },
-    update: { aiFunctionInvocations: { increment: count } },
-    create: { userId, date: month, aiFunctionInvocations: count },
-  })
-  usageCache.delete(`usage_${userId}`)
-}
-
-// ─── Enforcement helpers ─────────────────────────────────────────────────────
-
-export async function enforceProjectCreation(
-  userId: string,
-  currentProjectCount: number
-): Promise<true | LimitViolation> {
-  const sub = await getUserSubscription(userId)
-  if (!sub) return noSubscription()
-
-  const max = sub.plan.maxProjects
-  if (max !== null && currentProjectCount >= max) {
-    return violation(
-      sub.plan.name,
-      `You've reached the ${max}-project limit on the ${planDisplayName(sub.plan.name)} plan. Upgrade to add more projects.`
-    )
-  }
-  return true
-}
-
-export async function enforceAiBuildAction(userId: string): Promise<true | LimitViolation> {
-  const sub = await getUserSubscription(userId)
-  if (!sub) return noSubscription()
-
-  const max = sub.plan.maxAiBuildActionsPerMonth
-  if (max === null) return true
-
-  const usage = await getMonthlyUsage(userId)
-  if (usage.aiBuildActions >= max) {
-    return violation(
-      sub.plan.name,
-      `You've used all ${max.toLocaleString()} AI build actions this month on the ${planDisplayName(sub.plan.name)} plan. Resets on the 1st.`
-    )
-  }
-  return true
-}
-
-/** Alias for backward compatibility */
-export const checkAiIntentLimit = async (userId: string) => {
-  const sub = await getUserSubscription(userId)
-  if (!sub) return { allowed: false, code: 'AI_LIMIT_EXCEEDED' as const, remaining: 0, limit: 0, resetAt: getNextMonthStart(), usedToday: 0 }
-
-  const max = sub.plan.maxAiBuildActionsPerMonth
-  if (max === null) return { allowed: true, remaining: 999_999, limit: null, resetAt: getNextMonthStart(), usedToday: 0 }
-
-  const usage = await getMonthlyUsage(userId)
-  const remaining = Math.max(0, max - usage.aiBuildActions)
-  if (usage.aiBuildActions >= max) {
-    return { allowed: false, code: 'AI_LIMIT_EXCEEDED' as const, remaining: 0, limit: max, resetAt: getNextMonthStart(), usedToday: usage.aiBuildActions }
-  }
-  return { allowed: true, remaining, limit: max, resetAt: getNextMonthStart(), usedToday: usage.aiBuildActions }
-}
-
-export async function enforceAiFunctionInvocation(userId: string): Promise<true | LimitViolation> {
-  const sub = await getUserSubscription(userId)
-  if (!sub) return noSubscription()
-
-  const max = sub.plan.maxAiFunctionInvocationsPerMonth
-  if (max === null) return true
-
-  const usage = await getMonthlyUsage(userId)
-  if (usage.aiFunctionInvocations >= max) {
-    return violation(
-      sub.plan.name,
-      `You've used all ${max.toLocaleString()} AI Function invocations this month on the ${planDisplayName(sub.plan.name)} plan.`
-    )
-  }
-  return true
-}
-
-/**
- * @deprecated Realtime connection caps are enforced by the ListenerHub
- * (lib/realtime/listener-hub.ts) via lib/quota/kernel.ts
- * enforceRealtimeConnection. This wrapper delegates so any legacy caller
- * stays on the single kernel path.
- */
-export async function enforceRealtimeConnection(
-  projectId: string,
-  currentConnections: number
-): Promise<true | LimitViolation> {
-  const { enforceRealtimeConnection: kernelEnforce } = await import('../quota/kernel')
-  const decision = await kernelEnforce(projectId, currentConnections)
-  if (decision.allowed) return true
-  return violation(decision.plan ?? 'UNKNOWN', decision.message ?? 'Realtime connection limit reached')
-}
-
-export async function enforceTriggerCreation(
-  userId: string,
-  projectId: string,
-  currentTriggerCount: number
-): Promise<true | LimitViolation> {
-  const sub = await getUserSubscription(userId)
-  if (!sub) return noSubscription()
-
-  const max = sub.plan.maxTriggersPerProject
-  if (max === 0) {
-    return violation(sub.plan.name, `Event triggers are not available on the ${planDisplayName(sub.plan.name)} plan. Upgrade to Pro to use them.`)
-  }
-  if (max !== null && currentTriggerCount >= max) {
-    return violation(
-      sub.plan.name,
-      `You've reached the limit of ${max} triggers per project on the ${planDisplayName(sub.plan.name)} plan.`
-    )
-  }
-  return true
-}
-
-export async function enforceTeamSeat(
-  userId: string,
-  currentSeatCount: number
-): Promise<true | LimitViolation> {
-  const sub = await getUserSubscription(userId)
-  if (!sub) return noSubscription()
-
-  const max = sub.plan.maxTeamSeats
-  if (currentSeatCount >= max) {
-    return violation(
-      sub.plan.name,
-      `You've reached the ${max}-seat limit on the ${planDisplayName(sub.plan.name)} plan. Upgrade to add team members.`
-    )
-  }
-  return true
-}
-
-export async function enforceCustomDomain(userId: string): Promise<true | LimitViolation> {
-  const sub = await getUserSubscription(userId)
-  if (!sub) return noSubscription()
-
-  if (!sub.plan.allowCustomDomain) {
-    return violation(sub.plan.name, `Custom domains are available on the Pro plan ($25/mo) and above.`)
-  }
-  return true
-}
-
-export async function enforceWebhook(userId: string): Promise<true | LimitViolation> {
-  const sub = await getUserSubscription(userId)
-  if (!sub) return noSubscription()
-
-  if (!sub.plan.allowWebhooks) {
-    return violation(sub.plan.name, `Webhooks are available on the Pro plan ($25/mo) and above.`)
-  }
-  return true
-}
-
-export async function enforceRbac(userId: string): Promise<true | LimitViolation> {
-  const sub = await getUserSubscription(userId)
-  if (!sub) return noSubscription()
-
-  if (!sub.plan.allowRbac) {
-    return violation(sub.plan.name, `Role-based access control is available on the Pro plan ($25/mo) and above.`)
-  }
-  return true
-}
-
-export async function enforceDeployment(userId: string): Promise<true | LimitViolation> {
-  const sub = await getUserSubscription(userId)
-  if (!sub) return noSubscription()
-
-  if (!sub.plan.allowDeployment) {
-    return {
-      code: 'PLAN_LIMIT_EXCEEDED',
-      upgradeRequired: true,
-      currentPlan: sub.plan.name,
-      requiredPlan: 'BUILDER',
-      message: 'Deployment to production requires the Pro plan ($25/mo). Upgrade to keep your backend live.',
-    }
-  }
-  return true
-}
-
-export async function enforceAuthProvider(userId: string, provider: string): Promise<true | LimitViolation> {
-  const sub = await getUserSubscription(userId)
-  if (!sub) return noSubscription()
-
-  if (!sub.plan.allowedAuthProviders.includes(provider)) {
-    const requiredPlan = provider === 'oidc' ? 'SCALE' : 'BUILDER'
-    const displayName = provider === 'oidc' ? 'Enterprise (contact sales)' : 'Pro ($25/mo)'
-    return {
-      code: 'PLAN_LIMIT_EXCEEDED',
-      upgradeRequired: true,
-      currentPlan: sub.plan.name,
-      requiredPlan,
-      message: `The ${provider} auth provider requires the ${displayName} plan.`,
-    }
-  }
-  return true
 }
 
 // ─── Usage summary (cached 30s) ──────────────────────────────────────────────
@@ -649,25 +165,20 @@ export interface UserUsageSummary {
   maxRowsPerProject: number | null
 }
 
-const usageCache = new Map<string, { data: UserUsageSummary; expiresAt: number }>()
-
 export async function getUserUsageSummary(
   userId: string,
   skipCache = false
 ): Promise<UserUsageSummary | null> {
-  const cacheKey = `usage_${userId}`
-  const now = Date.now()
-
   if (!skipCache) {
-    const cached = usageCache.get(cacheKey)
-    if (cached && cached.expiresAt > now) return cached.data
+    const cached = readUsageCache<UserUsageSummary>(userId)
+    if (cached) return cached
   }
 
   const sub = await getUserSubscription(userId)
   if (!sub) return null
 
   const p = sub.plan
-  const month = getThisMonth()
+  const month = thisMonth()
   const [projects, monthlyUsage, lifetimeRow] = await Promise.all([
     prisma.project.findMany({ where: { userId }, select: { id: true, name: true, rowCount: true, storageUsed: true } }),
     getMonthlyUsage(userId),
@@ -718,7 +229,7 @@ export async function getUserUsageSummary(
     fileStorageUsedMb: Math.round(fileStorageUsedMb),
     maxTeamSeats: p.maxTeamSeats,
     maxTriggersPerProject: p.maxTriggersPerProject ?? null,
-    resetAt: getNextMonthStart(),
+    resetAt: nextMonthStart(),
 
     // Legacy aliases consumed by older UI code
     aiUsedToday: monthlyUsage.aiBuildActions,
@@ -733,7 +244,7 @@ export async function getUserUsageSummary(
     maxRowsPerProject: p.maxRowsPerProject ?? null,
   }
 
-  usageCache.set(cacheKey, { data: summary, expiresAt: now + 30_000 })
+  writeUsageCache(userId, summary)
   return summary
 }
 
@@ -742,13 +253,13 @@ export async function getUserUsageSummary(
 export async function incrementProjectRowCount(projectId: string, count = 1): Promise<void> {
   await prisma.project.update({ where: { id: projectId }, data: { rowCount: { increment: count } } })
   const project = await prisma.project.findUnique({ where: { id: projectId }, select: { userId: true } })
-  if (project?.userId) usageCache.delete(`usage_${project.userId}`)
+  if (project?.userId) invalidateUsageCache(project.userId)
 }
 
 export async function decrementProjectRowCount(projectId: string, count = 1): Promise<void> {
   await prisma.project.update({ where: { id: projectId }, data: { rowCount: { decrement: count } } })
   const project = await prisma.project.findUnique({ where: { id: projectId }, select: { userId: true } })
-  if (project?.userId) usageCache.delete(`usage_${project.userId}`)
+  if (project?.userId) invalidateUsageCache(project.userId)
 }
 
 export async function enforceRowInsertion(projectId: string, currentRowCount: number): Promise<true | LimitViolation> {
@@ -758,10 +269,10 @@ export async function enforceRowInsertion(projectId: string, currentRowCount: nu
       user: { include: { subscriptions: { include: { plan: true }, orderBy: { createdAt: 'desc' }, take: 1 } } },
     },
   })
-  if (!project?.user) return noSubscription()
+  if (!project?.user) return noEntitlements()
 
   const sub = project.user.subscriptions[0]
-  if (!sub) return noSubscription()
+  if (!sub) return noEntitlements()
 
   const max = sub.plan.maxRowsPerProject
   if (max !== null && currentRowCount >= max) {

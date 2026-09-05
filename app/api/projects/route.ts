@@ -7,7 +7,8 @@ import { z } from 'zod'
 import { generateUniqueSlug } from '@/lib/utils/slug'
 import { withAuth } from '@/lib/auth/route-protection'
 import crypto from 'crypto'
-import { enforceProjectCreation, createFreeSubscription, getUserSubscription } from '@/lib/billing'
+import { enforceProjectCreation } from '@/lib/entitlements/policy'
+import { initializeAccountEntitlements } from '@/lib/entitlements'
 import { logEvent } from '@/lib/analytics/logger'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import { assertWritable } from '@/lib/platform/controls'
@@ -176,9 +177,9 @@ export const POST = withAuth(async (request: NextRequest, { user }) => {
     // ─── Plan enforcement: project limit ─────────────────────────────────────
     const existingCount = await prisma.project.count({ where: { userId: user.userId } })
 
-    // Auto-provision a FREE subscription for first-time users
-    const sub = await getUserSubscription(user.userId)
-    if (!sub) await createFreeSubscription(user.userId)
+    // Give a first-time account whatever entitlements it needs. A no-op in
+    // single-tenant, where entitlements come from the edition rather than a row.
+    await initializeAccountEntitlements(user.userId)
 
     const limitCheck = await enforceProjectCreation(user.userId, existingCount)
     if (limitCheck !== true) {

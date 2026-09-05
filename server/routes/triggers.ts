@@ -11,7 +11,7 @@ import { Router, Request, Response } from 'express'
 import { verifyToken } from '@/lib/auth/jwt'
 import { prisma } from '@/lib/db'
 import { listTriggers, createTrigger, deleteTrigger } from '@/lib/services/trigger-service'
-import { enforceTriggerCreation } from '@/lib/billing'
+import { enforceTriggerCreation } from '@/lib/entitlements/policy'
 import { canAccessProject, canAdministerProject, canWriteProject } from '@/lib/edition/guard'
 
 const router = Router()

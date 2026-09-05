@@ -20,7 +20,7 @@
 import { prisma } from '@/lib/db/prisma'
 import { runAllAgents, executeAutoFixes } from './agent-orchestrator'
 import { runReconciler, computeReconciliationPlan } from '@/lib/autonomy/reconciler'
-import { getUserSubscription } from '@/lib/billing'
+import { getUserEntitlements } from '@/lib/entitlements'
 import type { AgentFinding } from './agents/types'
 
 // ── Public entry point ────────────────────────────────────────────────────────
@@ -66,7 +66,7 @@ export async function runMonitoredHealthScan(
     // any future plan that genuinely needs a ceiling. When a bounded project
     // does exhaust its budget it never goes silent and never keeps spending —
     // it degrades to cheap detect-only and surfaces one prompt.
-    const ownerPlan = (await getUserSubscription(userId).catch(() => null))?.plan ?? null
+    const ownerPlan = await getUserEntitlements(userId).catch(() => null)
     // Falls back to 1, matching every seeded plan, so an unresolvable plan lands
     // on the product's cadence rather than on an env default nobody sets
     // deliberately. Production carried AUTONOMY_SCAN_INTERVAL_MIN=60, which

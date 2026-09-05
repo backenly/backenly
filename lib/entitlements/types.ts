@@ -36,6 +36,13 @@ export interface UserEntitlements {
   maxTriggersPerProject: number | null
   maxTeamSeats: number
   maxDeploymentHistory: number | null
+  /**
+   * Minimum minutes between autonomy reconcile passes. `null` means the
+   * caller picks, and every seeded plan uses 1 (every minute, on every plan).
+   * Carried here because autonomy is public and ungated, so its cadence must
+   * not require a commercial lookup.
+   */
+  autonomyScanIntervalMin: number | null
 
   logRetentionDays: number
   supportResponseHours: number | null

@@ -1,22 +1,25 @@
 /**
- * Cloud entitlements, as resolved WITHOUT the private overlay.
+ * The Cloud entitlements provider, as resolved WITHOUT the private overlay.
  *
  * `@cloud/entitlements` resolves here only when `lib/cloud/entitlements.ts` is
  * absent, which means no Cloud overlay has been applied. Today that is every
- * public checkout, so this file still carries the real billing-backed mapping
- * and Cloud behaviour is unchanged by the seam that now sits in front of it.
+ * public checkout, so this file still delegates to the real implementation in
+ * lib/billing and Cloud behaviour is unchanged by the seam in front of it.
  *
- * Phase 6 moves the implementation into the private overlay. When it does, this
- * file stops mapping Plan rows and becomes the honest answer for a public
- * checkout that has no commercial implementation to consult. It is deliberately
- * the ONLY place the Plan -> UserEntitlements mapping exists, so that move is a
- * relocation rather than a second copy.
+ * Phase 6 moves that implementation into the private overlay. When it does,
+ * this file becomes the honest answer for a public checkout with no commercial
+ * half, and the delegation below is what disappears. Nothing else has to move,
+ * because the public product already calls the seam rather than lib/billing.
  *
- * `lib/billing` is imported here and nowhere else in public product code. That
- * is the point of the seam: this file is the single remaining edge, and it is
- * one the overlay replaces wholesale.
+ * ── Why every import here is dynamic ────────────────────────────────────────
+ *
+ * lib/billing imports the public policy layer (for getMonthlyUsage and the
+ * shared violation helpers), and the policy layer imports this provider. A
+ * static import in either direction would close that loop at module-evaluation
+ * time, and the usual symptom is an undefined binding in whichever module the
+ * bundler happens to initialise second. Deferring to call time breaks the cycle
+ * without either side having to know about the other's ordering.
  */
-import { getUserSubscription } from '@/lib/billing'
 import type { UserEntitlements } from '@/lib/entitlements/types'
 
 /**
@@ -25,6 +28,7 @@ import type { UserEntitlements } from '@/lib/entitlements/types'
  * lookup failed.
  */
 export async function cloudEntitlements(userId: string): Promise<UserEntitlements | null> {
+  const { getUserSubscription } = await import('@/lib/billing')
   const sub = await getUserSubscription(userId)
   if (!sub) return null
 
@@ -47,6 +51,7 @@ export async function cloudEntitlements(userId: string): Promise<UserEntitlement
     maxTriggersPerProject: p.maxTriggersPerProject ?? null,
     maxTeamSeats: p.maxTeamSeats,
     maxDeploymentHistory: p.maxDeploymentHistory ?? null,
+    autonomyScanIntervalMin: p.autonomyScanIntervalMin ?? null,
 
     logRetentionDays: p.logRetentionDays,
     supportResponseHours: p.supportResponseHours ?? null,
@@ -65,4 +70,38 @@ export async function cloudEntitlements(userId: string): Promise<UserEntitlement
     sandboxExpiryDays: p.sandboxExpiryDays ?? null,
     isPayAsYouGo: p.isPayAsYouGo,
   }
+}
+
+/** Granted credits (referral or promo) that extend the monthly cap. */
+export async function bonusCredits(userId: string): Promise<number> {
+  const { getBonusCredits } = await import('@/lib/billing/credit-ledger')
+  return getBonusCredits(userId)
+}
+
+/**
+ * Charge a completed AI turn to the commercial usage ledger.
+ *
+ * Never throws: the public policy layer calls this after it has already decided
+ * the turn was allowed, so a ledger failure must not surface as a build error.
+ */
+export async function recordAiConsumption(userId: string, tokensUsed: number): Promise<void> {
+  const { chargeAiCredits } = await import('@/lib/billing')
+  return chargeAiCredits(userId, tokensUsed)
+}
+
+/**
+ * Give a new account a free subscription.
+ *
+ * Only ever reached in cloud: lib/entitlements short-circuits single-tenant
+ * before the provider is consulted, which is what keeps a self-host install
+ * free of Plan and Subscription rows.
+ */
+export async function initializeAccountEntitlements(userId: string): Promise<void> {
+  const { getUserSubscription, createFreeSubscription } = await import('@/lib/billing')
+  // Idempotent: the callers used to guard this themselves, and a second
+  // Subscription row for the same account would make getUserSubscription's
+  // orderBy the only thing deciding which plan a user is on.
+  const existing = await getUserSubscription(userId)
+  if (existing) return
+  await createFreeSubscription(userId)
 }

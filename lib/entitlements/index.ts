@@ -15,7 +15,7 @@
  * is what makes one alias work identically under tsc, next build, tsx and jest.
  */
 import { currentEdition } from '@/lib/edition'
-import { cloudEntitlements } from '@cloud/entitlements'
+import { cloudEntitlements, initializeAccountEntitlements as cloudInitialize } from '@cloud/entitlements'
 import { selfHostedEntitlements } from './self-hosted'
 import type { UserEntitlements } from './types'
 
@@ -35,4 +35,19 @@ export { selfHostedEntitlements } from './self-hosted'
 export async function getUserEntitlements(userId: string): Promise<UserEntitlements | null> {
   if (currentEdition() === 'single-tenant') return selfHostedEntitlements()
   return cloudEntitlements(userId)
+}
+
+/**
+ * Give a newly created account whatever it needs to have entitlements.
+ *
+ * Cloud creates a free Subscription row. Single-tenant does nothing at all,
+ * and that is the point rather than an omission: entitlements there come from
+ * the edition, and creating a Subscription row would drag back the Plan seed
+ * requirement that a self-host install deliberately does without.
+ *
+ * Signup calls this and does not know which happened.
+ */
+export async function initializeAccountEntitlements(userId: string): Promise<void> {
+  if (currentEdition() === 'single-tenant') return
+  await cloudInitialize(userId)
 }

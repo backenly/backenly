@@ -5,7 +5,7 @@ import { prisma } from '@/lib/db/postgres'
 import { hashPassword, validatePasswordStrength } from '@/lib/auth/password'
 import { createSession } from '@/lib/auth/session'
 import { logAuthEvent } from '@/lib/services/logging'
-import { createFreeSubscription } from '@/lib/billing'
+import { initializeAccountEntitlements } from '@/lib/entitlements'
 import { logEvent } from '@/lib/analytics/logger'
 import { sendVerificationEmail } from '@/lib/auth/email'
 import {
@@ -159,8 +159,9 @@ export async function POST(request: NextRequest) {
     )
 
     
-    // Create free subscription
-    await createFreeSubscription(user.id).catch(() => {
+    // Give the new account its entitlements. A no-op in single-tenant, where
+    // they come from the edition rather than a Subscription row.
+    await initializeAccountEntitlements(user.id).catch(() => {
       // Non-fatal: billing seed may not have run yet
     })
 

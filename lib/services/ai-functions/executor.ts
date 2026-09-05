@@ -29,7 +29,7 @@ import { buildIntegrationContext, IntegrationContext } from './integration-conte
 import { getProviderSpec } from './integration-registry'
 import { generateFixedFunctionCode } from './generator'
 import { isRouteModuleFunction, executeRouteModuleFunction, validateRouteModule } from './route-module-runner'
-import { enforceAiFunctionInvocation, trackAiFunctionInvocation } from '@/lib/billing'
+import { enforceAiFunctionInvocation, trackAiFunctionInvocation } from '@/lib/entitlements/policy'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { isReservedTestEmail } from '@/lib/services/end-user-auth-table'
 // One cast table for the whole codebase. Duplicating it is how the MCP path and

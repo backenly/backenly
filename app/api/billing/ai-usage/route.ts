@@ -2,7 +2,8 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { withAuth } from '@/lib/auth/route-protection'
-import { getTodayAiUsage, checkAiIntentLimit } from '@/lib/billing'
+import { getTodayAiUsage } from '@/lib/billing'
+import { checkAiIntentLimit } from '@/lib/entitlements/policy'
 
 /**
  * GET /api/billing/ai-usage - Get AI usage for today

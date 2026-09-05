@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { withAuth } from '@/lib/auth/route-protection'
 import { createWebhook, getProjectWebhooks, deleteWebhook, toggleWebhook } from '@/lib/webhooks'
-import { enforceWebhook } from '@/lib/billing'
+import { enforceWebhook } from '@/lib/entitlements/policy'
 import { canAccessProject, canAdministerProject, canWriteProject } from '@/lib/edition/guard'
 
 /**

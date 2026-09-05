@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { withAuth } from '@/lib/auth/route-protection'
 import { addCustomDomain, getProjectDomains, deleteDomain, verifyDomain, isValidDomain, isReservedDomain } from '@/lib/domains'
-import { enforceCustomDomain } from '@/lib/billing'
+import { enforceCustomDomain } from '@/lib/entitlements/policy'
 import { canAccessProject, canAdministerProject, canWriteProject } from '@/lib/edition/guard'
 
 /**

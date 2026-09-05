@@ -24,7 +24,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { withAuth } from '@/lib/auth/route-protection'
 import { prisma } from '@/lib/db/prisma'
 import { upgradeSandboxToProduction } from '@/lib/billing/sandbox'
-import { enforceDeployment } from '@/lib/billing'
+import { enforceDeployment } from '@/lib/entitlements/policy'
 import { canWriteProject } from '@/lib/edition/guard'
 
 export const POST = withAuth(async (request: NextRequest, { user }) => {

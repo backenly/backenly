@@ -14,7 +14,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { withAuth } from '@/lib/auth/route-protection'
 import { prisma } from '@/lib/db/prisma'
-import { getUserSubscription } from '@/lib/billing'
+import { getUserEntitlements } from '@/lib/entitlements'
 import { getSandboxStatus } from '@/lib/billing/sandbox'
 
 export const GET = withAuth(async (request: NextRequest, { user }) => {
@@ -33,7 +33,7 @@ export const GET = withAuth(async (request: NextRequest, { user }) => {
       )
     }
 
-    const sub = await getUserSubscription(userId)
+    const ent = await getUserEntitlements(userId)
 
     const projectWhere: Record<string, unknown> = { userId }
     if (projectIdFilter) projectWhere.id = projectIdFilter
@@ -84,9 +84,9 @@ export const GET = withAuth(async (request: NextRequest, { user }) => {
 
     return NextResponse.json({
       month,
-      plan: sub?.plan.name ?? 'SANDBOX',
-      isPayAsYouGo: sub?.plan.isPayAsYouGo ?? false,
-      isSandboxPlan: sub?.plan.isSandboxPlan ?? true,
+      plan: ent?.planName ?? 'SANDBOX',
+      isPayAsYouGo: ent?.isPayAsYouGo ?? false,
+      isSandboxPlan: ent?.isSandboxPlan ?? true,
       projects: projectData,
       totals,
       resetAt,
