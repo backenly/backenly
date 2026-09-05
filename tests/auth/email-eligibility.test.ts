@@ -1,4 +1,4 @@
-import { checkSignupEmailEligibility } from '@/lib/trust/email-eligibility'
+import { checkSignupEmailEligibility } from '@/lib/auth/signup-email-eligibility'
 
 describe('checkSignupEmailEligibility', () => {
   it('allows genuine consumer and work emails', () => {

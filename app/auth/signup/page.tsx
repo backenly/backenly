@@ -7,7 +7,7 @@ import { useRouter, useSearchParams } from 'next/navigation'
 import {
   checkSignupEmailEligibility,
   SIGNUP_EMAIL_REJECTION_MESSAGE,
-} from '@/lib/trust/email-eligibility'
+} from '@/lib/auth/signup-email-eligibility'
 import { register } from '@/lib/api/auth'
 import { registerSiteIcons } from '@/lib/icons/registry'
 import {

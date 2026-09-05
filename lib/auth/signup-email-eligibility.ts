@@ -1,10 +1,29 @@
 /**
- * Platform signup email eligibility.
+ * Signup email eligibility: the client-safe half.
  *
  * The goal is not to maintain a perfect global email reputation database.
  * This catches the high-signal cases that produce low-quality Backenly users:
  * disposable mailbox domains, reserved/example domains, and obvious burner
  * local-parts even when the attacker uses a trusted mailbox provider.
+ *
+ * ── Why this is public and lib/trust is not ─────────────────────────────────
+ *
+ * Everything here is pure: a static list and some string tests, no network, no
+ * database, no secrets, no scoring. The signup page runs it to give inline
+ * feedback while someone is typing, so it is already compiled into the browser
+ * bundle that every visitor downloads. Keeping it under lib/trust would have
+ * meant either shipping a private module to the client or making the public
+ * signup page import code that is about to disappear from the repository.
+ *
+ * The actual admission decision is NOT here and must never move here. That is
+ * assertSignupAllowed, which applies MX and domain heuristics, the blocklist
+ * and the operator kill switches on the server, where a visitor cannot read
+ * it. This module only decides what the form says while you type; the server
+ * decides whether you get an account.
+ *
+ * So: adding a deterministic, disclosable check here is fine. Adding anything
+ * that reveals how Backenly scores abuse is not, because publishing it here
+ * publishes it to the people it is meant to catch.
  */
 
 export interface EmailEligibilityResult {

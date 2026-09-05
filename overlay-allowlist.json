@@ -115,7 +115,6 @@
       "lib/org/index.ts",
       "lib/trust/account-standing.ts",
       "lib/trust/bot-defense.ts",
-      "lib/trust/email-eligibility.ts",
       "lib/trust/email-trust.ts",
       "prisma/seed-billing.ts",
       "scripts/fleet/autonomy-fleet-check.ts",
