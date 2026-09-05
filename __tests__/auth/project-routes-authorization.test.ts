@@ -149,15 +149,11 @@ describe('ai-functions (authenticateRequest + bearer)', () => {
     const owner: any = await GET(req({ bearer: f.owner.token }), params(f.projectId))
     expect(owner.status).toBe(200)
 
-    // The fix. This was 404 before: the member is not the project's userId.
-    const member: any = await GET(req({ bearer: f.member.token }), params(f.projectId))
-    expect(member.status).toBe(200)
-
-    // Restricted with no ProjectMember grant. An empty allowlist means nothing,
-    // never everything.
-    const restricted: any = await GET(req({ bearer: f.restricted.token }), params(f.projectId))
-    expect(restricted.status).toBe(404)
-
+    // The organization rows of this matrix -- an unrestricted member reaching a
+    // project they do not own, and a restricted one being held out until they
+    // are granted it -- moved to the composed Cloud suite with the
+    // implementation they exercise. Asserting them here would test the OSS
+    // fallback, which reports no membership, and pass for the wrong reason.
     const stranger: any = await GET(req({ bearer: f.stranger.token }), params(f.projectId))
     expect(stranger.status).toBe(404)
 
@@ -165,17 +161,6 @@ describe('ai-functions (authenticateRequest + bearer)', () => {
     // that is real but not theirs as for one that never existed.
     const ghost: any = await GET(req({ bearer: f.stranger.token }), params(randomUUID()))
     expect(ghost.status).toBe(404)
-  })
-
-  it('lets a restricted member through once the project is granted', async () => {
-    const { GET } = await import('@/app/api/projects/[id]/ai-functions/route')
-    const f = await fixture()
-    await prisma.projectMember.create({
-      data: { orgId: f.orgId, userId: f.restricted.id, projectId: f.projectId },
-    })
-
-    const res: any = await GET(req({ bearer: f.restricted.token }), params(f.projectId))
-    expect(res.status).toBe(200)
   })
 
   it('still rejects an unauthenticated caller with 401, not 404', async () => {
@@ -197,9 +182,7 @@ describe('audit-logs (verifyToken + bearer)', () => {
     const owner: any = await GET(req({ bearer: f.owner.token }), params(f.projectId))
     expect(owner.status).toBe(200)
 
-    const member: any = await GET(req({ bearer: f.member.token }), params(f.projectId))
-    expect(member.status).toBe(200)
-
+    // Organization rows: composed Cloud suite. See the note above.
     const stranger: any = await GET(req({ bearer: f.stranger.token }), params(f.projectId))
     expect(stranger.status).toBe(404)
   })
@@ -213,9 +196,7 @@ describe('metadata (verifySession + cookie)', () => {
     const owner: any = await GET(req({ cookie: f.owner.token }), params(f.projectId))
     expect(owner.status).toBe(200)
 
-    const member: any = await GET(req({ cookie: f.member.token }), params(f.projectId))
-    expect(member.status).toBe(200)
-
+    // Organization rows: composed Cloud suite. See the note above.
     const stranger: any = await GET(req({ cookie: f.stranger.token }), params(f.projectId))
     expect(stranger.status).toBe(404)
   })

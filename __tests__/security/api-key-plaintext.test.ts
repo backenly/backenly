@@ -31,7 +31,11 @@ const read = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), 'ut
 const ISSUANCE_PATHS = [
   'app/api/api-keys/route.ts',
   'app/api/api-keys/[id]/rotate/route.ts',
-  'app/api/projects/route.ts',
+  // Project creation issues the default key here rather than inline in the
+  // route: Phase 7 moved the provisioning sequence behind ProjectLifecycle, and
+  // this guard follows the code it protects. Leaving it pointed at the route
+  // would have kept passing against a file that no longer issues anything.
+  'lib/projects/default-api-key.ts',
   'app/api/projects/[id]/anon-key/route.ts',
 ]
 
@@ -112,8 +116,14 @@ describe('no issuance path persists plaintext', () => {
   })
 
   it('project creation stores null in the key column', () => {
-    const src = code(read('app/api/projects/route.ts'))
+    const src = code(read('lib/projects/default-api-key.ts'))
     expect(src).toMatch(/key:\s*plaintextForStorage\(\)/)
+  })
+
+  it('the project route no longer issues a key of its own', () => {
+    // If creation ever moves back inline, the path above would still pass while
+    // the route quietly persisted a plaintext key beside it.
+    expect(code(read('app/api/projects/route.ts'))).not.toMatch(/apiKey\.create/)
   })
 
   it('still returns the full key to the caller exactly once', () => {

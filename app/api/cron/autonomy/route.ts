@@ -13,18 +13,22 @@
  *   - the owner's autonomy dial (OFF → shadow only)
  *   - the circuit breaker + change-freeze during incidents
  *
- * So this route does no policy work — it just enumerates active projects and
- * fans out, with per-project failure isolation and a small concurrency cap.
+ * So this route does no policy work. It asks FleetScheduler which projects to
+ * visit and fans out, with per-project failure isolation and a small
+ * concurrency cap.
+ *
+ * WHICH projects is an edition question and is not answered here: single-tenant
+ * resolves THE project, Cloud enumerates its estate. WHAT happens to each one
+ * is runReconciler, which is public product and identical in both editions.
  */
 
 export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db/prisma'
 import { runReconciler } from '@/lib/autonomy/reconciler'
 import { diagnoseEscalatedFindings } from '@/lib/autonomy/escalation-diagnosis'
 import { FLAGS } from '@/lib/config/flags'
-import { activeProjectsWhere } from '@/lib/autonomy/activity-gate'
+import { getFleetScheduler } from '@/lib/edition'
 
 const CONCURRENCY = 5
 
@@ -47,14 +51,10 @@ export async function GET(request: NextRequest) {
 
   const startedAt = Date.now()
 
-  const activeProjects = await prisma.project
-    .findMany({
-      // Shared with the in-process node-cron tick so the two schedulers cannot
-      // disagree about which projects get healed. See lib/autonomy/activity-gate.ts.
-      where: activeProjectsWhere(),
-      select: { id: true },
-    })
-    .catch(() => [])
+  // Shared with the in-process node-cron tick so the two schedulers cannot
+  // disagree about which projects get healed. The eligibility rule itself is
+  // still lib/autonomy/activity-gate.ts; the edition decides only the SET.
+  const activeProjects = await getFleetScheduler().activeTargets()
 
   let attempted = 0
   let applied = 0

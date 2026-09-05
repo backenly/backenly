@@ -119,30 +119,6 @@ afterAll(async () => {
 })
 
 describe('DELETE /api/projects/[id]', () => {
-  it.each(['VIEWER', 'DEVELOPER'])('refuses an org %s, and the project survives', async role => {
-    const { DELETE } = await import('@/app/api/projects/[id]/route')
-    const f = await fixture(role)
-    currentUserId = f.memberId
-
-    const res: any = await DELETE(req(f.projectId), {} as any)
-
-    expect(res.status).toBe(404)
-    // The assertion that matters. A refusal that still deleted would be the
-    // worst possible outcome of this migration.
-    expect(await stillExists(f.projectId)).toBe(true)
-  })
-
-  it('allows an org ADMIN', async () => {
-    const { DELETE } = await import('@/app/api/projects/[id]/route')
-    const f = await fixture('ADMIN')
-    currentUserId = f.memberId
-
-    const res: any = await DELETE(req(f.projectId), {} as any)
-
-    expect(res.status).toBe(200)
-    expect(await stillExists(f.projectId)).toBe(false)
-  })
-
   it('allows the project owner', async () => {
     const { DELETE } = await import('@/app/api/projects/[id]/route')
     const f = await fixture('VIEWER')

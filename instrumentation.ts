@@ -70,14 +70,10 @@ export async function register() {
       // project) and skips findings that already carry a diagnosis, so a tick
       // with nothing escalated costs one indexed query per project.
       cron.schedule('*/10 * * * *', async () => {
-        const { prisma } = await import('./lib/db/prisma')
         const { diagnoseEscalatedFindings } = await import('./lib/autonomy/escalation-diagnosis')
-        const { activeProjectsWhere } = await import('./lib/autonomy/activity-gate')
+        const { getFleetScheduler } = await import('./lib/edition')
 
-        const activeProjects = await prisma.project.findMany({
-          where: activeProjectsWhere(),
-          select: { id: true },
-        }).catch(() => [])
+        const activeProjects = await getFleetScheduler().activeTargets()
         if (activeProjects.length === 0) return
 
         const CONCURRENCY = 5
@@ -110,14 +106,10 @@ export async function register() {
       // Daily, and after the observer's own pass, because it runs the full
       // desired-state diff per project.
       cron.schedule('40 0 * * *', async () => {
-        const { prisma } = await import('./lib/db/prisma')
         const { checkSensorHealth, summariseSensorHealth } = await import('./lib/autonomy/sensor-health')
-        const { activeProjectsWhere } = await import('./lib/autonomy/activity-gate')
+        const { getFleetScheduler } = await import('./lib/edition')
 
-        const activeProjects = await prisma.project.findMany({
-          where: activeProjectsWhere(),
-          select: { id: true },
-        }).catch(() => [])
+        const activeProjects = await getFleetScheduler().activeTargets()
 
         for (const p of activeProjects) {
           try {
@@ -237,14 +229,10 @@ export async function register() {
 
       // Autonomous background health scan once daily — 01:00 UTC
       cron.schedule('0 1 * * *', async () => {
-        const { prisma } = await import('./lib/db/prisma')
         const { runMonitoredHealthScan } = await import('./lib/ai/background-monitor')
 
-        const { activeProjectsWhere } = await import('./lib/autonomy/activity-gate')
-        const activeProjects = await prisma.project.findMany({
-          where: activeProjectsWhere(7),
-          select: { id: true, userId: true },
-        }).catch(() => [])
+        const { getFleetScheduler } = await import('./lib/edition')
+        const activeProjects = await getFleetScheduler().activeTargets({ windowDays: 7 })
 
         const CONCURRENCY = 10
         for (let i = 0; i < activeProjects.length; i += CONCURRENCY) {
@@ -284,14 +272,10 @@ export async function register() {
         if (g.__infraScanRunning) return
         g.__infraScanRunning = true
         try {
-          const { prisma } = await import('./lib/db/prisma')
           const { runAndStoreInfraIntelligence } = await import('./lib/ai/infra-intelligence')
 
-          const { activeProjectsWhere } = await import('./lib/autonomy/activity-gate')
-          const loadedProjects = await prisma.project.findMany({
-            where: activeProjectsWhere(),
-            select: { id: true, userId: true },
-          }).catch(() => [])
+          const { getFleetScheduler } = await import('./lib/edition')
+          const loadedProjects = await getFleetScheduler().activeTargets()
 
           const CONCURRENCY = 5
           for (let i = 0; i < loadedProjects.length; i += CONCURRENCY) {
@@ -313,14 +297,10 @@ export async function register() {
       // Detects project stage (MVP→Growth→Scale→Enterprise), plans migration
       // steps, identifies service extraction candidates and tech debt.
       cron.schedule('20 3 * * *', async () => {
-        const { prisma } = await import('./lib/db/prisma')
         const { runAndStoreArchitectureEvolution } = await import('./lib/ai/architecture-evolution')
 
-        const { activeProjectsWhere } = await import('./lib/autonomy/activity-gate')
-        const activeProjects = await prisma.project.findMany({
-          where: activeProjectsWhere(),
-          select: { id: true, userId: true },
-        }).catch(() => [])
+        const { getFleetScheduler } = await import('./lib/edition')
+        const activeProjects = await getFleetScheduler().activeTargets()
 
         const CONCURRENCY = 5
         for (let i = 0; i < activeProjects.length; i += CONCURRENCY) {
@@ -338,14 +318,10 @@ export async function register() {
       // Analyses AuditLog API call patterns + SDK telemetry.
       // Auto-adds missing indexes; queues schema changes for approval.
       cron.schedule('0 4 * * *', async () => {
-        const { prisma } = await import('./lib/db/prisma')
         const { runAndStoreFrontendCoevolution } = await import('./lib/ai/frontend-coevolution')
 
-        const { activeProjectsWhere } = await import('./lib/autonomy/activity-gate')
-        const activeProjects = await prisma.project.findMany({
-          where: activeProjectsWhere(7),
-          select: { id: true, userId: true },
-        }).catch(() => [])
+        const { getFleetScheduler } = await import('./lib/edition')
+        const activeProjects = await getFleetScheduler().activeTargets({ windowDays: 7 })
 
         const CONCURRENCY = 5
         for (let i = 0; i < activeProjects.length; i += CONCURRENCY) {
@@ -379,7 +355,6 @@ export async function register() {
       // kicks (after mutations) flow through the same dispatcher, so they
       // honor the same rules. The cron is the backstop for drift detection.
       cron.schedule('* * * * *', async () => {
-        const { prisma } = await import('./lib/db/prisma')
         const { runReconciler } = await import('./lib/autonomy/reconciler')
         const { FLAGS } = await import('./lib/config/flags')
 
@@ -416,11 +391,8 @@ export async function register() {
         // reconciler does real work per project, no point burning DB on dead
         // projects. See lib/autonomy/activity-gate.ts for what counts as alive
         // and why it is no longer "somebody chatted about it".
-        const { activeProjectsWhere } = await import('./lib/autonomy/activity-gate')
-        const activeProjects = await prisma.project.findMany({
-          where: activeProjectsWhere(),
-          select: { id: true },
-        }).catch(() => [])
+        const { getFleetScheduler } = await import('./lib/edition')
+        const activeProjects = await getFleetScheduler().activeTargets()
 
         // Per-project failure isolation — one bad project never stalls the
         // whole tick. Concurrency 5; the reconciler is deterministic (no model
@@ -463,14 +435,10 @@ export async function register() {
         if (g.__baselineCollectorRunning) return
         g.__baselineCollectorRunning = true
         try {
-          const { prisma } = await import('./lib/db/prisma')
           const { collectBaseline, pruneBaseline } = await import('./lib/autonomy/baseline/collector')
-          const { activeProjectsWhere } = await import('./lib/autonomy/activity-gate')
+          const { getFleetScheduler } = await import('./lib/edition')
 
-          const projects = await prisma.project.findMany({
-            where: activeProjectsWhere(),
-            select: { id: true },
-          }).catch(() => [])
+          const projects = await getFleetScheduler().activeTargets()
 
           const CONCURRENCY = 5
           for (let i = 0; i < projects.length; i += CONCURRENCY) {
@@ -493,8 +461,8 @@ export async function register() {
       // ProjectUsage.dbStorageUsedMb so the billing dashboard reflects real
       // end-user inserts (not only AI-build-time side-effects).
       cron.schedule('0 * * * *', async () => {
-        const { snapshotAllProjectsDbStorage } = await import('./lib/fleet/db-storage-sweep')
-        await snapshotAllProjectsDbStorage().catch((err: any) =>
+        const { snapshotScheduledDbStorage } = await import('./lib/usage/db-storage')
+        await snapshotScheduledDbStorage().catch((err: any) =>
           console.error('[DbStorageSnapshot] Error:', err?.message)
         )
       })

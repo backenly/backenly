@@ -16,13 +16,17 @@
  * single-tenant/project-resolver.ts is the backstop for exactly that mistake
  * and is already live.
  */
+import { cloudFleetScheduler } from './cloud/fleet-scheduler'
 import { cloudProjectLifecycle } from './cloud/project-lifecycle'
 import { cloudProjectResolver } from './cloud/project-resolver'
+import { singleTenantFleetScheduler } from './single-tenant/fleet-scheduler'
 import { singleTenantProjectLifecycle } from './single-tenant/project-lifecycle'
 import { singleTenantProjectResolver } from './single-tenant/project-resolver'
 import type { Edition, ProjectLifecycle, ProjectResolver } from './types'
+import type { FleetScheduler } from './fleet-types'
 
 export * from './types'
+export * from './fleet-types'
 
 const DEFAULT_EDITION: Edition = 'cloud'
 
@@ -56,4 +60,15 @@ export function getProjectResolver(): ProjectResolver {
  */
 export function getProjectLifecycle(): ProjectLifecycle {
   return currentEdition() === 'single-tenant' ? singleTenantProjectLifecycle : cloudProjectLifecycle
+}
+
+/**
+ * Which projects a scheduled or background pass runs against.
+ *
+ * Per-project execution stays public and unchanged: this answers only WHICH,
+ * never WHAT. See lib/edition/fleet-types.ts for why the interface is this
+ * narrow.
+ */
+export function getFleetScheduler(): FleetScheduler {
+  return currentEdition() === 'single-tenant' ? singleTenantFleetScheduler : cloudFleetScheduler
 }

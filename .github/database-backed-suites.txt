@@ -107,3 +107,10 @@ __tests__/auth/first-operator-admission.test.ts
 # its refusal happens BEFORE the insert, and that Cloud creation provisions a
 # graph, a workspace, a schema and a signing secret rather than one row.
 __tests__/edition/project-lifecycle.test.ts
+
+# FleetScheduler, the Phase 7 edition seam for "which projects does a scheduled
+# pass run against". The property under test is a `where` clause: single-tenant
+# must return THE project while a second, equally eligible row sits in the same
+# table. A mock cannot show that, and "returns one project" would pass against
+# an enumeration that happened to find one.
+__tests__/edition/fleet-scheduler.test.ts

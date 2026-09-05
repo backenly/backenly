@@ -75,7 +75,6 @@ describeOss('the product is still here', () => {
     'lib/projects/sandbox-lifecycle.ts',
     'lib/projects/milestones.ts',
     'lib/usage/db-storage.ts',
-    'lib/fleet/db-storage-sweep.ts',
     'lib/auth/signup-email-eligibility.ts',
     'app/api/cron/autonomy/route.ts',
     'app/api/cron/daily-backup/route.ts',

@@ -161,24 +161,6 @@ describe('cloud adapter', () => {
     )
   })
 
-  it('resolves an org project for a member who does not own it', async () => {
-    // The fix. Every route behind this adapter denied this caller before.
-    const owner = await makeUser()
-    const member = await makeUser()
-    const org = await prisma.organization.create({
-      data: { name: `adapter-org-${randomUUID().slice(0, 8)}`, ownerId: owner.id },
-      select: { id: true },
-    })
-    createdOrgIds.push(org.id)
-    await prisma.organizationMember.create({ data: { orgId: org.id, userId: owner.id, role: 'OWNER' } })
-    await prisma.organizationMember.create({ data: { orgId: org.id, userId: member.id, role: 'DEVELOPER' } })
-    const projectId = await makeProject(owner.id, org.id)
-
-    await expect(getCurrentProjectId(req({ token: member.token, projectHeader: projectId }))).resolves.toBe(
-      projectId
-    )
-  })
-
   it('refuses a request that names no project, and names no project of its own', async () => {
     const user = await makeUser()
     const ownProjectId = await makeProject(user.id)
