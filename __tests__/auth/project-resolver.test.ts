@@ -22,9 +22,22 @@
  * The nastier half is the fallback. `getCurrentProjectId` resolves a MISSING
  * projectId to the caller's OLDEST OWNED project, so those routes do not merely
  * deny an organization member: they answer 200 with a different project's data.
- * Storage renders the organization's project as empty rather than as an error.
- * `respects the organization project over the caller's own older one` below is
- * the test for precisely that, and it is the reason this file exists.
+ *
+ * ---- WHAT THIS SUITE COVERS, AND WHAT MOVED ------------------------------
+ *
+ * The ORGANIZATION half of that question is Cloud control plane, and Phase 7
+ * moved its implementation to the private overlay. The tests that exercise it
+ * -- unrestricted membership, the `restricted` allowlist, a member's role
+ * gating what they may DO, and the organization project outranking the
+ * caller's own older one -- moved with it, to the composed Cloud suite. They
+ * were not deleted: a test that stays behind while its implementation leaves
+ * either fails for the wrong reason or passes without asserting anything, and
+ * both read as "covered" from a summary line.
+ *
+ * What stays here is the part every edition answers identically: which edition
+ * is in force, the owner, the stranger, not-found versus forbidden, the
+ * missing-project refusal, the machine-credential contract, the trusted
+ * bypass, and the whole single-tenant model.
  *
  * Real database. Every defect here lives in a `where` clause, which is exactly
  * what a mocked client cannot model.
@@ -61,7 +74,6 @@ function assertSafeTestDatabase(): void {
 }
 
 const createdUserIds: string[] = []
-const createdOrgIds: string[] = []
 const createdProjectIds: string[] = []
 
 async function makeUser(): Promise<string> {
@@ -73,37 +85,13 @@ async function makeUser(): Promise<string> {
   return u.id
 }
 
-async function makeProject(userId: string | null, orgId?: string): Promise<string> {
+async function makeProject(userId: string | null): Promise<string> {
   const p = await prisma.project.create({
-    data: { name: `resolver-${randomUUID().slice(0, 8)}`, userId, organizationId: orgId ?? null },
+    data: { name: `resolver-${randomUUID().slice(0, 8)}`, userId },
     select: { id: true },
   })
   createdProjectIds.push(p.id)
   return p.id
-}
-
-async function makeOrg(ownerId: string): Promise<string> {
-  const o = await prisma.organization.create({
-    data: { name: `resolver-org-${randomUUID().slice(0, 8)}`, ownerId },
-    select: { id: true },
-  })
-  createdOrgIds.push(o.id)
-  return o.id
-}
-
-async function addMember(orgId: string, userId: string, role: string, restricted = false): Promise<void> {
-  await prisma.organizationMember.create({ data: { orgId, userId, role, restricted } })
-}
-
-/** An organization project plus a member of the given role. */
-async function orgFixture(role: string, restricted = false) {
-  const ownerId = await makeUser()
-  const memberId = await makeUser()
-  const orgId = await makeOrg(ownerId)
-  await addMember(orgId, ownerId, 'OWNER')
-  await addMember(orgId, memberId, role, restricted)
-  const projectId = await makeProject(ownerId, orgId)
-  return { ownerId, memberId, orgId, projectId }
 }
 
 const ORIGINAL_EDITION = process.env.BACKENLY_EDITION
@@ -124,10 +112,6 @@ afterAll(async () => {
   if (createdProjectIds.length) {
     await prisma.projectMember.deleteMany({ where: { projectId: { in: createdProjectIds } } })
     await prisma.project.deleteMany({ where: { id: { in: createdProjectIds } } })
-  }
-  if (createdOrgIds.length) {
-    await prisma.organizationMember.deleteMany({ where: { orgId: { in: createdOrgIds } } })
-    await prisma.organization.deleteMany({ where: { id: { in: createdOrgIds } } })
   }
   if (createdUserIds.length) {
     await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } })
@@ -170,16 +154,6 @@ describe('cloud: human sessions', () => {
     expect(resolved.id).toBe(projectId)
   })
 
-  it.each(['OWNER', 'ADMIN', 'DEVELOPER', 'VIEWER'])(
-    'allows an unrestricted org %s who does not own the project',
-    async role => {
-      const { memberId, projectId } = await orgFixture(role)
-
-      const resolved = await getProjectResolver().resolveForUser(memberId, projectId)
-      expect(resolved.id).toBe(projectId)
-    }
-  )
-
   it('denies a user with no relationship to the project', async () => {
     const ownerId = await makeUser()
     const strangerId = await makeUser()
@@ -189,34 +163,6 @@ describe('cloud: human sessions', () => {
       ProjectAccessDeniedError
     )
   })
-
-  it('denies a restricted member with no grant for this project', async () => {
-    const { memberId, projectId } = await orgFixture('DEVELOPER', true)
-
-    // An empty allowlist means NOTHING, never everything. A restricted member
-    // with zero ProjectMember rows must not fall back to org-wide access.
-    await expect(getProjectResolver().resolveForUser(memberId, projectId)).rejects.toBeInstanceOf(
-      ProjectAccessDeniedError
-    )
-  })
-
-  it('allows a restricted member once the project is granted to them', async () => {
-    const { memberId, orgId, projectId } = await orgFixture('DEVELOPER', true)
-    await prisma.projectMember.create({ data: { orgId, userId: memberId, projectId } })
-
-    const resolved = await getProjectResolver().resolveForUser(memberId, projectId)
-    expect(resolved.id).toBe(projectId)
-  })
-
-  it.each(['OWNER', 'ADMIN'])(
-    'never scopes a restricted %s, who stays org-wide by definition',
-    async role => {
-      const { memberId, projectId } = await orgFixture(role, true)
-
-      const resolved = await getProjectResolver().resolveForUser(memberId, projectId)
-      expect(resolved.id).toBe(projectId)
-    }
-  )
 
   it('reports a missing project as not found, distinctly from forbidden', async () => {
     const userId = await makeUser()
@@ -241,20 +187,6 @@ describe('cloud: human sessions', () => {
     expect(err.code).toBe('PROJECT_REQUIRED')
   })
 
-  it('respects the organization project over the caller\'s own older one', async () => {
-    // THE regression. Under getCurrentProjectId an org member calling a route
-    // that reads storage, logs or env vars got their OWN oldest project back
-    // with a 200, so the organization's project rendered as empty rather than
-    // erroring. Ordering matters here: the member's own project is created
-    // FIRST so it is the one the old `orderBy: { createdAt: 'asc' }` would win.
-    const { memberId, projectId: orgProjectId } = await orgFixture('DEVELOPER')
-    const ownProjectId = await makeProject(memberId)
-
-    const resolved = await getProjectResolver().resolveForUser(memberId, orgProjectId)
-
-    expect(resolved.id).toBe(orgProjectId)
-    expect(resolved.id).not.toBe(ownProjectId)
-  })
 })
 
 // ============================================================================
@@ -274,17 +206,17 @@ describe('cloud: api keys are authorized by the project the key belongs to', () 
     expect(resolved.id).toBe(projectId)
   })
 
-  it('keeps working when the key owner holds no org membership at all', async () => {
-    // A machine credential must not be revoked because the human who created it
-    // changed teams — nor widened because they were promoted. This asserts the
-    // key path does NOT consult organization membership.
-    const orgOwnerId = await makeUser()
+  it('keeps working when the human who holds it could not reach the project', async () => {
+    // A machine credential is authorized by the project the KEY was issued for,
+    // never by what its creator may currently reach. Asking the human question
+    // here would revoke a live production key the moment its creator lost
+    // access, and widen one the moment they gained more.
+    const ownerId = await makeUser()
     const keyOwnerId = await makeUser()
-    const orgId = await makeOrg(orgOwnerId)
-    await addMember(orgId, orgOwnerId, 'OWNER')
-    const projectId = await makeProject(orgOwnerId, orgId)
+    const projectId = await makeProject(ownerId)
 
-    // keyOwnerId is in no organization and owns nothing, so the HUMAN check denies.
+    // The HUMAN check denies keyOwnerId: they own nothing and this deployment
+    // has no other way to grant them the project.
     await expect(getProjectResolver().resolveForUser(keyOwnerId, projectId)).rejects.toBeInstanceOf(
       ProjectAccessDeniedError
     )
@@ -346,45 +278,7 @@ describe('cloud: role gates what a member may DO', () => {
     expect(resolved.callerRole).toBe('OWNER')
   })
 
-  it.each(['ADMIN', 'DEVELOPER', 'VIEWER'])('reports an org %s as that role', async role => {
-    const { memberId, projectId } = await orgFixture(role)
-
-    const resolved = await getProjectResolver().resolveForUser(memberId, projectId)
-    expect(resolved.callerRole).toBe(role)
-  })
-
-  it('lets a VIEWER read and stops them writing or deleting', async () => {
-    // The regression this section exists for. Every one of these routes was
-    // owner-only before the migration, so membership had never had to mean
-    // anything narrower than "may do everything" — and routing writes through
-    // the access check would have handed a VIEWER the ability to edit project
-    // settings and delete webhooks, domains and functions.
-    const { memberId, projectId } = await orgFixture('VIEWER')
-
-    expect(await canAccessProject(memberId, projectId)).toBe(true)
-    expect(await canWriteProject(memberId, projectId)).toBe(false)
-    expect(await canAdministerProject(memberId, projectId)).toBe(false)
-  })
-
-  it('lets a DEVELOPER write but not perform an irreversible operation', async () => {
-    const { memberId, projectId } = await orgFixture('DEVELOPER')
-
-    expect(await canAccessProject(memberId, projectId)).toBe(true)
-    expect(await canWriteProject(memberId, projectId)).toBe(true)
-    // Deleting a project, a domain or a webhook is not undoable from the
-    // dashboard. A DEVELOPER builds; removing what they built is administrative.
-    expect(await canAdministerProject(memberId, projectId)).toBe(false)
-  })
-
-  it.each(['ADMIN', 'OWNER'])('lets an org %s do all three', async role => {
-    const { memberId, projectId } = await orgFixture(role)
-
-    expect(await canAccessProject(memberId, projectId)).toBe(true)
-    expect(await canWriteProject(memberId, projectId)).toBe(true)
-    expect(await canAdministerProject(memberId, projectId)).toBe(true)
-  })
-
-  it('denies every level to someone outside the organization', async () => {
+  it('denies every level to a caller with no claim on the project', async () => {
     const ownerId = await makeUser()
     const strangerId = await makeUser()
     const projectId = await makeProject(ownerId)
@@ -392,19 +286,6 @@ describe('cloud: role gates what a member may DO', () => {
     expect(await canAccessProject(strangerId, projectId)).toBe(false)
     expect(await canWriteProject(strangerId, projectId)).toBe(false)
     expect(await canAdministerProject(strangerId, projectId)).toBe(false)
-  })
-
-  it('gives the project owner every level even as a VIEWER of the org', async () => {
-    // Project.userId outranks the org role: the owner of a project cannot be
-    // demoted out of their own project by an organization membership row.
-    const ownerId = await makeUser()
-    const orgId = await makeOrg(ownerId)
-    await addMember(orgId, ownerId, 'VIEWER')
-    const projectId = await makeProject(ownerId, orgId)
-
-    const resolved = await getProjectResolver().resolveForUser(ownerId, projectId)
-    expect(resolved.callerRole).toBe('OWNER')
-    expect(await canAdministerProject(ownerId, projectId)).toBe(true)
   })
 })
 

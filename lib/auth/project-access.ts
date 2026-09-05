@@ -1,14 +1,23 @@
 import { prisma } from '@/lib/db'
 import type { ProjectRole } from '@/lib/edition/types'
+import { organizationRoleForProject } from '@cloud/project-access'
 
 /**
  * Verify user has access to a project
- * 
+ *
  * This function handles:
  * - Project existence check
  * - Ownership verification
  * - Legacy projects without userId (allows access)
- * 
+ *
+ * The organization question — is a non-owner a member, and is that membership
+ * scoped to a subset of projects — is asked of `@cloud/project-access` rather
+ * than answered here. Organizations are Cloud control plane and their
+ * implementation lives in the private overlay; a public checkout resolves that
+ * specifier to an OSS fallback that reports no membership. See
+ * lib/edition/oss/project-access.ts for why that is the correct answer rather
+ * than a degraded one.
+ *
  * @param projectId - The project ID to check
  * @param userId - The user ID requesting access
  * @returns Project data if access granted
@@ -18,7 +27,7 @@ export async function verifyProjectAccess(projectId: string, userId: string) {
   const callId = Math.random().toString(36).substring(7);
   console.log(`[${callId}] 🔍 verifyProjectAccess() called`);
   console.log(`[${callId}] 📋 Input:`, { projectId, userId });
-  
+
   console.log(`[${callId}] 🔄 Querying database for project...`);
   const project = await prisma.project.findUnique({
     where: { id: projectId },
@@ -43,7 +52,7 @@ export async function verifyProjectAccess(projectId: string, userId: string) {
     console.error(`[${callId}] ❌ Project does not exist in database:`, projectId);
     throw new Error('PROJECT_NOT_FOUND'); // 404
   }
-  
+
   console.log(`[${callId}] ✅ Project found:`, {
     id: project.id,
     name: project.name,
@@ -53,21 +62,22 @@ export async function verifyProjectAccess(projectId: string, userId: string) {
 
   // Check access (handle legacy projects without userId)
   // If project.userId is null/undefined, allow access (legacy project)
-  // If project.userId is set, the requester must be the owner OR a member of
-  // the project's organization (Phase 6). Org check only runs for non-owners
-  // and only when the project has an org, so it is strictly additive — it can
-  // never deny access that the owner-only rule would have granted.
-  let orgMember: { id: string; role: string; restricted: boolean } | null = null
+  // If project.userId is set, the requester must be the owner OR hold a role
+  // through the project's organization. The organization check only runs for
+  // non-owners, so it is strictly additive — it can never deny access that the
+  // owner-only rule would have granted, and a deployment with no organization
+  // layer simply never widens it.
+  let organizationRole: ProjectRole | null = null
 
   if (project.userId && project.userId !== userId) {
-    orgMember = project.organizationId
-      ? await prisma.organizationMember.findUnique({
-          where: { orgId_userId: { orgId: project.organizationId, userId } },
-          select: { id: true, role: true, restricted: true },
-        })
-      : null
+    // Cloud consults OrganizationMember, the `restricted` flag and the
+    // project-scoped grant a restricted member needs. That enforcement runs on
+    // EVERY plan: a downgrade must never silently widen a restricted member's
+    // access, which is why the rule lives with the membership data rather than
+    // beside a plan check.
+    organizationRole = await organizationRoleForProject(projectId, project.organizationId, userId)
 
-    if (!orgMember) {
+    if (!organizationRole) {
       console.error(`[${callId}] ❌ Project exists but user is neither owner nor org member:`, {
         projectId,
         projectUserId: project.userId,
@@ -75,23 +85,8 @@ export async function verifyProjectAccess(projectId: string, userId: string) {
       });
       throw new Error('PROJECT_FORBIDDEN'); // 403 - different from not found!
     }
-
-    // Project-scoped members (Pro+): a DEVELOPER/VIEWER marked `restricted` may
-    // only reach projects explicitly granted to them. OWNER/ADMIN are never
-    // scoped. This enforcement runs on EVERY plan — a downgrade must never
-    // silently widen a restricted member's access.
-    if (orgMember.restricted && orgMember.role !== 'OWNER' && orgMember.role !== 'ADMIN') {
-      const grant = await prisma.projectMember.findUnique({
-        where: { userId_projectId: { userId, projectId } },
-        select: { id: true },
-      })
-      if (!grant) {
-        console.error(`[${callId}] ❌ Restricted member not granted this project:`, { projectId, requestUserId: userId });
-        throw new Error('PROJECT_FORBIDDEN'); // 403
-      }
-    }
   }
-  
+
   if (!project.userId) {
     console.log(`[${callId}] ⚠️ Legacy project (no userId) - access granted`);
   }
@@ -103,8 +98,7 @@ export async function verifyProjectAccess(projectId: string, userId: string) {
   });
 
   // The caller's effective role, returned alongside the project so a route can
-  // gate a WRITE without asking a second time. No extra query: the membership
-  // row above is the same one this needs.
+  // gate a WRITE without asking a second time.
   //
   // Access and authority are not the same question, and conflating them is how
   // an organization VIEWER became able to delete a webhook. These routes had
@@ -117,7 +111,7 @@ export async function verifyProjectAccess(projectId: string, userId: string) {
   const callerRole: ProjectRole =
     !project.userId || project.userId === userId
       ? 'OWNER'
-      : ((orgMember?.role as ProjectRole | undefined) ?? 'OWNER')
+      : (organizationRole ?? 'OWNER')
 
   return { ...project, callerRole };
 }

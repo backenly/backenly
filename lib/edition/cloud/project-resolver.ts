@@ -11,6 +11,7 @@
  */
 import { prisma } from '@/lib/db'
 import { verifyProjectAccess } from '@/lib/auth/project-access'
+import { organizationProjectClauses } from '@cloud/project-access'
 import {
   type ApiKeyIdentity,
   type Edition,
@@ -80,18 +81,17 @@ export const cloudProjectResolver: ProjectResolver = {
   },
 
   /**
-   * Owner, unrestricted member of the project's organization, or an explicit
-   * project grant. Lifted verbatim out of GET /api/projects so that the listing
-   * rule lives beside the resolution rule instead of drifting from it.
+   * Owner, plus whatever the organization layer adds.
+   *
+   * Ownership is the part every edition agrees on, so it is stated here. The
+   * organization clauses — unrestricted membership, and the explicit grant a
+   * restricted member needs — come from `@cloud/project-access`, because they
+   * are the same tenancy rules `resolveForUser` delegates and the two must not
+   * drift. A checkout with no overlay adds none, leaving ownership alone.
    */
   async accessibleProjectsWhere(userId: string): Promise<Record<string, unknown>> {
-    return {
-      OR: [
-        { userId },
-        { organization: { members: { some: { userId, restricted: false } } } },
-        { projectMembers: { some: { userId } } },
-      ],
-    }
+    const orgClauses = await organizationProjectClauses(userId)
+    return { OR: [{ userId }, ...orgClauses] }
   },
 
   async resolveTrusted(projectId, reason) {
