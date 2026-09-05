@@ -17,7 +17,14 @@
  */
 
 import 'dotenv/config'
+import { assertEditionCompositionOrExit } from '../lib/edition/cloud-extension'
 import app from './app'
+
+// Before the socket, not after. This process serves every /api/v1/* request in
+// production, so a cloud deployment that is missing its private half must die
+// here rather than answer one request with single-tenant tenancy rules. A no-op
+// unless BACKENLY_EDITION is explicitly cloud.
+assertEditionCompositionOrExit('Runtime Server')
 
 const PORT = parseInt(process.env.RUNTIME_PORT || '3001', 10)
 

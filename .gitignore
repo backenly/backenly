@@ -139,3 +139,15 @@ public/backenly-supabase.esm.js
 # jest --json reports written by CI for the no-vacuous-suites guard
 jest-static.json
 jest-integration.json
+
+# Private Cloud overlay, applied by scripts/apply-overlay.sh on a Cloud build.
+# These two directories are reserved for the overlay in overlay-allowlist.json
+# and hold ZERO tracked public files, so ignoring them wholesale hides no public
+# development. Without this, every Cloud checkout reports the composed overlay
+# as untracked changes and the next deploy's `git pull` has to reason about it.
+#
+# This is bookkeeping, not a boundary. The ownership authority is
+# scripts/verify-overlay-boundary.ts, which asks git what is tracked; .gitignore
+# cannot make an overlay add-only and is not relied on to.
+/lib/cloud/
+/config/cloud/

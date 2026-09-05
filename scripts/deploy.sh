@@ -62,6 +62,23 @@ if [ "$OLD_SHA" = "$NEW_SHA" ]; then
   echo "deploy: no new commits (HEAD $NEW_SHA) — rebuilding anyway"
 fi
 
+# Compose the edition BEFORE anything expensive or destructive happens.
+#
+# Cloud is this public repository plus the private add-only overlay from
+# backenly/backenly-cloud. compose-cloud.sh fetches it, refuses if the two
+# revisions were not written for each other, and applies the overlay through
+# scripts/apply-overlay.sh, which is all-or-nothing.
+#
+# Placed here on purpose: before npm install, before db:push, before the build,
+# and a long way before the .next swap and the PM2 restart. Every failure mode
+# below — private repo unreachable, SHA mismatch, an overlay that would clobber
+# public source — aborts with the live site still serving the previous build.
+#
+# Single-tenant returns immediately and never touches the private repository, so
+# a self-hosted operator running this script is unaffected.
+echo "deploy: composing edition"
+bash scripts/compose-cloud.sh
+
 # Dependencies first — package.json can gain build-time deps (2026-07-16:
 # esbuild for the generated SDK bundles). npm install is a fast no-op when
 # the lockfile is unchanged, and a missing dep fails the build loudly later

@@ -16,6 +16,15 @@
  */
 export async function register() {
   if (process.env.NEXT_RUNTIME === 'nodejs') {
+    // FIRST, before Sentry, the scheduler, or anything that could start doing
+    // work. A cloud deployment missing its private overlay must not reach the
+    // point of serving a request: the single-tenant resolver it would otherwise
+    // fall back to treats every authenticated account as the operator of the
+    // project it asked for. A no-op unless BACKENLY_EDITION is explicitly cloud,
+    // so OSS, local dev and CI are untouched.
+    const { assertEditionCompositionOrExit } = await import('./lib/edition/cloud-extension')
+    assertEditionCompositionOrExit('Next server')
+
     await import('./sentry.server.config')
 
     // Start the in-process cron scheduler.

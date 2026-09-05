@@ -124,6 +124,30 @@ jobs:
       - name: Overlay ownership boundary
         run: npx tsx scripts/verify-overlay-boundary.ts
 
+      # The boundary verifier answers "may the overlay own this path". This
+      # answers the harder question: when it refuses, does the working tree come
+      # through untouched? A script that validated and copied file by file would
+      # pass every path check and still leave a half-composed checkout, which is
+      # neither the public product nor Cloud and which builds perfectly happily.
+      #
+      # REQUIRE=1 so the symlink-escape case FAILS here instead of skipping. It
+      # skips on Windows, where symlinks need a privilege, and a green tick that
+      # quietly checked nothing is the failure mode this repository keeps
+      # relearning.
+      - name: Overlay applies add-only, or not at all
+        env:
+          OVERLAY_APPLY_REQUIRE: '1'
+        run: bash scripts/test/overlay-apply.sh
+
+      # Cloud is the public repository plus the private overlay. Every way that
+      # can go wrong — the private repo unreachable, the two revisions written
+      # against each other, an overlay that would clobber public source — has to
+      # stop the deploy while the previous build is still serving, not halfway
+      # through a .next swap. Real git repositories over file:// remotes; no
+      # production host is contacted and deploy.sh is only read, never run.
+      - name: Cloud deploy composes before it builds
+        run: bash scripts/test/deploy-composition.sh
+
       # An acceptance install on a clean Ubuntu 24.04 machine stopped here:
       # `psql -f <path>` makes the postgres user open the file, and Ubuntu home
       # directories are 0750, so a normal clone was unreadable. This builds that
@@ -570,6 +594,27 @@ jobs:
       # README step 3.
       - name: db:generate and db:push
         run: npm run db:generate && npm run db:push
+
+      # A self-hosted install must work with NO private repository, on a machine
+      # that has never heard of backenly-cloud. This is that claim, asserted on
+      # the real clean-machine path rather than in a unit test with a temporary
+      # directory: the composition state must be `absent` and the process must
+      # still be willing to start. --expect makes it impossible to pass by
+      # reaching the right verdict for the wrong reason.
+      - name: a self-host install needs no private overlay
+        run: npx tsx scripts/verify-cloud-composition.ts --expect absent
+
+      # The same checkout, asked to be Cloud, must refuse. If this ever exits 0
+      # the fail-closed guarantee is gone and a Cloud process could serve
+      # multi-tenant traffic with single-tenant tenancy rules.
+      - name: the same checkout refuses to run as cloud
+        run: |
+          set -euo pipefail
+          if BACKENLY_EDITION=cloud npx tsx scripts/verify-cloud-composition.ts; then
+            echo "cloud started without its private overlay - fail-closed is broken"
+            exit 1
+          fi
+          echo "cloud correctly refused without the private overlay"
 
       - name: bootstrap reports NOT ready, with exit 3
         run: |
