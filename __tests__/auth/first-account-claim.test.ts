@@ -22,7 +22,7 @@
 
 import { randomUUID } from 'crypto'
 import { prisma } from '@/lib/db/prisma'
-import { createUserClaimingSignupSlot, SignupSlotTakenError } from '@/lib/platform/controls'
+import { assertSignupAllowed, createUserClaimingSignupSlot, SignupSlotTakenError } from '@/lib/platform/controls'
 
 const DB_URL = process.env.TEST_DATABASE_URL
 
@@ -149,5 +149,51 @@ describe('self-hosted first-account claim', () => {
     const user = await createUserClaimingSignupSlot(makeUser)
     created.push(user.id)
     expect(user.id).toBeTruthy()
+  })
+})
+
+/**
+ * THE FIRST OPERATOR IS NOT A STRANGER
+ * ====================================
+ * Cloud's email heuristics keep throwaway and undeliverable addresses out of a
+ * PUBLIC signup funnel. Applied to the one account that makes a private
+ * deployment usable, they only lock the operator out of their own installation.
+ *
+ * Measured on a clean acceptance machine:
+ *
+ *   operator@acceptance.test  ->  403 "That domain cannot receive email."
+ *
+ * `admin@company.internal` fails the same way, and on an air-gapped install no
+ * address passes at all.
+ *
+ * The relaxation is deliberately narrow: single-tenant edition AND an empty
+ * user table, so it can happen once per deployment.
+ *
+ * The bypass itself needs a database with NO accounts, which cannot be
+ * arranged in this shared test database, so it lives in
+ * __tests__/auth/first-operator-admission.test.ts against its own. What is
+ * asserted here is the other half: that the bypass did not leave self-hosted
+ * signup permanently open, and that Cloud is untouched.
+ */
+describe('first self-hosted operator admission', () => {
+  it('applies the normal policy again once the operator exists', async () => {
+    process.env.BACKENLY_EDITION = 'single-tenant'
+    delete process.env.BACKENLY_ALLOW_PUBLIC_SIGNUP
+    await seedOperator()
+
+    const guard = await assertSignupAllowed('someone-else@acceptance.test')
+    expect(guard.ok).toBe(false)
+    // Closed because the slot is taken, which is the pre-existing rule. The
+    // bypass must not have made self-hosted signup permanently open.
+    expect(guard.status).toBe(403)
+  })
+
+  it('does not relax anything on Cloud', async () => {
+    process.env.BACKENLY_EDITION = 'cloud'
+
+    // Syntactically invalid, so this is decided without a DNS lookup: the point
+    // is that the heuristics still RUN, not which verdict they reach.
+    const guard = await assertSignupAllowed('not-an-email')
+    expect(guard.ok).toBe(false)
   })
 })

@@ -288,6 +288,8 @@ export class SignupSlotTakenError extends Error {
 }
 
 export async function assertSignupAllowed(email: string, ip?: string | null): Promise<SignupGuard> {
+  let firstSelfHostedOperator = false
+
   // Self-hosted is CLOSED after the first account.
   //
   // A self-hosted deployment is one team's infrastructure, usually reachable
@@ -304,6 +306,34 @@ export async function assertSignupAllowed(email: string, ip?: string | null): Pr
   if (selfHostedRegistrationClosed()) {
     const existing = await prisma.user.count()
     if (existing > 0) return SELF_HOSTED_CLOSED
+
+    // FIRST OPERATOR ON A SELF-HOSTED BOX: admitted without the Cloud email
+    // heuristics.
+    //
+    // Those heuristics exist to keep throwaway and undeliverable addresses out
+    // of a PUBLIC signup funnel. Applied to the one account that makes a
+    // private deployment usable, they only block the operator from their own
+    // installation. Measured on a clean acceptance machine:
+    //
+    //   operator@acceptance.test -> 403 "That domain cannot receive email."
+    //
+    // An operator using `admin@company.internal`, or any internal domain with
+    // no public MX, cannot create an account at all, and the message reads as
+    // "your address is wrong" rather than "this box applies cloud abuse rules".
+    // On an air-gapped install there is no address that passes.
+    //
+    // Narrow on purpose. It requires the single-tenant edition AND a database
+    // with zero accounts, so it can happen exactly once per deployment, and it
+    // does not touch Cloud or any later self-hosted signup. The operator's own
+    // decisions are still honoured: the kill switches and the blocklist below
+    // continue to apply, because those are things somebody chose rather than a
+    // score computed about a stranger.
+    //
+    // This does not widen who can claim the box. The first account was already
+    // open by design — that is what makes a fresh install usable — so the only
+    // thing removed here is a deliverability requirement that never had any
+    // bearing on that.
+    firstSelfHostedOperator = true
   }
 
   const c = await getPlatformControls()
@@ -328,6 +358,12 @@ export async function assertSignupAllowed(email: string, ip?: string | null): Pr
     }).catch(() => {})
     return { ok: false, reason: 'Sign-up is not allowed for this account.', status: 403 }
   }
+
+  // The Cloud email heuristics, skipped for the one account described above.
+  // Everything before this point — the kill switches and the operator
+  // blocklist — has already run, because those are explicit decisions rather
+  // than a score computed about a stranger.
+  if (firstSelfHostedOperator) return ok
 
   const trust = await assessEmailTrust(email)
   if (trust.verdict === 'deny') {

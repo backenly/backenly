@@ -103,3 +103,7 @@ __tests__/bootstrap/postgrest-roles-idempotency.test.ts
 # against its own database, because the failure was a state the database was
 # allowed to sit in.
 __tests__/bootstrap/single-tenant-ownership.test.ts
+
+# First self-hosted operator admission. Needs a user table with ZERO rows, which
+# a shared database cannot guarantee, so it runs against its own.
+__tests__/auth/first-operator-admission.test.ts
