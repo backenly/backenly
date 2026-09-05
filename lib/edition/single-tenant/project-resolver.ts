@@ -34,6 +34,17 @@ import {
   ProjectAccessDeniedError,
   ProjectNotFoundError,
 } from '../types'
+import { forgetTheProjectId, theProjectId } from './the-project'
+
+// Re-exported because callers have imported them from here since Phase 3, and
+// the identity of an error class is part of its contract: a test that catches
+// MultipleProjectsInSingleTenantError must catch the same class the resolver
+// throws, not a second one with the same name.
+export {
+  MultipleProjectsInSingleTenantError,
+  NoProjectBootstrappedError,
+  resetSingleTenantCache,
+} from './the-project'
 
 const PROJECT_SELECT = {
   id: true,
@@ -50,63 +61,13 @@ const PROJECT_SELECT = {
   },
 } as const
 
-export class MultipleProjectsInSingleTenantError extends Error {
-  constructor(count: number) {
-    super(
-      `Single-tenant edition found ${count} projects. One deployment is one project. ` +
-        'Refusing to resolve a project: this resolver treats any authenticated user as an ' +
-        'operator of the deployment, so choosing between tenants here would grant one ' +
-        "tenant's data to another. Set BACKENLY_EDITION=cloud if this is a multi-tenant " +
-        'database, or point this deployment at its own.'
-    )
-    this.name = 'MultipleProjectsInSingleTenantError'
-  }
-}
-
-export class NoProjectBootstrappedError extends Error {
-  constructor() {
-    super('No project exists yet. Run `npm run bootstrap` to provision this deployment.')
-    this.name = 'NoProjectBootstrappedError'
-  }
-}
-
-/** Cached because it cannot change while the process lives: one deployment, one project. */
-let cachedProjectId: string | null = null
-
-/** Tests create and drop the single project, so they need to clear the cache. */
-export function resetSingleTenantCache(): void {
-  cachedProjectId = null
-}
-
-async function theProjectId(): Promise<string> {
-  if (cachedProjectId) return cachedProjectId
-
-  const pinned = process.env.BACKENLY_PROJECT_ID?.trim()
-  if (pinned) {
-    const exists = await prisma.project.findUnique({ where: { id: pinned }, select: { id: true } })
-    if (!exists) throw new ProjectNotFoundError(pinned)
-    cachedProjectId = exists.id
-    return cachedProjectId
-  }
-
-  // Unpinned: infer it, but only when the inference is unambiguous.
-  const count = await prisma.project.count()
-  if (count === 0) throw new NoProjectBootstrappedError()
-  if (count > 1) throw new MultipleProjectsInSingleTenantError(count)
-
-  const only = await prisma.project.findFirst({ select: { id: true } })
-  if (!only) throw new NoProjectBootstrappedError()
-  cachedProjectId = only.id
-  return cachedProjectId
-}
-
 async function loadTheProject(): Promise<ResolvedProject> {
   const id = await theProjectId()
   const project = await prisma.project.findUnique({ where: { id }, select: PROJECT_SELECT })
   if (!project) {
     // The pinned or cached id has gone. Drop the cache so a later call can
     // re-infer rather than failing forever on a stale value.
-    cachedProjectId = null
+    forgetTheProjectId()
     throw new ProjectNotFoundError(id)
   }
   // Every authenticated account is an operator of a self-hosted deployment,

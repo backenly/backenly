@@ -100,3 +100,10 @@ __tests__/bootstrap/single-tenant-ownership.test.ts
 # First self-hosted operator admission. Needs a user table with ZERO rows, which
 # a shared database cannot guarantee, so it runs against its own.
 __tests__/auth/first-operator-admission.test.ts
+
+# ProjectLifecycle, the Phase 7 edition seam for "which projects exist, and may
+# another be created". Every assertion is a property of rows: that single-tenant
+# resolves THE pinned project while a second row sits in the same table, that
+# its refusal happens BEFORE the insert, and that Cloud creation provisions a
+# graph, a workspace, a schema and a signing secret rather than one row.
+__tests__/edition/project-lifecycle.test.ts

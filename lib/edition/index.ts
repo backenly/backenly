@@ -16,9 +16,11 @@
  * single-tenant/project-resolver.ts is the backstop for exactly that mistake
  * and is already live.
  */
+import { cloudProjectLifecycle } from './cloud/project-lifecycle'
 import { cloudProjectResolver } from './cloud/project-resolver'
+import { singleTenantProjectLifecycle } from './single-tenant/project-lifecycle'
 import { singleTenantProjectResolver } from './single-tenant/project-resolver'
-import type { Edition, ProjectResolver } from './types'
+import type { Edition, ProjectLifecycle, ProjectResolver } from './types'
 
 export * from './types'
 
@@ -43,4 +45,15 @@ export function currentEdition(): Edition {
  */
 export function getProjectResolver(): ProjectResolver {
   return currentEdition() === 'single-tenant' ? singleTenantProjectResolver : cloudProjectResolver
+}
+
+/**
+ * Who may create and list projects, and what creating one does.
+ *
+ * Read per call for the same reason as the resolver: the edition is a
+ * configuration value, and capturing it at module load is how a test that sets
+ * BACKENLY_EDITION ends up asserting against the previous one.
+ */
+export function getProjectLifecycle(): ProjectLifecycle {
+  return currentEdition() === 'single-tenant' ? singleTenantProjectLifecycle : cloudProjectLifecycle
 }

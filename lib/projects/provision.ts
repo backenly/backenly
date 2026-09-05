@@ -26,6 +26,7 @@ import { ensureSchemaRegistered } from '@/lib/postgrest/registration'
 import { JWTSecretManager } from '@/lib/services/jwtSecretManager'
 import { createEmptyGraph } from '@/lib/orchestration/backend-state-graph'
 import { currentEdition } from '@/lib/edition'
+import { generateUniqueSlug } from '@/lib/utils/slug'
 
 export class ProjectCreationUnsupportedError extends Error {
   readonly code = 'PROJECT_CREATION_UNSUPPORTED'
@@ -44,11 +45,26 @@ export interface ProvisionInput {
   description?: string | null
   userId: string
   organizationId?: string | null
+  /**
+   * Optional presentation and routing fields.
+   *
+   * They live here rather than being patched onto the row afterwards because a
+   * caller that updates a project it has just created has, for a moment,
+   * published a project in a state it never intended. `slug` is generated when
+   * absent: it is unique-constrained and every listing surface keys off it, and
+   * the two pre-existing callers of this function created rows without one.
+   */
+  slug?: string
+  environment?: string
+  apiUrlDev?: string | null
+  apiUrlStaging?: string | null
+  apiUrlProd?: string | null
 }
 
 export interface ProvisionedProject {
   id: string
   name: string
+  slug: string
   postgresSchema: string
   /** False when PostgREST could not be told about the schema. See the warning. */
   dataPlaneRegistered: boolean
@@ -72,14 +88,26 @@ export async function createProvisionedProject(input: ProvisionInput): Promise<P
 
   const id = randomUUID()
 
+  const slug =
+    input.slug ??
+    (await generateUniqueSlug(input.name, async candidate => {
+      const taken = await prisma.project.findUnique({ where: { slug: candidate }, select: { id: true } })
+      return !!taken
+    }))
+
   await prisma.$transaction(async tx => {
     await tx.project.create({
       data: {
         id,
         name: input.name,
+        slug,
         description: input.description ?? null,
         userId: input.userId,
         organizationId: input.organizationId ?? null,
+        environment: input.environment ?? 'development',
+        apiUrlDev: input.apiUrlDev ?? null,
+        apiUrlStaging: input.apiUrlStaging ?? null,
+        apiUrlProd: input.apiUrlProd ?? null,
       },
     })
     const graph = await tx.backendGraph.create({
@@ -122,5 +150,5 @@ export async function createProvisionedProject(input: ProvisionInput): Promise<P
     console.warn(`[provision] jwtSecret not seeded for ${id}: ${(err as Error)?.message ?? err}`)
   }
 
-  return { id, name: input.name, postgresSchema, dataPlaneRegistered: registration.registered }
+  return { id, name: input.name, slug, postgresSchema, dataPlaneRegistered: registration.registered }
 }

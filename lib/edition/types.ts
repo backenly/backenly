@@ -173,3 +173,106 @@ export interface ProjectResolver {
    */
   accessibleProjectsWhere(userId: string): Promise<Record<string, unknown>>
 }
+
+// ============================================================================
+// PROJECT LIFECYCLE
+// ============================================================================
+
+/**
+ * A project as a listing shows it.
+ *
+ * Shaped like the `select` GET /api/projects has always used, so moving the
+ * query behind this seam changed the authority for "which projects" and not
+ * the payload any dashboard reads.
+ */
+export interface ProjectListEntry {
+  id: string
+  name: string
+  slug: string | null
+  description: string | null
+  userId: string | null
+  publicEnabled: boolean
+  projectStatus: string
+  deployedAt: Date | null
+  environment: string
+  apiUrlDev: string | null
+  apiUrlStaging: string | null
+  apiUrlProd: string | null
+  apiRequests: number
+  avgLatency: number
+  errorCount: number
+  storageUsed: bigint
+  storageLimit: bigint
+  maxFileSize: bigint
+  maxFilesPerBucket: number
+  activeUsers: number
+  lastMetricsUpdate: Date | null
+  createdAt: Date
+  updatedAt: Date
+  _count: { tables: number; workspaces: number }
+}
+
+export interface ProjectCreateInput {
+  name: string
+  description?: string | null
+  environment?: string
+  apiUrlDev?: string | null
+  apiUrlStaging?: string | null
+  apiUrlProd?: string | null
+  /** The authenticated account creating it. */
+  userId: string
+}
+
+export interface ProjectCreateResult {
+  /** The created project, loaded in the shape the route serialises. */
+  project: ProjectListEntry & { user: { id: string; email: string; name: string | null } | null }
+  /**
+   * The plaintext key, returned exactly once and never persisted.
+   *
+   * Null when key generation failed. Creation deliberately survives that: a
+   * project with no default key is repairable from the dashboard, whereas
+   * failing the whole request leaves a provisioned project the caller was never
+   * told about.
+   */
+  apiKey: string | null
+}
+
+/**
+ * Who may create and list projects, and what creating one actually does.
+ *
+ * ---- WHY THIS IS AN EDITION SEAM AND NOT A LIMIT ------------------------
+ *
+ * "One deployment is one project" is architectural, not `maxProjects = 1`. A
+ * counter is a policy a caller can be granted an exception to; this is a
+ * different implementation, and the single-tenant one has no code path that
+ * inserts a second Project row at all. The distinction matters because the
+ * single-tenant resolver treats every authenticated account as an operator of
+ * the deployment: a second project appearing in that database would be
+ * reachable by everyone with an account on it.
+ *
+ * Cloud creates projects. Single-tenant provisions its one project through
+ * `npm run bootstrap`, which reconciles rather than inserts, and refuses here.
+ */
+export interface ProjectLifecycle {
+  readonly edition: Edition
+
+  /**
+   * Every project this caller may see.
+   *
+   * Single-tenant resolves THE project rather than enumerating a table, so a
+   * self-host install never runs a fleet-shaped query to answer a question with
+   * exactly one answer.
+   */
+  list(userId: string): Promise<ProjectListEntry[]>
+
+  /**
+   * Create a project and everything that makes it usable.
+   *
+   * A Project row is not a project: without a workspace schema, a PostgREST
+   * registration, a backend graph and a signing secret, every data-plane
+   * request against it answers PGRST106 forever. Implementations MUST perform
+   * the whole sequence, which is why they delegate to
+   * `lib/projects/provision.ts` rather than reimplementing it.
+   */
+  create(input: ProjectCreateInput): Promise<ProjectCreateResult>
+}

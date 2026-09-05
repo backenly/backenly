@@ -31,16 +31,17 @@ const SKIP_DIRS = ['node_modules', '.next', 'workspace', '.git', 'dist', 'covera
  * Modules allowed to insert a Project row directly.
  *
  * Each is a place that performs the FULL sequence or is not application code
- * at all. Adding a fourth means writing a fourth provisioning path, which is
- * the thing this check exists to prevent.
+ * at all. Adding a third means writing a third provisioning path, which is the
+ * thing this check exists to prevent.
+ *
+ * app/api/projects/route.ts used to be listed here, because it carried a second
+ * complete implementation inline. Phase 7 converged it onto the provisioner
+ * through ProjectLifecycle, and the stale-allowance check below is what forced
+ * this entry to be removed rather than left behind as a standing permission.
  */
 const ALLOWED: Record<string, string> = {
   'lib/projects/provision.ts':
     'The provisioner itself: row, graph, schema, PostgREST registration, jwtSecret.',
-  'app/api/projects/route.ts':
-    'The Cloud multi-project creation route, which performs the same sequence inline. ' +
-    'It converges onto the provisioner when the project lifecycle moves to the private ' +
-    'control plane; until then it is the other complete implementation, not a bypass.',
   'lib/testing/connection-manager.ts':
     'A test harness that builds throwaway projects, not a request path.',
 }
