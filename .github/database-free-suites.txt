@@ -98,6 +98,12 @@ __tests__/edition/quota-kernel-entitlements.test.ts
 # ever read.
 __tests__/edition/self-host-enforcement.test.ts
 
+# The PlatformSignals seam: single-tenant reacts to nothing and never
+# consults the Cloud provider, the seam absorbs provider failures rather than
+# failing a signup that already succeeded, and the three signup flows report
+# rather than importing the referral implementation.
+__tests__/edition/platform-signals-seam.test.ts
+
 # README.md is the acceptance script for a self-hosted install, so it is checked
 # against the module bootstrap renders its prerequisite guidance from. Compares
 # committed text to committed code; no database.

@@ -14,7 +14,7 @@ import {
   recordSecurityEvent,
   SignupSlotTakenError,
 } from '@/lib/platform/controls'
-import { applyReferralOnSignup } from '@/lib/billing/referral'
+import { onSignupCompleted } from '@/lib/platform-signals'
 import { consume, AUTH_LIMITS, clientIp } from '@/lib/security/auth-rate-limit'
 import { verifyBotChallenge } from '@/lib/trust/bot-defense'
 import { z } from 'zod'
@@ -165,11 +165,13 @@ export async function POST(request: NextRequest) {
       // Non-fatal: billing seed may not have run yet
     })
 
-    // Referral attribution + signup bonus. Ref comes from the form body, or the
-    // backenly_ref cookie set when the visitor landed on ?ref= (survives the
-    // OAuth round-trip too). Fully non-fatal — never breaks signup.
+    // Tell Backenly's business machinery an account was created. Referral
+    // attribution is what it does with that today. Ref comes from the form
+    // body, or the backenly_ref cookie set when the visitor landed on ?ref=
+    // (survives the OAuth round-trip too). A no-op in single-tenant, and the
+    // seam swallows its own errors, so signup cannot fail here.
     const refCode = parsed.ref || request.cookies.get('backenly_ref')?.value || null
-    await applyReferralOnSignup(user.id, user.email, refCode).catch(() => {})
+    await onSignupCompleted({ userId: user.id, email: user.email, provider: 'email', referralCode: refCode })
 
     // Track signup event (non-blocking)
     logEvent('signup', user.id, undefined, { email: user.email, provider: 'email' })

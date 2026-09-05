@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { verify } from 'jsonwebtoken'
 import { createSession } from '@/lib/auth/session'
 import { prisma } from '@/lib/db'
+import { onSignupCompleted } from '@/lib/platform-signals'
 import { assertSignupAllowed, isBlocked } from '@/lib/platform/controls'
 import { consume, AUTH_LIMITS, clientIp } from '@/lib/security/auth-rate-limit'
 
@@ -179,13 +180,11 @@ export async function GET(request: NextRequest) {
         include: { role: true },
       })
 
-      // Referral: a brand-new OAuth account carries its ?ref= via the
-      // backenly_ref cookie set on the signup page. Non-fatal.
+      // A brand-new OAuth account carries its ?ref= via the backenly_ref cookie
+      // set on the signup page. Reporting the signup is a no-op in single-tenant
+      // and never throws, so it cannot block sign-in.
       const refCode = request.cookies.get('backenly_ref')?.value || null
-      if (refCode) {
-        const { applyReferralOnSignup } = await import('@/lib/billing/referral')
-        await applyReferralOnSignup(user.id, user.email, refCode).catch(() => {})
-      }
+      await onSignupCompleted({ userId: user.id, email: user.email, provider: 'github', referralCode: refCode })
     } else {
       // Always stamp lastLogin + lastActiveAt on a successful OAuth sign-in;
       // link the provider on the first OAuth sign-in for an email-only account.
