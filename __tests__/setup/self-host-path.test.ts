@@ -136,3 +136,65 @@ describe('finding 4 — SQL is opened by the operator, never by the database use
     expect(probe).toContain('proves nothing')
   })
 })
+
+/**
+ * ACCEPTANCE FINDING D — autonomy was documented nowhere
+ * =====================================================
+ * The acceptance run could not satisfy "autonomy ticks THE_PROJECT" from the
+ * documentation, and my first reading of that was wrong in an instructive way.
+ * I probed `/api/cron/autonomy`, got 401, and concluded there was no scheduler.
+ *
+ * There is one. instrumentation.ts starts an in-process node-cron tick on every
+ * non-Vercel boot, and it had been running on the acceptance machine the whole
+ * time, once a minute, reporting `0 projects`. Zero was CORRECT: the activity
+ * gate requires a project to have tables (or an open finding) before there is
+ * anything to reconcile, and the install had none yet.
+ *
+ * So the gap was documentation, not mechanism. These assertions tie the README
+ * to the code it describes, because every claim in that section is one a reader
+ * would otherwise have to take on faith — and the cadence, the flag names and
+ * the log line are all things a refactor can silently change.
+ */
+describe('finding D — the README describes the autonomy that actually runs', () => {
+  const INSTRUMENTATION = read('instrumentation.ts')
+
+  it('documents the scheduler that exists, not the endpoint that nothing calls', () => {
+    expect(README).toContain('instrumentation.ts')
+    // The endpoint is real but ad-hoc. Presenting it as the mechanism is what
+    // sent the acceptance run down the wrong path.
+    expect(README).toContain('Nothing calls that URL on its own')
+    expect(README).toContain('CRON_SECRET')
+  })
+
+  it('states the cadence the code actually schedules', () => {
+    // The reconciler tick. If this expression changes, the README is wrong.
+    const reconciler = INSTRUMENTATION.slice(INSTRUMENTATION.indexOf('runReconciler'))
+    expect(INSTRUMENTATION).toContain("cron.schedule('* * * * *'")
+    expect(reconciler).toContain('runReconciler')
+    expect(README).toContain('every minute')
+  })
+
+  it('names the flags that gate it, and matches the shipped template', () => {
+    for (const flag of ['ENABLE_AUTONOMY_RECONCILER', 'ENABLE_AUTONOMY_LIVE_EXECUTION']) {
+      expect(README).toContain(flag)
+      // The code default is false; the template turns them on. A reader
+      // following the README copies that template, so the two must agree.
+      expect(read('.env.example')).toMatch(new RegExp(`^${flag}=true$`, 'm'))
+      expect(read('lib/config/flags.ts')).toContain(flag)
+    }
+  })
+
+  it('quotes the log line the process really prints', () => {
+    // Verbatim from instrumentation.ts, so a reworded log breaks this rather
+    // than leaving an operator watching for a string that never appears.
+    expect(INSTRUMENTATION).toContain('[AutonomyReconciler] Cron run complete')
+    expect(README).toContain('[AutonomyReconciler] Cron run complete')
+  })
+
+  it('explains why a fresh install reports zero projects', () => {
+    // The single most confusing observation on a new box, and the reason the
+    // acceptance run could not prove item 9.
+    expect(README).toContain('`0 projects` is normal on a new install')
+    expect(read('lib/autonomy/activity-gate.ts')).toContain('tables: { some: {} }')
+  })
+})

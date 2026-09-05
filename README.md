@@ -273,6 +273,43 @@ npm run dev                   # dashboard :3000 · runtime :3001
 in the dashboard, then run `npm run bootstrap` once more to issue the anon key
 your frontend embeds.
 
+#### Autonomy
+
+The self-healing loop runs by itself. There is nothing to schedule.
+
+`instrumentation.ts` starts an in-process scheduler when the app boots, and it
+is active whenever `VERCEL` is unset — which is every self-hosted deployment. The
+reconciler ticks **every minute**. `.env.example` already sets the two flags it
+needs, so a `.env` copied from it has autonomy on:
+
+```bash
+ENABLE_AUTONOMY_RECONCILER=true      # the loop runs at all
+ENABLE_AUTONOMY_LIVE_EXECUTION=true  # it may apply fixes, not just observe
+```
+
+Confirm it is ticking by watching the process output:
+
+```
+[AutonomyReconciler] Cron run complete — 1 projects, 0 fixes applied, 0 frozen
+```
+
+**`0 projects` is normal on a new install, and does not mean it is broken.** A
+project is only reconciled once it has at least one table (or an open finding)
+*and* recent activity. A backend with no tables has nothing to be right or wrong
+about, so the loop skips it. Create a table through your agent and the count
+becomes 1 on the next tick.
+
+`CRON_SECRET` is **not** required for any of the above. It guards one ad-hoc
+endpoint, for forcing a tick without waiting for the minute:
+
+```bash
+CRON_SECRET=<openssl rand -hex 32>   # add to .env, then restart
+curl -H "x-cron-secret: $CRON_SECRET" http://127.0.0.1:3000/api/cron/autonomy
+```
+
+Nothing calls that URL on its own. The in-process scheduler is the mechanism;
+the endpoint is for operators.
+
 #### Bringing your own database
 
 The Compose stack is the supported path. If you already operate PostgreSQL, or
