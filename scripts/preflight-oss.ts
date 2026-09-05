@@ -15,6 +15,10 @@
  *
  *   npx tsx scripts/preflight-oss.ts           # working tree + history
  *   npx tsx scripts/preflight-oss.ts --tree    # working tree only (faster)
+ *   npx tsx scripts/preflight-oss.ts --credentials-only
+ *                                             # credential rules only, no OSS
+ *                                             # release-artifact checks. Used by
+ *                                             # backenly-cloud CI on its own tree.
  *
  * Exit 0 = safe to publish. Nonzero = do not publish.
  */
@@ -558,6 +562,10 @@ function checkReleaseArtifacts(): string[] {
 
 function main() {
   const treeOnly = process.argv.includes('--tree')
+  // Credential rules only, no OSS release-artifact expectations. This is what
+  // backenly-cloud's CI runs over its own tree: private is not a secret store,
+  // but it owes nobody a LICENSE.
+  const credentialsOnly = process.argv.includes('--credentials-only')
 
   console.log('\n  Open-source preflight')
   // Stated up front because it is otherwise baffling: a file edited and not yet
@@ -603,10 +611,23 @@ function main() {
     }
   }
 
-  const artifactProblems = checkReleaseArtifacts()
-  console.log(
-    `  release files  ${artifactProblems.length === 0 ? 'complete' : `${artifactProblems.length} missing/incomplete`}`,
-  )
+  // LICENSE, NOTICE, SECURITY.md and a compose file are what an OSS RELEASE
+  // owes its readers. backenly-cloud is private and publishes nothing, so
+  // holding it to them would fail its CI for missing artifacts it should not
+  // have — while the part that matters there, "no credential was committed",
+  // applies to both repositories and applies harder to the private one, which
+  // gets cloned onto every build host and CI runner.
+  //
+  // So the credential rules are reusable on their own. One set of patterns,
+  // two repositories, no second scanner to drift.
+  const artifactProblems = credentialsOnly ? [] : checkReleaseArtifacts()
+  if (credentialsOnly) {
+    console.log('  release files  not checked (--credentials-only)')
+  } else {
+    console.log(
+      `  release files  ${artifactProblems.length === 0 ? 'complete' : `${artifactProblems.length} missing/incomplete`}`,
+    )
+  }
   if (artifactProblems.length > 0) {
     console.log('\n  RELEASE ARTIFACTS:\n')
     for (const p of artifactProblems) console.log(`    - ${p}\n`)
@@ -614,7 +635,11 @@ function main() {
 
   const total = treeFindings.length + historyFindings.length + artifactProblems.length
   if (total === 0) {
-    console.log('\n  No credential patterns found; release files complete. Safe to publish.\n')
+    console.log(
+      credentialsOnly
+        ? '\n  No credential patterns found.\n'
+        : '\n  No credential patterns found; release files complete. Safe to publish.\n',
+    )
     process.exit(0)
   }
 
