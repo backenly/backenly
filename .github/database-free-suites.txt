@@ -104,6 +104,12 @@ __tests__/edition/self-host-enforcement.test.ts
 # rather than importing the referral implementation.
 __tests__/edition/platform-signals-seam.test.ts
 
+# REGRESSION: the sandbox lifecycle primitive performs an already-authorized
+# transition and no longer re-derives commercial policy. That was the SECOND
+# reason a self-hosted deploy failed. Pins the deploy route ordering, because
+# removing a gate is only safe if the caller really does gate.
+__tests__/edition/sandbox-lifecycle.test.ts
+
 # README.md is the acceptance script for a self-hosted install, so it is checked
 # against the module bootstrap renders its prerequisite guidance from. Compares
 # committed text to committed code; no database.

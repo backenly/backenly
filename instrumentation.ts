@@ -493,7 +493,7 @@ export async function register() {
       // ProjectUsage.dbStorageUsedMb so the billing dashboard reflects real
       // end-user inserts (not only AI-build-time side-effects).
       cron.schedule('0 * * * *', async () => {
-        const { snapshotAllProjectsDbStorage } = await import('./lib/billing/usage-tracker')
+        const { snapshotAllProjectsDbStorage } = await import('./lib/fleet/db-storage-sweep')
         await snapshotAllProjectsDbStorage().catch((err: any) =>
           console.error('[DbStorageSnapshot] Error:', err?.message)
         )

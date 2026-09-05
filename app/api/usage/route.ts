@@ -15,7 +15,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { withAuth } from '@/lib/auth/route-protection'
 import { prisma } from '@/lib/db/prisma'
 import { getUserEntitlements } from '@/lib/entitlements'
-import { getSandboxStatus } from '@/lib/billing/sandbox'
+import { getSandboxStatus } from '@/lib/projects/sandbox-lifecycle'
 
 export const GET = withAuth(async (request: NextRequest, { user }) => {
   try {

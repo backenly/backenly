@@ -23,7 +23,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { withAuth } from '@/lib/auth/route-protection'
 import { prisma } from '@/lib/db/prisma'
-import { upgradeSandboxToProduction } from '@/lib/billing/sandbox'
+import { promoteSandboxToProduction } from '@/lib/projects/sandbox-lifecycle'
 import { enforceDeployment } from '@/lib/entitlements/policy'
 import { canWriteProject } from '@/lib/edition/guard'
 
@@ -76,14 +76,13 @@ export const POST = withAuth(async (request: NextRequest, { user }) => {
     }
 
     // Execute the upgrade
-    const result = await upgradeSandboxToProduction(projectId, userId)
+    const result = await promoteSandboxToProduction(projectId, userId)
 
     if (!result.success) {
-      const statusCode =
-        result.errorCode === 'ALREADY_PRODUCTION' ? 409
-        : result.errorCode === 'DEPLOYMENT_NOT_ALLOWED' ? 402
-        : result.errorCode === 'NO_SUBSCRIPTION' ? 402
-        : 400
+      // The commercial refusals used to be mapped here too. They are gone
+      // because the lifecycle primitive no longer re-derives plan policy;
+      // enforceDeployment above already answered that and returns its own 402.
+      const statusCode = result.errorCode === 'ALREADY_PRODUCTION' ? 409 : 400
 
       return NextResponse.json(
         { error: result.errorCode ?? 'DEPLOY_FAILED', message: result.error },

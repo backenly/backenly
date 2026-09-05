@@ -141,48 +141,11 @@ export async function updateProjectFileStorage(
  *
  * Uses pg_total_relation_size to measure the workspace schema.
  */
-export async function snapshotProjectDbStorage(projectId: string): Promise<void> {
-  const month = thisMonth()
-  const schemaName = `workspace_${projectId}`
-
-  try {
-    // Query total size of all tables in the workspace schema
-    const result = await prisma.$queryRawUnsafe<Array<{ total_bytes: bigint }>>(
-      `SELECT COALESCE(SUM(pg_total_relation_size(quote_ident(schemaname) || '.' || quote_ident(tablename))), 0) AS total_bytes
-       FROM pg_tables
-       WHERE schemaname = $1`,
-      schemaName
-    )
-
-    const totalBytes = Number(result[0]?.total_bytes ?? 0)
-    const totalMb = totalBytes / (1024 * 1024)
-
-    await prisma.projectUsage.upsert({
-      where: { projectId_month: { projectId, month } },
-      update: { dbStorageUsedMb: totalMb },
-      create: { projectId, month, dbStorageUsedMb: totalMb },
-    })
-  } catch (err) {
-    console.error(`[UsageTracker] DB storage snapshot failed for ${projectId}:`, err)
-  }
-}
-
-// ─── Bulk DB storage snapshot ─────────────────────────────────────────────────
-
-/**
- * Snapshot DB storage for ALL projects.
- * Call from a scheduled job (e.g., every 6 hours).
- */
-export async function snapshotAllProjectsDbStorage(): Promise<void> {
-  const projects = await prisma.project.findMany({
-    select: { id: true },
-    where: { expiresAt: null }, // only active (non-expired) projects
-  })
-
-  await Promise.allSettled(
-    projects.map((p) => snapshotProjectDbStorage(p.id))
-  )
-}
+// ─── DB storage snapshot ─────────────────────────────────────────────────────
+//
+// Moved out. Measuring one project belongs to the product and lives in
+// lib/usage/db-storage.ts; fanning that out across every project is control
+// plane work and is parked in lib/fleet/db-storage-sweep.ts for Phase 7.
 
 // ─── Get current usage ────────────────────────────────────────────────────────
 

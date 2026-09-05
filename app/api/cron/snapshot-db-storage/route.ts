@@ -18,7 +18,7 @@ export const dynamic = 'force-dynamic'
 export const maxDuration = 300
 
 import { NextRequest, NextResponse } from 'next/server'
-import { snapshotAllProjectsDbStorage } from '@/lib/billing/usage-tracker'
+import { snapshotAllProjectsDbStorage } from '@/lib/fleet/db-storage-sweep'
 
 function verifyCronAuth(request: NextRequest): boolean {
   return request.headers.get('authorization') === `Bearer ${process.env.CRON_SECRET}`

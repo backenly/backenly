@@ -11,70 +11,10 @@ import { prisma } from '@/lib/db/prisma'
 import { getUserSubscription } from '@/lib/billing'
 import { canWriteProject } from '@/lib/edition/guard'
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-export interface SandboxStatus {
-  isSandbox: boolean
-  isExpired: boolean
-  expiresAt: Date | null
-  daysRemaining: number | null
-  hoursRemaining: number | null
-  countdownMessage: string
-}
-
 // ─── Status checks ────────────────────────────────────────────────────────────
-
-export function getSandboxStatus(project: { expiresAt: Date | null }): SandboxStatus {
-  if (!project.expiresAt) {
-    return {
-      isSandbox: false,
-      isExpired: false,
-      expiresAt: null,
-      daysRemaining: null,
-      hoursRemaining: null,
-      countdownMessage: 'Production — never expires',
-    }
-  }
-
-  const now = new Date()
-  const expiresAt = new Date(project.expiresAt)
-  const msRemaining = expiresAt.getTime() - now.getTime()
-  const isExpired = msRemaining <= 0
-
-  if (isExpired) {
-    return {
-      isSandbox: true,
-      isExpired: true,
-      expiresAt,
-      daysRemaining: 0,
-      hoursRemaining: 0,
-      countdownMessage: 'Sandbox expired — project will be deleted shortly',
-    }
-  }
-
-  const hoursRemaining = Math.floor(msRemaining / (1000 * 60 * 60))
-  const daysRemaining = Math.floor(hoursRemaining / 24)
-
-  let countdownMessage: string
-  if (daysRemaining >= 2) {
-    countdownMessage = `Your sandbox will be deleted in ${daysRemaining} days. Deploy to keep it live.`
-  } else if (daysRemaining === 1) {
-    countdownMessage = `Your sandbox expires tomorrow! Deploy now to keep your backend.`
-  } else if (hoursRemaining > 0) {
-    countdownMessage = `Your sandbox expires in ${hoursRemaining} hours! Deploy now to keep your backend.`
-  } else {
-    countdownMessage = `Your sandbox expires in less than 1 hour! Deploy immediately.`
-  }
-
-  return {
-    isSandbox: true,
-    isExpired: false,
-    expiresAt,
-    daysRemaining,
-    hoursRemaining,
-    countdownMessage,
-  }
-}
+//
+// Moved to lib/projects/sandbox-lifecycle.ts. Reading a countdown off a
+// column on Project is project-local work, not commercial machinery.
 
 // ─── Sandbox expiry date ──────────────────────────────────────────────────────
 
@@ -145,72 +85,10 @@ async function deleteProjectWorkspace(projectId: string): Promise<void> {
 }
 
 // ─── Upgrade: sandbox → production ───────────────────────────────────────────
-
-export interface UpgradeResult {
-  success: boolean
-  error?: string
-  errorCode?: 'NO_SUBSCRIPTION' | 'DEPLOYMENT_NOT_ALLOWED' | 'ALREADY_PRODUCTION' | 'PROJECT_NOT_FOUND'
-}
-
-/**
- * Converts a sandbox project to production.
- * Clears expiresAt so the project persists permanently.
- * Requires the user to have BUILDER or SCALE subscription.
- */
-export async function upgradeSandboxToProduction(
-  projectId: string,
-  userId: string
-): Promise<UpgradeResult> {
-  // Audited: app/api/project/deploy is the only caller and already gates at
-  // DEVELOPER. Kept here too, because a library that performs a privileged
-  // action should not depend on every future caller remembering to ask.
-  if (!(await canWriteProject(userId, projectId))) {
-    return { success: false, error: 'Project not found', errorCode: 'PROJECT_NOT_FOUND' }
-  }
-
-  const project = await prisma.project.findUnique({
-    where: { id: projectId },
-    select: { id: true, expiresAt: true, isDeployed: true },
-  })
-
-  if (!project) {
-    return { success: false, error: 'Project not found', errorCode: 'PROJECT_NOT_FOUND' }
-  }
-
-  if (!project.expiresAt && project.isDeployed) {
-    return { success: false, error: 'Project is already in production', errorCode: 'ALREADY_PRODUCTION' }
-  }
-
-  const sub = await getUserSubscription(userId)
-  if (!sub) {
-    return {
-      success: false,
-      error: 'No active subscription. Upgrade to Pro to deploy.',
-      errorCode: 'NO_SUBSCRIPTION',
-    }
-  }
-
-  if (!sub.plan.allowDeployment) {
-    return {
-      success: false,
-      error: 'Your Free plan does not allow deployment. Upgrade to Pro to go live.',
-      errorCode: 'DEPLOYMENT_NOT_ALLOWED',
-    }
-  }
-
-  // Clear expiry — project now persists permanently
-  await prisma.project.update({
-    where: { id: projectId },
-    data: {
-      expiresAt: null,
-      isDeployed: true,
-      deployedAt: new Date(),
-      environment: 'production',
-    },
-  })
-
-  return { success: true }
-}
+//
+// Moved to lib/projects/sandbox-lifecycle.ts as promoteSandboxToProduction.
+// The transition itself is project-local; deciding whether a plan permits it
+// is enforceDeployment's job and the route already calls it.
 
 // ─── Enforce sandbox limits ───────────────────────────────────────────────────
 
