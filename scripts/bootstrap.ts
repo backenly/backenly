@@ -24,13 +24,17 @@
  *   BackendGraph         the state the brain and autonomy reconcile against
  *   jwtSecret            per-project signing for end-user auth
  *   anonKey              the credential a frontend embeds
- *   bkn_ro_/bkn_rw_      direct database roles
+ *
+ * And what is NOT required for it to be ready:
+ *
+ *   bkn_ro_/bkn_rw_      direct database roles, for handing out a psql string
  *
  * Exit codes (BOOTSTRAP_EXIT in ./bootstrap-prerequisites, which is the value
  * this script actually exits with, and what README.md is checked against):
  *   0  ready
  *   2  refused (incompatible database, or a pinned id that does not match)
- *   3  core bootstrapped, prerequisites unmet — NOT ready
+ *   3  core bootstrapped, a REQUIRED prerequisite unmet — NOT ready.
+ *      Optional pieces are reported as advisories and do not affect this.
  *
  * Usage:
  *   npm run bootstrap
@@ -71,6 +75,26 @@ const step = (what: string, outcome: Outcome) => log.push([what, outcome])
  */
 const pending: Array<{ what: string; fix: string }> = []
 const needs = (what: string, fix: string) => pending.push({ what, fix })
+
+/**
+ * Missing, but not blocking. Reported, and does NOT change the exit code.
+ *
+ * The distinction exists because there was none, and the result was that exit 0
+ * could not be reached on the documented path. Direct database access was
+ * tracked with `needs()`, so a deployment that skipped it stayed at exit 3
+ * forever — while the very warning it printed said "the deployment is usable",
+ * this file's own comment said a missing installer "must not fail the whole
+ * bootstrap", and the README called the step optional. All three were right
+ * about the intent and the code did the opposite.
+ *
+ * Found by running the quickstart in CI: every prerequisite the README calls
+ * required was installed, and bootstrap still refused to say ready.
+ *
+ * So the rule is now explicit. A prerequisite is `needs()` only if Backenly
+ * does not work without it. Everything else is an advisory.
+ */
+const advisories: Array<{ what: string; fix: string }> = []
+const advisory = (what: string, fix: string) => advisories.push({ what, fix })
 
 class BootstrapRefusal extends Error {
   constructor(code: string, detail: string) {
@@ -354,7 +378,12 @@ async function ensureDirectAccessRoles(projectId: string): Promise<void> {
               '    Everything else below is provisioned and the deployment is usable.'
             : message.split('\n')[0])
       )
-      needs(
+      // Advisory, not a blocker. These roles exist so an operator can hand out a
+      // psql connection string; the data plane, auth, storage and functions all
+      // work without them. Tracking this with needs() made exit 0 unreachable
+      // for anyone who followed the README and skipped the step it calls
+      // optional.
+      advisory(
         `privileged role helpers are not installed, so ${mode} database access is unavailable`,
         `${DIRECT_ACCESS_PREREQUISITE.command}   (as a superuser), then rerun: npm run bootstrap`
       )
@@ -415,6 +444,18 @@ async function main(): Promise<void> {
     console.log('')
     process.exitCode = BOOTSTRAP_EXIT.incomplete // BACKENLY_BOOTSTRAP_INCOMPLETE
     return
+  }
+
+  // Printed on the ready path too, because "ready" must not mean "silent about
+  // what is missing". These do not change the exit code.
+  if (advisories.length > 0) {
+    console.log('')
+    console.log('  Optional, not installed:')
+    console.log('')
+    for (const a of advisories) {
+      console.log(`    -  ${a.what}`)
+      console.log(`       ${a.fix}`)
+    }
   }
   if (!process.env.BACKENLY_PROJECT_ID) {
     console.log('')

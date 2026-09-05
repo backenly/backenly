@@ -605,6 +605,13 @@ jobs:
           cat boot2.log
           [ "$code" -eq 0 ] || { echo "expected exit 0, got $code"; exit 1; }
           grep -q "Backenly is ready" boot2.log || { echo "did not report ready"; exit 1; }
+          # Direct database access is deliberately NOT installed at this point.
+          # Proving that the step the README calls optional really is optional is
+          # the point: it used to be tracked as a hard prerequisite, so exit 0 was
+          # unreachable for anyone who skipped it. It must still be REPORTED,
+          # because "ready" must not mean "silent about what is missing".
+          grep -q "Optional, not installed" boot2.log || {
+            echo "the optional piece was not reported at all"; exit 1; }
 
       - name: PostgREST is reachable and serving the workspace schema
         run: |
@@ -633,14 +640,36 @@ jobs:
           echo "$SCHEMAS" | grep -q "workspace_${PID}" || {
             echo "workspace_${PID} is not registered"; exit 1; }
 
-      - name: a second bootstrap changes nothing
+      # Exercises install-sql.sh on the real path, in docker mode, and proves the
+      # advisory is a real signal rather than a permanent line of text.
+      - name: the optional piece installs, and its advisory clears
         run: |
           set -euo pipefail
+          bash scripts/install-sql.sh scripts/setup-direct-access.sql
           npm run bootstrap > boot3.log 2>&1
           cat boot3.log
           grep -q "Backenly is ready" boot3.log
+          if grep -q "Optional, not installed" boot3.log; then
+            echo "the advisory did not clear after installing it"; exit 1
+          fi
+          grep -q "direct access role" boot3.log || {
+            echo "direct access roles were never provisioned"; exit 1; }
+          echo "  direct access provisioned, advisory cleared"
+
+      - name: a further bootstrap changes nothing
+        run: |
+          set -euo pipefail
+          npm run bootstrap > boot4.log 2>&1
+          cat boot4.log
+          grep -q "Backenly is ready" boot4.log
           # The reconciler claim, asserted rather than described.
-          grep -q "created" boot3.log && { echo "a rerun created something"; exit 1; }
+          #
+          # `if grep; then fail; fi`, never `grep && fail`: under `set -e` a grep
+          # that finds nothing returns 1, the && chain yields 1, and the step
+          # dies on the SUCCESS path.
+          if grep -qE '^\s+\S.*\s+created$' boot4.log; then
+            echo "a rerun created something:"; grep -E 'created$' boot4.log; exit 1
+          fi
           echo "  rerun created nothing"
 
       - name: compose logs on failure
