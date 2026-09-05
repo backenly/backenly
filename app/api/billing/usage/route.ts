@@ -2,7 +2,8 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { withAuth } from '@/lib/auth/route-protection'
-import { getUserUsageSummary, getUserEntitlements, createFreeSubscription } from '@/lib/billing'
+import { getUserUsageSummary, createFreeSubscription } from '@/lib/billing'
+import { getUserEntitlements } from '@/lib/entitlements'
 
 /**
  * GET /api/billing/usage

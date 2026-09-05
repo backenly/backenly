@@ -23,6 +23,10 @@ const customJestConfig = {
     // Jest runs plain Node, so map it to a no-op — the modules that import it
     // are still server modules, we just want to be able to unit test them.
     '^server-only$': '<rootDir>/tests/__mocks__/server-only.js',
+    // Overlay-first, OSS fallback. Jest tries each entry in order, so the
+    // private Cloud implementation wins when the overlay has been applied and
+    // the public single-tenant one is used when it has not.
+    '^@cloud/(.*)$': ['<rootDir>/lib/cloud/$1', '<rootDir>/lib/edition/oss/$1'],
     '^@/(.*)$': '<rootDir>/$1',
   },
   collectCoverageFrom: [

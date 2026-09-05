@@ -14,6 +14,11 @@
  * makes the displayed `Plan` the one and only source of truth. Every metered
  * limit routes through here. The other two engines now delegate to this.
  *
+ * The kernel reads ENTITLEMENTS, never Plan or Subscription rows directly.
+ * In Cloud those entitlements are still resolved from the displayed Plan, so
+ * nothing about the enforced numbers changes; in single-tenant they come from
+ * the edition itself, which is why a self-host install needs no billing seed.
+ *
  * SEMANTICS (product decisions, locked):
  *   • Soft enforcement: warn at 80%, hard block at 100%.
  *   • API requests: Free = lifetime TOTAL (never resets, `apiQuotaIsLifetime`);
@@ -27,7 +32,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
-import { getUserSubscription } from '@/lib/billing'
+import { getUserEntitlements } from '@/lib/entitlements'
 import { createPlatformNotification } from '@/lib/notifications/platform'
 
 // ─── Result type ─────────────────────────────────────────────────────────────
@@ -103,11 +108,11 @@ function blocked(plan: string, message: string, used?: number, max?: number | nu
  */
 export async function enforceAndTrackApiRequest(userId: string): Promise<QuotaDecision> {
   try {
-    const sub = await getUserSubscription(userId)
-    if (!sub) return ALLOW // no sub on a hot path → fail open
+    const ent = await getUserEntitlements(userId)
+    if (!ent) return ALLOW // no entitlements on a hot path → fail open
 
-    const max = sub.plan.maxApiRequestsPerMonth // BigInt | null
-    const isLifetime = sub.plan.apiQuotaIsLifetime
+    const max = ent.maxApiRequestsPerMonth // BigInt | null
+    const isLifetime = ent.apiQuotaIsLifetime
     const periodKey = isLifetime ? 'LIFETIME' : thisMonth()
 
     const record = await prisma.userAiUsage.upsert({
@@ -132,10 +137,10 @@ export async function enforceAndTrackApiRequest(userId: string): Promise<QuotaDe
 
     if (used > limit) {
       return blocked(
-        sub.plan.name,
+        ent.planName,
         isLifetime
           ? `You've used all ${limit.toLocaleString()} API requests included with the Free plan. Upgrade to Pro ($25/mo) for unlimited API requests.`
-          : `You've hit your ${limit.toLocaleString()} API requests for this month on the ${sub.plan.name} plan. Resets on the 1st, or upgrade for more.`,
+          : `You've hit your ${limit.toLocaleString()} API requests for this month on the ${ent.planName} plan. Resets on the 1st, or upgrade for more.`,
         used,
         limit,
       )
@@ -154,9 +159,9 @@ async function planForProject(projectId: string): Promise<{ ownerId: string; max
     select: { userId: true },
   })
   if (!project?.userId) return null
-  const sub = await getUserSubscription(project.userId)
-  if (!sub) return null
-  return { ownerId: project.userId, maxMau: sub.plan.maxMonthlyActiveUsers ?? null, planName: sub.plan.name }
+  const ent = await getUserEntitlements(project.userId)
+  if (!ent) return null
+  return { ownerId: project.userId, maxMau: ent.maxMonthlyActiveUsers ?? null, planName: ent.planName }
 }
 
 /**
@@ -229,15 +234,15 @@ export async function enforceRealtimeConnection(
       select: { userId: true },
     })
     if (!project?.userId) return ALLOW
-    const sub = await getUserSubscription(project.userId)
-    if (!sub) return ALLOW
-    const max = sub.plan.maxRealtimeConnections
+    const ent = await getUserEntitlements(project.userId)
+    if (!ent) return ALLOW
+    const max = ent.maxRealtimeConnections
     if (max === null || max === undefined) return ALLOW
     fireThresholdWarning(project.userId, 'realtime connections', currentConnections, max, thisMonth())
     if (currentConnections >= max) {
       return blocked(
-        sub.plan.name,
-        `This app has reached its limit of ${max.toLocaleString()} concurrent realtime connections on the ${sub.plan.name} plan.`,
+        ent.planName,
+        `This app has reached its limit of ${max.toLocaleString()} concurrent realtime connections on the ${ent.planName} plan.`,
         currentConnections,
         max,
       )
@@ -259,12 +264,12 @@ export async function getRealtimeConnectionLimit(projectId: string): Promise<{
       select: { userId: true },
     })
     if (!project?.userId) return null
-    const sub = await getUserSubscription(project.userId)
-    if (!sub) return null
+    const ent = await getUserEntitlements(project.userId)
+    if (!ent) return null
     return {
       ownerId: project.userId,
-      planName: sub.plan.name,
-      max: sub.plan.maxRealtimeConnections ?? null,
+      planName: ent.planName,
+      max: ent.maxRealtimeConnections ?? null,
     }
   } catch {
     return null
@@ -286,9 +291,9 @@ export async function enforceDbStorage(projectId: string): Promise<QuotaDecision
       select: { userId: true },
     })
     if (!project?.userId) return ALLOW
-    const sub = await getUserSubscription(project.userId)
-    if (!sub) return ALLOW
-    const maxMb = sub.plan.maxPostgresStorageMb
+    const ent = await getUserEntitlements(project.userId)
+    if (!ent) return ALLOW
+    const maxMb = ent.maxPostgresStorageMb
     if (maxMb === null || maxMb === undefined) return ALLOW
 
     const month = thisMonth()
@@ -300,8 +305,8 @@ export async function enforceDbStorage(projectId: string): Promise<QuotaDecision
     fireThresholdWarning(project.userId, 'PostgreSQL storage (MB)', usedMb, maxMb, month)
     if (usedMb >= maxMb) {
       return blocked(
-        sub.plan.name,
-        `This project has reached its ${maxMb.toLocaleString()} MB PostgreSQL storage limit on the ${sub.plan.name} plan. Upgrade or remove data to continue.`,
+        ent.planName,
+        `This project has reached its ${maxMb.toLocaleString()} MB PostgreSQL storage limit on the ${ent.planName} plan. Upgrade or remove data to continue.`,
         usedMb,
         maxMb,
       )
@@ -326,9 +331,9 @@ export async function getFileStorageLimitBytes(projectId: string): Promise<bigin
       select: { userId: true },
     })
     if (!project?.userId) return null
-    const sub = await getUserSubscription(project.userId)
-    if (!sub) return null
-    const mb = sub.plan.maxFileStorageMb
+    const ent = await getUserEntitlements(project.userId)
+    if (!ent) return null
+    const mb = ent.maxFileStorageMb
     if (mb === null || mb === undefined) return null // unlimited
     return BigInt(mb) * BigInt(1024 * 1024)
   } catch {

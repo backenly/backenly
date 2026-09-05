@@ -2,7 +2,8 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { withAuth } from '@/lib/auth/route-protection'
-import { getUserSubscription, getUserEntitlements, getSubscriptionStatusDisplay } from '@/lib/billing'
+import { getUserSubscription, getSubscriptionStatusDisplay } from '@/lib/billing'
+import { getUserEntitlements } from '@/lib/entitlements'
 
 /**
  * GET /api/billing - Get current user subscription and entitlements

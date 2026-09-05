@@ -12,7 +12,6 @@ import { prisma } from '@/lib/db/prisma'
 import { Plan, Subscription, SubscriptionStatus } from '@prisma/client'
 import crypto from 'crypto'
 import { getBonusCredits } from './credit-ledger'
-import { currentEdition } from '@/lib/edition'
 
 /**
  * Derive a stable 32-bit advisory lock key from a (userId, month) tuple.
@@ -114,142 +113,11 @@ export async function createFreeSubscription(userId: string): Promise<Subscripti
 }
 
 // ─── Entitlements resolver ───────────────────────────────────────────────────
-
-export interface UserEntitlements {
-  planName: string
-  priceCents: number
-  annualPriceCents: number | null
-
-  maxProjects: number | null
-  maxAiBuildActionsPerMonth: number | null
-  monthlyAiCredits: number | null
-  maxApiRequestsPerMonth: bigint | null
-  maxPostgresStorageMb: number | null
-  maxFileStorageMb: number | null
-  maxRealtimeConnections: number | null
-  maxAiFunctionInvocationsPerMonth: number | null
-  maxTriggersPerProject: number | null
-  maxTeamSeats: number
-  maxDeploymentHistory: number | null
-
-  logRetentionDays: number
-  supportResponseHours: number | null
-  allowedAuthProviders: string[]
-
-  allowCustomDomain: boolean
-  allowAdvancedMonitoring: boolean
-  allowRbac: boolean
-  allowSso: boolean
-  allowDeploymentRollback: boolean
-  allowWebhooks: boolean
-  prioritySupport: boolean
-
-  // New: sandbox & billing flags
-  allowDeployment: boolean
-  isSandboxPlan: boolean
-  sandboxExpiryDays: number | null
-  isPayAsYouGo: boolean
-}
-
-/**
- * Self-hosted entitlements: everything, metered by nothing.
- *
- * A self-hoster is already paying for their own hardware, their own Postgres
- * and their own model tokens. There is nobody to bill and no plan to resolve,
- * so quotas here would only be an artificial ceiling on infrastructure the
- * operator owns.
- *
- * Returned WITHOUT touching the plans or subscriptions tables, which is the
- * point rather than an optimisation. `resolveFreePlan()` throws when neither
- * SANDBOX nor FREE exists, so an unseeded database used to break signup and
- * checkout on a fresh self-host install. Single-tenant now needs no seed at
- * all: `npm run bootstrap` provisions a working project and never creates a
- * Plan or a Subscription row.
- *
- * `null` means unlimited throughout this module, so this is the same shape the
- * quota kernel already understands. Nothing downstream needs an edition check.
- */
-function selfHostedEntitlements(): UserEntitlements {
-  return {
-    planName: 'SELF_HOSTED',
-    priceCents: 0,
-    annualPriceCents: null,
-
-    maxProjects: 1, // one deployment is one project
-    maxAiBuildActionsPerMonth: null,
-    monthlyAiCredits: null,
-    maxApiRequestsPerMonth: null,
-    maxPostgresStorageMb: null,
-    maxFileStorageMb: null,
-    maxRealtimeConnections: null,
-    maxAiFunctionInvocationsPerMonth: null,
-    maxTriggersPerProject: null,
-    maxTeamSeats: 1,
-    maxDeploymentHistory: null,
-
-    logRetentionDays: 365,
-    supportResponseHours: null,
-    allowedAuthProviders: ['email', 'google', 'github'],
-
-    allowCustomDomain: true,
-    allowAdvancedMonitoring: true,
-    // RBAC and SSO are false because they are not withheld, they do not exist
-    // here: organizations, roles and invites are the Cloud control plane.
-    allowRbac: false,
-    allowSso: false,
-    allowDeploymentRollback: true,
-    allowWebhooks: true,
-    prioritySupport: false,
-
-    allowDeployment: true,
-    isSandboxPlan: false,
-    sandboxExpiryDays: null,
-    isPayAsYouGo: false,
-  }
-}
-
-export async function getUserEntitlements(userId: string): Promise<UserEntitlements | null> {
-  if (currentEdition() === 'single-tenant') return selfHostedEntitlements()
-
-  const sub = await getUserSubscription(userId)
-  if (!sub) return null
-  const p = sub.plan
-  return {
-    planName: p.name,
-    priceCents: p.priceCents,
-    annualPriceCents: p.annualPriceCents ?? null,
-
-    maxProjects: p.maxProjects ?? null,
-    maxAiBuildActionsPerMonth: p.maxAiBuildActionsPerMonth ?? null,
-    monthlyAiCredits: p.monthlyAiCredits ?? null,
-    maxApiRequestsPerMonth: p.maxApiRequestsPerMonth ?? null,
-    maxPostgresStorageMb: p.maxPostgresStorageMb ?? null,
-    maxFileStorageMb: p.maxFileStorageMb ?? null,
-    maxRealtimeConnections: p.maxRealtimeConnections ?? null,
-    maxAiFunctionInvocationsPerMonth: p.maxAiFunctionInvocationsPerMonth ?? null,
-    maxTriggersPerProject: p.maxTriggersPerProject ?? null,
-    maxTeamSeats: p.maxTeamSeats,
-    maxDeploymentHistory: p.maxDeploymentHistory ?? null,
-
-    logRetentionDays: p.logRetentionDays,
-    supportResponseHours: p.supportResponseHours ?? null,
-    allowedAuthProviders: p.allowedAuthProviders,
-
-    allowCustomDomain: p.allowCustomDomain,
-    allowAdvancedMonitoring: p.allowAdvancedMonitoring,
-    allowRbac: p.allowRbac,
-    allowSso: p.allowSso,
-    allowDeploymentRollback: p.allowDeploymentRollback,
-    allowWebhooks: p.allowWebhooks,
-    prioritySupport: p.prioritySupport,
-
-    allowDeployment: p.allowDeployment,
-    isSandboxPlan: p.isSandboxPlan,
-    sandboxExpiryDays: p.sandboxExpiryDays ?? null,
-    isPayAsYouGo: p.isPayAsYouGo,
-  }
-}
-
+//
+// Moved to lib/entitlements. The resolver is the seam between the product and
+// this file: public code asks lib/entitlements what a user may do, and only
+// the Cloud provider behind that seam reads the Plan and Subscription tables
+// below. Keeping a copy here would defeat the split, so there is none.
 // ─── Limit violation type ────────────────────────────────────────────────────
 
 export interface LimitViolation {

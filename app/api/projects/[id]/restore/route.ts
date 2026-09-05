@@ -6,7 +6,7 @@ import { undoToGraph } from '@/lib/orchestration/graph-pointer'
 import { reconcileWorkspaceToGraph } from '@/lib/orchestration/graph-reconciler'
 import { recordRollbackMemory } from '@/lib/operational-memory/ledger'
 import { prisma } from '@/lib/db'
-import { getUserEntitlements } from '@/lib/billing'
+import { getUserEntitlements } from '@/lib/entitlements'
 import type { BackendStateGraph } from '@/lib/orchestration/backend-state-graph'
 
 const QUOTA_DISABLED = process.env.DISABLE_QUOTA_ENFORCEMENT === 'true'

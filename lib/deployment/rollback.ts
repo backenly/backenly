@@ -13,7 +13,7 @@
 import { prisma } from '@/lib/db/prisma'
 import { emit } from '@/lib/events/bus'
 import { emitTrace } from '@/lib/ai/execution-tracer'
-import { getUserEntitlements } from '@/lib/billing'
+import { getUserEntitlements } from '@/lib/entitlements'
 import { recordRollbackMemory } from '@/lib/operational-memory/ledger'
 import { canAdministerProject } from '@/lib/edition/guard'
 

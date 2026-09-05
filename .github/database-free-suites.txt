@@ -79,6 +79,17 @@ __tests__/security/api-key-plaintext.test.ts
 # touching Prisma, and asserting that they do is half the point.
 __tests__/edition/single-tenant-runtime.test.ts
 
+# The Entitlements seam: single-tenant resolves without a Plan or Subscription
+# row, cloud delegates to the @cloud/* provider, and the alias stays
+# overlay-first in all three configs. Database-free because proving the
+# single-tenant path never reaches Prisma is the assertion itself.
+__tests__/edition/entitlements-seam.test.ts
+
+# The quota kernel enforces the numbers the seam hands it. Covers the two
+# fields it used to read straight off a Plan row (apiQuotaIsLifetime and
+# maxMonthlyActiveUsers) and the fail-open path. Prisma and the seam are both
+# mocked, so no database.
+__tests__/edition/quota-kernel-entitlements.test.ts
 # README.md is the acceptance script for a self-hosted install, so it is checked
 # against the module bootstrap renders its prerequisite guidance from. Compares
 # committed text to committed code; no database.

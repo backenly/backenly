@@ -27,6 +27,10 @@
     "paths": {
       "@/*": [
         "./*"
+      ],
+      "@cloud/*": [
+        "./lib/cloud/*",
+        "./lib/edition/oss/*"
       ]
     }
   },

@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { verifyToken } from '@/lib/auth/jwt'
-import { getUserEntitlements } from '@/lib/billing'
+import { getUserEntitlements } from '@/lib/entitlements'
 import { canAccessProject } from '@/lib/edition/guard'
 
 const QUOTA_DISABLED = process.env.DISABLE_QUOTA_ENFORCEMENT === 'true'

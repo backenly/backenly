@@ -23,7 +23,7 @@
  * touching Prisma, and asserting that they do so is half the point.
  */
 
-import { getUserEntitlements } from '@/lib/billing'
+import { getUserEntitlements } from '@/lib/entitlements'
 import {
   createProvisionedProject,
   ProjectCreationUnsupportedError,
