@@ -21,16 +21,32 @@
  */
 import {
   assessSignupAdmission as cloudAssessSignupAdmission,
+  recordProductEvent as cloudRecordProductEvent,
+  recordUsageMetrics as cloudRecordUsageMetrics,
+  verifySignupChallenge as cloudVerifySignupChallenge,
   onSignupCompleted as cloudOnSignupCompleted,
   runScheduledBackOfficeMaintenance as cloudRunBackOfficeMaintenance,
 } from '@cloud/platform-signals'
 import { currentEdition } from '@/lib/edition'
-import type { SignupAdmission, SignupAttempt, SignupCompleted } from './types'
-
-export type {
-  PlatformSignalsProvider,
+import type {
+  ChallengeResult,
+  ProductEvent,
   SignupAdmission,
   SignupAttempt,
+  SignupChallenge,
+  SignupCompleted,
+  UsageMetricsDelta,
+} from './types'
+
+export type {
+  ChallengeResult,
+  PlatformSignalsProvider,
+  ProductEvent,
+  ProductEventType,
+  UsageMetricsDelta,
+  SignupAdmission,
+  SignupAttempt,
+  SignupChallenge,
   SignupCompleted,
 } from './types'
 
@@ -89,4 +105,54 @@ export async function assessSignupAdmission(attempt: SignupAttempt): Promise<Sig
     return { ok: true, reason: '', status: 200 }
   }
   return cloudAssessSignupAdmission(attempt)
+}
+
+/**
+ * Record a Backenly funnel event.
+ *
+ * A no-op in single-tenant. There is no founder console on a self-hosted box
+ * and no funnel to measure, so writing ProductEvent rows there would only
+ * accumulate data nobody can read.
+ *
+ * Void and fire-and-forget, because every caller is on a hot path.
+ */
+export function recordProductEvent(event: ProductEvent): void {
+  if (currentEdition() === 'single-tenant') return
+  try {
+    cloudRecordProductEvent(event)
+  } catch {
+    /* telemetry must never break the path it is describing */
+  }
+}
+
+/** Increment Backenly's daily usage bucket. No-op in single-tenant. */
+export function recordUsageMetrics(
+  userId: string,
+  projectId: string | undefined,
+  delta: UsageMetricsDelta,
+): void {
+  if (currentEdition() === 'single-tenant') return
+  try {
+    cloudRecordUsageMetrics(userId, projectId, delta)
+  } catch {
+    /* as above */
+  }
+}
+
+/**
+ * Verify a proof-of-humanity challenge at signup.
+ *
+ * Single-tenant admits without one. There is no Turnstile account on a
+ * self-hosted box, and registration there is closed after the first account by
+ * default, which is a stronger control than any challenge. This mirrors what
+ * the old implementation already did when no secret was configured.
+ *
+ * Unlike the telemetry signals this does NOT swallow errors, because it is an
+ * admission decision and a thrown error must not read as "human".
+ */
+export async function verifySignupChallenge(challenge: SignupChallenge): Promise<ChallengeResult> {
+  if (currentEdition() === 'single-tenant') {
+    return { ok: true, unconfigured: true }
+  }
+  return cloudVerifySignupChallenge(challenge)
 }

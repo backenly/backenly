@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest } from 'next/server'
 import { verifyToken } from '@/lib/auth/jwt'
 import { prisma } from '@/lib/db'
-import { markBackendGenerated } from '@/lib/analytics/logger'
+import { markBackendGenerated } from '@/lib/projects/milestones'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import { canWriteProject } from '@/lib/edition/guard'
 

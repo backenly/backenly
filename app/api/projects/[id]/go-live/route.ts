@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getProjectContext, UnauthorizedError, ForbiddenError } from '@/lib/auth/server'
 import { goLive } from '@/lib/deployment/go-live'
-import { markDeployed } from '@/lib/analytics/logger'
+import { markDeployed } from '@/lib/projects/milestones'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 
 /**

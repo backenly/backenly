@@ -5,7 +5,22 @@
  * The structural half of the anti-abuse work, and the half that does not depend
  * on correctly identifying an abusive domain.
  *
- * A signup whose email scored in the challenge band (lib/trust/email-trust.ts)
+ * PUBLIC, and it stays public for the same reason the blocklist does: both
+ * rules it enforces are decisions somebody made about this deployment, not
+ * scores computed about a stranger.
+ *
+ *   - suspendedAt is an operator action, and public auth already enforces it
+ *     in lib/auth/middleware.ts, lib/auth/server.ts and lib/auth/session.ts.
+ *     Moving this gate private would have left a self-hosted deployment
+ *     enforcing suspension on sign-in but not on project creation.
+ *   - the untrusted gate is inert in single-tenant by construction: nothing
+ *     there ever sets trustLevel to 'untrusted', because that only happens when
+ *     Cloud signup scoring returns a challenge verdict, and that scoring does
+ *     not run. So it needs no private module to be correct in OSS.
+ *
+ * It reads only User columns that stay in the public schema.
+ *
+ * A signup whose email scored in the challenge band (the Cloud admission path)
  * is created as `untrusted`. It can sign in and look around, but it cannot
  * consume anything — no projects, no databases, no compute — until it proves it
  * controls the mailbox. That inverts the economics: minting an account stops

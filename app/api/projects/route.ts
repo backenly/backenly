@@ -9,10 +9,10 @@ import { withAuth } from '@/lib/auth/route-protection'
 import crypto from 'crypto'
 import { enforceProjectCreation } from '@/lib/entitlements/policy'
 import { initializeAccountEntitlements } from '@/lib/entitlements'
-import { logEvent } from '@/lib/analytics/logger'
+import { recordProductEvent } from '@/lib/platform-signals'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import { assertWritable } from '@/lib/platform-controls'
-import { assertAccountCanConsume } from '@/lib/trust/account-standing'
+import { assertAccountCanConsume } from '@/lib/platform-controls'
 import { getProjectResolver } from '@/lib/edition'
 import { ensureSchemaRegistered } from '@/lib/postgrest/registration'
 
@@ -406,7 +406,7 @@ export const POST = withAuth(async (request: NextRequest, { user }) => {
     }
 
     // Track project_created event (non-blocking)
-    logEvent('project_created', user.userId, project.id, { name: project.name })
+    recordProductEvent({ type: 'project_created', userId: user.userId, projectId: project.id, metadata: { name: project.name } })
 
     return NextResponse.json(
       {

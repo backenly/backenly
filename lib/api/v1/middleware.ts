@@ -6,7 +6,8 @@ import { checkUsage, getUsageMessage } from '@/lib/scaling/usage-monitor'
 import { applySoftRateLimit } from '@/lib/scaling/usage-monitor'
 import { scanRequest } from '@/lib/services/waf'
 import crypto from 'crypto'
-import { markFrontendConnected, markExternalUsage, trackUsage } from '@/lib/analytics/logger'
+import { markFrontendConnected, markExternalUsage } from '@/lib/projects/milestones'
+import { recordUsageMetrics } from '@/lib/platform-signals'
 import { enforceAndTrackApiRequest } from '@/lib/quota/kernel'
 import { getPlatformControls, recordSecurityEvent } from '@/lib/platform-controls'
 import jwt from 'jsonwebtoken'
@@ -455,7 +456,7 @@ export async function v1ApiMiddleware(
       markExternalUsage(projectId, userId)
     }
     // Track API call
-    trackUsage(userId, projectId, { apiCalls: 1 })
+    recordUsageMetrics(userId, projectId, { apiCalls: 1 })
   }
 
   return {

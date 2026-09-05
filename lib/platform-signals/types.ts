@@ -70,7 +70,84 @@ export interface SignupAdmission {
   signals?: string[]
 }
 
+/**
+ * Backenly's product funnel events.
+ *
+ * These land in ProductEvent, which is read by exactly one thing: the founder
+ * admin console. They measure how Backenly's own funnel is doing, which a
+ * self-hosted deployment has no stake in and no console to read.
+ *
+ * NOT to be confused with the deployment's own observability. Project logs,
+ * runtime logs, monitoring and the SecurityEvent audit trail are product
+ * functionality and stay public.
+ */
+export type ProductEventType =
+  | 'signup'
+  | 'project_created'
+  | 'backend_generated'
+  | 'frontend_connected'
+  | 'deployed'
+  | 'external_usage_started'
+  | 'ai_prompt'
+  | 'api_call'
+
+export interface ProductEvent {
+  type: ProductEventType
+  userId: string
+  projectId?: string | null
+  metadata?: Record<string, unknown>
+}
+
+/** Daily usage counters, read only by the founder analytics pages. */
+export interface UsageMetricsDelta {
+  apiCalls?: number
+  dbReads?: number
+  dbWrites?: number
+  aiCalls?: number
+  computeTime?: number
+}
+
+/** A proof-of-humanity challenge presented at signup. */
+export interface SignupChallenge {
+  token: string | null | undefined
+  ip: string | null
+}
+
+export interface ChallengeResult {
+  ok: boolean
+  /** Reason code when the check fails, for the security feed. */
+  code?: 'missing_token' | 'invalid_token' | 'duplicate_token'
+  reason?: string
+  /** True when no provider is configured, so the caller can surface the gap. */
+  unconfigured?: boolean
+}
+
 export interface PlatformSignalsProvider {
+  /**
+   * Verify a proof-of-humanity challenge.
+   *
+   * Cloud runs Turnstile. Single-tenant has no bot funnel to defend and no
+   * Turnstile account, so it admits: the deployment is one team's
+   * infrastructure and its registration is closed after the first account
+   * anyway, which is a stronger control than any challenge.
+   *
+   * The public signup flow asks for the RESULT. It never imports the provider,
+   * so OSS carries no Turnstile dependency at all.
+   */
+  verifySignupChallenge(challenge: SignupChallenge): Promise<ChallengeResult>
+
+  /**
+   * Record a funnel event.
+   *
+   * Fire-and-forget and returns void, not a promise: every caller is on a hot
+   * path and the original logger was explicitly "safe to call without await".
+   * Making this awaitable would invite someone to await it.
+   */
+  recordProductEvent(event: ProductEvent): void
+
+  /** Increment the daily usage bucket. Fire-and-forget, same reasoning. */
+  recordUsageMetrics(userId: string, projectId: string | undefined, delta: UsageMetricsDelta): void
+
   /**
    * Judge a signup Backenly has never seen before.
    *

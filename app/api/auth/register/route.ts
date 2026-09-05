@@ -6,7 +6,6 @@ import { hashPassword, validatePasswordStrength } from '@/lib/auth/password'
 import { createSession } from '@/lib/auth/session'
 import { logAuthEvent } from '@/lib/services/logging'
 import { initializeAccountEntitlements } from '@/lib/entitlements'
-import { logEvent } from '@/lib/analytics/logger'
 import { sendVerificationEmail } from '@/lib/auth/email'
 import {
   assertSignupAllowed,
@@ -14,9 +13,9 @@ import {
   recordSecurityEvent,
   SignupSlotTakenError,
 } from '@/lib/platform-controls'
-import { onSignupCompleted } from '@/lib/platform-signals'
+import { onSignupCompleted, recordProductEvent, verifySignupChallenge } from '@/lib/platform-signals'
 import { consume, AUTH_LIMITS, clientIp } from '@/lib/security/auth-rate-limit'
-import { verifyBotChallenge } from '@/lib/trust/bot-defense'
+
 import { z } from 'zod'
 import jwt from 'jsonwebtoken'
 
@@ -62,7 +61,7 @@ export async function POST(request: NextRequest) {
     // Proof of humanity. This is the control that actually stops scripted
     // signups — the domain heuristics below are a second layer, because a bot
     // operator can register a fresh domain faster than any list can grow.
-    const botCheck = await verifyBotChallenge(parsed.turnstileToken, ip)
+    const botCheck = await verifySignupChallenge({ token: parsed.turnstileToken, ip })
     if (!botCheck.ok) {
       await recordSecurityEvent({
         kind: 'bot_challenge_failed',
@@ -174,7 +173,7 @@ export async function POST(request: NextRequest) {
     await onSignupCompleted({ userId: user.id, email: user.email, provider: 'email', referralCode: refCode })
 
     // Track signup event (non-blocking)
-    logEvent('signup', user.id, undefined, { email: user.email, provider: 'email' })
+    recordProductEvent({ type: 'signup', userId: user.id, metadata: { email: user.email, provider: 'email' } })
 
     // Create session
     const { token } = await createSession(user.id, user.email, user.role?.name, user.name || undefined, 'email')

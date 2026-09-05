@@ -16,9 +16,13 @@
  * into them would have to be unpicked rather than deleted.
  */
 import type {
+  ChallengeResult,
+  ProductEvent,
   SignupAdmission,
   SignupAttempt,
+  SignupChallenge,
   SignupCompleted,
+  UsageMetricsDelta,
 } from '@/lib/platform-signals/types'
 
 /**
@@ -108,4 +112,26 @@ export async function assessSignupAdmission(
     score: trust.score,
     signals: trust.signals,
   }
+}
+
+/** Backenly's product funnel event log. Read only by the founder console. */
+export function recordProductEvent(event: ProductEvent): void {
+  void import('@/lib/analytics/logger').then(({ logEvent }) =>
+    logEvent(event.type, event.userId, event.projectId ?? undefined, event.metadata),
+  )
+}
+
+/** Backenly's daily usage buckets. Read only by the founder analytics pages. */
+export function recordUsageMetrics(
+  userId: string,
+  projectId: string | undefined,
+  delta: UsageMetricsDelta,
+): void {
+  void import('@/lib/analytics/logger').then(({ trackUsage }) => trackUsage(userId, projectId, delta))
+}
+
+/** Turnstile. Reached only in cloud; OSS never loads the implementation. */
+export async function verifySignupChallenge(challenge: SignupChallenge): Promise<ChallengeResult> {
+  const { verifyBotChallenge } = await import('@/lib/trust/bot-defense')
+  return verifyBotChallenge(challenge.token, challenge.ip)
 }
