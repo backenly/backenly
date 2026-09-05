@@ -18,6 +18,7 @@ import { getProjects, deleteProject, type Project } from '@/lib/api/projects'
 import { OrgShell } from '@/components/shell/OrgShell'
 import { GlobalLoading } from '@/components/ui/GlobalLoading'
 import { KitConfirmDialog } from '@/components/inspector/kit'
+import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 
 type UserProfile = { id: string; name?: string; email?: string }
 
@@ -211,14 +212,19 @@ export default function DashboardPage() {
                 className="h-9 w-full rounded-lg border border-white/[0.07] bg-[#16171d] pl-9 pr-3 text-[13px] text-zinc-50 outline-none transition-colors placeholder:text-zinc-600 focus:border-violet-400/40 focus:ring-2 focus:ring-violet-400/15"
               />
             </div>
-            <button
-              type="button"
-              onClick={() => setShowNewModal(true)}
-              className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-lg bg-white px-3.5 text-[13px] font-semibold text-black transition-colors hover:bg-zinc-200"
-            >
-              <Plus className="h-4 w-4" />
-              New project
-            </button>
+            {/* One deployment is one project on a self-hosted build, and the
+                API refuses a second with PROJECT_CREATION_UNSUPPORTED. Offering
+                the button anyway would make the refusal look like a bug. */}
+            {CLOUD_CONTROL_PLANE && (
+              <button
+                type="button"
+                onClick={() => setShowNewModal(true)}
+                className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-lg bg-white px-3.5 text-[13px] font-semibold text-black transition-colors hover:bg-zinc-200"
+              >
+                <Plus className="h-4 w-4" />
+                New project
+              </button>
+            )}
           </div>
         </header>
 
@@ -254,18 +260,28 @@ export default function DashboardPage() {
               {isEmpty ? (
                 <>
                   <h3 className="mt-4 text-sm font-semibold text-white">No projects yet</h3>
-                  <p className="mt-2 max-w-sm text-sm leading-6 text-zinc-500">
-                    Create a project, then wire your coding agent to it from the project&apos;s
-                    Connect page.
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => setShowNewModal(true)}
-                    className="mt-4 inline-flex h-9 items-center gap-1.5 rounded-lg bg-white px-3.5 text-[13px] font-semibold text-black transition-colors hover:bg-zinc-200"
-                  >
-                    <Plus className="h-4 w-4" />
-                    New project
-                  </button>
+                  {CLOUD_CONTROL_PLANE ? (
+                    <>
+                      <p className="mt-2 max-w-sm text-sm leading-6 text-zinc-500">
+                        Create a project, then wire your coding agent to it from the project&apos;s
+                        Connect page.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => setShowNewModal(true)}
+                        className="mt-4 inline-flex h-9 items-center gap-1.5 rounded-lg bg-white px-3.5 text-[13px] font-semibold text-black transition-colors hover:bg-zinc-200"
+                      >
+                        <Plus className="h-4 w-4" />
+                        New project
+                      </button>
+                    </>
+                  ) : (
+                    <p className="mt-2 max-w-sm text-sm leading-6 text-zinc-500">
+                      This deployment provisions its one project with{' '}
+                      <code className="rounded bg-white/[0.06] px-1 py-0.5 text-[12px] text-zinc-300">npm run bootstrap</code>.
+                      Run it, then reload this page.
+                    </p>
+                  )}
                 </>
               ) : (
                 <>
@@ -281,7 +297,7 @@ export default function DashboardPage() {
       </main>
 
       {/* New Project modal */}
-      {showNewModal && (
+      {showNewModal && CLOUD_CONTROL_PLANE && (
         <NewProjectModal
           creating={creating}
           error={createError}

@@ -35,6 +35,7 @@ import {
 import { motion, AnimatePresence } from 'framer-motion'
 import { useRouter, usePathname } from 'next/navigation'
 import { useAssistantStore } from '@/lib/stores/use-assistant-store'
+import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 
 interface Command {
   id: string
@@ -95,8 +96,16 @@ export function CommandPalette() {
     const account: Command[] = [
       { id: 'a-projects', label: 'All projects',     icon: FolderKanban, category: 'Account', action: go('/app'),          keywords: ['dashboard', 'home', 'list'] },
       { id: 'a-usage',    label: 'Usage',            icon: Gauge,        category: 'Account', action: go('/app/usage'),    keywords: ['quota', 'limits', 'requests'] },
-      { id: 'a-members',  label: 'Members',          icon: Users,        category: 'Account', action: go('/app/members'),  keywords: ['team', 'invite', 'organization'] },
-      { id: 'a-billing',  label: 'Billing',          icon: CreditCard,   category: 'Account', action: go('/app/billing'), keywords: ['plan', 'subscription', 'upgrade', 'pro'] },
+      // Cloud surfaces. Offering a command that navigates to a page this build
+      // does not contain is worse than not offering it: the palette is how
+      // people look for a feature, so a dead entry reads as a broken feature
+      // rather than an absent one.
+      ...(CLOUD_CONTROL_PLANE
+        ? [
+            { id: 'a-members',  label: 'Members',          icon: Users,        category: 'Account', action: go('/app/members'),  keywords: ['team', 'invite', 'organization'] },
+            { id: 'a-billing',  label: 'Billing',          icon: CreditCard,   category: 'Account', action: go('/app/billing'), keywords: ['plan', 'subscription', 'upgrade', 'pro'] },
+          ]
+        : []),
       { id: 'a-settings', label: 'Account settings', icon: Settings,     category: 'Account', action: go('/app/settings'), keywords: ['profile', 'password', 'email'] },
     ]
 

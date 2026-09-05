@@ -280,9 +280,15 @@ describe('MOVE 4: Cloud UI and fleet scripts', () => {
     expect(trackedFilesMatching(/components\/shell\/OrgSwitcher/)).toEqual([])
   })
 
-  it('TopBar imports it from its new home', () => {
+  it('TopBar reaches it through the Cloud seam, not by path', () => {
+    // Phase 4 moved the file to components/cloud and had TopBar import it
+    // directly. Phase 7 moves the file itself into the private overlay, so a
+    // direct import would break the public build. TopBar now imports the
+    // specifier, which resolves to the overlay when composed and to the static
+    // chip in lib/edition/oss otherwise.
     const topbar = fs.readFileSync(path.join(ROOT, 'components/shell/TopBar.tsx'), 'utf8')
-    expect(topbar).toMatch(/@\/components\/cloud\/OrgSwitcher/)
+    expect(topbar).toMatch(/@cloud\/org-switcher/)
+    expect(topbar).not.toMatch(/@\/components\/cloud\/OrgSwitcher/)
   })
 
   it('fleet-wide scripts are under scripts/fleet', () => {

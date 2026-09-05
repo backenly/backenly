@@ -29,17 +29,29 @@ import {
   LogOut,
 } from 'lucide-react'
 import { Logo } from '@/components/Logo'
+import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 
 interface MeUser {
   name?: string
   email?: string
 }
 
+/**
+ * Members and Billing are Cloud surfaces: their pages and APIs live in the
+ * private overlay, so a public build that listed them would offer a menu item
+ * routing to a page it does not contain. CLOUD_CONTROL_PLANE is a build-time
+ * constant that is true exactly when those files are present. It gates
+ * PRESENTATION only; every access decision stays server-side.
+ */
 const NAV = [
   { id: 'projects', title: 'Projects',          icon: FolderKanban, href: '/app',          match: (p: string) => p === '/app' || p === '/app/' },
   { id: 'usage',    title: 'Usage',             icon: Gauge,        href: '/app/usage',    match: (p: string) => p.startsWith('/app/usage') },
-  { id: 'members',  title: 'Members',           icon: Users,        href: '/app/members',  match: (p: string) => p.startsWith('/app/members') },
-  { id: 'billing',  title: 'Billing', icon: CreditCard,   href: '/app/billing',  match: (p: string) => p.startsWith('/app/billing') },
+  ...(CLOUD_CONTROL_PLANE
+    ? ([
+        { id: 'members',  title: 'Members',           icon: Users,        href: '/app/members',  match: (p: string) => p.startsWith('/app/members') },
+        { id: 'billing',  title: 'Billing', icon: CreditCard,   href: '/app/billing',  match: (p: string) => p.startsWith('/app/billing') },
+      ] as const)
+    : ([] as const)),
   // HIDDEN 2026-07-19 — referral program parked for now. Backend (signup ?ref=,
   // /api/referral, credit grants) still works; to restore, uncomment this row,
   // the Gift import above, and REFERRAL_HIDDEN in app/app/referral/page.tsx.

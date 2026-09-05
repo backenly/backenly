@@ -28,6 +28,7 @@ import {
   KitTabs, KitTab, KitCard, KitCardHeader, KitCardBody, KitButton, KitField, KitInput, KitPage, KitBadge, KitNote,
 } from '@/components/inspector/kit'
 import { ClientKeysPanel } from '@/components/hub/ClientKeysPanel'
+import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 
 type Tab = 'general' | 'keys' | 'access'
 
@@ -41,7 +42,7 @@ export default function ProjectSettingsPage() {
   // mount — useSearchParams would need a Suspense boundary at export time.
   useEffect(() => {
     const t = new URLSearchParams(window.location.search).get('tab')
-    if (t === 'keys' || t === 'access') setTab(t)
+    if (t === 'keys' || (t === 'access' && CLOUD_CONTROL_PLANE)) setTab(t)
   }, [])
 
   if (projectId && typeof window !== 'undefined') setCurrentProjectId(projectId)
@@ -68,17 +69,22 @@ export default function ProjectSettingsPage() {
             <KeyRound className="w-3.5 h-3.5" />
             API Keys
           </KitTab>
-          <KitTab active={tab === 'access'} onClick={() => setTab('access')}>
-            <Users className="w-3.5 h-3.5" />
-            Access
-          </KitTab>
+          {/* Access is team management, and a team is an organization. Both the
+              page and the API behind it are Cloud control plane, so a public
+              build has no roster to show and no route to ask. */}
+          {CLOUD_CONTROL_PLANE && (
+            <KitTab active={tab === 'access'} onClick={() => setTab('access')}>
+              <Users className="w-3.5 h-3.5" />
+              Access
+            </KitTab>
+          )}
         </KitTabs>
       </div>
 
       <div className="flex-1">
         {tab === 'general' && <GeneralTab projectId={projectId} onDeleted={() => router.push('/app')} />}
         {tab === 'keys' && <ClientKeysPanel />}
-        {tab === 'access' && <AccessTab projectId={projectId} />}
+        {tab === 'access' && CLOUD_CONTROL_PLANE && <AccessTab projectId={projectId} />}
       </div>
     </div>
   )

@@ -36,7 +36,7 @@ import {
   Circle,
 } from 'lucide-react'
 import { Logo } from '@/components/Logo'
-import { OrgSwitcher } from '@/components/cloud/OrgSwitcher'
+import { OrgSwitcher } from '@cloud/org-switcher'
 import { getProjects, type Project } from '@/lib/api/projects'
 
 interface MeUser {
