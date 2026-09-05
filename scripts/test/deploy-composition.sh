@@ -140,7 +140,7 @@ reset_tree
 CLOBBER="$(make_private_repo clobber "$PUBLIC_SHA" \
   "lib/cloud/manifest.json=$VALID_MANIFEST" \
   "lib/cloud/extension.ts=export const CLOUD = true" \
-  "lib/billing/index.ts=// clobbered")"
+  "lib/org/index.ts=// clobbered")"
 if run_compose cloud "file://$CLOBBER" "$WORK/clobber-dir"; then
   bad "clobbering overlay should have aborted"
 else
@@ -148,7 +148,7 @@ else
 fi
 if [ ! -e "$ROOT/lib/cloud/extension.ts" ]; then ok "atomic: the valid file was not applied either"
 else bad "PARTIAL COMPOSITION: a valid overlay file was applied"; fi
-if git -C "$ROOT" diff --quiet -- lib/billing/index.ts; then ok "public source untouched"; else bad "PUBLIC SOURCE MODIFIED"; fi
+if git -C "$ROOT" diff --quiet -- lib/org/index.ts; then ok "public source untouched"; else bad "PUBLIC SOURCE MODIFIED"; fi
 
 # ---------------------------------------------------------------------------
 echo

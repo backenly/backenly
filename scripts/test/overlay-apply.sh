@@ -129,7 +129,11 @@ echo "4. ATOMIC REFUSAL: one bad file means nothing is copied"
 reset_tree
 SRC="$(mkoverlay atomic)"
 put "$SRC/overlay/lib/cloud/aaa-good.ts" 'export const GOOD = 1'
-put "$SRC/overlay/lib/billing/index.ts" '// would clobber public source'
+# lib/org/index.ts is allowlisted for the overlay AND still tracked publicly,
+# because Phase 7 has not moved it. lib/billing was the example until Phase 6
+# removed it, at which point an overlay file there became perfectly legal and
+# this case silently stopped testing a collision at all.
+put "$SRC/overlay/lib/org/index.ts" '// would clobber public source'
 if bash "$APPLY" "$SRC" >/dev/null 2>&1; then bad "collision should have been refused"; else ok "collision refused (non-zero exit)"; fi
 if [ ! -e "$ROOT/lib/cloud/aaa-good.ts" ]; then ok "NO PARTIAL COPY: the valid file was not written"
 else bad "PARTIAL COPY: a valid file was written before the refusal"; fi
