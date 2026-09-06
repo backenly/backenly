@@ -179,6 +179,22 @@ const nextConfig = {
   // `experimental`.
   outputFileTracingIncludes: {
     '/api/**/*': ['./node_modules/.prisma/**/*'],
+    // Cloud composition, named explicitly because it is read at RUNTIME by
+    // lib/edition/cloud-extension.ts and cannot be traced:
+    //
+    //   overlay-allowlist.json   findRepoRoot() walks up looking for this
+    //   lib/cloud/manifest.json  the manifest itself
+    //   lib/cloud/**             the extension module the manifest names,
+    //                            whose path is only known from that JSON
+    //
+    // These reached .next/standalone before only as a side effect of the
+    // whole-project tracing this change removes. Without naming them, an
+    // explicit BACKENLY_EDITION=cloud container would find no composition and
+    // refuse to start — correctly, but for the wrong reason.
+    //
+    // In a single-tenant build lib/cloud does not exist and the glob matches
+    // nothing, which is the intended outcome rather than an error.
+    '/**/*': ['./overlay-allowlist.json', './lib/cloud/**/*'],
   },
   images: {
     remotePatterns: [

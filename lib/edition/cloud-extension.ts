@@ -149,11 +149,20 @@ export function loadCloudExtension(root?: string): CloudExtensionState {
   }
 
   const manifestPath = path.join(repoRoot, CLOUD_MANIFEST_PATH)
-  if (!fs.existsSync(manifestPath)) return { status: 'absent', manifestPath }
+  // turbopackIgnore on the composition reads below.
+  //
+  // These files ARE required at runtime, so the answer is not to stop shipping
+  // them: next.config.js names them in outputFileTracingIncludes, which is a
+  // guarantee rather than an inference. What must stop is the FALLBACK the
+  // tracer takes when it cannot resolve `repoRoot` (found by walking up at
+  // runtime) or `manifest.extension` (read out of JSON): tracing the entire
+  // repository into .next/standalone, 1,423 source files including the private
+  // overlay. The include makes them present; the annotation stops the guess.
+  if (!fs.existsSync(/*turbopackIgnore: true*/ manifestPath)) return { status: 'absent', manifestPath }
 
   let parsed: unknown
   try {
-    parsed = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+    parsed = JSON.parse(fs.readFileSync(/*turbopackIgnore: true*/ manifestPath, 'utf8'))
   } catch (err) {
     return { status: 'invalid', manifestPath, reason: `manifest is not valid JSON: ${(err as Error).message}` }
   }
@@ -166,8 +175,8 @@ export function loadCloudExtension(root?: string): CloudExtensionState {
   // The manifest is a claim about the overlay. An entry module it names but did
   // not deliver is a half-applied overlay, which is the state apply-overlay.sh
   // exists to make impossible; finding one here means something bypassed it.
-  const entry = path.join(repoRoot, manifest.extension)
-  if (!fs.existsSync(entry)) {
+  const entry = path.join(/*turbopackIgnore: true*/ repoRoot, manifest.extension)
+  if (!fs.existsSync(/*turbopackIgnore: true*/ entry)) {
     return { status: 'invalid', manifestPath, reason: `manifest names ${manifest.extension}, which is not present` }
   }
 
