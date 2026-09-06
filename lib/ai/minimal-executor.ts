@@ -11949,10 +11949,11 @@ async function executeFixStorage(params: any, projectId: string): Promise<Execut
           // The old path checked a directory the storage engine never uses, so
           // FIX_STORAGE always "passed" while real bucket dirs could be missing.
           const storageDir = process.env.STORAGE_DIR || path.join(process.cwd(), 'storage')
-          const bucketDir = path.join(storageDir, bucket.name)
+          const bucketDir = path.join(/*turbopackIgnore: true*/ storageDir, bucket.name)
 
           try {
-            await fs.access(bucketDir)
+            // turbopackIgnore: runtime storage directory, not a build input.
+            await fs.access(/*turbopackIgnore: true*/ bucketDir)
             healthy.push(bucket.name)
           } catch {
             // Directory missing — recreate it

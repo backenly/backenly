@@ -747,7 +747,7 @@ async function readLlmsTxt(request: NextRequest): Promise<string> {
       path.join(process.cwd(), '.next', 'standalone', 'public', 'llms.txt'),
     ]) {
       try {
-        const txt = await fs.readFile(p, 'utf8')
+        const txt = await fs.readFile(/*turbopackIgnore: true*/ p, 'utf8')
         if (txt && txt.trim()) return txt
       } catch { /* try next path */ }
     }
