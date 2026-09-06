@@ -79,6 +79,23 @@ fi
 echo "deploy: composing edition"
 bash scripts/compose-cloud.sh
 
+# Managed Cloud hosts only. A self-hosted operator running this script is
+# unaffected, because for them an unset edition legitimately means single-tenant
+# and must simply work.
+#
+# On a Cloud host "unset" is never an intention, it is a lost variable. Stage A
+# proved how quiet that failure is: the prepared release reported
+# `single-tenant (default)` and "this checkout would start", and would have gone
+# live serving a multi-tenant database with single-tenant project rules. This
+# runs before the build, the swap and the restart, so a refusal costs nothing.
+if [ -n "${BACKENLY_MANAGED_DEPLOY:-}" ]; then
+  echo "deploy: managed Cloud host, running deploy preflight"
+  if ! node node_modules/tsx/dist/cli.mjs scripts/verify-deploy-preflight.ts; then
+    echo "deploy: PREFLIGHT REFUSED. Nothing has been changed." >&2
+    exit 1
+  fi
+fi
+
 # Dependencies first — package.json can gain build-time deps (2026-07-16:
 # esbuild for the generated SDK bundles). npm install is a fast no-op when
 # the lockfile is unchanged, and a missing dep fails the build loudly later
