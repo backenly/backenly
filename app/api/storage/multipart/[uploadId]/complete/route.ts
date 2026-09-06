@@ -80,7 +80,8 @@ export async function POST(request: NextRequest, props: { params: Promise<{ uplo
       }
 
       // Assemble all chunks into the final file
-      const bucketDir = path.join(STORAGE_DIR, upload.bucket.name)
+      // turbopackIgnore: runtime storage directory, absent at build time.
+      const bucketDir = path.join(/*turbopackIgnore: true*/ STORAGE_DIR, upload.bucket.name)
       await fs.mkdir(bucketDir, { recursive: true })
 
       // Generate a unique filename to avoid collisions
