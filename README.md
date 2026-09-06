@@ -158,16 +158,21 @@ docker compose -f docker-compose.dev.yml up -d
 expected, and it is deliberate that it serves nothing until then.
 
 Then set these in `.env`, adding any line the template does not already carry —
-today that is `BACKENLY_EDITION` and `BACKENLY_PROJECT_ID`:
+today that is `BACKENLY_PROJECT_ID`:
 
 ```bash
-BACKENLY_EDITION=single-tenant   # the default is still `cloud`; it flips in a later release
 BACKENLY_PROJECT_ID=<uuid>       # any UUID, e.g. `uuidgen`
 JWT_SECRET=<openssl rand -hex 32>
 POSTGREST_JWT_SECRET=<openssl rand -hex 32>
 STORAGE_SECRET=<openssl rand -hex 32>
 OPENAI_API_KEY=<your key>
 ```
+
+`BACKENLY_EDITION` is already `single-tenant` in the template and you can leave
+it there. Backenly resolves an unset edition to `single-tenant` too, so the line
+is not what makes this a self-host install — it is there because
+`scripts/deploy.sh` composes through `scripts/compose-cloud.sh`, which refuses to
+guess an edition rather than risk cloning a private repository you cannot read.
 
 `DATABASE_URL` already matches the Compose stack, so leave it alone unless you
 changed `POSTGRES_USER` or `POSTGRES_PASSWORD`.

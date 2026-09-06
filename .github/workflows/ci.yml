@@ -635,8 +635,10 @@ jobs:
         run: |
           set -euo pipefail
           cp .env.example .env
+          # BACKENLY_EDITION is NOT appended here. The template already carries
+          # single-tenant, and the README no longer tells anyone to add it, so
+          # appending would test a path the documentation does not describe.
           {
-            echo "BACKENLY_EDITION=single-tenant"
             echo "BACKENLY_PROJECT_ID=$(cat /proc/sys/kernel/random/uuid)"
             echo "JWT_SECRET=$(openssl rand -hex 32)"
             echo "POSTGREST_JWT_SECRET=$(openssl rand -hex 32)"

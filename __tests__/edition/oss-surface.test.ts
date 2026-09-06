@@ -148,9 +148,13 @@ describeOss('the org and fleet control plane is absent', () => {
     expect(src).not.toMatch(/project\.findMany/)
   })
 
-  it('the transition list is empty, so nothing is grandfathered any more', () => {
+  it('has no transition configuration left to grandfather anything', () => {
+    // Phase 7 emptied the list; Phase 8 removed the key. Asserting the KEY is
+    // gone rather than that the list is empty matters: reading
+    // `transition.grandfathered` off an absent object throws, so the previous
+    // form of this test could not survive its own success.
     const allowlist = JSON.parse(fs.readFileSync(path.join(ROOT, 'overlay-allowlist.json'), 'utf8'))
-    expect(allowlist.transition.grandfathered).toEqual([])
+    expect(allowlist.transition).toBeUndefined()
   })
 
   it('no public module imports the organization layer', () => {
@@ -250,6 +254,10 @@ describeOss('the Cloud-only environment template is gone', () => {
   })
 
   it.each([
+    // Phase 8: the template ships the edition explicitly even though an unset
+    // one now resolves to single-tenant, because compose-cloud.sh refuses to
+    // guess and reads this file when the environment is silent.
+    'BACKENLY_EDITION',
     // CRON_SECRET guards ten public self-host cron routes including autonomy.
     'CRON_SECRET',
     // Its route, /api/cron/reap-abandoned-signups, is still public.

@@ -59,12 +59,14 @@ done
 # decides the edition in production; an operator's shell may know nothing about
 # it. The environment still wins when set, which is what makes this testable.
 #
-# An UNSET edition is refused rather than defaulted. The code default is still
-# `cloud` (it flips to single-tenant in a later phase), and guessing either way
-# here is a bad trade: guess cloud and a self-hoster's deploy tries to clone a
-# private repository they cannot read; guess single-tenant and a Cloud deploy
-# silently builds without its control plane. One clear question is cheaper than
-# either failure.
+# An UNSET edition is refused rather than defaulted, and that is deliberately
+# NOT the same rule the application runtime follows. Since Phase 8 an unset
+# BACKENLY_EDITION resolves to single-tenant when Backenly RUNS; this is a
+# deployment command, and guessing here is a bad trade in a way it is not
+# there: guess cloud and a self-hoster's deploy tries to clone a private
+# repository they cannot read; guess single-tenant and a Cloud deploy silently
+# builds without its control plane. One clear question is cheaper than either
+# failure, so the runtime default is not inherited into this script.
 EDITION="${BACKENLY_EDITION:-}"
 if [ -z "$EDITION" ] && [ -f "$ROOT/.env" ]; then
   EDITION="$(grep -E '^[[:space:]]*BACKENLY_EDITION[[:space:]]*=' "$ROOT/.env" | tail -1 | cut -d= -f2- | tr -d '"'"'"' \t\r' || true)"
