@@ -149,15 +149,23 @@ export function loadCloudExtension(root?: string): CloudExtensionState {
   }
 
   const manifestPath = path.join(repoRoot, CLOUD_MANIFEST_PATH)
-  // turbopackIgnore on the composition reads below.
+  // Two separate mechanisms are at work here, and they are easy to conflate.
   //
-  // These files ARE required at runtime, so the answer is not to stop shipping
-  // them: next.config.js names them in outputFileTracingIncludes, which is a
-  // guarantee rather than an inference. What must stop is the FALLBACK the
-  // tracer takes when it cannot resolve `repoRoot` (found by walking up at
-  // runtime) or `manifest.extension` (read out of JSON): tracing the entire
-  // repository into .next/standalone, 1,423 source files including the private
-  // overlay. The include makes them present; the annotation stops the guess.
+  //   outputFileTracingIncludes in next.config.js EXPLICITLY retains the Cloud
+  //   composition assets in .next/standalone. That is a contract, not an
+  //   inference, and it is what guarantees these files exist at runtime.
+  //
+  //   turbopackIgnore below REDUCES Turbopack's conservative tracing around
+  //   runtime filesystem paths. Measured: with these annotations the standalone
+  //   tree carries 1,099 source files at 294M, without them 1,423 at 314M.
+  //
+  // What it does NOT do is eliminate broad tracing. 277 of 434 routes still
+  // trace repository-wide artifacts (package-lock.json, docker-compose.yml,
+  // docs, SQL scripts), and removing the upward search in findRepoRoot did not
+  // change that either. The mechanism behind the residual glob is unidentified.
+  //
+  // An earlier version of this comment claimed the annotation "stops the
+  // guess". It does not, and the measurements above are why.
   if (!fs.existsSync(/*turbopackIgnore: true*/ manifestPath)) return { status: 'absent', manifestPath }
 
   let parsed: unknown
