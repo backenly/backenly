@@ -68,16 +68,43 @@ async function sql(query: string): Promise<void> {
 
 /** Ask the real guard, in a process bound to the scratch database. */
 function admits(email: string, edition: string): { ok: boolean; out: string } {
+  return probeGuard(email, { BACKENLY_EDITION: edition })
+}
+
+/**
+ * Ask the guard with BACKENLY_EDITION genuinely ABSENT from the child process.
+ *
+ * Not `BACKENLY_EDITION: ''`. An empty string and an absent key resolve the
+ * same way through `currentEdition()` today, but they are different states and
+ * only one of them is what a real unconfigured deployment has. Deleting the key
+ * means this proves the DEFAULT rather than proving how an empty value is
+ * parsed.
+ */
+function admitsWithNoEditionSet(
+  email: string,
+  extra: Record<string, string> = {},
+): { ok: boolean; out: string } {
+  return probeGuard(email, extra, /* deleteEdition */ true)
+}
+
+function probeGuard(
+  email: string,
+  extra: Record<string, string>,
+  deleteEdition = false,
+): { ok: boolean; out: string } {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    DATABASE_URL: dbUrl,
+    DIRECT_URL: dbUrl,
+    BACKENLY_ALLOW_PUBLIC_SIGNUP: '',
+    ...extra,
+  }
+  if (deleteEdition) delete env.BACKENLY_EDITION
+
   const out = execFileSync(process.execPath, ['node_modules/tsx/dist/cli.mjs', probe, email], {
     cwd: process.cwd(),
     encoding: 'utf8',
-    env: {
-      ...process.env,
-      DATABASE_URL: dbUrl,
-      DIRECT_URL: dbUrl,
-      BACKENLY_EDITION: edition,
-      BACKENLY_ALLOW_PUBLIC_SIGNUP: '',
-    },
+    env,
   })
   return { ok: /GUARD_OK=true/.test(out), out }
 }
@@ -159,6 +186,69 @@ describe('first self-hosted operator admission', () => {
     expect(selfHosted.out).toMatch(/GUARD_OK=true/)
 
     // Cloud is decided by the seam, not by the first-operator exception.
+    const cloud = admits('operator@acceptance.test', 'cloud')
+    expect(cloud.out).not.toMatch(/first[- ]operator/i)
+  }, 120_000)
+})
+
+// ============================================================================
+// THE DEFAULT, WITH NOTHING CONFIGURED
+// ============================================================================
+
+/**
+ * Phase 8 made an unset edition mean single-tenant, and this is the one place
+ * that changes RUNTIME PRODUCT BEHAVIOUR rather than merely which provider
+ * answers.
+ *
+ * `selfHostedRegistrationClosed()` reads `currentEdition() === 'single-tenant'`,
+ * so a deployment that configures nothing now closes public signup after its
+ * first operator. That is the intended self-host posture and it is deliberately
+ * NOT gated behind an explicit edition: gating it would mean the default was
+ * single-tenant in name only.
+ *
+ * Because the consequence is a closed signup form, it gets a direct proof
+ * against a real database rather than an inference from the edition constant.
+ */
+describe('with BACKENLY_EDITION absent entirely', () => {
+  it('admits the first operator into an empty deployment', async () => {
+    await sql(`DELETE FROM users`)
+
+    const r = admitsWithNoEditionSet('operator@acceptance.test')
+    expect(r.ok).toBe(true)
+  }, 120_000)
+
+  it('closes registration once that first account exists', async () => {
+    await sql(`DELETE FROM users`)
+    await sql(
+      `INSERT INTO users (id, email, name, "updatedAt") ` +
+        `VALUES ('22222222-2222-4222-8222-222222222222', 'operator@acceptance.test', 'Operator', now())`,
+    )
+
+    // The behaviour change the flip actually ships. Before Phase 8 an unset
+    // edition resolved to cloud and this second signup was admitted.
+    const r = admitsWithNoEditionSet('second@acceptance.test')
+    expect(r.ok).toBe(false)
+  }, 120_000)
+
+  it('still honours BACKENLY_ALLOW_PUBLIC_SIGNUP as the operator override', async () => {
+    await sql(`DELETE FROM users`)
+    await sql(
+      `INSERT INTO users (id, email, name, "updatedAt") ` +
+        `VALUES ('33333333-3333-4333-8333-333333333333', 'operator@acceptance.test', 'Operator', now())`,
+    )
+
+    // The escape hatch must not have been lost along with the default. An
+    // operator who wants an open self-hosted instance still has one switch.
+    const r = admitsWithNoEditionSet('second@acceptance.test', {
+      BACKENLY_ALLOW_PUBLIC_SIGNUP: 'true',
+    })
+    expect(r.ok).toBe(true)
+  }, 120_000)
+
+  it('leaves explicit cloud on the Cloud path, not the first-operator one', async () => {
+    await sql(`DELETE FROM users`)
+
+    // Explicit intent still wins over the default in both directions.
     const cloud = admits('operator@acceptance.test', 'cloud')
     expect(cloud.out).not.toMatch(/first[- ]operator/i)
   }, 120_000)

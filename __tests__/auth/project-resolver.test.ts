@@ -123,10 +123,13 @@ afterAll(async () => {
 // ============================================================================
 
 describe('edition selection', () => {
-  it('defaults to cloud so this seam changes no running behaviour yet', () => {
+  it('defaults to single-tenant, so an unconfigured clone is a self-host install', () => {
+    // Phase 8 flipped this. The resolver that answers by default is now the
+    // one that resolves THE project, not the one that consults organizations.
+    // The full default contract lives in __tests__/edition/default-edition.test.ts.
     delete process.env.BACKENLY_EDITION
-    expect(currentEdition()).toBe('cloud')
-    expect(getProjectResolver().edition).toBe('cloud')
+    expect(currentEdition()).toBe('single-tenant')
+    expect(getProjectResolver().edition).toBe('single-tenant')
   })
 
   it('refuses an unrecognised edition instead of guessing', () => {

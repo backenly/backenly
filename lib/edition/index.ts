@@ -1,20 +1,26 @@
 /**
  * Edition resolution: which implementation of the seams is in force.
  *
- * `BACKENLY_EDITION` selects it. Today the default is `cloud`, so this commit
- * changes no running behaviour; the default flips to `single-tenant` in the
- * commit that makes a fresh public clone a self-host install with no
- * configuration.
+ * `BACKENLY_EDITION` selects it, and the DEFAULT is `single-tenant`: a fresh
+ * public clone is a self-host install with no configuration at all. Cloud is
+ * the thing you opt into, never the thing you land on by forgetting.
  *
- * Both providers are imported statically here, and that is temporary. Once the
- * Cloud control plane lives in the private repository, the cloud provider is
- * loaded dynamically and a `cloud` edition that cannot load its provider must
- * EXIT rather than fall back. Falling back would be the worst available
- * outcome: the single-tenant resolver treats every authenticated user as an
- * operator, so running it against the multi-tenant production database would
- * hand any logged-in user somebody else's project. The count guard in
- * single-tenant/project-resolver.ts is the backstop for exactly that mistake
- * and is already live.
+ * Both edition objects are imported statically here, and that is correct rather
+ * than temporary: the files below are thin ADAPTERS, not implementations. Since
+ * Phase 7 the Cloud control plane lives in the private repository and is reached
+ * through the `@cloud/*` alias, which resolves `lib/cloud/*` when an overlay has
+ * been composed and `lib/edition/oss/*` when it has not. So a public checkout
+ * type-checks and builds with every one of these imports present, and the thing
+ * that varies is what the alias resolved to.
+ *
+ * A `cloud` edition that has no private provider must EXIT rather than fall
+ * back. Falling back would be the worst available outcome: the single-tenant
+ * resolver treats every authenticated user as an operator, so running it
+ * against the multi-tenant production database would hand any logged-in user
+ * somebody else's project. That refusal is assertEditionCompositionOrExit in
+ * lib/edition/cloud-extension.ts, and it matters more now than it did before
+ * Phase 8, because single-tenant is what an unconfigured process resolves to.
+ * The count guard in single-tenant/project-resolver.ts is the second backstop.
  */
 import { cloudFleetScheduler } from './cloud/fleet-scheduler'
 import { cloudProjectLifecycle } from './cloud/project-lifecycle'
@@ -28,7 +34,19 @@ import type { FleetScheduler } from './fleet-types'
 export * from './types'
 export * from './fleet-types'
 
-const DEFAULT_EDITION: Edition = 'cloud'
+/**
+ * An unconfigured Backenly is a self-hosted, single-project deployment.
+ *
+ * This is safe only BECAUSE an explicit `cloud` fails closed: a Cloud process
+ * with no private overlay exits at startup rather than falling back here. See
+ * lib/edition/cloud-extension.ts. Without that, a Cloud deployment whose
+ * environment failed to load would quietly adopt the single-tenant resolver,
+ * which treats every authenticated account as an operator of whichever project
+ * it names -- a cross-tenant bypass produced by a missing variable.
+ *
+ * Contract pinned in __tests__/edition/default-edition.test.ts.
+ */
+const DEFAULT_EDITION: Edition = 'single-tenant'
 
 export function currentEdition(): Edition {
   const raw = process.env.BACKENLY_EDITION?.trim().toLowerCase()

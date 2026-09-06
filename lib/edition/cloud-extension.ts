@@ -78,16 +78,20 @@ export type CloudExtensionState =
 /**
  * Was the edition asked for, or merely defaulted to?
  *
- * `DEFAULT_EDITION` is still `cloud`, so an unset `BACKENLY_EDITION` resolves
- * to cloud in CI, in local development and in every OSS build. Requiring the
- * private overlay for that case would break all three and leave only two ways
- * out: flip the default early, or weaken the guarantee. Both are worse than
- * asking the question precisely.
+ * The composition requirement attaches to an EXPLICIT `BACKENLY_EDITION=cloud`,
+ * which is what a Cloud deployment sets.
  *
- * So the composition requirement attaches to an EXPLICIT `BACKENLY_EDITION=cloud`,
- * which is what a Cloud deployment sets. When the default flips to
- * single-tenant, explicit is the only remaining route to cloud and this
- * distinction tightens on its own with nothing to rewrite.
+ * This predates Phase 8, when `DEFAULT_EDITION` was still `cloud` and an unset
+ * variable resolved to cloud in CI, in local development and in every OSS
+ * build; requiring the overlay for that case would have broken all three. The
+ * distinction was written to tighten by itself once the default flipped, and it
+ * did: explicit is now the ONLY route to cloud, so `requiresCloudComposition`
+ * below is exactly "a Cloud deployment", with no logic change needed.
+ *
+ * It is kept rather than collapsed into a bare edition check because it still
+ * answers a different question -- was this asked for, or merely defaulted to --
+ * which `describeComposition` and `currentEditionLabel` report to operators
+ * diagnosing a refusal.
  */
 export function editionIsExplicit(): boolean {
   return (process.env.BACKENLY_EDITION?.trim() ?? '') !== ''

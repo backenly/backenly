@@ -77,13 +77,13 @@ describe('which processes must have the private overlay', () => {
     expect(requiresCloudComposition()).toBe(false)
   })
 
-  it('an unset edition does not require it, because the default is still legacy', () => {
-    // DEFAULT_EDITION is `cloud` until Phase 8, so an unset variable resolves to
-    // cloud in CI, in local development and in every OSS build. Requiring the
-    // overlay for that case would break all three, and the only ways out would
-    // be flipping the default early or weakening the guarantee. The requirement
-    // is attached to an EXPLICIT request instead. When the default flips,
-    // explicit becomes the only route to cloud and this tightens by itself.
+  it('an unset edition does not require it, because unset now means self-host', () => {
+    // Since Phase 8 an unset variable resolves to single-tenant, which needs no
+    // private overlay at all. The requirement is attached to an EXPLICIT
+    // request, and that is now the only way to reach cloud -- so this assertion
+    // is unchanged by the flip while its reasoning is the opposite of what it
+    // was: it used to say "unset is cloud but we choose not to require the
+    // overlay", and it now says "unset is not cloud".
     setEdition(undefined)
     expect(editionIsExplicit()).toBe(false)
     expect(requiresCloudComposition()).toBe(false)

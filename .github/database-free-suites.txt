@@ -126,3 +126,9 @@ __tests__/bootstrap/readme-matches-bootstrap.test.ts
 # running the README on a clean Ubuntu machine; the runtime half of finding 4
 # lives in scripts/test/sql-file-access.sh. Reads committed text; no database.
 __tests__/setup/self-host-path.test.ts
+
+# The Phase 8 product default: an unconfigured Backenly is a self-hosted,
+# single-project deployment. Database-free on purpose - currentEdition() reads
+# one environment variable and never touches Prisma, and the suite deletes the
+# variable outright so it cannot pass on a leftover value from the runner.
+__tests__/edition/default-edition.test.ts
