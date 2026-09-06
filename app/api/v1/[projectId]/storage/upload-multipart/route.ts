@@ -35,8 +35,7 @@ function isValidUploadId(id: string): boolean {
  */
 function safeChunkPath(uploadId: string, partFile?: string): string | null {
   if (!isValidUploadId(uploadId)) return null
-  // turbopackIgnore: runtime chunk-upload directory, absent at build time.
-  const root = path.resolve(/*turbopackIgnore: true*/ CHUNK_UPLOAD_DIR)
+  const root = path.resolve(CHUNK_UPLOAD_DIR)
   const target = partFile
     ? path.resolve(root, uploadId, partFile)
     : path.resolve(root, uploadId)

@@ -3,11 +3,6 @@
  * ========================
  * Automated pg_dump backups for each project's workspace_{projectId} schema.
  *
- * Every path here is BACKUP_DIR/<projectId>/<timestamp>.sql.gz: created, read
- * and pruned at runtime, and absent when Next builds. The filesystem calls
- * therefore carry turbopackIgnore; without it the tracer cannot resolve them
- * and falls back to tracing the whole repository into .next/standalone.
- *
  * Features:
  *  - Daily scheduled backups (triggered by cron-runner.ts)
  *  - On-demand backup via AI chat BACKUP_DATABASE action
@@ -42,7 +37,7 @@ const MIN_RETAINED_PER_PROJECT = 2
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function getBackupDir(projectId: string): string {
-  return path.join(/*turbopackIgnore: true*/ BACKUP_DIR, projectId)
+  return path.join(BACKUP_DIR, projectId)
 }
 
 function getBackupFilename(): string {
@@ -115,13 +110,13 @@ export async function backupWorkspace(projectId: string): Promise<BackupResult> 
   const schemaName = `workspace_${projectId}`
   const backupDir = getBackupDir(projectId)
   const filename = getBackupFilename()
-  const sqlPath = path.join(/*turbopackIgnore: true*/ backupDir, filename.replace('.gz', ''))
+  const sqlPath = path.join(backupDir, filename.replace('.gz', ''))
   const gzPath = path.join(backupDir, filename)
   const createdAt = new Date().toISOString()
 
   try {
     // Ensure backup directory exists
-    await fs.promises.mkdir(/*turbopackIgnore: true*/ backupDir, { recursive: true })
+    await fs.promises.mkdir(backupDir, { recursive: true })
 
     const connArgs = buildPgDumpArgs()
 
@@ -132,15 +127,15 @@ export async function backupWorkspace(projectId: string): Promise<BackupResult> 
 
     // Compress the dump
     await pipeline(
-      fs.createReadStream(/*turbopackIgnore: true*/ sqlPath),
+      fs.createReadStream(sqlPath),
       zlib.createGzip({ level: 6 }),
-      fs.createWriteStream(/*turbopackIgnore: true*/ gzPath)
+      fs.createWriteStream(gzPath)
     )
 
     // Remove uncompressed file
-    await fs.promises.unlink(/*turbopackIgnore: true*/ sqlPath).catch(() => {})
+    await fs.promises.unlink(sqlPath).catch(() => {})
 
-    const stat = await fs.promises.stat(/*turbopackIgnore: true*/ gzPath)
+    const stat = await fs.promises.stat(gzPath)
 
     // Record in DB
     await prisma.workspaceBackup.create({
@@ -193,8 +188,8 @@ export async function backupWorkspace(projectId: string): Promise<BackupResult> 
     }).catch(() => {})
 
     // Clean up any partial files
-    await fs.promises.unlink(/*turbopackIgnore: true*/ sqlPath).catch(() => {})
-    await fs.promises.unlink(/*turbopackIgnore: true*/ gzPath).catch(() => {})
+    await fs.promises.unlink(sqlPath).catch(() => {})
+    await fs.promises.unlink(gzPath).catch(() => {})
 
     return { success: false, error: message, projectId, createdAt }
   }
@@ -231,7 +226,7 @@ export async function restoreWorkspace(
     return { success: false, error: 'No completed backup found for this project' }
   }
 
-  if (!fs.existsSync(/*turbopackIgnore: true*/ backup.filePath)) {
+  if (!fs.existsSync(backup.filePath)) {
     return { success: false, error: `Backup file not found on disk: ${backup.filename}` }
   }
 
@@ -245,15 +240,15 @@ export async function restoreWorkspace(
     // Decompress and restore
     const sqlPath = backup.filePath.replace('.gz', '.restore.sql')
     await pipeline(
-      fs.createReadStream(/*turbopackIgnore: true*/ backup.filePath),
+      fs.createReadStream(backup.filePath),
       zlib.createGunzip(),
-      fs.createWriteStream(/*turbopackIgnore: true*/ sqlPath)
+      fs.createWriteStream(sqlPath)
     )
 
     const psqlCmd = `psql ${connArgs} --file="${sqlPath}" --single-transaction`
     await execAsync(psqlCmd, { timeout: 300_000 })
 
-    await fs.promises.unlink(/*turbopackIgnore: true*/ sqlPath).catch(() => {})
+    await fs.promises.unlink(sqlPath).catch(() => {})
 
     console.log(`[Restore] Restored ${projectId} from ${backup.filename}`)
 
@@ -336,7 +331,7 @@ export async function pruneOldBackups(
     if (b.createdAt >= cutoff) continue
     if (protectedIds.has(b.id)) continue
     if (b.filePath) {
-      await fs.promises.unlink(/*turbopackIgnore: true*/ b.filePath).catch(() => {})
+      await fs.promises.unlink(b.filePath).catch(() => {})
     }
     await prisma.workspaceBackup.delete({ where: { id: b.id } }).catch(() => {})
     pruned++
