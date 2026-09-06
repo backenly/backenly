@@ -44,6 +44,8 @@ export interface PurgeReport {
   projectId: string
   backups: PurgeResourceStatus
   storage: PurgeResourceStatus
+  /** Generated project files under workspace/<projectId>. */
+  workspace: PurgeResourceStatus
   /** Objects removed from S3. Always 0 for the local driver. */
   objectsDeleted: number
 }
@@ -68,6 +70,27 @@ function backupRoot(): string {
 
 function storageRoot(): string {
   return process.env.STORAGE_DIR || path.join(process.cwd(), 'storage')
+}
+
+/**
+ * Generated project files: `workspace/<projectId>/...`.
+ *
+ * Deleting a project used to leave this behind. Backups and storage were both
+ * cleaned, workspace was not, so every deleted project left its generated
+ * Prisma schema on disk forever. Measured on production 2026-09-06: ten
+ * workspace directories, eight live projects, and NO overlap between them —
+ * every directory present belonged to a project that no longer exists.
+ *
+ * NOTE on WORKSPACE_DIR: the modules that WRITE here (execution-engine.ts,
+ * schema-writer.ts, aiWorkspace.ts and the workspace file routes) all resolve
+ * `path.join(process.cwd(), 'workspace')` with no override. The default below
+ * matches them exactly. The variable exists so tests can redirect the root, in
+ * the same way BACKUP_DIR and STORAGE_DIR are used above; setting it in a real
+ * deployment without also changing those writers would point cleanup at a
+ * directory nothing writes to.
+ */
+function workspaceRoot(): string {
+  return process.env.WORKSPACE_DIR || path.join(process.cwd(), 'workspace')
 }
 
 function storageDriver(): string {
@@ -250,5 +273,13 @@ export async function purgeProjectExternals(
     storage = await removeDirectory(storageRoot(), path.join(/*turbopackIgnore: true*/ storageRoot(), projectId))
   }
 
-  return { projectId, backups, storage, objectsDeleted }
+  // Same contract as backups: absent counts as purged, and a genuine failure
+  // throws so the job stays queued rather than reporting a cleanup that did not
+  // happen.
+  const workspace = await removeDirectory(
+    workspaceRoot(),
+    path.join(/*turbopackIgnore: true*/ workspaceRoot(), projectId),
+  )
+
+  return { projectId, backups, storage, workspace, objectsDeleted }
 }

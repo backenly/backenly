@@ -194,20 +194,24 @@ describe('purgeProjectExternals — idempotence on the local driver', () => {
   const originalBackup = process.env.BACKUP_DIR
   const originalStorage = process.env.STORAGE_DIR
   const originalDriver = process.env.STORAGE_DRIVER
+  const originalWorkspace = process.env.WORKSPACE_DIR
 
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'backenly-purge-'))
     process.env.BACKUP_DIR = path.join(root, 'backups')
     process.env.STORAGE_DIR = path.join(root, 'storage')
+    process.env.WORKSPACE_DIR = path.join(root, 'workspace')
     process.env.STORAGE_DRIVER = 'local'
     await fs.mkdir(process.env.BACKUP_DIR, { recursive: true })
     await fs.mkdir(process.env.STORAGE_DIR, { recursive: true })
+    await fs.mkdir(process.env.WORKSPACE_DIR, { recursive: true })
   })
 
   afterEach(async () => {
     process.env.BACKUP_DIR = originalBackup
     process.env.STORAGE_DIR = originalStorage
     process.env.STORAGE_DRIVER = originalDriver
+    process.env.WORKSPACE_DIR = originalWorkspace
     await fs.rm(root, { recursive: true, force: true })
   })
 
@@ -227,6 +231,68 @@ describe('purgeProjectExternals — idempotence on the local driver', () => {
     await expect(fs.stat(path.join(process.env.STORAGE_DIR!, PROJECT))).rejects.toMatchObject({
       code: 'ENOENT',
     })
+  })
+
+
+  // ── workspace/<projectId> ──────────────────────────────────────────────────
+  //
+  // Deleting a project cleaned backups and storage but never the generated
+  // project files. Production carried ten orphaned workspace directories for
+  // eight live projects, with no overlap: every directory present belonged to a
+  // project that had already been deleted.
+
+  it('removes the generated workspace directory, including nested files', async () => {
+    const ws = path.join(process.env.WORKSPACE_DIR!, PROJECT)
+    await fs.mkdir(path.join(ws, 'prisma'), { recursive: true })
+    await fs.writeFile(path.join(ws, 'prisma', 'schema.prisma'), 'model A {}')
+    await fs.mkdir(path.join(ws, 'api', 'users'), { recursive: true })
+    await fs.writeFile(path.join(ws, 'api', 'users', 'route.ts'), 'export {}')
+
+    const report = await purgeProjectExternals(PROJECT)
+
+    expect(report.workspace).toBe('purged')
+    await expect(fs.stat(ws)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('treats a missing workspace directory as already purged', async () => {
+    const report = await purgeProjectExternals(PROJECT)
+    expect(report.workspace).toBe('alreadyAbsent')
+  })
+
+  it('is idempotent: purging twice does not throw', async () => {
+    await fs.mkdir(path.join(process.env.WORKSPACE_DIR!, PROJECT), { recursive: true })
+    await purgeProjectExternals(PROJECT)
+    await expect(purgeProjectExternals(PROJECT)).resolves.toMatchObject({
+      workspace: 'alreadyAbsent',
+    })
+  })
+
+  it("leaves another project's workspace untouched", async () => {
+    const mine = path.join(process.env.WORKSPACE_DIR!, PROJECT)
+    const theirs = path.join(process.env.WORKSPACE_DIR!, OTHER)
+    await fs.mkdir(mine, { recursive: true })
+    await fs.mkdir(path.join(theirs, 'prisma'), { recursive: true })
+    await fs.writeFile(path.join(theirs, 'prisma', 'schema.prisma'), 'keep me')
+
+    await purgeProjectExternals(PROJECT)
+
+    await expect(fs.stat(mine)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await fs.readFile(path.join(theirs, 'prisma', 'schema.prisma'), 'utf8')).toBe('keep me')
+  })
+
+  it('leaves the workspace ROOT itself in place', async () => {
+    await fs.mkdir(path.join(process.env.WORKSPACE_DIR!, PROJECT), { recursive: true })
+    await purgeProjectExternals(PROJECT)
+    expect((await fs.stat(process.env.WORKSPACE_DIR!)).isDirectory()).toBe(true)
+  })
+
+  it('refuses a project id that would escape the workspace root', async () => {
+    // assertValidProjectId runs before any path is built, so traversal is
+    // rejected at the identifier rather than by the path check behind it.
+    for (const bad of ['../../etc', `${PROJECT}/../../..`, '..']) {
+      await expect(purgeProjectExternals(bad)).rejects.toThrow()
+    }
+    expect((await fs.stat(process.env.WORKSPACE_DIR!)).isDirectory()).toBe(true)
   })
 
   it("leaves another project's data untouched", async () => {
