@@ -162,12 +162,43 @@ async function audit(
 // ── The restart channel ──────────────────────────────────────────────────────
 
 /**
+ * Resolve the LOCAL restart channel, if this host has one.
+ *
+ * Restarting a process is a host concern, not an application one. On a bare
+ * host like Hetzner the app can shell out to systemctl; under an orchestrator
+ * it must not, and does not need to: a wedged task fails its health check and
+ * the orchestrator replaces it. So this is named `LOCAL`, is optional, and its
+ * absence is a normal configuration rather than a fault.
+ *
+ * Backenly deliberately holds no infrastructure credentials. There is no
+ * ECS-aware branch here and there should never be one: giving the product
+ * process permission to replace its own tasks buys nothing that a health check
+ * does not already provide, and costs a blast radius.
+ *
+ * The old `POSTGREST_RESTART_COMMAND` is still honoured for one transitional
+ * cycle so that redeploying an older host, or rolling back, does not silently
+ * lose its emergency fallback just because the variable was not renamed.
+ */
+function resolveLocalRestartCommand(): { command: string | null; deprecated: boolean } {
+  const preferred = process.env.POSTGREST_LOCAL_RESTART_COMMAND?.trim()
+  if (preferred) return { command: preferred, deprecated: false }
+
+  const legacy = process.env.POSTGREST_RESTART_COMMAND?.trim()
+  if (legacy) return { command: legacy, deprecated: true }
+
+  return { command: null, deprecated: false }
+}
+
+/**
  * Run the configured restart command.
  *
- * `POSTGREST_RESTART_COMMAND` is executed as-is by the platform operator's own
- * shell — it is operator configuration on the operator's own host, in the same
- * category as `DATABASE_URL`. It is never built from user input, never
- * interpolated with anything from a finding, and absent by default.
+ * The command is executed as-is by the platform operator's own shell — it is
+ * operator configuration on the operator's own host, in the same category as
+ * `DATABASE_URL`. It is never built from user input, never interpolated with
+ * anything from a finding, and absent by default.
+ *
+ * Its text is never logged. An operator is free to put credentials in it, and a
+ * heal note travels into findings the customer can read.
  */
 async function runRestartCommand(command: string): Promise<{ ok: boolean; detail: string }> {
   try {
@@ -311,13 +342,23 @@ export async function healDataPlane(projectId: string | null = null): Promise<He
     }
 
     // ── 4. Restart ──────────────────────────────────────────────────────────
-    const command = process.env.POSTGREST_RESTART_COMMAND?.trim()
+    const { command, deprecated } = resolveLocalRestartCommand()
+    if (deprecated) {
+      // Names the replacement, never the value.
+      notes.push(
+        'POSTGREST_RESTART_COMMAND is deprecated. Rename it to ' +
+        'POSTGREST_LOCAL_RESTART_COMMAND: restarting a process is a host concern, and under an ' +
+        'orchestrator the variable should be absent so a wedged task is replaced by its health ' +
+        'check instead.',
+      )
+    }
     if (!command) {
       notes.push(
-        'Verified that PostgREST needs a restart, but POSTGREST_RESTART_COMMAND is not set, so ' +
-        'there is no channel to restart it through. Set it to the supervisor command for this ' +
-        'host (for example a systemctl or pm2 restart of the postgrest process) and the loop will ' +
-        'repair this class of outage on its own.',
+        'Verified that PostgREST needs a restart, but no local restart channel is configured, so ' +
+        'this platform cannot restart it from here. That is expected under an orchestrator, where ' +
+        'a failing health check replaces the task. On a bare host, set ' +
+        'POSTGREST_LOCAL_RESTART_COMMAND to the supervisor command (for example a systemctl or pm2 ' +
+        'restart of the postgrest process) and the loop will repair this class of outage on its own.',
       )
       await audit('DATA_PLANE_RESTART_UNCONFIGURED', projectId, { status: attempt.status, notes })
       return {
@@ -392,8 +433,8 @@ export async function healDataPlane(projectId: string | null = null): Promise<He
  * OWNER, not for whoever runs the platform.
  *
  * The distinction is load-bearing. The data plane is Backenly's infrastructure,
- * not the customer's: telling them "POSTGREST_RESTART_COMMAND is not set on this
- * host" names a variable they cannot reach, in a system they did not deploy, and
+ * not the customer's: telling them "POSTGREST_LOCAL_RESTART_COMMAND is not set on
+ * this host" names a variable they cannot reach, in a system they did not deploy, and
  * reads as the platform blaming its own config at them. They need to know what
  * is broken, that it is ours, and whether they must do anything.
  *
