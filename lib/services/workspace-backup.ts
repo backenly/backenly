@@ -14,7 +14,7 @@
  *   backups/{projectId}/{YYYY-MM-DD-HH-mm}.sql.gz
  */
 
-import { exec } from 'child_process'
+import { execFile } from 'child_process'
 import { promisify } from 'util'
 import * as fs from 'fs'
 import * as path from 'path'
@@ -22,7 +22,7 @@ import * as zlib from 'zlib'
 import { pipeline } from 'stream/promises'
 import { prisma } from '@/lib/db/prisma'
 
-const execAsync = promisify(exec)
+const execFileAsync = promisify(execFile)
 
 const BACKUP_DIR = process.env.BACKUP_DIR || path.join(process.cwd(), 'backups')
 const RETENTION_DAYS = 7
@@ -69,14 +69,72 @@ function getBackupFilename(): string {
  * vulnerability that exposed password hashes. It needs a role that is read-only
  * AND bypasses RLS, used by nothing but this dump. See docs for the DDL.
  */
-function buildPgDumpArgs(): string {
+/**
+ * Connection arguments for pg_dump/psql, with the password kept OUT of argv.
+ *
+ * This used to return `"<full postgresql:// URL>"` for interpolation into a
+ * shell string. That put the production password on the command line, and
+ * Node's exec error includes the whole command it ran — so every pg_dump
+ * failure wrote the live credential into the Web error log, and into the
+ * `workspace_backups.error` column. Measured on production 2026-09-06: 450 log
+ * lines carrying the DB URI with credentials.
+ *
+ * Discrete flags plus PGPASSWORD in the CHILD environment fixes the class of
+ * bug, not just the symptom: there is no longer any string containing the
+ * password for an error message to capture.
+ */
+export function buildConnection(): { args: string[]; env: NodeJS.ProcessEnv } {
   const url =
     process.env.BACKUP_DATABASE_URL ||
     process.env.DATABASE_URL ||
     process.env.DIRECT_URL ||
     ''
   if (!url) throw new Error('DATABASE_URL not set — cannot run pg_dump')
-  return `"${url}"` // pg_dump accepts full connection URL
+
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    throw new Error('DATABASE_URL is not a valid connection URL')
+  }
+
+  const args = [
+    '--host', parsed.hostname,
+    '--port', parsed.port || '5432',
+    '--username', decodeURIComponent(parsed.username),
+    '--dbname', parsed.pathname.replace(/^\//, ''),
+    '--no-password',
+  ]
+
+  const env: NodeJS.ProcessEnv = { ...process.env }
+  if (parsed.password) env.PGPASSWORD = decodeURIComponent(parsed.password)
+  const sslmode = parsed.searchParams.get('sslmode')
+  if (sslmode) env.PGSSLMODE = sslmode
+
+  return { args, env }
+}
+
+/**
+ * Strip anything credential-shaped from a message before it is logged or stored.
+ *
+ * Defence in depth. With the password out of argv nothing should reach here,
+ * but a message is written to logs AND persisted to the database, so it is the
+ * wrong place to rely on an upstream guarantee.
+ */
+export function sanitizeError(message: string): string {
+  let out = String(message ?? '')
+  // postgres://user:secret@host -> postgres://user:***@host
+  out = out.replace(/([a-z]+:\/\/[^:\s/]+:)[^@\s]*(@)/gi, '$1***$2')
+  // Any literal occurrence of the live password, however it got there.
+  for (const key of ['PGPASSWORD', 'BACKUP_DATABASE_URL', 'DATABASE_URL', 'DIRECT_URL']) {
+    const raw = process.env[key]
+    if (!raw) continue
+    const secret = key === 'PGPASSWORD' ? raw : (() => {
+      try { return decodeURIComponent(new URL(raw).password) } catch { return '' }
+    })()
+    if (secret && secret.length >= 8) out = out.split(secret).join('***')
+  }
+  return out
 }
 
 /**
@@ -118,12 +176,16 @@ export async function backupWorkspace(projectId: string): Promise<BackupResult> 
     // Ensure backup directory exists
     await fs.promises.mkdir(backupDir, { recursive: true })
 
-    const connArgs = buildPgDumpArgs()
+    const conn = buildConnection()
 
-    // Dump only the workspace schema (data + structure, no roles)
-    const pgDumpCmd = `pg_dump ${connArgs} --schema="${schemaName}" --no-privileges --no-owner --file="${sqlPath}"`
-
-    await execAsync(pgDumpCmd, { timeout: 120_000 })
+    // Dump only the workspace schema (data + structure, no roles).
+    // execFile, not exec: no shell, no command string, nothing for an error to
+    // quote back containing the credential.
+    await execFileAsync(
+      'pg_dump',
+      [...conn.args, '--schema', schemaName, '--no-privileges', '--no-owner', '--file', sqlPath],
+      { timeout: 120_000, env: conn.env },
+    )
 
     // Compress the dump
     await pipeline(
@@ -164,13 +226,16 @@ export async function backupWorkspace(projectId: string): Promise<BackupResult> 
     // row-level security policy") reads like a database fault, so four days of
     // total backup failure looked like something transient. It is a missing
     // credential, and the message now says so.
-    const isRlsBlock = /row-level security policy/i.test(err?.message ?? '')
+    // Sanitize FIRST, then classify. Everything downstream of this line is
+    // logged and persisted, so nothing credential-shaped may survive it.
+    const raw = sanitizeError(err?.message ?? '')
+    const isRlsBlock = /row-level security policy/i.test(raw)
     const message = isRlsBlock && usingAppCredentialForBackup()
-      ? `${err.message} — pg_dump is running as the application role, which does not ` +
+      ? `${raw} — pg_dump is running as the application role, which does not ` +
         `bypass RLS, and these tables use FORCE ROW LEVEL SECURITY (the owner is ` +
         `subject to policies too). Set BACKUP_DATABASE_URL to a read-only role with ` +
         `BYPASSRLS. Do NOT grant BYPASSRLS to the application role.`
-      : err.message
+      : raw
 
     console.error(`[Backup] Failed for ${projectId}:`, message)
 
@@ -231,7 +296,7 @@ export async function restoreWorkspace(
   }
 
   try {
-    const connArgs = buildPgDumpArgs()
+    const conn = buildConnection()
 
     // Drop and recreate the schema
     await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`)
@@ -245,8 +310,12 @@ export async function restoreWorkspace(
       fs.createWriteStream(sqlPath)
     )
 
-    const psqlCmd = `psql ${connArgs} --file="${sqlPath}" --single-transaction`
-    await execAsync(psqlCmd, { timeout: 300_000 })
+    // Same contract as the dump path: discrete argv, password in the child env.
+    await execFileAsync(
+      'psql',
+      [...conn.args, '--file', sqlPath, '--single-transaction'],
+      { timeout: 300_000, env: conn.env },
+    )
 
     await fs.promises.unlink(sqlPath).catch(() => {})
 
@@ -254,8 +323,8 @@ export async function restoreWorkspace(
 
     return { success: true, restoredFrom: backup.filename }
   } catch (err: any) {
-    console.error(`[Restore] Failed for ${projectId}:`, err.message)
-    return { success: false, error: err.message }
+    console.error(`[Restore] Failed for ${projectId}:`, sanitizeError(err?.message ?? ''))
+    return { success: false, error: sanitizeError(err?.message ?? '') }
   }
 }
 
