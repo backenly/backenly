@@ -196,3 +196,6 @@ jest-integration.json
 /scripts/fleet/
 /tests/auth/email-trust.test.ts
 /tests/core/autonomy-entitlements-are-seeded.test.ts
+
+# Maintenance-window state snapshots (scripts/maintenance-freeze.sh)
+.maintenance/
