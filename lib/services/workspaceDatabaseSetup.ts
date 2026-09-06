@@ -113,7 +113,8 @@ export async function setupWorkspaceDatabaseFromSchema(
       console.warn('⚠️  Falling back to Prisma schema file (legacy mode)...')
       const defaultSchemaPath = join(workspaceBase, 'prisma', 'schema.prisma')
       
-      if (!existsSync(defaultSchemaPath)) {
+      // Same reasoning: workspace/<projectId>/prisma/schema.prisma is user data.
+      if (!existsSync(/*turbopackIgnore: true*/ defaultSchemaPath)) {
         console.error('❌ No Prisma schema file found either!')
         return {
           success: false,
@@ -122,7 +123,7 @@ export async function setupWorkspaceDatabaseFromSchema(
       }
       
       console.log(`📖 Reading Prisma schema from ${defaultSchemaPath}...`)
-      const schemaContent = readFileSync(defaultSchemaPath, 'utf-8')
+      const schemaContent = readFileSync(/*turbopackIgnore: true*/ defaultSchemaPath, 'utf-8')
       const models = parsePrismaModels(schemaContent)
 
       if (models.length === 0) {
@@ -1198,9 +1199,10 @@ async function generateMockDataForMongoCollection(
 /**
  * Detect Mongoose models from TypeScript files in the workspace
  *
- * Exported for tests. This module's only other export needs Prisma and a
- * provisioned database, so without this there is no cheap regression guard for
- * the workspace path discovery below.
+ * Exported for tests. This is the narrowest seam around the workspace path
+ * discovery that the file-tracing opt-outs below touch: the only other export
+ * in this module needs Prisma and a provisioned database, so without this there
+ * is no cheap regression guard for the behaviour those annotations sit on.
  */
 export async function detectMongooseModels(workspaceBase: string): Promise<Array<{ name: string; filePath: string }>> {
   const mongooseModels: Array<{ name: string; filePath: string }> = []
@@ -1214,19 +1216,25 @@ export async function detectMongooseModels(workspaceBase: string): Promise<Array
     join(workspaceBase, 'mongo', 'models'),
   ]
   
+  // turbopackIgnore on every read below: these paths live under
+  // workspace/<projectId>/, created at runtime from user data. They are never
+  // part of the build, so there is nothing for the tracer to resolve, and
+  // leaving it to guess makes it trace the WHOLE repository into
+  // .next/standalone. Behaviour is unchanged; __tests__/services/
+  // workspace-model-detection.test.ts is the guard that says so.
   for (const modelPath of possiblePaths) {
-    if (!existsSync(modelPath)) continue
-    
+    if (!existsSync(/*turbopackIgnore: true*/ modelPath)) continue
+
     try {
-      const files = readdirSync(modelPath)
+      const files = readdirSync(/*turbopackIgnore: true*/ modelPath)
       for (const file of files) {
         if (!file.endsWith('.ts') && !file.endsWith('.js')) continue
-        
+
         const filePath = join(modelPath, file)
-        const stats = statSync(filePath)
+        const stats = statSync(/*turbopackIgnore: true*/ filePath)
         if (!stats.isFile()) continue
-        
-        const fileContent = readFileSync(filePath, 'utf-8')
+
+        const fileContent = readFileSync(/*turbopackIgnore: true*/ filePath, 'utf-8')
         
         // Look for Mongoose schema definitions
         // Pattern: mongoose.model('ModelName', schema) or model('ModelName', schema)

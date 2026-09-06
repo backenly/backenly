@@ -2366,9 +2366,11 @@ export async function applyChangesFromPlan(
           applied.push(change.target)
         } else if (change.type === 'config') {
           // Update config file
-          const configPath = path.join(process.cwd(), change.target)
+          const configPath = path.join(/*turbopackIgnore: true*/ process.cwd(), change.target)
           if (change.code) {
-            await fs.writeFile(configPath, change.code, 'utf-8')
+            // turbopackIgnore: writes generated config into the runtime
+            // workspace. A write has nothing for the tracer to include.
+            await fs.writeFile(/*turbopackIgnore: true*/ configPath, change.code, 'utf-8')
             applied.push(change.target)
           }
         }

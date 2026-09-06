@@ -146,7 +146,11 @@ async function removeDirectory(root: string, target: string): Promise<PurgeResou
   assertSafeChildPath(root, target)
 
   try {
-    await fs.stat(target)
+    // turbopackIgnore: `target` is <backupRoot|storageRoot>/<projectId>,
+    // per-project data created at runtime and deleted here. Nothing about it
+    // exists at build time, so tracing it is impossible and attempting to
+    // pulls the whole repository into .next/standalone.
+    await fs.stat(/*turbopackIgnore: true*/ target)
   } catch (err: any) {
     if (err?.code === 'ENOENT') return 'alreadyAbsent'
     throw err
@@ -155,7 +159,7 @@ async function removeDirectory(root: string, target: string): Promise<PurgeResou
   // `force` swallows ENOENT on entries that vanish mid-walk, which is exactly
   // the race a concurrent retry creates. It does NOT swallow permission or I/O
   // errors, so a genuine failure still surfaces and the job stays retryable.
-  await fs.rm(target, { recursive: true, force: true })
+  await fs.rm(/*turbopackIgnore: true*/ target, { recursive: true, force: true })
   return 'purged'
 }
 
@@ -229,7 +233,7 @@ export async function purgeProjectExternals(
 ): Promise<PurgeReport> {
   assertValidProjectId(projectId)
 
-  const backups = await removeDirectory(backupRoot(), path.join(backupRoot(), projectId))
+  const backups = await removeDirectory(backupRoot(), path.join(/*turbopackIgnore: true*/ backupRoot(), projectId))
 
   let storage: PurgeResourceStatus
   let objectsDeleted = 0
@@ -243,7 +247,7 @@ export async function purgeProjectExternals(
     storage = result.status
     objectsDeleted = result.deleted
   } else {
-    storage = await removeDirectory(storageRoot(), path.join(storageRoot(), projectId))
+    storage = await removeDirectory(storageRoot(), path.join(/*turbopackIgnore: true*/ storageRoot(), projectId))
   }
 
   return { projectId, backups, storage, objectsDeleted }
