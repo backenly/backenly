@@ -116,13 +116,20 @@ jobs:
       # is theirs. overlay-allowlist.json is the ownership map; this is what
       # makes it falsifiable.
       #
-      # It runs in transition mode: the subsystems the map names do not actually
-      # move private until Phases 6 and 7, so the public files still sitting
-      # under those paths are grandfathered BY NAME and anything new fails. A
-      # count would not do — Phase 1 established that the same number of
-      # failures is not evidence that the same things failed.
+      # STRICT since Phase 8. From Phase 4 to Phase 7 this ran in transition
+      # mode, grandfathering BY NAME the public files that still sat under paths
+      # the overlay would eventually own; that list went 73 -> 14 -> 0 as Phase 6
+      # moved the back office and Phase 7 the control plane, and the exemption
+      # mechanism went with it. Strict means what it says: ANY public file
+      # tracked under a private-owned path fails, and there is no way to spell
+      # an exception.
+      #
+      # The verifier is unchanged. --strict was already passing at the end of
+      # Phase 7, so this switched a policy rather than fixing a check, and its
+      # negative test (an allowlist claiming lib/usage/**) is what keeps strict
+      # mode from being vacuously green.
       - name: Overlay ownership boundary
-        run: npx tsx scripts/verify-overlay-boundary.ts
+        run: npx tsx scripts/verify-overlay-boundary.ts --strict
 
       # The boundary verifier answers "may the overlay own this path". This
       # answers the harder question: when it refuses, does the working tree come
@@ -290,6 +297,71 @@ jobs:
   # name — and overwrote DATABASE_URL with it at module load. They failed with
   # PrismaClientInitializationError everywhere, which reads as "needs a
   # database" and is why #7 first filed them that way. They needed one specific
+  # -- The product default, built -------------------------------------------
+  #
+  # Phase 8 made an unset BACKENLY_EDITION mean single-tenant. This job is the
+  # proof that a fresh public clone builds that way with NOTHING configured,
+  # which is the claim the whole OSS story rests on.
+  #
+  # The absence of the variable is DELIBERATE here, not incidental:
+  #
+  #   - the job never writes a .env, and .env is gitignored and untracked, so a
+  #     fresh checkout cannot be carrying one. That matters because
+  #     .env.example DOES set BACKENLY_EDITION=single-tenant for self-hosters,
+  #     and `cp .env.example .env` would quietly turn this into an explicit-
+  #     edition build that proves nothing about the default.
+  #   - the first step asserts the variable is genuinely unset and no .env
+  #     exists, so this cannot pass because a runner happened to export it.
+  #
+  # A separate explicit single-tenant build already runs in the self-host job.
+  # This one exists only to test the DEFAULT.
+  default-oss-build:
+    name: default OSS build (edition unset)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+
+      - name: nothing is supplying an edition
+        run: |
+          set -euo pipefail
+          if [ -n "${BACKENLY_EDITION:-}" ]; then
+            echo "BACKENLY_EDITION is set to '${BACKENLY_EDITION}' - this job must run with it UNSET"
+            exit 1
+          fi
+          if [ -f .env ]; then
+            echo ".env exists in a fresh checkout; it could supply BACKENLY_EDITION and void this proof"
+            exit 1
+          fi
+          echo "no BACKENLY_EDITION in the environment, no .env in the tree"
+
+      - name: the default really is single-tenant
+        run: |
+          set -euo pipefail
+          npx tsx -e "
+            const { currentEdition } = require('./lib/edition');
+            const e = currentEdition();
+            if (e !== 'single-tenant') { console.error('unset edition resolved to ' + e); process.exit(1); }
+            console.log('unset edition resolves to single-tenant');
+          "
+
+      - name: a self-host install needs no private overlay
+        run: npx tsx scripts/verify-cloud-composition.ts --expect absent
+
+      - run: npx prisma generate
+
+      - name: Typecheck
+        run: npx tsc --noEmit -p tsconfig.json
+
+      # The flagship proof. No edition, no overlay, no private repository.
+      - name: Build
+        run: npm run build
+
   # dead database. They now use TEST_DATABASE_URL like everything else.
   integration:
     name: integration suites

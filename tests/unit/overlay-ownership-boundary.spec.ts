@@ -491,19 +491,30 @@ describe('overlay-allowlist.json', () => {
     }
   })
 
-  it('grandfathers only files that are really still public', () => {
-    for (const file of allowlist.transition?.grandfathered ?? []) {
-      expect(tracked.has(file)).toBe(true)
-    }
+  it('carries no transition configuration at all', () => {
+    // Phase 4 to Phase 7 grandfathered public files that still sat under a
+    // future-private path: 73, then 14, then 0. Phase 8 removed the key.
+    //
+    // These two assertions replace the two that used to read
+    // `transition.grandfathered`. Left as they were, both would have gone on
+    // passing forever against `?? []` -- comparing an empty list to an empty
+    // list and reporting green while asserting nothing, which is exactly the
+    // shape Phase 1 was written to eliminate. The invariant they were really
+    // protecting is below, and it is now stated directly.
+    expect(allowlist.transition).toBeUndefined()
   })
 
-  it('grandfathers every public file under a private-owned path, and no others', () => {
+  it('has no public file under any private-owned path', () => {
+    // What the grandfather list existed to bound, now that it bounds nothing.
+    // This is the same question --strict asks the verifier, asserted here
+    // against the tracked tree so a violation is named rather than merely
+    // exiting non-zero.
     const prefixes = allowlist.private.filter(p => p.endsWith('/**')).map(p => p.slice(0, -2))
     const exact = new Set(allowlist.private.filter(p => !p.endsWith('/**')))
     const under = [...tracked]
       .filter(f => exact.has(f) || prefixes.some(pre => f.startsWith(pre)))
       .sort()
-    expect([...(allowlist.transition?.grandfathered ?? [])].sort()).toEqual(under)
+    expect(under).toEqual([])
   })
 })
 
@@ -516,6 +527,15 @@ describe('verify-overlay-boundary', () => {
     const run = runVerifier()
     expect(run.status).toBe(0)
     expect(run.stdout).toMatch(/ok \(transition\)/)
+  })
+
+  it('is invoked by CI in --strict mode', () => {
+    // Phase 8 made strict the enforced policy. Asserting it here means removing
+    // the flag from the workflow fails a test rather than silently reverting
+    // the repository to a mode that tolerates exemptions -- and the workflow is
+    // exactly the kind of file whose edits no unit test usually sees.
+    const workflow = fs.readFileSync(path.join(ROOT, '.github/workflows/ci.yml'), 'utf8')
+    expect(workflow).toMatch(/verify-overlay-boundary\.ts --strict/)
   })
 
   it('passes in --strict mode, now that nothing is grandfathered', () => {

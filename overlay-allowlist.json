@@ -4,7 +4,9 @@
     "",
     "PUBLIC IS THE DEFAULT. A path listed here is one the private overlay is",
     "ALLOWED to own; everything not listed belongs to the public product and the",
-    "overlay may never write it. Enforced by scripts/verify-overlay-boundary.ts.",
+    "overlay may never write it. Enforced by scripts/verify-overlay-boundary.ts,",
+    "which CI runs in --strict mode: ANY public file tracked under one of these",
+    "paths is a violation, with no exemptions available.",
     "",
     "Ownership is whole-directory wherever a private subsystem can have a",
     "directory of its own, so the overlay only ever ADDS files and never has to",
@@ -17,8 +19,15 @@
     "                                          family that is otherwise entirely",
     "                                          per-project product",
     "",
-    "Phases 6 and 7 performed the removals. Phase 7 emptied the transition list:",
-    "no public file remains under a private-owned path."
+    "There was a `transition` key here from Phase 4 to Phase 7, grandfathering",
+    "public files that still sat under a future-private path. It went 73 -> 14 ->",
+    "0 and Phase 8 removed it. The verifier still UNDERSTANDS transition config",
+    "and still refuses a grandfather entry whose file is gone; that guard is",
+    "exercised against a synthetic config in tests/unit/overlay-ownership-boundary.spec.ts",
+    "rather than against this file, so it survives the key's removal.",
+    "",
+    "Every path below is also listed in .gitignore, so a composed Cloud checkout",
+    "reports no untracked overlay files. A unit test asserts that parity."
   ],
   "version": 1,
   "private": [
@@ -57,24 +66,5 @@
     "scripts/fleet/**",
     "tests/auth/email-trust.test.ts",
     "tests/core/autonomy-entitlements-are-seeded.test.ts"
-  ],
-  "transition": {
-    "comment": [
-      "Phase 4 grandfather list: public files that already lived under a path the",
-      "overlay would eventually own. It was legal only until Phases 6 and 7 moved",
-      "them, and it could SHRINK but never grow.",
-      "",
-      "It is now EMPTY. Phase 6 took it from 73 to 14, and Phase 7 moved the",
-      "remaining 14 -- the organization routes, lib/org, OrgSwitcher and the fleet",
-      "scripts -- so nothing is grandfathered any more.",
-      "",
-      "The key is kept rather than deleted because deleting it is the same commit",
-      "that moves CI to --strict, and that is Phase 8 work with its own acceptance.",
-      "An empty list is already strictly enforced: the verifier fails on any NEW",
-      "public file under a private-owned path, and its stale-entry check means an",
-      "entry cannot be re-added for a file that is not actually there."
-    ],
-    "expiresAfterPhase": 7,
-    "grandfathered": []
-  }
+  ]
 }
