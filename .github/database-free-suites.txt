@@ -138,3 +138,11 @@ __tests__/edition/default-edition.test.ts
 # BUILD-time requirement for the whole app; the Phase 8 unset-edition build job
 # is what exposed it. Database-free: it imports one module and reads one file.
 __tests__/edition/build-time-credentials.test.ts
+
+# A failed backup must never reveal the database password. buildPgDumpArgs()
+# returned the whole postgresql:// URL for interpolation into a shell command,
+# and Node's exec error carries the command it ran, so every pg_dump failure
+# wrote the live credential to the Web log and to workspace_backups.error.
+# Database-free: it builds argv, sanitizes strings, and fails one child process
+# on purpose. Verified against the unroutable URL, 9 passed, none skipped.
+__tests__/services/backup-credential-safety.test.ts
