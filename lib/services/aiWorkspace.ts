@@ -1,9 +1,33 @@
 import OpenAI from 'openai'
 import { prisma } from '@/lib/db'
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-})
+/**
+ * The OpenAI client, built on first use rather than at import.
+ *
+ * This was a module-scope `new OpenAI({ apiKey: process.env.OPENAI_API_KEY })`,
+ * and the SDK throws when the key is missing or empty. `next build` evaluates
+ * route modules to collect their configuration, so importing any of the three
+ * ai-workspace routes made OPENAI_API_KEY a BUILD-time requirement for the
+ * whole application -- including deployments that never call an AI feature.
+ *
+ * That was invisible until Phase 8 added the first public Next build to CI,
+ * where a fresh checkout with no credentials failed at
+ * /api/ai-workspace/preview-diff. Supplying a fake key in CI would have made
+ * the build pass while permanently encoding the accident, so the construction
+ * moved instead.
+ *
+ * Every other OpenAI call site in this repository already builds its client
+ * inside a function; this was the only one that did not.
+ *
+ * Failure semantics are deliberately UNCHANGED. A missing key still throws --
+ * it just throws when an AI operation actually runs, which is the moment the
+ * key is genuinely needed, rather than when the module is loaded.
+ */
+function getOpenAIClient(): OpenAI {
+  return new OpenAI({
+    apiKey: process.env.OPENAI_API_KEY,
+  })
+}
 
 export interface BackendChangePlan {
   id: string
@@ -1031,7 +1055,7 @@ Your response must be valid JSON:
   "tier": "production-ready"
 }`
 
-  const completion = await openai.chat.completions.create({
+  const completion = await getOpenAIClient().chat.completions.create({
     model: 'gpt-4.1',
     messages: [
       { role: 'system', content: planningPrompt },
@@ -1626,7 +1650,7 @@ IMPORTANT: You MUST implement ALL ${architecture.routes?.length || 0} routes fro
   const startTime = Date.now()
 
   try {
-    const completion = await openai.chat.completions.create({
+    const completion = await getOpenAIClient().chat.completions.create({
       model: 'gpt-4.1',
       messages: [
         { role: 'system', content: systemPrompt },

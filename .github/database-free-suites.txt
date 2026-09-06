@@ -132,3 +132,9 @@ __tests__/setup/self-host-path.test.ts
 # one environment variable and never touches Prisma, and the suite deletes the
 # variable outright so it cannot pass on a leftover value from the runner.
 __tests__/edition/default-edition.test.ts
+
+# Building Backenly must not require an AI credential. lib/services/aiWorkspace.ts
+# constructed its OpenAI client at module scope, which made OPENAI_API_KEY a
+# BUILD-time requirement for the whole app; the Phase 8 unset-edition build job
+# is what exposed it. Database-free: it imports one module and reads one file.
+__tests__/edition/build-time-credentials.test.ts

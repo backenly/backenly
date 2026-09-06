@@ -319,6 +319,22 @@ jobs:
     name: default OSS build (edition unset)
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    # JWT_SECRET only, and deliberately nothing else.
+    #
+    # It is a fundamental application security prerequisite: five modules read
+    # it at import time and every real deployment sets it, so supplying a
+    # throwaway value here does not weaken what this job proves. The value is
+    # not secret-shaped and grants nothing.
+    #
+    # OPENAI_API_KEY is deliberately ABSENT. It was the second blocker this job
+    # found, and injecting a fake key would have made the build pass while
+    # permanently encoding an implementation accident: an optional AI feature
+    # making itself a build-time requirement. lib/services/aiWorkspace.ts
+    # constructs its client lazily instead, so an OSS build needs no AI
+    # credential at all. Do not add one here to fix a future failure without
+    # first asking whether the module should have required it.
+    env:
+      JWT_SECRET: phase8-ci-placeholder-not-a-real-secret
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
