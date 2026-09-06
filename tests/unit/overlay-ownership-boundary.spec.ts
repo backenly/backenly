@@ -601,9 +601,28 @@ describe('verify-overlay-boundary', () => {
   it('rejects a grandfather entry for a file that no longer exists', () => {
     // Phase 6/7 delete files and must prune the list in the same commit, so
     // the exemption cannot outlive the thing it exempts.
-    const run = runWithAllowlist(a => a.transition?.grandfathered.push('lib/billing/gone.ts'))
+    //
+    // The transition object is CONSTRUCTED here rather than mutated in place.
+    // The previous form was `a.transition?.grandfathered.push(...)`, which read
+    // the shape off the committed allowlist -- so the moment Phase 8 deletes
+    // that key the optional chain short-circuits, the mutation becomes a no-op,
+    // the verifier correctly exits 0, and this test starts failing for a reason
+    // that has nothing to do with the guard it protects. Building the config
+    // makes the test independent of whether the real repository still uses
+    // transition mode, which is the whole point: the guard must outlive the
+    // configuration that motivated it.
+    //
+    // The synthetic object mirrors the real schema, `expiresAfterPhase`
+    // included, so the refusal below can only be about the STALE PATH. A
+    // malformed object could fail for its own reasons and prove nothing.
+    const run = runWithAllowlist(a => {
+      a.transition = { grandfathered: ['lib/billing/gone.ts'], expiresAfterPhase: 7 }
+    })
     expect(run.status).toBe(1)
     expect(run.stderr).toMatch(/stale grandfather entry/)
+    // The diagnosis must name the offending path. Asserting only the exit code
+    // would pass against a verifier that refused for any other reason at all.
+    expect(run.stderr).toContain('lib/billing/gone.ts')
   })
 
   it('accepts an overlay that only adds files in allowlisted paths', () => {
