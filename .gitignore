@@ -199,3 +199,6 @@ jest-integration.json
 
 # Maintenance-window state snapshots (scripts/maintenance-freeze.sh)
 .maintenance/
+
+# Runtime container bundle (scripts/build-runtime-bundle.mjs)
+/dist-runtime

@@ -38,7 +38,8 @@
     "db:studio": "prisma studio",
     "db:test:setup": "npm run test:setup",
     "migrate:api-keys": "tsx scripts/migrate-api-keys-to-hash.ts",
-    "cleanup:tokens": "tsx scripts/cleanup-expired-tokens.ts"
+    "cleanup:tokens": "tsx scripts/cleanup-expired-tokens.ts",
+    "build:runtime": "node scripts/build-runtime-bundle.mjs"
   },
   "dependencies": {
     "@amplitude/analytics-browser": "^2.44.5",
