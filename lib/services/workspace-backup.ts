@@ -16,10 +16,11 @@
  *  - Backups stored in BACKUP_DIR (default: ./backups/) as compressed SQL
  *
  * Each backup file:
- *   backups/{projectId}/{YYYY-MM-DD-HH-mm}.sql.gz
+ *   backups/{projectId}/{YYYY-MM-DD-HH-mm-ss}-{random}.sql.gz
  */
 
 import { execFile } from 'child_process'
+import { randomBytes } from 'crypto'
 import { promisify } from 'util'
 import * as fs from 'fs'
 import * as path from 'path'
@@ -45,10 +46,32 @@ function getBackupDir(projectId: string): string {
   return path.join(/*turbopackIgnore: true*/ BACKUP_DIR, projectId)
 }
 
-function getBackupFilename(): string {
+/**
+ * A filename that is unique per backup, not per minute.
+ *
+ * This used to be minute-precision, so two backups of the same project inside
+ * one minute resolved to the SAME path: the second dump overwrote the first
+ * file, and the first `workspace_backups` row was left describing content that
+ * no longer existed. Observed on production 2026-09-07, when an on-demand
+ * verification backup landed in the same minute as the scheduled one — two rows
+ * (5419 and 5423 bytes) pointing at a single 5423-byte file.
+ *
+ * Seconds alone only narrows the window: a retry, or two projects' jobs
+ * finishing together, still collide inside one second. The random suffix is
+ * what makes the name independent of how often backups run, so no future
+ * cadence change can reintroduce the overwrite.
+ *
+ * Nothing parses this name — restore resolves `filePath` from the row, and
+ * pruning works from rows — so the format is free to change. Historical files
+ * keep their old names and remain valid.
+ */
+export function getBackupFilename(): string {
   const now = new Date()
   const pad = (n: number) => String(n).padStart(2, '0')
-  return `${now.getUTCFullYear()}-${pad(now.getUTCMonth() + 1)}-${pad(now.getUTCDate())}-${pad(now.getUTCHours())}-${pad(now.getUTCMinutes())}.sql.gz`
+  const stamp =
+    `${now.getUTCFullYear()}-${pad(now.getUTCMonth() + 1)}-${pad(now.getUTCDate())}` +
+    `-${pad(now.getUTCHours())}-${pad(now.getUTCMinutes())}-${pad(now.getUTCSeconds())}`
+  return `${stamp}-${randomBytes(4).toString('hex')}.sql.gz`
 }
 
 /**

@@ -155,3 +155,9 @@ __tests__/deployment/deploy-preflight.test.ts
 __tests__/deployment/standalone-env.test.ts
 __tests__/services/backup-credential-safety.test.ts
 __tests__/services/workspace-model-detection.test.ts
+
+# Two backups of one project in the same second must not share a path. The
+# minute-precision filename made the second dump overwrite the first and orphan
+# its row; seen on production 2026-09-07. Database-free: it calls one pure
+# function, including with the clock frozen.
+__tests__/services/backup-filename-uniqueness.test.ts
