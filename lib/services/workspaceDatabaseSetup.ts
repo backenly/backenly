@@ -7,6 +7,7 @@
  * 3. Creates MongoDB collections if needed
  */
 
+import { projectWorkspaceDir } from '@/lib/workspace/paths'
 import { provisionWorkspaceDatabase, getWorkspaceDatabaseNames } from './databaseProvisioning'
 import { prisma } from '@/lib/db'
 import { Prisma } from '@prisma/client'
@@ -97,7 +98,7 @@ export async function setupWorkspaceDatabaseFromSchema(
 
     // 2. Get table plans from ProjectMetadata (AI-extracted from user prompt)
     console.log('🧠 Step 2: Loading AI-extracted table plans from metadata...')
-    const workspaceBase = join(process.cwd(), 'workspace', projectId)
+    const workspaceBase = projectWorkspaceDir(projectId)
     
     const metadata = await prisma.projectMetadata.findUnique({
       where: { projectId },

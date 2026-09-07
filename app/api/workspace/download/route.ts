@@ -1,5 +1,6 @@
 export const dynamic = 'force-dynamic'
 
+import { projectWorkspaceDir } from '@/lib/workspace/paths'
 import { NextRequest, NextResponse } from 'next/server'
 import { authenticateRequest } from '@/lib/auth/middleware'
 import { promises as fs } from 'fs'
@@ -23,7 +24,7 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    const workspacePath = path.join(process.cwd(), 'workspace', projectId)
+    const workspacePath = projectWorkspaceDir(projectId)
 
     // Check if workspace directory exists
     try {

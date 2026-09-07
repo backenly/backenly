@@ -4,6 +4,7 @@
  * Automatically creates User model and runs migrations when Auth is enabled.
  */
 
+import { projectWorkspaceDir } from '@/lib/workspace/paths';
 import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
@@ -117,7 +118,7 @@ export async function enableAuth(projectId: string): Promise<{ success: boolean;
   // Create migration promise
   const migrationPromise = (async () => {
     try {
-      const workspacePath = path.join(process.cwd(), 'workspace', projectId);
+      const workspacePath = projectWorkspaceDir(projectId);
       const schemaPath = path.join(workspacePath, 'schema.prisma');
       
       // Check if schema exists
@@ -229,7 +230,7 @@ export async function registerUser(
       };
     }
     
-    const workspacePath = path.join(process.cwd(), 'workspace', projectId);
+    const workspacePath = projectWorkspaceDir(projectId);
     
     // Ensure User model exists
     if (!hasUserModel(workspacePath)) {
@@ -298,7 +299,7 @@ export async function loginUser(
   data: LoginData
 ): Promise<AuthResponse> {
   try {
-    const workspacePath = path.join(process.cwd(), 'workspace', projectId);
+    const workspacePath = projectWorkspaceDir(projectId);
     
     // Ensure User model exists
     if (!hasUserModel(workspacePath)) {
@@ -365,7 +366,7 @@ export async function loginUser(
  */
 export async function getWorkspaceUsers(projectId: string): Promise<any[]> {
   try {
-    const workspacePath = path.join(process.cwd(), 'workspace', projectId);
+    const workspacePath = projectWorkspaceDir(projectId);
     
     // Check if User model exists
     if (!hasUserModel(workspacePath)) {

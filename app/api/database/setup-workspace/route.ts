@@ -1,5 +1,6 @@
 export const dynamic = 'force-dynamic'
 
+import { projectWorkspaceDir } from '@/lib/workspace/paths'
 import { NextRequest, NextResponse } from 'next/server'
 import { setupWorkspaceDatabaseFromSchema } from '@/lib/services/workspaceDatabaseSetup'
 import { prisma } from '@/lib/db'
@@ -71,7 +72,7 @@ export async function POST(request: NextRequest) {
       // This ensures we never read the wrong project's schema
       const { join } = await import('path')
       const { existsSync, mkdirSync, writeFileSync } = await import('fs')
-      const workspaceBase = join(process.cwd(), 'workspace', projectId)
+      const workspaceBase = projectWorkspaceDir(projectId)
       const schemaPath = join(workspaceBase, 'prisma', 'schema.prisma')
       const envPath = join(workspaceBase, '.env')
 

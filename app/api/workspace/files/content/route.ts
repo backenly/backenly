@@ -1,5 +1,6 @@
 export const dynamic = 'force-dynamic'
 
+import { projectWorkspaceDir } from '@/lib/workspace/paths'
 import { NextRequest, NextResponse } from 'next/server'
 import { requireAuth } from '@/lib/auth/middleware'
 import { prisma } from '@/lib/db/postgres'
@@ -27,7 +28,7 @@ export async function POST(request: NextRequest) {
       
       // Remove 'workspace/' prefix and construct file system path
       const relativePath = filePath.replace(/^workspace\//, '')
-      const fsPath = path.join(process.cwd(), 'workspace', projectId, relativePath)
+      const fsPath = path.join(projectWorkspaceDir(projectId), relativePath)
       
       console.log('[File Content] Trying to read from file system: ' + fsPath)
       const content = await fs.readFile(fsPath, 'utf-8')

@@ -1,3 +1,4 @@
+import { projectWorkspaceDir } from '@/lib/workspace/paths'
 import OpenAI from 'openai'
 import { prisma } from '@/lib/db'
 
@@ -2191,7 +2192,7 @@ export async function applyChangesFromPlan(
           }
           
           let filePath: string
-          const workspaceBase = path.join(process.cwd(), 'workspace', projectId)
+          const workspaceBase = projectWorkspaceDir(projectId)
           
           // Handle different file types and folder structures
           if (change.target.startsWith('/api/')) {
@@ -2289,7 +2290,7 @@ export async function applyChangesFromPlan(
           if (!projectId) {
             throw new Error('Project ID is required to apply changes')
           }
-          const workspaceBase = path.join(process.cwd(), 'workspace', projectId)
+          const workspaceBase = projectWorkspaceDir(projectId)
           const migrationDir = path.join(workspaceBase, 'migrations')
           await fs.mkdir(migrationDir, { recursive: true })
           
@@ -2307,7 +2308,7 @@ export async function applyChangesFromPlan(
           if (!projectId) {
             throw new Error('Project ID is required to apply changes')
           }
-          const workspaceBase = path.join(process.cwd(), 'workspace', projectId)
+          const workspaceBase = projectWorkspaceDir(projectId)
           const schemaPath = path.join(workspaceBase, 'prisma', 'schema.prisma')
           
           // Ensure prisma directory exists

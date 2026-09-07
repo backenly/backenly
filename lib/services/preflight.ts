@@ -5,6 +5,7 @@
  * Ensures code is deployable before sending to production
  */
 
+import { projectWorkspaceDir } from '@/lib/workspace/paths'
 import { exec } from 'child_process'
 import { promisify } from 'util'
 import * as fs from 'fs/promises'
@@ -45,7 +46,7 @@ export class PreflightService {
     try {
       // 1. Prepare project directory
       buildLogs.push('📦 Preparing project directory...')
-      const workspacePath = path.join(process.cwd(), 'workspace', projectId)
+      const workspacePath = projectWorkspaceDir(projectId)
       
       // Check if project exists
       try {

@@ -5,6 +5,7 @@
  * These are project-scoped and independent of platform OAuth.
  */
 
+import { projectWorkspaceDir } from '@/lib/workspace/paths'
 import { prisma } from '@/lib/db'
 import * as crypto from 'crypto'
 import { requireOAuthEncryptionKey } from '@/lib/auth/jwt-secret'
@@ -175,7 +176,7 @@ export class WorkspaceOAuthService {
     const fs = require('fs').promises
     const path = require('path')
     
-    const workspacePath = path.join(process.cwd(), 'workspace', projectId, 'routes', 'auth')
+    const workspacePath = path.join(projectWorkspaceDir(projectId), 'routes', 'auth')
     const providerRoutePath = path.join(workspacePath, `${provider}.ts`)
     
     try {

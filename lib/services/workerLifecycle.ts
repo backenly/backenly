@@ -15,6 +15,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import { prisma } from '@/lib/db/postgres';
 import path from 'path';
+import { workspaceRoot as sharedWorkspaceRoot } from '@/lib/workspace/paths';
 import fs from 'fs/promises';
 
 const execAsync = promisify(exec);
@@ -259,7 +260,7 @@ export class WorkerLifecycleService {
     });
 
     const port = config?.port || project?.workerPort || await this.allocatePort();
-    const workspaceRoot = config?.workspaceRoot || path.resolve(process.cwd(), 'workspace');
+    const workspaceRoot = config?.workspaceRoot || sharedWorkspaceRoot();
 
     return await this.startWorker({
       projectId,

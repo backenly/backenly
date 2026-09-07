@@ -4,6 +4,7 @@
  * This is where simulation ends and reality begins.
  */
 
+import { projectWorkspaceDir } from '@/lib/workspace/paths'
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import { BackendStateGraph, EntityState } from '@/lib/orchestration/backend-state-graph'
@@ -130,7 +131,7 @@ export async function generatePrismaSchema(
     
     // Write to workspace-specific schema file
     // IMPORTANT: Use the same path that workspaceDatabaseSetup expects
-    const workspaceDir = path.join(process.cwd(), 'workspace', projectId, 'prisma')
+    const workspaceDir = path.join(projectWorkspaceDir(projectId), 'prisma')
     await fs.mkdir(workspaceDir, { recursive: true })
     
     const schemaPath = path.join(workspaceDir, 'schema.prisma')

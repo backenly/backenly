@@ -1,3 +1,4 @@
+import { projectWorkspaceDir } from '@/lib/workspace/paths'
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { exec } from 'child_process'
@@ -805,7 +806,7 @@ export async function executePlan(
   projectId: string,
   userId?: string
 ): Promise<ExecutionResult & { journalId?: string }> {
-  const workspacePath = join(process.cwd(), 'workspace', projectId)
+  const workspacePath = projectWorkspaceDir(projectId)
   const results: ExecutionResult[] = []
   const allFilesCreated: string[] = []
   const allFilesModified: string[] = []

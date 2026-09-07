@@ -1,3 +1,4 @@
+import { projectWorkspaceDir } from '@/lib/workspace/paths'
 import { writeFileSync, readFileSync, existsSync, unlinkSync, renameSync, copyFileSync } from 'fs'
 import { join } from 'path'
 import { prisma } from '@/lib/db'
@@ -153,7 +154,7 @@ export function recordAction(
   
   // Backup file if it exists (for rollback)
   if (action === 'CREATE_PRISMA_MODEL' || action === 'CREATE_API_ROUTE') {
-    const workspacePath = join(process.cwd(), 'workspace', journal.projectId)
+    const workspacePath = projectWorkspaceDir(journal.projectId)
     const filePath = getFilePath(action, target, workspacePath)
     
     if (existsSync(filePath)) {

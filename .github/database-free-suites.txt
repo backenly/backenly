@@ -138,3 +138,10 @@ __tests__/edition/default-edition.test.ts
 # BUILD-time requirement for the whole app; the Phase 8 unset-edition build job
 # is what exposed it. Database-free: it imports one module and reads one file.
 __tests__/edition/build-time-credentials.test.ts
+
+# WORKSPACE_DIR must move every workspace reader and writer together. Only
+# purge.ts honoured it before, and its own comment recorded the hazard: setting
+# the variable without changing the writers aimed project deletion at a
+# directory nothing writes to. Database-free: it writes a Prisma schema into a
+# temp dir and purges it, with all three purge roots redirected there.
+__tests__/workspace-paths/workspace-dir-contract.test.ts
