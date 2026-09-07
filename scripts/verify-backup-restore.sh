@@ -14,13 +14,14 @@
 set -Eeuo pipefail
 
 DB_NAME="${BACKUP_DB_NAME:-backenly}"
-BACKUP_DIR="${BACKUP_DIR:-/var/backups/backenly}"
+# Cluster backups, not the Web application's workspace BACKUP_DIR. See scripts/backup.sh.
+DATABASE_BACKUP_DIR="${DATABASE_BACKUP_DIR:-/var/backups/backenly}"
 TEST_DB="backenly_restore_test_$$"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
-LATEST="$(ls -t "$BACKUP_DIR"/backenly-*.dump 2>/dev/null | head -1 || true)"
-if [ -z "$LATEST" ]; then log "FATAL: no .dump files in $BACKUP_DIR"; exit 1; fi
+LATEST="$(ls -t "$DATABASE_BACKUP_DIR"/backenly-*.dump 2>/dev/null | head -1 || true)"
+if [ -z "$LATEST" ]; then log "FATAL: no .dump files in $DATABASE_BACKUP_DIR"; exit 1; fi
 log "Verifying restorability of: $LATEST"
 
 cleanup() { sudo -u postgres dropdb --if-exists "$TEST_DB" >/dev/null 2>&1 || true; }
