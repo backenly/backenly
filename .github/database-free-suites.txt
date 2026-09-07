@@ -145,3 +145,13 @@ __tests__/edition/build-time-credentials.test.ts
 # directory nothing writes to. Database-free: it writes a Prisma schema into a
 # temp dir and purges it, with all three purge roots redirected there.
 __tests__/workspace-paths/workspace-dir-contract.test.ts
+
+# Three Stage B suites and the credential-safety suite were added without being
+# named in any manifest, so verify-suite-accounting.ts failed: 188 categorised
+# against 192 canonical. None of them ran on a blocking job. All four were
+# checked the way the header asks, against the unroutable placeholder URL:
+# 9, 11, 6 and 9 tests, all passing, none skipped.
+__tests__/deployment/deploy-preflight.test.ts
+__tests__/deployment/standalone-env.test.ts
+__tests__/services/backup-credential-safety.test.ts
+__tests__/services/workspace-model-detection.test.ts
