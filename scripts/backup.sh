@@ -30,9 +30,11 @@
 # ============================================================================
 set -Eeuo pipefail
 
-# Load backup config from .env so BACKUP_REMOTE (the off-box target) and any
-# BACKUP_* overrides are picked up when run from cron with a bare environment.
-# Only BACKUP_* keys are sourced — never the whole .env into the shell.
+# Load backup config from .env so BACKUP_REMOTE (the off-box target) and the
+# other overrides are picked up when run from cron with a bare environment.
+# Only the four keys named below are sourced — never the whole .env into the
+# shell, and deliberately NOT BACKUP_DIR, which belongs to the Web application
+# (see the note above DATABASE_BACKUP_DIR).
 #
 # Derived from this script's OWN location, not hardcoded. The previous default
 # was /opt/backenly/.env, a path that does not exist on this host — the live
@@ -50,22 +52,49 @@ ENV_FILE="${ENV_FILE:-$_BACKUP_SCRIPT_DIR/.env}"
 if [ -f "$ENV_FILE" ]; then
   while IFS= read -r line; do
     case "$line" in
-      BACKUP_REMOTE=*|BACKUP_DB_NAME=*|BACKUP_DIR=*|BACKUP_KEEP_DAYS=*) export "${line?}" ;;
+      BACKUP_REMOTE=*|BACKUP_DB_NAME=*|DATABASE_BACKUP_DIR=*|BACKUP_KEEP_DAYS=*) export "${line?}" ;;
     esac
-  done < <(grep -E '^BACKUP_(REMOTE|DB_NAME|DIR|KEEP_DAYS)=' "$ENV_FILE" || true)
+  done < <(grep -E '^(BACKUP_(REMOTE|DB_NAME|KEEP_DAYS)|DATABASE_BACKUP_DIR)=' "$ENV_FILE" || true)
 fi
 
+# Cluster backups have their OWN directory variable, and it is deliberately not
+# BACKUP_DIR.
+#
+# BACKUP_DIR belongs to the Web application: lib/services/workspace-backup.ts
+# reads it to decide where per-project workspace dumps go. On 2026-09-06 it was
+# set in .env to /var/backups/backenly/workspace-backups to stop those dumps
+# stranding under .next/standalone/backups. This script read the same name out
+# of the same file, so the next night's CLUSTER backup silently followed it:
+# backenly-2026-09-07_0200.dump, globals-2026-09-07_0200.sql and LAST_BACKUP_OK
+# all landed inside the workspace-backup tree, and the marker anything watches
+# at /var/backups/backenly/LAST_BACKUP_OK went stale.
+#
+# One name meant two things. It now means one: this script never reads
+# BACKUP_DIR, so whatever the Web application sets cannot move cluster backups.
+DATABASE_BACKUP_DIR="${DATABASE_BACKUP_DIR:-/var/backups/backenly}"
+
 DB_NAME="${BACKUP_DB_NAME:-backenly}"
-BACKUP_DIR="${BACKUP_DIR:-/var/backups/backenly}"
 KEEP_DAYS="${BACKUP_KEEP_DAYS:-14}"
 DATE="$(date +%Y-%m-%d_%H%M)"
-DUMP_FILE="$BACKUP_DIR/backenly-$DATE.dump"
-GLOBALS_FILE="$BACKUP_DIR/globals-$DATE.sql"
-STATUS_OK="$BACKUP_DIR/LAST_BACKUP_OK"
-STATUS_FAIL="$BACKUP_DIR/LAST_BACKUP_FAILED"
+DUMP_FILE="$DATABASE_BACKUP_DIR/backenly-$DATE.dump"
+GLOBALS_FILE="$DATABASE_BACKUP_DIR/globals-$DATE.sql"
+STATUS_OK="$DATABASE_BACKUP_DIR/LAST_BACKUP_OK"
+STATUS_FAIL="$DATABASE_BACKUP_DIR/LAST_BACKUP_FAILED"
 LOCK="/tmp/backenly-backup.lock"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+
+# Report where this run WOULD write, then exit without touching the database,
+# the lock or the filesystem. This is what makes the directory contract
+# testable: proving it by running a real backup would need a live cluster, and
+# the bug being guarded against is purely one of path resolution.
+if [ "${1:-}" = "--print-config" ]; then
+  echo "DATABASE_BACKUP_DIR=$DATABASE_BACKUP_DIR"
+  echo "DUMP_FILE=$DUMP_FILE"
+  echo "GLOBALS_FILE=$GLOBALS_FILE"
+  echo "STATUS_OK=$STATUS_OK"
+  exit 0
+fi
 
 # Any error trips this: record a loud, machine-readable failure marker so a
 # broken backup is never silent again (the exact trap that hid the 4-month gap).
@@ -82,7 +111,7 @@ trap 'fail $LINENO' ERR
 exec 9>"$LOCK"
 if ! flock -n 9; then log "another backup is running — exiting"; exit 0; fi
 
-mkdir -p "$BACKUP_DIR"
+mkdir -p "$DATABASE_BACKUP_DIR"
 log "Starting backup of '$DB_NAME'…"
 
 # ── 1. Globals (roles + grants) ──────────────────────────────────────────────
@@ -131,8 +160,8 @@ else
 fi
 
 # ── 5. Retention (local) ─────────────────────────────────────────────────────
-find "$BACKUP_DIR" -name "backenly-*.dump" -mtime "+$KEEP_DAYS" -delete
-find "$BACKUP_DIR" -name "globals-*.sql"   -mtime "+$KEEP_DAYS" -delete
+find "$DATABASE_BACKUP_DIR" -name "backenly-*.dump" -mtime "+$KEEP_DAYS" -delete
+find "$DATABASE_BACKUP_DIR" -name "globals-*.sql"   -mtime "+$KEEP_DAYS" -delete
 
 # ── 6. Success marker + heartbeat ────────────────────────────────────────────
 rm -f "$STATUS_FAIL" 2>/dev/null || true
@@ -144,4 +173,4 @@ rm -f "$STATUS_FAIL" 2>/dev/null || true
 } > "$STATUS_OK"
 
 log "Backup complete. Local copies:"
-ls -lh "$BACKUP_DIR"/backenly-*.dump | tail -5
+ls -lh "$DATABASE_BACKUP_DIR"/backenly-*.dump | tail -5

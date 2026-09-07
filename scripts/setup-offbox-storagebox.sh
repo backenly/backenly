@@ -24,7 +24,8 @@ KEY="/root/.ssh/backenly_backup"
 REMOTE_NAME="storagebox"
 REMOTE_PATH="$REMOTE_NAME:backenly-backups"
 ENV_FILE="${ENV_FILE:-/opt/backenly/.env}"
-BACKUP_DIR="${BACKUP_DIR:-/var/backups/backenly}"
+# Cluster backups, not the Web application's workspace BACKUP_DIR. See scripts/backup.sh.
+DATABASE_BACKUP_DIR="${DATABASE_BACKUP_DIR:-/var/backups/backenly}"
 
 [ -f "$KEY" ] || { echo "FATAL: $KEY missing — generate it first."; exit 1; }
 
@@ -49,10 +50,10 @@ else
 fi
 
 echo "==> proving it: pushing the latest local backup off-box"
-LATEST_DUMP="$(ls -t "$BACKUP_DIR"/backenly-*.dump 2>/dev/null | head -1 || true)"
+LATEST_DUMP="$(ls -t "$DATABASE_BACKUP_DIR"/backenly-*.dump 2>/dev/null | head -1 || true)"
 if [ -n "$LATEST_DUMP" ]; then
   rclone copy "$LATEST_DUMP" "$REMOTE_PATH" --no-traverse
-  LATEST_GLOBALS="$(ls -t "$BACKUP_DIR"/globals-*.sql 2>/dev/null | head -1 || true)"
+  LATEST_GLOBALS="$(ls -t "$DATABASE_BACKUP_DIR"/globals-*.sql 2>/dev/null | head -1 || true)"
   [ -n "$LATEST_GLOBALS" ] && rclone copy "$LATEST_GLOBALS" "$REMOTE_PATH" --no-traverse
 fi
 
