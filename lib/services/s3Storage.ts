@@ -5,12 +5,22 @@
  * Works with: AWS S3, Cloudflare R2, MinIO, Backblaze B2, Google Cloud Storage (S3 compat mode)
  * 
  * Environment Variables:
- *   STORAGE_S3_ENDPOINT - S3 endpoint URL (e.g., https://s3.amazonaws.com or https://<account-id>.r2.cloudflarestorage.com)
- *   STORAGE_S3_REGION - Region (e.g., us-east-1, auto for R2/MinIO)
- *   STORAGE_S3_BUCKET - Bucket name
- *   STORAGE_S3_ACCESS_KEY - Access key ID
- *   STORAGE_S3_SECRET_KEY - Secret access key
- *   STORAGE_S3_PUBLIC_URL - Optional: Public CDN URL for public files
+ *   STORAGE_S3_BUCKET     - Bucket name (required)
+ *   STORAGE_S3_REGION     - Region. Required when no endpoint is set, because
+ *                           nothing can derive it then (native AWS).
+ *   STORAGE_S3_ENDPOINT   - Optional. Set for an S3-COMPATIBLE provider
+ *                           (Backblaze, R2, MinIO). LEAVE UNSET for native AWS.
+ *   STORAGE_S3_ACCESS_KEY - Optional. Set BOTH key and secret for static
+ *   STORAGE_S3_SECRET_KEY   credentials, or NEITHER to use the AWS default
+ *                           provider chain (ECS Task Role, instance profile,
+ *                           SSO). Exactly one of the two is refused.
+ *   STORAGE_S3_PUBLIC_URL - Optional legacy provider public host. Only
+ *                           interpreted alongside STORAGE_S3_ENDPOINT.
+ *   STORAGE_CDN_URL       - Optional explicit CDN base for public files.
+ *
+ * With neither public URL configured, public files are served through the
+ * application's own /api/storage/files/{id}/download route and everything else
+ * through presigned GETs — which is what lets the bucket stay private.
  */
 
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3'
@@ -20,7 +30,7 @@ import crypto from 'crypto'
 import type { StorageService } from './storage'
 import { generateUniqueStoragePath, enforceStorageQuota as enforceStorageLifecycleQuota, generatePresignedUrlExpiry } from '@/lib/storage/storage-lifecycle'
 import { enforceStorageQuota as enforceStorageBillingQuota } from './quota-enforcement'
-import { getS3Client, getS3Config } from './s3-config'
+import { getS3Client, getS3Config, s3ConfigurationProblem, checkS3Configuration } from './s3-config'
 
 export class S3StorageService implements StorageService {
   private s3Client: S3Client
@@ -35,17 +45,25 @@ export class S3StorageService implements StorageService {
     this.bucket = cfg.bucket
     this.publicUrl = cfg.publicUrl
 
-    if (!cfg.endpoint || !cfg.accessKeyId || !cfg.secretAccessKey || !cfg.bucket) {
-      throw new Error(
-        'S3 storage requires: STORAGE_S3_ENDPOINT, STORAGE_S3_ACCESS_KEY, ' +
-        'STORAGE_S3_SECRET_KEY, STORAGE_S3_BUCKET environment variables'
-      )
+    // Refuse an INCOHERENT configuration, not merely one that omits an endpoint
+    // or static keys. Requiring those two made this constructor throw outright
+    // on native AWS, where the endpoint is absent by definition and an ECS Task
+    // Role supplies credentials through the SDK's provider chain.
+    const problem = s3ConfigurationProblem()
+    if (problem) {
+      throw new Error(`S3 storage is not configured: ${problem}`)
     }
 
     this.s3Client = getS3Client()
 
+    // Name the credential mode. "endpoint: undefined" is the correct and
+    // expected state on native AWS, and an operator reading a log should be
+    // able to tell that apart from a missing setting at a glance.
+    const check = checkS3Configuration()
+    const credentials = 'credentials' in check ? check.credentials : 'unknown'
     console.log(
-      `[S3Storage] Initialized with endpoint: ${cfg.endpoint}, bucket: ${this.bucket}, region: ${cfg.region}`
+      `[S3Storage] Initialized bucket=${this.bucket} region=${cfg.region} ` +
+      `endpoint=${cfg.endpoint || '(native AWS)'} credentials=${credentials}`
     )
   }
 
@@ -59,17 +77,42 @@ export class S3StorageService implements StorageService {
    * enable direct public URLs.
    */
   private publicCdnBase(): string | null {
-    const base = process.env.STORAGE_CDN_URL || this.publicUrl
-    if (!base) return null
+    // STORAGE_CDN_URL is the EXPLICIT answer: an operator naming a CDN means a
+    // CDN, and it is honoured whatever the storage provider is.
+    const cdn = (process.env.STORAGE_CDN_URL ?? '').trim()
+    if (cdn) {
+      try {
+        new URL(cdn)
+      } catch {
+        return null
+      }
+      return cdn.replace(/\/$/, '')
+    }
+
+    // STORAGE_S3_PUBLIC_URL is the LEGACY provider-shaped value, and it is only
+    // interpretable next to a custom endpoint: its whole job is to say "this
+    // provider serves objects from a different host than its API".
+    //
+    // It must never be inferred without one. The old code compared the value's
+    // host against the endpoint's host and returned null when they matched —
+    // correct for Backblaze, but with no endpoint the comparison was against
+    // the empty string, so ANY value looked like a real CDN. On native AWS with
+    // Block Public Access that would have manufactured direct bucket URLs for
+    // every public file, all of them 403.
+    const legacy = (this.publicUrl ?? '').trim()
+    if (!legacy) return null
+
+    const endpoint = (getS3Config().endpoint ?? '').trim()
+    if (!endpoint) return null
+
     try {
-      const baseHost = new URL(base).host
-      const endpoint = getS3Config().endpoint
-      const epHost = endpoint ? new URL(endpoint).host : ''
-      if (baseHost && baseHost === epHost) return null // raw S3 endpoint, not a CDN
+      const baseHost = new URL(legacy).host
+      const epHost = new URL(endpoint).host
+      if (!baseHost || baseHost === epHost) return null // the API host cannot serve objects
+      return legacy.replace(/\/$/, '')
     } catch {
       return null
     }
-    return base.replace(/\/$/, '')
   }
 
   /**

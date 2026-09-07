@@ -103,9 +103,83 @@ export function getS3Config(): S3Config {
 }
 
 /** True when the S3 driver has everything it needs to talk to object storage. */
+/** How the S3 client will obtain credentials. */
+export type S3CredentialMode = 'static' | 'default-chain'
+
+export type S3ConfigCheck =
+  | { ok: true; credentials: S3CredentialMode }
+  | { ok: false; reason: string }
+
+/**
+ * Is object storage configured well enough to talk to?
+ *
+ * This used to require `endpoint && accessKeyId && secretAccessKey && bucket`,
+ * which encoded one deployment shape — Backblaze with static keys — as if it
+ * were the definition of "S3". Native AWS has NO custom endpoint, and a task
+ * running under an ECS Task Role has NO static keys, so that test returned
+ * false for a perfectly good AWS deployment. Nothing announced it: the seven
+ * call sites simply took their non-S3 branch, so `purgeS3Prefix` reported
+ * `skipped` (deleted projects keep their objects forever) and presigned upload
+ * and all four multipart branches quietly stopped using S3.
+ *
+ * The contract is now about whether the configuration is COHERENT, not about
+ * which provider it names:
+ *
+ *   bucket        required
+ *   region        required when there is no endpoint — nothing can derive it
+ *                 then, and a silent us-east-1 default against an ap-south-1
+ *                 bucket fails every request with PermanentRedirect
+ *   endpoint      optional (absent = native AWS)
+ *   credentials   both set = static; both absent = AWS default provider chain
+ *                 (Task Role, instance profile, SSO); exactly one set is a
+ *                 half-configured deployment and is refused rather than
+ *                 silently falling back to the chain, because that would
+ *                 present as mysterious AccessDenied rather than as the typo
+ *                 it is
+ *
+ * Deliberately NOT checked here: STORAGE_DRIVER. Callers gate on the driver
+ * themselves, and purge gates on the driver SNAPSHOTTED when the deletion was
+ * enqueued — folding a live driver read in here would let an operator flipping
+ * STORAGE_DRIVER strand files a retry was supposed to remove.
+ */
+export function checkS3Configuration(): S3ConfigCheck {
+  const bucket = (process.env.STORAGE_S3_BUCKET ?? '').trim()
+  const endpoint = (process.env.STORAGE_S3_ENDPOINT ?? '').trim()
+  const region = (process.env.STORAGE_S3_REGION ?? '').trim()
+  const accessKey = (process.env.STORAGE_S3_ACCESS_KEY ?? '').trim()
+  const secretKey = (process.env.STORAGE_S3_SECRET_KEY ?? '').trim()
+
+  if (!bucket) return { ok: false, reason: 'STORAGE_S3_BUCKET is not set' }
+
+  if (!endpoint && (!region || region.toLowerCase() === 'auto')) {
+    return {
+      ok: false,
+      reason:
+        'STORAGE_S3_REGION must name a real region when STORAGE_S3_ENDPOINT is unset ' +
+        '(native AWS: the region cannot be derived from an endpoint)',
+    }
+  }
+
+  if (accessKey && !secretKey) {
+    return { ok: false, reason: 'STORAGE_S3_ACCESS_KEY is set but STORAGE_S3_SECRET_KEY is not' }
+  }
+  if (secretKey && !accessKey) {
+    return { ok: false, reason: 'STORAGE_S3_SECRET_KEY is set but STORAGE_S3_ACCESS_KEY is not' }
+  }
+
+  return { ok: true, credentials: accessKey && secretKey ? 'static' : 'default-chain' }
+}
+
 export function isS3Configured(): boolean {
-  const c = getS3Config()
-  return Boolean(c.endpoint && c.accessKeyId && c.secretAccessKey && c.bucket)
+  return checkS3Configuration().ok
+}
+
+/** Why storage is unconfigured, for logs and startup errors. Never a secret. */
+export function s3ConfigurationProblem(): string | null {
+  // `in` rather than narrowing on `ok`: strictNullChecks is off in this
+  // tsconfig, which disables discriminated-union narrowing on boolean literals.
+  const c = checkS3Configuration()
+  return 'reason' in c ? c.reason : null
 }
 
 // Cached singleton — rebuilt only if the effective config changes (tests / env

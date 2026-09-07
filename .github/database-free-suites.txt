@@ -161,3 +161,14 @@ __tests__/services/workspace-model-detection.test.ts
 # its row; seen on production 2026-09-07. Database-free: it calls one pure
 # function, including with the clock frozen.
 __tests__/services/backup-filename-uniqueness.test.ts
+
+# Native AWS S3 must count as configured. isS3Configured() required an endpoint
+# and static keys, which native AWS + an ECS Task Role have neither of, so the
+# S3 path was silently disabled at seven call sites and the storage constructor
+# threw outright. Database-free: pure config resolution.
+__tests__/storage/s3-native-aws-config.test.ts
+
+# A private bucket must never be handed out as a public URL base. With no
+# endpoint the old host comparison ran against '', so any STORAGE_S3_PUBLIC_URL
+# looked like a CDN. Database-free: reads env and builds a string.
+__tests__/storage/public-url-contract.test.ts
