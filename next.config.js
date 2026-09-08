@@ -196,6 +196,51 @@ const nextConfig = {
     // nothing, which is the intended outcome rather than an error.
     '/**/*': ['./overlay-allowlist.json', './lib/cloud/**/*'],
   },
+  // CONTAINMENT, not a root-cause fix.
+  //
+  // The tracer pulls far more of this repository into .next/standalone than the
+  // server can execute — 315 MB and 18,105 files, including 78 files under
+  // __tests__, 142 under tests/ and the docs tree. The mechanism was bisected
+  // across several controlled builds and never identified; a plausible
+  // contributor is that some filesystem calls take computed paths the tracer
+  // cannot resolve, so it falls back to including everything nearby.
+  //
+  // Rather than keep hunting, the directories below are named as things that
+  // CANNOT legitimately be a production runtime dependency. Each was checked
+  // rather than assumed: nothing under lib/, app/, server/ or instrumentation.ts
+  // imports, requires, or exec()s anything in scripts/ — every mention of it is
+  // a comment or documentation string. The deployment scripts run on the host
+  // from the git checkout, never from .next/standalone, so excluding them from
+  // the TRACE does not affect deploy.sh or backup.sh.
+  //
+  // Deliberately NOT excluded, because real runtime assets live there:
+  // prisma/, public/, lib/, app/, packages/, node_modules/.prisma.
+  // MEASURED SCOPE, not a guess. Route traces obey this: it takes 78 files
+  // under __tests__ out of the standalone output.
+  //
+  // It does NOT remove tests/, docs/, scripts/ or the compose files, and that
+  // is not a pattern bug. Reading the .nft.json manifests the build itself
+  // produced, every one of those survivors is referenced by exactly one
+  // manifest — server/instrumentation.js.nft.json — and by no route manifest at
+  // all. instrumentation.js is not a route, so a route-keyed exclusion cannot
+  // reach it. That single trace carries 2,435 entries, including 772 under
+  // lib/ and 468 under app/: instrumentation.ts is the tracer's doorway into
+  // most of the repository, which is the real shape of the over-tracing.
+  //
+  // The rest of the containment therefore lives at the CONTAINER boundary,
+  // where it can be asserted rather than hoped for — see docker/web.Dockerfile.
+  outputFileTracingExcludes: {
+    '/*': [
+      './__tests__/**/*',
+      './tests/**/*',
+      './docs/**/*',
+      './scripts/**/*',
+      './docker-compose*.yml',
+      './docker/docker-compose*.yml',
+      './.github/**/*',
+      './coverage/**/*',
+    ],
+  },
   images: {
     remotePatterns: [
       {

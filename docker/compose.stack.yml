@@ -1,0 +1,133 @@
+# ============================================================================
+# The three Backenly services, as they will run on ECS.
+# ============================================================================
+#
+# This file exists to run the AWS topology locally before it exists in AWS, and
+# to state each service's contract in one place. It is NOT the development
+# stack (docker-compose.dev.yml) and NOT a production deployment.
+#
+#   docker compose -f docker/compose.stack.yml up --build
+#
+# ECS mapping:
+#   every service below is one task in one service, desired_count = 1
+#   web reaches runtime and postgrest over the task network, never the internet
+#   only web is exposed to a load balancer
+#
+# Secrets: nothing here is a real credential. On ECS these arrive from Secrets
+# Manager / SSM as task-definition secrets, never baked into an image.
+# ============================================================================
+
+services:
+  # ── Data plane ────────────────────────────────────────────────────────────
+  # On AWS this is RDS, not a container. Present here only so the stack runs.
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: backenly
+      POSTGRES_PASSWORD: changeme
+      POSTGRES_DB: backenly
+    ports: ['5433:5432']
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U backenly']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # ── PostgREST ─────────────────────────────────────────────────────────────
+  # The OFFICIAL image, unmodified. It ships no shell and no curl, so it gets
+  # no container healthcheck: ECS process liveness plus the application probes
+  # in Web and Runtime are the liveness signal. Building a custom image purely
+  # to add curl would mean maintaining a fork of the data plane for the sake of
+  # a health command, which is a worse trade.
+  #
+  # 0.25 vCPU / 512 MB · port 3002, internal only · read-only root · no volumes
+  # AWS: reaches RDS on 5432 and nothing else. No internet route required.
+  postgrest:
+    image: postgrest/postgrest:v14.15
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      PGRST_DB_URI: postgres://backenly:changeme@postgres:5432/backenly
+      PGRST_DB_ANON_ROLE: anon
+      # Production rewrites this per project and reloads over db-channel rather
+      # than restarting the process.
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_CHANNEL_ENABLED: 'true'
+      PGRST_DB_POOL: '10'
+      # 0.0.0.0 inside a container, not the 127.0.0.1 the host install uses:
+      # here the port is the service boundary rather than a loopback detail.
+      PGRST_SERVER_HOST: '0.0.0.0'
+      PGRST_SERVER_PORT: '3002'
+      PGRST_JWT_SECRET: local-not-a-real-secret-at-least-32-chars
+    read_only: true
+    tmpfs: ['/tmp']
+    deploy:
+      resources:
+        limits: { cpus: '0.25', memory: 512M }
+
+  # ── Runtime ───────────────────────────────────────────────────────────────
+  # 0.25 vCPU / 512 MB · port 3001 · GET /health · read-only root · no EFS
+  # Measured idle RSS ~57 MiB. See docker/runtime.Dockerfile.
+  runtime:
+    build:
+      context: ..
+      dockerfile: docker/runtime.Dockerfile
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      DATABASE_URL: postgresql://backenly:changeme@postgres:5432/backenly
+      DIRECT_URL: postgresql://backenly:changeme@postgres:5432/backenly
+      JWT_SECRET: changeme
+      # Mandatory in production: the server refuses to start with allow-all.
+      CORS_ORIGIN: http://localhost:3000
+      POSTGREST_URL: http://postgrest:3002
+      RUNTIME_PORT: '3001'
+    ports: ['3001:3001']
+    read_only: true
+    tmpfs: ['/tmp']
+    user: node
+    deploy:
+      resources:
+        limits: { cpus: '0.25', memory: 512M }
+
+  # ── Web ───────────────────────────────────────────────────────────────────
+  # 0.5 vCPU / 1 GB · port 3000 · the only service behind the load balancer.
+  #
+  # The one service with persistent state, and both paths are EFS on AWS:
+  #   WORKSPACE_DIR=/app/workspace   generated project files
+  #   BACKUP_DIR=/app/backups        per-project workspace dumps
+  # Everything else is ephemeral. Object storage is native S3 through the task
+  # role — no endpoint, no static keys (see lib/services/s3-config.ts).
+  web:
+    build:
+      context: ..
+      dockerfile: docker/web.Dockerfile
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      DATABASE_URL: postgresql://backenly:changeme@postgres:5432/backenly
+      DIRECT_URL: postgresql://backenly:changeme@postgres:5432/backenly
+      JWT_SECRET: changeme
+      BACKENLY_EDITION: cloud
+      WORKSPACE_DIR: /app/workspace
+      BACKUP_DIR: /app/backups
+      RUNTIME_API_URL: http://runtime:3001
+      POSTGREST_URL: http://postgrest:3002
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+      # Suppresses the in-process scheduler, exactly as production does while a
+      # deploy is in flight.
+      VERCEL: '1'
+      PORT: '3000'
+    ports: ['3000:3000']
+    volumes:
+      - web-workspace:/app/workspace
+      - web-backups:/app/backups
+    tmpfs: ['/tmp']
+    deploy:
+      resources:
+        limits: { cpus: '0.5', memory: 1G }
+
+# EFS on AWS. Named volumes locally so the same paths are exercised.
+volumes:
+  web-workspace:
+  web-backups:
