@@ -52,8 +52,27 @@ COPY tsconfig.json tsconfig.server.json ./
 COPY scripts/build-runtime-bundle.mjs ./scripts/
 COPY server ./server
 COPY lib ./lib
+COPY overlay-allowlist.json ./
 
 RUN node scripts/build-runtime-bundle.mjs
+
+# The Cloud composition is verified from DISK at startup, not from the bundle.
+#
+# server/index.ts calls assertEditionCompositionOrExit, and loadCloudExtension
+# walks up from process.cwd() looking for overlay-allowlist.json (ROOT_MARKER),
+# then reads lib/cloud/manifest.json and checks the file that manifest names.
+# esbuild inlines the extension CODE, but none of those three files exist in an
+# image that ships only the bundle — so a Cloud Runtime refused to start with
+# "could not locate the repository root (no overlay-allowlist.json above /app)".
+# It passed every earlier smoke test only because those left BACKENLY_EDITION
+# unset, where the assertion is a no-op.
+#
+# Staged into one directory so a single COPY works for both editions: a public
+# checkout has no lib/cloud and simply contributes nothing.
+RUN mkdir -p /src/edition-files/lib \
+ && cp overlay-allowlist.json /src/edition-files/ \
+ && if [ -d lib/cloud ]; then cp -r lib/cloud /src/edition-files/lib/cloud; fi \
+ && find /src/edition-files -type f | sed 's/^/  edition file: /'
 
 # Generate explicitly rather than relying on the postinstall hook, so the
 # client is produced with openssl present and lands in node_modules/.prisma.
@@ -87,6 +106,10 @@ COPY --from=build /src/dist-runtime ./dist-runtime
 COPY --from=build /src/node_modules/@prisma/client ./node_modules/@prisma/client
 COPY --from=build /src/node_modules/.prisma ./node_modules/.prisma
 COPY --from=build /src/prisma/schema.prisma ./prisma/schema.prisma
+
+# overlay-allowlist.json and, when composed, lib/cloud/** — read from disk by
+# the startup edition assertion. Without these a Cloud Runtime refuses to boot.
+COPY --from=build /src/edition-files/ ./
 
 ENV NODE_ENV=production \
     RUNTIME_PORT=3001
