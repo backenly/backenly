@@ -93,10 +93,16 @@ services:
       # cannot validate Backenly's per-project end-user tokens directly.
       PGRST_JWT_SECRET: ${POSTGREST_JWT_SECRET:-}
       PGRST_SERVER_PORT: 3000
-      # Deliberately NOT setting PGRST_DB_SCHEMAS. The served-schema list lives
-      # in `ALTER ROLE backenly_authenticator SET pgrst.db_schemas`, written by
-      # backenly_pgrst_register_schema, and in-database config is what lets a
-      # newly provisioned project appear without editing this file.
+      # Deliberately NOT setting PGRST_DB_SCHEMAS. The served-schema list comes
+      # from postgrest.pre_config(), which reads
+      # public.backenly_pgrst_schema_registry. Pinning the list here would stop a
+      # newly provisioned project from ever appearing.
+      #
+      # db-pre-config runs at startup AND on every `NOTIFY pgrst, 'reload config'`,
+      # which is how backenly_pgrst_register_schema reaches a RUNNING PostgREST
+      # with no restart. It replaced `ALTER ROLE ... SET pgrst.db_schemas`, which
+      # requires true superuser and so cannot work on a managed database.
+      PGRST_DB_PRE_CONFIG: postgrest.pre_config
     ports:
       # POSTGREST_URL in .env.example is http://127.0.0.1:3002.
       - "${POSTGREST_PORT:-3002}:3000"

@@ -108,9 +108,13 @@ describe('finding 3 — the documented path produces a running PostgREST', () =>
     // holds exactly one secret, so the two must be the same value.
     expect(COMPOSE).toContain('PGRST_JWT_SECRET: ${POSTGREST_JWT_SECRET:-}')
     expect(COMPOSE).toContain('PGRST_DB_ANON_ROLE: anon')
-    // db-schemas comes from the role setting the registry writes. Pinning it
-    // here would stop a newly provisioned project from ever appearing.
+    // db-schemas comes from postgrest.pre_config(), which reads the registry
+    // table. Pinning it here would stop a newly provisioned project from ever
+    // appearing.
     expect(COMPOSE).not.toMatch(/^\s*PGRST_DB_SCHEMAS:/m)
+    // ...and the pre-config function must actually be wired up, or PostgREST
+    // starts with no schemas at all and every project 406s.
+    expect(COMPOSE).toContain('PGRST_DB_PRE_CONFIG: postgrest.pre_config')
   })
 
   it('gives the operator a command to start it, not just a requirement', () => {

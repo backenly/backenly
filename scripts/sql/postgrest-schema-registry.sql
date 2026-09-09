@@ -7,17 +7,20 @@
 -- new project would therefore be born broken until someone edited a root-owned
 -- file and reloaded.
 --
--- PostgREST also reads its configuration FROM THE DATABASE (`db-config`, on by
--- default) via settings stamped on the authenticator role, and re-reads them on
--- `NOTIFY pgrst, 'reload config'`. That turns schema registration into a SQL
--- operation — which the app can perform, and which is transactional.
+-- PostgREST also reads its configuration FROM THE DATABASE via a `db-pre-config`
+-- function, and re-runs that function on `NOTIFY pgrst, 'reload config'`. That
+-- turns schema registration into a SQL operation — which the app can perform,
+-- and which is transactional.
 --
--- The catch: `ALTER ROLE ... SET` requires superuser. Granting the app superuser
--- to solve a list-append is wildly disproportionate — it would hand the runtime
--- the ability to read every tenant's data and disable RLS outright. So the
--- privilege is confined to exactly this operation with SECURITY DEFINER, and the
--- argument is validated rather than trusted, since it is concatenated into a
--- role-level setting.
+-- The list is held in `public.backenly_pgrst_schema_registry` and handed to
+-- PostgREST by `postgrest.pre_config()`. It used to be stamped on the
+-- authenticator role with `ALTER ROLE ... SET pgrst.db_schemas`, which requires
+-- TRUE SUPERUSER and therefore cannot work on a managed database — see the
+-- registry section below for the measured RDS failure.
+--
+-- The app still holds no privilege of its own: the write path is confined to
+-- these SECURITY DEFINER functions, and the argument is validated rather than
+-- trusted, since a schema name decides what becomes publicly servable.
 --
 -- ── THE DANGLING-SCHEMA OUTAGE ──────────────────────────────────────────────
 -- A registered schema that no longer exists does not degrade one tenant; it
@@ -101,9 +104,9 @@ BEGIN
     CREATE ROLE service_role NOLOGIN;
   END IF;
 
-  -- The login role PostgREST authenticates as. backenly_pgrst_register_schema
-  -- stores the served-schema list in ALTER ROLE ... SET pgrst.db_schemas on it,
-  -- so registration needs it to exist just as much as the grants need anon.
+  -- The login role PostgREST authenticates as. It is granted EXECUTE on
+  -- postgrest.pre_config() below, which is how PostgREST learns which schemas
+  -- to serve, so registration needs it to exist just as much as grants need anon.
   --
   -- Created with NO PASSWORD, so it cannot authenticate yet. NOINHERIT is
   -- load-bearing: with INHERIT it would passively hold the union of every role
@@ -114,7 +117,132 @@ BEGIN
   END IF;
 END $roles$;
 
+-- ── The registry ────────────────────────────────────────────────────────────
+--
+-- The served-schema list USED to live in `ALTER ROLE backenly_authenticator SET
+-- pgrst.db_schemas`, PostgREST's in-database configuration. That cannot work on
+-- a managed database. `pgrst.db_schemas` is a PLACEHOLDER GUC — an unreserved
+-- namespace no extension defines — and PostgreSQL requires TRUE SUPERUSER to set
+-- one. RDS never grants that (its master has rolsuper = false), and the PG15
+-- `GRANT SET ON PARAMETER` escape hatch does not cover placeholders, so the
+-- master cannot even grant itself the privilege. Measured on RDS PG 16.13:
+--
+--   ALTER ROLE backenly_authenticator SET pgrst.db_schemas = 'x'
+--     ERROR:  permission denied to set parameter "pgrst.db_schemas"
+--   GRANT SET ON PARAMETER "pgrst.db_schemas" TO backenly_admin
+--     ERROR:  permission denied for parameter pgrst.db_schemas
+--
+-- Every workspace registration failed. So the list lives in a table, and
+-- PostgREST reads it through a db-pre-config function (§ below) which calls
+-- set_config() — no role setting, no superuser. PostgREST's own guidance moved
+-- the same way, for the same reason.
+--
+-- PRIMARY KEY, not a UNIQUE index: it makes registration idempotent via
+-- ON CONFLICT DO NOTHING and makes two projects registering at once safe
+-- without an advisory lock.
+CREATE TABLE IF NOT EXISTS public.backenly_pgrst_schema_registry (
+  schema_name text PRIMARY KEY,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+-- Never reachable through the API. The registry names every served schema, so
+-- exposing it would hand any client the tenant list.
+REVOKE ALL ON TABLE public.backenly_pgrst_schema_registry FROM PUBLIC;
+
+-- ── One-time migration off the role setting ─────────────────────────────────
+--
+-- Backfills the table from the OLD location — `pgrst.db_schemas` on the
+-- authenticator — so an existing deployment keeps serving exactly the schemas it
+-- was serving a moment ago. Read directly from pg_db_role_setting rather than
+-- through backenly_pgrst_current_schemas(), because by the time this file
+-- finishes that function reads the table instead.
+--
+-- The source is the SERVED LIST, never a scan of information_schema. A scan
+-- would sweep in `_staging` schemas from the migration dry-run path and branch
+-- clones, which are full copies of a tenant's tables. Registering one of those
+-- would serve a shadow of an entire dataset under a name no dashboard shows.
+--
+-- FAILS CLOSED. If the legacy list holds an entry this file's own validation
+-- would refuse, the install aborts rather than silently serving less (or more)
+-- than before. Idempotent, and a no-op on a fresh install and on every re-run.
+DO $migrate$
+DECLARE
+  legacy_raw text;
+  legacy     text[];
+  rejected   text[];
+  migrated   text[];
+BEGIN
+  SELECT split_part(s.setting, '=', 2) INTO legacy_raw
+    FROM pg_db_role_setting r
+    CROSS JOIN LATERAL unnest(r.setconfig) AS s(setting)
+   WHERE r.setrole = (SELECT oid FROM pg_roles WHERE rolname = 'backenly_authenticator')
+     AND s.setting LIKE 'pgrst.db_schemas=%'
+   LIMIT 1;
+
+  IF legacy_raw IS NULL OR legacy_raw = '' THEN
+    RETURN;  -- fresh install, or already migrated and the setting cleaned up
+  END IF;
+
+  legacy := string_to_array(legacy_raw, ',');
+
+  -- Same pattern backenly_pgrst_register_schema enforces. Anything else in the
+  -- legacy list is a schema that should never have been servable.
+  SELECT array_agg(x) INTO rejected
+    FROM unnest(legacy) AS x
+   WHERE x !~ '^workspace_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(_br_[a-z][a-z0-9_]{1,30})?$';
+
+  IF rejected IS NOT NULL THEN
+    RAISE EXCEPTION
+      'Refusing to migrate the PostgREST registry: % legacy entr(y/ies) are not canonical workspace schemas: %. Resolve by hand, then re-run.',
+      array_length(rejected, 1), array_to_string(rejected, ', ');
+  END IF;
+
+  INSERT INTO public.backenly_pgrst_schema_registry(schema_name)
+  SELECT unnest(legacy)
+  ON CONFLICT (schema_name) DO NOTHING;
+
+  -- Prove the migration preserved the served set exactly. A mismatch here means
+  -- the table and the role setting disagree, and continuing would change which
+  -- tenants are reachable.
+  SELECT array_agg(schema_name ORDER BY schema_name) INTO migrated
+    FROM public.backenly_pgrst_schema_registry;
+
+  IF (SELECT array_agg(x ORDER BY x) FROM unnest(legacy) AS x)
+     IS DISTINCT FROM migrated THEN
+    RAISE EXCEPTION
+      'PostgREST registry migration mismatch. legacy=[%] migrated=[%]. No schemas were lost, but the sets differ - inspect public.backenly_pgrst_schema_registry before proceeding.',
+      array_to_string((SELECT array_agg(x ORDER BY x) FROM unnest(legacy) AS x), ','),
+      array_to_string(migrated, ',');
+  END IF;
+
+  RAISE NOTICE 'PostgREST registry migrated % schema(s) off the role setting.',
+    array_length(legacy, 1);
+END $migrate$;
+
+-- ── The idle schema ─────────────────────────────────────────────────────────
+--
+-- PostgREST refuses to start with an empty db-schemas, and a fresh install has
+-- zero workspaces — so pre_config() must always name at least one schema. This
+-- is that schema. It exists to be empty.
+--
+-- It is emphatically NOT `public`: falling back to public would serve the
+-- platform's own Prisma tables — every user, project and API key — over the
+-- public REST API for as long as no workspace happened to be registered.
+CREATE SCHEMA IF NOT EXISTS backenly_pgrst_idle;
+
+-- Inert by construction, not by convention. Nothing may be created here (a
+-- table in this schema would be world-readable the moment the registry empties),
+-- and no privilege beyond the USAGE PostgREST needs to consider it a valid
+-- schema is granted.
+REVOKE ALL ON SCHEMA backenly_pgrst_idle FROM PUBLIC;
+REVOKE CREATE ON SCHEMA backenly_pgrst_idle FROM PUBLIC;
+GRANT USAGE ON SCHEMA backenly_pgrst_idle TO anon, authenticated, service_role;
+
 -- ── Internal: read the current list ─────────────────────────────────────────
+-- Signature and return value are UNCHANGED: a comma-separated text list, in
+-- deterministic order. Every caller across lib/** reads through this function,
+-- so swapping the storage underneath it is invisible to them. Do not change the
+-- shape of this return value without auditing those callers.
 CREATE OR REPLACE FUNCTION public.backenly_pgrst_current_schemas()
 RETURNS text
 LANGUAGE sql
@@ -123,16 +251,47 @@ SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $fn$
   SELECT COALESCE(
-    split_part(
-      (SELECT s.setting
-         FROM pg_db_role_setting r
-         CROSS JOIN LATERAL unnest(r.setconfig) AS s(setting)
-        WHERE r.setrole = (SELECT oid FROM pg_roles WHERE rolname = 'backenly_authenticator')
-          AND s.setting LIKE 'pgrst.db_schemas=%'
-        LIMIT 1),
-      '=', 2),
+    (SELECT string_agg(schema_name, ',' ORDER BY schema_name)
+       FROM public.backenly_pgrst_schema_registry),
     '')
 $fn$;
+
+-- ── PostgREST db-pre-config ─────────────────────────────────────────────────
+--
+-- PostgREST calls this on startup AND on every `NOTIFY pgrst, 'reload config'`,
+-- which is what makes registration take effect on a running process with no
+-- restart. Proven against postgrest v14.15 on PostgreSQL 16 as a NON-SUPERUSER:
+-- a schema registered after boot went 406 -> 200 without restarting, while an
+-- already-served tenant stayed 200 across the reload.
+--
+-- Configure PostgREST with:  PGRST_DB_PRE_CONFIG=postgrest.pre_config
+--
+-- SECURITY DEFINER so backenly_authenticator needs no read on the registry
+-- table itself — only USAGE here and EXECUTE below.
+CREATE SCHEMA IF NOT EXISTS postgrest;
+REVOKE ALL ON SCHEMA postgrest FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION postgrest.pre_config()
+RETURNS void
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $fn$
+  SELECT set_config(
+    'pgrst.db_schemas',
+    COALESCE(NULLIF(public.backenly_pgrst_current_schemas(), ''), 'backenly_pgrst_idle'),
+    true)
+$fn$;
+
+REVOKE ALL ON FUNCTION postgrest.pre_config() FROM PUBLIC;
+
+DO $pre_cfg$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'backenly_authenticator') THEN
+    GRANT USAGE ON SCHEMA postgrest TO backenly_authenticator;
+    GRANT EXECUTE ON FUNCTION postgrest.pre_config() TO backenly_authenticator;
+  END IF;
+END $pre_cfg$;
 
 -- ── Internal: drop entries whose schema no longer exists ────────────────────
 -- Returns the pruned list. Never notifies on its own; callers decide when a
@@ -144,28 +303,18 @@ SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $fn$
 DECLARE
-  current_list text;
-  kept         text;
+  kept text;
 BEGIN
-  current_list := public.backenly_pgrst_current_schemas();
-  IF current_list IS NULL OR current_list = '' THEN
-    RETURN '';
-  END IF;
-
-  SELECT string_agg(name, ',' ORDER BY ord)
-    INTO kept
-    FROM unnest(string_to_array(current_list, ',')) WITH ORDINALITY AS t(name, ord)
-   WHERE EXISTS (
-     SELECT 1 FROM information_schema.schemata WHERE schema_name = t.name
+  -- One statement instead of read-modify-write: a row whose schema is gone is
+  -- deleted directly, so two prunes racing cannot resurrect each other's
+  -- entries the way rewriting a whole comma-separated list could.
+  DELETE FROM public.backenly_pgrst_schema_registry r
+   WHERE NOT EXISTS (
+     SELECT 1 FROM information_schema.schemata s WHERE s.schema_name = r.schema_name
    );
 
-  kept := COALESCE(kept, '');
-
-  IF kept IS DISTINCT FROM current_list THEN
-    EXECUTE format('ALTER ROLE backenly_authenticator SET pgrst.db_schemas = %L', kept);
-  END IF;
-
-  RETURN kept;
+  kept := public.backenly_pgrst_current_schemas();
+  RETURN COALESCE(kept, '');
 END;
 $fn$;
 
@@ -402,8 +551,7 @@ SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $fn$
 DECLARE
-  current_list text;
-  new_list     text;
+  new_list text;
 BEGIN
   -- The argument lands inside an ALTER ROLE ... SET statement, so it is checked
   -- against a strict pattern instead of being escaped. Only workspace schemas
@@ -442,9 +590,11 @@ BEGIN
     RAISE EXCEPTION 'Refusing to register schema %: it does not exist', target_schema;
   END IF;
 
-  -- Repair before extending: adding to a list that already contains a dangling
-  -- entry would reload straight into the cross-tenant 503 described above.
-  current_list := public.backenly_pgrst_prune_schemas();
+  -- Repair before extending: registering alongside a dangling entry would
+  -- reload straight into the cross-tenant 503 described above. The pruned list
+  -- is not captured — the INSERT below no longer builds on it, and reading the
+  -- registry once at the end is what the caller gets back.
+  PERFORM public.backenly_pgrst_prune_schemas();
 
   -- Grants. Registration used to omit this, on the assumption that
   -- `backenly_pgrst_on_ddl` had already granted as the tables were created.
@@ -471,27 +621,21 @@ BEGIN
   -- for omitting a column the token already carries.
   PERFORM public.backenly_pgrst_apply_owner_defaults(target_schema);
 
-  -- Idempotent. Compared against the comma-delimited list rather than by
-  -- substring, so `workspace_abc` is not considered already-present merely
-  -- because `workspace_abcdef` is.
-  IF target_schema = ANY (string_to_array(current_list, ',')) THEN
-    NOTIFY pgrst, 'reload config';
-    NOTIFY pgrst, 'reload schema';
-    RETURN current_list;
-  END IF;
+  -- Idempotent, and now enforced by the PRIMARY KEY rather than by comparing
+  -- against a comma-delimited string. The old substring hazard — treating
+  -- `workspace_abc` as present because `workspace_abcdef` was — cannot arise
+  -- from a keyed row. Two concurrent registrations of the same schema resolve
+  -- to one row instead of one clobbering the other's rewritten list.
+  INSERT INTO public.backenly_pgrst_schema_registry(schema_name)
+  VALUES (target_schema)
+  ON CONFLICT (schema_name) DO NOTHING;
 
-  IF current_list = '' OR current_list IS NULL THEN
-    new_list := target_schema;
-  ELSE
-    new_list := current_list || ',' || target_schema;
-  END IF;
-
-  EXECUTE format(
-    'ALTER ROLE backenly_authenticator SET pgrst.db_schemas = %L', new_list
-  );
+  new_list := public.backenly_pgrst_current_schemas();
 
   -- Config first, then schema cache: reloading the cache before the new schema
   -- is in the config would rebuild it without that schema and report success.
+  -- The config reload is what re-runs postgrest.pre_config(), which is how the
+  -- row above reaches a running PostgREST with no restart.
   NOTIFY pgrst, 'reload config';
   NOTIFY pgrst, 'reload schema';
 
@@ -509,21 +653,20 @@ SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $fn$
 DECLARE
-  current_list text;
-  new_list     text;
+  new_list text;
+  removed  integer;
 BEGIN
-  current_list := public.backenly_pgrst_current_schemas();
-  IF current_list IS NULL OR current_list = '' THEN
-    RETURN '';
-  END IF;
+  -- Idempotent: unregistering something already absent deletes nothing, emits
+  -- nothing, and is not an error. The row count — not a before/after string
+  -- comparison — decides whether anything actually changed, so a concurrent
+  -- unregister of a different schema cannot make this one look like a no-op.
+  DELETE FROM public.backenly_pgrst_schema_registry
+   WHERE schema_name = target_schema;
+  GET DIAGNOSTICS removed = ROW_COUNT;
 
-  SELECT COALESCE(string_agg(name, ',' ORDER BY ord), '')
-    INTO new_list
-    FROM unnest(string_to_array(current_list, ',')) WITH ORDINALITY AS t(name, ord)
-   WHERE t.name <> target_schema;
+  new_list := public.backenly_pgrst_current_schemas();
 
-  IF new_list IS DISTINCT FROM current_list THEN
-    EXECUTE format('ALTER ROLE backenly_authenticator SET pgrst.db_schemas = %L', new_list);
+  IF removed > 0 THEN
     NOTIFY pgrst, 'reload config';
     NOTIFY pgrst, 'reload schema';
   END IF;
