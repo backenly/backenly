@@ -83,9 +83,9 @@ BEGIN
     CREATE ROLE service_role NOLOGIN;
   END IF;
 
-  -- The login role PostgREST authenticates as. backenly_pgrst_register_schema
-  -- stores the served-schema list in ALTER ROLE ... SET pgrst.db_schemas on it,
-  -- so registration needs it to exist just as much as the grants need anon.
+  -- The login role PostgREST authenticates as. It is granted EXECUTE on
+  -- postgrest.pre_config() below, which is how PostgREST learns which schemas
+  -- to serve, so registration needs it to exist just as much as grants need anon.
   --
   -- Created with NO PASSWORD, so it cannot authenticate yet. NOINHERIT is
   -- load-bearing: with INHERIT it would passively hold the union of every role
