@@ -17,6 +17,7 @@ import { generateDomainEndpoints as _generateDomainEndpoints } from './build-run
 import { USER_ROLE_ID_BASES as _SEMANTIC_USER_ROLE_ID_BASES, USER_SEMANTIC_COLS as _SEMANTIC_USER_COLS } from './semantic-relations'
 import { writeDecisionEntry, extractFkInferences } from '@/lib/memory/decision-memory'
 import { riskLevelForExecutorAction, queuePendingActionFinding } from '@/lib/operational-memory/ledger'
+import { plaintextForStorage } from '@/lib/auth/api-key-plaintext'
 
 export interface AIAction {
   /** Optional trace explaining why this action was chosen — aids debugging hallucinations */
@@ -6692,7 +6693,8 @@ async function executeCreateKey(params: any, projectId: string): Promise<Executi
         projectId,
         userId: project.userId,
         name: description || 'AI Generated Key',
-        key: keyValue,
+        // Returned to the caller once, below. Never persisted.
+        key: plaintextForStorage(),
         keyHash,
         keyPrefix,
         permissions: Array.isArray(permissions) ? permissions : ['read', 'write'],
@@ -9744,7 +9746,11 @@ async function executeRotateKey(params: any, projectId: string): Promise<Executi
 
     await prisma.apiKey.update({
       where: { id: keyId },
-      data: { key: newKeyValue, keyPrefix: newPrefix, keyHash: newHash },
+      // The rotated secret goes back to the caller below and is never stored.
+      // This path was missed when the other four issuance sites were fixed,
+      // because the guard that protects them enumerated files by hand and this
+      // one was not on the list. See lib/auth/api-key-plaintext.ts.
+      data: { key: plaintextForStorage(), keyPrefix: newPrefix, keyHash: newHash },
     })
 
     return {

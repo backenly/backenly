@@ -27,7 +27,17 @@ import {
 
 const read = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), 'utf8')
 
-/** Every file that creates or updates an ApiKey row. */
+/**
+ * Hand-named issuance paths, kept as readable documentation of where keys are
+ * minted. NOT the coverage mechanism — see `discoverApiKeyMutationFiles`.
+ *
+ * This list WAS the coverage mechanism, and that is exactly how the defect it
+ * was written to prevent came back: `lib/ai/minimal-executor.ts` rotates a key
+ * from the agent surface and wrote `key: newKeyValue` straight to the column.
+ * It was never on this list, so the suite stayed green while plaintext was
+ * being persisted by a fifth path. An enumerated allowlist can only protect
+ * the files someone remembered to enumerate.
+ */
 const ISSUANCE_PATHS = [
   'app/api/api-keys/route.ts',
   'app/api/api-keys/[id]/rotate/route.ts',
@@ -90,6 +100,78 @@ describe('the shared rule', () => {
     expect(hasPersistedPlaintext({ key: '' })).toBe(false)
     expect(hasPersistedPlaintext({})).toBe(false)
   })
+})
+
+/**
+ * Every source file anywhere in the product that mutates an ApiKey row.
+ *
+ * Walks the tree rather than trusting a list. A new issuance path is caught the
+ * moment it is written, which is the only version of this guard that actually
+ * holds — the enumerated one above did not.
+ */
+function discoverApiKeyMutationFiles(): string[] {
+  const roots = ['lib', 'app', 'server', 'scripts', 'packages']
+  const out: string[] = []
+
+  const walk = (dir: string) => {
+    let entries: fs.Dirent[]
+    try {
+      entries = fs.readdirSync(path.join(process.cwd(), dir), { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const e of entries) {
+      const rel = `${dir}/${e.name}`
+      if (e.isDirectory()) {
+        if (e.name === 'node_modules' || e.name === '.next' || e.name === 'dist') continue
+        walk(rel)
+        continue
+      }
+      if (!/\.tsx?$/.test(e.name)) continue
+      const src = read(rel)
+      if (/prisma\.apiKey\.(?:create|update|updateMany)\s*\(/.test(src)) out.push(rel)
+    }
+  }
+
+  for (const r of roots) walk(r)
+  return out
+}
+
+describe('no path anywhere persists plaintext', () => {
+  const discovered = discoverApiKeyMutationFiles()
+
+  /**
+   * Without this the suite passes vacuously: a broken walker returns [], and
+   * `it.each([])` asserts nothing while reporting success. Assert the walker
+   * found real work to do, and specifically that it reaches BOTH a known
+   * issuance route and the executor path the enumerated list missed.
+   */
+  it('the scan actually found the mutation sites', () => {
+    expect(discovered.length).toBeGreaterThanOrEqual(ISSUANCE_PATHS.length)
+    expect(discovered).toEqual(expect.arrayContaining(['app/api/api-keys/route.ts']))
+    expect(discovered).toEqual(expect.arrayContaining(['lib/ai/minimal-executor.ts']))
+  })
+
+  /**
+   * The two spellings that mean "no plaintext".
+   *
+   * `plaintextForStorage()` is the rule for issuance paths. A bare `null` is
+   * accepted because the scrub script's whole job is
+   * `updateMany({ data: { key: null } })` — clearing the column, which is the
+   * invariant rather than a violation of it. Nothing else passes.
+   */
+  const PERMITTED = new Set(['plaintextForStorage()', 'null'])
+
+  it.each(discoverApiKeyMutationFiles())(
+    '%s writes no raw key to the key column',
+    rel => {
+      for (const block of prismaApiKeyMutations(code(read(rel)))) {
+        const assignment = block.match(/(?<![A-Za-z])key:\s*([^,\n}]+)/)
+        if (!assignment) continue
+        expect(PERMITTED).toContain(assignment[1].trim())
+      }
+    },
+  )
 })
 
 describe('no issuance path persists plaintext', () => {
