@@ -10,20 +10,23 @@
  *
  * This module asks that question and, for now, only records the answer.
  *
- * ── Why shadow first ────────────────────────────────────────────────────────
+ * ── How this is validated, and how it is NOT ────────────────────────────────
  *
  * The firing contract below is deliberately strict, and strict contracts can be
- * strict enough never to fire. Nobody knows yet whether Backenly-managed
- * projects actually exhibit subsystem-level repeated failure often enough to
- * justify building diagnosis, planning and structural execution on top of it.
- * Writing findings before that is known would be building six phases on an
- * input that may not exist. So this writes ONE audit row per tick, changes
- * nothing a user sees, and exists to answer four questions:
+ * strict enough never to fire. The original plan was to settle that by watching
+ * production. That plan was abandoned once it became clear the accounts on
+ * production belong to the founder and a relative: a detector that never fires
+ * proves nothing when nobody is generating real workloads, and one that fires
+ * proves nothing when its author caused the firing.
  *
- *   1. does the predicate ever fire?
- *   2. is the clustering sane, or is everything one blob?
- *   3. how many projects have no FK skeleton at all?
- *   4. do inferred edges help, or just merge everything?
+ * Correctness is therefore established against the scenario bank in
+ * `tests/lab/`, which builds real schemas in a real PostgreSQL and asserts both
+ * halves — that the evaluator fires on constructed recurrence, and stays silent
+ * on every near-miss. PREVALENCE is a separate question that cannot be answered
+ * yet, and nothing here should be read as an answer to it.
+ *
+ * The shadow telemetry still exists and is still worth collecting, but it is
+ * now descriptive rather than a gate.
  *
  * ── The evidence rule ───────────────────────────────────────────────────────
  *
@@ -99,7 +102,32 @@ export interface ConfirmedRepair {
   at: string
 }
 
-export type HarmKind = 'escalation' | 'server_error'
+/**
+ * The kinds of harm that can be attributed to a subsystem.
+ *
+ * ── What is deliberately absent, and why ────────────────────────────────────
+ *
+ * `RollbackExecution` looks like the obvious rollback source and is NOT used:
+ * nothing in the product writes that model. The only `rollbackExecution`
+ * symbols in the tree are a same-named function in
+ * `lib/ai/execution-journal.ts`. Reading it would add a harm source that can
+ * never fire — coverage that looks real in a type and is empty at runtime,
+ * which is the exact shape of scaffolding this codebase refuses to ship.
+ *
+ * Rollbacks come instead from the audit ledger, using the same
+ * `ROLLBACK_`-prefixed action set the trust scoreboard counts. Two definitions
+ * of "a rollback happened" would drift, and the one that drifts low is the one
+ * that quietly inflates a firing rate.
+ *
+ * Runtime telemetry (`computeHealthSignal`) is also absent from this list, and
+ * that is a limitation rather than an oversight: it aggregates `ApiRequestLog`
+ * per PROJECT, so it cannot say which subsystem degraded. It is reported
+ * alongside as project-level context and never counted as subsystem harm.
+ */
+export type HarmKind = 'escalation' | 'server_error' | 'rollback' | 'incident'
+
+/** Audit actions the trust scoreboard counts as a rollback. Kept in step with it. */
+const ROLLBACK_PREFIX = 'ROLLBACK_'
 
 export interface HarmSignal {
   kind: HarmKind
@@ -128,6 +156,8 @@ export interface SubsystemEvidence {
   independentHarm: HarmSignal[]
   /** Amplifier only. Present for reporting; never consulted by the gate. */
   changeCount: number
+  /** Amplifier only: DDL that arrived outside Backenly, over a direct connection. */
+  externalDdlCount: number
   fires: boolean
 }
 
@@ -184,6 +214,36 @@ export function requestTable(path: string): string | null {
 }
 
 /**
+ * The table named by a `SchemaDriftEvent.objectIdentity`.
+ *
+ * Identities arrive schema-qualified and sometimes quoted
+ * (`workspace_<id>."orders"`). Same parse `drift-watch.ts` applies when it
+ * decides which externally-altered tables to re-register, so the two agree
+ * about what an identity names.
+ */
+export function driftTable(objectIdentity: string | null | undefined): string | null {
+  const ident = objectIdentity ?? ''
+  if (!ident) return null
+  const name = ident.includes('.')
+    ? ident.slice(ident.indexOf('.') + 1).replace(/"/g, '')
+    : ident.replace(/"/g, '')
+  return name || null
+}
+
+/**
+ * Which member tables an audit row's payload names, if any.
+ *
+ * Audit `details` is a JSON STRING column with no consistent schema across
+ * actions, so this matches member names inside it rather than reading a field
+ * that may not exist. Word-boundary matched to keep `orders` from matching
+ * `order_items`, which would silently move one subsystem's harm into another.
+ */
+export function tablesNamedIn(details: string | null | undefined, members: readonly string[]): string[] {
+  if (!details) return []
+  return members.filter(m => new RegExp(`\\b${m.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(details))
+}
+
+/**
  * Only the kernel's own positive re-probe counts as a confirmed repair.
  *
  * Same accessor the trust scoreboard uses (`rollbackData.verification`), on
@@ -207,7 +267,7 @@ export async function evaluateSubsystemRecurrence(
 
   const map = opts.map ?? (await computeSubsystems(projectId, kind))
 
-  const [fixed, escalated, serverErrors] = await Promise.all([
+  const [fixed, escalated, serverErrors, rollbackRows, incidents, driftRows] = await Promise.all([
     prisma.healthFinding.findMany({
       where: { projectId, status: 'auto_fixed', fixAppliedAt: { gte: since } },
       select: { id: true, type: true, details: true, fixAppliedAt: true },
@@ -222,6 +282,21 @@ export async function evaluateSubsystemRecurrence(
     prisma.apiRequestLog.findMany({
       where: { projectId, timestamp: { gte: since }, statusCode: { gte: 500 } },
       select: { path: true, statusCode: true, timestamp: true },
+      take: 500,
+    }),
+    prisma.auditLog.findMany({
+      where: { projectId, timestamp: { gte: since }, action: { startsWith: ROLLBACK_PREFIX } },
+      select: { id: true, action: true, details: true, timestamp: true },
+      take: 200,
+    }),
+    prisma.incident.findMany({
+      where: { projectId, startedAt: { gte: since } },
+      select: { id: true, title: true, affectedServices: true, startedAt: true },
+      take: 200,
+    }),
+    prisma.schemaDriftEvent.findMany({
+      where: { projectId, capturedAt: { gte: since } },
+      select: { objectIdentity: true },
       take: 500,
     }),
   ])
@@ -278,6 +353,50 @@ export async function evaluateSubsystemRecurrence(
     })
   }
 
+  // Rollbacks and incidents are attributed per SUBSYSTEM rather than per table,
+  // because neither source carries a single table: an audit payload may name
+  // several, and an incident's affectedServices is a free-form list. Held aside
+  // and matched against each component's membership below.
+  const allMembers = [...new Set(map.subsystems.flatMap(s => s.membership))]
+
+  const rollbackHarm: Array<{ tables: string[]; signal: HarmSignal }> = []
+  for (const r of rollbackRows) {
+    const tables = tablesNamedIn(r.details, allMembers)
+    if (tables.length === 0) continue
+    rollbackHarm.push({
+      tables,
+      signal: {
+        kind: 'rollback',
+        detail: `${r.action} touched ${tables.join(', ')}`,
+        at: r.timestamp.toISOString(),
+      },
+    })
+  }
+
+  const incidentHarm: Array<{ tables: string[]; signal: HarmSignal }> = []
+  for (const inc of incidents) {
+    const tables = allMembers.filter(m => inc.affectedServices.includes(m))
+    if (tables.length === 0) continue
+    incidentHarm.push({
+      tables,
+      signal: {
+        kind: 'incident',
+        detail: `incident: ${inc.title}`,
+        at: inc.startedAt.toISOString(),
+      },
+    })
+  }
+
+  // External DDL is an AMPLIFIER, not harm. Someone running ALTER TABLE from
+  // psql is a person working, not a backend failing, and counting it as harm
+  // would make the most actively maintained backend look the sickest.
+  const externalDdlByTable = new Map<string, number>()
+  for (const d of driftRows) {
+    const t = driftTable(d.objectIdentity)
+    if (!t) continue
+    externalDdlByTable.set(t, (externalDdlByTable.get(t) ?? 0) + 1)
+  }
+
   // Amplifier: how much this area changed at all. Reported, never gated on.
   const changes = await prisma.backendEvent
     .findMany({
@@ -302,11 +421,22 @@ export async function evaluateSubsystemRecurrence(
     // Independence: a harm signal produced BY one of the counted repairs would
     // make the loop's own activity the evidence for its own escalation.
     const repairIds = new Set(confirmedRepairs.map(r => r.findingId))
-    const independentHarm = s.membership
-      .flatMap(t => harmByTable.get(t) ?? [])
-      .filter(h => !(h.sourceFindingId && repairIds.has(h.sourceFindingId)))
+    const memberSet = new Set(s.membership)
+    const independentHarm = [
+      ...s.membership.flatMap(t => harmByTable.get(t) ?? []),
+      // Subsystem-scoped sources. Deduplicated by signal rather than by table:
+      // one rollback naming three member tables is ONE piece of evidence, and
+      // counting it three times would let a single event clear the harm gate on
+      // its own.
+      ...rollbackHarm.filter(r => r.tables.some(t => memberSet.has(t))).map(r => r.signal),
+      ...incidentHarm.filter(i => i.tables.some(t => memberSet.has(t))).map(i => i.signal),
+    ].filter(h => !(h.sourceFindingId && repairIds.has(h.sourceFindingId)))
 
     const changeCount = s.membership.reduce((n, t) => n + (changeByTable.get(t) ?? 0), 0)
+    const externalDdlCount = s.membership.reduce(
+      (n, t) => n + (externalDdlByTable.get(t) ?? 0),
+      0,
+    )
 
     return {
       fingerprint: s.fingerprint,
@@ -319,6 +449,7 @@ export async function evaluateSubsystemRecurrence(
       distinctGapIdentities,
       independentHarm,
       changeCount,
+      externalDdlCount,
       fires: firesSubsystemRecurrence({
         confirmedRepairCount: confirmedRepairs.length,
         distinctGapIdentityCount: distinctGapIdentities.length,
