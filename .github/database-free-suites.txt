@@ -172,3 +172,5 @@ __tests__/storage/s3-native-aws-config.test.ts
 # endpoint the old host comparison ran against '', so any STORAGE_S3_PUBLIC_URL
 # looked like a CDN. Database-free: reads env and builds a string.
 __tests__/storage/public-url-contract.test.ts
+__tests__/security/outbound-guard.test.ts
+__tests__/security/integration-credential-egress.test.ts

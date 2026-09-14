@@ -31,6 +31,7 @@ import { generateFixedFunctionCode } from './generator'
 import { isRouteModuleFunction, executeRouteModuleFunction, validateRouteModule } from './route-module-runner'
 import { enforceAiFunctionInvocation, trackAiFunctionInvocation } from '@/lib/entitlements/policy'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
+import { safeFetch } from '@/lib/security/outbound-guard'
 import { isReservedTestEmail } from '@/lib/services/end-user-auth-table'
 // One cast table for the whole codebase. Duplicating it is how the MCP path and
 // this one would drift, and a drifted cast table is invisible until 42804.
@@ -220,22 +221,32 @@ function buildDbProxy(projectId: string, caller: FunctionCallerContext = {}) {
       return null
     },
 
+    // ── ctx.http.* ───────────────────────────────────────────────────────────
+    //
+    // These two handlers run PARENT-side. Every other control in this module
+    // bounds the worker; none of them bounds the parent's network reach, so a
+    // bare fetch() here could read the cloud metadata service, anything on the
+    // VPC, or the loopback admin ports (PostgREST on 3002, the runtime on 3001)
+    // on behalf of customer-authored code. safeFetch is the boundary: scheme
+    // allowlist, connect-time address validation that closes the DNS-rebinding
+    // window, per-hop redirect re-validation, and a response cap.
+    // See lib/security/outbound-guard.ts.
     async 'http.get'([url, headers]: [string, Record<string, string> | undefined]) {
-      const res = await fetch(url, {
+      const res = await safeFetch(url, {
         method: 'GET',
         headers: { 'Content-Type': 'application/json', ...headers },
-        signal: AbortSignal.timeout(8000),
+        timeoutMs: 8000,
       })
       const text = await res.text()
       try { return JSON.parse(text) } catch { return text }
     },
 
     async 'http.post'([url, body, headers]: [string, any, Record<string, string> | undefined]) {
-      const res = await fetch(url, {
+      const res = await safeFetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...headers },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(8000),
+        timeoutMs: 8000,
       })
       const text = await res.text()
       try { return JSON.parse(text) } catch { return text }
