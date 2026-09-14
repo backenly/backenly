@@ -155,6 +155,14 @@ It must be attributed before any comparison is trusted, because
 `add_rls_policies.sql` is one of the six loose files, and "no policies" is
 exactly what a broken read looks like.
 
+**Do not assume privilege visibility is the explanation.** That is the
+comfortable answer and it is unfalsifiable from a single empty result. Settle it
+by joining `pg_policy` to `pg_class` and `pg_namespace` directly rather than
+reading the `pg_policies` view, and by inspecting `relrowsecurity` and
+`relforcerowsecurity` on the tables themselves. Those distinguish "these tables
+genuinely carry no policies" from "the view, the query or a filter missed them",
+which the view alone cannot.
+
 ## 9. What the RDS rehearsal already proved
 
 Separately established at 7/7 against staging (see
