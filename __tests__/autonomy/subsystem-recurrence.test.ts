@@ -181,11 +181,15 @@ describe('toShadowTelemetry', () => {
   })
 
   /**
-   * The row is written to AuditLog, which is shared operational data. Table
-   * names are customer schema detail and do not belong in it, so firing
-   * subsystems are identified by membership hash only.
+   * A firing case must be inspectable after the fact.
+   *
+   * "The predicate fired" is not evidence it fired USEFULLY: five technically
+   * valid but worthless correlations look identical to five real ones in a bare
+   * count, and the decision this telemetry informs is whether to build six more
+   * phases. So a firing case carries the gaps, the repairs and the harm a human
+   * needs to judge it. Non-firing components stay aggregate.
    */
-  it('records firing subsystems by hash, never by table name', () => {
+  it('records inspectable evidence for a firing subsystem', () => {
     const t = toShadowTelemetry(
       report({
         firing: [
@@ -195,10 +199,14 @@ describe('toShadowTelemetry', () => {
             membership: ['sessions', 'users'],
             provenance: 'constraint',
             eligible: true,
-            confirmedRepairs: [],
-            distinctGapIdentities: [],
-            independentHarm: [],
-            changeCount: 0,
+            confirmedRepairs: [
+              { findingId: 'f1', type: 'missing_rls', gapKey: 'missing_rls::users', table: 'users', at: '2026-09-01T00:00:00Z' },
+            ],
+            distinctGapIdentities: ['missing_rls::users', 'missing_fk_index::sessions.user_id'],
+            independentHarm: [
+              { kind: 'server_error', detail: '500 on /db/sessions', at: '2026-09-02T00:00:00Z' },
+            ],
+            changeCount: 14,
             fires: true,
           },
         ],
@@ -206,6 +214,29 @@ describe('toShadowTelemetry', () => {
     )
     expect(t.firedCount).toBe(1)
     expect(t.firedMemberships).toEqual(['abc123'])
-    expect(JSON.stringify(t)).not.toMatch(/sessions|users/)
+
+    const [ev] = t.firingEvidence
+    expect(ev.membership).toEqual(['sessions', 'users'])
+    expect(ev.gapIdentities).toHaveLength(2)
+    expect(ev.repairs[0]).toMatchObject({ type: 'missing_rls', table: 'users' })
+    expect(ev.harm[0]).toMatchObject({ kind: 'server_error' })
+    // Churn is recorded as context and played no part in the decision.
+    expect(ev.changeCount).toBe(14)
+  })
+
+  it('records no evidence when nothing fired', () => {
+    expect(toShadowTelemetry(report()).firingEvidence).toEqual([])
+  })
+
+  it('reports the singleton count that views used to distort', () => {
+    const t = toShadowTelemetry(
+      report({
+        subsystems: [
+          { fingerprint: 'a', membershipHash: 'h1', membership: ['a'], provenance: 'constraint', eligible: false, confirmedRepairs: [], distinctGapIdentities: [], independentHarm: [], changeCount: 0, fires: false },
+          { fingerprint: 'b', membershipHash: 'h2', membership: ['b', 'c'], provenance: 'constraint', eligible: true, confirmedRepairs: [], distinctGapIdentities: [], independentHarm: [], changeCount: 0, fires: false },
+        ],
+      }),
+    )
+    expect(t.singletonComponentCount).toBe(1)
   })
 })

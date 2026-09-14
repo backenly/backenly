@@ -129,6 +129,50 @@ describe('clustering reads the real catalog', () => {
     const products = report.subsystems.find(s => s.membership.includes('products'))!
     expect(products.membership).toEqual(['product_images', 'products'])
   })
+
+  /**
+   * Views must not reach the graph.
+   *
+   * `readWorkspaceSchema` reads `information_schema.columns`, which describes
+   * views too. Each would land as a singleton, and the shadow run reports
+   * component count, singleton ratio and largest-component share as the inputs
+   * to a GO/MODIFY/STOP decision — so views would make good clustering look
+   * like noise AND make a genuinely over-broad component look narrow by
+   * inflating the denominator.
+   *
+   * The unit tests cover the filter's logic. This covers the half they cannot:
+   * that the `pg_class` relkind query actually runs and returns what the filter
+   * expects against a real database.
+   */
+  it('is unchanged by adding ten views to the schema', async () => {
+    const before = await evaluateSubsystemRecurrence(projectId, { kind: 'attached' })
+
+    for (let i = 0; i < 10; i++) {
+      await q(`CREATE VIEW "${schema}"."v_report_${i}" AS
+                 SELECT id AS id, user_id AS user_id FROM "${schema}"."sessions"`)
+    }
+    // Materialized views are a separate relkind ('m') and must also be excluded.
+    await q(`CREATE MATERIALIZED VIEW "${schema}"."mv_users" AS
+               SELECT id AS id FROM "${schema}"."users"`)
+    invalidateSubsystemCache(projectId)
+
+    try {
+      const after = await evaluateSubsystemRecurrence(projectId, { kind: 'attached' })
+      expect(after.tableCount).toBe(before.tableCount)
+      expect(after.componentCount).toBe(before.componentCount)
+      expect(after.largestComponentShare).toBeCloseTo(before.largestComponentShare, 10)
+      expect(after.subsystems.map(s => s.membership)).toEqual(
+        before.subsystems.map(s => s.membership),
+      )
+      expect(JSON.stringify(after.subsystems)).not.toMatch(/v_report|mv_users/)
+    } finally {
+      await q(`DROP MATERIALIZED VIEW IF EXISTS "${schema}"."mv_users"`).catch(() => {})
+      for (let i = 0; i < 10; i++) {
+        await q(`DROP VIEW IF EXISTS "${schema}"."v_report_${i}"`).catch(() => {})
+      }
+      invalidateSubsystemCache(projectId)
+    }
+  })
 })
 
 describe('the firing case', () => {

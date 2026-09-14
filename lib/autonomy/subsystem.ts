@@ -37,6 +37,7 @@
  */
 
 import { readWorkspaceSchema } from '@/lib/typegen/schema-reader'
+import { queryWorkspaceSchema } from '@/lib/services/workspaceDatabase'
 import { extractFkInferences } from '@/lib/memory/decision-memory'
 
 /** How a component's edges were established. */
@@ -171,23 +172,48 @@ export interface SchemaGraph {
  *
  * Separated from clustering so the hard part is testable without a database.
  */
-export function buildSchemaGraph(schema: {
-  tables: Array<{
-    tableName: string
-    columns: Array<{
-      columnName: string
-      isForeignKey?: boolean
-      referencedTable?: string
+export function buildSchemaGraph(
+  schema: {
+    tables: Array<{
+      tableName: string
+      columns: Array<{
+        columnName: string
+        isForeignKey?: boolean
+        referencedTable?: string
+      }>
     }>
-  }>
-}): SchemaGraph {
-  const tables = schema.tables.map(t => t.tableName).sort()
+  },
+  /**
+   * Physical tables, when the caller knows them. Everything else in the schema
+   * is excluded from the graph entirely.
+   *
+   * `readWorkspaceSchema` reads `information_schema.columns`, which describes
+   * VIEWS as well as tables. Views carry no foreign keys, so every one of them
+   * lands as a singleton component — and the shadow run's whole purpose is to
+   * report component counts, singleton ratio and largest-component share so a
+   * human can decide whether this roadmap continues.
+   *
+   * A project with 12 base tables and 20 views would report as overwhelmingly
+   * singleton, and a genuinely over-broad component would look narrow because
+   * the views inflated the denominator. Those are precisely the two numbers the
+   * GO/MODIFY/STOP gate turns on, so this is not cosmetic noise: it would bias
+   * the decision in both directions at once.
+   *
+   * Omit it and every relation in the snapshot is treated as a table, which is
+   * correct for the pure unit tests that construct their own fixtures.
+   */
+  baseTables?: ReadonlySet<string>,
+): SchemaGraph {
+  const relations = baseTables
+    ? schema.tables.filter(t => baseTables.has(t.tableName))
+    : schema.tables
+  const tables = relations.map(t => t.tableName).sort()
   const known = new Set(tables)
 
   const constraint = new Set<string>()
   const inferred = new Set<string>()
 
-  for (const t of schema.tables) {
+  for (const t of relations) {
     for (const c of t.columns) {
       if (!c.isForeignKey || !c.referencedTable) continue
       if (!known.has(c.referencedTable)) continue
@@ -196,7 +222,7 @@ export function buildSchemaGraph(schema: {
     }
   }
 
-  for (const t of schema.tables) {
+  for (const t of relations) {
     const guesses = extractFkInferences(
       t.columns.map(c => ({ name: c.columnName })),
       tables,
@@ -218,12 +244,21 @@ export function buildSchemaGraph(schema: {
   }
 }
 
+/**
+ * Order-independent key for an edge between two tables.
+ *
+ * NUL separates the halves because it is the one byte a PostgreSQL identifier
+ * cannot contain, so no table name can forge a pair boundary. It is spelled as
+ * a unicode escape rather than written as a literal control byte: an invisible
+ * byte in source makes the whole file read as binary to grep, which costs more
+ * in lost searchability than the separator is worth.
+ */
 function pairKey(a: string, b: string): string {
-  return a < b ? `${a} ${b}` : `${b} ${a}`
+  return a < b ? `${a}\u0000${b}` : `${b}\u0000${a}`
 }
 
 function unpairKey(k: string): [string, string] {
-  const [a, b] = k.split(' ')
+  const [a, b] = k.split('\u0000')
   return [a, b]
 }
 
@@ -338,6 +373,34 @@ export function clusterSchemaGraph(
   }
 }
 
+// ── Physical relations ────────────────────────────────────────────────────────
+
+/**
+ * The tables in a workspace schema that are actually tables.
+ *
+ * `relkind` from `pg_class` rather than `information_schema.tables.table_type`:
+ * it distinguishes ordinary ('r') and partitioned ('p') tables from views ('v'),
+ * materialized views ('m'), foreign tables ('f') and sequences ('S') in one
+ * cheap indexed read, and it is the same catalog the rest of the loop trusts.
+ *
+ * Kept here rather than pushed into `readWorkspaceSchema`, because other
+ * consumers of that reader legitimately want views — a generated TypeScript
+ * type for a view is useful, a view in a foreign-key clustering is not.
+ */
+async function readBaseTableNames(projectId: string): Promise<Set<string>> {
+  const rows = await queryWorkspaceSchema(
+    projectId,
+    `SELECT c.relname
+       FROM pg_class c
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = $1
+        AND c.relkind IN ('r', 'p')`,
+    `workspace_${projectId}`,
+  )
+  const list: Array<{ relname: string }> = rows?.rows ?? rows ?? []
+  return new Set(list.map(r => r.relname))
+}
+
 // ── Per-tick cache ────────────────────────────────────────────────────────────
 
 interface CacheEntry {
@@ -375,8 +438,11 @@ export async function computeSubsystems(
     // an empty clustering here would be indistinguishable from a flat backend,
     // which is the exact shape of the detectMissingRls defect that left a
     // security probe dead for months while the dashboard rendered green.
-    const schema = await readWorkspaceSchema(projectId)
-    graph = buildSchemaGraph(schema)
+    const [schema, baseTables] = await Promise.all([
+      readWorkspaceSchema(projectId),
+      readBaseTableNames(projectId),
+    ])
+    graph = buildSchemaGraph(schema, baseTables)
     cache.set(projectId, { at: Date.now(), graph })
   }
   return clusterSchemaGraph(projectId, graph, kind)

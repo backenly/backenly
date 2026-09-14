@@ -343,6 +343,83 @@ describe('fingerprint and membership semantics', () => {
   })
 })
 
+describe('views are excluded from the graph', () => {
+  /**
+   * `readWorkspaceSchema` reads `information_schema.columns`, which describes
+   * views as well as tables. Views have no foreign keys, so each one lands as a
+   * singleton — and the shadow run reports component count, singleton ratio and
+   * largest-component share as the inputs to a GO/MODIFY/STOP decision.
+   *
+   * Ten views on a four-table schema would turn "clusters reasonably" into
+   * "overwhelmingly singleton", and would shrink a genuinely over-broad
+   * component's share by inflating the denominator. It biases both gate numbers
+   * at once, in opposite directions, which is why this is not cosmetic noise.
+   */
+  const physical = {
+    users: [['id', null]],
+    sessions: [['id', null], ['user_id', 'users']],
+    products: [['id', null]],
+    audit: [['id', null]],
+  } as Record<string, Array<[string, string | null]>>
+
+  const withViews = {
+    ...physical,
+    ...Object.fromEntries(
+      Array.from({ length: 10 }, (_, i) => [
+        `v_report_${i}`,
+        [['id', null], ['user_id', null]] as Array<[string, string | null]>,
+      ]),
+    ),
+  }
+
+  const baseTables = new Set(Object.keys(physical))
+
+  it('produces identical clustering with and without views present', () => {
+    const clean = clusterSchemaGraph('p1', buildSchemaGraph(schema(physical)), 'attached')
+    const noisy = clusterSchemaGraph(
+      'p1',
+      buildSchemaGraph(schema(withViews), baseTables),
+      'attached',
+    )
+    expect(noisy.subsystems).toEqual(clean.subsystems)
+    expect(noisy.tables).toEqual(clean.tables)
+  })
+
+  it('produces identical breadth metrics', () => {
+    const clean = clusterSchemaGraph('p1', buildSchemaGraph(schema(physical)), 'skeleton')
+    const noisy = clusterSchemaGraph(
+      'p1',
+      buildSchemaGraph(schema(withViews), baseTables),
+      'skeleton',
+    )
+    const share = (m: typeof clean) =>
+      Math.max(...m.subsystems.map(s => s.membership.length)) / m.tables.length
+    expect(share(noisy)).toBeCloseTo(share(clean), 10)
+    expect(noisy.tables).toHaveLength(4)
+  })
+
+  /**
+   * Proves the filter is doing work. Without it the same fixture reports very
+   * differently, so a future change that drops the base-table read cannot pass
+   * the two tests above by accident.
+   */
+  it('UNFILTERED, the same fixture reports materially different topology', () => {
+    const unfiltered = clusterSchemaGraph('p1', buildSchemaGraph(schema(withViews)), 'skeleton')
+    expect(unfiltered.tables).toHaveLength(14)
+    const singletons = unfiltered.subsystems.filter(s => s.membership.length === 1)
+    expect(singletons.length).toBeGreaterThan(10)
+  })
+
+  it('a view is not pulled in by an inferred edge either', () => {
+    const noisy = clusterSchemaGraph(
+      'p1',
+      buildSchemaGraph(schema(withViews), baseTables),
+      'attached',
+    )
+    expect(noisy.subsystems.flatMap(s => s.membership).join(',')).not.toMatch(/v_report/)
+  })
+})
+
 describe('vacuous-pass guards', () => {
   /**
    * Every assertion above would still pass if the clusterer returned nothing

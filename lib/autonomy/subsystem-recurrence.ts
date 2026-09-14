@@ -352,6 +352,34 @@ export async function evaluateSubsystemRecurrence(
  * and no queue grows. The shape is chosen so the four questions in the module
  * header can be answered by querying this action alone.
  */
+/**
+ * Enough of one firing case to judge it later without re-deriving it.
+ *
+ * An earlier version of this recorded membership HASHES only, to keep customer
+ * table names out of shared operational data. That was the wrong trade, for a
+ * reason worth stating: "the predicate fired at least once" is not evidence
+ * that it fired USEFULLY. Five technically-valid but worthless correlations
+ * would look identical to five real ones in a bare count, and the decision this
+ * telemetry exists to inform is whether to build six more phases.
+ *
+ * So a firing case carries what a human needs to say "yes, that really was one
+ * area whose repairs were not holding" or "no, those four repairs were
+ * unrelated". Non-firing components stay aggregate. Firings are rare by
+ * construction, so the row stays small, and `AUTONOMY_RECURRENCE_ESCALATED`
+ * already records `tableName` to the same log.
+ */
+export interface FiringEvidence {
+  membershipHash: string
+  membership: string[]
+  provenance: EdgeProvenance
+  /** The distinct gaps repaired. The heart of "several DIFFERENT things". */
+  gapIdentities: string[]
+  repairs: Array<{ type: string; table: string; at: string }>
+  harm: Array<{ kind: HarmKind; detail: string; at: string }>
+  /** Amplifier, recorded for context. Played no part in the decision to fire. */
+  changeCount: number
+}
+
 export interface ShadowTelemetry {
   kind: ClusteringKind
   windowDays: number
@@ -359,14 +387,20 @@ export interface ShadowTelemetry {
   tableCount: number
   componentCount: number
   eligibleComponentCount: number
+  /** Components of exactly one table, the statistic views used to distort. */
+  singletonComponentCount: number
   largestComponentShare: number
   attributionCoverage: number
   firedCount: number
-  /** Membership hashes only. No table names, so the row stays small. */
   firedMemberships: string[]
+  /** Inspectable evidence, firing components only. */
+  firingEvidence: FiringEvidence[]
   maxConfirmedRepairs: number
   maxDistinctIdentities: number
 }
+
+/** Bound on recorded evidence, so one pathological project cannot bloat the log. */
+const MAX_EVIDENCE_ITEMS = 10
 
 export function toShadowTelemetry(report: SubsystemRecurrenceReport): ShadowTelemetry {
   return {
@@ -377,9 +411,23 @@ export function toShadowTelemetry(report: SubsystemRecurrenceReport): ShadowTele
     componentCount: report.componentCount,
     eligibleComponentCount: report.eligibleComponentCount,
     largestComponentShare: Number(report.largestComponentShare.toFixed(3)),
+    singletonComponentCount: report.subsystems.filter(s => s.membership.length === 1).length,
     attributionCoverage: Number(report.attributionCoverage.toFixed(3)),
     firedCount: report.firing.length,
     firedMemberships: report.firing.map(f => f.membershipHash),
+    firingEvidence: report.firing.slice(0, MAX_EVIDENCE_ITEMS).map(f => ({
+      membershipHash: f.membershipHash,
+      membership: f.membership,
+      provenance: f.provenance,
+      gapIdentities: f.distinctGapIdentities,
+      repairs: f.confirmedRepairs
+        .slice(0, MAX_EVIDENCE_ITEMS)
+        .map(r => ({ type: r.type, table: r.table, at: r.at })),
+      harm: f.independentHarm
+        .slice(0, MAX_EVIDENCE_ITEMS)
+        .map(h => ({ kind: h.kind, detail: h.detail, at: h.at })),
+      changeCount: f.changeCount,
+    })),
     maxConfirmedRepairs: report.subsystems.reduce(
       (n, s) => Math.max(n, s.confirmedRepairs.length),
       0,
