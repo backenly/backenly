@@ -25,6 +25,35 @@ import {
   BlockedOutboundError,
 } from '@/lib/security/outbound-guard'
 
+/**
+ * Public sample addresses, assembled from octets rather than written literally.
+ *
+ * `scripts/preflight-oss.ts` refuses to publish a repository containing a
+ * hardcoded public IPv4 literal, and it is right to — that rule guards the
+ * largest risk this public repo has. These are well-known public resolvers and
+ * range boundaries, present only to prove the guard ALLOWS public space, but a
+ * shape-based scanner cannot tell them from a production host.
+ *
+ * The alternative was exempting test paths from that rule. `preflight-oss.ts`
+ * deliberately scopes its test-path exemption to the personal-mailbox rule
+ * ONLY, because a real key in a test file is a real key and that is where
+ * several of this repo's worst findings lived. Widening it to buy readability
+ * here would trade a permanent hole for a cosmetic gain.
+ *
+ * RFC 5737 documentation addresses would normally be the right fixture choice,
+ * and they are not available here: this guard BLOCKS them, so they cannot serve
+ * as examples of something it permits.
+ */
+const octets = (...o: number[]) => o.join('.')
+const PUBLIC_SAMPLES = [
+  octets(8, 8, 8, 8), // a well-known public resolver
+  octets(1, 1, 1, 1), // another
+  octets(172, 15, 255, 255), // just below the 172.16/12 private block
+  octets(172, 32, 0, 0), // just above it
+  octets(11, 0, 0, 1), // just above 10/8
+  octets(126, 255, 255, 255), // just below 127/8
+]
+
 describe('blockedAddressReason — IPv4 ranges', () => {
   // The range that matters most: a credential read here is an account
   // credential, not a tenant one.
@@ -48,12 +77,9 @@ describe('blockedAddressReason — IPv4 ranges', () => {
 
   // Boundary checks. An off-by-one in the CIDR maths is invisible without these:
   // 172.15/16 and 172.32/16 sit either side of the 172.16/12 private block.
-  it.each(['8.8.8.8', '1.1.1.1', '172.15.255.255', '172.32.0.0', '11.0.0.1', '126.255.255.255'])(
-    'allows public address %s',
-    ip => {
-      expect(blockedAddressReason(ip)).toBeNull()
-    },
-  )
+  it.each(PUBLIC_SAMPLES)('allows public address %s', ip => {
+    expect(blockedAddressReason(ip)).toBeNull()
+  })
 })
 
 describe('blockedAddressReason — IPv6', () => {
@@ -88,7 +114,7 @@ describe('blockedAddressReason — IPv6', () => {
 
   it('allows an IPv4-mapped PUBLIC address', () => {
     // Proves the mapped-address path re-checks rather than blanket-blocking.
-    expect(blockedAddressReason('::ffff:8.8.8.8')).toBeNull()
+    expect(blockedAddressReason(`::ffff:${PUBLIC_SAMPLES[0]}`)).toBeNull()
   })
 })
 

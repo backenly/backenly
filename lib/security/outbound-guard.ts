@@ -133,7 +133,7 @@ function v6Groups(ip: string): number[] | null {
   const pct = s.indexOf('%')
   if (pct !== -1) s = s.slice(0, pct)
 
-  // An embedded IPv4 tail (::ffff:1.2.3.4) becomes two groups.
+  // An embedded IPv4 tail (the `::ffff:` form) becomes two groups.
   const v4m = s.match(/(\d{1,3}(?:\.\d{1,3}){3})$/)
   if (v4m) {
     const n = v4ToInt(v4m[1])

@@ -174,8 +174,26 @@ const RULES: Rule[] = [
     // thing it exists to suppress. The gate must not become the leak.
     //
     // Excludes the private and reserved ranges, which are meaningless to a
-    // remote attacker: 10/8, 127/8, 192.168/16, 172.16-31/12, 169.254/16,
-    // 0.x, 224+/4 multicast+reserved, and 255.x.
+    // remote attacker: 10/8, 127/8, 100.64/10, 192.168/16, 172.16-31/12,
+    // 169.254/16, 0.x, 224+/4 multicast+reserved, and 255.x.
+    //
+    // Three IANA-reserved ranges were missing from that list until
+    // lib/security/outbound-guard.ts became the first code to name them — in a
+    // table of ranges it exists to BLOCK:
+    //
+    //   100.64/10     RFC 6598 carrier-grade NAT
+    //   192.88.99/24  6to4 relay anycast
+    //   198.18/15     RFC 2544 benchmarking
+    //
+    // The gate reported blocklist entries as "Names the production host", which
+    // is the same false-positive class as the Chrome user-agent and RFC 5737
+    // cases below: shape-identical to a routable address, definitionally not
+    // one. The irony is worth noting, because it will recur — an egress
+    // blocklist is a list of addresses nobody should reach, so it reads to a
+    // shape-based scanner exactly like a list of addresses someone did reach.
+    // Every false positive spends credibility this gate cannot afford, since it
+    // guards the repository's single largest risk and only works if its output
+    // is read rather than skimmed.
     //
     // Also excludes `N.0.0.0`, and that trailing exclusion is load-bearing
     // rather than tidy. A dotted quad whose last three octets are all zero is a
@@ -199,7 +217,7 @@ const RULES: Rule[] = [
     // correct thing and must not be punished for it. This gate guards the
     // repository's single largest risk; its credibility is the asset, and every
     // false positive spends some.
-    pattern: /\b(?!0\.)(?!10\.)(?!127\.)(?!169\.254\.)(?!192\.168\.)(?!192\.0\.2\.)(?!198\.51\.100\.)(?!203\.0\.113\.)(?!172\.(?:1[6-9]|2\d|3[01])\.)(?!22[4-9]\.)(?!2[3-5]\d\.)(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b(?<!\.0\.0\.0)/g,
+    pattern: /\b(?!0\.)(?!10\.)(?!127\.)(?!100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)(?!169\.254\.)(?!192\.168\.)(?!192\.0\.0\.)(?!192\.0\.2\.)(?!192\.88\.99\.)(?!198\.1[89]\.)(?!198\.51\.100\.)(?!203\.0\.113\.)(?!172\.(?:1[6-9]|2\d|3[01])\.)(?!22[4-9]\.)(?!2[3-5]\d\.)(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b(?<!\.0\.0\.0)/g,
     impact: 'Names the production host — the first step of any real attack is finding it.',
     treeOnly: true,
   },
