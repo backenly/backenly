@@ -210,6 +210,27 @@ export const FLAGS = {
   get ENABLE_AUTONOMY_RECONCILER(): boolean { return readBool('ENABLE_AUTONOMY_RECONCILER') },
 
   /**
+   * Subsystem-recurrence shadow evaluation.
+   *
+   * Asks, once per tick, whether several DIFFERENT gaps have been repaired in
+   * one foreign-key-connected area and whether that area shows harm the loop
+   * did not cause itself. Writes ONE AuditLog row and nothing else: no finding,
+   * no queue entry, no mutation, nothing an owner sees.
+   *
+   * It is a measurement, not a feature. The question it answers is whether
+   * subsystem-level repeated failure happens often enough to justify building
+   * structural diagnosis and maintenance on top of it. Enabling this before
+   * building those phases is the cheap way to find out; building them first and
+   * discovering the input does not exist is the expensive way.
+   *
+   * Its numbers are only admissible once the detectMissingRls fix is deployed —
+   * before that the confirmed-repair count is measuring a partly blind detector.
+   *
+   * Off by default. Safe to enable in production: read-only.
+   */
+  get ENABLE_SUBSYSTEM_RECURRENCE_SHADOW(): boolean { return readBool('ENABLE_SUBSYSTEM_RECURRENCE_SHADOW') },
+
+  /**
    * Autonomy live execution.
    *
    * Separate explicit production lever for real autonomous mutations. The

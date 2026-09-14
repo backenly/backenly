@@ -970,12 +970,57 @@ export async function runReconciler(
     })
     .catch(() => {})
 
+  // Subsystem-recurrence measurement. Deliberately placed after the tick marker
+  // and before the mode dispatch, so it observes every project the loop visits
+  // regardless of whether that project is set to act.
+  //
+  // Fail-silent and awaited: it must never change whether the loop repairs a
+  // backend, and a measurement that takes the loop down with it is worse than
+  // no measurement. Both clusterings are evaluated because which one is useful
+  // is exactly what the shadow run is for.
+  await recordSubsystemRecurrenceShadow(projectId)
+
   const level = await getProjectAutonomyLevel(projectId)
   if (level === 'OFF' || !FLAGS.ENABLE_AUTONOMY_LIVE_EXECUTION) {
     // Loop is on but this project opted out of action — still observe + record.
     return runReconcilerShadow(projectId)
   }
   return runReconcilerLive(projectId)
+}
+
+/**
+ * Evaluate subsystem recurrence and write one audit row. Observes only.
+ *
+ * Exported for the verification script; not part of the reconciler's contract.
+ */
+export async function recordSubsystemRecurrenceShadow(projectId: string): Promise<void> {
+  if (!FLAGS.ENABLE_SUBSYSTEM_RECURRENCE_SHADOW) return
+  try {
+    const { evaluateSubsystemRecurrence, toShadowTelemetry } = await import('./subsystem-recurrence')
+    const [skeleton, attached] = await Promise.all([
+      evaluateSubsystemRecurrence(projectId, { kind: 'skeleton' }),
+      evaluateSubsystemRecurrence(projectId, { kind: 'attached' }),
+    ])
+    await prisma.auditLog.create({
+      data: {
+        projectId,
+        action: 'AUTONOMY_SUBSYSTEM_RECURRENCE_SHADOW',
+        type: 'autonomy',
+        details: JSON.stringify({
+          skeleton: toShadowTelemetry(skeleton),
+          attached: toShadowTelemetry(attached),
+        }),
+        timestamp: new Date(),
+      },
+    })
+  } catch (err) {
+    // One project's unreadable catalog must not stop the fleet being measured,
+    // and must not stop that project being HEALED.
+    console.warn(
+      `[Reconciler] subsystem-recurrence shadow failed for project=${projectId}:`,
+      err instanceof Error ? err.message : err,
+    )
+  }
 }
 
 /**

@@ -232,13 +232,22 @@ export function extractFkInferences(
   for (const col of columns) {
     if (!col.name.endsWith('_id') || col.name === 'id') continue
     const candidate = col.name.slice(0, -3) // strip _id
-    // Try plural → singular heuristic
+
+    // Both directions, because the column and the table rarely agree on number.
+    //
+    // This only tried plural -> singular, which meant the single most common
+    // convention in the wild missed entirely: `user_id` produced the candidates
+    // `user` and `user`, and a schema whose table is `users` matched neither.
+    // The function found inferences only for the rarer `users_id` spelling, so
+    // it read as working while returning almost nothing on real schemas.
     const singular = candidate.endsWith('s') ? candidate.slice(0, -1) : candidate
-    const ref = tableSet.has(candidate)
-      ? candidate
-      : tableSet.has(singular)
-      ? singular
-      : null
+    const plural = candidate.endsWith('s') ? candidate : `${candidate}s`
+    // `category` -> `categories`, `company` -> `companies`.
+    const pluralY = /[^aeiou]y$/.test(candidate) ? `${candidate.slice(0, -1)}ies` : null
+
+    const ref = [candidate, singular, plural, pluralY].find(
+      (c): c is string => typeof c === 'string' && tableSet.has(c),
+    )
     if (ref) {
       inferences.push({ column: col.name, references: `${ref}.id` })
     }
