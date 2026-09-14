@@ -174,5 +174,3 @@ __tests__/storage/s3-native-aws-config.test.ts
 __tests__/storage/public-url-contract.test.ts
 __tests__/security/outbound-guard.test.ts
 __tests__/security/integration-credential-egress.test.ts
-__tests__/autonomy/subsystem-clustering.test.ts
-__tests__/autonomy/subsystem-recurrence.test.ts
