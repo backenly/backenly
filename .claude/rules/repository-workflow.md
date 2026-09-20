@@ -106,6 +106,20 @@ If the checkout is dirty with unrelated work, preserve it. Use a separate
 worktree or a clean branch from `origin/main`; never stash/reset/delete someone
 else's work just to make the current task convenient.
 
+### Verify the Git identity before any automated commit
+
+Identity is configured **per repository** in `.git/config`, so a fresh clone, a
+new worktree, or a different Backenly repo may not carry it:
+
+```bash
+git config user.name && git config user.email
+```
+
+Both must be the approved identity — `Adarsh` with the GitHub `noreply`
+address. If they are not, set them at repo scope before committing rather than
+committing under a wrong, personal, or machine-default identity. This
+repository is public and the commit author is published.
+
 ## Backenly Cloud infrastructure facts
 
 Backenly Cloud has completely moved to AWS.
@@ -183,3 +197,14 @@ staging/production results, and rollback information.
 A release record must be truthful about exceptions (for example,
 environment-specific web digests). Never rewrite history to make the process
 look cleaner than it was.
+
+## API keys: NULL plaintext is the healthy state
+
+Bulk API-key repair is **retired**. A `NULL` stored plaintext is the **secure**
+state, not a broken one.
+
+`scripts/repair-all-api-keys.ts` still selects `{ key: null }` as "needs
+repair" and regenerates a plaintext for every match, so **running it now would
+rotate valid credentials.** It is operator-only with no HTTP surface. Retiring
+or rewriting it is a tracked cleanup item — do not run it, and do not
+reintroduce a bulk repair path reachable from the product.
