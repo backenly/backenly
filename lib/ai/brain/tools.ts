@@ -2071,6 +2071,12 @@ export async function dispatchTool(
         })
       }
       const s = report.scoreboard
+      // Stated before anything else, because an agent reading "AGGRESSIVE"
+      // and reporting that the backend self-heals would be repeating the
+      // exact claim the deployment cannot support.
+      const modeLine = report.executionMode?.repairsAreApplied
+        ? ''
+        : `\n\n**NOT REPAIRING.** ${report.executionMode?.explanation ?? ''}`
       const pending = report.pendingApprovals.length
       const verifiedPct =
         s.verifiedRate === null ? '—' : `${Math.round(s.verifiedRate * 100)}%`
@@ -2086,13 +2092,17 @@ export async function dispatchTool(
         `Rollbacks: ${s.rollbacks} · ` +
         `Verified: ${verifiedPct} · ` +
         `Breaker trips: ${s.breakerTrips}` +
-        capLine
+        capLine +
+        modeLine
       return finalize({
         ok: true,
         summary,
         data: {
           level: report.level,
           cap: report.cap,
+          // Hoisted out of `report` so an agent reading the structured data
+          // cannot miss it behind the dial.
+          executionMode: report.executionMode,
           windowDays,
           report,
         },

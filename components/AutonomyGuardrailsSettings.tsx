@@ -50,6 +50,19 @@ interface TrustReport {
   /** Optional on the wire so a response predating the field renders no panel
    *  rather than crashing the page. */
   appliedChanges?: AppliedChange[]
+  /**
+   * Whether the loop is really applying repairs.
+   *
+   * Optional for the same reason as above. Absent means an older server, and
+   * the page then says nothing rather than guessing - which is the honest
+   * fallback, since guessing "live" is exactly the bug this field fixes.
+   */
+  executionMode?: {
+    mode: 'live' | 'shadow'
+    reason: 'live' | 'loop_off' | 'deployment_flag_off' | 'project_dial_off'
+    explanation: string
+    repairsAreApplied: boolean
+  }
 }
 
 // TWO modes, not three (founder, 2026-07-18: "the off also not needed — just
@@ -102,14 +115,25 @@ function timeAgo(iso: string): string {
 
 // ── Shell ─────────────────────────────────────────────────────────────────────
 
-function Shell({ level, children }: { level?: Level; children: React.ReactNode }) {
+function Shell({ level, shadow, children }: { level?: Level; shadow?: boolean; children: React.ReactNode }) {
   return (
     <div className="h-full overflow-y-auto bg-[#101116] text-zinc-100">
       <InspectorPageHeader
         icon={Bot}
         title="Autonomy"
         description="Your backend keeps working when nobody is asking. Control what Backenly can change on its own and what always needs your approval. The safety floor below never moves, at any mode."
-        badge={level ? { label: labelFor(level), variant: level === 'OFF' ? 'governed' : 'beta' } : undefined}
+        {...{}}
+        badge={
+          // Shadow wins over the dial. The dial is what the owner ASKED for;
+          // the mode is what the deployment is doing, and rendering the ask as
+          // though it were the outcome is what let a backend read "Autopilot"
+          // while the loop could not apply a single fix.
+          shadow
+            ? { label: 'Shadow', variant: 'governed' as const }
+            : level
+              ? { label: labelFor(level), variant: level === 'OFF' ? 'governed' : 'beta' }
+              : undefined
+        }
       />
       <div className="px-8 pb-10 pt-6">{children}</div>
     </div>
@@ -211,7 +235,7 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
   const capLabel = labelFor(data.cap)
 
   return (
-    <Shell level={data.level}>
+    <Shell level={data.level} shadow={data.executionMode?.mode === 'shadow'}>
       <div className="space-y-8">
         {banner && (
           <div
@@ -258,6 +282,34 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
                landed on "Nothing waiting on you". Detect's number is now the
                sum of these two cards, which is the only arrangement in which
                the dashboard and the page it links to can both be true. ── */}
+        {/* ── Shadow is stated, not implied ────────────────────────────
+
+             With live execution off the loop evaluates every invariant,
+             decides what it would repair, writes an audit row that looks like
+             work, and applies nothing. Every surface here still rendered the
+             dial, so the page said "Autopilot" over a deployment structurally
+             incapable of fixing anything. The only signal was a server log
+             line throttled to hourly.
+
+             Placed above the queues deliberately: everything below it is a
+             list of things that are NOT being acted on, and reading those
+             first gives exactly the wrong impression. ── */}
+        {data.executionMode && !data.executionMode.repairsAreApplied && (
+          <section className={`overflow-hidden ${KIT.radius} border border-amber-500/20 bg-amber-500/[0.04] ${KIT.inset}`}>
+            <div className="flex items-start gap-2.5 px-5 py-3.5">
+              <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-400" />
+              <div>
+                <h3 className="text-[13px] font-semibold tracking-tight text-amber-100">
+                  Watching, not repairing
+                </h3>
+                <p className="mt-1 text-[11.5px] leading-relaxed text-amber-200/80">
+                  {data.executionMode.explanation}
+                </p>
+              </div>
+            </div>
+          </section>
+        )}
+
         <ReviewQueuePanel projectId={projectId} />
         <DetectedFindingsPanel projectId={projectId} level={data.level} />
 
