@@ -53,6 +53,7 @@ import {
   type MaintenanceStep,
   type MaintenanceStepKind,
 } from './step'
+import { rollbackRefusal } from './rollback-capability'
 
 export type PlanValidity = 'executable' | 'blocked_by_capability' | 'invalid'
 
@@ -133,7 +134,7 @@ function ladderFor(
           params: { tableName: table, purpose: 'consolidated lifecycle column' },
           preconditions: ['target column does not already exist'],
           expectedPostconditions: ['target column exists and is nullable'],
-          rollbackSpec: { strategy: 'drop_object', description: 'Drop the added column.' },
+          rollbackSpec: { strategy: 'drop_column', description: 'Drop the added column.' },
         },
         {
           // Before dual_write, so the catalog never rests with an unconstrained
@@ -150,7 +151,7 @@ function ladderFor(
           params: { tableName: table, purpose: "the source column's domain under the transform" },
           preconditions: ['target column exists', 'source column declares an enumerable domain'],
           expectedPostconditions: ['target column is constrained to the transformed source domain'],
-          rollbackSpec: { strategy: 'drop_object', description: 'Drop the added constraint.' },
+          rollbackSpec: { strategy: 'drop_constraint', description: 'Drop the added constraint.' },
         },
         {
           kind: 'dual_write',
@@ -158,7 +159,7 @@ function ladderFor(
           params: { tableName: table },
           preconditions: ['target column exists', 'trigger body cannot abort the caller'],
           expectedPostconditions: ['writes to the legacy column also populate the target'],
-          rollbackSpec: { strategy: 'drop_object', description: 'Drop the dual-write trigger.' },
+          rollbackSpec: { strategy: 'drop_trigger', description: 'Drop the dual-write trigger.' },
         },
         {
           kind: 'backfill',
@@ -167,7 +168,7 @@ function ladderFor(
           preconditions: ['dual-write installed', 'no unreconciled mismatches'],
           expectedPostconditions: ['every pre-existing row has a target value'],
           rollbackSpec: {
-            strategy: 'revert_new_structure',
+            strategy: 'drop_column',
             description:
               'Drop the target column. The source is untouched by expand, so there is nothing ' +
               'to restore and no checkpoint to depend on.',
@@ -211,7 +212,7 @@ function ladderFor(
           params: { tableName: table, purpose: 'constraint, added NOT VALID' },
           preconditions: ['constraint does not already exist'],
           expectedPostconditions: ['constraint exists, not yet validated'],
-          rollbackSpec: { strategy: 'drop_object', description: 'Drop the constraint.' },
+          rollbackSpec: { strategy: 'drop_constraint', description: 'Drop the constraint.' },
         },
         {
           kind: 'verify',
@@ -231,7 +232,13 @@ function ladderFor(
           params: { tableName: table, purpose: 'single consolidated policy' },
           preconditions: ['consolidated policy does not already exist'],
           expectedPostconditions: ['one policy covers the command'],
-          rollbackSpec: { strategy: 'drop_object', description: 'Drop the consolidated policy.' },
+          rollbackSpec: {
+            strategy: 'restore_policies',
+            description:
+              'Restore the exact policy set that existed before consolidation. NOT a drop: ' +
+              'consolidation replaced the fragments, so removing the result would leave the ' +
+              'table with no row security at all.',
+          },
         },
         {
           kind: 'verify',
@@ -310,6 +317,23 @@ export function buildMaintenancePlan(input: PlanInput): MaintenancePlan {
     humanOnlySteps: [],
   })
 
+  /**
+   * The ladder is sound and this deployment cannot safely run it.
+   *
+   * `blocked_by_capability`, not `invalid`: nothing is wrong with the plan,
+   * and nothing a human approves can make a missing executor exist. Steps are
+   * carried so the surface can show WHAT it would have done, which is the
+   * difference between "Backenly cannot do this yet" and a blank refusal.
+   */
+  const blockedByCapability = (reasons: string[]): MaintenancePlan => ({
+    ...base,
+    planVersion: stableHash([base.planId, 'blocked_by_capability', reasons]),
+    steps: [],
+    validity: 'blocked_by_capability',
+    blockedReasons: reasons,
+    humanOnlySteps: [],
+  })
+
   // ── 1. The diagnosis must be decision-quality ──────────────────────────────
   //
   // Planning is NOT evidence. A ladder existing must never raise confidence in
@@ -351,6 +375,27 @@ export function buildMaintenancePlan(input: PlanInput): MaintenancePlan {
     return invalid([
       `steps without a rollback: ${missingRollback.map(s => s.kind).join(', ')}`,
     ])
+  }
+
+  // And a description is not a capability.
+  //
+  // This check used to end one line above, which treated the presence of a
+  // sentence as proof of an ability. Two of the four operations the old
+  // `drop_object` strategy covered had no executor at all, so ladders were
+  // planned, approved and executed on the strength of a recovery that did not
+  // exist. The registry is the authority now: a rung is recoverable when the
+  // deployed executor can perform its exact rollback kind, and not before.
+  const unrecoverable = seeds
+    .filter(s => requiresRollbackSpec(s.kind) && s.rollbackSpec)
+    .map(s => ({ kind: s.kind, refusal: rollbackRefusal(s.rollbackSpec!.strategy) }))
+    .filter(x => x.refusal !== null)
+  if (unrecoverable.length > 0) {
+    // `blocked_by_capability`, deliberately NOT something a human can approve.
+    // Nobody's consent makes a missing executor exist, so this must never
+    // surface as work waiting on the owner.
+    return blockedByCapability(
+      unrecoverable.map(x => `${x.kind} cannot be scheduled because ${x.refusal}`),
+    )
   }
 
   const steps: MaintenanceStep[] = seeds.map((s, i) => ({

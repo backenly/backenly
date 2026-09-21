@@ -22,6 +22,23 @@
  * contract.
  */
 
+/**
+ * What this file tests is resolve -> ladder composition -> dry run, and the
+ * ORDER of those rungs, which is a safety property in its own right.
+ *
+ * `drop_constraint` is unsupported in this deployment, so every ladder the
+ * planner emits is now blocked at plan time. That is correct in production and
+ * would leave the composition assertions below with an empty step list, so
+ * recovery is treated as available here. The real registry's behaviour - and
+ * the fact that all three ladders are refused today - is owned by
+ * tests/core/rollback-capability-is-real.test.ts.
+ */
+jest.mock('@/lib/autonomy/maintenance/rollback-capability', () => ({
+  ...jest.requireActual('@/lib/autonomy/maintenance/rollback-capability'),
+  rollbackRefusal: () => null,
+  canRollback: () => true,
+}))
+
 import { randomUUID } from 'node:crypto'
 import { prisma } from '@/lib/db'
 import {

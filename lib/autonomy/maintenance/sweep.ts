@@ -59,6 +59,17 @@ export type SweepDisposition =
   | 'approval_stale'
   /** The plan will not build, or is not executable. Reported, never forced. */
   | 'not_planable'
+  /**
+   * The ladder is sound and THIS DEPLOYMENT cannot safely undo it.
+   *
+   * Separated from `awaiting_approval` on purpose, and from `not_planable`
+   * too. "Waiting on you" is a claim that a human's consent is the missing
+   * prerequisite; here the missing prerequisite is an executor Backenly has
+   * not built, and no approval creates one. Rendering this as an approval task
+   * would put work in a person's queue that they cannot discharge, and would
+   * make the trust surface count a platform gap as user-held.
+   */
+  | 'unsupported_recovery'
   /** Nothing to do. */
   | 'no_finding'
   /** The sweep itself is off, or mutations are. */
@@ -166,7 +177,12 @@ export async function sweepProjectMaintenance(input: {
   if (plan.validity !== 'executable') {
     return {
       ...base,
-      disposition: 'not_planable',
+      // A capability gap is its own answer. `not_planable` means the planner
+      // could not produce a sound ladder; this means it did, and the platform
+      // cannot guarantee the recovery the ladder's own safety contract
+      // promises.
+      disposition:
+        plan.validity === 'blocked_by_capability' ? 'unsupported_recovery' : 'not_planable',
       reason: `plan is ${plan.validity}: ${plan.blockedReasons.join('; ')}`,
     }
   }
