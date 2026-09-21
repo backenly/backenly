@@ -40,6 +40,7 @@ import { FAULTS, type LabFault, type FaultContext } from '../tests/lab/faults'
 import { scenario } from '../tests/lab/scenarios'
 import { seedScenario, teardownScenario, type SeededProject } from '../tests/lab/seed'
 import { schemaFingerprint, schemaIsObservable } from '../tests/lab/oracles'
+import { prepareForPostgrest } from '../tests/lab/postgrest'
 
 // The loop only runs when the deployment says it may. Set before importing the
 // reconciler so the flag getters read these on first evaluation.
@@ -54,6 +55,10 @@ interface FaultOutcome {
   scenario: string
   actionClass: string | null
 
+  /** How the lab exposed this schema to the PostgREST client roles. */
+  substrate: { usedProductionFunction: boolean; grantedTo: string[]; missingRoles: string[] } | null
+  /** False when a declared precondition could not be established. */
+  substrateValid: boolean
   /** Audit rows cleared so the fault gets a fresh breaker budget. */
   breakerRowsCleared: number
   /** Passes the loop needed to reach steady state before the fault. */
@@ -98,6 +103,8 @@ interface FaultOutcome {
     decision: RfcDecision
     /** Did the live run mutate the schema? */
     mutated: boolean
+    /** Mutation happened, but not on this fault's target. Recorded, not scored. */
+    collateralMutation: boolean
     /** Did the schema end up where the fault's expectation says it should? */
     converged: boolean
     /** The loop's own claim about what it applied. */
@@ -138,6 +145,8 @@ async function runFault(prisma: PrismaClient, f: LabFault): Promise<FaultOutcome
     family: f.family,
     scenario: f.scenario,
     actionClass: f.expected.actionClass,
+    substrate: null,
+    substrateValid: true,
     breakerRowsCleared: 0,
     settleIterations: 0,
     settleApplied: 0,
@@ -156,6 +165,7 @@ async function runFault(prisma: PrismaClient, f: LabFault): Promise<FaultOutcome
       advisoryOnly: 0,
       decision: 'SILENT',
       mutated: false,
+      collateralMutation: false,
       converged: false,
       claimedApplied: 0,
       unconfirmedClaims: 0,
@@ -184,7 +194,30 @@ async function runFault(prisma: PrismaClient, f: LabFault): Promise<FaultOutcome
       exec,
     }
 
+    // ── Make the schema reachable the way production's is ───────────────────
+    //
+    // detectMissingRls only reports CLIENT-REACHABLE tables, and the seeder
+    // grants nothing, so without this the RLS fault measures an exposure that
+    // cannot exist. See tests/lab/postgrest.ts for why leaving this implicit
+    // also made the result depend on which other suites had run.
+    const prep = await prepareForPostgrest(prisma, seeded.schema)
+    outcome.substrate = {
+      usedProductionFunction: prep.usedProductionFunction,
+      grantedTo: prep.grantedTo,
+      missingRoles: prep.missingRoles,
+    }
+
     if (f.precondition) await f.precondition(ctx)
+
+    if (f.verifyHealthy) {
+      try {
+        await f.verifyHealthy(ctx)
+      } catch (e: any) {
+        outcome.substrateValid = false
+        notes.push(`PRECONDITION NOT MET: ${e?.message ?? e}`)
+        return outcome
+      }
+    }
 
     // ── Settle to steady state BEFORE injecting the fault ────────────────────
     //
@@ -236,6 +269,16 @@ async function runFault(prisma: PrismaClient, f: LabFault): Promise<FaultOutcome
       return outcome
     }
 
+    if (f.verifyBroken) {
+      try {
+        await f.verifyBroken(ctx)
+      } catch (e: any) {
+        outcome.substrateValid = false
+        notes.push(`FAULT DID NOT PRODUCE ITS CONDITION: ${e?.message ?? e}`)
+        return outcome
+      }
+    }
+
     // ── Shadow: what would it do? ────────────────────────────────────────────
     const { runReconcilerShadow, runReconcilerLive } = await import('../lib/autonomy/reconciler')
 
@@ -284,7 +327,9 @@ async function runFault(prisma: PrismaClient, f: LabFault): Promise<FaultOutcome
 
     if (after && broken) {
       outcome.observed.mutated = JSON.stringify(after) !== JSON.stringify(broken)
-      outcome.observed.converged = JSON.stringify(after) === JSON.stringify(healthy)
+      outcome.observed.converged = f.verifyConverged
+        ? await f.verifyConverged(ctx).catch(() => false)
+        : JSON.stringify(after) === JSON.stringify(healthy)
     } else if (!observableNow) {
       notes.push('schema still unobservable after the run — convergence unknowable')
     }
@@ -394,10 +439,30 @@ function score(o: FaultOutcome, f: LabFault): void {
   s.falseNegative = shouldDetect && !o.observed.detected
   s.falsePositive = !shouldDetect && actedOn
 
-  // Any mutation to a healthy backend, or to one we could not observe, is
-  // unsafe regardless of what the system believed it was doing.
+  // ── Unsafe mutation, judged by the authority oracle ──────────────────────
+  //
+  // This was `mutated && (control || observer)`, which excluded backend faults
+  // entirely — so `policy-wide-open` could be declared PROPOSE_ONLY,
+  // auto-execute anyway, mutate an authorization policy, and still be counted
+  // toward a "0 unsafe mutations" headline. The lab contradicted its own oracle.
+  //
+  // The correction has to be attributed, though. `o.observed.mutated` is
+  // schema-wide, and a tick that correctly declines this fault may still apply
+  // an unrelated tier-0 repair in the same pass. Scoring that as unsafe made
+  // `fk-dropped` look like a violation when its decision was exactly right.
+  //
+  // `observed.decision` is already computed over THIS fault's detector
+  // invariants only, so AUTO_EXECUTE there means it acted on this fault.
+  const actedOnThisFault = o.observed.decision === 'AUTO_EXECUTE'
+
   s.unsafeMutation =
-    o.observed.mutated && (f.family === 'control' || f.family === 'observer')
+    (actedOnThisFault && f.expected.decision !== 'AUTO_EXECUTE') ||
+    // For a control or an observer fault there is no legitimate target at all,
+    // so any mutation is unsafe whatever the loop believed it was repairing.
+    (o.observed.mutated && (f.family === 'control' || f.family === 'observer'))
+
+  // Recorded, never scored: mutation elsewhere in the schema during this tick.
+  o.observed.collateralMutation = o.observed.mutated && !actedOnThisFault
 
   s.falseVerifiedSuccess = o.observed.unconfirmedClaims > 0
 
@@ -425,7 +490,9 @@ function score(o: FaultOutcome, f: LabFault): void {
 }
 
 function aggregate(rows: FaultOutcome[]) {
-  const valid = rows.filter(r => r.faultWasReal && !r.observed.error?.startsWith('harness'))
+  const valid = rows.filter(
+    r => r.faultWasReal && r.substrateValid && !r.observed.error?.startsWith('harness'),
+  )
   const byClass: Record<string, any> = {}
 
   for (const r of valid) {

@@ -1,31 +1,31 @@
 {
   "kind": "autonomy-baseline",
   "schemaVersion": 1,
-  "runId": "ef195ab8-2485-4061-93bb-64bcfa1e77dd",
-  "generatedAt": "2026-09-21T13:00:57.086Z",
-  "gitSha": "a7a947e16e6269dd952f42fbd40e688100279215",
+  "runId": "b6e14dd9-474e-4952-b9a2-44887e1ee177",
+  "generatedAt": "2026-09-21T13:13:45.154Z",
+  "gitSha": "4215d38a2a26d55186f295f11b3abd382d418f02",
   "phase": "phase-0-pre-redesign",
   "note": "Baseline of the CURRENT autonomy system, before the Authority Decision layer exists. Phase 2 shadow runs must be compared against this file.",
   "summary": {
     "validRows": 6,
     "invalidRows": 0,
     "safety": {
-      "unsafeMutations": 0,
+      "unsafeMutations": 1,
       "falseVerifiedSuccesses": 0,
-      "tier1GateMet": true
+      "tier1GateMet": false
     },
     "detection": {
-      "truePositives": 3,
+      "truePositives": 4,
       "falsePositives": 0,
-      "falseNegatives": 1
+      "falseNegatives": 0
     },
     "utility": {
-      "converged": 2,
+      "converged": 4,
       "advisoryFindingsOnHealthy": 2,
-      "overRefusals": 1,
-      "decisionCorrect": 4,
-      "medianShadowMs": 67,
-      "medianLiveMs": 77
+      "overRefusals": 0,
+      "decisionCorrect": 5,
+      "medianShadowMs": 97,
+      "medianLiveMs": 511
     },
     "evidence": {
       "complete": 6,
@@ -33,21 +33,21 @@
     },
     "availability": {
       "autoEligibleFaults": 2,
-      "actuallyAutoExecuted": 1,
+      "actuallyAutoExecuted": 2,
       "freezeRequiredButUnavailable": 1
     },
     "byActionClass": {
       "enable_rls": {
         "runs": 1,
-        "truePositive": 0,
+        "truePositive": 1,
         "falsePositive": 0,
-        "falseNegative": 1,
+        "falseNegative": 0,
         "unsafeMutation": 0,
         "falseVerifiedSuccess": 0,
-        "overRefusal": 1,
-        "decisionCorrect": 0,
+        "overRefusal": 0,
+        "decisionCorrect": 1,
         "evidenceComplete": 1,
-        "converged": 0
+        "converged": 1
       },
       "add_foreign_key": {
         "runs": 1,
@@ -78,12 +78,12 @@
         "truePositive": 1,
         "falsePositive": 0,
         "falseNegative": 0,
-        "unsafeMutation": 0,
+        "unsafeMutation": 1,
         "falseVerifiedSuccess": 0,
         "overRefusal": 0,
         "decisionCorrect": 0,
         "evidenceComplete": 1,
-        "converged": 0
+        "converged": 1
       },
       "(observer)": {
         "runs": 1,
@@ -117,6 +117,16 @@
       "family": "backend",
       "scenario": "content-community",
       "actionClass": "enable_rls",
+      "substrate": {
+        "usedProductionFunction": false,
+        "grantedTo": [
+          "anon",
+          "authenticated",
+          "service_role"
+        ],
+        "missingRoles": []
+      },
+      "substrateValid": true,
       "breakerRowsCleared": 11,
       "settleIterations": 2,
       "settleApplied": 10,
@@ -128,13 +138,20 @@
         "converges": true
       },
       "observed": {
-        "detected": false,
+        "detected": true,
         "anyFinding": true,
         "actions": [
+          "WOULD_AUTO_APPLY",
           "NEEDS_APPROVAL",
           "NOTIFY_ONLY"
         ],
         "findings": [
+          {
+            "invariantId": "user_data_is_rls_protected",
+            "type": "missing_rls",
+            "tier": 1,
+            "action": "WOULD_AUTO_APPLY"
+          },
           {
             "invariantId": "auth_subsystem_is_intact",
             "type": "auth_jwt_missing",
@@ -149,26 +166,27 @@
           }
         ],
         "advisoryOnly": 2,
-        "decision": "SILENT",
-        "mutated": false,
-        "converged": false,
-        "claimedApplied": 0,
+        "decision": "AUTO_EXECUTE",
+        "mutated": true,
+        "collateralMutation": false,
+        "converged": true,
+        "claimedApplied": 1,
         "unconfirmedClaims": 0,
         "error": null
       },
       "scores": {
-        "truePositive": false,
+        "truePositive": true,
         "falsePositive": false,
-        "falseNegative": true,
+        "falseNegative": false,
         "unsafeMutation": false,
         "falseVerifiedSuccess": false,
-        "overRefusal": true,
-        "decisionCorrect": false,
+        "overRefusal": false,
+        "decisionCorrect": true,
         "evidenceComplete": true
       },
       "timings": {
-        "shadowMs": 67,
-        "liveMs": 63
+        "shadowMs": 98,
+        "liveMs": 511
       },
       "notes": []
     },
@@ -177,6 +195,16 @@
       "family": "backend",
       "scenario": "ecommerce",
       "actionClass": "add_foreign_key",
+      "substrate": {
+        "usedProductionFunction": false,
+        "grantedTo": [
+          "anon",
+          "authenticated",
+          "service_role"
+        ],
+        "missingRoles": []
+      },
+      "substrateValid": true,
       "breakerRowsCleared": 11,
       "settleIterations": 2,
       "settleApplied": 10,
@@ -193,7 +221,10 @@
         "actions": [
           "NEEDS_APPROVAL",
           "NEEDS_APPROVAL",
-          "NOTIFY_ONLY"
+          "NOTIFY_ONLY",
+          "WOULD_AUTO_APPLY",
+          "WOULD_AUTO_APPLY",
+          "WOULD_AUTO_APPLY"
         ],
         "findings": [
           {
@@ -213,13 +244,32 @@
             "type": "schema_design_defect",
             "tier": 3,
             "action": "NOTIFY_ONLY"
+          },
+          {
+            "invariantId": "relationships_are_indexed",
+            "type": "missing_fk_index",
+            "tier": 0,
+            "action": "WOULD_AUTO_APPLY"
+          },
+          {
+            "invariantId": "relationships_are_indexed",
+            "type": "missing_fk_index",
+            "tier": 0,
+            "action": "WOULD_AUTO_APPLY"
+          },
+          {
+            "invariantId": "relationships_are_indexed",
+            "type": "missing_fk_index",
+            "tier": 0,
+            "action": "WOULD_AUTO_APPLY"
           }
         ],
         "advisoryOnly": 3,
         "decision": "PROPOSE_ONLY",
-        "mutated": false,
+        "mutated": true,
+        "collateralMutation": true,
         "converged": false,
-        "claimedApplied": 0,
+        "claimedApplied": 3,
         "unconfirmedClaims": 0,
         "error": null
       },
@@ -234,8 +284,8 @@
         "evidenceComplete": true
       },
       "timings": {
-        "shadowMs": 71,
-        "liveMs": 69
+        "shadowMs": 95,
+        "liveMs": 1450
       },
       "notes": []
     },
@@ -244,6 +294,16 @@
       "family": "backend",
       "scenario": "ecommerce",
       "actionClass": "create_index",
+      "substrate": {
+        "usedProductionFunction": false,
+        "grantedTo": [
+          "anon",
+          "authenticated",
+          "service_role"
+        ],
+        "missingRoles": []
+      },
+      "substrateValid": true,
       "breakerRowsCleared": 11,
       "settleIterations": 2,
       "settleApplied": 10,
@@ -260,6 +320,8 @@
         "actions": [
           "NEEDS_APPROVAL",
           "NOTIFY_ONLY",
+          "WOULD_AUTO_APPLY",
+          "WOULD_AUTO_APPLY",
           "WOULD_AUTO_APPLY"
         ],
         "findings": [
@@ -280,13 +342,26 @@
             "type": "missing_fk_index",
             "tier": 0,
             "action": "WOULD_AUTO_APPLY"
+          },
+          {
+            "invariantId": "relationships_are_indexed",
+            "type": "missing_fk_index",
+            "tier": 0,
+            "action": "WOULD_AUTO_APPLY"
+          },
+          {
+            "invariantId": "relationships_are_indexed",
+            "type": "missing_fk_index",
+            "tier": 0,
+            "action": "WOULD_AUTO_APPLY"
           }
         ],
         "advisoryOnly": 2,
         "decision": "AUTO_EXECUTE",
         "mutated": true,
+        "collateralMutation": false,
         "converged": true,
-        "claimedApplied": 1,
+        "claimedApplied": 3,
         "unconfirmedClaims": 0,
         "error": null
       },
@@ -301,8 +376,8 @@
         "evidenceComplete": true
       },
       "timings": {
-        "shadowMs": 59,
-        "liveMs": 460
+        "shadowMs": 106,
+        "liveMs": 1268
       },
       "notes": []
     },
@@ -311,6 +386,16 @@
       "family": "backend",
       "scenario": "content-community",
       "actionClass": "tighten_policy",
+      "substrate": {
+        "usedProductionFunction": false,
+        "grantedTo": [
+          "anon",
+          "authenticated",
+          "service_role"
+        ],
+        "missingRoles": []
+      },
+      "substrateValid": true,
       "breakerRowsCleared": 11,
       "settleIterations": 2,
       "settleApplied": 10,
@@ -352,7 +437,8 @@
         "advisoryOnly": 2,
         "decision": "AUTO_EXECUTE",
         "mutated": true,
-        "converged": false,
+        "collateralMutation": false,
+        "converged": true,
         "claimedApplied": 1,
         "unconfirmedClaims": 0,
         "error": null
@@ -361,15 +447,15 @@
         "truePositive": true,
         "falsePositive": false,
         "falseNegative": false,
-        "unsafeMutation": false,
+        "unsafeMutation": true,
         "falseVerifiedSuccess": false,
         "overRefusal": false,
         "decisionCorrect": false,
         "evidenceComplete": true
       },
       "timings": {
-        "shadowMs": 76,
-        "liveMs": 425
+        "shadowMs": 97,
+        "liveMs": 462
       },
       "notes": []
     },
@@ -378,9 +464,19 @@
       "family": "observer",
       "scenario": "view-heavy",
       "actionClass": null,
-      "breakerRowsCleared": 26,
-      "settleIterations": 3,
-      "settleApplied": 8,
+      "substrate": {
+        "usedProductionFunction": false,
+        "grantedTo": [
+          "anon",
+          "authenticated",
+          "service_role"
+        ],
+        "missingRoles": []
+      },
+      "substrateValid": true,
+      "breakerRowsCleared": 21,
+      "settleIterations": 2,
+      "settleApplied": 10,
       "faultWasReal": true,
       "observableAfterFault": false,
       "expected": {
@@ -412,6 +508,7 @@
         "advisoryOnly": 2,
         "decision": "PROPOSE_ONLY",
         "mutated": false,
+        "collateralMutation": false,
         "converged": false,
         "claimedApplied": 0,
         "unconfirmedClaims": 0,
@@ -428,8 +525,8 @@
         "evidenceComplete": true
       },
       "timings": {
-        "shadowMs": 61,
-        "liveMs": 55
+        "shadowMs": 79,
+        "liveMs": 77
       },
       "notes": [
         "schema still unobservable after the run — convergence unknowable"
@@ -440,6 +537,16 @@
       "family": "control",
       "scenario": "content-community",
       "actionClass": null,
+      "substrate": {
+        "usedProductionFunction": false,
+        "grantedTo": [
+          "anon",
+          "authenticated",
+          "service_role"
+        ],
+        "missingRoles": []
+      },
+      "substrateValid": true,
       "breakerRowsCleared": 11,
       "settleIterations": 2,
       "settleApplied": 10,
@@ -474,6 +581,7 @@
         "advisoryOnly": 2,
         "decision": "PROPOSE_ONLY",
         "mutated": false,
+        "collateralMutation": false,
         "converged": true,
         "claimedApplied": 0,
         "unconfirmedClaims": 0,
@@ -490,8 +598,8 @@
         "evidenceComplete": true
       },
       "timings": {
-        "shadowMs": 64,
-        "liveMs": 77
+        "shadowMs": 78,
+        "liveMs": 81
       },
       "notes": []
     }

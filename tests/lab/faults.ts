@@ -49,6 +49,9 @@
 
 import type { PrismaClient } from '@prisma/client'
 
+import { isClientReachable } from './postgrest'
+import { hasForeignKey, indexesOn, policies, rlsState } from './oracles'
+
 export interface FaultContext {
   prisma: PrismaClient
   projectId: string
@@ -102,7 +105,34 @@ export interface LabFault {
    * role state the teardown could not otherwise reverse.
    */
   apply: (ctx: FaultContext) => Promise<(() => Promise<void>) | void>
+  /**
+   * Prove, from PostgreSQL, that the healthy state this fault departs from is
+   * actually in place. Throwing invalidates the row instead of scoring it.
+   *
+   * This exists because `enable_rls` was scored as a product false negative on
+   * the strength of a precondition nobody had checked: the table was never
+   * client-reachable, so the detector's silence was correct and the lab was
+   * wrong. An unasserted precondition is an assumption, and this baseline
+   * exists to stop assumptions becoming numbers.
+   */
+  verifyHealthy?: (ctx: FaultContext) => Promise<void>
+  /** Prove the fault actually produced the condition it claims to. */
+  verifyBroken?: (ctx: FaultContext) => Promise<void>
+  /**
+   * Did the repair actually fix THIS fault, asked of the catalog?
+   *
+   * Falls back to whole-schema fingerprint equality when absent, which is too
+   * strict once a tick also applies unrelated repairs: `unindexed-fk` recreated
+   * its index correctly and still scored as not converged, because collateral
+   * repairs had moved the fingerprint. Convergence is about the fault's own
+   * target, so the faults that can state it precisely do.
+   */
+  verifyConverged?: (ctx: FaultContext) => Promise<boolean>
   expected: FaultExpectation
+}
+
+function must(ok: boolean, msg: string): void {
+  if (!ok) throw new Error(msg)
 }
 
 /** Give every RLS-enabled table a sane per-owner policy. */
@@ -135,6 +165,27 @@ const rlsDisabled: LabFault = {
   apply: async ({ exec, schema }) => {
     await exec(`ALTER TABLE "${schema}"."posts" DISABLE ROW LEVEL SECURITY`)
   },
+  verifyHealthy: async ({ prisma, schema }) => {
+    const st = await rlsState(prisma, schema, 'posts')
+    must(st.exists, 'posts does not exist')
+    must(st.enabled, 'RLS is not enabled before the fault, so nothing is being removed')
+    must(
+      await isClientReachable(prisma, schema, 'posts'),
+      'posts is not reachable by anon/authenticated, so an exposure cannot exist ' +
+        'and detectMissingRls is correct to stay silent',
+    )
+  },
+  verifyBroken: async ({ prisma, schema }) => {
+    const st = await rlsState(prisma, schema, 'posts')
+    must(!st.enabled, 'RLS is still enabled after the fault')
+    must(
+      await isClientReachable(prisma, schema, 'posts'),
+      'posts stopped being client-reachable, so the fault changed reachability ' +
+        'rather than protection and is measuring the wrong thing',
+    )
+  },
+  verifyConverged: async ({ prisma, schema }) =>
+    (await rlsState(prisma, schema, 'posts')).enabled,
   expected: {
     detected: true,
     actionClass: 'enable_rls',
@@ -156,6 +207,8 @@ const fkDropped: LabFault = {
   apply: async ({ exec, schema }) => {
     await exec(`ALTER TABLE "${schema}"."orders" DROP CONSTRAINT "fk_orders_user_id"`)
   },
+  verifyConverged: async ({ prisma, schema }) =>
+    hasForeignKey(prisma, schema, 'orders', 'user_id'),
   expected: {
     detected: true,
     actionClass: 'add_foreign_key',
@@ -183,6 +236,8 @@ const unindexedRelationship: LabFault = {
   apply: async ({ exec, schema }) => {
     await exec(`DROP INDEX "${schema}"."idx_orders_user_id"`)
   },
+  verifyConverged: async ({ prisma, schema }) =>
+    (await indexesOn(prisma, schema, 'orders', 'user_id')).length > 0,
   expected: {
     detected: true,
     actionClass: 'create_index',
@@ -207,6 +262,13 @@ const wideOpenPolicy: LabFault = {
   apply: async ({ exec, schema }) => {
     await exec(`DROP POLICY "p_posts_owner" ON "${schema}"."posts"`)
     await exec(`CREATE POLICY "p_posts_open" ON "${schema}"."posts" USING (true)`)
+  },
+  verifyConverged: async ({ prisma, schema }) => {
+    // Converged means no wide-open policy remains, whatever the replacement is
+    // called. Requiring the original policy NAME back would fail a correct
+    // repair that generated its own.
+    const names = await policies(prisma, schema, 'posts')
+    return names.length > 0 && !names.includes('p_posts_open')
   },
   expected: {
     detected: true,
