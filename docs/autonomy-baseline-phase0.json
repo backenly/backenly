@@ -1,9 +1,9 @@
 {
   "kind": "autonomy-baseline",
   "schemaVersion": 1,
-  "runId": "6d156c29-97e8-45b2-ae3a-46342da7c40d",
-  "generatedAt": "2026-09-21T13:35:26.925Z",
-  "gitSha": "371098331f6ece4d04de3ebb53ee9c695d0430d7",
+  "runId": "668f64c0-c643-4ba4-a0c4-c52ea8f71265",
+  "generatedAt": "2026-09-21T14:06:55.276Z",
+  "gitSha": "3593924a273d7809a9f317da4ef4b53415b25c6a",
   "phase": "phase-0-pre-redesign",
   "substrate": {
     "appRole": {
@@ -17,6 +17,106 @@
   },
   "note": "Baseline of the CURRENT autonomy system, before the Authority Decision layer exists. Phase 2 shadow runs must be compared against this file.",
   "summary": {
+    "phase2ShadowComparison": {
+      "rows": [
+        {
+          "faultId": "rls-disabled-on-user-table",
+          "actionClass": "AUTO_EXECUTE",
+          "oracle": "AUTO_EXECUTE",
+          "oldBehaviour": "AUTO_EXECUTE",
+          "shadowDecision": "AUTO_EXECUTE",
+          "shadowMatchesOracle": true,
+          "oldMatchedOracle": true,
+          "narrowedBy": [],
+          "blocker": null
+        },
+        {
+          "faultId": "fk-dropped",
+          "actionClass": "PROPOSE_ONLY",
+          "oracle": "PROPOSE_ONLY",
+          "oldBehaviour": "PROPOSE_ONLY",
+          "shadowDecision": "PROPOSE_ONLY",
+          "shadowMatchesOracle": true,
+          "oldMatchedOracle": true,
+          "narrowedBy": [
+            "tier_above_dial_ceiling",
+            "recovery_not_implemented"
+          ],
+          "blocker": null
+        },
+        {
+          "faultId": "unindexed-fk",
+          "actionClass": "AUTO_EXECUTE",
+          "oracle": "AUTO_EXECUTE",
+          "oldBehaviour": "AUTO_EXECUTE",
+          "shadowDecision": "AUTO_EXECUTE",
+          "shadowMatchesOracle": true,
+          "oldMatchedOracle": true,
+          "narrowedBy": [],
+          "blocker": null
+        },
+        {
+          "faultId": "policy-wide-open",
+          "actionClass": "PROPOSE_ONLY",
+          "oracle": "PROPOSE_ONLY",
+          "oldBehaviour": "AUTO_EXECUTE",
+          "shadowDecision": "PROPOSE_ONLY",
+          "shadowMatchesOracle": true,
+          "oldMatchedOracle": false,
+          "narrowedBy": [
+            "tier_above_dial_ceiling",
+            "recovery_not_implemented",
+            "no_declared_intent_for_authorization_change"
+          ],
+          "blocker": null
+        },
+        {
+          "faultId": "schema-absent",
+          "actionClass": "FREEZE",
+          "oracle": "FREEZE",
+          "oldBehaviour": "PROPOSE_ONLY",
+          "shadowDecision": "FREEZE",
+          "shadowMatchesOracle": true,
+          "oldMatchedOracle": false,
+          "narrowedBy": [
+            "resource_unobservable"
+          ],
+          "blocker": "restore access to workspace_7b0db764-cf42-408c-89e5-336f29c408da.posts"
+        },
+        {
+          "faultId": "observer-blinded-by-force-rls",
+          "actionClass": "FREEZE",
+          "oracle": "FREEZE",
+          "oldBehaviour": "AUTO_EXECUTE",
+          "shadowDecision": "PROPOSE_ONLY",
+          "shadowMatchesOracle": false,
+          "oldMatchedOracle": false,
+          "narrowedBy": [
+            "sensor_unverified"
+          ],
+          "blocker": null
+        },
+        {
+          "faultId": "observer-blinded-by-catalog-revoke",
+          "actionClass": "FREEZE",
+          "oracle": "FREEZE",
+          "oldBehaviour": "AUTO_EXECUTE",
+          "shadowDecision": "AUTO_EXECUTE",
+          "shadowMatchesOracle": false,
+          "oldMatchedOracle": false,
+          "narrowedBy": [],
+          "blocker": null
+        }
+      ],
+      "shadowCorrect": 5,
+      "oldCorrect": 3,
+      "total": 7,
+      "fixed": [
+        "policy-wide-open",
+        "schema-absent"
+      ],
+      "regressed": []
+    },
     "validRows": 6,
     "invalidRows": 0,
     "recordedNotScored": [
@@ -44,8 +144,8 @@
       "advisoryFindingsOnHealthy": 2,
       "overRefusals": 0,
       "decisionCorrect": 5,
-      "medianShadowMs": 149,
-      "medianLiveMs": 1062
+      "medianShadowMs": 94,
+      "medianLiveMs": 511
     },
     "evidence": {
       "complete": 6,
@@ -205,9 +305,17 @@
         "decisionCorrect": true,
         "evidenceComplete": true
       },
+      "shadow": {
+        "decision": "AUTO_EXECUTE",
+        "narrowedBy": [],
+        "blocker": null,
+        "reason": "All required sensors support the claim, enable_rls is tier 1 within the project ceiling of 1, verification and recovery are available.",
+        "matchesOracle": true,
+        "differsFromOld": false
+      },
       "timings": {
-        "shadowMs": 149,
-        "liveMs": 1062
+        "shadowMs": 94,
+        "liveMs": 470
       },
       "notes": []
     },
@@ -305,9 +413,20 @@
         "decisionCorrect": true,
         "evidenceComplete": true
       },
+      "shadow": {
+        "decision": "PROPOSE_ONLY",
+        "narrowedBy": [
+          "tier_above_dial_ceiling",
+          "recovery_not_implemented"
+        ],
+        "blocker": null,
+        "reason": "add_foreign_key is tier 2 and this project's autonomy allows up to tier 1.",
+        "matchesOracle": true,
+        "differsFromOld": false
+      },
       "timings": {
-        "shadowMs": 158,
-        "liveMs": 1907
+        "shadowMs": 99,
+        "liveMs": 1430
       },
       "notes": []
     },
@@ -398,9 +517,17 @@
         "decisionCorrect": true,
         "evidenceComplete": true
       },
+      "shadow": {
+        "decision": "AUTO_EXECUTE",
+        "narrowedBy": [],
+        "blocker": null,
+        "reason": "All required sensors support the claim, create_index is tier 0 within the project ceiling of 1, verification and recovery are available.",
+        "matchesOracle": true,
+        "differsFromOld": false
+      },
       "timings": {
-        "shadowMs": 110,
-        "liveMs": 2070
+        "shadowMs": 79,
+        "liveMs": 1364
       },
       "notes": []
     },
@@ -477,9 +604,21 @@
         "decisionCorrect": false,
         "evidenceComplete": true
       },
+      "shadow": {
+        "decision": "PROPOSE_ONLY",
+        "narrowedBy": [
+          "tier_above_dial_ceiling",
+          "recovery_not_implemented",
+          "no_declared_intent_for_authorization_change"
+        ],
+        "blocker": null,
+        "reason": "tighten_policy is tier 2 and this project's autonomy allows up to tier 1.",
+        "matchesOracle": true,
+        "differsFromOld": true
+      },
       "timings": {
-        "shadowMs": 86,
-        "liveMs": 476
+        "shadowMs": 102,
+        "liveMs": 511
       },
       "notes": []
     },
@@ -549,9 +688,19 @@
         "decisionCorrect": true,
         "evidenceComplete": true
       },
+      "shadow": {
+        "decision": "FREEZE",
+        "narrowedBy": [
+          "resource_unobservable"
+        ],
+        "blocker": "restore access to workspace_7b0db764-cf42-408c-89e5-336f29c408da.posts",
+        "reason": "workspace_7b0db764-cf42-408c-89e5-336f29c408da.posts could not be observed, so every probe reporting nothing about it reported an absence of evidence, not evidence of health.",
+        "matchesOracle": true,
+        "differsFromOld": true
+      },
       "timings": {
-        "shadowMs": 337,
-        "liveMs": 207
+        "shadowMs": 80,
+        "liveMs": 78
       },
       "notes": [
         "schema still unobservable after the run — convergence unknowable"
@@ -630,9 +779,19 @@
         "decisionCorrect": false,
         "evidenceComplete": true
       },
+      "shadow": {
+        "decision": "PROPOSE_ONLY",
+        "narrowedBy": [
+          "sensor_unverified"
+        ],
+        "blocker": null,
+        "reason": "Probe user_data_is_rls_protected ran quietly but has never fired, so its silence proves nothing, so it cannot support acting without review.",
+        "matchesOracle": false,
+        "differsFromOld": true
+      },
       "timings": {
-        "shadowMs": 172,
-        "liveMs": 771
+        "shadowMs": 81,
+        "liveMs": 446
       },
       "notes": [
         "NOT SCORED: the application role bypasses RLS, so the product never experienced this blindness. Re-run against a NOSUPERUSER NOBYPASSRLS role."
@@ -732,9 +891,17 @@
         "decisionCorrect": false,
         "evidenceComplete": true
       },
+      "shadow": {
+        "decision": "AUTO_EXECUTE",
+        "narrowedBy": [],
+        "blocker": null,
+        "reason": "All required sensors support the claim, enable_rls is tier 1 within the project ceiling of 1, verification and recovery are available.",
+        "matchesOracle": false,
+        "differsFromOld": false
+      },
       "timings": {
-        "shadowMs": 259,
-        "liveMs": 1723
+        "shadowMs": 95,
+        "liveMs": 933
       },
       "notes": [
         "NOT SCORED: the application role bypasses RLS, so the product never experienced this blindness. Re-run against a NOSUPERUSER NOBYPASSRLS role."
@@ -806,9 +973,19 @@
         "decisionCorrect": true,
         "evidenceComplete": true
       },
+      "shadow": {
+        "decision": "PROPOSE_ONLY",
+        "narrowedBy": [
+          "sensor_unverified"
+        ],
+        "blocker": null,
+        "reason": "Probe user_data_is_rls_protected ran quietly but has never fired, so its silence proves nothing, so it cannot support acting without review.",
+        "matchesOracle": false,
+        "differsFromOld": false
+      },
       "timings": {
-        "shadowMs": 128,
-        "liveMs": 120
+        "shadowMs": 89,
+        "liveMs": 91
       },
       "notes": []
     }

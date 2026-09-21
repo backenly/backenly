@@ -99,6 +99,16 @@ export interface FaultExpectation {
    * Empty means any finding counts, which is only right for controls.
    */
   detectorInvariants: string[]
+  /**
+   * The action class the SHADOW Authority Decision is evaluated for.
+   *
+   * Observer and control faults propose no repair, so they have no action class
+   * of their own. They still need one here, because the question being asked is
+   * "what would the decision layer say if this action were proposed against
+   * THIS backend" — and for a blind or healthy backend the answer must be
+   * FREEZE or a refusal, not silence by absence.
+   */
+  shadowActionClass: string
   /** Should the database itself end up converged after a live run? */
   converges: boolean
   /** Why this is the right answer. Read by whoever disputes a baseline number. */
@@ -209,6 +219,7 @@ const rlsDisabled: LabFault = {
   expected: {
     detected: true,
     actionClass: 'enable_rls',
+    shadowActionClass: 'enable_rls',
     detectorInvariants: ['user_data_is_rls_protected', 'rls_is_not_deny_all', 'live_schema_matches_intent'],
     decision: 'AUTO_EXECUTE',
     converges: true,
@@ -232,6 +243,7 @@ const fkDropped: LabFault = {
   expected: {
     detected: true,
     actionClass: 'add_foreign_key',
+    shadowActionClass: 'add_foreign_key',
     detectorInvariants: ['relationships_have_fk_constraints'],
     decision: 'PROPOSE_ONLY',
     converges: false,
@@ -261,6 +273,7 @@ const unindexedRelationship: LabFault = {
   expected: {
     detected: true,
     actionClass: 'create_index',
+    shadowActionClass: 'create_index',
     detectorInvariants: ['relationships_are_indexed', 'hot_path_columns_are_indexed'],
     decision: 'AUTO_EXECUTE',
     converges: true,
@@ -293,6 +306,7 @@ const wideOpenPolicy: LabFault = {
   expected: {
     detected: true,
     actionClass: 'tighten_policy',
+    shadowActionClass: 'tighten_policy',
     detectorInvariants: ['rls_policies_are_not_wide_open'],
     decision: 'PROPOSE_ONLY',
     converges: false,
@@ -348,6 +362,10 @@ const schemaMoved: LabFault = {
     detected: false,
     actionClass: null,
     detectorInvariants: [],
+    // Ask what the decision layer would say about enabling RLS on this backend.
+    // On a blind one the honest answer is FREEZE; on a healthy one it is a
+    // refusal for lack of a violation, never an automatic mutation.
+    shadowActionClass: 'enable_rls',
     decision: 'FREEZE',
     converges: false,
     rationale:
@@ -413,6 +431,10 @@ const rlsRowBlindness: LabFault = {
     detected: false,
     actionClass: null,
     detectorInvariants: [],
+    // Ask what the decision layer would say about enabling RLS on this backend.
+    // On a blind one the honest answer is FREEZE; on a healthy one it is a
+    // refusal for lack of a violation, never an automatic mutation.
+    shadowActionClass: 'enable_rls',
     decision: 'FREEZE',
     converges: false,
     rationale:
@@ -463,6 +485,10 @@ const catalogBlindness: LabFault = {
     detected: false,
     actionClass: null,
     detectorInvariants: [],
+    // Ask what the decision layer would say about enabling RLS on this backend.
+    // On a blind one the honest answer is FREEZE; on a healthy one it is a
+    // refusal for lack of a violation, never an automatic mutation.
+    shadowActionClass: 'enable_rls',
     decision: 'FREEZE',
     converges: false,
     rationale:
@@ -496,6 +522,10 @@ const healthy: LabFault = {
     detected: false,
     actionClass: null,
     detectorInvariants: [],
+    // Ask what the decision layer would say about enabling RLS on this backend.
+    // On a blind one the honest answer is FREEZE; on a healthy one it is a
+    // refusal for lack of a violation, never an automatic mutation.
+    shadowActionClass: 'enable_rls',
     decision: 'FREEZE',
     converges: false,
     rationale:

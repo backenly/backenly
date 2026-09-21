@@ -42,7 +42,15 @@
 export type Principal =
   | { kind: 'user'; userId: string }
   | { kind: 'agent'; apiKeyId: string; onBehalfOf?: string }
-  | { kind: 'backenly'; loop: 'reconciler' | 'maintenance' }
+  /**
+   * A Backenly component acting on its own.
+   *
+   * `agent_orchestrator` is the auto-fix path reached from the background
+   * monitor and the agents API. It is named narrowly rather than folded into
+   * `reconciler`, because calling it the reconciler would attribute its
+   * mutations to a loop that did not make them.
+   */
+  | { kind: 'backenly'; loop: 'reconciler' | 'maintenance' | 'agent_orchestrator' }
   | { kind: 'operator'; via: 'cli' | 'deployment' | 'system' }
   /**
    * A direct database connection. `role` is a PostgreSQL role name and nothing
@@ -59,11 +67,32 @@ export type Principal =
    */
   | { kind: 'unknown'; why: string }
 
+/**
+ * Where an authorization came from.
+ *
+ * `authorizedBy: user:<owner>` on its own is ambiguous and will be misread once
+ * grants exist: today the owner's authority is TRANSITIVE, delegated through a
+ * dial they set once, and it must never be presented as "the owner approved
+ * this exact mutation". Naming the source keeps those apart before anything
+ * depends on the difference.
+ */
+export type AuthorizationSource =
+  /** The project's autonomy dial: standing, coarse, set once by the owner. */
+  | 'project_autonomy_dial'
+  /** A future explicit grant naming a principal, action class and scope. */
+  | 'grant'
+  /** A human approving this specific action, e.g. a maintenance approval. */
+  | 'explicit_approval'
+  /** Nothing establishes authority for this action. */
+  | 'none'
+
 /** The three roles an adaptation distinguishes. Any may be unknown. */
 export interface PrincipalSet {
   requestedBy: Principal
   authorizedBy: Principal | null
   executedBy: Principal
+  /** How `authorizedBy` came to authorize it. Never inferred from the principal. */
+  authorizationSource?: AuthorizationSource
 }
 
 // ── Constructors ─────────────────────────────────────────────────────────────
@@ -77,6 +106,7 @@ export const P = {
   }),
   reconciler: (): Principal => ({ kind: 'backenly', loop: 'reconciler' }),
   maintenance: (): Principal => ({ kind: 'backenly', loop: 'maintenance' }),
+  agentOrchestrator: (): Principal => ({ kind: 'backenly', loop: 'agent_orchestrator' }),
   operator: (via: 'cli' | 'deployment' | 'system'): Principal => ({ kind: 'operator', via }),
   external: (role: string): Principal => ({ kind: 'external', role }),
   unknown: (why: string): Principal => ({ kind: 'unknown', why }),
@@ -156,7 +186,7 @@ export function fromBackendActor(actorType: string, actorId?: string | null): Pr
     return actorId ? P.user(actorId) : P.unknown('user event with no actorId')
   }
   if (actorType === 'backenly_agent') {
-    if (actorId === 'reconciler' || actorId === 'maintenance') {
+    if (actorId === 'reconciler' || actorId === 'maintenance' || actorId === 'agent_orchestrator') {
       return { kind: 'backenly', loop: actorId }
     }
     return actorId ? P.agent(actorId) : P.unknown('backenly_agent event with no actorId')
@@ -217,6 +247,7 @@ export function principalsToMetadata(set: Partial<PrincipalSet>): Record<string,
       requestedBy: set.requestedBy ?? null,
       authorizedBy: set.authorizedBy ?? null,
       executedBy: set.executedBy ?? null,
+      authorizationSource: set.authorizationSource ?? 'none',
       v: 1,
     },
   }
@@ -232,6 +263,7 @@ export function readPrincipals(metadata: unknown): Partial<PrincipalSet> | null 
     requestedBy: (b.requestedBy as Principal) ?? undefined,
     authorizedBy: (b.authorizedBy as Principal) ?? undefined,
     executedBy: (b.executedBy as Principal) ?? undefined,
+    authorizationSource: (b.authorizationSource as AuthorizationSource) ?? undefined,
   }
 }
 
@@ -272,12 +304,17 @@ export async function projectOwnerPrincipal(
 export async function loopPrincipals(
   prisma: { project: { findUnique: (a: any) => Promise<any> } },
   projectId: string,
-  loop: 'reconciler' | 'maintenance',
+  loop: 'reconciler' | 'maintenance' | 'agent_orchestrator',
+  requestedBy?: Principal,
 ): Promise<PrincipalSet> {
   const self: Principal = { kind: 'backenly', loop }
+  const owner = await projectOwnerPrincipal(prisma, projectId)
   return {
-    requestedBy: self,
-    authorizedBy: await projectOwnerPrincipal(prisma, projectId),
+    requestedBy: requestedBy ?? self,
+    authorizedBy: owner,
     executedBy: self,
+    // Transitive, through the dial the owner controls. NOT a per-mutation
+    // approval, and Phase 2 must not read it as one.
+    authorizationSource: owner.kind === 'unknown' ? 'none' : 'project_autonomy_dial',
   }
 }

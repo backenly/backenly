@@ -22,6 +22,7 @@ import { runAllAgents, executeAutoFixes } from './agent-orchestrator'
 import { runReconciler, computeReconciliationPlan } from '@/lib/autonomy/reconciler'
 import { getUserEntitlements } from '@/lib/entitlements'
 import type { AgentFinding } from './agents/types'
+import { P } from '@/lib/principal'
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
@@ -160,7 +161,8 @@ export async function runMonitoredHealthScan(
 
     if (agentHasWork) {
       // ── Auto-fix Phase 1 findings ────────────────────────────────────────
-      const applied = await executeAutoFixes(projectId, plan)
+      // Backenly acting on its own schedule; nobody asked for this run.
+      const applied = await executeAutoFixes(projectId, plan, P.agentOrchestrator())
 
       // ── Store Phase 2 findings in HealthFinding table ────────────────────
       const phase2 = plan.executionPlan.find(p => !p.canAutoRun && p.name.includes('Approval'))

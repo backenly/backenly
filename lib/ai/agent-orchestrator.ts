@@ -22,6 +22,8 @@ import { emitTrace } from './execution-tracer'
 import { shouldSkipLLM, schemaFingerprint, getCachedResult, setCachedResult, recordLLMUsage } from './cost-governor'
 import type { AgentInput, AgentFinding, AgentResult, OrchestratorResult } from './agents/types'
 import type { PlannerOutput } from './agents/types'
+import { P, loopPrincipals, type Principal } from '@/lib/principal'
+import { prisma } from '@/lib/db/prisma'
 
 export type { OrchestratorResult, PlannerOutput }
 
@@ -203,6 +205,15 @@ export async function runAllAgents(
 export async function executeAutoFixes(
   projectId: string,
   plan: PlannerOutput,
+  /**
+   * Who asked for this run.
+   *
+   * Passed rather than assumed, because the two callers differ: the background
+   * monitor is Backenly acting on its own, and the agents API is somebody
+   * asking it to. Omitted records an explicit unknown with the reason, never a
+   * plausible default.
+   */
+  requestedBy?: Principal,
 ): Promise<string[]> {
   const phase1 = plan.executionPlan.find(p => p.canAutoRun)
   if (!phase1 || phase1.actions.length === 0) return []
@@ -266,12 +277,23 @@ export async function executeAutoFixes(
       // Record into the breaker ledger so this path is counted consistently
       // with the auto-fix-engine paths (it previously wrote no audit at all).
       if (didApply) {
-        await recordAutonomousAction(projectId, 'AGENT_AUTO_FIXED', {
-          title: finding.title,
-          category: finding.category,
-          location: finding.location,
-          via: finding.fix.sql ? 'sql' : 'executor',
-        })
+        await recordAutonomousAction(
+          projectId,
+          'AGENT_AUTO_FIXED',
+          {
+            title: finding.title,
+            category: finding.category,
+            location: finding.location,
+            via: finding.fix.sql ? 'sql' : 'executor',
+          },
+          await loopPrincipals(
+            prisma,
+            projectId,
+            'agent_orchestrator',
+            requestedBy ??
+              P.unknown('auto-fix run started without a recorded requester'),
+          ),
+        )
       }
     } catch (err: any) {
       console.warn(`[AgentOrchestrator] Auto-fix failed for "${finding.title}":`, err?.message)

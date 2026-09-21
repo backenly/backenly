@@ -41,6 +41,8 @@ import { scenario } from '../tests/lab/scenarios'
 import { seedScenario, teardownScenario, type SeededProject } from '../tests/lab/seed'
 import { schemaFingerprint, schemaIsObservable } from '../tests/lab/oracles'
 import { prepareForPostgrest } from '../tests/lab/postgrest'
+import { decideAuthority, type AuthorityDecision } from '../lib/authority/decision'
+import { loopPrincipals } from '../lib/principal'
 import {
   connectObserver,
   connectionBypassesRls,
@@ -143,6 +145,21 @@ interface FaultOutcome {
     evidenceComplete: boolean
   }
 
+  /**
+   * PHASE 2. What the Authority Decision layer would have said, evaluated
+   * beside the live loop and changing nothing.
+   */
+  shadow: {
+    decision: string
+    narrowedBy: string[]
+    blocker: string | null
+    reason: string
+    /** Did the shadow layer land on the oracle's declared answer? */
+    matchesOracle: boolean
+    /** Did it differ from what the old behaviour did? */
+    differsFromOld: boolean
+  } | null
+
   timings: { shadowMs: number; liveMs: number }
   notes: string[]
 }
@@ -200,6 +217,7 @@ async function runFault(
       decisionCorrect: false,
       evidenceComplete: false,
     },
+    shadow: null,
     timings: { shadowMs: 0, liveMs: 0 },
     notes,
   }
@@ -332,6 +350,52 @@ async function runFault(
       }
     }
 
+    // ── PHASE 2: the Authority Decision, in shadow ───────────────────────────
+    //
+    // Evaluated on the same backend, at the same moment, from the same sensor
+    // report the loop would see. It gates nothing: the live run below still
+    // behaves exactly as it did in Phase 0, which is the only way to compare
+    // the two answers honestly.
+    try {
+      const { checkSensorHealth } = await import('../lib/autonomy/sensor-health')
+      const { DEFAULT_LEVEL } = await import('../lib/autonomy/autonomy-level')
+      const report = await checkSensorHealth(seeded.projectId)
+      const principals = await loopPrincipals(prisma, seeded.projectId, 'reconciler')
+
+      const d: AuthorityDecision = decideAuthority({
+        projectId: seeded.projectId,
+        actionClassId: f.expected.shadowActionClass,
+        resource: `${seeded.schema}.posts`,
+        environment: 'development',
+        principals,
+        // Lab projects carry the default dial, which is AGGRESSIVE.
+        level: DEFAULT_LEVEL,
+        probes: report.probes,
+        // Asked of PostgreSQL at decision time, by the oracle rather than by a
+        // probe. For the blindness faults this is what the sensor layer cannot
+        // tell the decision on its own.
+        resourceObservable: await schemaIsObservable(prisma, seeded.schema).catch(
+          () => 'unknown' as const,
+        ),
+        // Phase 2 has no ownership intent. Phase 3 supplies it and tests
+        // whether the same action can then legitimately become AUTO_EXECUTE.
+        hasDeclaredIntent: false,
+      })
+
+      outcome.shadow = {
+        decision: d.decision,
+        narrowedBy: d.narrowedBy,
+        blocker: d.blocker,
+        reason: d.reasons[0] ?? '',
+        matchesOracle: d.decision === f.expected.decision,
+        // Filled in after the live run below, which is what establishes the old
+        // behaviour to compare against.
+        differsFromOld: false,
+      }
+    } catch (e: any) {
+      notes.push(`shadow authority decision failed: ${String(e?.message ?? e)}`)
+    }
+
     // ── Shadow: what would it do? ────────────────────────────────────────────
     const { runReconcilerShadow, runReconcilerLive } = await import('../lib/autonomy/reconciler')
 
@@ -373,6 +437,10 @@ async function runFault(
     outcome.timings.liveMs = Date.now() - t1
 
     if (live) outcome.observed.claimedApplied = live.applied
+
+    if (outcome.shadow) {
+      outcome.shadow.differsFromOld = outcome.shadow.decision !== outcome.observed.decision
+    }
 
     // ── Ground truth, after the system has had its turn ──────────────────────
     const observableNow = await schemaIsObservable(prisma, seeded.schema)
@@ -618,7 +686,35 @@ function aggregate(rows: FaultOutcome[]) {
     ).length,
   }
 
+  const phase2 = rows
+    // Controls are scored on RESTRAINT, not on decision agreement: a healthy
+    // backend has no proposed action, so the four-valued vocabulary has no
+    // member that fits and `FREEZE` is recorded only to keep the type total.
+    // Including it would penalise the decision layer for a placeholder.
+    .filter(r => r.shadow && r.faultWasReal && r.substrateValid && r.family !== 'control')
+    .map(r => ({
+      faultId: r.faultId,
+      actionClass: r.expected.decision,
+      oracle: r.expected.decision,
+      oldBehaviour: r.observed.decision,
+      shadowDecision: r.shadow!.decision,
+      shadowMatchesOracle: r.shadow!.matchesOracle,
+      oldMatchedOracle: r.observed.decision === r.expected.decision,
+      narrowedBy: r.shadow!.narrowedBy,
+      blocker: r.shadow!.blocker,
+    }))
+
   return {
+    phase2ShadowComparison: {
+      rows: phase2,
+      shadowCorrect: phase2.filter(r => r.shadowMatchesOracle).length,
+      oldCorrect: phase2.filter(r => r.oldMatchedOracle).length,
+      total: phase2.length,
+      /** Rows the old behaviour got wrong and the shadow layer gets right. */
+      fixed: phase2.filter(r => r.shadowMatchesOracle && !r.oldMatchedOracle).map(r => r.faultId),
+      /** Rows the old behaviour got right and the shadow layer would break. */
+      regressed: phase2.filter(r => !r.shadowMatchesOracle && r.oldMatchedOracle).map(r => r.faultId),
+    },
     validRows: valid.length,
     invalidRows: rows.length - valid.length - recordedNotScored.length,
     recordedNotScored: recordedNotScored.map(r => ({ faultId: r.faultId, why: r.notes[0] ?? '' })),
