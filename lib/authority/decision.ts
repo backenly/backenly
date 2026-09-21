@@ -525,6 +525,13 @@ export function decideAuthority(input: AuthorityInputs): AuthorityDecision {
   // So this rule is deliberately narrow rather than deliberately cautious:
   // widening it before correlation carries principals would produce a loop that
   // refuses to act because it acted.
+  //
+  // TODO(autonomy): external_ddl is not the conceptual model, it is the only
+  // source attributable today. Once schema and deploy events carry principals,
+  // this becomes "a recent change by a principal OTHER than the executing
+  // controller", which is what conflict actually means. Keeping external_ddl as
+  // the permanent rule would quietly ignore an agent migrating the same table
+  // through the platform.
   const conflicting = (input.recentChanges ?? []).filter(
     c => c.minutesBefore <= 10 && c.source === 'external_ddl',
   )

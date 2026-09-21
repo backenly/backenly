@@ -222,7 +222,7 @@ export const AUTONOMOUSLY_REPAIRABLE_FINDING_TYPES = Object.keys(FINDING_TYPE_TO
  * `verifier` and `recovery` contracts nobody had verified, which is the exact
  * fabrication this architecture exists to prevent.
  *
- * So these 30 keep TODAY'S proven behaviour, and the debt is made explicit:
+ * So these 17 keep TODAY'S proven behaviour, and the debt is made explicit:
  *
  *   - the list is hardcoded and exhaustive. There is no wildcard and no
  *     "unknown types fall through", because either of those would let the
