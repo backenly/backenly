@@ -198,7 +198,16 @@ const FINDING_TYPE_TO_ACTION_CLASS: Readonly<Record<string, string>> = {
   slow_query_missing_index: 'create_index',
   query_pattern_missing_index: 'create_index',
 
-  rls_wide_open: 'tighten_policy',
+  // `rls_expression_invalid`, NOT `rls_wide_open`. The wide-open invariant's
+  // probe, detectOverPermissiveRls, emits `rls_expression_invalid` — proven by
+  // tests/probes/security-probe-fixtures.spec.ts and measured in the Phase 0
+  // baseline. The first version of this map used `rls_wide_open`, a string no
+  // probe has ever emitted, and put the real type on the legacy compatibility
+  // bridge. The live gate keys on finding type, so a wide-open policy went
+  // straight to the old auto-repair and never met the Authority Decision: the
+  // exact unsafe mutation Phase 0 measured, which this class exists to stop.
+  // Both tests that should have caught it fed the gate the invented string.
+  rls_expression_invalid: 'tighten_policy',
   policy_fragmentation: 'tighten_policy',
 }
 
@@ -215,14 +224,14 @@ export const AUTONOMOUSLY_REPAIRABLE_FINDING_TYPES = Object.keys(FINDING_TYPE_TO
  * ==========================================================
  *
  * Making the Authority Decision mandatory revealed the real migration surface:
- * 20 finding types are auto-safe today, and only 3 of them have a declared
- * action class. Gating all of them at once would have frozen 17 repair types
- * that work now; declaring 17 classes at once would have meant inventing
+ * 20 finding types are auto-safe today, and only 4 of them have a declared
+ * action class. Gating all of them at once would have frozen 16 repair types
+ * that work now; declaring 16 classes at once would have meant inventing
  * `requiredSensors`,
  * `verifier` and `recovery` contracts nobody had verified, which is the exact
  * fabrication this architecture exists to prevent.
  *
- * So these 17 keep TODAY'S proven behaviour, and the debt is made explicit:
+ * So these 16 keep TODAY'S proven behaviour, and the debt is made explicit:
  *
  *   - the list is hardcoded and exhaustive. There is no wildcard and no
  *     "unknown types fall through", because either of those would let the
@@ -258,7 +267,6 @@ export const LEGACY_AUTONOMY_COMPAT_TYPES: ReadonlySet<string> = new Set([
   'orphan_table',
   'realtime_gap',
   'rls_denies_everything',
-  'rls_expression_invalid',
   'schema_not_registered',
   'shadow_mutation',
   'unprotected_user_data',

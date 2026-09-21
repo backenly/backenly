@@ -68,7 +68,10 @@ async function grant(projectId: string, userId: string, over: any = {}) {
 const gateFor = (projectId: string) =>
   authorizeAutonomousFix({
     projectId,
-    findingType: 'rls_wide_open',
+    // The type the wide-open probe ACTUALLY emits. This test first used
+    // 'rls_wide_open', which no probe produces, and passed while the live path
+    // routed the real type straight to the legacy auto-repair.
+    findingType: 'rls_expression_invalid',
     tableName: 'posts',
     loop: 'reconciler',
   })
