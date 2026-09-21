@@ -12,6 +12,29 @@
  * refused anyway.
  */
 
+/**
+ * Most of this file is about the CONSENT rules - version binding, bindings,
+ * the tier ceiling, revocation - and those need a ladder somebody could
+ * actually approve.
+ *
+ * Since the capability gate landed, every ladder the planner emits is
+ * `blocked_by_capability` because `drop_constraint` has no executor, and
+ * `grantMaintenanceApproval` correctly refuses to record consent for a plan
+ * that cannot be safely undone. That is asserted explicitly at the bottom of
+ * this file with the real registry; everywhere else recovery is treated as
+ * available so the consent rules themselves are exercised.
+ */
+let recoveryIsAvailable = true
+
+jest.mock('@/lib/autonomy/maintenance/rollback-capability', () => {
+  const actual = jest.requireActual('@/lib/autonomy/maintenance/rollback-capability')
+  return {
+    ...actual,
+    rollbackRefusal: (st: string) => (recoveryIsAvailable ? null : actual.rollbackRefusal(st)),
+    canRollback: (st: string) => (recoveryIsAvailable ? true : actual.canRollback(st)),
+  }
+})
+
 const mockFindFinding = jest.fn()
 const mockFindApproval = jest.fn()
 const mockUpsertApproval = jest.fn()
@@ -77,6 +100,7 @@ const ANSWERS: LadderAnswers = {
 }
 
 beforeEach(() => {
+  recoveryIsAvailable = true
   jest.clearAllMocks()
   mockFindFinding.mockResolvedValue({ id: 'f1' })
   mockFindApproval.mockResolvedValue(null)
@@ -319,5 +343,40 @@ describe('withdrawing consent', () => {
     const arg = mockUpdateApproval.mock.calls[0][0] as any
     expect(arg.data.revokedBy).toBe('user-42')
     expect(arg.data.revokedAt).toBeInstanceOf(Date)
+  })
+})
+
+// ── The gate, with the real registry ────────────────────────────────────────
+
+describe('consent cannot be recorded for a ladder Backenly cannot undo', () => {
+  it('refuses, and says the plan is blocked rather than asking for bindings', async () => {
+    // The property that keeps an unrecoverable ladder out of the approval
+    // queue entirely. Without it the owner is handed a decision they cannot
+    // make meaningfully: approving a change whose recovery does not exist.
+    recoveryIsAvailable = false
+    // Rebuilt AFTER the flip. `beforeEach` primes the resolve mock with a plan
+    // built while recovery was available, so reusing it would be approving a
+    // plan the planner would no longer produce.
+    const blocked = plan()
+    expect(blocked.validity).toBe('blocked_by_capability')
+    mockResolve.mockResolvedValue({
+      plan: blocked,
+      subsystem: { fingerprint: 'sessions', membership: ['sessions', 'users'] },
+      catalogFingerprint: 'cat-v1',
+      table: 'sessions',
+    })
+
+    const r = await grantMaintenanceApproval({
+      projectId: 'p1',
+      planVersion: blocked.planVersion,
+      approvedBy: 'u1',
+      answers: ANSWERS,
+    })
+
+    expect(isGrantRefusal(r)).toBe(true)
+    if (!isGrantRefusal(r)) return
+    expect(r.refusal).toMatch(/blocked_by_capability/)
+    expect(r.refusal).toMatch(/drop a constraint/)
+    expect(mockUpsertApproval).not.toHaveBeenCalled()
   })
 })
