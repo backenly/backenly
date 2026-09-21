@@ -34,6 +34,7 @@ import { evaluateFixOutcome, captureCheckBaseline } from '@/lib/autonomy/desired
 import { FLAGS } from '@/lib/config/flags'
 import { withBuildLock } from '@/lib/ai/build-runtime/build-lock'
 import { normalizeFindingType } from './types'
+import type { FixVerification } from './fix-verification'
 import { buildFixAction, getManualRemediationHint } from './fix-actions'
 import type { FindingType } from './types'
 import type { AIAction } from '@/lib/ai/minimal-executor'
@@ -47,7 +48,18 @@ export interface AutoFixResult {
   // left OPEN and retried on the next loop tick — it is NOT a failure and is
   // NEVER escalated to a human. Escalating a timing condition to an approval
   // queue is what made the loop look non-autonomous.
-  outcome: 'auto_fixed' | 'pending_approval' | 'notify_only' | 'escalated' | 'deferred'
+  // 'applied_unverified' = the mutation ran and the acceptance probe could not
+  // produce evidence either way. NOT success and NOT failure: a verifier that
+  // throws proves nothing about the repair. It is its own outcome so callers
+  // cannot count it as a fix, and so the reconciler can stop making dependent
+  // repairs on state it has not confirmed.
+  outcome:
+    | 'auto_fixed'
+    | 'applied_unverified'
+    | 'pending_approval'
+    | 'notify_only'
+    | 'escalated'
+    | 'deferred'
   findingId: string
   message: string
   rollbackData?: Record<string, unknown>
@@ -240,7 +252,7 @@ export async function executeApprovedFix(
   snapshotId?: string
   rollbackData?: Record<string, unknown>
   /** Whether the gap was re-probed after the fix and confirmed gone. */
-  verification?: 'confirmed' | 'unverified'
+  verification?: FixVerification
 }> {
   const finding = await prisma.healthFinding.findUnique({ where: { id: findingId } })
   if (!finding) return { success: false, message: 'Finding not found.' }
@@ -262,6 +274,88 @@ export async function executeApprovedFix(
       message: hint
         ?? `This issue needs your manual review — open the relevant section of your dashboard to resolve it.`,
     }
+  }
+
+  // ── An unverified mutation is not permission to mutate again ──────────────
+  //
+  // A finding carrying `appliedUnverified` has already had its repair run
+  // once; what failed was the check, not necessarily the fix. This path had no
+  // precondition at all — it went from `buildFixAction` straight to executing
+  // — so the sequence below was reachable in about ten seconds:
+  //
+  //   CREATE INDEX succeeds -> verification times out -> finding stays in the
+  //   queue -> owner opens Autonomy and clicks Approve & fix -> the same
+  //   mutation runs again
+  //
+  // For `CREATE INDEX IF NOT EXISTS` that is merely wasteful. The repair
+  // vocabulary is not all idempotent and will not stay this small, and
+  // "unknown" must never be usable as consent to repeat a change.
+  //
+  // So the rule is: after a verification error, no second mutation until a
+  // FRESH observation says whether the first one worked.
+  if (details.appliedUnverified) {
+    const { recheckGap } = await import('@/lib/autonomy/desired-state')
+    const fresh = await recheckGap(projectId, finding.type, details).catch(() => 'error' as const)
+
+    if (fresh === 'resolved') {
+      // The earlier mutation did work; only the check had failed. Close it
+      // without touching the database a second time.
+      //
+      // Recorded as the auto-fix it actually was, not as a repair performed
+      // now. The statements and pre-fix snapshot from that run are promoted
+      // into `rollbackData` so Undo keeps working, and `verification` is
+      // stamped 'confirmed' because a probe has now positively established the
+      // postcondition. Late evidence is still evidence.
+      const applied = details.appliedUnverified as Record<string, unknown>
+      await prisma.healthFinding.update({
+        where: { id: findingId },
+        data: {
+          status: 'auto_fixed',
+          autoFixed: true,
+          fixAppliedAt: new Date(),
+          details: {
+            ...details,
+            rollbackData: {
+              fixAction: applied.fixAction,
+              statements: applied.statements,
+              rollbackFormat: 2,
+              snapshotId: applied.snapshotId ?? null,
+              fixedAt: applied.at,
+              verification: 'confirmed' satisfies FixVerification,
+              confirmedLate: true,
+            },
+          } as any,
+        },
+      })
+      await _writeAuditLog(projectId, 'HEALTH_FIX_CONFIRMED_LATE', {
+        findingId,
+        findingType: finding.type,
+        note: 'An earlier fix could not be verified at the time. A fresh check found the issue gone; nothing was re-applied.',
+      })
+      return {
+        success: true,
+        message:
+          'This was already fixed. The earlier repair could not be confirmed at the time, ' +
+          'and a fresh check now finds the issue gone, so nothing was changed again.',
+        verification: 'confirmed',
+      }
+    }
+
+    if (fresh !== 'unresolved') {
+      // 'unknown' (no probe covers this type) or the re-probe itself failed.
+      // Either way there is still no observation, and repeating a mutation on
+      // no evidence is the thing this guard exists to prevent.
+      return {
+        success: false,
+        message:
+          'Backenly already applied a fix for this and could not confirm the result. ' +
+          'It cannot check whether that fix worked right now, so it will not run the same ' +
+          'change again. It will re-check on its next pass.',
+        verification: 'verification_error',
+      }
+    }
+    // 'unresolved' — a fresh observation says the problem is genuinely still
+    // there, so re-applying is a decision made on evidence. Fall through.
   }
 
   // PRE-FIX capture — the state one-click undo restores (see capturePreFixState).
@@ -359,10 +453,36 @@ export async function executeApprovedFix(
   // table-shaped location exempted exactly the finding types a human is most
   // likely to be approving by hand — the auth pair, whose fix rewires sign-in for
   // every end-user of the project.
-  let verification: 'confirmed' | 'unverified' = 'unverified'
+  let verification: FixVerification = 'unverified'
   {
-    const outcome = await evaluateFixOutcome(projectId, finding.type, details, baseline)
-      .catch(() => null)
+    // Same three-outcome rule as the autonomous path. The verifier throwing is
+    // not the fix failing and is not the fix working, and a human who clicked
+    // Approve is extending MORE trust than the loop takes on its own, so this
+    // is the last place that distinction should be collapsed.
+    let verifierError: string | null = null
+    const outcome = await evaluateFixOutcome(projectId, finding.type, details, baseline).catch(
+      (err: unknown) => {
+        verifierError = err instanceof Error ? err.message : String(err)
+        return null
+      },
+    )
+
+    if (verifierError !== null) {
+      // `success: false` is deliberate and it is NOT a claim that the fix
+      // failed - the message says so in as many words. It is the only value
+      // that stops the caller rendering "verified & snapshotted", which is the
+      // claim we cannot make. The finding stays in the queue and the next
+      // detection pass settles it.
+      return {
+        success: false,
+        message:
+          'The fix ran, but the check that would confirm it could not complete ' +
+          `(${verifierError}). It has not been recorded as verified. Backenly re-checks ` +
+          'on its next pass and will close this automatically if the problem is gone.',
+        verification: 'verification_error',
+      }
+    }
+
     if (outcome && outcome.recheck === 'unresolved') {
       return {
         success: false,
@@ -929,10 +1049,52 @@ async function _executeAutoFix(
   // for any type no probe covers, which is precisely the case the location check
   // was reaching for. Deleting it costs nothing (the baseline diff above is
   // already computed unconditionally) and closes the hole.
-  let verification: 'confirmed' | 'unverified' = 'unverified'
+  // ── Three outcomes, not two ───────────────────────────────────────────────
+  //
+  // This block used to be `.catch(() => null)` followed by three guards all
+  // shaped `if (outcome && ...)`. When the verifier THREW, every one of them
+  // was skipped and the fix fell through to be recorded as applied:
+  //
+  //     detect -> mutate -> verifier throws -> record success
+  //
+  // A transient database error therefore certified a repair nobody had
+  // checked. That is the observation bug the probes had, moved one step later
+  // and made worse: this manufactures certainty about our own work, after
+  // already having changed the customer's backend.
+  //
+  // A timeout does not prove the fix failed. It also does not prove it worked.
+  // So the error case is its own state and is never success.
+  let verification: FixVerification = 'unverified'
   {
-    const outcome = await evaluateFixOutcome(projectId, type, details, baseline)
-      .catch(() => null)
+    let verifierError: string | null = null
+    const outcome = await evaluateFixOutcome(projectId, type, details, baseline).catch(
+      (err: unknown) => {
+        verifierError = err instanceof Error ? err.message : String(err)
+        return null
+      },
+    )
+
+    if (verifierError !== null) {
+      // Applied, unverifiable. NOT escalated as a failed fix — the repair may
+      // well have worked and calling it a failure is its own false claim — and
+      // NOT rolled back, because undoing a good index because the observer
+      // blinked is the same error in the other direction.
+      //
+      // The finding stays visible instead of disappearing as healed, and the
+      // next tick re-probes it for free: `reapInvariantFindings` closes a
+      // `pending_approval` finding whose gap is genuinely gone, so a fix that
+      // did work resolves itself on the following pass. That is the bounded
+      // verification retry, using the machinery that already exists rather
+      // than re-running a mutation that has already happened.
+      return _appliedUnverified(findingId, projectId, type, details, {
+        fixAction,
+        statements,
+        preSnapshotId: pre.preSnapshotId,
+        message: result.message,
+        verifierError,
+      })
+    }
+
     if (outcome && !outcome.accepted && outcome.recheck !== 'unknown') {
       return _escalate(findingId, projectId, type, details, outcome.reason)
     }
@@ -1002,6 +1164,93 @@ async function _executeAutoFix(
   })
 
   return { findingId, outcome: 'auto_fixed', message: result.message, rollbackData }
+}
+
+/**
+ * The mutation happened and we could not confirm it. Say exactly that.
+ *
+ * Deliberately NOT `_escalate`. Escalation means "the loop tried, verified,
+ * and the fix did not hold" — a claim about the repair. This is a claim about
+ * the OBSERVING, and conflating them would tell a user their fix failed when
+ * what actually failed was the check.
+ *
+ * Deliberately not `auto_fixed` either. The whole point is that nothing may
+ * call this a verified repair, and a finding that leaves the queue as healed
+ * is the system asserting exactly that.
+ *
+ * ── Why the mutation is recorded even though the fix "did not complete" ───
+ *
+ * Because it DID run. `statements` and the pre-fix snapshot are written the
+ * same way a confirmed fix writes them, so Undo still works and "show me what
+ * it ran" still has an answer. Losing that because the verifier broke would
+ * turn an unverified change into an untraceable one.
+ */
+async function _appliedUnverified(
+  findingId: string,
+  projectId: string,
+  type: FindingType,
+  details: Record<string, unknown>,
+  applied: {
+    fixAction: unknown
+    statements: unknown
+    preSnapshotId: string | null
+    message: string
+    verifierError: string
+  },
+): Promise<AutoFixResult> {
+  const reason =
+    `The fix ran, but the check that would confirm it could not complete: ${applied.verifierError}. ` +
+    'It has not been recorded as verified. Backenly will re-check on its next pass and close this ' +
+    'automatically if the problem is genuinely gone.'
+
+  await prisma.healthFinding.update({
+    where: { id: findingId },
+    data: {
+      // Stays in the queue. `reapInvariantFindings` closes a pending_approval
+      // finding whose gap is actually gone, so a fix that worked resolves
+      // itself next tick and one that did not stays visible.
+      status: 'pending_approval',
+      details: {
+        ...details,
+        // The mutation is on the record even though the verdict is not, so a
+        // later reader can tell "we changed this and do not know the result"
+        // from "we never got that far".
+        appliedUnverified: {
+          at: new Date().toISOString(),
+          fixAction: applied.fixAction,
+          statements: applied.statements,
+          snapshotId: applied.preSnapshotId,
+          verifierError: applied.verifierError,
+        },
+        escalation: {
+          ...((details.escalation ?? {}) as Record<string, unknown>),
+          reason,
+          at: new Date().toISOString(),
+        },
+      } as any,
+    },
+  })
+
+  // Its own action, not HEALTH_FIX_ESCALATED. The activity feed, the trust
+  // scoreboard and the welcome-back banner all read these strings, and a
+  // verification outage read as a failed repair would be a second false claim
+  // laid on top of the first.
+  await _writeAuditLog(projectId, 'HEALTH_FIX_UNVERIFIED', {
+    findingId,
+    findingType: type,
+    tableName: (details.tableName ?? details.table ?? details.location ?? null) as string | null,
+    columnName: (details.columnName ?? details.column ?? null) as string | null,
+    fixAction: applied.fixAction,
+    message: applied.message,
+    snapshotId: applied.preSnapshotId,
+    statements: applied.statements,
+    verifierError: applied.verifierError,
+    // Never 'confirmed'. The scoreboard counts only that string, so this row
+    // cannot inflate the verified rate however it is later aggregated.
+    verification: 'verification_error' satisfies FixVerification,
+  })
+
+  return { findingId, outcome: 'applied_unverified', message: reason }
 }
 
 async function _escalate(
