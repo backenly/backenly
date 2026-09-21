@@ -222,9 +222,19 @@ somewhere in the tree; the RFC's job is to make them structural.
 | P10 | Required observation capability is a precondition of authority | new, §7 |
 | P11 | An executor never certifies its own success | `#79` |
 | P12 | Correlation is reported as correlation, never as cause | `change-correlation.ts:194` |
+| P13 | A decision authorizes only while its inputs hold; revalidate before mutating | new, §10.4 |
+| P14 | Confidence decays: demonstrated capability is not current health | new, §7.2 |
+| P15 | A refusal explains its blocker; silence is not a safe refusal | new, §10.1 |
 
-P9 and P10 are the two new ones, and they are the two that prevent this
-architecture from recreating the failure the audit spent itself removing.
+P9, P10 and P13 to P15 are the ones this RFC adds. P9 and P10 prevent the
+architecture from recreating the failure the audit spent itself removing:
+Backenly guessing, then treating the guess as grounds to act.
+
+P13 to P15 came out of review and each closes a gap the first draft opened.
+P13 closes a time-of-check-to-time-of-use window the decision layer would
+otherwise have introduced. P14 stops `clean` from meaning "worked once, months
+ago". P15 stops a refusal from being indistinguishable from health, which is the
+original sin of this codebase restated at the decision layer.
 
 ---
 
@@ -245,6 +255,11 @@ The distinction is load-bearing. "Claude Code requested a Tier-2 migration, the
 owner's standing grant authorized it, the maintenance loop executed it" is three
 principals and one sentence, and today it is unrepresentable.
 
+`authorizedBy` is modelled here as a single principal, which holds while a human
+grants authority directly. It likely needs to widen into an authorization chain
+with a named root once organization policy is the source of authority — carried
+as Q9 (§23.1), not designed here.
+
 ### 4.2 The type
 
 ```ts
@@ -260,6 +275,11 @@ type Principal =
 identified by its PostgreSQL role and nothing more, which is exactly what
 `change-correlation.ts:157` already reports. Pretending otherwise would be a P1
 violation about actors instead of about tables.
+
+This is **weak attribution by construction, not a gap to close later**: a shared
+role identifies a credential and a context, and several humans and jobs may sit
+behind one. §23.1 states the rules that follow from that, and they are binding on
+any surface built on this model.
 
 ### 4.3 Adoption path
 
@@ -430,7 +450,7 @@ with the crucial distinction already made:
 | Status | Meaning | Effect on authority |
 |---|---|---|
 | `fired` | found something | observation is actionable |
-| `clean` | ran, silent, **has fired before** — proven capable | supports `AUTO_EXECUTE` |
+| `clean` | ran, silent, **has fired before** — proven capable | supports `AUTO_EXECUTE`, **only while fresh and currently executing** (§7.2) |
 | `unverified` | ran, silent, **never fired** — indistinguishable from broken | may observe; cannot support autonomous authority |
 | `errored` | the probe failed | `PROPOSE_ONLY` or `FREEZE` |
 | `disabled` | not installed | `FREEZE` for actions needing it |
@@ -438,6 +458,10 @@ with the crucial distinction already made:
 The `clean` / `unverified` distinction is the best idea in the current codebase
 and is currently consumed by a `console.warn` (§1.1c). Wiring it into the
 decision is a small change to a proven component, not a new subsystem.
+
+It is also not sufficient on its own: these five states describe a probe's
+*demonstrated capability*, not its *current health*. §7.2 adds the two parts
+that decay.
 
 ### 7.1 Degradation is per-dependency, never global
 
@@ -453,6 +477,50 @@ schema drift proposal  PROPOSE_ONLY
 Disabling all autonomy because one observer is impaired is its own failure mode:
 it removes repair capability precisely when something is already wrong.
 
+### 7.2 Confidence decays: a sensor requirement is four parts, not one
+
+The five-state model answers "has this probe ever proven it can fire". It does
+not answer "is it working now". `clean` is computed from a first-firing that may
+be months old, so a probe that fired in June and has been silently misconfigured
+since July is still classified `clean` today. That is the same optimism the
+audit removed everywhere else, surviving in the confidence model itself.
+
+Confidence is therefore **not** a single status. A sensor requirement is
+satisfied only when all four parts hold:
+
+```
+required probe        the specific probe this action depends on
+current execution     its most recent run completed without error
+confidence state      clean (never unverified, errored or disabled)
+freshness bound       that run, and its evidence, are inside the action's window
+```
+
+`current execution` is the part that does not exist today, and it is cheap: the
+daily cron in `instrumentation.ts:132` already runs every probe per project and
+already throws its result away (§1.1c). Persisting last-run outcome and
+timestamp turns a discarded log line into the liveness half of this requirement.
+
+**Freshness bounds are per action class, never one global TTL.** The bound
+belongs to the action because the underlying signal decays at completely
+different rates:
+
+| Signal | Reasonable bound | Why |
+|---|---|---|
+| Schema catalog shape | minutes to hours | changes only on DDL, and DDL is itself an observed event |
+| RLS / policy configuration | minutes | security-relevant, and a migration can invalidate it instantly |
+| Index existence | hours | slow-moving |
+| Behavioural latency (p95) | short, and a window not a point | a single sample is noise; the bound is over an aggregation window |
+
+A single TTL would have to be set to the shortest of these, making slow-moving
+actions needlessly unrunnable, or to the longest, making security actions unsafe.
+
+**A stale sensor is not a broken one.** Staleness resolves by re-observing,
+which the system can do itself. The correct response is therefore to re-observe
+and re-decide, not to `FREEZE` — freezing is for a probe that *cannot* produce a
+trustworthy reading, not one that merely has not lately. This distinction is why
+§10.4's table maps stale evidence to "re-observe" and bad sensor status to
+`FREEZE`.
+
 ---
 
 ## 8. Action classes
@@ -462,19 +530,39 @@ declaration that does not exist today, and it is what makes §7.1 mechanical
 rather than a matter of judgement.
 
 ```ts
+/** A sensor dependency, with the freshness bound that belongs to THIS action. */
+interface SensorRequirement {
+  probeId: string
+  /** How old the probe's last successful run may be. Per §7.2, never global. */
+  livenessBound: number               // seconds
+  /** How old the observation it produced may be. Often shorter than liveness. */
+  evidenceBound: number               // seconds
+  /** Aggregation window, for signals where a single sample is noise. */
+  window?: number                     // seconds
+}
+
 interface ActionClass {
   id: string                          // 'enable_rls' | 'create_index' | …
   tier: 0 | 1 | 2 | 3                 // reuses the maintenance tier scale
-  requiredSensors: string[]           // probe ids that must support the claim
-  verifier: string                    // the probe that independently confirms
+  requiredSensors: SensorRequirement[]
+  verifier: SensorRequirement         // the probe that independently confirms
   recovery: RollbackStrategy | 'none'
-  evidenceFreshness: number           // seconds
   blastRadius: 'single_object' | 'table' | 'schema'
   reversibility: 'reversible' | 'irreversible'
 }
 ```
 
-Two rules make the registry load-bearing:
+`evidenceFreshness` was a single number on the action in an earlier draft. It is
+now per sensor, because an action can depend on two probes whose signals decay at
+different rates — `enable_rls` needs both a policy reading (minutes) and a
+catalog reading (hours), and the stricter bound must not be forced onto both.
+
+Three rules make the registry load-bearing:
+
+- **Every required sensor must satisfy all four parts of §7.2.** A missing
+  `livenessBound` is not a permissive default; an action class that fails to
+  declare one is malformed and its actions are `FREEZE` until it does. Default-deny
+  (P8) applies to the declaration itself, not only to capability lookups.
 
 - **`verifier` may not be the executor.** P11, structurally.
 - **`recovery` resolves through `ROLLBACK_CAPABILITY`**
@@ -559,7 +647,7 @@ proposed action
 ```
 AUTO_EXECUTE    act now, within the stated bounds
 PROPOSE_ONLY    prepare it, surface it, do not act
-FREEZE          do not act and do not propose; the state cannot be established
+FREEZE          no mutation and no executable repair proposal; explain the blocker
 DENY            this action is never permitted here
 ```
 
@@ -572,6 +660,30 @@ something that might resolve itself.
 `FREEZE` is also the answer that did not exist during the audit. Every bug `#77`
 through `#83` was a case where the system had no way to say *"I cannot establish
 this"* and therefore said something else.
+
+**`FREEZE` silences the repair, not the system.** An earlier draft defined it as
+"do not act and do not propose", which is too broad in its second half: a frozen
+action that says nothing reproduces the failure it exists to prevent, because
+the user sees a quiet surface and infers health. Precisely:
+
+| Under `FREEZE` | Permitted? |
+|---|---|
+| Mutate the resource | **no** |
+| Present an executable repair proposal for that resource | **no** |
+| Report the blocker as a diagnostic, naming the failed prerequisite | **yes, required** |
+| Propose or perform remediation **of the broken prerequisite itself** | **yes** |
+| Count the action as healthy, clean, or verified | **no** — it is `unchecked` |
+
+The distinction is that a frozen RLS action must not offer "apply this policy",
+because the evidence for needing it cannot be established. It must say:
+
+> RLS reconciliation is frozen because sensor `detect_missing_rls` is errored.
+> Restore that probe before Backenly can establish whether a repair is needed.
+
+The second line is the actionable part, and it points at the *prerequisite*, not
+at the resource. Repairing a broken probe is itself an action class with its own
+decision, and it is usually available when the action it blocks is not — which
+is what makes `FREEZE` a state a user can exit rather than a dead end.
 
 ### 10.2 The receipt
 
@@ -634,6 +746,53 @@ and a decision about an unnamed resource is not a decision. The maintenance path
 already re-checks consent and catalog fingerprint immediately before every
 privileged rung (`lib/autonomy/maintenance/execute.ts:339`); the decision joins
 that check rather than replacing it.
+
+### 10.4 A decision is a lease, not a certificate
+
+A stored `AUTO_EXECUTE` is not permission that keeps. Between deciding and
+mutating, an intent can be superseded, a grant revoked, a sensor can break, the
+resource can be replaced, and another principal can start changing the same
+object. Without an explicit rule, this architecture would introduce its own
+time-of-check-to-time-of-use gap:
+
+```
+decision valid → the world changes → stale AUTO_EXECUTE → mutation
+```
+
+That would be a new instance of exactly the failure class this whole audit
+removed: acting on a belief that was true once and is no longer checked.
+
+> **NORMATIVE.** An Authority Decision authorizes execution only while its
+> decision inputs remain valid. Execution **must revalidate every mutable safety
+> input immediately before mutation**, inside the same single-flight lock as the
+> mutation itself.
+
+The mutable inputs, and what a changed value means:
+
+| Input | Revalidated against | On mismatch |
+|---|---|---|
+| Intent version | current `Intent.version` for the resource | decision void, re-decide |
+| Grant validity | not expired, not revoked, budget remaining | decision void, `PROPOSE_ONLY` |
+| Required sensor status | current `ProbeStatus` per §8 | decision void, `FREEZE` |
+| Evidence freshness | within the action class's bound (§7.2) | decision void, re-observe |
+| Resource identity | observed shape and fingerprint | decision void, `blocked_stale` |
+| Capability revisions | forward and recovery revision strings | decision void, re-decide |
+| Conflicting recent change | §12, within the action class's window | decision void, `PROPOSE_ONLY` |
+
+Three properties keep this honest:
+
+- **Revalidation is inside the lock.** Checking outside the single-flight lock
+  and then mutating inside it reopens the same gap it closes.
+- **A revalidation that cannot complete is not a pass.** If the revalidation
+  read itself fails, the answer is `FREEZE`, never "proceed". P1 applies to the
+  safety check as much as to the observation.
+- **A void decision is recorded, not silently retried.** The superseded receipt
+  and its reason are written, because "Backenly was about to act and stopped
+  because the grant had been revoked" is exactly the event an owner should see.
+
+Static inputs — the action class, the environment, the resource *scope* — do not
+need revalidation. Distinguishing them matters: revalidating everything on every
+step would make long maintenance ladders unrunnable for no safety gain.
 
 ---
 
@@ -734,10 +893,22 @@ the decision layer sits above them:
   `executeMaintenancePlan` on a pinned connection, failing closed
   (`lib/autonomy/maintenance/single-flight.ts`, `#78`).
 
-The decision layer adds one obligation: the `AuthorityDecision.capability` block
-is captured **at decision time** and re-checked at execution time. A recovery
-capability that changed revision between decision and execution invalidates the
-decision, exactly as `planVersion` invalidates an approval.
+The decision layer adds exactly one obligation to this machinery, and it is
+§10.4: **the executor must revalidate every mutable decision input immediately
+before mutating, inside the single-flight lock.** A recovery capability whose
+revision changed between decision and execution voids the decision, exactly as
+`planVersion` invalidates an approval.
+
+This is a small change to the existing execution path rather than a new
+mechanism, because the shape already exists. `lib/autonomy/maintenance/execute.ts:339`
+already re-reads live consent and the catalog fingerprint immediately before
+every privileged rung, and `#81`'s rollback already reloads the execution record
+and re-observes the resource before acting. §10.4 generalises that discipline
+from "consent and catalog" to the full input set, and extends it from
+maintenance to the reconciler, which today has no equivalent re-check.
+
+The honest way to describe the change: maintenance already does about half of
+this, and the reconciler does none of it.
 
 ---
 
@@ -754,7 +925,7 @@ reviewing any future autonomy code.
 | `failed` | positively established: it did not work | unknown |
 | `unsupported` | no implementation exists in this deployment | not needed |
 | `blocked_stale` | the resource moved since it was recorded | failed |
-| `FREEZE` | authority cannot be established right now | denied |
+| `FREEZE` | authority cannot be established right now; explain the blocker | denied, or silent |
 | `DENY` | policy forbids it, permanently | freeze |
 
 Six of these eight already exist in the tree. The contribution here is that they
@@ -928,22 +1099,52 @@ architecture's value is demonstrated or disproven.
 Per **action class**, not globally — a single aggregate would hide the case
 where index repair is excellent and RLS repair is dangerous.
 
+**These are two different kinds of number and must never be summed.** An
+earlier draft weighted unsafe action and over-refusal equally. That is wrong: a
+single aggregate that trades one unsafe autonomous mutation against one
+unnecessary refusal creates precisely the wrong optimization incentive, because
+the two failures are not commensurable. An unnecessary refusal costs utility and
+is recoverable by a human. An unsafe mutation costs a user's data and may not be.
+
+**Tier 1 — safety constraint. A release gate, not a score.**
+
 ```
-detection precision / recall
-unsafe-action rate               mutations that should not have happened
-correct-refusal rate             FREEZE/DENY where that was right
-over-refusal rate                FREEZE where action was safe and justified
-verification correctness         confirmed/failed/unknown vs ground truth
-rollback correctness             including blocked_stale accuracy
-authority-decision correctness   decision vs the fault's declared expectation
-evidence completeness            % of actions with a full receipt
+unsafe-action rate           mutations that should not have happened
+verification correctness     confirmed/failed/unknown vs ground truth
+rollback correctness         including blocked_stale accuracy
 ```
 
-**Over-refusal deserves equal weight to unsafe action.** A system that freezes
-constantly is safe and worthless, and the audit's direction of travel — every PR
-made the system refuse more — makes this the metric most likely to be ignored.
-`#80` already left every maintenance ladder `blocked_by_capability`, which is
-correct and is also a product with no autonomy in it.
+> **NORMATIVE.** For any action class to become eligible for automatic
+> authority (`AUTO_EXECUTE`) in production, it must show **zero observed unsafe
+> actions** across the lab scenario bank. This is a gate, not a target to
+> optimize toward, and it is not tradeable against any utility metric.
+
+Zero-observed is a weak guarantee and is stated as such: it means "no unsafe
+action was observed in the bank", not "unsafe action is impossible". It is the
+strongest claim the lab can support with no user population
+(`project_user_base_is_synthetic`). Statistical budgets — an unsafe-action rate
+below some bound, with confidence intervals — become meaningful only once there
+is real traffic, and should replace the zero-observed gate then, not before.
+
+**Tier 2 — utility metrics. Optimize these, within the Tier 1 constraint.**
+
+```
+detection precision / recall
+correct-refusal rate             FREEZE/DENY where that was right
+over-refusal rate                FREEZE where action was safe and justified
+authority-decision correctness   decision vs the fault's declared expectation
+evidence completeness            % of actions with a full receipt
+time to detection / time to repair
+```
+
+Over-refusal stays a first-class metric, and it is still the one most likely to
+be ignored: every audit PR made the system refuse more, and `#80` left every
+maintenance ladder `blocked_by_capability`, which is correct and is also a
+product with no autonomy in it. The change is that over-refusal is now measured
+and reported **separately**, as the cost of the safety constraint, rather than
+netted against it.
+
+Both tiers are reported per action class, never as one number.
 
 ### 18.5 Shadow and counterfactual
 
@@ -963,11 +1164,13 @@ in `orders.user_id`."*
 
 Why this one:
 
-1. **It is the class competitors structurally cannot express.** §21 shows
+1. **No reviewed competitor documents this class of assertion.** §21 shows
    Convex's `schema.ts` covers document shape at write time and Supabase's
-   advisor lints for RLS being absent. Neither holds *"this table is
-   user-owned"* as a durable, attributable assertion — one is a type, the other
-   is a lint with no declarant.
+   advisor lints for RLS being absent. Neither is documented as holding *"this
+   table is user-owned"* as a durable, attributable assertion — one is a type,
+   the other is a lint with no declarant. Whether this is a *structural* limit
+   or merely an unbuilt feature is not established, and the slice does not
+   depend on it being structural.
 2. **It exercises every part of the architecture.** It has a declared intent, a
    probe with a known blindness history (`detectMissingRls`), a real repair, an
    independent verifier, a recovery strategy, and a genuine unsafe failure mode.
@@ -1042,8 +1245,8 @@ Confidence is marked per claim; "not found" is never reported as absence.
 Supabase's consent lives in the **MCP client, in the session**. "Most MCP
 clients ask you to accept each tool call before it runs." That is a strong
 control while a human is watching a session and provides nothing once the
-session ends. There is no server-side grant, so there is no answer to "what may
-happen tonight".
+session ends. **No server-side grant mechanism was found in reviewed primary
+sources**, so no documented answer to "what may happen tonight" was identified.
 
 ### 21.2 Neon
 
@@ -1139,22 +1342,40 @@ prove something a remediation prompt cannot express.
 
 ### 21.5 Summary
 
+**Legend, and it is load-bearing.** This matrix distinguishes three different
+epistemic states, because collapsing them would break the rule stated at the top
+of §21:
+
+- **yes** — documented capability, cited above.
+- **documented limit** — the vendor *positively states* the boundary (for
+  example Convex's "the human keeps the merge button"). This is evidence of
+  absence.
+- **none found** — not found in reviewed primary sources. This is **absence of
+  evidence, not evidence of absence**, and must never be read as "they cannot
+  do this" or repeated as a competitive claim.
+
 | | Supabase | Neon | Convex | InsForge | Backenly (proposed) |
 |---|---|---|---|---|---|
-| Detects misconfiguration | yes (lint) | no | yes (advisor) | **yes (daily)** | yes |
-| Detects with nobody present | on demand | n/a | sentinel, on error | **yes, scheduled** | yes, scheduled |
-| Declared intent | no | no | **yes** (shape) | not found | yes (shape + ownership + objective + boundary) |
-| Applies fixes without a human | no | no | no (PR) | **no** (paste-a-prompt) | yes, within a grant |
-| Verifies the result | n/a | on a branch | on a preview | not found | in production, three-valued |
+| Detects misconfiguration | yes (lint) | none found | yes (advisor) | **yes (daily)** | yes |
+| Detects with nobody present | on demand | none found | sentinel, on error | **yes, scheduled** | yes, scheduled |
+| Declared intent | none found | none found | **yes** (shape) | none found | yes (shape + ownership + objective + boundary) |
+| Applies fixes without a human | none found | none found | **documented limit** (PR) | **documented limit** (paste-a-prompt) | yes, within a grant |
+| Verifies the result | n/a | on a branch | on a preview | none found | in production, three-valued |
 | Reversibility | migrations | **branching** | PR revert | branching, human-approved | execution-bound rollback |
 | Consent model | per tool call, in session | per tool call | standing, per class | human approval per write | grant: principal × class × resource × env |
-| Authority contracts when observers degrade | no | no | not found | not found | yes |
+| Authority contracts when observers degrade | none found | none found | none found | none found | yes |
 
 **Read the first two rows together before claiming differentiation.** Detection
-is commoditized and scheduled detection is not unique. The rows that are still
-empty for everyone else are *applies fixes without a human*, *verifies in
-production*, and *authority contracts when observers degrade* — and the last one
-only has value because of the first.
+is commoditized and scheduled detection is not unique.
+
+The rows where Backenly's proposed position is not matched by anything found are
+*applies fixes without a human*, *verifies in production*, and *authority
+contracts when observers degrade* — and the last only has value because of the
+first. Note the epistemic asymmetry: on *applies fixes without a human* two
+vendors state the limit explicitly, so that row is well evidenced. On *authority
+contracts when observers degrade* every cell is `none found`, which is the
+weakest row in the table and should be re-checked before it is used in any
+external claim.
 
 ---
 
@@ -1177,12 +1398,19 @@ For any change Backenly made, answerable from one record:
 An advisor answers (3). An advisor plus automation answers (3) and (7). Convex's
 self-heal answers (1) for shape, (3), (7) on a preview, and part of (5).
 
-**The genuinely hard-to-copy part is (4) and (6) together:** a controller whose
+**The plausibly hard-to-copy part is (4) and (6) together:** a controller whose
 authority contracts when its own observers degrade, and which can itemise why.
 That requires holding sensor confidence, action dependencies and delegated
-authority in one evaluation, and it only *matters* if the system acts unattended
-— which is why no competitor has built it. They stop at a PR, so they never need
-to answer "was the observer trustworthy at 3am".
+authority in one evaluation, and it only *matters* if the system acts
+unattended.
+
+**No documented equivalent was found in reviewed primary sources**, which is not
+the same as establishing that none exists — §21.5 marks that row `none found` in
+every competitor cell, making it the weakest-evidenced row in the analysis. The
+*explanation* offered here is a hypothesis, not a finding: vendors that stop at a
+PR (a limit Convex and InsForge both state explicitly) never have to answer "was
+the observer trustworthy at 3am", so the requirement may simply not arise for
+them. Treat that as a reason to re-check the claim, not as proof of a gap.
 
 ### 22.1 Where this is not a moat
 
@@ -1225,15 +1453,51 @@ Marked where founder/product judgement is required rather than engineering.
 |---|---|---|
 | Q1 | Does `Incident` link to `Adaptation`, or stay fully separate? | engineering |
 | Q2 | Is `boundary` intent enforced at the planner or the executor? Planner refuses earlier; executor is harder to bypass. | engineering |
-| Q3 | Evidence freshness: per action class, or global with overrides? | engineering |
+| ~~Q3~~ | ~~Evidence freshness: per action class, or global?~~ **Resolved in review: per action class, and promoted into the core model as §7.2.** A global TTL is unsafe for security signals and needlessly restrictive for slow-moving ones. | resolved |
 | Q4 | Should `platform_invariant` outrank `declared_by_authorized_agent`? §5.4 argues the current order may be backwards. | engineering |
 | Q5 | How does a grant expire — time, budget, or explicit revocation only? | **product** |
 | Q6 | Does the dial survive as a preset once grants exist? | **product** |
 | Q7 | Could workspace schemas be branched cheaply, making part of the recovery registry unnecessary? | engineering, high value |
 | Q8 | **Is unattended execution the product, or is PR-gated repair?** (§22.1) | **product, blocking** |
+| Q9 | Does `authorizedBy` need an authorization **chain** rather than one direct human? See below. | engineering |
 
-Q8 is blocking in the sense that a negative answer changes what Phase 3 should
-build, though not Phases 0–2.
+Q8 is blocking before **Phase 3**, not before Phases 0–2. Measuring the current
+system and building principal and decision observability are worth doing whether
+or not the eventual answer is "users prefer PR-gated remediation".
+
+### 23.1 Carried from review, not blocking
+
+**Q9 — `authorizedBy` may need a chain, not an actor.** §4.1 models
+`authorizedBy` as a single principal, which holds while a human grants authority
+directly. It does not obviously hold once organization policy is the source: the
+authority for an action may derive from a role, which derives from an org policy,
+which was set by an admin who has since left. Recording only the leaf loses the
+root, and "who is accountable for this grant" is an org-level audit question.
+
+The likely shape is an authorization chain with a named root, resembling a
+delegation path more than a field. Deliberately not designed here: it should
+follow the organizations model rather than be guessed at now, and the single-
+principal form is a strict subset that can widen without breaking.
+
+**External role attribution is weak attribution, permanently.** §4.2 types
+direct database access as `{ kind: 'external'; role: string }`. Worth stating
+explicitly as a property rather than a limitation to fix later: **a shared
+PostgreSQL role identifies a credential and a context, not a person.** Several
+humans and several automated jobs may share one role, and the database cannot
+distinguish them.
+
+Consequences that follow, and should survive into implementation:
+
+- Never render an `external` principal as a person, or with a person's name
+  resolved from anywhere else.
+- Never use `external` attribution as the basis for an authority decision about
+  *who* acted. It is legitimate input for §12 conflict detection ("something
+  outside the platform changed this recently"), which does not require identity.
+- Surfaces should say "over a direct database connection as role `X`", which is
+  what `change-correlation.ts:157` already does correctly today.
+
+This is the actor-level form of P1: the system cannot observe who held the
+credential, so it must not report a person.
 
 ---
 
