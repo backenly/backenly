@@ -222,7 +222,7 @@ somewhere in the tree; the RFC's job is to make them structural.
 | P10 | Required observation capability is a precondition of authority | new, §7 |
 | P11 | An executor never certifies its own success | `#79` |
 | P12 | Correlation is reported as correlation, never as cause | `change-correlation.ts:194` |
-| P13 | A decision authorizes only while its inputs hold; revalidate before mutating | new, §10.4 |
+| P13 | A decision authorizes only while its inputs hold; prove they are unchanged at the mutation boundary, not merely re-read | new, §10.4 |
 | P14 | Confidence decays: demonstrated capability is not current health | new, §7.2 |
 | P15 | A refusal explains its blocker; silence is not a safe refusal | new, §10.1 |
 
@@ -452,8 +452,8 @@ with the crucial distinction already made:
 | `fired` | found something | observation is actionable |
 | `clean` | ran, silent, **has fired before** — proven capable | supports `AUTO_EXECUTE`, **only while fresh and currently executing** (§7.2) |
 | `unverified` | ran, silent, **never fired** — indistinguishable from broken | may observe; cannot support autonomous authority |
-| `errored` | the probe failed | `PROPOSE_ONLY` or `FREEZE` |
-| `disabled` | not installed | `FREEZE` for actions needing it |
+| `errored` | the probe failed | **`FREEZE`** whenever the probe is in the action's `requiredSensors` |
+| `disabled` | not installed | **`FREEZE`** whenever the probe is in the action's `requiredSensors` |
 
 The `clean` / `unverified` distinction is the best idea in the current codebase
 and is currently consumed by a `console.warn` (§1.1c). Wiring it into the
@@ -462,6 +462,28 @@ decision is a small change to a proven component, not a new subsystem.
 It is also not sufficient on its own: these five states describe a probe's
 *demonstrated capability*, not its *current health*. §7.2 adds the two parts
 that decay.
+
+**`errored` and `disabled` are unconditional for a required sensor.** An earlier
+draft read "`PROPOSE_ONLY` or `FREEZE`", which is too loose to sit beside §8's
+rule that every required sensor must satisfy all four parts of §7.2. Left
+ambiguous, an implementer could cite this table to emit an executable-looking
+proposal built on evidence the architecture has already declared insufficient —
+which is the failure in P15's clothing: an action that *looks* ready while its
+grounds cannot be established.
+
+`PROPOSE_ONLY` remains correct in exactly two cases, and both turn on the sensor
+not being load-bearing for *this* action:
+
+1. The failed probe is **not** in this action's `requiredSensors`. A broken
+   latency sensor does not block an RLS proposal.
+2. The failed probe **was** supplementary, and the action's required sensors
+   independently establish the violation on their own. The proposal then rests
+   entirely on trustworthy evidence, and the failure is context, not grounds.
+
+Both cases are decidable from the action class's declaration, so this is a
+lookup rather than a judgement call. If an action's required sensor is `errored`
+or `disabled`, the answer is `FREEZE` — and per §10.1 that freeze must still say
+which probe failed and how to restore it.
 
 ### 7.1 Degradation is per-dependency, never global
 
@@ -709,6 +731,8 @@ interface AuthorityDecision {
     requestedBy: Principal
     authorizedBy: Principal | null
     grantId: string | null
+    /** The exact version decided under, for the §10.4 contract to compare. */
+    grantVersion: number | null
     narrowedBy: string[]       // every input that reduced the answer
   }
 
@@ -766,6 +790,13 @@ removed: acting on a belief that was true once and is no longer checked.
 > decision inputs remain valid. Execution **must revalidate every mutable safety
 > input immediately before mutation**, inside the same single-flight lock as the
 > mutation itself.
+>
+> **The execution lock alone is not sufficient.** Each mutable authority input
+> must *either* be serialized with execution through the same coordination
+> mechanism, *or* be revalidated through a version, compare-and-set or lease
+> contract that proves the value has not changed at the mutation boundary.
+> Revalidation under the execution lock is insufficient whenever the input's
+> **writer** does not share that lock.
 
 The mutable inputs, and what a changed value means:
 
@@ -779,16 +810,55 @@ The mutable inputs, and what a changed value means:
 | Capability revisions | forward and recovery revision strings | decision void, re-decide |
 | Conflicting recent change | §12, within the action class's window | decision void, `PROPOSE_ONLY` |
 
-Three properties keep this honest:
+#### Who writes the input decides what revalidation must prove
 
-- **Revalidation is inside the lock.** Checking outside the single-flight lock
-  and then mutating inside it reopens the same gap it closes.
+The single-flight lock (`#78`) serializes *executors* against each other. It
+does **not** serialize an executor against an owner clicking "revoke" in
+settings, because the settings API never acquires it. So for any input whose
+writer sits outside the lock, a plain read under the lock proves nothing:
+
+```
+executor acquires the project lock
+  → reads grant: valid
+      → owner revokes the grant through the settings API   (never takes the lock)
+  → executor mutates under a grant that no longer exists
+```
+
+The lock was held throughout and the race still happened. This is why the rule
+above is two-branched, and the branch required depends on who the writer is:
+
+| Input | Writer | Shares the execution lock? | Therefore |
+|---|---|---|---|
+| Grant validity | owner, via settings API | **no** | version/CAS, or make revocation take the lock |
+| Intent version | user or agent, via API | **no** | version/CAS |
+| Operator flags / config | deployment | **no** | re-read at the boundary; cannot be CAS'd, so treat as advisory and fail closed |
+| Required sensor status | probe runs | **no** | re-read plus freshness (§7.2) |
+| Resource identity | DDL, any source | **no** | observed fingerprint compare (already `#81`'s stale guard) |
+| Capability revisions | the deployed build | n/a, immutable per process | compare captured revision strings |
+| Conflicting recent change | many | **no** | re-query the window (§12) |
+
+Note that **every row but one has a writer outside the lock.** That is the point:
+"revalidate under the lock" would have been true and nearly useless.
+
+**This RFC does not choose the mechanism.** Two implementations are plausible
+and the trade-off is real: comparing `grantVersion == decision.grantVersion` as
+part of atomically claiming execution is cheap and local but must be threaded
+through every authority writer; routing policy mutations through the same
+project-level advisory lock is simpler to reason about but puts a user-facing
+settings write behind a lock held by long-running maintenance. Phase 2 should
+pick one with the shadow data in hand.
+
+#### Three properties keep this honest
+
 - **A revalidation that cannot complete is not a pass.** If the revalidation
   read itself fails, the answer is `FREEZE`, never "proceed". P1 applies to the
   safety check as much as to the observation.
 - **A void decision is recorded, not silently retried.** The superseded receipt
   and its reason are written, because "Backenly was about to act and stopped
   because the grant had been revoked" is exactly the event an owner should see.
+- **Proving freshness is not proving unchanged.** A value re-read a millisecond
+  before the mutation is still a read, not a lease. Only the version, CAS or
+  lock contract establishes that it did not change *during* the mutation.
 
 Static inputs — the action class, the environment, the resource *scope* — do not
 need revalidation. Distinguishing them matters: revalidating everything on every
@@ -1460,6 +1530,7 @@ Marked where founder/product judgement is required rather than engineering.
 | Q7 | Could workspace schemas be branched cheaply, making part of the recovery registry unnecessary? | engineering, high value |
 | Q8 | **Is unattended execution the product, or is PR-gated repair?** (§22.1) | **product, blocking** |
 | Q9 | Does `authorizedBy` need an authorization **chain** rather than one direct human? See below. | engineering |
+| Q10 | Which §10.4 coordination mechanism: version/CAS threaded through every authority writer, or routing policy mutations through the project advisory lock? Decide in Phase 2 with shadow data. | engineering |
 
 Q8 is blocking before **Phase 3**, not before Phases 0–2. Measuring the current
 system and building principal and decision observability are worth doing whether
@@ -1508,7 +1579,8 @@ credential, so it must not report a person.
 | Agent self-authorization | An agent is never `authorizedBy`; grants are human-created and name the agent as principal (§4.3) |
 | Compromised agent API key | Grant scoped by action class, resource, environment, tier, blast radius, time and budget; the blast radius of a stolen key is the grant, not the project |
 | Poisoned inferred intent | P9 — inferred intent cannot authorize; promotion requires an authorized principal |
-| Stale authority | Decision captures capability revisions; re-checked at execution; intent version change invalidates pending approvals (§5.4) |
+| Stale authority | §10.4: every mutable input is either serialized with execution or proven unchanged by version/CAS/lease at the mutation boundary; intent version change invalidates pending approvals (§5.4) |
+| Revocation race | An owner revoking a grant mid-execution must win. The execution lock alone does not ensure this, because the settings API does not take it (§10.4) |
 | Observer blindness used as evidence | P1 + `indeterminate` + sensor status as an authority precondition (§7) |
 | Executor certifying itself | P11 — `ActionClass.verifier` may not be the executor (§8) |
 | Conflicting principals | Conflict input (§9.2, §12); concurrent agent or human change narrows the decision |
