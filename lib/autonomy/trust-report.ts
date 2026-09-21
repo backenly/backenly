@@ -28,6 +28,7 @@ import { isVerifiedFix, isVerificationError } from '@/lib/core/fix-verification'
 import { classifyFix } from '@/lib/core/fix-classifier'
 import { revertEligibility } from '@/lib/core/auto-fix-engine'
 import { INVARIANTS } from './desired-state'
+import { resolveExecutionMode, type ExecutionModeState } from './execution-mode'
 
 export interface TrustScoreboard {
   windowDays: number
@@ -211,6 +212,19 @@ export interface TrustReport {
   appliedChanges: AppliedChange[]
   /** What the closed loop would do right now (present only in shadow mode). */
   shadowPreview: ShadowPreview | null
+  /**
+   * Whether the loop is actually applying repairs to this project.
+   *
+   * Authoritative: read from the flags and the dial, not inferred from audit
+   * rows. `shadowPreview` above is evidence the loop LEFT and says nothing on
+   * a project that has never ticked; this is a fact about the running process
+   * and is correct before the first tick.
+   *
+   * The surfaces render the dial, so a project showed "Autopilot" while the
+   * deployment was structurally incapable of applying a fix. This is the field
+   * that has to be believed over the dial.
+   */
+  executionMode: ExecutionModeState
 }
 
 const ROLLBACK_PREFIX = 'ROLLBACK_'
@@ -573,6 +587,7 @@ export async function buildTrustReport(
   }
 
   return {
+    executionMode: resolveExecutionMode(level),
     projectId,
     level,
     cap,
