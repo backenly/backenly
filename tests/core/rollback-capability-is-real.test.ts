@@ -156,10 +156,90 @@ describe('no ladder is schedulable while its recovery is fictional', () => {
     jest.isolateModules(() => {
       jest.doMock('@/lib/autonomy/maintenance/rollback-capability', () => {
         const actual = jest.requireActual('@/lib/autonomy/maintenance/rollback-capability')
+        // `rollbackContract` is overridden too, not just the registry: the
+        // real one closes over the real registry, and `planVersion` reads the
+        // contract string rather than the map.
         return {
           ...actual,
-          ROLLBACK_CAPABILITY: { ...actual.ROLLBACK_CAPABILITY, drop_constraint: 'implemented' },
+          ROLLBACK_REGISTRY: {
+            ...actual.ROLLBACK_REGISTRY,
+            drop_constraint: { capability: 'implemented', revision: 'v1' },
+          },
           rollbackRefusal: (s: string) => (s === 'drop_constraint' ? null : actual.rollbackRefusal(s)),
+          rollbackContract: (s: string) =>
+            s === 'drop_constraint'
+              ? 'drop_constraint:implemented:v1'
+              : actual.rollbackContract(s),
+        }
+      })
+      const { buildMaintenancePlan: rebuilt } = require('@/lib/autonomy/maintenance/plan')
+      after = rebuilt({
+        findingId: 'f1',
+        diagnosis: diagnosis('duplicated_lifecycle_state'),
+        subsystem: { fingerprint: 'sessions', membership: ['sessions', 'users'] },
+        catalogFingerprint: 'cat-v1',
+      }).planVersion
+    })
+    jest.dontMock('@/lib/autonomy/maintenance/rollback-capability')
+
+    expect(after).not.toBe(before)
+  })
+
+  it('does not re-version a plan when an UNRELATED recovery lands', () => {
+    // Consent is bound to what this plan depends upon. The whole registry used
+    // to be hashed, so implementing a strategy a ladder never touches
+    // invalidated its approval anyway — which trains people to re-approve
+    // without re-reading, and that is the habit the version exists to prevent.
+    //
+    // `missing_constraint_permits_invalid_state` is add_structure + verify and
+    // uses no reader switching, so moving `restore_reader_config` must leave
+    // it alone.
+    const before = planFor('missing_constraint_permits_invalid_state').planVersion
+
+    let after = ''
+    jest.isolateModules(() => {
+      jest.doMock('@/lib/autonomy/maintenance/rollback-capability', () => {
+        const actual = jest.requireActual('@/lib/autonomy/maintenance/rollback-capability')
+        return {
+          ...actual,
+          ROLLBACK_REGISTRY: {
+            ...actual.ROLLBACK_REGISTRY,
+            restore_reader_config: { capability: 'implemented', revision: 'v99' },
+          },
+          rollbackContract: (st: string) =>
+            st === 'restore_reader_config'
+              ? 'restore_reader_config:implemented:v99'
+              : actual.rollbackContract(st),
+        }
+      })
+      const { buildMaintenancePlan: rebuilt } = require('@/lib/autonomy/maintenance/plan')
+      after = rebuilt({
+        findingId: 'f1',
+        diagnosis: diagnosis('missing_constraint_permits_invalid_state'),
+        subsystem: { fingerprint: 'sessions', membership: ['sessions', 'users'] },
+        catalogFingerprint: 'cat-v1',
+      }).planVersion
+    })
+    jest.dontMock('@/lib/autonomy/maintenance/rollback-capability')
+
+    expect(after).toBe(before)
+  })
+
+  it('re-versions when a recovery it DOES use changes behaviour but stays available', () => {
+    // The case a boolean cannot express. `drop_column` is implemented before
+    // and after; only what it does has changed. Without the revision in the
+    // contract string, an approval would survive a materially different
+    // recovery.
+    const before = planFor('duplicated_lifecycle_state').planVersion
+
+    let after = ''
+    jest.isolateModules(() => {
+      jest.doMock('@/lib/autonomy/maintenance/rollback-capability', () => {
+        const actual = jest.requireActual('@/lib/autonomy/maintenance/rollback-capability')
+        return {
+          ...actual,
+          rollbackContract: (st: string) =>
+            st === 'drop_column' ? 'drop_column:implemented:v2' : actual.rollbackContract(st),
         }
       })
       const { buildMaintenancePlan: rebuilt } = require('@/lib/autonomy/maintenance/plan')

@@ -66,6 +66,24 @@ export type RollbackStrategy =
 
 export type RollbackCapability = 'implemented' | 'not_implemented'
 
+export interface RollbackHandler {
+  capability: RollbackCapability
+  /**
+   * The SEMANTICS of this recovery, not its availability.
+   *
+   * Bumped when what the handler actually does changes materially, even if it
+   * stays `implemented` throughout. Availability alone is too coarse to carry
+   * consent: an approval is agreement to a safety envelope the owner reviewed,
+   * and "we can drop the column" changing to "we can drop the column, and it
+   * now also rebuilds the dependent view" is a different envelope wearing the
+   * same boolean.
+   *
+   * Folded into `planVersion`, so bumping one here invalidates consent for
+   * exactly the ladders that depend on it.
+   */
+  revision: string
+}
+
 /**
  * The single source of truth for what recovery this deployment can perform.
  *
@@ -74,23 +92,23 @@ export type RollbackCapability = 'implemented' | 'not_implemented'
  * be perfectly executable and not undoable, and conflating them is how the
  * ladder came to promise a recovery it did not have.
  */
-export const ROLLBACK_CAPABILITY: Readonly<Record<RollbackStrategy, RollbackCapability>> = {
+export const ROLLBACK_REGISTRY: Readonly<Record<RollbackStrategy, RollbackHandler>> = {
   // Read-only rungs. Nothing to undo, so nothing to implement.
-  none_required: 'implemented',
+  none_required: { capability: 'implemented', revision: 'v1' },
 
   // `DROP_COLUMN` on the governed executor. The expand/contract insight makes
   // this sufficient: expand never destructively mutates the source column, so
   // undoing a backfill means dropping the structure it filled rather than
   // reconstructing anything from a checkpoint.
-  drop_column: 'implemented',
+  drop_column: { capability: 'implemented', revision: 'v1' },
 
   // `primitives/dual-write.ts removeDualWrite`, which drops the trigger and
   // leaves the fault table for inspection.
-  drop_trigger: 'implemented',
+  drop_trigger: { capability: 'implemented', revision: 'v1' },
 
   // `primitives/switch-readers.ts revertReaders`, which restores each
   // function's exact previous source.
-  restore_reader_config: 'implemented',
+  restore_reader_config: { capability: 'implemented', revision: 'v1' },
 
   // ── Not implemented, and the ladders that need them are refused ──────────
 
@@ -103,21 +121,41 @@ export const ROLLBACK_CAPABILITY: Readonly<Record<RollbackStrategy, RollbackCapa
   // caller can reach. A broadly available DROP_CONSTRAINT deserves its own
   // tier and approval review; it should not arrive as a side effect of
   // building a recovery path.
-  drop_constraint: 'not_implemented',
+  drop_constraint: { capability: 'not_implemented', revision: 'v0' },
 
   // Needs the pre-mutation policy set captured BEFORE the forward step, which
   // nothing in the maintenance path does today. `capturePreFixState` already
   // does exactly this for the auto-fix path (`PreFixMetadata.prePolicies`), so
   // the shape is known; it is the capture and the restore that are missing.
-  restore_policies: 'not_implemented',
+  restore_policies: { capability: 'not_implemented', revision: 'v0' },
+}
+
+/**
+ * Availability only, derived. Never declared separately: two maps that both
+ * claim to say what is supported are two maps that will eventually disagree.
+ */
+export const ROLLBACK_CAPABILITY: Readonly<Record<RollbackStrategy, RollbackCapability>> =
+  Object.fromEntries(
+    Object.entries(ROLLBACK_REGISTRY).map(([k, v]) => [k, v.capability]),
+  ) as Record<RollbackStrategy, RollbackCapability>
+
+/**
+ * What consent to a ladder using this strategy is actually consent TO.
+ *
+ * Both halves matter. Availability alone misses a handler whose behaviour
+ * changed; revision alone misses one that was switched off.
+ */
+export function rollbackContract(strategy: RollbackStrategy): string {
+  const h = ROLLBACK_REGISTRY[strategy]
+  return h ? `${strategy}:${h.capability}:${h.revision}` : `${strategy}:unknown:v0`
 }
 
 export function canRollback(strategy: RollbackStrategy): boolean {
-  return ROLLBACK_CAPABILITY[strategy] === 'implemented'
+  return ROLLBACK_REGISTRY[strategy]?.capability === 'implemented'
 }
 
 /** Every strategy the vocabulary defines. Enumerated, never regexed. */
-export const ROLLBACK_STRATEGIES = Object.keys(ROLLBACK_CAPABILITY) as RollbackStrategy[]
+export const ROLLBACK_STRATEGIES = Object.keys(ROLLBACK_REGISTRY) as RollbackStrategy[]
 
 /**
  * Why this rung cannot be undone, in words an operator can act on, or null

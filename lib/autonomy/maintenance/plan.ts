@@ -53,7 +53,11 @@ import {
   type MaintenanceStep,
   type MaintenanceStepKind,
 } from './step'
-import { rollbackRefusal, ROLLBACK_CAPABILITY } from './rollback-capability'
+import {
+  rollbackRefusal,
+  rollbackContract,
+  type RollbackStrategy,
+} from './rollback-capability'
 
 export type PlanValidity = 'executable' | 'blocked_by_capability' | 'invalid'
 
@@ -407,23 +411,32 @@ export function buildMaintenancePlan(input: PlanInput): MaintenancePlan {
     base.planId,
     catalogFingerprint,
     steps.map(s => [s.kind, s.action, s.params, s.idempotencyKey]),
-    // What the executor could do when this plan was built.
+    // ── What this plan DEPENDS ON being able to do, and to undo ───────────
     //
-    // Without this, a plan built while `dual_write` was `not_implemented` keeps
-    // its version when the primitive lands, and an approval granted against a
-    // ladder that could not run silently becomes consent for one that can.
-    // Including it re-versions every plan the moment the capability table moves,
-    // which is what "they are re-planned into a new planVersion" means in
-    // ./step.ts — enforced here rather than left as an instruction.
+    // Scoped to the capabilities these steps actually use, not the whole
+    // table. Both halves matter and both are here for the same reason: an
+    // approval is consent to a safety envelope the owner reviewed, not merely
+    // to the forward SQL. A ladder built while `dual_write` was unimplemented
+    // must not keep its version when the primitive lands, and one approved
+    // while `drop_constraint` was unsupported must not keep it either — the
+    // risk that approver weighed was "this cannot be put back".
     //
-    // Steps whose kind does not appear in the plan are included too: the table
-    // is a property of the executor, not of this ladder.
-    Object.entries(EXECUTOR_CAPABILITY).sort(([a], [b]) => a.localeCompare(b)),
-    // And what it could UNDO. Same argument, one step further: an approval
-    // granted while `drop_constraint` was unsupported must not silently become
-    // consent for the same ladder once the recovery lands, because the risk
-    // the approver weighed was "this cannot be put back".
-    Object.entries(ROLLBACK_CAPABILITY).sort(([a], [b]) => a.localeCompare(b)),
+    // Previously the ENTIRE executor table was hashed, on the reasoning that
+    // it is a property of the executor rather than of the ladder. True, and
+    // too broad: implementing an unrelated strategy then invalidated consent
+    // for ladders that never touch it, which trains people to re-approve
+    // without re-reading. Consent is bound to what this plan depends upon.
+    //
+    // The contract string carries a REVISION as well as availability, because
+    // a boolean cannot express a handler whose behaviour changed materially
+    // while remaining implemented. That is the case a plain capability flag
+    // silently lets through.
+    [...new Set(steps.map(s => s.kind))]
+      .sort()
+      .map(k => `${k}:${EXECUTOR_CAPABILITY[k]}`),
+    [...new Set(steps.map(s => s.rollbackSpec?.strategy).filter(Boolean))]
+      .sort()
+      .map(st => rollbackContract(st as RollbackStrategy)),
   ])
 
   return {
