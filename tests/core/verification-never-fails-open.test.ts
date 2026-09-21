@@ -88,6 +88,14 @@ import { runReconcilerLive, computeReconciliationPlan } from '@/lib/autonomy/rec
 import { executeApprovedFix } from '@/lib/core/auto-fix-engine'
 import { buildTrustReport } from '@/lib/autonomy/trust-report'
 
+// The autonomous path now enforces the deployment's live-execution flag at the
+// mutation boundary. `runAutoFix` never checked it before — only `runReconciler`
+// did — so a test calling `runReconcilerLive` directly could execute while the
+// operator's emergency lever was off. Setting it here keeps these suites testing
+// what they are for (executor and verification semantics) rather than the flag.
+process.env.ENABLE_AUTONOMY_RECONCILER = 'true'
+process.env.ENABLE_AUTONOMY_LIVE_EXECUTION = 'true'
+
 const prisma = new PrismaClient()
 const q = (sql: string) => prisma.$executeRawUnsafe(sql)
 

@@ -257,9 +257,40 @@ export async function runAutoFix(
   // check lives here rather than at each call site so that no entry point can
   // skip it by forgetting to call it.
   if (actor.kind === 'autonomous') {
-    const { authorizeAutonomousFix, revalidateAtMutationBoundary } = await import(
-      '@/lib/authority/gate'
-    )
+    const { authorizeAutonomousFix, revalidateAtMutationBoundary, enforceLegacyCompatibility } =
+      await import('@/lib/authority/gate')
+    const { authorityPathFor } = await import('@/lib/authority/action-classes')
+
+    const path = authorityPathFor(finding.type)
+
+    // ── Neither declared nor enumerated ──────────────────────────────────
+    //
+    // Nothing is known about this type's sensors, verifier or recovery, and it
+    // is not on the compatibility list either. Default deny.
+    if (path === 'freeze') {
+      return {
+        findingId,
+        outcome: 'notify_only',
+        message:
+          `Frozen: "${finding.type}" has no declared action class and is not a listed ` +
+          'legacy type, so Backenly cannot establish whether repairing it is safe.',
+      }
+    }
+
+    // ── Enumerated legacy type: today's proven behaviour, recorded as debt ──
+    //
+    // Deliberately NOT more permissive than before. The flag and the dial are
+    // enforced here because `runAutoFix` never checked them — only
+    // `runReconciler` did — so a direct caller could previously execute with
+    // ENABLE_AUTONOMY_LIVE_EXECUTION=false. The breaker, verification and
+    // recovery semantics below are unchanged.
+    if (path === 'legacy_compatibility') {
+      const compat = await enforceLegacyCompatibility(projectId, finding.type)
+      if (!compat.allowed) {
+        return { findingId, outcome: 'deferred', message: compat.reason ?? 'not permitted' }
+      }
+      return _executeAutoFix(finding.id, projectId, type, details, opts)
+    }
 
     const tableName =
       typeof details.tableName === 'string'

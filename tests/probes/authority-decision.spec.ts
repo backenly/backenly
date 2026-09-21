@@ -280,7 +280,8 @@ describe('the other inputs each narrow, and only narrow', () => {
     const d = decideAuthority(
       inputs({
         recentChanges: [
-          { at: new Date().toISOString(), source: 'schema', summary: 'schema v2', minutesBefore: 2 },
+          // external_ddl: the one source that is definitely not Backenly.
+          { at: new Date().toISOString(), source: 'external_ddl', summary: 'ALTER TABLE', minutesBefore: 2 },
         ],
       }),
     )
@@ -292,11 +293,27 @@ describe('the other inputs each narrow, and only narrow', () => {
     const d = decideAuthority(
       inputs({
         recentChanges: [
-          { at: new Date().toISOString(), source: 'schema', summary: 'schema v2', minutesBefore: 300 },
+          { at: new Date().toISOString(), source: 'external_ddl', summary: 'ALTER TABLE', minutesBefore: 300 },
         ],
       }),
     )
     expect(d.decision).toBe('AUTO_EXECUTE')
+  })
+
+  it('does not treat its own recent repairs as a conflict with itself', () => {
+    // The loop blocked itself for ten minutes after doing anything, and a user
+    // who had just created tables got no repairs at all.
+    const d = decideAuthority(
+      inputs({
+        recentChanges: [
+          { at: new Date().toISOString(), source: 'autonomy', summary: 'index created', minutesBefore: 1 },
+          { at: new Date().toISOString(), source: 'schema', summary: 'schema v2', minutesBefore: 1 },
+          { at: new Date().toISOString(), source: 'deploy', summary: 'deploy', minutesBefore: 1 },
+        ],
+      }),
+    )
+    expect(d.decision).toBe('AUTO_EXECUTE')
+    expect(d.narrowedBy).not.toContain('recent_conflicting_change')
   })
 
   it('the project dial being off prevents action', () => {

@@ -209,3 +209,86 @@ export function actionClassForFindingType(findingType: string): ActionClass | nu
 
 /** Every finding type this deployment can autonomously repair. */
 export const AUTONOMOUSLY_REPAIRABLE_FINDING_TYPES = Object.keys(FINDING_TYPE_TO_ACTION_CLASS)
+
+/**
+ * LEGACY COMPATIBILITY — a bridge with a sunset, not a bypass
+ * ==========================================================
+ *
+ * Making the Authority Decision mandatory revealed the real migration surface:
+ * 20 finding types are auto-safe today, and only 3 of them have a declared
+ * action class. Gating all of them at once would have frozen 17 repair types
+ * that work now; declaring 17 classes at once would have meant inventing
+ * `requiredSensors`,
+ * `verifier` and `recovery` contracts nobody had verified, which is the exact
+ * fabrication this architecture exists to prevent.
+ *
+ * So these 30 keep TODAY'S proven behaviour, and the debt is made explicit:
+ *
+ *   - the list is hardcoded and exhaustive. There is no wildcard and no
+ *     "unknown types fall through", because either of those would let the
+ *     bridge widen silently, which is how a temporary exception becomes the
+ *     architecture.
+ *   - a type that is neither registered nor listed here FREEZES.
+ *   - every compatibility execution records `authorityPath: 'legacy_compatibility'`
+ *     so the reliance is countable rather than assumed.
+ *   - `tests/probes/legacy-compat-is-bounded.spec.ts` fails if a new auto-safe
+ *     type appears without either a real ActionClass or a deliberate edit here.
+ *
+ * ── Sunset contract ─────────────────────────────────────────────────────────
+ *
+ * TODO(autonomy): migrate every entry below to a verified ActionClass after the
+ * production release, and delete it from this set as each one lands. Each
+ * migration needs a real probe, a verifier that is not the executor, and a
+ * recovery contract in ROLLBACK_CAPABILITY — the same bar the four registered
+ * classes met.
+ *
+ * **This set may shrink. It may not grow casually.** Adding an entry means
+ * choosing to ship an autonomous mutation whose dependencies are undeclared,
+ * and that decision should be visible in a diff and argued for in review.
+ */
+export const LEGACY_AUTONOMY_COMPAT_TYPES: ReadonlySet<string> = new Set([
+  'api_drift',
+  'external_schema_change',
+  'index_bloat',
+  'infra_hot_table',
+  'infra_table_bloat',
+  'missing_api_crud',
+  'missing_api_definition',
+  'missing_rate_limit',
+  'orphan_table',
+  'realtime_gap',
+  'rls_denies_everything',
+  'rls_expression_invalid',
+  'schema_not_registered',
+  'shadow_mutation',
+  'unprotected_user_data',
+  'verification_failed',
+  'workflow_broken',
+])
+
+/** Which path a finding type takes. Exhaustive: there is no fourth answer. */
+export type AuthorityPath =
+  /** A declared ActionClass. The Authority Decision governs it. */
+  | 'authority'
+  /** Enumerated legacy type. Today's proven behaviour, recorded as debt. */
+  | 'legacy_compatibility'
+  /** Neither. Nothing is declared about it, so nothing can be established. */
+  | 'freeze'
+
+export function authorityPathFor(findingType: string): AuthorityPath {
+  if (actionClassForFindingType(findingType)) return 'authority'
+  if (LEGACY_AUTONOMY_COMPAT_TYPES.has(findingType)) return 'legacy_compatibility'
+  return 'freeze'
+}
+
+/**
+ * The registered classes may never fall back to compatibility.
+ *
+ * A declared class that could degrade into the legacy path on a bad day would
+ * make its declaration decorative: the gate would be advisory for exactly the
+ * actions whose safety was most carefully established. Asserted in the suite so
+ * an overlap cannot be introduced by adding a string to both places.
+ */
+export function registeredAndCompatOverlap(): string[] {
+  return [...LEGACY_AUTONOMY_COMPAT_TYPES].filter(t => actionClassForFindingType(t) !== null)
+}

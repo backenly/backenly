@@ -185,6 +185,17 @@ export async function authorizeAutonomousFix(args: {
 
   await writeReceipt(args.projectId, decision, principals)
 
+  // A refused autonomous action is an operator-visible event. Without this the
+  // only symptom of a gate that refuses too much is silence, which is the
+  // failure mode this whole architecture exists to avoid.
+  if (decision.decision !== 'AUTO_EXECUTE') {
+    console.warn(
+      `[Authority] ${decision.decision} project=${args.projectId} ` +
+        `action=${actionClassId} narrowedBy=${decision.narrowedBy.join(',') || '-'} ` +
+        `${decision.blocker ? `blocker=${decision.blocker}` : ''}`,
+    )
+  }
+
   return {
     decision,
     mayExecute: decision.decision === 'AUTO_EXECUTE',
@@ -276,6 +287,78 @@ async function writeReceipt(
           evidence: decision.evidence,
         }),
         metadata: principalsToMetadata(principals) as any,
+        timestamp: new Date(),
+      },
+    })
+    .catch(() => {
+      /* a missed receipt must never block or permit a mutation */
+    })
+}
+
+/**
+ * The compatibility path's own guard rail.
+ *
+ * These 30 finding types keep the behaviour they had before the gate existed,
+ * with one correction: the deployment flag and the project dial are now
+ * enforced HERE, at the mutation boundary. `runAutoFix` never checked them —
+ * only `runReconciler` did — so a direct caller could execute with
+ * `ENABLE_AUTONOMY_LIVE_EXECUTION=false`, which meant the operator's emergency
+ * lever did not reach every path it was supposed to.
+ *
+ * Everything else about these repairs is unchanged: the circuit breaker, the
+ * pre-snapshot, verification and recovery all still run inside the executor.
+ * This is a bridge, and a bridge that quietly became more permissive than what
+ * it replaced would be worse than the gap it was built to cover.
+ */
+export async function enforceLegacyCompatibility(
+  projectId: string,
+  findingType: string,
+): Promise<{ allowed: boolean; reason: string | null }> {
+  const { resolveExecutionMode } = await import('@/lib/autonomy/execution-mode')
+
+  const level = await projectLevel(projectId)
+  const mode = resolveExecutionMode(level)
+
+  if (!mode.repairsAreApplied) {
+    await recordCompatibilityUse(projectId, findingType, 'refused', mode.reason)
+    return { allowed: false, reason: mode.explanation }
+  }
+
+  await recordCompatibilityUse(projectId, findingType, 'permitted', null)
+  return { allowed: true, reason: null }
+}
+
+/**
+ * Count the reliance rather than assume it.
+ *
+ * Every compatibility execution is recorded with `authorityPath`, so "how often
+ * are we leaning on the bridge, and for what" is a query rather than a guess.
+ * A migration plan that cannot measure what it is migrating tends not to finish.
+ */
+async function recordCompatibilityUse(
+  projectId: string,
+  findingType: string,
+  outcome: 'permitted' | 'refused',
+  reason: string | null,
+): Promise<void> {
+  const principals = await loopPrincipals(prisma, projectId, 'reconciler').catch(() => null)
+  await prisma.auditLog
+    .create({
+      data: {
+        projectId,
+        action: 'AUTHORITY_LEGACY_COMPATIBILITY',
+        type: 'autonomy',
+        details: JSON.stringify({
+          authorityPath: 'legacy_compatibility',
+          findingType,
+          narrowedBy: ['action_class_unregistered'],
+          outcome,
+          reason,
+          note:
+            'Executed under the enumerated legacy compatibility bridge. This type has ' +
+            'no declared action class yet; see LEGACY_AUTONOMY_COMPAT_TYPES.',
+        }),
+        metadata: principals ? (principalsToMetadata(principals) as any) : undefined,
         timestamp: new Date(),
       },
     })
