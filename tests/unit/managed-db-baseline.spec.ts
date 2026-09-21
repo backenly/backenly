@@ -93,6 +93,7 @@ const FORWARD_MIGRATIONS = [
   '20260916180000_maintenance_approvals',
   '20260919120000_project_email_config_and_templates',
   '20260921120000_rollback_authority',
+  '20260921160000_ownership_intent',
 ]
 
 describe('the assembled migration workspace', () => {
