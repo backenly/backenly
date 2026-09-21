@@ -305,6 +305,20 @@ export const PLATFORM_CREDENTIAL_TABLES: Readonly<Record<string, Disposition>> =
   share_tokens: 'carry',
 
   // ─── Dropped ────────────────────────────────────────────────────────────
+  /**
+   * A human's standing permission for Backenly to mutate unattended.
+   *
+   * Both tests hold. It is looked up to GRANT, so its absence denies and the
+   * loop falls back to proposing rather than acting. And the owner re-creates it
+   * through the same interactive flow they used the first time; nothing external
+   * holds a copy.
+   *
+   * The safety argument is stronger than either, though: a restore must never
+   * resurrect authority a person withdrew. Carrying these would mean a grant
+   * revoked on Tuesday could come back with a Wednesday restore, and Backenly
+   * would resume changing a backend under permission the owner had taken away.
+   */
+  authority_grants: 'drop',
   /** DB-backed, so absence denies, and signing in again is trivial. */
   sessions: 'drop',
   /** One-time, minutes-long, and very likely already spent or cancelled. */
