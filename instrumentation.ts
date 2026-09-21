@@ -487,15 +487,40 @@ export async function register() {
             tally[key] = (tally[key] ?? 0) + 1
           }
         }
-        // `no_finding` is the overwhelmingly common answer and logging it every
-        // ten minutes would bury the one line that matters. Anything else is
-        // worth a line.
-        const notable = Object.entries(tally).filter(([k]) => k !== 'no_finding')
-        if (notable.length > 0) {
+        // ── Steady states are not events ──────────────────────────────────
+        //
+        // A capability refusal is a SUCCESSFUL tick: the kernel found work,
+        // proved it cannot guarantee the recovery, and declined. It is
+        // fulfilled, not rejected, and it is never counted as `errored` — only
+        // a real exception is. Monitoring must not read a correctly denying
+        // safety kernel as a broken job every ten minutes.
+        //
+        // But it is also a CONDITION rather than something that happened, and
+        // a condition reprinted 144 times a day is one everybody learns to
+        // filter — which is how the thing you wanted noticed stops being
+        // noticed. `no_finding` was already excluded for that reason; these
+        // are excluded for the same one and throttled to hourly instead, the
+        // same way the shadow-mode warning above is.
+        const STEADY = new Set(['no_finding', 'unsupported_recovery', 'disabled'])
+        const events = Object.entries(tally).filter(([k]) => !STEADY.has(k))
+        if (events.length > 0) {
           console.log(
             `[MaintenanceSweep] ${activeProjects.length} projects — ` +
-            notable.map(([k, n]) => `${k}: ${n}`).join(', '),
+            events.map(([k, n]) => `${k}: ${n}`).join(', '),
           )
+        }
+
+        const steady = Object.entries(tally).filter(([k]) => STEADY.has(k) && k !== 'no_finding')
+        if (steady.length > 0) {
+          const g = globalThis as any
+          if (Date.now() - (g.__maintenanceSteadyLoggedAt ?? 0) > 60 * 60 * 1000) {
+            g.__maintenanceSteadyLoggedAt = Date.now()
+            console.log(
+              `[MaintenanceSweep] ${activeProjects.length} projects — ` +
+              steady.map(([k, n]) => `${k}: ${n}`).join(', ') +
+              '. Ticking normally; nothing was executed because the safety kernel declined.',
+            )
+          }
         }
       })
 

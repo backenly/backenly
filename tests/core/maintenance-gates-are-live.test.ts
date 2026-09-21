@@ -185,6 +185,18 @@ describe('the maintenance sweep is actually scheduled', () => {
     expect(instrumentation).toContain('sweepProjectMaintenance')
   })
 
+  it('treats a capability refusal as a healthy tick, not a failed job', () => {
+    // A refusal is a fulfilled promise tallied under its own disposition.
+    // Only a thrown exception becomes `errored`. Monitoring must not read a
+    // correctly denying safety kernel as a broken job every ten minutes.
+    const block = instrumentation.slice(instrumentation.indexOf('Tier C'))
+    expect(block).toMatch(/r\.status === 'fulfilled' \? r\.value\.disposition : 'errored'/)
+    // And the refusal is not reprinted every tick. A condition logged 144
+    // times a day is one everybody learns to filter.
+    expect(block).toContain("'unsupported_recovery'")
+    expect(block).toContain('__maintenanceSteadyLoggedAt')
+  })
+
   it('is gated by the scheduler flag before it imports anything', () => {
     const block = instrumentation.slice(instrumentation.indexOf('Tier C'))
     expect(block).toContain('ENABLE_MAINTENANCE_SCHEDULER')
