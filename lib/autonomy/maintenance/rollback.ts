@@ -52,6 +52,7 @@ import {
   type ResourceState,
 } from './resource-state'
 import { canRollback, rollbackContract, type RollbackStrategy } from './rollback-capability'
+import { P, principalsToMetadata } from '@/lib/principal'
 
 export type RollbackStatus =
   /** A positive forward failure made this undoable. Nothing has run. */
@@ -121,6 +122,15 @@ async function settle(
           action: 'MAINTENANCE_ROLLBACK_PERFORMED',
           type: 'autonomy',
           details: JSON.stringify({ stepExecutionId, status, detail, at: new Date().toISOString() }),
+          // The maintenance loop both requests and performs a rollback; the
+          // authority for it came from the approval that permitted the forward
+          // step, which this row does not resolve, so it stays null rather than
+          // being attributed to whoever happens to be nearby.
+          metadata: principalsToMetadata({
+            requestedBy: P.maintenance(),
+            executedBy: P.maintenance(),
+            authorizedBy: null,
+          }) as any,
           timestamp: new Date(),
         },
       })

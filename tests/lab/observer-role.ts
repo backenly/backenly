@@ -170,15 +170,15 @@ export async function observerTableCount(
 }
 
 /**
- * Physical row count that RLS cannot filter.
+ * Planner-estimated row count, from `pg_class.reltuples`.
  *
- * `pg_class.reltuples` is planner statistics, not a row read, so it is visible
- * regardless of policies. After the seeder's ANALYZE it is exact enough to tell
- * "this table holds 60 rows" from "this table is empty", which is the only
- * distinction a blindness fault needs — and it is an oracle the observer's own
- * privileges cannot influence.
+ * Deliberately named an ESTIMATE. `reltuples` is maintained by ANALYZE and is
+ * approximate by design, so it must never be reported as an exact row count.
+ * It is kept because it is readable regardless of policies, which makes it a
+ * useful sanity signal — but the blindness reproduction uses exact COUNT(*) on
+ * both sides instead (see `privilegedRowCount`).
  */
-export async function physicalRowEstimate(
+export async function plannerRowEstimate(
   prisma: PrismaClient,
   schema: string,
   table: string,
@@ -192,4 +192,30 @@ export async function physicalRowEstimate(
     table,
   )
   return rows.length > 0 ? rows[0].n : -1
+}
+
+/**
+ * Exact row count through the privileged connection.
+ *
+ * This is the strong half of the blindness reproduction:
+ *
+ *     privileged COUNT(*)  = 60
+ *     observer   COUNT(*)  = 0
+ *
+ * Caveat worth keeping in view: this is only unfiltered ground truth while the
+ * privileged connection actually bypasses RLS. A non-superuser OWNER under
+ * FORCE ROW LEVEL SECURITY is bound by its own policies too, so on a
+ * production-equivalent role this read would need the RLS claim set to be
+ * meaningful. The baseline records the connection's privileges for exactly
+ * this reason.
+ */
+export async function privilegedRowCount(
+  prisma: PrismaClient,
+  schema: string,
+  table: string,
+): Promise<number> {
+  const rows = await prisma.$queryRawUnsafe<Array<{ n: bigint }>>(
+    `SELECT count(*)::bigint AS n FROM "${schema}"."${table}"`,
+  )
+  return Number(rows[0].n)
 }

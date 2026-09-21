@@ -23,6 +23,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
+import { principalsToMetadata, type PrincipalSet } from '@/lib/principal'
 
 // ── Configuration (env-overridable without a deploy) ──────────────────────────
 
@@ -227,6 +228,15 @@ export async function recordAutonomousAction(
   projectId: string,
   action: (typeof AUTONOMOUS_AUDIT_ACTIONS)[number],
   payload: Record<string, unknown>,
+  /**
+   * Who asked, who allowed it, who did it.
+   *
+   * Optional so existing callers keep working, but every autonomy caller should
+   * pass it: an audit row that cannot say which loop acted is the reason
+   * "who did this" had no answer for anything either loop did. Omitted means
+   * unknown, and unknown is recorded as unknown rather than guessed.
+   */
+  principals?: Partial<PrincipalSet>,
 ): Promise<void> {
   try {
     await prisma.auditLog.create({
@@ -235,6 +245,8 @@ export async function recordAutonomousAction(
         action,
         type: 'autonomy',
         details: JSON.stringify(payload),
+        // Metadata, not columns: Phase 1 is a vocabulary, not a migration.
+        metadata: principals ? (principalsToMetadata(principals) as any) : undefined,
         timestamp: new Date(),
       },
     })

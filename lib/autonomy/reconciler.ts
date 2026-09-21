@@ -38,6 +38,7 @@ import { computeHealthSignal } from './telemetry'
 import { LOOP_TICK_ACTIONS } from './loop-tick'
 import { runAutoFix } from '@/lib/core/auto-fix-engine'
 import { FLAGS } from '@/lib/config/flags'
+import { loopPrincipals, principalsToMetadata } from '@/lib/principal'
 
 export type ReconcileAction =
   | 'WOULD_AUTO_APPLY'     // tier within dial + breaker budget available
@@ -185,6 +186,9 @@ export async function runReconcilerShadow(projectId: string): Promise<Reconcilia
         projectId,
         action: 'AUTONOMY_SHADOW_DECISION',
         type: 'autonomy',
+        metadata: principalsToMetadata(
+          await loopPrincipals(prisma, projectId, 'reconciler'),
+        ) as any,
         details: JSON.stringify({
           mode: 'shadow',
           level: plan.level,
@@ -648,6 +652,9 @@ export async function ensureFinding(
             projectId,
             action: 'AUTONOMY_RECURRENCE_ESCALATED',
             type: 'autonomy',
+            metadata: principalsToMetadata(
+              await loopPrincipals(prisma, projectId, 'reconciler'),
+            ) as any,
             details: JSON.stringify({
               findingId: created.id,
               findingType: gap.type,
@@ -750,6 +757,9 @@ export async function runReconcilerLive(projectId: string): Promise<LiveReconcil
           projectId,
           action: 'AUTONOMY_CHANGE_FREEZE',
           type: 'autonomy',
+          metadata: principalsToMetadata(
+            await loopPrincipals(prisma, projectId, 'reconciler'),
+          ) as any,
           details: JSON.stringify({
             reason: 'project is mid-incident — autonomous changes frozen this tick',
             health: health.reasons,
@@ -866,6 +876,9 @@ export async function runReconcilerLive(projectId: string): Promise<LiveReconcil
         projectId,
         action: 'AUTONOMY_LIVE_RUN',
         type: 'autonomy',
+        metadata: principalsToMetadata(
+          await loopPrincipals(prisma, projectId, 'reconciler'),
+        ) as any,
         details: JSON.stringify({
           level: plan.level,
           attempted,

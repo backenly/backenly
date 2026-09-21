@@ -53,7 +53,7 @@ import { isClientReachable } from './postgrest'
 import {
   observerRowCount,
   observerTableCount,
-  physicalRowEstimate,
+  privilegedRowCount,
   type LabObserver,
 } from './observer-role'
 import { hasForeignKey, indexesOn, policies, rlsState } from './oracles'
@@ -389,7 +389,7 @@ const rlsRowBlindness: LabFault = {
   verifyHealthy: async ({ prisma, schema, observer }) => {
     must(observer !== null, 'no production-equivalent observer; blindness is unmeasurable')
     must(
-      (await physicalRowEstimate(prisma, schema, 'posts')) > 0,
+      (await privilegedRowCount(prisma, schema, 'posts')) > 0,
       'posts holds no rows, so hidden rows and absent rows cannot be told apart',
     )
   },
@@ -397,11 +397,13 @@ const rlsRowBlindness: LabFault = {
     // The contrast IS the fault: rows exist, and a production-equivalent reader
     // cannot see one of them. Asserting both halves is what makes this
     // non-vacuous — either alone would be satisfied by an empty table.
-    const physical = await physicalRowEstimate(prisma, schema, 'posts')
+    // Exact COUNT(*) on both sides. The contrast is the finding, and an
+    // estimate on either side would weaken it to "roughly some rows".
+    const privileged = await privilegedRowCount(prisma, schema, 'posts')
     const seen = await observerRowCount(observer!, schema, 'posts')
     const forced = await rlsState(prisma, schema, 'posts')
     must(forced.forced, 'FORCE RLS is not set, so the table owner still bypasses every policy')
-    must(physical > 0, `physical rows are ${physical}; hidden and absent cannot be told apart`)
+    must(privileged > 0, `privileged COUNT(*) is ${privileged}; hidden and absent are the same`)
     must(
       seen.visible === 0,
       `observer sees ${seen.visible} rows but should see 0 under FORCE RLS with no claim`,
