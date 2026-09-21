@@ -124,12 +124,55 @@ describe('no ladder is schedulable while its recovery is fictional', () => {
     expect(policyLadder.blockedReasons.join(' ')).toMatch(/restore the previous policy set/)
   })
 
-  it('carries no executable steps, so nothing downstream can run a prefix', () => {
-    // A ladder is all-or-nothing. Handing back a runnable prefix is how a
-    // half-expanded schema gets created by the thing that was refusing.
+  it('still shows the ladder it would have run, without authorising any of it', () => {
+    // The steps ARE carried, deliberately. `blocked_by_capability` has always
+    // meant "the engineering is right and a tool is missing", and the surface
+    // shows what Backenly would have done — the difference between "cannot do
+    // this yet" and a blank refusal.
+    //
+    // Safety comes from the executor, not from hiding the plan: `refuseLadder`
+    // in execute.ts refuses a `blocked_by_capability` plan outright INCLUDING
+    // its runnable prefix, because running the supported prefix of
+    // expand/contract is how a half-expanded schema gets created by the thing
+    // that was refusing.
     for (const h of LADDERS) {
-      expect(planFor(h).steps).toEqual([])
+      const plan = planFor(h)
+      expect(plan.steps.length).toBeGreaterThan(0)
+      expect(plan.validity).not.toBe('executable')
     }
+  })
+
+  it('re-versions the plan when recovery capability moves', () => {
+    // An approval granted while `drop_constraint` was unsupported must not
+    // silently become consent for the same ladder once the recovery lands:
+    // the risk the approver weighed was "this cannot be put back". The forward
+    // capability table is already folded into planVersion for exactly this
+    // reason, and the rollback table now is too.
+    const before = planFor('duplicated_lifecycle_state').planVersion
+
+    // Rebuild the planner with `drop_constraint` supported, as a deployment
+    // that has shipped the recovery would see it.
+    let after = ''
+    jest.isolateModules(() => {
+      jest.doMock('@/lib/autonomy/maintenance/rollback-capability', () => {
+        const actual = jest.requireActual('@/lib/autonomy/maintenance/rollback-capability')
+        return {
+          ...actual,
+          ROLLBACK_CAPABILITY: { ...actual.ROLLBACK_CAPABILITY, drop_constraint: 'implemented' },
+          rollbackRefusal: (s: string) => (s === 'drop_constraint' ? null : actual.rollbackRefusal(s)),
+        }
+      })
+      const { buildMaintenancePlan: rebuilt } = require('@/lib/autonomy/maintenance/plan')
+      after = rebuilt({
+        findingId: 'f1',
+        diagnosis: diagnosis('duplicated_lifecycle_state'),
+        subsystem: { fingerprint: 'sessions', membership: ['sessions', 'users'] },
+        catalogFingerprint: 'cat-v1',
+      }).planVersion
+    })
+    jest.dontMock('@/lib/autonomy/maintenance/rollback-capability')
+
+    expect(after).not.toBe(before)
   })
 })
 

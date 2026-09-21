@@ -53,7 +53,7 @@ import {
   type MaintenanceStep,
   type MaintenanceStepKind,
 } from './step'
-import { rollbackRefusal } from './rollback-capability'
+import { rollbackRefusal, ROLLBACK_CAPABILITY } from './rollback-capability'
 
 export type PlanValidity = 'executable' | 'blocked_by_capability' | 'invalid'
 
@@ -317,23 +317,6 @@ export function buildMaintenancePlan(input: PlanInput): MaintenancePlan {
     humanOnlySteps: [],
   })
 
-  /**
-   * The ladder is sound and this deployment cannot safely run it.
-   *
-   * `blocked_by_capability`, not `invalid`: nothing is wrong with the plan,
-   * and nothing a human approves can make a missing executor exist. Steps are
-   * carried so the surface can show WHAT it would have done, which is the
-   * difference between "Backenly cannot do this yet" and a blank refusal.
-   */
-  const blockedByCapability = (reasons: string[]): MaintenancePlan => ({
-    ...base,
-    planVersion: stableHash([base.planId, 'blocked_by_capability', reasons]),
-    steps: [],
-    validity: 'blocked_by_capability',
-    blockedReasons: reasons,
-    humanOnlySteps: [],
-  })
-
   // ── 1. The diagnosis must be decision-quality ──────────────────────────────
   //
   // Planning is NOT evidence. A ladder existing must never raise confidence in
@@ -377,27 +360,6 @@ export function buildMaintenancePlan(input: PlanInput): MaintenancePlan {
     ])
   }
 
-  // And a description is not a capability.
-  //
-  // This check used to end one line above, which treated the presence of a
-  // sentence as proof of an ability. Two of the four operations the old
-  // `drop_object` strategy covered had no executor at all, so ladders were
-  // planned, approved and executed on the strength of a recovery that did not
-  // exist. The registry is the authority now: a rung is recoverable when the
-  // deployed executor can perform its exact rollback kind, and not before.
-  const unrecoverable = seeds
-    .filter(s => requiresRollbackSpec(s.kind) && s.rollbackSpec)
-    .map(s => ({ kind: s.kind, refusal: rollbackRefusal(s.rollbackSpec!.strategy) }))
-    .filter(x => x.refusal !== null)
-  if (unrecoverable.length > 0) {
-    // `blocked_by_capability`, deliberately NOT something a human can approve.
-    // Nobody's consent makes a missing executor exist, so this must never
-    // surface as work waiting on the owner.
-    return blockedByCapability(
-      unrecoverable.map(x => `${x.kind} cannot be scheduled because ${x.refusal}`),
-    )
-  }
-
   const steps: MaintenanceStep[] = seeds.map((s, i) => ({
     ...s,
     ordinal: i,
@@ -421,6 +383,26 @@ export function buildMaintenancePlan(input: PlanInput): MaintenancePlan {
     else blockedReasons.push(line)
   }
 
+  // ── 3b. And a rung the executor CAN run may still be unrecoverable ─────────
+  //
+  // Separate from the loop above because they are different questions. That
+  // one asks "can this step run"; this asks "if it runs and goes wrong, can
+  // this deployment put it back". A ladder can pass the first and fail the
+  // second, and until now nothing asked the second at all: the check ended at
+  // "does the step carry a rollbackSpec", which treats a description as proof
+  // of an ability. Two of the four operations the old `drop_object` strategy
+  // covered had no executor, so ladders were planned, approved and run on the
+  // strength of a recovery that did not exist.
+  //
+  // `contract` is exempt for the same reason as above — it is performed by a
+  // person, so its absence leaves the ladder complete rather than half-done.
+  for (const step of steps) {
+    if (OPTIONAL_TERMINAL_STEPS.includes(step.kind)) continue
+    if (!step.rollbackSpec) continue
+    const refusal = rollbackRefusal(step.rollbackSpec.strategy)
+    if (refusal) blockedReasons.push(`${step.kind}: cannot be scheduled because ${refusal}`)
+  }
+
   const planVersion = stableHash([
     base.planId,
     catalogFingerprint,
@@ -437,6 +419,11 @@ export function buildMaintenancePlan(input: PlanInput): MaintenancePlan {
     // Steps whose kind does not appear in the plan are included too: the table
     // is a property of the executor, not of this ladder.
     Object.entries(EXECUTOR_CAPABILITY).sort(([a], [b]) => a.localeCompare(b)),
+    // And what it could UNDO. Same argument, one step further: an approval
+    // granted while `drop_constraint` was unsupported must not silently become
+    // consent for the same ladder once the recovery lands, because the risk
+    // the approver weighed was "this cannot be put back".
+    Object.entries(ROLLBACK_CAPABILITY).sort(([a], [b]) => a.localeCompare(b)),
   ])
 
   return {
