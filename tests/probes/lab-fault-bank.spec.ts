@@ -92,14 +92,34 @@ describe('the bank covers the families the baseline reports on', () => {
     expect(families).toEqual(new Set(['backend', 'observer', 'control']))
   })
 
-  it('records the faults that cannot yet be expressed, rather than dropping them', () => {
-    // `catalog-permission-revoked` is unimplementable while the lab has one
-    // database role that owns every schema. Keeping it visible is the
-    // difference between a known gap and a silently narrower bank.
-    expect(UNIMPLEMENTED_FAULTS.length).toBeGreaterThan(0)
+  it('any fault that cannot yet be expressed stays recorded, not dropped', () => {
+    // Empty since Phase 0B, which added the non-owning observer role that made
+    // catalog-permission blindness reproducible. The list stays so the next
+    // unreproducible fault is recorded here instead of quietly narrowing the
+    // bank, and every entry must still say what blocks it.
     for (const u of UNIMPLEMENTED_FAULTS) {
       expect(u.blockedBy.length).toBeGreaterThan(20)
       expect(FAULTS.some(f => f.id === u.id)).toBe(false)
+    }
+  })
+
+  it('has at least one observer fault that blinds the application role itself', () => {
+    // Faults flagged `requiresProductionEquivalentAppRole` are unscorable on a
+    // deployment whose role bypasses RLS. If every observer fault were one of
+    // those, the family would silently measure nothing wherever the app role is
+    // a superuser — which is the case on a stock developer database.
+    const blindsEveryone = FAULTS.filter(
+      f => f.family === 'observer' && !f.requiresProductionEquivalentAppRole,
+    )
+    expect(blindsEveryone.length).toBeGreaterThan(0)
+  })
+
+  it('every observer fault proves its own blindness', () => {
+    // A schema diff cannot validate an observer fault, so `verifyBroken` is the
+    // only thing standing between "the reader went blind" and "nothing happened
+    // and nobody checked".
+    for (const f of FAULTS.filter(x => x.family === 'observer')) {
+      expect(typeof f.verifyBroken).toBe('function')
     }
   })
 })

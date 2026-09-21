@@ -139,9 +139,9 @@ export async function schemaFingerprint(
   prisma: PrismaClient,
   schema: string,
 ): Promise<Record<string, unknown>> {
-  const tables = await q<{ relname: string; relrowsecurity: boolean }>(
+  const tables = await q<{ relname: string; relrowsecurity: boolean; relforcerowsecurity: boolean }>(
     prisma,
-    `SELECT c.relname, c.relrowsecurity
+    `SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
        FROM pg_class c
        JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE n.nspname = $1 AND c.relkind = 'r'
@@ -179,7 +179,15 @@ export async function schemaFingerprint(
   )
 
   return {
-    tables: tables.map(t => ({ name: t.relname, rls: t.relrowsecurity })),
+    // FORCE is recorded separately from ENABLE because it is the flag that
+    // binds the table OWNER, and the owner is the role a pooled connection is
+    // most likely running as. A fingerprint that saw only ENABLE could not tell
+    // a protected table from one the observer still bypasses.
+    tables: tables.map(t => ({
+      name: t.relname,
+      rls: t.relrowsecurity,
+      forced: t.relforcerowsecurity,
+    })),
     columns: cols.map(c => `${c.table_name}.${c.column_name}:${c.data_type}`),
     policies: pol.map(p => `${p.tablename}.${p.policyname}`),
     constraints: cons.map(c => `${c.relname}.${c.conname}:${c.contype}`),

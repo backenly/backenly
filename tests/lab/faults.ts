@@ -50,6 +50,12 @@
 import type { PrismaClient } from '@prisma/client'
 
 import { isClientReachable } from './postgrest'
+import {
+  observerRowCount,
+  observerTableCount,
+  physicalRowEstimate,
+  type LabObserver,
+} from './observer-role'
 import { hasForeignKey, indexesOn, policies, rlsState } from './oracles'
 
 export interface FaultContext {
@@ -58,6 +64,12 @@ export interface FaultContext {
   schema: string
   /** Raw DDL executor on the lab's own connection. */
   exec: (sql: string) => Promise<unknown>
+  /**
+   * A NOSUPERUSER NOBYPASSRLS non-owning reader, for faults that impair
+   * OBSERVATION rather than the database. Null when the lab could not create
+   * one, in which case blindness faults invalidate rather than pass.
+   */
+  observer: LabObserver | null
 }
 
 /** What the system is expected to do about a fault. */
@@ -96,6 +108,14 @@ export interface FaultExpectation {
 export interface LabFault {
   id: string
   family: 'backend' | 'observer' | 'control'
+  /**
+   * True when this fault only blinds a reader WEAKER than the application
+   * connection. If the deployment's own role bypasses RLS, the product never
+   * experiences the blindness, so scoring its behaviour here would attribute a
+   * failure it could not have had. The harness records such rows and excludes
+   * them from scoring.
+   */
+  requiresProductionEquivalentAppRole?: boolean
   scenario: string
   description: string
   /** Establish the healthy state this fault departs from. Optional. */
@@ -287,39 +307,17 @@ const wideOpenPolicy: LabFault = {
 // ── Observer faults: the database is healthy, the instrument is not ──────────
 
 /**
- * NOT IMPLEMENTED, AND DELIBERATELY NOT FAKED
- * ===========================================
+ * Resolved in Phase 0B.
  *
- * `catalog-permission-revoked` was written as `REVOKE USAGE ON SCHEMA … FROM
- * PUBLIC`, and the first baseline run scored it "FAULT DID NOTHING". The reason
- * is structural, not a typo: the lab connects as the role that CREATED the
- * schema, and an owner keeps its privileges no matter what is revoked from
- * PUBLIC. The observer was never blinded, so the row measured nothing.
+ * `catalog-permission-revoked` was unimplementable while the lab had one role
+ * that owned every schema: no REVOKE can blind an owner. It is now
+ * `observer-blinded-by-catalog-revoke`, measured through a second
+ * NOSUPERUSER NOBYPASSRLS non-owning reader.
  *
- * The honest options were to delete the fault, or to keep it and let it look
- * like a passing observer test. Both are worse than saying what is true: **the
- * lab cannot currently express catalog-permission blindness**, because it has
- * exactly one database role and that role owns everything.
- *
- * Fixing it needs a second, non-owning role for the observer to read through —
- * which is also what would let the lab reproduce `#77` properly, since that bug
- * needed a `NOSUPERUSER NOBYPASSRLS` reader that RLS could actually hide rows
- * from. That is a Phase 0 follow-up, tracked here rather than in a comment
- * nobody reads.
- *
- * Until then `schema-absent` is the only working observer fault, and the
- * observer family is measured on one scenario rather than two. The baseline
- * report should be read with that in mind.
+ * Kept as an empty list rather than deleted, because the next unreproducible
+ * fault should be recorded here instead of quietly narrowing the bank.
  */
-export const UNIMPLEMENTED_FAULTS = [
-  {
-    id: 'catalog-permission-revoked',
-    family: 'observer' as const,
-    blockedBy:
-      'The lab has one database role and it owns the schema, so no REVOKE can ' +
-      'blind it. Needs a separate non-owning reader role.',
-  },
-]
+export const UNIMPLEMENTED_FAULTS: Array<{ id: string; family: string; blockedBy: string }> = []
 
 const schemaMoved: LabFault = {
   id: 'schema-absent',
@@ -332,6 +330,20 @@ const schemaMoved: LabFault = {
       await exec(`ALTER SCHEMA "${schema}_moved" RENAME TO "${schema}"`)
     }
   },
+  verifyBroken: async ({ prisma, schema }) => {
+    // This one blinds the OWNER too, so it is the only observer fault whose
+    // blindness the product itself experiences regardless of role privileges.
+    const rows = await prisma.$queryRawUnsafe<Array<{ n: number }>>(
+      `SELECT count(*)::int AS n FROM pg_namespace WHERE nspname = $1`,
+      schema,
+    )
+    must(rows[0].n === 0, 'the schema is still present, so nothing was blinded')
+    const moved = await prisma.$queryRawUnsafe<Array<{ n: number }>>(
+      `SELECT count(*)::int AS n FROM pg_namespace WHERE nspname = $1`,
+      `${schema}_moved`,
+    )
+    must(moved[0].n === 1, 'the schema was destroyed rather than moved; data is gone')
+  },
   expected: {
     detected: false,
     actionClass: null,
@@ -342,6 +354,119 @@ const schemaMoved: LabFault = {
       'An unreadable schema and an empty one produce identical zero counts. ' +
       'Treating this as "the tables are gone" is what deleted metadata in #83, ' +
       'so the only safe answer is to establish observability and refuse.',
+  },
+}
+
+
+// ── Observation blindness, measured through a production-equivalent reader ───
+//
+// These are the faults Phase 0 could not express. The database stays healthy and
+// the OBSERVER is impaired, which is the shape of #77 and #83 and the reason the
+// RFC introduces FREEZE. The correct answer to both is refusal.
+
+const rlsRowBlindness: LabFault = {
+  id: 'observer-blinded-by-force-rls',
+  requiresProductionEquivalentAppRole: true,
+  family: 'observer',
+  scenario: 'content-community',
+  description:
+    'Rows physically exist, but FORCE RLS hides every one of them from a ' +
+    'non-superuser reader with no claim set',
+  apply: async ctx => {
+    // Production's own sequence: ENABLE, then FORCE, then own-rows policies.
+    // FORCE is the part that matters — without it the table OWNER bypasses
+    // every policy, and a pooled connection is most likely running as the owner
+    // (lib/postgrest/rls-translation.ts).
+    //
+    // This is the `apply` step rather than a precondition because the harness
+    // proves a fault is non-vacuous by diffing the schema before and after it.
+    // A standing condition established in `precondition` leaves both sides
+    // identical and the row is correctly rejected as measuring nothing.
+    await ctx.exec(`ALTER TABLE "${ctx.schema}"."posts" ENABLE ROW LEVEL SECURITY`)
+    await ctx.exec(`ALTER TABLE "${ctx.schema}"."posts" FORCE ROW LEVEL SECURITY`)
+    await grantOwnerPolicies(ctx, ['posts'])
+  },
+  verifyHealthy: async ({ prisma, schema, observer }) => {
+    must(observer !== null, 'no production-equivalent observer; blindness is unmeasurable')
+    must(
+      (await physicalRowEstimate(prisma, schema, 'posts')) > 0,
+      'posts holds no rows, so hidden rows and absent rows cannot be told apart',
+    )
+  },
+  verifyBroken: async ({ prisma, schema, observer }) => {
+    // The contrast IS the fault: rows exist, and a production-equivalent reader
+    // cannot see one of them. Asserting both halves is what makes this
+    // non-vacuous — either alone would be satisfied by an empty table.
+    const physical = await physicalRowEstimate(prisma, schema, 'posts')
+    const seen = await observerRowCount(observer!, schema, 'posts')
+    const forced = await rlsState(prisma, schema, 'posts')
+    must(forced.forced, 'FORCE RLS is not set, so the table owner still bypasses every policy')
+    must(physical > 0, `physical rows are ${physical}; hidden and absent cannot be told apart`)
+    must(
+      seen.visible === 0,
+      `observer sees ${seen.visible} rows but should see 0 under FORCE RLS with no claim`,
+    )
+  },
+  expected: {
+    detected: false,
+    actionClass: null,
+    detectorInvariants: [],
+    decision: 'FREEZE',
+    converges: false,
+    rationale:
+      'The table is full and protected. A reader that cannot see its rows has ' +
+      'established nothing, and "no rows visible" must never become "the table ' +
+      'is empty" — the confident wrong answer #77 shipped for months.',
+  },
+}
+
+const catalogBlindness: LabFault = {
+  id: 'observer-blinded-by-catalog-revoke',
+  requiresProductionEquivalentAppRole: true,
+  family: 'observer',
+  scenario: 'auth-heavy',
+  description:
+    'The schema is healthy, but the observer loses USAGE and can no longer ' +
+    'read its catalog',
+  apply: async ({ exec, schema }) => {
+    // USAGE alone is not enough: information_schema.tables lists any table the
+    // caller holds a privilege on, so a surviving SELECT grant kept the
+    // observer sighted and the first run reported "still sees 6 tables".
+    await exec(`REVOKE SELECT ON ALL TABLES IN SCHEMA "${schema}" FROM "bkn_lab_observer"`)
+    await exec(`REVOKE USAGE ON SCHEMA "${schema}" FROM "bkn_lab_observer"`)
+    return async () => {
+      await exec(`GRANT USAGE ON SCHEMA "${schema}" TO "bkn_lab_observer"`)
+      await exec(`GRANT SELECT ON ALL TABLES IN SCHEMA "${schema}" TO "bkn_lab_observer"`)
+    }
+  },
+  verifyHealthy: async ({ schema, observer }) => {
+    must(observer !== null, 'no production-equivalent observer; blindness is unmeasurable')
+    const seen = await observerTableCount(observer!, schema)
+    must(seen.visible > 0, `observer cannot already be blind (saw ${seen.visible} tables)`)
+  },
+  verifyBroken: async ({ prisma, schema, observer }) => {
+    const seen = await observerTableCount(observer!, schema)
+    must(
+      seen.visible === 0 || seen.error !== null,
+      `observer still sees ${seen.visible} tables, so USAGE was not effectively revoked`,
+    )
+    // And the tables are still really there, asked of the owner.
+    const owner = await prisma.$queryRawUnsafe<Array<{ n: number }>>(
+      `SELECT count(*)::int AS n FROM information_schema.tables WHERE table_schema = $1`,
+      schema,
+    )
+    must(owner[0].n > 0, 'the tables actually disappeared; this is not a blindness fault')
+  },
+  expected: {
+    detected: false,
+    actionClass: null,
+    detectorInvariants: [],
+    decision: 'FREEZE',
+    converges: false,
+    rationale:
+      'Zero tables from an unreadable catalog and zero tables from an empty ' +
+      'schema are the same value. Acting on the first is what deleted metadata ' +
+      'in #83, so observability must be established before anything is pruned.',
   },
 }
 
@@ -384,6 +509,8 @@ export const FAULTS: readonly LabFault[] = [
   unindexedRelationship,
   wideOpenPolicy,
   schemaMoved,
+  rlsRowBlindness,
+  catalogBlindness,
   healthy,
 ]
 

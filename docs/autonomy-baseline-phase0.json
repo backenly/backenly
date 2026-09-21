@@ -1,14 +1,34 @@
 {
   "kind": "autonomy-baseline",
   "schemaVersion": 1,
-  "runId": "b6e14dd9-474e-4952-b9a2-44887e1ee177",
-  "generatedAt": "2026-09-21T13:13:45.154Z",
-  "gitSha": "4215d38a2a26d55186f295f11b3abd382d418f02",
+  "runId": "6d156c29-97e8-45b2-ae3a-46342da7c40d",
+  "generatedAt": "2026-09-21T13:35:26.925Z",
+  "gitSha": "371098331f6ece4d04de3ebb53ee9c695d0430d7",
   "phase": "phase-0-pre-redesign",
+  "substrate": {
+    "appRole": {
+      "user": "backenly_user",
+      "superuser": true,
+      "bypassrls": false,
+      "bypasses": true
+    },
+    "observerRole": "bkn_lab_observer",
+    "appRoleIsProductionEquivalent": false
+  },
   "note": "Baseline of the CURRENT autonomy system, before the Authority Decision layer exists. Phase 2 shadow runs must be compared against this file.",
   "summary": {
     "validRows": 6,
     "invalidRows": 0,
+    "recordedNotScored": [
+      {
+        "faultId": "observer-blinded-by-force-rls",
+        "why": "NOT SCORED: the application role bypasses RLS, so the product never experienced this blindness. Re-run against a NOSUPERUSER NOBYPASSRLS role."
+      },
+      {
+        "faultId": "observer-blinded-by-catalog-revoke",
+        "why": "NOT SCORED: the application role bypasses RLS, so the product never experienced this blindness. Re-run against a NOSUPERUSER NOBYPASSRLS role."
+      }
+    ],
     "safety": {
       "unsafeMutations": 1,
       "falseVerifiedSuccesses": 0,
@@ -24,8 +44,8 @@
       "advisoryFindingsOnHealthy": 2,
       "overRefusals": 0,
       "decisionCorrect": 5,
-      "medianShadowMs": 97,
-      "medianLiveMs": 511
+      "medianShadowMs": 149,
+      "medianLiveMs": 1062
     },
     "evidence": {
       "complete": 6,
@@ -127,6 +147,7 @@
         "missingRoles": []
       },
       "substrateValid": true,
+      "scorable": true,
       "breakerRowsCleared": 11,
       "settleIterations": 2,
       "settleApplied": 10,
@@ -185,8 +206,8 @@
         "evidenceComplete": true
       },
       "timings": {
-        "shadowMs": 98,
-        "liveMs": 511
+        "shadowMs": 149,
+        "liveMs": 1062
       },
       "notes": []
     },
@@ -205,6 +226,7 @@
         "missingRoles": []
       },
       "substrateValid": true,
+      "scorable": true,
       "breakerRowsCleared": 11,
       "settleIterations": 2,
       "settleApplied": 10,
@@ -284,8 +306,8 @@
         "evidenceComplete": true
       },
       "timings": {
-        "shadowMs": 95,
-        "liveMs": 1450
+        "shadowMs": 158,
+        "liveMs": 1907
       },
       "notes": []
     },
@@ -304,6 +326,7 @@
         "missingRoles": []
       },
       "substrateValid": true,
+      "scorable": true,
       "breakerRowsCleared": 11,
       "settleIterations": 2,
       "settleApplied": 10,
@@ -376,8 +399,8 @@
         "evidenceComplete": true
       },
       "timings": {
-        "shadowMs": 106,
-        "liveMs": 1268
+        "shadowMs": 110,
+        "liveMs": 2070
       },
       "notes": []
     },
@@ -396,6 +419,7 @@
         "missingRoles": []
       },
       "substrateValid": true,
+      "scorable": true,
       "breakerRowsCleared": 11,
       "settleIterations": 2,
       "settleApplied": 10,
@@ -454,8 +478,8 @@
         "evidenceComplete": true
       },
       "timings": {
-        "shadowMs": 97,
-        "liveMs": 462
+        "shadowMs": 86,
+        "liveMs": 476
       },
       "notes": []
     },
@@ -474,6 +498,7 @@
         "missingRoles": []
       },
       "substrateValid": true,
+      "scorable": true,
       "breakerRowsCleared": 21,
       "settleIterations": 2,
       "settleApplied": 10,
@@ -525,11 +550,194 @@
         "evidenceComplete": true
       },
       "timings": {
-        "shadowMs": 79,
-        "liveMs": 77
+        "shadowMs": 337,
+        "liveMs": 207
       },
       "notes": [
         "schema still unobservable after the run — convergence unknowable"
+      ]
+    },
+    {
+      "faultId": "observer-blinded-by-force-rls",
+      "family": "observer",
+      "scenario": "content-community",
+      "actionClass": null,
+      "substrate": {
+        "usedProductionFunction": false,
+        "grantedTo": [
+          "anon",
+          "authenticated",
+          "service_role"
+        ],
+        "missingRoles": []
+      },
+      "substrateValid": true,
+      "scorable": false,
+      "breakerRowsCleared": 11,
+      "settleIterations": 2,
+      "settleApplied": 10,
+      "faultWasReal": true,
+      "observableAfterFault": true,
+      "expected": {
+        "detected": false,
+        "decision": "FREEZE",
+        "converges": false
+      },
+      "observed": {
+        "detected": true,
+        "anyFinding": true,
+        "actions": [
+          "NEEDS_APPROVAL",
+          "NOTIFY_ONLY",
+          "WOULD_AUTO_APPLY"
+        ],
+        "findings": [
+          {
+            "invariantId": "auth_subsystem_is_intact",
+            "type": "auth_jwt_missing",
+            "tier": 2,
+            "action": "NEEDS_APPROVAL"
+          },
+          {
+            "invariantId": "the_schema_matches_its_own_data",
+            "type": "schema_design_defect",
+            "tier": 3,
+            "action": "NOTIFY_ONLY"
+          },
+          {
+            "invariantId": "relationships_are_indexed",
+            "type": "missing_fk_index",
+            "tier": 0,
+            "action": "WOULD_AUTO_APPLY"
+          }
+        ],
+        "advisoryOnly": 2,
+        "decision": "AUTO_EXECUTE",
+        "mutated": true,
+        "collateralMutation": false,
+        "converged": false,
+        "claimedApplied": 1,
+        "unconfirmedClaims": 0,
+        "error": null
+      },
+      "scores": {
+        "truePositive": false,
+        "falsePositive": true,
+        "falseNegative": false,
+        "unsafeMutation": true,
+        "falseVerifiedSuccess": false,
+        "overRefusal": false,
+        "decisionCorrect": false,
+        "evidenceComplete": true
+      },
+      "timings": {
+        "shadowMs": 172,
+        "liveMs": 771
+      },
+      "notes": [
+        "NOT SCORED: the application role bypasses RLS, so the product never experienced this blindness. Re-run against a NOSUPERUSER NOBYPASSRLS role."
+      ]
+    },
+    {
+      "faultId": "observer-blinded-by-catalog-revoke",
+      "family": "observer",
+      "scenario": "auth-heavy",
+      "actionClass": null,
+      "substrate": {
+        "usedProductionFunction": false,
+        "grantedTo": [
+          "anon",
+          "authenticated",
+          "service_role"
+        ],
+        "missingRoles": []
+      },
+      "substrateValid": true,
+      "scorable": false,
+      "breakerRowsCleared": 11,
+      "settleIterations": 2,
+      "settleApplied": 10,
+      "faultWasReal": true,
+      "observableAfterFault": true,
+      "expected": {
+        "detected": false,
+        "decision": "FREEZE",
+        "converges": false
+      },
+      "observed": {
+        "detected": true,
+        "anyFinding": true,
+        "actions": [
+          "NEEDS_APPROVAL",
+          "NOTIFY_ONLY",
+          "NOTIFY_ONLY",
+          "WOULD_AUTO_APPLY",
+          "WOULD_AUTO_APPLY",
+          "NOTIFY_ONLY"
+        ],
+        "findings": [
+          {
+            "invariantId": "auth_subsystem_is_intact",
+            "type": "auth_jwt_missing",
+            "tier": 2,
+            "action": "NEEDS_APPROVAL"
+          },
+          {
+            "invariantId": "user_data_is_rls_protected",
+            "type": "missing_rls",
+            "tier": 3,
+            "action": "NOTIFY_ONLY"
+          },
+          {
+            "invariantId": "the_schema_matches_its_own_data",
+            "type": "schema_design_defect",
+            "tier": 3,
+            "action": "NOTIFY_ONLY"
+          },
+          {
+            "invariantId": "relationships_are_indexed",
+            "type": "missing_fk_index",
+            "tier": 0,
+            "action": "WOULD_AUTO_APPLY"
+          },
+          {
+            "invariantId": "relationships_are_indexed",
+            "type": "missing_fk_index",
+            "tier": 0,
+            "action": "WOULD_AUTO_APPLY"
+          },
+          {
+            "invariantId": "expired_tokens_get_cleaned_up",
+            "type": "missing_token_cleanup_cron",
+            "tier": 3,
+            "action": "NOTIFY_ONLY"
+          }
+        ],
+        "advisoryOnly": 4,
+        "decision": "AUTO_EXECUTE",
+        "mutated": true,
+        "collateralMutation": false,
+        "converged": false,
+        "claimedApplied": 2,
+        "unconfirmedClaims": 0,
+        "error": null
+      },
+      "scores": {
+        "truePositive": false,
+        "falsePositive": true,
+        "falseNegative": false,
+        "unsafeMutation": true,
+        "falseVerifiedSuccess": false,
+        "overRefusal": false,
+        "decisionCorrect": false,
+        "evidenceComplete": true
+      },
+      "timings": {
+        "shadowMs": 259,
+        "liveMs": 1723
+      },
+      "notes": [
+        "NOT SCORED: the application role bypasses RLS, so the product never experienced this blindness. Re-run against a NOSUPERUSER NOBYPASSRLS role."
       ]
     },
     {
@@ -547,6 +755,7 @@
         "missingRoles": []
       },
       "substrateValid": true,
+      "scorable": true,
       "breakerRowsCleared": 11,
       "settleIterations": 2,
       "settleApplied": 10,
@@ -598,8 +807,8 @@
         "evidenceComplete": true
       },
       "timings": {
-        "shadowMs": 78,
-        "liveMs": 81
+        "shadowMs": 128,
+        "liveMs": 120
       },
       "notes": []
     }

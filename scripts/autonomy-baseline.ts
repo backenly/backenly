@@ -41,6 +41,13 @@ import { scenario } from '../tests/lab/scenarios'
 import { seedScenario, teardownScenario, type SeededProject } from '../tests/lab/seed'
 import { schemaFingerprint, schemaIsObservable } from '../tests/lab/oracles'
 import { prepareForPostgrest } from '../tests/lab/postgrest'
+import {
+  connectObserver,
+  connectionBypassesRls,
+  ensureObserverRole,
+  grantObserverAccess,
+  type LabObserver,
+} from '../tests/lab/observer-role'
 
 // The loop only runs when the deployment says it may. Set before importing the
 // reconciler so the flag getters read these on first evaluation.
@@ -59,6 +66,12 @@ interface FaultOutcome {
   substrate: { usedProductionFunction: boolean; grantedTo: string[]; missingRoles: string[] } | null
   /** False when a declared precondition could not be established. */
   substrateValid: boolean
+  /**
+   * False when the row is a valid observation of the LAB but not a scorable
+   * observation of the PRODUCT, e.g. blindness that the app role's privileges
+   * mean the loop never experienced.
+   */
+  scorable: boolean
   /** Audit rows cleared so the fault gets a fresh breaker budget. */
   breakerRowsCleared: number
   /** Passes the loop needed to reach steady state before the fault. */
@@ -134,7 +147,12 @@ interface FaultOutcome {
   notes: string[]
 }
 
-async function runFault(prisma: PrismaClient, f: LabFault): Promise<FaultOutcome> {
+async function runFault(
+  prisma: PrismaClient,
+  f: LabFault,
+  observer: LabObserver | null,
+  appBypassesRls: boolean,
+): Promise<FaultOutcome> {
   const notes: string[] = []
   let seeded: SeededProject | null = null
   let cleanup: (() => Promise<void>) | void
@@ -147,6 +165,7 @@ async function runFault(prisma: PrismaClient, f: LabFault): Promise<FaultOutcome
     actionClass: f.expected.actionClass,
     substrate: null,
     substrateValid: true,
+    scorable: true,
     breakerRowsCleared: 0,
     settleIterations: 0,
     settleApplied: 0,
@@ -192,7 +211,10 @@ async function runFault(prisma: PrismaClient, f: LabFault): Promise<FaultOutcome
       projectId: seeded.projectId,
       schema: seeded.schema,
       exec,
+      observer,
     }
+
+    if (observer) await grantObserverAccess(prisma, seeded.schema)
 
     // ── Make the schema reachable the way production's is ───────────────────
     //
@@ -259,14 +281,45 @@ async function runFault(prisma: PrismaClient, f: LabFault): Promise<FaultOutcome
     const broken = outcome.observableAfterFault
       ? await schemaFingerprint(prisma, seeded.schema)
       : null
+    // Non-vacuity, proven in the dimension the fault actually operates in.
+    //
+    // A schema diff is the right test for a `backend` fault, which changes the
+    // database. It is the WRONG test for an `observer` fault, which leaves the
+    // database healthy and impairs the reader: REVOKE USAGE moves no catalog
+    // row, so a fingerprint comparison reported "FAULT DID NOTHING" for a
+    // revocation that had genuinely blinded the observer.
+    //
+    // Observer faults are therefore validated by `verifyBroken`, which asserts
+    // the contrast that IS the fault: the owner still sees the truth and the
+    // production-equivalent reader does not.
     outcome.faultWasReal =
       f.family === 'control'
         ? true // a control is *supposed* to change nothing
-        : broken === null || JSON.stringify(healthy) !== JSON.stringify(broken)
+        : f.family === 'observer'
+          ? true // established by verifyBroken below; a missing one is rejected
+          : broken === null || JSON.stringify(healthy) !== JSON.stringify(broken)
+
+    if (f.family === 'observer' && !f.verifyBroken) {
+      outcome.faultWasReal = false
+      notes.push('observer fault has no verifyBroken, so its blindness is unproven')
+      return outcome
+    }
 
     if (!outcome.faultWasReal) {
       notes.push('FAULT DID NOTHING — this row is invalid, not a passing result')
       return outcome
+    }
+
+    // A fault that only blinds a reader weaker than the app connection cannot
+    // test the product when the app connection bypasses RLS. Record it, do not
+    // score it: calling that a product false positive would attribute a
+    // blindness the deployed loop never experienced.
+    if (f.requiresProductionEquivalentAppRole && appBypassesRls) {
+      outcome.scorable = false
+      notes.push(
+        'NOT SCORED: the application role bypasses RLS, so the product never ' +
+          'experienced this blindness. Re-run against a NOSUPERUSER NOBYPASSRLS role.',
+      )
     }
 
     if (f.verifyBroken) {
@@ -491,8 +544,13 @@ function score(o: FaultOutcome, f: LabFault): void {
 
 function aggregate(rows: FaultOutcome[]) {
   const valid = rows.filter(
-    r => r.faultWasReal && r.substrateValid && !r.observed.error?.startsWith('harness'),
+    r =>
+      r.faultWasReal &&
+      r.substrateValid &&
+      r.scorable &&
+      !r.observed.error?.startsWith('harness'),
   )
+  const recordedNotScored = rows.filter(r => r.faultWasReal && r.substrateValid && !r.scorable)
   const byClass: Record<string, any> = {}
 
   for (const r of valid) {
@@ -562,7 +620,8 @@ function aggregate(rows: FaultOutcome[]) {
 
   return {
     validRows: valid.length,
-    invalidRows: rows.length - valid.length,
+    invalidRows: rows.length - valid.length - recordedNotScored.length,
+    recordedNotScored: recordedNotScored.map(r => ({ faultId: r.faultId, why: r.notes[0] ?? '' })),
     safety,
     detection,
     utility,
@@ -576,6 +635,12 @@ function median(xs: number[]): number {
   if (xs.length === 0) return 0
   const s = [...xs].sort((a, b) => a - b)
   return s[Math.floor(s.length / 2)]
+}
+
+function firstLine(e: any): string {
+  const m = String(e?.message ?? e)
+  const nl = m.indexOf(String.fromCharCode(10))
+  return nl === -1 ? m : m.slice(0, nl)
 }
 
 async function main() {
@@ -596,9 +661,28 @@ async function main() {
 
   console.log(`\n  Autonomy baseline — ${faults.length} fault(s), real PostgreSQL\n`)
 
+  // What privileges is the application connection actually running with?
+  // Recorded because a superuser bypasses RLS entirely, which would make every
+  // observation-blindness measurement vacuous without saying so.
+  const appRole = await connectionBypassesRls(prisma)
+  console.log(
+    `  app role: ${appRole.user} super=${appRole.superuser} bypassrls=${appRole.bypassrls}` +
+      `${appRole.bypasses ? '  <-- BYPASSES RLS, not production-equivalent' : ''}`,
+  )
+
+  let observer: LabObserver | null = null
+  try {
+    await ensureObserverRole(prisma)
+    observer = await connectObserver(process.env.DATABASE_URL ?? '')
+    console.log(`  observer: ${observer.role} (NOSUPERUSER NOBYPASSRLS, non-owning)`)
+  } catch (e: any) {
+    console.log(`  observer: UNAVAILABLE - ` + firstLine(e))
+  }
+  console.log('')
+
   for (const f of faults) {
     process.stdout.write(`  ${f.id.padEnd(34)} `)
-    const r = await runFault(prisma, f)
+    const r = await runFault(prisma, f, observer, appRole.bypasses)
     rows.push(r)
     const verdict = !r.faultWasReal
       ? 'INVALID (fault did nothing)'
@@ -608,6 +692,7 @@ async function main() {
     console.log(verdict)
   }
 
+  if (observer) await observer.close()
   await prisma.$disconnect()
 
   const report = {
@@ -617,6 +702,14 @@ async function main() {
     generatedAt: new Date().toISOString(),
     gitSha: process.env.GIT_SHA ?? null,
     phase: 'phase-0-pre-redesign',
+    substrate: {
+      appRole,
+      observerRole: observer ? observer.role : null,
+      // The honest caveat: when the app connection bypasses RLS, the product's
+      // own probes cannot be blinded here, so blindness rows describe a
+      // production-equivalent reader rather than the deployed loop.
+      appRoleIsProductionEquivalent: !appRole.bypasses,
+    },
     note:
       'Baseline of the CURRENT autonomy system, before the Authority Decision ' +
       'layer exists. Phase 2 shadow runs must be compared against this file.',
