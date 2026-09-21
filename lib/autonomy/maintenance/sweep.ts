@@ -45,6 +45,7 @@ import { getProjectAutonomyLevel, isTierAutoAllowed } from '../autonomy-level'
 import { executeMaintenancePlan, type StepBinding } from './execute'
 import { resolveMaintenancePlan, isRefusal } from './resolve'
 import { classifyMaintenanceStep, OPTIONAL_TERMINAL_STEPS } from './step'
+import { readLiveApproval, type LiveApproval } from './approval'
 import type { MaintenancePlan } from './plan'
 
 /** Phase 3 raises this. It is the only finding a maintenance ladder answers. */
@@ -63,6 +64,14 @@ export type SweepDisposition =
   | 'no_finding'
   /** The sweep itself is off, or mutations are. */
   | 'disabled'
+  /**
+   * Another instance is already running this project's ladder.
+   *
+   * Not a failure and not a refusal: the ladder is being run, just not here.
+   * Named distinctly so a fleet log cannot read cross-instance contention as
+   * a project with nothing to do.
+   */
+  | 'in_flight_elsewhere'
 
 export interface SweepResult {
   projectId: string
@@ -86,9 +95,10 @@ export interface SweepResult {
 function firstUnrunnableRung(
   plan: MaintenancePlan,
   autonomyLevel: Parameters<typeof isTierAutoAllowed>[0],
-  approvalValid: boolean,
+  approval: LiveApproval | null,
   bindings: Record<number, StepBinding>,
 ): string | null {
+  const approvalValid = approval !== null
   // The single exception. `contract` is performed by a person and its absence
   // leaves the ladder complete, so it never makes the rest unrunnable.
   const required = plan.steps.filter(s => !OPTIONAL_TERMINAL_STEPS.includes(s.kind))
@@ -104,6 +114,12 @@ function firstUnrunnableRung(
     if (c.tier >= 3) return `${step.kind}: tier 3 is never executed here`
     if (c.tier >= 2 && !approvalValid) {
       return `${step.kind}: tier ${c.tier} needs an approval bound to this plan version`
+    }
+    // `maxTier` was stored on every approval and read by nothing, so consent
+    // recorded as "up to tier 1" authorised tier 2 anyway. An approval that
+    // does not reach this rung is not consent for it.
+    if (c.tier >= 2 && approval && c.tier > approval.maxTier) {
+      return `${step.kind}: tier ${c.tier} exceeds the approval's ceiling of tier ${approval.maxTier}`
     }
     if (c.tier < 2 && !isTierAutoAllowed(autonomyLevel, c.tier as 0 | 1)) {
       return `${step.kind}: the autonomy level ${autonomyLevel} does not permit tier ${c.tier}`
@@ -160,7 +176,7 @@ export async function sweepProjectMaintenance(input: {
     return { projectId, disposition: 'not_planable', findingId: finding.id, reason: resolved.refusal }
   }
 
-  const { plan, catalogFingerprint } = resolved
+  const { plan } = resolved
   const base = { projectId, findingId: finding.id, planId: plan.planId, planVersion: plan.planVersion }
 
   if (plan.validity !== 'executable') {
@@ -174,20 +190,16 @@ export async function sweepProjectMaintenance(input: {
   // Consent, looked up by the version it was given for. An approval for an
   // earlier version of this plan is not consent for this one, and says so
   // rather than being silently absent.
-  const approval = await prisma.maintenanceApproval.findFirst({
-    where: { planId: plan.planId, revokedAt: null },
-    orderBy: { createdAt: 'desc' },
-    select: { id: true, planVersion: true, maxTier: true, bindings: true },
-  })
+  const approval = await readLiveApproval(plan.planId)
   const approvalValid = approval?.planVersion === plan.planVersion
+  const validApproval = approvalValid ? approval : null
 
   // From the approval, and only when the approval is for THIS version. Reading
   // bindings off a stale consent would apply an old mapping to a new ladder.
-  const bindings: Record<number, StepBinding> =
-    approvalValid && approval?.bindings ? (approval.bindings as Record<number, StepBinding>) : {}
+  const bindings: Record<number, StepBinding> = validApproval?.bindings ?? {}
 
   const autonomyLevel = await getProjectAutonomyLevel(projectId)
-  const blocked = firstUnrunnableRung(plan, autonomyLevel, approvalValid, bindings)
+  const blocked = firstUnrunnableRung(plan, autonomyLevel, validApproval, bindings)
   if (blocked) {
     // An approval exists but names another version: a distinct answer, because
     // the fix is re-approving rather than approving.
@@ -206,7 +218,9 @@ export async function sweepProjectMaintenance(input: {
   const outcome = await executeMaintenancePlan({
     plan,
     projectId,
-    currentCatalogFingerprint: catalogFingerprint,
+    // Deliberately NOT passed. `catalogFingerprint` here is the one the plan
+    // was built from, so handing it back made `isPlanStale` compare a value to
+    // itself. The executor reads the catalog again for itself.
     autonomyLevel,
     bindings,
     approvedPlanVersion: approval?.planVersion ?? null,
@@ -217,7 +231,11 @@ export async function sweepProjectMaintenance(input: {
 
   return {
     ...base,
-    disposition: 'executed',
+    // The executor holds the per-project lock, so it is the one that discovers
+    // contention. Surfaced as its own disposition rather than folded into
+    // `executed`, because nothing ran and a fleet tally that said otherwise
+    // would overcount the work this pass did.
+    disposition: outcome.status === 'in_flight_elsewhere' ? 'in_flight_elsewhere' : 'executed',
     executionStatus: outcome.status,
     haltReason: outcome.haltReason ?? null,
   }

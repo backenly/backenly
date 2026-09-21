@@ -54,6 +54,7 @@ export type ToolName =
   | 'get_errors'
   | 'get_usage'
   | 'get_autonomy_status'
+  | 'get_maintenance_ladder'
   | 'get_realtime_status'
   // Build
   | 'create_table'
@@ -217,6 +218,7 @@ export const READ_ONLY_TOOLS = new Set<ToolName>([
   'get_errors',
   'get_usage',
   'get_autonomy_status',
+  'get_maintenance_ladder',
   'get_realtime_status',
   'list_findings',
   'get_pending_incidents',
@@ -817,6 +819,9 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   fn('get_autonomy_status',
     'Read the autonomy dial + Trust Report for this project: current level (OFF/CONSERVATIVE/BALANCED/AGGRESSIVE), recent self-applied actions, pending approvals, and the autonomy circuit-breaker state. Use before set_autonomy_level.',
     { windowDays: { type: 'integer', minimum: 1, maximum: 90 } }),
+  fn('get_maintenance_ladder',
+    'Read the structural maintenance ladder awaiting a decision on this project: the diagnosis that produced it, every rung with its tier and whether it can be undone, and whether anybody has consented yet. A ladder rewrites schema, so consent belongs to a person and this tool is READ-ONLY: report what is waiting and why, then point the user at the Autonomy page to approve it. Consent binds to one exact planVersion, so a version read earlier may already be stale.',
+    {}),
   fn('get_realtime_status',
     'Read realtime streaming state from the live database: which tables push live INSERT/UPDATE/DELETE events to subscribed clients over SSE, which tables are idle (realtime not enabled), how many end-users are online right now, and the Postgres NOTIFY channel. Side-effect free. Call this to answer "is realtime working?" / "what is streaming?" / "how many users are online?", and ALWAYS before enable_realtime / disable_realtime / fix_backend(target="realtime") so you act on real state instead of guessing.',
     {}),
@@ -2094,6 +2099,59 @@ export async function dispatchTool(
       })
     }
 
+    // ── Autonomy: the maintenance ladder awaiting a decision ──────────────
+    //
+    // READ-ONLY on purpose. A ladder rewrites schema, and the property that
+    // makes unattended execution safe is that a person consented to one exact
+    // planVersion. An agent able to grant that consent on the user's behalf
+    // would be approving its own work, which is the single thing the tier
+    // system exists to prevent. So the agent can see what is waiting and
+    // explain it; the approving happens on the Autonomy page or the API.
+    if (name === 'get_maintenance_ladder') {
+      const { describePendingLadder, isLadderRefusal } = await import(
+        '@/lib/autonomy/maintenance/approval'
+      )
+      const ladder = await describePendingLadder({ projectId: ctx.projectId }).catch(() => null)
+      if (!ladder) {
+        return finalize({
+          ok: false,
+          summary: 'Could not read the maintenance ladder right now. Try again in a moment.',
+        })
+      }
+      if (isLadderRefusal(ladder)) {
+        // Not a failure. "Nothing structural is wrong here" is the answer this
+        // gives most of the time, and reporting it as an error would teach an
+        // agent to treat a healthy backend as a broken tool.
+        return finalize({
+          ok: true,
+          summary: `No maintenance ladder is pending: ${ladder.refusal}.`,
+          data: { pending: false, reason: ladder.refusal },
+        })
+      }
+
+      const rung = (r: { ordinal: number; kind: string; tier: number; rollback: string | null }) =>
+        `  ${r.ordinal}. ${r.kind} (tier ${r.tier}, ${r.rollback ? `undo: ${r.rollback}` : 'no undo'})`
+      const rungs = ladder.needsBinding.map(rung).join('\n')
+      const consent = ladder.approval
+        ? `Approved by ${ladder.approval.approvedBy}, up to tier ${ladder.approval.maxTier}.`
+        : ladder.staleApproval
+          ? `An approval exists for version ${ladder.staleApproval.planVersion}, but the plan rebuilt to ${ladder.planVersion}, so it needs re-approving.`
+          : 'Nobody has approved it, so it will not run until somebody does.'
+
+      const summary = [
+        `Maintenance ladder for **${ladder.table}** (plan ${ladder.planId}@${ladder.planVersion})`,
+        `Diagnosis: ${ladder.diagnosis.hypothesis} (${ladder.diagnosis.verdict})`,
+        `Validity: ${ladder.validity}`,
+        ...(rungs ? [`Rungs:\n${rungs}`] : []),
+        ...(ladder.humanOnly.length > 0
+          ? [`Human-only, never run by the robot: ${ladder.humanOnly.map(h => h.kind).join(', ')}`]
+          : []),
+        consent,
+      ].join('\n')
+
+      return finalize({ ok: true, summary, data: { pending: true, ladder } })
+    }
+
     // ── Autonomy: set dial ────────────────────────────────────────────────
     if (name === 'set_autonomy_level') {
       const {
@@ -2770,6 +2828,7 @@ export function humanTitle(name: string, args: Record<string, unknown>): string 
     case 'get_errors': return 'Reading recent errors'
     case 'get_usage': return 'Reading usage + quota'
     case 'get_autonomy_status': return 'Reading autonomy + trust report'
+    case 'get_maintenance_ladder': return 'Reading the maintenance ladder'
     case 'set_bucket_public': return `Making ${args.bucketName ?? 'bucket'} ${args.isPublic ? 'public' : 'private'}`
     case 'delete_bucket': return `Deleting bucket ${args.bucketName ?? ''}`.trim()
     case 'delete_file': return `Deleting file ${args.path ?? ''}`.trim()

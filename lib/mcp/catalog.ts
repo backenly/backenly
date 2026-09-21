@@ -753,6 +753,9 @@ export const STATE_SECTIONS: Record<string, string> = {
   deploy: 'get_deploy_status',
   readiness: 'get_readiness',
   autonomy: 'get_autonomy_status',
+  // Read-only. Granting consent for a schema-rewriting ladder stays with a
+  // person: an agent that could approve its own work defeats the tier system.
+  maintenance: 'get_maintenance_ladder',
   realtime: 'get_realtime_status',
 }
 

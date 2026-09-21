@@ -34,6 +34,7 @@
 import { isTierAutoAllowed, type AutonomyLevel } from '../autonomy-level'
 import { approvalStillValid, isPlanStale, type MaintenancePlan } from './plan'
 import { classifyMaintenanceStep, OPTIONAL_TERMINAL_STEPS } from './step'
+import { computeCatalogFingerprint } from './resolve'
 import { inventoryReaders } from './readers'
 import type { StepBinding } from './execute'
 
@@ -92,7 +93,8 @@ export interface DryRunInput {
   projectId: string
   table: string
   sourceColumn: string
-  currentCatalogFingerprint: string
+  /** TEST SEAM. Omit it: a dry run reads the catalog itself. See execute.ts. */
+  currentCatalogFingerprint?: string
   autonomyLevel: AutonomyLevel
   approvedPlanVersion?: string | null
   mutationsEnvironmentEnabled: boolean
@@ -102,7 +104,9 @@ export interface DryRunInput {
 export async function dryRunPlan(input: DryRunInput): Promise<DryRunReport> {
   const { plan, projectId, autonomyLevel } = input
 
-  const catalogFingerprintMatches = !isPlanStale(plan, input.currentCatalogFingerprint)
+  const liveFingerprint =
+    input.currentCatalogFingerprint ?? (await computeCatalogFingerprint(projectId))
+  const catalogFingerprintMatches = !isPlanStale(plan, liveFingerprint)
   const approvalValid = input.approvedPlanVersion
     ? approvalStillValid(plan, input.approvedPlanVersion)
     : false
@@ -124,7 +128,10 @@ export async function dryRunPlan(input: DryRunInput): Promise<DryRunReport> {
     refusals.push(`the ladder is blocked by capability: ${plan.blockedReasons.join('; ')}`)
   }
   if (!catalogFingerprintMatches) {
-    refusals.push('the catalog moved since this plan was built, so its preconditions describe a schema that no longer exists')
+    refusals.push(
+      'the catalog moved since this plan was built, so its preconditions describe a schema that no longer exists ' +
+        `(planned against ${plan.catalogFingerprint}, catalog is now ${liveFingerprint})`,
+    )
   }
 
   const steps: DryRunStep[] = plan.steps.map(step => {

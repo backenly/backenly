@@ -174,7 +174,7 @@ async function main(): Promise<void> {
       projectId,
       table,
       sourceColumn: sourceColumn ?? '',
-      currentCatalogFingerprint: catalogFingerprint,
+      // Omitted on purpose: the dry run reads the catalog itself.
       autonomyLevel,
       approvedPlanVersion,
       // Read, never set. A dry run reports on the environment it found.
@@ -291,7 +291,7 @@ async function main(): Promise<void> {
   const outcome = await executeMaintenancePlan({
     plan,
     projectId,
-    currentCatalogFingerprint: catalogFingerprint,
+    // Omitted on purpose: the executor reads the catalog itself.
     autonomyLevel,
     bindings,
     approvedPlanVersion,

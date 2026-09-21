@@ -30,6 +30,7 @@ import { VersionHistory } from '@/components/workspace/VersionHistory'
 import { ReviewQueuePanel } from '@/components/ReviewQueuePanel'
 import { DetectedFindingsPanel } from '@/components/DetectedFindingsPanel'
 import { AppliedChangesPanel, type AppliedChange } from '@/components/AppliedChangesPanel'
+import { MaintenanceLadderPanel } from '@/components/MaintenanceLadderPanel'
 
 type Level = 'OFF' | 'CONSERVATIVE' | 'BALANCED' | 'AGGRESSIVE'
 
@@ -259,6 +260,18 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
                the dashboard and the page it links to can both be true. ── */}
         <ReviewQueuePanel projectId={projectId} />
         <DetectedFindingsPanel projectId={projectId} level={data.level} />
+
+        {/* ── 0c. The one thing that needs consent before it can run ───────
+
+             A structural ladder is not a finding with a fix button. It is a
+             multi-rung schema migration that adds a column, backfills it and
+             repoints readers, and it is the only autonomous path gated on a
+             human saying yes to one exact plan version.
+
+             It sits with the other two inboxes rather than further down,
+             because it is the heaviest thing on this page and because it
+             renders nothing at all unless a ladder is actually waiting. ── */}
+        <MaintenanceLadderPanel projectId={projectId} />
 
         {/* ── 1. Autonomy ladder ─────────────────────────────────────────── */}
         <section className={`overflow-hidden ${KIT.radius} border ${KIT.border} ${KIT.surface} ${KIT.inset}`}>

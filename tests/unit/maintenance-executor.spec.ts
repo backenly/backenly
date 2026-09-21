@@ -75,7 +75,66 @@ jest.mock('@/lib/db', () => ({
       upsert: (...a: any[]) => mockUpsertStep(...(a as [any])),
       update: (...a: any[]) => mockUpdateStep(...(a as [any])),
     },
+    // The executor re-reads consent immediately before every tier-2 rung, so a
+    // revocation that lands mid-ladder stops the next step rather than being
+    // noticed a pass later. That read is the point, so it is mocked here rather
+    // than stubbed out: `liveApprovalVersion` is what the row currently says,
+    // and a test sets it to null to revoke.
+    maintenanceApproval: {
+      findFirst: (...a: any[]) => mockApprovalFindFirst(...(a as [any])),
+    },
   },
+}))
+
+/** What the stored approval currently authorises. Null means none on file. */
+let liveApprovalVersion: string | null = null
+/** What ceiling that consent carries. Tier 3 is never approvable. */
+let liveApprovalMaxTier = 2
+/**
+ * What a test wants the stored row to say, when it cares.
+ *
+ * The helpers default the stored consent to agree with the plan they just
+ * built, because that is the uninteresting case and every pre-existing test
+ * assumes it. A test about consent moving underneath the executor sets this
+ * instead, and the helper leaves it alone.
+ */
+let approvalOverride: { version?: string | null; maxTier?: number } | null = null
+
+function applyApprovalState(planVersion: string) {
+  liveApprovalVersion =
+    approvalOverride && 'version' in approvalOverride
+      ? (approvalOverride.version ?? null)
+      : planVersion
+  liveApprovalMaxTier = approvalOverride?.maxTier ?? 2
+}
+
+const mockApprovalFindFirst = jest.fn(async ({ where }: any) =>
+  liveApprovalVersion === null
+    ? null
+    : {
+        id: 'a1',
+        planId: where?.planId ?? 'plan-1',
+        planVersion: liveApprovalVersion,
+        maxTier: liveApprovalMaxTier,
+        bindings: {},
+        approvedBy: 'u1',
+        reason: null,
+        createdAt: new Date(),
+      },
+)
+
+// The per-project single flight is a property of Postgres and is proven
+// against a real one in tests/core/maintenance-single-flight.test.ts. Here it
+// is stubbed to always win the lock: this file is about the executor's gates,
+// and letting it open a real connection would make every gate assertion depend
+// on a database being up.
+jest.mock('@/lib/autonomy/maintenance/single-flight', () => ({
+  withMaintenanceSingleFlight: async (_p: string, work: () => Promise<unknown>) => ({
+    ran: true,
+    value: await work(),
+  }),
+  projectToLockKey: () => 1,
+  closeMaintenanceLockPool: async () => {},
 }))
 
 const mockEnqueue = jest.fn(async () => ({ id: 'job-1' }))
@@ -194,6 +253,7 @@ const runBlocked = async (over: Record<string, unknown> = {}) => {
       subsystem: { fingerprint: 'sessions', membership: ['sessions', 'users'] },
       catalogFingerprint: 'cat-v1',
     })
+    applyApprovalState(plan.planVersion)
     outcome = {
       plan,
       result: await exec({
@@ -235,6 +295,7 @@ function bindingsFor(plan: MaintenancePlan): Record<number, StepBinding> {
 
 const run = (over: Partial<Parameters<typeof executeMaintenancePlan>[0]> = {}) => {
   const plan = over.plan ?? runnable()
+  applyApprovalState(plan.planVersion)
   return executeMaintenancePlan({
     plan,
     projectId: 'p1',
@@ -252,6 +313,11 @@ beforeEach(() => {
   // an environment that has enabled mutations.
   process.env.ENABLE_PHASE_6B_MAINTENANCE_MUTATIONS = 'true'
   jest.clearAllMocks()
+  // Consent state is per-test. A test that revokes or lowers the ceiling must
+  // not leak that into the next one.
+  liveApprovalVersion = null
+  liveApprovalMaxTier = 2
+  approvalOverride = null
   executionRows.clear()
   stepRows.clear()
   executionSeq = 0
@@ -355,6 +421,53 @@ describe('tier gates', () => {
     expect(r.status).toBe('refused')
     expect(r.haltReason).toMatch(/different plan version/)
     expect(mockAddStructure).not.toHaveBeenCalled()
+  })
+
+  // ── Consent is re-read, not remembered ────────────────────────────────────
+  //
+  // `approvedPlanVersion` is a string the caller read before the ladder began.
+  // A ladder runs for minutes and resumes across ticks, so trusting that string
+  // for the whole run means a withdrawal is honoured no earlier than the next
+  // pass — after the mutations this one was about to make.
+
+  it('refuses when the approval was withdrawn after the caller read it', async () => {
+    const plan = fullLadder()
+    // The caller still holds a version string that WAS valid. The row is gone.
+    approvalOverride = { version: null }
+    const r = await run({ plan, approvedPlanVersion: plan.planVersion })
+    expect(r.status).toBe('refused')
+    expect(r.haltReason).toMatch(/withdrawn since it started/)
+    expect(mockAddStructure).not.toHaveBeenCalled()
+  })
+
+  it('refuses when the stored approval moved to another version underneath it', async () => {
+    const plan = fullLadder()
+    approvalOverride = { version: 'a-version-approved-for-something-else' }
+    const r = await run({ plan, approvedPlanVersion: plan.planVersion })
+    expect(r.status).toBe('refused')
+    expect(r.haltReason).toMatch(/does not authorize this ladder/)
+    expect(mockAddStructure).not.toHaveBeenCalled()
+  })
+
+  it('refuses a tier-2 rung when the approval only reaches tier 1', async () => {
+    // `maxTier` was stored on every approval and read by nothing, so consent
+    // recorded as "up to tier 1" authorised tier 2 anyway.
+    const plan = fullLadder()
+    approvalOverride = { maxTier: 1 }
+    const r = await run({ plan, approvedPlanVersion: plan.planVersion })
+    expect(r.status).toBe('refused')
+    expect(r.haltReason).toMatch(/approval covers up to tier 1/)
+    expect(mockAddStructure).not.toHaveBeenCalled()
+  })
+
+  it('runs the same ladder when the approval does reach tier 2', async () => {
+    // The inverse, so the three refusals above cannot be passing vacuously on
+    // a ladder that would have refused for some other reason.
+    const plan = fullLadder()
+    approvalOverride = { maxTier: 2 }
+    const r = await run({ plan, approvedPlanVersion: plan.planVersion })
+    expect(r.status).not.toBe('refused')
+    expect(mockAddStructure).toHaveBeenCalled()
   })
 })
 

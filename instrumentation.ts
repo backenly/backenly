@@ -442,6 +442,63 @@ export async function register() {
         )
       })
 
+      // ── Tier C: run an APPROVED maintenance ladder ─────────────────────────
+      //
+      // This was missing, and it is why the whole Phase 6b stack — thirteen
+      // modules, seven mutation primitives, two migrations — had never
+      // executed outside a hand-typed CLI run.
+      //
+      // `sweepProjectMaintenance` had exactly one caller in the tree:
+      // GET /api/cron/autonomy. Nothing invokes that route on its own. There is
+      // no crontab entry, no systemd timer, and Vercel-style cron declarations
+      // do not fire on a self-hosted box, so on every OSS install Tier A and
+      // Tier B ran from this scheduler and Tier C simply never happened. The
+      // route stays as an ad-hoc operator entry point; this is the mechanism.
+      //
+      // Every gate still applies and none of them is relaxed by being reached
+      // from here: both maintenance flags are read inside the sweep, the plan
+      // is rebuilt from the live catalog, the executor re-reads the catalog
+      // again before mutating, and a Tier-2 rung still needs consent bound to
+      // this exact plan version. With no approval on file the sweep reports
+      // `awaiting_approval` and writes nothing.
+      //
+      // Every 10 minutes, not every minute. A ladder is a schema migration, not
+      // a probe: the finding it answers is `subsystem_repeat_failure`, which is
+      // measured over a 30-day window and does not change between minutes.
+      cron.schedule('*/10 * * * *', async () => {
+        const { FLAGS } = await import('./lib/config/flags')
+        if (!FLAGS.ENABLE_MAINTENANCE_SCHEDULER) return
+
+        const { sweepProjectMaintenance } = await import('./lib/autonomy/maintenance/sweep')
+        const { getFleetScheduler } = await import('./lib/edition')
+
+        const activeProjects = await getFleetScheduler().activeTargets()
+        if (activeProjects.length === 0) return
+
+        const CONCURRENCY = 5
+        const tally: Record<string, number> = {}
+        for (let i = 0; i < activeProjects.length; i += CONCURRENCY) {
+          const batch = activeProjects.slice(i, i + CONCURRENCY)
+          const results = await Promise.allSettled(
+            batch.map(p => sweepProjectMaintenance({ projectId: p.id })),
+          )
+          for (const r of results) {
+            const key = r.status === 'fulfilled' ? r.value.disposition : 'errored'
+            tally[key] = (tally[key] ?? 0) + 1
+          }
+        }
+        // `no_finding` is the overwhelmingly common answer and logging it every
+        // ten minutes would bury the one line that matters. Anything else is
+        // worth a line.
+        const notable = Object.entries(tally).filter(([k]) => k !== 'no_finding')
+        if (notable.length > 0) {
+          console.log(
+            `[MaintenanceSweep] ${activeProjects.length} projects — ` +
+            notable.map(([k, n]) => `${k}: ${n}`).join(', '),
+          )
+        }
+      })
+
       // ── Database behaviour baseline — hourly, on the hour ───────────────────
       //
       // Records query latency, sequential scans, table size and connection
