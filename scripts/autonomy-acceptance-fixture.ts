@@ -381,8 +381,18 @@ async function observe(env: Env): Promise<Record<string, unknown>> {
     orderBy: { timestamp: 'asc' },
     select: { action: true, timestamp: true, details: true, metadata: true },
   })
-  const runs = await prisma.auditLog.count({
-    where: { projectId: proj.id, timestamp: { gte: since }, action: 'AUTONOMY_LIVE_RUN' },
+  // Every action the loop writes for a tick (lib/autonomy/loop-tick.ts), not
+  // just the live one: counting only AUTONOMY_LIVE_RUN would report "the loop
+  // never looked" for a deployment running in shadow, which is a different
+  // fact and would send the reader hunting the wrong problem.
+  const ticks = await prisma.auditLog.groupBy({
+    by: ['action'],
+    where: {
+      projectId: proj.id,
+      timestamp: { gte: since },
+      action: { in: ['AUTONOMY_TICK', 'AUTONOMY_LIVE_RUN', 'AUTONOMY_SHADOW_DECISION', 'AUTONOMY_CHANGE_FREEZE'] },
+    },
+    _count: { action: true },
   })
 
   // Compatibility debt, measured rather than manufactured: every project.
@@ -417,7 +427,7 @@ async function observe(env: Env): Promise<Record<string, unknown>> {
     mode: 'observe',
     env,
     projectId: proj.id,
-    reconcilerRunsOnFixture: runs,
+    loopTicksOnFixture: Object.fromEntries(ticks.map(t => [t.action, t._count.action])),
     rls,
     policies,
     indexes: indexes.map(i => i.i),
