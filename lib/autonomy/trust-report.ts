@@ -187,7 +187,23 @@ export interface TrustReport {
    * (the K of MAPE-K). Surfaced under the Observe node of the dashboard's
    * self-healing loop so the number can never drift from the real catalogue.
    */
+  /**
+   * Guarantees a probe actively establishes for this project.
+   *
+   * Was `INVARIANTS.length`, which counted three members that could not fire:
+   * one held by PostgREST rather than watched, one inert with no observer at
+   * all, and one behind a deployment flag that is off by default. "29
+   * guarantees" meant 26 watched, one structural and two names.
+   */
   invariantCount: number
+  /** Held by the engine rather than watched. Real promises, not observations. */
+  guaranteedByConstruction: number
+  /**
+   * Declared but not establishable in THIS deployment - a missing server
+   * capability or a switched-off flag. Reported so the difference between
+   * "clean" and "not looked at" stays visible.
+   */
+  uncheckedHere: number
   scoreboard: TrustScoreboard
   recentActivity: ActivityItem[]
   pendingApprovals: PendingApproval[]
@@ -561,7 +577,9 @@ export async function buildTrustReport(
     level,
     cap,
     plan: planDisplayName(planName),
-    invariantCount: INVARIANTS.length,
+    invariantCount: INVARIANTS.filter(i => i.assurance !== 'by_construction' && !(i.enabled && !i.enabled())).length,
+    guaranteedByConstruction: INVARIANTS.filter(i => i.assurance === 'by_construction').length,
+    uncheckedHere: INVARIANTS.filter(i => i.enabled && !i.enabled()).length,
     scoreboard: {
       windowDays,
       autonomousFixes,
