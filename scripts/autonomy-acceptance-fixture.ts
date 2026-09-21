@@ -45,10 +45,15 @@
  * runtime image carries only the data-plane bundle.
  */
 
+import { randomUUID } from 'crypto'
+
 import { prisma } from '@/lib/db/prisma'
 import { P } from '@/lib/principal'
 import { declareOwnershipIntent } from '@/lib/authority/ownership-intent'
 import { grantAuthority, revokeAuthority, loadGrants } from '@/lib/authority/grants'
+import { workspaceSchemaName } from '@/lib/security/workspace-schema'
+import { generateUniqueSlug } from '@/lib/utils/slug'
+import { createEmptyGraph } from '@/lib/orchestration/backend-state-graph'
 
 /** The only project this file will ever touch. */
 export const FIXTURE_NAME = '__backenly_autonomy_acceptance_v1__'
@@ -191,23 +196,23 @@ async function prepare(env: Env): Promise<Record<string, unknown>> {
     })
   }
 
-  // An ordinary free-tier subscription, written by the product's own function.
+  // ── An ordinary free-tier subscription ───────────────────────────────────
+  //
   // Not decoration: with no subscription at all the plan ceiling cannot be
   // resolved, getProjectAutonomyLevel clamps to the safe fallback, and every
   // tier-1 repair would be refused for a reason that has nothing to do with the
   // Authority Decision. The fixture must be a project the loop treats normally.
+  //
+  // What `createFreeSubscription` writes, inlined rather than imported, because
+  // importing lib/billing pulls its whole dependency graph into a payload that
+  // travels in a 64 KB task definition. Kept identical to lib/billing/index.ts
+  // — SANDBOX, falling back to the legacy FREE plan, status FREE — and it
+  // refuses rather than inventing a plan if neither is seeded, because a
+  // fixture quietly running at a different ceiling would report a wrong answer.
   const sub = await prisma.subscription.findFirst({
     where: { userId: user.id, status: { in: ['ACTIVE', 'FREE', 'GRACE'] } },
     include: { plan: { select: { name: true, autonomyMaxLevel: true } } },
   })
-  //
-  // The two rows `createFreeSubscription` writes, inlined rather than imported:
-  // importing `lib/billing` pulls its whole dependency graph into the bundle
-  // and puts the payload over the task-definition limit. Kept identical to
-  // lib/billing/index.ts — SANDBOX, falling back to the legacy FREE plan,
-  // status FREE — and it refuses rather than inventing a plan if neither is
-  // seeded, because a fixture that quietly ran at a different ceiling would
-  // report the wrong answer.
   let subscription = sub
   if (!subscription) {
     const plan =
@@ -221,13 +226,53 @@ async function prepare(env: Env): Promise<Record<string, unknown>> {
     })
   }
 
+  // ── A real project, not a row and a schema ───────────────────────────────
+  //
+  // Every step `createProvisionedProject` performs, in its order, using the same
+  // helpers: the project row and its BackendGraph in one transaction, then the
+  // schema, the Workspace row, and the PostgREST registration that is the
+  // difference between a served data plane and PGRST106 on every table.
+  //
+  // Why not call that function: importing it pulls ~1.7 MB into a payload that
+  // travels in a task definition capped at 64 KB. The one step deliberately NOT
+  // reproduced is the JWT signing secret, which the product itself treats as
+  // non-fatal and provisions lazily on first end-user signup. Nothing the
+  // autonomy loop reads depends on it, and the fixture has no end-users.
   let proj = await fixtureProject()
+  let dataPlaneRegistered: boolean | null = null
   if (!proj) {
-    const created = await prisma.project.create({
-      data: { name: FIXTURE_NAME, userId: user.id },
-      select: { id: true, userId: true },
+    const id = randomUUID()
+    const slug = await generateUniqueSlug(FIXTURE_NAME, async candidate => {
+      const taken = await prisma.project.findUnique({ where: { slug: candidate }, select: { id: true } })
+      return !!taken
     })
-    proj = { id: created.id, userId: created.userId as string }
+    await prisma.$transaction(async tx => {
+      await tx.project.create({ data: { id, name: FIXTURE_NAME, slug, userId: user!.id } })
+      const graph = await tx.backendGraph.create({
+        data: { projectId: id, graphData: createEmptyGraph(id) as any },
+        select: { id: true },
+      })
+      await tx.project.update({ where: { id }, data: { activeGraphId: graph.id } })
+    })
+
+    const postgresSchema = workspaceSchemaName(id)
+    await q(`CREATE SCHEMA IF NOT EXISTS "${postgresSchema}"`)
+    await prisma.workspace.create({
+      data: {
+        name: `${FIXTURE_NAME} Workspace`,
+        projectId: id,
+        userId: user.id,
+        postgresSchema,
+        databaseProvisioned: true,
+        databaseProvisionedAt: new Date(),
+      },
+    })
+    // The same call lib/postgrest/registration.ts makes. It grants and registers
+    // in one function, so the data plane is served rather than 403ing.
+    dataPlaneRegistered = await q(`SELECT public.backenly_pgrst_register_schema('${postgresSchema}')`)
+      .then(() => true)
+      .catch(() => false)
+    proj = { id, userId: user.id }
   }
   if (proj.userId !== user.id) refuse('fixture project is not owned by the fixture user')
 
@@ -255,6 +300,9 @@ async function prepare(env: Env): Promise<Record<string, unknown>> {
   }
 
   // Production-equivalent exposure, so reachability-gated probes can see it.
+  // Re-run AFTER the tables exist: registration grants what was there when it
+  // ran, and these two tables are created after it. Without this the data plane
+  // serves the schema and has no privileges on its tables.
   const fn = await rows<{ n: number }>(
     `select count(*)::int as n from pg_proc where proname = 'backenly_pgrst_prepare_schema'`,
   )
@@ -267,6 +315,7 @@ async function prepare(env: Env): Promise<Record<string, unknown>> {
     projectId: proj.id,
     schema: s,
     postgrestPrepared: fn[0].n > 0,
+    dataPlaneRegistered,
     plan: subscription?.plan?.name ?? null,
     planAutonomyCeiling: subscription?.plan?.autonomyMaxLevel ?? null,
     autonomyLevel: (await prisma.project.findUnique({ where: { id: proj.id }, select: { autonomyLevel: true } }))
