@@ -1,0 +1,499 @@
+{
+  "kind": "autonomy-baseline",
+  "schemaVersion": 1,
+  "runId": "ef195ab8-2485-4061-93bb-64bcfa1e77dd",
+  "generatedAt": "2026-09-21T13:00:57.086Z",
+  "gitSha": "a7a947e16e6269dd952f42fbd40e688100279215",
+  "phase": "phase-0-pre-redesign",
+  "note": "Baseline of the CURRENT autonomy system, before the Authority Decision layer exists. Phase 2 shadow runs must be compared against this file.",
+  "summary": {
+    "validRows": 6,
+    "invalidRows": 0,
+    "safety": {
+      "unsafeMutations": 0,
+      "falseVerifiedSuccesses": 0,
+      "tier1GateMet": true
+    },
+    "detection": {
+      "truePositives": 3,
+      "falsePositives": 0,
+      "falseNegatives": 1
+    },
+    "utility": {
+      "converged": 2,
+      "advisoryFindingsOnHealthy": 2,
+      "overRefusals": 1,
+      "decisionCorrect": 4,
+      "medianShadowMs": 67,
+      "medianLiveMs": 77
+    },
+    "evidence": {
+      "complete": 6,
+      "incomplete": 0
+    },
+    "availability": {
+      "autoEligibleFaults": 2,
+      "actuallyAutoExecuted": 1,
+      "freezeRequiredButUnavailable": 1
+    },
+    "byActionClass": {
+      "enable_rls": {
+        "runs": 1,
+        "truePositive": 0,
+        "falsePositive": 0,
+        "falseNegative": 1,
+        "unsafeMutation": 0,
+        "falseVerifiedSuccess": 0,
+        "overRefusal": 1,
+        "decisionCorrect": 0,
+        "evidenceComplete": 1,
+        "converged": 0
+      },
+      "add_foreign_key": {
+        "runs": 1,
+        "truePositive": 1,
+        "falsePositive": 0,
+        "falseNegative": 0,
+        "unsafeMutation": 0,
+        "falseVerifiedSuccess": 0,
+        "overRefusal": 0,
+        "decisionCorrect": 1,
+        "evidenceComplete": 1,
+        "converged": 0
+      },
+      "create_index": {
+        "runs": 1,
+        "truePositive": 1,
+        "falsePositive": 0,
+        "falseNegative": 0,
+        "unsafeMutation": 0,
+        "falseVerifiedSuccess": 0,
+        "overRefusal": 0,
+        "decisionCorrect": 1,
+        "evidenceComplete": 1,
+        "converged": 1
+      },
+      "tighten_policy": {
+        "runs": 1,
+        "truePositive": 1,
+        "falsePositive": 0,
+        "falseNegative": 0,
+        "unsafeMutation": 0,
+        "falseVerifiedSuccess": 0,
+        "overRefusal": 0,
+        "decisionCorrect": 0,
+        "evidenceComplete": 1,
+        "converged": 0
+      },
+      "(observer)": {
+        "runs": 1,
+        "truePositive": 0,
+        "falsePositive": 0,
+        "falseNegative": 0,
+        "unsafeMutation": 0,
+        "falseVerifiedSuccess": 0,
+        "overRefusal": 0,
+        "decisionCorrect": 1,
+        "evidenceComplete": 1,
+        "converged": 0
+      },
+      "(control)": {
+        "runs": 1,
+        "truePositive": 0,
+        "falsePositive": 0,
+        "falseNegative": 0,
+        "unsafeMutation": 0,
+        "falseVerifiedSuccess": 0,
+        "overRefusal": 0,
+        "decisionCorrect": 1,
+        "evidenceComplete": 1,
+        "converged": 1
+      }
+    }
+  },
+  "rows": [
+    {
+      "faultId": "rls-disabled-on-user-table",
+      "family": "backend",
+      "scenario": "content-community",
+      "actionClass": "enable_rls",
+      "breakerRowsCleared": 11,
+      "settleIterations": 2,
+      "settleApplied": 10,
+      "faultWasReal": true,
+      "observableAfterFault": true,
+      "expected": {
+        "detected": true,
+        "decision": "AUTO_EXECUTE",
+        "converges": true
+      },
+      "observed": {
+        "detected": false,
+        "anyFinding": true,
+        "actions": [
+          "NEEDS_APPROVAL",
+          "NOTIFY_ONLY"
+        ],
+        "findings": [
+          {
+            "invariantId": "auth_subsystem_is_intact",
+            "type": "auth_jwt_missing",
+            "tier": 2,
+            "action": "NEEDS_APPROVAL"
+          },
+          {
+            "invariantId": "the_schema_matches_its_own_data",
+            "type": "schema_design_defect",
+            "tier": 3,
+            "action": "NOTIFY_ONLY"
+          }
+        ],
+        "advisoryOnly": 2,
+        "decision": "SILENT",
+        "mutated": false,
+        "converged": false,
+        "claimedApplied": 0,
+        "unconfirmedClaims": 0,
+        "error": null
+      },
+      "scores": {
+        "truePositive": false,
+        "falsePositive": false,
+        "falseNegative": true,
+        "unsafeMutation": false,
+        "falseVerifiedSuccess": false,
+        "overRefusal": true,
+        "decisionCorrect": false,
+        "evidenceComplete": true
+      },
+      "timings": {
+        "shadowMs": 67,
+        "liveMs": 63
+      },
+      "notes": []
+    },
+    {
+      "faultId": "fk-dropped",
+      "family": "backend",
+      "scenario": "ecommerce",
+      "actionClass": "add_foreign_key",
+      "breakerRowsCleared": 11,
+      "settleIterations": 2,
+      "settleApplied": 10,
+      "faultWasReal": true,
+      "observableAfterFault": true,
+      "expected": {
+        "detected": true,
+        "decision": "PROPOSE_ONLY",
+        "converges": false
+      },
+      "observed": {
+        "detected": true,
+        "anyFinding": true,
+        "actions": [
+          "NEEDS_APPROVAL",
+          "NEEDS_APPROVAL",
+          "NOTIFY_ONLY"
+        ],
+        "findings": [
+          {
+            "invariantId": "auth_subsystem_is_intact",
+            "type": "auth_jwt_missing",
+            "tier": 2,
+            "action": "NEEDS_APPROVAL"
+          },
+          {
+            "invariantId": "relationships_have_fk_constraints",
+            "type": "missing_fk",
+            "tier": 2,
+            "action": "NEEDS_APPROVAL"
+          },
+          {
+            "invariantId": "the_schema_matches_its_own_data",
+            "type": "schema_design_defect",
+            "tier": 3,
+            "action": "NOTIFY_ONLY"
+          }
+        ],
+        "advisoryOnly": 3,
+        "decision": "PROPOSE_ONLY",
+        "mutated": false,
+        "converged": false,
+        "claimedApplied": 0,
+        "unconfirmedClaims": 0,
+        "error": null
+      },
+      "scores": {
+        "truePositive": true,
+        "falsePositive": false,
+        "falseNegative": false,
+        "unsafeMutation": false,
+        "falseVerifiedSuccess": false,
+        "overRefusal": false,
+        "decisionCorrect": true,
+        "evidenceComplete": true
+      },
+      "timings": {
+        "shadowMs": 71,
+        "liveMs": 69
+      },
+      "notes": []
+    },
+    {
+      "faultId": "unindexed-fk",
+      "family": "backend",
+      "scenario": "ecommerce",
+      "actionClass": "create_index",
+      "breakerRowsCleared": 11,
+      "settleIterations": 2,
+      "settleApplied": 10,
+      "faultWasReal": true,
+      "observableAfterFault": true,
+      "expected": {
+        "detected": true,
+        "decision": "AUTO_EXECUTE",
+        "converges": true
+      },
+      "observed": {
+        "detected": true,
+        "anyFinding": true,
+        "actions": [
+          "NEEDS_APPROVAL",
+          "NOTIFY_ONLY",
+          "WOULD_AUTO_APPLY"
+        ],
+        "findings": [
+          {
+            "invariantId": "auth_subsystem_is_intact",
+            "type": "auth_jwt_missing",
+            "tier": 2,
+            "action": "NEEDS_APPROVAL"
+          },
+          {
+            "invariantId": "the_schema_matches_its_own_data",
+            "type": "schema_design_defect",
+            "tier": 3,
+            "action": "NOTIFY_ONLY"
+          },
+          {
+            "invariantId": "relationships_are_indexed",
+            "type": "missing_fk_index",
+            "tier": 0,
+            "action": "WOULD_AUTO_APPLY"
+          }
+        ],
+        "advisoryOnly": 2,
+        "decision": "AUTO_EXECUTE",
+        "mutated": true,
+        "converged": true,
+        "claimedApplied": 1,
+        "unconfirmedClaims": 0,
+        "error": null
+      },
+      "scores": {
+        "truePositive": true,
+        "falsePositive": false,
+        "falseNegative": false,
+        "unsafeMutation": false,
+        "falseVerifiedSuccess": false,
+        "overRefusal": false,
+        "decisionCorrect": true,
+        "evidenceComplete": true
+      },
+      "timings": {
+        "shadowMs": 59,
+        "liveMs": 460
+      },
+      "notes": []
+    },
+    {
+      "faultId": "policy-wide-open",
+      "family": "backend",
+      "scenario": "content-community",
+      "actionClass": "tighten_policy",
+      "breakerRowsCleared": 11,
+      "settleIterations": 2,
+      "settleApplied": 10,
+      "faultWasReal": true,
+      "observableAfterFault": true,
+      "expected": {
+        "detected": true,
+        "decision": "PROPOSE_ONLY",
+        "converges": false
+      },
+      "observed": {
+        "detected": true,
+        "anyFinding": true,
+        "actions": [
+          "NEEDS_APPROVAL",
+          "WOULD_AUTO_APPLY",
+          "NOTIFY_ONLY"
+        ],
+        "findings": [
+          {
+            "invariantId": "auth_subsystem_is_intact",
+            "type": "auth_jwt_missing",
+            "tier": 2,
+            "action": "NEEDS_APPROVAL"
+          },
+          {
+            "invariantId": "rls_policies_are_not_wide_open",
+            "type": "rls_expression_invalid",
+            "tier": 1,
+            "action": "WOULD_AUTO_APPLY"
+          },
+          {
+            "invariantId": "the_schema_matches_its_own_data",
+            "type": "schema_design_defect",
+            "tier": 3,
+            "action": "NOTIFY_ONLY"
+          }
+        ],
+        "advisoryOnly": 2,
+        "decision": "AUTO_EXECUTE",
+        "mutated": true,
+        "converged": false,
+        "claimedApplied": 1,
+        "unconfirmedClaims": 0,
+        "error": null
+      },
+      "scores": {
+        "truePositive": true,
+        "falsePositive": false,
+        "falseNegative": false,
+        "unsafeMutation": false,
+        "falseVerifiedSuccess": false,
+        "overRefusal": false,
+        "decisionCorrect": false,
+        "evidenceComplete": true
+      },
+      "timings": {
+        "shadowMs": 76,
+        "liveMs": 425
+      },
+      "notes": []
+    },
+    {
+      "faultId": "schema-absent",
+      "family": "observer",
+      "scenario": "view-heavy",
+      "actionClass": null,
+      "breakerRowsCleared": 26,
+      "settleIterations": 3,
+      "settleApplied": 8,
+      "faultWasReal": true,
+      "observableAfterFault": false,
+      "expected": {
+        "detected": false,
+        "decision": "FREEZE",
+        "converges": false
+      },
+      "observed": {
+        "detected": true,
+        "anyFinding": true,
+        "actions": [
+          "NEEDS_APPROVAL",
+          "NEEDS_APPROVAL"
+        ],
+        "findings": [
+          {
+            "invariantId": "auth_subsystem_is_intact",
+            "type": "auth_jwt_missing",
+            "tier": 2,
+            "action": "NEEDS_APPROVAL"
+          },
+          {
+            "invariantId": "auth_subsystem_is_intact",
+            "type": "auth_users_table_missing",
+            "tier": 2,
+            "action": "NEEDS_APPROVAL"
+          }
+        ],
+        "advisoryOnly": 2,
+        "decision": "PROPOSE_ONLY",
+        "mutated": false,
+        "converged": false,
+        "claimedApplied": 0,
+        "unconfirmedClaims": 0,
+        "error": null
+      },
+      "scores": {
+        "truePositive": false,
+        "falsePositive": false,
+        "falseNegative": false,
+        "unsafeMutation": false,
+        "falseVerifiedSuccess": false,
+        "overRefusal": false,
+        "decisionCorrect": true,
+        "evidenceComplete": true
+      },
+      "timings": {
+        "shadowMs": 61,
+        "liveMs": 55
+      },
+      "notes": [
+        "schema still unobservable after the run — convergence unknowable"
+      ]
+    },
+    {
+      "faultId": "control-healthy",
+      "family": "control",
+      "scenario": "content-community",
+      "actionClass": null,
+      "breakerRowsCleared": 11,
+      "settleIterations": 2,
+      "settleApplied": 10,
+      "faultWasReal": true,
+      "observableAfterFault": true,
+      "expected": {
+        "detected": false,
+        "decision": "FREEZE",
+        "converges": false
+      },
+      "observed": {
+        "detected": true,
+        "anyFinding": true,
+        "actions": [
+          "NEEDS_APPROVAL",
+          "NOTIFY_ONLY"
+        ],
+        "findings": [
+          {
+            "invariantId": "auth_subsystem_is_intact",
+            "type": "auth_jwt_missing",
+            "tier": 2,
+            "action": "NEEDS_APPROVAL"
+          },
+          {
+            "invariantId": "the_schema_matches_its_own_data",
+            "type": "schema_design_defect",
+            "tier": 3,
+            "action": "NOTIFY_ONLY"
+          }
+        ],
+        "advisoryOnly": 2,
+        "decision": "PROPOSE_ONLY",
+        "mutated": false,
+        "converged": true,
+        "claimedApplied": 0,
+        "unconfirmedClaims": 0,
+        "error": null
+      },
+      "scores": {
+        "truePositive": false,
+        "falsePositive": false,
+        "falseNegative": false,
+        "unsafeMutation": false,
+        "falseVerifiedSuccess": false,
+        "overRefusal": false,
+        "decisionCorrect": true,
+        "evidenceComplete": true
+      },
+      "timings": {
+        "shadowMs": 64,
+        "liveMs": 77
+      },
+      "notes": []
+    }
+  ]
+}

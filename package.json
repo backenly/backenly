@@ -36,6 +36,7 @@
     "db:migrate": "prisma migrate dev",
     "db:seed": "tsx scripts/db-seed.ts",
     "db:studio": "prisma studio",
+    "autonomy:baseline": "tsx scripts/autonomy-baseline.ts",
     "db:test:setup": "npm run test:setup",
     "migrate:api-keys": "tsx scripts/migrate-api-keys-to-hash.ts",
     "cleanup:tokens": "tsx scripts/cleanup-expired-tokens.ts",
