@@ -366,3 +366,31 @@ async function recordCompatibilityUse(
       /* a missed receipt must never block or permit a mutation */
     })
 }
+
+/**
+ * Make the repair follow the declared intent, not the executor's own inference.
+ *
+ * The Authority Decision authorizes a policy rewrite BECAUSE a declared intent
+ * says who owns a row. Before this, the executor then chose the owner column
+ * itself, by heuristic: `buildFixAction` resolves `template: 'auto'` against the
+ * live schema. For a table with one owner-like column the two agree by accident;
+ * for a table carrying both `user_id` and `owner_id` with an intent naming
+ * `owner_id`, the decision would authorize and the executor would scope rows on
+ * the wrong column. Authorization would be intent-aware and execution would not.
+ *
+ * `buildFixAction` already honours `details.userIdColumn` and
+ * `details.rlsTemplate`, so this passes the intent's column through rather than
+ * re-deriving it. Only for an authorization-shaped class, and only when the
+ * decision says the intent was satisfied: anything else is returned unchanged,
+ * so no other repair's behaviour moves.
+ */
+export function applyIntentToFixDetails(
+  decision: AuthorityDecision,
+  details: Record<string, unknown>,
+): Record<string, unknown> {
+  if (decision.decision !== 'AUTO_EXECUTE') return details
+  if (decision.actionClassId !== 'tighten_policy') return details
+  const intent = decision.intent
+  if (!intent?.satisfied || !intent.ownerColumn) return details
+  return { ...details, rlsTemplate: 'own_rows', userIdColumn: intent.ownerColumn }
+}

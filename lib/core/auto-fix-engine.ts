@@ -347,6 +347,17 @@ export async function runAutoFix(
         message: `Authority lapsed before execution: ${still.reason}`,
       }
     }
+
+    // The repair applies what the declared intent says, not what the executor
+    // would infer. See applyIntentToFixDetails.
+    const { applyIntentToFixDetails } = await import('@/lib/authority/gate')
+    return _executeAutoFix(
+      finding.id,
+      projectId,
+      type,
+      applyIntentToFixDetails(gate.decision, details),
+      opts,
+    )
   }
 
   return _executeAutoFix(finding.id, projectId, type, details, opts)

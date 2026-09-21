@@ -18,6 +18,8 @@ import { ACTION_CLASSES, actionClass } from '@/lib/authority/action-classes'
 import { P } from '@/lib/principal'
 import type { OwnershipIntentRecord } from '@/lib/authority/ownership-intent'
 import type { TierDelegation } from '@/lib/authority/delegation'
+import { applyIntentToFixDetails } from '@/lib/authority/gate'
+import { buildFixAction } from '@/lib/core/fix-actions'
 import type { ProbeOutcome } from '@/lib/autonomy/sensor-health'
 
 function probe(id: string, status: ProbeOutcome['status']): ProbeOutcome {
@@ -575,5 +577,71 @@ describe('unattended ownership repair: the seven cases', () => {
       }),
     )
     expect(d.decision).toBe('FREEZE')
+  })
+})
+
+/**
+ * THE REPAIR MUST APPLY WHAT THE INTENT SAYS
+ * ==========================================
+ *
+ * Authorizing a policy rewrite because an intent names the owner column, and
+ * then letting the executor infer a DIFFERENT column, would make authorization
+ * intent-aware and execution not. These pin that the column reaching the
+ * executor is the intent's, and that nothing else is disturbed.
+ */
+describe('the repair follows the declared intent', () => {
+  // The divergence case: a heuristic preferring `user_id` would scope rows on
+  // the wrong column here. The intent names `owner_id`.
+  const authorised = () =>
+    decideAuthority(
+      policyInputs({
+        ownershipIntents: [intent({ ownerColumn: 'owner_id' })],
+        delegations: [
+          {
+            id: 'd1',
+            projectId: 'p1',
+            actionClassId: 'tighten_policy',
+            environment: 'development',
+            grantedBy: P.user('owner-1'),
+            expiresAt: null,
+            revokedAt: null,
+          },
+        ],
+      }),
+    )
+
+  it('passes the intent column to the executor, not a guessed one', () => {
+    const d = authorised()
+    expect(d.decision).toBe('AUTO_EXECUTE')
+    expect(d.intent?.ownerColumn).toBe('owner_id')
+
+    const out = applyIntentToFixDetails(d, { tableName: 'posts', rlsTemplate: 'auto' })
+    expect(out.userIdColumn).toBe('owner_id')
+    expect(out.rlsTemplate).toBe('own_rows')
+    expect(out.tableName).toBe('posts')
+  })
+
+  it('reaches buildFixAction as the column the executor will apply', () => {
+    // The end of the chain: buildFixAction already honours userIdColumn, so
+    // this is the value SET_PERMISSION actually receives.
+    const out = applyIntentToFixDetails(authorised(), { tableName: 'posts' })
+    const action = buildFixAction('rls_expression_invalid', out)
+    expect(action?.action).toBe('SET_PERMISSION')
+    expect((action?.params as any).userIdColumn).toBe('owner_id')
+    expect((action?.params as any).template).toBe('own_rows')
+  })
+
+  it('does not touch a decision that is not AUTO_EXECUTE', () => {
+    const d = decideAuthority(policyInputs({ ownershipIntents: [intent()], delegations: [] }))
+    expect(d.decision).not.toBe('AUTO_EXECUTE')
+    const before = { tableName: 'posts', rlsTemplate: 'auto' }
+    expect(applyIntentToFixDetails(d, before)).toBe(before)
+  })
+
+  it('does not touch any other action class', () => {
+    const d = decideAuthority(inputs())
+    expect(d.actionClassId).toBe('create_index')
+    const before = { tableName: 'orders' }
+    expect(applyIntentToFixDetails(d, before)).toBe(before)
   })
 })

@@ -184,6 +184,11 @@ export interface AuthorityDecision {
     provenance: string | null
     /** The predicate the intent determines, when it determines one. */
     predicate: string | null
+    /**
+     * The owner column the declared intent names. Carried so the EXECUTOR can
+     * apply exactly this, rather than inferring a column on its own.
+     */
+    ownerColumn: string | null
   } | null
 
   /**
@@ -363,6 +368,7 @@ export function decideAuthority(input: AuthorityInputs): AuthorityDecision {
       version: a?.version ?? null,
       provenance: a?.provenance ?? null,
       predicate: a ? safePredicate(a) : null,
+      ownerColumn: a?.ownerColumn ?? null,
     }
   }
 
