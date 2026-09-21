@@ -42,6 +42,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
+import { isVerifiedFix } from '@/lib/core/fix-verification'
 import type { RawFinding, FindingSeverity } from '@/lib/core/types'
 import { FLAGS } from '@/lib/config/flags'
 import { gapIdentity } from './desired-state'
@@ -254,7 +255,7 @@ export function tablesNamedIn(details: string | null | undefined, members: reado
  */
 export function isConfirmedRepair(details: Record<string, unknown> | null | undefined): boolean {
   const rb = (details ?? {}).rollbackData as Record<string, unknown> | undefined
-  return rb?.verification === 'confirmed'
+  return isVerifiedFix(rb?.verification)
 }
 
 // ── Evaluation ────────────────────────────────────────────────────────────────

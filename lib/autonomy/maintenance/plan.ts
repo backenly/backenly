@@ -53,6 +53,11 @@ import {
   type MaintenanceStep,
   type MaintenanceStepKind,
 } from './step'
+import {
+  rollbackRefusal,
+  rollbackContract,
+  type RollbackStrategy,
+} from './rollback-capability'
 
 export type PlanValidity = 'executable' | 'blocked_by_capability' | 'invalid'
 
@@ -133,7 +138,7 @@ function ladderFor(
           params: { tableName: table, purpose: 'consolidated lifecycle column' },
           preconditions: ['target column does not already exist'],
           expectedPostconditions: ['target column exists and is nullable'],
-          rollbackSpec: { strategy: 'drop_object', description: 'Drop the added column.' },
+          rollbackSpec: { strategy: 'drop_column', description: 'Drop the added column.' },
         },
         {
           // Before dual_write, so the catalog never rests with an unconstrained
@@ -150,7 +155,7 @@ function ladderFor(
           params: { tableName: table, purpose: "the source column's domain under the transform" },
           preconditions: ['target column exists', 'source column declares an enumerable domain'],
           expectedPostconditions: ['target column is constrained to the transformed source domain'],
-          rollbackSpec: { strategy: 'drop_object', description: 'Drop the added constraint.' },
+          rollbackSpec: { strategy: 'drop_constraint', description: 'Drop the added constraint.' },
         },
         {
           kind: 'dual_write',
@@ -158,7 +163,7 @@ function ladderFor(
           params: { tableName: table },
           preconditions: ['target column exists', 'trigger body cannot abort the caller'],
           expectedPostconditions: ['writes to the legacy column also populate the target'],
-          rollbackSpec: { strategy: 'drop_object', description: 'Drop the dual-write trigger.' },
+          rollbackSpec: { strategy: 'drop_trigger', description: 'Drop the dual-write trigger.' },
         },
         {
           kind: 'backfill',
@@ -167,7 +172,7 @@ function ladderFor(
           preconditions: ['dual-write installed', 'no unreconciled mismatches'],
           expectedPostconditions: ['every pre-existing row has a target value'],
           rollbackSpec: {
-            strategy: 'revert_new_structure',
+            strategy: 'drop_column',
             description:
               'Drop the target column. The source is untouched by expand, so there is nothing ' +
               'to restore and no checkpoint to depend on.',
@@ -211,7 +216,7 @@ function ladderFor(
           params: { tableName: table, purpose: 'constraint, added NOT VALID' },
           preconditions: ['constraint does not already exist'],
           expectedPostconditions: ['constraint exists, not yet validated'],
-          rollbackSpec: { strategy: 'drop_object', description: 'Drop the constraint.' },
+          rollbackSpec: { strategy: 'drop_constraint', description: 'Drop the constraint.' },
         },
         {
           kind: 'verify',
@@ -231,7 +236,13 @@ function ladderFor(
           params: { tableName: table, purpose: 'single consolidated policy' },
           preconditions: ['consolidated policy does not already exist'],
           expectedPostconditions: ['one policy covers the command'],
-          rollbackSpec: { strategy: 'drop_object', description: 'Drop the consolidated policy.' },
+          rollbackSpec: {
+            strategy: 'restore_policies',
+            description:
+              'Restore the exact policy set that existed before consolidation. NOT a drop: ' +
+              'consolidation replaced the fragments, so removing the result would leave the ' +
+              'table with no row security at all.',
+          },
         },
         {
           kind: 'verify',
@@ -376,22 +387,56 @@ export function buildMaintenancePlan(input: PlanInput): MaintenancePlan {
     else blockedReasons.push(line)
   }
 
+  // ── 3b. And a rung the executor CAN run may still be unrecoverable ─────────
+  //
+  // Separate from the loop above because they are different questions. That
+  // one asks "can this step run"; this asks "if it runs and goes wrong, can
+  // this deployment put it back". A ladder can pass the first and fail the
+  // second, and until now nothing asked the second at all: the check ended at
+  // "does the step carry a rollbackSpec", which treats a description as proof
+  // of an ability. Two of the four operations the old `drop_object` strategy
+  // covered had no executor, so ladders were planned, approved and run on the
+  // strength of a recovery that did not exist.
+  //
+  // `contract` is exempt for the same reason as above — it is performed by a
+  // person, so its absence leaves the ladder complete rather than half-done.
+  for (const step of steps) {
+    if (OPTIONAL_TERMINAL_STEPS.includes(step.kind)) continue
+    if (!step.rollbackSpec) continue
+    const refusal = rollbackRefusal(step.rollbackSpec.strategy)
+    if (refusal) blockedReasons.push(`${step.kind}: cannot be scheduled because ${refusal}`)
+  }
+
   const planVersion = stableHash([
     base.planId,
     catalogFingerprint,
     steps.map(s => [s.kind, s.action, s.params, s.idempotencyKey]),
-    // What the executor could do when this plan was built.
+    // ── What this plan DEPENDS ON being able to do, and to undo ───────────
     //
-    // Without this, a plan built while `dual_write` was `not_implemented` keeps
-    // its version when the primitive lands, and an approval granted against a
-    // ladder that could not run silently becomes consent for one that can.
-    // Including it re-versions every plan the moment the capability table moves,
-    // which is what "they are re-planned into a new planVersion" means in
-    // ./step.ts — enforced here rather than left as an instruction.
+    // Scoped to the capabilities these steps actually use, not the whole
+    // table. Both halves matter and both are here for the same reason: an
+    // approval is consent to a safety envelope the owner reviewed, not merely
+    // to the forward SQL. A ladder built while `dual_write` was unimplemented
+    // must not keep its version when the primitive lands, and one approved
+    // while `drop_constraint` was unsupported must not keep it either — the
+    // risk that approver weighed was "this cannot be put back".
     //
-    // Steps whose kind does not appear in the plan are included too: the table
-    // is a property of the executor, not of this ladder.
-    Object.entries(EXECUTOR_CAPABILITY).sort(([a], [b]) => a.localeCompare(b)),
+    // Previously the ENTIRE executor table was hashed, on the reasoning that
+    // it is a property of the executor rather than of the ladder. True, and
+    // too broad: implementing an unrelated strategy then invalidated consent
+    // for ladders that never touch it, which trains people to re-approve
+    // without re-reading. Consent is bound to what this plan depends upon.
+    //
+    // The contract string carries a REVISION as well as availability, because
+    // a boolean cannot express a handler whose behaviour changed materially
+    // while remaining implemented. That is the case a plain capability flag
+    // silently lets through.
+    [...new Set(steps.map(s => s.kind))]
+      .sort()
+      .map(k => `${k}:${EXECUTOR_CAPABILITY[k]}`),
+    [...new Set(steps.map(s => s.rollbackSpec?.strategy).filter(Boolean))]
+      .sort()
+      .map(st => rollbackContract(st as RollbackStrategy)),
   ])
 
   return {

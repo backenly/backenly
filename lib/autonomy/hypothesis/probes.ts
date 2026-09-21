@@ -15,6 +15,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
+import { queryWorkspaceAsOwner, resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
 import { usesLegacyGucs } from '@/lib/postgrest/rls-translation'
 import { probePostgrest } from '@/lib/postgrest/health'
 
@@ -33,8 +34,18 @@ export interface ProbeContext {
 
 export type ProbeFn = (ctx: ProbeContext) => Promise<{ outcome: string; detail?: string }>
 
-function schemaFor(projectId: string): string {
-  return `workspace_${projectId}`
+/**
+ * The project's workspace schema, as STORED rather than as computed.
+ *
+ * This used to be `workspace_${projectId}` inline. `resolveWorkspaceSchema`
+ * prefers `Workspace.postgresSchema`, which is authoritative — and for any
+ * project whose stored name differs from the default, the computed one names a
+ * schema that does not exist. Every catalog probe below then reads an empty
+ * `information_schema` and reports the table missing, which is a confident
+ * wrong answer rather than a failure.
+ */
+async function schemaFor(projectId: string): Promise<string> {
+  return resolveWorkspaceSchema(projectId)
 }
 
 /** Identifier guard — these values reach raw SQL. */
@@ -53,12 +64,39 @@ function requireTable(ctx: ProbeContext): string {
  * The single most valuable observation for this symptom: it separates "the rows
  * are hidden from you" from "there are no rows", which are the two families of
  * cause and have nothing in common.
+ *
+ * ── AS OWNER, because it was asking as nobody ──────────────────────────────
+ *
+ * This ran through `prisma.$queryRawUnsafe`, which sets no RLS session
+ * variables at all. Under FORCE ROW LEVEL SECURITY — which every workspace
+ * table has, and which binds the table's owner too — the policy's claim is
+ * null, so the count came back 0 for a table full of rows.
+ *
+ * It read correctly in development only because the local role happens to be a
+ * superuser and superusers bypass RLS. Production's role is NOSUPERUSER
+ * NOBYPASSRLS by design, so the answer inverted between environments with
+ * nothing to say it had.
+ *
+ * That made this the worst possible probe to get wrong. `no_rows` is the SOLE
+ * prediction of `table_genuinely_empty`, so a blinded count did not degrade the
+ * diagnosis into uncertainty — it drove it confidently to "the table contains
+ * no rows" about a table the customer's app was reading from, and that
+ * conclusion is what the Review Queue then showed a human. The docstring above
+ * promised "ignoring row security" and the query did nothing of the kind.
  */
 export const serviceRows: ProbeFn = async ctx => {
   const table = requireTable(ctx)
-  const rows = await prisma.$queryRawUnsafe<Array<{ n: bigint }>>(
-    `SELECT count(*)::bigint AS n FROM "${schemaFor(ctx.projectId)}"."${table}"`,
-  )
+  const schema = await schemaFor(ctx.projectId)
+  const rows = await queryWorkspaceAsOwner<{ n: bigint }>(
+    ctx.projectId,
+    `SELECT count(*)::bigint AS n FROM "${schema}"."${table}"`,
+  ).catch((err: unknown) => {
+    // Thrown, never coerced to zero. "I could not count" and "I counted none"
+    // are different observations and only one of them is evidence.
+    throw new Error(
+      `could not count rows in ${table}: ${err instanceof Error ? err.message : String(err)}`,
+    )
+  })
   const n = Number(rows[0]?.n ?? 0)
   return { outcome: n > 0 ? 'rows_exist' : 'no_rows', detail: `${n} row(s) present` }
 }
@@ -76,7 +114,7 @@ export const serviceRows: ProbeFn = async ctx => {
 export const contractMatch: ProbeFn = async ctx => {
   const policies = await prisma.$queryRawUnsafe<Array<{ qual: string | null; with_check: string | null }>>(
     `SELECT qual, with_check FROM pg_policies WHERE schemaname = $1`,
-    schemaFor(ctx.projectId),
+    await schemaFor(ctx.projectId),
   )
   if (policies.length === 0) {
     return { outcome: 'match', detail: 'no row-security policies on this schema' }
@@ -108,8 +146,10 @@ export const callerIdentity: ProbeFn = async ctx => {
 
 export const softDeleted: ProbeFn = async ctx => {
   const table = requireTable(ctx)
-  const schema = schemaFor(ctx.projectId)
+  const schema = await schemaFor(ctx.projectId)
 
+  // Catalog read. RLS does not filter `information_schema`, so this one
+  // correctly needs no claim.
   const hasCol = await prisma.$queryRawUnsafe<Array<{ n: bigint }>>(
     `SELECT count(*)::bigint AS n FROM information_schema.columns
       WHERE table_schema = $1 AND table_name = $2 AND column_name = 'deleted_at'`,
@@ -120,11 +160,19 @@ export const softDeleted: ProbeFn = async ctx => {
     return { outcome: 'no_column', detail: 'table has no deleted_at column' }
   }
 
-  const counts = await prisma.$queryRawUnsafe<Array<{ total: bigint; live: bigint }>>(
+  // Tenant rows, so AS OWNER for the same reason as `serviceRows`. Blinded,
+  // this reported `total: 0` and returned 'some_live' — which reads as "the
+  // rows are fine" and eliminates `all_rows_soft_deleted` on no evidence.
+  const counts = await queryWorkspaceAsOwner<{ total: bigint; live: bigint }>(
+    ctx.projectId,
     `SELECT count(*)::bigint AS total,
             count(*) FILTER (WHERE deleted_at IS NULL)::bigint AS live
        FROM "${schema}"."${table}"`,
-  )
+  ).catch((err: unknown) => {
+    throw new Error(
+      `could not count soft-deleted rows in ${table}: ${err instanceof Error ? err.message : String(err)}`,
+    )
+  })
   const total = Number(counts[0]?.total ?? 0)
   const live = Number(counts[0]?.live ?? 0)
   return {
@@ -140,7 +188,7 @@ export const tableExists: ProbeFn = async ctx => {
   const rows = await prisma.$queryRawUnsafe<Array<{ n: bigint }>>(
     `SELECT count(*)::bigint AS n FROM information_schema.tables
       WHERE table_schema = $1 AND table_name = $2`,
-    schemaFor(ctx.projectId),
+    await schemaFor(ctx.projectId),
     table,
   )
   return { outcome: Number(rows[0]?.n ?? 0) > 0 ? 'exists' : 'missing' }
@@ -197,7 +245,7 @@ export const postgrestVisibility: ProbeFn = async ctx => {
   const res = await fetch(upstreamUrl(baseUrl, table, 'limit=0'), {
     headers: {
       Authorization: `Bearer ${token}`,
-      'Accept-Profile': schemaFor(ctx.projectId),
+      'Accept-Profile': await schemaFor(ctx.projectId),
     },
   })
   if (res.ok) return { outcome: 'visible' }
@@ -222,7 +270,7 @@ export const roleGrants: ProbeFn = async ctx => {
     `SELECT count(*)::bigint AS n FROM information_schema.role_table_grants
       WHERE table_schema = $1 AND table_name = $2
         AND grantee IN ('authenticated', 'service_role')`,
-    schemaFor(ctx.projectId),
+    await schemaFor(ctx.projectId),
     table,
   )
   return { outcome: Number(rows[0]?.n ?? 0) > 0 ? 'present' : 'absent' }

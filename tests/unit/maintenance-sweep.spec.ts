@@ -15,6 +15,23 @@
 
 const mockFindFinding = jest.fn()
 const mockFindApproval = jest.fn()
+/**
+ * This file tests the EXECUTOR's gates - tier, consent, staleness, the
+ * deployment flag - and those gates need a ladder that can actually run.
+ *
+ * `drop_constraint` is unsupported in this deployment, which blocks every
+ * ladder the planner currently emits at plan time. That is correct in
+ * production and it would leave every test below with nothing to execute, so
+ * recovery is treated as available here. The real registry's behaviour is
+ * owned by tests/core/rollback-capability-is-real.test.ts, which asserts the
+ * opposite and would fail if this mock leaked into it.
+ */
+jest.mock('@/lib/autonomy/maintenance/rollback-capability', () => ({
+  ...jest.requireActual('@/lib/autonomy/maintenance/rollback-capability'),
+  rollbackRefusal: () => null,
+  canRollback: () => true,
+}))
+
 jest.mock('@/lib/db', () => ({
   prisma: {
     healthFinding: { findFirst: (...a: any[]) => mockFindFinding(...(a as [])) },

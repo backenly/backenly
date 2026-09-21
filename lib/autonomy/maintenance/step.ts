@@ -41,6 +41,7 @@
  * event as them being permitted to run.
  */
 
+import type { RollbackStrategy } from './rollback-capability'
 import type { AutonomyTier } from '../desired-state'
 
 export type MaintenanceStepKind =
@@ -149,17 +150,27 @@ export interface MaintenanceStep {
 
 export interface RollbackSpec {
   /**
-   * `revert_new_structure` is the expand/contract insight: the original table
-   * is never destructively mutated during expand, so undoing a backfill means
-   * dropping the structure it filled — not reconstructing the original from a
-   * checkpoint.
+   * What undoing this rung actually means, named precisely enough that the
+   * capability registry can answer whether it is executable.
    *
-   * That matters because `rollbackDataMigration`'s checkpoint is
-   * `CREATE TABLE AS`, which documents its own limitation: it restores rows and
-   * column types but NOT constraints, indexes or defaults. Depending on it here
-   * would make "reversible" quietly weaker than it sounds.
+   * `drop_object` used to stand here and covered four different operations —
+   * dropping a column, a trigger, a constraint or a policy. Two of those have
+   * no executor, and one of them (policy) has a verb that removes EVERY policy
+   * on the table rather than the one that was added. The shared name is what
+   * let the planner treat all four as equally recoverable.
+   *
+   * Note that dropping the column a backfill filled is `drop_column` like any
+   * other. That is the expand/contract insight: expand never destructively
+   * mutates the source, so undoing a backfill means dropping the structure it
+   * filled rather than reconstructing anything from a checkpoint — which
+   * matters because `rollbackDataMigration`'s checkpoint is `CREATE TABLE AS`
+   * and restores rows and types but NOT constraints, indexes or defaults.
+   *
+   * Whether any of these can actually run is `ROLLBACK_CAPABILITY`'s question,
+   * never this type's. A spec is a description; capability is a fact about the
+   * deployed executor.
    */
-  strategy: 'revert_new_structure' | 'drop_object' | 'restore_reader_config' | 'none_required'
+  strategy: RollbackStrategy
   description: string
 }
 

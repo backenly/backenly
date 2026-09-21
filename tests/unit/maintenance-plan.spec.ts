@@ -30,6 +30,8 @@ import {
   EXECUTOR_CAPABILITY,
   requiresRollbackSpec,
 } from '@/lib/autonomy/maintenance/step'
+import { OPTIONAL_TERMINAL_STEPS } from '@/lib/autonomy/maintenance/step'
+import { canRollback } from '@/lib/autonomy/maintenance/rollback-capability'
 import type { StructuralDiagnosis } from '@/lib/autonomy/hypothesis/structural'
 
 const COVERAGE = {
@@ -312,9 +314,13 @@ describe('valid but blocked by capability', () => {
     // knowing nobody reads it — not a fact this platform can establish. The
     // ladder is complete and safe without it; the old column simply stays.
     const p = plan(diagnosis())
-    expect(p.validity).toBe('executable')
+    // Only `contract` may appear here. The rollback-capability gate adds its
+    // own reasons for this ladder (carry_constraints cannot be undone in this
+    // deployment), and those are owned by
+    // tests/core/rollback-capability-is-real.test.ts - what THIS test claims
+    // is narrower: the human-only rung is not one of them.
     expect(p.steps.map(s => s.kind)).toContain('contract')
-    expect(p.blockedReasons).toEqual([])
+    expect(p.blockedReasons.join(' ')).not.toMatch(/contract/)
     // Reported, not hidden: a person still has to do it.
     expect(p.humanOnlySteps.join(' ')).toMatch(/contract: human_only/)
   })
@@ -335,8 +341,22 @@ describe('valid but blocked by capability', () => {
         },
       } as Partial<StructuralDiagnosis>),
     )
-    const allImplemented = p.steps.every(s => EXECUTOR_CAPABILITY[s.kind] === 'implemented')
-    expect(p.validity).toBe(allImplemented ? 'executable' : 'blocked_by_capability')
+    // Executable requires BOTH gates, and this test exists to prove neither is
+    // a constant. A rung can be perfectly runnable and still unrecoverable -
+    // which is the whole point of the second registry - so asserting only the
+    // forward table would now be asserting something that is never true.
+    const runnable = p.steps.every(s => EXECUTOR_CAPABILITY[s.kind] === 'implemented')
+    const recoverable = p.steps.every(
+      s =>
+        OPTIONAL_TERMINAL_STEPS.includes(s.kind) ||
+        !s.rollbackSpec ||
+        canRollback(s.rollbackSpec.strategy),
+    )
+    expect(p.validity).toBe(runnable && recoverable ? 'executable' : 'blocked_by_capability')
+    // And the two gates disagree for this ladder today, which is the fact that
+    // makes the assertion above non-trivial rather than a tautology.
+    expect(runnable).toBe(true)
+    expect(recoverable).toBe(false)
   })
 })
 
@@ -361,7 +381,11 @@ describe('reversibility is a precondition, not a warning', () => {
   it('backfill reverts the new structure rather than restoring a checkpoint', () => {
     const p = plan(diagnosis())
     const backfill = p.steps.find(s => s.kind === 'backfill')!
-    expect(backfill.rollbackSpec?.strategy).toBe('revert_new_structure')
+    // `revert_new_structure` until the strategies were typed one per
+    // operation. Undoing a backfill has always MEANT dropping the column it
+    // filled - expand never destructively touches the source - so this is the
+    // same property under the name the capability registry knows it by.
+    expect(backfill.rollbackSpec?.strategy).toBe('drop_column')
     expect(backfill.rollbackSpec?.description).toMatch(/nothing to restore|no checkpoint/i)
   })
 

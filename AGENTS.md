@@ -359,80 +359,73 @@ npx jest path/to/file.spec.ts    # Single file
 
 ## Self-Hosting / Deployment
 
-Backenly runs as two Node processes behind a reverse proxy, against a
-PostgreSQL instance you control:
+There are TWO deployment contexts. Do not mix them.
 
-| Process | What it serves |
-|---------|----------------|
-| Next.js | The dashboard UI and all platform APIs under `/app/api/` |
-| Express runtime | The public end-user runtime, `/api/v1/*` (see `server/`) |
+### Backenly OSS / self-host
 
-`npm run selfhost` is the supported way to install it: one command that
-generates the secrets, starts `docker-compose.dev.yml` (PostgreSQL, Redis and
-PostgREST), creates the tables and reconciles until bootstrap reports ready.
-The two Node processes then run on the host with `npm run dev`.
+`npm run selfhost` is the supported OSS install path. It provisions the local
+Docker dependencies and configures a single-project deployment. Self-hosters may
+run the Node processes with their own process manager and may use local storage
+or a supported S3-compatible provider.
 
-No compose file starts the application itself. There used to be a root
-`docker-compose.yml` claimed here as "the whole stack"; it built an API-tester
-worker from a `./worker` directory that no longer exists, so the one command a
-Supabase user would reach for first failed on a missing build context. It has
-been removed rather than repaired.
+Hostnames, credentials, proxy configuration and provider-specific secrets belong
+in the operator's environment, never in this public repository.
 
-`ecosystem.config.js` is a PM2 alternative for a plain VM.
+### Backenly Cloud
 
-### Deploying an update
+Backenly Cloud no longer deploys from this repository directly and no longer
+runs on Hetzner.
 
-`scripts/deploy.sh` is the single entry point. It pulls, syncs the Prisma schema
-if `prisma/schema.prisma` changed anywhere in the pulled range, builds, restarts
-the processes **only after `postbuild` completes**, and then health-checks.
+Cloud production/staging run on AWS. The private repositories are:
 
-```bash
-# On the host, from the checkout:
-git pull && bash scripts/deploy.sh
+- `backenly/backenly-cloud` — add-only Cloud overlay, public SHA pin and release records.
+- `backenly/backenly-infra` — Terraform for AWS staging/production.
+
+Cloud runs Web/Runtime/PostgREST on ECS Fargate, PostgreSQL on RDS, persistent
+volumes on EFS, native object storage on AWS S3 via IAM task roles, images in
+ECR, secrets in Secrets Manager, and ingress through ALB/ACM.
+
+For Cloud, NEVER deploy with SSH, `git pull` on a server, PM2, or
+`scripts/deploy.sh`. The old Hetzner path is retired. Backblaze B2 is also
+retired from Backenly Cloud; do not reintroduce B2 endpoints or static storage
+credentials into Cloud configuration. This does NOT remove generic
+S3-compatible storage support for OSS self-hosters.
+
+Cloud source is composed from an exact pair:
+
+```text
+backenly/backenly       @ <public SHA>
+backenly/backenly-cloud @ <cloud SHA>, with PUBLIC_BASE_SHA == <public SHA>
 ```
 
-Prefer it over running the steps by hand — the ordering constraints below are
-the ones people get wrong:
+The AWS release is then performed from a known merged
+`backenly/backenly-infra` SHA with immutable ECR digests and Terraform.
+Staging qualification precedes production promotion. Release facts are recorded
+in `backenly-cloud/releases/*.yml`.
 
-- **Never restart before `npm run build` (including `postbuild`) has finished.**
-  `postbuild` copies static assets into the standalone output; restarting early
-  serves a build with no CSS or JS.
-- **Run `npm run db:generate` after any `schema.prisma` change**, before the
-  build. A stale Prisma client fails at runtime, not at build time.
-- **Pass `--update-env` when restarting** if `.env` changed, or the process
-  keeps the old environment.
+See `.claude/rules/repository-workflow.md` for the durable Git/branch/release
+rules that coding agents must follow.
 
-### Required PostgreSQL configuration
+### Required PostgreSQL configuration for self-host
 
 One server-level setting is not optional if you want the full detector set:
 
 ```conf
-shared_preload_libraries = 'pg_stat_statements'   # postgresql.conf, needs a restart
+shared_preload_libraries = 'pg_stat_statements'
 ```
 ```sql
 CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
 ```
 
-`docker-compose.dev.yml` and `docker/postgres-init/` do both for you. On a
-database without it, `measured_slow_queries_are_indexed` cannot run —
-`lib/autonomy/platform-capabilities.ts` detects that and the invariant is
-reported as UNCHECKED (`DesiredStateReport.disabled`), never as satisfied.
+`docker-compose.dev.yml` and `docker/postgres-init/` configure this for the
+supported self-host path. If a probe depends on a server capability, declare it
+as `requires` rather than returning an empty healthy-looking result.
 
-If you add another probe that depends on a server-level capability, declare it
-as `requires` on the invariant rather than returning `[]` when it is absent. An
-empty result is indistinguishable from a healthy backend, which is how
-`detectMissingRls` read green for months while it was dead.
+### Public-repository secret boundary
 
-### Host-specific configuration
-
-Deployment details — hostnames, credentials, proxy config, log paths — belong in
-your own environment, never in this repository. Configure them through `.env`
-(see `.env.example`) and your process manager.
-
-> Nothing in this repo should ever name a real host or hold a real credential.
-> `npx tsx scripts/preflight-oss.ts` enforces that: it scans the working tree
-> and the git history for credential shapes, public IP literals, session JWTs,
-> and personal email addresses, and exits nonzero if it finds any.
+Nothing in this repo should contain a real production credential or private
+Cloud infrastructure detail. `npx tsx scripts/preflight-oss.ts` enforces the
+public-tree credential/host hygiene checks.
 
 ---
 

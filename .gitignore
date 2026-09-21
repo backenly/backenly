@@ -81,9 +81,15 @@ public/*.pdf
 .secrets.local.md
 
 # Local Claude Code state — machine-specific, and has held credentials.
-# Ignore the whole dir; only explicitly re-allow shared, secret-free config.
-.claude/
+# Ignore the contents; only explicitly re-allow shared, secret-free config.
+#
+# This MUST be `.claude/*`, not `.claude/`. Git does not descend into an
+# excluded DIRECTORY, so a negation under one can never re-include anything:
+# `.claude/` plus `!.claude/settings.json` silently ignored settings.json too,
+# and .claude/rules/ is only tracked today because it was force-added.
+.claude/*
 !.claude/settings.json
+!.claude/rules/
 
 # Playwright run artifacts. These were tracked, so every test run left the tree
 # dirty with churn nobody reviews — and with parallel sessions running in this

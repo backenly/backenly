@@ -30,6 +30,7 @@ import {
 import { HeroConsole } from '@/components/landing/HeroConsole'
 import { ROUTES, SiteShell } from '@/components/site/SiteShell'
 import { useSettledReducedMotion } from '@/lib/hooks/useSettledReducedMotion'
+import { useUserSession } from '@/lib/hooks/useUserSession'
 
 /* ─────────────────────────────────────────────────────────────
    Design tokens
@@ -426,6 +427,7 @@ function LaunchPill({ quiet }: { quiet: boolean }) {
 function Hero() {
   const sectionRef = useRef<HTMLElement>(null)
   const quiet = useQuietMotion()
+  const { isLoggedIn } = useUserSession()
 
   return (
     <motion.section
@@ -475,8 +477,8 @@ function Hero() {
             transition={{ duration: quiet ? 0 : 0.9, ease: EASE_OUT }}
             className="flex shrink-0 flex-col gap-3 sm:flex-row"
           >
-            <Link href={ROUTES.signup} className={PRIMARY_CTA}>
-              Start free
+            <Link href={isLoggedIn ? ROUTES.app : ROUTES.signup} className={PRIMARY_CTA}>
+              {isLoggedIn ? 'Go to console' : 'Start free'}
               <ArrowRight
                 aria-hidden
                 className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5"
@@ -1054,6 +1056,8 @@ function FaqItem({
 ───────────────────────────────────────────────────────────── */
 
 function ClosingCTA() {
+  const { isLoggedIn } = useUserSession()
+
   return (
     <section className="relative px-5 pb-20 pt-6 sm:px-6 sm:pb-24">
       <Reveal className={CONTAINER}>
@@ -1078,8 +1082,8 @@ function ClosingCTA() {
             </div>
 
             <div className="flex shrink-0 flex-col gap-3 sm:flex-row lg:pb-1">
-              <Link href={ROUTES.signup} className={PRIMARY_CTA}>
-                Start free
+              <Link href={isLoggedIn ? ROUTES.app : ROUTES.signup} className={PRIMARY_CTA}>
+                {isLoggedIn ? 'Go to console' : 'Start free'}
                 <ArrowRight
                   aria-hidden
                   className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5"
