@@ -82,13 +82,18 @@ describe('the rollback capability registry is the authority', () => {
       'drop_column',
       'drop_trigger',
       'none_required',
+      'restore_policies',
       'restore_reader_config',
     ])
   })
 
-  it('names the two it cannot, and why', () => {
+  it('names the one it cannot, and why', () => {
+    // `restore_policies` left this list when it was built with a real capture,
+    // a stale guard and an independent verifier
+    // (primitives/recovery-restore-policies.ts). `drop_constraint` is still
+    // honestly missing: ADD_CONSTRAINT exists and its inverse does not.
     expect(rollbackRefusal('drop_constraint')).toMatch(/no executor that can drop one/)
-    expect(rollbackRefusal('restore_policies')).toMatch(/cannot yet capture or replay/)
+    expect(rollbackRefusal('restore_policies')).toBeNull()
   })
 
   it('gives no refusal for anything it claims to support', () => {
@@ -103,7 +108,17 @@ describe('the rollback capability registry is the authority', () => {
 // ── What that means for the ladders today ────────────────────────────────────
 
 describe('no ladder is schedulable while its recovery is fictional', () => {
-  it.each(LADDERS)('%s is blocked by capability, not offered for approval', hypothesis => {
+  /**
+   * Ladders still blocked on a missing executor.
+   *
+   * `policy_fragmentation` left this list when `restore_policies` became real,
+   * which is the registry doing its job rather than a gate being loosened: the
+   * ladder was blocked because its recovery did not exist, and now it does.
+   * Everything below still holds for the two that depend on `drop_constraint`.
+   */
+  const BLOCKED_LADDERS = LADDERS.filter(l => l !== 'policy_fragmentation')
+
+  it.each(BLOCKED_LADDERS)('%s is blocked by capability, not offered for approval', hypothesis => {
     const plan = planFor(hypothesis)
 
     // `blocked_by_capability`, never `executable`. The distinction that
@@ -120,8 +135,28 @@ describe('no ladder is schedulable while its recovery is fictional', () => {
     expect(constraintLadder.blockedReasons.join(' ')).toMatch(/carry_constraints/)
     expect(constraintLadder.blockedReasons.join(' ')).toMatch(/drop a constraint/)
 
+    // And the policy ladder no longer names a missing capability, because it
+    // no longer has one. Asserted positively so that a regression putting
+    // `restore_policies` back to not_implemented fails here loudly.
     const policyLadder = planFor('policy_fragmentation')
-    expect(policyLadder.blockedReasons.join(' ')).toMatch(/restore the previous policy set/)
+    expect(policyLadder.validity).toBe('executable')
+    expect(policyLadder.blockedReasons).toEqual([])
+  })
+
+  it('a ladder whose recovery became real is schedulable, and still needs approval', () => {
+    // The consequence of implementing restore_policies, stated rather than
+    // discovered later: policy_fragmentation can now be planned and offered.
+    // `executable` is not `authorised` — its rungs are tier 2, so a human
+    // approval bound to this exact plan version is still required before
+    // anything runs.
+    const plan = planFor('policy_fragmentation')
+    expect(plan.validity).toBe('executable')
+    expect(plan.steps.length).toBeGreaterThan(0)
+    // Its rungs still declare restore_policies as their recovery, which is the
+    // capability that unblocked them. Tier lives on the step kind rather than
+    // on the plan step, so the approval gate is asserted where it is enforced
+    // (execute.ts re-reads maxTier per rung) rather than re-derived here.
+    expect(plan.steps.some((s: any) => s.rollbackSpec?.strategy === 'restore_policies')).toBe(true)
   })
 
   it('still shows the ladder it would have run, without authorising any of it', () => {
@@ -135,7 +170,7 @@ describe('no ladder is schedulable while its recovery is fictional', () => {
     // its runnable prefix, because running the supported prefix of
     // expand/contract is how a half-expanded schema gets created by the thing
     // that was refusing.
-    for (const h of LADDERS) {
+    for (const h of BLOCKED_LADDERS) {
       const plan = planFor(h)
       expect(plan.steps.length).toBeGreaterThan(0)
       expect(plan.validity).not.toBe('executable')
