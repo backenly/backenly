@@ -24,6 +24,7 @@ import {
 } from './autonomy-level'
 import { explainAutonomyEvent } from './because-copy'
 import { summariseFinding } from '@/lib/core/finding-summaries'
+import { isVerifiedFix, isVerificationError } from '@/lib/core/fix-verification'
 import { classifyFix } from '@/lib/core/fix-classifier'
 import { revertEligibility } from '@/lib/core/auto-fix-engine'
 import { INVARIANTS } from './desired-state'
@@ -52,6 +53,14 @@ export interface ActivityItem {
   kind:
     | 'auto_fix'
     | 'applied'
+    /**
+     * The loop changed the backend and could not confirm the result.
+     *
+     * Its own kind rather than 'auto_fix' (which would claim a success nobody
+     * established) or 'failed' (which would claim a failure nobody
+     * established either).
+     */
+    | 'applied_unverified'
     | 'escalation'
     | 'breaker'
     | 'rollback'
@@ -217,6 +226,10 @@ const INTERNAL_ONLY_ACTIONS = [
 ]
 
 function classify(action: string): ActivityItem['kind'] {
+  // Before the AUTONOMOUS_AUDIT_ACTIONS test, not after. This action is in
+  // BUDGET_CONSUMING_ACTIONS (it spent a mutation) but must never be rendered
+  // as a completed fix.
+  if (action === 'HEALTH_FIX_UNVERIFIED') return 'applied_unverified'
   if ((AUTONOMOUS_AUDIT_ACTIONS as readonly string[]).includes(action)) return 'auto_fix'
   if (action === 'HEALTH_FIX_ESCALATED') return 'escalation'
   if (action === 'AUTONOMY_CIRCUIT_OPEN') return 'breaker'
@@ -236,6 +249,8 @@ function prettyAction(action: string): string {
     case 'HEALTH_FIX_APPROVED':       return 'You approved a fix — applying it now'
     case 'AUTONOMY_LEVEL_CHANGED':    return 'You changed the autonomy level'
     case 'HEALTH_FINDING_DISMISSED':  return 'You dismissed a finding'
+    case 'HEALTH_FIX_UNVERIFIED':
+      return 'Applied a fix but could not confirm it worked — re-checking next pass'
     default:                          return action.replace(/_/g, ' ').toLowerCase()
   }
 }
@@ -266,9 +281,10 @@ function humanize(action: string, details: string | null): string {
       // it. This row asserted "verified & snapshotted" on every applied fix,
       // including the ones whose type no probe can re-check — the ledger was
       // vouching for work nothing had looked at.
-      const suffix =
-        d.verification === 'confirmed'
-          ? ' — re-checked and confirmed, snapshot captured'
+      const suffix = isVerifiedFix(d.verification)
+        ? ' — re-checked and confirmed, snapshot captured'
+        : isVerificationError(d.verification)
+          ? ' — applied, but the check that would confirm it could not run'
           : ' — applied and snapshotted (not independently re-checked)'
       return what
         ? `Applied your approved fix: ${what}${suffix}`
@@ -514,7 +530,9 @@ export async function buildTrustReport(
       resource: det.location ?? det.tableName ?? undefined,
       // Only the kernel's positive re-probe counts. `rollbackData.verification`
       // is stamped by evaluateFixOutcome; anything else means nothing looked.
-      verified: (det.rollbackData as Record<string, unknown> | undefined)?.verification === 'confirmed',
+      verified: isVerifiedFix(
+        (det.rollbackData as Record<string, unknown> | undefined)?.verification,
+      ),
       revertible: eligibility.revertible,
       requiresConfirmation: eligibility.requiresConfirmation,
       revertBlockedReason: eligibility.reason,

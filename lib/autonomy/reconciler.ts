@@ -768,6 +768,11 @@ export async function runReconcilerLive(projectId: string): Promise<LiveReconcil
     let applied = 0
     let escalated = 0
     let deferred = 0
+    // Mutations whose result nobody could confirm. Tallied separately from
+    // `applied` on purpose: folding them in would make the ledger claim work
+    // the loop cannot vouch for, which is the bug this counter exists to make
+    // visible rather than to hide.
+    let unverified = 0
     let attempted = 0
 
     // Why each un-attempted gap was skipped, tallied by reason. This is what
@@ -826,6 +831,24 @@ export async function runReconcilerLive(projectId: string): Promise<LiveReconcil
       const res = await runAutoFix(findingId, projectId, { skipCooldown: true })
       if (res.outcome === 'auto_fixed') {
         applied++
+      } else if (res.outcome === 'applied_unverified') {
+        // STOP THE TICK. The backend was mutated and the acceptance probe
+        // could not say whether it worked, so everything this pass would do
+        // next rests on state nobody has confirmed.
+        //
+        // This is the second half of the fail-open fix and the half that is
+        // easy to miss: recording the outcome honestly is not enough if the
+        // controller then carries on as though the repair succeeded. Gap B's
+        // repair may assume Gap A's is in place, and a probe that could not
+        // read the database a moment ago is unlikely to adjudicate the next
+        // one either.
+        //
+        // Not counted in `applied`. The remaining gaps stay open and the next
+        // tick re-probes from scratch, which is also how an unverified fix
+        // that actually worked gets closed: `reapInvariantFindings` clears it
+        // once the gap is genuinely gone.
+        unverified++
+        break
       } else if (res.outcome === 'deferred') {
         deferred++
         // Still a real stop condition: what remains after the budget is removed
@@ -849,6 +872,7 @@ export async function runReconcilerLive(projectId: string): Promise<LiveReconcil
           applied,
           escalated,
           deferred,
+          unverified,
           autoBudget: plan.autoBudget,
           // The gaps this tick declined to act on, by reason. Persisted (not
           // just logged) because diagnosing the thirteen-day stall required

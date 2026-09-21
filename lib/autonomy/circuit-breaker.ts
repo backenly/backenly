@@ -125,6 +125,26 @@ export const AUTONOMOUS_AUDIT_ACTIONS = [
   'AGENT_AUTO_FIXED',           // agent-orchestrator.executeAutoFixes
 ] as const
 
+/**
+ * Actions that SPENT the project's mutation budget, whether or not they
+ * succeeded.
+ *
+ * Deliberately wider than `AUTONOMOUS_AUDIT_ACTIONS`, and used only by the
+ * breaker's count. The other three readers of that list ask a different
+ * question — "which fixes worked?" — for the scoreboard, the activity feed and
+ * the in-flow toaster, and a mutation nobody could verify is not an answer to
+ * that one.
+ *
+ * `HEALTH_FIX_UNVERIFIED` changed the customer's backend and then failed to
+ * confirm the result. Leaving it out of the budget would let a project whose
+ * verifier is broken mutate without limit precisely while the loop can see
+ * least, which is the worst moment to remove a ceiling.
+ */
+export const BUDGET_CONSUMING_ACTIONS = [
+  ...AUTONOMOUS_AUDIT_ACTIONS,
+  'HEALTH_FIX_UNVERIFIED',      // auto-fix-engine._appliedUnverified
+] as const
+
 export interface BreakerDecision {
   /** True when another autonomous action is permitted in this window. */
   allowed: boolean
@@ -165,7 +185,7 @@ export async function checkBreaker(projectId: string): Promise<BreakerDecision> 
       where: {
         projectId,
         timestamp: { gte: since },
-        action: { in: AUTONOMOUS_AUDIT_ACTIONS as unknown as string[] },
+        action: { in: BUDGET_CONSUMING_ACTIONS as unknown as string[] },
       },
     })
   } catch (err: any) {
