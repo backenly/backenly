@@ -39,6 +39,12 @@ import { buildFixAction, getManualRemediationHint } from './fix-actions'
 import type { FindingType } from './types'
 import type { AIAction } from '@/lib/ai/minimal-executor'
 import type { FixPlan } from './fix-plan-generator'
+import {
+  capturePolicies,
+  recoveryRestorePolicies,
+  samePolicies,
+  type PolicyCapture,
+} from '@/lib/autonomy/maintenance/primitives/recovery-restore-policies'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -350,13 +356,16 @@ export async function runAutoFix(
 
     // The repair applies what the declared intent says, not what the executor
     // would infer. See applyIntentToFixDetails.
+    //
+    // It also carries the class's declared recovery, so the executor performs
+    // the recovery the decision was granted on rather than a different one.
     const { applyIntentToFixDetails } = await import('@/lib/authority/gate')
     return _executeAutoFix(
       finding.id,
       projectId,
       type,
       applyIntentToFixDetails(gate.decision, details),
-      opts,
+      { ...opts, recovery: gate.decision.capability.recovery },
     )
   }
 
@@ -1096,7 +1105,11 @@ async function _executeAutoFix(
   projectId: string,
   type: FindingType,
   details: Record<string, unknown>,
-  opts: { skipCooldown?: boolean } = {},
+  /**
+   * `recovery` is the declared recovery of the action class that authorized
+   * this repair. Set only on the authority path; the legacy path has none.
+   */
+  opts: { skipCooldown?: boolean; recovery?: string } = {},
 ): Promise<AutoFixResult> {
   const baseType = (normalizeFindingType(type, details)?.base ?? type) as FindingType
   const fixAction = buildFixAction(type, details)
@@ -1119,6 +1132,32 @@ async function _executeAutoFix(
   // the mutation; the post-fix snapshot below is version history only.
   const pre = await capturePreFixState(projectId, baseType, fixAction)
 
+  // ── The declared recovery, prepared before anything changes ─────────────
+  //
+  // `tighten_policy` is authorized on the promise of `restore_policies`, and
+  // the decision reports that recovery as implemented. Until this block the
+  // reconciler never ran it: a policy repair that failed verification was
+  // escalated with the new policy left in place. A recovery the decision
+  // counts on and the executor never performs is a receipt that lies.
+  //
+  // If the pre-state cannot be read, the recovery cannot be performed, so the
+  // repair does not run. Deferred rather than escalated: nothing was tried.
+  let policyPre: PolicyCapture | null = null
+  let policyPost: PolicyCapture | null = null
+  if (opts.recovery === 'restore_policies') {
+    const table = typeof details.tableName === 'string' ? details.tableName : null
+    if (!table) {
+      return _deferred(findingId, projectId, type, details,
+        'Declared recovery restore_policies needs the table this repair changes, and the finding names none.')
+    }
+    try {
+      policyPre = await capturePolicies(projectId, table)
+    } catch (err: any) {
+      return _deferred(findingId, projectId, type, details,
+        `Declared recovery restore_policies could not capture the pre-repair policies: ${err?.message ?? err}`)
+    }
+  }
+
   // Baseline of which guarantees currently HOLD, so the acceptance gate below
   // can tell "this fix broke something" from "this was already broken". Without
   // a before-state there is nothing to compare against and a regression is
@@ -1133,14 +1172,21 @@ async function _executeAutoFix(
     const captured = await withSqlCapture(() => withBuildLock(
       projectId,
       'modify',
-      async () => executeAction(
-        { action: fixAction.action as AIAction['action'], params: fixAction.params },
-        projectId,
-        undefined, // apiKey
-        0,         // retryCount
-        undefined, // executionId
-        false,     // allowReplan — deterministic autonomy fix, never LLM-replan
-      ),
+      async () => {
+        const r = await executeAction(
+          { action: fixAction.action as AIAction['action'], params: fixAction.params },
+          projectId,
+          undefined, // apiKey
+          0,         // retryCount
+          undefined, // executionId
+          false,     // allowReplan — deterministic autonomy fix, never LLM-replan
+        )
+        // Still inside the lock, so this is the state THIS execution left, not
+        // one a later writer produced. restore_policies' stale guard compares
+        // against it and refuses to overwrite anything that differs.
+        if (policyPre) policyPost = await capturePolicies(projectId, policyPre.table).catch(() => null)
+        return r
+      },
       { skipCooldown: opts.skipCooldown },
     ))
     const governed = captured.result
@@ -1160,9 +1206,13 @@ async function _executeAutoFix(
 
   if (!result!.success) {
     const reason = result!.error ?? result!.message
+    const recovered = policyPre
+      ? await _recoverPolicies(findingId, projectId, type, policyPre, policyPost, reason)
+      : null
+    const full = recovered ? `${reason} ${recovered}` : reason
     return _isTransientGovernanceError(reason)
-      ? _deferred(findingId, projectId, type, details, reason)
-      : _escalate(findingId, projectId, type, details, reason)
+      ? _deferred(findingId, projectId, type, details, full)
+      : _escalate(findingId, projectId, type, details, full)
   }
 
   // ── TRUST GUARANTEE: a fix is only "fixed" if the gap actually closed ───────
@@ -1241,14 +1291,21 @@ async function _executeAutoFix(
       })
     }
 
-    if (outcome && !outcome.accepted && outcome.recheck !== 'unknown') {
-      return _escalate(findingId, projectId, type, details, outcome.reason)
-    }
-    // A regression is disqualifying even when closure could not be confirmed:
-    // "I could not prove I helped, and something that used to hold now fails"
-    // is the worst outcome to record as a fix.
-    if (outcome && outcome.regressions.length > 0) {
-      return _escalate(findingId, projectId, type, details, outcome.reason)
+    // Both rejections below are verdicts the verifier DID reach, so they are
+    // the case the declared recovery exists for. A verifier that could not
+    // reach one returned above without rolling back, and stays that way.
+    const rejected =
+      (outcome && !outcome.accepted && outcome.recheck !== 'unknown') ||
+      // A regression is disqualifying even when closure could not be confirmed:
+      // "I could not prove I helped, and something that used to hold now fails"
+      // is the worst outcome to record as a fix.
+      (outcome && outcome.regressions.length > 0)
+    if (rejected) {
+      const recovered = policyPre
+        ? await _recoverPolicies(findingId, projectId, type, policyPre, policyPost, outcome.reason)
+        : null
+      return _escalate(findingId, projectId, type, details,
+        recovered ? `${outcome.reason} ${recovered}` : outcome.reason)
     }
     if (outcome?.recheck === 'resolved') verification = 'confirmed'
   }
@@ -1397,6 +1454,54 @@ async function _appliedUnverified(
   })
 
   return { findingId, outcome: 'applied_unverified', message: reason }
+}
+
+/**
+ * Run the declared `restore_policies` recovery after a rejected policy repair.
+ *
+ * Returns the sentence the escalation carries, so the finding says what state
+ * the table was left in rather than only why the repair was rejected. Every
+ * outcome is written to the ledger as `AUTHORITY_RECOVERY`, including the ones
+ * where nothing had to be restored, because "was it put back" is the first
+ * question anyone asks about a rejected authorization change.
+ */
+async function _recoverPolicies(
+  findingId: string,
+  projectId: string,
+  type: FindingType,
+  pre: PolicyCapture,
+  post: PolicyCapture | null,
+  rejectedBecause: string,
+): Promise<string> {
+  let status: string
+  let message: string
+  if (!post) {
+    // Without the state this execution left, the stale guard has nothing to
+    // compare against, and restoring anyway could overwrite a later change.
+    status = 'blocked_stale'
+    message = 'The policies this repair left behind could not be read, so they were not overwritten.'
+  } else if (samePolicies(pre, post)) {
+    status = 'not_needed'
+    message = 'The repair changed no policy, so there was nothing to restore.'
+  } else {
+    const r = await recoveryRestorePolicies(projectId, pre, post).catch((err: any) => ({
+      status: 'failed' as const,
+      message: `Restore threw: ${err?.message ?? err}`,
+    }))
+    status = r.status
+    message = r.message
+  }
+
+  await _writeAuditLog(projectId, 'AUTHORITY_RECOVERY', {
+    findingId,
+    findingType: type,
+    tableName: pre.table,
+    strategy: 'restore_policies',
+    status,
+    message,
+    rejectedBecause,
+  })
+  return `Recovery (restore_policies): ${status}. ${message}`
 }
 
 async function _escalate(

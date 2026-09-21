@@ -133,8 +133,9 @@ export const ROLLBACK_REGISTRY: Readonly<Record<RollbackStrategy, RollbackHandle
   // Deliberately NOT `REMOVE_PERMISSION(table)`, which removes every policy:
   // that verb would undo "three policies consolidated into one" by leaving the
   // table unprotected, a security regression dressed as a recovery. This is a
-  // recovery-only primitive bound to one step execution, the sibling of
-  // `recovery-drop-column`, and nothing else imports it.
+  // recovery-only primitive bound to one execution, the sibling of
+  // `recovery-drop-column`. Its callers are the maintenance rollback path and
+  // the auto-fix executor's rejected `tighten_policy` repair, nothing else.
   restore_policies: { capability: 'implemented', revision: 'v1' },
 }
 

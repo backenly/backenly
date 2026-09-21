@@ -21,8 +21,14 @@
  *     `observedPostState`, so nothing has replaced them since
  *   - the project's maintenance lock is held
  *
- * There is no parameter a user or an agent supplies. The caller is the rollback
- * path, the identity comes out of the ledger, and nothing else imports this.
+ * There is no parameter a user or an agent supplies. Exactly two callers exist,
+ * and both are rollback paths bound to one execution:
+ *
+ *   - the maintenance rollback path, identity from the step ledger;
+ *   - the autonomous auto-fix executor, for a `tighten_policy` repair the
+ *     Authority Decision authorized on this recovery. It captures the pre-state
+ *     before the repair and the post-state inside the same build lock, and
+ *     calls this only when the verifier rejects the repair.
  *
  * ── Why capture is a policy DEFINITION, not a policy name ───────────────────
  *
