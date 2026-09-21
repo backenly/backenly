@@ -1,9 +1,9 @@
 {
   "kind": "autonomy-baseline",
   "schemaVersion": 1,
-  "runId": "7bb3b1e2-ae64-45bd-be8f-b3417ff01c2a",
-  "generatedAt": "2026-09-21T14:23:55.518Z",
-  "gitSha": "c83f17fb2af0ad68d8a0dd7386df9ba0ef79c456",
+  "runId": "7533139b-b104-4b4e-b8ec-6af2918fd323",
+  "generatedAt": "2026-09-21T15:26:08.157Z",
+  "gitSha": "b9ad3cd84d6936ab73c9d51882f5e8c16d2d0a89",
   "phase": "phase-0-pre-redesign",
   "substrate": {
     "appRole": {
@@ -40,7 +40,7 @@
           "shadowMatchesOracle": true,
           "oldMatchedOracle": true,
           "narrowedBy": [
-            "tier_above_dial_ceiling",
+            "tier_above_ceiling_no_delegation_for_action",
             "recovery_not_implemented"
           ],
           "blocker": null,
@@ -67,8 +67,7 @@
           "shadowMatchesOracle": true,
           "oldMatchedOracle": false,
           "narrowedBy": [
-            "tier_above_dial_ceiling",
-            "recovery_not_implemented",
+            "tier_above_ceiling_no_delegation_for_action",
             "intent_no_intent_for_resource"
           ],
           "blocker": null,
@@ -83,8 +82,7 @@
           "shadowMatchesOracle": true,
           "oldMatchedOracle": false,
           "narrowedBy": [
-            "tier_above_dial_ceiling",
-            "recovery_not_implemented"
+            "tier_above_ceiling_no_delegation_for_action"
           ],
           "blocker": null,
           "intentSatisfied": true
@@ -98,8 +96,7 @@
           "shadowMatchesOracle": true,
           "oldMatchedOracle": false,
           "narrowedBy": [
-            "tier_above_dial_ceiling",
-            "recovery_not_implemented",
+            "tier_above_ceiling_no_delegation_for_action",
             "intent_intent_provenance_not_authoritative"
           ],
           "blocker": null,
@@ -116,7 +113,7 @@
           "narrowedBy": [
             "resource_unobservable"
           ],
-          "blocker": "restore access to workspace_dc0b6edc-8654-4643-ae32-c741e8a12b50.posts",
+          "blocker": "restore access to workspace_c8aaeaa3-9faf-4862-935f-b9e8d75c875f.posts",
           "intentSatisfied": null
         },
         {
@@ -199,8 +196,8 @@
       "advisoryFindingsOnHealthy": 2,
       "overRefusals": 0,
       "decisionCorrect": 5,
-      "medianShadowMs": 84,
-      "medianLiveMs": 418
+      "medianShadowMs": 74,
+      "medianLiveMs": 405
     },
     "evidence": {
       "complete": 8,
@@ -370,8 +367,8 @@
         "differsFromOld": false
       },
       "timings": {
-        "shadowMs": 86,
-        "liveMs": 558
+        "shadowMs": 74,
+        "liveMs": 513
       },
       "notes": []
     },
@@ -472,18 +469,18 @@
       "shadow": {
         "decision": "PROPOSE_ONLY",
         "narrowedBy": [
-          "tier_above_dial_ceiling",
+          "tier_above_ceiling_no_delegation_for_action",
           "recovery_not_implemented"
         ],
         "intentSatisfied": null,
         "blocker": null,
-        "reason": "add_foreign_key is tier 2 and this project's autonomy allows up to tier 1.",
+        "reason": "add_foreign_key is tier 2 and this project's autonomy allows up to tier 1. No delegation permits add_foreign_key to run unattended.",
         "matchesOracle": true,
         "differsFromOld": false
       },
       "timings": {
-        "shadowMs": 87,
-        "liveMs": 1345
+        "shadowMs": 83,
+        "liveMs": 1169
       },
       "notes": []
     },
@@ -584,8 +581,8 @@
         "differsFromOld": false
       },
       "timings": {
-        "shadowMs": 84,
-        "liveMs": 1302
+        "shadowMs": 69,
+        "liveMs": 1167
       },
       "notes": []
     },
@@ -665,19 +662,18 @@
       "shadow": {
         "decision": "PROPOSE_ONLY",
         "narrowedBy": [
-          "tier_above_dial_ceiling",
-          "recovery_not_implemented",
+          "tier_above_ceiling_no_delegation_for_action",
           "intent_no_intent_for_resource"
         ],
         "intentSatisfied": false,
         "blocker": null,
-        "reason": "tighten_policy is tier 2 and this project's autonomy allows up to tier 1.",
+        "reason": "tighten_policy is tier 2 and this project's autonomy allows up to tier 1. No delegation permits tighten_policy to run unattended.",
         "matchesOracle": true,
         "differsFromOld": true
       },
       "timings": {
-        "shadowMs": 85,
-        "liveMs": 418
+        "shadowMs": 86,
+        "liveMs": 393
       },
       "notes": []
     },
@@ -757,18 +753,17 @@
       "shadow": {
         "decision": "PROPOSE_ONLY",
         "narrowedBy": [
-          "tier_above_dial_ceiling",
-          "recovery_not_implemented"
+          "tier_above_ceiling_no_delegation_for_action"
         ],
         "intentSatisfied": true,
         "blocker": null,
-        "reason": "tighten_policy is tier 2 and this project's autonomy allows up to tier 1.",
+        "reason": "tighten_policy is tier 2 and this project's autonomy allows up to tier 1. No delegation permits tighten_policy to run unattended.",
         "matchesOracle": true,
         "differsFromOld": true
       },
       "timings": {
-        "shadowMs": 68,
-        "liveMs": 413
+        "shadowMs": 61,
+        "liveMs": 380
       },
       "notes": []
     },
@@ -848,19 +843,18 @@
       "shadow": {
         "decision": "PROPOSE_ONLY",
         "narrowedBy": [
-          "tier_above_dial_ceiling",
-          "recovery_not_implemented",
+          "tier_above_ceiling_no_delegation_for_action",
           "intent_intent_provenance_not_authoritative"
         ],
         "intentSatisfied": false,
         "blocker": null,
-        "reason": "tighten_policy is tier 2 and this project's autonomy allows up to tier 1.",
+        "reason": "tighten_policy is tier 2 and this project's autonomy allows up to tier 1. No delegation permits tighten_policy to run unattended.",
         "matchesOracle": true,
         "differsFromOld": true
       },
       "timings": {
-        "shadowMs": 62,
-        "liveMs": 361
+        "shadowMs": 70,
+        "liveMs": 405
       },
       "notes": []
     },
@@ -936,14 +930,14 @@
           "resource_unobservable"
         ],
         "intentSatisfied": null,
-        "blocker": "restore access to workspace_dc0b6edc-8654-4643-ae32-c741e8a12b50.posts",
-        "reason": "workspace_dc0b6edc-8654-4643-ae32-c741e8a12b50.posts could not be observed as backenly_user, so every probe reporting nothing about it reported an absence of evidence, not evidence of health.",
+        "blocker": "restore access to workspace_c8aaeaa3-9faf-4862-935f-b9e8d75c875f.posts",
+        "reason": "workspace_c8aaeaa3-9faf-4862-935f-b9e8d75c875f.posts could not be observed as backenly_user, so every probe reporting nothing about it reported an absence of evidence, not evidence of health.",
         "matchesOracle": true,
         "differsFromOld": true
       },
       "timings": {
-        "shadowMs": 54,
-        "liveMs": 76
+        "shadowMs": 57,
+        "liveMs": 67
       },
       "notes": [
         "schema still unobservable after the run — convergence unknowable"
@@ -1034,8 +1028,8 @@
         "differsFromOld": true
       },
       "timings": {
-        "shadowMs": 56,
-        "liveMs": 503
+        "shadowMs": 61,
+        "liveMs": 454
       },
       "notes": [
         "NOT SCORED: the application role bypasses RLS, so the product never experienced this blindness. Re-run against a NOSUPERUSER NOBYPASSRLS role."
@@ -1145,8 +1139,8 @@
         "differsFromOld": false
       },
       "timings": {
-        "shadowMs": 77,
-        "liveMs": 863
+        "shadowMs": 78,
+        "liveMs": 855
       },
       "notes": [
         "NOT SCORED: the application role bypasses RLS, so the product never experienced this blindness. Re-run against a NOSUPERUSER NOBYPASSRLS role."
@@ -1230,8 +1224,8 @@
         "differsFromOld": false
       },
       "timings": {
-        "shadowMs": 60,
-        "liveMs": 61
+        "shadowMs": 78,
+        "liveMs": 74
       },
       "notes": []
     }

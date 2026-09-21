@@ -41,6 +41,7 @@ import type { CorrelatedChange } from '@/lib/autonomy/change-correlation'
 import type { Principal, PrincipalSet } from '@/lib/principal'
 
 import { actionClass, type ActionClass, type SensorRequirement } from './action-classes'
+import { evaluateDelegation, type DelegationEvaluation, type TierDelegation } from './delegation'
 import {
   evaluateOwnershipIntent,
   predicateFor,
@@ -128,6 +129,16 @@ export interface AuthorityInputs {
    * be the next unsafe shortcut. The decision evaluates the rule itself.
    */
   ownershipIntents?: OwnershipIntentRecord[]
+
+  /**
+   * Delegations that may permit an action above the dial's tier ceiling.
+   *
+   * Separate from intent on purpose. Intent says what the correct end state is;
+   * delegation says whether Backenly may reach it unattended. A declared intent
+   * must never imply permission, or a factual declaration becomes a grant of
+   * power the owner never made.
+   */
+  delegations?: TierDelegation[]
 }
 
 export interface AuthorityDecision {
@@ -173,6 +184,16 @@ export interface AuthorityDecision {
     provenance: string | null
     /** The predicate the intent determines, when it determines one. */
     predicate: string | null
+  } | null
+
+  /**
+   * What permitted this action above the dial's tier ceiling, when it needed
+   * permission. Null when the action is within the ceiling anyway.
+   */
+  delegation: {
+    satisfied: boolean
+    refusal: string | null
+    note: string
   } | null
 
   /** For FREEZE: the prerequisite to restore. Never null on a FREEZE. */
@@ -291,6 +312,7 @@ export function decideAuthority(input: AuthorityInputs): AuthorityDecision {
       evidence: [],
       capability: { verification: 'unavailable', recovery: 'none', recoveryStatus: 'not_implemented' },
       intent: null,
+      delegation: null,
       narrowedBy,
       reasons,
       blocker,
@@ -305,6 +327,7 @@ export function decideAuthority(input: AuthorityInputs): AuthorityDecision {
       evidence: [],
       capability: { verification: 'unavailable', recovery: cls.recovery, recoveryStatus: 'not_implemented' },
       intent: null,
+      delegation: null,
       narrowedBy,
       reasons,
       blocker: blockerText,
@@ -352,6 +375,7 @@ export function decideAuthority(input: AuthorityInputs): AuthorityDecision {
       evidence,
       capability,
       intent: intentReceipt,
+      delegation: null,
       narrowedBy,
       reasons,
       blocker,
@@ -434,13 +458,31 @@ export function decideAuthority(input: AuthorityInputs): AuthorityDecision {
 
   // Tier ceiling: the dial's, which is 1 even at AGGRESSIVE.
   const maxTier = maxAutoTier(input.level)
+  let delegationEval: DelegationEvaluation | null = null
   if (cls.tier > maxTier) {
-    narrow(
-      'PROPOSE_ONLY',
-      'tier_above_dial_ceiling',
-      `${cls.id} is tier ${cls.tier} and this project's autonomy allows up to tier ${maxTier}.`,
-    )
+    // Above the dial's ceiling. The ceiling is not raised — a narrow delegation
+    // may permit THIS action class here, and nothing else.
+    delegationEval = evaluateDelegation(input.delegations ?? [], cls.id, input.environment)
+    if (!delegationEval.delegation) {
+      narrow(
+        'PROPOSE_ONLY',
+        `tier_above_ceiling_${delegationEval.refusal}`,
+        `${cls.id} is tier ${cls.tier} and this project's autonomy allows up to tier ` +
+          `${maxTier}. ${delegationEval.note}`,
+      )
+    } else {
+      reasons.push(
+        `${cls.id} is tier ${cls.tier}, above the ceiling of ${maxTier}, and ${delegationEval.note}`,
+      )
+    }
   }
+  const delegationReceipt = delegationEval
+    ? {
+        satisfied: delegationEval.delegation !== null,
+        refusal: delegationEval.refusal,
+        note: delegationEval.note,
+      }
+    : null
 
   // Recovery: an action that cannot be undone is never automatic.
   if (recoveryStatus === 'not_implemented') {
@@ -484,5 +526,15 @@ export function decideAuthority(input: AuthorityInputs): AuthorityDecision {
     )
   }
 
-  return { ...base, decision, evidence, capability, intent: intentReceipt, narrowedBy, reasons, blocker }
+  return {
+    ...base,
+    decision,
+    evidence,
+    capability,
+    intent: intentReceipt,
+    delegation: delegationReceipt,
+    narrowedBy,
+    reasons,
+    blocker,
+  }
 }

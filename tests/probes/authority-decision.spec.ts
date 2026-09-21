@@ -17,6 +17,7 @@ import { decideAuthority, type AuthorityInputs } from '@/lib/authority/decision'
 import { ACTION_CLASSES, actionClass } from '@/lib/authority/action-classes'
 import { P } from '@/lib/principal'
 import type { OwnershipIntentRecord } from '@/lib/authority/ownership-intent'
+import type { TierDelegation } from '@/lib/authority/delegation'
 import type { ProbeOutcome } from '@/lib/autonomy/sensor-health'
 
 function probe(id: string, status: ProbeOutcome['status']): ProbeOutcome {
@@ -256,7 +257,10 @@ describe('the other inputs each narrow, and only narrow', () => {
       }),
     )
     expect(d.decision).toBe('PROPOSE_ONLY')
-    expect(d.narrowedBy).toContain('tier_above_dial_ceiling')
+    // The key names WHY the ceiling was not lifted, not just that it applied:
+    // a tier-2 action with no delegation and one whose delegation expired are
+    // different situations and a reader should not have to guess which.
+    expect(d.narrowedBy).toContain('tier_above_ceiling_no_delegation_for_action')
   })
 
   it('an unimplemented rollback strategy prevents unattended action', () => {
@@ -384,5 +388,175 @@ describe('the action class registry is well formed', () => {
     expect(Object.keys(ACTION_CLASSES).sort()).toEqual(
       ['add_foreign_key', 'create_index', 'enable_rls', 'tighten_policy'].sort(),
     )
+  })
+})
+
+/**
+ * THE FINAL PROOF
+ * ===============
+ *
+ * The seven cases that decide whether unattended autonomous repair of a
+ * security property is actually reachable, or whether the architecture only
+ * ever produces better refusals.
+ *
+ * Each row differs from the one above it by exactly ONE thing, so the answer
+ * can be attributed. A suite that jumped straight from "nothing" to "everything
+ * permits it" would prove only that some combination works.
+ */
+describe('unattended ownership repair: the seven cases', () => {
+  const delegation = (over: Partial<TierDelegation> = {}): TierDelegation => ({
+    id: 'd1',
+    projectId: 'p1',
+    actionClassId: 'tighten_policy',
+    environment: 'development',
+    grantedBy: P.user('owner-1'),
+    expiresAt: null,
+    revokedAt: null,
+    ...over,
+  })
+
+  it('1. no ownership intent -> PROPOSE_ONLY', () => {
+    const d = decideAuthority(policyInputs({ ownershipIntents: [], delegations: [delegation()] }))
+    expect(d.decision).toBe('PROPOSE_ONLY')
+    expect(d.intent?.satisfied).toBe(false)
+  })
+
+  it('2. inferred ownership -> PROPOSE_ONLY', () => {
+    const d = decideAuthority(
+      policyInputs({
+        ownershipIntents: [intent({ provenance: 'inferred_by_backenly' })],
+        delegations: [delegation()],
+      }),
+    )
+    expect(d.decision).toBe('PROPOSE_ONLY')
+    expect(d.narrowedBy).toContain('intent_intent_provenance_not_authoritative')
+  })
+
+  it('3. declared ownership, NO tier-2 delegation -> PROPOSE_ONLY', () => {
+    // Intent is satisfied and the action is still refused. This is the case
+    // that proves intent is not authority.
+    const d = decideAuthority(policyInputs({ ownershipIntents: [intent()], delegations: [] }))
+    expect(d.decision).toBe('PROPOSE_ONLY')
+    expect(d.intent?.satisfied).toBe(true)
+    expect(d.narrowedBy).toContain('tier_above_ceiling_no_delegation_for_action')
+  })
+
+  it('4. declared ownership + delegation, NO recovery -> PROPOSE_ONLY', () => {
+    // Simulated by asking for an action class whose rollback is unimplemented,
+    // with everything else in place. Knowing what correct looks like and being
+    // permitted to act does not remove the need to be able to undo it.
+    const d = decideAuthority(
+      inputs({
+        actionClassId: 'add_foreign_key',
+        resource: 'workspace_x.posts',
+        probes: [probe('relationships_have_fk_constraints', 'clean')],
+        ownershipIntents: [intent()],
+        delegations: [delegation({ actionClassId: 'add_foreign_key' })],
+      }),
+    )
+    expect(d.capability.recoveryStatus).toBe('not_implemented')
+    expect(d.decision).toBe('PROPOSE_ONLY')
+    expect(d.narrowedBy).toContain('recovery_not_implemented')
+  })
+
+  it('5. declared ownership + delegation + recovery + healthy evidence -> AUTO_EXECUTE', () => {
+    // Every contract satisfied, each established separately.
+    const d = decideAuthority(
+      policyInputs({ ownershipIntents: [intent()], delegations: [delegation()] }),
+    )
+    expect(d.capability.recoveryStatus).toBe('implemented')
+    expect(d.intent?.satisfied).toBe(true)
+    expect(d.delegation?.satisfied).toBe(true)
+    expect(d.decision).toBe('AUTO_EXECUTE')
+  })
+
+  it('6. resource unobservable -> FREEZE', () => {
+    const d = decideAuthority(
+      policyInputs({
+        ownershipIntents: [intent()],
+        delegations: [delegation()],
+        observation: {
+          role: 'app',
+          bypassesRls: false,
+          observedAt: new Date().toISOString(),
+          resourceObservable: false,
+          reason: 'schema is not readable',
+        },
+      }),
+    )
+    expect(d.decision).toBe('FREEZE')
+    expect(d.blocker).toBeTruthy()
+  })
+
+  it('7. conflicting recent change -> refuses and does not act', () => {
+    const d = decideAuthority(
+      policyInputs({
+        ownershipIntents: [intent()],
+        delegations: [delegation()],
+        recentChanges: [
+          { at: new Date().toISOString(), source: 'external_ddl', summary: 'ALTER TABLE', minutesBefore: 1 },
+        ],
+      }),
+    )
+    expect(d.decision).toBe('PROPOSE_ONLY')
+    expect(d.narrowedBy).toContain('recent_conflicting_change')
+  })
+
+  // ── The properties that keep case 5 from being a loophole ────────────────
+
+  it('a delegation in another environment does not carry', () => {
+    const d = decideAuthority(
+      policyInputs({
+        ownershipIntents: [intent()],
+        delegations: [delegation({ environment: 'staging' })],
+      }),
+    )
+    expect(d.decision).toBe('PROPOSE_ONLY')
+    expect(d.narrowedBy).toContain('tier_above_ceiling_delegation_wrong_environment')
+  })
+
+  it('an expired or revoked delegation permits nothing', () => {
+    const expired = decideAuthority(
+      policyInputs({
+        ownershipIntents: [intent()],
+        delegations: [delegation({ expiresAt: new Date(Date.now() - 1000) })],
+      }),
+    )
+    expect(expired.narrowedBy).toContain('tier_above_ceiling_delegation_expired')
+
+    const revoked = decideAuthority(
+      policyInputs({
+        ownershipIntents: [intent()],
+        delegations: [delegation({ revokedAt: new Date() })],
+      }),
+    )
+    expect(revoked.narrowedBy).toContain('tier_above_ceiling_delegation_revoked')
+  })
+
+  it('an agent cannot delegate authority to itself', () => {
+    // The self-authorization rule. An agent requesting an action and an agent
+    // authorizing it are the same principal, which is the thing the
+    // requested/authorized distinction exists to prevent.
+    const d = decideAuthority(
+      policyInputs({
+        ownershipIntents: [intent()],
+        delegations: [delegation({ grantedBy: P.agent('key_1') })],
+      }),
+    )
+    expect(d.decision).toBe('PROPOSE_ONLY')
+    expect(d.narrowedBy).toContain('tier_above_ceiling_delegation_not_granted_by_human')
+  })
+
+  it('delegation never rescues a broken sensor', () => {
+    // Authority is not evidence. Being permitted to act says nothing about
+    // whether the state can be established.
+    const d = decideAuthority(
+      policyInputs({
+        ownershipIntents: [intent()],
+        delegations: [delegation()],
+        probes: [probe('rls_policies_are_not_wide_open', 'errored')],
+      }),
+    )
+    expect(d.decision).toBe('FREEZE')
   })
 })

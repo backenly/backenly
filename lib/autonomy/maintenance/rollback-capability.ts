@@ -123,11 +123,19 @@ export const ROLLBACK_REGISTRY: Readonly<Record<RollbackStrategy, RollbackHandle
   // building a recovery path.
   drop_constraint: { capability: 'not_implemented', revision: 'v0' },
 
-  // Needs the pre-mutation policy set captured BEFORE the forward step, which
-  // nothing in the maintenance path does today. `capturePreFixState` already
-  // does exactly this for the auto-fix path (`PreFixMetadata.prePolicies`), so
-  // the shape is known; it is the capture and the restore that are missing.
-  restore_policies: { capability: 'not_implemented', revision: 'v0' },
+  // ── Implemented in Phase 3 ───────────────────────────────────────────────
+
+  // `primitives/recovery-restore-policies.ts`. Restores the EXACT captured
+  // policy set — command, permissive flag, bound roles, USING and WITH CHECK
+  // expressions, plus the RLS enabled/forced flags — behind a stale guard and
+  // an independent verifier.
+  //
+  // Deliberately NOT `REMOVE_PERMISSION(table)`, which removes every policy:
+  // that verb would undo "three policies consolidated into one" by leaving the
+  // table unprotected, a security regression dressed as a recovery. This is a
+  // recovery-only primitive bound to one step execution, the sibling of
+  // `recovery-drop-column`, and nothing else imports it.
+  restore_policies: { capability: 'implemented', revision: 'v1' },
 }
 
 /**
