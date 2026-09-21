@@ -61,6 +61,8 @@ import { approvalStillValid, isPlanStale, type MaintenancePlan } from './plan'
 import { computeCatalogFingerprint } from './resolve'
 import { readLiveApproval } from './approval'
 import { withMaintenanceSingleFlight } from './single-flight'
+import { observeResource, hashCode, type ResourceIdentity } from './resource-state'
+import { dualWriteObjectName } from './primitives/dual-write'
 import {
   classifyMaintenanceStep,
   OPTIONAL_TERMINAL_STEPS,
@@ -208,6 +210,40 @@ export interface MaintenanceExecutionOutcome {
  * Returned as a reason rather than thrown, because a refusal is an outcome the
  * ledger records, not an error the caller handles.
  */
+/**
+ * What this rung will touch, in real identifiers.
+ *
+ * Derived from the BINDING, because the plan deliberately never names a
+ * column - it says `{ tableName, purpose }` and the concrete resource arrives
+ * with the approval. That is also why rollback cannot be reconstructed from
+ * the plan later, and why this has to be persisted at execution time.
+ *
+ * Null for a rung with no undoable resource, which is not a failure: `verify`
+ * mutates nothing and `contract` is never run here.
+ */
+function identityForStep(step: MaintenanceStep, binding: StepBinding): ResourceIdentity | null {
+  switch (binding.kind) {
+    case 'add_structure':
+      return { kind: 'column', table: binding.table, column: binding.column }
+    case 'backfill':
+      // Undoing a backfill means dropping the column it filled. Expand never
+      // destructively touches the source, so there is nothing to restore.
+      return { kind: 'column', table: binding.table, column: binding.targetColumn }
+    case 'dual_write':
+      return {
+        kind: 'trigger',
+        table: binding.table,
+        trigger: dualWriteObjectName(binding.table, binding.targetColumn),
+        targetColumn: binding.targetColumn,
+      }
+    default:
+      // `carry_constraints` is deliberately absent: its rollback is
+      // `drop_constraint`, which this deployment cannot perform, so the
+      // planner refuses the ladder before any of this runs.
+      return null
+  }
+}
+
 async function refuseLadder(input: ExecuteMaintenanceInput): Promise<string | null> {
   const { plan, autonomyLevel } = input
 
@@ -455,6 +491,28 @@ async function runLadder(
       update: { status: 'running', startedAt: new Date() },
     })
 
+    // ── Recovery authority, captured at the only moment it exists ──────────
+    //
+    // `preconditionEvidence` above holds the planner's DECLARED sentences and
+    // cannot serve here: a claim written before the work cannot say what the
+    // work left behind, and a stale guard built on one would authorise undoing
+    // a resource somebody else replaced.
+    //
+    // Observation failure is recorded as null rather than swallowed into a
+    // shape, and `performRollback` refuses on a null - so a step whose state
+    // could not be captured is simply not undoable, which is the honest
+    // outcome rather than a guess.
+    const identity = identityForStep(step, binding)
+    const preState = identity
+      ? await observeResource(projectId, identity).catch(() => null)
+      : null
+    if (identity) {
+      await prisma.maintenanceStepExecution.update({
+        where: { id: row.id },
+        data: { resourceIdentity: identity as object, observedPreState: preState as object | undefined },
+      })
+    }
+
     let outcome: StepOutcome
     try {
       outcome = await runStep(projectId, step, binding, plan.planVersion)
@@ -468,13 +526,45 @@ async function runLadder(
       return halt(executionId, steps, `step ${step.ordinal} (${step.kind}) threw: ${message}`)
     }
 
+    // ── Readers are identified only AFTER the switch ──────────────────────
+    //
+    // The binding names a table and a column pair; WHICH functions read that
+    // column is discovered by the switch itself. So unlike a column or a
+    // trigger, this identity cannot be captured before the mutation, and its
+    // pre-state comes from the bytes the primitive recorded rather than from
+    // a catalog read that is now too late.
+    let readersIdentity: ResourceIdentity | null = null
+    let readersPreState: unknown = null
+    if (step.kind === 'switch_readers' && outcome.switchedReaders?.length) {
+      readersIdentity = {
+        kind: 'readers',
+        functionIds: outcome.switchedReaders.map(r => r.id),
+      }
+      readersPreState = {
+        kind: 'readers',
+        entries: outcome.switchedReaders.map(r => ({ id: r.id, codeHash: hashCode(r.previousCode) })),
+      }
+    }
+
     await prisma.maintenanceStepExecution.update({
       where: { id: row.id },
       data: {
         status: outcome.status === 'failed' ? 'failed' : outcome.status,
         completedAt: new Date(),
         backgroundJobId: outcome.backgroundJobId ?? null,
+        ...(readersIdentity
+          ? {
+              resourceIdentity: readersIdentity as object,
+              observedPreState: readersPreState as object,
+            }
+          : {}),
         postconditionEvidence: { declared: step.expectedPostconditions, detail: outcome.detail },
+        // What the mutation actually left, as the catalog reports it. This is
+        // the value the stale guard compares against before undoing anything.
+        observedPostState: ((await (async () => {
+          const id = readersIdentity ?? identity
+          return id ? observeResource(projectId, id).catch(() => null) : null
+        })()) as object | undefined),
         // Through JSON so the ledger stores plain data. `switchedReaders`
         // carries the bytes a revert restores, so it has to land in the row
         // rather than only in the return value.

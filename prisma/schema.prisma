@@ -3315,10 +3315,43 @@ model MaintenanceStepExecution {
   status          String  @default("pending") // pending | running | succeeded | failed | skipped
   backgroundJobId String? // the BackgroundJob that owns this step's retries
 
-  preconditionEvidence  Json? // what was true immediately before mutating
-  postconditionEvidence Json? // what was observed immediately after
+  // DECLARED, not observed. These hold the planner's sentences - "target
+  // column does not already exist" - and the step's classification. Useful as
+  // a record of what was required; useless as a stale guard, because a claim
+  // made before the work cannot say what the work left behind.
+  preconditionEvidence  Json? // what the step DECLARED it required
+  postconditionEvidence Json? // what the step DECLARED it would achieve
   rollback              Json? // rollback spec, and whether it has been applied
   result                Json? // failure or result evidence, including reconciliation
+
+  // ── Recovery authority: what rollback is allowed to undo ──────────────────
+  //
+  // The plan says what KIND of work should happen; only the execution record
+  // can say what actually happened, so rollback is reconstructed from here and
+  // never from the plan. The plan does not even name the column - that arrives
+  // in the approval's bindings - so "undo this ladder's drop_column" is not a
+  // resolvable instruction without these.
+
+  /// What this step operated on, in real identifiers.
+  resourceIdentity Json?
+  /// The resource's SHAPE as observed immediately before and after mutating.
+  ///
+  /// Shape, not just name: `sessions.state` does not distinguish the column
+  /// this ladder added from one somebody recreated under the same name an hour
+  /// later, and dropping the second because the ledger remembers the first is
+  /// how automatic recovery destroys somebody's work.
+  observedPreState  Json?
+  observedPostState Json?
+
+  /// eligible | started | verified | failed | unverified | blocked_stale
+  ///
+  /// Null until a rollback is considered. `verified` is the ONLY value that
+  /// means the prior state was restored and independently confirmed; `failed`
+  /// and `unverified` must never be read as restored, for the same reason a
+  /// thrown forward verifier must never be read as success.
+  rollbackStatus String?
+  rollbackDetail String?
+  rollbackAt     DateTime?
 
   startedAt   DateTime?
   completedAt DateTime?
@@ -3328,5 +3361,6 @@ model MaintenanceStepExecution {
   @@index([executionId, ordinal])
   @@index([status])
   @@index([backgroundJobId])
+  @@index([rollbackStatus])
   @@map("maintenance_step_executions")
 }

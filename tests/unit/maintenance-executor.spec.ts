@@ -180,6 +180,10 @@ jest.mock('@/lib/autonomy/maintenance/primitives/verify', () => ({
 const mockInstallDualWrite = jest.fn()
 jest.mock('@/lib/autonomy/maintenance/primitives/dual-write', () => ({
   installDualWrite: (...a: any[]) => mockInstallDualWrite(...(a as [])),
+  // Pure name derivation, not a mutation. The executor uses it to record the
+  // trigger identity a rollback would later need, and stubbing it out would
+  // make this spec pass while the recovery authority was written wrong.
+  dualWriteObjectName: (t: string, c: string) => `bkn_dw_${t}_${c}`,
 }))
 
 const mockSwitchReaders = jest.fn()
