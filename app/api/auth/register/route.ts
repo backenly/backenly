@@ -213,7 +213,7 @@ export async function POST(request: NextRequest) {
     recordProductEvent({ type: 'signup', userId: user.id, metadata: { email: user.email, provider: 'email' } })
 
     // Create session
-    const { token } = await createSession(user.id, user.email, user.role?.name, user.name || undefined, 'email')
+    const { token, refreshToken } = await createSession(user.id, user.email, user.role?.name, user.name || undefined, 'email')
     
     // Create audit log
     await prisma.auditLog.create({
@@ -251,7 +251,7 @@ export async function POST(request: NextRequest) {
       ]).catch(() => { /* Non-fatal */ })
     }
 
-    return NextResponse.json({
+    const response = NextResponse.json({
       user: {
         id: user.id,
         email: user.email,
@@ -260,7 +260,28 @@ export async function POST(request: NextRequest) {
         role: user.role?.name,
       },
       token,
+      refreshToken,
     })
+
+    response.cookies.set('auth-token', token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV !== 'development',
+      sameSite: 'lax',
+      maxAge: 60 * 60 * 24 * 7, // 7 days
+      path: '/',
+    })
+
+    if (refreshToken) {
+      response.cookies.set('refresh-token', refreshToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV !== 'development',
+        sameSite: 'lax',
+        maxAge: 60 * 60 * 24 * 30, // 30 days
+        path: '/',
+      })
+    }
+
+    return response
   } catch (error) {
     // A concurrent request won the single self-hosted account slot. The
     // transaction that raised this already rolled back, so nothing partial was

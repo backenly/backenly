@@ -54,6 +54,13 @@ export async function login(data: LoginRequest): Promise<AuthResponse> {
     localStorage.setItem('auth-token', result.token)
   }
   
+  try {
+    const { setSessionCache } = await import('@/lib/hooks/useUserSession')
+    setSessionCache(result.user || null, true)
+  } catch {
+    // Non-critical hook sync failure
+  }
+  
   return result
 }
 
@@ -73,6 +80,13 @@ export async function register(data: RegisterRequest): Promise<AuthResponse> {
   // Store token in localStorage
   if (result.token) {
     localStorage.setItem('auth-token', result.token)
+  }
+  
+  try {
+    const { setSessionCache } = await import('@/lib/hooks/useUserSession')
+    setSessionCache(result.user || null, true)
+  } catch {
+    // Non-critical hook sync failure
   }
   
   return result
@@ -95,6 +109,13 @@ export async function logout(): Promise<void> {
   localStorage.removeItem('auth-token')
   localStorage.removeItem('current-project-id')
   localStorage.removeItem('user-info')
+
+  try {
+    const { invalidateSessionCache } = await import('@/lib/hooks/useUserSession')
+    invalidateSessionCache()
+  } catch {
+    // Non-critical hook sync failure
+  }
 }
 
 export async function verifyEmail(token?: string): Promise<{ message: string; emailVerified: boolean }> {

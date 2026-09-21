@@ -9,6 +9,7 @@ import {
   SIGNUP_EMAIL_REJECTION_MESSAGE,
 } from '@/lib/auth/signup-email-eligibility'
 import { register } from '@/lib/api/auth'
+import { useUserSession } from '@/lib/hooks/useUserSession'
 import { registerSiteIcons } from '@/lib/icons/registry'
 import {
   AuthChrome,
@@ -62,6 +63,13 @@ function SignupForm() {
   const rawRedirect = searchParams.get('redirect') || '/app'
   const isAuthPath = rawRedirect.startsWith('/auth') || rawRedirect === '/login' || rawRedirect === '/signup'
   const redirectUrl = isAuthPath ? '/app' : rawRedirect
+  const { isLoggedIn } = useUserSession()
+
+  useEffect(() => {
+    if (isLoggedIn) {
+      router.replace(redirectUrl)
+    }
+  }, [isLoggedIn, redirectUrl, router])
 
   useEffect(() => {
     fetch('/api/auth/platform-providers')
@@ -129,6 +137,22 @@ function SignupForm() {
       setTurnstileToken(null)
       resetTurnstile()
     }
+  }
+
+  if (isLoggedIn) {
+    return (
+      <AuthChrome>
+        <AuthCard
+          eyebrow="Account"
+          title="Already signed in"
+          subtitle="Redirecting to your projects..."
+        >
+          <div className="flex h-24 items-center justify-center">
+            <div className="h-6 w-6 animate-spin rounded-full border-2 border-white/20 border-t-white" />
+          </div>
+        </AuthCard>
+      </AuthChrome>
+    )
   }
 
   return (

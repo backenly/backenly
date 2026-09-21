@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { Icon } from '@iconify/react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { login } from '@/lib/api/auth'
+import { useUserSession } from '@/lib/hooks/useUserSession'
 import { GlobalLoading } from '@/components/ui/GlobalLoading'
 import { registerSiteIcons } from '@/lib/icons/registry'
 import {
@@ -33,11 +34,17 @@ function LoginForm() {
   const [showEmailForm, setShowEmailForm] = useState(false)
   const [oauthProviders, setOauthProviders] = useState<{ google: boolean; github: boolean } | null>(null)
 
-  // Get redirect URL — sanitize to prevent loops back to /auth/*
   const rawRedirect = searchParams.get('redirect') || '/app'
   const isAuthPath = rawRedirect.startsWith('/auth') || rawRedirect === '/login' || rawRedirect === '/signup'
   const redirectUrl = isAuthPath ? '/app' : rawRedirect
   const errorParam = searchParams.get('error')
+  const { isLoggedIn } = useUserSession()
+
+  useEffect(() => {
+    if (isLoggedIn && !errorParam) {
+      router.replace(redirectUrl)
+    }
+  }, [isLoggedIn, errorParam, redirectUrl, router])
 
   useEffect(() => {
     if (errorParam === 'invalid_session') {
@@ -82,6 +89,22 @@ function LoginForm() {
       setErrors({ password: error instanceof Error ? error.message : 'Login failed' })
       setIsSubmitting(false)
     }
+  }
+
+  if (isLoggedIn && !errorParam) {
+    return (
+      <AuthChrome>
+        <AuthCard
+          eyebrow="Account"
+          title="Already signed in"
+          subtitle="Redirecting to your projects..."
+        >
+          <div className="flex h-24 items-center justify-center">
+            <div className="h-6 w-6 animate-spin rounded-full border-2 border-white/20 border-t-white" />
+          </div>
+        </AuthCard>
+      </AuthChrome>
+    )
   }
 
   return (

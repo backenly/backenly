@@ -10,6 +10,7 @@ import { Menu, X } from 'lucide-react'
 import { registerSiteIcons } from '@/lib/icons/registry'
 import { BrandMark } from '@/components/site/BrandMark'
 import { SmoothScroll } from '@/components/site/SmoothScroll'
+import { useUserSession } from '@/lib/hooks/useUserSession'
 
 // Synchronously load all marketing-site icons into the Iconify cache so
 // every <Icon> renders on first paint, even with no network to api.iconify.design.
@@ -19,6 +20,7 @@ export const ROUTES = {
   home: '/',
   signup: '/auth/signup',
   login: '/auth/login',
+  app: '/app',
   pricing: '/pricing',
   features: '/features',
   useCases: '/use-cases',
@@ -144,6 +146,7 @@ export function NavBar() {
   const [mobileOpen, setMobileOpen] = useState(false)
   const pathname = usePathname()
   const reduceMotion = useSettledReducedMotion()
+  const { isLoggedIn } = useUserSession()
 
   useEffect(() => {
     if (!mobileOpen) return
@@ -224,10 +227,10 @@ export function NavBar() {
           )}
           <span className="h-6 w-px bg-white/[0.12]" aria-hidden />
           <Link
-            href={ROUTES.signup}
+            href={isLoggedIn ? ROUTES.app : ROUTES.signup}
             className="rounded-full bg-white px-5 py-2.5 text-[15px] font-semibold text-black transition-colors hover:bg-zinc-200"
           >
-            Sign up
+            {isLoggedIn ? 'Console' : 'Sign up'}
           </Link>
           </motion.div>
         </div>
@@ -298,11 +301,11 @@ export function NavBar() {
               )}
 
               <Link
-                href={ROUTES.signup}
+                href={isLoggedIn ? ROUTES.app : ROUTES.signup}
                 onClick={() => setMobileOpen(false)}
                 className="mt-4 flex items-center justify-center rounded-full bg-white py-3 text-sm font-semibold text-black transition-colors hover:bg-zinc-200"
               >
-                Sign up
+                {isLoggedIn ? 'Console' : 'Sign up'}
               </Link>
             </div>
           </motion.div>

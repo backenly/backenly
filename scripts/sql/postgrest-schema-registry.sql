@@ -63,7 +63,27 @@
 --   ALTER DATABASE mydb SET backenly.app_role = 'myrole';
 CREATE OR REPLACE FUNCTION public.backenly_app_role() RETURNS text
 LANGUAGE sql STABLE AS $fn$
-  SELECT coalesce(nullif(current_setting('backenly.app_role', true), ''), 'backenly_user')
+  -- Resolved, not a constant.
+  --
+  -- The old fallback was the literal 'backenly_user'. That is the INSTALLER
+  -- role, which is precisely what the application role is meant not to be, and
+  -- on a managed deployment it may not exist at all: measured on RDS, where the
+  -- app had always run as the master credential, this function returned
+  -- 'backenly_user' while no such role was present in the cluster. Every grant
+  -- routed through it was therefore aimed at a name nothing could be granted
+  -- to, silently.
+  --
+  -- The explicit setting still wins wherever an operator established one. Where
+  -- none exists - and a custom parameter cannot always BE established, since
+  -- RDS refuses ALTER DATABASE/ROLE SET of a placeholder from a non-superuser -
+  -- this falls through to a role that actually exists, in the order the
+  -- credential split intends.
+  SELECT coalesce(
+    nullif(current_setting('backenly.app_role', true), ''),
+    (SELECT rolname::text FROM pg_roles WHERE rolname = 'backenly_app'),
+    (SELECT rolname::text FROM pg_roles WHERE rolname = 'backenly_user'),
+    current_user::text
+  )
 $fn$;
 
 -- ── PostgREST roles ─────────────────────────────────────────────────────────
