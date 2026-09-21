@@ -217,6 +217,7 @@ model Project {
   organization           Organization?             @relation(fields: [organizationId], references: [id], onDelete: SetNull)
   projectMembers         ProjectMember[]
   maintenanceApprovals   MaintenanceApproval[]
+  ownershipIntents       OwnershipIntent[]
 
   @@index([userId])
   @@index([updatedAt])
@@ -427,6 +428,54 @@ model SchemaIntent {
   @@index([projectId])
   @@index([projectId, tableName])
   @@map("schema_intents")
+}
+
+/// A durable assertion that a table's rows are owned by the authenticated
+/// subject through a named column.
+///
+/// The first intent that is NOT a property of application code. Column shape
+/// (`SchemaIntent`) describes what a table looks like; this describes who its
+/// rows belong to, which no type system expresses and which drifts
+/// independently of the code.
+///
+/// Append-only. A change writes a new version and supersedes the old one,
+/// because "what did we believe when we acted" is the question an incident
+/// review asks, and an in-place update destroys the answer.
+model OwnershipIntent {
+  id        String @id @default(uuid())
+  projectId String @map("project_id")
+
+  /// What this asserts ownership over.
+  tableName   String @map("table_name")
+  /// The column naming the owner, e.g. "user_id".
+  ownerColumn String @map("owner_column")
+  /// What the column's value is compared against. Only "authenticated_user" today.
+  subject     String @default("authenticated_user")
+
+  /// WHO said so. Only declared_by_user and declared_by_authorized_agent may
+  /// authorize a mutation; observed and inferred may explain and recommend and
+  /// never widen authority on their own.
+  provenance String
+
+  /// Monotonic per (project, table). Approval binds to an exact version.
+  version        Int       @default(1)
+  /// Set when a newer version replaces this one.
+  supersededById String?   @map("superseded_by_id")
+  supersededAt   DateTime? @map("superseded_at")
+  /// Set when withdrawn. A revoked intent authorizes nothing, immediately.
+  revokedAt      DateTime? @map("revoked_at")
+  revokedBy      String?   @map("revoked_by")
+
+  /// The principal that declared it, as lib/principal serialises one.
+  declaredBy Json?    @map("declared_by")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, tableName, version])
+  @@index([projectId, tableName])
+  @@index([projectId, revokedAt])
+  @@map("ownership_intents")
 }
 
 model BackendEvent {
@@ -3333,7 +3382,7 @@ model MaintenanceStepExecution {
   // resolvable instruction without these.
 
   /// What this step operated on, in real identifiers.
-  resourceIdentity Json?
+  resourceIdentity  Json?
   /// The resource's SHAPE as observed immediately before and after mutating.
   ///
   /// Shape, not just name: `sessions.state` does not distinguish the column

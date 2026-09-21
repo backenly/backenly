@@ -16,10 +16,39 @@
 import { decideAuthority, type AuthorityInputs } from '@/lib/authority/decision'
 import { ACTION_CLASSES, actionClass } from '@/lib/authority/action-classes'
 import { P } from '@/lib/principal'
+import type { OwnershipIntentRecord } from '@/lib/authority/ownership-intent'
 import type { ProbeOutcome } from '@/lib/autonomy/sensor-health'
 
 function probe(id: string, status: ProbeOutcome['status']): ProbeOutcome {
   return { id, title: id, status, findingCount: status === 'fired' ? 1 : 0 }
+}
+
+/** An ownership intent record, defaulting to one that DOES authorize. */
+function intent(over: Partial<OwnershipIntentRecord> = {}): OwnershipIntentRecord {
+  return {
+    id: 'i1',
+    projectId: 'p1',
+    tableName: 'posts',
+    ownerColumn: 'user_id',
+    subject: 'authenticated_user',
+    provenance: 'declared_by_user',
+    version: 1,
+    supersededById: null,
+    supersededAt: null,
+    revokedAt: null,
+    declaredBy: null,
+    ...over,
+  }
+}
+
+/** The policy-rewrite action, on the table the intents above name. */
+function policyInputs(over: Partial<AuthorityInputs> = {}): AuthorityInputs {
+  return inputs({
+    actionClassId: 'tighten_policy',
+    resource: 'workspace_x.posts',
+    probes: [probe('rls_policies_are_not_wide_open', 'clean')],
+    ...over,
+  })
 }
 
 /** Healthy baseline: everything permits action. Each test breaks ONE thing. */
@@ -38,8 +67,14 @@ function inputs(over: Partial<AuthorityInputs> = {}): AuthorityInputs {
     },
     level: 'AGGRESSIVE',
     probes: cls.requiredSensors.map(s => probe(s.probeId, 'clean')),
-    resourceObservable: true,
-    hasDeclaredIntent: false,
+    observation: {
+      role: 'backenly_user',
+      bypassesRls: false,
+      observedAt: new Date().toISOString(),
+      resourceObservable: true,
+      reason: null,
+    },
+    ownershipIntents: [],
     ...over,
   }
 }
@@ -60,13 +95,13 @@ beforeAll(() => {
 
 describe('observability is a precondition of evidence', () => {
   it('freezes when the resource cannot be observed', () => {
-    const d = decideAuthority(inputs({ resourceObservable: false }))
+    const d = decideAuthority(inputs({ observation: { role: 'r', bypassesRls: false, observedAt: new Date().toISOString(), resourceObservable: false, reason: 'schema missing' } }))
     expect(d.decision).toBe('FREEZE')
     expect(d.narrowedBy).toContain('resource_unobservable')
   })
 
   it('treats unknown observability as unobservable, never as fine', () => {
-    const d = decideAuthority(inputs({ resourceObservable: 'unknown' }))
+    const d = decideAuthority(inputs({ observation: { role: 'r', bypassesRls: false, observedAt: new Date().toISOString(), resourceObservable: 'unknown', reason: 'lookup failed' } }))
     expect(d.decision).toBe('FREEZE')
   })
 
@@ -74,7 +109,7 @@ describe('observability is a precondition of evidence', () => {
     // The Phase 2 finding: a probe against a missing schema returns zero rows
     // and no error, so it looks `clean`. If observability were checked after
     // sensor health, that silence would read as evidence of health.
-    const d = decideAuthority(inputs({ resourceObservable: false, probes: [probe('relationships_are_indexed', 'clean')] }))
+    const d = decideAuthority(inputs({ observation: { role: 'r', bypassesRls: false, observedAt: new Date().toISOString(), resourceObservable: false, reason: null }, probes: [probe('relationships_are_indexed', 'clean')] }))
     expect(d.decision).toBe('FREEZE')
     expect(d.narrowedBy).toContain('resource_unobservable')
   })
@@ -111,38 +146,104 @@ describe('sensor confidence constrains authority', () => {
   })
 })
 
-describe('authorization-shaped actions need declared intent', () => {
-  it('refuses to auto-apply a policy rewrite without ownership intent', () => {
+describe('authorization changes need a MATCHING AUTHORITATIVE intent', () => {
+  it('refuses to auto-apply a policy rewrite with no intent at all', () => {
     // The one unsafe mutation the Phase 0 baseline measured.
+    const d = decideAuthority(policyInputs({ ownershipIntents: [] }))
+    expect(d.decision).toBe('PROPOSE_ONLY')
+    expect(d.narrowedBy).toContain('intent_no_intent_for_resource')
+    expect(d.intent?.satisfied).toBe(false)
+  })
+
+  it('a declared, current intent for THIS table authorizes it', () => {
+    const d = decideAuthority(policyInputs({ ownershipIntents: [intent()] }))
+    expect(d.intent?.satisfied).toBe(true)
+    expect(d.intent?.predicate).toContain('user_id')
+    expect(d.narrowedBy.some(n => n.startsWith('intent_'))).toBe(false)
+  })
+
+  // ── The negative cases. "Some intent exists" must never be enough. ────────
+
+  it('an intent for ANOTHER table cannot authorize', () => {
     const d = decideAuthority(
-      inputs({
-        actionClassId: 'tighten_policy',
-        probes: [probe('rls_policies_are_not_wide_open', 'clean')],
-        hasDeclaredIntent: false,
+      policyInputs({ ownershipIntents: [intent({ tableName: 'comments' })] }),
+    )
+    expect(d.decision).toBe('PROPOSE_ONLY')
+    expect(d.narrowedBy).toContain('intent_no_intent_for_resource')
+  })
+
+  it('an INFERRED intent cannot authorize', () => {
+    const d = decideAuthority(
+      policyInputs({ ownershipIntents: [intent({ provenance: 'inferred_by_backenly' })] }),
+    )
+    expect(d.decision).toBe('PROPOSE_ONLY')
+    expect(d.narrowedBy).toContain('intent_intent_provenance_not_authoritative')
+  })
+
+  it('an OBSERVED ownership pattern cannot authorize', () => {
+    const d = decideAuthority(
+      policyInputs({ ownershipIntents: [intent({ provenance: 'observed_from_existing_state' })] }),
+    )
+    expect(d.decision).toBe('PROPOSE_ONLY')
+    expect(d.narrowedBy).toContain('intent_intent_provenance_not_authoritative')
+  })
+
+  it('a SUPERSEDED intent cannot authorize', () => {
+    const d = decideAuthority(
+      policyInputs({
+        ownershipIntents: [intent({ supersededById: 'i2', supersededAt: new Date() })],
       }),
     )
     expect(d.decision).toBe('PROPOSE_ONLY')
-    expect(d.narrowedBy).toContain('no_declared_intent_for_authorization_change')
+    expect(d.narrowedBy).toContain('intent_intent_superseded')
   })
 
-  it('the same action is not blocked by that rule once intent exists', () => {
-    // Phase 3's hypothesis, asserted here so the rule is known to be about
-    // intent rather than a blanket ban on the action class. It may still be
-    // narrowed by tier, which is a different and legitimate reason.
+  it('a REVOKED intent cannot authorize', () => {
     const d = decideAuthority(
-      inputs({
-        actionClassId: 'tighten_policy',
-        probes: [probe('rls_policies_are_not_wide_open', 'clean')],
-        hasDeclaredIntent: true,
+      policyInputs({ ownershipIntents: [intent({ revokedAt: new Date() })] }),
+    )
+    expect(d.decision).toBe('PROPOSE_ONLY')
+    expect(d.narrowedBy).toContain('intent_intent_revoked')
+  })
+
+  it('an intent that determines no predicate cannot authorize', () => {
+    const d = decideAuthority(
+      policyInputs({ ownershipIntents: [intent({ ownerColumn: '' })] }),
+    )
+    expect(d.decision).toBe('PROPOSE_ONLY')
+    expect(d.narrowedBy).toContain('intent_intent_does_not_determine_predicate')
+  })
+
+  it('only the CURRENT version is consulted, and its state decides', () => {
+    // v2 is revoked; v1 is a perfectly good declaration. The newest version is
+    // what describes the table now, so the answer is refusal, not "find one
+    // that works".
+    const d = decideAuthority(
+      policyInputs({
+        ownershipIntents: [intent({ version: 2, revokedAt: new Date() }), intent({ version: 1 })],
       }),
     )
-    expect(d.narrowedBy).not.toContain('no_declared_intent_for_authorization_change')
+    expect(d.decision).toBe('PROPOSE_ONLY')
+    expect(d.narrowedBy).toContain('intent_intent_revoked')
   })
 
   it('does not apply the intent rule to actions that do not change authorization', () => {
     expect(ACTION_CLASSES.create_index.changesAuthorization).toBe(false)
-    const d = decideAuthority(inputs({ hasDeclaredIntent: false }))
-    expect(d.narrowedBy).not.toContain('no_declared_intent_for_authorization_change')
+    const d = decideAuthority(inputs({ ownershipIntents: [] }))
+    expect(d.narrowedBy.some(n => n.startsWith('intent_'))).toBe(false)
+    expect(d.intent).toBeNull()
+  })
+
+  it('intent never rescues a FREEZE', () => {
+    // Authority cannot substitute for evidence. A declared intent says what
+    // SHOULD be true; it cannot establish what IS true.
+    const d = decideAuthority(
+      policyInputs({
+        ownershipIntents: [intent()],
+        probes: [probe('rls_policies_are_not_wide_open', 'errored')],
+      }),
+    )
+    expect(d.decision).toBe('FREEZE')
   })
 })
 
@@ -223,7 +324,7 @@ describe('guarantees that hold for every decision', () => {
   it('every FREEZE names a blocker to restore', () => {
     // RFC P15: a refusal that says nothing is indistinguishable from health.
     const frozen = [
-      decideAuthority(inputs({ resourceObservable: false })),
+      decideAuthority(inputs({ observation: { role: 'r', bypassesRls: false, observedAt: new Date().toISOString(), resourceObservable: false, reason: 'schema missing' } })),
       decideAuthority(inputs({ probes: [probe('relationships_are_indexed', 'errored')] })),
       decideAuthority(inputs({ actionClassId: 'nope' })),
     ]

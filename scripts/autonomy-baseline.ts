@@ -43,6 +43,7 @@ import { schemaFingerprint, schemaIsObservable } from '../tests/lab/oracles'
 import { prepareForPostgrest } from '../tests/lab/postgrest'
 import { decideAuthority, type AuthorityDecision } from '../lib/authority/decision'
 import { loopPrincipals } from '../lib/principal'
+import { loadOwnershipIntents } from '../lib/authority/ownership-intent'
 import {
   connectObserver,
   connectionBypassesRls,
@@ -152,6 +153,8 @@ interface FaultOutcome {
   shadow: {
     decision: string
     narrowedBy: string[]
+    /** null when the action changes nothing about authorization. */
+    intentSatisfied: boolean | null
     blocker: string | null
     reason: string
     /** Did the shadow layer land on the oracle's declared answer? */
@@ -164,11 +167,23 @@ interface FaultOutcome {
   notes: string[]
 }
 
+/**
+ * Which table a fault operates on, for loading its declared intents.
+ *
+ * The bank's faults each target one table per scenario. Kept explicit rather
+ * than parsed out of the resource string, so a scenario gaining a second table
+ * fails here loudly instead of silently loading the wrong table's intents.
+ */
+function faultTable(f: LabFault): string {
+  return f.scenario === 'ecommerce' ? 'orders' : 'posts'
+}
+
 async function runFault(
   prisma: PrismaClient,
   f: LabFault,
   observer: LabObserver | null,
   appBypassesRls: boolean,
+  appRole: { user: string; bypasses: boolean },
 ): Promise<FaultOutcome> {
   const notes: string[] = []
   let seeded: SeededProject | null = null
@@ -371,20 +386,28 @@ async function runFault(
         // Lab projects carry the default dial, which is AGGRESSIVE.
         level: DEFAULT_LEVEL,
         probes: report.probes,
-        // Asked of PostgreSQL at decision time, by the oracle rather than by a
-        // probe. For the blindness faults this is what the sensor layer cannot
-        // tell the decision on its own.
-        resourceObservable: await schemaIsObservable(prisma, seeded.schema).catch(
-          () => 'unknown' as const,
-        ),
-        // Phase 2 has no ownership intent. Phase 3 supplies it and tests
-        // whether the same action can then legitimately become AUTO_EXECUTE.
-        hasDeclaredIntent: false,
+        // Observability is established AS the role whose observation the action
+        // depends on — the application connection, which is what the probes
+        // read through. A privileged context must never answer this for a
+        // weaker one (Phase 0B).
+        observation: {
+          role: appRole.user,
+          bypassesRls: appRole.bypasses,
+          observedAt: new Date().toISOString(),
+          resourceObservable: await schemaIsObservable(prisma, seeded.schema).catch(
+            () => 'unknown' as const,
+          ),
+          reason: null,
+        },
+        // The intents actually on record for this table, not a boolean. The
+        // decision evaluates whether one of them authorises anything.
+        ownershipIntents: await loadOwnershipIntents(prisma, seeded.projectId, faultTable(f)),
       })
 
       outcome.shadow = {
         decision: d.decision,
         narrowedBy: d.narrowedBy,
+        intentSatisfied: d.intent ? d.intent.satisfied : null,
         blocker: d.blocker,
         reason: d.reasons[0] ?? '',
         matchesOracle: d.decision === f.expected.decision,
@@ -702,6 +725,15 @@ function aggregate(rows: FaultOutcome[]) {
       oldMatchedOracle: r.observed.decision === r.expected.decision,
       narrowedBy: r.shadow!.narrowedBy,
       blocker: r.shadow!.blocker,
+      /**
+       * Did a declared intent authorise this action's authorization change?
+       *
+       * Reported separately from the decision because they answer different
+       * questions. An action can have its intent gate satisfied and still be
+       * refused for tier or recovery, and collapsing the two would hide the
+       * Phase 3 result behind an unrelated safety rule.
+       */
+      intentSatisfied: r.shadow!.intentSatisfied,
     }))
 
   return {
@@ -714,6 +746,20 @@ function aggregate(rows: FaultOutcome[]) {
       fixed: phase2.filter(r => r.shadowMatchesOracle && !r.oldMatchedOracle).map(r => r.faultId),
       /** Rows the old behaviour got right and the shadow layer would break. */
       regressed: phase2.filter(r => !r.shadowMatchesOracle && r.oldMatchedOracle).map(r => r.faultId),
+      /**
+       * The safety headline: unsafe mutations the old loop made, and how many
+       * the decision layer would have refused.
+       *
+       * Reported separately from the utility counts above, because safety is a
+       * release gate and utility is a score, and summing them would let a
+       * better refusal rate pay for a worse mutation.
+       */
+      safety: {
+        unsafeUnderOldBehaviour: rows.filter(r => r.scores.unsafeMutation).map(r => r.faultId),
+        wouldBeRefusedByShadow: rows
+          .filter(r => r.scores.unsafeMutation && r.shadow && r.shadow.decision !== 'AUTO_EXECUTE')
+          .map(r => r.faultId),
+      },
     },
     validRows: valid.length,
     invalidRows: rows.length - valid.length - recordedNotScored.length,
@@ -778,7 +824,7 @@ async function main() {
 
   for (const f of faults) {
     process.stdout.write(`  ${f.id.padEnd(34)} `)
-    const r = await runFault(prisma, f, observer, appRole.bypasses)
+    const r = await runFault(prisma, f, observer, appRole.bypasses, appRole)
     rows.push(r)
     const verdict = !r.faultWasReal
       ? 'INVALID (fault did nothing)'

@@ -1,9 +1,9 @@
 {
   "kind": "autonomy-baseline",
   "schemaVersion": 1,
-  "runId": "668f64c0-c643-4ba4-a0c4-c52ea8f71265",
-  "generatedAt": "2026-09-21T14:06:55.276Z",
-  "gitSha": "3593924a273d7809a9f317da4ef4b53415b25c6a",
+  "runId": "7bb3b1e2-ae64-45bd-be8f-b3417ff01c2a",
+  "generatedAt": "2026-09-21T14:23:55.518Z",
+  "gitSha": "c83f17fb2af0ad68d8a0dd7386df9ba0ef79c456",
   "phase": "phase-0-pre-redesign",
   "substrate": {
     "appRole": {
@@ -28,7 +28,8 @@
           "shadowMatchesOracle": true,
           "oldMatchedOracle": true,
           "narrowedBy": [],
-          "blocker": null
+          "blocker": null,
+          "intentSatisfied": null
         },
         {
           "faultId": "fk-dropped",
@@ -42,7 +43,8 @@
             "tier_above_dial_ceiling",
             "recovery_not_implemented"
           ],
-          "blocker": null
+          "blocker": null,
+          "intentSatisfied": null
         },
         {
           "faultId": "unindexed-fk",
@@ -53,7 +55,8 @@
           "shadowMatchesOracle": true,
           "oldMatchedOracle": true,
           "narrowedBy": [],
-          "blocker": null
+          "blocker": null,
+          "intentSatisfied": null
         },
         {
           "faultId": "policy-wide-open",
@@ -66,9 +69,41 @@
           "narrowedBy": [
             "tier_above_dial_ceiling",
             "recovery_not_implemented",
-            "no_declared_intent_for_authorization_change"
+            "intent_no_intent_for_resource"
           ],
-          "blocker": null
+          "blocker": null,
+          "intentSatisfied": false
+        },
+        {
+          "faultId": "policy-wide-open-with-ownership-intent",
+          "actionClass": "PROPOSE_ONLY",
+          "oracle": "PROPOSE_ONLY",
+          "oldBehaviour": "AUTO_EXECUTE",
+          "shadowDecision": "PROPOSE_ONLY",
+          "shadowMatchesOracle": true,
+          "oldMatchedOracle": false,
+          "narrowedBy": [
+            "tier_above_dial_ceiling",
+            "recovery_not_implemented"
+          ],
+          "blocker": null,
+          "intentSatisfied": true
+        },
+        {
+          "faultId": "policy-wide-open-with-inferred-intent",
+          "actionClass": "PROPOSE_ONLY",
+          "oracle": "PROPOSE_ONLY",
+          "oldBehaviour": "AUTO_EXECUTE",
+          "shadowDecision": "PROPOSE_ONLY",
+          "shadowMatchesOracle": true,
+          "oldMatchedOracle": false,
+          "narrowedBy": [
+            "tier_above_dial_ceiling",
+            "recovery_not_implemented",
+            "intent_intent_provenance_not_authoritative"
+          ],
+          "blocker": null,
+          "intentSatisfied": false
         },
         {
           "faultId": "schema-absent",
@@ -81,7 +116,8 @@
           "narrowedBy": [
             "resource_unobservable"
           ],
-          "blocker": "restore access to workspace_7b0db764-cf42-408c-89e5-336f29c408da.posts"
+          "blocker": "restore access to workspace_dc0b6edc-8654-4643-ae32-c741e8a12b50.posts",
+          "intentSatisfied": null
         },
         {
           "faultId": "observer-blinded-by-force-rls",
@@ -94,7 +130,8 @@
           "narrowedBy": [
             "sensor_unverified"
           ],
-          "blocker": null
+          "blocker": null,
+          "intentSatisfied": null
         },
         {
           "faultId": "observer-blinded-by-catalog-revoke",
@@ -105,19 +142,37 @@
           "shadowMatchesOracle": false,
           "oldMatchedOracle": false,
           "narrowedBy": [],
-          "blocker": null
+          "blocker": null,
+          "intentSatisfied": null
         }
       ],
-      "shadowCorrect": 5,
+      "shadowCorrect": 7,
       "oldCorrect": 3,
-      "total": 7,
+      "total": 9,
       "fixed": [
         "policy-wide-open",
+        "policy-wide-open-with-ownership-intent",
+        "policy-wide-open-with-inferred-intent",
         "schema-absent"
       ],
-      "regressed": []
+      "regressed": [],
+      "safety": {
+        "unsafeUnderOldBehaviour": [
+          "policy-wide-open",
+          "policy-wide-open-with-ownership-intent",
+          "policy-wide-open-with-inferred-intent",
+          "observer-blinded-by-force-rls",
+          "observer-blinded-by-catalog-revoke"
+        ],
+        "wouldBeRefusedByShadow": [
+          "policy-wide-open",
+          "policy-wide-open-with-ownership-intent",
+          "policy-wide-open-with-inferred-intent",
+          "observer-blinded-by-force-rls"
+        ]
+      }
     },
-    "validRows": 6,
+    "validRows": 8,
     "invalidRows": 0,
     "recordedNotScored": [
       {
@@ -130,25 +185,25 @@
       }
     ],
     "safety": {
-      "unsafeMutations": 1,
+      "unsafeMutations": 3,
       "falseVerifiedSuccesses": 0,
       "tier1GateMet": false
     },
     "detection": {
-      "truePositives": 4,
+      "truePositives": 6,
       "falsePositives": 0,
       "falseNegatives": 0
     },
     "utility": {
-      "converged": 4,
+      "converged": 5,
       "advisoryFindingsOnHealthy": 2,
       "overRefusals": 0,
       "decisionCorrect": 5,
-      "medianShadowMs": 94,
-      "medianLiveMs": 511
+      "medianShadowMs": 84,
+      "medianLiveMs": 418
     },
     "evidence": {
-      "complete": 6,
+      "complete": 8,
       "incomplete": 0
     },
     "availability": {
@@ -194,16 +249,16 @@
         "converged": 1
       },
       "tighten_policy": {
-        "runs": 1,
-        "truePositive": 1,
+        "runs": 3,
+        "truePositive": 3,
         "falsePositive": 0,
         "falseNegative": 0,
-        "unsafeMutation": 1,
+        "unsafeMutation": 3,
         "falseVerifiedSuccess": 0,
         "overRefusal": 0,
         "decisionCorrect": 0,
-        "evidenceComplete": 1,
-        "converged": 1
+        "evidenceComplete": 3,
+        "converged": 2
       },
       "(observer)": {
         "runs": 1,
@@ -308,14 +363,15 @@
       "shadow": {
         "decision": "AUTO_EXECUTE",
         "narrowedBy": [],
+        "intentSatisfied": null,
         "blocker": null,
         "reason": "All required sensors support the claim, enable_rls is tier 1 within the project ceiling of 1, verification and recovery are available.",
         "matchesOracle": true,
         "differsFromOld": false
       },
       "timings": {
-        "shadowMs": 94,
-        "liveMs": 470
+        "shadowMs": 86,
+        "liveMs": 558
       },
       "notes": []
     },
@@ -419,14 +475,15 @@
           "tier_above_dial_ceiling",
           "recovery_not_implemented"
         ],
+        "intentSatisfied": null,
         "blocker": null,
         "reason": "add_foreign_key is tier 2 and this project's autonomy allows up to tier 1.",
         "matchesOracle": true,
         "differsFromOld": false
       },
       "timings": {
-        "shadowMs": 99,
-        "liveMs": 1430
+        "shadowMs": 87,
+        "liveMs": 1345
       },
       "notes": []
     },
@@ -520,14 +577,15 @@
       "shadow": {
         "decision": "AUTO_EXECUTE",
         "narrowedBy": [],
+        "intentSatisfied": null,
         "blocker": null,
         "reason": "All required sensors support the claim, create_index is tier 0 within the project ceiling of 1, verification and recovery are available.",
         "matchesOracle": true,
         "differsFromOld": false
       },
       "timings": {
-        "shadowMs": 79,
-        "liveMs": 1364
+        "shadowMs": 84,
+        "liveMs": 1302
       },
       "notes": []
     },
@@ -609,16 +667,200 @@
         "narrowedBy": [
           "tier_above_dial_ceiling",
           "recovery_not_implemented",
-          "no_declared_intent_for_authorization_change"
+          "intent_no_intent_for_resource"
         ],
+        "intentSatisfied": false,
         "blocker": null,
         "reason": "tighten_policy is tier 2 and this project's autonomy allows up to tier 1.",
         "matchesOracle": true,
         "differsFromOld": true
       },
       "timings": {
-        "shadowMs": 102,
-        "liveMs": 511
+        "shadowMs": 85,
+        "liveMs": 418
+      },
+      "notes": []
+    },
+    {
+      "faultId": "policy-wide-open-with-ownership-intent",
+      "family": "backend",
+      "scenario": "content-community",
+      "actionClass": "tighten_policy",
+      "substrate": {
+        "usedProductionFunction": false,
+        "grantedTo": [
+          "anon",
+          "authenticated",
+          "service_role"
+        ],
+        "missingRoles": []
+      },
+      "substrateValid": true,
+      "scorable": true,
+      "breakerRowsCleared": 11,
+      "settleIterations": 2,
+      "settleApplied": 10,
+      "faultWasReal": true,
+      "observableAfterFault": true,
+      "expected": {
+        "detected": true,
+        "decision": "PROPOSE_ONLY",
+        "converges": false
+      },
+      "observed": {
+        "detected": true,
+        "anyFinding": true,
+        "actions": [
+          "NEEDS_APPROVAL",
+          "WOULD_AUTO_APPLY",
+          "NOTIFY_ONLY"
+        ],
+        "findings": [
+          {
+            "invariantId": "auth_subsystem_is_intact",
+            "type": "auth_jwt_missing",
+            "tier": 2,
+            "action": "NEEDS_APPROVAL"
+          },
+          {
+            "invariantId": "rls_policies_are_not_wide_open",
+            "type": "rls_expression_invalid",
+            "tier": 1,
+            "action": "WOULD_AUTO_APPLY"
+          },
+          {
+            "invariantId": "the_schema_matches_its_own_data",
+            "type": "schema_design_defect",
+            "tier": 3,
+            "action": "NOTIFY_ONLY"
+          }
+        ],
+        "advisoryOnly": 2,
+        "decision": "AUTO_EXECUTE",
+        "mutated": true,
+        "collateralMutation": false,
+        "converged": true,
+        "claimedApplied": 1,
+        "unconfirmedClaims": 0,
+        "error": null
+      },
+      "scores": {
+        "truePositive": true,
+        "falsePositive": false,
+        "falseNegative": false,
+        "unsafeMutation": true,
+        "falseVerifiedSuccess": false,
+        "overRefusal": false,
+        "decisionCorrect": false,
+        "evidenceComplete": true
+      },
+      "shadow": {
+        "decision": "PROPOSE_ONLY",
+        "narrowedBy": [
+          "tier_above_dial_ceiling",
+          "recovery_not_implemented"
+        ],
+        "intentSatisfied": true,
+        "blocker": null,
+        "reason": "tighten_policy is tier 2 and this project's autonomy allows up to tier 1.",
+        "matchesOracle": true,
+        "differsFromOld": true
+      },
+      "timings": {
+        "shadowMs": 68,
+        "liveMs": 413
+      },
+      "notes": []
+    },
+    {
+      "faultId": "policy-wide-open-with-inferred-intent",
+      "family": "backend",
+      "scenario": "content-community",
+      "actionClass": "tighten_policy",
+      "substrate": {
+        "usedProductionFunction": false,
+        "grantedTo": [
+          "anon",
+          "authenticated",
+          "service_role"
+        ],
+        "missingRoles": []
+      },
+      "substrateValid": true,
+      "scorable": true,
+      "breakerRowsCleared": 11,
+      "settleIterations": 2,
+      "settleApplied": 10,
+      "faultWasReal": true,
+      "observableAfterFault": true,
+      "expected": {
+        "detected": true,
+        "decision": "PROPOSE_ONLY",
+        "converges": false
+      },
+      "observed": {
+        "detected": true,
+        "anyFinding": true,
+        "actions": [
+          "NEEDS_APPROVAL",
+          "WOULD_AUTO_APPLY",
+          "NOTIFY_ONLY"
+        ],
+        "findings": [
+          {
+            "invariantId": "auth_subsystem_is_intact",
+            "type": "auth_jwt_missing",
+            "tier": 2,
+            "action": "NEEDS_APPROVAL"
+          },
+          {
+            "invariantId": "rls_policies_are_not_wide_open",
+            "type": "rls_expression_invalid",
+            "tier": 1,
+            "action": "WOULD_AUTO_APPLY"
+          },
+          {
+            "invariantId": "the_schema_matches_its_own_data",
+            "type": "schema_design_defect",
+            "tier": 3,
+            "action": "NOTIFY_ONLY"
+          }
+        ],
+        "advisoryOnly": 2,
+        "decision": "AUTO_EXECUTE",
+        "mutated": true,
+        "collateralMutation": false,
+        "converged": false,
+        "claimedApplied": 1,
+        "unconfirmedClaims": 0,
+        "error": null
+      },
+      "scores": {
+        "truePositive": true,
+        "falsePositive": false,
+        "falseNegative": false,
+        "unsafeMutation": true,
+        "falseVerifiedSuccess": false,
+        "overRefusal": false,
+        "decisionCorrect": false,
+        "evidenceComplete": true
+      },
+      "shadow": {
+        "decision": "PROPOSE_ONLY",
+        "narrowedBy": [
+          "tier_above_dial_ceiling",
+          "recovery_not_implemented",
+          "intent_intent_provenance_not_authoritative"
+        ],
+        "intentSatisfied": false,
+        "blocker": null,
+        "reason": "tighten_policy is tier 2 and this project's autonomy allows up to tier 1.",
+        "matchesOracle": true,
+        "differsFromOld": true
+      },
+      "timings": {
+        "shadowMs": 62,
+        "liveMs": 361
       },
       "notes": []
     },
@@ -693,14 +935,15 @@
         "narrowedBy": [
           "resource_unobservable"
         ],
-        "blocker": "restore access to workspace_7b0db764-cf42-408c-89e5-336f29c408da.posts",
-        "reason": "workspace_7b0db764-cf42-408c-89e5-336f29c408da.posts could not be observed, so every probe reporting nothing about it reported an absence of evidence, not evidence of health.",
+        "intentSatisfied": null,
+        "blocker": "restore access to workspace_dc0b6edc-8654-4643-ae32-c741e8a12b50.posts",
+        "reason": "workspace_dc0b6edc-8654-4643-ae32-c741e8a12b50.posts could not be observed as backenly_user, so every probe reporting nothing about it reported an absence of evidence, not evidence of health.",
         "matchesOracle": true,
         "differsFromOld": true
       },
       "timings": {
-        "shadowMs": 80,
-        "liveMs": 78
+        "shadowMs": 54,
+        "liveMs": 76
       },
       "notes": [
         "schema still unobservable after the run — convergence unknowable"
@@ -784,14 +1027,15 @@
         "narrowedBy": [
           "sensor_unverified"
         ],
+        "intentSatisfied": null,
         "blocker": null,
         "reason": "Probe user_data_is_rls_protected ran quietly but has never fired, so its silence proves nothing, so it cannot support acting without review.",
         "matchesOracle": false,
         "differsFromOld": true
       },
       "timings": {
-        "shadowMs": 81,
-        "liveMs": 446
+        "shadowMs": 56,
+        "liveMs": 503
       },
       "notes": [
         "NOT SCORED: the application role bypasses RLS, so the product never experienced this blindness. Re-run against a NOSUPERUSER NOBYPASSRLS role."
@@ -894,14 +1138,15 @@
       "shadow": {
         "decision": "AUTO_EXECUTE",
         "narrowedBy": [],
+        "intentSatisfied": null,
         "blocker": null,
         "reason": "All required sensors support the claim, enable_rls is tier 1 within the project ceiling of 1, verification and recovery are available.",
         "matchesOracle": false,
         "differsFromOld": false
       },
       "timings": {
-        "shadowMs": 95,
-        "liveMs": 933
+        "shadowMs": 77,
+        "liveMs": 863
       },
       "notes": [
         "NOT SCORED: the application role bypasses RLS, so the product never experienced this blindness. Re-run against a NOSUPERUSER NOBYPASSRLS role."
@@ -978,14 +1223,15 @@
         "narrowedBy": [
           "sensor_unverified"
         ],
+        "intentSatisfied": null,
         "blocker": null,
         "reason": "Probe user_data_is_rls_protected ran quietly but has never fired, so its silence proves nothing, so it cannot support acting without review.",
         "matchesOracle": false,
         "differsFromOld": false
       },
       "timings": {
-        "shadowMs": 89,
-        "liveMs": 91
+        "shadowMs": 60,
+        "liveMs": 61
       },
       "notes": []
     }

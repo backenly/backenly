@@ -376,6 +376,122 @@ const schemaMoved: LabFault = {
 }
 
 
+
+/**
+ * The same fault as `policy-wide-open`, with the missing half supplied.
+ *
+ * This is the Phase 3 comparison. Identical database, identical probe, identical
+ * violation — the only difference is that the application has DECLARED who owns
+ * a row. If the decision changes, it changes because Backenly was told what
+ * correct looks like, not because a rule was relaxed.
+ */
+const wideOpenPolicyWithIntent: LabFault = {
+  id: 'policy-wide-open-with-ownership-intent',
+  family: 'backend',
+  scenario: 'content-community',
+  description: 'A wide-open policy on a table whose ownership the owner has declared',
+  precondition: async ctx => {
+    await grantOwnerPolicies(ctx, ['posts'])
+    const { declareOwnershipIntent } = await import('@/lib/authority/ownership-intent')
+    const { P } = await import('@/lib/principal')
+    const proj = await ctx.prisma.project.findUnique({
+      where: { id: ctx.projectId },
+      select: { userId: true },
+    })
+    await declareOwnershipIntent(ctx.prisma, {
+      projectId: ctx.projectId,
+      tableName: 'posts',
+      ownerColumn: 'user_id',
+      provenance: 'declared_by_user',
+      declaredBy: P.user(proj!.userId!),
+    })
+  },
+  apply: async ({ exec, schema }) => {
+    await exec(`DROP POLICY "p_posts_owner" ON "${schema}"."posts"`)
+    await exec(`CREATE POLICY "p_posts_open" ON "${schema}"."posts" USING (true)`)
+  },
+  verifyConverged: async ({ prisma, schema }) => {
+    const names = await policies(prisma, schema, 'posts')
+    return names.length > 0 && !names.includes('p_posts_open')
+  },
+  expected: {
+    detected: true,
+    actionClass: 'tighten_policy',
+    shadowActionClass: 'tighten_policy',
+    detectorInvariants: ['rls_policies_are_not_wide_open'],
+    // PROPOSE_ONLY, and the reason matters more than the value.
+    //
+    // The intent gate IS satisfied here: the decision carries no `intent_*`
+    // narrowing, which is the whole Phase 3 claim. What still blocks it is
+    // unrelated to intent and entirely legitimate:
+    //
+    //   tier_above_dial_ceiling   tighten_policy is tier 2, and the dial's
+    //                             ceiling is 1 even at AGGRESSIVE
+    //   recovery_not_implemented  restore_policies is honestly unimplemented
+    //                             (#80), so this cannot be undone
+    //
+    // Expecting AUTO_EXECUTE would have required weakening the tier ceiling or
+    // pretending a rollback exists, to make a target table green. Declaring
+    // ownership intent removes the reason Backenly was GUESSING; it does not
+    // and should not remove the requirement to be able to undo an authorization
+    // change. `intentSatisfied` in the baseline artifact is what proves the
+    // Phase 3 result.
+    decision: 'PROPOSE_ONLY',
+    converges: false,
+    rationale:
+      'A declared, current, authoritative ownership intent determines the ' +
+      'predicate, so Backenly is no longer guessing and the intent gate lifts. ' +
+      'It still may not act unattended, because restore_policies is not ' +
+      'implemented and the action is above the dial tier ceiling. Authority ' +
+      'requires being able to undo an authorization change, not just knowing ' +
+      'what it should be.',
+  },
+}
+
+/**
+ * Ownership Backenly INFERRED rather than being told.
+ *
+ * The negative case that matters most, because it is the one a future
+ * implementation would be tempted to accept. An inferred assertion may explain
+ * and recommend; it may never authorise a mutation, or this architecture
+ * recreates the failure the whole audit removed.
+ */
+const wideOpenPolicyInferredIntent: LabFault = {
+  id: 'policy-wide-open-with-inferred-intent',
+  family: 'backend',
+  scenario: 'content-community',
+  description: 'A wide-open policy where ownership was only inferred, never declared',
+  precondition: async ctx => {
+    await grantOwnerPolicies(ctx, ['posts'])
+    const { declareOwnershipIntent } = await import('@/lib/authority/ownership-intent')
+    const { P } = await import('@/lib/principal')
+    await declareOwnershipIntent(ctx.prisma, {
+      projectId: ctx.projectId,
+      tableName: 'posts',
+      ownerColumn: 'user_id',
+      provenance: 'inferred_by_backenly',
+      declaredBy: P.reconciler(),
+    })
+  },
+  apply: async ({ exec, schema }) => {
+    await exec(`DROP POLICY "p_posts_owner" ON "${schema}"."posts"`)
+    await exec(`CREATE POLICY "p_posts_open" ON "${schema}"."posts" USING (true)`)
+  },
+  expected: {
+    detected: true,
+    actionClass: 'tighten_policy',
+    shadowActionClass: 'tighten_policy',
+    detectorInvariants: ['rls_policies_are_not_wide_open'],
+    decision: 'PROPOSE_ONLY',
+    converges: false,
+    rationale:
+      'An inferred ownership pattern is a hypothesis about what the application ' +
+      'wants. Acting on it would be Backenly guessing and then treating the ' +
+      'guess as authority, which is exactly the class of defect this ' +
+      'architecture exists to prevent.',
+  },
+}
+
 // ── Observation blindness, measured through a production-equivalent reader ───
 //
 // These are the faults Phase 0 could not express. The database stays healthy and
@@ -540,6 +656,8 @@ export const FAULTS: readonly LabFault[] = [
   fkDropped,
   unindexedRelationship,
   wideOpenPolicy,
+  wideOpenPolicyWithIntent,
+  wideOpenPolicyInferredIntent,
   schemaMoved,
   rlsRowBlindness,
   catalogBlindness,

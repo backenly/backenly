@@ -41,6 +41,12 @@ import type { CorrelatedChange } from '@/lib/autonomy/change-correlation'
 import type { Principal, PrincipalSet } from '@/lib/principal'
 
 import { actionClass, type ActionClass, type SensorRequirement } from './action-classes'
+import {
+  evaluateOwnershipIntent,
+  predicateFor,
+  type IntentEvaluation,
+  type OwnershipIntentRecord,
+} from './ownership-intent'
 
 export type Decision = 'AUTO_EXECUTE' | 'PROPOSE_ONLY' | 'FREEZE' | 'DENY'
 
@@ -53,6 +59,32 @@ export interface SensorEvidence {
   withinLiveness: boolean
   supportsAutonomy: boolean
   note: string
+}
+
+/**
+ * The context an observation was made in.
+ *
+ * Recorded on every decision so that, later, it is possible to know not just
+ * that Backenly saw the resource but AS WHOM it saw it. Without the role, a
+ * receipt saying "the table was observable" is unfalsifiable six months on.
+ */
+export interface ObservationContext {
+  /** The database role the observation was made as. */
+  role: string
+  /**
+   * Does that role bypass row-level security?
+   *
+   * A `true` here means this context can see things a production reader cannot,
+   * so its answer does not establish observability for an action whose evidence
+   * comes from a weaker reader.
+   */
+  bypassesRls: boolean
+  /** When the observability question was asked. */
+  observedAt: string
+  /** Was the resource visible to THIS context? `'unknown'` is not optimism. */
+  resourceObservable: boolean | 'unknown'
+  /** Why, whenever the answer is not a plain `true`. */
+  reason: string | null
 }
 
 export interface AuthorityInputs {
@@ -68,34 +100,34 @@ export interface AuthorityInputs {
   /** Sensor health, as produced by lib/autonomy/sensor-health. */
   probes: ProbeOutcome[]
   /**
-   * Could the resource be observed at all when this was decided?
+   * Where the observation came from, and whether the resource was visible TO
+   * THAT CONTEXT.
    *
    * Separate from sensor health, and it has to be, because the Phase 2 run
    * showed sensor health CANNOT report this. `detectMissingRls` asks
    * `pg_tables WHERE schemaname = $1`; against a schema that no longer exists
    * that returns zero rows and no error, so the probe is classified
    * `unverified` — ran quietly, never fired — exactly as it would be on a
-   * healthy backend with nothing wrong.
+   * healthy backend with nothing wrong. That is `#83` restated one layer up.
    *
-   * That is `#83` restated one layer up: an unreadable resource and a clean one
-   * produce the same value. Establishing observability separately is what makes
-   * a probe's silence mean something, and it is the only input that can turn
-   * observation blindness into FREEZE.
-   *
-   * `'unknown'` is not optimism: it is treated as unobservable.
+   * It carries the ROLE because observability is not a property of the resource
+   * alone. Phase 0B measured a table that a superuser could read in full and a
+   * NOSUPERUSER NOBYPASSRLS reader could not see a single row of. A privileged
+   * context must never answer this question on behalf of a weaker one.
    */
-  resourceObservable: boolean | 'unknown'
+  observation: ObservationContext
 
   /** Recent changes by anyone, for conflict detection. */
   recentChanges?: CorrelatedChange[]
   /**
-   * Does a durable declaration say what the correct end state is?
+   * Every ownership intent recorded for the resource's table, newest first.
    *
-   * Phase 2 always passes false: no ownership intent exists yet. Phase 3 supplies
-   * it, and the same action can then legitimately reach a different answer
-   * WITHOUT any rule here being relaxed.
+   * The LIST, not a boolean. A boolean would collapse "declared by the owner
+   * five minutes ago" and "inferred by Backenly from traffic, then revoked"
+   * into the same value, and `changesAuthorization && someIntentExists` would
+   * be the next unsafe shortcut. The decision evaluates the rule itself.
    */
-  hasDeclaredIntent?: boolean
+  ownershipIntents?: OwnershipIntentRecord[]
 }
 
 export interface AuthorityDecision {
@@ -121,13 +153,46 @@ export interface AuthorityDecision {
 
   conflict: CorrelatedChange[]
 
+  /** Where the evidence was observed from, and whether it was visible there. */
+  observation: ObservationContext
+
   /** Every input that reduced the answer, in the order it applied. */
   narrowedBy: string[]
   /** Ordered, machine-readable, human-legible. */
   reasons: string[]
+  /**
+   * What a declared intent established about this resource, when the action
+   * needed one. Null for actions that change nothing about authorization.
+   */
+  intent: {
+    satisfied: boolean
+    refusal: string | null
+    note: string
+    /** The exact version relied on, so consent binds to it. */
+    version: number | null
+    provenance: string | null
+    /** The predicate the intent determines, when it determines one. */
+    predicate: string | null
+  } | null
+
   /** For FREEZE: the prerequisite to restore. Never null on a FREEZE. */
   blocker: string | null
   decidedAt: string
+}
+
+/** The table part of a `schema.table` resource identifier. */
+function tableOf(resource: string): string {
+  const dot = resource.lastIndexOf('.')
+  return dot === -1 ? resource : resource.slice(dot + 1)
+}
+
+/** The predicate, or null when the intent names a subject we cannot express. */
+function safePredicate(intent: OwnershipIntentRecord): string | null {
+  try {
+    return predicateFor(intent)
+  } catch {
+    return null
+  }
 }
 
 /** Seconds since an ISO timestamp, or null when absent. */
@@ -208,6 +273,7 @@ export function decideAuthority(input: AuthorityInputs): AuthorityDecision {
       authorizationSource: input.principals.authorizationSource ?? 'none',
     },
     conflict: input.recentChanges ?? [],
+    observation: input.observation,
     decidedAt: new Date().toISOString(),
   }
 
@@ -224,6 +290,7 @@ export function decideAuthority(input: AuthorityInputs): AuthorityDecision {
       decision: 'FREEZE',
       evidence: [],
       capability: { verification: 'unavailable', recovery: 'none', recoveryStatus: 'not_implemented' },
+      intent: null,
       narrowedBy,
       reasons,
       blocker,
@@ -237,6 +304,7 @@ export function decideAuthority(input: AuthorityInputs): AuthorityDecision {
       decision: 'FREEZE',
       evidence: [],
       capability: { verification: 'unavailable', recovery: cls.recovery, recoveryStatus: 'not_implemented' },
+      intent: null,
       narrowedBy,
       reasons,
       blocker: blockerText,
@@ -258,6 +326,23 @@ export function decideAuthority(input: AuthorityInputs): AuthorityDecision {
     recoveryStatus,
   }
 
+  // Evaluated up front so every return path, including the frozen ones, can
+  // carry what was known about the resource's declared intent.
+  let intentEval: IntentEvaluation | null = null
+  let intentReceipt: AuthorityDecision['intent'] = null
+  if (cls.changesAuthorization) {
+    intentEval = evaluateOwnershipIntent(input.ownershipIntents ?? [], tableOf(input.resource))
+    const a = intentEval.authoritative
+    intentReceipt = {
+      satisfied: a !== null,
+      refusal: intentEval.refusal,
+      note: intentEval.note,
+      version: a?.version ?? null,
+      provenance: a?.provenance ?? null,
+      predicate: a ? safePredicate(a) : null,
+    }
+  }
+
   const frozen = (why: string, blockerText: string): AuthorityDecision => {
     narrowedBy.push(why)
     blocker = blockerText
@@ -266,6 +351,7 @@ export function decideAuthority(input: AuthorityInputs): AuthorityDecision {
       decision: 'FREEZE',
       evidence,
       capability,
+      intent: intentReceipt,
       narrowedBy,
       reasons,
       blocker,
@@ -277,13 +363,15 @@ export function decideAuthority(input: AuthorityInputs): AuthorityDecision {
   // Before any probe's output is worth reading. A probe that reported nothing
   // about a schema it could not see has established nothing, and acting on that
   // silence is the failure this whole audit removed.
-  if (input.resourceObservable !== true) {
+  if (input.observation.resourceObservable !== true) {
+    const why = input.observation.reason ? ` (${input.observation.reason})` : ''
     reasons.push(
-      input.resourceObservable === 'unknown'
-        ? `Backenly could not establish whether ${input.resource} is observable, so ` +
-          'no probe result about it can be trusted.'
-        : `${input.resource} could not be observed, so every probe reporting nothing ` +
-          'about it reported an absence of evidence, not evidence of health.',
+      input.observation.resourceObservable === 'unknown'
+        ? `Backenly could not establish whether ${input.resource} is observable as ` +
+          `${input.observation.role}${why}, so no probe result about it can be trusted.`
+        : `${input.resource} could not be observed as ${input.observation.role}${why}, ` +
+          'so every probe reporting nothing about it reported an absence of evidence, ' +
+          'not evidence of health.',
     )
     return frozenEarly('resource_unobservable', `restore access to ${input.resource}`)
   }
@@ -369,12 +457,12 @@ export function decideAuthority(input: AuthorityInputs): AuthorityDecision {
   // The measured failure from Phase 0. Backenly can see that USING (true) is
   // wrong and cannot know what predicate is right. Evidence establishes that
   // something is broken; only a declaration establishes what "fixed" means.
-  if (cls.changesAuthorization && !input.hasDeclaredIntent) {
+  if (cls.changesAuthorization && !intentEval?.authoritative) {
     narrow(
       'PROPOSE_ONLY',
-      'no_declared_intent_for_authorization_change',
-      `${cls.id} changes who can read data, and no declared ownership intent says ` +
-        'what the correct rule is. Backenly would be guessing the predicate.',
+      `intent_${intentEval?.refusal ?? 'unavailable'}`,
+      `${cls.id} changes who can read data. ${intentEval?.note ?? 'No intent was supplied.'} ` +
+        'Backenly would be guessing the predicate.',
     )
   }
 
@@ -396,5 +484,5 @@ export function decideAuthority(input: AuthorityInputs): AuthorityDecision {
     )
   }
 
-  return { ...base, decision, evidence, capability, narrowedBy, reasons, blocker }
+  return { ...base, decision, evidence, capability, intent: intentReceipt, narrowedBy, reasons, blocker }
 }
