@@ -55,6 +55,11 @@ export interface TierDelegation {
   /** When it stops applying. A delegation without an end is a policy change. */
   expiresAt: Date | null
   revokedAt: Date | null
+  /** Bumped on any change to what the grant permits; the decision records it. */
+  version?: number
+  /** '*' or a specific resource. */
+  resourceScope?: string
+  maxTier?: number
 }
 
 export type DelegationRefusal =

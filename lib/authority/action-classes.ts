@@ -168,3 +168,44 @@ export function actionClassForInvariant(invariantId: string): ActionClass | null
   }
   return null
 }
+
+/**
+ * Map a HealthFinding type to the action class that would repair it.
+ *
+ * The finding types are the vocabulary the reconciler and the auto-fix engine
+ * already speak; the action classes are what declares dependencies. This is the
+ * join between them, and it is deliberately explicit rather than derived from a
+ * naming convention: a typo in a convention silently produces "unregistered",
+ * and unregistered means FREEZE, so a convention would turn a rename into an
+ * outage that looks like a safety feature.
+ *
+ * Anything absent from this map is unregistered, which is default-deny. That is
+ * the correct answer for a repair whose dependencies nobody has declared — but
+ * it means adding a new autonomous fix type requires adding it here, and the
+ * gate will refuse it loudly until somebody does.
+ */
+const FINDING_TYPE_TO_ACTION_CLASS: Readonly<Record<string, string>> = {
+  missing_rls: 'enable_rls',
+  weak_rls: 'enable_rls',
+  security_gap: 'enable_rls',
+
+  missing_fk: 'add_foreign_key',
+  missing_fk_constraint: 'add_foreign_key',
+  orphaned_fk: 'add_foreign_key',
+
+  missing_index: 'create_index',
+  missing_fk_index: 'create_index',
+  slow_query_missing_index: 'create_index',
+  query_pattern_missing_index: 'create_index',
+
+  rls_wide_open: 'tighten_policy',
+  policy_fragmentation: 'tighten_policy',
+}
+
+export function actionClassForFindingType(findingType: string): ActionClass | null {
+  const id = FINDING_TYPE_TO_ACTION_CLASS[findingType]
+  return id ? (ACTION_CLASSES[id] ?? null) : null
+}
+
+/** Every finding type this deployment can autonomously repair. */
+export const AUTONOMOUSLY_REPAIRABLE_FINDING_TYPES = Object.keys(FINDING_TYPE_TO_ACTION_CLASS)

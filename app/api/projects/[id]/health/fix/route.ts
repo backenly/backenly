@@ -82,7 +82,12 @@ export const POST = withProjectAccess(async (req: NextRequest, { user, projectId
   }).catch(() => { /* audit is best-effort; never block the fix on it */ })
 
   try {
-    const result = await runAutoFix(findingId, projectId)
+    // A person clicked "fix this" on an authenticated surface. The click IS
+    // the authorisation; gating it behind a standing grant would mean a user
+    // could not repair their own backend without first delegating to a robot.
+    const result = await runAutoFix(findingId, projectId, {
+      actor: { kind: 'human', userId: user.userId },
+    })
 
     // Map the engine outcome to a user-facing message the advisor row renders.
     const outcome = result.outcome

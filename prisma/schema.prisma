@@ -218,6 +218,7 @@ model Project {
   projectMembers         ProjectMember[]
   maintenanceApprovals   MaintenanceApproval[]
   ownershipIntents       OwnershipIntent[]
+  authorityGrants        AuthorityGrant[]
 
   @@index([userId])
   @@index([updatedAt])
@@ -476,6 +477,65 @@ model OwnershipIntent {
   @@index([projectId, tableName])
   @@index([projectId, revokedAt])
   @@map("ownership_intents")
+}
+
+/// A human's standing permission for a Backenly controller to perform one class
+/// of action unattended.
+///
+/// Distinct from OwnershipIntent, and the distinction is load-bearing: intent
+/// says what SHOULD be true of a resource, a grant says whether Backenly may
+/// CHANGE it without asking. Treating a declaration of fact as a grant of power
+/// is the shortcut this model exists to make impossible.
+///
+/// Distinct from MaintenanceApproval too: that is consent to ONE plan at one
+/// version, this is a standing permission for a class of action within bounds.
+/// Both are valid authority sources and neither replaces the other.
+///
+/// Default deny. Absence of a row is absence of authority.
+model AuthorityGrant {
+  id        String @id @default(uuid())
+  projectId String @map("project_id")
+
+  /// The human who created it. Only a person may delegate unattended authority;
+  /// an agent granting itself authority is the thing requestedBy/authorizedBy
+  /// exists to prevent.
+  grantedByUserId String @map("granted_by_user_id")
+
+  /// Which Backenly controller may act under it.
+  granteeKind String @default("backenly") @map("grantee_kind")
+  granteeLoop String @map("grantee_loop")
+
+  /// Exactly one action class. Never a tier band: permitting a class is narrow,
+  /// raising a ceiling is not.
+  actionClassId String @map("action_class_id")
+  /// Resource scope. '*' means every resource in the project.
+  resourceScope String @default("*") @map("resource_scope")
+  environment   String
+
+  maxTier        Int    @default(2) @map("max_tier")
+  maxBlastRadius String @default("table") @map("max_blast_radius")
+
+  validFrom       DateTime  @default(now()) @map("valid_from")
+  expiresAt       DateTime? @map("expires_at")
+  /// Remaining uses, when the grant is budgeted. Null means unbudgeted.
+  budgetRemaining Int?      @map("budget_remaining")
+
+  /// Set when withdrawn. Checked at the mutation boundary, so revocation stops
+  /// an execution that has already been decided.
+  revokedAt DateTime? @map("revoked_at")
+  revokedBy String?   @map("revoked_by")
+
+  /// Bumped on any change that alters what the grant permits. The decision
+  /// records the version it relied on so the mutation boundary can prove the
+  /// permission did not move underneath it.
+  version   Int      @default(1)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, actionClassId, environment])
+  @@index([projectId, revokedAt])
+  @@map("authority_grants")
 }
 
 model BackendEvent {

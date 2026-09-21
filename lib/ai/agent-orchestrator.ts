@@ -23,6 +23,7 @@ import { shouldSkipLLM, schemaFingerprint, getCachedResult, setCachedResult, rec
 import type { AgentInput, AgentFinding, AgentResult, OrchestratorResult } from './agents/types'
 import type { PlannerOutput } from './agents/types'
 import { P, loopPrincipals, type Principal } from '@/lib/principal'
+import { authorizeAutonomousFix, revalidateAtMutationBoundary } from '@/lib/authority/gate'
 import { prisma } from '@/lib/db/prisma'
 
 export type { OrchestratorResult, PlannerOutput }
@@ -239,6 +240,42 @@ export async function executeAutoFixes(
         `stopping auto-fix batch after ${applied.length} applied. ${breaker.reason ?? ''}`,
       )
       break
+    }
+
+    // ── THE GATE ─────────────────────────────────────────────────────────
+    //
+    // This path mutates through its own pg.Pool and the AI executor, never
+    // through runAutoFix, so it does not inherit the gate that lives there.
+    // Before Phase 5B it was a genuine autonomous bypass: the circuit breaker
+    // above bounds HOW MUCH it may do, and bounded the wrong question — a
+    // budget is not authority.
+    const gate = await authorizeAutonomousFix({
+      projectId,
+      // The orchestrator's own vocabulary. An unmapped category is
+      // unregistered, which the decision reads as FREEZE — the correct answer
+      // for a repair whose dependencies nobody has declared.
+      findingType: String((finding as any).type ?? (finding as any).category ?? 'unknown'),
+      tableName:
+        typeof (finding as any).location === 'string'
+          ? ((finding as any).location as string).split('.').pop() ?? null
+          : null,
+      loop: 'reconciler',
+    })
+
+    if (!gate.mayExecute) {
+      console.warn(
+        `[AgentOrchestrator] ${gate.decision.decision} for "${finding.title}" — ` +
+          `${gate.decision.reasons[0] ?? 'authority insufficient'}`,
+      )
+      continue
+    }
+
+    const stillValid = await revalidateAtMutationBoundary(gate, projectId)
+    if (!stillValid.stillValid) {
+      console.warn(
+        `[AgentOrchestrator] authority lapsed before "${finding.title}": ${stillValid.reason}`,
+      )
+      continue
     }
 
     try {

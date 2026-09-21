@@ -838,7 +838,10 @@ export async function runReconcilerLive(projectId: string): Promise<LiveReconcil
       // every safety property is preserved — classifier gate, pre-fix snapshot,
       // post-fix re-probe, regression check, change-freeze — while a backend
       // converges in a tick or two instead of an afternoon.
-      const res = await runAutoFix(findingId, projectId, { skipCooldown: true })
+      const res = await runAutoFix(findingId, projectId, {
+        skipCooldown: true,
+        actor: { kind: 'autonomous', loop: 'reconciler' },
+      })
       if (res.outcome === 'auto_fixed') {
         applied++
       } else if (res.outcome === 'applied_unverified') {

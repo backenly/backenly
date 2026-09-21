@@ -89,10 +89,12 @@ async function applyOneGap(
     },
     select: { id: true },
   })
-  let res = await runAutoFix(finding.id, projectId, { skipCooldown: true })
+  // Operator verification harness, labelled explicitly.
+  const harness = { skipCooldown: true, actor: { kind: 'operator' as const, via: 'cli' as const } }
+  let res = await runAutoFix(finding.id, projectId, harness)
   for (let a = 0; a < 5 && res.outcome === 'deferred'; a++) {
     await sleep(4000)
-    res = await runAutoFix(finding.id, projectId, { skipCooldown: true })
+    res = await runAutoFix(finding.id, projectId, harness)
   }
   return { outcome: res.outcome, findingId: finding.id }
 }
