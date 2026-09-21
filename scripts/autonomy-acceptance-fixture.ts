@@ -191,6 +191,36 @@ async function prepare(env: Env): Promise<Record<string, unknown>> {
     })
   }
 
+  // An ordinary free-tier subscription, written by the product's own function.
+  // Not decoration: with no subscription at all the plan ceiling cannot be
+  // resolved, getProjectAutonomyLevel clamps to the safe fallback, and every
+  // tier-1 repair would be refused for a reason that has nothing to do with the
+  // Authority Decision. The fixture must be a project the loop treats normally.
+  const sub = await prisma.subscription.findFirst({
+    where: { userId: user.id, status: { in: ['ACTIVE', 'FREE', 'GRACE'] } },
+    include: { plan: { select: { name: true, autonomyMaxLevel: true } } },
+  })
+  //
+  // The two rows `createFreeSubscription` writes, inlined rather than imported:
+  // importing `lib/billing` pulls its whole dependency graph into the bundle
+  // and puts the payload over the task-definition limit. Kept identical to
+  // lib/billing/index.ts — SANDBOX, falling back to the legacy FREE plan,
+  // status FREE — and it refuses rather than inventing a plan if neither is
+  // seeded, because a fixture that quietly ran at a different ceiling would
+  // report the wrong answer.
+  let subscription = sub
+  if (!subscription) {
+    const plan =
+      (await prisma.plan.findUnique({ where: { name: 'SANDBOX' } })) ??
+      (await prisma.plan.findUnique({ where: { name: 'FREE' } }))
+    if (!plan) refuse('no SANDBOX or FREE plan is seeded, so the fixture cannot be an ordinary free project')
+    await prisma.subscription.create({ data: { userId: user.id, planId: plan.id, status: 'FREE' } })
+    subscription = await prisma.subscription.findFirst({
+      where: { userId: user.id },
+      include: { plan: { select: { name: true, autonomyMaxLevel: true } } },
+    })
+  }
+
   let proj = await fixtureProject()
   if (!proj) {
     const created = await prisma.project.create({
@@ -231,7 +261,17 @@ async function prepare(env: Env): Promise<Record<string, unknown>> {
   if (fn[0].n > 0) await q(`SELECT public.backenly_pgrst_prepare_schema('${s}')`)
 
   await restoreHealthy(proj.id)
-  return { mode: 'prepare', env, projectId: proj.id, schema: s, postgrestPrepared: fn[0].n > 0 }
+  return {
+    mode: 'prepare',
+    env,
+    projectId: proj.id,
+    schema: s,
+    postgrestPrepared: fn[0].n > 0,
+    plan: subscription?.plan?.name ?? null,
+    planAutonomyCeiling: subscription?.plan?.autonomyMaxLevel ?? null,
+    autonomyLevel: (await prisma.project.findUnique({ where: { id: proj.id }, select: { autonomyLevel: true } }))
+      ?.autonomyLevel ?? null,
+  }
 }
 
 async function authority(env: Env, action: Action): Promise<Record<string, unknown>> {
@@ -417,6 +457,7 @@ async function teardown(env: Env): Promise<Record<string, unknown>> {
   await q(`DROP SCHEMA IF EXISTS "${s}" CASCADE`)
   await q(`DROP SCHEMA IF EXISTS "${s}_blind" CASCADE`)
   await prisma.project.delete({ where: { id: proj.id } })
+  await prisma.subscription.deleteMany({ where: { userId: proj.userId } })
   await prisma.user.deleteMany({ where: { email: FIXTURE_USER_EMAIL } })
   return { mode: 'teardown', env, removed: true, projectId: proj.id }
 }
