@@ -49,6 +49,26 @@
   animation: heroFrameEnter 1450ms cubic-bezier(0.16, 1, 0.3, 1) 720ms forwards;
 }
 
+/* Launch chip: the violet top hairline sweeps, so the edge reads imminent
+   rather than static. TEMPORARY, paired with LaunchPill in app/page.tsx;
+   delete both together after the Product Hunt launch.
+
+   This is CSS rather than framer-motion on purpose. The first attempt used a
+   motion.span with `repeat: Infinity` nested inside the hero's variant tree,
+   and the parent's `visible` label overrode the child's own `animate`, so the
+   sweep ran exactly once and then froze at its end position. Measured, not
+   guessed: its transform sat at a constant translateX(431px) across 1.6s.
+   CSS also keeps an infinite animation off the JS thread and gets the
+   reduced-motion gate below for free, with no hydration branch. */
+@keyframes launchSweep {
+  0%        { transform: translateX(-120%); }
+  55%, 100% { transform: translateX(420%); }
+}
+
+.launch-sweep {
+  animation: launchSweep 5000ms cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .hero-enter,
   .hero-frame-enter {
@@ -56,6 +76,15 @@
     animation: none;
     transform: none;
     filter: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Hide it rather than just stopping it, so the bright bar does not sit
+     parked at the right edge. The static violet hairline stays. */
+  .launch-sweep {
+    animation: none;
+    opacity: 0;
   }
 }
 

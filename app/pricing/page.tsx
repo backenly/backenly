@@ -18,6 +18,7 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { ROUTES, SiteShell } from '@/components/site/SiteShell'
+import { useUserSession } from '@/lib/hooks/useUserSession'
 
 type Plan = {
   name: string
@@ -157,36 +158,7 @@ const faqs = [
 
 export default function PricingPage() {
   const router = useRouter()
-  const [isLoggedIn, setIsLoggedIn] = useState(false)
-
-  useEffect(() => {
-    let cancelled = false
-
-    async function loadSession() {
-      try {
-        const token = localStorage.getItem('auth-token')
-        if (!token) {
-          if (!cancelled) setIsLoggedIn(false)
-          return
-        }
-
-        const response = await fetch('/api/auth/me', {
-          headers: { Authorization: `Bearer ${token}` },
-        })
-        if (cancelled) return
-
-        setIsLoggedIn(response.ok)
-      } catch {
-        if (!cancelled) setIsLoggedIn(false)
-      }
-    }
-
-    void loadSession()
-
-    return () => {
-      cancelled = true
-    }
-  }, [])
+  const { isLoggedIn } = useUserSession()
 
   function handleCta() {
     if (!isLoggedIn) {

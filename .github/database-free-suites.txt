@@ -190,3 +190,8 @@ __tests__/security/integration-credential-egress.test.ts
 # treating it as configured is worse than leaving the file empty). Pure string
 # handling, checked against the real .env.example.
 __tests__/selfhost/env-file.test.ts
+
+# The shared session hook behind the landing and navbar CTAs. Exercises the
+# module-level cache, in-flight request deduplication and the logged-out
+# fallback against a mocked fetch, so it never reaches Prisma. jsdom.
+__tests__/hooks/useUserSession.test.ts

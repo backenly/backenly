@@ -33,7 +33,15 @@ export class ForbiddenError extends Error {
  */
 export async function requireUser() {
   const cookieStore = await cookies()
-  const token = cookieStore.get('auth-token')?.value
+  let token = cookieStore.get('auth-token')?.value
+
+  if (!token) {
+    const headersList = await headers()
+    const authHeader = headersList.get('authorization')
+    if (authHeader?.startsWith('Bearer ')) {
+      token = authHeader.slice(7).trim()
+    }
+  }
 
   if (!token) {
     throw new UnauthorizedError('No authentication token')
