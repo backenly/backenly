@@ -628,6 +628,22 @@ function main(): void {
   console.log('  It is in .env as BACKENLY_SETUP_TOKEN. Once the deployment is claimed')
   console.log('  the token stops working, whatever it is set to.')
   console.log('')
+
+  // Said here because nothing else will say it until someone needs it: with
+  // no mail transport, password-reset codes cannot be sent, and a second
+  // account (BACKENLY_ALLOW_PUBLIC_SIGNUP=true) cannot verify its email.
+  const lines = readEnvLines()
+  const mailConfigured = ['SMTP_HOST', 'SMTP_USER', 'SMTP_PASS'].every(k => !!envValue(lines, k))
+  if (mailConfigured) {
+    console.log('  Email: configured (SMTP). Password-reset codes will be sent.')
+  } else {
+    console.log('  Email: not configured, so password-reset codes cannot be sent.')
+    console.log('  Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS and SMTP_FROM in .env to')
+    console.log('  enable it. Until then, reset a password from this machine with:')
+    console.log('')
+    console.log('    npm run auth:reset-password -- --email you@example.com')
+  }
+  console.log('')
 }
 
 try {

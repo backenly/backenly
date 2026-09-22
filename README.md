@@ -144,6 +144,33 @@ without it the single administrator slot would go to whoever loaded the page
 first. Once the deployment is claimed the token stops working, whatever it is
 set to.
 
+#### Email
+
+Claiming the deployment needs no email. Two things do: **password-reset
+codes**, and the code a new account must enter before it exists if you open
+registration with `BACKENLY_ALLOW_PUBLIC_SIGNUP=true`. Set any SMTP provider in
+`.env`:
+
+```bash
+SMTP_HOST=smtp.resend.com     # or SES, Mailgun, SendGrid, Gmail
+SMTP_PORT=587                 # STARTTLS; 465 is rewritten to 587
+SMTP_USER=resend
+SMTP_PASS=...
+SMTP_FROM=Backenly <noreply@yourdomain.com>   # a domain your provider has verified
+```
+
+Without it, the reset page says email is unavailable rather than pretending a
+code was sent, and later signups are refused rather than created unverified.
+To reset a password without email, run this on the server:
+
+```bash
+npm run auth:reset-password -- --email you@example.com              # prompts
+npm run auth:reset-password -- --email you@example.com --generate   # prints one
+```
+
+It ends every session for that account. Access to the machine is the
+authority, as it is for the setup token.
+
 #### The four credentials
 
 The install creates a separate PostgreSQL role for each job, rather than one

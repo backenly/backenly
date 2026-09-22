@@ -64,7 +64,9 @@ describe('one policy, not copies', () => {
 
   test.each([
     'app/auth/signup/page.tsx',
-    'app/auth/reset-password/page.tsx',
+    // Where a new password is chosen after an emailed reset code.
+    // app/auth/reset-password only redirects here now.
+    'app/auth/forgot-password/page.tsx',
   ])('%s checks passwords with the shared policy', (file) => {
     const source = readFileSync(join(process.cwd(), file), 'utf8')
     expect(source).toContain("from '@/lib/auth/password-policy'")

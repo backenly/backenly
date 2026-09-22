@@ -1,17 +1,25 @@
 export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
-import jwt from 'jsonwebtoken'
 import { prisma } from '@/lib/db/postgres'
 import { hashPassword, validatePasswordStrength } from '@/lib/auth/password'
 import { z } from 'zod'
 import { consume, AUTH_LIMITS, clientIp } from '@/lib/security/auth-rate-limit'
+import { EMAIL_CODE_REJECTED_MESSAGE, normalizeEmail, verifyEmailCode } from '@/lib/auth/email-code'
 
 const schema = z.object({
-  token: z.string().min(1, 'Reset token is required'),
+  email: z.string().email('Invalid email address'),
+  code: z.string().min(1, 'Enter the code from the email').max(32),
   password: z.string().min(1, 'Password is required'),
 })
 
+/**
+ * POST /api/auth/reset-password
+ *
+ * Replaces a password once the code mailed by POST /api/auth/forgot-password
+ * is proven. Every existing session ends, and a lockout from failed sign-ins
+ * is lifted, because the person has just proven they own the address.
+ */
 export async function POST(request: NextRequest) {
   // IP rate limit — these are unauthenticated calls.
   const ip = clientIp(request)
@@ -25,56 +33,30 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json()
-    const { token, password } = schema.parse(body)
+    const parsed = schema.parse(body)
+    const email = normalizeEmail(parsed.email)
 
-    const strength = validatePasswordStrength(password)
+    // Checked before the code, so a weak password does not spend one of the
+    // code's five attempts.
+    const strength = validatePasswordStrength(parsed.password)
     if (!strength.valid) {
       return NextResponse.json({ error: strength.message }, { status: 400 })
     }
 
-    const secret = process.env.JWT_SECRET
-    if (!secret) throw new Error('JWT_SECRET is not configured')
-
-    // Pin HS256. Reset JWTs are signed by us with the same secret.
-    let payload: { userId: string; purpose: string; jti: string }
-    try {
-      payload = jwt.verify(token, secret, { algorithms: ['HS256'] }) as any
-    } catch {
-      return NextResponse.json(
-        { error: 'Reset link is invalid or has expired. Please request a new one.' },
-        { status: 400 }
-      )
+    const result = await verifyEmailCode('password_reset', email, parsed.code)
+    if (!result.ok) {
+      return NextResponse.json({ error: EMAIL_CODE_REJECTED_MESSAGE, code: 'CODE_REJECTED' }, { status: 400 })
     }
 
-    if (payload.purpose !== 'password-reset' || !payload.jti) {
-      return NextResponse.json(
-        { error: 'Reset link is invalid or has expired. Please request a new one.' },
-        { status: 400 }
-      )
-    }
-
-    // Single-use enforcement: the issuing route recorded jti+userId. Consume
-    // the row atomically — `deleteMany` returns count 0 if it's already been
-    // used or expired, in which case we reject without doing anything.
-    const consumed = await prisma.passwordResetToken.deleteMany({
-      where: { jti: payload.jti, userId: payload.userId, expiresAt: { gt: new Date() } },
+    const user = await prisma.user.findFirst({
+      where: { email: { equals: email, mode: 'insensitive' }, deletedAt: null },
+      select: { id: true, email: true },
     })
-    if (consumed.count === 0) {
-      return NextResponse.json(
-        { error: 'Reset link is invalid or has expired. Please request a new one.' },
-        { status: 400 }
-      )
-    }
-
-    const user = await prisma.user.findUnique({ where: { id: payload.userId } })
     if (!user) {
-      return NextResponse.json(
-        { error: 'Reset link is invalid or has expired. Please request a new one.' },
-        { status: 400 }
-      )
+      return NextResponse.json({ error: EMAIL_CODE_REJECTED_MESSAGE, code: 'CODE_REJECTED' }, { status: 400 })
     }
 
-    const hashedPassword = await hashPassword(password)
+    const hashedPassword = await hashPassword(parsed.password)
 
     await prisma.user.update({
       where: { id: user.id },
@@ -83,6 +65,9 @@ export async function POST(request: NextRequest) {
         tokenVersion: { increment: 1 },
         failedLoginAttempts: 0,
         lockedUntil: null,
+        // The code was mailed to this address and typed back, which is the
+        // proof verification asks for.
+        emailVerified: true,
       },
     })
 
@@ -96,11 +81,11 @@ export async function POST(request: NextRequest) {
         type: 'ui',
         userId: user.id,
         userEmail: user.email,
-        details: 'User successfully reset their password',
+        details: 'Password replaced with an emailed code; all sessions ended',
       },
     })
 
-    return NextResponse.json({ message: 'Password reset successfully. You can now sign in.' })
+    return NextResponse.json({ message: 'Password updated. You can now sign in with it.' })
   } catch (error) {
     if (error instanceof z.ZodError) {
       return NextResponse.json({ error: error.errors[0].message }, { status: 400 })

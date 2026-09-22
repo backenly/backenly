@@ -248,7 +248,13 @@ __tests__/auth/deployment-claim.test.ts
 # only safe short because it can be guessed a few times, online, and used once:
 # the attempt budget is one conditional UPDATE and single use is one conditional
 # DELETE, so both are asserted under real concurrency against Postgres.
+#
+# The routes suite drives signup and reset end to end against a real STARTTLS
+# SMTP sink, reading each code out of the mail that actually arrived, and
+# includes the production failure where the provider rejected the sending
+# domain while every page still said "sent".
 __tests__/auth/email-code.test.ts
+__tests__/auth/email-code-routes.test.ts
 
 # The read-only SQL workspace. /api/database/query used to run queryRaw on the
 # APPLICATION connection with a deny-list regex as its only tenant boundary -

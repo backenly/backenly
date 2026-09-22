@@ -85,32 +85,97 @@ export async function getRegistrationRequirements(): Promise<RegistrationRequire
   return response.json()
 }
 
-export async function register(data: RegisterRequest): Promise<AuthResponse> {
-  const response = await fetch(`${API_BASE}/auth/register`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
-  })
-  
-  if (!response.ok) {
-    const error = await response.json()
-    throw new AuthRequestError(error.error || 'Registration failed', error.code)
-  }
-  
-  const result = await response.json()
-  // Store token in localStorage
+/**
+ * What POST /api/auth/register answers when the address must be proven first.
+ * No account and no session exist yet; the code mailed to `email` creates them.
+ */
+export interface SignupVerificationRequired {
+  status: 'verification_required'
+  email: string
+  expiresInSec: number
+  resendAfterSec: number
+}
+
+export type RegisterResult =
+  | ({ status: 'created' } & AuthResponse)
+  | SignupVerificationRequired
+
+async function readAuthError(response: Response, fallback: string): Promise<AuthRequestError> {
+  const error = await response.json().catch(() => ({}))
+  return new AuthRequestError(error.error || fallback, error.code)
+}
+
+/** Remember the session a successful signup or verification issued. */
+async function adoptSession(result: AuthResponse): Promise<void> {
   if (result.token) {
     localStorage.setItem('auth-token', result.token)
   }
-  
   try {
     const { setSessionCache } = await import('@/lib/hooks/useUserSession')
     setSessionCache(result.user || null, true)
   } catch {
     // Non-critical hook sync failure
   }
-  
+}
+
+export async function register(data: RegisterRequest): Promise<RegisterResult> {
+  const response = await fetch(`${API_BASE}/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+
+  if (!response.ok) throw await readAuthError(response, 'Registration failed')
+
+  const result = await response.json()
+  if (result.status === 'verification_required') return result as SignupVerificationRequired
+
+  await adoptSession(result)
+  return { ...result, status: 'created' }
+}
+
+/** Prove the address with the mailed code; this is what creates the account. */
+export async function verifySignupCode(email: string, code: string): Promise<AuthResponse> {
+  const response = await fetch(`${API_BASE}/auth/register/verify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, code }),
+  })
+
+  if (!response.ok) throw await readAuthError(response, 'Verification failed')
+
+  const result = await response.json()
+  await adoptSession(result)
   return result
+}
+
+export async function resendSignupCode(email: string): Promise<{ resendAfterSec: number }> {
+  const response = await fetch(`${API_BASE}/auth/register/resend`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email }),
+  })
+  if (!response.ok) throw await readAuthError(response, 'Could not send a new code')
+  return response.json()
+}
+
+export async function requestPasswordResetCode(email: string): Promise<{ resendAfterSec: number }> {
+  const response = await fetch(`${API_BASE}/auth/forgot-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email }),
+  })
+  if (!response.ok) throw await readAuthError(response, 'Could not send a reset code')
+  return response.json()
+}
+
+export async function resetPasswordWithCode(email: string, code: string, password: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/auth/reset-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, code, password }),
+  })
+  if (!response.ok) throw await readAuthError(response, 'Could not reset the password')
 }
 
 export async function logout(): Promise<void> {

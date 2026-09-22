@@ -65,6 +65,16 @@
     "reason": "ACCEPTED: unauthenticated by design. Rate-limited per IP via AUTH_LIMITS, bot-checked through verifySignupChallenge, and on self-host the single account slot is claimed inside the inserting transaction behind an advisory lock."
   },
   {
+    "route": "/api/auth/register/resend",
+    "status": "ACCEPTED",
+    "reason": "ACCEPTED: unauthenticated by design - it re-sends the code for a signup that has no account and no session yet. It carries only an address and re-issues the pending signup's stored code, so it cannot change what is created. Rate-limited per IP via AUTH_LIMITS and per address by throttleEmailCodeSend, and it answers identically whether or not a signup is pending."
+  },
+  {
+    "route": "/api/auth/register/verify",
+    "status": "ACCEPTED",
+    "reason": "ACCEPTED: unauthenticated by design - this is what creates the account, so no session can exist yet. Authority is the six-digit code mailed to the address, stored as an HMAC, dead after five wrong guesses and single-use. Rate-limited per IP via AUTH_LIMITS, and assertSignupAllowed is re-checked before the account is created."
+  },
+  {
     "route": "/api/auth/replit",
     "status": "ACCEPTED",
     "reason": "ACCEPTED: unauthenticated by design - starts the replit OAuth redirect before a session exists."
@@ -77,7 +87,7 @@
   {
     "route": "/api/auth/reset-password",
     "status": "ACCEPTED",
-    "reason": "ACCEPTED: unauthenticated by design; authority comes from the emailed token, not a session. Rate-limited via AUTH_LIMITS."
+    "reason": "ACCEPTED: unauthenticated by design; authority comes from the six-digit code mailed to the address, not a session. The code is stored as an HMAC, dies after five wrong guesses and is single-use. Rate-limited via AUTH_LIMITS."
   },
   {
     "route": "/api/auth/verify-email",

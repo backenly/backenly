@@ -180,21 +180,13 @@ export default function SettingsPage() {
     } catch { /* noop */ }
   }
 
-  const handlePasswordReset = async () => {
+  // Reset is a code typed back with the new password, so it happens on the
+  // recovery page rather than as a fire-and-forget request with a toast that
+  // said "sent" whether or not anything was.
+  const handlePasswordReset = () => {
     if (!user?.email) return
     setResetLoading(true)
-    try {
-      const res = await fetch('/api/auth/forgot-password', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: user.email }),
-      })
-      showToast(res.ok ? 'Password reset link sent to your email' : 'Could not send reset link. Try again', res.ok ? 'success' : 'error')
-    } catch {
-      showToast('Could not send reset link. Try again', 'error')
-    } finally {
-      setResetLoading(false)
-    }
+    router.push(`/auth/forgot-password?email=${encodeURIComponent(user.email)}`)
   }
 
   const handle2FABegin = async () => {

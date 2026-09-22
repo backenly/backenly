@@ -120,11 +120,17 @@ export async function GET(request: NextRequest) {
       },
     })
 
-    let email = githubUser.email
-    if (!email && emailsResponse.ok) {
+    // Only an address GitHub itself has verified. The account below is created,
+    // or linked to an existing one by address, as email-verified, so taking the
+    // public profile email or `emails[0]` unchecked let an unverified address
+    // skip the proof email signup requires, and attach to whichever Backenly
+    // account already owned that address. `user:email` is always requested,
+    // so the verified list is always available.
+    let email: string | null = null
+    if (emailsResponse.ok) {
       const emails = await emailsResponse.json()
-      const primaryEmail = emails.find((e: any) => e.primary && e.verified)
-      email = primaryEmail?.email || emails[0]?.email
+      const verified = Array.isArray(emails) ? emails.filter((e: any) => e?.verified && e?.email) : []
+      email = (verified.find((e: any) => e.primary) ?? verified[0])?.email ?? null
     }
 
     if (!email) {

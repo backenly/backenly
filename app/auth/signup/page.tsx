@@ -8,7 +8,14 @@ import {
   checkSignupEmailEligibility,
   SIGNUP_EMAIL_REJECTION_MESSAGE,
 } from '@/lib/auth/signup-email-eligibility'
-import { AuthRequestError, getRegistrationRequirements, register } from '@/lib/api/auth'
+import {
+  AuthRequestError,
+  getRegistrationRequirements,
+  register,
+  resendSignupCode,
+  verifySignupCode,
+} from '@/lib/api/auth'
+import { CODE_LENGTH, CodeField, ResendCodeButton, useCooldown } from '@/components/site/EmailCodeFields'
 import { PASSWORD_MIN_LENGTH, PASSWORD_POLICY_HINT, validatePasswordStrength } from '@/lib/auth/password-policy'
 import { useUserSession } from '@/lib/hooks/useUserSession'
 import { registerSiteIcons } from '@/lib/icons/registry'
@@ -52,7 +59,16 @@ function SignupForm() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
-  const [errors, setErrors] = useState<{ email?: string; password?: string; setupToken?: string }>({})
+  const [errors, setErrors] = useState<{ email?: string; password?: string; setupToken?: string; form?: string }>({})
+  // Set once the server has mailed a code. No account exists until it is
+  // entered, so this step is where signup actually finishes.
+  const [pendingEmail, setPendingEmail] = useState<string | null>(null)
+  const [code, setCode] = useState('')
+  const [codeError, setCodeError] = useState<string | null>(null)
+  const [codeNotice, setCodeNotice] = useState<string | null>(null)
+  const [isVerifying, setIsVerifying] = useState(false)
+  const [isResending, setIsResending] = useState(false)
+  const [resendIn, setResendIn] = useCooldown(0)
   const [isSubmitting, setIsSubmitting] = useState(false)
   // The installer prints a claim link carrying the token. Read once, at first
   // render, so the form opens already filled in.
@@ -155,19 +171,30 @@ function SignupForm() {
     setErrors({})
     setIsSubmitting(true)
     try {
-      await register({
+      const result = await register({
         email,
         password,
         ...(refCode ? { ref: refCode } : {}),
         ...(turnstileToken ? { turnstileToken } : {}),
         ...(setupTokenRequired && setupToken.trim() ? { setupToken: setupToken.trim() } : {}),
       })
+      if (result.status === 'verification_required') {
+        setPendingEmail(result.email)
+        setCode('')
+        setCodeError(null)
+        setCodeNotice(null)
+        setResendIn(result.resendAfterSec)
+        setIsSubmitting(false)
+        return
+      }
       router.push(redirectUrl)
     } catch (error) {
       if (error instanceof AuthRequestError && error.code === 'SETUP_TOKEN_REJECTED') {
         // Also the fallback when the requirements could not be read up front.
         setSetupTokenRequired(true)
         setErrors({ setupToken: error.message })
+      } else if (error instanceof AuthRequestError && error.code === 'EMAIL_DELIVERY_UNAVAILABLE') {
+        setErrors({ form: error.message })
       } else {
         setErrors({ password: error instanceof Error ? error.message : 'Registration failed' })
       }
@@ -175,6 +202,52 @@ function SignupForm() {
       setTurnstileToken(null)
       resetTurnstile()
     }
+  }
+
+  const handleVerify = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!pendingEmail) return
+    if (code.length !== CODE_LENGTH) {
+      setCodeError(`Enter the ${CODE_LENGTH}-digit code from the email.`)
+      return
+    }
+    setCodeError(null)
+    setIsVerifying(true)
+    try {
+      await verifySignupCode(pendingEmail, code)
+      router.push(redirectUrl)
+    } catch (error) {
+      setCodeError(error instanceof Error ? error.message : 'Verification failed')
+      setIsVerifying(false)
+    }
+  }
+
+  const handleResend = async () => {
+    if (!pendingEmail) return
+    setIsResending(true)
+    setCodeError(null)
+    setCodeNotice(null)
+    try {
+      const r = await resendSignupCode(pendingEmail)
+      setResendIn(r.resendAfterSec)
+      setCode('')
+      setCodeNotice(`A new code is on its way to ${pendingEmail}.`)
+    } catch (error) {
+      setCodeError(error instanceof Error ? error.message : 'Could not send a new code')
+    } finally {
+      setIsResending(false)
+    }
+  }
+
+  // Back to the form, keeping what was typed. The pending signup is replaced
+  // by the next submit, so nothing about the abandoned one lingers.
+  const startOver = () => {
+    setPendingEmail(null)
+    setCode('')
+    setCodeError(null)
+    setCodeNotice(null)
+    setTurnstileToken(null)
+    resetTurnstile()
   }
 
   if (isLoggedIn) {
@@ -189,6 +262,56 @@ function SignupForm() {
             <div className="h-6 w-6 animate-spin rounded-full border-2 border-white/20 border-t-white" />
           </div>
         </AuthCard>
+      </AuthChrome>
+    )
+  }
+
+  if (pendingEmail) {
+    return (
+      <AuthChrome>
+        <AuthCard
+          eyebrow="Check your email"
+          title="Enter your code"
+          subtitle={`We sent a ${CODE_LENGTH}-digit code to ${pendingEmail}. It expires in 10 minutes.`}
+        >
+          <form onSubmit={handleVerify} className="flex flex-col gap-4 mb-5">
+            <CodeField value={code} onChange={setCode} disabled={isVerifying} error={codeError || undefined} />
+
+            {codeNotice && !codeError && (
+              <p className="text-[11px] text-emerald-300">{codeNotice}</p>
+            )}
+
+            <PrimaryButton type="submit" disabled={isVerifying} loading={isVerifying}>
+              {isVerifying ? 'Creating account…' : 'Verify and create account'}
+            </PrimaryButton>
+          </form>
+
+          <div className="flex items-center justify-between gap-3">
+            <ResendCodeButton secondsLeft={resendIn} sending={isResending} onResend={handleResend} />
+            <button
+              type="button"
+              onClick={startOver}
+              className="text-xs text-zinc-400 hover:text-zinc-200 transition-colors"
+            >
+              Use a different email
+            </button>
+          </div>
+
+          <p className="mt-6 text-[11px] leading-relaxed text-zinc-500">
+            No email? Check your spam folder. If this address already has an account, we sent a note
+            saying so instead, and you can{' '}
+            <Link href="/auth/login" className="text-zinc-300 hover:text-white">sign in</Link> or{' '}
+            <Link
+              href={`/auth/forgot-password?email=${encodeURIComponent(pendingEmail)}`}
+              className="text-zinc-300 hover:text-white"
+            >
+              reset your password
+            </Link>
+            .
+          </p>
+        </AuthCard>
+
+        <AuthFooterNote />
       </AuthChrome>
     )
   }
@@ -294,6 +417,13 @@ function SignupForm() {
               )}
 
               <TurnstileWidget onToken={setTurnstileToken} className="mt-1" />
+
+              {errors.form && (
+                <div className="flex items-start gap-2 rounded-lg border border-rose-500/30 bg-rose-500/[0.06] p-3 text-[12px] leading-relaxed text-rose-200">
+                  <Icon icon="solar:shield-warning-linear" width={14} className="mt-0.5 shrink-0" />
+                  <span>{errors.form}</span>
+                </div>
+              )}
 
               <PrimaryButton type="submit" disabled={isSubmitting} loading={isSubmitting}>
                 {isSubmitting ? 'Creating account…' : 'Create account'}

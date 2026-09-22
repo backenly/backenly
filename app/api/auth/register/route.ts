@@ -3,28 +3,40 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/postgres'
 import { hashPassword, validatePasswordStrength } from '@/lib/auth/password'
-import { createSession } from '@/lib/auth/session'
-import { logAuthEvent } from '@/lib/services/logging'
-import { initializeAccountEntitlements } from '@/lib/entitlements'
-import { sendVerificationEmail } from '@/lib/auth/email'
+import { sendAccountExistsEmail, sendSignupCodeEmail } from '@/lib/auth/email'
 import {
   assertSignupAllowed,
-  createUserClaimingSignupSlot,
   recordSecurityEvent,
   SignupSlotTakenError,
 } from '@/lib/platform-controls'
-import { onSignupCompleted, recordProductEvent, verifySignupChallenge } from '@/lib/platform-signals'
+import { verifySignupChallenge } from '@/lib/platform-signals'
 import {
   assertSetupTokenAdmits,
   claimAwaitsToken,
+  deploymentIsClaimed,
   SetupTokenError,
   setupTokenRequired,
 } from '@/lib/auth/setup-token'
 import { currentEdition } from '@/lib/edition'
 import { consume, AUTH_LIMITS, clientIp } from '@/lib/security/auth-rate-limit'
+import {
+  EMAIL_CODE_TTL_MS,
+  issueEmailCode,
+  normalizeEmail,
+  throttleEmailCodeSend,
+} from '@/lib/auth/email-code'
+import {
+  deliverPlatformEmail,
+  EmailDeliveryUnavailableError,
+  emailUnavailableBody,
+  platformEmailConfigured,
+} from '@/lib/email/platform-delivery'
+import { signupVerificationPolicy } from '@/lib/auth/signup/policy'
+import { AccountAlreadyExistsError, completeEmailSignup } from '@/lib/auth/signup/complete-email-signup'
+import type { PendingSignup } from '@/lib/auth/signup/pending'
+import type { Prisma } from '@prisma/client'
 
 import { z } from 'zod'
-import jwt from 'jsonwebtoken'
 
 const registerSchema = z.object({
   email: z.string().email('Invalid email address'),
@@ -63,11 +75,19 @@ export async function GET() {
   return NextResponse.json({ setupTokenRequired: required })
 }
 
+/**
+ * POST /api/auth/register
+ *
+ * Every gate runs here, once. Then either the account is created now (the
+ * first operator of a self-hosted install) or a code is mailed and the account
+ * is created by POST /api/auth/register/verify once the code is proven. No
+ * account and no session exist for an address nobody has proven.
+ */
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
     const parsed = registerSchema.parse(body)
-    const email = parsed.email.trim().toLowerCase()
+    const email = normalizeEmail(parsed.email)
     const { password, name } = parsed
 
     const ip = clientIp(request)
@@ -113,7 +133,6 @@ export async function POST(request: NextRequest) {
     if (!signupGuard.ok) {
       return NextResponse.json({ error: signupGuard.reason }, { status: signupGuard.status })
     }
-    const untrusted = signupGuard.untrusted === true
 
     // Validate password strength
     const passwordValidation = validatePasswordStrength(password)
@@ -123,191 +142,86 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       )
     }
-    
-    // Check if user already exists
-    const existingUser = await prisma.user.findUnique({
-      where: { email },
-    })
-    
-    if (existingUser) {
-      return NextResponse.json(
-        { error: 'User with this email already exists' },
-        { status: 400 }
-      )
-    }
-    
-    // Hash password
-    const hashedPassword = await hashPassword(password)
-    
-    // Get default role (Developer) or create if doesn't exist
-    // Since roles can be global (projectId: null) or project-scoped, we look for a global Developer role
-    // Note: Compound unique constraints don't support null, so we use findFirst for global roles
-    let defaultRole = await prisma.role.findFirst({
-      where: {
-        name: 'Developer',
-        projectId: null, // Global role
-      },
-    })
-    
-    if (!defaultRole) {
-      defaultRole = await prisma.role.create({
-        data: {
-          name: 'Developer',
-          description: 'Can read and write data, deploy functions',
-          permissions: ['read', 'write', 'deploy'],
-          projectId: null, // Global role, not project-scoped
-        },
-      })
-    }
-    
-    // Create user — signup is also a session start, so seed both timestamps.
-    //
-    // Wrapped so a self-hosted deployment's single account slot is claimed
-    // atomically. assertSignupAllowed above is a pre-flight, fifty lines back;
-    // relying on it alone lets two concurrent first signups both read zero
-    // accounts and both succeed, which is exactly the state a single-operator
-    // install must not reach. On Cloud this takes no lock and inserts directly.
-    // Refused before anything is written. On a self-hosted deployment with a
-    // configured token this is what stops a stranger who can reach the host
-    // from taking the operator's administrator slot.
+
+    // Refused before anything is written, and before any code is mailed. On a
+    // self-hosted deployment with a configured token this is what stops a
+    // stranger who can reach the host from taking the operator's
+    // administrator slot.
     await assertSetupTokenAdmits(parsed.setupToken)
 
-    const now = new Date()
-    const user = await createUserClaimingSignupSlot(async tx => {
-      const created = await tx.user.create({
-        data: {
-          email,
-          name: name || null,
-          password: hashedPassword,
-          provider: 'email',
-          emailVerified: false,
-          roleId: defaultRole.id,
-          lastLogin: now,
-          lastActiveAt: now,
-          trustLevel: untrusted ? 'untrusted' : 'trusted',
-          signupScore: signupGuard.score ?? null,
-          signupSignals: signupGuard.signals ?? [],
-          signupIp: ip === 'unknown' ? null : ip,
-        },
-        include: {
-          role: true,
-        },
-      })
-
-      // Adopt THE project, in the same transaction that created the account.
-      //
-      // This is the second half of "one command produces a ready deployment".
-      // Bootstrap creates the project before any account exists, so it starts
-      // owner-less; until something adopted the operator, Project.userId stayed
-      // NULL and every path keyed on ownership disagreed with every other one —
-      // the dashboard listed no projects to the only account there was.
-      //
-      // `userId: null` in the WHERE is what makes it safe: only an unowned
-      // project is ever claimed, so a later account cannot take it and two
-      // requests racing cannot disagree. The database decides, once. Doing it
-      // HERE rather than in a second `npm run bootstrap` is what removes the
-      // hidden step.
-      //
-      // Single-tenant only. On Cloud, projects belong to whoever created them
-      // and an unowned project is not a state that occurs.
-      if (currentEdition() === 'single-tenant') {
-        await tx.project.updateMany({
-          where: { userId: null },
-          data: { userId: created.id },
-        })
-      }
-
-      return created
+    const edition = currentEdition()
+    const verification = signupVerificationPolicy({
+      edition,
+      isFirstAccount: edition === 'single-tenant' ? !(await deploymentIsClaimed()) : false,
+      mailConfigured: platformEmailConfigured(),
     })
 
-    
-    // Give the new account its entitlements. A no-op in single-tenant, where
-    // they come from the edition rather than a Subscription row.
-    await initializeAccountEntitlements(user.id).catch(() => {
-      // Non-fatal: billing seed may not have run yet
-    })
+    // No transport, and this signup must prove its address. Refused, and said
+    // so, rather than creating an account nobody verified or telling someone
+    // to wait for a code that is never coming.
+    if (verification === 'refuse') {
+      return NextResponse.json(emailUnavailableBody('not_configured'), { status: 503 })
+    }
 
-    // Tell Backenly's business machinery an account was created. Referral
-    // attribution is what it does with that today. Ref comes from the form
-    // body, or the backenly_ref cookie set when the visitor landed on ?ref=
-    // (survives the OAuth round-trip too). A no-op in single-tenant, and the
-    // seam swallows its own errors, so signup cannot fail here.
-    const refCode = parsed.ref || request.cookies.get('backenly_ref')?.value || null
-    await onSignupCompleted({ userId: user.id, email: user.email, provider: 'email', referralCode: refCode })
+    // Hashed before the branch below so that an address with an account and
+    // one without cost the same, and nothing downstream sees the plaintext.
+    const passwordHash = await hashPassword(password)
+    const referralCode = parsed.ref || request.cookies.get('backenly_ref')?.value || null
 
-    // Track signup event (non-blocking)
-    recordProductEvent({ type: 'signup', userId: user.id, metadata: { email: user.email, provider: 'email' } })
+    const pending: PendingSignup = {
+      passwordHash,
+      name: name || null,
+      referralCode,
+      untrusted: signupGuard.untrusted === true,
+      score: signupGuard.score ?? null,
+      signals: signupGuard.signals ?? [],
+      ip,
+    }
 
-    // Create session
-    const { token, refreshToken } = await createSession(user.id, user.email, user.role?.name, user.name || undefined, 'email')
-    
-    // Create audit log
-    await prisma.auditLog.create({
-      data: {
-        action: 'User registered',
-        type: 'ui',
-        userId: user.id,
-        userEmail: user.email,
-        details: `New user registered with email: ${user.email}`,
-      },
-    })
+    // The operator claiming their own self-hosted install. Possession of the
+    // machine is the proof, and most installs have no mail transport yet.
+    if (verification === 'skip') {
+      return await completeEmailSignup({ email, ...pending, emailVerified: false })
+    }
 
-    // Log auth event
-    await logAuthEvent({
-      event: 'register',
-      userId: user.id,
-      success: true,
-      metadata: { email: user.email, provider: 'email' },
-    })
-
-    // Fire-and-forget: truly non-blocking — never delay the response for email
-    const secret = process.env.JWT_SECRET
-    if (secret) {
-      const verifyToken = jwt.sign(
-        { userId: user.id, email: user.email, purpose: 'email-verification' },
-        secret,
-        { expiresIn: '24h' }
+    // Everything else proves the address first.
+    const throttle = await throttleEmailCodeSend('signup', email)
+    if (!throttle.allowed) {
+      return NextResponse.json(
+        { error: 'A code was sent to this address moments ago. Wait a minute before asking for another.' },
+        { status: 429, headers: { 'Retry-After': String(throttle.retryAfter) } },
       )
-      const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'
-      const verifyUrl = `${appUrl}/auth/verify-email?token=${verifyToken}`
-      // 10 s hard cap so a firewalled SMTP host never blocks the HTTP response
-      Promise.race([
-        sendVerificationEmail(user.email, verifyUrl),
-        new Promise<void>((_, reject) => setTimeout(() => reject(new Error('email_timeout')), 10_000)),
-      ]).catch(() => { /* Non-fatal */ })
     }
 
-    const response = NextResponse.json({
-      user: {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        emailVerified: user.emailVerified,
-        role: user.role?.name,
-      },
-      token,
-      refreshToken,
+    // An address that already has an account gets a note saying so instead of
+    // a code, and the page answers exactly as it does for a new address. This
+    // route used to answer "User with this email already exists", which let
+    // anyone test which addresses have Backenly accounts.
+    const existing = await prisma.user.findFirst({
+      where: { email: { equals: email, mode: 'insensitive' } },
+      select: { id: true },
     })
 
-    response.cookies.set('auth-token', token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV !== 'development',
-      sameSite: 'lax',
-      maxAge: 60 * 60 * 24 * 7, // 7 days
-      path: '/',
-    })
-
-    if (refreshToken) {
-      response.cookies.set('refresh-token', refreshToken, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV !== 'development',
-        sameSite: 'lax',
-        maxAge: 60 * 60 * 24 * 30, // 30 days
-        path: '/',
-      })
+    try {
+      if (existing) {
+        await deliverPlatformEmail(() => sendAccountExistsEmail(email))
+      } else {
+        const { code } = await issueEmailCode('signup', email, pending as unknown as Prisma.InputJsonValue)
+        await deliverPlatformEmail(() => sendSignupCodeEmail(email, code))
+      }
+    } catch (error) {
+      if (error instanceof EmailDeliveryUnavailableError) {
+        return NextResponse.json(emailUnavailableBody('failed'), { status: 503 })
+      }
+      throw error
     }
 
-    return response
+    return NextResponse.json({
+      status: 'verification_required',
+      email,
+      expiresInSec: Math.round(EMAIL_CODE_TTL_MS / 1000),
+      resendAfterSec: Math.round(AUTH_LIMITS.emailCode.send.cooldown.windowMs / 1000),
+    })
   } catch (error) {
     // A concurrent request won the single self-hosted account slot. The
     // transaction that raised this already rolled back, so nothing partial was
@@ -324,13 +238,16 @@ export async function POST(request: NextRequest) {
         { status: error.status }
       )
     }
+    if (error instanceof AccountAlreadyExistsError) {
+      return NextResponse.json({ error: error.message }, { status: 409 })
+    }
     if (error instanceof z.ZodError) {
       return NextResponse.json(
         { error: error.errors[0].message },
         { status: 400 }
       )
     }
-    
+
     console.error('Registration error:', error)
     return NextResponse.json(
       { error: 'Failed to register user' },

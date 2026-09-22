@@ -26,6 +26,7 @@
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
     "bootstrap": "tsx scripts/bootstrap.ts",
+    "auth:reset-password": "tsx scripts/reset-password.ts",
     "test:setup": "tsx scripts/setup-test-db.ts",
     "test:baseline": "tsx scripts/test-baseline.ts",
     "test:e2e": "playwright test",

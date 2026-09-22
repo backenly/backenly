@@ -87,7 +87,9 @@ describe('the signup flows report rather than implement', () => {
   const ROOT = process.cwd()
 
   const FLOWS = [
-    'app/api/auth/register/route.ts',
+    // Email signup's account creation, shared by POST /api/auth/register (the
+    // self-hosted first operator) and POST /api/auth/register/verify.
+    'lib/auth/signup/complete-email-signup.ts',
     'app/api/auth/platform-github/callback/route.ts',
     'app/api/auth/platform-google/callback/route.ts',
   ]
