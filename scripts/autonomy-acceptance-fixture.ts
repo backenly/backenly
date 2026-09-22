@@ -508,33 +508,77 @@ async function diagnose(env: Env): Promise<Record<string, unknown>> {
     ? await rows<{ t: string }>(`select tablename as t from pg_tables where schemaname=$1 order by 1`, s)
     : []
 
-  // ── Who is the migration connection, and could it repair this? ───────────
+  // ── Who is the migration connection, and may it ADMINISTER the app role? ──
   //
-  // DIRECT_URL is the connection migrations run as. It is read here because the
-  // failure above needs a role that is a member of the app role (or holds admin
-  // option on it) to repair, and whether the deployment already HAS such a
-  // connection decides whether this is fixable in place or needs a credential
-  // nobody has wired up. Read-only: identity and two catalog predicates.
+  // DIRECT_URL is the connection migrations run as. The repair this deployment
+  // needs is a membership grant, and the question is not "is this role a member"
+  // but "may this role administer membership of the app role". Those are
+  // different: a member can SET ROLE, an administrator can grant it to others.
+  //
+  // Every field below is an input; `canPerformMembershipRepair` is a verdict
+  // computed FROM them, and both are reported so the reasoning can be checked
+  // rather than trusted. This reads. It never performs the grant.
   let direct: Record<string, unknown> | null = null
   const directUrl = process.env.DIRECT_URL ?? ''
   if (directUrl) {
     const { PrismaClient } = await import('@prisma/client')
     const d = new PrismaClient({ datasources: { db: { url: directUrl } } })
     try {
-      const who = await d.$queryRawUnsafe<Array<{ cu: string }>>('select current_user as cu')
       const caps = await d.$queryRawUnsafe<
-        Array<{ is_member: boolean | null; can_create_role: boolean; is_rds_superuser: boolean | null }>
+        Array<{
+          connected_as: string
+          app_role: string | null
+          server_version_num: number
+          is_superuser: boolean
+          can_create_role: boolean
+          is_rds_superuser: boolean
+          is_member_of_app_role: boolean | null
+          has_admin_option_on_app_role: boolean
+        }>
       >(
-        `select case when public.backenly_app_role() is null then null
-                     else pg_has_role(current_user, public.backenly_app_role(), 'MEMBER') end as is_member,
-                (select rolcreaterole from pg_roles where rolname = current_user) as can_create_role,
-                (select bool_or(r.rolname = 'rds_superuser')
-                   from pg_auth_members m
-                   join pg_roles r on r.oid = m.roleid
-                  where m.member = (select oid from pg_roles where rolname = current_user)
-                ) as is_rds_superuser`,
+        `select
+           current_user::text as connected_as,
+           public.backenly_app_role() as app_role,
+           current_setting('server_version_num')::int as server_version_num,
+           (select rolsuper from pg_roles where rolname = current_user) as is_superuser,
+           (select rolcreaterole from pg_roles where rolname = current_user) as can_create_role,
+           -- Membership in the managed-instance administrative role, which on RDS
+           -- is what stands in for a superuser. Read from the catalog rather than
+           -- pg_has_role, which errors when the role does not exist at all.
+           (select exists (
+              select 1 from pg_auth_members m
+                join pg_roles r on r.oid = m.roleid
+                join pg_roles mem on mem.oid = m.member
+               where r.rolname = 'rds_superuser' and mem.rolname = current_user
+            )) as is_rds_superuser,
+           case when public.backenly_app_role() is null then null
+                else pg_has_role(current_user, public.backenly_app_role(), 'MEMBER') end
+             as is_member_of_app_role,
+           -- ADMIN OPTION is the one that decides. Read straight from
+           -- pg_auth_members.admin_option, which every supported version has.
+           (select exists (
+              select 1 from pg_auth_members m
+                join pg_roles r on r.oid = m.roleid
+                join pg_roles mem on mem.oid = m.member
+               where r.rolname = public.backenly_app_role()
+                 and mem.rolname = current_user
+                 and m.admin_option
+            )) as has_admin_option_on_app_role`,
       )
-      direct = { connectedAs: who[0]?.cu ?? null, ...(caps[0] ?? {}) }
+      const c = caps[0]
+      // Why each branch grants the verdict:
+      //   superuser / rds_superuser  may grant membership in any role
+      //   admin option               is precisely the right to grant this role
+      //   CREATEROLE before PG16     could grant membership in any non-superuser
+      //                              role; from PG16 it may only administer roles
+      //                              it created, so it is NOT sufficient evidence
+      const legacyCreateRole = c.can_create_role && c.server_version_num < 160000
+      direct = {
+        ...c,
+        legacy_createrole_sufficient: legacyCreateRole,
+        canPerformMembershipRepair:
+          c.is_superuser || c.is_rds_superuser || c.has_admin_option_on_app_role || legacyCreateRole,
+      }
     } catch (err: any) {
       direct = { error: String(err?.message ?? err).split('\n').filter(Boolean).pop() ?? 'failed' }
     } finally {
