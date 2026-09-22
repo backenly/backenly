@@ -62,11 +62,28 @@ const FIXTURE_USER_EMAIL = 'autonomy-acceptance-v1@backenly.internal'
 
 const ENVS = ['staging', 'production'] as const
 type Env = (typeof ENVS)[number]
-type Mode = 'prepare' | 'fault' | 'authority' | 'freeze-begin' | 'freeze-end' | 'observe' | 'teardown'
+type Mode =
+  | 'prepare'
+  | 'fault'
+  | 'authority'
+  | 'freeze-begin'
+  | 'freeze-end'
+  | 'observe'
+  | 'diagnose'
+  | 'teardown'
 type Fault = 'healthy' | 'rls_disabled' | 'missing_index' | 'wide_open_policy'
 type Action = 'declare_intent' | 'grant' | 'revoke'
 
-const MODES: readonly Mode[] = ['prepare', 'fault', 'authority', 'freeze-begin', 'freeze-end', 'observe', 'teardown']
+const MODES: readonly Mode[] = [
+  'prepare',
+  'fault',
+  'authority',
+  'freeze-begin',
+  'freeze-end',
+  'observe',
+  'diagnose',
+  'teardown',
+]
 const FAULTS: readonly Fault[] = ['healthy', 'rls_disabled', 'missing_index', 'wide_open_policy']
 const ACTIONS: readonly Action[] = ['declare_intent', 'grant', 'revoke']
 
@@ -312,7 +329,18 @@ async function prepare(env: Env): Promise<Record<string, unknown>> {
   const fn = await rows<{ n: number }>(
     `select count(*)::int as n from pg_proc where proname = 'backenly_pgrst_prepare_schema'`,
   )
-  if (fn[0].n > 0) await q(`SELECT public.backenly_pgrst_prepare_schema('${s}')`)
+  // Reported, not fatal. Measured on staging: this raises 42501 "permission
+  // denied to change default privileges", because the SECURITY DEFINER owner is
+  // not a member of the role whose default privileges it sets. That is a real
+  // deployment finding and `diagnose` exists to characterise it — but a fixture
+  // that dies here would report nothing at all about the loop, which is the
+  // thing being qualified.
+  let preparedError: string | null = null
+  if (fn[0].n > 0) {
+    preparedError = await q(`SELECT public.backenly_pgrst_prepare_schema('${s}')`)
+      .then(() => null)
+      .catch((err: any) => String(err?.message ?? err).split('\n').filter(Boolean).pop() ?? 'failed')
+  }
 
   await restoreHealthy(proj.id)
   return {
@@ -320,7 +348,8 @@ async function prepare(env: Env): Promise<Record<string, unknown>> {
     env,
     projectId: proj.id,
     schema: s,
-    postgrestPrepared: fn[0].n > 0,
+    postgrestPrepared: fn[0].n > 0 && preparedError === null,
+    postgrestPrepareError: preparedError,
     dataPlaneRegistered,
     plan: subscription?.plan?.name ?? null,
     planAutonomyCeiling: subscription?.plan?.autonomyMaxLevel ?? 'SAFE_FALLBACK (no plan seeded)',
@@ -410,6 +439,86 @@ async function freezeEnd(env: Env): Promise<Record<string, unknown>> {
     tablesAfter: await prisma.table.count({ where: { projectId: proj.id } }),
     autoExecutedDuringBlind: autoExecuted,
     freezeReceiptsDuringBlind: frozen,
+  }
+}
+
+/**
+ * Read-only characterisation of the data-plane plumbing this deployment has.
+ *
+ * Every query is fixed and every one is a read. It exists because a probe that
+ * cannot see a table reports it healthy, so "the loop did nothing" and "the
+ * loop could not look" must be told apart before any result is believed.
+ */
+async function diagnose(env: Env): Promise<Record<string, unknown>> {
+  const proj = await fixtureProject()
+  const s = proj ? schemaOf(proj.id) : null
+
+  const who = await rows<{ cu: string; su: string }>(
+    'select current_user as cu, session_user as su',
+  )
+
+  const appRole = await rows<{ r: string | null }>(
+    `select public.backenly_app_role() as r`,
+  ).catch(() => [{ r: null }])
+
+  // Owner and security type of each function the data plane depends on, plus
+  // whether that owner may set default privileges for the app role — the exact
+  // precondition the 42501 failure reports on.
+  const fns = await rows<{
+    name: string
+    owner: string
+    secdef: boolean
+    owner_in_app_role: boolean | null
+  }>(
+    `select p.proname as name,
+            pg_get_userbyid(p.proowner) as owner,
+            p.prosecdef as secdef,
+            case when public.backenly_app_role() is null then null
+                 else pg_has_role(pg_get_userbyid(p.proowner), public.backenly_app_role(), 'MEMBER')
+            end as owner_in_app_role
+       from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+      where n.nspname = 'public'
+        and p.proname in ('backenly_pgrst_prepare_schema','backenly_pgrst_register_schema')
+      order by 1`,
+  ).catch(() => [])
+
+  const registry = await rows<{ n: number }>(
+    `select count(*)::int as n from public.backenly_pgrst_current_schemas()`,
+  ).catch(() => [{ n: -1 }])
+
+  const workspaces = await rows<{ n: number }>(
+    `select count(*)::int as n from pg_namespace where nspname like 'workspace\\_%'`,
+  )
+
+  // Does the data plane's own role actually reach the fixture's tables? This is
+  // the question the registry entry only implies.
+  const reach = s
+    ? await rows<{ usage_anon: boolean; usage_auth: boolean; tables_selectable_by_auth: number }>(
+        `select has_schema_privilege('anon', $1, 'USAGE') as usage_anon,
+                has_schema_privilege('authenticated', $1, 'USAGE') as usage_auth,
+                (select count(*)::int from pg_tables t
+                  where t.schemaname = $1
+                    and has_table_privilege('authenticated', format('%I.%I', t.schemaname, t.tablename), 'SELECT')
+                ) as tables_selectable_by_auth`,
+        s,
+      ).catch(() => [])
+    : []
+
+  const tables = s
+    ? await rows<{ t: string }>(`select tablename as t from pg_tables where schemaname=$1 order by 1`, s)
+    : []
+
+  return {
+    mode: 'diagnose',
+    env,
+    connectedAs: who[0],
+    appRole: appRole[0]?.r ?? null,
+    dataPlaneFunctions: fns,
+    schemasInPostgrestRegistry: registry[0]?.n ?? null,
+    workspaceSchemasInCluster: workspaces[0]?.n ?? null,
+    fixtureSchema: s,
+    fixtureTables: tables.map(t => t.t),
+    fixtureReachability: reach[0] ?? null,
   }
 }
 
@@ -549,6 +658,7 @@ async function main(): Promise<void> {
   } else if (mode === 'freeze-begin') result = await freezeBegin(env)
   else if (mode === 'freeze-end') result = await freezeEnd(env)
   else if (mode === 'observe') result = await observe(env)
+  else if (mode === 'diagnose') result = await diagnose(env)
   else result = await teardown(env)
 
   emit({ ok: true, ...result })

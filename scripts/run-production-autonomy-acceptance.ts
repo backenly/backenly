@@ -51,7 +51,7 @@ const ENTRY = 'scripts/autonomy-acceptance-fixture.ts'
 const RESULT_MARKER = 'ACCEPTANCE-RESULT '
 const ENV_BUDGET_BYTES = 58 * 1024
 
-const MODES = ['prepare', 'fault', 'authority', 'freeze-begin', 'freeze-end', 'observe', 'teardown'] as const
+const MODES = ['prepare', 'fault', 'authority', 'freeze-begin', 'freeze-end', 'observe', 'diagnose', 'teardown'] as const
 const FAULTS = ['healthy', 'rls_disabled', 'missing_index', 'wide_open_policy'] as const
 const ACTIONS = ['declare_intent', 'grant', 'revoke'] as const
 

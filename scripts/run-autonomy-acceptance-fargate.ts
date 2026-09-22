@@ -55,7 +55,7 @@ const RESULT_MARKER = 'ACCEPTANCE-RESULT '
 /** Headroom under the 64 KB task-definition limit for the rest of the definition. */
 const ENV_BUDGET_BYTES = 58 * 1024
 
-const MODES = ['prepare', 'fault', 'authority', 'freeze-begin', 'freeze-end', 'observe', 'teardown'] as const
+const MODES = ['prepare', 'fault', 'authority', 'freeze-begin', 'freeze-end', 'observe', 'diagnose', 'teardown'] as const
 const FAULTS = ['healthy', 'rls_disabled', 'missing_index', 'wide_open_policy'] as const
 const ACTIONS = ['declare_intent', 'grant', 'revoke'] as const
 
