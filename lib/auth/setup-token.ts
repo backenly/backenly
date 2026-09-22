@@ -77,6 +77,25 @@ export async function deploymentIsClaimed(): Promise<boolean> {
 }
 
 /**
+ * Whether a signup made right now must present the token.
+ *
+ * The signup page asks this before it renders, so its token field appears
+ * exactly when the register route would refuse a signup without one. The gate
+ * shipped without that question: the route demanded a token that no page could
+ * send, so every browser signup on a fresh install was refused and only a
+ * hand-written request could claim the deployment the README said to claim
+ * "at signup".
+ *
+ * Answers yes or no and nothing else. The token itself never leaves `.env`, and
+ * that a claim is pending is already what the register route tells anyone who
+ * tries without one.
+ */
+export async function claimAwaitsToken(): Promise<boolean> {
+  if (!setupTokenRequired()) return false
+  return !(await deploymentIsClaimed())
+}
+
+/**
  * Compare without leaking where two values start to differ.
  *
  * Lengths are compared first and separately, because timingSafeEqual throws on

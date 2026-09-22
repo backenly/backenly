@@ -17,6 +17,21 @@ export interface RegisterRequest {
   ref?: string
   /** Cloudflare Turnstile solve. Required once the server has a secret key. */
   turnstileToken?: string
+  /** Claims a self-hosted deployment. Printed by `npm run selfhost`. */
+  setupToken?: string
+}
+
+/** What a signup made right now must carry beyond an email and a password. */
+export interface RegistrationRequirements {
+  setupTokenRequired: boolean
+}
+
+/** A refusal from an auth route, with the machine-readable code when it sent one. */
+export class AuthRequestError extends Error {
+  constructor(message: string, readonly code?: string) {
+    super(message)
+    this.name = 'AuthRequestError'
+  }
 }
 
 export interface AuthResponse {
@@ -64,6 +79,12 @@ export async function login(data: LoginRequest): Promise<AuthResponse> {
   return result
 }
 
+export async function getRegistrationRequirements(): Promise<RegistrationRequirements> {
+  const response = await fetch(`${API_BASE}/auth/register`, { cache: 'no-store' })
+  if (!response.ok) throw new Error(`registration requirements: ${response.status}`)
+  return response.json()
+}
+
 export async function register(data: RegisterRequest): Promise<AuthResponse> {
   const response = await fetch(`${API_BASE}/auth/register`, {
     method: 'POST',
@@ -73,7 +94,7 @@ export async function register(data: RegisterRequest): Promise<AuthResponse> {
   
   if (!response.ok) {
     const error = await response.json()
-    throw new Error(error.error || 'Registration failed')
+    throw new AuthRequestError(error.error || 'Registration failed', error.code)
   }
   
   const result = await response.json()

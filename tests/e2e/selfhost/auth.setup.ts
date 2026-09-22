@@ -6,12 +6,16 @@
  * "assumes user is already authenticated" and nothing ever made that true,
  * which is why it has never run in CI and is not evidence for anything.
  *
- * This makes it true, without a fixture or a mock: it registers through the
- * real `/api/auth/register` route against the deployment `npm run selfhost`
- * just built, and saves the session cookie the app itself issued. If
- * registration is broken, these tests do not run — which is correct, because a
- * deployment nobody can sign into is not one whose dashboard is worth
- * asserting.
+ * This makes it true, without a fixture or a mock: it claims the deployment
+ * `npm run selfhost` just built through the real signup PAGE, and saves the
+ * session cookie the app itself issued. If registration is broken, these tests
+ * do not run — which is correct, because a deployment nobody can sign into is
+ * not one whose dashboard is worth asserting.
+ *
+ * The page, not a request composed here. This setup used to POST the setup
+ * token to `/api/auth/register` itself, and stayed green while the route
+ * demanded a token that no page could send: every operator following the
+ * README was refused, on the one path nothing here exercised.
  *
  * A self-hosted install admits exactly one account and then closes
  * registration, so this runs once per deployment, as the first operator.
@@ -47,17 +51,38 @@ setup('sign up the first operator', async ({ page, request, baseURL }) => {
     // and CI passes it through, exactly as an operator reads it from the
     // install output. Registration without it is refused on a self-hosted
     // deployment, which is the point.
-    const res = await request.post('/api/auth/register', {
-      data: {
-        email,
-        password,
-        name: 'E2E Operator',
-        setupToken: process.env.BACKENLY_SETUP_TOKEN,
-      },
-    })
+    const token = process.env.BACKENLY_SETUP_TOKEN?.trim()
+    expect(token, 'BACKENLY_SETUP_TOKEN is not exported, so nothing can claim the deployment').toBeTruthy()
+
+    // Entry one: the plain signup page asks for the token while unclaimed.
+    // The email form opens on click, and a click before hydration is
+    // swallowed, so retry until the form is there.
+    await page.goto('/auth/signup')
+    await expect(async () => {
+      await page.getByText('Continue with Email').click()
+      await expect(page.locator('#email')).toBeVisible({ timeout: 1_000 })
+    }).toPass({ timeout: 60_000 })
+    await expect(
+      page.locator('#setupToken'),
+      'the signup page shows no setup-token field on an unclaimed deployment'
+    ).toBeVisible()
+
+    // Entry two, used for the claim itself: the link the installer prints.
+    await page.goto(`/auth/signup?setup_token=${token}`)
+    await expect(page.locator('#setupToken')).toHaveValue(token!, { timeout: 60_000 })
+    await expect(page, 'the token stayed in the address bar').not.toHaveURL(/setup_token=/)
+
+    await page.fill('#email', email)
+    await page.fill('#password', password)
+    const [res] = await Promise.all([
+      page.waitForResponse(
+        r => new URL(r.url()).pathname === '/api/auth/register' && r.request().method() === 'POST'
+      ),
+      page.getByRole('button', { name: /create account/i }).click(),
+    ])
     expect(
       res.ok(),
-      `registration failed (${res.status()}): ${await res.text()}`
+      `registration through the signup page failed (${res.status()}): ${await res.text()}`
     ).toBe(true)
   }
 

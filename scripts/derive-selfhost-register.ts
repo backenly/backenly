@@ -91,8 +91,13 @@ const CAPABILITIES: Capability[] = [
     backend: ['scripts/selfhost.ts'], ui: ['README.md'], uiMentions: 'npm run selfhost' },
   { area: 'Install', name: 'Non-superuser application role',
     backend: ['scripts/setup-app-role.ts'], ui: ['README.md'], uiMentions: 'backenly_app' },
+  // The surface is the signup page, not the README. The token is consumed by an
+  // HTTP route a browser form must send it to, and this row once graded DONE on
+  // the README alone while no page could send it: every browser signup on a
+  // fresh install was refused.
   { area: 'Install', name: 'First-owner claim token',
-    backend: ['lib/auth/setup-token.ts'], ui: ['README.md'], uiMentions: 'BACKENLY_SETUP_TOKEN' },
+    backend: ['lib/auth/setup-token.ts', 'app/api/auth/register/route.ts'],
+    ui: ['app/auth/signup/page.tsx'], uiMentions: 'setupToken' },
 
   // ── Database ───────────────────────────────────────────────────────────
   { area: 'Database', name: 'Table editor',

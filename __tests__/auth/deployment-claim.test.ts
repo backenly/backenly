@@ -26,6 +26,7 @@ import { describe, test, expect, beforeEach, afterEach } from '@jest/globals'
 import { prisma } from '@/lib/db/prisma'
 import {
   assertSetupTokenAdmits,
+  claimAwaitsToken,
   configuredSetupToken,
   deploymentIsClaimed,
   SetupTokenError,
@@ -160,6 +161,46 @@ describe('the comparison itself', () => {
   test('rejects nothing at all', () => {
     expect(setupTokenMatches(undefined)).toBe(false)
     expect(setupTokenMatches('')).toBe(false)
+  })
+})
+
+describe('what the signup page is told', () => {
+  // The gate shipped enforced by the route and asked for by no page, so every
+  // browser signup on a fresh install was refused. The page now asks first,
+  // and these pin the answer it gets.
+  test('asks for the token while a configured deployment is unclaimed', async () => {
+    // The shared test database may already hold users; then "claimed" is the
+    // true answer and the case below is the one that applies.
+    const expected = !(await deploymentIsClaimed())
+    await expect(claimAwaitsToken()).resolves.toBe(expected)
+  })
+
+  test('stops asking once the deployment is claimed', async () => {
+    const user = await prisma.user.create({
+      data: { email: `claimed-page-${Date.now()}@example.test`, password: 'x', name: 'first' },
+    })
+    createdUserIds.push(user.id)
+
+    await expect(claimAwaitsToken()).resolves.toBe(false)
+  })
+
+  test('never asks on cloud, which has no single slot to protect', async () => {
+    process.env.BACKENLY_EDITION = 'cloud'
+    await expect(claimAwaitsToken()).resolves.toBe(false)
+  })
+
+  test('never asks an install that configured no token', async () => {
+    delete process.env.BACKENLY_SETUP_TOKEN
+    await expect(claimAwaitsToken()).resolves.toBe(false)
+  })
+
+  test('the endpoint answers yes or no, and never with the token', async () => {
+    const { GET } = await import('@/app/api/auth/register/route')
+    const body = await (await GET()).json()
+
+    expect(Object.keys(body)).toEqual(['setupTokenRequired'])
+    expect(typeof body.setupTokenRequired).toBe('boolean')
+    expect(JSON.stringify(body)).not.toContain(TOKEN)
   })
 })
 

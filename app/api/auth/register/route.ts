@@ -14,7 +14,12 @@ import {
   SignupSlotTakenError,
 } from '@/lib/platform-controls'
 import { onSignupCompleted, recordProductEvent, verifySignupChallenge } from '@/lib/platform-signals'
-import { assertSetupTokenAdmits, SetupTokenError } from '@/lib/auth/setup-token'
+import {
+  assertSetupTokenAdmits,
+  claimAwaitsToken,
+  SetupTokenError,
+  setupTokenRequired,
+} from '@/lib/auth/setup-token'
 import { currentEdition } from '@/lib/edition'
 import { consume, AUTH_LIMITS, clientIp } from '@/lib/security/auth-rate-limit'
 
@@ -36,6 +41,27 @@ const registerSchema = z.object({
   // first. Ignored on Cloud and on installs that configured no token.
   setupToken: z.string().max(256).optional(),
 })
+
+/**
+ * GET /api/auth/register
+ *
+ * What a signup made right now must carry beyond an email and a password. The
+ * signup page reads it to decide whether to show the setup-token field.
+ *
+ * When the database cannot say whether the deployment is claimed, this answers
+ * from configuration alone. Showing the field to an operator who does not need
+ * it costs one ignored input; hiding it from one who does is the defect this
+ * exists to fix.
+ */
+export async function GET() {
+  let required: boolean
+  try {
+    required = await claimAwaitsToken()
+  } catch {
+    required = setupTokenRequired()
+  }
+  return NextResponse.json({ setupTokenRequired: required })
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -293,7 +319,10 @@ export async function POST(request: NextRequest) {
     // message is written for an operator standing at the machine and says
     // nothing useful to anybody else.
     if (error instanceof SetupTokenError) {
-      return NextResponse.json({ error: error.message }, { status: error.status })
+      return NextResponse.json(
+        { error: error.message, code: 'SETUP_TOKEN_REJECTED' },
+        { status: error.status }
+      )
     }
     if (error instanceof z.ZodError) {
       return NextResponse.json(

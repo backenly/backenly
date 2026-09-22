@@ -30,7 +30,7 @@ call, or a Backenly repo path. A claim with no locator does not belong here.
 
 ## Capability register
 
-**Derived from `3b61a1ec` on 2026-09-19 by `scripts/derive-selfhost-register.ts`.**
+**Derived from `79b4fa20` on 2026-09-22 by `scripts/derive-selfhost-register.ts`.**
 Do not hand-edit this section: it is regenerated, and a capability
 cannot be marked done by editing prose. The previous hand-maintained
 matrix listed five shipped capabilities as "not started".
@@ -41,7 +41,7 @@ DONE 21 · INTENTIONAL 2
 |---|---|---|---|
 | Install | One-command install | **DONE** | scripts/selfhost.ts, README.md |
 | Install | Non-superuser application role | **DONE** | scripts/setup-app-role.ts, README.md |
-| Install | First-owner claim token | **DONE** | lib/auth/setup-token.ts, README.md |
+| Install | First-owner claim token | **DONE** | lib/auth/setup-token.ts, app/api/auth/register/route.ts, app/auth/signup/page.tsx |
 | Database | Table editor | **DONE** | app/api/database/tables/route.ts, app/app/projects/[id]/database/page.tsx |
 | Database | Foreign keys and constraints | **DONE** | app/api/database/schema/constraints/route.ts, lib/db/fk-shape.ts, app/app/projects/[id]/database/page.tsx |
 | Database | Read-only SQL workspace | **DONE** | app/api/database/query/route.ts, lib/mcp/read-query.ts, components/database/SqlWorkspace.tsx |

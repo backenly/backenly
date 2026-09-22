@@ -130,10 +130,12 @@ and reconciles until the deployment reports ready. Then:
 npm run dev                   # dashboard :3000 · runtime :3001
 ```
 
-Then **claim the deployment**. The installer prints a setup token; the first
-account to present it at signup becomes the administrator and takes ownership
-of this deployment's single project in the same step. There is no second
-command to run.
+Then **claim the deployment**. The installer prints a claim link carrying a
+setup token. Open it and create your account: the first account to present the
+token becomes the administrator and takes ownership of this deployment's single
+project in the same step. There is no second command to run. The signup page
+also has a **Setup token** field while the deployment is unclaimed, if you
+would rather paste the token than follow the link.
 
 The token is in `.env` as `BACKENLY_SETUP_TOKEN`. It gates the claim because a
 deployment is often reachable before its operator gets to it — an open port on

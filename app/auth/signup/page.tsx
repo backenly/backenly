@@ -8,7 +8,7 @@ import {
   checkSignupEmailEligibility,
   SIGNUP_EMAIL_REJECTION_MESSAGE,
 } from '@/lib/auth/signup-email-eligibility'
-import { register } from '@/lib/api/auth'
+import { AuthRequestError, getRegistrationRequirements, register } from '@/lib/api/auth'
 import { useUserSession } from '@/lib/hooks/useUserSession'
 import { registerSiteIcons } from '@/lib/icons/registry'
 import {
@@ -51,12 +51,20 @@ function SignupForm() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
-  const [errors, setErrors] = useState<{ email?: string; password?: string }>({})
+  const [errors, setErrors] = useState<{ email?: string; password?: string; setupToken?: string }>({})
   const [isSubmitting, setIsSubmitting] = useState(false)
-  const [showEmailForm, setShowEmailForm] = useState(false)
+  // The installer prints a claim link carrying the token. Read once, at first
+  // render, so the form opens already filled in.
+  const [claimLinkToken] = useState(() => searchParams.get('setup_token')?.trim() || '')
+  const [showEmailForm, setShowEmailForm] = useState(!!claimLinkToken)
   const [oauthProviders, setOauthProviders] = useState<{ google: boolean; github: boolean } | null>(null)
   const [refCode, setRefCode] = useState<string | null>(null)
   const [turnstileToken, setTurnstileToken] = useState<string | null>(null)
+  // A self-hosted deployment is claimed by the first account that presents the
+  // token `npm run selfhost` printed. The register route refuses a first signup
+  // without it, so the form has to be able to send it.
+  const [setupTokenRequired, setSetupTokenRequired] = useState(!!claimLinkToken)
+  const [setupToken, setSetupToken] = useState(claimLinkToken)
 
   // Honor ?redirect= (e.g. an org-invite accept page) — sanitized the same way
   // as login so we never loop back into /auth/*.
@@ -77,6 +85,23 @@ function SignupForm() {
       .then((data) => setOauthProviders(data))
       .catch(() => setOauthProviders({ google: false, github: false }))
   }, [])
+
+  useEffect(() => {
+    getRegistrationRequirements()
+      .then((r) => { if (r.setupTokenRequired) setSetupTokenRequired(true) })
+      // Unanswerable is not "not required": the first refusal reveals the field.
+      .catch(() => {})
+  }, [])
+
+  // Then drop the claim link's token from the address bar, so it does not sit
+  // in history or on a shared screen.
+  useEffect(() => {
+    if (!searchParams.get('setup_token')) return
+    const rest = new URLSearchParams(searchParams.toString())
+    rest.delete('setup_token')
+    const query = rest.toString()
+    router.replace(query ? `/auth/signup?${query}` : '/auth/signup', { scroll: false })
+  }, [searchParams, router])
 
   // Capture ?ref= once: remember it for the email form AND drop a cookie so it
   // survives the OAuth round-trip (the register route + OAuth callbacks read it).
@@ -111,8 +136,16 @@ function SignupForm() {
     e.preventDefault()
     const emailError = validateEmail(email)
     const passwordError = validatePassword(password)
-    if (emailError || passwordError) {
-      setErrors({ email: emailError || undefined, password: passwordError || undefined })
+    const setupTokenError =
+      setupTokenRequired && !setupToken.trim()
+        ? 'Paste the setup token printed by npm run selfhost.'
+        : null
+    if (emailError || passwordError || setupTokenError) {
+      setErrors({
+        email: emailError || undefined,
+        password: passwordError || undefined,
+        setupToken: setupTokenError || undefined,
+      })
       return
     }
     // Turnstile issues single-use tokens, so a failed submit must not be
@@ -129,10 +162,17 @@ function SignupForm() {
         password,
         ...(refCode ? { ref: refCode } : {}),
         ...(turnstileToken ? { turnstileToken } : {}),
+        ...(setupTokenRequired && setupToken.trim() ? { setupToken: setupToken.trim() } : {}),
       })
       router.push(redirectUrl)
     } catch (error) {
-      setErrors({ password: error instanceof Error ? error.message : 'Registration failed' })
+      if (error instanceof AuthRequestError && error.code === 'SETUP_TOKEN_REJECTED') {
+        // Also the fallback when the requirements could not be read up front.
+        setSetupTokenRequired(true)
+        setErrors({ setupToken: error.message })
+      } else {
+        setErrors({ password: error instanceof Error ? error.message : 'Registration failed' })
+      }
       setIsSubmitting(false)
       setTurnstileToken(null)
       resetTurnstile()
@@ -234,6 +274,26 @@ function SignupForm() {
                   </button>
                 }
               />
+
+              {setupTokenRequired && (
+                <>
+                  <FieldLabel htmlFor="setupToken">Setup token</FieldLabel>
+                  <FieldInput
+                    id="setupToken"
+                    type="text"
+                    value={setupToken}
+                    onChange={(e) => setSetupToken(e.target.value)}
+                    placeholder="Printed by npm run selfhost"
+                    disabled={isSubmitting}
+                    error={errors.setupToken}
+                    helper={
+                      errors.setupToken
+                        ? undefined
+                        : 'Claims this self-hosted deployment. Also in .env as BACKENLY_SETUP_TOKEN.'
+                    }
+                  />
+                </>
+              )}
 
               <TurnstileWidget onToken={setTurnstileToken} className="mt-1" />
 
