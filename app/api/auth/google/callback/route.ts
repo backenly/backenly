@@ -6,6 +6,7 @@ import { prisma } from '@/lib/db'
 import { logger } from '@/lib/logger'
 import { verifyOAuthState, validateStateProvider } from '@/lib/auth/oauth-state'
 import { assertSignupAllowed } from '@/lib/platform-controls'
+import { googleVerifiedEmail } from '@/lib/auth/oauth/verified-email'
 
 export async function GET(request: NextRequest) {
   try {
@@ -89,10 +90,13 @@ export async function GET(request: NextRequest) {
     }
 
     const googleUser = await userInfoResponse.json()
-    if (!googleUser?.email) {
-      return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/auth/login?error=no_email`)
+    // Only an address Google says it verified. This creates a platform account
+    // marked emailVerified, and links by address, so an unverified one could
+    // claim whichever account already held it.
+    const email = googleVerifiedEmail(googleUser)
+    if (!email) {
+      return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/auth/login?error=email_not_verified`)
     }
-    const email = String(googleUser.email).trim().toLowerCase()
 
     // ✅ SECURITY: Find or create user within PROJECT SCOPE
     // Note: User model is global, but session/JWT will be project-scoped
@@ -116,7 +120,7 @@ export async function GET(request: NextRequest) {
         data: {
           email,
           name: googleUser.name,
-          emailVerified: true, // Google emails are verified
+          emailVerified: true, // Google reported this address as verified, checked above
           provider: 'google',
           providerId: googleUser.id,
           lastLogin: signedInAt,

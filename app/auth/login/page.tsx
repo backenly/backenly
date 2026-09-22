@@ -23,6 +23,26 @@ import {
 
 registerSiteIcons()
 
+/**
+ * What the OAuth callbacks' `?error=` codes mean, in words.
+ *
+ * `email_not_verified` is the one people will actually meet: signing in with a
+ * provider is treated as proof of the address, so an address the provider has
+ * not verified cannot be accepted, and saying nothing would leave them
+ * clicking the same button again.
+ */
+const OAUTH_ERRORS: Record<string, string> = {
+  invalid_session: 'Your session has expired. Please log in again.',
+  email_not_verified:
+    'That account has no verified email address with the provider. Verify your email there and try again, or sign in with a password.',
+  no_email: 'That provider did not share an email address, so there is nothing to sign you in as.',
+  blocked: 'This account cannot sign in. Contact support if you think that is wrong.',
+  signup_not_allowed: 'New accounts are not being accepted right now.',
+  token_failed: 'Sign-in with that provider did not complete. Please try again.',
+  userinfo_failed: 'Sign-in with that provider did not complete. Please try again.',
+  oauth_failed: 'Sign-in with that provider did not complete. Please try again.',
+}
+
 function LoginForm() {
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -34,6 +54,9 @@ function LoginForm() {
   const [showEmailForm, setShowEmailForm] = useState(false)
   const [oauthProviders, setOauthProviders] = useState<{ google: boolean; github: boolean } | null>(null)
 
+  // The OAuth callbacks redirect here with ?error=... on every refusal. Only
+  // invalid_session was ever explained, so the rest bounced people back to a
+  // login form that looked like nothing had happened.
   const rawRedirect = searchParams.get('redirect') || '/app'
   const isAuthPath = rawRedirect.startsWith('/auth') || rawRedirect === '/login' || rawRedirect === '/signup'
   const redirectUrl = isAuthPath ? '/app' : rawRedirect
@@ -47,8 +70,9 @@ function LoginForm() {
   }, [isLoggedIn, errorParam, redirectUrl, router])
 
   useEffect(() => {
-    if (errorParam === 'invalid_session') {
-      setErrors({ password: 'Your session has expired. Please log in again.' })
+    const message = errorParam ? OAUTH_ERRORS[errorParam] : null
+    if (message) {
+      setErrors({ password: message })
       setIsSubmitting(false)
     }
   }, [errorParam])

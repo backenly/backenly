@@ -97,6 +97,12 @@ export class SmtpSink {
   certificate = ''
   /** Set to a 5xx code to make the sink reject at DATA, proving the failure path. */
   rejectWith: string | null = null
+  /**
+   * Hold the reply to DATA this long, so a caller can prove it does NOT wait
+   * for the provider. A response that returns while this is still pending
+   * cannot have been timed by the send.
+   */
+  delayMs = 0
   port = 0
 
   async start(): Promise<void> {
@@ -146,12 +152,16 @@ export class SmtpSink {
         mail.raw = buffer.slice(0, end)
         buffer = buffer.slice(end + 5)
         inData = false
-        if (this.rejectWith) {
-          write(`${this.rejectWith} message rejected by the sink`)
-        } else {
-          this.received.push({ ...mail, rcptTo: [...mail.rcptTo] })
-          write('250 2.0.0 queued')
+        const reply = () => {
+          if (this.rejectWith) {
+            write(`${this.rejectWith} message rejected by the sink`)
+          } else {
+            this.received.push({ ...mail, rcptTo: [...mail.rcptTo] })
+            write('250 2.0.0 queued')
+          }
         }
+        if (this.delayMs > 0) setTimeout(reply, this.delayMs).unref?.()
+        else reply()
         return
       }
 

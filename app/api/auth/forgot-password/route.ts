@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/postgres'
 import { sendPasswordResetCodeEmail } from '@/lib/auth/email'
+import { recordSecurityEvent } from '@/lib/platform-controls'
 import { z } from 'zod'
 import { consume, AUTH_LIMITS, clientIp } from '@/lib/security/auth-rate-limit'
 import { EMAIL_CODE_TTL_MS, issueEmailCode, normalizeEmail, throttleEmailCodeSend } from '@/lib/auth/email-code'
@@ -18,6 +19,40 @@ const schema = z.object({
 })
 
 /**
+ * Mail the code and record what happened, without the caller waiting.
+ *
+ * Every outcome lands somewhere an operator can see it. A delivery failure is
+ * also a security event, because "nobody can reset their password" is an
+ * availability incident and the whole reason this route was rewritten: the
+ * provider refused every message for days while each page said "sent".
+ */
+async function deliverResetCode(user: { id: string; email: string }, code: string): Promise<void> {
+  let details: string
+  try {
+    const outcome = await deliverPlatformEmail(user.email, () => sendPasswordResetCodeEmail(user.email, code))
+    details = outcome === 'sent'
+      ? 'Password reset code sent'
+      : 'Password reset code refused for this recipient by the receiving mail server'
+  } catch (error) {
+    // Nothing escapes: this runs detached from the request, and an unhandled
+    // rejection takes the whole process down with it.
+    const category = error instanceof EmailDeliveryUnavailableError ? error.category : 'unknown'
+    details = `Password reset code could not be sent (${category})`
+    await recordSecurityEvent({
+      kind: 'email_delivery_failed',
+      severity: 'high',
+      userEmail: user.email,
+      summary: `Password reset code could not be delivered (${category})`,
+      detail: { surface: 'forgot-password', category },
+    }).catch(() => {})
+  }
+
+  await prisma.auditLog.create({
+    data: { action: 'Password reset requested', type: 'ui', userId: user.id, userEmail: user.email, details },
+  }).catch(() => {})
+}
+
+/**
  * POST /api/auth/forgot-password
  *
  * Mails a six-digit code that POST /api/auth/reset-password accepts with a new
@@ -26,8 +61,13 @@ const schema = z.object({
  * This used to answer "we sent a reset link" in every case, including the ones
  * where nothing was sent: an account with no password (every Google or GitHub
  * signup), a per-email limit that returned a fake success, an address stored
- * with different letter case, and a send that failed and was swallowed. Now
- * the only thing the answer hides is whether an account exists.
+ * with different letter case, and a send that failed and was swallowed.
+ *
+ * It answers the same thing to everyone now, and means it. Whether an account
+ * exists changes nothing a caller can observe: not the status, not the body,
+ * not the database work done, and not how long any of it takes. What changed
+ * is that a failure is no longer lost — it is recorded for operators rather
+ * than reported to the stranger who asked.
  */
 export async function POST(request: NextRequest) {
   const ip = clientIp(request)
@@ -67,41 +107,23 @@ export async function POST(request: NextRequest) {
       select: { id: true, email: true },
     })
 
+    // Issued either way, so an address with an account and one without cost
+    // the same database work. The code for an address with no account is never
+    // mailed anywhere and expires unused.
+    const { code } = await issueEmailCode('password_reset', email)
+
     if (user) {
       // Also for an account with no password. Google and GitHub signups have
       // none, and proving the address is enough to let them set one: it is
       // the same proof the provider gave when the account was made.
-      const { code } = await issueEmailCode('password_reset', email)
-      let outcome: 'sent' | 'recipient_refused'
-      try {
-        outcome = await deliverPlatformEmail(() => sendPasswordResetCodeEmail(user.email, code))
-      } catch (error) {
-        if (error instanceof EmailDeliveryUnavailableError) {
-          await prisma.auditLog.create({
-            data: {
-              action: 'Password reset requested',
-              type: 'ui',
-              userId: user.id,
-              userEmail: user.email,
-              details: `Password reset code could not be sent (${error.category})`,
-            },
-          }).catch(() => {})
-          return NextResponse.json(emailUnavailableBody('failed'), { status: 503 })
-        }
-        throw error
-      }
-
-      await prisma.auditLog.create({
-        data: {
-          action: 'Password reset requested',
-          type: 'ui',
-          userId: user.id,
-          userEmail: user.email,
-          details: outcome === 'sent'
-            ? 'Password reset code sent'
-            : 'Password reset code refused by the recipient mail server',
-        },
-      })
+      //
+      // NOT awaited, and its outcome never reaches the response. Waiting for
+      // the provider would make a request for a real address take as long as
+      // a send and one for an unknown address return at once, which answers
+      // "does this account exist" by stopwatch. A failure is recorded where
+      // operators look instead: the audit trail, the Security tab, and the
+      // structured [email] line.
+      void deliverResetCode(user, code).catch(() => {})
     }
 
     return NextResponse.json({

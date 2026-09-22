@@ -101,10 +101,32 @@ function mailTo(email: string) {
   return sink.received.filter(m => m.rcptTo.some(r => r.toLowerCase() === wanted))
 }
 
+/** Reset mail is sent detached from the request, so it lands after the answer. */
+async function waitForMail(email: string, count = 1) {
+  await waitFor(async () => (mailTo(email).length >= count ? true : null))
+  return mailTo(email)
+}
+
 function codeIn(raw: string): string {
   const m = raw.match(/(\d{6}) is your Backenly (?:verification|password reset) code/)
   if (!m) throw new Error('no code in the mail that arrived')
   return m[1]
+}
+
+/**
+ * Poll until something the background send wrote turns up.
+ *
+ * Reset mail is dispatched detached from the request, precisely so the
+ * response cannot be timed by it, so its records land after the answer.
+ */
+async function waitFor<T>(read: () => Promise<T | null>, timeoutMs = 10_000): Promise<T | null> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const found = await read()
+    if (found) return found
+    if (Date.now() > deadline) throw new Error('nothing was recorded within the timeout')
+    await new Promise(r => setTimeout(r, 100))
+  }
 }
 
 /** Both the one-a-minute and five-an-hour send budgets, so a test can resend. */
@@ -129,6 +151,7 @@ beforeEach(() => {
   delete process.env.BACKENLY_SETUP_TOKEN
   delete process.env.TURNSTILE_SECRET_KEY
   sink.rejectWith = null
+  sink.delayMs = 0
   useMail()
 })
 
@@ -144,6 +167,7 @@ afterAll(async () => {
     await prisma.auditLog.deleteMany({ where: { userId: { in: ids } } })
     await prisma.user.deleteMany({ where: { id: { in: ids } } }).catch(() => {})
   }
+  await prisma.securityEvent.deleteMany({ where: { userEmail: { in: emails } } }).catch(() => {})
   await prisma.authEmailCode.deleteMany({ where: { email: { in: emails } } })
   untrust?.()
   // Guarded so a sink that never started reports the real setup failure rather
@@ -305,7 +329,7 @@ describe('password reset by code', () => {
     const r = await call(forgotPassword, { email: user.email })
     expect(r.status).toBe(200)
     expect(r.body.status).toBe('code_sent')
-    const code = codeIn(mailTo(user.email)[0].raw)
+    const code = codeIn((await waitForMail(user.email))[0].raw)
 
     const weak = await call(resetPassword, { email: user.email, code, password: 'short' })
     expect(weak.status).toBe(400)
@@ -329,15 +353,15 @@ describe('password reset by code', () => {
     const b = await call(forgotPassword, { email: unknown })
     expect(a.status).toBe(b.status)
     expect(a.body).toEqual(b.body)
+    expect(await waitForMail(known.email)).toHaveLength(1)
     expect(mailTo(unknown)).toHaveLength(0)
-    expect(mailTo(known.email)).toHaveLength(1)
   })
 
   it('lets an account created with Google set a password', async () => {
     // These accounts have no password, and the old route silently sent nothing.
     const user = await account({ password: null })
     expect((await call(forgotPassword, { email: user.email })).status).toBe(200)
-    const code = codeIn(mailTo(user.email)[0].raw)
+    const code = codeIn((await waitForMail(user.email))[0].raw)
 
     expect((await call(resetPassword, { email: user.email, code, password: NEW_PASSWORD })).status).toBe(200)
     expect((await call(login, { email: user.email, password: NEW_PASSWORD })).status).toBe(200)
@@ -350,7 +374,7 @@ describe('password reset by code', () => {
 
     const r = await call(forgotPassword, { email: stored.toLowerCase() })
     expect(r.status).toBe(200)
-    expect(mailTo(stored)).toHaveLength(1)
+    expect(await waitForMail(stored)).toHaveLength(1)
   })
 
   it('says email is unavailable, before any lookup, when there is no transport', async () => {
@@ -363,12 +387,60 @@ describe('password reset by code', () => {
     expect(a.body.code).toBe('EMAIL_DELIVERY_UNAVAILABLE')
   })
 
-  it('says so when the provider refuses the message, instead of "check your inbox"', async () => {
+  it('answers a failed send exactly like an unknown address, and records the failure internally', async () => {
+    // The enumeration this closes: surfacing the provider's refusal told a
+    // stranger that the address they asked about has an account, because an
+    // address with no account never sends anything and so never fails.
+    // Operators still learn about it, from the audit trail and the Security
+    // tab rather than from the response.
     const user = await account()
     sink.rejectWith = '550 The example.test domain is not verified.'
-    const r = await call(forgotPassword, { email: user.email })
-    expect(r.status).toBe(503)
-    expect(r.body.code).toBe('EMAIL_DELIVERY_UNAVAILABLE')
+
+    const failed = await call(forgotPassword, { email: user.email })
+    const unknown = await call(forgotPassword, { email: address('nobody') })
+
+    expect(failed.status).toBe(200)
+    expect(failed.status).toBe(unknown.status)
+    expect(failed.body).toEqual(unknown.body)
+
+    const audit = await waitFor(() =>
+      prisma.auditLog.findFirst({ where: { userId: user.id, action: 'Password reset requested' } }),
+    )
+    expect(audit!.details).toMatch(/could not be sent/)
+
+    const event = await waitFor(() =>
+      prisma.securityEvent.findFirst({ where: { kind: 'email_delivery_failed', userEmail: user.email } }),
+    )
+    expect(event!.severity).toBe('high')
+  })
+
+  it('does not wait for the provider, so a slow send cannot time the answer', async () => {
+    // Latency is the other half of the oracle: awaiting the send made a
+    // request for a real address cost a whole SMTP round trip while an
+    // unknown one returned at once.
+    const user = await account()
+    sink.delayMs = 3000
+
+    const startKnown = Date.now()
+    const known = await call(forgotPassword, { email: user.email })
+    const knownMs = Date.now() - startKnown
+
+    const startUnknown = Date.now()
+    const unknown = await call(forgotPassword, { email: address('nobody') })
+    const unknownMs = Date.now() - startUnknown
+
+    expect(known.body).toEqual(unknown.body)
+    // Comfortably inside the 3s the provider is holding the message for.
+    expect(knownMs).toBeLessThan(1500)
+    expect(Math.abs(knownMs - unknownMs)).toBeLessThan(1000)
+  })
+
+  it('issues a code for an address with no account, so even the database work matches', async () => {
+    const unknown = address('nobody')
+    expect((await call(forgotPassword, { email: unknown })).status).toBe(200)
+    expect(await prisma.authEmailCode.count({ where: { purpose: 'password_reset', email: unknown } })).toBe(1)
+    // It is never mailed anywhere, and cannot reset anything.
+    expect(mailTo(unknown)).toHaveLength(0)
   })
 
   it('throttles honestly, and identically for an address with no account', async () => {

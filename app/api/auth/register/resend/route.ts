@@ -54,7 +54,7 @@ export async function POST(request: NextRequest) {
     const reissued = await reissueEmailCode('signup', email)
     if (reissued) {
       try {
-        await deliverPlatformEmail(() => sendSignupCodeEmail(email, reissued.code))
+        await deliverPlatformEmail(email, () => sendSignupCodeEmail(email, reissued.code))
       } catch (error) {
         if (error instanceof EmailDeliveryUnavailableError) {
           return NextResponse.json(emailUnavailableBody('failed'), { status: 503 })

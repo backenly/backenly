@@ -41,13 +41,61 @@ export class EmailDeliveryUnavailableError extends Error {
 }
 
 /**
+ * Did the provider refuse THIS recipient, and nothing else?
+ *
+ * Only such a refusal may be reported as success, and only because naming it
+ * would tell a stranger an account lives at that address. Everything else on
+ * our side must stay visible.
+ *
+ * `EENVELOPE` alone is not proof of that. Nodemailer raises it for the whole
+ * envelope: a sender address the provider rejected, a message with no
+ * recipients defined, an unverified sending domain refused at MAIL FROM. So
+ * the error has to attribute the refusal to this address specifically:
+ *
+ *   - the failing command is RCPT TO, when the error names one;
+ *   - the rejected list is exactly this recipient;
+ *   - the response, where there is one, is a permanent 5xx. A 4xx is
+ *     greylisting or a full mailbox, which is a retry, not a refusal.
+ *
+ * Masking on the bare code was how a configuration fault could hide again,
+ * which is the failure this module exists to end.
+ */
+export function isRecipientRefusal(err: unknown, recipient: string): boolean {
+  const e = (err ?? {}) as Record<string, unknown>
+  if (e.code !== 'EENVELOPE') return false
+
+  const command = typeof e.command === 'string' ? e.command.toUpperCase().trim() : ''
+  if (command && command !== 'RCPT TO') return false
+
+  const wanted = String(recipient ?? '').trim().toLowerCase()
+  if (!wanted) return false
+  const rejected = Array.isArray(e.rejected)
+    ? e.rejected.map(r => String((r as { address?: unknown })?.address ?? r).trim().toLowerCase())
+    : []
+  if (rejected.length === 0) return false
+  if (!rejected.every(r => r === wanted)) return false
+
+  // A temporary refusal is a delivery failure that will clear, so it must not
+  // be reported as delivered.
+  const codes = [
+    e.responseCode,
+    ...(Array.isArray(e.rejectedErrors) ? e.rejectedErrors.map(r => (r as { responseCode?: unknown })?.responseCode) : []),
+  ].filter((c): c is number => typeof c === 'number')
+  if (codes.some(c => c < 500)) return false
+
+  return true
+}
+
+/**
  * Send, wait for the provider's answer, and say what happened.
  *
- * Returns 'recipient_refused' only for nodemailer's EENVELOPE: the provider
- * accepted the connection and the sender, and refused this one address. Every
- * other failure is ours, and throws.
+ * `recipient` is the address being written to, because "the provider refused
+ * this one address" can only be decided against it.
  */
-export async function deliverPlatformEmail(send: () => Promise<unknown>): Promise<'sent' | 'recipient_refused'> {
+export async function deliverPlatformEmail(
+  recipient: string,
+  send: () => Promise<unknown>,
+): Promise<'sent' | 'recipient_refused'> {
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
     await Promise.race([
@@ -62,7 +110,7 @@ export async function deliverPlatformEmail(send: () => Promise<unknown>): Promis
     return 'sent'
   } catch (err) {
     if (err instanceof EmailNotConfiguredError) throw new EmailDeliveryUnavailableError('not_configured')
-    if ((err as { code?: unknown })?.code === 'EENVELOPE') return 'recipient_refused'
+    if (isRecipientRefusal(err, recipient)) return 'recipient_refused'
     throw new EmailDeliveryUnavailableError(classifyEmailError(err).category)
   } finally {
     if (timer) clearTimeout(timer)

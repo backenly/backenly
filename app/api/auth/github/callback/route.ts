@@ -6,6 +6,7 @@ import { prisma } from '@/lib/db'
 import { logger } from '@/lib/logger'
 import { verifyOAuthState, validateStateProvider } from '@/lib/auth/oauth-state'
 import { assertSignupAllowed } from '@/lib/platform-controls'
+import { githubVerifiedEmail } from '@/lib/auth/oauth/verified-email'
 import { requireJwtSecret } from '@/lib/auth/jwt-secret'
 
 export async function GET(request: NextRequest) {
@@ -97,29 +98,20 @@ export async function GET(request: NextRequest) {
 
     const githubUser = await userInfoResponse.json()
 
-    // Get user email if not public
-    let email = githubUser.email
-    if (!email) {
-      const emailsResponse = await fetch('https://api.github.com/user/emails', {
-        headers: {
-          Authorization: `Bearer ${tokens.access_token}`,
-          Accept: 'application/vnd.github.v3+json',
-        },
-      })
-
-      if (emailsResponse.ok) {
-        const emails = await emailsResponse.json()
-        const primaryEmail = emails.find((e: any) => e.primary && e.verified)
-        if (primaryEmail) {
-          email = primaryEmail.email
-        }
-      }
-    }
+    // The verified list, always, rather than the public profile address. This
+    // creates a platform account marked emailVerified, and links by address,
+    // so an unverified one could claim whichever account already held it.
+    const emailsResponse = await fetch('https://api.github.com/user/emails', {
+      headers: {
+        Authorization: `Bearer ${tokens.access_token}`,
+        Accept: 'application/vnd.github.v3+json',
+      },
+    })
+    const email = emailsResponse.ok ? githubVerifiedEmail(await emailsResponse.json()) : null
 
     if (!email) {
-      return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/auth/login?error=no_email`)
+      return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/auth/login?error=email_not_verified`)
     }
-    email = String(email).trim().toLowerCase()
 
     // ✅ SECURITY: Find or create user within PROJECT SCOPE
     // Note: User model is global, but session/JWT will be project-scoped
@@ -143,7 +135,7 @@ export async function GET(request: NextRequest) {
         data: {
           email,
           name: githubUser.name || githubUser.login,
-          emailVerified: true, // GitHub emails are verified
+          emailVerified: true, // GitHub reported this address as verified, checked above
           provider: 'github',
           providerId: githubUser.id.toString(),
           lastLogin: signedInAt,

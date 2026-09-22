@@ -153,14 +153,35 @@ export async function POST(request: NextRequest) {
     const verification = signupVerificationPolicy({
       edition,
       isFirstAccount: edition === 'single-tenant' ? !(await deploymentIsClaimed()) : false,
+      // True only when a token is configured, and `assertSetupTokenAdmits`
+      // above has already refused anyone who did not present it. That is what
+      // makes skipping the code a claim by the operator of the machine rather
+      // than by whoever reached an empty deployment first.
+      claimGatedBySetupToken: setupTokenRequired(),
       mailConfigured: platformEmailConfigured(),
     })
 
     // No transport, and this signup must prove its address. Refused, and said
     // so, rather than creating an account nobody verified or telling someone
     // to wait for a code that is never coming.
-    if (verification === 'refuse') {
+    if (verification === 'refuse_no_mail') {
       return NextResponse.json(emailUnavailableBody('not_configured'), { status: 503 })
+    }
+
+    // A first account on an install that configured neither a setup token nor
+    // SMTP. Nothing here can tell the operator apart from a passer-by, and the
+    // single administrator slot is not something to hand out on first come.
+    if (verification === 'refuse_unprotected_claim') {
+      return NextResponse.json(
+        {
+          error:
+            'This deployment cannot admit its first account yet: it has no setup token and no email configured, ' +
+            'so nothing can prove who you are. Set BACKENLY_SETUP_TOKEN in .env (npm run selfhost prints one) ' +
+            'and restart, or configure SMTP_HOST, SMTP_USER, SMTP_PASS and SMTP_FROM to verify by email.',
+          code: 'CLAIM_NOT_PROTECTED',
+        },
+        { status: 503 },
+      )
     }
 
     // Hashed before the branch below so that an address with an account and
@@ -197,6 +218,11 @@ export async function POST(request: NextRequest) {
     // a code, and the page answers exactly as it does for a new address. This
     // route used to answer "User with this email already exists", which let
     // anyone test which addresses have Backenly accounts.
+    //
+    // Unlike forgot-password, this one may report a delivery failure: BOTH
+    // branches send a message, so a broken transport fails both identically
+    // and the failure says nothing about which addresses have accounts. There
+    // is also no account to protect yet if the address is new.
     const existing = await prisma.user.findFirst({
       where: { email: { equals: email, mode: 'insensitive' } },
       select: { id: true },
@@ -204,10 +230,10 @@ export async function POST(request: NextRequest) {
 
     try {
       if (existing) {
-        await deliverPlatformEmail(() => sendAccountExistsEmail(email))
+        await deliverPlatformEmail(email, () => sendAccountExistsEmail(email))
       } else {
         const { code } = await issueEmailCode('signup', email, pending as unknown as Prisma.InputJsonValue)
-        await deliverPlatformEmail(() => sendSignupCodeEmail(email, code))
+        await deliverPlatformEmail(email, () => sendSignupCodeEmail(email, code))
       }
     } catch (error) {
       if (error instanceof EmailDeliveryUnavailableError) {

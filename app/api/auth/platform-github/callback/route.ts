@@ -7,6 +7,7 @@ import { prisma } from '@/lib/db'
 import { onSignupCompleted } from '@/lib/platform-signals'
 import { assertSignupAllowed, isBlocked } from '@/lib/platform-controls'
 import { consume, AUTH_LIMITS, clientIp } from '@/lib/security/auth-rate-limit'
+import { githubVerifiedEmail } from '@/lib/auth/oauth/verified-email'
 
 function isSafeRedirect(target: unknown): target is string {
   if (typeof target !== 'string') return false
@@ -121,23 +122,16 @@ export async function GET(request: NextRequest) {
     })
 
     // Only an address GitHub itself has verified. The account below is created,
-    // or linked to an existing one by address, as email-verified, so taking the
+    // or LINKED to an existing one by address, as email-verified, so taking the
     // public profile email or `emails[0]` unchecked let an unverified address
     // skip the proof email signup requires, and attach to whichever Backenly
-    // account already owned that address. `user:email` is always requested,
-    // so the verified list is always available.
-    let email: string | null = null
-    if (emailsResponse.ok) {
-      const emails = await emailsResponse.json()
-      const verified = Array.isArray(emails) ? emails.filter((e: any) => e?.verified && e?.email) : []
-      email = (verified.find((e: any) => e.primary) ?? verified[0])?.email ?? null
-    }
+    // account already owned that address.
+    const email = emailsResponse.ok ? githubVerifiedEmail(await emailsResponse.json()) : null
 
     if (!email) {
-      console.error('[Platform GitHub OAuth] No email found')
-      return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/auth/login?error=no_email`)
+      console.error('[Platform GitHub OAuth] No verified email found')
+      return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/auth/login?error=email_not_verified`)
     }
-    email = String(email).trim().toLowerCase()
 
     // Founder blocklist — gates both new signups and existing logins.
     const oauthIp =
