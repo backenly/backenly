@@ -746,6 +746,29 @@ export async function runReconcilerLive(projectId: string): Promise<LiveReconcil
 
     const toApply = plan.decisions.filter(d => d.action === 'WOULD_AUTO_APPLY')
     if (toApply.length === 0) {
+      // Why nothing will happen this tick.
+      //
+      // The shadow path prints its counts; the live path printed nothing, so a
+      // deployment where the loop evaluated every project and repaired none was
+      // indistinguishable from one with nothing to repair. Measured on staging
+      // 2026-09-22: a table with RLS disabled sat through 28 ticks and the only
+      // available signal was "0 fixes applied".
+      //
+      // An UNCHECKED invariant is the case worth shouting about: a probe that
+      // errored or was gated reports no violation, which reads exactly like a
+      // healthy backend.
+      const report = plan.report as unknown as {
+        errors?: string[]
+        disabled?: Array<{ invariantId?: string; id?: string }>
+        violations?: Array<{ type: string; tier: number }>
+      }
+      console.log(
+        `[Reconciler:live] project=${projectId} nothing to apply — ` +
+          `counts=${JSON.stringify(plan.counts)} ` +
+          `violations=${JSON.stringify((report.violations ?? []).map(v => `${v.type}:t${v.tier}`))} ` +
+          `errors=${JSON.stringify(report.errors ?? [])} ` +
+          `disabled=${JSON.stringify((report.disabled ?? []).map(d => d.invariantId ?? d.id ?? 'unknown'))}`,
+      )
       return { ...base, frozen: false, attempted: 0, applied: 0, escalated: 0, deferred: 0 }
     }
 
