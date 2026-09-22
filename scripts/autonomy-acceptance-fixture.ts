@@ -196,19 +196,24 @@ async function prepare(env: Env): Promise<Record<string, unknown>> {
     })
   }
 
-  // ── An ordinary free-tier subscription ───────────────────────────────────
-  //
-  // Not decoration: with no subscription at all the plan ceiling cannot be
-  // resolved, getProjectAutonomyLevel clamps to the safe fallback, and every
-  // tier-1 repair would be refused for a reason that has nothing to do with the
-  // Authority Decision. The fixture must be a project the loop treats normally.
+  // ── An ordinary free-tier subscription, when the deployment has plans ────
   //
   // What `createFreeSubscription` writes, inlined rather than imported, because
   // importing lib/billing pulls its whole dependency graph into a payload that
-  // travels in a 64 KB task definition. Kept identical to lib/billing/index.ts
-  // — SANDBOX, falling back to the legacy FREE plan, status FREE — and it
-  // refuses rather than inventing a plan if neither is seeded, because a
-  // fixture quietly running at a different ceiling would report a wrong answer.
+  // travels in a 64 KB task definition. Identical to lib/billing/index.ts:
+  // SANDBOX, falling back to the legacy FREE plan, status FREE.
+  //
+  // Optional, deliberately. An earlier version REFUSED when no plan was seeded,
+  // on the theory that the plan ceiling would otherwise clamp autonomy down.
+  // That was wrong for this product: with no subscription, the ceiling falls
+  // back to SAFE_FALLBACK_LEVEL, which is AGGRESSIVE (lib/autonomy/
+  // autonomy-level.ts — "self-healing is the product"), and the cadence falls
+  // back to SAFE_CADENCE_MIN, one minute. So a project without a subscription
+  // is treated exactly as fully as one with a free plan, and refusing would
+  // have blocked the qualification over a difference that does not exist.
+  //
+  // The path taken IS reported, because "which plan was this measured under"
+  // is a question the reader of a qualification run is entitled to.
   const sub = await prisma.subscription.findFirst({
     where: { userId: user.id, status: { in: ['ACTIVE', 'FREE', 'GRACE'] } },
     include: { plan: { select: { name: true, autonomyMaxLevel: true } } },
@@ -218,12 +223,13 @@ async function prepare(env: Env): Promise<Record<string, unknown>> {
     const plan =
       (await prisma.plan.findUnique({ where: { name: 'SANDBOX' } })) ??
       (await prisma.plan.findUnique({ where: { name: 'FREE' } }))
-    if (!plan) refuse('no SANDBOX or FREE plan is seeded, so the fixture cannot be an ordinary free project')
-    await prisma.subscription.create({ data: { userId: user.id, planId: plan.id, status: 'FREE' } })
-    subscription = await prisma.subscription.findFirst({
-      where: { userId: user.id },
-      include: { plan: { select: { name: true, autonomyMaxLevel: true } } },
-    })
+    if (plan) {
+      await prisma.subscription.create({ data: { userId: user.id, planId: plan.id, status: 'FREE' } })
+      subscription = await prisma.subscription.findFirst({
+        where: { userId: user.id },
+        include: { plan: { select: { name: true, autonomyMaxLevel: true } } },
+      })
+    }
   }
 
   // ── A real project, not a row and a schema ───────────────────────────────
@@ -317,7 +323,7 @@ async function prepare(env: Env): Promise<Record<string, unknown>> {
     postgrestPrepared: fn[0].n > 0,
     dataPlaneRegistered,
     plan: subscription?.plan?.name ?? null,
-    planAutonomyCeiling: subscription?.plan?.autonomyMaxLevel ?? null,
+    planAutonomyCeiling: subscription?.plan?.autonomyMaxLevel ?? 'SAFE_FALLBACK (no plan seeded)',
     autonomyLevel: (await prisma.project.findUnique({ where: { id: proj.id }, select: { autonomyLevel: true } }))
       ?.autonomyLevel ?? null,
   }
