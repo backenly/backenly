@@ -56,6 +56,7 @@ import { grantAuthority, revokeAuthority, loadGrants } from '@/lib/authority/gra
 import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 import { generateUniqueSlug } from '@/lib/utils/slug'
 import { createEmptyGraph } from '@/lib/orchestration/backend-state-graph'
+import { claimExpr, jwtClaimFunctionSql, ownRowsPredicate } from '@/lib/postgrest/rls-translation'
 
 /** The only project this file will ever touch. */
 export const FIXTURE_NAME = '__backenly_autonomy_acceptance_v1__'
@@ -163,7 +164,11 @@ const schemaOf = (projectId: string) => `workspace_${projectId}`
  */
 async function restoreHealthy(projectId: string): Promise<void> {
   const s = schemaOf(projectId)
-  const claim = `current_setting('request.jwt.claim.sub', true)`
+  // The product's own predicate builders, not a hand-written equivalent. A
+  // fixture whose "healthy" policies are written in a dialect the product no
+  // longer emits is a fixture that measures drift it introduced itself.
+  const owner = ownRowsPredicate(s, 'user_id')
+  const sub = claimExpr(s, 'sub')
 
   await q(`ALTER TABLE "${s}"."posts" ENABLE ROW LEVEL SECURITY`)
   await q(`ALTER TABLE "${s}"."posts" FORCE ROW LEVEL SECURITY`)
@@ -174,12 +179,12 @@ async function restoreHealthy(projectId: string): Promise<void> {
   await q(`DROP POLICY IF EXISTS "fixture_posts_owner" ON "${s}"."posts"`)
   await q(
     `CREATE POLICY "fixture_posts_owner" ON "${s}"."posts" ` +
-      `USING (user_id::text = ${claim}) WITH CHECK (user_id::text = ${claim})`,
+      `USING ${owner} WITH CHECK ${owner}`,
   )
   await q(`DROP POLICY IF EXISTS "fixture_comments_parent" ON "${s}"."comments"`)
   await q(
     `CREATE POLICY "fixture_comments_parent" ON "${s}"."comments" USING (EXISTS (` +
-      `SELECT 1 FROM "${s}"."posts" p WHERE p.id = post_id AND p.user_id::text = ${claim}))`,
+      `SELECT 1 FROM "${s}"."posts" p WHERE p.id = post_id AND p.user_id::text = ${sub}))`,
   )
 
   await q(`CREATE INDEX IF NOT EXISTS "fixture_posts_user_id_idx" ON "${s}"."posts" ("user_id")`)
@@ -303,6 +308,11 @@ async function prepare(env: Env): Promise<Record<string, unknown>> {
 
   const s = schemaOf(proj.id)
   await q(`CREATE SCHEMA IF NOT EXISTS "${s}"`)
+  // The per-schema claim reader every generated policy and column default calls.
+  // The product installs it alongside the tables (lib/ai/schema-reconciler.ts,
+  // lib/ai/production-intelligence.ts); without it the DDL-sync event trigger's
+  // own owner-default pass fails with 42883 and takes the CREATE TABLE with it.
+  await q(jwtClaimFunctionSql(s))
   await q(`CREATE TABLE IF NOT EXISTS "${s}"."posts" (id uuid PRIMARY KEY, user_id uuid, body text)`)
   await q(
     `CREATE TABLE IF NOT EXISTS "${s}"."comments" (id uuid PRIMARY KEY, ` +
