@@ -742,9 +742,25 @@ async function observe(env: Env): Promise<Record<string, unknown>> {
     take: 12,
   })
 
+  // The most recent loop tick's own record. Without it, "0 fixes applied" is a
+  // mystery: the plan counts say whether the loop found no gap at all, found
+  // one the dial refused, or found one the breaker blocked — three different
+  // facts that look identical from outside.
+  const lastTick = await prisma.auditLog.findFirst({
+    where: {
+      projectId: proj.id,
+      action: { in: ['AUTONOMY_TICK', 'AUTONOMY_LIVE_RUN', 'AUTONOMY_SHADOW_DECISION', 'AUTONOMY_CHANGE_FREEZE'] },
+    },
+    orderBy: { timestamp: 'desc' },
+    select: { action: true, timestamp: true, details: true },
+  })
+
   return {
     mode: 'observe',
     env,
+    lastTick: lastTick
+      ? { action: lastTick.action, at: lastTick.timestamp, details: JSON.parse(lastTick.details ?? '{}') }
+      : null,
     projectId: proj.id,
     loopTicksOnFixture: Object.fromEntries(ticks.map(t => [t.action, t._count.action])),
     rls,
