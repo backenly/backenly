@@ -95,6 +95,12 @@ function emit(result: Record<string, unknown>): void {
   console.log('ACCEPTANCE-RESULT ' + JSON.stringify(result))
 }
 
+/** An error's first couple of lines, which is all a report needs of a stack. */
+function firstLines(err: unknown): string {
+  const msg = String((err as any)?.message ?? err)
+  return msg.split(String.fromCharCode(10)).filter(Boolean).slice(0, 2).join(' | ')
+}
+
 function refuse(msg: string): never {
   emit({ ok: false, refused: msg })
   process.exit(2)
@@ -742,25 +748,51 @@ async function observe(env: Env): Promise<Record<string, unknown>> {
     take: 12,
   })
 
-  // The most recent loop tick's own record. Without it, "0 fixes applied" is a
-  // mystery: the plan counts say whether the loop found no gap at all, found
-  // one the dial refused, or found one the breaker blocked — three different
-  // facts that look identical from outside.
-  const lastTick = await prisma.auditLog.findFirst({
-    where: {
-      projectId: proj.id,
-      action: { in: ['AUTONOMY_TICK', 'AUTONOMY_LIVE_RUN', 'AUTONOMY_SHADOW_DECISION', 'AUTONOMY_CHANGE_FREEZE'] },
-    },
-    orderBy: { timestamp: 'desc' },
-    select: { action: true, timestamp: true, details: true },
-  })
+  // ── Why the loop did or did not act, one condition at a time ────────────
+  //
+  // Neither the planner nor the probe can be imported here: measured,
+  // `computeReconciliationPlan` bundles to 11.8 MB and `workspace-observer` to
+  // 2.2 MB, against a task definition capped at 64 KB. And reading the last
+  // tick's audit row cannot answer it either — AUTONOMY_TICK stores an empty
+  // details object, and the live path returns BEFORE writing AUTONOMY_LIVE_RUN
+  // when there is nothing to apply, so the one case worth explaining is the one
+  // that leaves no record.
+  //
+  // So the probe's OWN conditions are evaluated here, per table, exactly as
+  // `detectMissingRls` (lib/services/workspace-observer.ts) states them. This is
+  // a copy and says so; it answers "would that query return this table", which
+  // is the first fork of the diagnosis and the only one reachable from here.
+  const rlsProbe = await rows<{
+    tablename: string
+    rls_off: boolean
+    anon_select: boolean
+    auth_select: boolean
+    is_users: boolean
+    would_match: boolean
+  }>(
+    `SELECT t.tablename,
+            NOT pc.relrowsecurity AS rls_off,
+            has_table_privilege('anon', pc.oid, 'SELECT') AS anon_select,
+            has_table_privilege('authenticated', pc.oid, 'SELECT') AS auth_select,
+            (t.tablename = 'users') AS is_users,
+            (NOT pc.relrowsecurity
+              AND t.tablename <> 'users'
+              AND (has_table_privilege('anon', pc.oid, 'SELECT')
+                   OR has_table_privilege('authenticated', pc.oid, 'SELECT'))) AS would_match
+       FROM pg_tables t
+       JOIN pg_class pc ON pc.relname = t.tablename
+        AND pc.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = $1)
+      WHERE t.schemaname = $1
+      ORDER BY 1`,
+    s ?? 'no-such-schema',
+  ).catch((err: any) => [{ tablename: firstLines(err), rls_off: false, anon_select: false, auth_select: false, is_users: false, would_match: false }])
+
+  const why = { detectMissingRlsConditions: rlsProbe }
 
   return {
     mode: 'observe',
     env,
-    lastTick: lastTick
-      ? { action: lastTick.action, at: lastTick.timestamp, details: JSON.parse(lastTick.details ?? '{}') }
-      : null,
+    why,
     projectId: proj.id,
     loopTicksOnFixture: Object.fromEntries(ticks.map(t => [t.action, t._count.action])),
     rls,
