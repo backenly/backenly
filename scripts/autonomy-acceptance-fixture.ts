@@ -47,6 +47,8 @@
 
 import { randomUUID } from 'crypto'
 
+import { PrismaClient } from '@prisma/client'
+
 import { prisma } from '@/lib/db/prisma'
 import { P } from '@/lib/principal'
 import { declareOwnershipIntent } from '@/lib/authority/ownership-intent'
@@ -521,7 +523,13 @@ async function diagnose(env: Env): Promise<Record<string, unknown>> {
   let direct: Record<string, unknown> | null = null
   const directUrl = process.env.DIRECT_URL ?? ''
   if (directUrl) {
-    const { PrismaClient } = await import('@prisma/client')
+    // PrismaClient is imported at the top of this file, not with a dynamic
+    // import. esbuild leaves `await import()` of an external package as a NATIVE
+    // ESM import, and Node's ESM resolver does not consult NODE_PATH — which is
+    // the only thing that makes /app/node_modules reachable from a script that
+    // executes out of /tmp. A top-level import compiles to require() and
+    // resolves. Measured: the dynamic form fails with "Cannot find package
+    // '@prisma/client'" inside the task while the top-level one works.
     const d = new PrismaClient({ datasources: { db: { url: directUrl } } })
     try {
       const caps = await d.$queryRawUnsafe<
