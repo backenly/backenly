@@ -455,6 +455,53 @@ async function freezeEnd(env: Env): Promise<Record<string, unknown>> {
 }
 
 /**
+ * One real request to PostgREST, anonymously.
+ *
+ * Catalog privileges say what SHOULD be reachable. This asks the data plane
+ * itself, which is the only thing that can distinguish a schema PostgREST
+ * actually serves from one that merely looks correct in pg_catalog.
+ *
+ * Anonymous on purpose: this task does not carry the PostgREST signing secret,
+ * and it does not need to. Unauthenticated requests run as the anon role, which
+ * `prepare_schema` grants SELECT, and the fixture's tables force row-level
+ * security with an owner policy — so the CORRECT answer is `200` with an empty
+ * array. Every failure mode stays distinguishable:
+ *
+ *   200 + []        served, granted, and RLS applied — what we want
+ *   404 / PGRST205  the schema is not in PostgREST's cache or registry
+ *   403             served, but the grants never reached anon
+ *   401             served, but this deployment has no anonymous role
+ *   5xx / throw     the data plane is not answering at all
+ *
+ * The base URL is read from the environment the launcher copied off the
+ * DEPLOYED task definition, so it is the address the application itself uses.
+ */
+async function dataPlaneRequest(schema: string | null): Promise<Record<string, unknown>> {
+  const baseUrl = process.env.POSTGREST_URL
+  if (!baseUrl) return { attempted: false, reason: 'POSTGREST_URL is not set for this task' }
+  if (!schema) return { attempted: false, reason: 'no fixture schema to ask about' }
+
+  const url = `${baseUrl.replace(/\/$/, '')}/posts?limit=1`
+  const started = Date.now()
+  try {
+    const res = await fetch(url, {
+      headers: { 'Accept-Profile': schema, Accept: 'application/json' },
+      signal: AbortSignal.timeout(10_000),
+    })
+    const body = (await res.text()).slice(0, 300)
+    const verdict =
+      res.ok ? 'served'
+      : /PGRST205|PGRST106/.test(body) ? 'not_in_schema_cache'
+      : res.status === 403 ? 'served_but_not_granted'
+      : res.status === 401 ? 'served_but_no_anonymous_role'
+      : `unexpected_${res.status}`
+    return { attempted: true, url, status: res.status, ms: Date.now() - started, verdict, body }
+  } catch (err: any) {
+    return { attempted: true, url, verdict: 'no_answer', error: String(err?.message ?? err) }
+  }
+}
+
+/**
  * Read-only characterisation of the data-plane plumbing this deployment has.
  *
  * Every query is fixed and every one is a read. It exists because a probe that
@@ -494,9 +541,22 @@ async function diagnose(env: Env): Promise<Record<string, unknown>> {
       order by 1`,
   ).catch(() => [])
 
-  const registry = await rows<{ n: number }>(
-    `select count(*)::int as n from public.backenly_pgrst_current_schemas()`,
-  ).catch(() => [{ n: -1 }])
+  // `backenly_pgrst_current_schemas()` returns ONE comma-separated text value,
+  // not a set. An earlier version counted rows over it and reported 1 in every
+  // environment, which looked like a finding and was an artefact of the query.
+  // Read the value, split it, and answer the question actually being asked.
+  // `backenly_pgrst_current_schemas()` returns ONE comma-separated text value,
+  // not a set. An earlier version counted rows over it and reported 1 in every
+  // environment, which looked like a finding and was an artefact of the query.
+  //
+  // Membership is exact, not a substring test: qualification instrumentation
+  // should prove "this schema is registered", never "its name appears in the
+  // text somewhere".
+  const registry = await rows<{ entries: number; has_fixture: boolean }>(
+    `select coalesce(array_length(string_to_array(nullif(public.backenly_pgrst_current_schemas(), ''), ','), 1), 0) as entries,
+            $1 = ANY(string_to_array(coalesce(public.backenly_pgrst_current_schemas(), ''), ',')) as has_fixture`,
+    s ?? 'no-such-schema',
+  ).catch(() => [])
 
   const workspaces = await rows<{ n: number }>(
     `select count(*)::int as n from pg_namespace where nspname like 'workspace\\_%'`,
@@ -607,10 +667,12 @@ async function diagnose(env: Env): Promise<Record<string, unknown>> {
   return {
     mode: 'diagnose',
     env,
+    dataPlaneRequest: await dataPlaneRequest(s),
     connectedAs: who[0],
     appRole: appRole[0]?.r ?? null,
     dataPlaneFunctions: fns,
-    schemasInPostgrestRegistry: registry[0]?.n ?? null,
+    schemasInPostgrestRegistry: registry[0]?.entries ?? null,
+    fixtureSchemaInPostgrestRegistry: registry[0]?.has_fixture ?? null,
     workspaceSchemasInCluster: workspaces[0]?.n ?? null,
     fixtureSchema: s,
     fixtureTables: tables.map(t => t.t),

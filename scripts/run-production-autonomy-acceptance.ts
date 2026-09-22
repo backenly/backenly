@@ -238,6 +238,10 @@ async function main(): Promise<number> {
       { name: 'NODE_PATH', value: '/app/node_modules' },
       { name: 'BACKENLY_ENV', value: backenlyEnv },
       { name: 'EXPECT_ENVIRONMENT', value: 'production' },
+    // The data-plane address the deployed service itself uses, copied from its
+    // task definition so the fixture asks the same PostgREST the app asks.
+    ...(((srcDef.containerDefinitions?.[0]?.environment ?? []) as Array<{ name: string; value: string }>)
+      .filter(e => e.name === 'POSTGREST_URL')),
       { name: 'ALLOW_PRODUCTION_FIXTURE', value: 'yes' },
       { name: 'ACCEPTANCE_MODE', value: mode },
       ...(mode === 'fault' ? [{ name: 'ACCEPTANCE_FAULT', value: fault }] : []),

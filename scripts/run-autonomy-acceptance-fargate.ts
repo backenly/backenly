@@ -133,6 +133,10 @@ async function main(): Promise<number> {
     { name: 'FIXTURE_B64', value: compressed },
     { name: 'BACKENLY_ENV', value: backenlyEnv },
     { name: 'EXPECT_ENVIRONMENT', value: 'staging' },
+    // The data-plane address the deployed service itself uses, copied from its
+    // task definition so the fixture asks the same PostgREST the app asks.
+    ...(((ctx.srcDef.containerDefinitions?.[0]?.environment ?? []) as Array<{ name: string; value: string }>)
+      .filter(e => e.name === 'POSTGREST_URL')),
     { name: 'ACCEPTANCE_MODE', value: mode },
     ...(mode === 'fault' ? [{ name: 'ACCEPTANCE_FAULT', value: fault }] : []),
     ...(mode === 'authority' ? [{ name: 'ACCEPTANCE_ACTION', value: action }] : []),
