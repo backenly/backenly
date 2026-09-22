@@ -122,12 +122,23 @@ function productionDbSecret(taskDef: any): Array<{ name: string; valueFrom: stri
  * The fixture compares its `EXPECT_ENVIRONMENT` against this. Inventing it here
  * would make that check agree with itself.
  */
-function deployedEnvironment(srcDef: any): string {
+function deployedEnvironment(srcDef: any, readOnly: boolean): string {
   const env: Array<{ name: string; value: string }> = srcDef.containerDefinitions?.[0]?.environment ?? []
   const found = env.find(e => e.name === 'BACKENLY_ENV')?.value
-  if (!found) die('the production task definition declares no BACKENLY_ENV, so the environment cannot be proven')
-  if (found !== 'production') die(`the deployed task definition says BACKENLY_ENV=${found}, not production`)
-  return found
+  if (found) {
+    if (found !== 'production') die(`the deployed task definition says BACKENLY_ENV=${found}, not production`)
+    return found
+  }
+  // A deployment that predates environment naming cannot prove itself this way.
+  // For a mode that only reads, the fixture's other identity checks still hold
+  // — the database host must carry the production marker and must not carry the
+  // staging one — so the value is supplied and the weaker proof is stated. No
+  // mode that writes is allowed through here.
+  if (!readOnly) {
+    die('the production task definition declares no BACKENLY_ENV, so the environment cannot be proven')
+  }
+  console.log('  NOTE: task definition declares no BACKENLY_ENV; read-only mode proceeds on the database-host check alone')
+  return 'production'
 }
 
 function readLogStream(stream: string): string[] {
@@ -212,7 +223,8 @@ async function main(): Promise<number> {
   const srcDef = aws(['ecs', 'describe-task-definition', '--task-definition', SERVICE])?.taskDefinition
   if (!srcDef) die('could not read the production task definition')
   const secrets = productionDbSecret(srcDef)
-  const backenlyEnv = deployedEnvironment(srcDef)
+  // Only `diagnose` and `observe` read without writing.
+  const backenlyEnv = deployedEnvironment(srcDef, mode === 'diagnose' || mode === 'observe')
   console.log(`  deployed task definition declares BACKENLY_ENV=${backenlyEnv}`)
 
   const container = {

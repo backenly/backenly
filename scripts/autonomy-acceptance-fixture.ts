@@ -508,6 +508,40 @@ async function diagnose(env: Env): Promise<Record<string, unknown>> {
     ? await rows<{ t: string }>(`select tablename as t from pg_tables where schemaname=$1 order by 1`, s)
     : []
 
+  // ── Who is the migration connection, and could it repair this? ───────────
+  //
+  // DIRECT_URL is the connection migrations run as. It is read here because the
+  // failure above needs a role that is a member of the app role (or holds admin
+  // option on it) to repair, and whether the deployment already HAS such a
+  // connection decides whether this is fixable in place or needs a credential
+  // nobody has wired up. Read-only: identity and two catalog predicates.
+  let direct: Record<string, unknown> | null = null
+  const directUrl = process.env.DIRECT_URL ?? ''
+  if (directUrl) {
+    const { PrismaClient } = await import('@prisma/client')
+    const d = new PrismaClient({ datasources: { db: { url: directUrl } } })
+    try {
+      const who = await d.$queryRawUnsafe<Array<{ cu: string }>>('select current_user as cu')
+      const caps = await d.$queryRawUnsafe<
+        Array<{ is_member: boolean | null; can_create_role: boolean; is_rds_superuser: boolean | null }>
+      >(
+        `select case when public.backenly_app_role() is null then null
+                     else pg_has_role(current_user, public.backenly_app_role(), 'MEMBER') end as is_member,
+                (select rolcreaterole from pg_roles where rolname = current_user) as can_create_role,
+                (select bool_or(r.rolname = 'rds_superuser')
+                   from pg_auth_members m
+                   join pg_roles r on r.oid = m.roleid
+                  where m.member = (select oid from pg_roles where rolname = current_user)
+                ) as is_rds_superuser`,
+      )
+      direct = { connectedAs: who[0]?.cu ?? null, ...(caps[0] ?? {}) }
+    } catch (err: any) {
+      direct = { error: String(err?.message ?? err).split('\n').filter(Boolean).pop() ?? 'failed' }
+    } finally {
+      await d.$disconnect().catch(() => {})
+    }
+  }
+
   return {
     mode: 'diagnose',
     env,
@@ -519,6 +553,7 @@ async function diagnose(env: Env): Promise<Record<string, unknown>> {
     fixtureSchema: s,
     fixtureTables: tables.map(t => t.t),
     fixtureReachability: reach[0] ?? null,
+    migrationConnection: direct,
   }
 }
 
