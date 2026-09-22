@@ -141,11 +141,29 @@ RUN mkdir -p /app/workspace /app/backups && chown -R node:node /app/workspace /a
 # so the server comes up, logs "Ready", listens on a name nothing else can
 # reach, and every request times out. It looks like a hung app rather than a
 # binding mistake.
+# Trust the Amazon RDS root CAs for every Node TLS connection.
+#
+# node-postgres treats `sslmode=require` as full verification (pg 8.13+), and
+# the RDS certificate chain is not in Node's default roots. So every `pg.Pool`
+# in the app - the workspace pool behind every autonomy catalog probe among
+# them - failed with "self-signed certificate in certificate chain" against
+# RDS, while Prisma, which ships its own trust store, connected fine. Measured
+# on AWS staging 2026-09-22: fourteen invariants reported as errors, so the
+# reconciler saw no gaps and healed nothing, and every health check was green.
+#
+# NODE_EXTRA_CA_CERTS ADDS these roots; public CAs stay trusted and chain
+# verification stays on. The bundle is the pinned ap-south-1 set already used
+# by tools/migration-lineage (a test asserts the two copies are identical).
+# Inert against any server not signed by RDS, so it is safe in every image; an
+# operator on another RDS region overrides the variable with that bundle.
+COPY docker/certs/rds-ca-ap-south-1.pem /app/certs/rds-ca-ap-south-1.pem
+
 ENV NODE_ENV=production \
     PORT=3000 \
     HOSTNAME=0.0.0.0 \
     WORKSPACE_DIR=/app/workspace \
-    BACKUP_DIR=/app/backups
+    BACKUP_DIR=/app/backups \
+    NODE_EXTRA_CA_CERTS=/app/certs/rds-ca-ap-south-1.pem
 
 EXPOSE 3000
 

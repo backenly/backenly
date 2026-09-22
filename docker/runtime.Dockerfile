@@ -111,8 +111,15 @@ COPY --from=build /src/prisma/schema.prisma ./prisma/schema.prisma
 # the startup edition assertion. Without these a Cloud Runtime refuses to boot.
 COPY --from=build /src/edition-files/ ./
 
+# Trust the Amazon RDS root CAs for every Node TLS connection. The runtime's
+# pg connections (realtime LISTEN/NOTIFY among them) hit the same pg 8.13+
+# verify-full behaviour as the web app; see docker/web.Dockerfile for the full
+# account. Additive, verification stays on, inert against non-RDS servers.
+COPY docker/certs/rds-ca-ap-south-1.pem /app/certs/rds-ca-ap-south-1.pem
+
 ENV NODE_ENV=production \
-    RUNTIME_PORT=3001
+    RUNTIME_PORT=3001 \
+    NODE_EXTRA_CA_CERTS=/app/certs/rds-ca-ap-south-1.pem
 
 EXPOSE 3001
 

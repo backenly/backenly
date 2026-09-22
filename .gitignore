@@ -22,6 +22,11 @@ packages/*/*.tsbuildinfo
 # misc
 .DS_Store
 *.pem
+# The one exception: Amazon's PUBLIC RDS root certificates, which the images
+# trust so node-postgres can verify an RDS chain. Certificates only, no keys;
+# tests/unit/rds-ca-bundle-is-pinned.spec.ts holds it to a reviewed SHA-256.
+# Every other .pem stays ignored, because that is where private keys live.
+!docker/certs/rds-ca-ap-south-1.pem
 
 # debug
 npm-debug.log*
