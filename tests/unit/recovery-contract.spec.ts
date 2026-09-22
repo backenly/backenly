@@ -234,7 +234,7 @@ describe('durable credentials survive recovery, ephemeral ones must not', () => 
 
   it('drops one-time credentials that were already spent or cancelled', () => {
     for (const token of [
-      'password_reset_tokens',
+      'auth_email_codes',
       'oauth_authorization_codes',
       'mcp_oauth_codes',
       '_magic_links',

@@ -2407,19 +2407,29 @@ model ProcessedWebhookEvent {
   @@map("processed_webhook_events")
 }
 
-// Single-use password reset token tracking. We sign a short-lived JWT with a
-// jti and record it here on issue; the reset route deletes the row on success
-// to make the token un-replayable. Expired rows are GC'd by the cleanup-tokens
-// cron job.
-model PasswordResetToken {
-  jti       String   @id
-  userId    String
-  expiresAt DateTime
-  createdAt DateTime @default(now())
+// A six-digit code emailed to prove someone controls an address: before a
+// platform account is created (`signup`) and before a password is replaced
+// (`password_reset`). One live code per purpose and address; issuing again
+// replaces it. Only an HMAC of the code is stored, and it is deleted on use.
+//
+// `payload` holds what a pending signup needs to become an account once the
+// code is proven: the bcrypt hash of the chosen password and the admission
+// verdict. No user row exists until then.
+model AuthEmailCode {
+  id         String   @id @default(uuid())
+  purpose    String
+  email      String
+  codeHash   String
+  attempts   Int      @default(0)
+  sendCount  Int      @default(1)
+  lastSentAt DateTime @default(now())
+  expiresAt  DateTime
+  payload    Json?
+  createdAt  DateTime @default(now())
 
-  @@index([userId])
+  @@unique([purpose, email])
   @@index([expiresAt])
-  @@map("password_reset_tokens")
+  @@map("auth_email_codes")
 }
 
 // ============================================================================

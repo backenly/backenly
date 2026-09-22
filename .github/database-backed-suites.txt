@@ -244,6 +244,12 @@ __tests__/database/app-role-separation.test.ts
 # first. Covers the race, the replay, and adoption itself.
 __tests__/auth/deployment-claim.test.ts
 
+# Emailed six-digit codes for platform signup and password reset. The code is
+# only safe short because it can be guessed a few times, online, and used once:
+# the attempt budget is one conditional UPDATE and single use is one conditional
+# DELETE, so both are asserted under real concurrency against Postgres.
+__tests__/auth/email-code.test.ts
+
 # The read-only SQL workspace. /api/database/query used to run queryRaw on the
 # APPLICATION connection with a deny-list regex as its only tenant boundary -
 # and before the credential split that connection was a superuser. Its sibling

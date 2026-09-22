@@ -91,11 +91,17 @@ export function classifyEmailError(err: unknown): { category: EmailFailureCatego
 
   let category: EmailFailureCategory = 'unknown'
 
+  // A provider refusing OUR sending domain answers with the same 550 a refused
+  // recipient gets. Resend's "The backenly.com domain is not verified" arrived
+  // as EMESSAGE/550 and was filed as recipient_rejected, which pointed at the
+  // person being written to when every message to everyone was failing.
+  const senderRefused = code !== 'EENVELOPE' && (msg.includes('not verified') || msg.includes('sender'))
+
   if (code === 'EAUTH' || responseCode === 535 || msg.includes('invalid login') || msg.includes('authentication failed')) {
     category = 'auth_failure'
   } else if (code === 'ETIMEDOUT' || code === 'ECONNECTION' && msg.includes('timeout') || msg.includes('timeout') || msg.includes('timed out')) {
     category = 'timeout'
-  } else if (code === 'EENVELOPE' || responseCode === 550 || responseCode === 553 || msg.includes('invalid `to`') || msg.includes('recipient')) {
+  } else if (!senderRefused && (code === 'EENVELOPE' || responseCode === 550 || responseCode === 553 || msg.includes('invalid `to`') || msg.includes('recipient'))) {
     category = 'recipient_rejected'
   } else if (code === 'ETLS' || msg.includes('tls') || msg.includes('certificate') || msg.includes('ssl')) {
     category = 'tls_error'

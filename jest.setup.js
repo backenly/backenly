@@ -102,7 +102,30 @@ global.Headers = class Headers {
   has(name) {
     return name.toLowerCase() in this._headers
   }
-  
+
+  // NextResponse's cookie jar clears and re-appends Set-Cookie on every
+  // `response.cookies.set(...)`. Without these, any route that sets a cookie
+  // (register, login, signup verification) died with "headers.delete is not a
+  // function" and answered 500 in tests, which reads like a bug in the route.
+  delete(name) {
+    delete this._headers[name.toLowerCase()]
+    if (name.toLowerCase() === 'set-cookie') this._setCookies = []
+  }
+
+  append(name, value) {
+    const key = name.toLowerCase()
+    if (key === 'set-cookie') {
+      this._setCookies = [...(this._setCookies || []), value]
+      this._headers[key] = this._setCookies.join(', ')
+      return
+    }
+    this._headers[key] = key in this._headers ? `${this._headers[key]}, ${value}` : value
+  }
+
+  getSetCookie() {
+    return [...(this._setCookies || [])]
+  }
+
   forEach(callback) {
     Object.entries(this._headers).forEach(([key, value]) => {
       callback(value, key, this)

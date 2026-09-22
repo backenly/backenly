@@ -321,8 +321,12 @@ export const PLATFORM_CREDENTIAL_TABLES: Readonly<Record<string, Disposition>> =
   authority_grants: 'drop',
   /** DB-backed, so absence denies, and signing in again is trivial. */
   sessions: 'drop',
-  /** One-time, minutes-long, and very likely already spent or cancelled. */
-  password_reset_tokens: 'drop',
+  /**
+   * One-time, minutes-long, and very likely already spent or cancelled. A
+   * pending signup in here also holds a password hash for an account that does
+   * not exist yet; the person simply signs up again.
+   */
+  auth_email_codes: 'drop',
   oauth_authorization_codes: 'drop',
   mcp_oauth_codes: 'drop',
   /** Short-lived bearer tokens with a re-issue path. */

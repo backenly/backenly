@@ -95,6 +95,7 @@ const FORWARD_MIGRATIONS = [
   '20260921120000_rollback_authority',
   '20260921160000_ownership_intent',
   '20260921180000_authority_grants',
+  '20260922120000_auth_email_codes',
 ]
 
 describe('the assembled migration workspace', () => {

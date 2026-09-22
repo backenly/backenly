@@ -95,6 +95,15 @@ export const AUTH_LIMITS = {
   signup:        { ip: { limit: 10, windowMs: 60 * 60_000 } },
   verifyEmail:   { ip: { limit: 20, windowMs: 60 * 60_000 } },
   twoFactor:     { ip: { limit: 10, windowMs: 15 * 60_000 } },
+  // Emailed signup and reset codes (lib/auth/email-code.ts). `send` is keyed
+  // on the address before any lookup, so it answers the same whether or not an
+  // account exists, and it is what stops the form being used to flood a
+  // stranger's inbox. `verify` caps guessing from one IP across many codes;
+  // each code also dies after its own five wrong tries.
+  emailCode: {
+    send:   { cooldown: { limit: 1, windowMs: 60_000 }, email: { limit: 5, windowMs: 60 * 60_000 } },
+    verify: { ip: { limit: 30, windowMs: 15 * 60_000 } },
+  },
   oauthCallback: { ip: { limit: 20, windowMs: 15 * 60_000 } },
 
   // ── The END-USER auth surface, /api/v1/{projectId}/auth/* ────────────────

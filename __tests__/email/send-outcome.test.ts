@@ -26,6 +26,9 @@ describe('email send observability', () => {
       ['TLS failure',         { code: 'ETLS', message: 'certificate has expired' },                    'tls_error'],
       ['network refused',     { code: 'ECONNREFUSED', message: 'connect ECONNREFUSED' },               'network_error'],
       ['provider 5xx',        { responseCode: 554, message: 'domain is not verified' },                'provider_rejected'],
+      // The exact shape Resend returned in production for an unverified sending
+      // domain. A 550 like a refused recipient, but nothing about the recipient.
+      ['unverified sender domain', { code: 'EMESSAGE', responseCode: 550, message: 'Message failed: 550 The backenly.com domain is not verified. Please, add and verify your domain' }, 'provider_rejected'],
     ])('classifies %s', (_label, err, expected) => {
       expect(classifyEmailError(err).category).toBe(expected)
     })
