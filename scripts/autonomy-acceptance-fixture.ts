@@ -544,10 +544,6 @@ async function diagnose(env: Env): Promise<Record<string, unknown>> {
   // `backenly_pgrst_current_schemas()` returns ONE comma-separated text value,
   // not a set. An earlier version counted rows over it and reported 1 in every
   // environment, which looked like a finding and was an artefact of the query.
-  // Read the value, split it, and answer the question actually being asked.
-  // `backenly_pgrst_current_schemas()` returns ONE comma-separated text value,
-  // not a set. An earlier version counted rows over it and reported 1 in every
-  // environment, which looked like a finding and was an artefact of the query.
   //
   // Membership is exact, not a substring test: qualification instrumentation
   // should prove "this schema is registered", never "its name appears in the
