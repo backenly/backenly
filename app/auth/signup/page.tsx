@@ -9,6 +9,7 @@ import {
   SIGNUP_EMAIL_REJECTION_MESSAGE,
 } from '@/lib/auth/signup-email-eligibility'
 import { AuthRequestError, getRegistrationRequirements, register } from '@/lib/api/auth'
+import { PASSWORD_MIN_LENGTH, PASSWORD_POLICY_HINT, validatePasswordStrength } from '@/lib/auth/password-policy'
 import { useUserSession } from '@/lib/hooks/useUserSession'
 import { registerSiteIcons } from '@/lib/icons/registry'
 import {
@@ -125,11 +126,8 @@ function SignupForm() {
 
   const validatePassword = (val: string) => {
     if (!val) return 'Password is required'
-    if (val.length < 8) return 'Password must be at least 8 characters'
-    if (!/(?=.*[a-z])/.test(val)) return 'Password must contain at least one lowercase letter'
-    if (!/(?=.*[A-Z])/.test(val)) return 'Password must contain at least one uppercase letter'
-    if (!/(?=.*\d)/.test(val)) return 'Password must contain at least one number'
-    return null
+    const strength = validatePasswordStrength(val)
+    return strength.valid ? null : strength.message || 'Choose a stronger password'
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -259,10 +257,10 @@ function SignupForm() {
                 type={showPassword ? 'text' : 'password'}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder="At least 8 characters"
+                placeholder={`At least ${PASSWORD_MIN_LENGTH} characters`}
                 disabled={isSubmitting}
                 error={errors.password}
-                helper={errors.password ? undefined : '8+ chars, mix of upper, lower, and a number.'}
+                helper={errors.password ? undefined : PASSWORD_POLICY_HINT}
                 trailing={
                   <button
                     type="button"

@@ -28,7 +28,7 @@ import jwt from 'jsonwebtoken'
 
 const registerSchema = z.object({
   email: z.string().email('Invalid email address'),
-  password: z.string().min(8, 'Password must be at least 8 characters'),
+  password: z.string().min(1, 'Password is required'),
   name: z.string().optional(),
   // Referral code captured from ?ref= on the signup page (optional).
   ref: z.string().max(32).optional(),

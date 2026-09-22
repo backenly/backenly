@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { Icon } from '@iconify/react'
 import { registerSiteIcons } from '@/lib/icons/registry'
+import { PASSWORD_MIN_LENGTH, PASSWORD_POLICY_HINT, validatePasswordStrength } from '@/lib/auth/password-policy'
 import { GlobalLoading } from '@/components/ui/GlobalLoading'
 import {
   AuthChrome,
@@ -77,8 +78,9 @@ function ResetPasswordForm() {
 
     if (!password) {
       newErrors.password = 'Password is required'
-    } else if (password.length < 8) {
-      newErrors.password = 'Password must be at least 8 characters'
+    } else {
+      const strength = validatePasswordStrength(password)
+      if (!strength.valid) newErrors.password = strength.message || 'Choose a stronger password'
     }
 
     if (!confirm) {
@@ -153,7 +155,7 @@ function ResetPasswordForm() {
       <AuthCard
         eyebrow="Security"
         title="Set a new password"
-        subtitle="Make sure your new password is at least 8 characters long."
+        subtitle={PASSWORD_POLICY_HINT}
       >
         <form onSubmit={handleSubmit} className="flex flex-col gap-4 mb-5">
           <FieldLabel htmlFor="password">New password</FieldLabel>
@@ -162,7 +164,7 @@ function ResetPasswordForm() {
             type={showPassword ? 'text' : 'password'}
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            placeholder="At least 8 characters"
+            placeholder={`At least ${PASSWORD_MIN_LENGTH} characters`}
             disabled={isSubmitting}
             error={errors.password}
             trailing={
