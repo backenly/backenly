@@ -8,6 +8,7 @@ import { onSignupCompleted } from '@/lib/platform-signals'
 import { assertSignupAllowed, isBlocked } from '@/lib/platform-controls'
 import { consume, AUTH_LIMITS, clientIp } from '@/lib/security/auth-rate-limit'
 import { githubVerifiedEmail } from '@/lib/auth/oauth/verified-email'
+import { oauthMayCreateAccount } from '@/lib/auth/setup-token'
 
 function isSafeRedirect(target: unknown): target is string {
   if (typeof target !== 'string') return false
@@ -153,6 +154,13 @@ export async function GET(request: NextRequest) {
     })
 
     if (!user) {
+      // An OAuth round trip carries no setup token, so it cannot claim a
+      // self-hosted deployment that is waiting for one.
+      if (!(await oauthMayCreateAccount())) {
+        return NextResponse.redirect(
+          `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/auth/login?error=claim_requires_setup_token`,
+        )
+      }
       // Founder kill switches gate NEW signups via OAuth too.
       const guard = await assertSignupAllowed(email, oauthIp)
       if (!guard.ok) {

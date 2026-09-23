@@ -256,6 +256,12 @@ __tests__/auth/deployment-claim.test.ts
 __tests__/auth/email-code.test.ts
 __tests__/auth/email-code-routes.test.ts
 
+# An OAuth sign-in carries no setup token, so it must not be able to claim a
+# self-hosted deployment - and the Google and GitHub callbacks used to create
+# the first account without asking. Needs a users table with ZERO rows, which a
+# shared database cannot guarantee, so it runs against a database of its own.
+__tests__/auth/oauth-claim-gate.test.ts
+
 # The read-only SQL workspace. /api/database/query used to run queryRaw on the
 # APPLICATION connection with a deny-list regex as its only tenant boundary -
 # and before the credential split that connection was a superuser. Its sibling

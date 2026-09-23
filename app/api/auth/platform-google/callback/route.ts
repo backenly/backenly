@@ -8,6 +8,7 @@ import { createSession } from '@/lib/auth/session'
 import { assertSignupAllowed, isBlocked } from '@/lib/platform-controls'
 import { consume, AUTH_LIMITS, clientIp } from '@/lib/security/auth-rate-limit'
 import { googleVerifiedEmail } from '@/lib/auth/oauth/verified-email'
+import { oauthMayCreateAccount } from '@/lib/auth/setup-token'
 
 /**
  * Platform-level Google OAuth callback.
@@ -120,6 +121,11 @@ export async function GET(request: NextRequest) {
     include: { role: true },
   })
   if (!user) {
+    // An OAuth round trip carries no setup token, so it cannot claim a
+    // self-hosted deployment that is waiting for one.
+    if (!(await oauthMayCreateAccount())) {
+      return NextResponse.redirect(`${appUrl()}/auth/login?error=claim_requires_setup_token`)
+    }
     const guard = await assertSignupAllowed(email, ipForBlock)
     if (!guard.ok) {
       return NextResponse.redirect(`${appUrl()}/auth/login?error=signup_not_allowed`)

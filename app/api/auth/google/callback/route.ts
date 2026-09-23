@@ -7,6 +7,7 @@ import { logger } from '@/lib/logger'
 import { verifyOAuthState, validateStateProvider } from '@/lib/auth/oauth-state'
 import { assertSignupAllowed } from '@/lib/platform-controls'
 import { googleVerifiedEmail } from '@/lib/auth/oauth/verified-email'
+import { oauthMayCreateAccount } from '@/lib/auth/setup-token'
 
 export async function GET(request: NextRequest) {
   try {
@@ -106,6 +107,11 @@ export async function GET(request: NextRequest) {
     })
 
     if (!user) {
+      // An OAuth round trip carries no setup token, so it cannot claim a
+      // self-hosted deployment that is waiting for one.
+      if (!(await oauthMayCreateAccount())) {
+        return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/auth/login?error=claim_requires_setup_token`)
+      }
       const signupIp =
         request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
         request.headers.get('x-real-ip') ||

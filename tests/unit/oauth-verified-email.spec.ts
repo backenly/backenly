@@ -97,3 +97,28 @@ describe('the callbacks use it', () => {
     expect(src).not.toMatch(/email = githubUser\.email/)
   })
 })
+
+describe('an OAuth sign-in cannot claim a self-hosted deployment', () => {
+  // OAuth carries no setup token, so every callback must ask before it creates
+  // an account, and must ask BEFORE the create rather than somewhere after it.
+  // The decision itself is asserted against an empty database in
+  // __tests__/auth/oauth-claim-gate.test.ts; this pins that it is consulted.
+  const fs = require('fs') as typeof import('fs')
+  const path = require('path') as typeof import('path')
+
+  it.each([
+    'app/api/auth/platform-google/callback/route.ts',
+    'app/api/auth/platform-github/callback/route.ts',
+    'app/api/auth/google/callback/route.ts',
+    'app/api/auth/github/callback/route.ts',
+  ])('%s checks oauthMayCreateAccount before it creates a user', (file) => {
+    const src = fs.readFileSync(path.join(process.cwd(), file), 'utf8')
+    const gate = src.indexOf('oauthMayCreateAccount()')
+    const create = src.indexOf('prisma.user.create(')
+    expect(gate).toBeGreaterThan(-1)
+    expect(create).toBeGreaterThan(-1)
+    expect(gate).toBeLessThan(create)
+    // Exactly one create per callback, so "before the create" means all of them.
+    expect(src.indexOf('prisma.user.create(', create + 1)).toBe(-1)
+  })
+})

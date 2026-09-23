@@ -36,6 +36,8 @@ const OAUTH_ERRORS: Record<string, string> = {
   email_not_verified:
     'That account has no verified email address with the provider. Verify your email there and try again, or sign in with a password.',
   no_email: 'That provider did not share an email address, so there is nothing to sign you in as.',
+  claim_requires_setup_token:
+    'This deployment has not been claimed yet. Its operator claims it on the sign-up page with the setup token that npm run selfhost printed; Google and GitHub sign-in work after that.',
   blocked: 'This account cannot sign in. Contact support if you think that is wrong.',
   signup_not_allowed: 'New accounts are not being accepted right now.',
   token_failed: 'Sign-in with that provider did not complete. Please try again.',
