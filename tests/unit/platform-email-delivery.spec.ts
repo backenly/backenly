@@ -80,6 +80,36 @@ describe('everything else, which must stay a delivery failure', () => {
     )).toBe(false)
   })
 
+  it('refuses an exact-recipient RCPT TO rejection that carries no SMTP status at all', () => {
+    // Everything else matches, so this is the case that proves the status is
+    // REQUIRED rather than merely checked when present. An empty status list
+    // used to pass, because "no status is below 500" is true of nothing.
+    expect(isRecipientRefusal(
+      { code: 'EENVELOPE', command: 'RCPT TO', rejected: [RECIPIENT] },
+      RECIPIENT,
+    )).toBe(false)
+    expect(isRecipientRefusal(
+      { code: 'EENVELOPE', command: 'RCPT TO', rejected: [RECIPIENT], rejectedErrors: [{}] },
+      RECIPIENT,
+    )).toBe(false)
+  })
+
+  it('refuses a status outside 5xx even when it is above 500', () => {
+    // ">= 500" is not "a 5xx". A status no SMTP server should send is
+    // uncertainty, and uncertainty stays a delivery failure.
+    expect(isRecipientRefusal(
+      { code: 'EENVELOPE', command: 'RCPT TO', responseCode: 600, rejected: [RECIPIENT] },
+      RECIPIENT,
+    )).toBe(false)
+  })
+
+  it('refuses when any one of several statuses is not a 5xx', () => {
+    expect(isRecipientRefusal(
+      { code: 'EENVELOPE', command: 'RCPT TO', responseCode: 550, rejected: [RECIPIENT], rejectedErrors: [{ responseCode: 451 }] },
+      RECIPIENT,
+    )).toBe(false)
+  })
+
   it('refuses every other error code, however it is shaped', () => {
     for (const err of [
       { code: 'EAUTH', responseCode: 535 },

@@ -54,8 +54,9 @@ export class EmailDeliveryUnavailableError extends Error {
  *
  *   - the failing command is RCPT TO, when the error names one;
  *   - the rejected list is exactly this recipient;
- *   - the response, where there is one, is a permanent 5xx. A 4xx is
- *     greylisting or a full mailbox, which is a retry, not a refusal.
+ *   - there IS an SMTP status, and every one given is a permanent 5xx. A
+ *     4xx is greylisting or a full mailbox, which is a retry, not a refusal,
+ *     and a missing status proves nothing either way.
  *
  * Masking on the bare code was how a configuration fault could hide again,
  * which is the failure this module exists to end.
@@ -75,13 +76,16 @@ export function isRecipientRefusal(err: unknown, recipient: string): boolean {
   if (rejected.length === 0) return false
   if (!rejected.every(r => r === wanted)) return false
 
-  // A temporary refusal is a delivery failure that will clear, so it must not
-  // be reported as delivered.
+  // The refusal must be PROVEN permanent: at least one SMTP status, and every
+  // status a 5xx. No status at all is not proof of anything, and was masked
+  // before, because "no code is below 500" is also true of an empty list. A
+  // 4xx is greylisting or a full mailbox, which clears on its own.
   const codes = [
     e.responseCode,
     ...(Array.isArray(e.rejectedErrors) ? e.rejectedErrors.map(r => (r as { responseCode?: unknown })?.responseCode) : []),
   ].filter((c): c is number => typeof c === 'number')
-  if (codes.some(c => c < 500)) return false
+  if (codes.length === 0) return false
+  if (!codes.every(c => c >= 500 && c <= 599)) return false
 
   return true
 }
