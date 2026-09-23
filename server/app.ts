@@ -14,6 +14,8 @@ import bootstrapRoutes from './routes/bootstrap'
 import dynamicRoutes from './routes/dynamic'
 import v2Routes from './routes/v2'
 import { nextProxy } from './routes/next-proxy'
+import { asyncRoute } from './lib/async-route'
+import { projectServingGate } from './lib/serving-gate'
 
 const app = express()
 
@@ -95,6 +97,13 @@ app.use(cors({
   exposedHeaders: ['Content-Range', 'Content-Location', 'Location', 'Range-Unit', 'Preference-Applied'],
   maxAge: 86400,
 }))
+
+// ── Project serving gate ───────────────────────────────────────────────────────
+// Before the Next proxy and before every router, because it is the one check
+// they all need and none of them used to make: founder lockdown was enforced by
+// the Next-owned surfaces only, so /db, /v2, end-user auth, functions and
+// realtime kept serving a sealed project. See lib/projects/serving-state.ts.
+app.use(['/api/v1/:projectId', '/api/v2/:projectId'], asyncRoute(projectServingGate))
 
 // ── Next.js-owned v1 surfaces (storage, orgs, stats, checkout, …) ──────────────
 // nginx sends ALL /api/v1/* here, but these routes only exist in the Next app.

@@ -290,9 +290,13 @@ export async function v1ApiMiddleware(
   // Publish?) rather than a bug fix. Reinstating it here alone would restore the
   // inconsistency, not the protection.
   //
-  // What still blocks a request, and is genuinely enforced: `lockedDownAt`
-  // (above), platform maintenance / read-only (below), API-key scope, quota,
-  // and RLS. Those are real gates on every surface.
+  // What still blocks a request on every surface: `lockedDownAt`, which the
+  // runtime's serving gate (server/lib/serving-gate.ts) enforces in front of
+  // all of /api/v1 and /api/v2 as well as here, API-key scope, quota, and RLS.
+  //
+  // Platform maintenance / read-only (below) are NOT yet every-surface gates:
+  // they are checked here and in the bootstrap routes only, not on the Express
+  // /db, /v2, auth or realtime paths.
   void isStatusEndpoint
 
   const platformControls = await getPlatformControls()

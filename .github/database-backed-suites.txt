@@ -481,3 +481,11 @@ tests/integration/runtime-async-crash.spec.ts
 # NOBYPASSRLS. That is asserted here rather than argued - the app role is made
 # to try both dumps, and fails both.
 tests/integration/backup-role-contract.spec.ts
+
+# Founder lockdown was enforced by the Next-owned v1 surfaces and bootstrap
+# only, so /db, /database, /v2, end-user sign-in, OAuth and realtime kept
+# serving a locked project. The runtime serving gate now sits in front of all
+# of them. This drives the REAL server/app.ts over a socket, because mount
+# order is the property under test. Mutation-checked: unmounting the gate
+# fails 7 of the 8 locked-door assertions (bootstrap has its own check).
+tests/integration/runtime-serving-gate.spec.ts
