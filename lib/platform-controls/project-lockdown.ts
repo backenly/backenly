@@ -23,10 +23,13 @@ export async function setProjectLockdown(
   })
   if (!proj) throw new Error('Project not found')
 
-  // Lockdown is enforced in lib/api/v1/middleware.ts by checking
-  // Project.lockedDownAt — single source of truth, so we don't need to mutate
-  // every ApiKey row (and risk losing their original expiresAt). Lifting the
-  // lockdown is therefore reversible with no side effects.
+  // Lockdown is enforced by checking Project.lockedDownAt, in front of every
+  // runtime route by server/lib/serving-gate.ts and on the Next-owned v1
+  // surfaces by lib/api/v1/middleware.ts. Single source of truth, so we don't
+  // need to mutate every ApiKey row (and risk losing their original
+  // expiresAt). Lifting the lockdown is therefore reversible with no side
+  // effects. The runtime may keep serving for up to FRESH_MS after this write
+  // (lib/projects/serving-state.ts), because its cache lives in another process.
   await prisma.project.update({
     where: { id: projectId },
     data: {
