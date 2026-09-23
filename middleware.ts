@@ -423,6 +423,14 @@ export async function middleware(request: NextRequest) {
     const response = NextResponse.next({
       request: { headers: requestHeaders },
     })
+    // A signed-in page must not outlive its session in the browser's caches.
+    // Next serves the console as static HTML (`s-maxage=31536000`), and Back
+    // reuses a stored page without asking the server, so after signing out
+    // Back repainted the console instead of reaching the login redirect above.
+    // Outside dev, Next only sets its own Cache-Control when none is present.
+    if (!pathname.startsWith('/api')) {
+      response.headers.set('Cache-Control', 'private, no-store')
+    }
     return applyCorsHeaders(response)
   } catch {
     // Invalid token — clear and redirect. Never log the token itself.

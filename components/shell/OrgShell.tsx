@@ -33,6 +33,7 @@ import {
 } from 'lucide-react'
 import { Logo } from '@/components/Logo'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
+import { signOut } from '@/lib/api/auth'
 
 interface MeUser {
   name?: string
@@ -125,9 +126,8 @@ export function OrgShell({ children }: { children: ReactNode }) {
     return user.email?.[0]?.toUpperCase() ?? '?'
   }
 
-  const logout = async () => {
-    await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' })
-    router.push('/login')
+  const logout = () => {
+    signOut().catch((error) => console.error('Sign-out failed:', error))
   }
 
   const settingsActive = pathname.startsWith('/app/settings')

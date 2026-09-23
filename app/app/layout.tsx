@@ -7,7 +7,7 @@ import { AppSidebar } from '@/components/app/AppSidebar'
 import { Logo } from '@/components/Logo'
 import { GlobalLoading } from '@/components/ui/GlobalLoading'
 import { getProjects } from '@/lib/api/projects'
-import { isAuthenticated, logout } from '@/lib/api/auth'
+import { isAuthenticated, signOut } from '@/lib/api/auth'
 import { VerifyEmailWall } from '@/components/app/VerifyEmailWall'
 
 // Inner component for layout
@@ -213,12 +213,8 @@ function AppLayoutInternal({
     return (
       <VerifyEmailWall
         email={standing.email}
-        onLogout={async () => {
-          try {
-            await logout()
-          } finally {
-            router.push('/auth/login')
-          }
+        onLogout={() => {
+          signOut().catch((error) => console.error('Sign-out failed:', error))
         }}
       />
     )
