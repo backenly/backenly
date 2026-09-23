@@ -213,9 +213,13 @@ async function handleCORS(request: NextRequest): Promise<NextResponse | null> {
       allowedOrigin = origin
     }
   } else {
-    // Platform routes: strict allow-list. Dev includes localhost; prod does not.
+    // Platform routes: strict allow-list. Dev includes localhost and local IPs; prod does not.
     const list = process.env.NODE_ENV === 'production' ? ALLOWED_ORIGINS_PROD : ALLOWED_ORIGINS_DEV
     allowedOrigin = list.includes(origin) ? origin : null
+    if (!allowedOrigin && process.env.NODE_ENV === 'development' &&
+        (origin.includes('localhost') || origin.includes('127.0.0.1') || origin.includes('192.168.') || origin.includes('10.') || origin.includes('.local') || origin.includes('trycloudflare.com') || origin.includes('ngrok') || origin.includes('loca.lt') || origin.includes('pinggy.link'))) {
+      allowedOrigin = origin
+    }
   }
 
   // `Prefer`, `Range` and `Range-Unit` are the PostgREST control headers. They

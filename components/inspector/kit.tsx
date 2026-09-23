@@ -16,6 +16,7 @@
 
 import { useEffect, forwardRef, type ReactNode, type ComponentType } from 'react'
 import { Check, ChevronRight, X, type LucideIcon } from 'lucide-react'
+import { motion, AnimatePresence } from 'framer-motion'
 
 // ─── Tokens ──────────────────────────────────────────────────────────────────
 // Use these className recipes (not raw hex) when extending the kit.
@@ -664,34 +665,54 @@ export function KitModal({
     return () => window.removeEventListener('keydown', onKey)
   }, [open, onClose])
 
-  if (!open) return null
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true">
-      <div className="absolute inset-0 bg-black/70" onClick={onClose} />
-      <div className={`relative w-full ${width} ${KIT.surface} border ${KIT.borderStrong} ${KIT.radius} ${KIT.pop} overflow-hidden`}>
-        <div className={`flex items-start justify-between gap-3 px-4 py-3 border-b ${KIT.hairline}`}>
-          <div className="min-w-0">
-            <h3 className="text-[13px] font-semibold text-zinc-100 leading-tight">{title}</h3>
-            {description && (
-              <p className="text-[11.5px] text-zinc-500 mt-1 leading-snug">{description}</p>
-            )}
-          </div>
-          <button
+    <AnimatePresence>
+      {open && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4" role="dialog" aria-modal="true">
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="absolute inset-0 bg-black/70 backdrop-blur-sm sm:backdrop-blur-none"
             onClick={onClose}
-            aria-label="Close"
-            className={`flex-shrink-0 -mr-1 p-1 ${KIT.radiusXs} text-zinc-500 transition-colors hover:text-zinc-200 hover:bg-white/[0.04] focus:outline-none`}
+          />
+          <motion.div
+            initial={{ y: '100%', opacity: 0.6 }}
+            animate={{ y: 0, opacity: 1 }}
+            exit={{ y: '100%', opacity: 0 }}
+            transition={{ type: 'spring', damping: 28, stiffness: 300 }}
+            className={`relative w-full ${width} ${KIT.surface} border-t sm:border ${KIT.borderStrong} rounded-t-2xl sm:${KIT.radius} ${KIT.pop} overflow-hidden pb-safe sm:pb-0`}
           >
-            <X className="w-3.5 h-3.5" />
-          </button>
+            {/* Mobile drag handle indicator */}
+            <div className="sm:hidden pt-2.5 pb-1 flex justify-center">
+              <div className="h-1 w-10 rounded-full bg-white/20" />
+            </div>
+            <div className={`flex items-start justify-between gap-3 px-4 py-3 border-b ${KIT.hairline}`}>
+              <div className="min-w-0">
+                <h3 className="text-[13px] font-semibold text-zinc-100 leading-tight">{title}</h3>
+                {description && (
+                  <p className="text-[11.5px] text-zinc-500 mt-1 leading-snug">{description}</p>
+                )}
+              </div>
+              <button
+                onClick={onClose}
+                aria-label="Close"
+                className={`flex-shrink-0 -mr-1 p-1.5 sm:p-1 ${KIT.radiusXs} text-zinc-500 transition-colors hover:text-zinc-200 hover:bg-white/[0.04] focus:outline-none`}
+              >
+                <X className="w-4 h-4 sm:w-3.5 sm:h-3.5" />
+              </button>
+            </div>
+            {children && <div className="p-4 max-h-[70vh] overflow-y-auto">{children}</div>}
+            {footer && (
+              <div className={`flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-end gap-2 px-4 py-3 border-t ${KIT.hairline}`}>
+                {footer}
+              </div>
+            )}
+          </motion.div>
         </div>
-        {children && <div className="p-4 max-h-[70vh] overflow-y-auto">{children}</div>}
-        {footer && (
-          <div className={`flex items-center justify-end gap-2 px-4 py-3 border-t ${KIT.hairline}`}>
-            {footer}
-          </div>
-        )}
-      </div>
-    </div>
+      )}
+    </AnimatePresence>
   )
 }
 

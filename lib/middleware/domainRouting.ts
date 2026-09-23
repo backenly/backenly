@@ -18,10 +18,24 @@ import { NextRequest, NextResponse } from 'next/server';
 export async function domainRoutingMiddleware(request: NextRequest): Promise<NextResponse | null> {
   const hostname = request.headers.get('host') || '';
   
-  // Skip for main domain (dashboard) and Vercel deployment URLs
+  // Skip for main domain (dashboard), local development IPs, tunnel domains, and Vercel deployment URLs
+  const isLocalIp =
+    hostname.startsWith('192.168.') ||
+    hostname.startsWith('10.') ||
+    /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(hostname) ||
+    hostname.includes('.local');
+
+  const isTunnelDomain =
+    hostname.includes('trycloudflare.com') ||
+    hostname.includes('ngrok') ||
+    hostname.includes('loca.lt') ||
+    hostname.includes('pinggy');
+
   const isMainDomain = hostname === process.env.NEXT_PUBLIC_APP_URL?.replace(/^https?:\/\//, '') ||
                        hostname.startsWith('localhost') ||
                        hostname.startsWith('127.0.0.1') ||
+                       isLocalIp ||
+                       isTunnelDomain ||
                        hostname.includes('.vercel.app'); // Vercel deployment URLs
 
   if (isMainDomain) {

@@ -26,7 +26,6 @@ import {
   SectionTitle, KitCard, KitCardHeader, KitCardBody, KitButton,
   KitField, KitInput, KitNote, KitBadge, KitTabs, KitTab,
 } from '@/components/inspector/kit'
-import { GlobalLoading } from '@/components/ui/GlobalLoading'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import { DeploymentRecoverySection } from '@/components/app/DeploymentRecoverySection'
 
@@ -75,10 +74,12 @@ function planLabelFor(tier?: string): string {
   return 'Free'
 }
 
+let cachedSettingsUser: UserProfile | null = null
+
 export default function SettingsPage() {
   const router = useRouter()
-  const [user, setUser] = useState<UserProfile | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [user, setUser] = useState<UserProfile | null>(() => cachedSettingsUser)
+  const [loading, setLoading] = useState(() => !cachedSettingsUser)
   const [activeSection, setActiveSection] = useState<Section>('profile')
   const [toast, setToast] = useState<{ kind: 'success' | 'error'; msg: string } | null>(null)
 
@@ -113,8 +114,9 @@ export default function SettingsPage() {
       if (!response.ok) { router.push('/login'); return }
       const data = await response.json()
       const u = data.user ?? data
+      cachedSettingsUser = u
       setUser(u)
-      setNewName(u?.name || '')
+      setNewName((prev) => prev || u?.name || '')
     } catch {
       router.push('/login')
     } finally {
@@ -262,8 +264,6 @@ export default function SettingsPage() {
     setTwoFABackupCodes(null)
   }
 
-  if (loading) return <GlobalLoading message="Loading your settings..." />
-
   const initials = user?.name
     ? user.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)
     : user?.email?.[0]?.toUpperCase() ?? 'U'
@@ -300,7 +300,7 @@ export default function SettingsPage() {
         </div>
       )}
 
-      <div className="mx-auto w-full max-w-[1000px] px-6 py-8 lg:px-10">
+      <div className="mx-auto w-full max-w-[1000px] px-4 py-6 sm:px-6 sm:py-8 lg:px-10">
         <SectionTitle
           title="Settings"
           description="Manage your profile, security and account."
@@ -320,37 +320,49 @@ export default function SettingsPage() {
           ))}
         </KitTabs>
 
-        {activeSection === 'profile' && (
-          <ProfileSection
-            user={user}
-            initials={initials}
-            planLabel={planLabelFor(user?.tier)}
-            editingName={editingName}
-            setEditingName={setEditingName}
-            newName={newName}
-            setNewName={setNewName}
-            savingName={savingName}
-            onSaveName={handleSaveName}
-          />
+        {loading ? (
+          <div className="space-y-4 animate-pulse">
+            <div className="h-44 rounded-xl border border-white/[0.07] bg-[#16171d] p-5 space-y-3">
+              <div className="h-4 w-32 rounded bg-white/[0.06]" />
+              <div className="h-8 w-48 rounded bg-white/[0.04]" />
+              <div className="h-3 w-64 rounded bg-white/[0.03]" />
+            </div>
+          </div>
+        ) : (
+          <>
+            {activeSection === 'profile' && (
+              <ProfileSection
+                user={user}
+                initials={initials}
+                planLabel={planLabelFor(user?.tier)}
+                editingName={editingName}
+                setEditingName={setEditingName}
+                newName={newName}
+                setNewName={setNewName}
+                savingName={savingName}
+                onSaveName={handleSaveName}
+              />
+            )}
+
+            {activeSection === 'security' && (
+              <SecuritySection
+                user={user}
+                resetLoading={resetLoading}
+                onPasswordReset={handlePasswordReset}
+                on2FAEnroll={handle2FABegin}
+                on2FADisableOpen={() => { setTwoFAModal('disable'); setTwoFACode('') }}
+                twoFALoading={twoFALoading}
+                onLogout={handleLogout}
+              />
+            )}
+
+            {activeSection === 'recovery' && !CLOUD_CONTROL_PLANE && <DeploymentRecoverySection />}
+
+            {activeSection === 'support' && <SupportSection userEmail={user?.email} />}
+
+            {activeSection === 'danger' && <DangerSection onOpenDelete={() => setShowDeleteModal(true)} />}
+          </>
         )}
-
-        {activeSection === 'security' && (
-          <SecuritySection
-            user={user}
-            onPasswordReset={handlePasswordReset}
-            resetLoading={resetLoading}
-            on2FAEnroll={handle2FABegin}
-            on2FADisableOpen={() => { setTwoFAModal('disable'); setTwoFACode('') }}
-            twoFALoading={twoFALoading}
-            onLogout={handleLogout}
-          />
-        )}
-
-        {activeSection === 'recovery' && !CLOUD_CONTROL_PLANE && <DeploymentRecoverySection />}
-
-        {activeSection === 'support' && <SupportSection userEmail={user?.email} />}
-
-        {activeSection === 'danger' && <DangerSection onOpenDelete={() => setShowDeleteModal(true)} />}
       </div>
 
       {/* Delete account modal */}
