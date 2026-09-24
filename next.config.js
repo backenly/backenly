@@ -160,8 +160,11 @@ const nextConfig = {
         destination: '/api/mcp/oauth/authorization-server',
       },
     ]
-    // Only proxy /api/v1/* when RUNTIME_API_URL is set. In production the
-    // Next.js route handlers in app/api/v1/ serve these requests directly.
+    // Only when RUNTIME_API_URL is set. This rarely fires: a rewrite in this
+    // position runs only when no route matches, and under /api/v1/{projectId}/
+    // the [...unmatched] catch-all matches everything, so that route is what
+    // forwards the runtime's paths (lib/runtime/forward-to-runtime.ts). This
+    // still covers /api/v1/* paths outside a project.
     if (process.env.RUNTIME_API_URL) {
       rules.push({
         source: '/api/v1/:path*',

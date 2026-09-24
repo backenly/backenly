@@ -267,7 +267,7 @@
   {
     "route": "/api/v1/[projectId]/[...unmatched]",
     "status": "ACCEPTED",
-    "reason": "Catch-all that answers 404/405 for unknown v1 paths. Reads nothing and writes nothing; its purpose is to stop unmatched routes falling through to a handler that would."
+    "reason": "Catch-all for v1 paths Next does not serve. Forwards the request unchanged to the Express runtime when RUNTIME_API_URL is set (lib/runtime/forward-to-runtime.ts), otherwise answers the JSON 404. It authorizes nothing itself and needs nothing: the runtime authenticates the API key on every forwarded request and serves the key's own project (server/routes/dynamic.ts, server/routes/v2.ts), behind the serving gate (server/lib/serving-gate.ts). The only header it adds, x-backenly-internal, is read solely to skip traffic recording and to stop a forward loop; it grants no access."
   },
   {
     "route": "/api/v1/[projectId]/auth/forgot-password",
@@ -333,6 +333,11 @@
     "route": "/api/v1/[projectId]/webhooks/[integration]",
     "status": "ACCEPTED",
     "reason": "Inbound provider callback. The caller is a third party that cannot hold a Backenly session; authenticity comes from the provider\u2019s signature rather than a guard."
+  },
+  {
+    "route": "/api/v2/[projectId]/[[...path]]",
+    "status": "ACCEPTED",
+    "reason": "The PostgREST-grammar data API, served by the runtime. Forwards the request unchanged to the Express runtime when RUNTIME_API_URL is set (lib/runtime/forward-to-runtime.ts), otherwise answers the JSON 404. It authorizes nothing itself and needs nothing: the runtime authenticates the API key on every forwarded request and serves the key's own project (server/routes/dynamic.ts, server/routes/v2.ts), behind the serving gate (server/lib/serving-gate.ts). The only header it adds, x-backenly-internal, is read solely to skip traffic recording and to stop a forward loop; it grants no access."
   },
   {
     "route": "/api/workspace-oauth/[provider]",
