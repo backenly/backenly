@@ -340,6 +340,26 @@ export async function runObserverForProject(projectId: string): Promise<Observer
   // lastObservedAt is deliberate: "never checked" is the truth.
   if (!(await isWatchableProject(projectId))) return result
 
+  // One scan per project at a time in this process. The dashboard's first-load
+  // kick, Re-scan, the event bus and the settled-build pass can all land
+  // together, and two concurrent scans race writeFinding's find-then-create
+  // into duplicate rows.
+  if (observing.has(projectId)) {
+    result.errors.push('a scan of this project is already running')
+    return result
+  }
+  observing.add(projectId)
+  try {
+    return await observeProject(projectId, result)
+  } finally {
+    observing.delete(projectId)
+  }
+}
+
+const observing = new Set<string>()
+
+async function observeProject(projectId: string, result: ObserverResult): Promise<ObserverResult> {
+
   // Gather all raw findings in parallel — each detector is isolated
   const detectors = [
     // ── Existing checks ──────────────────────────────────────────────────────
@@ -417,7 +437,25 @@ export async function runObserverForProject(projectId: string): Promise<Observer
     let autoFixed = false
     let fixAppliedAt: Date | undefined
 
-    if (finding.autoFixable && finding.fix) {
+    // An inline fix is a mutation of the owner's schema, so it answers to the
+    // same flag and dial as every other repair. Refused, the finding is still
+    // recorded as detected, with the reason, and nothing is changed.
+    // Imported lazily: desired-state imports this module.
+    const permit =
+      finding.autoFixable && finding.fix
+        ? await (async () => {
+            const [{ permitInlineRepair }, { deriveTier }] = await Promise.all([
+              import('@/lib/authority/gate'),
+              import('@/lib/autonomy/desired-state'),
+            ])
+            return permitInlineRepair(projectId, finding.type, deriveTier(finding.type, finding.details))
+          })()
+        : null
+
+    if (finding.autoFixable && finding.fix && permit && !permit.allowed) {
+      status = 'open'
+      finding.details = { ...finding.details, notAppliedBecause: permit.reason }
+    } else if (finding.autoFixable && finding.fix) {
       try {
         await finding.fix()
         status = 'auto_fixed'

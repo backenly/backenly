@@ -78,7 +78,6 @@ describe('a project with nothing built is never watched', () => {
   afterAll(async () => {
     if (savedOrigin === undefined) delete process.env.CONTRACT_PROBE_ORIGIN
     else process.env.CONTRACT_PROBE_ORIGIN = savedOrigin
-    await prisma.$disconnect()
   })
 
   it('files nothing and emails nothing for a named-only project', async () => {
@@ -541,4 +540,12 @@ describe('a verifier account never provisions end-user auth', () => {
       await dropProject(p)
     }
   })
+})
+
+afterAll(async () => {
+  // Every block above opens workspace pools through the observer and sweep;
+  // CI runs all core suites in one process, so they are closed here.
+  const { closeAllWorkspacePools } = await import('@/lib/services/workspace-pool')
+  await closeAllWorkspacePools()
+  await prisma.$disconnect()
 })

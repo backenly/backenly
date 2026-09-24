@@ -211,6 +211,8 @@ export interface ProjectListEntry {
   lastMetricsUpdate: Date | null
   createdAt: Date
   updatedAt: Date
+  /** Set while the project is paused for inactivity (Backenly Cloud only). */
+  pausedAt: Date | null
   _count: { tables: number; workspaces: number }
 }
 

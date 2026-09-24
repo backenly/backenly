@@ -945,7 +945,16 @@ export async function runAndStoreInfraIntelligence(
     // possible — could never be retried, and the finding sat open forever with
     // an index that was reported as auto-applicable and never applied.
     // Detected-but-never-repaired, the same shape as the wide-open RLS bug.
-    if (report.autoApplicableFixes.length > 0) {
+    // Index creation is tier 0, and still the owner's call: with live
+    // execution off or the dial at Off, the finding stays open and nothing is
+    // created. See permitInlineRepair.
+    const permit = report.autoApplicableFixes.length > 0
+      ? await (await import('@/lib/authority/gate')).permitInlineRepair(projectId, 'infra_hot_table', 0)
+      : null
+    if (permit && !permit.allowed) {
+      console.log(`[InfraIntelligence] Not applying index fixes for ${projectId} — ${permit.reason}`)
+    }
+    if (report.autoApplicableFixes.length > 0 && permit?.allowed) {
       const { withBuildLock } = await import('@/lib/ai/build-runtime/build-lock')
       const lockResult = await withBuildLock(projectId, 'modify', async () => {
         await _applyAutoFixes(projectId, report.autoApplicableFixes)

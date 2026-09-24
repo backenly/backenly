@@ -23,6 +23,7 @@
  *   execution path bolted on here.
  */
 
+import { isWatchableProject } from '@/lib/projects/backend-presence'
 import { prisma } from '@/lib/db/prisma'
 import { computeDesiredStateDiff, summarizeDesiredState, gapIdentity } from './desired-state'
 import type { DesiredStateGap, DesiredStateReport } from './desired-state'
@@ -1008,6 +1009,12 @@ export async function runReconciler(
   projectId: string,
 ): Promise<ReconciliationPlan | LiveReconcileResult | null> {
   if (!FLAGS.ENABLE_AUTONOMY_RECONCILER) return null
+
+  // Every way in — the fleet schedulers, the post-mutation kick, the HTTP cron
+  // route — arrives here, so this is where "is there a backend to watch?" is
+  // asked. The schedulers already filtered on it; the kick did not, and
+  // neither did anything that calls this directly.
+  if (!(await isWatchableProject(projectId))) return null
 
   // Plan-driven cadence gate. The "tick" is any prior reconciler audit row
   // — live, shadow, change-freeze, or the dispatcher-written TICK marker. The

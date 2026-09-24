@@ -96,11 +96,17 @@ export async function resolveMaintenancePlan(input: {
   }
 
   const details = (finding.details ?? {}) as Record<string, unknown>
+  // Rows written before the detector named an anchor table still carry their
+  // membership; any member resolves the same subsystem while it is unchanged,
+  // and a changed membership is refused below as it should be.
+  const membership = Array.isArray(details.membership)
+    ? (details.membership as unknown[]).filter((t): t is string => typeof t === 'string').sort()
+    : []
   const table = typeof details.table === 'string'
     ? details.table
     : typeof details.tableName === 'string'
       ? details.tableName
-      : null
+      : membership[0] ?? null
   if (!table) return { refusal: `finding ${findingId} names no table, so no subsystem can be resolved` }
 
   const map = await computeSubsystems(projectId)

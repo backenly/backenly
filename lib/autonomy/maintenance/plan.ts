@@ -212,7 +212,7 @@ function ladderFor(
       return [
         {
           kind: 'add_structure',
-          action: 'ADD_COLUMN',
+          action: 'ADD_CONSTRAINT',
           params: { tableName: table, purpose: 'constraint, added NOT VALID' },
           preconditions: ['constraint does not already exist'],
           expectedPostconditions: ['constraint exists, not yet validated'],

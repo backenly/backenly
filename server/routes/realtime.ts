@@ -30,6 +30,7 @@ import { prisma } from '@/lib/db/prisma'
 import { getProjectServingState, PAUSED_CODE, PAUSED_MESSAGE } from '@/lib/projects/serving-state'
 import { asyncRoute } from '../lib/async-route'
 import { LOCKED_MESSAGE } from '../lib/serving-gate'
+import { touchProjectActivity } from '@/lib/projects/activity'
 
 const router = Router()
 
@@ -102,6 +103,8 @@ router.get('/:projectId/realtime', asyncRoute(realtimeAuth), asyncRoute(async (r
     subscription = result
 
     send({ type: 'connected', projectId, channel: result.channel })
+    // A ticketed connect never passes v1AuthMiddleware, so it stamps here.
+    void touchProjectActivity(projectId)
 
     // Keepalive comment every 25 s to prevent proxy/CDN idle timeouts, and the
     // moment an open stream re-checks its project. The serving gate only runs
@@ -123,6 +126,9 @@ router.get('/:projectId/realtime', asyncRoute(realtimeAuth), asyncRoute(async (r
             return
           }
           sendComment('keepalive')
+          // An app holding a stream open is using its backend. Throttled to
+          // one write an hour by the activity module, not one per tick.
+          void touchProjectActivity(projectId)
         })
         .catch(() => {
           if (!closed) sendComment('keepalive')
