@@ -4,6 +4,7 @@ import { NextRequest } from 'next/server'
 import { v1ApiMiddleware, requirePermission } from '@/lib/api/v1/middleware'
 import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
 import { prisma } from '@/lib/db'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 /**
  * GET /v1/{projectId}/stats/summary
@@ -26,7 +27,7 @@ import { prisma } from '@/lib/db'
  *   ?lowStockThreshold=10   (default: 10)
  *   ?recentLimit=5          (default: 5, max 20)
  */
-export async function GET(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+async function handleGET(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, params)
@@ -132,3 +133,5 @@ export async function GET(request: NextRequest, props: { params: Promise<{ proje
     return createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Failed to fetch stats', 500)
   }
 }
+
+export const GET = recordedV1(handleGET)

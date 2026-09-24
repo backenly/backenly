@@ -2,6 +2,7 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 /**
  * GET /v1/{projectId}/healthz
@@ -21,7 +22,7 @@ import { prisma } from '@/lib/db'
  *   uptime:    number,   // process uptime in seconds
  * }
  */
-export async function GET(_request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+async function handleGET(_request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
   const start = Date.now()
   const checks: Record<string, any> = {}
@@ -74,3 +75,5 @@ export async function GET(_request: NextRequest, props: { params: Promise<{ proj
     { status: (overallStatus as string) === 'down' ? 503 : 200 }
   )
 }
+
+export const GET = recordedV1(handleGET)

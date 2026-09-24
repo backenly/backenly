@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { consume, AUTH_LIMITS, clientIp } from '@/lib/security/auth-rate-limit'
 import { throttledV1Response } from '@/lib/security/rate-limit-response'
 import { forgotEndUserPassword } from '@/lib/services/end-user-auth-flows'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 /**
  * POST /v1/{projectId}/auth/forgot-password
@@ -13,7 +14,7 @@ import { forgotEndUserPassword } from '@/lib/services/end-user-auth-flows'
  *
  * Body: { email }. Always 200 for unknown emails (no user enumeration).
  */
-export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
 
   // Throttled per IP AND per project. This surface had no rate limiting of any
@@ -59,3 +60,5 @@ export async function POST(request: NextRequest, props: { params: Promise<{ proj
   const result = await forgotEndUserPassword(params.projectId, email)
   return NextResponse.json(result.body, { status: result.status })
 }
+
+export const POST = recordedV1(handlePOST)

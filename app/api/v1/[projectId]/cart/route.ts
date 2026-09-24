@@ -4,6 +4,7 @@ import { NextRequest } from 'next/server'
 import { v1ApiMiddleware, requirePermission } from '@/lib/api/v1/middleware'
 import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
 import { getCart, cartWithTotals, clearCart, resolveSessionId } from '@/lib/services/cart-store'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 /**
  * GET /v1/{projectId}/cart
@@ -12,7 +13,7 @@ import { getCart, cartWithTotals, clearCart, resolveSessionId } from '@/lib/serv
  * Session identity: X-Cart-Session header (or ?cartSession= query param).
  * If omitted the API key ID is used as the session key.
  */
-export async function GET(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+async function handleGET(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, params)
@@ -37,7 +38,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ proje
  * Alias for clear — empties the cart completely.
  * Also accessible at /cart/clear for backwards compatibility.
  */
-export async function DELETE(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+async function handleDELETE(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, params)
@@ -56,3 +57,6 @@ export async function DELETE(request: NextRequest, props: { params: Promise<{ pr
     return createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Failed to clear cart', 500)
   }
 }
+
+export const GET = recordedV1(handleGET)
+export const DELETE = recordedV1(handleDELETE)

@@ -5,12 +5,13 @@ import { v1ApiMiddleware, requirePermission, requireCapability } from '@/lib/api
 import { createErrorResponse, createSuccessResponse, handleValidationError, ErrorCodes } from '@/lib/api/v1/errors'
 import { invokeFunctionSchema } from '@/lib/api/v1/schemas'
 import { validateRequestBody } from '@/lib/validation/schemas'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 /**
  * POST /v1/{projectId}/functions/invoke
  * Invoke a serverless function (placeholder)
  */
-export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, params)
@@ -86,3 +87,5 @@ export async function POST(request: NextRequest, props: { params: Promise<{ proj
     )
   }
 }
+
+export const POST = recordedV1(handlePOST)

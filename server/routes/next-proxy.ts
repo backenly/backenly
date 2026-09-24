@@ -20,6 +20,7 @@
 import http from 'http'
 import https from 'https'
 import type { Request, Response, NextFunction } from 'express'
+import { internalTrafficHeaders } from '@/lib/traffic/request-recorder'
 
 // v1 sections owned by Next.js. Everything else (auth, oauth, database, db
 // CRUD, realtime, presence, broadcast, triggers, logs, bootstrap, fn) is
@@ -90,6 +91,9 @@ export function nextProxy(req: Request, res: Response, next: NextFunction) {
   const priorFwd = req.headers['x-forwarded-for']
   headers['x-forwarded-for'] = priorFwd ? `${priorFwd}, ${remote}` : remote
   headers['x-forwarded-proto'] = (req.headers['x-forwarded-proto'] as string) || req.protocol
+  // This process already recorded the request (server/app.ts), so the Next
+  // handler it lands on must not count it a second time.
+  Object.assign(headers, internalTrafficHeaders())
 
   const upstream = (isTls ? https : http).request(
     {
