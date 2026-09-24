@@ -410,6 +410,16 @@ tests/integration/dependency-failure-webhook-receiver.spec.ts
 # vacuous: "nothing was lost" is trivially true when there was nothing to lose.
 tests/integration/selfhost-failed-migration.spec.ts
 
+# ── Managed migration runner: ownership and failed-migration recovery ─────────
+#
+# The 2026-09-24 staging incident, rebuilt: a non-superuser admin builds the
+# chain, the tables move to the app role, the enums stay behind, and the pause
+# migration fails with 42501. Proves the ownership preflight refuses before
+# Prisma writes history, rollback resolves only a genuinely absent failed
+# attempt, and the enum repair converges and is idempotent. Real runner
+# entrypoint, real Prisma CLI, real PostgreSQL. Needs CREATE DATABASE/ROLE.
+tests/integration/migration-ownership-recovery.spec.ts
+
 # ── Credential rotation ─────────────────────────────────────────────────────
 #
 # A rotation proven only by "the new password works" is not proven: the point of

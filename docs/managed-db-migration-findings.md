@@ -22,6 +22,68 @@ dropped.
 
 ---
 
+## Enum ownership and failed-migration recovery (2026-09-24)
+
+The first migration to `ALTER` an enum, `20260924120000_project_pause`, failed
+on staging at its first statement:
+
+```
+ALTER TYPE "WebhookDeliveryStatus" ADD VALUE 'CANCELLED'
+ERROR: must be owner of type "WebhookDeliveryStatus"   (42501)
+```
+
+- **Cause.** The app-role cutover (`tools/managed-db/sql/app-role-cutover.sql`,
+  run on both environments around 2026-09-20) moved public relations and
+  functions to `backenly_app`. It did not move types. The runner connects as
+  `backenly_app`, which owned 127 of the 128 public tables; all five enums
+  were still owned by `backenly_admin`. Measured read-only on staging.
+  Production ran the same SQL.
+- **Blast radius.** Nothing was applied: Postgres rolled back the implicit
+  transaction, and the columns, index and enum value were verified absent.
+  But Prisma wrote a FAILED row to `_prisma_migrations`, and a failed row
+  refuses every later deploy (P3009). The runner could not resolve it.
+- **OSS self-host is unaffected.** `setup-app-role` runs before the schema
+  exists, so the app role creates and owns every enum there.
+
+The fix, in four parts:
+
+1. **The cutover moves enums too.** It discovers them from the catalog,
+   excludes extension members, and asserts none are left. Check mode shows
+   current owner -> desired owner.
+2. **`scripts/run-enum-ownership-repair.ts`** handles databases already cut
+   over.
+   - Its only dynamic statement is `ALTER TYPE … OWNER TO`, audited before the
+     SQL is sent. It never touches a role, password, secret, grant, table or
+     row. Re-running the cutover instead would rotate the application
+     credential.
+   - It has check mode first, needs `--confirm-apply`, and is idempotent.
+   - It refuses an enum owned by a third role.
+   - It is guarded on the account, the RDS instance endpoint and master
+     secret, and the database, which is checked again inside the SQL.
+3. **The runner can resolve a failed migration:** `rollback <id>`.
+   - It needs `MIGRATE_ROLLBACK_CONFIRM` naming the same migration.
+   - It is allowed only for a migration with an absence proof
+     (`tools/managed-db/runner/checks/<id>.absent.sql`), and resolves only
+     when that proof passes. Prisma itself refuses to roll back a migration
+     that is not in a failed state.
+4. **The runner runs an ownership preflight before every `deploy`**
+   (`checks/ownership-preflight.sql`). The migration role must be able to
+   alter every migration-managed object in `public`, or nothing starts and no
+   history is written.
+
+**Trap, measured with Prisma 5.22:** after `migrate resolve --rolled-back`,
+`migrate status` prints "Database schema is up to date!" and exits 0, although
+the migration is unapplied and the next `deploy` applies it. After a rollback,
+`status` is not evidence of anything. The evidence is `verify <id>` failing,
+then the deploy's own `Applying migration` line, then `verify <id>` passing.
+
+The whole sequence, the incident included, is rebuilt against a real
+PostgreSQL in `tests/integration/migration-ownership-recovery.spec.ts`. An
+admin that is not a superuser builds the chain, the tables move, and the enums
+stay behind.
+
+---
+
 ## Repo inspection corrections (2026-09-15)
 
 An inspection of the repository before building the lineage probe contradicted
