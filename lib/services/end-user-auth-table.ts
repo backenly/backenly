@@ -287,16 +287,44 @@ export async function introspectAuthUsersTable(
 }
 
 /**
+ * A verifier account asked for end-user auth to be provisioned. Refused: see
+ * ensureAuthUsersTable. Signup routes answer it with 503 AUTH_NOT_CONFIGURED,
+ * which every probe already reads as "auth is not set up here".
+ */
+export class AuthNotProvisionedError extends Error {
+  readonly code = 'AUTH_NOT_CONFIGURED'
+  constructor() {
+    super('Authentication is not set up for this project yet.')
+    this.name = 'AuthNotProvisionedError'
+  }
+}
+
+/**
  * Guarantee `workspace_{projectId}.users` satisfies the auth contract, then
  * return its descriptor.
  *
  * Safe to call on every signup / OAuth callback: it is idempotent and cheap
  * (introspection plus, at most, one ALTER on the very first call per project).
+ *
+ * `requestedBy` is required so every caller states whose request this is. A
+ * verifier account (`isReservedTestEmail`) may use an auth table that exists
+ * but may never create one, or the schema around it. Monitoring that
+ * provisions is how a named-only project would grow a `users` table nobody
+ * built, and it re-created a workspace schema an operator had just dropped in
+ * the middle of a restore: the contract probe's signup ran
+ * CREATE SCHEMA IF NOT EXISTS between the platform replay and the workspace
+ * replay, and the restore failed on "schema already exists".
  */
 export async function ensureAuthUsersTable(
   projectId: string,
+  requestedBy: { email: string | null | undefined },
 ): Promise<AuthUsersSchema> {
   const schemaName = `workspace_${projectId}`
+
+  if (isReservedTestEmail(requestedBy.email)) {
+    const existing = await introspectColumns(schemaName)
+    if (existing.length === 0) throw new AuthNotProvisionedError()
+  }
 
   // 1. Schema + canonical table. Both IF NOT EXISTS — no-ops when present.
   await prisma.$executeRawUnsafe(`CREATE SCHEMA IF NOT EXISTS "${schemaName}"`)
