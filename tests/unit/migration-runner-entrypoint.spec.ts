@@ -20,7 +20,8 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const ENTRYPOINT = join(__dirname, '..', '..', 'tools', 'managed-db', 'runner', 'entrypoint.sh')
@@ -145,6 +146,145 @@ describe('the entrypoint still refuses an unconfirmed baseline', () => {
   it('rejects an unknown command rather than doing nothing quietly', () => {
     const r = run(['migrate-everything'], { DATABASE_URL: url('backenly') })
     expect(r.status).toBe(2)
-    expect(r.output).toMatch(/usage: status \| deploy \| baseline/)
+    expect(r.output).toMatch(/usage: status \| deploy \| preflight \| baseline <migration-id> \| rollback <migration-id>/)
+  })
+})
+
+// ── Ordering, with a recording stand-in for prisma ─────────────────────────
+//
+// The runner's promises are about ORDER: the preflight runs before `migrate
+// deploy`, and the absence proof runs before `migrate resolve --rolled-back`.
+// A stand-in that records every invocation, and fails when told to, is how the
+// order becomes observable without a database. The database-backed half, with
+// the real CLI against a real PostgreSQL, is
+// tests/integration/migration-ownership-recovery.spec.ts.
+
+describe('the entrypoint runs its checks before it touches migration history', () => {
+  let dir: string
+  let stub: string
+  let log: string
+
+  beforeAll(() => {
+    // Forward slashes: the paths are handed to `sh`, which on a Windows checkout
+    // is Git Bash and reads a backslash as an escape.
+    dir = mkdtempSync(join(tmpdir(), 'runner-stub-')).replace(/\\/g, '/')
+    stub = `${dir}/prisma`
+    log = `${dir}/calls.log`
+    writeFileSync(
+      stub,
+      [
+        '#!/bin/sh',
+        'echo "$*" >> "$STUB_LOG"',
+        'if [ -n "${STUB_FAIL_ON:-}" ]; then',
+        '  case "$*" in *"$STUB_FAIL_ON"*) echo "stub: failing on $STUB_FAIL_ON"; exit 1 ;; esac',
+        'fi',
+        'exit 0',
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    )
+  })
+
+  afterAll(() => rmSync(dir, { recursive: true, force: true }))
+
+  const calls = (): string[] =>
+    existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter(Boolean) : []
+
+  function withStub(args: string[], env: Record<string, string> = {}): Run {
+    rmSync(log, { force: true })
+    return run(args, {
+      DATABASE_URL: url('backenly'),
+      MIGRATE_PRISMA: stub,
+      MIGRATE_SCHEMA: '/schema.prisma',
+      MIGRATE_CHECKS: '/checks',
+      STUB_LOG: log,
+      ...env,
+    })
+  }
+
+  it('deploy runs the ownership preflight first, and never deploys when it fails', () => {
+    const r = withStub(['deploy'], { STUB_FAIL_ON: 'ownership-preflight.sql' })
+    expect(r.status).toBe(3)
+    expect(r.output).toMatch(/refusing: ownership preflight failed; nothing was applied and no migration history was written/)
+    expect(calls()).toEqual(['db execute --schema /schema.prisma --file /checks/ownership-preflight.sql'])
+  })
+
+  it('deploy proceeds to migrate deploy only after the preflight passes', () => {
+    const r = withStub(['deploy'])
+    expect(r.status).toBe(0)
+    expect(r.output).toMatch(/PREFLIGHT PASSED/)
+    expect(calls()).toEqual([
+      'db execute --schema /schema.prisma --file /checks/ownership-preflight.sql',
+      'migrate deploy --schema /schema.prisma',
+    ])
+  })
+
+  it('preflight alone runs the check and nothing else', () => {
+    const r = withStub(['preflight'])
+    expect(r.status).toBe(0)
+    expect(calls()).toEqual(['db execute --schema /schema.prisma --file /checks/ownership-preflight.sql'])
+  })
+
+  it('rollback refuses without a confirmation, and calls nothing', () => {
+    const r = withStub(['rollback', '20260924120000_project_pause'])
+    expect(r.status).toBe(2)
+    expect(r.output).toMatch(/MIGRATE_ROLLBACK_CONFIRM to name the same migration/)
+    expect(calls()).toEqual([])
+  })
+
+  it('rollback refuses a confirmation that names a DIFFERENT migration', () => {
+    const r = withStub(['rollback', '20260924120000_project_pause'], {
+      MIGRATE_ROLLBACK_CONFIRM: '20260922120000_auth_email_codes',
+    })
+    expect(r.status).toBe(2)
+    expect(calls()).toEqual([])
+  })
+
+  it('rollback refuses a migration that has no absence proof, even when confirmed', () => {
+    const r = withStub(['rollback', '20260922120000_auth_email_codes'], {
+      MIGRATE_ROLLBACK_CONFIRM: '20260922120000_auth_email_codes',
+    })
+    expect(r.status).toBe(2)
+    expect(r.output).toMatch(/no absence proof is defined/)
+    expect(calls()).toEqual([])
+  })
+
+  it('rollback refuses when the absence proof fails, and never resolves', () => {
+    const r = withStub(['rollback', '20260924120000_project_pause'], {
+      MIGRATE_ROLLBACK_CONFIRM: '20260924120000_project_pause',
+      STUB_FAIL_ON: 'project_pause.absent.sql',
+    })
+    expect(r.status).toBe(3)
+    expect(r.output).toMatch(/left effects of 20260924120000_project_pause behind/)
+    expect(calls()).toEqual([
+      'db execute --schema /schema.prisma --file /checks/20260924120000_project_pause.absent.sql',
+    ])
+  })
+
+  it('rollback resolves only after the absence proof passes', () => {
+    const r = withStub(['rollback', '20260924120000_project_pause'], {
+      MIGRATE_ROLLBACK_CONFIRM: '20260924120000_project_pause',
+    })
+    expect(r.status).toBe(0)
+    expect(r.output).toMatch(/ABSENT: 20260924120000_project_pause left none of its declared effects behind/)
+    expect(calls()).toEqual([
+      'db execute --schema /schema.prisma --file /checks/20260924120000_project_pause.absent.sql',
+      'migrate resolve --rolled-back 20260924120000_project_pause --schema /schema.prisma',
+    ])
+  })
+
+  it('verify for the pause migration runs its presence proof', () => {
+    const r = withStub(['verify', '20260924120000_project_pause'])
+    expect(r.status).toBe(0)
+    expect(r.output).toMatch(/VERIFIED: 20260924120000_project_pause/)
+    expect(calls()).toEqual([
+      'db execute --schema /schema.prisma --file /checks/20260924120000_project_pause.present.sql',
+    ])
+  })
+
+  it('verify does not claim success when the presence proof fails', () => {
+    const r = withStub(['verify', '20260924120000_project_pause'], { STUB_FAIL_ON: 'present.sql' })
+    expect(r.status).not.toBe(0)
+    expect(r.output).not.toMatch(/VERIFIED/)
   })
 })

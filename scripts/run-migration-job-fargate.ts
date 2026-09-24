@@ -7,13 +7,23 @@
  *
  *   node .../launcher --command status  --image <ecr uri>
  *   node .../launcher --command deploy  --image <ecr uri>
+ *   node .../launcher --command preflight --image <ecr uri>
+ *   node .../launcher --command verify  --migration <id> --image <ecr uri>
  *   node .../launcher --command baseline --migration 00000000000000_baseline \
  *        --image <ecr uri> --confirm-baseline
+ *   node .../launcher --command rollback --migration <id> \
+ *        --confirm-rollback <the same id> --image <ecr uri>
  *
  * `baseline` is a one-time action for an existing database, not part of a
  * normal release: it needs its own flag here AND the runner's own
  * MIGRATE_BASELINE_CONFIRM check, which must name the same migration. Steady
- * state is `deploy` alone.
+ * state is `deploy` alone, and the runner runs its ownership preflight before
+ * every deploy.
+ *
+ * `rollback` resolves a FAILED migration as rolled back so the next deploy
+ * retries it. The confirmation must name the same migration here, the runner
+ * checks it again, and the runner resolves only after that migration's absence
+ * proof shows the failed attempt left nothing behind.
  */
 
 import {
@@ -25,17 +35,22 @@ import {
   withEphemeralTaskDefinition,
   type OneShotTaskSpec,
 } from './lib/staging-fargate-task'
+import { readMigrationJobOutcome, type RunnerCommand } from '../tools/managed-db/migration-job-outcome'
 
 const FAMILY = 'backenly-staging-migration-job'
 const CONTAINER = 'migrate'
 const LOG_PREFIX = 'migrate'
 
-type Command = 'status' | 'deploy' | 'baseline'
+type Command = RunnerCommand
+const COMMANDS: readonly Command[] = ['status', 'deploy', 'preflight', 'verify', 'baseline', 'rollback']
 
 async function main(): Promise<void> {
   const command = (argValue('--command') ?? '') as Command
-  if (command !== 'status' && command !== 'deploy' && command !== 'baseline') {
-    die('usage: --command status|deploy|baseline --image <ecr uri> [--migration <id> --confirm-baseline]')
+  if (!COMMANDS.includes(command)) {
+    die(
+      'usage: --command status|deploy|preflight|verify|baseline|rollback --image <ecr uri> ' +
+        '[--migration <id>] [--confirm-baseline | --confirm-rollback <id>]',
+    )
   }
   const image = argValue('--image')
   if (!image) die('--image is required: the migration runner image to run')
@@ -53,6 +68,20 @@ async function main(): Promise<void> {
     args.push(migration)
     environment.push({ name: 'MIGRATE_BASELINE_CONFIRM', value: migration })
     console.log(`\nLayer 3 migration job — BASELINE ${migration}\n`)
+  } else if (command === 'rollback') {
+    const migration = argValue('--migration')
+    if (!migration) die('rollback needs --migration <id>')
+    if (argValue('--confirm-rollback') !== migration) {
+      die('rollback rewrites migration history; pass --confirm-rollback naming the same migration')
+    }
+    args.push(migration)
+    environment.push({ name: 'MIGRATE_ROLLBACK_CONFIRM', value: migration })
+    console.log(`\nLayer 3 migration job — ROLLBACK ${migration}\n`)
+  } else if (command === 'verify') {
+    const migration = argValue('--migration')
+    if (!migration) die('verify needs --migration <id>')
+    args.push(migration)
+    console.log(`\nLayer 3 migration job — verify ${migration}\n`)
   } else {
     console.log(`\nLayer 3 migration job — ${command}\n`)
   }
@@ -75,34 +104,15 @@ async function main(): Promise<void> {
 
   const exitCode = await withEphemeralTaskDefinition(ctx, spec, taskDefArn => {
     const { lines, containerExit } = runTaskAndReadResult(ctx, taskDefArn, spec)
-    const text = lines.join('\n')
-    // Prisma says what it did; the task's exit code is the authority, and the
-    // launcher reports both rather than interpreting one as the other.
-    const clean = /Database schema is up to date/i.test(text)
-    const noPending = /No pending migrations to apply/i.test(text)
-    const applied = /migration\(s\) have been applied|have been successfully applied/i.test(text)
-    const resolved = /marked as applied/i.test(text)
-    console.log(
-      `\n  observed: clean=${clean} noPending=${noPending} applied=${applied} resolved=${resolved}`,
-    )
-
-    // `status` exits 1 when migrations are pending, which is an answer rather
-    // than a failure, so the launcher passes it through: the caller sees the
-    // same code Prisma chose. For a mutation the exit code gates the claim.
-    if (command === 'status') return containerExit === 0 ? 0 : 1
-
-    if (containerExit !== 0) {
-      console.error(`\n  FAILED: ${command} exited ${containerExit}; the database may be partially migrated`)
-      return 1
-    }
-    const proved = command === 'deploy' ? applied || noPending : resolved
-    if (!proved) {
-      // A zero exit with none of the expected output means the logs did not
-      // arrive or the runner did something else. Not a success.
-      console.error(`\n  FAILED: ${command} exited 0 but its outcome was never observed in the logs`)
-      return 1
-    }
-    return 0
+    // Prisma and the runner say what they did; the task's exit code is the
+    // authority for failure, and the shared reader reports both rather than
+    // interpreting one as the other.
+    const outcome = readMigrationJobOutcome(command, lines.join('\n'), containerExit)
+    const flags = Object.entries(outcome.observed).map(([k, v]) => `${k}=${v}`).join(' ')
+    console.log(`\n  observed: ${flags}`)
+    if (outcome.exitCode === 0) console.log(`  ${outcome.message}`)
+    else console.error(`\n  ${outcome.message}`)
+    return outcome.exitCode
   })
 
   process.exit(exitCode)

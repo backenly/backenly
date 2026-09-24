@@ -141,6 +141,24 @@ SELECT c.relowner::regrole::text AS owner,
  WHERE n.nspname = 'public' AND c.relkind IN ('r','S','v','m','p')
  GROUP BY 1, 2 ORDER BY 3 DESC, 1;
 
+\echo '--- ENUM TYPES: current owner -> desired owner ---'
+-- Types were missing from the first version of this cutover, which moved
+-- relations and functions and left every enum with the admin role. The first
+-- migration to ALTER one (20260924120000_project_pause) then failed as
+-- backenly_app with 42501. Discovered from the catalog, not named, so an enum
+-- added later is covered. Extension-owned types follow their extension.
+SELECT format('%I.%I', n.nspname, t.typname) AS enum_type,
+       pg_get_userbyid(t.typowner) AS current_owner,
+       'backenly_app' AS desired_owner,
+       CASE WHEN pg_get_userbyid(t.typowner) = 'backenly_app' THEN 'already correct'
+            WHEN t.typowner = current_user::regrole THEN 'will move'
+            ELSE 'owned by another role; not moved' END AS action
+  FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+ WHERE n.nspname = 'public' AND t.typtype = 'e'
+   AND NOT EXISTS (SELECT 1 FROM pg_depend d
+                    WHERE d.classid = 'pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e')
+ ORDER BY 1;
+
 \echo '--- EXCLUDED from the move, and why ---'
 SELECT 'owned by another role (not ' || current_user || ')' AS reason, count(*) AS n
   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -352,6 +370,26 @@ BEGIN
   END LOOP;
   RAISE NOTICE 'public: moved % application function(s) to %', moved, app_role;
 
+  -- ── 4a. The enum types the migrations alter ──────────────────────────────
+  -- Migrations ALTER enums (`ADD VALUE`), and PostgreSQL ties that to
+  -- ownership exactly as it does for tables. The first version of this file
+  -- left them behind, which is why tools/managed-db/sql/enum-ownership-repair.sql
+  -- exists for the databases it already ran on. Idempotent: only enums still
+  -- owned by the admin role are moved.
+  moved := 0;
+  FOR r IN
+    SELECT format('%I.%I', n.nspname, t.typname) AS ident
+      FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+     WHERE n.nspname = 'public' AND t.typtype = 'e'
+       AND t.typowner = admin::regrole
+       AND NOT EXISTS (SELECT 1 FROM pg_depend d
+                        WHERE d.classid = 'pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e')
+  LOOP
+    EXECUTE format('ALTER TYPE %s OWNER TO %I', r.ident, app_role);
+    moved := moved + 1;
+  END LOOP;
+  RAISE NOTICE 'public: moved % enum type(s) to %', moved, app_role;
+
   -- ── 4b. EXECUTE on the privileged helpers ────────────────────────────────
   -- These stay owned by the elevated role — that is what makes them SECURITY
   -- DEFINER — but the application is the thing that CALLS them. Today it can
@@ -431,6 +469,17 @@ BEGIN
        AND c.relowner = app_role::regrole
   ) THEN
     RAISE EXCEPTION 'the PostgREST registry is now owned by %, which it must not be', app_role;
+  END IF;
+
+  -- No enum the migrations may alter is left with the admin role.
+  IF EXISTS (
+    SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+     WHERE n.nspname = 'public' AND t.typtype = 'e'
+       AND t.typowner = admin::regrole
+       AND NOT EXISTS (SELECT 1 FROM pg_depend d
+                        WHERE d.classid = 'pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e')
+  ) THEN
+    RAISE EXCEPTION 'an enum type in public is still owned by %, so a migration that alters it would fail', admin;
   END IF;
 
   -- Every existing workspace owner role must now be inherited by the app role.

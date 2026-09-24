@@ -29,6 +29,11 @@ COPY schema.prisma ./prisma/schema.prisma
 # Renamed on the way in: the image's migrations directory IS the canonical chain.
 COPY migrations-canonical ./prisma/migrations
 
+# Fixed catalog checks the entrypoint runs by name: the ownership preflight and
+# the per-migration absence and presence proofs. Read-only SQL, never a query
+# surface: a command selects one of these files, it cannot supply its own.
+COPY checks ./checks
+
 COPY entrypoint.sh /usr/local/bin/migrate
 RUN chmod +x /usr/local/bin/migrate
 

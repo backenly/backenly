@@ -3,8 +3,8 @@
  * ====================================================================
  *
  * Runs `tools/managed-db/runner` as a one-shot Fargate task in the production
- * cluster. Three commands, the same three the runner has: `status`, `baseline`,
- * `deploy`.
+ * cluster, with the runner's own commands: `status`, `preflight`, `verify`,
+ * `deploy`, `baseline`, `rollback`.
  *
  * ── Why this is a separate file and not `--target production` ──────────────
  *
@@ -44,14 +44,24 @@
  *   PRODUCTION_AWS_ACCOUNT_ID=<account> PRODUCTION_DB_NAME=<database> \
  *     node <scratch>/prod-migrate.cjs --command status --image <ecr uri>
  *
- * `status` is read-only and needs no confirmation. `deploy` needs
- * `--confirm-production-deploy`. `baseline` needs BOTH
+ * `status`, `preflight` and `verify --migration <id>` are read-only and need no
+ * confirmation. `deploy` needs `--confirm-production-deploy`, and the runner
+ * runs its ownership preflight first. `baseline` needs BOTH
  * `--confirm-production-baseline` AND the runner's own MIGRATE_BASELINE_CONFIRM
  * naming the same migration, because it is a one-time action that rewrites what
- * the database believes about its own history.
+ * the database believes about its own history. `rollback` is the same kind of
+ * action for a FAILED migration: `--confirm-production-rollback <id>` must name
+ * the migration, the runner checks that again, and it resolves only after that
+ * migration's absence proof passes. It is for a failed row that actually
+ * exists, never a routine step.
+ *
+ * `--image` is the runner by an immutable reference: a `migrate-<sha>` tag or
+ * an `@sha256:` digest. Release records name digests.
  */
 
 import { execFileSync } from 'node:child_process'
+
+import { readMigrationJobOutcome, type RunnerCommand } from '../tools/managed-db/migration-job-outcome'
 
 const REGION = 'ap-south-1'
 const CLUSTER = 'backenly-production'
@@ -61,7 +71,8 @@ const LOG_PREFIX = 'migrate'
 const FAMILY = 'backenly-production-migration-job'
 const CONTAINER = 'migrate'
 
-type Command = 'status' | 'baseline' | 'deploy'
+type Command = RunnerCommand
+const COMMANDS: readonly Command[] = ['status', 'preflight', 'verify', 'deploy', 'baseline', 'rollback']
 
 function aws(args: string[]): any {
   const out = execFileSync('aws', [...args, '--region', REGION, '--output', 'json'], {
@@ -134,17 +145,21 @@ const sleep = (ms: number) => {
 
 async function main(): Promise<void> {
   const command = (argValue('--command') ?? '') as Command
-  if (command !== 'status' && command !== 'baseline' && command !== 'deploy') {
-    die('usage: --command status|baseline|deploy --image <ecr uri> [--migration <id>] [--confirm-production-deploy|--confirm-production-baseline]')
+  if (!COMMANDS.includes(command)) {
+    die(
+      'usage: --command status|preflight|verify|deploy|baseline|rollback --image <ecr uri> [--migration <id>] ' +
+        '[--confirm-production-deploy | --confirm-production-baseline | --confirm-production-rollback <id>]',
+    )
   }
 
   const image = argValue('--image')
   if (!image) die('--image is required: the migration runner image to run')
   if (!/^\d+\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com\//.test(image)) die(`--image is not an ECR image: ${image}`)
-  if (!/:migrate-[0-9a-f]{7,40}$/.test(image)) {
-    // An immutable, content-identified tag. `:latest` on a production migration
-    // is a different image every time it is pulled.
-    die(`--image must carry a migrate-<git sha> tag, not a floating one: ${image}`)
+  if (!/:migrate-[0-9a-f]{7,40}$/.test(image) && !/@sha256:[0-9a-f]{64}$/.test(image)) {
+    // Immutable and content-identified: a migrate-<sha> tag or a digest.
+    // `:latest` on a production migration is a different image every time it
+    // is pulled.
+    die(`--image must carry a migrate-<git sha> tag or an @sha256 digest, not a floating reference: ${image}`)
   }
 
   const database = process.env.PRODUCTION_DB_NAME?.trim()
@@ -167,8 +182,23 @@ async function main(): Promise<void> {
     args.push(migration)
     environment.push({ name: 'MIGRATE_BASELINE_CONFIRM', value: migration })
   }
+  if (command === 'rollback') {
+    const migration = argValue('--migration')
+    if (!migration) die('rollback needs --migration <id>')
+    if (argValue('--confirm-production-rollback') !== migration) {
+      die('rollback rewrites what production believes about its own history; pass --confirm-production-rollback naming the same migration')
+    }
+    args.push(migration)
+    environment.push({ name: 'MIGRATE_ROLLBACK_CONFIRM', value: migration })
+  }
+  if (command === 'verify') {
+    const migration = argValue('--migration')
+    if (!migration) die('verify needs --migration <id>')
+    args.push(migration)
+  }
 
-  console.log(`\nProduction migration job — ${command}${command === 'baseline' ? ` ${argValue('--migration')}` : ''}\n`)
+  const named = command === 'baseline' || command === 'rollback' || command === 'verify' ? ` ${argValue('--migration')}` : ''
+  console.log(`\nProduction migration job — ${command}${named}\n`)
   assertProductionAccount()
 
   const svc = aws(['ecs', 'describe-services', '--cluster', CLUSTER, '--services', SERVICE])?.services?.[0]
@@ -250,28 +280,14 @@ async function main(): Promise<void> {
     }
     for (const l of lines) console.log(`    | ${l}`)
 
-    const text = lines.join('\n')
-    const clean = /Database schema is up to date/i.test(text)
-    const noPending = /No pending migrations to apply/i.test(text)
-    const applied = /migration\(s\) have been applied|have been successfully applied/i.test(text)
-    const resolved = /marked as applied/i.test(text)
-    console.log(`\n  observed: clean=${clean} noPending=${noPending} applied=${applied} resolved=${resolved}`)
-
-    if (command === 'status') {
-      // Prisma exits 1 when migrations are pending, which is an answer rather
-      // than a failure. Passed through so the caller sees the code Prisma chose.
-      exitCode = containerExit === 0 ? 0 : 1
-    } else if (containerExit !== 0) {
-      console.error(`\n  FAILED: ${command} exited ${containerExit}; production may be partially migrated`)
-      exitCode = 1
-    } else if (!(command === 'deploy' ? applied || noPending : resolved)) {
-      // A zero exit with none of the expected output means the logs did not
-      // arrive or the runner did something else. Not a success.
-      console.error(`\n  FAILED: ${command} exited 0 but its outcome was never observed in the logs`)
-      exitCode = 1
-    } else {
-      exitCode = 0
-    }
+    // Same reader as the staging launcher, so the two cannot disagree about
+    // what counts as proved.
+    const outcome = readMigrationJobOutcome(command, lines.join('\n'), containerExit)
+    const flags = Object.entries(outcome.observed).map(([k, v]) => `${k}=${v}`).join(' ')
+    console.log(`\n  observed: ${flags}`)
+    if (outcome.exitCode === 0) console.log(`  ${outcome.message}`)
+    else console.error(`\n  ${outcome.message}`)
+    exitCode = outcome.exitCode
   } catch (err) {
     console.error(`\n  ERROR: ${err instanceof Error ? err.message : String(err)}`)
     exitCode = 2
