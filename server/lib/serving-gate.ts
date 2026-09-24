@@ -12,7 +12,12 @@
  * keeps answering its own 404 exactly as before.
  */
 import type { NextFunction, Request, Response } from 'express'
-import { getProjectServingState } from '@/lib/projects/serving-state'
+import {
+  getProjectServingState,
+  PAUSED_CODE,
+  PAUSED_MESSAGE,
+  pausedDetails,
+} from '@/lib/projects/serving-state'
 import { ErrorCodes, sendError } from './response'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -38,6 +43,11 @@ export async function projectServingGate(req: Request, res: Response, next: Next
 
     case 'locked':
       return sendError(res, ErrorCodes.FORBIDDEN, LOCKED_MESSAGE, 503)
+
+    case 'paused':
+      // No Retry-After: nothing changes until the owner resumes it, and a
+      // client that backs off and retries would only keep asking.
+      return sendError(res, PAUSED_CODE, PAUSED_MESSAGE, 503, pausedDetails(projectId, state))
 
     case 'unavailable':
       res.setHeader('Retry-After', '5')

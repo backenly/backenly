@@ -489,3 +489,11 @@ tests/integration/backup-role-contract.spec.ts
 # order is the property under test. Mutation-checked: unmounting the gate
 # fails 7 of the 8 locked-door assertions (bootstrap has its own check).
 tests/integration/runtime-serving-gate.spec.ts
+
+# The public half of the inactivity pause, against real Postgres: the
+# fail-closed lifecycle lock, the conditional pause write that loses to real
+# use arriving mid-snapshot, CANCELLED webhook deliveries and a discarded
+# outbox, idempotent resume, paused-project jobs left queued with attempts
+# unspent, and the mutation kernel refusing a paused project. Mutation-checked:
+# dropping the activity guard or the job filter fails the matching tests.
+tests/integration/project-pause-lifecycle.spec.ts

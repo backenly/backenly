@@ -14,8 +14,12 @@ import {
   type ServingRow,
 } from '@/lib/projects/serving-state'
 
-const LOCKED: ServingRow = { lockedDownAt: new Date('2026-09-01T00:00:00Z'), lockedDownReason: 'abuse' }
-const OPEN: ServingRow = { lockedDownAt: null, lockedDownReason: null }
+const NO_PAUSE = { pausedAt: null, pauseReason: null }
+const LOCKED: ServingRow = { lockedDownAt: new Date('2026-09-01T00:00:00Z'), lockedDownReason: 'abuse', ...NO_PAUSE }
+const OPEN: ServingRow = { lockedDownAt: null, lockedDownReason: null, ...NO_PAUSE }
+const PAUSED_AT = new Date('2026-09-10T00:00:00Z')
+const PAUSED: ServingRow = { lockedDownAt: null, lockedDownReason: null, pausedAt: PAUSED_AT, pauseReason: 'inactivity' }
+const LOCKED_AND_PAUSED: ServingRow = { ...LOCKED, pausedAt: PAUSED_AT, pauseReason: 'inactivity' }
 
 function harness(opts: { maxEntries?: number } = {}) {
   let clock = 1_000_000
@@ -70,6 +74,22 @@ describe('what the reader answers when the database answers', () => {
     expect(h.loads()).toBe(2)
   })
 
+  it('reports a pause with when and why', async () => {
+    const h = harness()
+    h.set('idle', PAUSED)
+    await expect(h.reader.get('idle')).resolves.toEqual({
+      kind: 'paused',
+      pausedAt: PAUSED_AT,
+      reason: 'inactivity',
+    })
+  })
+
+  it('lets a lock outrank a pause, so resuming can never look like lifting a lock', async () => {
+    const h = harness()
+    h.set('both', LOCKED_AND_PAUSED)
+    await expect(h.reader.get('both')).resolves.toEqual({ kind: 'locked', reason: 'abuse' })
+  })
+
   it('caches not_found for less time than a real project', async () => {
     const h = harness()
     await h.reader.get('ghost')
@@ -90,6 +110,20 @@ describe('what the reader answers when the database does NOT', () => {
     h.fail(true)
     h.advance(24 * 60 * 60 * 1000)
     await expect(h.reader.get('sealed')).resolves.toEqual({ kind: 'locked', reason: 'abuse' })
+  })
+
+  it('keeps a known pause in force, so an error never resumes a project', async () => {
+    const h = harness()
+    h.set('idle', PAUSED)
+    await h.reader.get('idle')
+
+    h.fail(true)
+    h.advance(24 * 60 * 60 * 1000)
+    await expect(h.reader.get('idle')).resolves.toEqual({
+      kind: 'paused',
+      pausedAt: PAUSED_AT,
+      reason: 'inactivity',
+    })
   })
 
   it('refuses when it has nothing to go on', async () => {
