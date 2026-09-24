@@ -67,9 +67,11 @@ describe('the runtime mode is a fact, not an inference', () => {
     expect(resolveExecutionMode('OFF').reason).toBe('project_dial_off')
 
     delete process.env.ENABLE_AUTONOMY_RECONCILER
-    // Autonomy disabled outright. Nothing is even watching.
+    // Autonomy disabled outright.
     expect(resolveExecutionMode('AGGRESSIVE').reason).toBe('loop_off')
-    expect(resolveExecutionMode('AGGRESSIVE').explanation).toMatch(/not watching/)
+    // Not "nothing is watching": the observer and the contract sweep still run
+    // and report with the reconciler off. What stops is every repair.
+    expect(resolveExecutionMode('AGGRESSIVE').explanation).toMatch(/repairs nothing/)
   })
 
   it('mirrors the reconciler dispatch, flag before dial', () => {

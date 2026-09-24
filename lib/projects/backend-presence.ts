@@ -51,7 +51,7 @@ import { prisma } from '@/lib/db/prisma'
  * test database: 39 of 39 tables matched it. Written that way, "not a reserved
  * table" would exclude every table and no project would ever count as built.
  */
-function literalPrefix(prefix: string): string {
+export function literalPrefix(prefix: string): string {
   return prefix.replace(/[\\%_]/g, (c) => `\\${c}`)
 }
 

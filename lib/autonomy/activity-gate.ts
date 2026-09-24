@@ -38,6 +38,9 @@
  * pass, a false negative costs a customer their self-healing, silently.
  */
 
+import type { Prisma } from '@prisma/client'
+import { watchableProjectsWhere, literalPrefix } from '@/lib/projects/backend-presence'
+
 export const ACTIVITY_WINDOW_DAYS = 30
 
 /**
@@ -58,52 +61,56 @@ export const ACTIVITY_WINDOW_DAYS = 30
 export function activeProjectsWhere(
   windowDays: number = ACTIVITY_WINDOW_DAYS,
   now: Date = new Date(),
-) {
+): Prisma.ProjectWhereInput {
   const cutoff = new Date(now.getTime() - windowDays * 24 * 60 * 60 * 1000)
 
+  // What may be watched at all: built, serving, not deleted or expired. The
+  // same predicate the observer and the contract sweep ask, so the loop can
+  // never select a project the rest of autonomy considers empty. Its top-level
+  // keys (deletedAt, lockedDownAt, pausedAt) are kept, and activity is added to
+  // its AND list.
+  //
+  // This replaced "has a table OR carries an open finding". The second half was
+  // there so a finding on a table-less project could be re-evaluated, and it
+  // let a false finding make an unbuilt project permanently active. Findings on
+  // unbuilt projects are now withdrawn by the contract sweep every minute
+  // (reapUnattributableFindings), so the loop has nothing to come back for.
+  const watchable = watchableProjectsWhere(now)
+  const watchableAnd = Array.isArray(watchable.AND) ? watchable.AND : watchable.AND ? [watchable.AND] : []
+
   return {
-    deletedAt: null,
-    // A paused project is not served, so there is nothing to heal, scan or
-    // evolve, and the model budget these passes spend is Backenly's. Always
-    // NULL on a self-hosted deployment, where nothing pauses.
-    pausedAt: null,
-    OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+    ...watchable,
     AND: [
-      {
-        OR: [
-          // No tables means no backend to reconcile — nothing to be right or
-          // wrong about.
-          { tables: { some: {} } },
-          // ...UNLESS the project already carries an open finding. Findings are
-          // also written by on-demand scans (the dashboard's deep scan, the
-          // health re-check), which are NOT gated on this predicate. A
-          // table-less project could therefore accumulate a finding that the
-          // loop was structurally forbidden from ever re-evaluating, so the row
-          // sat in "Waiting on you" permanently even after the condition healed
-          // — the reaper runs inside the reconciler, and the reconciler never
-          // selected the project. An open finding IS something to reconcile:
-          // either it still reproduces, or it gets withdrawn.
-          {
-            healthFindings: {
-              some: { status: { in: ['open', 'pending_approval'] } },
-            },
-          },
-        ],
-      },
+      ...watchableAnd,
       {
         OR: [
           // Live end-user traffic: the strongest signal a backend is real.
           { apiRequestLogs: { some: { timestamp: { gte: cutoff } } } },
           // Any governed mutation — this is what catches an agent driving the
-          // MCP tools directly, which writes no conversation row.
-          { auditLogs: { some: { timestamp: { gte: cutoff } } } },
+          // MCP tools directly, which writes no conversation row. The loop's
+          // own rows do not count: it writes AUTONOMY_TICK on every pass, so
+          // counting them made every project it had ever visited permanently
+          // "active" and the window meaningless.
+          {
+            auditLogs: {
+              some: {
+                timestamp: { gte: cutoff },
+                NOT: [
+                  { action: { startsWith: literalPrefix('AUTONOMY_') } },
+                  // The authority gate's legacy-compatibility receipts and every
+                  // other row autonomy writes about itself.
+                  { type: 'autonomy' },
+                ],
+              },
+            },
+          },
           // A conversation with the brain (backend_chat over MCP).
           { conversationMessages: { some: { createdAt: { gte: cutoff } } } },
-          // Newly created, or changed platform-side, and simply has not had
-          // time to emit any of the above yet. Without this a fresh project
-          // waits for its first request before it is ever protected.
+          // Newly created, and simply has not had time to emit any of the
+          // above yet. Without this a fresh project waits for its first request
+          // before it is ever protected. `updatedAt` is deliberately NOT here:
+          // the observer's lastObservedAt stamp bumps it every day.
           { createdAt: { gte: cutoff } },
-          { updatedAt: { gte: cutoff } },
         ],
       },
     ],

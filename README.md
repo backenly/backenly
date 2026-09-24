@@ -411,10 +411,12 @@ Confirm it is ticking by watching the process output:
 ```
 
 **`0 projects` is normal on a new install, and does not mean it is broken.** A
-project is only reconciled once it has at least one table (or an open finding)
-*and* recent activity. A backend with no tables has nothing to be right or wrong
-about, so the loop skips it. Create a table through your agent and the count
-becomes 1 on the next tick.
+project is only reconciled once something has been built in it (a table other
+than the built-in `users` table, a function, a bucket, a trigger, a webhook or
+enabled auth) *and* it shows recent activity. A project that has only been named
+has nothing to be right or wrong about, so the loop skips it and files nothing
+against it. Create a table through your agent and the count becomes 1 on the
+next tick.
 
 `CRON_SECRET` is **not** required for any of the above. It guards one ad-hoc
 endpoint, for forcing a tick without waiting for the minute:
