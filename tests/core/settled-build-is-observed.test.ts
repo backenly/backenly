@@ -22,11 +22,17 @@ import { runObserverForProject } from '@/lib/services/workspace-observer'
 const observe = runObserverForProject as unknown as jest.Mock
 
 describe('one observer pass after a burst of mutations', () => {
+  const saved = process.env.ENABLE_AUTONOMY_RECONCILER
   beforeEach(() => {
+    process.env.ENABLE_AUTONOMY_RECONCILER = 'true'
     jest.useFakeTimers()
     observe.mockClear()
   })
-  afterEach(() => jest.useRealTimers())
+  afterEach(() => {
+    jest.useRealTimers()
+    if (saved === undefined) delete process.env.ENABLE_AUTONOMY_RECONCILER
+    else process.env.ENABLE_AUTONOMY_RECONCILER = saved
+  })
 
   it('waits for the burst to end, then scans once', async () => {
     kickReconciler('p-settle', 'create_table')

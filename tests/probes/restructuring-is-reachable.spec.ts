@@ -63,6 +63,8 @@ afterAll(async () => {
     else process.env[f] = saved[f]
   }
   for (const s of seeded) await teardownScenario(prisma, s)
+  const { closeAllWorkspacePools } = await import('@/lib/services/workspace-pool')
+  await closeAllWorkspacePools()
   await prisma.$disconnect()
 })
 

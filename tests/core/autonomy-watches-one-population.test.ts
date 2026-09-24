@@ -56,6 +56,10 @@ async function isActive(projectId: string): Promise<boolean> {
 }
 
 afterAll(async () => {
+  // The observer opens a workspace pool per project; CI runs every core suite
+  // in one process, and pools left open are what exhaust its connections.
+  const { closeAllWorkspacePools } = await import('@/lib/services/workspace-pool')
+  await closeAllWorkspacePools()
   await prisma.$disconnect()
 })
 

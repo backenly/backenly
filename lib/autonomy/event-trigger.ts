@@ -87,14 +87,13 @@ const MAX_PENDING = 10_000
  * truth for drift the event path can't predict.
  */
 export function kickReconciler(projectId: string, reason: string): void {
+  if (!FLAGS.ENABLE_AUTONOMY_RECONCILER) return
   if (!projectId) return
   if (!shouldKickFor(reason)) return
 
-  // Independent of the reconciler flag: the observer reports, and its repairs
-  // answer to the flag and dial on their own (permitInlineRepair).
+  // Event-driven passes are part of the loop, so they share its switch. The
+  // daily observer still runs with the loop off.
   scheduleSettledObserverPass(projectId)
-
-  if (!FLAGS.ENABLE_AUTONOMY_RECONCILER) return
 
   const existing = pending.get(projectId)
   if (existing) {
@@ -139,17 +138,17 @@ function scheduleSettledObserverPass(projectId: string): void {
   const existing = settling.get(projectId)
   if (existing) clearTimeout(existing)
   else if (settling.size >= MAX_PENDING) return
-  settling.set(
-    projectId,
-    setTimeout(() => {
-      settling.delete(projectId)
-      import('@/lib/services/workspace-observer')
-        .then(m => m.runObserverForProject(projectId))
-        .catch((err: any) =>
-          console.warn(`[autonomy:event-trigger] settled observer pass failed project=${projectId}:`, err?.message ?? err),
-        )
-    }, OBSERVER_SETTLE_MS),
-  )
+  const timer = setTimeout(() => {
+    settling.delete(projectId)
+    import('@/lib/services/workspace-observer')
+      .then(m => m.runObserverForProject(projectId))
+      .catch((err: any) =>
+        console.warn(`[autonomy:event-trigger] settled observer pass failed project=${projectId}:`, err?.message ?? err),
+      )
+  }, OBSERVER_SETTLE_MS)
+  // Never the reason a process stays alive.
+  timer.unref?.()
+  settling.set(projectId, timer)
 }
 
 async function runKick(projectId: string): Promise<void> {
