@@ -359,3 +359,130 @@ describe("synthetic probe sign-ins never count toward a customer's active users"
     }
   })
 })
+
+// ── The critical email tells the truth ───────────────────────────────────────
+
+import * as platformNotifications from '@/lib/notifications/platform'
+import { notifyCritical, CRITICAL_ALERT_CONFIRM_MS } from '@/lib/services/workspace-observer'
+import { buildNotificationEmail } from '@/lib/notifications/email-templates'
+import type { RawFinding } from '@/lib/core/types'
+
+const critical: RawFinding = {
+  type: 'missing_rls',
+  severity: 'critical',
+  autoFixable: false,
+  details: { tableName: 'todos' },
+}
+const ago = (ms: number) => new Date(Date.now() - ms)
+
+// Wrapped rather than replaced: every other block in this file gets the real
+// function. The email block stubs it so no test sends real mail, and counts
+// the calls. (jest.mock is hoisted to the top of the file.)
+jest.mock('@/lib/notifications/platform', () => {
+  const actual = jest.requireActual('@/lib/notifications/platform')
+  return { ...actual, createPlatformNotification: jest.fn(actual.createPlatformNotification) }
+})
+
+describe('the critical email tells the truth', () => {
+  const send = platformNotifications.createPlatformNotification as unknown as jest.Mock
+  const real = jest.requireActual('@/lib/notifications/platform').createPlatformNotification
+  beforeEach(() => {
+    send.mockReset()
+    send.mockResolvedValue(undefined)
+  })
+  afterEach(() => {
+    send.mockReset()
+    send.mockImplementation(real)
+  })
+
+  it('does not page on a finding seen for the first time', async () => {
+    const p = await builtProject()
+    try {
+      await notifyCritical(p.projectId, [{ finding: critical, firstDetectedAt: new Date() }])
+      expect(send).not.toHaveBeenCalled()
+    } finally {
+      await dropProject(p)
+    }
+  })
+
+  it('pages once for a confirmed critical, as a health alert', async () => {
+    const p = await builtProject()
+    try {
+      await notifyCritical(p.projectId, [{ finding: critical, firstDetectedAt: ago(CRITICAL_ALERT_CONFIRM_MS + 1000) }])
+      expect(send).toHaveBeenCalledTimes(1)
+      expect(send.mock.calls[0][0].type).toBe('health_alert')
+      expect(send.mock.calls[0][0].metadata.summaries[0]).toMatch(/todos/)
+    } finally {
+      await dropProject(p)
+    }
+  })
+
+  it('sends exactly one email when two scans race', async () => {
+    const p = await builtProject()
+    try {
+      const confirmed = [{ finding: critical, firstDetectedAt: ago(CRITICAL_ALERT_CONFIRM_MS + 1000) }]
+      await Promise.all([
+        notifyCritical(p.projectId, confirmed),
+        notifyCritical(p.projectId, confirmed),
+        notifyCritical(p.projectId, confirmed),
+      ])
+      expect(send).toHaveBeenCalledTimes(1)
+    } finally {
+      await dropProject(p)
+    }
+  })
+
+  it('holds the window even when the owner turned in-app alerts off', async () => {
+    // The old dedup looked for the in-app row, so with in-app off it found
+    // nothing and emailed on every scan.
+    const p = await builtProject()
+    try {
+      await prisma.notificationPreference.create({
+        data: { userId: p.userId, type: 'health_alert', emailEnabled: true, inAppEnabled: false },
+      })
+      const confirmed = [{ finding: critical, firstDetectedAt: ago(CRITICAL_ALERT_CONFIRM_MS + 1000) }]
+      await notifyCritical(p.projectId, confirmed)
+      await notifyCritical(p.projectId, confirmed)
+      expect(send).toHaveBeenCalledTimes(1)
+    } finally {
+      await prisma.notificationPreference.deleteMany({ where: { userId: p.userId } })
+      await dropProject(p)
+    }
+  })
+
+  it('keeps when a finding was first seen across repeated writes', async () => {
+    // Confirmation depends on this: detectedAt moves on every write.
+    const ps = [await builtProject(), await builtProject(), await builtProject()]
+    const ingress = await stubIngress({ db: new Set([ps[0].projectId]) })
+    process.env.CONTRACT_PROBE_ORIGIN = ingress.origin
+    try {
+      await runContractSweep({ projectIds: ps.map(p => p.projectId) })
+      const first = await prisma.healthFinding.findFirstOrThrow({
+        where: { projectId: ps[0].projectId, type: 'contract_surface_broken' },
+      })
+      await new Promise(r => setTimeout(r, 50))
+      await runContractSweep({ projectIds: ps.map(p => p.projectId) })
+      const second = await prisma.healthFinding.findFirstOrThrow({ where: { id: first.id } })
+
+      expect((second.details as any).firstDetectedAt).toBe((first.details as any).firstDetectedAt)
+      expect(second.detectedAt.getTime()).toBeGreaterThan(first.detectedAt.getTime())
+    } finally {
+      delete process.env.CONTRACT_PROBE_ORIGIN
+      await ingress.close()
+      for (const p of ps) await dropProject(p)
+    }
+  }, 60_000)
+
+  it('never renders a project name as markup', () => {
+    const { html } = buildNotificationEmail(
+      'health_alert',
+      '1 critical issue in "<img src=x onerror=alert(1)>"',
+      'Backenly found a problem.',
+      { summaries: ['<script>steal()</script>'], actionUrl: 'https://backenly.com/app' },
+    )
+    expect(html).not.toContain('<img src=x')
+    expect(html).not.toContain('<script>')
+    expect(html).toContain('&lt;img src=x')
+    expect(html).toContain('/app/settings?tab=notifications')
+  })
+})
