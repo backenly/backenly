@@ -90,6 +90,30 @@ describe('the SDK stops reconnecting to a project a person has to act on', () =>
   })
 })
 
+describe('a platform notice is only "sent" when it really was', () => {
+  // The inactivity pause refuses to proceed without a DELIVERED warning, so the
+  // notice sender must never resolve as though it sent when it did not.
+  const saved = { ...process.env }
+  afterEach(() => {
+    process.env = { ...saved }
+  })
+
+  it('reports an unconfigured mailer as undelivered, never as sent', async () => {
+    delete process.env.SMTP_HOST
+    delete process.env.SMTP_USER
+    delete process.env.SMTP_PASS
+    const { sendPlatformNotice } = await import('@/lib/auth/email')
+    const { deliverPlatformEmail, EmailDeliveryUnavailableError } = await import('@/lib/email/platform-delivery')
+
+    const outcome = deliverPlatformEmail('owner@example.test', () =>
+      sendPlatformNotice({ kind: 'pause_warning', to: 'owner@example.test', subject: 's', html: '<p>h</p>', text: 't' }),
+    )
+
+    await expect(outcome).rejects.toBeInstanceOf(EmailDeliveryUnavailableError)
+    await expect(outcome).rejects.toMatchObject({ category: 'not_configured' })
+  })
+})
+
 describe('the MCP client does not retry a paused project', () => {
   let server: http.Server
   let hits = 0
