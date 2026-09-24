@@ -80,8 +80,8 @@ export function resolveExecutionMode(level: AutonomyLevel): ExecutionModeState {
       mode: 'shadow',
       reason: 'loop_off',
       explanation:
-        'Autonomy is switched off for this deployment, so Backenly is not watching this backend. ' +
-        'Nothing is detected and nothing is repaired.',
+        'Autonomy is switched off for this deployment. Backenly still reports what its checks find, ' +
+        'and repairs nothing on its own.',
       repairsAreApplied: false,
     }
   }

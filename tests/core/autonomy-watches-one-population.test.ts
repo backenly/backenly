@@ -128,3 +128,88 @@ describe('the loop selects built, serving, active projects and nothing else', ()
     }
   })
 })
+
+// ── Every repair answers to the owner's dial ─────────────────────────────────
+
+import { runObserverForProject } from '@/lib/services/workspace-observer'
+import { permitInlineRepair } from '@/lib/authority/gate'
+
+describe("every autonomous repair answers to the owner's dial", () => {
+  const saved = {
+    reconciler: process.env.ENABLE_AUTONOMY_RECONCILER,
+    live: process.env.ENABLE_AUTONOMY_LIVE_EXECUTION,
+  }
+  beforeEach(() => {
+    process.env.ENABLE_AUTONOMY_RECONCILER = 'true'
+    process.env.ENABLE_AUTONOMY_LIVE_EXECUTION = 'true'
+  })
+  afterEach(() => {
+    for (const [k, v] of [
+      ['ENABLE_AUTONOMY_RECONCILER', saved.reconciler],
+      ['ENABLE_AUTONOMY_LIVE_EXECUTION', saved.live],
+    ] as const) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+  })
+
+  it('permits by flag, then dial, then tier', async () => {
+    const p = await project({ built: true })
+    try {
+      await prisma.project.update({ where: { id: p.projectId }, data: { autonomyLevel: 'AGGRESSIVE' } as any })
+      expect((await permitInlineRepair(p.projectId, 'missing_rls', 1)).allowed).toBe(true)
+      expect((await permitInlineRepair(p.projectId, 'missing_fk', 2)).allowed).toBe(false)
+
+      await prisma.project.update({ where: { id: p.projectId }, data: { autonomyLevel: 'OFF' } as any })
+      expect((await permitInlineRepair(p.projectId, 'infra_hot_table', 0)).allowed).toBe(false)
+
+      await prisma.project.update({ where: { id: p.projectId }, data: { autonomyLevel: 'AGGRESSIVE' } as any })
+      process.env.ENABLE_AUTONOMY_LIVE_EXECUTION = 'false'
+      const refused = await permitInlineRepair(p.projectId, 'infra_hot_table', 0)
+      expect(refused.allowed).toBe(false)
+      expect(refused.reason).toMatch(/live execution/)
+    } finally {
+      await drop(p)
+    }
+  })
+
+  it('the observer leaves the schema alone when the owner set autonomy to Off', async () => {
+    // detectMissingRls carries an inline fix. It used to run whatever the dial
+    // said, while the dashboard told the owner nothing was being repaired.
+    const p = await project({ built: true })
+    const schema = `workspace_${p.projectId}`
+    try {
+      await prisma.project.update({ where: { id: p.projectId }, data: { autonomyLevel: 'OFF' } as any })
+      await prisma.$executeRawUnsafe(`CREATE SCHEMA "${schema}"`)
+      await prisma.$executeRawUnsafe(
+        `CREATE TABLE "${schema}".todos (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), user_id uuid, title text)`,
+      )
+      // Reachable by the data plane, which is what makes RLS-off an exposure.
+      await prisma.$executeRawUnsafe(`
+        DO $$ BEGIN
+          IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+            EXECUTE 'GRANT USAGE ON SCHEMA "${schema}" TO anon';
+            EXECUTE 'GRANT SELECT ON "${schema}".todos TO anon';
+          END IF;
+        END $$`)
+
+      await runObserverForProject(p.projectId)
+
+      const row = await prisma.healthFinding.findFirst({
+        where: { projectId: p.projectId, type: 'missing_rls' },
+        select: { status: true, details: true },
+      })
+      expect(row).not.toBeNull()
+      expect(row!.status).toBe('open')
+      expect(String((row!.details as any).notAppliedBecause)).toMatch(/Off/)
+
+      const rls = await prisma.$queryRawUnsafe<Array<{ on: boolean }>>(
+        `SELECT relrowsecurity AS on FROM pg_class WHERE oid = '"${schema}".todos'::regclass`,
+      )
+      expect(rls[0].on).toBe(false)
+    } finally {
+      await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`)
+      await drop(p)
+    }
+  }, 120_000)
+})

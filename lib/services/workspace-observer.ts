@@ -417,7 +417,25 @@ export async function runObserverForProject(projectId: string): Promise<Observer
     let autoFixed = false
     let fixAppliedAt: Date | undefined
 
-    if (finding.autoFixable && finding.fix) {
+    // An inline fix is a mutation of the owner's schema, so it answers to the
+    // same flag and dial as every other repair. Refused, the finding is still
+    // recorded as detected, with the reason, and nothing is changed.
+    // Imported lazily: desired-state imports this module.
+    const permit =
+      finding.autoFixable && finding.fix
+        ? await (async () => {
+            const [{ permitInlineRepair }, { deriveTier }] = await Promise.all([
+              import('@/lib/authority/gate'),
+              import('@/lib/autonomy/desired-state'),
+            ])
+            return permitInlineRepair(projectId, finding.type, deriveTier(finding.type, finding.details))
+          })()
+        : null
+
+    if (finding.autoFixable && finding.fix && permit && !permit.allowed) {
+      status = 'open'
+      finding.details = { ...finding.details, notAppliedBecause: permit.reason }
+    } else if (finding.autoFixable && finding.fix) {
       try {
         await finding.fix()
         status = 'auto_fixed'

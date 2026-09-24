@@ -95,7 +95,12 @@ export function activeProjectsWhere(
             auditLogs: {
               some: {
                 timestamp: { gte: cutoff },
-                NOT: { action: { startsWith: literalPrefix('AUTONOMY_') } },
+                NOT: [
+                  { action: { startsWith: literalPrefix('AUTONOMY_') } },
+                  // The authority gate's legacy-compatibility receipts and every
+                  // other row autonomy writes about itself.
+                  { type: 'autonomy' },
+                ],
               },
             },
           },
