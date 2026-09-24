@@ -340,6 +340,26 @@ export async function runObserverForProject(projectId: string): Promise<Observer
   // lastObservedAt is deliberate: "never checked" is the truth.
   if (!(await isWatchableProject(projectId))) return result
 
+  // One scan per project at a time in this process. The dashboard's first-load
+  // kick, Re-scan, the event bus and the settled-build pass can all land
+  // together, and two concurrent scans race writeFinding's find-then-create
+  // into duplicate rows.
+  if (observing.has(projectId)) {
+    result.errors.push('a scan of this project is already running')
+    return result
+  }
+  observing.add(projectId)
+  try {
+    return await observeProject(projectId, result)
+  } finally {
+    observing.delete(projectId)
+  }
+}
+
+const observing = new Set<string>()
+
+async function observeProject(projectId: string, result: ObserverResult): Promise<ObserverResult> {
+
   // Gather all raw findings in parallel — each detector is isolated
   const detectors = [
     // ── Existing checks ──────────────────────────────────────────────────────

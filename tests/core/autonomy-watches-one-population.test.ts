@@ -213,3 +213,18 @@ describe("every autonomous repair answers to the owner's dial", () => {
     }
   }, 120_000)
 })
+
+// ── One scan per project at a time ───────────────────────────────────────────
+
+describe('the observer never scans the same project twice at once', () => {
+  it('lets the second concurrent scan stand down', async () => {
+    const p = await project({ built: true })
+    try {
+      const [a, b] = await Promise.all([runObserverForProject(p.projectId), runObserverForProject(p.projectId)])
+      const stoodDown = [a, b].filter(r => r.errors.includes('a scan of this project is already running'))
+      expect(stoodDown).toHaveLength(1)
+    } finally {
+      await drop(p)
+    }
+  }, 120_000)
+})

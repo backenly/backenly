@@ -87,9 +87,14 @@ const MAX_PENDING = 10_000
  * truth for drift the event path can't predict.
  */
 export function kickReconciler(projectId: string, reason: string): void {
-  if (!FLAGS.ENABLE_AUTONOMY_RECONCILER) return
   if (!projectId) return
   if (!shouldKickFor(reason)) return
+
+  // Independent of the reconciler flag: the observer reports, and its repairs
+  // answer to the flag and dial on their own (permitInlineRepair).
+  scheduleSettledObserverPass(projectId)
+
+  if (!FLAGS.ENABLE_AUTONOMY_RECONCILER) return
 
   const existing = pending.get(projectId)
   if (existing) {
@@ -115,6 +120,36 @@ export function kickReconciler(projectId: string, reason: string): void {
     timer: setTimeout(() => runKick(projectId), DEBOUNCE_MS),
   }
   pending.set(projectId, entry)
+}
+
+// ── The observer pass after a build settles ──────────────────────────────────
+//
+// The reconciler only persists findings it would repair on its own, so an
+// approval-tier gap from a build (a missing foreign key, say) reached "Waiting
+// on you" only through the observer, and MCP builds never trigger it:
+// executeAction emits no `schema.changed`. Such a finding waited for the daily
+// 00:10 run. One pass a minute after the LAST mutation of a burst surfaces it
+// within the session, without scanning a half-built schema on every tool call.
+// It never pages anyone early: the observer's email waits for a finding to be
+// seen on a second pass (CRITICAL_ALERT_CONFIRM_MS).
+export const OBSERVER_SETTLE_MS = 60_000
+const settling = new Map<string, ReturnType<typeof setTimeout>>()
+
+function scheduleSettledObserverPass(projectId: string): void {
+  const existing = settling.get(projectId)
+  if (existing) clearTimeout(existing)
+  else if (settling.size >= MAX_PENDING) return
+  settling.set(
+    projectId,
+    setTimeout(() => {
+      settling.delete(projectId)
+      import('@/lib/services/workspace-observer')
+        .then(m => m.runObserverForProject(projectId))
+        .catch((err: any) =>
+          console.warn(`[autonomy:event-trigger] settled observer pass failed project=${projectId}:`, err?.message ?? err),
+        )
+    }, OBSERVER_SETTLE_MS),
+  )
 }
 
 async function runKick(projectId: string): Promise<void> {
