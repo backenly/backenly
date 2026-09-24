@@ -81,7 +81,14 @@ export async function computeHealthSignal(
 
   const logs = await prisma.apiRequestLog
     .findMany({
-      where: { projectId, timestamp: { gte: new Date(now - baselineSpanMs) } },
+      // End-user traffic only. Rows under /api/ are the platform's own AI rate
+      // limiter (lib/middleware/rateLimiter.ts): always 200, always 0ms, and
+      // counting them would make a quiet backend look busy and healthy.
+      where: {
+        projectId,
+        timestamp: { gte: new Date(now - baselineSpanMs) },
+        NOT: { path: { startsWith: '/api/' } },
+      },
       select: { statusCode: true, duration: true, timestamp: true },
     })
     .catch(() => [])
