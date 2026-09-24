@@ -2,8 +2,8 @@
  * RUNTIME CONTRACT VERIFICATION
  * ==============================
  * Synthetic probes that exercise a project's ADVERTISED API surfaces the way a
- * real client would — over HTTP, through the same nginx→Express→(Next proxy)
- * chain production traffic takes. This is the platform noticing its own
+ * real client would — over HTTP, entering at the same process production
+ * traffic enters (see probeOrigin). This is the platform noticing its own
  * breakage instead of the developer's users finding it first.
  *
  * Born from a real incident: the storage endpoints were dead in production
@@ -49,13 +49,33 @@ export interface ProbeResult {
   durationMs: number
 }
 
-function probeOrigin(): string {
-  // Probe the local Express runtime directly — same handler chain as
-  // production traffic (nginx → Express → Next proxy), minus TLS.
-  return (
-    process.env.CONTRACT_PROBE_ORIGIN ||
-    `http://127.0.0.1:${process.env.RUNTIME_PORT || '3001'}`
-  ).replace(/\/+$/, '')
+/**
+ * Where the probes enter: the process that receives a customer's traffic, over
+ * loopback, so a probe takes the same handler chain a real request takes minus
+ * TLS and the load balancer.
+ *
+ * That process depends on the topology, and assuming one is how production
+ * probed nothing at all. On the old single box nginx sent everything to the
+ * Express runtime on :3001, which fronted Next. On AWS (and in
+ * docker/compose.stack.yml) the load balancer sends everything to Next on
+ * :3000, which serves its own /api/v1 routes and rewrites the rest to a
+ * separate runtime named by RUNTIME_API_URL (next.config.js). The sweep runs
+ * in the web process, so a hardcoded :3001 there reached an empty port: every
+ * built project was reported "runtime unreachable" every minute, and the
+ * customers were told it was their problem.
+ *
+ *   CONTRACT_PROBE_ORIGIN set   that, verbatim
+ *   RUNTIME_API_URL set         this web process's own ingress, 127.0.0.1:PORT
+ *   neither                     the single-box Express runtime, 127.0.0.1:RUNTIME_PORT
+ */
+export function probeOrigin(env: NodeJS.ProcessEnv = process.env): string {
+  const explicit = env.CONTRACT_PROBE_ORIGIN?.trim()
+  const origin = explicit
+    ? explicit
+    : env.RUNTIME_API_URL?.trim()
+      ? `http://127.0.0.1:${env.PORT || '3000'}`
+      : `http://127.0.0.1:${env.RUNTIME_PORT || '3001'}`
+  return origin.replace(/\/+$/, '')
 }
 
 async function probeFetch(
