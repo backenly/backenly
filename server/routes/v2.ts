@@ -51,6 +51,7 @@ import { ensureSchemaRegistered } from '@/lib/postgrest/registration'
 import { getProjectIdFromAuth } from './dynamic'
 import { enforceRateLimitByKeyId } from '../lib/auth'
 import { asyncRoute } from '../lib/async-route'
+import { touchProjectActivity } from '@/lib/projects/activity'
 
 const router = Router()
 
@@ -135,6 +136,9 @@ router.all('/:projectId/*', asyncRoute(async (req: Request, res: Response) => {
       })
     }
   }
+
+  // Authenticated, in quota, and past the serving gate: real use.
+  void touchProjectActivity(projectId)
 
   const operation = operationFor(req.method, Boolean(maybeId))
   if (!operation) {

@@ -222,12 +222,20 @@ export function pausedDetails(
   state: { pausedAt: Date; reason: string | null },
 ): Record<string, string | null> {
   const origin = process.env.NEXT_PUBLIC_APP_URL?.trim().replace(/\/$/, '')
+  // Absolute only when this process knows the dashboard's origin. A guessed
+  // host would send a self-hoster's users to somebody else's site.
+  const resumeUrl = origin ? `${origin}${resumePath(projectId)}` : null
   return {
     pausedAt: state.pausedAt.toISOString(),
     reason: state.reason,
     resumePath: resumePath(projectId),
-    // Absolute only when this process knows the dashboard's origin. A guessed
-    // host would send a self-hoster's users to somebody else's site.
-    resumeUrl: origin ? `${origin}${resumePath(projectId)}` : null,
+    resumeUrl,
+    // `hint` and `fixUrl` are the fields the SDK's BackenlyError already turns
+    // into a console banner, so a developer sees why every call is failing and
+    // where to fix it without opening the network tab.
+    hint:
+      'This project is paused, so every API call is refused until it is resumed. ' +
+      'Its owner can resume it from the Backenly dashboard.',
+    fixUrl: resumeUrl,
   }
 }

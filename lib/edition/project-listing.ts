@@ -29,6 +29,9 @@ export const PROJECT_LIST_SELECT = {
   lastMetricsUpdate: true,
   createdAt: true,
   updatedAt: true,
+  // So the chooser can mark a paused project before anyone opens it. Always
+  // null on a self-hosted deployment, where nothing pauses.
+  pausedAt: true,
   // Counted, never fetched: a listing needs the number of tables, not the tables.
   _count: { select: { tables: true, workspaces: true } },
 } as const

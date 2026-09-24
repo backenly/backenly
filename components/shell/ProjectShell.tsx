@@ -25,6 +25,8 @@ import { AssistantPanel } from '@/components/assistant/AssistantPanel'
 import { useAssistantStore } from '@/lib/stores/use-assistant-store'
 import AutonomyToaster from '@/components/autonomy/AutonomyToaster'
 import AutonomyWelcomeBackBanner from '@/components/autonomy/AutonomyWelcomeBackBanner'
+import { ProjectAvailabilityGate } from '@cloud/project-availability'
+import { ProjectActivityBeacon } from './ProjectActivityBeacon'
 
 export function ProjectShell({ children }: { children: ReactNode }) {
   const assistantOpen = useAssistantStore((s) => s.open)
@@ -49,8 +51,11 @@ export function ProjectShell({ children }: { children: ReactNode }) {
             className="pointer-events-none absolute inset-x-0 top-0 z-0 h-px bg-[linear-gradient(to_right,transparent,rgba(196,181,253,0.30),transparent)]"
           />
           <AutonomyWelcomeBackBanner />
-          {children}
+          {/* Cloud swaps a paused project's pages for the paused screen; a
+              self-hosted build renders the page, because nothing pauses. */}
+          <ProjectAvailabilityGate>{children}</ProjectAvailabilityGate>
           <AutonomyToaster />
+          <ProjectActivityBeacon />
         </div>
       </div>
 
