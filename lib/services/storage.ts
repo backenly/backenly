@@ -6,6 +6,7 @@ import { S3StorageService } from './s3Storage'
 import { clampIsPublic } from '@/lib/storage/access-policy'
 import { requireStorageSecret } from '@/lib/auth/jwt-secret'
 import { StorageUnavailableError } from '@/lib/storage/errors'
+import { signExportToken } from '@/lib/storage/export-token'
 
 export interface StorageService {
   // Bucket operations
@@ -32,6 +33,12 @@ export interface StorageService {
   }>>
   getFile(fileId: string, projectId: string): Promise<{ path: string; buffer: Buffer; mimeType: string | null; name: string } | null>
   getFileUrl(fileId: string, projectId: string, expiresIn?: number): Promise<string>
+  /**
+   * A time-limited link an administrator can hand to a script to take this
+   * file out of the project, public or private, INCLUDING while the project is
+   * paused. Only the admin-only export route may call this.
+   */
+  getExportUrl(fileId: string, projectId: string, ttlSeconds: number): Promise<string>
   deleteFile(fileId: string, projectId: string): Promise<void>
   deleteFiles(fileIds: string[], projectId: string): Promise<void>
 
@@ -658,6 +665,23 @@ class LocalStorageService implements StorageService {
     // For private files, generate a signed URL
     const token = await this.generateAccessToken(fileId, expiresIn)
     return `${baseUrl}/${fileId}/download?token=${token}`
+  }
+
+  /**
+   * Always a signed export link, even for a public file: the bare public route
+   * is refused while the project is paused, and an export has to work then.
+   */
+  async getExportUrl(fileId: string, projectId: string, ttlSeconds: number): Promise<string> {
+    const file = await prisma.storageFile.findUnique({
+      where: { id: fileId },
+      select: { projectId: true, deletedAt: true },
+    })
+    if (!file || file.deletedAt) throw new Error('File not found')
+    if (file.projectId !== projectId) throw new Error('File does not belong to this project')
+
+    const baseUrl = process.env.STORAGE_BASE_URL || '/api/storage/files'
+    const token = signExportToken(fileId, ttlSeconds, requireStorageSecret('sign an export link'))
+    return `${baseUrl}/${fileId}/download?token=${encodeURIComponent(token)}`
   }
 
   async deleteFile(fileId: string, projectId: string, deletedBy?: string) {

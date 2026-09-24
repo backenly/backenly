@@ -10,6 +10,7 @@
  *
  *   1. Authenticate (delegates to `authenticateMcp`).
  *   1b. Refuse a paused project, before any quota is spent.
+ *   1c. Stamp the project's activity clock (only once past 1b).
  *   2. Plan-level quota — `enforceAndTrackApiRequest`. A Free user who has
  *      blown their lifetime cap cannot grind through their quota over MCP.
  *   3. Per-key rate limit — ApiKey.rateLimit / rateLimitWindow. Sliding
@@ -35,6 +36,7 @@ import {
   PAUSED_MESSAGE,
   pausedDetails,
 } from '@/lib/projects/serving-state'
+import { touchProjectActivity } from '@/lib/projects/activity'
 
 export interface McpGuardAuth {
   keyId: string
@@ -83,6 +85,11 @@ export async function mcpGuard(request: NextRequest): Promise<McpGuardResult> {
       ),
     }
   }
+
+  // The owner's agent operating the backend is real use. Stamped after the
+  // pause check, so a refused call never moves the clock, and before quota,
+  // because an over-quota agent is still someone using this project.
+  void touchProjectActivity(auth.projectId!)
 
   // Plan-level lifetime / monthly quota (fail-open on infra error inside the
   // kernel itself — that lib already swallows DB failures to ALLOW).

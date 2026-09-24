@@ -20,6 +20,7 @@ import { z } from 'zod'
 import jwt from 'jsonwebtoken'
 import { JWTSecretManager, resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { asyncRoute } from '../lib/async-route'
+import { touchProjectActivity } from '@/lib/projects/activity'
 
 const router = Router()
 
@@ -216,6 +217,8 @@ async function handleSignUp(req: Request, res: Response) {
       )
     }
 
+    // An end user signing up is the backend being used.
+    void touchProjectActivity(projectId)
     res.status(201).json({ data: { user, token } })
   } catch (error: any) {
     console.error('Signup error:', error)
@@ -344,6 +347,9 @@ async function handleSignIn(req: Request, res: Response) {
       resolveJwtSecret(project.jwtSecret),
       { expiresIn: '7d', algorithm: 'HS256' }
     )
+    // Only a SUCCESSFUL sign-in counts: failed attempts are not use, and
+    // counting them would let a credential-stuffing bot keep a project awake.
+    void touchProjectActivity(projectId)
     sendSuccess(res, { user: { id: user.id, email: user.email, name: user.name }, token })
   } catch (error: any) {
     console.error('Signin error:', error?.message ?? 'unknown')

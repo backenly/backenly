@@ -110,7 +110,11 @@ export class BackenlyClient {
       // Decide whether to retry. GET → any 5xx is fair game. POST → only the
       // gateway-flavor 5xx, never a 500-from-app since the request may have
       // mutated state already.
+      // A paused project answers 503 but will keep answering it until a person
+      // resumes the project, so retrying only delays telling the agent why.
+      const paused = parsed?.code === 'PROJECT_PAUSED'
       const retryable =
+        !paused &&
         attempt < MAX_ATTEMPTS - 1 &&
         ((method === 'GET' && response.status >= 500 && response.status < 600) ||
           (method === 'POST' && RETRY_STATUSES_POST.has(response.status)))
@@ -123,10 +127,15 @@ export class BackenlyClient {
       const errorMsg = (parsed && (parsed.error || parsed.message || parsed.summary)) ||
         `HTTP ${response.status} from ${path}`
       const codeSuffix = parsed?.code ? ` (${parsed.code})` : ''
+      // Where to send the user, so the agent can say it rather than guess.
+      const resumeSuffix =
+        paused && typeof parsed?.resumeUrl === 'string'
+          ? ` The project owner can resume it at ${parsed.resumeUrl}.`
+          : ''
       // Carry the server's own account of the failure through instead of
       // reducing it to one sentence — see BackenlyHttpError.detail.
       const trail = parsed?.partialEvents ?? parsed?.events ?? parsed?.applied ?? null
-      lastError = new BackenlyHttpError(`${errorMsg}${codeSuffix}`, {
+      lastError = new BackenlyHttpError(`${errorMsg}${codeSuffix}${resumeSuffix}`, {
         status: response.status,
         code: typeof parsed?.code === 'string' ? parsed.code : undefined,
         detail: Array.isArray(trail) && trail.length > 0 ? trail.slice(-25) : undefined,

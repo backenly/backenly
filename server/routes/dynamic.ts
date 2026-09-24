@@ -28,6 +28,7 @@ import {
 } from '@/lib/security/service-role-exposure'
 import { asyncRoute } from '../lib/async-route'
 import { refuseUnlessServing } from '../lib/serving-gate'
+import { touchProjectActivity } from '@/lib/projects/activity'
 
 const router = Router()
 
@@ -291,6 +292,7 @@ async function handleDynamicRequest(req: Request, res: Response) {
   // never saw when the path is the legacy `/api/v1/{table}` form. Judge it now
   // that it is known, or a paused or locked project's key walks straight past.
   if (await refuseUnlessServing(res, projectId)) return
+  void touchProjectActivity(projectId)
 
   // Strip the URL prefix that the SDK and verifier always include:
   //   /api/v1/{projectId}/db/{tableName}[/{id}]   →  pathSegments = [tableName, …]

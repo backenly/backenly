@@ -15,6 +15,7 @@ import {
 import { canAcceptNewEndUser, trackEndUserActive } from '@/lib/quota/kernel'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import { asyncRoute } from '../lib/async-route'
+import { touchProjectActivity } from '@/lib/projects/activity'
 
 /**
  * END-USER OAUTH RUNTIME (Express)
@@ -523,6 +524,8 @@ async function handleOAuthCallback(req: Request, res: Response) {
       .catch(() => {})
     if (!isReservedTestEmail(userEmail)) trackEndUserActive(projectId, String(userId)).catch(() => {})
     stampLastLogin(projectId, userId).catch(() => {})
+    // A completed end-user sign-in is the backend being used.
+    void touchProjectActivity(projectId)
 
     // 6. Project-scoped JWT.
     const token = jwt.sign(
