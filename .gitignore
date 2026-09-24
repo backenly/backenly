@@ -186,6 +186,7 @@ jest-integration.json
 /app/api/cron/process-grace-periods/route.ts
 /app/api/org/
 /app/api/projects/\[id\]/access/route.ts
+/app/api/projects/\[id\]/availability/
 /app/api/referral/
 /app/api/users/route.ts
 /app/app/billing/

@@ -175,7 +175,9 @@ export async function describePendingLadder(input: {
   const { projectId } = input
 
   const finding = await prisma.healthFinding.findFirst({
-    where: { projectId, type: STRUCTURAL_FINDING, status: 'open' },
+    // The same population the sweep plans from (see sweep.ts), so what an owner
+    // is shown is what the scheduler would run.
+    where: { projectId, type: STRUCTURAL_FINDING, status: { in: ['open', 'pending_approval'] } },
     select: { id: true },
     orderBy: { detectedAt: 'asc' },
   })

@@ -199,7 +199,10 @@ describe('finding D — the README describes the autonomy that actually runs', (
     // The single most confusing observation on a new box, and the reason the
     // acceptance run could not prove item 9.
     expect(README).toContain('`0 projects` is normal on a new install')
-    expect(read('lib/autonomy/activity-gate.ts')).toContain('tables: { some: {} }')
+    // The loop selects only built projects: the gate composes the one
+    // predicate every autonomy entry point shares, and a table is evidence.
+    expect(read('lib/autonomy/activity-gate.ts')).toContain('watchableProjectsWhere(now)')
+    expect(read('lib/projects/backend-presence.ts')).toContain('tables: {')
   })
 })
 

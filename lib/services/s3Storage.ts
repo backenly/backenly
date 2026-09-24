@@ -668,6 +668,24 @@ export class S3StorageService implements StorageService {
     return url
   }
 
+  /**
+   * Always presigned, even for a public file. A presigned GetObject goes to the
+   * bucket and never touches the app, so it is unaffected by the download
+   * route's pause refusal, which is the whole point of an export link.
+   */
+  async getExportUrl(fileId: string, projectId: string, ttlSeconds: number): Promise<string> {
+    const file = await prisma.storageFile.findUnique({
+      where: { id: fileId },
+      select: { projectId: true, deletedAt: true, path: true },
+    })
+    if (!file || file.deletedAt) throw new Error('File not found')
+    if (file.projectId !== projectId) throw new Error('File does not belong to this project')
+
+    return getSignedUrl(this.s3Client, new GetObjectCommand({ Bucket: this.bucket, Key: file.path }), {
+      expiresIn: generatePresignedUrlExpiry(ttlSeconds),
+    })
+  }
+
   async deleteFile(fileId: string, projectId: string, deletedBy?: string) {
     if (!projectId) {
       throw new Error('Project ID is required for tenant isolation')

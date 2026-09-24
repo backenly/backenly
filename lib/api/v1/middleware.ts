@@ -11,6 +11,7 @@ import { recordUsageMetrics } from '@/lib/platform-signals'
 import { enforceAndTrackApiRequest } from '@/lib/quota/kernel'
 import { getPlatformControls, recordSecurityEvent } from '@/lib/platform-controls'
 import { PAUSED_CODE, PAUSED_MESSAGE, pausedDetails } from '@/lib/projects/serving-state'
+import { touchProjectActivity } from '@/lib/projects/activity'
 import jwt from 'jsonwebtoken'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 
@@ -478,6 +479,9 @@ export async function v1ApiMiddleware(
     // Track API call
     recordUsageMetrics(userId, projectId, { apiCalls: 1 })
   }
+
+  // Every check above passed: this is the backend being used.
+  void touchProjectActivity(projectId)
 
   return {
     context: {

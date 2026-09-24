@@ -149,6 +149,28 @@ async function sendRequiredEmail(
   await observeSend(kind, email, () => transporter.sendMail({ from, to: email, subject, html, text }))
 }
 
+/**
+ * A platform notice whose delivery the caller must KNOW about.
+ *
+ * The same transport and the same honesty as the code emails: it throws when
+ * there is no transport and lets a provider error through, so a caller that
+ * wraps it in `deliverPlatformEmail` learns whether the message was really
+ * accepted. Exported for notices composed elsewhere, such as Backenly Cloud's
+ * inactivity-pause warning, which must not record a warning as delivered when
+ * it was not: the pause refuses to proceed without one.
+ */
+export async function sendPlatformNotice(input: {
+  kind: string
+  to: string
+  subject: string
+  html: string
+  text: string
+}): Promise<void> {
+  await sendRequiredEmail(input.kind, input.to, input.subject, input.html, input.text, {
+    subject: input.subject,
+  })
+}
+
 function codeEmailHtml(opts: { heading: string; intro: string; code: string; footer: string }): string {
   return `
     <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; padding: 32px 24px; background: #0A0E1A; color: #f0f0f5; border-radius: 16px;">

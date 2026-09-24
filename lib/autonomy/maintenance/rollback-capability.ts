@@ -39,10 +39,12 @@
  * fictional is more dangerous than no ladder, because the fiction is what the
  * tier system, the approval flow and the operator are all relying on.
  *
- * Consequence, accepted deliberately: every ladder the planner currently emits
- * has at least one rung whose rollback is unsupported, so none of them is
- * schedulable until the executors below are real. Less autonomy with truthful
- * guarantees beats broader autonomy backed by recovery that does not exist.
+ * Consequence, accepted deliberately: a ladder with any rung whose rollback is
+ * unsupported is refused as `unsupported_recovery`. Today that is both ladders
+ * that add a constraint (they wait on `drop_constraint`); `policy_fragmentation`
+ * is schedulable since `restore_policies` became real. Less autonomy with
+ * truthful guarantees beats broader autonomy backed by recovery that does not
+ * exist.
  */
 
 export type RollbackStrategy =

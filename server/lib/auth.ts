@@ -23,6 +23,7 @@ import {
   recordServiceRoleBrowserBlock,
   serviceRoleRefusalMessage,
 } from '@/lib/security/service-role-exposure'
+import { touchProjectActivity } from '@/lib/projects/activity'
 
 export interface V1ApiContext {
   projectId: string
@@ -382,6 +383,9 @@ export async function v1AuthMiddleware(req: Request, res: Response, next: NextFu
       serviceRole: apiKeyRecord.serviceRole,
     },
   }
+
+  // Authenticated, in quota, and past the serving gate: real use.
+  void touchProjectActivity(projectId)
 
   next()
 }

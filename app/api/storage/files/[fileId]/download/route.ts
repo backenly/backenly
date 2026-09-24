@@ -9,6 +9,7 @@ import jwt from 'jsonwebtoken'
 import { canAccessProject } from '@/lib/edition/guard'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { cacheControlFor, mayRead, type Reader } from '@/lib/storage/access-policy'
+import { isExportToken, verifyExportToken } from '@/lib/storage/export-token'
 import { isStorageUnavailable } from '@/lib/storage/errors'
 import {
   getProjectServingState,
@@ -81,10 +82,12 @@ export async function GET(request: NextRequest, props: { params: Promise<{ fileI
     }
 
     // A paused project stops serving its files through this route to everyone
-    // except its own members, who still need them to export their data. A
-    // public object served straight from a CDN never reaches this code, so a
-    // pause cannot stop that and nothing claims it does.
-    if (reader.kind !== 'operator') {
+    // except its own members and holders of an EXPORT link, both of whom are
+    // taking their own data out. A public object served straight from a CDN
+    // never reaches this code, so a pause cannot stop that and nothing claims
+    // it does.
+    const exporting = reader.kind === 'signed' && reader.purpose === 'export'
+    if (reader.kind !== 'operator' && !exporting) {
       const serving = await getProjectServingState(record.projectId)
       if (serving.kind === 'paused') {
         return NextResponse.json(
@@ -178,6 +181,11 @@ async function classifyReader(
     if (!secret) {
       console.error('[storage/download] STORAGE_SECRET is not set')
       return 'misconfigured'
+    }
+    // Two kinds of link, never interchangeable: an export link has its own
+    // prefix and its own HMAC domain (lib/storage/export-token.ts).
+    if (isExportToken(token)) {
+      return verifyExportToken(fileId, token, secret) ? { kind: 'signed', purpose: 'export' } : 'invalid-token'
     }
     return verifySignedToken(fileId, token, secret) ? { kind: 'signed' } : 'invalid-token'
   }
