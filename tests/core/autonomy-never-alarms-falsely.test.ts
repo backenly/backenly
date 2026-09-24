@@ -126,6 +126,18 @@ describe('a project with nothing built is never watched', () => {
     }
   })
 
+  it('does not watch a paused project, which refuses traffic on purpose', async () => {
+    const p = await namedProject()
+    try {
+      await prisma.table.create({ data: { name: 'todos', projectId: p.projectId } })
+      expect(await isWatchableProject(p.projectId)).toBe(true)
+      await prisma.project.update({ where: { id: p.projectId }, data: { pausedAt: new Date(), pauseReason: 'inactivity' } })
+      expect(await isWatchableProject(p.projectId)).toBe(false)
+    } finally {
+      await dropProject(p)
+    }
+  })
+
   it('does not watch a locked-down project, which refuses traffic on purpose', async () => {
     const p = await namedProject()
     try {

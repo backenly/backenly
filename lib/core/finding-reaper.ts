@@ -37,7 +37,8 @@ async function withdraw(
     | 'invariant_reaper'
     | 'not_built'
     | 'platform_fault'
-    | 'locked_down',
+    | 'locked_down'
+    | 'paused',
 ): Promise<number> {
   let withdrawn = 0
   for (const row of rows) {
@@ -490,6 +491,7 @@ export async function reapStaleFindings(
  *                    reports that to the operator now and never files it.
  *   locked_down      Contract rows on a locked-down project. It refuses traffic
  *                    by design, so a refusal is the lockdown working.
+ *   paused           Contract rows on a paused project, for the same reason.
  *
  * Deleted projects are left alone; their rows cascade with them.
  */
@@ -497,10 +499,11 @@ export async function reapUnattributableFindings(): Promise<{
   notBuilt: number
   platformFault: number
   lockedDown: number
+  paused: number
 }> {
   const open = { in: ['open', 'pending_approval'] }
 
-  const [unbuilt, runtimeRows, lockedRows] = await Promise.all([
+  const [unbuilt, runtimeRows, lockedRows, pausedRows] = await Promise.all([
     prisma.healthFinding.findMany({
       where: { status: open, project: { deletedAt: null, NOT: builtEvidenceWhere() } },
       select: { id: true, details: true },
@@ -521,6 +524,14 @@ export async function reapUnattributableFindings(): Promise<{
       },
       select: { id: true, details: true },
     }),
+    prisma.healthFinding.findMany({
+      where: {
+        status: open,
+        type: 'contract_surface_broken',
+        project: { pausedAt: { not: null } },
+      },
+      select: { id: true, details: true },
+    }),
   ])
 
   const seen = new Set<string>()
@@ -530,5 +541,6 @@ export async function reapUnattributableFindings(): Promise<{
   const notBuilt = await withdraw(once(unbuilt), 'not_built')
   const platformFault = await withdraw(once(runtimeRows), 'platform_fault')
   const lockedDown = await withdraw(once(lockedRows), 'locked_down')
-  return { notBuilt, platformFault, lockedDown }
+  const paused = await withdraw(once(pausedRows), 'paused')
+  return { notBuilt, platformFault, lockedDown, paused }
 }

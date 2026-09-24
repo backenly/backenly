@@ -18,8 +18,8 @@
  *
  * ── What counts as built ────────────────────────────────────────────────────
  *
- * Only things a developer or their agent actually created, or real end-user
- * activity. Provisioning state never counts:
+ * Only things a developer or their agent actually created. Provisioning state
+ * never counts:
  *
  *   counts   a table other than the auth-managed `users` table and reserved
  *            `_`/`pg_` plumbing (every generated API hangs off one), an AI
@@ -34,9 +34,10 @@
  * and `getEndUserAuthUsage` draws for auth, expressed as one Prisma filter so a
  * scheduler can select every watchable project in a single query.
  *
- * A locked-down project is excluded as well. It refuses every runtime request
- * on purpose (lib/projects/serving-state.ts), so probing it would report the
- * lockdown working as an outage, and autonomy must not mutate a sealed project.
+ * Locked-down and paused projects are excluded as well. Both refuse every
+ * runtime request on purpose (lib/projects/serving-state.ts), so probing one
+ * would report the refusal working as an outage, and autonomy must not mutate a
+ * sealed project or spend on one nobody is using.
  */
 
 import type { Prisma } from '@prisma/client'
@@ -80,13 +81,15 @@ export function builtEvidenceWhere(): Prisma.ProjectWhereInput {
 }
 
 /**
- * Projects autonomy may watch right now: alive, not locked, and built.
+ * Projects autonomy may watch right now: alive, serving, and built.
  * Compose into a scheduler's `where` rather than restating any part of it.
  */
 export function watchableProjectsWhere(now: Date = new Date()): Prisma.ProjectWhereInput {
   return {
     deletedAt: null,
     lockedDownAt: null,
+    // Always NULL on a self-hosted deployment, where nothing pauses.
+    pausedAt: null,
     AND: [
       { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
       builtEvidenceWhere(),
