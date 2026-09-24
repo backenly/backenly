@@ -27,6 +27,7 @@ import {
   serviceRoleRefusalMessage,
 } from '@/lib/security/service-role-exposure'
 import { asyncRoute } from '../lib/async-route'
+import { refuseUnlessServing } from '../lib/serving-gate'
 
 const router = Router()
 
@@ -285,6 +286,11 @@ async function handleDynamicRequest(req: Request, res: Response) {
   }
 
   const { projectId, keyId, userId, endUserId, isServiceRole, userRole, branchSchema } = authResult
+
+  // The project served here is the KEY's, which the URL-keyed serving gate
+  // never saw when the path is the legacy `/api/v1/{table}` form. Judge it now
+  // that it is known, or a paused or locked project's key walks straight past.
+  if (await refuseUnlessServing(res, projectId)) return
 
   // Strip the URL prefix that the SDK and verifier always include:
   //   /api/v1/{projectId}/db/{tableName}[/{id}]   →  pathSegments = [tableName, …]

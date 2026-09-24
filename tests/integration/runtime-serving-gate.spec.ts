@@ -21,10 +21,11 @@
  */
 import http from 'http'
 import type { AddressInfo } from 'net'
-import { randomUUID } from 'crypto'
+import { randomBytes, randomUUID } from 'crypto'
 
 import app from '@/server/app'
 import { prisma } from '@/lib/db/prisma'
+import { hashApiKey } from '@/server/lib/end-user-identity'
 import { LOCKED_MESSAGE } from '@/server/lib/serving-gate'
 import { PAUSED_CODE, PAUSED_MESSAGE } from '@/lib/projects/serving-state'
 
@@ -170,6 +171,61 @@ describe('an open project (the control)', () => {
     },
     60_000,
   )
+})
+
+/**
+ * The dynamic CRUD handler serves the project the KEY belongs to, and still
+ * accepts the legacy `/api/v1/{tableName}` form with no project id in the path.
+ * The URL-keyed gate cannot judge a path with no project in it, so the project
+ * actually being served has to be judged where it becomes known: after the key
+ * is resolved.
+ */
+describe('the legacy path that names no project, only a table', () => {
+  async function keyFor(projectId: string): Promise<string> {
+    const raw = `bk_test_${randomBytes(16).toString('hex')}`
+    await prisma.apiKey.create({
+      data: {
+        name: 'serving-gate legacy path',
+        keyPrefix: raw.slice(0, 12),
+        permissions: ['read', 'write'],
+        capabilities: [],
+        userId: ownerId,
+        projectId,
+        keyType: 'public',
+        keyHash: hashApiKey(raw),
+      },
+    })
+    return raw
+  }
+
+  async function legacy(key: string) {
+    const res = await fetch(`${base}/api/v1/things`, {
+      headers: { 'x-api-key': key },
+      redirect: 'manual',
+      signal: AbortSignal.timeout(15_000),
+    })
+    const text = await res.text()
+    let json: any = null
+    try { json = JSON.parse(text) } catch { /* not JSON */ }
+    return { status: res.status, json }
+  }
+
+  it("refuses a paused project's key", async () => {
+    const res = await legacy(await keyFor(await makeProject('paused')))
+    expect(res.status).toBe(503)
+    expect(res.json?.error?.code).toBe(PAUSED_CODE)
+  }, 60_000)
+
+  it("refuses a locked project's key", async () => {
+    const res = await legacy(await keyFor(await makeProject('locked')))
+    expect(res.status).toBe(503)
+    expect(res.json?.error?.message).toBe(LOCKED_MESSAGE)
+  }, 60_000)
+
+  it("still serves an open project's key (the control)", async () => {
+    const res = await legacy(await keyFor(await makeProject('open')))
+    expect(res.status).not.toBe(503)
+  }, 60_000)
 })
 
 describe('paths the gate must leave alone', () => {
