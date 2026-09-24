@@ -1479,6 +1479,16 @@ async function checkLiveApiEndpoints(projectId: string): Promise<BehavioralCheck
 
     if (!signupRes.ok) {
       const body = await signupRes.text().catch(() => '')
+      // Verifier accounts may use end-user auth but never provision it, so a
+      // project with no users table answers them 503 AUTH_NOT_CONFIGURED. That
+      // is "auth is not set up here", not "auth is broken".
+      if (signupRes.status === 503 && body.includes('AUTH_NOT_CONFIGURED')) {
+        return {
+          ...base,
+          skipped: true,
+          skipReason: 'End-user auth is not set up for this project yet, so there is no signup flow to verify.',
+        }
+      }
       return {
         ...base,
         error: `POST /auth/signup returned HTTP ${signupRes.status} — ${sanitizeDiagnostic(body)}`,

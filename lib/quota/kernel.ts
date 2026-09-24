@@ -34,6 +34,7 @@
 import { prisma } from '@/lib/db/prisma'
 import { getUserEntitlements } from '@/lib/entitlements'
 import { createPlatformNotification } from '@/lib/notifications/platform'
+import { isReservedTestEmail } from '@/lib/services/end-user-auth-table'
 
 // ─── Result type ─────────────────────────────────────────────────────────────
 
@@ -169,9 +170,20 @@ async function planForProject(projectId: string): Promise<{ ownerId: string; max
  * Called on every successful end-user authentication (sign-in / refresh /
  * OAuth). Idempotent per (project, end-user, month). NEVER blocks — existing
  * users must always be able to use a live app.
+ *
+ * `email` is required so the synthetic-account rule lives here and not at each
+ * call site. The contract probe signs a fresh `…@backenly.internal` user in
+ * every minute; two of the five callers skipped it and three did not, so each
+ * probe pass counted as a new monthly active user against the customer's plan
+ * cap. Verifier accounts are never people.
  */
-export async function trackEndUserActive(projectId: string, endUserId: string): Promise<void> {
+export async function trackEndUserActive(
+  projectId: string,
+  endUserId: string,
+  email: string | null | undefined,
+): Promise<void> {
   if (!projectId || !endUserId) return
+  if (isReservedTestEmail(email)) return
   const month = thisMonth()
   try {
     await prisma.projectActiveUser.upsert({

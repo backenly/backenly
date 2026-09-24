@@ -180,7 +180,7 @@ export async function POST(request: NextRequest, props: { params: Promise<{ proj
     )
 
     // Count this end-user as active for the month (MAU tracking — never blocks).
-    trackEndUserActive(projectId, String(user.id)).catch(() => {})
+    trackEndUserActive(projectId, String(user.id), user.email).catch(() => {})
     // Stamp last_login so the Auth dashboard's "active · 30d" metric is real.
     stampLastLogin(projectId, user.id).catch(() => {})
 

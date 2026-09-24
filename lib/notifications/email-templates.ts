@@ -19,9 +19,23 @@ function shell(content: string): string {
   <hr style="border:none;border-top:1px solid #1f2937;margin:28px 0 20px;" />
   <p style="color:#4b5563;font-size:12px;margin:0;">
     You're receiving this because you have an active Backenly account.<br/>
-    <a href="${APP_URL}/settings/notifications" style="color:#7c3aed;text-decoration:none;">Manage notification preferences</a>
+    <a href="${APP_URL}/app/settings?tab=notifications" style="color:#7c3aed;text-decoration:none;">Manage notification preferences</a>
   </p>
 </div>`
+}
+
+/**
+ * Escape text for an HTML email body. Project names and finding summaries are
+ * written by users and their agents; interpolated raw, a project named
+ * `<img src=x onerror=...>` would be markup in its owner's inbox.
+ */
+export function escapeHtml(text: unknown): string {
+  return String(text ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
 }
 
 function button(text: string, url: string): string {
@@ -54,6 +68,8 @@ export function buildNotificationEmail(
       return buildDeployCompleteEmail(title, body, metadata)
     case 'system':
       return buildSystemEmail(title, body, metadata)
+    case 'health_alert':
+      return buildHealthAlertEmail(title, body, metadata)
     default:
       return buildGenericEmail(title, body)
   }
@@ -187,6 +203,33 @@ function buildSystemEmail(title: string, body: string, metadata: Record<string, 
     ${button(buttonLabel, actionUrl)}
   `)
   return { subject: `${isHealthAlert ? '🔴 ' : ''}${title} — Backenly`, html }
+}
+
+/**
+ * A confirmed critical in one of the recipient's backends. Lists what was
+ * found in words (finding summaries), not internal type names: "contract
+ * surface broken" told a customer nothing and implied a fix they could not
+ * find. Everything interpolated is escaped.
+ */
+function buildHealthAlertEmail(
+  title: string,
+  body: string,
+  metadata: Record<string, any> = {},
+): NotificationEmailContent {
+  const actionUrl = typeof metadata.actionUrl === 'string' ? metadata.actionUrl : APP_URL + '/app'
+  const summaries: string[] = Array.isArray(metadata.summaries) ? metadata.summaries.slice(0, 5) : []
+  const html = shell(`
+    <h1 style="font-size:22px;font-weight:800;margin:0 0 8px;color:#ffffff;">${escapeHtml(title)}</h1>
+    <p style="color:#9ca3af;margin:0 0 20px;font-size:15px;line-height:1.6;">${escapeHtml(body)}</p>
+    ${summaries.length ? `
+      <div style="background:#16171d;border:1px solid #2a2b33;border-radius:8px;padding:12px 16px;margin-bottom:20px;">
+        <ul style="margin:0;padding-left:16px;">
+          ${summaries.map(t => `<li style="color:#e4e4e7;font-size:13px;margin:4px 0;line-height:1.5;">${escapeHtml(t)}</li>`).join('')}
+        </ul>
+      </div>` : ''}
+    ${button('Open Autonomy', escapeHtml(actionUrl))}
+  `)
+  return { subject: `${title} — Backenly`, html }
 }
 
 function buildGenericEmail(title: string, body: string): NotificationEmailContent {

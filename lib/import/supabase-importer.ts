@@ -374,7 +374,7 @@ async function importAuthUsers(source: PgClient, projectId: string, schemaName: 
   `)
   if (users.rows.length === 0) return 0
 
-  await ensureAuthUsersTable(projectId)
+  await ensureAuthUsersTable(projectId, { email: null })
 
   // Adapt to whatever columns the destination users table actually has.
   const destColsRes = await destPool.query(
