@@ -123,7 +123,14 @@ export class RealtimeModule {
   }
 
   private _isFatalError(event: StreamErrorEvent): boolean {
-    if (event.code === 'PLAN_LIMIT_EXCEEDED' || event.code === 'INVALID_PROJECT') return true
+    // A paused or locked project stays that way until a person acts, so
+    // reconnecting would only hammer a server that will keep refusing.
+    if (
+      event.code === 'PLAN_LIMIT_EXCEEDED' ||
+      event.code === 'INVALID_PROJECT' ||
+      event.code === 'PROJECT_PAUSED' ||
+      event.code === 'PROJECT_LOCKED'
+    ) return true
     const msg = event.message || ''
     return /reached its limit|api key|unauthor/i.test(msg)
   }

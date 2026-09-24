@@ -497,3 +497,12 @@ tests/integration/runtime-serving-gate.spec.ts
 # unspent, and the mutation kernel refusing a paused project. Mutation-checked:
 # dropping the activity guard or the job filter fails the matching tests.
 tests/integration/project-pause-lifecycle.spec.ts
+
+# The inactivity clock (Project.lastActivityAt), which decides who Backenly
+# Cloud pauses: first use, the hourly write ceiling, a paused project's clock
+# never moving, a stamp making a stale pause decision lose, the real runtime
+# stamping served traffic and NOT refused or unauthenticated traffic, and the
+# snapshot download refusing a row that points outside its project's backup
+# directory. Mutation-checked: dropping the runtime stamp or the containment
+# check fails the matching tests.
+tests/integration/project-activity-clock.spec.ts
