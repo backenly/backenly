@@ -78,7 +78,9 @@ export async function runDueCronJobs(now?: Date): Promise<CronRunResult> {
   const ts = now ?? new Date()
 
   const cronJobs = await prisma.aiFunction.findMany({
-    where: { status: 'active', triggerType: 'cron' },
+    // A paused or deleted project's schedule does not fire. The function stays
+    // `active`, so it resumes on its next tick after the project does.
+    where: { status: 'active', triggerType: 'cron', project: { pausedAt: null, deletedAt: null } },
     select: { id: true, name: true, projectId: true, triggerTable: true },
   })
 

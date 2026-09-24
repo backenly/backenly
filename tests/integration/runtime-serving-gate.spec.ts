@@ -21,11 +21,13 @@
  */
 import http from 'http'
 import type { AddressInfo } from 'net'
-import { randomUUID } from 'crypto'
+import { randomBytes, randomUUID } from 'crypto'
 
 import app from '@/server/app'
 import { prisma } from '@/lib/db/prisma'
+import { hashApiKey } from '@/server/lib/end-user-identity'
 import { LOCKED_MESSAGE } from '@/server/lib/serving-gate'
+import { PAUSED_CODE, PAUSED_MESSAGE } from '@/lib/projects/serving-state'
 
 let server: http.Server
 let base: string
@@ -36,18 +38,22 @@ let ownerId: string
  * bootstrap route's anon-key provisioning throw (ApiKey requires a user),
  * which is noise this suite is not about.
  */
-async function makeProject(locked: boolean): Promise<string> {
+async function makeProject(state: 'open' | 'locked' | 'paused'): Promise<string> {
   const project = await prisma.project.create({
     data: {
-      name: `serving-gate-${locked ? 'locked' : 'open'}-${randomUUID().slice(0, 8)}`,
+      name: `serving-gate-${state}-${randomUUID().slice(0, 8)}`,
       userId: ownerId,
-      lockedDownAt: locked ? new Date() : null,
-      lockedDownReason: locked ? 'serving-gate test' : null,
+      lockedDownAt: state === 'locked' ? new Date() : null,
+      lockedDownReason: state === 'locked' ? 'serving-gate test' : null,
+      pausedAt: state === 'paused' ? PAUSED_AT : null,
+      pauseReason: state === 'paused' ? 'inactivity' : null,
     },
     select: { id: true },
   })
   return project.id
 }
+
+const PAUSED_AT = new Date('2026-09-10T08:00:00.000Z')
 
 async function call(method: string, path: string, body?: unknown) {
   const res = await fetch(`${base}${path}`, {
@@ -116,7 +122,7 @@ afterAll(async () => {
 
 describe('a locked project', () => {
   let id: string
-  beforeAll(async () => { id = await makeProject(true) }, 60_000)
+  beforeAll(async () => { id = await makeProject('locked') }, 60_000)
 
   it.each(doors('__ID__'))('is refused on the $name door', async ({ method, path, body }) => {
     const res = await call(method, path.replace('__ID__', id), body)
@@ -125,9 +131,34 @@ describe('a locked project', () => {
   }, 60_000)
 })
 
+describe('a paused project', () => {
+  let id: string
+  beforeAll(async () => { id = await makeProject('paused') }, 60_000)
+
+  it.each(doors('__ID__'))('is refused on the $name door, with where to resume it', async ({ method, path, body }) => {
+    const res = await call(method, path.replace('__ID__', id), body)
+    expect(res.status).toBe(503)
+    expect(res.json?.error).toMatchObject({
+      code: PAUSED_CODE,
+      message: PAUSED_MESSAGE,
+      details: {
+        pausedAt: PAUSED_AT.toISOString(),
+        reason: 'inactivity',
+        resumePath: `/app/projects/${id}`,
+      },
+    })
+  }, 60_000)
+
+  it('does not tell the client to retry, because nothing changes until the owner resumes', async () => {
+    const res = await fetch(`${base}/api/v1/${id}/db/things`, { redirect: 'manual' })
+    await res.text()
+    expect(res.headers.get('retry-after')).toBeNull()
+  }, 60_000)
+})
+
 describe('an open project (the control)', () => {
   let id: string
-  beforeAll(async () => { id = await makeProject(false) }, 60_000)
+  beforeAll(async () => { id = await makeProject('open') }, 60_000)
 
   // The proxied Next surface is left out: with no Next server listening its
   // answer depends on whatever happens to own port 3000 on the machine.
@@ -140,6 +171,61 @@ describe('an open project (the control)', () => {
     },
     60_000,
   )
+})
+
+/**
+ * The dynamic CRUD handler serves the project the KEY belongs to, and still
+ * accepts the legacy `/api/v1/{tableName}` form with no project id in the path.
+ * The URL-keyed gate cannot judge a path with no project in it, so the project
+ * actually being served has to be judged where it becomes known: after the key
+ * is resolved.
+ */
+describe('the legacy path that names no project, only a table', () => {
+  async function keyFor(projectId: string): Promise<string> {
+    const raw = `bk_test_${randomBytes(16).toString('hex')}`
+    await prisma.apiKey.create({
+      data: {
+        name: 'serving-gate legacy path',
+        keyPrefix: raw.slice(0, 12),
+        permissions: ['read', 'write'],
+        capabilities: [],
+        userId: ownerId,
+        projectId,
+        keyType: 'public',
+        keyHash: hashApiKey(raw),
+      },
+    })
+    return raw
+  }
+
+  async function legacy(key: string) {
+    const res = await fetch(`${base}/api/v1/things`, {
+      headers: { 'x-api-key': key },
+      redirect: 'manual',
+      signal: AbortSignal.timeout(15_000),
+    })
+    const text = await res.text()
+    let json: any = null
+    try { json = JSON.parse(text) } catch { /* not JSON */ }
+    return { status: res.status, json }
+  }
+
+  it("refuses a paused project's key", async () => {
+    const res = await legacy(await keyFor(await makeProject('paused')))
+    expect(res.status).toBe(503)
+    expect(res.json?.error?.code).toBe(PAUSED_CODE)
+  }, 60_000)
+
+  it("refuses a locked project's key", async () => {
+    const res = await legacy(await keyFor(await makeProject('locked')))
+    expect(res.status).toBe(503)
+    expect(res.json?.error?.message).toBe(LOCKED_MESSAGE)
+  }, 60_000)
+
+  it("still serves an open project's key (the control)", async () => {
+    const res = await legacy(await keyFor(await makeProject('open')))
+    expect(res.status).not.toBe(503)
+  }, 60_000)
 })
 
 describe('paths the gate must leave alone', () => {

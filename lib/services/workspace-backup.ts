@@ -582,9 +582,12 @@ export async function runDailyBackups(): Promise<{ ran: number; succeeded: numbe
   const today = new Date()
   today.setUTCHours(0, 0, 0, 0)
 
-  // Get all projects with an active workspace
+  // Get all projects with an active workspace. A paused project is skipped:
+  // nothing can write to it, so today's dump would equal the one taken when it
+  // paused. Skipping it also keeps that snapshot, because pruning below only
+  // ever touches projects backed up in this run.
   const projects = await prisma.project.findMany({
-    where: { deletedAt: null },
+    where: { deletedAt: null, pausedAt: null },
     select: { id: true },
   })
 

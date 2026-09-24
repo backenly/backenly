@@ -27,7 +27,9 @@ import { redeemRealtimeTicketParam } from '@/lib/realtime/ticket-auth'
 import { mintSseTicket, SSE_TICKET_TTL_SECONDS } from '@/lib/realtime/sse-ticket'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { prisma } from '@/lib/db/prisma'
+import { getProjectServingState, PAUSED_CODE, PAUSED_MESSAGE } from '@/lib/projects/serving-state'
 import { asyncRoute } from '../lib/async-route'
+import { LOCKED_MESSAGE } from '../lib/serving-gate'
 
 const router = Router()
 
@@ -101,9 +103,30 @@ router.get('/:projectId/realtime', asyncRoute(realtimeAuth), asyncRoute(async (r
 
     send({ type: 'connected', projectId, channel: result.channel })
 
-    // Keepalive comment every 25 s to prevent proxy/CDN idle timeouts.
+    // Keepalive comment every 25 s to prevent proxy/CDN idle timeouts, and the
+    // moment an open stream re-checks its project. The serving gate only runs
+    // when a stream connects; without this, a stream opened before a pause or
+    // a lockdown would keep delivering changes for as long as it stayed up.
+    // An `unavailable` answer keeps the stream: a lookup blip is not a pause.
     keepaliveTimer = setInterval(() => {
-      if (!closed) sendComment('keepalive')
+      if (closed) return
+      void getProjectServingState(projectId)
+        .then(state => {
+          if (closed) return
+          if (state.kind === 'paused' || state.kind === 'locked') {
+            send({
+              type: 'error',
+              code: state.kind === 'paused' ? PAUSED_CODE : 'PROJECT_LOCKED',
+              message: state.kind === 'paused' ? PAUSED_MESSAGE : LOCKED_MESSAGE,
+            })
+            cleanup()
+            return
+          }
+          sendComment('keepalive')
+        })
+        .catch(() => {
+          if (!closed) sendComment('keepalive')
+        })
     }, 25_000)
   } catch (err: any) {
     console.warn('[Realtime SSE] subscribe failed:', err?.message)
