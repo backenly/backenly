@@ -136,9 +136,9 @@ export async function POST(request: NextRequest, props: { params: Promise<{ proj
 
     const user = created[0]
 
-    // Count this new end-user toward the project's MAU for the month (never for
-    // internal verifier accounts).
-    if (!isInternalTest) trackEndUserActive(projectId, String(user.id)).catch(() => {})
+    // Count this new end-user toward the project's MAU for the month. Verifier
+    // accounts are excluded inside trackEndUserActive itself.
+    trackEndUserActive(projectId, String(user.id), email).catch(() => {})
 
     const token = jwt.sign(
       { userId: user.id, email: user.email, projectId, role: user.role ?? 'user', jti: crypto.randomUUID() },
