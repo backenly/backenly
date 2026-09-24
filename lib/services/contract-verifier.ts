@@ -19,9 +19,11 @@
  *   functions  dispatcher reachability (expects FUNCTION_NOT_FOUND, not a misroute)
  *   healthz    hosted health endpoint (proves the Express→Next proxy hop)
  *
- * Integrated as a workspace-observer detector: failures become
- * `contract_surface_broken` HealthFindings (dashboard "A few things to clear"
- * + Autonomy); recoveries auto-resolve previously open findings.
+ * Run by the contract sweep (runContractSweep in workspace-observer.ts), the
+ * ONLY writer and resolver of `contract_surface_broken`. The sweep checks the
+ * ingress first, probes every watchable project, and only then decides who a
+ * failure belongs to (attributeContractFailures). A failure the platform
+ * caused is reported to the operator and never filed against a tenant.
  */
 
 import { prisma } from '@/lib/db'
@@ -31,21 +33,23 @@ import type { RawFinding } from '@/lib/core/types'
 
 const PROBE_TIMEOUT_MS = 8_000
 
-/**
- * How long to wait before re-probing when EVERY surface failed to connect.
- * Sized to outlast a PM2 restart of the runtime (restart_delay 4s + tsx boot),
- * which is the common cause and is not an outage anyone should be paged for.
- */
-const TRANSPORT_RETRY_DELAY_MS = 12_000
+export type ContractSurface = 'auth' | 'db' | 'storage' | 'functions' | 'healthz'
 
 export interface ProbeResult {
-  surface: 'auth' | 'db' | 'storage' | 'functions' | 'healthz'
+  surface: ContractSurface
   ok: boolean
   critical: boolean
   detail: string
   /** Truncated raw response body — Details-expander evidence, never shown in the summary row. */
   response?: string
   status?: number
+  /**
+   * Set only when no HTTP response arrived. `unreachable` means the connection
+   * itself failed, which nothing inside a tenant's project can cause.
+   * `timeout` means the ingress accepted the request and did not answer in
+   * time, which can be one project's problem or everyone's.
+   */
+  transport?: 'unreachable' | 'timeout'
   durationMs: number
 }
 
@@ -67,6 +71,9 @@ export interface ProbeResult {
  *   CONTRACT_PROBE_ORIGIN set   that, verbatim
  *   RUNTIME_API_URL set         this web process's own ingress, 127.0.0.1:PORT
  *   neither                     the single-box Express runtime, 127.0.0.1:RUNTIME_PORT
+ *
+ * A wrong answer here can no longer blame a tenant: the sweep checks this
+ * origin before it probes anyone (probePlatformIngress).
  */
 export function probeOrigin(env: NodeJS.ProcessEnv = process.env): string {
   const explicit = env.CONTRACT_PROBE_ORIGIN?.trim()
@@ -108,6 +115,14 @@ function fail(
   response?: string,
 ): ProbeResult {
   return { surface, ok: false, critical, detail, status, response, durationMs: Date.now() - startedAt }
+}
+
+/** A probe that threw before any HTTP response arrived. */
+function probeError(surface: ProbeResult['surface'], err: any, startedAt: number, critical = true): ProbeResult {
+  return {
+    ...fail(surface, `probe error: ${err?.message ?? String(err)}`, startedAt, undefined, critical),
+    transport: err?.name === 'AbortError' ? 'timeout' : 'unreachable',
+  }
 }
 
 /**
@@ -177,7 +192,7 @@ async function probeAuth(projectId: string, base: string): Promise<ProbeResult> 
 
     return pass('auth', 'signup → signin → logout round-trip OK', startedAt)
   } catch (err: any) {
-    return fail('auth', `probe error: ${err?.message ?? String(err)}`, startedAt)
+    return probeError('auth', err, startedAt)
   } finally {
     // Delete the synthetic user AND every side-effect row the signup/logout
     // round-trip created for it (email-verification token, blacklisted jti).
@@ -198,7 +213,7 @@ async function probeDb(projectId: string, base: string, apiKey: string, tableNam
     }
     return fail('db', `GET /db/${tableName} ${statusLine(res)}`, startedAt, res.status, true, res.raw)
   } catch (err: any) {
-    return fail('db', `probe error: ${err?.message ?? String(err)}`, startedAt)
+    return probeError('db', err, startedAt)
   }
 }
 
@@ -219,7 +234,7 @@ async function probeStorage(projectId: string, base: string, apiKey: string): Pr
     }
     return fail('storage', `GET /storage/files ${statusLine(res)}`, startedAt, res.status, true, res.raw)
   } catch (err: any) {
-    return fail('storage', `probe error: ${err?.message ?? String(err)}`, startedAt)
+    return probeError('storage', err, startedAt)
   }
 }
 
@@ -240,7 +255,7 @@ async function probeFunctions(projectId: string, base: string, apiKey: string): 
       startedAt, res.status, false, res.raw,
     )
   } catch (err: any) {
-    return fail('functions', `probe error: ${err?.message ?? String(err)}`, startedAt, undefined, false)
+    return probeError('functions', err, startedAt, false)
   }
 }
 
@@ -253,7 +268,7 @@ async function probeHealthz(projectId: string, base: string): Promise<ProbeResul
     if (res.body?.status) return pass('healthz', `healthz answered (${res.body.status})`, startedAt, false)
     return fail('healthz', `GET /healthz ${statusLine(res)}`, startedAt, res.status, false, res.raw)
   } catch (err: any) {
-    return fail('healthz', `probe error: ${err?.message ?? String(err)}`, startedAt, undefined, false)
+    return probeError('healthz', err, startedAt, false)
   }
 }
 
@@ -283,9 +298,14 @@ export async function runContractVerification(projectId: string): Promise<ProbeR
 
   const probes: Promise<ProbeResult>[] = [probeHealthz(projectId, base)]
 
-  // Auth probe needs a configured jwtSecret (otherwise signup 503s by design).
+  // Auth is probed only where it is genuinely in use. The jwtSecret is seeded
+  // at creation, so keying on it probed the auth surface of projects that had
+  // never built auth, and the probe's own signup would have created the very
+  // `users` table the no-fake-scaffolding rule says must not appear by itself.
   if (project.jwtSecret && project.jwtSecret.length >= 32) {
-    probes.push(probeAuth(projectId, base))
+    const { getEndUserAuthUsage } = await import('@/lib/services/auth-status')
+    const usage = await getEndUserAuthUsage(projectId).catch(() => null)
+    if (usage?.inUse) probes.push(probeAuth(projectId, base))
   }
 
   // Key-authed probes need the anon key.
@@ -301,98 +321,177 @@ export async function runContractVerification(projectId: string): Promise<ProbeR
     .map(s => s.value)
 }
 
+// ── Who a failure belongs to ──────────────────────────────────────────────────
+
 /**
- * Workspace-observer detector: probe the runtime contract, resolve recovered
- * findings, and return RawFindings for surfaces that are broken right now.
+ * Before any tenant is probed: does the ingress answer at all?
+ *
+ * If it does not, every probe that follows would fail the same way, and the
+ * only honest conclusion is that the platform is down. That is the operator's
+ * problem, never a tenant's. Checked once per sweep, so a dead ingress costs
+ * one request rather than five per project.
  */
-/**
- * A probe that never got an HTTP response at all — the TCP connect failed
- * (ECONNREFUSED / ENOTFOUND / abort). `status` is undefined and the detail is
- * the fetch error, not a status line. This is categorically different from a
- * surface answering wrongly: nothing about the project can cause it.
- */
-function isTransportFailure(r: ProbeResult): boolean {
-  return !r.ok && r.status === undefined && r.detail.startsWith('probe error:')
+export interface IngressCheck {
+  ok: boolean
+  origin: string
+  status?: number
+  detail: string
 }
 
-export async function detectContractViolations(projectId: string): Promise<RawFinding[]> {
-  // Never return "no findings" when the probe run itself could not complete.
-  // An empty result is indistinguishable from a healthy backend — that is
-  // exactly how detectMissingRls stayed silently dead for months. The observer
-  // calls every detector inside Promise.allSettled, so throwing here is
-  // isolated to this detector and surfaces as a scan error instead of being
-  // laundered into "all surfaces OK".
-  let results: ProbeResult[] = await runContractVerification(projectId)
+export async function probePlatformIngress(origin: string = probeOrigin()): Promise<IngressCheck> {
+  try {
+    const res = await probeFetch(`${origin}/api/health`)
+    // A 5xx here is the platform reporting its own database or process as
+    // unhealthy. Anything below that proves something is listening.
+    if (res.status >= 500) {
+      return { ok: false, origin, status: res.status, detail: `ingress health at ${origin} returned ${res.status}` }
+    }
+    return { ok: true, origin, status: res.status, detail: `ingress at ${origin} answered ${res.status}` }
+  } catch (err: any) {
+    return { ok: false, origin, detail: `no response from ingress at ${origin}: ${err?.message ?? String(err)}` }
+  }
+}
 
-  // A genuinely empty run (project gone, no anonKey, no jwtSecret) is a
-  // configuration state, not a health signal — distinct from the throw above.
-  if (results.length === 0) return []
+export interface ProjectProbeOutcome {
+  projectId: string
+  results: ProbeResult[]
+}
 
-  // ── The runtime was unreachable, not the surfaces ───────────────────────────
-  //
-  // When EVERY probe fails at the transport level, the one thing that has been
-  // proven is that the probe could not open a connection to its own origin. That
-  // is a platform-runtime state (restarting, crashed, wrong port) and it is the
-  // same single fault N times, not N independent broken surfaces.
-  //
-  // Reporting it per-surface is what produced "4 live API surfaces are failing"
-  // criticals against a project whose backend was answering fine 15 minutes
-  // later — the probe had fired 157ms into a scheduled PM2 restart of the
-  // Express runtime. A restart window is seconds (restart_delay 4s plus tsx
-  // boot), so one bounded retry absorbs it entirely; anything that survives the
-  // retry is a real outage worth reporting, and still worth reporting as ONE
-  // fault rather than as a per-surface fan-out.
-  const allTransportFailed = results.length > 0 && results.every(isTransportFailure)
-  if (allTransportFailed) {
-    await new Promise(resolve => setTimeout(resolve, TRANSPORT_RETRY_DELAY_MS))
-    results = await runContractVerification(projectId)
-    if (results.length === 0) return []
+export interface PlatformFault {
+  kind: 'surface_unreachable' | 'surface_failing_fleetwide'
+  surface: ContractSurface
+  /** HTTP status the failing projects shared, or 'timeout'. Absent when unreachable. */
+  status?: number | 'timeout'
+  projectIds: string[]
+  /** How many projects this surface was probed on this pass. */
+  probed: number
+  detail: string
+}
 
-    if (results.every(isTransportFailure)) {
-      // Still nothing listening. Resolve nothing (a surface that cannot be
-      // probed has not been proven healthy) and report the single real fault.
-      return [{
-        type: 'contract_surface_broken',
-        severity: 'critical',
-        autoFixable: false,
-        details: {
-          surface: 'runtime',
-          detail: `runtime unreachable at ${probeOrigin()} — ${results[0].detail}`,
-          response: null,
-          httpStatus: null,
-          durationMs: results.reduce((n, r) => n + r.durationMs, 0),
-          probedAt: new Date().toISOString(),
-          surfacesAffected: results.map(r => r.surface),
-          retried: true,
-          hint:
-            'Every advertised surface failed to accept a connection, twice, ' +
-            `${Math.round(TRANSPORT_RETRY_DELAY_MS / 1000)}s apart. This is the platform runtime ` +
-            'being down rather than anything in your project — nothing in your schema, ' +
-            'RLS or API can cause it, and there is nothing for you to change. It clears ' +
-            'automatically as soon as the runtime answers again.',
-        },
-      }]
+export interface ContractAttribution {
+  platformFaults: PlatformFault[]
+  /** Failures that are this project's alone, by project. */
+  tenantBroken: Map<string, ProbeResult[]>
+  /**
+   * Surfaces whose state this pass could not attribute to the tenant. Unknown,
+   * not healthy: nothing is resolved and no heartbeat is written for them.
+   */
+  unknown: Map<string, Set<ContractSurface>>
+}
+
+/**
+ * The same surface failing the same way on this many projects, and on at least
+ * this share of the projects it was probed on, is one platform fault rather
+ * than N tenant faults. A tenant can only break its own surface; a route, a
+ * proxy or a shared process breaks everyone's at once. With a single project
+ * (a self-hosted install) nothing can be correlated, and the operator and the
+ * tenant are the same person anyway.
+ */
+export const FLEET_FAULT_MIN_PROJECTS = 2
+export const FLEET_FAULT_MIN_SHARE = 0.5
+
+function failureKey(r: ProbeResult): string {
+  return `${r.surface}|${r.status ?? r.transport ?? 'unknown'}`
+}
+
+/**
+ * Decide, for every failed probe of one sweep, whether it belongs to a tenant.
+ *
+ *   no connection at all      platform. Nothing in a project can refuse a TCP
+ *                             connection to the platform's own ingress.
+ *   same failure fleet-wide   platform (see FLEET_FAULT_MIN_*).
+ *   anything else             the tenant's, and filed against their project.
+ *
+ * Pure, so the rule is provable without a network.
+ */
+export function attributeContractFailures(outcomes: ProjectProbeOutcome[]): ContractAttribution {
+  const platformFaults: PlatformFault[] = []
+  const tenantBroken = new Map<string, ProbeResult[]>()
+  const unknown = new Map<string, Set<ContractSurface>>()
+  const markUnknown = (projectId: string, surface: ContractSurface) => {
+    const set = unknown.get(projectId) ?? new Set<ContractSurface>()
+    set.add(surface)
+    unknown.set(projectId, set)
+  }
+
+  const probedBySurface = new Map<ContractSurface, number>()
+  const unreachableBySurface = new Map<ContractSurface, string[]>()
+  const failingByKey = new Map<
+    string,
+    { surface: ContractSurface; status: number | 'timeout' | undefined; projectIds: string[] }
+  >()
+
+  for (const { projectId, results } of outcomes) {
+    for (const r of results) {
+      probedBySurface.set(r.surface, (probedBySurface.get(r.surface) ?? 0) + 1)
+      if (r.ok) continue
+      if (r.transport === 'unreachable') {
+        unreachableBySurface.set(r.surface, [...(unreachableBySurface.get(r.surface) ?? []), projectId])
+        markUnknown(projectId, r.surface)
+        continue
+      }
+      const key = failureKey(r)
+      const entry = failingByKey.get(key) ?? {
+        surface: r.surface,
+        status: r.status ?? (r.transport === 'timeout' ? 'timeout' : undefined),
+        projectIds: [],
+      }
+      entry.projectIds.push(projectId)
+      failingByKey.set(key, entry)
     }
   }
 
-  const broken = results.filter(r => !r.ok)
-  const recovered = results.filter(r => r.ok)
+  for (const [surface, projectIds] of unreachableBySurface) {
+    platformFaults.push({
+      kind: 'surface_unreachable',
+      surface,
+      projectIds,
+      probed: probedBySurface.get(surface) ?? projectIds.length,
+      detail: `${surface} probes could not connect to the platform on ${projectIds.length} project(s)`,
+    })
+  }
 
-  // At least one surface accepted a connection, so the runtime is up. Close any
-  // aggregate runtime-unreachable finding — no per-surface probe carries the
-  // 'runtime' marker, so the loop below can never resolve it.
-  await prisma.healthFinding.updateMany({
-    where: {
-      projectId,
-      type: 'contract_surface_broken',
-      status: { in: ['open', 'pending_approval'] },
-      details: { path: ['surface'], equals: 'runtime' },
-    },
-    data: { status: 'auto_fixed', autoFixed: true, fixAppliedAt: new Date() },
-  }).catch(() => {})
+  const fleetKeys = new Set<string>()
+  for (const [key, entry] of failingByKey) {
+    const probed = probedBySurface.get(entry.surface) ?? 0
+    const failing = entry.projectIds.length
+    if (failing >= FLEET_FAULT_MIN_PROJECTS && probed > 0 && failing / probed >= FLEET_FAULT_MIN_SHARE) {
+      fleetKeys.add(key)
+      platformFaults.push({
+        kind: 'surface_failing_fleetwide',
+        surface: entry.surface,
+        status: entry.status,
+        projectIds: entry.projectIds,
+        probed,
+        detail: `${entry.surface} failed with ${entry.status ?? 'no status'} on ${failing} of ${probed} projects`,
+      })
+      for (const projectId of entry.projectIds) markUnknown(projectId, entry.surface)
+    }
+  }
 
-  // Auto-resolve open findings for surfaces that answer correctly again.
-  for (const r of recovered) {
+  for (const { projectId, results } of outcomes) {
+    const mine = results.filter(
+      r => !r.ok && r.transport !== 'unreachable' && !fleetKeys.has(failureKey(r)),
+    )
+    if (mine.length > 0) tenantBroken.set(projectId, mine)
+  }
+
+  return { platformFaults, tenantBroken, unknown }
+}
+
+/**
+ * Settle one project's pass: close findings for surfaces that answered
+ * correctly, and turn this project's own failures into findings.
+ *
+ * `broken` must already be attributed. Passing raw probe results here is how
+ * the platform's outage used to become the customer's critical.
+ */
+export async function settleTenantContract(
+  projectId: string,
+  results: ProbeResult[],
+  broken: ProbeResult[],
+): Promise<RawFinding[]> {
+  for (const r of results.filter(r => r.ok)) {
     await prisma.healthFinding.updateMany({
       where: {
         projectId,
@@ -413,9 +512,10 @@ export async function detectContractViolations(projectId: string): Promise<RawFi
       durationMs: r.durationMs,
       probedAt: new Date().toISOString(),
       hint:
-        r.surface === 'storage' || r.surface === 'healthz'
-          ? 'This surface is served by the Next.js app behind the Express proxy — check that both PM2 processes are running and the proxy route is mounted.'
-          : 'This surface is served by the Express runtime — check backenly-runtime logs.',
+        'Other projects answered on this surface in the same pass, so the fault is specific to this ' +
+        (r.surface === 'storage' || r.surface === 'healthz'
+          ? 'project. The surface is served by the web app.'
+          : 'project. The surface is served by the runtime.'),
     }
 
     // A broken surface is usually a symptom whose cause is outside this
@@ -442,10 +542,10 @@ export async function detectContractViolations(projectId: string): Promise<RawFi
             const { healDataPlane, describeHeal } = await import('@/lib/postgrest/supervisor')
             const result = await healDataPlane(projectId)
             // Only `healthy` counts. Throwing on anything else is deliberate:
-            // the observer records a non-throwing fix as auto_fixed, and a
-            // data plane recorded as repaired while it is still serving 502s
-            // is worse than an open finding, because the queue stops showing
-            // it. Recoveries auto-resolve at the top of this function anyway.
+            // the sweep records a non-throwing fix as auto_fixed, and a data
+            // plane recorded as repaired while it is still serving 502s is
+            // worse than an open finding, because the queue stops showing it.
+            // Recoveries auto-resolve at the top of this function anyway.
             if (!result.healthy) throw new Error(describeHeal(result))
           }
         : undefined,

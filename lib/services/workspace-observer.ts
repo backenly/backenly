@@ -41,7 +41,16 @@ import {
 } from '@/lib/core/drift-detector'
 import { checkIntegrationHealth } from '@/lib/core/integration-health'
 import { verifyWorkflows } from '@/lib/core/workflow-verifier'
-import { detectContractViolations } from '@/lib/services/contract-verifier'
+import {
+  runContractVerification,
+  probePlatformIngress,
+  attributeContractFailures,
+  settleTenantContract,
+  type ProjectProbeOutcome,
+} from '@/lib/services/contract-verifier'
+import { isDataPlaneOutage } from '@/lib/core/fix-actions'
+import { reportPlatformFault, type PlatformFaultReport } from '@/lib/autonomy/platform-faults'
+import { reapUnattributableFindings } from '@/lib/core/finding-reaper'
 import { recordContractSweepResult } from '@/lib/autonomy/data-plane-liveness'
 import { writeFixHistory, checkEscalation, buildResolutionText } from '@/lib/memory/fix-history'
 import { generateFixPlansFromRawFindings, type FixPlan } from '@/lib/core/fix-plan-generator'
@@ -119,7 +128,7 @@ export async function runWorkspaceObserver(): Promise<{
 }
 
 /**
- * Contract-only sweep: probe every reachable project's live API surfaces and
+ * Contract-only sweep: probe every watchable project's live API surfaces and
  * persist the results. Runs far more often than the full observer.
  *
  * Split out because the two have opposite cost profiles. The full observer
@@ -134,43 +143,136 @@ export async function runWorkspaceObserver(): Promise<{
  * before anything noticed; that is the gap that let a signup outage last
  * sixty days. Cheap checks belong on a cheap-check schedule.
  *
- * Findings flow through the same writeFinding path as the observer, so
- * dedup, escalation, and auto-resolve behave identically.
+ * This is the ONLY writer and resolver of `contract_surface_broken`, and it
+ * judges nobody until it has seen everybody:
+ *
+ *   1. withdraw rows that no longer describe a tenant fault
+ *   2. check the ingress once; if it is not there, report the platform and stop
+ *   3. probe every watchable project
+ *   4. attribute each failure (lib/services/contract-verifier.ts)
+ *   5. report platform faults to the operator, heal the shared data plane if
+ *      that is what failed, and settle each project with only its own failures
+ *
+ * It never notifies a tenant. A contract failure reaches the owner through the
+ * Autonomy queue, and only when it is theirs.
  */
-export async function runContractSweep(): Promise<{
+export async function runContractSweep(options: {
+  /**
+   * Narrow the pass to these projects (still only the watchable ones). For an
+   * operator re-checking specific projects, and for tests. Fleet attribution
+   * then compares within this set only.
+   */
+  projectIds?: string[]
+} = {}): Promise<{
   processed: number
   broken: number
   errors: string[]
+  platformFaults: PlatformFaultReport[]
 }> {
-  const projects = await prisma.project.findMany({
-    where: watchableProjectsWhere(),
-    select: { id: true },
-  })
-
   const errors: string[] = []
+  const platformFaults: PlatformFaultReport[] = []
   let broken = 0
 
+  await reapUnattributableFindings().catch((err: any) => {
+    errors.push(`[reap] ${err?.message ?? String(err)}`)
+  })
+
+  const projects = await prisma.project.findMany({
+    where: options.projectIds
+      ? { id: { in: options.projectIds }, ...watchableProjectsWhere() }
+      : watchableProjectsWhere(),
+    select: { id: true },
+  })
+  if (projects.length === 0) return { processed: 0, broken, errors, platformFaults }
+
+  const ingress = await probePlatformIngress()
+  if (!ingress.ok) {
+    // Nothing is probed, resolved or heartbeated. Liveness goes stale and
+    // reads "unknown" after the heartbeat window, which is the truth.
+    const fault: PlatformFaultReport = {
+      kind: 'ingress_unreachable',
+      detail: ingress.detail,
+      origin: ingress.origin,
+      projectIds: projects.map(p => p.id),
+    }
+    reportPlatformFault(fault)
+    platformFaults.push(fault)
+    return { processed: 0, broken, errors, platformFaults }
+  }
+
   const CONCURRENCY = 5
+  const outcomes: ProjectProbeOutcome[] = []
   for (let i = 0; i < projects.length; i += CONCURRENCY) {
     const batch = projects.slice(i, i + CONCURRENCY)
     const settled = await Promise.allSettled(
-      batch.map(async (p) => {
-        const findings = await detectContractViolations(p.id)
+      batch.map(async (p) => ({ projectId: p.id, results: await runContractVerification(p.id) })),
+    )
+    for (const outcome of settled) {
+      if (outcome.status === 'fulfilled') outcomes.push(outcome.value)
+      else errors.push(String(outcome.reason?.message ?? outcome.reason))
+    }
+  }
 
-        // The heartbeat, written on EVERY pass including clean ones.
-        //
-        // Before this, a clean sweep recorded nothing at all, so "no open
-        // contract_surface_broken finding" was ambiguous between "verified
-        // answering" and "never checked". The data-plane invariant
-        // (lib/autonomy/data-plane-liveness.ts) cannot tell those apart from the
-        // findings table alone, and reading the second as the first is exactly
-        // how detectMissingRls reported green while dead. Written before the
-        // per-finding handling below so a failure while WRITING findings still
-        // leaves an accurate record of when the probe last ran.
-        await recordContractSweepResult(
-          p.id,
-          findings.map(f => String((f.details as Record<string, unknown>)?.surface ?? 'unknown')),
+  const attribution = attributeContractFailures(outcomes)
+
+  for (const f of attribution.platformFaults) {
+    const fault: PlatformFaultReport = {
+      kind: f.kind,
+      detail: f.detail,
+      surface: f.surface,
+      status: f.status,
+      projectIds: f.projectIds,
+      origin: ingress.origin,
+    }
+    reportPlatformFault(fault)
+    platformFaults.push(fault)
+  }
+
+  // The data plane is shared. When it fails for everyone, the repair is a
+  // platform action taken once, not a finding per tenant. healDataPlane is
+  // single-flighted and re-verifies against its own PostgREST probe before it
+  // restarts anything.
+  const dataPlaneDown = attribution.platformFaults.some(
+    f =>
+      f.kind === 'surface_failing_fleetwide' &&
+      isDataPlaneOutage({ surface: f.surface, httpStatus: f.status === 'timeout' ? null : f.status ?? null }),
+  )
+  if (dataPlaneDown) {
+    try {
+      const { healDataPlane, describeHeal } = await import('@/lib/postgrest/supervisor')
+      const heal = await healDataPlane(null)
+      if (!heal.healthy) errors.push(`[data-plane heal] ${describeHeal(heal)}`)
+    } catch (err: any) {
+      errors.push(`[data-plane heal] ${err?.message ?? String(err)}`)
+    }
+  }
+
+  for (let i = 0; i < outcomes.length; i += CONCURRENCY) {
+    const batch = outcomes.slice(i, i + CONCURRENCY)
+    const settled = await Promise.allSettled(
+      batch.map(async ({ projectId, results }) => {
+        const findings = await settleTenantContract(
+          projectId,
+          results,
+          attribution.tenantBroken.get(projectId) ?? [],
         )
+
+        // The heartbeat, written on every pass whose outcome is KNOWN.
+        //
+        // Before it existed a clean sweep recorded nothing, so "no open
+        // contract_surface_broken finding" was ambiguous between "verified
+        // answering" and "never checked", and reading the second as the first
+        // is how detectMissingRls reported green while dead. A surface the
+        // platform could not settle this pass is unknown, not healthy, so that
+        // project gets no heartbeat and its liveness goes stale rather than
+        // green. Written before the findings so a failure while writing them
+        // still leaves an accurate record of when the probe last ran.
+        if (!attribution.unknown.has(projectId)) {
+          await recordContractSweepResult(
+            projectId,
+            findings.map(f => String((f.details as Record<string, unknown>)?.surface ?? 'unknown')),
+          )
+        }
 
         for (const finding of findings) {
           // Most broken surfaces are symptoms whose cause is outside this
@@ -186,13 +288,13 @@ export async function runContractSweep(): Promise<{
           if (finding.autoFixable && finding.fix) {
             try {
               await finding.fix()
-              await writeFinding(p.id, finding, 'auto_fixed', true, new Date())
+              await writeFinding(projectId, finding, 'auto_fixed', true, new Date())
             } catch (err: any) {
               finding.details.fixError = err?.message ?? String(err)
-              await writeFinding(p.id, finding, 'pending_approval', false)
+              await writeFinding(projectId, finding, 'pending_approval', false)
             }
           } else {
-            await writeFinding(p.id, finding, 'pending_approval', false)
+            await writeFinding(projectId, finding, 'pending_approval', false)
           }
         }
         return findings.length
@@ -204,13 +306,14 @@ export async function runContractSweep(): Promise<{
     }
   }
 
-  if (broken > 0 || errors.length > 0) {
+  if (broken > 0 || errors.length > 0 || platformFaults.length > 0) {
     console.warn(
-      `[ContractSweep] ${projects.length} projects | ${broken} broken surfaces | ${errors.length} scan errors`,
+      `[ContractSweep] ${projects.length} projects | ${broken} tenant surfaces broken | ` +
+      `${platformFaults.length} platform faults | ${errors.length} scan errors`,
     )
   }
 
-  return { processed: projects.length, broken, errors }
+  return { processed: outcomes.length, broken, errors, platformFaults }
 }
 
 /**
@@ -262,9 +365,10 @@ export async function runObserverForProject(projectId: string): Promise<Observer
     verifyWorkflows(projectId),
     // ── 3.5 API Coverage ─────────────────────────────────────────────────────
     detectApiCoverageGaps(projectId),
-    // ── Runtime contract — live HTTP probes of the advertised API surfaces
-    // (auth/db/storage/functions/healthz) through the real serving chain.
-    detectContractViolations(projectId),
+    // The runtime contract is NOT probed here. runContractSweep is its only
+    // writer and resolver, because only a pass that has seen every project can
+    // tell a tenant's broken surface from the platform's. Probing it here as
+    // well is what emailed a customer about an outage that was ours.
     // Daily, not per-minute, and deliberately so: this reports that repairs
     // across one area have stopped holding, which is a slow-moving structural
     // signal. It also has no executable fix (notify_only / Tier 3), so the
