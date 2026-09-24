@@ -24,7 +24,8 @@
  *
  * The hour is also what the pause relies on: a project idle for days has an old
  * clock, so the first real request after that always writes, and that write is
- * what makes a pause decided against the old value lose (applyPauseTransition).
+ * what makes a pause decided against the old value lose (see the conditional
+ * write in lib/projects/pause-lifecycle.ts).
  *
  * It is edition-neutral. A self-hosted project gets a truthful "last used" time
  * and nothing reads it to pause anything.
