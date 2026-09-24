@@ -576,6 +576,12 @@ export async function detectSubsystemRecurrence(projectId: string): Promise<RawF
       autoFixable: false,
       details: {
         location: `subsystem:${s.fingerprint}:${s.membershipHash}`,
+        // The table the maintenance planner resolves the subsystem from
+        // (lib/autonomy/maintenance/resolve.ts). Without it every real finding
+        // was refused as "names no table", so no restructuring plan could ever
+        // be built from what this detector writes. The member that took the
+        // most confirmed repairs is where the patching concentrated.
+        tableName: anchorTable(s.membership, s.confirmedRepairs),
         fingerprint: s.fingerprint,
         membershipHash: s.membershipHash,
         membership: s.membership,
@@ -590,6 +596,15 @@ export async function detectSubsystemRecurrence(projectId: string): Promise<RawF
         windowDays: report.windowDays,
       },
     }))
+}
+
+/** The member with the most confirmed repairs; ties broken by name, for stability. */
+function anchorTable(membership: readonly string[], repairs: ReadonlyArray<{ table?: string | null }>): string {
+  const counts = new Map<string, number>()
+  for (const r of repairs) {
+    if (r.table && membership.includes(r.table)) counts.set(r.table, (counts.get(r.table) ?? 0) + 1)
+  }
+  return [...membership].sort((a, b) => (counts.get(b) ?? 0) - (counts.get(a) ?? 0) || a.localeCompare(b))[0]
 }
 
 /**

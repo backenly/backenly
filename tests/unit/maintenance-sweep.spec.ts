@@ -265,12 +265,15 @@ describe('the plan is rebuilt, never remembered', () => {
     expect(mockResolve).not.toHaveBeenCalled()
   })
 
-  it('looks only at open findings', async () => {
-    // A finding already proposed, fixed or dismissed is somebody else's
-    // business, and re-planning from a dismissed one overrides a human.
+  it('looks only at unresolved findings, never fixed or dismissed ones', async () => {
+    // Re-planning from a dismissed finding overrides a human, and a fixed one
+    // is done. `pending_approval` IS unresolved: it is the status the observer
+    // writes this finding with, and reading `open` alone meant the sweep never
+    // found a real one (tests/probes/restructuring-is-reachable.spec.ts).
     await sweep()
-    expect(mockFindFinding).toHaveBeenCalledWith(
-      expect.objectContaining({ where: expect.objectContaining({ status: 'open' }) }),
-    )
+    const where = mockFindFinding.mock.calls[0][0].where
+    expect(where.status).toEqual({ in: ['open', 'pending_approval'] })
+    expect(where.status.in).not.toContain('dismissed')
+    expect(where.status.in).not.toContain('auto_fixed')
   })
 })
