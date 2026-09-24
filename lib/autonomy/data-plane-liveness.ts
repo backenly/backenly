@@ -19,7 +19,7 @@
  *
  * `contract_surface_broken` means a customer cannot reach their backend. It was
  * not one of the seventeen invariants. It is written only by
- * `lib/services/contract-verifier.ts` on a separate 15-minute sweep, and appears
+ * `lib/services/contract-verifier.ts` on a separate sweep, and appears
  * in the desired-state catalogue exactly once — in a comment explaining that it
  * is EXCLUDED.
  *
@@ -37,10 +37,10 @@
  * invariant — is wrong and would be a serious regression. That function makes
  * five real HTTP calls per project with an 8s timeout each, plus a 12s retry
  * window when every surface fails. The reconciler runs the full invariant set
- * EVERY MINUTE for every active project; the contract sweep runs every fifteen
- * for exactly this reason. Wiring live probing into the minute loop would
- * multiply outbound probe traffic ~15x and put a 20s worst case inside a loop
- * that is otherwise pure database work.
+ * EVERY MINUTE for every active project, and it is pure database work. Live
+ * HTTP there would put seconds of network wait inside that loop and give the
+ * probes a second, uncoordinated schedule; the sweep owns the probing on its
+ * own self-limiting minute cadence instead.
  *
  * So the sweep stays the only prober, and this invariant reads what it recorded.
  *
@@ -68,6 +68,7 @@
 
 import { prisma } from '@/lib/db/prisma'
 import type { RawFinding } from '@/lib/core/types'
+import { isWatchableProject } from '@/lib/projects/backend-presence'
 
 const PREF_TYPE = 'contract_liveness'
 const PREF_KEY = 'last_sweep'
@@ -75,7 +76,7 @@ const PREF_KEY = 'last_sweep'
 /**
  * How stale a heartbeat may be before its silence stops meaning anything.
  *
- * The sweep is scheduled every 15 minutes (instrumentation.ts, `*​/15 * * * *`).
+ * The sweep is scheduled every minute (instrumentation.ts).
  * Three intervals allows a missed run plus scheduling jitter without crying
  * wolf, while still surfacing a genuinely dead sweep within the hour. Tightening
  * this below one interval would make the invariant flap against its own
@@ -162,14 +163,15 @@ export function isHeartbeatStale(
  * disagreed on would decide which one won.
  */
 export async function detectDataPlaneNotAnswering(projectId: string): Promise<RawFinding[]> {
-  // A project with no tables is never swept (runContractSweep selects
-  // `tables: { some: {} }`), so it has no heartbeat and never will. That is a
+  // A project with nothing built is never swept (runContractSweep selects
+  // watchableProjectsWhere), so it has no heartbeat and never will. That is a
   // correct state — there is no data plane to answer — not an unknown one.
   // Without this branch every unbuilt project would permanently report "could
   // not be checked", and because `reapInvariantFindings` refuses to reap on any
-  // probe error, it would also permanently freeze their finding cleanup.
-  const tableCount = await prisma.table.count({ where: { projectId } }).catch(() => 0)
-  if (tableCount === 0) return []
+  // probe error, it would also permanently freeze their finding cleanup. It
+  // asks the sweep's own question, so the two can never disagree about which
+  // projects should have a heartbeat.
+  if (!(await isWatchableProject(projectId))) return []
 
   const beat = await readContractLiveness(projectId)
 

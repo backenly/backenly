@@ -3,9 +3,10 @@
  * ==================
  * The central health-check loop for the platform's "Runs Itself" pillar.
  *
- * Runs every 6 hours (scheduled in instrumentation.ts) AND is triggered
+ * Runs once a day (scheduled in instrumentation.ts) AND is triggered
  * immediately by schema changes, fix attempts, and deployment failures via
- * the event bus (lib/events/bus.ts).
+ * the event bus (lib/events/bus.ts). Only projects with something built are
+ * ever scanned; see lib/projects/backend-presence.ts.
  *
  * Per project it:
  *   1. Loads the latest WorkspaceSchemaSnapshot
@@ -46,6 +47,7 @@ import { writeFixHistory, checkEscalation, buildResolutionText } from '@/lib/mem
 import { generateFixPlansFromRawFindings, type FixPlan } from '@/lib/core/fix-plan-generator'
 import { runBuiltInVerification, type VerificationExecutionResult } from '@/lib/verification/verification-executor'
 import { FLAGS } from '@/lib/config/flags'
+import { watchableProjectsWhere, isWatchableProject } from '@/lib/projects/backend-presence'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -81,7 +83,8 @@ export interface ObserverResult {
  * healthz consult it). Gating the observer on it meant a project could take
  * real end-user signups while never being probed again after its first
  * event-driven scan — the platform serving traffic it had stopped watching.
- * Probing must cover exactly what serves, so the gate is "has tables".
+ * Probing must cover exactly what serves, so the gate is "something was
+ * built" (watchableProjectsWhere), the same one every entry point asks.
  */
 export async function runWorkspaceObserver(): Promise<{
   processed: number
@@ -89,11 +92,7 @@ export async function runWorkspaceObserver(): Promise<{
   errors: string[]
 }> {
   const projects = await prisma.project.findMany({
-    where: {
-      tables: { some: {} },
-      deletedAt: null,
-      OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
-    },
+    where: watchableProjectsWhere(),
     select: { id: true, userId: true },
   })
 
@@ -144,11 +143,7 @@ export async function runContractSweep(): Promise<{
   errors: string[]
 }> {
   const projects = await prisma.project.findMany({
-    where: {
-      tables: { some: {} },
-      deletedAt: null,
-      OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
-    },
+    where: watchableProjectsWhere(),
     select: { id: true },
   })
 
@@ -232,6 +227,14 @@ export async function runObserverForProject(projectId: string): Promise<Observer
     critical: 0,
     errors: [],
   }
+
+  // Nothing built means nothing can be wrong. This is the only gate, and it is
+  // here rather than at the callers because five of them reach this function
+  // (the dashboard's first-load kick, Re-scan, the event bus, the cron route
+  // and the daily sweep) and the one that did not check is the one that
+  // emailed a customer about a project they had only named. Not stamping
+  // lastObservedAt is deliberate: "never checked" is the truth.
+  if (!(await isWatchableProject(projectId))) return result
 
   // Gather all raw findings in parallel — each detector is isolated
   const detectors = [
