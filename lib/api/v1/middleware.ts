@@ -10,6 +10,7 @@ import { markFrontendConnected, markExternalUsage } from '@/lib/projects/milesto
 import { recordUsageMetrics } from '@/lib/platform-signals'
 import { enforceAndTrackApiRequest } from '@/lib/quota/kernel'
 import { getPlatformControls, recordSecurityEvent } from '@/lib/platform-controls'
+import { PAUSED_CODE, PAUSED_MESSAGE, pausedDetails } from '@/lib/projects/serving-state'
 import jwt from 'jsonwebtoken'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 
@@ -246,6 +247,21 @@ export async function v1ApiMiddleware(
         ErrorCodes.FORBIDDEN,
         'This project is currently locked by the platform operator. Contact support.',
         503,
+      ),
+    }
+  }
+
+  // Paused for inactivity: the same answer the runtime's serving gate gives,
+  // from the row this middleware already loaded. Reached directly only when a
+  // request bypasses the runtime; in production the gate refuses it first.
+  if (project.pausedAt) {
+    return {
+      context: {} as V1ApiContext,
+      response: createErrorResponse(
+        PAUSED_CODE,
+        PAUSED_MESSAGE,
+        503,
+        pausedDetails(projectId, { pausedAt: project.pausedAt, reason: project.pauseReason }),
       ),
     }
   }

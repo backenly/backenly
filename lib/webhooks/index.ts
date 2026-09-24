@@ -291,6 +291,9 @@ export async function retryFailedWebhooks(): Promise<number> {
       status: 'RETRYING',
       nextRetryAt: { lte: now },
       attemptCount: { lt: MAX_ATTEMPTS },
+      // Pausing cancels these; this keeps one created by a drain that was
+      // already in flight from being delivered before that cancellation lands.
+      webhook: { project: { pausedAt: null } },
     },
     include: {
       webhook: {

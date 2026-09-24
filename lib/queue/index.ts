@@ -52,6 +52,17 @@ export type JobType =
 export const PURGE_JOB_TYPE = 'purge_project' as const
 
 /**
+ * Job types that still run for a PAUSED project.
+ *
+ * An allowlist of exemptions rather than a list of what to suspend, so a job
+ * type added later is suspended by default: for a paused project that means
+ * delayed, which is recoverable, where running user work Backenly then pays for
+ * is not. Purges are not listed because they never enter 'queued' at all (see
+ * PURGE_STATUS below) and run on their own path regardless.
+ */
+export const PAUSE_EXEMPT_JOB_TYPES: readonly JobType[] = ['cleanup']
+
+/**
  * Purge jobs use their own status vocabulary, and that is the whole point.
  *
  * ── THE ROLLBACK HAZARD ─────────────────────────────────────────────────────
@@ -159,8 +170,28 @@ export async function enqueue(
 export async function claimNextJobs(limit = 10) {
   const now = new Date()
 
+  // A paused project's jobs are left queued, never claimed, so none of their
+  // attempts are spent and they run as normal once the project resumes.
+  // BackgroundJob.projectId has no relation to Project, hence the id list.
+  const pausedIds = (
+    await prisma.project.findMany({ where: { pausedAt: { not: null } }, select: { id: true } })
+  ).map(p => p.id)
+
   const candidates = await prisma.backgroundJob.findMany({
-    where: { status: 'queued', runAt: { lte: now } },
+    where: {
+      status: 'queued',
+      runAt: { lte: now },
+      ...(pausedIds.length > 0
+        ? {
+            OR: [
+              // `projectId NOT IN (...)` is NULL, not true, for a system job.
+              { projectId: null },
+              { projectId: { notIn: pausedIds } },
+              { type: { in: [...PAUSE_EXEMPT_JOB_TYPES] } },
+            ],
+          }
+        : {}),
+    },
     orderBy: { runAt: 'asc' },
     take: limit,
     select: { id: true },

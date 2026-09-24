@@ -63,6 +63,10 @@ export function activeProjectsWhere(
 
   return {
     deletedAt: null,
+    // A paused project is not served, so there is nothing to heal, scan or
+    // evolve, and the model budget these passes spend is Backenly's. Always
+    // NULL on a self-hosted deployment, where nothing pauses.
+    pausedAt: null,
     OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
     AND: [
       {

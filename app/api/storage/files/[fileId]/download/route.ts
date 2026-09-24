@@ -10,6 +10,12 @@ import { canAccessProject } from '@/lib/edition/guard'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { cacheControlFor, mayRead, type Reader } from '@/lib/storage/access-policy'
 import { isStorageUnavailable } from '@/lib/storage/errors'
+import {
+  getProjectServingState,
+  PAUSED_CODE,
+  PAUSED_MESSAGE,
+  pausedDetails,
+} from '@/lib/projects/serving-state'
 
 /**
  * GET /api/storage/files/{fileId}/download — stream the file bytes.
@@ -72,6 +78,22 @@ export async function GET(request: NextRequest, props: { params: Promise<{ fileI
     }
     if (reader === 'misconfigured') {
       return NextResponse.json({ error: 'Server misconfiguration' }, { status: 500 })
+    }
+
+    // A paused project stops serving its files through this route to everyone
+    // except its own members, who still need them to export their data. A
+    // public object served straight from a CDN never reaches this code, so a
+    // pause cannot stop that and nothing claims it does.
+    if (reader.kind !== 'operator') {
+      const serving = await getProjectServingState(record.projectId)
+      if (serving.kind === 'paused') {
+        return NextResponse.json(
+          {
+            error: { code: PAUSED_CODE, message: PAUSED_MESSAGE, details: pausedDetails(record.projectId, serving) },
+          },
+          { status: 503 },
+        )
+      }
     }
 
     const decision = mayRead(

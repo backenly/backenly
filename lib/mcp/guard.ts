@@ -9,6 +9,7 @@
  * Responsibilities:
  *
  *   1. Authenticate (delegates to `authenticateMcp`).
+ *   1b. Refuse a paused project, before any quota is spent.
  *   2. Plan-level quota — `enforceAndTrackApiRequest`. A Free user who has
  *      blown their lifetime cap cannot grind through their quota over MCP.
  *   3. Per-key rate limit — ApiKey.rateLimit / rateLimitWindow. Sliding
@@ -28,6 +29,12 @@ import {
   type McpAuthResult,
 } from './auth'
 import { enforceAndTrackApiRequest } from '@/lib/quota/kernel'
+import {
+  getProjectServingState,
+  PAUSED_CODE,
+  PAUSED_MESSAGE,
+  pausedDetails,
+} from '@/lib/projects/serving-state'
 
 export interface McpGuardAuth {
   keyId: string
@@ -56,6 +63,26 @@ export async function mcpGuard(request: NextRequest): Promise<McpGuardResult> {
   const auth = await authenticateMcp(request)
   const failure = mcpAuthFailureResponse(auth)
   if (failure) return { response: failure, auth: null }
+
+  // A paused project, refused BEFORE quota and rate limiting so a call that
+  // cannot run does not spend either. The agent gets a stable code and the
+  // place to resume, rather than a tool failure that reads like a bug in its
+  // own request.
+  const serving = await getProjectServingState(auth.projectId!)
+  if (serving.kind === 'paused') {
+    return {
+      auth: null,
+      response: NextResponse.json(
+        {
+          ok: false,
+          error: PAUSED_MESSAGE,
+          code: PAUSED_CODE,
+          ...pausedDetails(auth.projectId!, serving),
+        },
+        { status: 503 },
+      ),
+    }
+  }
 
   // Plan-level lifetime / monthly quota (fail-open on infra error inside the
   // kernel itself — that lib already swallows DB failures to ALLOW).

@@ -134,6 +134,14 @@ model Project {
   deletedAt               DateTime? // Soft delete — set instead of removing the row
   lockedDownAt            DateTime? // Founder-triggered emergency lockdown — blocks public API + freezes the project. See lib/platform/controls.ts.
   lockedDownReason        String? // Human-readable note for why the project was locked.
+  // Inactivity pause. Set only by Backenly Cloud's idle sweep through
+  // lib/projects/pause-lifecycle.ts; nothing public writes it, so a self-hosted
+  // project never pauses. While set, every runtime door answers PROJECT_PAUSED.
+  pausedAt                DateTime?
+  pauseReason             String? // 'inactivity' today. Text, so a new reason is a code change reviewed with its writer.
+  pauseWarnedAt           DateTime? // When the pause warning was DELIVERED. Cleared by real activity. No delivered warning, no pause.
+  lastActivityAt          DateTime? // Real use only (runtime traffic, MCP calls, dashboard writes). Never stamped by autonomy, cron or backups.
+  pausePolicySince        DateTime? // When the inactivity policy first applied to this project, so a paid-to-Free downgrade gets a full window.
   isDeployed              Boolean                @default(false)
   isBackendGenerated      Boolean                @default(false)
   isFrontendConnected     Boolean                @default(false)
@@ -225,6 +233,7 @@ model Project {
   @@index([expiresAt])
   @@index([deletedAt])
   @@index([organizationId])
+  @@index([pausedAt])
   @@map("projects")
 }
 
@@ -1957,6 +1966,8 @@ model Plan {
   autonomyMaxActionsPerWindow      Int? // Circuit-breaker ceiling: autonomous mutations/project/rolling-window (null = unlimited — healing is never a paywall)
   maxApiRequestsPerMonth           BigInt? // API request cap — monthly OR lifetime (see apiQuotaIsLifetime)
   apiQuotaIsLifetime               Boolean @default(false) // true = maxApiRequestsPerMonth is a lifetime total that never resets (Free)
+  inactivityPauseDays              Int? // Days without real use before a project on this plan is paused. null = never paused.
+  pausedFreeResumeDays             Int? // Days after pausing that resuming stays free on this plan. null = always free to resume.
   maxPostgresStorageMb             Int? // PostgreSQL storage in MB
   maxFileStorageMb                 Int? // File/object storage in MB
   maxRealtimeConnections           Int? // Concurrent SSE/realtime connections
@@ -2071,6 +2082,9 @@ enum WebhookDeliveryStatus {
   FAILED
   RETRYING
   DEAD_LETTER
+  // Terminal, and never retried: the delivery was withdrawn because its project
+  // was paused. Holding it instead would fire a weeks-old event on resume.
+  CANCELLED
 }
 
 model WebhookLog {
