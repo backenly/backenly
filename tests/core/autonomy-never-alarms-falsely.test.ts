@@ -498,3 +498,47 @@ describe('the critical email tells the truth', () => {
     expect(html).toContain('/app/settings?tab=notifications')
   })
 })
+
+// ── Monitoring never provisions ──────────────────────────────────────────────
+
+import { ensureAuthUsersTable, AuthNotProvisionedError } from '@/lib/services/end-user-auth-table'
+
+async function schemaExists(projectId: string): Promise<boolean> {
+  const rows = await prisma.$queryRawUnsafe<Array<{ n: number }>>(
+    `SELECT count(*)::int AS n FROM information_schema.schemata WHERE schema_name = $1`,
+    `workspace_${projectId}`,
+  )
+  return rows[0].n === 1
+}
+
+describe('a verifier account never provisions end-user auth', () => {
+  it('refuses to create the schema or the users table for a probe signup', async () => {
+    // The self-host restore failed because the contract probe's signup ran
+    // CREATE SCHEMA between the platform replay and the workspace replay.
+    const p = await builtProject()
+    try {
+      expect(await schemaExists(p.projectId)).toBe(false)
+      await expect(
+        ensureAuthUsersTable(p.projectId, { email: '__cv_probe@backenly.internal' }),
+      ).rejects.toBeInstanceOf(AuthNotProvisionedError)
+      expect(await schemaExists(p.projectId)).toBe(false)
+    } finally {
+      await dropProject(p)
+    }
+  })
+
+  it('still provisions for a real person, and lets a verifier use what exists', async () => {
+    const p = await builtProject()
+    try {
+      const real = await ensureAuthUsersTable(p.projectId, { email: 'first.user@example.com' })
+      expect(real.schemaName).toBe(`workspace_${p.projectId}`)
+      expect(await schemaExists(p.projectId)).toBe(true)
+
+      const probe = await ensureAuthUsersTable(p.projectId, { email: '__cv_probe@backenly.internal' })
+      expect(probe.schemaName).toBe(real.schemaName)
+    } finally {
+      await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "workspace_${p.projectId}" CASCADE`)
+      await dropProject(p)
+    }
+  })
+})

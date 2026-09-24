@@ -453,7 +453,7 @@ async function handleOAuthCallback(req: Request, res: Response) {
     const providerUser = await fetchProviderUser(provider, tokenData.access_token)
 
     // 3. Bring the users table to the auth contract, then add OAuth columns.
-    const baseSchema = await ensureAuthUsersTable(projectId)
+    const baseSchema = await ensureAuthUsersTable(projectId, { email: providerUser.email })
     const schemaName = baseSchema.schemaName
     await prisma.$executeRawUnsafe(
       `ALTER TABLE "${schemaName}"."users"
