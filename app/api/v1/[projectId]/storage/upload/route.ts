@@ -9,6 +9,7 @@ import { prisma } from '@/lib/db'
 import { processImage, mimeToExtension } from '@/lib/storage/image-processor'
 import { assertQuotaAvailable, QuotaExceededError } from '@/lib/services/storageQuota'
 import path from 'path'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 // ── Global hard limits (defence-in-depth before any bucket config) ─────────
 // Default is 500 MB to support video/asset uploads via this endpoint.
@@ -51,7 +52,7 @@ const BLOCKED_EXTENSIONS = new Set([
  *   path      — desired file path/name inside the bucket
  *   isPublic  — 'true' | 'false'
  */
-export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, params)
@@ -219,3 +220,5 @@ export async function POST(request: NextRequest, props: { params: Promise<{ proj
     return createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Failed to upload file', 500)
   }
 }
+
+export const POST = recordedV1(handlePOST)

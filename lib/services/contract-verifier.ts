@@ -30,6 +30,7 @@ import { prisma } from '@/lib/db'
 import { purgeSyntheticAuthArtifacts } from '@/lib/services/end-user-auth-table'
 import { isDataPlaneOutage } from '@/lib/core/fix-actions'
 import type { RawFinding } from '@/lib/core/types'
+import { internalTrafficHeaders } from '@/lib/traffic/request-recorder'
 
 const PROBE_TIMEOUT_MS = 8_000
 
@@ -92,7 +93,13 @@ async function probeFetch(
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS)
   try {
-    const res = await fetch(url, { ...init, signal: controller.signal })
+    // Marked as Backenly's own, so the probe never shows up as the customer's
+    // traffic (lib/traffic/request-recorder.ts).
+    const res = await fetch(url, {
+      ...init,
+      headers: { ...(init.headers as Record<string, string> | undefined), ...internalTrafficHeaders() },
+      signal: controller.signal,
+    })
     const raw = await res.text()
     let body: any = null
     try { body = JSON.parse(raw) } catch { /* HTML or empty */ }

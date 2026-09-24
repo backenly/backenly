@@ -37,6 +37,7 @@ import { prisma } from '@/lib/db'
 import { generateApiKey } from '@/lib/auth/apiKeyAuth'
 import { recordSecurityEvent, getPlatformControls } from '@/lib/platform-controls'
 import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 // ── In-memory rate limit (per IP, per project) ───────────────────────────────
 // 120 bootstraps per minute per IP per project — generous enough that real
@@ -66,7 +67,7 @@ setInterval(() => {
   for (const [k, b] of buckets) if (b.resetAt < now) buckets.delete(k)
 }, WINDOW_MS).unref?.()
 
-export async function GET(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+async function handleGET(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
   const projectId = params.projectId
 
@@ -214,7 +215,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ proje
  * runtimes: a caller who guesses the wrong verb gets the key, not a dead end
  * that reads like a platform auth failure.
  */
-export async function POST(
+async function handlePOST(
   request: NextRequest,
   ctx: { params: Promise<{ projectId: string }> },
 ) {
@@ -222,13 +223,13 @@ export async function POST(
   // itself, which is the only place projectId is read, so there is nothing to
   // await at this level. The Next 15 codemod flags any forwarded ctx because it
   // cannot see that.
-  return GET(request, ctx)
+  return handleGET(request, ctx)
 }
 
 // CORS preflight — bootstrap is called from arbitrary frontend origins
 // (lovable.app preview, vercel.app, netlify.app, custom domains), so we
 // always allow.
-export async function OPTIONS() {
+async function handleOPTIONS() {
   return new NextResponse(null, {
     status: 204,
     headers: {
@@ -239,3 +240,7 @@ export async function OPTIONS() {
     },
   })
 }
+
+export const GET = recordedV1(handleGET)
+export const POST = recordedV1(handlePOST)
+export const OPTIONS = recordedV1(handleOPTIONS)

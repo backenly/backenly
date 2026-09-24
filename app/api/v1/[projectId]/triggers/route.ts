@@ -15,6 +15,7 @@ import { prisma } from '@/lib/db'
 import { listTriggers, createTrigger, deleteTrigger } from '@/lib/services/trigger-service'
 import { enforceTriggerCreation } from '@/lib/entitlements/policy'
 import { canAccessProject, canAdministerProject, canWriteProject } from '@/lib/edition/guard'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 /**
  * Authentication only: who is calling, or null.
@@ -34,7 +35,7 @@ async function authenticate(req: NextRequest): Promise<string | null> {
   return decoded.userId
 }
 
-export async function GET(req: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+async function handleGET(req: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
   const userId = await authenticate(req)
   if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
@@ -45,7 +46,7 @@ export async function GET(req: NextRequest, props: { params: Promise<{ projectId
   return NextResponse.json({ triggers })
 }
 
-export async function POST(req: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+async function handlePOST(req: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
   const userId = await authenticate(req)
   if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
@@ -83,7 +84,7 @@ export async function POST(req: NextRequest, props: { params: Promise<{ projectI
   return NextResponse.json({ trigger }, { status: 201 })
 }
 
-export async function DELETE(req: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+async function handleDELETE(req: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
   const userId = await authenticate(req)
   if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
@@ -97,3 +98,7 @@ export async function DELETE(req: NextRequest, props: { params: Promise<{ projec
   await deleteTrigger(params.projectId, triggerId)
   return NextResponse.json({ success: true })
 }
+
+export const GET = recordedV1(handleGET)
+export const POST = recordedV1(handlePOST)
+export const DELETE = recordedV1(handleDELETE)

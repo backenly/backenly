@@ -20,6 +20,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { v1ApiMiddleware } from '@/lib/api/v1/middleware'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 export const dynamic = 'force-dynamic'
 
@@ -29,7 +30,7 @@ const MAX_PAYLOAD_BYTES = 6_000
 // Channel names: alphanumeric, hyphens, underscores — no SQL injection surface
 const CHANNEL_RE = /^[a-zA-Z0-9_-]{1,64}$/
 
-export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
   const auth = await v1ApiMiddleware(request, params)
   if (auth.response) return auth.response
@@ -78,3 +79,5 @@ export async function POST(request: NextRequest, props: { params: Promise<{ proj
     return NextResponse.json({ error: err.message }, { status: 500 })
   }
 }
+
+export const POST = recordedV1(handlePOST)

@@ -6,6 +6,7 @@ import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/ap
 import { getCart, clearCart, resolveSessionId } from '@/lib/services/cart-store'
 import { prisma } from '@/lib/db'
 import { executeInWorkspaceSchema } from '@/lib/services/workspaceDatabase'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 /**
  * POST /v1/{projectId}/checkout
@@ -30,7 +31,7 @@ import { executeInWorkspaceSchema } from '@/lib/services/workspaceDatabase'
  * Works with BOTH auth-gated orders (user_id col) and guest orders
  * (customer_name / customer_email cols). Detects schema at runtime.
  */
-export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, params)
@@ -249,3 +250,5 @@ export async function POST(request: NextRequest, props: { params: Promise<{ proj
     return createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Checkout failed', 500)
   }
 }
+
+export const POST = recordedV1(handlePOST)

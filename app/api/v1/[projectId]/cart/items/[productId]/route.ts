@@ -4,13 +4,14 @@ import { NextRequest } from 'next/server'
 import { v1ApiMiddleware, requirePermission } from '@/lib/api/v1/middleware'
 import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
 import { updateCartItem, removeFromCart, cartWithTotals, resolveSessionId } from '@/lib/services/cart-store'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 /**
  * PATCH /v1/{projectId}/cart/items/:productId
  * Update the quantity of a specific cart item.
  * Body: { quantity: number }  — set to 0 or less to remove the item.
  */
-export async function PATCH(
+async function handlePATCH(
   request: NextRequest,
   props: { params: Promise<{ projectId: string; productId: string }> }
 ) {
@@ -51,7 +52,7 @@ export async function PATCH(
  * DELETE /v1/{projectId}/cart/items/:productId
  * Remove a specific item from the cart entirely.
  */
-export async function DELETE(
+async function handleDELETE(
   request: NextRequest,
   props: { params: Promise<{ projectId: string; productId: string }> }
 ) {
@@ -73,3 +74,6 @@ export async function DELETE(
     return createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Failed to remove cart item', 500)
   }
 }
+
+export const PATCH = recordedV1(handlePATCH)
+export const DELETE = recordedV1(handleDELETE)

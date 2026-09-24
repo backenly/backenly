@@ -16,6 +16,7 @@ import v2Routes from './routes/v2'
 import { nextProxy } from './routes/next-proxy'
 import { asyncRoute } from './lib/async-route'
 import { projectServingGate } from './lib/serving-gate'
+import { recordRuntimeRequest, INTERNAL_TRAFFIC_HEADER } from '@/lib/traffic/request-recorder'
 
 const app = express()
 
@@ -97,6 +98,28 @@ app.use(cors({
   exposedHeaders: ['Content-Range', 'Content-Location', 'Location', 'Range-Unit', 'Preference-Applied'],
   maxAge: 86400,
 }))
+
+// ── Traffic ─────────────────────────────────────────────────────────────────────
+// Every request to a project's runtime API is recorded once it finishes, first
+// in the chain so a request the gate refuses is recorded too: a paused or
+// locked project answering 503 is exactly what the traffic signals should see.
+// See lib/traffic/request-recorder.ts for why this table was empty.
+app.use(['/api/v1/:projectId', '/api/v2/:projectId'], (req, res, next) => {
+  const startedAt = Date.now()
+  res.on('finish', () => {
+    recordRuntimeRequest({
+      // From the URL rather than req.params: a mount-path parameter is not
+      // reliably populated on an app-level use() across Express versions.
+      projectId: /^\/api\/v[12]\/([^/?#]+)/.exec(req.originalUrl)?.[1] ?? null,
+      method: req.method,
+      pathname: req.originalUrl,
+      statusCode: res.statusCode,
+      durationMs: Date.now() - startedAt,
+      internalHeader: req.get(INTERNAL_TRAFFIC_HEADER),
+    })
+  })
+  next()
+})
 
 // ── Project serving gate ───────────────────────────────────────────────────────
 // Before the Next proxy and before every router, because it is the one check

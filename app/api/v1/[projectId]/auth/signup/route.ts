@@ -14,6 +14,7 @@ import { canAcceptNewEndUser, trackEndUserActive } from '@/lib/quota/kernel'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import jwt from 'jsonwebtoken'
 import crypto from 'crypto'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 /**
  * POST /v1/{projectId}/auth/signup
@@ -27,7 +28,7 @@ import crypto from 'crypto'
  * RETURNING clause are built from the live schema, so an AI-generated table
  * with a missing column (e.g. no `role`) can no longer 500 signup.
  */
-export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
   try {
     const projectId = params.projectId
@@ -192,3 +193,5 @@ export async function POST(request: NextRequest, props: { params: Promise<{ proj
     )
   }
 }
+
+export const POST = recordedV1(handlePOST)

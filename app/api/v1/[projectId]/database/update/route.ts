@@ -8,12 +8,13 @@ import { validateRequestBody } from '@/lib/validation/schemas'
 import { prisma } from '@/lib/db'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { validateUpdatePayload } from '@/lib/services/workspace-validator'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 /**
  * POST /v1/{projectId}/database/update
  * Update rows in the project's workspace schema table
  */
-export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, params)
@@ -131,4 +132,4 @@ export async function POST(request: NextRequest, props: { params: Promise<{ proj
   }
 }
 
-
+export const POST = recordedV1(handlePOST)

@@ -29,6 +29,7 @@ import { generateToken, verifyToken } from '@/lib/auth/jwt'
 import { hashPassword } from '@/lib/auth/password'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import crypto from 'crypto'
+import { internalTrafficHeaders } from '@/lib/traffic/request-recorder'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -1444,7 +1445,13 @@ async function checkLiveApiEndpoints(projectId: string): Promise<BehavioralCheck
   const fetchWithTimeout = (url: string, opts: RequestInit, ms = 8000): Promise<Response> => {
     const controller = new AbortController()
     const id = setTimeout(() => controller.abort(), ms)
-    return fetch(url, { ...opts, signal: controller.signal }).finally(() => clearTimeout(id))
+    // Marked as Backenly's own so a verification run is never recorded as the
+    // customer's traffic (lib/traffic/request-recorder.ts).
+    return fetch(url, {
+      ...opts,
+      headers: { ...(opts.headers as Record<string, string> | undefined), ...internalTrafficHeaders() },
+      signal: controller.signal,
+    }).finally(() => clearTimeout(id))
   }
 
   try {

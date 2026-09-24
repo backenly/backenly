@@ -16,6 +16,7 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { v1NotFoundBody } from '@/lib/api/v1/route-not-found'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 async function handler(
   _request: NextRequest,
@@ -25,10 +26,10 @@ async function handler(
   return NextResponse.json(v1NotFoundBody(params.projectId, params.unmatched ?? []), { status: 404 })
 }
 
-export const GET = handler
-export const POST = handler
-export const PUT = handler
-export const PATCH = handler
-export const DELETE = handler
-export const HEAD = handler
-export const OPTIONS = handler
+export const GET = recordedV1(handler)
+export const POST = recordedV1(handler)
+export const PUT = recordedV1(handler)
+export const PATCH = recordedV1(handler)
+export const DELETE = recordedV1(handler)
+export const HEAD = recordedV1(handler)
+export const OPTIONS = recordedV1(handler)

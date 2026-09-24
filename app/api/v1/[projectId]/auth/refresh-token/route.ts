@@ -2,6 +2,7 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { refreshEndUserToken } from '@/lib/services/end-user-auth-flows'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 /**
  * POST /v1/{projectId}/auth/refresh-token
@@ -12,7 +13,7 @@ import { refreshEndUserToken } from '@/lib/services/end-user-auth-flows'
  * The client passes the current token in the Authorization header
  * (Bearer <token>) or the body as { token }.
  */
-export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
   let rawToken: string | null = null
   const authHeader = request.headers.get('authorization')
@@ -30,3 +31,5 @@ export async function POST(request: NextRequest, props: { params: Promise<{ proj
   const result = await refreshEndUserToken(params.projectId, rawToken)
   return NextResponse.json(result.body, { status: result.status })
 }
+
+export const POST = recordedV1(handlePOST)
