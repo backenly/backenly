@@ -55,9 +55,22 @@
 --
 -- Override per database or per session:
 --   ALTER DATABASE mydb SET backenly.app_role = 'myrole';
+--
+-- This body is IDENTICAL to the one in scripts/sql/postgrest-ddl-sync.sql,
+-- scripts/sql/postgrest-schema-registry.sql and the managed-DB cutover, and
+-- tests/unit/backenly-app-role-definition.spec.ts keeps it that way. This file
+-- installs after postgrest-install.sh, so it used to have the last word with an
+-- older body whose final fallback was the literal 'backenly_user': on a managed
+-- database with no such role, reinstalling direct access silently pointed
+-- every grant made through this function at a role nothing could receive.
 CREATE OR REPLACE FUNCTION public.backenly_app_role() RETURNS text
 LANGUAGE sql STABLE AS $fn$
-  SELECT coalesce(nullif(current_setting('backenly.app_role', true), ''), 'backenly_user')
+  SELECT coalesce(
+    nullif(current_setting('backenly.app_role', true), ''),
+    (SELECT rolname::text FROM pg_roles WHERE rolname = 'backenly_app'),
+    (SELECT rolname::text FROM pg_roles WHERE rolname = 'backenly_user'),
+    current_user::text
+  )
 $fn$;
 
 -- ── 1. Remote-access group (pg_hba matches +backenly_external) ───────────────
