@@ -47,6 +47,7 @@ import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 import { ensureSchemaRegistered, postgrestRegistryInstalled } from '@/lib/postgrest/registration'
 import { JWTSecretManager } from '@/lib/services/jwtSecretManager'
 import { directAccessHelpersInstalled, getDirectAccessStatus, provisionDirectAccess } from '@/lib/services/direct-access'
+import { functionRoleHelperInstalled, provisionFunctionRole } from '@/lib/services/ai-functions/function-db-role'
 import { createEmptyGraph } from '@/lib/orchestration/backend-state-graph'
 import {
   BOOTSTRAP_EXIT,
@@ -419,6 +420,30 @@ async function ensureAnonKey(projectId: string, ownerId: string): Promise<void> 
   step('anon key', 'created')
 }
 
+/**
+ * The login route-module functions run their SQL as.
+ *
+ * Required, unlike direct access below: a function refuses to run SQL on the
+ * app's own connection, which can read every platform table, so without this
+ * helper every function that touches the database fails.
+ */
+async function ensureFunctionRole(projectId: string): Promise<void> {
+  if (!(await functionRoleHelperInstalled())) {
+    // postgrest-install.sh installs this helper too, so where the data-plane
+    // helpers are also missing, that prerequisite already names the command.
+    if (await postgrestRegistryInstalled()) {
+      needs(
+        'route-module functions cannot run their SQL, because the per-project function login helper is not installed',
+        renderPrerequisiteSteps(postgrestPrerequisiteSteps(projectId))
+      )
+    }
+    step('function database login', 'skipped (see warning)')
+    return
+  }
+  const { existed } = await provisionFunctionRole(projectId)
+  step('function database login', existed ? 'already present' : 'created')
+}
+
 async function ensureDirectAccessRoles(projectId: string): Promise<void> {
   const status = await getDirectAccessStatus(projectId)
   const modes = new Set(status.credentials.map(c => c.mode))
@@ -510,6 +535,7 @@ async function main(): Promise<void> {
   await ensurePostgrestRegistration(id)
   await ensureJwtSecret(id)
   if (ownerId) await ensureAnonKey(id, ownerId)
+  await ensureFunctionRole(id)
   await ensureDirectAccessRoles(id)
 
   // Postcondition. If anything above created a second project this must fail
