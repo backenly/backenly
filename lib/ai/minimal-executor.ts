@@ -6681,10 +6681,8 @@ async function executeCreateKey(params: any, projectId: string): Promise<Executi
     //
     // Backenly's own generator is used now, and the prefix distinguishes the two
     // real kinds: `proj_live_…` is publishable, `svc_live_…` bypasses RLS.
-    const { generateApiKey } = await import('@/lib/auth/apiKeyAuth')
-    const keyValue = serviceRole
-      ? `svc_live_${crypto.randomBytes(24).toString('hex')}`
-      : generateApiKey('live')
+    const { mintKey } = await import('@/lib/auth/key-prefix')
+    const { key: keyValue } = mintKey({ serviceRole: Boolean(serviceRole) })
     const keyPrefix = keyValue.substring(0, 12)
     const keyHash = crypto.createHash('sha256').update(keyValue).digest('hex')
         
@@ -9739,8 +9737,10 @@ async function executeRotateKey(params: any, projectId: string): Promise<Executi
     const existing = await prisma.apiKey.findFirst({ where: { id: keyId, projectId } })
     if (!existing) return { success: false, message: `API key "${keyId}" not found` }
 
-    // Generate new key
-    const newKeyValue = `sk_live_${crypto.randomBytes(24).toString('hex')}`
+    // A new secret of the same kind: service, MCP or project (lib/auth/key-prefix.ts).
+    // This minted `sk_live_`, Stripe's secret-key prefix, for every key.
+    const { mintKey } = await import('@/lib/auth/key-prefix')
+    const { key: newKeyValue } = mintKey(existing)
     const newPrefix = newKeyValue.substring(0, 12)
     const newHash = crypto.createHash('sha256').update(newKeyValue).digest('hex')
 
