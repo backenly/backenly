@@ -522,6 +522,50 @@ export async function sendTestDelivery(projectId: string, webhookId: string) {
     },
   }
 
+  return deliverOnceAndRecord(webhook, payload)
+}
+
+/** Why a delivery cannot be sent again, or null when it can. */
+export function replayRefusal(status: string, active: boolean): string | null {
+  if (!active) return 'the webhook is disabled; enable it first'
+  if (status === 'SUCCESS') return 'it was delivered; sending it again would deliver the event twice'
+  if (status === 'PENDING' || status === 'RETRYING') return 'it is still being retried'
+  if (status === 'CANCELLED') {
+    return 'it was withdrawn when the project was paused, so sending it now would fire a stale event'
+  }
+  return null
+}
+
+/**
+ * Send a failed delivery again: the original payload, signed with the
+ * webhook's current secret, as ONE new attempt with its own log row.
+ *
+ * Only FAILED and DEAD_LETTER deliveries qualify (replayRefusal). The original
+ * row is left as it was, so the history still says what happened the first
+ * time; the new row says what happened now.
+ */
+export async function redeliverWebhookLog(projectId: string, logId: string) {
+  const original = await prisma.webhookLog.findFirst({
+    where: { id: logId, webhook: { projectId } },
+    include: { webhook: true },
+  })
+  if (!original) return null
+
+  const refusal = replayRefusal(original.status, original.webhook.active)
+  if (refusal) return { refused: refusal, status: original.status }
+
+  const result = await deliverOnceAndRecord(original.webhook, original.payload as unknown as WebhookPayload)
+  return { replayOf: original.id, ...result }
+}
+
+/**
+ * One attempt, recorded honestly: a REAL WebhookLog row, and a failure written
+ * as FAILED rather than left looking like a delivery still in progress.
+ */
+async function deliverOnceAndRecord(
+  webhook: { id: string; eventType: string; targetUrl: string; secret: string },
+  payload: WebhookPayload,
+) {
   const log = await prisma.webhookLog.create({
     data: {
       webhookId: webhook.id,
@@ -540,8 +584,8 @@ export async function sendTestDelivery(projectId: string, webhookId: string) {
     1,
   )
 
-  // deliverSingleAttempt only writes the log on success, so a failed test would
-  // otherwise sit at PENDING for ever and read as "still trying".
+  // deliverSingleAttempt only writes the log on success, so a failed attempt
+  // would otherwise sit at PENDING for ever and read as "still trying".
   if (!result.success) {
     await prisma.webhookLog.update({
       where: { id: log.id },

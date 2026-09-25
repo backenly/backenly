@@ -86,6 +86,9 @@ export const DOMAIN_TOOLS: DomainTool[] = [
     actions: {
       create: { tool: 'generate_function', gloss: 'a function from a plain-English spec, fired by sign-up, a table event, HTTP or manually' },
       list: { tool: 'list_ai_functions', gloss: 'every function with its trigger and on/off state' },
+      get: { tool: 'get_ai_function', gloss: 'one function in full: its code, trigger, endpoint, state and last error' },
+      invoke: { tool: 'invoke_ai_function', gloss: 'run it once now and get its answer, return value and log lines; a failure is reported, never auto-repaired' },
+      logs: { tool: 'list_ai_function_logs', gloss: 'recent runs from every trigger, with errors and ctx.log lines' },
       set_active: { tool: 'toggle_ai_function', gloss: 'turn a function on or off' },
       delete: { tool: 'delete_ai_function', gloss: 'remove a function' },
       schedule: { tool: 'create_cron_job', gloss: 'a job on a schedule ("every 15 minutes" or 5-field cron)' },
@@ -128,6 +131,7 @@ export const DOMAIN_TOOLS: DomainTool[] = [
       errors: { tool: 'get_errors', gloss: 'recent 5xx errors grouped by endpoint' },
       usage: { tool: 'get_usage', gloss: 'plan usage against its limits' },
       incidents: { tool: 'get_pending_incidents', gloss: 'what was detected, fixed or queued while nobody was watching' },
+      request_logs: { tool: 'list_request_logs', gloss: 'each request the runtime API served: method, path, status, latency, time' },
       set_alert: { tool: 'set_alert', gloss: 'an alert on error rate, p95 latency, request rate or integration failures' },
     },
   },
@@ -147,12 +151,24 @@ export const DOMAIN_TOOLS: DomainTool[] = [
   {
     name: 'webhooks',
     title: 'Webhooks',
-    summary: 'Event deliveries and their signing secrets.',
+    summary:
+      'Endpoints that receive signed POSTs when rows change or an end user signs up (the Webhooks page), and ' +
+      'table triggers whose action calls a URL. Endpoint deliveries carry X-Webhook-Signature: ' +
+      'sha256=<HMAC-SHA256 of the raw body>; a secret is returned once, in data.secret.',
+    openWorld: true,
     actions: {
-      deliveries: { tool: 'list_webhook_deliveries', gloss: 'recent deliveries, filterable by SUCCESS, FAILED or DEAD' },
-      replay: { tool: 'replay_webhook_delivery', gloss: 'send one delivery again' },
-      rotate_secret: { tool: 'rotate_webhook_secret', gloss: 'issue a new signing secret for a trigger' },
-      triggers: { tool: 'list_triggers', gloss: 'the table-event triggers that produce deliveries' },
+      list: { tool: 'list_webhooks', gloss: 'every endpoint with its event, URL, on/off state and capture health' },
+      create: { tool: 'create_webhook', gloss: 'an endpoint for row.inserted, row.updated, row.deleted or auth.user.created' },
+      update: { tool: 'update_webhook', gloss: 'change the URL or event of an endpoint, or switch it on or off' },
+      delete: { tool: 'delete_webhook', gloss: 'remove an endpoint and its delivery history' },
+      test: { tool: 'test_webhook', gloss: 'send one real signed test delivery now and see what the receiver answered' },
+      logs: { tool: 'list_webhook_logs', gloss: 'the deliveries of one endpoint, with status, HTTP code, error and payload' },
+      replay: { tool: 'replay_webhook_log', gloss: 'send a FAILED or DEAD_LETTER delivery again' },
+      rotate_secret: { tool: 'rotate_webhook_endpoint_secret', gloss: 'a new signing secret for an endpoint' },
+      triggers: { tool: 'list_triggers', gloss: 'the table triggers, including those whose action calls a URL' },
+      trigger_deliveries: { tool: 'list_webhook_deliveries', gloss: 'recent trigger deliveries, filterable by SUCCESS, FAILED or DEAD' },
+      replay_trigger_delivery: { tool: 'replay_webhook_delivery', gloss: 'send a DEAD trigger delivery again' },
+      rotate_trigger_secret: { tool: 'rotate_webhook_secret', gloss: 'a new signing secret for a trigger' },
     },
   },
   {
@@ -161,6 +177,7 @@ export const DOMAIN_TOOLS: DomainTool[] = [
     summary: 'Publishing and rolling back. Both change what production serves, so both wait for a human.',
     actions: {
       status: { tool: 'get_deploy_status', gloss: 'the live version, when it shipped and its state' },
+      history: { tool: 'list_deploy_versions', gloss: 'every published version, which one is serving, and which can be rolled back to' },
       readiness: { tool: 'get_readiness', gloss: 'the 0-100 readiness score with blockers; fixes nothing unless autoFix is true', readGloss: 'the 0-100 readiness score with its blockers' },
       deploy: { tool: 'trigger_deploy', gloss: 'publish the current backend' },
       rollback: { tool: 'rollback_deploy', gloss: 'return to an earlier version' },

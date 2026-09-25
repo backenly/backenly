@@ -83,6 +83,13 @@ export interface FunctionCallerContext {
    * endpoint's real logic can be exercised. Never set on public paths.
    */
   testRun?: boolean
+  /**
+   * Whether a failure hands the function to the model-backed auto-fixer, which
+   * rewrites its code. On by default. An agent invoking a function to test it
+   * turns it off: it needs the error, and code that changes under it without a
+   * word would make the next run test something it never wrote or saw.
+   */
+  selfHeal?: boolean
 }
 
 const EXECUTION_TIMEOUT_MS = 10_000
@@ -687,7 +694,7 @@ export async function executeAiFunction(
       // auto-fixer would rewrite the module into a ctx.* sandbox body and
       // corrupt it — never use it here). Guarded so a failed fix can't loop.
       const prevError = fn.lastError ?? ''
-      if (!prevError.startsWith('AUTO-FIX')) {
+      if (caller.selfHeal !== false && !prevError.startsWith('AUTO-FIX')) {
         autoFixRouteModuleFunction(
           functionId, projectId, errorMsg, fn.generatedCode, fn.description, fn.triggerTable
         ).catch(() => {})
@@ -759,7 +766,7 @@ export async function executeAiFunction(
   }).catch(() => {})
 
   const previousError = fn.lastError ?? ''
-  if (!previousError.startsWith('AUTO-FIX')) {
+  if (caller.selfHeal !== false && !previousError.startsWith('AUTO-FIX')) {
     autoFixAiFunction(
       functionId, projectId, errorMsg, fn.generatedCode,
       fn.description, fn.triggerType, fn.triggerTable

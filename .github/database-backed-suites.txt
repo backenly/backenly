@@ -516,3 +516,10 @@ tests/integration/project-pause-lifecycle.spec.ts
 # directory. Mutation-checked: dropping the runtime stamp or the containment
 # check fails the matching tests.
 tests/integration/project-activity-clock.spec.ts
+
+# PR 2b of the MCP program: the section tools' new actions, end to end through
+# the real MCP route with real keys. Webhooks run against a loopback receiver
+# that verifies the signature; the delete is parked and runs only when a human
+# approves it. Runs as the cloud edition with only the plan lookup supplied,
+# because the single-tenant resolver rightly refuses a database of many projects.
+tests/integration/mcp-domain-operations.spec.ts

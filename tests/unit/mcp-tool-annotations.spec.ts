@@ -64,7 +64,7 @@ describe('catalog annotations', () => {
 
   it('marks exactly the tools that reach an outside provider as open-world', () => {
     const openWorld = dispatchable.filter((t) => t.annotations!.openWorldHint).map((t) => t.name).sort()
-    expect(openWorld).toEqual(['backend_chat', 'integrations', 'send_push', 'store_integration_key'])
+    expect(openWorld).toEqual(['backend_chat', 'integrations', 'send_push', 'store_integration_key', 'webhooks'])
   })
 
   it('titles the advertised tools in words, not snake_case', () => {

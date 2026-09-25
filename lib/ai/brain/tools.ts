@@ -20,6 +20,13 @@ import { getOpenAIClient, trackCompletionCost } from '../openai-service'
 import { getModel } from '../model-router'
 import { answererPrompt } from './prompts'
 import { kickReconciler, shouldKickFor } from '@/lib/autonomy/event-trigger'
+import { WEBHOOK_EVENT_TYPES } from '@/lib/webhooks/events'
+
+/** Brain tools served by lib/webhooks/agent-actions.ts. */
+const WEBHOOK_ENDPOINT_TOOLS = new Set<string>([
+  'list_webhooks', 'create_webhook', 'update_webhook', 'delete_webhook',
+  'test_webhook', 'list_webhook_logs', 'rotate_webhook_endpoint_secret', 'replay_webhook_log',
+])
 
 export type ToolName =
   // Read (live state)
@@ -87,6 +94,23 @@ export type ToolName =
   | 'rotate_webhook_secret'
   | 'list_webhook_deliveries'
   | 'replay_webhook_delivery'
+  // Outbound webhook endpoints (the Webhooks page, lib/webhooks)
+  | 'list_webhooks'
+  | 'create_webhook'
+  | 'update_webhook'
+  | 'delete_webhook'
+  | 'test_webhook'
+  | 'list_webhook_logs'
+  | 'rotate_webhook_endpoint_secret'
+  | 'replay_webhook_log'
+  // Functions: inspect, run, logs
+  | 'get_ai_function'
+  | 'invoke_ai_function'
+  | 'list_ai_function_logs'
+  // Monitoring
+  | 'list_request_logs'
+  // Deploy history
+  | 'list_deploy_versions'
   // Connect Frontend
   | 'connect_frontend'
   | 'disconnect_frontend'
@@ -174,6 +198,8 @@ const DESTRUCTIVE_TOOLS = new Set<ToolName>([
   'delete_ai_function',
   'delete_cron_job',
   'remove_integration_key',
+  // Drops the endpoint and its delivery history; not undoable from the dashboard
+  'delete_webhook',
   // DROP SCHEMA CASCADE on the branch — every experiment in it is gone.
   'discard_branch',
   // Affects end-users / data exposure
@@ -222,6 +248,12 @@ export const READ_ONLY_TOOLS = new Set<ToolName>([
   'get_realtime_status',
   'list_findings',
   'get_pending_incidents',
+  'list_webhooks',
+  'list_webhook_logs',
+  'get_ai_function',
+  'list_ai_function_logs',
+  'list_request_logs',
+  'list_deploy_versions',
 ])
 
 export function isDestructiveTool(name: string): boolean {
@@ -667,7 +699,7 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     },
     []),
   fn('list_webhook_deliveries',
-    'Read-only view of recent webhook deliveries: each attempt, status (SUCCESS / FAILED / DEAD), HTTP code, last error, attempt count. Use when the user asks "is my webhook working?" / "show recent deliveries" / "why did the X integration miss events?". Optional status filter narrows to failures or dead-letter rows.',
+    'Read-only view of recent TRIGGER webhook deliveries (a table trigger whose action calls a URL; the Webhooks page\'s endpoints use list_webhook_logs): each attempt, status (SUCCESS / FAILED / DEAD), HTTP code, last error, attempt count. Use when the user asks "is my webhook working?" / "show recent deliveries" / "why did the X integration miss events?". Optional status filter narrows to failures or dead-letter rows.',
     {
       status: { type: 'string', enum: ['SUCCESS', 'FAILED', 'DEAD'] },
       limit: { type: 'integer', minimum: 1, maximum: 100 },
@@ -677,6 +709,93 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     'Resend a previously-failed (DEAD) webhook delivery, signed with the trigger\'s current secret. Use when the user says "retry that delivery" / "replay the failed webhook" / "send that event again". The id comes from list_webhook_deliveries.',
     { id: { type: 'string', description: 'Delivery log id from list_webhook_deliveries.' } },
     ['id']),
+  // ── Outbound webhook endpoints: the project's Webhooks page ───────────────
+  // Distinct from the three trigger tools above, which serve a table trigger
+  // whose action is a webhook call. These manage the endpoints on the Webhooks
+  // page (lib/webhooks), signed as X-Webhook-Signature.
+  fn('list_webhooks',
+    'List the project\'s outbound webhook endpoints (the Webhooks page): event, target URL, on/off, delivery count, and whether row-event capture is healthy. Never returns signing secrets.',
+    {},
+    []),
+  fn('create_webhook',
+    'Create an outbound webhook endpoint that receives signed POSTs when rows change or an end user signs up. Returns the signing secret ONCE in data.secret; it belongs in the receiver\'s environment, never in code.',
+    {
+      eventType: { type: 'string', enum: [...WEBHOOK_EVENT_TYPES], description: 'The event that fires it.' },
+      targetUrl: { type: 'string', description: 'The https URL that receives the events.' },
+    },
+    ['eventType', 'targetUrl']),
+  fn('update_webhook',
+    'Change an outbound webhook endpoint: its target URL, its event, or switch it on or off.',
+    {
+      webhookId: { type: 'string', description: 'From list_webhooks.' },
+      targetUrl: { type: 'string', description: 'A new https URL.' },
+      eventType: { type: 'string', enum: [...WEBHOOK_EVENT_TYPES], description: 'A new event.' },
+      active: { type: 'boolean', description: 'false stops deliveries without deleting the endpoint.' },
+    },
+    ['webhookId']),
+  fn('delete_webhook',
+    'Delete an outbound webhook endpoint and its delivery history. To stop deliveries reversibly, set active false with update_webhook instead.',
+    { webhookId: { type: 'string', description: 'From list_webhooks.' } },
+    ['webhookId']),
+  fn('test_webhook',
+    'Send one real, signed test delivery to an outbound webhook endpoint now and report what its receiver answered. Carries no project data.',
+    { webhookId: { type: 'string', description: 'From list_webhooks.' } },
+    ['webhookId']),
+  fn('list_webhook_logs',
+    'Delivery history of one outbound webhook endpoint, newest first: status, HTTP code, attempts, error, the receiver\'s response and the payload.',
+    {
+      webhookId: { type: 'string', description: 'From list_webhooks.' },
+      limit: { type: 'integer', minimum: 1, maximum: 200 },
+    },
+    ['webhookId']),
+  fn('rotate_webhook_endpoint_secret',
+    'Issue a new signing secret for an outbound webhook endpoint. Returns it ONCE in data.secret; the receiver rejects deliveries until it has the new one.',
+    { webhookId: { type: 'string', description: 'From list_webhooks.' } },
+    ['webhookId']),
+  fn('replay_webhook_log',
+    'Send a FAILED or DEAD_LETTER delivery of an outbound webhook endpoint again: its original payload, signed with the current secret, as one new logged attempt. Delivered, in-flight and paused-project deliveries are refused.',
+    { deliveryId: { type: 'string', description: 'A delivery id from list_webhook_logs.' } },
+    ['deliveryId']),
+  // ── Functions: inspect, run, logs ─────────────────────────────────────────
+  fn('get_ai_function',
+    'One function in full: its code, trigger, HTTP endpoint, on/off state, run count and last error. Side-effect free.',
+    {
+      functionId: { type: 'string', description: 'From list_ai_functions. Either functionId or name.' },
+      name: { type: 'string', description: 'The function\'s name, as requested or as deployed (lowercase kebab-case).' },
+    },
+    []),
+  fn('invoke_ai_function',
+    'Run a function once now, as the project owner\'s test run, and return what its handler answered, its return value and its log lines. A failure is reported, not auto-repaired: the code is left exactly as it was. Counts as one invocation against the plan. A function that is switched off is refused, not switched on.',
+    {
+      functionId: { type: 'string', description: 'From list_ai_functions. Either functionId or name.' },
+      name: { type: 'string', description: 'The function\'s name.' },
+      event: { type: 'object', description: 'The JSON the function receives as its body (and query for GET).' },
+    },
+    []),
+  fn('list_ai_function_logs',
+    'Recent function runs, newest first, from every trigger: success or failure, error, captured ctx.log lines, duration. Optionally for one function. Kept 30 days.',
+    {
+      functionId: { type: 'string', description: 'Only this function.' },
+      name: { type: 'string', description: 'Only this function, by name.' },
+      limit: { type: 'integer', minimum: 1, maximum: 100 },
+    },
+    []),
+  // ── Monitoring: request log ───────────────────────────────────────────────
+  fn('list_request_logs',
+    'The requests this project\'s runtime API served, newest first: method, path (no query string), status, latency, time. Filter to failures with minStatus 400, or to one route with pathPrefix.',
+    {
+      method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] },
+      minStatus: { type: 'integer', minimum: 100, maximum: 599, description: 'e.g. 400 for failures, 500 for server errors.' },
+      pathPrefix: { type: 'string', description: 'e.g. "/db/orders" or "/fn/".' },
+      sinceMinutes: { type: 'integer', minimum: 1, maximum: 43200 },
+      limit: { type: 'integer', minimum: 1, maximum: 200 },
+    },
+    []),
+  // ── Deploy: version history ───────────────────────────────────────────────
+  fn('list_deploy_versions',
+    'Every published version, newest first: id, version number, change summary, when it was published, which one is serving, and which can be rolled back to (rollback_deploy takes the version or its id).',
+    {},
+    []),
   fn('fix_backend',
     'Repair a broken subsystem. target: auth | api | table | deploy | realtime | storage | integration | workflow. Use when read_backend_state shows something is broken.',
     {
@@ -2310,6 +2429,75 @@ export async function dispatchTool(
       ))
     }
 
+    // ── Outbound webhook endpoints (the Webhooks page) ────────────────────
+    // Same operations and gates as /api/projects/[id]/webhooks/*, in
+    // lib/webhooks/agent-actions.ts.
+    if (WEBHOOK_ENDPOINT_TOOLS.has(name)) {
+      if (!ctx.userId) return finalize({ ok: false, summary: 'Webhooks need a caller identity, and this call has none.' })
+      const w = await import('@/lib/webhooks/agent-actions')
+      const actor = { userId: ctx.userId, projectId: ctx.projectId }
+      const run: Record<string, () => Promise<{ ok: boolean; summary: string; data?: unknown; code?: string }>> = {
+        list_webhooks: () => w.listWebhooks(actor),
+        create_webhook: () => w.createProjectWebhook(actor, args),
+        update_webhook: () => w.updateProjectWebhook(actor, args),
+        delete_webhook: () => w.deleteProjectWebhook(actor, args),
+        test_webhook: () => w.testProjectWebhook(actor, args),
+        list_webhook_logs: () => w.listWebhookLogs(actor, args),
+        rotate_webhook_endpoint_secret: () => w.rotateProjectWebhookSecret(actor, args),
+        replay_webhook_log: () => w.replayWebhookDelivery(actor, args),
+      }
+      return finalize(await run[name]())
+    }
+
+    // ── Functions: inspect, run, logs ─────────────────────────────────────
+    if (name === 'get_ai_function' || name === 'invoke_ai_function' || name === 'list_ai_function_logs') {
+      const f = await import('@/lib/services/ai-functions/agent-actions')
+      const actor = { userId: ctx.userId, projectId: ctx.projectId }
+      const result = name === 'get_ai_function'
+        ? await f.getFunction(actor, args)
+        : name === 'invoke_ai_function'
+          ? await f.invokeFunction(actor, args)
+          : await f.listFunctionLogs(actor, args)
+      return finalize(result)
+    }
+
+    // ── Monitoring: request log ───────────────────────────────────────────
+    if (name === 'list_request_logs') {
+      const { queryRequestLogs } = await import('@/lib/monitoring/request-log-query')
+      const rows = await queryRequestLogs(ctx.projectId, {
+        method: typeof args.method === 'string' ? args.method : undefined,
+        minStatus: typeof args.minStatus === 'number' ? args.minStatus : undefined,
+        pathPrefix: typeof args.pathPrefix === 'string' ? args.pathPrefix : undefined,
+        sinceMinutes: typeof args.sinceMinutes === 'number' ? args.sinceMinutes : undefined,
+        limit: typeof args.limit === 'number' ? args.limit : undefined,
+      })
+      const lines = rows.slice(0, 15).map((r) => `• ${r.timestamp} ${r.method} ${r.path} → ${r.status} (${r.latencyMs}ms)`)
+      return finalize({
+        ok: true,
+        summary: rows.length
+          ? `Requests served, newest first:\n${lines.join('\n')}` + (rows.length > 15 ? `\n…${rows.length - 15} more in data.requests.` : '')
+          : 'No requests match. Only traffic to this project\'s runtime API (/db, /auth, /fn, /storage, /realtime) is recorded.',
+        data: { requests: rows },
+      })
+    }
+
+    // ── Deploy: version history ───────────────────────────────────────────
+    if (name === 'list_deploy_versions') {
+      const { listPublishedVersions } = await import('@/lib/deployment/published-versions')
+      const history = await listPublishedVersions(ctx.projectId)
+      if (!history) return finalize({ ok: false, summary: 'Project not found.' })
+      const lines = history.versions.slice(0, 15).map((v) =>
+        `• v${v.version} (${v.id}) ${v.publishedAt}: ${v.changeSummary}` +
+        (v.isActive ? ' [serving]' : '') + (v.canRollback ? '' : ' [cannot roll back to]'))
+      return finalize({
+        ok: true,
+        summary: history.versions.length
+          ? `Published versions, newest first:\n${lines.join('\n')}`
+          : 'Nothing has been published yet. The backend is fully usable unpublished; deploy { action: "deploy" } publishes a version.',
+        data: history,
+      })
+    }
+
     // ── Webhook delivery replay (DEAD → re-attempt) ───────────────────────
     if (name === 'replay_webhook_delivery') {
       const { replayDelivery } = await import('@/lib/services/trigger-service')
@@ -2814,6 +3002,19 @@ export function humanTitle(name: string, args: Record<string, unknown>): string 
     case 'rotate_webhook_secret': return `Rotating signing secret for ${args.triggerName ?? 'webhook'}`.trim()
     case 'list_webhook_deliveries': return 'Reading webhook delivery log'
     case 'replay_webhook_delivery': return `Replaying delivery ${args.id ?? ''}`.trim()
+    case 'list_webhooks': return 'Reading webhook endpoints'
+    case 'create_webhook': return `Creating a ${args.eventType ?? ''} webhook`.replace(/\s+/g, ' ')
+    case 'update_webhook': return `Updating webhook ${args.webhookId ?? ''}`.trim()
+    case 'delete_webhook': return `Deleting webhook ${args.webhookId ?? ''}`.trim()
+    case 'test_webhook': return `Sending a test delivery to ${args.webhookId ?? 'a webhook'}`
+    case 'list_webhook_logs': return `Reading deliveries of ${args.webhookId ?? 'a webhook'}`
+    case 'rotate_webhook_endpoint_secret': return `Rotating the signing secret of ${args.webhookId ?? 'a webhook'}`
+    case 'replay_webhook_log': return `Sending delivery ${args.deliveryId ?? ''} again`.replace(/\s+/g, ' ')
+    case 'get_ai_function': return `Reading function ${args.name ?? args.functionId ?? ''}`.trim()
+    case 'invoke_ai_function': return `Running function ${args.name ?? args.functionId ?? ''}`.trim()
+    case 'list_ai_function_logs': return 'Reading function runs'
+    case 'list_request_logs': return 'Reading the request log'
+    case 'list_deploy_versions': return 'Reading published versions'
     case 'fix_backend': return `Repairing ${args.target ?? 'backend'}`
     case 'apply_proposal': return 'Applying the recommendation list'
     case 'drop_table': return `Dropping table ${args.tableName ?? ''}`.trim()
