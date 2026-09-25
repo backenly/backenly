@@ -38,6 +38,41 @@ process.env.ENGINE_MODE = 'integration' // Integration tests should not execute 
 
 console.log('✅ Test database configured:', process.env.TEST_DATABASE_URL.replace(/:[^:]*@/, ':***@'))
 
+// Record every database handle this test file opens, so the test environment
+// (tests/helpers/db-release-environment.js) can close them when the file ends.
+// Without it each file's Prisma clients and pg pools stayed open for the life
+// of the process, and a --runInBand job ran Postgres out of connections.
+//
+// The constructors are wrapped, not replaced: a Proxy's construct trap builds
+// the real object and only notes it, so `instanceof`, statics and subclasses
+// behave exactly as before. Modules read `pg.Pool` / `PrismaClient` when they
+// construct, and they load after this file in the same registry, so they get
+// the wrapped constructor. A file that mocks either module is unaffected.
+;(() => {
+  const handles = { pools: new Set(), clients: new Set() }
+  globalThis.__backenlyDbHandles = handles
+  const track = (Ctor, into) =>
+    new Proxy(Ctor, {
+      construct(target, args, newTarget) {
+        const made = Reflect.construct(target, args, newTarget)
+        into.add(made)
+        return made
+      },
+    })
+  try {
+    const pg = require('pg')
+    pg.Pool = track(pg.Pool, handles.pools)
+  } catch {
+    /* pg not installed in this context */
+  }
+  try {
+    const client = require('@prisma/client')
+    client.PrismaClient = track(client.PrismaClient, handles.clients)
+  } catch {
+    /* no generated client in this context */
+  }
+})()
+
 // Mock Next.js Request/Response
 global.Request = class Request {
   constructor(input, init) {
