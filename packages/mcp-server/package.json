@@ -27,6 +27,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
+    "test": "node --test test/catalog-recovery.test.mjs",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

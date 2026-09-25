@@ -88,9 +88,9 @@ describe('tools/call on the remote endpoint', () => {
   })
 
   it('still forwards an API key for key-based hosts', async () => {
-    await call({ 'x-api-key': 'mcp_live_0123456789abcdef' })
+    await call({ 'x-api-key': 'mcp_live_test_key' })
 
-    expect(mockSeen).toEqual([{ path: '/api/mcp/tool', authorization: null, apiKey: 'mcp_live_0123456789abcdef' }])
+    expect(mockSeen).toEqual([{ path: '/api/mcp/tool', authorization: null, apiKey: 'mcp_live_test_key' }])
   })
 
   it('turns a delegated auth failure into a 401 challenge, so the host refreshes its token', async () => {
@@ -105,7 +105,7 @@ describe('tools/call on the remote endpoint', () => {
   })
 
   it('reports a successful delegated call as a normal tool result', async () => {
-    const res = await call({ 'x-api-key': 'mcp_live_0123456789abcdef' })
+    const res = await call({ 'x-api-key': 'mcp_live_test_key' })
     const body = await res.json()
 
     expect(res.status).toBe(200)

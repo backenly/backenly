@@ -291,6 +291,11 @@ jobs:
         run: |
           npm install
           npm run build
+      # Drives the BUILT entrypoint over stdio JSON-RPC. It needs this package's
+      # own dependencies, which the root install in the static job does not have.
+      - name: The built server recovers a catalog that failed at boot
+        working-directory: packages/mcp-server
+        run: npm test
       - name: Verify the published entrypoint parses its documented flags
         working-directory: packages/mcp-server
         run: |

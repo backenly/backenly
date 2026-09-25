@@ -19,7 +19,7 @@ import os from 'os'
 import path from 'path'
 
 const CLI = path.join(__dirname, '..', '..', 'packages', 'cli', 'bin', 'backenly.mjs')
-const KEY = 'mcp_live_0123456789abcdef'
+const KEY = 'mcp_live_test_key'
 
 interface Seen {
   method: string

@@ -77,7 +77,7 @@ describe('remote tools/list', () => {
     const res = await POST(
       new NextRequest('https://backenly.test/api/mcp', {
         method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-api-key': 'mcp_live_0123456789abcdef' },
+        headers: { 'content-type': 'application/json', 'x-api-key': 'mcp_live_test_key' },
         body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
       }),
     )
