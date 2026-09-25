@@ -503,6 +503,17 @@ export async function POST(request: NextRequest) {
     delete dispatchArgs.section
   }
 
+  // ── Readiness is a read here ──────────────────────────────────────────────
+  // The readiness executor APPLIES fixes (JWT generation, default RLS) unless
+  // told `autoFix: false`, and it defaults to fixing. This surface serves it as
+  // a read: `read_backend_state {section:"readiness"}` is side-effect free by
+  // contract and is offered to read-only keys. So a readiness call over MCP
+  // fixes nothing unless a read-write key asks for `autoFix: true` in so many
+  // words.
+  if (dispatchName === 'get_readiness') {
+    dispatchArgs.autoFix = dispatchArgs.autoFix === true && !auth.readOnly
+  }
+
   // Runtime data tools (db_query/insert/update/delete) live in the catalog but
   // are served by dedicated helpers, not the brain dispatch. Handle them here so
   // an agent can call them through the SAME /api/mcp/tool surface as every other
