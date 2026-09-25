@@ -170,12 +170,14 @@ export const DOMAIN_TOOLS: DomainTool[] = [
     name: 'connect',
     title: 'Connect',
     summary: 'Keys, secrets and connections for the apps and tools that use this backend.',
+    // No rotate_api_key: the executor puts the new secret in its summary, and an
+    // approved exact call stores that summary where check_approval and the
+    // approvals list serve it. It stays out until the secret is handed over once.
     actions: {
       create_api_key: { tool: 'create_api_key', gloss: 'a scoped key for an app, optionally bound to a preview branch' },
       list_api_keys: { tool: 'list_api_keys', gloss: 'every key with its scope and last use' },
       set_key_permissions: { tool: 'set_key_permissions', gloss: 'change what a key may do' },
       revoke_api_key: { tool: 'revoke_api_key', gloss: 'disable a key (apps using it stop working)' },
-      rotate_api_key: { tool: 'rotate_api_key', gloss: 'replace a key\'s secret' },
       set_env: { tool: 'set_env_var', gloss: 'an encrypted variable functions read as ctx.env.KEY' },
       list_env: { tool: 'list_env_vars', gloss: 'variable names with 4-character previews' },
       delete_env: { tool: 'delete_env_var', gloss: 'remove a variable' },

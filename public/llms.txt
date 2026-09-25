@@ -99,7 +99,7 @@ Exactly **23** tools are advertised to the host. The number is deliberate: tool-
 | `autonomy` | Actions: `status`, `findings`, `maintenance`, `set_level`. Approving what the loop queued is for a human. |
 | `webhooks` | Actions: `deliveries`, `replay`, `rotate_secret`, `triggers`. |
 | `deploy` | Actions: `status`, `readiness` (fixes nothing unless `autoFix: true`); `deploy` and `rollback` wait for approval. |
-| `connect` | Keys, secrets and connections. Actions: `create_api_key`, `list_api_keys`, `set_key_permissions`, `set_env`, `list_env`, `database_credentials` (read-write only after a human arms it), `connect_frontend`, `list_apps`; `revoke_api_key`, `rotate_api_key`, `delete_env` and `disconnect_frontend` wait for approval. |
+| `connect` | Keys, secrets and connections. Actions: `create_api_key`, `list_api_keys`, `set_key_permissions`, `set_env`, `list_env`, `database_credentials` (read-write only after a human arms it), `connect_frontend`, `list_apps`; `revoke_api_key`, `delete_env` and `disconnect_frontend` wait for approval. |
 | `fetch_docs` | This document, or one section of it (`topic`: `database`, `auth`, `storage`, `realtime`, `functions`, `integrations`, `mcp`). |
 
 **Read-only keys and connections** see the read tools, plus each section tool narrowed to its read actions (`monitoring` offers `metrics` but not `set_alert`); no write action is shown, every write door (`backend_chat` included) is withheld, and calling one anyway is refused with `READ_ONLY_KEY` before it runs. Read-only is chosen by a human when the key is issued. An agent cannot upgrade its own key.

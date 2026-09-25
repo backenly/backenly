@@ -101,6 +101,12 @@ describe('the domain table', () => {
     expect(everyAction.filter((a) => forbidden.has(a.tool))).toEqual([])
   })
 
+  it('never routes an approval-gated action to a tool that returns a new secret, which approval would store', () => {
+    // rotate_api_key answers with the new key in its summary; runApprovedCall
+    // persists the summary to agent_approval_requests.resultSummary.
+    expect(everyAction.filter((a) => a.tool === 'rotate_api_key')).toEqual([])
+  })
+
   it('advertises every domain tool', () => {
     const advertised = new Set(buildCatalog().map((t) => t.name))
     expect(DOMAIN_TOOLS.filter((d) => !advertised.has(d.name)).map((d) => d.name)).toEqual([])
