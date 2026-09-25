@@ -24,6 +24,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/prisma'
+import { withholdSecrets } from '@/lib/mcp/withhold-secrets'
 import {
   authenticateMcp,
   mcpAuthFailureResponse,
@@ -241,6 +242,11 @@ export interface McpCallContext {
 /**
  * Post-flight: write usage log + (for mutations) audit log. Fire-and-forget —
  * never block the response on telemetry writes.
+ *
+ * Both rows keep a slice of the summary, and a summary can carry a credential
+ * the tool just handed the agent (a new API key, a rotated signing secret), so
+ * it is stored with those withheld. Pass the tool's `data` so values it names
+ * are withheld too; it is read here and never stored.
  */
 export function recordMcpCall(
   ctx: McpCallContext,
@@ -250,9 +256,12 @@ export function recordMcpCall(
     mutation?: boolean
     summary?: string
     error?: string
+    data?: unknown
   },
 ): void {
   const responseTime = Date.now() - ctx.startedAt
+  const summary = result.summary === undefined ? undefined : withholdSecrets(result.summary, result.data)
+  const error = result.error === undefined ? undefined : withholdSecrets(result.error, result.data)
 
   prisma.apiKeyUsage
     .create({
@@ -265,8 +274,8 @@ export function recordMcpCall(
         metadata: {
           tool: result.tool,
           mutation: !!result.mutation,
-          summary: result.summary?.slice(0, 200),
-          error: result.error?.slice(0, 200),
+          summary: summary?.slice(0, 200),
+          error: error?.slice(0, 200),
         },
       },
     })
@@ -283,7 +292,7 @@ export function recordMcpCall(
           details: JSON.stringify({
             tool: result.tool,
             endpoint: ctx.endpoint,
-            summary: result.summary?.slice(0, 240),
+            summary: summary?.slice(0, 240),
             ms: responseTime,
             at: new Date().toISOString(),
           }),

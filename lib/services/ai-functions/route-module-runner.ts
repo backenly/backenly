@@ -53,7 +53,8 @@ import { verifyToken } from '@/lib/auth/jwt'
 import * as bcryptjs from 'bcryptjs'
 import * as jsonwebtoken from 'jsonwebtoken'
 import { loadProjectFnAuth, mintTestRunToken, ProjectFnAuth } from './project-fn-auth'
-import { makeRlsAwarePrisma } from './rls-aware-db'
+import { makeRlsAwarePrisma, refusingPrisma, type RlsAwarePrisma } from './rls-aware-db'
+import { functionDbClient, forgetFunctionDbClient } from './function-db-role'
 import type { RlsIdentity } from '@/lib/services/rls-session'
 import { FORWARDABLE_FN_HEADERS } from './forward-headers'
 
@@ -335,16 +336,11 @@ class RunnerRequest {
 function buildRequire(
   projectId: string,
   auth: ProjectFnAuth,
-  identity: RlsIdentity = { userId: null, isServiceRole: false },
+  scopedPrisma: RlsAwarePrisma,
 ): (id: string) => any {
   const nextServer = makeNextServerShim()
   const projectVerifyToken = makeProjectVerifyToken(auth)
   const jwtShim = makeJsonwebtokenShim(projectId)
-  // Every raw query this function issues runs with the caller's identity set on
-  // the connection. Handing over the bare client instead is what made every
-  // generated read of an RLS-protected table return an empty list and every
-  // write fail 42501 — see lib/services/ai-functions/rls-aware-db.ts.
-  const scopedPrisma = makeRlsAwarePrisma(identity)
   return (id: string) => {
     switch (id) {
       case 'next/server':
@@ -367,6 +363,20 @@ function buildRequire(
         )
     }
   }
+}
+
+/**
+ * The database handle a function receives as `@/lib/db`: every raw query runs
+ * with the caller's identity set (rls-aware-db.ts), on a connection that logs in
+ * as the project's own function role (function-db-role.ts). Handing over the
+ * bare client instead is what made generated reads of RLS-protected tables come
+ * back empty, and what let function SQL read the platform's own tables.
+ */
+function scopedDb(projectId: string, identity: RlsIdentity): RlsAwarePrisma {
+  return makeRlsAwarePrisma(identity, async (opts) => {
+    if (opts?.refresh) await forgetFunctionDbClient(projectId)
+    return functionDbClient(projectId)
+  })
 }
 
 // ─── Method resolution ────────────────────────────────────────────────────────
@@ -433,7 +443,11 @@ export function validateRouteModule(code: string, expectedMethod?: string | null
     module: { exports: moduleExports },
     exports: moduleExports,
     // Dummy auth material — evaluation only defines the handlers; nothing runs.
-    require: buildRequire('00000000-0000-4000-8000-000000000000', { jwtSecret: null, adminKey: null }),
+    require: buildRequire(
+      '00000000-0000-4000-8000-000000000000',
+      { jwtSecret: null, adminKey: null },
+      refusingPrisma('The database is not reachable while a function is being validated.'),
+    ),
     console: { log() {}, error() {}, warn() {}, info() {} },
     URL, URLSearchParams, TextEncoder, TextDecoder, Buffer,
     fetch, setTimeout, clearTimeout,
@@ -597,7 +611,7 @@ export async function executeRouteModuleFunction(
   const sandbox: Record<string, any> = {
     module: { exports: moduleExports },
     exports: moduleExports,
-    require: buildRequire(projectId, auth, callerIdentity),
+    require: buildRequire(projectId, auth, scopedDb(projectId, callerIdentity)),
     console: {
       log: (...a: any[]) => logs.push(a.map(stringify).join(' ')),
       error: (...a: any[]) => logs.push(a.map(stringify).join(' ')),

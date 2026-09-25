@@ -714,6 +714,7 @@ export async function POST(request: NextRequest) {
         mutation: isMutation,
         summary: result.summary,
         error: code,
+        data: result.data,
       },
     )
 

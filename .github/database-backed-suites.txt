@@ -271,6 +271,14 @@ __tests__/auth/oauth-claim-gate.test.ts
 # positive reads present so the refusals cannot pass because nothing works.
 __tests__/database/sql-workspace-isolation.test.ts
 
+# Function SQL ran on the app's own connection, whose role owns every platform
+# table and workspace schema, so generated function code could read public.users
+# or another tenant's tables; claims filter rows, not schemas. It now logs in as
+# the project's own role. The suite runs the real runner and asserts POSTGRES
+# refuses, including after RESET ROLE, with positive reads and writes present
+# so the refusals cannot pass because nothing works.
+__tests__/database/function-sql-isolation.test.ts
+
 # Cross-tenant schema history. The route called verifyToken and stopped, so any
 # authenticated account could read another tenant's schema snapshots and roll
 # back their schema. Underneath, getSchemaVersion looked up by version id alone
