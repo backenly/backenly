@@ -23,6 +23,7 @@ import type { NextRequest } from 'next/server'
 import * as unmatched from '@/app/api/v1/[projectId]/[...unmatched]/route'
 import * as v2 from '@/app/api/v2/[projectId]/[[...path]]/route'
 import { internalTrafficHeaders, INTERNAL_TRAFFIC_HEADER } from '@/lib/traffic/request-recorder'
+import { RUNTIME_HOP_HEADER } from '@/lib/runtime/forward-to-runtime'
 
 interface Seen {
   method: string
@@ -135,13 +136,33 @@ describe('Next forwards what it does not serve', () => {
   })
 
   it('never sends back what the runtime forwarded here, so a path cannot loop', async () => {
+    // What server/routes/next-proxy.ts sends: marked as internal AND as a hop.
     const id = randomUUID()
     const res = await unmatched.GET(
-      req(`https://backenly.com/api/v1/${id}/storage/nope`, { headers: internalTrafficHeaders() }),
+      req(`https://backenly.com/api/v1/${id}/storage/nope`, {
+        headers: { ...internalTrafficHeaders(), [RUNTIME_HOP_HEADER]: 'runtime' },
+      }),
       ctx(id, ['storage', 'nope']),
     )
     expect(res.status).toBe(404)
     expect(seen).toHaveLength(0)
+  })
+
+  it('still forwards a request that is only marked internal: the contract probe', async () => {
+    // The probe marks itself internal so it is never counted as the customer's
+    // traffic. When the loop guard read that same header, every probe of /db
+    // and /fn got Next's own 404 and was filed as the tenant's broken surface
+    // (AWS staging, v8 qualification). Internal is not a hop.
+    const id = randomUUID()
+    const res = await unmatched.GET(
+      req(`https://backenly.com/api/v1/${id}/db/todos`, { headers: internalTrafficHeaders() }),
+      ctx(id, ['db', 'todos']),
+    )
+    expect(res.status).toBe(200)
+    expect(seen).toHaveLength(1)
+    expect(seen[0].url).toBe(`/api/v1/${id}/db/todos`)
+    // Still marked internal on arrival, so the runtime does not record it.
+    expect(seen[0].headers[INTERNAL_TRAFFIC_HEADER]).toBe(internalTrafficHeaders()[INTERNAL_TRAFFIC_HEADER])
   })
 
   it('answers 404 itself when no runtime is configured', async () => {

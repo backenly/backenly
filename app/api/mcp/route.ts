@@ -18,9 +18,10 @@ export const runtime = 'nodejs'
  * rate-limit, approval escalation, audit) applies identically. The only logic
  * here is the wire protocol: initialize / tools.list / tools.call / ping.
  *
- * Stateless by design: every request carries `x-api-key`, so there is no
- * session to keep. We return no `Mcp-Session-Id` and offer no GET SSE stream —
- * both are optional in the spec for a server that never initiates messages.
+ * Stateless by design: every request carries its credential (`x-api-key`, or
+ * an OAuth `Authorization: Bearer` token), so there is no session to keep. We
+ * return no `Mcp-Session-Id` and offer no GET SSE stream — both are optional
+ * in the spec for a server that never initiates messages.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -31,6 +32,7 @@ import { prisma } from '@/lib/db/prisma'
 import { POST as toolCall } from './tool/route'
 import { POST as chatCall } from './chat/route'
 import { leanForAgent } from '@/lib/mcp/agent-response'
+import { forwardedCredentialHeaders } from '@/lib/mcp/forward-credential'
 
 const SERVER_NAME = 'backenly'
 const SERVER_VERSION = '1.0.0'
@@ -166,8 +168,10 @@ async function handleToolsList(id: any, request: NextRequest): Promise<object> {
 
   const tools = buildCatalog({ readOnly: auth.readOnly }).map((t) => ({
     name: t.name,
+    ...(t.annotations ? { title: t.annotations.title } : {}),
     description: t.description,
     inputSchema: t.inputSchema,
+    ...(t.annotations ? { annotations: t.annotations } : {}),
   }))
   return rpcResult(id, { tools })
 }
@@ -179,7 +183,7 @@ async function handleToolsCall(id: any, params: any, request: NextRequest): Prom
     return rpcError(id, -32602, 'Invalid params: tools/call requires a string `name`.')
   }
 
-  const apiKey = request.headers.get('x-api-key') ?? ''
+  const credentials = forwardedCredentialHeaders(request.headers)
   const origin = request.nextUrl.origin
 
   // Route exactly like the stdio server does: natural language goes to the
@@ -194,10 +198,12 @@ async function handleToolsCall(id: any, params: any, request: NextRequest): Prom
 
   let body: any = {}
   let status = 200
+  let challenge: string | null = null
   try {
-    const proxied = proxyRequest(origin, targetPath, apiKey, forwardBody)
+    const proxied = proxyRequest(origin, targetPath, credentials, forwardBody)
     const res = isChat ? await chatCall(proxied) : await toolCall(proxied)
     status = res.status
+    challenge = res.headers.get('www-authenticate')
     body = await res.json().catch(() => ({}))
   } catch (err) {
     // A crash in a delegated handler must not take down the JSON-RPC channel —
@@ -207,6 +213,16 @@ async function handleToolsCall(id: any, params: any, request: NextRequest): Prom
       content: [{ type: 'text', text: `Backenly tool "${name}" failed: ${message}` }],
       isError: true,
     })
+  }
+
+  // An auth failure must leave as a 401 challenge, the same as on initialize and
+  // tools/list. A host refreshes an expired OAuth token only when it sees a 401;
+  // wrapped in a 200 tool error, the session stays broken until someone
+  // reconnects it by hand.
+  if (status === 401) {
+    const reply = rpcError(id, -32001, body?.error ?? 'Authentication failed.', { code: body?.code })
+    AUTH_CHALLENGE.set(reply, challenge ?? wwwAuthenticate())
+    return reply
   }
 
   const ok = body?.ok !== false && status >= 200 && status < 300
@@ -220,14 +236,20 @@ async function handleToolsCall(id: any, params: any, request: NextRequest): Prom
 
 /**
  * Synthesize the request the delegated REST handler expects. It carries the
- * same `x-api-key`, so auth / quota / rate-limit / audit all run identically to
- * a direct call. A full URL is used so the handler's `request.nextUrl.origin`
- * (e.g. fetch_docs) resolves correctly.
+ * caller's own credential (x-api-key or an OAuth Bearer token), so auth /
+ * quota / rate-limit / audit all run identically to a direct call. A full URL
+ * is used so the handler's `request.nextUrl.origin` (e.g. fetch_docs) resolves
+ * correctly.
  */
-function proxyRequest(origin: string, path: string, apiKey: string, body: unknown): NextRequest {
+function proxyRequest(
+  origin: string,
+  path: string,
+  credentials: Record<string, string>,
+  body: unknown,
+): NextRequest {
   return new NextRequest(new URL(path, origin).toString(), {
     method: 'POST',
-    headers: { 'x-api-key': apiKey, 'content-type': 'application/json' },
+    headers: { ...credentials, 'content-type': 'application/json' },
     body: JSON.stringify(body ?? {}),
   })
 }

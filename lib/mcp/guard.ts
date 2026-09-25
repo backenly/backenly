@@ -180,7 +180,7 @@ export function refuseIfReadOnly(
       hint:
         'Reads still work — use run_query for SQL and read_backend_state for structure. ' +
         'To make changes, a human must issue a read-write MCP key from ' +
-        'Backenly → Project → MCP. An agent cannot upgrade its own key.',
+        'the Backenly dashboard under the project → Connect → Agents. An agent cannot upgrade its own key.',
     },
     { status: 403 },
   )

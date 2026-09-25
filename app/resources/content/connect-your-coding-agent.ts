@@ -4,15 +4,15 @@ export const article: ArticleData = {
   slug: 'connect-your-coding-agent',
   title: 'Connect your coding agent',
   metaDescription:
-    'Connect Claude Code, Cursor, Codex, or Cline to a Backenly project over MCP. Both transports, scoped and read-only keys, the host restart that everyone hits, and how to verify the connection.',
+    'Connect Claude Code, Cursor, Codex, or Cline to a Backenly project over MCP. Both transports, scoped and read-only keys, when the tools appear, how an agent keeps working in the conversation that installed them, and how to verify the connection.',
   lane: 'start',
   category: 'Setup',
   answers: 'How do I point Claude Code, Cursor, or Codex at a Backenly project?',
   datePublished: '2026-08-29',
-  dateModified: '2026-08-29',
-  dateDisplay: 'Updated August 29, 2026',
+  dateModified: '2026-09-25',
+  dateDisplay: 'Updated September 25, 2026',
   intro:
-    'Backenly has one build door: an MCP server your coding agent connects to. There is no in-product chat builder — the agent you already use is the operator, and Backenly is the governed runtime it talks to. Setup is one command, one scoped key, and one restart. The restart is the step people miss, so it gets its own section.',
+    'Backenly has one build door: an MCP server your coding agent connects to. There is no in-product chat builder — the agent you already use is the operator, and Backenly is the governed runtime it talks to. Setup is one command and one scoped key. Run the command before you open the agent and the tools are there from the first message; if an agent installs it mid-conversation, the CLI carries the same tools until the next one.',
   sections: [
     {
       heading: 'Get a scoped key',
@@ -70,32 +70,43 @@ export const article: ArticleData = {
 
   ✓ Verified. Connected to project 4f2a…  (20 tools).
 
-  Setup complete. Restart your MCP host and Backenly is wired in.`,
+  Setup complete. Open a new conversation in your MCP host and Backenly is wired in.`,
         },
       ],
     },
     {
-      heading: 'Restart the host — this is not optional',
+      heading: 'When the tools appear',
       blocks: [
         {
           kind: 'p',
-          text: 'MCP hosts connect their servers at process start and read each manifest once. A server registered mid-session is written to config and connected to nothing, so Backenly\'s tools are absent from the session that installed them. No amount of retrying changes that.',
-        },
-        {
-          kind: 'p',
-          text: 'This matters more than it sounds, because of what a capable agent does next. Told to install the server and then call a tool, it installs the server, finds no tools, and improvises a way to reach us anyway — a stdio bridge, a raw HTTP call with the MCP key. The permission classifier blocks those, and you watch three failures scroll past in the first minute of using the product. Nothing is broken. The instructions asked for something impossible.',
+          text: 'MCP hosts read their server configuration when a conversation starts. A server registered during a conversation is saved to config but is not in that conversation\'s tool list, and no amount of retrying changes that. So run the install command in a terminal before you open the agent, and the tools are there from the first message.',
         },
         {
           kind: 'list',
           items: [
-            'VS Code family — Claude Code, Cursor, Cline: Reload Window.',
+            'Claude Code in VS Code: open a new conversation tab. A window reload is not needed.',
+            'Claude Code in a terminal: `/exit`, then `claude --continue` to pick the same conversation back up.',
+            'Cursor and Cline: Reload Window.',
             'Codex CLI: quit and relaunch.',
-            'Claude Desktop: quit and reopen.',
           ],
         },
         {
+          kind: 'p',
+          text: 'An agent that installs the server mid-conversation should not stop and ask for a restart. The CLI calls the same tools through the same handlers with the same key, so the work continues in the conversation it started in:',
+        },
+        {
+          kind: 'code',
+          language: 'bash',
+          label: 'The same tools, from the shell',
+          code: `npx -y @backenly/cli@latest link --project <PROJECT_ID> --key <KEY>
+npx -y @backenly/cli@latest tools
+npx -y @backenly/cli@latest call read_backend_state
+npx -y @backenly/cli@latest call apply_migration sql="CREATE TABLE posts (title text NOT NULL)"
+npx -y @backenly/cli@latest chat "add likes and comments to posts"`,
+        },
+        {
           kind: 'note',
-          text: 'If you are an agent reading this after running the install command: stop here and ask your human to restart the host. Registering first and restarting second is the order that works; restarting before the install accomplishes nothing.',
+          text: 'If you are an agent reading this after running the install command: keep working through the CLI above and switch to the MCP tools when they appear. Do not start the MCP server yourself or call Backenly\'s HTTP API with curl to imitate the tools. Those paths are unsupported and fail on permissions.',
         },
       ],
     },
@@ -104,7 +115,7 @@ export const article: ArticleData = {
       blocks: [
         {
           kind: 'p',
-          text: 'After the restart, ask for a read. `read_backend_state` is the one read door for project state and it is on the advertised surface, so it is a safe first call:',
+          text: 'Ask for a read. `read_backend_state` is the one read door for project state and it is on the advertised surface, so it is a safe first call:',
         },
         {
           kind: 'code',
@@ -118,7 +129,7 @@ export const article: ArticleData = {
         },
         {
           kind: 'p',
-          text: 'In Claude Code, `/mcp` lists `backenly` once the connection is live. If the tools are still missing after a restart, the usual causes are a key that was revoked, a Cline remote entry without `"type": "streamableHttp"`, or a Codex entry whose header never made it into `config.toml`.',
+          text: 'In Claude Code, `/mcp` lists `backenly` once the connection is live. If the tools are still missing in a new conversation, the usual causes are a key that was revoked, a Cline remote entry without `"type": "streamableHttp"`, or a Codex entry whose header never made it into `config.toml`.',
         },
       ],
     },
@@ -192,7 +203,7 @@ export const article: ArticleData = {
             'Verifies the key against the live manifest during `init` before writing config.',
           ],
           you: [
-            'Restart the MCP host after installing.',
+            'Install the MCP server before opening the agent, or let it work through the CLI until the next conversation.',
             'Choose read-only or read-write when you mint the key, and revoke keys you stop using.',
             'Approve or reject anything that reaches the Review Queue.',
             'Keep the key out of your repository — it is a credential, not configuration.',
@@ -202,6 +213,6 @@ export const article: ArticleData = {
     },
   ],
   conclusion:
-    'Mint a scoped key, add the server on either transport, restart the host, and confirm with one `read_backend_state` call. From there your agent reads the live schema instead of guessing at it, and the operations it should never perform unattended are structurally out of reach rather than discouraged in a prompt.',
+    'Mint a scoped key, add the server on either transport before you open the agent, and confirm with one `read_backend_state` call. From there your agent reads the live schema instead of guessing at it, and the operations it should never perform unattended are structurally out of reach rather than discouraged in a prompt.',
   relatedSlugs: ['your-first-backend', 'the-data-api'],
 }

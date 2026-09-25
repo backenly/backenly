@@ -7,11 +7,11 @@ claude mcp add backenly -- npx -y @backenly/mcp-server \
   --project <projectId> --key mcp_live_...
 ```
 
-Restart your host, done. Your AI host now has governed agentic access to your Backenly backend.
+Run it before you open the agent: hosts read MCP config when a conversation starts, so the tools appear in the next conversation, not the one that ran the command. An agent that installs it mid-conversation keeps working through `npx -y @backenly/cli@latest call <tool>`, which reaches the same tools with the same key.
 
 ## What you get
 
-Eighteen advertised tools, not sixty. The catalog is an allowlist admitted on one
+Twenty advertised tools, not sixty. The catalog is an allowlist admitted on one
 rule — *is there exactly one tool here that answers a given request?* — because
 tool-selection accuracy degrades with catalog size and models misfire hardest
 between similarly-named tools. Everything else is reached through `backend_chat`.
@@ -30,6 +30,8 @@ The host LLM hands the request to Backenly's brain. Brain plans, executes, and r
 
 - `read_backend_state` — the single read-state door. Call with no arguments for the grounding overview; pass `section` (`schema`, `tables`, `apis`, `rls`, `metrics`, `errors`, `deploy`, `usage`, `autonomy`, …) to drill in. It replaces the ~26 `list_*` / `get_*` tools, which remain dispatchable.
 - `run_query` — standard read-only SQL over your workspace schema: joins, `GROUP BY`, aggregates, window functions, CTEs, `EXPLAIN`. Runs as a SELECT-only Postgres role scoped to the project, so isolation is a database grant rather than a parser. Secret-bearing columns come back redacted.
+- `get_table_schema` — everything about one table: columns, foreign keys, indexes, CHECK constraints with their permitted values, and live RLS policies. Read it before any write.
+- `generate_types` — TypeScript types (or a typed client, or OpenAPI) from the live catalog, with a `schemaHash` for drift checks.
 - `fetch_docs` — pull current Backenly docs instead of guessing.
 - `check_approval` — poll an escalated destructive request.
 
@@ -37,10 +39,11 @@ The host LLM hands the request to Backenly's brain. Brain plans, executes, and r
 
 - `apply_migration` — ordinary PostgreSQL DDL (`CREATE TABLE`, `ALTER TABLE`, `CREATE INDEX`), translated statement by statement into governed actions. All-or-nothing; anything it cannot govern is refused with the tool to use instead. Not raw SQL execution.
 - `db_insert` / `db_update` / `db_delete` — row writes. Owner-level: validates shapes but bypasses end-user RLS and triggers, so treat them as maintenance tools.
+- `set_rls` — a row-level security predicate installed verbatim and read back from `pg_policies`.
 
 ### Capabilities
 
-`enable_auth`, `create_bucket`, `generate_api`, `generate_function`, `enable_realtime`, `create_api_key`, `set_env_var` — the things no SQL statement expresses. Plus `get_database_credentials` (direct Postgres, read-write only after a human arms it) and `adopt_external_schema` (reconcile drift you made outside Backenly).
+`enable_auth`, `create_bucket`, `generate_function`, `enable_realtime`, `create_api_key`, `set_env_var`, `branch` (preview branches) — the things no SQL statement expresses. Plus `get_database_credentials` (direct Postgres, read-write only after a human arms it). REST endpoints need no generation step, and `adopt_external_schema` (reconcile drift made outside Backenly) stays callable by name without being advertised.
 
 ### Resources (11)
 
@@ -96,7 +99,7 @@ snippets. The host block then needs no key at all.
 npx @backenly/mcp-server init
 ```
 
-Restart your host. Backenly appears as a tool surface.
+Open a new conversation in your host. Backenly appears as a tool surface.
 
 ## How it works
 

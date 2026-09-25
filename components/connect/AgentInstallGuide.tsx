@@ -177,18 +177,31 @@ const AGENTS: Agent[] = [
  * scroll past on what is supposed to be the first thirty seconds of the
  * product. Nothing is broken; the instructions asked for something impossible.
  *
- * So the prompt now states the lifecycle, tells the agent to STOP after the
- * install, and explicitly forecloses the improvisation. Naming the wrong path
- * matters as much as naming the right one: a capable agent will invent the
- * bridge unless told not to.
+ * The fix after that told the agent to STOP after the install and ask for a
+ * restart. Correct, and still a dead end: the user asked for a backend and got
+ * "reload VS Code" instead. So the prompt now splits the two jobs. The MCP
+ * server is registered for the NEXT conversation, and the work continues in
+ * THIS one through `@backenly/cli call`, which posts to the same /api/mcp/*
+ * handlers with the same key. The improvised paths (a stdio bridge, a raw curl)
+ * are still named as unsupported: a capable agent invents them unless told the
+ * supported one exists.
  */
 function quickStartPrompt(projectId: string, key: string): string {
-  return `I'm using Backenly as my backend. Install its MCP server:
+  return `I'm using Backenly as my backend (project ${projectId}).
+
+1. Register its MCP server for my future conversations:
 claude mcp add backenly -- npx -y @backenly/mcp-server --project ${projectId} --key ${key}
 
-MCP servers only connect when the host process starts, so Backenly's tools will NOT appear in this session. Once the command succeeds, stop and tell me to restart. Do not try to reach Backenly another way in the meantime — a stdio bridge or a raw HTTP call is not the supported path and will just fail on permissions.
+2. Do not stop and ask me to restart. MCP tools registered during a conversation only appear in the next one, but every Backenly tool is callable right now from the shell with the same key:
+npx -y @backenly/cli@latest link --project ${projectId} --key ${key}
+npx -y @backenly/cli@latest tools
+npx -y @backenly/cli@latest call read_backend_state
+npx -y @backenly/cli@latest call apply_migration sql="CREATE TABLE posts (title text NOT NULL)"
+npx -y @backenly/cli@latest chat "describe the change in plain English"
+(Arguments are key=value pairs; for nested JSON use --args-file args.json.)
+Use the CLI for this conversation and the MCP tools once they appear. Do not start the MCP server yourself or call Backenly's HTTP API with curl; the CLI is the supported path.
 
-After I restart, call \`read_backend_state\` to confirm the connection, then use Backenly's tools for all backend work. Docs: ${MCP_DOCS}`
+3. Start with read_backend_state and tell me what the backend has, then build what I ask for. Docs: ${MCP_DOCS}`
 }
 
 export function AgentInstallGuide({
@@ -362,23 +375,24 @@ export function AgentInstallGuide({
 }
 
 /**
- * Per-host restart instruction. Every MCP host reads its server manifest once,
- * at process start, so the install command above has NO effect on a session
- * that is already running. This is the single most common "Backenly doesn't
- * work" report and it is never a Backenly fault — which is exactly why it has
- * to be on screen next to the command rather than in docs somebody already
- * skipped.
+ * When the tools appear, per host. Every MCP host reads its server config when
+ * a session starts, so the command above has no effect on a conversation that
+ * is already open. That is the most common "Backenly doesn't work" report and
+ * it is never a Backenly fault, which is why it sits next to the command rather
+ * than in docs somebody already skipped.
  *
- * Each hint names the cheapest real action for that host, not a generic
- * "restart your editor": in VS Code-family hosts reloading the window is both
- * faster and more reliable than hunting for the right process to kill.
+ * Each hint names the cheapest real action for that host. For Claude Code that
+ * is a new conversation, not a window reload: its docs say an added server
+ * takes effect in conversations started afterwards, and `claude --continue`
+ * starts one that keeps the history. Running the command BEFORE opening the
+ * agent avoids the wait entirely, and the CLI covers the gap when it cannot be.
  */
 const RESTART_HINT: Record<string, string> = {
-  'claude-code': 'Reload Window (Ctrl/Cmd+Shift+P) in the VS Code extension, or start a new `claude` process in the terminal. Then run /mcp — backenly should be listed.',
+  'claude-code': 'Open a new Claude Code conversation (a new tab in VS Code), or in a terminal run /exit and then `claude --continue` to keep this conversation. /mcp lists backenly when it worked.',
   cursor: 'Reload Window (Ctrl/Cmd+Shift+P), then check Settings → MCP for a green backenly entry.',
   cline: 'Reload Window (Ctrl/Cmd+Shift+P), then reopen the Cline panel and check its MCP Servers list.',
   codex: 'Quit and relaunch the Codex CLI.',
-  other: 'Restart the host process — MCP manifests are read once at startup.',
+  other: 'Restart the host process. MCP config is read when a session starts.',
 }
 
 function RestartNotice({ agentName, hint }: { agentName: string; hint?: string }) {
@@ -386,9 +400,10 @@ function RestartNotice({ agentName, hint }: { agentName: string; hint?: string }
     <div className="mt-3 flex items-start gap-2.5 rounded-lg border border-amber-400/20 bg-amber-400/[0.04] px-3 py-2.5">
       <RefreshCw className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-amber-300/80" />
       <p className="text-[11.5px] leading-relaxed text-zinc-400">
-        <span className="font-semibold text-amber-200/90">Restart {agentName} after this.</span>{' '}
-        MCP servers connect when the host starts, so the tools stay invisible in any session that was
-        already open. {hint ?? RESTART_HINT.other}
+        <span className="font-semibold text-amber-200/90">Run this before you open {agentName}.</span>{' '}
+        Servers connect when a session starts, so a conversation that is already open will not see
+        the tools. {hint ?? RESTART_HINT.other} Until then, the same tools work from the shell:{' '}
+        <code className="font-mono text-zinc-300">npx -y @backenly/cli@latest call &lt;tool&gt;</code>.
       </p>
     </div>
   )

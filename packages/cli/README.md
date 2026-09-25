@@ -15,6 +15,18 @@ npx @backenly/cli query "select count(*) from posts"   # read-only SQL, workspac
 npx @backenly/cli install-skill    # teach Claude Code / Cursor the Backenly vocabulary
 ```
 
+## Every MCP tool, from the shell
+
+```bash
+npx -y @backenly/cli@latest tools                                   # what this key can call
+npx -y @backenly/cli@latest call read_backend_state section=schema  # any tool, key=value args
+npx -y @backenly/cli@latest call apply_migration sql="ALTER TABLE posts ADD COLUMN likes integer DEFAULT 0"
+npx -y @backenly/cli@latest call db_insert --args-file row.json      # nested JSON from a file (or --args - for stdin)
+npx -y @backenly/cli@latest chat "add comments to posts"            # backend_chat in plain English
+```
+
+These post to the same handlers the MCP server uses, with the same key and the same governance. They exist for the conversation that just installed the MCP server: hosts read MCP config when a conversation starts, so the MCP tools only appear in the next one, and an agent can keep working here in the meantime. The exit code is `1` whenever Backenly answers `ok: false`.
+
 ## The CI gate
 
 ```bash
@@ -26,7 +38,7 @@ Exits `1` when your committed `backenly.types.ts` no longer matches the live sch
 ## Notes
 
 - **Zero dependencies, no build step** — fast `npx` cold starts, safe for agent loops.
-- **Read-only by design.** Backend *changes* go through governed doors: the Backenly dashboard, or MCP `backend_chat` (destructive operations always wait for human approval in the Review Queue).
+- **Governed, not raw.** `call` and `chat` reach exactly what MCP reaches: schema changes are translated into governed actions, and destructive operations return an approval id and wait for a human on the project's Autonomy page.
 - Keys are scoped and revocable; `link` stores them in `.backenly/config.json` and gitignores the directory. `BACKENLY_API_KEY` / `BACKENLY_API_URL` env vars are also honored.
 - Agent docs: https://backenly.com/llms.txt · installable skill: https://backenly.com/skill.md
 

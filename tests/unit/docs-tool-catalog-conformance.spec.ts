@@ -26,7 +26,8 @@
 
 import fs from 'fs'
 import path from 'path'
-import { buildCatalog, buildDispatchable } from '@/lib/mcp/catalog'
+import { buildCatalog, buildDispatchable, STATE_SECTIONS } from '@/lib/mcp/catalog'
+import { DOCS_MAX_CHARS } from '@/lib/mcp/docs-limit'
 import { BRAIN_TOOLS } from '@/lib/ai/brain/tools'
 
 const LLMS_TXT = fs.readFileSync(path.join(process.cwd(), 'public', 'llms.txt'), 'utf8')
@@ -92,10 +93,18 @@ describe('llms.txt describes the real MCP surface', () => {
       'http_headers', 'search_path', 'gen_random_uuid', 'backenly_jwt_claim',
       'anon_key', 'project_id', 'pg_dump', 'pg_policies',
       'on_signup', 'on_insert', 'on_update', 'on_delete_row',
-      'backenly_types', 'service_key', 'x_backenly_key',
+      'backenly_types', 'service_key', 'x_backenly_key', 'redirect_to',
     ])
+    // The RLS template names come from the add_rls enum itself, so documenting
+    // a new template never needs this list edited, and a template that is
+    // removed from the enum becomes a failure here instead of a stale doc.
+    const addRls = BRAIN_TOOLS.find((t) => t.function?.name === 'add_rls')
+    const rlsTemplates = new Set<string>(
+      ((addRls?.function?.parameters as any)?.properties?.policy?.enum ?? []) as string[],
+    )
     const suspicious = [...mentionedTools()].filter(
-      (name) => name.includes('_') && !realTools.has(name) && !KNOWN_NON_TOOLS.has(name),
+      (name) =>
+        name.includes('_') && !realTools.has(name) && !KNOWN_NON_TOOLS.has(name) && !rlsTemplates.has(name),
     )
     expect(suspicious).toEqual([])
   })
@@ -137,5 +146,19 @@ describe('llms.txt describes the real MCP surface', () => {
 
   it('distinguishes a failed approval from a partial one', () => {
     expect(LLMS_TXT).toMatch(/partial/)
+  })
+
+  it('fits in one fetch_docs response, so the guide is never served truncated', () => {
+    expect(LLMS_TXT.length).toBeLessThanOrEqual(DOCS_MAX_CHARS)
+  })
+
+  it('names every read_backend_state section it can dispatch', () => {
+    const missing = Object.keys(STATE_SECTIONS).filter((s) => !LLMS_TXT.includes(`\`${s}\``))
+    expect(missing).toEqual([])
+  })
+
+  it('never teaches the project key as a Bearer token, which the runtime rejects', () => {
+    expect(LLMS_TXT).not.toMatch(/Authorization: Bearer <(?:apiKey|project key)>/)
+    expect(LLMS_TXT).toMatch(/x-api-key: <project key>/)
   })
 })

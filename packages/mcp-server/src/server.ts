@@ -45,6 +45,14 @@ interface CatalogTool {
   tier: string
   description: string
   inputSchema: any
+  /** MCP ToolAnnotations from the live manifest; absent from an older server. */
+  annotations?: {
+    title?: string
+    readOnlyHint?: boolean
+    destructiveHint?: boolean
+    idempotentHint?: boolean
+    openWorldHint?: boolean
+  }
 }
 
 interface ProjectResource {
@@ -189,10 +197,12 @@ export async function startServer(overrides: ConfigOverrides = {}) {
   // Manifest is the source of the full tool catalog. On success it replaces the
   // fallback; on an auth failure it's fatal (a wrong key that somehow passed the
   // health blip); on any other failure we keep the fallback and stay degraded.
+  let catalogLoaded = false
   try {
     const manifest = await client.manifest()
     if (manifest.tools?.length) {
       tools = manifest.tools
+      catalogLoaded = true
     }
   } catch (err) {
     if (err instanceof BackenlyHttpError && err.isAuthFailure) {
@@ -212,10 +222,12 @@ export async function startServer(overrides: ConfigOverrides = {}) {
   // Code inject it into the agent's context on connect, so the agent knows it
   // is wired into Backenly, confirms the connection to the user, and asks what
   // to build — instead of the connection landing silently.
+  // `listChanged` because the tool list really can change: a catalog that
+  // failed to load at boot is replaced once it loads (see recoverCatalog).
   const server = new Server(
     { name: '@backenly/mcp-server', version },
     {
-      capabilities: { tools: {}, resources: {} },
+      capabilities: { tools: { listChanged: true }, resources: {} },
       instructions: buildInstructions(projectLabel, tools.length),
     },
   )
@@ -224,8 +236,10 @@ export async function startServer(overrides: ConfigOverrides = {}) {
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: tools.map((t) => ({
       name: t.name,
+      ...(t.annotations?.title ? { title: t.annotations.title } : {}),
       description: t.description,
       inputSchema: t.inputSchema,
+      ...(t.annotations ? { annotations: t.annotations } : {}),
     })),
   }))
 
@@ -309,7 +323,46 @@ export async function startServer(overrides: ConfigOverrides = {}) {
 
   const transport = new StdioServerTransport()
   await server.connect(transport)
+
+  if (!catalogLoaded) recoverCatalog()
+
+  // ── Catalog recovery ──────────────────────────────────────────────────────
+  // A manifest that failed at boot used to be fetched exactly once, so a brief
+  // outage during install left the session on the three fallback tools for its
+  // whole life while the log promised the full list would load. It is retried
+  // in the background until it loads, and the host is told the list changed;
+  // hosts that support `list_changed` (Claude Code does) then re-read it.
+  // A key rejected mid-recovery stops the retries: every call will fail the
+  // same way, and saying so once is the useful thing.
+  function recoverCatalog(attempt = 0): void {
+    const override = Number(process.env.BACKENLY_MCP_CATALOG_RETRY_MS)
+    const delay = override > 0 ? override : CATALOG_RETRY_MS[Math.min(attempt, CATALOG_RETRY_MS.length - 1)]
+    const timer = setTimeout(async () => {
+      try {
+        const manifest = await client.manifest()
+        if (!manifest.tools?.length) return recoverCatalog(attempt + 1)
+        tools = manifest.tools
+        catalogLoaded = true
+        process.stderr.write(`[@backenly/mcp-server v${version}] tool catalog loaded (${tools.length} tools).\n`)
+        await server.sendToolListChanged().catch(() => {})
+      } catch (err) {
+        if (err instanceof BackenlyHttpError && err.isAuthFailure) {
+          process.stderr.write(
+            `[@backenly/mcp-server v${version}] Backenly rejected the API key (HTTP ${err.status}) while loading ` +
+              `the tool catalog. Re-copy the install command from your project's Connect → Agents tab.\n`,
+          )
+          return
+        }
+        recoverCatalog(attempt + 1)
+      }
+    }, delay)
+    // Never the reason the process stays alive: stdio owns the lifetime.
+    timer.unref()
+  }
 }
+
+/** Retry delays for a catalog that failed to load at boot; the last repeats. */
+const CATALOG_RETRY_MS = [5_000, 15_000, 30_000, 60_000, 120_000]
 
 /**
  * The greeting + operating brief the host injects on connect. Kept short on
