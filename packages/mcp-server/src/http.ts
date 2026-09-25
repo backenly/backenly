@@ -1,7 +1,7 @@
 /**
  * HTTP client for backenly.com.
  *
- * Uses native `fetch` (Node 18+). Adds `x-api-key` + `x-correlation-id` on
+ * Uses native `fetch` (Node 20+, which the MCP SDK requires). Adds `x-api-key` + `x-correlation-id` on
  * every request. Retries idempotent failures (HTTP 5xx, network) with
  * exponential backoff. Surfaces typed errors so the MCP host can show them
  * usefully to the LLM.
@@ -43,18 +43,63 @@ export class BackenlyHttpError extends Error {
    */
   readonly detail?: unknown
 
-  constructor(message: string, opts: { status?: number; code?: string; detail?: unknown } = {}) {
+  /**
+   * The server's JSON body, when it sent one. A tool call hands this to the
+   * agent as the result, so a refusal carries its own `code`, `hint` and
+   * `applied` rather than the sentence this error's message makes of them.
+   */
+  readonly body?: Record<string, unknown>
+
+  constructor(message: string, opts: { status?: number; code?: string; detail?: unknown; body?: Record<string, unknown> } = {}) {
     super(message)
     this.name = 'BackenlyHttpError'
     this.status = opts.status
     this.code = opts.code
     this.detail = opts.detail
+    this.body = opts.body
   }
 
   /** True when the server authenticated us and said no — a bad or wrong-scope key. */
   get isAuthFailure(): boolean {
     return this.status === 401 || this.status === 403
   }
+}
+
+/** A tool as the manifest lists it. */
+export interface ManifestTool {
+  name: string
+  tier?: string
+  description: string
+  inputSchema: Record<string, unknown>
+  /** MCP ToolAnnotations; absent from an older server. */
+  annotations?: {
+    title?: string
+    readOnlyHint?: boolean
+    destructiveHint?: boolean
+    idempotentHint?: boolean
+    openWorldHint?: boolean
+  }
+}
+
+/** A resource as the manifest lists it: `tool` is the read it delegates to. */
+export interface ManifestResource {
+  uri: string
+  name: string
+  description: string
+  mimeType: string
+  tool: string
+}
+
+/**
+ * GET /api/mcp/manifest. `instructions` and `resources` arrived with manifest
+ * 1.1.0; an older server omits them and the package serves its own.
+ */
+export interface Manifest {
+  ok: boolean
+  server: { name: string; version: string; projectId: string }
+  tools: ManifestTool[]
+  instructions?: string
+  resources?: ManifestResource[]
 }
 
 export class BackenlyClient {
@@ -139,6 +184,7 @@ export class BackenlyClient {
         status: response.status,
         code: typeof parsed?.code === 'string' ? parsed.code : undefined,
         detail: Array.isArray(trail) && trail.length > 0 ? trail.slice(-25) : undefined,
+        body: parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : undefined,
       })
 
       if (retryable) {
@@ -163,11 +209,7 @@ export class BackenlyClient {
   }
 
   manifest() {
-    return this.request<{
-      ok: boolean
-      server: { name: string; version: string; projectId: string }
-      tools: Array<{ name: string; tier: string; description: string; inputSchema: any }>
-    }>('GET', '/api/mcp/manifest')
+    return this.request<Manifest>('GET', '/api/mcp/manifest')
   }
 
   callTool(tool: string, args: Record<string, unknown>) {

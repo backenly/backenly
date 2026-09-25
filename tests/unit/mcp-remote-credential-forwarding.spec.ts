@@ -8,10 +8,12 @@
  * initialize and list tools, then failed NO_AUTH on every call.
  *
  * The delegated handlers are replaced with recorders that capture the request
- * they were given. No database is mocked: nothing here reaches one.
+ * they were given, and the route's own authentication is stubbed to accept any
+ * credential except an expired one. No database is mocked: nothing here
+ * reaches one.
  */
 
-import '../helpers/next-request-polyfill'
+import '../helpers/real-web-standard'
 import { NextRequest, NextResponse } from 'next/server'
 
 const mockSeen: { path: string; authorization: string | null; apiKey: string | null }[] = []
@@ -36,6 +38,16 @@ function mockRecorder(path: string) {
 
 jest.mock('@/app/api/mcp/tool/route', () => ({ POST: mockRecorder('/api/mcp/tool') }))
 jest.mock('@/app/api/mcp/chat/route', () => ({ POST: mockRecorder('/api/mcp/chat') }))
+jest.mock('@/lib/mcp/auth', () => {
+  const actual = jest.requireActual('@/lib/mcp/auth')
+  return {
+    ...actual,
+    authenticateMcp: jest.fn(async (req: NextRequest) =>
+      req.headers.get('authorization') === 'Bearer expired'
+        ? { success: false, status: 401, code: 'INVALID_TOKEN', error: 'The access token is invalid or expired.' }
+        : { success: true, projectId: 'p1', userId: 'u1', keyId: 'k1', readOnly: false }),
+  }
+})
 
 import { forwardedCredentialHeaders } from '@/lib/mcp/forward-credential'
 import { POST } from '@/app/api/mcp/route'
@@ -93,8 +105,7 @@ describe('tools/call on the remote endpoint', () => {
     expect(mockSeen).toEqual([{ path: '/api/mcp/tool', authorization: null, apiKey: 'mcp_live_test_key' }])
   })
 
-  it('turns a delegated auth failure into a 401 challenge, so the host refreshes its token', async () => {
-    mockDelegatedStatus = 401
+  it('answers an expired token with a 401 challenge before the SDK sees the request, so the host refreshes it', async () => {
     const res = await call({ authorization: 'Bearer expired' })
 
     expect(res.status).toBe(401)
@@ -102,13 +113,27 @@ describe('tools/call on the remote endpoint', () => {
     const body = await res.json()
     expect(body.error.code).toBe(-32001)
     expect(body.error.data).toEqual({ code: 'INVALID_TOKEN' })
+    expect(mockSeen).toEqual([])
   })
 
-  it('reports a successful delegated call as a normal tool result', async () => {
+  it('reports a delegated handler refusing the credential mid-call as a readable tool error', async () => {
+    // The route authenticated this request; a handler refusing it afterwards
+    // (a key revoked in between) is reported in the result, with its code.
+    mockDelegatedStatus = 401
+    const res = await call({ 'x-api-key': 'mcp_live_test_key' })
+    const body = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(body.result.isError).toBe(true)
+    expect(body.result.structuredContent).toMatchObject({ ok: false, code: 'INVALID_TOKEN' })
+  })
+
+  it('reports a successful delegated call as a normal tool result, with structured content', async () => {
     const res = await call({ 'x-api-key': 'mcp_live_test_key' })
     const body = await res.json()
 
     expect(res.status).toBe(200)
     expect(body.result.isError).toBe(false)
+    expect(body.result.structuredContent).toEqual({ ok: true, summary: 'done', data: null })
   })
 })
