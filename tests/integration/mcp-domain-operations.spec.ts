@@ -343,6 +343,55 @@ describe('monitoring request_logs', () => {
   }, 60_000)
 })
 
+// ── Integrations: capabilities and a key re-check ────────────────────────────
+
+describe('integrations', () => {
+  const replicateKey = `r8_${crypto.randomBytes(18).toString('hex')}`
+
+  beforeAll(async () => {
+    const { storeIntegrationKey } = await import('@/lib/services/integrationKeyStore')
+    // A fixture, not a connect: replicate has no verification probe, so the
+    // re-check below gets a real answer without calling any provider.
+    await storeIntegrationKey(projectId, 'replicate', replicateKey, { skipVerification: true })
+  })
+
+  it('names the exact methods a function can call, and never a key', async () => {
+    const r = await call(RO_KEY, 'integrations', { action: 'capabilities' })
+    const byId = Object.fromEntries(r.body.data.providers.map((p: any) => [p.id, p]))
+    expect(byId.stripe.methods.map((m: any) => m.name)).toContain('createCheckoutSession')
+    expect(byId.stripe).toMatchObject({ connected: false, signingSecretStored: false })
+    expect(byId.stripe.receiverUrl).toMatch(new RegExp(`/api/v1/${projectId}/webhooks/stripe$`))
+    expect(byId.posthog.methods.map((m: any) => m.name)).toEqual(['capture', 'identify', 'isFeatureEnabled'])
+    expect(byId.replicate).toMatchObject({ connected: true })
+    expect(JSON.stringify(r.body)).not.toContain(replicateKey)
+  }, 60_000)
+
+  it('answers for one provider, and refuses one that does not exist', async () => {
+    const one = await call(RO_KEY, 'integrations', { action: 'capabilities', integrationId: 'claude' })
+    expect(one.body.data.providers.map((p: any) => p.id)).toEqual(['anthropic'])
+    const none = await call(RO_KEY, 'integrations', { action: 'capabilities', integrationId: 'myspace' })
+    expect(none.body).toMatchObject({ ok: false, code: 'NOT_FOUND' })
+  }, 60_000)
+
+  it('re-asks about a stored key and records the honest answer', async () => {
+    const r = await call(RW_KEY, 'integrations', { action: 'verify', integrationId: 'replicate' })
+    expect(r.body).toMatchObject({ ok: true, data: { integrationId: 'replicate', verification: 'unverifiable' } })
+    expect(JSON.stringify(r.body)).not.toContain(replicateKey)
+    const row = await prisma.projectIntegrationKey.findFirst({ where: { projectId, integrationId: 'replicate' } })
+    expect(row?.verification).toBe('unverifiable')
+  }, 60_000)
+
+  it('says there is nothing to verify when no key is stored', async () => {
+    const r = await call(RW_KEY, 'integrations', { action: 'verify', integrationId: 'stripe' })
+    expect(r.body).toMatchObject({ ok: false, code: 'NOT_CONNECTED' })
+  }, 60_000)
+
+  it('does not let a read-only key re-check, since that writes the answer', async () => {
+    const r = await call(RO_KEY, 'integrations', { action: 'verify', integrationId: 'replicate' })
+    expect(r.body.code).toBe('READ_ONLY_KEY')
+  }, 60_000)
+})
+
 // ── Deploy: version history ──────────────────────────────────────────────────
 
 describe('deploy history', () => {

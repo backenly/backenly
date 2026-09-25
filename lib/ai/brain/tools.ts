@@ -111,6 +111,9 @@ export type ToolName =
   | 'list_request_logs'
   // Deploy history
   | 'list_deploy_versions'
+  // Integrations: what each can do, and whether its key still works
+  | 'list_integration_capabilities'
+  | 'verify_integration_key'
   // Connect Frontend
   | 'connect_frontend'
   | 'disconnect_frontend'
@@ -254,6 +257,7 @@ export const READ_ONLY_TOOLS = new Set<ToolName>([
   'list_ai_function_logs',
   'list_request_logs',
   'list_deploy_versions',
+  'list_integration_capabilities',
 ])
 
 export function isDestructiveTool(name: string): boolean {
@@ -796,6 +800,15 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     'Every published version, newest first: id, version number, change summary, when it was published, which one is serving, and which can be rolled back to (rollback_deploy takes the version or its id).',
     {},
     []),
+  // ── Integrations: capabilities and a key re-check ─────────────────────────
+  fn('list_integration_capabilities',
+    'What a function can call on each integration (the exact ctx.integrations.<id> method signatures), whether it is connected, and what its provider said about the key. For Stripe also the receiver URL and whether the signing secret is stored. Never returns a key.',
+    { integrationId: { type: 'string', description: 'One provider, e.g. "stripe", "resend", "openai", "anthropic", "posthog". Omit for all.' } },
+    []),
+  fn('verify_integration_key',
+    'Ask the provider again whether the stored key works, and record the answer: verified, rejected, unverifiable (the provider offers no check) or unreachable. A key revoked in the provider dashboard is only caught this way.',
+    { integrationId: { type: 'string', description: 'e.g. "stripe".' } },
+    ['integrationId']),
   fn('fix_backend',
     'Repair a broken subsystem. target: auth | api | table | deploy | realtime | storage | integration | workflow. Use when read_backend_state shows something is broken.',
     {
@@ -2481,6 +2494,14 @@ export async function dispatchTool(
       })
     }
 
+    // ── Integrations: capabilities and a key re-check ─────────────────────
+    if (name === 'list_integration_capabilities' || name === 'verify_integration_key') {
+      const i = await import('@/lib/integrations/agent-actions')
+      return finalize(name === 'list_integration_capabilities'
+        ? await i.integrationCapabilities(ctx.projectId, args)
+        : await i.verifyIntegration(ctx.projectId, args))
+    }
+
     // ── Deploy: version history ───────────────────────────────────────────
     if (name === 'list_deploy_versions') {
       const { listPublishedVersions } = await import('@/lib/deployment/published-versions')
@@ -3015,6 +3036,8 @@ export function humanTitle(name: string, args: Record<string, unknown>): string 
     case 'list_ai_function_logs': return 'Reading function runs'
     case 'list_request_logs': return 'Reading the request log'
     case 'list_deploy_versions': return 'Reading published versions'
+    case 'list_integration_capabilities': return 'Reading what each integration can do'
+    case 'verify_integration_key': return `Checking the ${args.integrationId ?? ''} key with its provider`.replace(/\s+/g, ' ')
     case 'fix_backend': return `Repairing ${args.target ?? 'backend'}`
     case 'apply_proposal': return 'Applying the recommendation list'
     case 'drop_table': return `Dropping table ${args.tableName ?? ''}`.trim()
