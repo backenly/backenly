@@ -24,7 +24,7 @@ import {
   type OwnershipCatalog,
 } from '@/lib/services/rls-ownership'
 import { looksFabricated, verificationLabel } from '@/lib/integrations/key-verification'
-import { buildCatalog, buildDispatchable } from '@/lib/mcp/catalog'
+import { ADVERTISED_CAP, buildCatalog, buildDispatchable } from '@/lib/mcp/catalog'
 
 // ── #26 / #46 — ownership inference ──────────────────────────────────────────
 
@@ -221,7 +221,7 @@ describe('preview branches are reachable from an agent (#30)', () => {
 
   it('keeps the catalog inside the tool-selection budget', () => {
     // Adding branches must not be paid for out of every other call's accuracy.
-    expect(buildCatalog().length).toBeLessThanOrEqual(20)
+    expect(buildCatalog().length).toBeLessThanOrEqual(ADVERTISED_CAP)
   })
 })
 

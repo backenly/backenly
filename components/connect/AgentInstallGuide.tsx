@@ -457,7 +457,7 @@ function CommandGlyph({ className }: { className?: string }) {
  * longer carries. And the audience is agent operators, for whom a tool name IS
  * the capability; a paragraph explaining it is the part they skip.
  *
- * The four listed are the load-bearing quarter of MCP_SURFACE (lib/mcp/
+ * The four listed are the load-bearing core of MCP_SURFACE (lib/mcp/
  * catalog.ts) — read, migrate, query, escape hatch. Keep this list in step with
  * that set; packages/mcp-server/README.md covers the rest.
  */
@@ -465,7 +465,7 @@ const HEADLINE_TOOLS: { name: string; gloss: string }[] = [
   { name: 'read_backend_state', gloss: 'Schema, RLS, metrics, incidents' },
   { name: 'apply_migration', gloss: 'DDL, governed and reversible' },
   { name: 'run_query', gloss: 'Read-only SQL, scoped role' },
-  { name: 'get_database_credentials', gloss: 'Real Postgres connection string' },
+  { name: 'deploy', gloss: 'Readiness, publish, rollback (approved)' },
 ]
 
 export function AgentCapabilitiesCard() {

@@ -76,27 +76,30 @@ Do not start the MCP server yourself over a stdio bridge, and do not call Backen
 
 ## The MCP tools
 
-Exactly **20** tools are advertised to the host. The number is deliberate: tool-selection accuracy drops as a catalog grows, so each request has one obvious door. `tools/list` on the server is the authority. Trust it over any document, including this one. Every tool carries MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`), so a host can tell a read from a write before calling it.
+Exactly **23** tools are advertised to the host. The number is deliberate: tool-selection accuracy drops as a catalog grows, so each request has one obvious door. `tools/list` on the server is the authority. Trust it over any document, including this one. Every tool carries MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`), so a host can tell a read from a write before calling it.
 
 | Tool | What it is for |
 | --- | --- |
-| `backend_chat` | Plain-English requests to Backenly's own engine, which plans and executes them. Anything not listed below is reached through here. It runs on Backenly's model and draws AI credits; every other tool here is deterministic. |
+| `backend_chat` | Plain-English requests to Backenly's own engine, which plans and executes them. Anything not listed below is reached through here. It runs on Backenly's model and draws AI credits; every other tool here is deterministic (except `functions` `create`, which writes code with the same model). |
 | `read_backend_state` | The one read door for state. No arguments gives the overview. `section` drills in: `schema`, `instructions`, `tables`, `apis`, `buckets`, `files`, `keys`, `users`, `rls`, `triggers`, `functions`, `cron`, `integrations`, `apps`, `env`, `webhooks`, `findings`, `incidents`, `metrics`, `errors`, `usage`, `deploy`, `readiness`, `autonomy`, `maintenance`, `realtime`. |
 | `get_table_schema` | Everything about ONE table: columns (type, nullability, default, PK), foreign keys with `ON DELETE`, indexes including `UNIQUE`, CHECK constraints **with their permitted values**, triggers, and live RLS policies with their roles. Read it before any write. |
 | `run_query` | Read-only SQL over the workspace schema: joins, `GROUP BY`, aggregates, window functions, CTEs, `EXPLAIN`. Runs as a SELECT-only role scoped to the project; secret-bearing columns come back redacted. |
 | `apply_migration` | Schema changes as SQL: `CREATE TABLE`, `ALTER TABLE` (`ADD COLUMN`, `RENAME COLUMN`, `ADD CONSTRAINT`, `ALTER COLUMN SET`/`DROP NOT NULL`, `SET`/`DROP DEFAULT`), `CREATE [UNIQUE] INDEX`. Each statement becomes a governed action; a migration is all-or-nothing, and anything it cannot map is refused with the tool to use instead. |
 | `db_insert` / `db_update` / `db_delete` | Row writes, as the project owner. They bypass end-user RLS, triggers and function side effects, so they are for seeding and repair, not for simulating an end-user. `db_update` and `db_delete` require a non-empty filter. |
 | `set_rls` | Row-level security as **exact SQL**, one rule per command. Predicates are installed verbatim and read back from `pg_policies` before it reports success. Idempotent; commands you do not name are left byte-identical. |
-| `enable_auth` | Turn on end-user authentication (email + password, JWT). |
-| `create_bucket` | Create a storage bucket. |
-| `enable_realtime` | Stream change events for a table. |
-| `generate_function` | A backend function from a plain-English spec (HTTP endpoint, table event, sign-up). Backenly writes the code with its model; it does not accept code you wrote. Draws AI credits. |
-| `create_api_key` | A scoped project key for an app, optionally bound to a preview branch. |
-| `set_env_var` | An encrypted project variable, readable in functions as `ctx.env.KEY`. |
-| `get_database_credentials` | A direct PostgreSQL connection string: read-only on demand, read-write only after a human arms it in the dashboard. |
 | `branch` | Preview branches (Backenly Cloud): `action` is `list`, `create`, `diff` or `merge`. A branch starts empty unless you pass `includeData: true`. |
 | `generate_types` | TypeScript types for every table from the live catalog. `format`: `dts`, `client` or `openapi`. Carries `schemaHash` so you can tell whether a regeneration changed anything. |
 | `check_approval` | Poll an operation waiting for human approval. |
+| `auth` | End-user auth. Actions: `enable`, `add_oauth_provider` (provider, clientId, clientSecret), `list_users`, `reset_password`, `unblock_user`, `enable_teams`; `remove_oauth_provider` and `block_user` wait for approval. |
+| `storage` | Buckets and files. Actions: `create_bucket`, `set_public`, `list_buckets`, `list_files`, `signed_url`; `delete_file` and `delete_bucket` wait for approval. Uploads go through the SDK or REST. |
+| `functions` | Actions: `create` (Backenly writes the code from your plain-English spec with its model, so it draws AI credits; it does not accept code you wrote), `list`, `set_active`, `schedule`, `list_schedules`; `delete` and `delete_schedule` wait for approval. |
+| `realtime` | Actions: `enable`, `status`; `disable` waits for approval. |
+| `integrations` | Actions: `list`, `connect` (verified with the provider before it is stored; Stripe also takes `webhookSecret`), `send_push`; `disconnect` waits for approval. |
+| `monitoring` | Actions: `metrics`, `errors`, `usage`, `incidents`, `set_alert`. |
+| `autonomy` | Actions: `status`, `findings`, `maintenance`, `set_level`. Approving what the loop queued is for a human. |
+| `webhooks` | Actions: `deliveries`, `replay`, `rotate_secret`, `triggers`. |
+| `deploy` | Actions: `status`, `readiness` (fixes nothing unless `autoFix: true`); `deploy` and `rollback` wait for approval. |
+| `connect` | Keys, secrets and connections. Actions: `create_api_key`, `list_api_keys`, `set_key_permissions`, `set_env`, `list_env`, `database_credentials` (read-write only after a human arms it), `connect_frontend`, `list_apps`; `revoke_api_key`, `rotate_api_key`, `delete_env` and `disconnect_frontend` wait for approval. |
 | `fetch_docs` | This document, or one section of it (`topic`: `database`, `auth`, `storage`, `realtime`, `functions`, `integrations`, `mcp`). |
 
 **Read-only keys and connections** see the read tools only; every write door, `backend_chat` included, is withheld, and calling one anyway is refused with `READ_ONLY_KEY` before it runs. Read-only is chosen by a human when the key is issued. An agent cannot upgrade its own key.
@@ -105,7 +108,7 @@ Exactly **20** tools are advertised to the host. The number is deliberate: tool-
 
 **REST endpoints are automatic**, which is why there is no `generate_api` in the list. `/db/<table>` is live the moment a table exists, resolved from the PostgreSQL catalog per request. `generate_api` remains dispatchable for pinned clients; it writes a metadata row and nothing that serves traffic. The one exception is `users`, which is served only through `/auth/*` because it holds password hashes, so an empty `apis` list on a project whose only table is `users` is correct.
 
-**Destructive tools** (`drop_table`, `truncate_table`, `drop_column`, `delete_bucket`, `delete_file`, `disable_realtime`, `trigger_deploy`, `rollback_deploy`, `revoke_api_key`, `rotate_api_key`, `delete_env_var`, `delete_trigger`, `delete_ai_function`, `delete_cron_job`, `remove_integration_key`, `discard_branch`, `block_end_user`, `remove_permission`, `disable_oauth_provider`) never execute directly. Ask for the operation through `backend_chat`: it is parked for a human, and the response carries an `approval` object with an id. The human approves it on the project's **Autonomy** page. Poll `check_approval` every 15–30 seconds until the status is terminal: `executed`, `rejected` (do not retry; ask what they want), `expired` (24 hours), `failed` (nothing was applied, safe to retry) or `partial` (some changes landed before the run stopped; read `resultSummary` and verify state instead of replaying).
+**Destructive tools** (`drop_table`, `truncate_table`, `drop_column`, `delete_bucket`, `delete_file`, `disable_realtime`, `trigger_deploy`, `rollback_deploy`, `revoke_api_key`, `rotate_api_key`, `delete_env_var`, `delete_trigger`, `delete_ai_function`, `delete_cron_job`, `remove_integration_key`, `discard_branch`, `block_end_user`, `remove_permission`, `disable_oauth_provider`) never execute directly. Their domain action (`deploy` `deploy`, `storage` `delete_bucket`, `connect` `revoke_api_key`, …) parks the exact call for a human; dropping, truncating and discarding a branch go through `backend_chat`, which parks them the same way. Either way the response carries an `approval` object with an id, and nothing changes until a human approves. The human approves it on the project's **Autonomy** page. Poll `check_approval` every 15–30 seconds until the status is terminal: `executed`, `rejected` (do not retry; ask what they want), `expired` (24 hours), `failed` (nothing was applied, safe to retry) or `partial` (some changes landed before the run stopped; read `resultSummary` and verify state instead of replaying).
 
 **Older tool names still work.** Clients pinned to an earlier manifest may hold `list_tables`, `create_table`, `add_column`, `create_index`, `add_rls`, `create_trigger`, `get_backend_metadata`, `get_metrics` and the rest of the pre-consolidation set. Those stay dispatchable at `POST /api/mcp/tool`, and the CLI's `call` reaches any of them by name. They are not advertised because every listed tool costs every agent accuracy on every call. `adopt_external_schema` is one of them: after DDL run over a direct Postgres connection, it reconciles Backenly's metadata (never emitting DDL itself).
 
@@ -115,24 +118,24 @@ Every MCP surface reads from one catalog, and the PostgreSQL catalog is the sour
 
 ## Every dashboard section, from an agent
 
-What an agent can do in each section of the project dashboard, and the door to use. "Via `backend_chat`" means a plain-English request; the CLI's `call` also reaches the typed tool named in brackets deterministically. "Approval" means a human confirms on the Autonomy page. "Dashboard only" means there is no agent path today.
+What an agent can do in each section of the project dashboard, and the door to use. "Approval" means the call is parked with its exact arguments and runs verbatim once a human approves it on the Autonomy page. "Dashboard only" means there is no agent path today.
 
-| Section | Reads | Changes |
+| Section | Tool | Notes |
 | --- | --- | --- |
-| Overview | `read_backend_state` (no section), `readiness`, `usage` | n/a |
-| Database | `get_table_schema`, `run_query`, `read_backend_state` `schema` / `tables` | `apply_migration`, `db_insert` / `db_update` / `db_delete`, `generate_types`; dropping a table or column needs approval |
-| Auth & Users | `read_backend_state` `users` | `enable_auth`; OAuth providers via `backend_chat` (it asks for the provider's client id and secret); password reset and unblock via `backend_chat` [`reset_end_user_password`, `unblock_end_user`]; blocking a user needs approval. Email templates and session settings: dashboard only |
-| Storage | `read_backend_state` `buckets` / `files` | `create_bucket`; public/private and signed URLs via `backend_chat` [`set_bucket_public`, `generate_signed_url`]; deleting a bucket or file needs approval. Uploads go through the SDK or REST |
-| Functions | `read_backend_state` `functions` / `cron` / `triggers` | `generate_function`; schedules and triggers via `backend_chat` [`create_cron_job`, `create_trigger`]; on/off [`toggle_ai_function`]; deleting needs approval |
-| Realtime | `read_backend_state` `realtime` | `enable_realtime`; disabling needs approval |
-| Integrations | `read_backend_state` `integrations` | Connect a provider key via `backend_chat` or [`store_integration_key`], or on the Integrations page, which keeps the key out of the conversation; removing a key needs approval. See Integrations below |
-| Autonomy | `read_backend_state` `autonomy` / `findings` / `incidents` / `maintenance` | autonomy level via `backend_chat` [`set_autonomy_level`]; approving queued items is for a human only |
-| Monitoring | `read_backend_state` `metrics` / `errors` / `usage`; request logs with the CLI's `logs` | alerts via `backend_chat` [`set_alert`] |
-| Branches (Cloud) | `branch` `list` / `diff` | `branch` `create` / `merge`; discarding needs approval |
-| Deploy | `read_backend_state` `deploy` / `readiness` | deploy and rollback via `backend_chat`, both need approval. Custom domains: dashboard only |
-| Connect | `read_backend_state` `keys` / `env` / `apps` | `create_api_key`, `get_database_credentials`, `set_env_var`; revoking or rotating a key needs approval. MCP keys: dashboard only, by design |
-| Webhooks | `read_backend_state` `webhooks` (deliveries) | secret rotation via `backend_chat` [`rotate_webhook_secret`]; creating outbound endpoints: dashboard only |
-| Projects | n/a | creating or switching projects: dashboard only; each key or sign-in is bound to one project |
+| Overview | `read_backend_state` | No section for the overview; `readiness`, `usage` for the rest |
+| Database | `get_table_schema`, `run_query`, `apply_migration`, `db_insert` / `db_update` / `db_delete`, `set_rls`, `generate_types` | Dropping a table or column: `backend_chat`, then approval |
+| Auth & Users | `auth` | Email templates and session settings: dashboard only |
+| Storage | `storage` | Deletes need approval |
+| Functions | `functions` | Deletes need approval |
+| Realtime | `realtime` | Disabling needs approval |
+| Integrations | `integrations` | See Integrations below |
+| Autonomy | `autonomy` | Approving queued items is for a human only |
+| Monitoring | `monitoring` | Request logs: the CLI's `logs` |
+| Branches (Cloud) | `branch` | Discarding: `backend_chat`, then approval |
+| Deploy | `deploy` | Deploy and rollback need approval. Custom domains: dashboard only |
+| Connect | `connect` | MCP keys: dashboard only, by design |
+| Webhooks | `webhooks` | Creating or deleting outbound endpoints: dashboard only |
+| Projects | none | Creating or switching projects: dashboard only; each key or sign-in is bound to one project |
 
 ---
 
@@ -164,7 +167,7 @@ Server-side TypeScript functions, triggered by `on_signup`, table events (insert
 
 Five providers have a dashboard card, and all of them work from an agent: Stripe, Resend, OpenAI, Anthropic and PostHog. The runtime registry also covers SendGrid, Twilio, OneSignal, Replicate, Runway and Stability.
 
-**Connecting a key.** Either the human pastes it on the Integrations page, which keeps the key out of the conversation, or the agent passes it: `backend_chat` ("connect Stripe with key sk_test_…") or `npx -y @backenly/cli@latest call store_integration_key integrationId=stripe apiKey=sk_test_…`. The key is verified with the provider before it is stored: Stripe, Resend, OpenAI and Anthropic are asked directly, and a key the provider rejects is refused rather than filed. PostHog project keys and webhook signing secrets cannot be checked by an API call and are stored as unverifiable, never reported as verified. Backenly never invents a credential.
+**Connecting a key.** Either the human pastes it on the Integrations page, which keeps the key out of the conversation, or the agent passes it: `integrations { action: "connect", integrationId: "stripe", apiKey: "sk_test_…", webhookSecret: "whsec_…" }` (from the shell: `npx -y @backenly/cli@latest call integrations action=connect integrationId=stripe apiKey=sk_test_…`). The key is verified with the provider before it is stored: Stripe, Resend, OpenAI and Anthropic are asked directly, and a key the provider rejects is refused rather than filed. PostHog project keys and webhook signing secrets cannot be checked by an API call and are stored as unverifiable, never reported as verified. Backenly never invents a credential.
 
 **What connecting from an agent wires up.** Storing the key through the agent path also builds the first pieces:
 
@@ -214,7 +217,7 @@ Everything the SDK does is plain HTTP. The base is `https://backenly.com/api/v1/
 
 **Data**, two grammars over one engine:
 
-- `/db/{table}`: Backenly's stable contract. `GET` (list, with filtering, sorting, pagination and search), `POST` (create), `GET /db/{table}/{id}`, `PATCH /db/{table}/{id}` (update; there is no `PUT`), `DELETE /db/{table}/{id}`.
+- `/db/{table}`: Backenly's stable contract. `GET` (list, with filtering, sorting, pagination and search), `POST` (create), `GET /db/{table}/{id}`, `PATCH /db/{table}/{id}` (update; `PUT` is accepted as the same update), `DELETE /db/{table}/{id}`.
 - `https://backenly.com/api/v2/{projectId}/{table}`: PostgREST's grammar, passed through: `?price=gte.100`, `?or=(a.eq.1,b.eq.2)`, `?order=createdAt.desc`, and embedded resources such as `?select=*,author(*)`.
 
 Authorization is enforced by PostgreSQL grants and row-level security, not by application code, including through embedded resources.

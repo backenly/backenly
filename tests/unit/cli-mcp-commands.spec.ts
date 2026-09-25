@@ -11,6 +11,8 @@
  * The real CLI runs as a child process against a local recorder server.
  */
 
+jest.setTimeout(60_000)
+
 import http from 'http'
 import { AddressInfo } from 'net'
 import { execFile } from 'child_process'

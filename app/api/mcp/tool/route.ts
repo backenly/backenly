@@ -20,7 +20,7 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
-import { mcpGuard, recordMcpCall, refuseIfReadOnly } from '@/lib/mcp/guard'
+import { mcpGuard, recordMcpCall, refuseIfReadOnly, type McpGuardAuth } from '@/lib/mcp/guard'
 import { corsHeaders, optionsResponse } from '@/lib/mcp/cors'
 import { catalogByName, STATE_SECTIONS, BRANCH_ACTIONS, isReadOnlyTool } from '@/lib/mcp/catalog'
 import { dispatchTool, isDestructiveTool, READ_ONLY_TOOLS } from '@/lib/ai/brain/tools'
@@ -31,6 +31,7 @@ import { prisma } from '@/lib/db/prisma'
 import { createTokenScope, runInTokenScope } from '@/lib/ai/token-meter'
 import { createHash } from 'crypto'
 import { DOCS_MAX_CHARS } from '@/lib/mcp/docs-limit'
+import { resolveDomainAction, type DomainResolution } from '@/lib/mcp/domains'
 
 /**
  * Tools on this route that spend Backenly's model budget. See the gate in POST
@@ -92,19 +93,56 @@ export async function POST(request: NextRequest) {
 
   const { tool, args } = parsed
 
+  // ── Domain tools: resolve the action before anything reads `tool` ─────────
+  //
+  // `auth {action:"enable"}` is enable_auth, `deploy {action:"rollback"}` is
+  // rollback_deploy (lib/mcp/domains.ts). Every check below — read-only keys,
+  // the credit gate, metering — is about what actually runs, so it reads the
+  // resolved target, while the activity feed records `domain.action`.
+  const domain = resolveDomainAction(tool, args.action)
+  if (domain?.kind === 'unknown_action') {
+    recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 400, tool, error: 'UNKNOWN_ACTION' })
+    return withCors(NextResponse.json(
+      {
+        ok: false,
+        error: domain.action ? `Unknown ${tool} action "${domain.action}".` : `${tool} requires { action }.`,
+        code: 'UNKNOWN_ACTION',
+        supported: domain.supported,
+        hint: `The ${tool} tool description lists what each action does and the arguments it needs.`,
+      },
+      { status: 400 },
+    ))
+  }
+  const resolved = domain?.kind === 'ok' ? domain : null
+  const effectiveTool = resolved ? resolved.target : tool
+  const callLabel = resolved ? `${tool}.${resolved.action}` : tool
+  const domainArgs: Record<string, unknown> | null = resolved
+    ? Object.fromEntries(Object.entries(args).filter(([k]) => k !== 'action'))
+    : null
+
   // ── Read-only keys ────────────────────────────────────────────────────────
   //
   // Before anything else that could touch state. tools/list already hides every
   // mutating tool from a read-only key, so reaching here means the client was
   // pinned to an older manifest or is calling the dispatch surface directly —
-  // both of which must be refused rather than served.
-  if (auth.readOnly && !isReadOnlyTool(tool)) {
-    const res = refuseIfReadOnly(auth, tool)!
+  // both of which must be refused rather than served. For a domain tool it is
+  // the action's target that is judged: `monitoring {action:"metrics"}` is a read.
+  if (auth.readOnly && !isReadOnlyTool(effectiveTool)) {
+    const res = refuseIfReadOnly(auth, callLabel)!
     recordMcpCall(
       { ...auth, endpoint: ENDPOINT, startedAt },
-      { statusCode: 403, error: 'READ_ONLY_KEY' },
+      { statusCode: 403, tool: callLabel, error: 'READ_ONLY_KEY' },
     )
     return withCors(res)
+  }
+
+  // ── Destructive and high-risk domain actions wait for a human ─────────────
+  //
+  // Parked with the exact call. Approval runs that call verbatim (see
+  // runApprovedCall in lib/mcp/approvals.ts), so what executes is what the
+  // human read, not a model's re-reading of it.
+  if (resolved?.approval) {
+    return withCors(await parkForApproval(auth, resolved, domainArgs!, startedAt))
   }
 
   // ── Credit gate for the model-backed tools ────────────────────────────────
@@ -123,13 +161,13 @@ export async function POST(request: NextRequest) {
   // two modules are the only OpenAI callers on the path. GENERATE_API, by
   // contrast, is pure SQL generation and is deliberately NOT gated. Keep this
   // set in sync when a new model-backed tool lands.
-  if (MODEL_BACKED_TOOLS.has(tool)) {
+  if (MODEL_BACKED_TOOLS.has(effectiveTool)) {
     const { enforceAiCredits } = await import('@/lib/entitlements/policy')
     const credits = await enforceAiCredits(auth.userId)
     if (credits !== true) {
       recordMcpCall(
         { ...auth, endpoint: ENDPOINT, startedAt },
-        { statusCode: 402, tool, error: 'AI_CREDITS_EXHAUSTED' },
+        { statusCode: 402, tool: callLabel, error: 'AI_CREDITS_EXHAUSTED' },
       )
       return withCors(NextResponse.json(
         {
@@ -140,7 +178,7 @@ export async function POST(request: NextRequest) {
           requiredPlan: credits.requiredPlan,
           upgradeRequired: true,
           remedy:
-            `\`${tool}\` uses Backenly's model budget and this month's credits are spent. ` +
+            `\`${callLabel}\` uses Backenly's model budget and this month's credits are spent. ` +
             `Every other tool on this route is deterministic and still works. ` +
             `Credits reset on the 1st, or upgrade the plan.`,
           retryable: false,
@@ -154,8 +192,8 @@ export async function POST(request: NextRequest) {
   // The call is still RECORDED as read_backend_state — that is what the agent
   // invoked and what the activity feed should say — but dispatch targets the
   // resolved name.
-  let dispatchName = tool
-  const dispatchArgs: Record<string, unknown> = args
+  let dispatchName = effectiveTool
+  const dispatchArgs: Record<string, unknown> = domainArgs ?? args
 
   // fetch_docs — synthetic read-only tool. Serves the agent-facing docs
   // (public/llms.txt) so a connected host LLM can self-serve context instead of
@@ -584,7 +622,9 @@ export async function POST(request: NextRequest) {
   // Checked against the DISPATCHABLE set, which is wider than the advertised
   // catalog — a client pinned to an older manifest still calls `list_tables`,
   // and 404-ing it would break a working setup for no reliability gain.
-  if (!catalog.has(dispatchName)) {
+  // A domain action's target is admitted by the domain table itself, which is
+  // narrower than the dispatchable set (it never names a control-loop tool).
+  if (!resolved && !catalog.has(dispatchName)) {
     const res = NextResponse.json(
       {
         ok: false,
@@ -613,7 +653,7 @@ export async function POST(request: NextRequest) {
   // Billed in `finally` because a dispatch that threw still burned the tokens
   // it burned. Fire-and-forget, mirroring the chat route: a billing write must
   // never turn a completed backend change into an error response.
-  const metered = MODEL_BACKED_TOOLS.has(tool)
+  const metered = MODEL_BACKED_TOOLS.has(effectiveTool)
   const tokenScope = createTokenScope()
 
   try {
@@ -664,7 +704,7 @@ export async function POST(request: NextRequest) {
       { ...auth, endpoint: ENDPOINT, startedAt },
       {
         statusCode: result.ok ? 200 : 400,
-        tool,
+        tool: callLabel,
         mutation: isMutation,
         summary: result.summary,
         error: code,
@@ -806,4 +846,68 @@ function extractSection(markdown: string, topic: string): string | null {
 
 function clamp(s: string): string {
   return s.length <= DOCS_MAX_CHARS ? s : s.slice(0, DOCS_MAX_CHARS) + '\n\n…(truncated — see https://backenly.com/llms.txt)'
+}
+
+// ── Parking a domain action for a human ─────────────────────────────────────
+
+/** Argument names whose values never belong in a human-facing description. */
+const SECRET_ARG = /^(apiKey|clientSecret|webhookSecret|value|password|secret)$/i
+
+/** "Deploy: rollback (version=3)" — what the human reads on the approval card. */
+function describeCall(resolution: Extract<DomainResolution, { kind: 'ok' }>, args: Record<string, unknown>): string {
+  const shown = Object.entries(args)
+    .filter(([, v]) => v !== undefined && v !== null && v !== '')
+    .map(([k, v]) => `${k}=${SECRET_ARG.test(k) ? '•••' : typeof v === 'string' ? v : JSON.stringify(v)}`)
+    .join(', ')
+  const text = `${resolution.domain.title}: ${resolution.action}${shown ? ` (${shown})` : ''}`
+  return text.length > 280 ? text.slice(0, 277) + '…' : text
+}
+
+async function parkForApproval(
+  auth: McpGuardAuth,
+  resolution: Extract<DomainResolution, { kind: 'ok' }>,
+  args: Record<string, unknown>,
+  startedAt: number,
+): Promise<NextResponse> {
+  const callLabel = `${resolution.domain.name}.${resolution.action}`
+  const described = describeCall(resolution, args)
+  try {
+    const { createApprovalRequest } = await import('@/lib/mcp/approvals')
+    const row = await createApprovalRequest({
+      projectId: auth.projectId,
+      userId: auth.userId,
+      apiKeyId: auth.keyId,
+      message: `Requested by an agent over MCP: ${described}`,
+      danger: { tool: resolution.target, target: described, rowCount: null, reversible: false },
+      toolArgs: args,
+    })
+    recordMcpCall(
+      { ...auth, endpoint: ENDPOINT, startedAt },
+      { statusCode: 200, tool: callLabel, mutation: false, summary: `awaiting approval ${row.id}` },
+    )
+    return NextResponse.json({
+      ok: true,
+      status: 'awaiting_approval',
+      summary:
+        `${described} needs a human's approval and is waiting on the project's Autonomy page. ` +
+        `Nothing has changed yet.`,
+      approval: {
+        id: row.id,
+        status: 'pending',
+        poll: `check_approval with { "id": "${row.id}" }`,
+        note:
+          'The exact call you sent runs verbatim once a human approves it. Tell your human it is waiting, ' +
+          'then poll check_approval every 15-30s until it is executed, rejected, failed or expired (24h).',
+      },
+      needsUser: true,
+      timing: { ms: Date.now() - startedAt, heavy: false },
+    })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Could not create the approval request.'
+    recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 500, tool: callLabel, error: 'APPROVAL_FAILED' })
+    return NextResponse.json(
+      { ok: false, error: message, code: 'APPROVAL_FAILED', retryable: true, hint: 'Nothing was changed. Retry the call.' },
+      { status: 500 },
+    )
+  }
 }

@@ -32,6 +32,7 @@
  */
 
 import { BRAIN_TOOLS, READ_ONLY_TOOLS, isDestructiveTool } from '@/lib/ai/brain/tools'
+import { DOMAIN_TOOLS, domainDescription, domainInputSchema, getDomainTool } from '@/lib/mcp/domains'
 
 export type McpTier = 'chat' | 'read' | 'build' | 'data'
 
@@ -105,6 +106,18 @@ const TITLES: Record<string, string> = {
 const OPEN_WORLD = new Set(['backend_chat', 'store_integration_key', 'send_push'])
 
 export function annotationsFor(name: string): McpToolAnnotations {
+  // A domain tool never performs a destructive update itself: its destructive
+  // and high-risk actions park the exact call for a human (lib/mcp/domains.ts).
+  const domain = getDomainTool(name)
+  if (domain) {
+    return {
+      title: domain.title,
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: !!domain.openWorld,
+    }
+  }
   const readOnly = isReadOnlyTool(name)
   const words = name.replace(/_/g, ' ')
   return {
@@ -204,6 +217,12 @@ function tierOf(name: string): McpTier | null {
  * working — being unlisted costs an agent nothing, while being listed costs
  * every agent accuracy on every call.
  */
+/**
+ * The most tools the manifest may advertise. Asserted by test: raising it is a
+ * decision about every agent's selection accuracy, not a side effect.
+ */
+export const ADVERTISED_CAP = 23
+
 const MCP_SURFACE = new Set<string>([
   // Natural language — the fall-through for everything not listed here.
   'backend_chat',
@@ -275,9 +294,25 @@ const MCP_SURFACE = new Set<string>([
   // reads pg_policies back before reporting. `add_rls` remains for the named
   // templates and stays dispatchable.
   'set_rls',
-  // Capabilities with no SQL expression and no competing tool.
-  'enable_auth',
-  'create_bucket',
+  // ── One door per dashboard section (lib/mcp/domains.ts) ────────────────────
+  //
+  // These replaced the single-purpose capability tools (enable_auth,
+  // create_bucket, generate_function, enable_realtime, create_api_key,
+  // set_env_var, get_database_credentials), each of which covered one button of
+  // its section and left the rest behind backend_chat. Each is now one tool with
+  // an `action` enum, routed to the same brain tools; the old names stay
+  // dispatchable for pinned clients. Destructive and high-risk actions park the
+  // exact call for a human instead of running.
+  'auth',
+  'storage',
+  'functions',
+  'realtime',
+  'integrations',
+  'monitoring',
+  'autonomy',
+  'webhooks',
+  'deploy',
+  'connect',
   // ── Deliberately absent: generate_api ─────────────────────────────────────
   //
   // It contradicts what read_backend_state now says. Since the PostgREST
@@ -294,37 +329,23 @@ const MCP_SURFACE = new Set<string>([
   //
   // The slot it frees goes to generate_types, which the surface genuinely
   // lacked. Net advertised count is unchanged.
-  'generate_function',
-  'enable_realtime',
-  'create_api_key',
-  'set_env_var',
-  // ── Deliberately absent: trigger_deploy, delete_ai_function ───────────────
   //
-  // Both were reported as missing from a real build ("Project stuck
-  // not_deployed with no MCP tool to deploy", "No way to delete a function via
-  // MCP — my scratch diag-echo is stuck deployed"), and listing them here does
-  // nothing: `buildDispatchable()` skips every tool `isDestructiveTool()` names,
-  // so they would be filtered before reaching the manifest.
+  // ── Deploying and deleting a function: through their domain tools ─────────
   //
-  // That filter is the design, not an oversight. Shipping to production and
-  // deleting a deployed function are outward-facing and hard to reverse, so
-  // they route through backend_chat → the human Review Queue → check_approval.
-  // The agent CAN do both; it just cannot do them unilaterally.
+  // Both were reported missing from a real build ("Project stuck not_deployed
+  // with no MCP tool to deploy", "No way to delete a function via MCP"). The
+  // answer then was a sign pointing at backend_chat, because trigger_deploy and
+  // delete_ai_function are destructive and never dispatch directly. They are
+  // now `deploy {action:"deploy"}` and `functions {action:"delete"}`, which park
+  // the exact call for a human and run it verbatim once approved. The agent can
+  // request them deterministically; it still cannot do them unilaterally.
   //
-  // What was actually broken was the documentation. get_instructions listed the
-  // approval path as covering "drop_table / truncate_table / drop_column /
-  // delete_bucket" — an incomplete list that did not include deploying or
-  // deleting a function, so an agent looking for either concluded no path
-  // existed. Fixed in the guide rather than by widening the surface: the answer
-  // to "I could not find the door" is a sign, not a second door.
-  //
-  // Direct Postgres access.
-  'get_database_credentials',
   // ── Deliberately absent: adopt_external_schema ────────────────────────────
   //
-  // The slot pays for `set_rls`. This allowlist is capped at 20 by test, and the
-  // cap is the point — every addition has to displace something rather than
-  // quietly cost every other call its accuracy.
+  // The slot paid for `set_rls` when this allowlist was capped at 20. The cap is
+  // now ADVERTISED_CAP (the domain tools cost three net slots), and it is still
+  // the point: every addition has to displace something rather than quietly
+  // cost every other call its accuracy.
   //
   // This is the weakest tool on the list to give up. It is bookkeeping-only and
   // never emits DDL: it reconciles Backenly's metadata after someone changed the
@@ -744,6 +765,18 @@ export function buildDispatchable(): McpToolDescriptor[] {
   // a STRING from an enum inside a chosen tool is a far easier decision for a
   // model than picking between 26 similarly-named tools, and it costs a fraction
   // of the context. The underlying tools are unchanged and still dispatchable.
+  // ── Domain tools — one door per dashboard section (lib/mcp/domains.ts) ─────
+  // Description and schema are generated from the brain tools each action
+  // routes to, so the advertised arguments can never drift from what runs.
+  for (const domain of DOMAIN_TOOLS) {
+    out.push({
+      name: domain.name,
+      tier: 'build',
+      description: domainDescription(domain),
+      inputSchema: domainInputSchema(domain),
+    })
+  }
+
   const stateIndex = out.findIndex((t) => t.name === 'read_backend_state')
   const stateDescriptor: McpToolDescriptor = {
     name: 'read_backend_state',

@@ -28,6 +28,12 @@ import fs from 'fs'
 import path from 'path'
 import { buildCatalog, buildDispatchable, STATE_SECTIONS } from '@/lib/mcp/catalog'
 import { DOCS_MAX_CHARS } from '@/lib/mcp/docs-limit'
+import { DOMAIN_TOOLS } from '@/lib/mcp/domains'
+
+// A domain tool's actions (`set_public`, `list_users`, …) are vocabulary the
+// docs must be free to name. Read from the domain table, so an action that is
+// renamed or removed makes a stale mention fail instead of passing silently.
+const DOMAIN_ACTIONS = new Set(DOMAIN_TOOLS.flatMap((d) => Object.keys(d.actions)))
 import { BRAIN_TOOLS } from '@/lib/ai/brain/tools'
 
 const LLMS_TXT = fs.readFileSync(path.join(process.cwd(), 'public', 'llms.txt'), 'utf8')
@@ -104,7 +110,11 @@ describe('llms.txt describes the real MCP surface', () => {
     )
     const suspicious = [...mentionedTools()].filter(
       (name) =>
-        name.includes('_') && !realTools.has(name) && !KNOWN_NON_TOOLS.has(name) && !rlsTemplates.has(name),
+        name.includes('_') &&
+        !realTools.has(name) &&
+        !KNOWN_NON_TOOLS.has(name) &&
+        !rlsTemplates.has(name) &&
+        !DOMAIN_ACTIONS.has(name),
     )
     expect(suspicious).toEqual([])
   })
@@ -117,6 +127,7 @@ describe('llms.txt describes the real MCP surface', () => {
     const unexplained = named.filter(
       (name) =>
         !dispatchable.has(name) &&
+        !DOMAIN_ACTIONS.has(name) &&
         !new RegExp(`Older tool names[\\s\\S]{0,1200}\`${name}\``).test(LLMS_TXT) &&
         !new RegExp(`Destructive tools[\\s\\S]{0,600}\`${name}\``).test(LLMS_TXT) &&
         !new RegExp(`\`${name}\`[\\s\\S]{0,400}backend_chat`).test(LLMS_TXT),

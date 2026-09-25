@@ -11,7 +11,7 @@ Run it before you open the agent: hosts read MCP config when a conversation star
 
 ## What you get
 
-Twenty advertised tools, not sixty. The catalog is an allowlist admitted on one
+Twenty-three advertised tools, not sixty. The catalog is an allowlist admitted on one
 rule — *is there exactly one tool here that answers a given request?* — because
 tool-selection accuracy degrades with catalog size and models misfire hardest
 between similarly-named tools. Everything else is reached through `backend_chat`.
@@ -43,7 +43,7 @@ The host LLM hands the request to Backenly's brain. Brain plans, executes, and r
 
 ### Capabilities
 
-`enable_auth`, `create_bucket`, `generate_function`, `enable_realtime`, `create_api_key`, `set_env_var`, `branch` (preview branches) — the things no SQL statement expresses. Plus `get_database_credentials` (direct Postgres, read-write only after a human arms it). REST endpoints need no generation step, and `adopt_external_schema` (reconcile drift made outside Backenly) stays callable by name without being advertised.
+One tool per dashboard section, each with an `action`: `auth`, `storage`, `functions`, `realtime`, `integrations`, `monitoring`, `autonomy`, `webhooks`, `deploy`, `connect`, plus `branch` (preview branches). Each tool's description lists its actions and their arguments. Destructive and high-risk actions (deploy, rollback, deletes, revoking a key) park the exact call for a human and run it verbatim once approved; poll `check_approval`. REST endpoints need no generation step, and older tool names such as `enable_auth` or `adopt_external_schema` stay callable by name without being advertised.
 
 ### Resources (11)
 

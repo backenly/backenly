@@ -58,14 +58,20 @@ describe('the read-only catalog', () => {
       'db_update',
       'db_delete',
       'set_rls',
-      'enable_auth',
-      'create_bucket',
-      'generate_function',
-      'enable_realtime',
-      'create_api_key',
-      'set_env_var',
       'branch',
-      'get_database_credentials',
+      // Every domain tool carries at least one write action, so each one is
+      // withheld whole; the dispatcher still serves a read-only key the read
+      // actions (see mcp-domain-tools.spec.ts).
+      'auth',
+      'storage',
+      'functions',
+      'realtime',
+      'integrations',
+      'monitoring',
+      'autonomy',
+      'webhooks',
+      'deploy',
+      'connect',
     ]
     for (const name of withheld) {
       expect(names(full)).toContain(name)      // it is a real advertised tool…
