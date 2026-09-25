@@ -321,6 +321,29 @@ function getConnectedFromContext(integrations: IntegrationContext): string[] {
 
 // ─── Worker-based execution ───────────────────────────────────────────────────
 
+/**
+ * A sandbox run that failed, carrying the lines the function logged first.
+ *
+ * The worker sends its log lines in the message that ends the run, `done` or
+ * `error`, and never one at a time. This used to reject with a bare Error and
+ * resolve with the parent's own list, which only ever filled from per-line
+ * messages that were never sent, so every sandbox run was recorded with no
+ * log lines at all: after a success, and after the failure an agent most
+ * needed them for.
+ */
+export class SandboxRunError extends Error {
+  constructor(message: string, readonly logs: string[]) {
+    super(message)
+    this.name = 'SandboxRunError'
+  }
+}
+
+/** The lines a finished run logged: the ones the worker sent, else any streamed. */
+function workerLines(streamed: string[], msg: { logs?: unknown }): string[] {
+  const sent = Array.isArray(msg.logs) ? msg.logs.map((l) => String(l)) : []
+  return sent.length ? sent : streamed
+}
+
 function runInWorker(
   code: string,
   event: FunctionEvent,
@@ -351,7 +374,7 @@ function runInWorker(
     // Hard timeout: kill the worker after EXECUTION_TIMEOUT_MS
     const hardKillTimer = setTimeout(() => {
       worker.terminate().catch(() => {})
-      reject(new Error('Function timed out after 10s'))
+      reject(new SandboxRunError('Function timed out after 10s', logs))
     }, EXECUTION_TIMEOUT_MS)
 
     worker.on('message', async (msg: any) => {
@@ -379,27 +402,27 @@ function runInWorker(
       if (msg.type === 'done') {
         clearTimeout(hardKillTimer)
         worker.terminate().catch(() => {})
-        resolve({ logs, returnValue: msg.result })
+        resolve({ logs: workerLines(logs, msg), returnValue: msg.result })
         return
       }
 
       if (msg.type === 'error') {
         clearTimeout(hardKillTimer)
         worker.terminate().catch(() => {})
-        reject(new Error(msg.error))
+        reject(new SandboxRunError(msg.error, workerLines(logs, msg)))
         return
       }
     })
 
     worker.on('error', (err) => {
       clearTimeout(hardKillTimer)
-      reject(err)
+      reject(new SandboxRunError(err.message, logs))
     })
 
     worker.on('exit', (code) => {
       clearTimeout(hardKillTimer)
       if (code !== 0) {
-        reject(new Error(`Sandbox worker exited with code ${code}`))
+        reject(new SandboxRunError(`Sandbox worker exited with code ${code}`, logs))
       }
     })
 
@@ -755,7 +778,9 @@ export async function executeAiFunction(
 
   const durationMs = Date.now() - startMs
   const errorMsg = lastError?.message || 'Unknown error'
-  const logs: string[] = []
+  // What the function logged before it failed, which is what an agent reads
+  // to find out why.
+  const logs: string[] = lastError instanceof SandboxRunError ? lastError.logs : []
 
   // Persist error log
   await persistExecutionLog(functionId, projectId, false, logs, errorMsg, durationMs, event.type)
