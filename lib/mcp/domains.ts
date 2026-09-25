@@ -61,6 +61,12 @@ export const DOMAIN_TOOLS: DomainTool[] = [
       block_user: { tool: 'block_end_user', gloss: 'stop one user from signing in' },
       unblock_user: { tool: 'unblock_end_user', gloss: 'let a blocked user sign in again' },
       enable_teams: { tool: 'enable_teams', gloss: 'organizations with members and roles' },
+      email_settings: { tool: 'get_auth_email_settings', gloss: 'how verification and password-reset emails are sent, whether the last test worked, and the templates' },
+      set_smtp: { tool: 'set_auth_smtp', gloss: 'the SMTP server auth emails are sent through (the password is stored encrypted and never returned)' },
+      test_smtp: { tool: 'test_auth_smtp', gloss: 'send one real test email and record whether it arrived at the server' },
+      remove_smtp: { tool: 'remove_auth_smtp', gloss: 'remove the SMTP settings' },
+      set_email_template: { tool: 'set_auth_email_template', gloss: 'the app\'s own verification, password_reset or magic_link email; must include {{ctaUrl}}' },
+      reset_email_template: { tool: 'reset_auth_email_template', gloss: 'go back to the default for one of them' },
     },
   },
   {
@@ -86,6 +92,9 @@ export const DOMAIN_TOOLS: DomainTool[] = [
     actions: {
       create: { tool: 'generate_function', gloss: 'a function from a plain-English spec, fired by sign-up, a table event, HTTP or manually' },
       list: { tool: 'list_ai_functions', gloss: 'every function with its trigger and on/off state' },
+      get: { tool: 'get_ai_function', gloss: 'one function in full: its code, trigger, endpoint, state and last error' },
+      invoke: { tool: 'invoke_ai_function', gloss: 'run it once now and get its answer, return value and log lines; a failure is reported, never auto-repaired' },
+      logs: { tool: 'list_ai_function_logs', gloss: 'recent runs from every trigger, with errors and ctx.log lines' },
       set_active: { tool: 'toggle_ai_function', gloss: 'turn a function on or off' },
       delete: { tool: 'delete_ai_function', gloss: 'remove a function' },
       schedule: { tool: 'create_cron_job', gloss: 'a job on a schedule ("every 15 minutes" or 5-field cron)' },
@@ -114,6 +123,8 @@ export const DOMAIN_TOOLS: DomainTool[] = [
     openWorld: true,
     actions: {
       list: { tool: 'list_integration_keys', gloss: 'connected providers, masked keys and verification state' },
+      capabilities: { tool: 'list_integration_capabilities', gloss: 'the exact ctx.integrations methods each provider gives a function, and for Stripe its receiver URL and signing-secret state' },
+      verify: { tool: 'verify_integration_key', gloss: 'ask the provider again whether the stored key works' },
       connect: { tool: 'store_integration_key', gloss: 'store a provider key (Stripe also takes webhookSecret) and wire the first functions' },
       disconnect: { tool: 'remove_integration_key', gloss: 'remove a provider key' },
       send_push: { tool: 'send_push', gloss: 'a push notification through the connected OneSignal app' },
@@ -128,6 +139,7 @@ export const DOMAIN_TOOLS: DomainTool[] = [
       errors: { tool: 'get_errors', gloss: 'recent 5xx errors grouped by endpoint' },
       usage: { tool: 'get_usage', gloss: 'plan usage against its limits' },
       incidents: { tool: 'get_pending_incidents', gloss: 'what was detected, fixed or queued while nobody was watching' },
+      request_logs: { tool: 'list_request_logs', gloss: 'each request the runtime API served: method, path, status, latency, time' },
       set_alert: { tool: 'set_alert', gloss: 'an alert on error rate, p95 latency, request rate or integration failures' },
     },
   },
@@ -147,12 +159,24 @@ export const DOMAIN_TOOLS: DomainTool[] = [
   {
     name: 'webhooks',
     title: 'Webhooks',
-    summary: 'Event deliveries and their signing secrets.',
+    summary:
+      'Endpoints that receive signed POSTs when rows change or an end user signs up (the Webhooks page), and ' +
+      'table triggers whose action calls a URL. Endpoint deliveries carry X-Webhook-Signature: ' +
+      'sha256=<HMAC-SHA256 of the raw body>; a secret is returned once, in data.secret.',
+    openWorld: true,
     actions: {
-      deliveries: { tool: 'list_webhook_deliveries', gloss: 'recent deliveries, filterable by SUCCESS, FAILED or DEAD' },
-      replay: { tool: 'replay_webhook_delivery', gloss: 'send one delivery again' },
-      rotate_secret: { tool: 'rotate_webhook_secret', gloss: 'issue a new signing secret for a trigger' },
-      triggers: { tool: 'list_triggers', gloss: 'the table-event triggers that produce deliveries' },
+      list: { tool: 'list_webhooks', gloss: 'every endpoint with its event, URL, on/off state and capture health' },
+      create: { tool: 'create_webhook', gloss: 'an endpoint for row.inserted, row.updated, row.deleted or auth.user.created' },
+      update: { tool: 'update_webhook', gloss: 'change the URL or event of an endpoint, or switch it on or off' },
+      delete: { tool: 'delete_webhook', gloss: 'remove an endpoint and its delivery history' },
+      test: { tool: 'test_webhook', gloss: 'send one real signed test delivery now and see what the receiver answered' },
+      logs: { tool: 'list_webhook_logs', gloss: 'the deliveries of one endpoint, with status, HTTP code, error and payload' },
+      replay: { tool: 'replay_webhook_log', gloss: 'send a FAILED or DEAD_LETTER delivery again' },
+      rotate_secret: { tool: 'rotate_webhook_endpoint_secret', gloss: 'a new signing secret for an endpoint' },
+      triggers: { tool: 'list_triggers', gloss: 'the table triggers, including those whose action calls a URL' },
+      trigger_deliveries: { tool: 'list_webhook_deliveries', gloss: 'recent trigger deliveries, filterable by SUCCESS, FAILED or DEAD' },
+      replay_trigger_delivery: { tool: 'replay_webhook_delivery', gloss: 'send a DEAD trigger delivery again' },
+      rotate_trigger_secret: { tool: 'rotate_webhook_secret', gloss: 'a new signing secret for a trigger' },
     },
   },
   {
@@ -161,6 +185,7 @@ export const DOMAIN_TOOLS: DomainTool[] = [
     summary: 'Publishing and rolling back. Both change what production serves, so both wait for a human.',
     actions: {
       status: { tool: 'get_deploy_status', gloss: 'the live version, when it shipped and its state' },
+      history: { tool: 'list_deploy_versions', gloss: 'every published version, which one is serving, and which can be rolled back to' },
       readiness: { tool: 'get_readiness', gloss: 'the 0-100 readiness score with blockers; fixes nothing unless autoFix is true', readGloss: 'the 0-100 readiness score with its blockers' },
       deploy: { tool: 'trigger_deploy', gloss: 'publish the current backend' },
       rollback: { tool: 'rollback_deploy', gloss: 'return to an earlier version' },
@@ -169,11 +194,14 @@ export const DOMAIN_TOOLS: DomainTool[] = [
   {
     name: 'connect',
     title: 'Connect',
-    summary: 'Keys, secrets and connections for the apps and tools that use this backend.',
+    summary:
+      'Keys, secrets and connections for the apps and tools that use this backend. To rotate a key without ' +
+      'downtime: create_api_key, move the app to the new key, then revoke_api_key the old one.',
     // No rotate_api_key: the executor puts the new secret in its summary, and an
     // approved exact call stores that summary where check_approval and the
-    // approvals list serve it. It stays out until the secret is handed over once.
+    // approvals list serve it. Create-then-revoke rotates with nothing stored.
     actions: {
+      whoami: { tool: 'get_connection_identity', gloss: 'the project this connection is bound to, and the key or OAuth connection calling' },
       create_api_key: { tool: 'create_api_key', gloss: 'a scoped key for an app, optionally bound to a preview branch' },
       list_api_keys: { tool: 'list_api_keys', gloss: 'every key with its scope and last use' },
       set_key_permissions: { tool: 'set_key_permissions', gloss: 'change what a key may do' },

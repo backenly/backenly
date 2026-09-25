@@ -322,6 +322,52 @@ export async function recordSmtpTest(
     })
 }
 
+/**
+ * Send one real test message to `to` with the settings a send would use now,
+ * and record the outcome. Shared by the Auth page's "Send test" and the
+ * agent's auth test_smtp, so both prove the same thing.
+ */
+export async function sendProjectSmtpTest(
+  nodemailer: any,
+  projectId: string,
+  to: string,
+): Promise<{ sent: boolean; source: SmtpSource; error?: string }> {
+  const resolved = await buildProjectSmtpTransport(nodemailer, projectId)
+  if (!resolved) {
+    return {
+      sent: false,
+      source: 'none',
+      error: 'No SMTP settings for this project and no deployment fallback, so nothing was sent.',
+    }
+  }
+  try {
+    await resolved.transport.sendMail({
+      from: resolved.from,
+      to,
+      subject: 'Backenly SMTP test',
+      // Deliberately dull and carrying no project data. A test message is not a
+      // place to demonstrate templates, and it must be safe to send anywhere.
+      text:
+        'This is a test message from Backenly. If you are reading it, this ' +
+        "project's outgoing mail settings work.",
+    })
+    await recordSmtpTest(projectId, null)
+    return { sent: true, source: resolved.source }
+  } catch (err: any) {
+    // The provider's own words. An operator debugging a 535 needs to read it,
+    // and paraphrasing it into "send failed" is how a five-second fix becomes a
+    // support thread.
+    const message = String(err?.message ?? err)
+    await recordSmtpTest(projectId, message)
+    return { sent: false, source: resolved.source, error: message.slice(0, 500) }
+  }
+}
+
+/** A recipient a test can be checked at. */
+export function isTestRecipient(to: unknown): to is string {
+  return typeof to === 'string' && /^[^\s@]+@[^\s@.]+\.[^\s@]+$/.test(to.trim())
+}
+
 export async function deleteSmtpConfig(projectId: string): Promise<boolean> {
   const { count } = await prisma.projectEmailConfig.deleteMany({ where: { projectId } })
   return count > 0
