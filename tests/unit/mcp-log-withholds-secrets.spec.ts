@@ -71,8 +71,9 @@ describe('what is withheld', () => {
   })
 
   it('the password in a connection string, leaving the rest readable', () => {
-    expect(withholdSecrets('postgresql://bkn_ro_abc:s3cretpassw0rd@db.host:5432/backenly'))
-      .toBe('postgresql://bkn_ro_abc:[withheld]@db.host:5432/backenly')
+    // A placeholder the credential scan recognises as one; the shape is what matters.
+    expect(withholdSecrets('postgresql://bkn_ro_abc:changeme@localhost:5432/backenly'))
+      .toBe('postgresql://bkn_ro_abc:[withheld]@localhost:5432/backenly')
   })
 
   it('nothing from an ordinary summary, including a short key prefix shown for recognition', () => {
