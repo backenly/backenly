@@ -40,6 +40,13 @@ for f in postgrest-schema-registry.sql postgrest-ddl-sync.sql; do
   db_admin_sql_file "$DIR/sql/$f"
 done
 
+# Not PostgREST, but required the same way: route-module functions run their
+# SQL as a per-project login this helper creates, and refuse to run without it.
+# After ddl-sync, which defines backenly_app_role(); it has no event triggers,
+# so nothing about its position can break the install.
+echo "  → function-roles.sql"
+db_admin_sql_file "$DIR/sql/function-roles.sql"
+
 echo
 echo "Verifying:"
 
@@ -53,7 +60,9 @@ for fn in \
   backenly_pgrst_unregister_schema \
   backenly_pgrst_revoke_internal \
   backenly_pgrst_prepare_schema \
-  backenly_pgrst_reload
+  backenly_pgrst_reload \
+  backenly_fn_role_name \
+  backenly_fn_role_sync
 do
   if [ "$(db_admin_psql -tAqc "SELECT count(*) FROM pg_proc WHERE proname = '$fn'" | tr -d '[:space:]')" = "0" ]; then
     echo "  MISSING function: $fn"
@@ -88,7 +97,7 @@ if [ "$missing" -ne 0 ]; then
   exit 1
 fi
 
-echo "  7 functions + 2 event triggers + 4 roles present."
+echo "  9 functions + 2 event triggers + 4 roles present."
 echo
 echo "  Registered schemas: $(db_admin_psql -tAqc 'SELECT public.backenly_pgrst_current_schemas()' | tr -d '[:space:]')"
 echo
