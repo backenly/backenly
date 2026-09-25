@@ -12,8 +12,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { withAuth } from '@/lib/auth/route-protection'
 import { canAccessProject } from '@/lib/edition/guard'
-import { prisma } from '@/lib/db/prisma'
-import { KIND_LABELS, TEMPLATE_KINDS, TEMPLATE_VARIABLES, REQUIRED_VARIABLES } from '@/lib/email/template-kinds'
+import { listProjectTemplates } from '@/lib/email/project-templates'
 
 export const GET = withAuth(async (_request: NextRequest, { user, params }) => {
   const { id: projectId } = await params
@@ -21,29 +20,6 @@ export const GET = withAuth(async (_request: NextRequest, { user, params }) => {
     return NextResponse.json({ error: 'Project not found' }, { status: 404 })
   }
 
-  const overrides = await prisma.projectEmailTemplate.findMany({
-    where: { projectId },
-    select: { kind: true, subject: true, bodyHtml: true, updatedAt: true },
-  })
-  const byKind = new Map(overrides.map(o => [o.kind, o]))
-
-  return NextResponse.json({
-    // The allowlist travels with the list, so the editor renders its help text
-    // from the same source the validator enforces. Two copies is how a UI ends
-    // up offering a placeholder the API rejects.
-    variables: TEMPLATE_VARIABLES,
-    requiredVariables: REQUIRED_VARIABLES,
-    templates: TEMPLATE_KINDS.map(kind => {
-      const override = byKind.get(kind)
-      return {
-        kind,
-        title: KIND_LABELS[kind].title,
-        sends: KIND_LABELS[kind].sends,
-        customised: Boolean(override),
-        subject: override?.subject ?? null,
-        bodyHtml: override?.bodyHtml ?? null,
-        updatedAt: override?.updatedAt?.toISOString() ?? null,
-      }
-    }),
-  })
+  // Shared with the agent's auth email_settings (lib/email/project-templates.ts).
+  return NextResponse.json(await listProjectTemplates(projectId))
 })

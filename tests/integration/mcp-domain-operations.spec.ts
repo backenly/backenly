@@ -392,6 +392,67 @@ describe('integrations', () => {
   }, 60_000)
 })
 
+// ── Auth: the emails end users receive ───────────────────────────────────────
+
+describe('auth email', () => {
+  const smtpPassword = `fixture-${crypto.randomBytes(8).toString('hex')}`
+
+  it('shows the sender and the three templates, for a read-only key too', async () => {
+    const r = await call(RO_KEY, 'auth', { action: 'email_settings' })
+    expect(r.body.ok).toBe(true)
+    expect(r.body.data.smtp).toMatchObject({ configured: false, passwordConfigured: false })
+    expect(r.body.data.templates.map((t: any) => t.kind)).toEqual(['verification', 'password_reset', 'magic_link'])
+  }, 60_000)
+
+  it('refuses a template without the link it exists to deliver, and saves nothing', async () => {
+    const r = await call(RW_KEY, 'auth', { action: 'set_email_template', kind: 'password_reset', subject: 'Reset', bodyHtml: '<p>no link</p>' })
+    expect(r.body).toMatchObject({ ok: false, code: 'INVALID_ARGUMENT' })
+    expect(await prisma.projectEmailTemplate.count({ where: { projectId } })).toBe(0)
+  }, 60_000)
+
+  it('saves a template and puts the default back', async () => {
+    const saved = await call(RW_KEY, 'auth', { action: 'set_email_template', kind: 'password_reset', subject: 'Reset your {{appName}} password', bodyHtml: '<a href="{{ctaUrl}}">Reset</a>' })
+    expect(saved.body).toMatchObject({ ok: true, data: { template: { kind: 'password_reset', customised: true } } })
+    const reset = await call(RW_KEY, 'auth', { action: 'reset_email_template', kind: 'password_reset' })
+    expect(reset.body).toMatchObject({ ok: true, data: { reverted: true } })
+    expect(await prisma.projectEmailTemplate.count({ where: { projectId } })).toBe(0)
+  }, 60_000)
+
+  it('does not let a read-only key change a template', async () => {
+    const r = await call(RO_KEY, 'auth', { action: 'set_email_template', kind: 'verification', subject: 's', bodyHtml: '{{ctaUrl}}' })
+    expect(r.body.code).toBe('READ_ONLY_KEY')
+  }, 60_000)
+
+  it('refuses SMTP settings that cannot authenticate', async () => {
+    const r = await call(RW_KEY, 'auth', { action: 'set_smtp', host: '127.0.0.1', port: 1, username: 'u', fromAddress: 'app@example.test' })
+    expect(r.body).toMatchObject({ ok: false, code: 'INVALID_ARGUMENT' })
+    expect(r.body.summary).toContain('password')
+  }, 60_000)
+
+  it('stores the password and never returns it', async () => {
+    const r = await call(RW_KEY, 'auth', { action: 'set_smtp', host: '127.0.0.1', port: 1, username: 'u', password: smtpPassword, fromAddress: 'app@example.test' })
+    expect(r.body).toMatchObject({ ok: true, data: { smtp: { configured: true, passwordConfigured: true } } })
+    expect(JSON.stringify(r.body)).not.toContain(smtpPassword)
+  }, 60_000)
+
+  it('reports a test send that fails, and records the failure instead of a green tick', async () => {
+    const r = await call(RW_KEY, 'auth', { action: 'test_smtp', to: 'owner@example.test' })
+    expect(r.body).toMatchObject({ ok: false, code: 'SEND_FAILED', data: { sent: false, source: 'project' } })
+    const row = await prisma.projectEmailConfig.findUnique({ where: { projectId } })
+    expect(row?.lastTestAt).not.toBeNull()
+    expect(row?.lastTestError).toBeTruthy()
+  }, 60_000)
+
+  it('parks removing the sender for a human', async () => {
+    const r = await call(RW_KEY, 'auth', { action: 'remove_smtp' })
+    expect(r.body).toMatchObject({ ok: true, status: 'awaiting_approval' })
+    expect(await prisma.projectEmailConfig.count({ where: { projectId } })).toBe(1)
+    const decided = await decideApproval({ projectId, approvalId: r.body.approval.id, approverUserId: ownerId, decision: 'approve' })
+    expect(decided).toMatchObject({ ok: true, status: 'executed' })
+    expect(await prisma.projectEmailConfig.count({ where: { projectId } })).toBe(0)
+  }, 60_000)
+})
+
 // ── Connect: which project and key ───────────────────────────────────────────
 
 describe('connect whoami', () => {

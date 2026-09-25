@@ -22,6 +22,12 @@ import { answererPrompt } from './prompts'
 import { kickReconciler, shouldKickFor } from '@/lib/autonomy/event-trigger'
 import { WEBHOOK_EVENT_TYPES } from '@/lib/webhooks/events'
 
+/** Brain tools served by lib/email/agent-actions.ts. */
+const AUTH_EMAIL_TOOLS = new Set<string>([
+  'get_auth_email_settings', 'set_auth_smtp', 'test_auth_smtp', 'remove_auth_smtp',
+  'set_auth_email_template', 'reset_auth_email_template',
+])
+
 /** Brain tools served by lib/webhooks/agent-actions.ts. */
 const WEBHOOK_ENDPOINT_TOOLS = new Set<string>([
   'list_webhooks', 'create_webhook', 'update_webhook', 'delete_webhook',
@@ -116,6 +122,13 @@ export type ToolName =
   | 'verify_integration_key'
   // Which project and credential this caller is acting as
   | 'get_connection_identity'
+  // End-user auth email: sender and templates (the Auth page)
+  | 'get_auth_email_settings'
+  | 'set_auth_smtp'
+  | 'test_auth_smtp'
+  | 'remove_auth_smtp'
+  | 'set_auth_email_template'
+  | 'reset_auth_email_template'
   // Connect Frontend
   | 'connect_frontend'
   | 'disconnect_frontend'
@@ -212,6 +225,8 @@ const DESTRUCTIVE_TOOLS = new Set<ToolName>([
   'remove_permission',
   // Breaks live sign-in flow for end-users using this provider
   'disable_oauth_provider',
+  // Password-reset and verification mail stops, or falls back to the deployment
+  'remove_auth_smtp',
 ])
 
 /**
@@ -261,6 +276,7 @@ export const READ_ONLY_TOOLS = new Set<ToolName>([
   'list_deploy_versions',
   'list_integration_capabilities',
   'get_connection_identity',
+  'get_auth_email_settings',
 ])
 
 export function isDestructiveTool(name: string): boolean {
@@ -821,6 +837,43 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     'Which project this connection is bound to (id, name, published, paused) and which key or OAuth connection is calling (name, prefix, read-only or not, preview-branch binding). Check it before changing anything when more than one project is in play.',
     {},
     []),
+  // ── End-user auth email: sender and templates ─────────────────────────────
+  fn('get_auth_email_settings',
+    'How this project sends its end users\' verification, password-reset and magic-link emails: the SMTP sender in use (never its password), whether the last test send worked, and each template with the variables it may use.',
+    {},
+    []),
+  fn('set_auth_smtp',
+    'Save the SMTP server this project sends auth emails through. Omitting password on an edit keeps the stored one. Settings are unproven until test_auth_smtp succeeds.',
+    {
+      host: { type: 'string', description: 'e.g. "smtp.resend.com".' },
+      port: { type: 'integer', minimum: 1, maximum: 65535, description: '587 for STARTTLS; 465 is normalised to 587.' },
+      username: { type: 'string' },
+      password: { type: 'string', description: 'Stored encrypted and never returned.' },
+      fromAddress: { type: 'string', description: 'The sender address, verified with the provider.' },
+      fromName: { type: 'string' },
+      enabled: { type: 'boolean', description: 'false keeps the settings but stops using them.' },
+    },
+    ['host', 'port', 'username', 'fromAddress']),
+  fn('test_auth_smtp',
+    'Send one real test email to an address through the settings a send would use now, and record whether it worked.',
+    { to: { type: 'string', description: 'An address where the test can be checked.' } },
+    ['to']),
+  fn('remove_auth_smtp',
+    'Remove this project\'s SMTP settings. Auth emails then fall back to the deployment\'s sender if one exists, and otherwise stop.',
+    {},
+    []),
+  fn('set_auth_email_template',
+    'Replace the default verification, password_reset or magic_link email with the app\'s own subject and HTML. It must include {{ctaUrl}}; it may use {{appName}}, {{email}} and {{expiry}}.',
+    {
+      kind: { type: 'string', enum: ['verification', 'password_reset', 'magic_link'] },
+      subject: { type: 'string' },
+      bodyHtml: { type: 'string' },
+    },
+    ['kind', 'subject', 'bodyHtml']),
+  fn('reset_auth_email_template',
+    'Go back to Backenly\'s default template for one auth email.',
+    { kind: { type: 'string', enum: ['verification', 'password_reset', 'magic_link'] } },
+    ['kind']),
   fn('fix_backend',
     'Repair a broken subsystem. target: auth | api | table | deploy | realtime | storage | integration | workflow. Use when read_backend_state shows something is broken.',
     {
@@ -2514,6 +2567,21 @@ export async function dispatchTool(
         : await i.verifyIntegration(ctx.projectId, args))
     }
 
+    // ── End-user auth email (the Auth page) ───────────────────────────────
+    if (AUTH_EMAIL_TOOLS.has(name)) {
+      const e = await import('@/lib/email/agent-actions')
+      const actor = { userId: ctx.userId, projectId: ctx.projectId }
+      const run: Record<string, () => Promise<{ ok: boolean; summary: string; data?: unknown; code?: string }>> = {
+        get_auth_email_settings: () => e.emailSettings(actor),
+        set_auth_smtp: () => e.setSmtp(actor, args),
+        test_auth_smtp: () => e.testSmtp(actor, args),
+        remove_auth_smtp: () => e.removeSmtp(actor),
+        set_auth_email_template: () => e.setEmailTemplate(actor, args),
+        reset_auth_email_template: () => e.resetEmailTemplate(actor, args),
+      }
+      return finalize(await run[name]())
+    }
+
     // ── Connection identity ───────────────────────────────────────────────
     if (name === 'get_connection_identity') {
       const { connectionIdentity } = await import('@/lib/mcp/identity')
@@ -3056,6 +3124,12 @@ export function humanTitle(name: string, args: Record<string, unknown>): string 
     case 'list_deploy_versions': return 'Reading published versions'
     case 'list_integration_capabilities': return 'Reading what each integration can do'
     case 'get_connection_identity': return 'Reading which project this connection is bound to'
+    case 'get_auth_email_settings': return 'Reading the auth email settings'
+    case 'set_auth_smtp': return 'Saving the auth email sender'
+    case 'test_auth_smtp': return 'Sending a test email'
+    case 'remove_auth_smtp': return 'Removing the auth email sender'
+    case 'set_auth_email_template': return `Saving the ${args.kind ?? ''} email template`.replace(/  +/g, ' ')
+    case 'reset_auth_email_template': return `Resetting the ${args.kind ?? ''} email template`.replace(/  +/g, ' ')
     case 'verify_integration_key': return `Checking the ${args.integrationId ?? ''} key with its provider`.replace(/\s+/g, ' ')
     case 'fix_backend': return `Repairing ${args.target ?? 'backend'}`
     case 'apply_proposal': return 'Applying the recommendation list'

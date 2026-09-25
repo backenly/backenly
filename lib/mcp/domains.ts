@@ -61,6 +61,12 @@ export const DOMAIN_TOOLS: DomainTool[] = [
       block_user: { tool: 'block_end_user', gloss: 'stop one user from signing in' },
       unblock_user: { tool: 'unblock_end_user', gloss: 'let a blocked user sign in again' },
       enable_teams: { tool: 'enable_teams', gloss: 'organizations with members and roles' },
+      email_settings: { tool: 'get_auth_email_settings', gloss: 'how verification and password-reset emails are sent, whether the last test worked, and the templates' },
+      set_smtp: { tool: 'set_auth_smtp', gloss: 'the SMTP server auth emails are sent through (the password is stored encrypted and never returned)' },
+      test_smtp: { tool: 'test_auth_smtp', gloss: 'send one real test email and record whether it arrived at the server' },
+      remove_smtp: { tool: 'remove_auth_smtp', gloss: 'remove the SMTP settings' },
+      set_email_template: { tool: 'set_auth_email_template', gloss: 'the app\'s own verification, password_reset or magic_link email; must include {{ctaUrl}}' },
+      reset_email_template: { tool: 'reset_auth_email_template', gloss: 'go back to the default for one of them' },
     },
   },
   {
