@@ -34,9 +34,21 @@ const REQUEST_DROP = new Set([
   'trailer', 'transfer-encoding', 'upgrade', 'host', 'content-length',
 ])
 
+/**
+ * Set ONLY by this forwarder, and only on the 502 it answers when the runtime
+ * could not be reached at all. It is how the contract sweep tells "our ingress
+ * could not reach our runtime" (the platform's fault, whatever project the probe
+ * was for) from a surface that answered 502 for one tenant's own reasons.
+ *
+ * Stripped from every proxied response, so nothing behind the forwarder, a
+ * tenant's function included, can claim it.
+ */
+export const PLATFORM_FAULT_HEADER = 'x-backenly-platform-fault'
+
 function keepResponseHeader(name: string): boolean {
   const n = name.toLowerCase()
   if (n.startsWith('access-control-')) return false
+  if (n === PLATFORM_FAULT_HEADER) return false
   // fetch has already decoded the body and knows its own framing.
   return !['content-encoding', 'content-length', 'transfer-encoding', 'connection', 'keep-alive'].includes(n)
 }
@@ -82,7 +94,7 @@ export async function forwardToRuntime(request: Request, origin: string): Promis
           message: 'The service that answers this route did not respond. Try again shortly.',
         },
       },
-      { status: 502 },
+      { status: 502, headers: { [PLATFORM_FAULT_HEADER]: 'runtime-unreachable' } },
     )
   }
 
