@@ -1,6 +1,6 @@
 {
   "name": "@backenly/mcp-server",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "mcpName": "io.github.backenly/backenly",
   "description": "Backenly MCP server — gives Claude Code, Cursor, Codex, Cline, and Claude Desktop direct access to your Backenly backend (tables, APIs, brain chat, runtime data).",
   "license": "MIT",

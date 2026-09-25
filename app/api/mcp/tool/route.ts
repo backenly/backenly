@@ -30,6 +30,7 @@ import { parseMigration, MigrationParseError } from '@/lib/mcp/migration-parser'
 import { prisma } from '@/lib/db/prisma'
 import { createTokenScope, runInTokenScope } from '@/lib/ai/token-meter'
 import { createHash } from 'crypto'
+import { DOCS_MAX_CHARS } from '@/lib/mcp/docs-limit'
 
 /**
  * Tools on this route that spend Backenly's model budget. See the gate in POST
@@ -697,8 +698,6 @@ function jsonSafe<T>(value: T): T {
 }
 
 // ── fetch_docs support ────────────────────────────────────────────────────────
-
-const DOCS_MAX_CHARS = 24_000
 
 /**
  * Load the agent-facing docs (public/llms.txt) and, when a topic is given,

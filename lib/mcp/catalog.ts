@@ -49,6 +49,71 @@ export interface McpToolDescriptor {
     required?: string[]
     additionalProperties?: boolean
   }
+  /** MCP tool annotations, derived once in `annotationsFor`. */
+  annotations?: McpToolAnnotations
+}
+
+/**
+ * The MCP `ToolAnnotations` a host reads to tell a read from a write before it
+ * calls anything: whether to ask the user first, whether a retry is safe,
+ * whether the tool reaches outside this project.
+ *
+ * Both transports serve these from here, so the stdio package and the remote
+ * endpoint can never describe the same tool differently.
+ */
+export interface McpToolAnnotations {
+  title: string
+  readOnlyHint: boolean
+  destructiveHint: boolean
+  idempotentHint: boolean
+  openWorldHint: boolean
+}
+
+/**
+ * Writes that can remove or overwrite existing rows with no approval step in
+ * between. Everything else that mutates is additive, or reaches anything
+ * irreversible only through the human Review Queue (destructive brain tools are
+ * never dispatchable here at all).
+ */
+const OVERWRITES_DATA = new Set(['db_update', 'db_delete'])
+
+/** Writes that leave the same end state however many times they run. */
+const IDEMPOTENT_WRITES = new Set(['set_rls', 'set_env_var'])
+
+/** Titles where the name alone would read badly as a label. */
+const TITLES: Record<string, string> = {
+  backend_chat: 'Ask Backenly to build or change the backend',
+  run_query: 'Run a read-only SQL query',
+  get_table_schema: "Get a table's schema",
+  db_query: 'Read rows',
+  db_insert: 'Insert a row',
+  db_update: 'Update rows',
+  db_delete: 'Delete rows',
+  set_rls: 'Set row-level security',
+  set_env_var: 'Set an environment variable',
+  get_database_credentials: 'Get Postgres connection credentials',
+  generate_types: 'Generate TypeScript types',
+  branch: 'Preview branches',
+}
+
+/**
+ * Tools that reach a system outside this project: storing a provider key asks
+ * the provider whether it works, send_push delivers through OneSignal, and
+ * backend_chat can do either on the agent's behalf. Everything else acts on
+ * this project's own database and config.
+ */
+const OPEN_WORLD = new Set(['backend_chat', 'store_integration_key', 'send_push'])
+
+export function annotationsFor(name: string): McpToolAnnotations {
+  const readOnly = isReadOnlyTool(name)
+  const words = name.replace(/_/g, ' ')
+  return {
+    title: TITLES[name] ?? words.charAt(0).toUpperCase() + words.slice(1),
+    readOnlyHint: readOnly,
+    destructiveHint: !readOnly && OVERWRITES_DATA.has(name),
+    idempotentHint: readOnly || IDEMPOTENT_WRITES.has(name),
+    openWorldHint: OPEN_WORLD.has(name),
+  }
 }
 
 /**
@@ -641,10 +706,11 @@ export function buildDispatchable(): McpToolDescriptor[] {
     tier: 'build',
     description:
       'Apply a schema migration written as ordinary PostgreSQL DDL. Supports CREATE TABLE, ' +
-      'ALTER TABLE (ADD COLUMN / RENAME COLUMN / ALTER COLUMN SET NOT NULL / ADD CONSTRAINT) and CREATE INDEX; ' +
+      'ALTER TABLE (ADD COLUMN / RENAME COLUMN / ADD CONSTRAINT / ALTER COLUMN SET|DROP NOT NULL / SET|DROP DEFAULT) and CREATE [UNIQUE] INDEX; ' +
       'multiple statements in one call are applied in order. Write bare table names — your project schema is ' +
-      'already in scope. `id`, `created_at` and `updated_at` are provisioned automatically; declaring them is ' +
-      'harmless and they are skipped. Each statement is translated into a governed action, so the change stays ' +
+      'already in scope. Every table gets `id`, `"createdAt"` and `"updatedAt"` (camelCase) and `"deleted_at"` ' +
+      'automatically; a declared `id`, `created_at` or `updated_at` is skipped in their favour, so order by ' +
+      '`"createdAt"`. Each statement is translated into a governed action, so the change stays ' +
       'planned, verified and reversible — this is NOT raw SQL execution. Anything it cannot govern is refused ' +
       'with the exact tool to use instead, and a migration is all-or-nothing: if one statement is unsupported, ' +
       'none are applied. For row changes use db_insert/db_update/db_delete; for reads use run_query; for drops ' +
@@ -704,7 +770,7 @@ export function buildDispatchable(): McpToolDescriptor[] {
   if (stateIndex === -1) out.push(stateDescriptor)
   else out[stateIndex] = stateDescriptor
 
-  return out
+  return out.map((t) => ({ ...t, annotations: annotationsFor(t.name) }))
 }
 
 /**

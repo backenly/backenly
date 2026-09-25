@@ -1,149 +1,86 @@
 # Working with Backenly (for coding agents)
 
-You are working against a **Backenly** backend — a governed, autonomous backend platform. The backend already exists as running infrastructure: PostgreSQL tables in an isolated per-project schema, a REST surface served straight from the catalog, JWT auth for end-users, file storage, realtime streams, and serverless functions. Your job is to *use* and *evolve* it through the governed doors below — never around them.
+You are working against a **Backenly** backend: a governed, autonomous backend platform. The backend is running infrastructure already: PostgreSQL tables in an isolated per-project schema, a REST surface served from the catalog, JWT auth for end-users, file storage, realtime and functions. Your job is to use and evolve it through the governed doors below, never around them.
 
 ## The one rule that matters
 
-**Every schema change flows through a governed mutation kernel.** Create/alter/drop table, indexes, RLS policies and triggers are planned, applied, verified, snapshotted and reversible. Do not generate migration files and do not look for a SQL editor to change structure — use `apply_migration` (or `backend_chat` to describe the outcome).
+**Every structural change goes through a governed kernel.** Tables, columns, indexes, RLS policies and triggers are planned, applied, verified, snapshotted and reversible. Do not write migration files and do not look for a SQL editor: use `apply_migration`, or describe the outcome to `backend_chat`.
 
-Reading is a different matter, and there are three legitimate read paths: `run_query` (read-only SQL — joins, aggregates, CTEs, `EXPLAIN` — as a SELECT-only role), the `/api/v2` PostgREST grammar, and a real Postgres connection string from `get_database_credentials`. Your data is not locked in; `pg_dump` works.
+Reading is different. There are three legitimate read paths: `run_query` (read-only SQL as a SELECT-only role), the `/api/v2` PostgREST grammar, and a real Postgres connection string from `get_database_credentials`. DDL you run over a direct connection bypasses the kernel; reconcile it afterwards with `adopt_external_schema`.
 
-One caveat if you take the direct connection: DDL you run over psql bypasses the kernel, so Backenly's metadata will not know about it until `adopt_external_schema` reconciles the drift. Prefer `apply_migration` for structure.
+Destructive or irreversible operations always need a human's approval on the project's **Autonomy** page.
 
-Destructive or irreversible operations always require explicit human approval — if you request one, tell your human to open the project's **Autonomy** page, which is where the review queue lives.
+## Getting connected
 
-## Door 1 — CLI (`@backenly/cli`)
+The human generates a scoped key at **project → Connect → Agents**. It is bound to one project and revocable.
 
-Read-only inspection + code generation. Shell out freely; every command is safe.
-
-```bash
-npx @backenly/cli link --project <PROJECT_ID> --key <SCOPED_KEY>  # once per repo
-npx @backenly/cli status          # project overview: tables, endpoints, functions
-npx @backenly/cli schema          # every table, column, type, and FK relationship
-npx @backenly/cli types --client  # writes backenly.types.ts + backenly.client.ts
-npx @backenly/cli openapi         # writes backenly.openapi.json (OpenAPI 3.0)
-npx @backenly/cli diff            # exit 1 if local types drifted from live schema — use in CI
-npx @backenly/cli logs --status 5xx --limit 50   # recent request logs (add --follow to tail)
-npx @backenly/cli query "select count(*) from posts"   # read-only SQL (SELECT/WITH/EXPLAIN, workspace-scoped)
-```
-
-`query` is the debugging escape hatch: reads only, 500-row cap, 10s timeout, pinned to this project's schema. If you hand it an UPDATE/DELETE it refuses and tells you to run the statement as a governed change instead — do that, don't fight it.
-
-The scoped key comes from the Backenly dashboard: **project → Connect → Agents → Generate key**. It is revocable and read/agent-scoped — never a root credential. It is honored via `--key`, `BACKENLY_API_KEY`, or `.backenly/config.json` (which `link` writes and gitignores).
-
-## Door 2 — MCP server (`@backenly/mcp-server`)
-
-Live tool access for schema questions, data operations, and governed backend changes. Local (npm package, works in every host):
+**MCP (preferred for the long run).** Register it in a terminal before the conversation starts:
 
 ```bash
 claude mcp add backenly -- npx -y @backenly/mcp-server --project <PROJECT_ID> --key <SCOPED_KEY>
 ```
 
-Or remote (Streamable-HTTP — no npx, no local process; the agent connects straight to Backenly):
+Or remote, with no local process: `claude mcp add --transport http backenly https://backenly.com/api/mcp --header "x-api-key: <SCOPED_KEY>"`. Without the header, `/mcp` → Authenticate signs in through the browser instead.
+
+**If you registered it during this conversation, the MCP tools are not here yet**: hosts read MCP config when a conversation starts. Do not stop and ask for a restart. Keep working through the CLI, which calls the same tools with the same key:
 
 ```bash
-claude mcp add --transport http backenly https://backenly.com/api/mcp --header "x-api-key: <SCOPED_KEY>"
+npx -y @backenly/cli@latest link --project <PROJECT_ID> --key <SCOPED_KEY>
+npx -y @backenly/cli@latest tools                                  # what you can call
+npx -y @backenly/cli@latest call read_backend_state                # any tool, key=value args
+npx -y @backenly/cli@latest call get_table_schema tableName=posts
+npx -y @backenly/cli@latest call apply_migration sql="ALTER TABLE posts ADD COLUMN likes integer DEFAULT 0"
+npx -y @backenly/cli@latest chat "add comments to posts"           # backend_chat
 ```
 
-### The host must restart before these tools exist
+Nested JSON arguments go in a file (`--args-file args.json`) or on stdin (`--args -`); PowerShell strips inline quotes. Exit code 1 means Backenly said `ok: false`. The MCP tools appear in the next conversation: a new tab in the Claude Code VS Code extension, or `/exit` then `claude --continue` in a terminal.
 
-**If you are an agent and you just ran one of the commands above: your Backenly tools are not available in this session.** MCP hosts read their server manifest once, when the host process starts. A server you register mid-session is written to config and connects to nothing until the host restarts.
+Never spawn the MCP server yourself or imitate the tools with curl. The CLI is the supported path.
 
-Stop after the install and tell your human to restart:
+## The tools
 
-- **Claude Code / Cursor / Cline (VS Code family)** — Reload Window (`Ctrl/Cmd+Shift+P` → "Developer: Reload Window"), or start a fresh `claude` process in a terminal. In Claude Code, `/mcp` then lists `backenly` when it worked.
-- **Codex CLI** — quit and relaunch.
+Exactly **20** are advertised over MCP; `tools/list` (or `backenly tools`) is the authority.
 
-**Do not work around it.** Spawning the server yourself over a stdio bridge, or calling the REST API with the MCP key to simulate the tools, is not a supported path: the key is scoped for MCP, the permission classifier blocks the bridge, and the resulting failures look like Backenly is broken when the integration is simply not connected yet. Adding the server and restarting takes seconds; the workaround never ends well.
+- **Read**: `read_backend_state` (call it first; `section` drills into `schema`, `users`, `functions`, `integrations`, `metrics`, `deploy`, `autonomy` and more), `get_table_schema` (columns, FKs, CHECK constraints with their permitted values, RLS; read it before any write), `run_query`.
+- **Write**: `apply_migration` (DDL), `db_insert` / `db_update` / `db_delete` (row writes as the owner; they bypass end-user RLS, so use them for seeding and repair, not to simulate a user), `set_rls` (a policy predicate installed verbatim; prefer it to describing a policy in prose).
+- **Capabilities**: `enable_auth`, `create_bucket`, `enable_realtime`, `generate_function` (Backenly writes the code from your spec), `create_api_key`, `set_env_var`, `branch` (preview branches: list / create / diff / merge).
+- **Everything else**: `backend_chat` (plain English; draws AI credits), `get_database_credentials`, `generate_types`, `fetch_docs`, `check_approval`.
 
-Order matters — register the server **first**, then restart. Restarting before the `mcp add` command achieves nothing.
+Tools that are not advertised still run by name through `backenly call` (for example `store_integration_key`, `create_cron_job`, `set_alert`). REST is automatic: `/db/<table>` exists the moment the table does, so there is no API-generation step.
 
-### The tools
+**Destructive operations escalate instead of executing.** Dropping, truncating, deleting buckets or functions, deploying, rolling back, revoking keys: ask through `backend_chat`. The response carries an `approval` id and nothing is changed until a human approves it on the Autonomy page. Poll `check_approval` every 15–30s: `executed` (done), `rejected` (do not retry), `failed` (nothing applied), `partial` (some changes landed; verify, do not replay), `expired`.
 
-Exactly **20** tools are advertised. `tools/list` on the server is the authority — trust it over this file if they ever disagree.
+## Integrations
 
-On a **read-only key** you will see only the read tools; the write doors, `backend_chat` included, are not advertised and are refused with `READ_ONLY_KEY` if called anyway. Nothing is partially applied. Ask the human to issue a read-write key if you need to change anything — you cannot upgrade your own.
+Stripe, Resend, OpenAI, Anthropic and PostHog all connect from an agent. The key is verified with the provider before it is stored. Either the human pastes it on the Integrations page (keeps it out of the conversation) or you pass it: `backenly call store_integration_key integrationId=stripe apiKey=sk_test_…`. Never put a provider key in app code. Functions reach providers as `ctx.integrations.stripe`, `.resend`, `.openai`, `.anthropic`, `.posthog`.
 
-**Read**
-- `read_backend_state` — the one read door for state: tables, endpoints, auth, buckets, RLS, integrations, realtime. Takes an optional `section`. Call it first to ground any decision.
-- `get_table_schema` — everything about ONE table: column types/nullability/defaults, foreign keys, indexes, and CHECK constraints **with their permitted values**. Read this before any write, or you will send an insert that looks correct and fails on a constraint you could not see.
-- `run_query` — read-only SQL against a SELECT-only role.
+Stripe events arrive at `/api/v1/{projectId}/webhooks/stripe`, which verifies the signature and rejects everything until the signing secret is stored. The human must paste that URL into the Stripe dashboard; no provider API can do it for them.
 
-**Write**
-- `apply_migration` — governed DDL.
-- `db_insert` / `db_update` / `db_delete` — RLS-scoped row writes.
-- `set_rls` — takes a policy predicate **verbatim** and installs exactly the commands you name. Use this rather than describing a policy in prose: a re-generated predicate silently drops conjuncts, and this is the one operation where being wrong is a vulnerability.
+## The runtime API (what your app calls)
 
-**Capabilities**
-- `enable_auth`, `create_bucket`, `enable_realtime`, `generate_function`, `create_api_key`, `set_env_var`, `branch` (preview branches — `action` enum: create / list / diff / merge).
+Two headers: `x-api-key: <project key>` on every request, and `X-User-Token: <end-user JWT>` for anything RLS protects. Never send the project key as `Authorization: Bearer`; the runtime parses that header as a JWT and answers 401.
 
-**Escape hatches and self-service**
-- `backend_chat` — plain-English fall-through to the governed engine. Anything not listed above is reached through here.
-- `get_database_credentials` — a real Postgres connection string.
-- `generate_types` — regenerate typed row definitions after a schema change.
-- `fetch_docs`, `check_approval`.
+- `/api/v1/{projectId}/db/{table}`: `GET` (list), `POST`, `GET /{id}`, `PATCH /{id}` (no `PUT`), `DELETE /{id}`.
+- `/api/v2/{projectId}/{table}`: PostgREST grammar: `?price=gte.100`, `?order=createdAt.desc`, `?select=*,author(*)`.
+- `/auth/signup`, `/auth/signin`, `/auth/refresh-token`, `/auth/logout`, `/auth/forgot-password`, `/auth/reset-password`, `/auth/me`, magic links, OAuth, email verification.
+- `/db/users` is never served; users live behind `/auth/*`.
 
-There is **no** `db_query` (it is `run_query`) and **no** `generate_api` — REST is automatic, see Door 3.
-
-**Destructive operations escalate instead of executing.** Dropping tables/columns, truncating, deleting buckets, deploying, and deleting a function are not in the catalog at all. Ask for one through `backend_chat` and nothing is destroyed: the response carries an `approval` object with a pending request id, and the operation waits for a human on the project's **Autonomy** page. Poll `check_approval` with the id (every 15–30s) until the status is `executed` (done — read `resultSummary`), `rejected` (do not retry; ask what they want instead), `failed`, or `expired` (24h). Only the human can approve. You can request and poll; you can never self-approve, and there is no way around the gate worth looking for.
-
-## Door 3 — the runtime API + SDK (what your app code calls)
-
-Authenticated with `x-api-key` (project client key) and, for user-scoped calls, `X-User-Token` (the end-user's JWT).
-
-Every table is served by **PostgREST**, reading straight from the PostgreSQL catalog. There is no generation step and no API registry to keep in sync — a table created a second ago is queryable immediately. Two grammars over the same data:
-
-- **`/api/v1/{projectId}/db/{table}`** — the stable contract, with filtering, sorting, pagination and search:
-  `GET /db/{table}` (list) · `POST /db/{table}` (create) · `GET /db/{table}/{id}` · `PATCH /db/{table}/{id}` (update) · `DELETE /db/{table}/{id}`
-  **Update is `PATCH`, not `PUT`.** There is no `PUT` on this contract.
-- **`/api/v2/{projectId}/{table}`** — PostgREST's native grammar passed through untouched: `?price=gte.100`, `?or=(a.eq.1,b.eq.2)`, `?order=created_at.desc`, and embedded resources: `?select=*,author(*)` returns a post and its author in one round trip.
-
-**`/db/users` is deliberately never served** — that table holds password hashes and is reached only through `/auth/*`. An empty endpoint list on a project whose only table is `users` is correct, not a missing step.
-
-Auth endpoints: `/auth/signup`, `/auth/signin`, `/auth/refresh-token`, `/auth/logout`, `/auth/forgot-password`, `/auth/reset-password`, magic links, email verification.
-
-Or use the SDK:
-
-```js
-import { createClient } from "https://backenly.com/backenly-sdk.esm.js"
-const backend = createClient({ projectId: "…", apiKey: "…" })
-
-await backend.auth.signUp({ email, password })
-await backend.posts.create({ title: "Hello" })
-await backend.posts.list({ filter: { published: true }, search: "launch" })
-backend.posts.subscribe(({ event, row }) => { /* realtime */ })
-await backend.storage.upload(file)
-```
-
-For typed access, run `npx @backenly/cli types --client` and import from the generated `backenly.client.ts`.
+SDK: `npm install @backenly/sdk`, then `createClient({ projectId, apiKey })`.
 
 ## The workflow that works
 
-1. **Learn the backend first**: `read_backend_state`, then `get_table_schema` on any table you are about to touch. Never guess table or column names — read them.
-2. **Need a backend change** (new table, column, RLS rule, function, trigger)? `apply_migration` for DDL, `set_rls` for policies, or `backend_chat` to describe the outcome. Do not simulate the change client-side.
-3. **Read the schema back after every migration.** Do not assume the column names you asked for survived verbatim — call `get_table_schema` and use what is actually there. Types generated from a name you assumed will compile and then fail at runtime.
+1. `read_backend_state`, then `get_table_schema` on anything you will touch. Never guess names.
+2. Change structure with `apply_migration` / `set_rls`, or `backend_chat` for the outcome.
+3. Read the schema back after every migration. **Every new table gets four columns you did not ask for:** `id` (uuid), `"createdAt"` and `"updatedAt"` (camelCase), `"deleted_at"` (snake_case). Order by `createdAt`, filter soft deletes on `deleted_at`, and quote camelCase names in SQL. A `created_at` or `updated_at` you declare in `CREATE TABLE` is skipped in favour of these.
+4. `generate_types` (or `backenly types --client`), commit the output, regenerate after every schema change. `backenly diff` in CI fails when they drift.
+5. Build the app against the REST API or SDK.
 
-   In particular, **every new table gets four columns you did not ask for**, and they do not share one naming convention:
+## Errors
 
-   | Column | Type |
-   | --- | --- |
-   | `id` | `UUID PRIMARY KEY DEFAULT gen_random_uuid()` |
-   | `"createdAt"` | `TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP` — **camelCase** |
-   | `"updatedAt"` | `TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP` — **camelCase** |
-   | `"deleted_at"` | `TIMESTAMPTZ NULL` — **snake_case**, soft delete |
+Structured JSON: `{ ok: false, error, code }`. `RATE_LIMITED`: respect `retry-after`. `PLAN_LIMIT_EXCEEDED` / `AI_CREDITS_EXHAUSTED`: the human must act; do not retry in a loop (only `backend_chat` and `generate_function` spend credits). `READ_ONLY_KEY`: ask for a read-write key. `INVALID_KEY` / `NO_AUTH`: ask for a fresh key from Connect → Agents.
 
-   So on a table whose timestamps came from this default, `?order=createdAt.desc` is correct and `?order=created_at.desc` resolves to nothing — while `deleted_at` is the opposite. If you explicitly declared a `created_at` column in your own migration, that one exists as written; both can be present on the same table. **Quote camelCase columns in SQL** — unquoted `createdAt` folds to lowercase and will not resolve. This is a known wart; `get_table_schema` is always the authority.
-4. **Generate types**: `generate_types` (or `npx @backenly/cli types --client`), commit them, and import them instead of hand-writing interfaces. Regenerate after every schema change.
-5. **Build frontend/app code** against the REST API or SDK.
-6. **Guard your CI**: add `npx @backenly/cli diff` to the pipeline. It exits 1 when the live schema no longer matches your committed types — catching contract drift before your users do.
+## Worth telling your human
 
-## Error contract (all doors)
-
-Errors are structured JSON: `{ error, code }`. Codes you should handle: `RATE_LIMITED` (respect `retry-after`), `PLAN_LIMIT_EXCEEDED` (HTTP 402 — the human must upgrade; do not retry-loop), `VALIDATION_ERROR` (fix the payload; the message lists failing fields), `INVALID_API_KEY` / `API_KEY_EXPIRED` (ask the human for a fresh scoped key).
-
-## Facts worth repeating to your human
-
-- Every change Backenly applies is verified, snapshotted, and reversible — the History page is the audit trail, and the **Autonomy** page is both the approvals inbox and the record of what the platform repaired on its own.
-- Auth, destructive, and irreversible changes always require the human's approval, at every autonomy mode.
-- The backend is not static between your sessions: a self-healing loop reconciles it every minute on every plan, so a gap you leave (a missing index, an RLS hole) may already be closed when you look again.
-- Docs for agents: https://backenly.com/llms.txt · this file: https://backenly.com/skill.md
+- Every change is verified, snapshotted and reversible; the History page is the audit trail and the Autonomy page is the approvals inbox.
+- The backend is not static between sessions: the autonomy loop repairs what it safely can on every plan, so a gap you leave may already be closed next time.
+- Full docs: https://backenly.com/llms.txt · this file: https://backenly.com/skill.md
