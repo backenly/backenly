@@ -2,6 +2,24 @@
 
 All notable changes to `@backenly/mcp-server` are documented here. Follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — Unreleased
+
+### Changed
+- **Built on the official MCP SDK v2** (`@modelcontextprotocol/server`), replacing `@modelcontextprotocol/sdk` v1. One server now serves both protocol eras: 2025-era hosts that open with `initialize`, and 2026-07-28 hosts that open with `server/discover`. A catalog that loads after boot reaches either kind of host (`notifications/tools/list_changed`, or the host's `subscriptions/listen` stream).
+- **Node.js 20 or newer is required**, as the SDK requires.
+- **Tool results are the server's own body**, as `structuredContent` and as JSON text, the shape the remote endpoint returns. A failure used to reach the agent as one sentence, and over a 4xx the server's `hint`, `applied` and trail of what ran were dropped. A failure now also carries a text block saying what its fields mean for the next step (what already landed, whether a retry can help).
+- **`db_query`, `db_insert`, `db_update` and `db_delete` go through `/api/mcp/tool`**, as they do over the remote endpoint, instead of `/api/mcp/db/*`, which answer in a different shape. The server validates their arguments there with the same schemas as `/api/mcp/db/*`, so a bad call is refused the same way on every surface (needs a Backenly release that includes it).
+- **Instructions and resources come from the manifest** (manifest 1.1.0), so they match the remote endpoint's. The package keeps its own copies for a server that does not send them.
+- Unknown resources are refused as invalid params (`-32602`) naming the URI.
+
+### Added
+Also first published in this release: 0.3.3 was versioned in #117 and never published.
+- **A catalog that failed to load at boot is retried** in the background, and the host is told the tool list changed once it loads. It used to be fetched once, leaving the session on the three fallback tools for its whole life.
+- **Tools carry MCP annotations** (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) and a `title`, from the manifest.
+
+### Fixed
+- `init` says to open a new conversation, not to restart the host: hosts read MCP config when a conversation starts.
+
 ## [0.3.1] — 2026-07-25
 
 ### Fixed

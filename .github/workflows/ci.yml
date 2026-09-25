@@ -196,6 +196,14 @@ jobs:
       # docs-install-command.spec.ts is the one that fails when public/llms.txt
       # and the MCP CLI parser drift apart — the defect that made the published
       # install command unusable. It only protects anything if it runs here.
+      # tests/unit/mcp-transport-parity.spec.ts drives the BUILT stdio package
+      # against the remote endpoint, so it is built here from its own lockfile,
+      # as npm ships it. The suite fails, rather than skips, when it is missing.
+      - name: Build the stdio MCP package for the transport parity suite
+        run: |
+          npm ci --prefix packages/mcp-server
+          npm run build --prefix packages/mcp-server
+
       - name: Unit tests
         run: npx jest tests/unit --ci --verbose
 
@@ -291,9 +299,10 @@ jobs:
         run: |
           npm install
           npm run build
-      # Drives the BUILT entrypoint over stdio JSON-RPC. It needs this package's
-      # own dependencies, which the root install in the static job does not have.
-      - name: The built server recovers a catalog that failed at boot
+      # Drives the BUILT entrypoint over stdio with the official MCP client, in
+      # both protocol eras, and over raw JSON-RPC. It needs this package's own
+      # dependencies, which the root install in the static job does not have.
+      - name: The built server speaks both eras and recovers a catalog that failed at boot
         working-directory: packages/mcp-server
         run: npm test
       - name: Verify the published entrypoint parses its documented flags

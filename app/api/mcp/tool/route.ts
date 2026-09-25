@@ -26,6 +26,8 @@ import { catalogByName, STATE_SECTIONS, BRANCH_ACTIONS, isReadOnlyTool } from '@
 import { dispatchTool, isDestructiveTool, READ_ONLY_TOOLS } from '@/lib/ai/brain/tools'
 import { dbQuery, dbInsert, dbUpdate, dbDelete } from '@/lib/mcp/runtime-db'
 import { dbErrorBody } from '@/lib/db/query-errors'
+import { parseMcpBody } from '@/lib/mcp/request-body'
+import { DB_TOOL_FAILURE_CODE, DB_TOOL_REQUESTS, isDbTool, type DbToolName } from '@/lib/mcp/db-tool-requests'
 import { parseMigration, MigrationParseError } from '@/lib/mcp/migration-parser'
 import { prisma } from '@/lib/db/prisma'
 import { createTokenScope, runInTokenScope } from '@/lib/ai/token-meter'
@@ -560,22 +562,34 @@ export async function POST(request: NextRequest) {
   // are served by dedicated helpers, not the brain dispatch. Handle them here so
   // an agent can call them through the SAME /api/mcp/tool surface as every other
   // tool (previously they 404'd with "Unknown tool" unless the host knew to hit
-  // /api/mcp/db/*). The dedicated /api/mcp/db/* routes remain for lower latency.
+  // /api/mcp/db/*). The remote MCP endpoint and the stdio package both call
+  // them here; the dedicated /api/mcp/db/* routes remain for older clients.
   // run_query needs no special arm here: it is a brain tool, so the generic
   // dispatchTool path above already serves it from its single definition.
+  //
+  // The args are parsed with the schemas /api/mcp/db/* use
+  // (lib/mcp/db-tool-requests.ts), so a bad call is refused here exactly as it
+  // is there, with the offending keys named, and the helper runs on the parsed
+  // args rather than on what was sent.
 
-  const DB_TOOLS: Record<string, (projectId: string, input: any) => Promise<any>> = {
+  const DB_TOOLS: Record<DbToolName, (projectId: string, input: any) => Promise<any>> = {
     db_query: dbQuery, db_insert: dbInsert, db_update: dbUpdate, db_delete: dbDelete,
   }
-  if (tool in DB_TOOLS) {
+  if (isDbTool(tool)) {
+    const parsedArgs = parseMcpBody(DB_TOOL_REQUESTS[tool], args, tool)
+    if (!parsedArgs.ok) {
+      recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 400, tool, error: parsedArgs.error.code })
+      return withCors(NextResponse.json(parsedArgs.error, { status: 400 }))
+    }
+    const input = parsedArgs.data as { table: string }
     try {
-      const result = await DB_TOOLS[tool](auth.projectId, args as any)
+      const result = await DB_TOOLS[tool](auth.projectId, input)
       const mutation = tool !== 'db_query'
       const summary =
-        tool === 'db_query' ? `Read ${result.count ?? 0} row(s) from ${(args as any).table}`
-        : tool === 'db_insert' ? `Inserted 1 row into ${(args as any).table}`
-        : tool === 'db_update' ? `Updated ${result.updated ?? 0} row(s) in ${(args as any).table}`
-        : `Deleted ${result.deleted ?? 0} row(s) from ${(args as any).table}`
+        tool === 'db_query' ? `Read ${result.count ?? 0} row(s) from ${input.table}`
+        : tool === 'db_insert' ? `Inserted 1 row into ${input.table}`
+        : tool === 'db_update' ? `Updated ${result.updated ?? 0} row(s) in ${input.table}`
+        : `Deleted ${result.deleted ?? 0} row(s) from ${input.table}`
       recordMcpCall(
         { ...auth, endpoint: ENDPOINT, startedAt },
         { statusCode: 200, tool, mutation, summary },
@@ -587,7 +601,7 @@ export async function POST(request: NextRequest) {
     } catch (err) {
       // Same structured contract as the dedicated /api/mcp/db/* routes, so an
       // agent gets identical, self-correctable errors on either surface.
-      const body = dbErrorBody(err, 'DB_OP_FAILED')
+      const body = dbErrorBody(err, DB_TOOL_FAILURE_CODE[tool])
       recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 400, tool, error: body.error })
       return withCors(NextResponse.json(body, { status: 400 }))
     }

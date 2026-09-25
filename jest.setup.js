@@ -73,6 +73,18 @@ console.log('✅ Test database configured:', process.env.TEST_DATABASE_URL.repla
   }
 })()
 
+// The runtime's real web-standard classes, kept before the mocks below replace
+// them. Code built on the real ones (the MCP SDK, which clones requests and
+// streams responses) restores them per file with
+// tests/helpers/real-web-standard.ts, so it is tested against what production
+// runs rather than against these stand-ins.
+global.__realWebStandard = {
+  Request: global.Request,
+  Response: global.Response,
+  Headers: global.Headers,
+  fetch: global.fetch,
+}
+
 // Mock Next.js Request/Response
 global.Request = class Request {
   constructor(input, init) {

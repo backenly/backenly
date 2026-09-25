@@ -115,6 +115,14 @@ backenly.com — brain, executor, runtime APIs
 
 The package contains **zero business logic** — it's a thin protocol adapter. Tool definitions, billing, rate limiting, and audit logging all live server-side. New brain tools appear in your host immediately without `npm update`.
 
+## Protocol
+
+Built on the official MCP TypeScript SDK (v2). It serves both protocol eras from one server: hosts that open with `initialize` (revisions 2024-11-05 through 2025-11-25) and hosts that speak 2026-07-28 (`server/discover`, per-request `_meta`). Requires **Node.js 20 or newer**.
+
+Every tool result carries the server's JSON body twice: as `structuredContent`, for hosts that read fields (`ok`, `code`, `hint`, `applied`, `approval`, …), and as text, for hosts that only read text. A failure adds a second text block saying what its fields mean for the next step. Fields the server did not send stay absent.
+
+What this package serves (tools, instructions, resources, result shapes) is what the remote endpoint (`https://backenly.com/api/mcp`) serves, and CI compares the two call for call.
+
 ## Reliability
 
 - **Retry** — network errors and `502/503/504` retry with exponential backoff (250ms / 1s / 3s + jitter), honoring `Retry-After`.

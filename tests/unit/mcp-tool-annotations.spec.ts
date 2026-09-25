@@ -9,7 +9,7 @@
  * here, plus one check that the remote endpoint actually sends them.
  */
 
-import '../helpers/next-request-polyfill'
+import '../helpers/real-web-standard'
 import { NextRequest } from 'next/server'
 
 jest.mock('@/lib/mcp/auth', () => {
