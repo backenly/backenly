@@ -23,7 +23,7 @@ export const article: ArticleData = {
         },
         {
           kind: 'p',
-          text: 'Decide read-only or read-write when you mint the key, because an agent cannot change its own and no endpoint flips an existing one. A read-only key is served 6 tools instead of 20 — `read_backend_state`, `get_table_schema`, `run_query`, `generate_types`, `fetch_docs`, and `check_approval`. Every write door is withheld, `backend_chat` included, because the brain can apply non-destructive changes without ever reaching the destructive gate, so a key that could reach it would not be read-only. Calling a mutating tool anyway is refused with `READ_ONLY_KEY` before it runs, and nothing is partially applied.',
+          text: 'Decide read-only or read-write when you mint the key, because an agent cannot change its own and no endpoint flips an existing one. A read-only key is served 16 tools instead of 23: `read_backend_state`, `get_table_schema`, `run_query`, `generate_types`, `fetch_docs` and `check_approval`, plus each section tool (`monitoring`, `deploy`, `storage` and the rest) narrowed to its read actions, so a write action is never even shown. Every write door is withheld, `backend_chat` included, because the brain can apply non-destructive changes without ever reaching the destructive gate, so a key that could reach it would not be read-only. Calling a mutating tool anyway is refused with `READ_ONLY_KEY` before it runs, and nothing is partially applied.',
         },
       ],
     },
@@ -32,7 +32,7 @@ export const article: ArticleData = {
       blocks: [
         {
           kind: 'p',
-          text: 'Two transports, the same 20 tools behind both. Local runs the npm package over stdio and works in every host. Remote is Streamable-HTTP straight to Backenly, with nothing to install and no Node process on your machine.',
+          text: 'Two transports, the same 23 tools behind both. Local runs the npm package over stdio and works in every host. Remote is Streamable-HTTP straight to Backenly, with nothing to install and no Node process on your machine.',
         },
         {
           kind: 'code',
@@ -68,7 +68,7 @@ export const article: ArticleData = {
           label: 'Interactive setup',
           code: `npx @backenly/mcp-server init
 
-  ✓ Verified. Connected to project 4f2a…  (20 tools).
+  ✓ Verified. Connected to project 4f2a…  (23 tools).
 
   Setup complete. Open a new conversation in your MCP host and Backenly is wired in.`,
         },
@@ -138,16 +138,16 @@ npx -y @backenly/cli@latest chat "add likes and comments to posts"`,
       blocks: [
         {
           kind: 'p',
-          text: 'The manifest advertises 20 tools. That number is a deliberate cap, not a roadmap gap: tool-selection accuracy degrades as a catalog grows, so the surface is an allowlist where every request has one obvious door. `tools/list` on the server is the authority — trust it over any document, including this one.',
+          text: 'The manifest advertises 23 tools. That number is a deliberate cap, not a roadmap gap: tool-selection accuracy degrades as a catalog grows, so the surface is an allowlist where every request has one obvious door. `tools/list` on the server is the authority — trust it over any document, including this one.',
         },
         {
           kind: 'table',
           columns: ['Group', 'Tools'],
           rows: [
             ['Understand', 'read_backend_state · get_table_schema · run_query · fetch_docs'],
-            ['Build', 'apply_migration · enable_auth · set_rls · create_bucket · generate_function · enable_realtime'],
-            ['Data', 'db_insert · db_update · db_delete'],
-            ['Operate', 'branch · create_api_key · set_env_var · get_database_credentials · check_approval · generate_types'],
+            ['Database', 'apply_migration · set_rls · db_insert · db_update · db_delete · generate_types · branch'],
+            ['One per section', 'auth · storage · functions · realtime · integrations · monitoring · autonomy · webhooks · deploy · connect — each with an action'],
+            ['Approvals', 'check_approval — destructive actions park the exact call for a human'],
             ['Natural language', 'backend_chat — the fall-through for anything not named above'],
           ],
           caption: 'The advertised surface. More tools remain dispatchable so clients pinned to an older manifest keep working.',

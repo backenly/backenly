@@ -57,14 +57,14 @@ describe('catalog annotations', () => {
     for (const read of ['read_backend_state', 'run_query', 'get_table_schema', 'fetch_docs', 'generate_types', 'check_approval']) {
       expect({ read, hint: annotationsFor(read).readOnlyHint }).toEqual({ read, hint: true })
     }
-    for (const write of ['backend_chat', 'apply_migration', 'set_rls', 'branch', 'create_api_key']) {
+    for (const write of ['backend_chat', 'apply_migration', 'set_rls', 'branch', 'create_api_key', 'deploy', 'connect']) {
       expect({ write, hint: annotationsFor(write).readOnlyHint }).toEqual({ write, hint: false })
     }
   })
 
   it('marks exactly the tools that reach an outside provider as open-world', () => {
     const openWorld = dispatchable.filter((t) => t.annotations!.openWorldHint).map((t) => t.name).sort()
-    expect(openWorld).toEqual(['backend_chat', 'send_push', 'store_integration_key'])
+    expect(openWorld).toEqual(['backend_chat', 'integrations', 'send_push', 'store_integration_key'])
   })
 
   it('titles the advertised tools in words, not snake_case', () => {

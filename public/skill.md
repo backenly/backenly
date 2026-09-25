@@ -39,20 +39,20 @@ Never spawn the MCP server yourself or imitate the tools with curl. The CLI is t
 
 ## The tools
 
-Exactly **20** are advertised over MCP; `tools/list` (or `backenly tools`) is the authority.
+Exactly **23** are advertised over MCP; `tools/list` (or `backenly tools`) is the authority.
 
 - **Read**: `read_backend_state` (call it first; `section` drills into `schema`, `users`, `functions`, `integrations`, `metrics`, `deploy`, `autonomy` and more), `get_table_schema` (columns, FKs, CHECK constraints with their permitted values, RLS; read it before any write), `run_query`.
 - **Write**: `apply_migration` (DDL), `db_insert` / `db_update` / `db_delete` (row writes as the owner; they bypass end-user RLS, so use them for seeding and repair, not to simulate a user), `set_rls` (a policy predicate installed verbatim; prefer it to describing a policy in prose).
-- **Capabilities**: `enable_auth`, `create_bucket`, `enable_realtime`, `generate_function` (Backenly writes the code from your spec), `create_api_key`, `set_env_var`, `branch` (preview branches: list / create / diff / merge).
-- **Everything else**: `backend_chat` (plain English; draws AI credits), `get_database_credentials`, `generate_types`, `fetch_docs`, `check_approval`.
+- **One tool per dashboard section**, each with an `action` its description lists: `auth`, `storage`, `functions` (Backenly writes the code from your spec), `realtime`, `integrations`, `monitoring`, `autonomy`, `webhooks`, `deploy`, `connect`, plus `branch` (preview branches: list / create / diff / merge).
+- **Everything else**: `backend_chat` (plain English; draws AI credits), `generate_types`, `fetch_docs`, `check_approval`.
 
-Tools that are not advertised still run by name through `backenly call` (for example `store_integration_key`, `create_cron_job`, `set_alert`). REST is automatic: `/db/<table>` exists the moment the table does, so there is no API-generation step.
+Older tool names that are no longer advertised still run by name through `backenly call` (for example `enable_auth`, `create_bucket`, `set_env_var`). REST is automatic: `/db/<table>` exists the moment the table does, so there is no API-generation step.
 
-**Destructive operations escalate instead of executing.** Dropping, truncating, deleting buckets or functions, deploying, rolling back, revoking keys: ask through `backend_chat`. The response carries an `approval` id and nothing is changed until a human approves it on the Autonomy page. Poll `check_approval` every 15–30s: `executed` (done), `rejected` (do not retry), `failed` (nothing applied), `partial` (some changes landed; verify, do not replay), `expired`.
+**Destructive operations escalate instead of executing.** Deploying, rolling back, deleting buckets or functions, revoking keys: call the domain action (`deploy { action: "deploy" }`, `functions { action: "delete" }` …) and the exact call is parked. Dropping or truncating a table: ask through `backend_chat`. Either way the response carries an `approval` id and nothing is changed until a human approves it on the Autonomy page; an approved domain call runs verbatim. Poll `check_approval` every 15–30s: `executed` (done), `rejected` (do not retry), `failed` (nothing applied), `partial` (some changes landed; verify, do not replay), `expired`.
 
 ## Integrations
 
-Stripe, Resend, OpenAI, Anthropic and PostHog all connect from an agent. The key is verified with the provider before it is stored. Either the human pastes it on the Integrations page (keeps it out of the conversation) or you pass it: `backenly call store_integration_key integrationId=stripe apiKey=sk_test_…`. Never put a provider key in app code. Functions reach providers as `ctx.integrations.stripe`, `.resend`, `.openai`, `.anthropic`, `.posthog`.
+Stripe, Resend, OpenAI, Anthropic and PostHog all connect from an agent. The key is verified with the provider before it is stored. Either the human pastes it on the Integrations page (keeps it out of the conversation) or you pass it: `integrations { action: "connect", integrationId: "stripe", apiKey: "sk_test_…", webhookSecret: "whsec_…" }`. Never put a provider key in app code. Functions reach providers as `ctx.integrations.stripe`, `.resend`, `.openai`, `.anthropic`, `.posthog`.
 
 Stripe events arrive at `/api/v1/{projectId}/webhooks/stripe`, which verifies the signature and rejects everything until the signing secret is stored. The human must paste that URL into the Stripe dashboard; no provider API can do it for them.
 
@@ -60,7 +60,7 @@ Stripe events arrive at `/api/v1/{projectId}/webhooks/stripe`, which verifies th
 
 Two headers: `x-api-key: <project key>` on every request, and `X-User-Token: <end-user JWT>` for anything RLS protects. Never send the project key as `Authorization: Bearer`; the runtime parses that header as a JWT and answers 401.
 
-- `/api/v1/{projectId}/db/{table}`: `GET` (list), `POST`, `GET /{id}`, `PATCH /{id}` (no `PUT`), `DELETE /{id}`.
+- `/api/v1/{projectId}/db/{table}`: `GET` (list), `POST`, `GET /{id}`, `PATCH /{id}` (`PUT` is accepted as the same update), `DELETE /{id}`.
 - `/api/v2/{projectId}/{table}`: PostgREST grammar: `?price=gte.100`, `?order=createdAt.desc`, `?select=*,author(*)`.
 - `/auth/signup`, `/auth/signin`, `/auth/refresh-token`, `/auth/logout`, `/auth/forgot-password`, `/auth/reset-password`, `/auth/me`, magic links, OAuth, email verification.
 - `/db/users` is never served; users live behind `/auth/*`.

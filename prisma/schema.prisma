@@ -1821,6 +1821,7 @@ model AgentApprovalRequest {
   apiKeyId      String? // which scoped key asked — agent identity for receipts
   message       String // original natural-language request, replayed on approval
   tool          String // blocked destructive tool (e.g. drop_table)
+  toolArgs      Json? // exact arguments, run verbatim on approval (MCP domain tools); null replays `message` through the brain
   target        String // human description, e.g. "recipes table"
   rowCount      Int? // live rows affected when cheaply knowable
   reversible    Boolean   @default(false)
