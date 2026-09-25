@@ -21,6 +21,7 @@ import http from 'http'
 import https from 'https'
 import type { Request, Response, NextFunction } from 'express'
 import { internalTrafficHeaders } from '@/lib/traffic/request-recorder'
+import { RUNTIME_HOP_HEADER } from '@/lib/runtime/forward-to-runtime'
 
 // v1 sections owned by Next.js. Everything else (auth, oauth, database, db
 // CRUD, realtime, presence, broadcast, triggers, logs, bootstrap, fn) is
@@ -94,6 +95,11 @@ export function nextProxy(req: Request, res: Response, next: NextFunction) {
   // This process already recorded the request (server/app.ts), so the Next
   // handler it lands on must not count it a second time.
   Object.assign(headers, internalTrafficHeaders())
+  // And it came FROM the runtime, so Next's catch-all must not send it back.
+  // A separate marker from the one above: "not the customer's traffic" and
+  // "already been through the runtime" are different facts, and the contract
+  // probe is the first and not the second.
+  headers[RUNTIME_HOP_HEADER] = 'runtime'
 
   const upstream = (isTls ? https : http).request(
     {

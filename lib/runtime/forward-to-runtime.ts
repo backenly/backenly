@@ -35,6 +35,20 @@ const REQUEST_DROP = new Set([
 ])
 
 /**
+ * Marks a request the RUNTIME handed to Next (server/routes/next-proxy.ts), and
+ * is the only thing Next's catch-all reads to refuse sending it back, so a path
+ * neither side serves cannot bounce between them.
+ *
+ * Deliberately NOT the internal-traffic header. That one means "synthetic, do
+ * not count it as the customer's traffic", and the contract probe sends it on
+ * purpose. When both meanings rode on one header, every probe of /db and /fn
+ * was refused by the loop guard with Next's own 404 and filed as the tenant's
+ * broken surface: found qualifying v8 on AWS staging, the moment the probe could
+ * finally reach the ingress. A client that sets this itself only gets Next's 404.
+ */
+export const RUNTIME_HOP_HEADER = 'x-backenly-hop'
+
+/**
  * Set ONLY by this forwarder, and only on the 502 it answers when the runtime
  * could not be reached at all. It is how the contract sweep tells "our ingress
  * could not reach our runtime" (the platform's fault, whatever project the probe
