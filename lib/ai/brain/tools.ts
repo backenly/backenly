@@ -1896,7 +1896,7 @@ export async function dispatchTool(
         '',
         '## 4. The runtime API (the app you build)',
         `- Base URL: \`${base}\``,
-        '- Header `x-api-key: <proj_live_... runtime key>` on every call. (`sk_live_` is the Stripe prefix, NOT the Backenly one -- a Backenly project key always starts `proj_live_` or `proj_test_`.)',
+        '- Header `x-api-key: <proj_live_... runtime key>` on every call. A Backenly project key starts `proj_live_` (publishable, RLS-bound) or `svc_live_` (service role, server-side only). `sk_live_` is Stripe\'s secret-key prefix; only keys Backenly issued before it adopted these prefixes start with it, and they keep working.',
         '- **The project key is SAFE IN A BROWSER BUNDLE.** It identifies the project, it is not a user. On its own it can only read what your SELECT policies make public, and every write is refused until you also send `X-User-Token`. It is the equivalent of a publishable/anon key — ship it in your frontend. The key you must NEVER ship is a SERVICE-ROLE key, which bypasses RLS entirely.',
         '- End-user auth: `POST /auth/signup` and `POST /auth/signin` → `{ token }`. Send that token as header **`X-User-Token: <token>`** on data calls — RLS then scopes rows to that user. (An API key alone is NOT a user; owner writes without a user token are correctly denied on own-rows tables.)',
         '- **CRUD paths — one form only:** `GET /db/<table>`, `POST /db/<table>`, `GET /db/<table>/<id>`, `PATCH /db/<table>/<id>` (PUT is accepted as the same update), `DELETE /db/<table>/<id>`. The `/db/` prefix is required. There is no bare `/<table>` route.',
