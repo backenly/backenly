@@ -15,17 +15,20 @@ export const dynamic = 'force-dynamic'
  * lib/runtime/forward-to-runtime.ts.
  *
  * With no runtime configured, or for a request the runtime itself forwarded
- * here (server/routes/next-proxy.ts on the single-box layout, marked with the
- * internal-traffic header), it is a JSON 404, so a path neither side serves
- * cannot bounce between them. Both runtimes build that body from
- * lib/api/v1/route-not-found, so they cannot drift apart.
+ * here (server/routes/next-proxy.ts, marked with RUNTIME_HOP_HEADER), it is a
+ * JSON 404, so a path neither side serves cannot bounce between them. Both
+ * runtimes build that body from lib/api/v1/route-not-found, so they cannot
+ * drift apart.
+ *
+ * The internal-traffic header is NOT the loop signal. The contract probe sends
+ * it so it is never counted as the customer's traffic, and it must still be
+ * forwarded: a probe the loop guard refuses measures this 404, not the runtime.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
 import { v1NotFoundBody } from '@/lib/api/v1/route-not-found'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
-import { forwardToRuntime, runtimeOrigin } from '@/lib/runtime/forward-to-runtime'
-import { isInternalTraffic, INTERNAL_TRAFFIC_HEADER } from '@/lib/traffic/request-recorder'
+import { forwardToRuntime, runtimeOrigin, RUNTIME_HOP_HEADER } from '@/lib/runtime/forward-to-runtime'
 
 async function handler(
   request: NextRequest,
@@ -33,7 +36,7 @@ async function handler(
 ) {
   const params = await props.params
   const origin = runtimeOrigin()
-  if (origin && !isInternalTraffic(request.headers.get(INTERNAL_TRAFFIC_HEADER))) {
+  if (origin && !request.headers.get(RUNTIME_HOP_HEADER)) {
     return forwardToRuntime(request, origin)
   }
   return NextResponse.json(v1NotFoundBody(params.projectId, params.unmatched ?? []), { status: 404 })
