@@ -67,6 +67,9 @@ beforeAll(async () => {
         // The runtime's own CORS answer, which must not reach the browser twice.
         'Access-Control-Allow-Origin': '*',
         'X-Runtime': 'yes',
+        // Anything behind the forwarder (a tenant's function included) trying
+        // to claim the platform-fault marker the contract sweep trusts.
+        'X-Backenly-Platform-Fault': 'forged-by-upstream',
       })
       res.end(JSON.stringify({ data: [{ id: 1 }] }))
     })
@@ -106,6 +109,8 @@ describe('Next forwards what it does not serve', () => {
     expect(seen[0].headers[INTERNAL_TRAFFIC_HEADER]).toBe(internalTrafficHeaders()[INTERNAL_TRAFFIC_HEADER])
     expect(res.headers.get('x-runtime')).toBe('yes')
     expect(res.headers.get('access-control-allow-origin')).toBeNull()
+    // Only the forwarder itself may say the platform failed.
+    expect(res.headers.get('x-backenly-platform-fault')).toBeNull()
   })
 
   it('streams a write body through', async () => {
@@ -153,6 +158,9 @@ describe('Next forwards what it does not serve', () => {
     const res = await unmatched.GET(req(`https://backenly.com/api/v1/${id}/db/todos`), ctx(id, ['db', 'todos']))
     expect(res.status).toBe(502)
     expect((await res.json()).error.code).toBe('RUNTIME_UNREACHABLE')
+    // The marker the contract sweep reads as "the platform's fault, not this
+    // project's" (lib/services/contract-verifier.ts).
+    expect(res.headers.get('x-backenly-platform-fault')).toBe('runtime-unreachable')
   })
 })
 
