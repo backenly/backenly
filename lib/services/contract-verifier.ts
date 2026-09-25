@@ -31,6 +31,7 @@ import { purgeSyntheticAuthArtifacts } from '@/lib/services/end-user-auth-table'
 import { isDataPlaneOutage } from '@/lib/core/fix-actions'
 import type { RawFinding } from '@/lib/core/types'
 import { internalTrafficHeaders } from '@/lib/traffic/request-recorder'
+import { PLATFORM_FAULT_HEADER } from '@/lib/runtime/forward-to-runtime'
 
 const PROBE_TIMEOUT_MS = 8_000
 
@@ -100,6 +101,20 @@ async function probeFetch(
       headers: { ...(init.headers as Record<string, string> | undefined), ...internalTrafficHeaders() },
       signal: controller.signal,
     })
+    // The ingress answered, but only to say it could not reach the service
+    // behind it. That is the platform's fault on every project probed, so it is
+    // raised the way a refused connection is: as a transport failure, which the
+    // attribution never files against a tenant. Before this, a 502 from our own
+    // forwarder read as a tenant fault whenever too few projects were probed
+    // for fleet correlation to see it, and a Cloud account whose backend was the
+    // only one built got the platform's outage as its own critical.
+    const platformFault = res.headers.get(PLATFORM_FAULT_HEADER)
+    if (platformFault) {
+      await res.body?.cancel().catch(() => {})
+      const err = new Error(`the ingress could not reach the service behind it (${platformFault}, HTTP ${res.status})`)
+      err.name = 'PlatformUnreachable'
+      throw err
+    }
     const raw = await res.text()
     let body: any = null
     try { body = JSON.parse(raw) } catch { /* HTML or empty */ }

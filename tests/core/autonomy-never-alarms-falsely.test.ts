@@ -160,6 +160,7 @@ import type { AddressInfo } from 'net'
 import { runContractSweep } from '@/lib/services/workspace-observer'
 import { attributeContractFailures, type ProbeResult } from '@/lib/services/contract-verifier'
 import { reapUnattributableFindings } from '@/lib/core/finding-reaper'
+import { PLATFORM_FAULT_HEADER } from '@/lib/runtime/forward-to-runtime'
 
 /** A built project with the anon key the key-authed probes need. */
 async function builtProject(): Promise<{ userId: string; projectId: string }> {
@@ -172,17 +173,32 @@ async function builtProject(): Promise<{ userId: string; projectId: string }> {
  * A stand-in ingress. Every surface answers the way a healthy platform does,
  * except the ones a test breaks: `fail.storage` / `fail.db` are project ids.
  */
-function stubIngress(fail: { storage?: Set<string>; db?: Set<string> } = {}) {
+function stubIngress(
+  fail: {
+    storage?: Set<string>
+    db?: Set<string>
+    /** Next is up, the runtime behind it is not: what forwardToRuntime answers. */
+    runtimeDown?: boolean
+    /** The same 502, WITHOUT the forwarder's marker, for these projects. */
+    unmarked502?: Set<string>
+  } = {},
+) {
   const server = http.createServer((req, res) => {
     const url = req.url ?? ''
-    const json = (status: number, body: unknown) => {
-      res.writeHead(status, { 'Content-Type': 'application/json' })
+    const json = (status: number, body: unknown, headers: Record<string, string> = {}) => {
+      res.writeHead(status, { 'Content-Type': 'application/json', ...headers })
       res.end(JSON.stringify(body))
     }
     if (url.startsWith('/api/health')) return json(200, { healthy: true })
     const m = url.match(/^\/api\/v1\/([^/]+)\/([^/?]+)/)
     if (!m) return json(404, { error: 'not found' })
     const [, projectId, surface] = m
+    // Every runtime-served surface; storage is the web app's own.
+    if (surface !== 'storage') {
+      const unreachable = { error: { code: 'RUNTIME_UNREACHABLE', message: 'The service that answers this route did not respond.' } }
+      if (fail.runtimeDown) return json(502, unreachable, { [PLATFORM_FAULT_HEADER]: 'runtime-unreachable' })
+      if (fail.unmarked502?.has(projectId)) return json(502, unreachable)
+    }
     if (surface === 'healthz') return json(200, { status: 'healthy' })
     if (surface === 'fn') return json(404, { code: 'FUNCTION_NOT_FOUND' })
     if (surface === 'storage') {
@@ -257,6 +273,52 @@ describe('a platform fault is never filed against a tenant', () => {
     } finally {
       await ingress.close()
       for (const p of ps) await dropProject(p)
+    }
+  }, 60_000)
+
+  it('files nothing for a lone built project when the runtime behind the ingress is down', async () => {
+    // Found qualifying v8 on AWS staging, where one project was built. Next is
+    // up, so the ingress preflight passes; the runtime behind it is not, so
+    // every runtime surface answers our forwarder's 502. With ONE project there
+    // is nothing for fleet correlation to correlate, and that 502 used to be
+    // filed as the tenant's critical, then emailed to them.
+    const only = await builtProject()
+    const ingress = await stubIngress({ runtimeDown: true })
+    process.env.CONTRACT_PROBE_ORIGIN = ingress.origin
+    try {
+      const sweep = await runContractSweep({ projectIds: [only.projectId] })
+
+      expect(sweep.platformFaults.length).toBeGreaterThan(0)
+      expect(sweep.platformFaults.every(f => f.kind === 'surface_unreachable')).toBe(true)
+      expect(sweep.platformFaults.map(f => f.surface)).toContain('db')
+      expect(await prisma.healthFinding.count({ where: { projectId: only.projectId } })).toBe(0)
+      expect(await prisma.platformNotification.count({ where: { userId: only.userId } })).toBe(0)
+      // Unknown, not healthy: no heartbeat claims the runtime answered.
+      expect(await heartbeat(only.projectId)).toBeNull()
+    } finally {
+      await ingress.close()
+      await dropProject(only)
+    }
+  }, 60_000)
+
+  it("the platform marker is what decides it: the same 502 without it is still the tenant's", async () => {
+    // Non-vacuity for the case above. A 502 that our forwarder did NOT mark is
+    // not evidence about the platform, so on a lone project it stays exactly
+    // what it was: that project's finding.
+    const only = await builtProject()
+    const ingress = await stubIngress({ unmarked502: new Set([only.projectId]) })
+    process.env.CONTRACT_PROBE_ORIGIN = ingress.origin
+    try {
+      const sweep = await runContractSweep({ projectIds: [only.projectId] })
+      expect(sweep.platformFaults).toEqual([])
+      const rows = await prisma.healthFinding.findMany({
+        where: { projectId: only.projectId, type: 'contract_surface_broken' },
+        select: { details: true },
+      })
+      expect(rows.length).toBeGreaterThan(0)
+    } finally {
+      await ingress.close()
+      await dropProject(only)
     }
   }, 60_000)
 
