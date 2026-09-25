@@ -392,6 +392,23 @@ describe('integrations', () => {
   }, 60_000)
 })
 
+// ── Connect: which project and key ───────────────────────────────────────────
+
+describe('connect whoami', () => {
+  it('names the bound project and the calling key, from the database', async () => {
+    const r = await call(RW_KEY, 'connect', { action: 'whoami' })
+    expect(r.body.data.project).toMatchObject({ id: projectId, name: 'mcp-domain-operations', published: false, paused: false })
+    expect(r.body.data.connection).toMatchObject({ prefix: RW_KEY.slice(0, 12), scope: 'mcp', readOnly: false, branch: null })
+    expect(r.body.summary).toContain(projectId)
+    expect(JSON.stringify(r.body)).not.toContain(RW_KEY)
+  }, 60_000)
+
+  it('reports a read-only key as read-only', async () => {
+    const r = await call(RO_KEY, 'connect', { action: 'whoami' })
+    expect(r.body.data.connection).toMatchObject({ prefix: RO_KEY.slice(0, 12), readOnly: true })
+  }, 60_000)
+})
+
 // ── Deploy: version history ──────────────────────────────────────────────────
 
 describe('deploy history', () => {

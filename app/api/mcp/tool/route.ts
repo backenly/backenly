@@ -664,6 +664,8 @@ export async function POST(request: NextRequest) {
     const result = await runInTokenScope(tokenScope, () => dispatchTool(dispatchName, dispatchArgs, {
       projectId: auth.projectId,
       userId: auth.userId,
+      apiKeyId: auth.keyId,
+      keyReadOnly: auth.readOnly,
       sessionToken: undefined,
       destructiveConfirmed: false,
       // Owner-held MCP key on the direct tool surface: destructive tools are

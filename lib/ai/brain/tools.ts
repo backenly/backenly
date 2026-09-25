@@ -114,6 +114,8 @@ export type ToolName =
   // Integrations: what each can do, and whether its key still works
   | 'list_integration_capabilities'
   | 'verify_integration_key'
+  // Which project and credential this caller is acting as
+  | 'get_connection_identity'
   // Connect Frontend
   | 'connect_frontend'
   | 'disconnect_frontend'
@@ -258,6 +260,7 @@ export const READ_ONLY_TOOLS = new Set<ToolName>([
   'list_request_logs',
   'list_deploy_versions',
   'list_integration_capabilities',
+  'get_connection_identity',
 ])
 
 export function isDestructiveTool(name: string): boolean {
@@ -272,6 +275,10 @@ export interface ToolDispatchContext {
   projectId: string
   /** Owner of the project — required for autonomy + audit-log writes. */
   userId?: string
+  /** The MCP key or OAuth connection making the call. Set by the MCP route only. */
+  apiKeyId?: string
+  /** Whether that caller is read-only, as the MCP guard decided it. */
+  keyReadOnly?: boolean
   sessionToken?: string
   /** The user's most recent message — needed for answer_question. */
   userMessage?: string
@@ -809,6 +816,11 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     'Ask the provider again whether the stored key works, and record the answer: verified, rejected, unverifiable (the provider offers no check) or unreachable. A key revoked in the provider dashboard is only caught this way.',
     { integrationId: { type: 'string', description: 'e.g. "stripe".' } },
     ['integrationId']),
+  // ── Connection identity ───────────────────────────────────────────────────
+  fn('get_connection_identity',
+    'Which project this connection is bound to (id, name, published, paused) and which key or OAuth connection is calling (name, prefix, read-only or not, preview-branch binding). Check it before changing anything when more than one project is in play.',
+    {},
+    []),
   fn('fix_backend',
     'Repair a broken subsystem. target: auth | api | table | deploy | realtime | storage | integration | workflow. Use when read_backend_state shows something is broken.',
     {
@@ -2502,6 +2514,12 @@ export async function dispatchTool(
         : await i.verifyIntegration(ctx.projectId, args))
     }
 
+    // ── Connection identity ───────────────────────────────────────────────
+    if (name === 'get_connection_identity') {
+      const { connectionIdentity } = await import('@/lib/mcp/identity')
+      return finalize(await connectionIdentity(ctx))
+    }
+
     // ── Deploy: version history ───────────────────────────────────────────
     if (name === 'list_deploy_versions') {
       const { listPublishedVersions } = await import('@/lib/deployment/published-versions')
@@ -3037,6 +3055,7 @@ export function humanTitle(name: string, args: Record<string, unknown>): string 
     case 'list_request_logs': return 'Reading the request log'
     case 'list_deploy_versions': return 'Reading published versions'
     case 'list_integration_capabilities': return 'Reading what each integration can do'
+    case 'get_connection_identity': return 'Reading which project this connection is bound to'
     case 'verify_integration_key': return `Checking the ${args.integrationId ?? ''} key with its provider`.replace(/\s+/g, ' ')
     case 'fix_backend': return `Repairing ${args.target ?? 'backend'}`
     case 'apply_proposal': return 'Applying the recommendation list'
