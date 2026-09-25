@@ -23,7 +23,7 @@ export const article: ArticleData = {
         },
         {
           kind: 'p',
-          text: 'Decide read-only or read-write when you mint the key, because an agent cannot change its own and no endpoint flips an existing one. A read-only key is served 6 tools instead of 23 — `read_backend_state`, `get_table_schema`, `run_query`, `generate_types`, `fetch_docs`, and `check_approval`. Every write door is withheld, `backend_chat` included, because the brain can apply non-destructive changes without ever reaching the destructive gate, so a key that could reach it would not be read-only. Calling a mutating tool anyway is refused with `READ_ONLY_KEY` before it runs, and nothing is partially applied.',
+          text: 'Decide read-only or read-write when you mint the key, because an agent cannot change its own and no endpoint flips an existing one. A read-only key is served 16 tools instead of 23: `read_backend_state`, `get_table_schema`, `run_query`, `generate_types`, `fetch_docs` and `check_approval`, plus each section tool (`monitoring`, `deploy`, `storage` and the rest) narrowed to its read actions, so a write action is never even shown. Every write door is withheld, `backend_chat` included, because the brain can apply non-destructive changes without ever reaching the destructive gate, so a key that could reach it would not be read-only. Calling a mutating tool anyway is refused with `READ_ONLY_KEY` before it runs, and nothing is partially applied.',
         },
       ],
     },

@@ -31,7 +31,7 @@ import { prisma } from '@/lib/db/prisma'
 import { createTokenScope, runInTokenScope } from '@/lib/ai/token-meter'
 import { createHash } from 'crypto'
 import { DOCS_MAX_CHARS } from '@/lib/mcp/docs-limit'
-import { resolveDomainAction, type DomainResolution } from '@/lib/mcp/domains'
+import { readOnlyView, resolveDomainAction, type DomainResolution } from '@/lib/mcp/domains'
 
 /**
  * Tools on this route that spend Backenly's model budget. See the gate in POST
@@ -107,7 +107,11 @@ export async function POST(request: NextRequest) {
         ok: false,
         error: domain.action ? `Unknown ${tool} action "${domain.action}".` : `${tool} requires { action }.`,
         code: 'UNKNOWN_ACTION',
-        supported: domain.supported,
+        // A read-only key is told only the actions it may use: the list of
+        // write actions is not something it should learn from an error.
+        supported: auth.readOnly
+          ? Object.keys(readOnlyView(domain.domain)?.actions ?? {})
+          : domain.supported,
         hint: `The ${tool} tool description lists what each action does and the arguments it needs.`,
       },
       { status: 400 },

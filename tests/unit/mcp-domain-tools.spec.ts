@@ -153,6 +153,63 @@ describe('the domain table', () => {
   })
 })
 
+describe('what a read-only key discovers', () => {
+  const ro = () => buildCatalog({ readOnly: true })
+  const writeActions = everyAction.filter((a) => !isReadOnlyTool(a.tool))
+
+  it('keeps one door per section: every domain with a read action is served', () => {
+    const names = new Set(ro().map((t) => t.name))
+    for (const d of DOMAIN_TOOLS) {
+      const hasRead = Object.values(d.actions).some((a) => isReadOnlyTool(a.tool))
+      expect({ domain: d.name, served: names.has(d.name) }).toEqual({ domain: d.name, served: hasRead })
+    }
+  })
+
+  it('offers exactly the read actions in the action enum', () => {
+    for (const t of ro().filter((t) => DOMAIN_TOOLS.some((d) => d.name === t.name))) {
+      const d = DOMAIN_TOOLS.find((x) => x.name === t.name)!
+      const reads = Object.entries(d.actions).filter(([, a]) => isReadOnlyTool(a.tool)).map(([n]) => n)
+      expect({ tool: t.name, enum: (t.inputSchema.properties.action as any).enum }).toEqual({ tool: t.name, enum: reads })
+    }
+  })
+
+  it('never shows a write action, in the enum or the description', () => {
+    const served = new Map(ro().map((t) => [t.name, t]))
+    const leaked = writeActions.filter((a) => {
+      const t = served.get(a.domain)
+      if (!t) return false
+      const inEnum = (t.inputSchema.properties.action as any).enum.includes(a.action)
+      const inText = t.description.split('\n').some((line) => line.startsWith(`• ${a.action}:`))
+      return inEnum || inText
+    })
+    expect(leaked).toEqual([])
+  })
+
+  it('offers no argument that asks a read to write', () => {
+    const deploy = ro().find((t) => t.name === 'deploy')!
+    expect(Object.keys(deploy.inputSchema.properties)).not.toContain('autoFix')
+    expect(deploy.description).not.toMatch(/autoFix/)
+  })
+
+  it('marks every narrowed domain read-only, so a host can treat it as one', () => {
+    for (const t of ro().filter((t) => DOMAIN_TOOLS.some((d) => d.name === t.name))) {
+      expect({ tool: t.name, ...t.annotations }).toMatchObject({ tool: t.name, readOnlyHint: true, destructiveHint: false })
+    }
+  })
+
+  it('is described in the Connect guide with the counts the catalog really serves', () => {
+    const { article } = require('@/app/resources/content/connect-your-coding-agent')
+    expect(JSON.stringify(article)).toContain(`served ${ro().length} tools instead of ${buildCatalog().length}`)
+  })
+
+  it('still withholds every write-only door', () => {
+    const names = ro().map((t) => t.name)
+    for (const w of ['backend_chat', 'apply_migration', 'db_insert', 'db_update', 'db_delete', 'set_rls', 'branch']) {
+      expect(names).not.toContain(w)
+    }
+  })
+})
+
 describe('the tool route', () => {
   it('runs a domain action as its target, without the action key', async () => {
     const res = await call('storage', { action: 'create_bucket', bucketName: 'avatars', isPublic: false })
@@ -207,6 +264,34 @@ describe('the tool route', () => {
     expect(read.status).toBe(200)
     expect(write.status).toBe(403)
     expect(mockDispatched.map((d) => d.name)).toEqual(['get_metrics'])
+  })
+
+  it('refuses a read-only key every write action of every domain, and dispatches nothing', async () => {
+    mockReadOnly = true
+    const writes = everyAction.filter((a) => !isReadOnlyTool(a.tool))
+    for (const w of writes) {
+      const res = await call(w.domain, { action: w.action })
+      expect({ call: `${w.domain}.${w.action}`, status: res.status }).toEqual({ call: `${w.domain}.${w.action}`, status: 403 })
+    }
+    expect(mockDispatched).toEqual([])
+    expect(mockParked).toEqual([])
+  })
+
+  it('serves a read-only key every read action it is shown', async () => {
+    mockReadOnly = true
+    const reads = everyAction.filter((a) => isReadOnlyTool(a.tool))
+    for (const r of reads) {
+      const res = await call(r.domain, { action: r.action })
+      expect({ call: `${r.domain}.${r.action}`, status: res.status }).toEqual({ call: `${r.domain}.${r.action}`, status: 200 })
+    }
+    expect(mockDispatched.map((d) => d.name)).toEqual(reads.map((r) => r.tool))
+  })
+
+  it('tells a read-only key only the read actions when it asks for one that does not exist', async () => {
+    mockReadOnly = true
+    const res = await call('deploy', { action: 'yolo' })
+    const body = await res.json()
+    expect(body.supported).toEqual(['status', 'readiness'])
   })
 
   it('never parks a request from a read-only key either', async () => {

@@ -32,7 +32,7 @@
  */
 
 import { BRAIN_TOOLS, READ_ONLY_TOOLS, isDestructiveTool } from '@/lib/ai/brain/tools'
-import { DOMAIN_TOOLS, domainDescription, domainInputSchema, getDomainTool } from '@/lib/mcp/domains'
+import { DOMAIN_TOOLS, domainDescription, domainInputSchema, getDomainTool, readOnlyView } from '@/lib/mcp/domains'
 
 export type McpTier = 'chat' | 'read' | 'build' | 'data'
 
@@ -381,7 +381,27 @@ const MCP_SURFACE = new Set<string>([
 export function buildCatalog(opts?: { readOnly?: boolean }): McpToolDescriptor[] {
   const advertised = buildDispatchable().filter((t) => MCP_SURFACE.has(t.name))
   if (!opts?.readOnly) return advertised
-  return advertised.filter((t) => isReadOnlyTool(t.name))
+  // A read-only key keeps each section's door, narrowed to its read actions:
+  // enum, description and schema are rebuilt from those alone, so no write
+  // action is ever shown. Everything else is served only if it is a read.
+  return advertised.flatMap((t) => {
+    if (isReadOnlyTool(t.name)) return [t]
+    const domain = getDomainTool(t.name)
+    const view = domain ? readOnlyView(domain) : null
+    if (!view) return []
+    return [{
+      ...t,
+      description: domainDescription(view),
+      inputSchema: domainInputSchema(view, { readOnly: true }),
+      annotations: {
+        ...annotationsFor(t.name),
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    }]
+  })
 }
 
 /**

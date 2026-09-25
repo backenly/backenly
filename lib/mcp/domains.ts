@@ -23,7 +23,7 @@
  *     call, and runs verbatim once approved (lib/mcp/approvals.ts).
  */
 
-import { BRAIN_TOOLS, TOOL_TO_ACTION, isDestructiveTool } from '@/lib/ai/brain/tools'
+import { BRAIN_TOOLS, READ_ONLY_TOOLS, TOOL_TO_ACTION, isDestructiveTool } from '@/lib/ai/brain/tools'
 import { riskLevelForExecutorAction } from '@/lib/operational-memory/ledger'
 
 export interface DomainAction {
@@ -31,6 +31,8 @@ export interface DomainAction {
   tool: string
   /** One line for the tool description, after the action name. */
   gloss: string
+  /** The line a read-only key sees instead, when `gloss` mentions changing something. */
+  readGloss?: string
 }
 
 export interface DomainTool {
@@ -159,7 +161,7 @@ export const DOMAIN_TOOLS: DomainTool[] = [
     summary: 'Publishing and rolling back. Both change what production serves, so both wait for a human.',
     actions: {
       status: { tool: 'get_deploy_status', gloss: 'the live version, when it shipped and its state' },
-      readiness: { tool: 'get_readiness', gloss: 'the 0-100 readiness score with blockers; fixes nothing unless autoFix is true' },
+      readiness: { tool: 'get_readiness', gloss: 'the 0-100 readiness score with blockers; fixes nothing unless autoFix is true', readGloss: 'the 0-100 readiness score with its blockers' },
       deploy: { tool: 'trigger_deploy', gloss: 'publish the current backend' },
       rollback: { tool: 'rollback_deploy', gloss: 'return to an earlier version' },
     },
@@ -209,6 +211,36 @@ export function needsApproval(target: string): boolean {
   return riskLevelForExecutorAction(build({}).action) === 'high'
 }
 
+/**
+ * A domain as a read-only key sees it: only the actions whose target is a read,
+ * or null when there are none.
+ *
+ * A read-only key used to see no domain tools at all, because each carries at
+ * least one write, so an operator on one lost the per-section door even though
+ * every read action behind it was allowed. The view keeps the door and narrows
+ * it: the action enum, the description and the argument schema are built from
+ * the read actions alone, so a write action is never shown. The route enforces
+ * the same line by judging each call's target (app/api/mcp/tool/route.ts).
+ */
+export function readOnlyView(domain: DomainTool): DomainTool | null {
+  const reads = Object.entries(domain.actions)
+    .filter(([, a]) => READ_ONLY_TOOLS.has(a.tool as any))
+    .map(([name, a]) => [name, { tool: a.tool, gloss: a.readGloss ?? a.gloss }] as const)
+  if (reads.length === 0) return null
+  return {
+    name: domain.name,
+    title: domain.title,
+    summary:
+      `${domain.title}, as a read-only key sees it: every action here reads and changes nothing. ` +
+      'Changing anything needs a read-write key, which only a human can issue.',
+    actions: Object.fromEntries(reads),
+    openWorld: false,
+  }
+}
+
+/** Arguments that ask a read to write, never offered to a read-only key. */
+const WRITE_ONLY_ARGS = new Set(['autoFix'])
+
 export type DomainResolution =
   | { kind: 'ok'; domain: DomainTool; action: string; target: string; approval: boolean }
   | { kind: 'unknown_action'; domain: DomainTool; action: string; supported: string[] }
@@ -235,7 +267,7 @@ function brainParams(tool: string): { properties: Record<string, JsonSchema>; re
  * so the two can never disagree. A property several actions share keeps one
  * description and lists which actions use it.
  */
-export function domainInputSchema(domain: DomainTool): {
+export function domainInputSchema(domain: DomainTool, opts?: { readOnly?: boolean }): {
   type: 'object'
   properties: Record<string, unknown>
   required: string[]
@@ -247,6 +279,7 @@ export function domainInputSchema(domain: DomainTool): {
   for (const [action, { tool }] of Object.entries(domain.actions)) {
     for (const [prop, schema] of Object.entries(brainParams(tool).properties)) {
       if (prop === 'action') continue
+      if (opts?.readOnly && WRITE_ONLY_ARGS.has(prop)) continue
       if (!properties[prop]) {
         properties[prop] = { ...schema }
         usedBy[prop] = [action]
