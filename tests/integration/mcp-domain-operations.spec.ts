@@ -36,6 +36,8 @@ import { prisma } from '@/lib/db/prisma'
 import { hashApiKey } from '@/lib/auth/apiKeyAuth'
 import { decideApproval } from '@/lib/mcp/approvals'
 import { POST } from '@/app/api/mcp/tool/route'
+import { execFileSync } from 'child_process'
+import { forgetFunctionDbClient, functionRoleName } from '@/lib/services/ai-functions/function-db-role'
 
 class Receiver {
   private server!: http.Server
@@ -316,6 +318,172 @@ describe('functions', () => {
     const runs = r.body.data.runs
     expect(runs.find((x: any) => x.functionId === okId)).toMatchObject({ success: true })
     expect(runs.find((x: any) => x.functionId === failingId)).toMatchObject({ success: false, error: expect.stringContaining('deliberately broken') })
+  }, 60_000)
+})
+
+// ── Functions: deploy code the agent wrote ───────────────────────────────────
+
+describe('functions deploy_code', () => {
+  let otherOwnerId: string
+  let otherProjectId: string
+  let otherFunctionId: string
+  const otherCode = `return 'someone else'`
+
+  const httpModule = (body: string) => `
+    import { NextResponse } from 'next/server'
+    import { prisma } from '@/lib/db'
+    export async function POST(request: Request) {
+      ${body}
+    }
+  `
+  const deploy = (key: string, args: Record<string, unknown>) => call(key, 'functions', { action: 'deploy_code', ...args })
+
+  beforeAll(async () => {
+    // Function SQL logs in as the project's own role; installed the way an
+    // operator installs it (see __tests__/database/function-sql-isolation.test.ts).
+    for (const file of ['scripts/setup-direct-access.sql', 'scripts/sql/function-roles.sql']) {
+      execFileSync('psql', ['-v', 'ON_ERROR_STOP=1', '-q', '-f', file, '-d', process.env.TEST_DATABASE_URL!], { stdio: 'pipe' })
+    }
+    await prisma.$executeRawUnsafe(`INSERT INTO "${schema}"."orders"(label) VALUES ('first'), ('second')`)
+    otherOwnerId = (await prisma.user.create({
+      data: { email: `other-${crypto.randomBytes(6).toString('hex')}@example.test`, password: 'not-a-real-hash', name: 'other' },
+    })).id
+    otherProjectId = (await prisma.project.create({ data: { name: 'someone-elses', userId: otherOwnerId } })).id
+    otherFunctionId = (await prisma.aiFunction.create({
+      data: { projectId: otherProjectId, name: 'theirs', description: 'theirs', generatedCode: otherCode, triggerType: 'manual', status: 'active' },
+    })).id
+  }, 180_000)
+
+  afterAll(async () => {
+    await forgetFunctionDbClient(projectId).catch(() => {})
+    // Roles are cluster-wide, so they outlive the test database unless dropped.
+    const role = functionRoleName(schema)
+    await prisma.$executeRawUnsafe(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${role}') THEN
+      EXECUTE 'DROP OWNED BY ${role}'; EXECUTE 'DROP ROLE ${role}'; END IF; END $$`).catch(() => {})
+    await prisma.project.deleteMany({ where: { userId: otherOwnerId } }).catch(() => {})
+    await prisma.user.delete({ where: { id: otherOwnerId } }).catch(() => {})
+  }, 60_000)
+
+  it('deploys an http route module exactly as written, runs it, and records the run', async () => {
+    const code = httpModule(`
+      const { name } = await request.json()
+      console.log('greeting', name)
+      return NextResponse.json({ hello: name })
+    `)
+    const d = await deploy(RW_KEY, { name: 'Greet Agent', code, trigger: 'http' })
+    expect(d.body).toMatchObject({
+      ok: true,
+      data: {
+        name: 'greet-agent',
+        requestedName: 'Greet Agent',
+        created: true,
+        trigger: 'http',
+        endpoint: { method: 'POST', path: `/api/v1/${projectId}/fn/greet-agent` },
+        codeBytes: Buffer.byteLength(code),
+        codeSha256: crypto.createHash('sha256').update(code).digest('hex'),
+      },
+    })
+    // A receipt, not the source.
+    expect(JSON.stringify(d.body)).not.toContain('greeting')
+    const stored = await prisma.aiFunction.findUnique({ where: { id: d.body.data.functionId } })
+    expect(stored).toMatchObject({
+      projectId, generatedCode: code, status: 'active', triggerType: 'manual', triggerTable: `POST /api/v1/${projectId}/fn/greet-agent`,
+    })
+
+    const run = await call(RW_KEY, 'functions', { action: 'invoke', functionId: d.body.data.functionId, event: { name: 'ada' } })
+    expect(run.body).toMatchObject({ ok: true, data: { success: true, httpStatus: 200, result: { hello: 'ada' } } })
+    expect(run.body.data.logs.join('\n')).toContain('greeting ada')
+    const logs = await call(RO_KEY, 'functions', { action: 'logs', functionId: d.body.data.functionId })
+    expect(logs.body.data.runs[0]).toMatchObject({ success: true })
+  }, 120_000)
+
+  it('deploys a sandbox body that reads this project\'s rows through ctx.db', async () => {
+    const code = `const rows = await ctx.db.query('orders')\nctx.log('found', rows.length)\nreturn { count: rows.length }`
+    const d = await deploy(RW_KEY, { name: 'count-orders', code, trigger: 'manual' })
+    expect(d.body).toMatchObject({ ok: true, data: { trigger: 'manual', endpoint: null, created: true } })
+    const run = await call(RW_KEY, 'functions', { action: 'invoke', functionId: d.body.data.functionId })
+    expect(run.body).toMatchObject({ ok: true, data: { success: true, result: { count: 2 } } })
+  }, 120_000)
+
+  it('records a failing run with its error and log lines, and leaves the code as deployed', async () => {
+    const code = `ctx.log('about to fail')\nthrow new Error('agent code failed on purpose')`
+    const d = await deploy(RW_KEY, { name: 'fails-on-purpose', code, trigger: 'manual' })
+    expect(d.body.ok).toBe(true)
+    const run = await call(RW_KEY, 'functions', { action: 'invoke', functionId: d.body.data.functionId })
+    expect(run.body.ok).toBe(false)
+    expect(run.body.summary).toContain('agent code failed on purpose')
+    const logs = await call(RO_KEY, 'functions', { action: 'logs', functionId: d.body.data.functionId })
+    expect(logs.body.data.runs[0]).toMatchObject({ success: false, error: expect.stringContaining('agent code failed on purpose') })
+    expect(JSON.stringify(logs.body.data.runs[0].logs)).toContain('about to fail')
+    await new Promise((res) => setTimeout(res, 500))
+    expect((await prisma.aiFunction.findUnique({ where: { id: d.body.data.functionId } }))?.generatedCode).toBe(code)
+  }, 120_000)
+
+  it('reaches this project\'s tables through SQL, and none of the platform\'s', async () => {
+    const own = await deploy(RW_KEY, {
+      name: 'own-orders', trigger: 'http',
+      code: httpModule(`const rows = await prisma.$queryRawUnsafe('SELECT label FROM orders ORDER BY id')\nreturn NextResponse.json({ rows })`),
+    })
+    const ownRun = await call(RW_KEY, 'functions', { action: 'invoke', functionId: own.body.data.functionId })
+    expect(ownRun.body.data?.result?.rows?.map((r: any) => r.label)).toEqual(['first', 'second'])
+
+    const probe = await deploy(RW_KEY, {
+      name: 'platform-probe', trigger: 'http',
+      code: httpModule(`const rows = await prisma.$queryRawUnsafe('SELECT email FROM public.users LIMIT 5')\nreturn NextResponse.json({ rows })`),
+    })
+    expect(probe.body.ok).toBe(true)
+    const probeRun = await call(RW_KEY, 'functions', { action: 'invoke', functionId: probe.body.data.functionId })
+    expect(probeRun.body.ok).toBe(false)
+    expect(JSON.stringify(probeRun.body)).toMatch(/permission denied/i)
+    expect(JSON.stringify(probeRun.body)).not.toMatch(/@example\.test/)
+  }, 120_000)
+
+  it('replaces the code of a function with the same name, and keeps one that was switched off, off', async () => {
+    const a = await deploy(RW_KEY, { name: 'versioned', code: `return 'v1'`, trigger: 'manual' })
+    await prisma.aiFunction.update({ where: { id: a.body.data.functionId }, data: { status: 'inactive' } })
+    const b = await deploy(RW_KEY, { name: 'versioned', code: `return 'v2'`, trigger: 'manual' })
+    expect(b.body).toMatchObject({
+      ok: true,
+      data: { functionId: a.body.data.functionId, created: false, status: 'inactive', previousCodeSha256: a.body.data.codeSha256 },
+    })
+    expect(b.body.summary).toMatch(/nothing to roll back to/)
+    expect(await prisma.aiFunction.count({ where: { projectId, name: 'versioned' } })).toBe(1)
+    expect((await prisma.aiFunction.findUnique({ where: { id: a.body.data.functionId } }))?.generatedCode).toBe(`return 'v2'`)
+  }, 60_000)
+
+  it('wires a row trigger to a table that exists, and refuses one that does not', async () => {
+    const ok = await deploy(RW_KEY, { name: 'on-order', trigger: 'on_insert', table: 'orders', code: `ctx.log('new order')\nreturn null` })
+    expect(ok.body).toMatchObject({ ok: true, data: { triggerType: 'on_db_insert', triggerTable: 'orders' } })
+    const missing = await deploy(RW_KEY, { name: 'on-nothing', trigger: 'on_insert', table: 'no_such_table', code: 'return null' })
+    expect(missing.body.code).toBe('TABLE_NOT_FOUND')
+  }, 60_000)
+
+  it('refuses code that cannot run, and stores nothing', async () => {
+    const before = await prisma.aiFunction.count({ where: { projectId } })
+    for (const args of [
+      { name: 'bad-syntax', trigger: 'manual', code: 'return {' },
+      { name: 'bad-escape', trigger: 'manual', code: 'return process.env.DATABASE_URL' },
+      { name: 'bad-shape', trigger: 'http', code: 'return 1' },
+    ]) {
+      const r = await deploy(RW_KEY, args)
+      expect(r.body).toMatchObject({ ok: false, code: 'INVALID_CODE' })
+    }
+    expect(await prisma.aiFunction.count({ where: { projectId } })).toBe(before)
+  }, 60_000)
+
+  it('does not let a read-only key deploy', async () => {
+    const r = await deploy(RO_KEY, { name: 'ro-attempt', code: 'return 1', trigger: 'manual' })
+    expect(r.body.code).toBe('READ_ONLY_KEY')
+    expect(await prisma.aiFunction.count({ where: { projectId, name: 'ro-attempt' } })).toBe(0)
+  }, 60_000)
+
+  it('cannot reach another project\'s function, by its id or by naming the project', async () => {
+    const byId = await deploy(RW_KEY, { functionId: otherFunctionId, name: 'theirs', code: 'return 1', trigger: 'manual' })
+    expect(byId.body.code).toBe('NOT_FOUND')
+    const byProject = await deploy(RW_KEY, { projectId: otherProjectId, name: 'theirs', code: 'return 1', trigger: 'manual' })
+    expect(byProject.body.code).toBe('PROJECT_MISMATCH')
+    expect((await prisma.aiFunction.findUnique({ where: { id: otherFunctionId } }))?.generatedCode).toBe(otherCode)
+    expect(await prisma.aiFunction.count({ where: { projectId, name: 'theirs' } })).toBe(0)
   }, 60_000)
 })
 
