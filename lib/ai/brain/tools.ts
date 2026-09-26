@@ -113,6 +113,7 @@ export type ToolName =
   | 'get_ai_function'
   | 'invoke_ai_function'
   | 'list_ai_function_logs'
+  | 'deploy_function_code'
   // Monitoring
   | 'list_request_logs'
   // Deploy history
@@ -347,6 +348,14 @@ export interface ToolResult {
    */
   code?: string
 }
+
+/**
+ * Tools an agent calls over MCP that the brain's own model is not offered.
+ * deploy_function_code stores source its caller already wrote; the brain writes
+ * code through generate_function, which repairs what it writes, and two doors
+ * to one behaviour is what the catalog was cut down to avoid.
+ */
+export const AGENT_ONLY_TOOLS = new Set<string>(['deploy_function_code'])
 
 // ── OpenAI tool schema ────────────────────────────────────────────────────────
 
@@ -807,6 +816,30 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
       limit: { type: 'integer', minimum: 1, maximum: 100 },
     },
     []),
+  fn('deploy_function_code',
+    'Deploy function source you wrote, exactly as written: no model reads or rewrites it. trigger "http" takes a route module ' +
+    '(`import { NextResponse } from \'next/server\'`, `export async function POST(req) { … }`) served at /api/v1/{projectId}/fn/{name}. ' +
+    'Every other trigger takes a sandbox body: statements using ctx.db, ctx.http, ctx.log, ctx.integrations.<provider> and ctx.env.KEY, ' +
+    'receiving `event`, optionally returning a value. The code is checked by the runtime that will run it and refused with the reason if it cannot run; ' +
+    'keys written into it are refused. Deploying a name that exists replaces its code (no version history is kept). ' +
+    `Source is limited to 64 KB. Test it with invoke_ai_function and read runs with list_ai_function_logs.`,
+    {
+      name: { type: 'string', description: 'The function\'s name, as requested or as deployed (lowercase kebab-case).' },
+      code: { type: 'string', description: 'The complete source: a route module for trigger "http", a sandbox body for every other trigger.' },
+      trigger: {
+        type: 'string',
+        enum: ['on_signup', 'on_insert', 'on_update', 'on_delete', 'http', 'manual'],
+        description: 'What fires the function. Use an event type for automatic behaviour; http for a directly-callable endpoint.',
+      },
+      table: { type: 'string', description: 'Required for on_insert / on_update / on_delete — the table whose row events fire the function.' },
+      method: {
+        type: 'string',
+        enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+        description: 'For trigger=http only — the HTTP verb of the endpoint. Defaults to the one the module exports.',
+      },
+      functionId: { type: 'string', description: 'To replace a specific existing function; its name must match.' },
+    },
+    ['name', 'code', 'trigger']),
   // ── Monitoring: request log ───────────────────────────────────────────────
   fn('list_request_logs',
     'The requests this project\'s runtime API served, newest first: method, path (no query string), status, latency, time. Filter to failures with minStatus 400, or to one route with pathPrefix.',
@@ -1322,6 +1355,9 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     },
     ['summary']),
 ]
+
+/** BRAIN_TOOLS as the brain's own model is offered them: without AGENT_ONLY_TOOLS. */
+export const BRAIN_MODEL_TOOLS = BRAIN_TOOLS.filter((t) => !AGENT_ONLY_TOOLS.has(t.function.name))
 
 function fn(
   name: string,
@@ -2527,15 +2563,17 @@ export async function dispatchTool(
       return finalize(await run[name]())
     }
 
-    // ── Functions: inspect, run, logs ─────────────────────────────────────
-    if (name === 'get_ai_function' || name === 'invoke_ai_function' || name === 'list_ai_function_logs') {
+    // ── Functions: inspect, run, logs, deploy agent-written code ──────────
+    if (name === 'get_ai_function' || name === 'invoke_ai_function' || name === 'list_ai_function_logs' || name === 'deploy_function_code') {
       const f = await import('@/lib/services/ai-functions/agent-actions')
       const actor = { userId: ctx.userId, projectId: ctx.projectId }
       const result = name === 'get_ai_function'
         ? await f.getFunction(actor, args)
         : name === 'invoke_ai_function'
           ? await f.invokeFunction(actor, args)
-          : await f.listFunctionLogs(actor, args)
+          : name === 'deploy_function_code'
+            ? await f.deployFunctionCode(actor, args)
+            : await f.listFunctionLogs(actor, args)
       return finalize(result)
     }
 
@@ -3120,6 +3158,7 @@ export function humanTitle(name: string, args: Record<string, unknown>): string 
     case 'get_ai_function': return `Reading function ${args.name ?? args.functionId ?? ''}`.trim()
     case 'invoke_ai_function': return `Running function ${args.name ?? args.functionId ?? ''}`.trim()
     case 'list_ai_function_logs': return 'Reading function runs'
+    case 'deploy_function_code': return `Deploying function ${args.name ?? ''}`.trim()
     case 'list_request_logs': return 'Reading the request log'
     case 'list_deploy_versions': return 'Reading published versions'
     case 'list_integration_capabilities': return 'Reading what each integration can do'

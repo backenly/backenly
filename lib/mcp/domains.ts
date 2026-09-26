@@ -87,10 +87,12 @@ export const DOMAIN_TOOLS: DomainTool[] = [
     name: 'functions',
     title: 'Functions',
     summary:
-      'Server-side functions and schedules. Backenly writes a function\'s code from your spec with its ' +
-      'own model, which draws AI credits; name the tables and integrations it uses.',
+      'Server-side functions and schedules. "create" has Backenly write a function\'s code from your spec with its ' +
+      'own model, which draws AI credits; name the tables and integrations it uses. "deploy_code" stores code you wrote, ' +
+      'exactly as written, after the runtime checks it can run.',
     actions: {
       create: { tool: 'generate_function', gloss: 'a function from a plain-English spec, fired by sign-up, a table event, HTTP or manually' },
+      deploy_code: { tool: 'deploy_function_code', gloss: 'your own source: a route module for trigger http, a ctx sandbox body for every other trigger; replaces the code of a function with the same name' },
       list: { tool: 'list_ai_functions', gloss: 'every function with its trigger and on/off state' },
       get: { tool: 'get_ai_function', gloss: 'one function in full: its code, trigger, endpoint, state and last error' },
       invoke: { tool: 'invoke_ai_function', gloss: 'run it once now and get its answer, return value and log lines; a failure is reported, never auto-repaired' },

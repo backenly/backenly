@@ -31,7 +31,7 @@ import { collectProof, formatProof } from '../proof-system'
 import { loadBrainMemory, formatUnderstanding, formatRecentHistory, saveTurn, type ConversationTurn } from './memory'
 import { classify, type BrainIntent, type Classification } from './classifier'
 import {
-  BRAIN_TOOLS,
+  BRAIN_MODEL_TOOLS,
   dispatchTool,
   isDestructiveTool,
   isReadOnlyTool,
@@ -1672,9 +1672,10 @@ async function runAgentLoop(
  */
 const CONFIRM_TOOL_BLOCKLIST = new Set<string>(['propose_plan'])
 
+// BRAIN_MODEL_TOOLS, not BRAIN_TOOLS: tools only an MCP agent calls are not offered to the model.
 function toolsForIntent(intent: BrainIntent): OpenAI.Chat.Completions.ChatCompletionTool[] {
-  if (intent !== 'CONFIRM') return BRAIN_TOOLS
-  return BRAIN_TOOLS.filter((t) => !CONFIRM_TOOL_BLOCKLIST.has(t.function.name))
+  if (intent !== 'CONFIRM') return BRAIN_MODEL_TOOLS
+  return BRAIN_MODEL_TOOLS.filter((t) => !CONFIRM_TOOL_BLOCKLIST.has(t.function.name))
 }
 
 /**
@@ -1685,7 +1686,7 @@ function toolsForIntent(intent: BrainIntent): OpenAI.Chat.Completions.ChatComple
 async function callModelWithRetry(
   openai: Pick<OpenAI, 'chat'>,
   messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[],
-  tools: OpenAI.Chat.Completions.ChatCompletionTool[] = BRAIN_TOOLS,
+  tools: OpenAI.Chat.Completions.ChatCompletionTool[] = BRAIN_MODEL_TOOLS,
 ): Promise<OpenAI.Chat.Completions.ChatCompletion> {
   const params = {
     model: getModel('respond'),

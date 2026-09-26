@@ -432,6 +432,37 @@ function runInWorker(
   })
 }
 
+/**
+ * Whether the sandbox would accept `code`, asked of the sandbox worker itself:
+ * the import rewrite, the blocked-pattern check, the ctx.require() package list
+ * and a compile of the wrapper the worker runs. The function body is never run.
+ * Deploying agent-written code checks this before storing it, so what is stored
+ * is what the runtime can execute.
+ */
+export function validateSandboxFunction(code: string): Promise<{ valid: boolean; error?: string }> {
+  return new Promise((resolve) => {
+    let settled = false
+    const worker = new Worker(SANDBOX_WORKER_PATH, {
+      env: {},
+      resourceLimits: { maxOldGenerationSizeMb: 64, maxYoungGenerationSizeMb: 16, codeRangeSizeMb: 8 },
+    })
+    const finish = (result: { valid: boolean; error?: string }) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      worker.terminate().catch(() => {})
+      resolve(result)
+    }
+    const timer = setTimeout(() => finish({ valid: false, error: 'The sandbox did not answer within 5s.' }), 5_000)
+    worker.on('message', (msg: any) => {
+      if (msg?.type === 'validated') finish(msg.error ? { valid: false, error: String(msg.error) } : { valid: true })
+    })
+    worker.on('error', (err) => finish({ valid: false, error: `The sandbox could not start: ${err.message}` }))
+    worker.on('exit', (exitCode) => finish({ valid: false, error: `The sandbox exited with code ${exitCode} before answering.` }))
+    worker.postMessage({ type: 'validate', id: `v${Date.now()}`, code })
+  })
+}
+
 // ─── Auto-Fix ─────────────────────────────────────────────────────────────────
 
 async function autoFixAiFunction(
