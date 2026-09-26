@@ -12,7 +12,7 @@
  */
 
 import { useEffect, useRef } from 'react'
-import { ArrowRight, BookOpen, ChevronDown, ChevronUp, Plus } from 'lucide-react'
+import { ChevronDown, ChevronUp, Plus } from 'lucide-react'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import { useGuidePolling, useGuideStore, useVisibleGuide } from '@/lib/stores/use-guide-store'
 import type { GuideProgress } from '@/lib/onboarding/guide'
@@ -20,6 +20,7 @@ import { STEP_COPY } from './guide-copy'
 import { GuideChecklist, GuidePanel, GuideProgressBar } from './GuidePanel'
 import { WorkflowDiagram } from './WorkflowDiagram'
 import { guidePollMs } from './poll'
+import { Eyebrow, Hairline, PANEL, Panel, PrimaryAction, QuietAction } from './ui'
 
 export function GettingStartedWelcome({
   progress,
@@ -38,78 +39,78 @@ export function GettingStartedWelcome({
   }, [panelOpen, setPanelOpen])
 
   return (
-    <section aria-labelledby="welcome-heading" className="w-full max-w-6xl py-4 sm:py-6">
-      <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-violet-300/80">Welcome to Backenly</p>
-      <h2 id="welcome-heading" className="mt-2 text-[22px] font-semibold tracking-[-0.015em] text-white sm:text-[26px]">
-        Build your backend from your coding agent.
-      </h2>
-      <p className="mt-2 max-w-2xl text-[13.5px] leading-relaxed text-zinc-300">
-        Your agent builds it through Backenly&apos;s MCP server. Backenly provisions and runs the backend, and keeps
-        watching it after you publish.
-      </p>
-      <p className="mt-1.5 max-w-2xl text-[12.5px] leading-relaxed text-zinc-500">
-        Describe what you want to your agent, not to this dashboard. Come here to review it, publish it and see what
-        Backenly is doing.
-      </p>
-
-      <div className="mt-6">
-        <WorkflowDiagram />
-      </div>
-
-      <div className="mt-6 overflow-hidden rounded-xl border border-white/[0.07] bg-[#16171d] shadow-[0_16px_44px_-28px_rgba(0,0,0,0.9)]">
-        <div className="grid gap-0 md:grid-cols-[minmax(0,280px)_minmax(0,1fr)]">
-          <div className="order-last border-t border-white/[0.06] p-4 md:order-none md:border-r md:border-t-0">
-            <p className="mb-2 flex items-center justify-between px-2.5 text-[11.5px] text-zinc-500">
-              <span className="font-medium text-zinc-300">Getting started</span>
-              <span className="font-mono tabular-nums">
-                {progress.completed}/{progress.total}
-              </span>
+    <section aria-labelledby="welcome-heading" className="w-full py-2 sm:py-4">
+      <Panel>
+        <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_300px]">
+          {/* ── The pitch, and the one thing to do ─────────────────────── */}
+          <div className="flex flex-col justify-center px-5 py-6 sm:px-7 sm:py-7">
+            <Eyebrow pulse>Welcome to Backenly</Eyebrow>
+            <h2
+              id="welcome-heading"
+              className="mt-3 text-[22px] font-semibold leading-tight tracking-[-0.015em] text-white sm:text-[26px]"
+            >
+              Build your backend from your coding agent.
+            </h2>
+            <p className="mt-2.5 max-w-xl text-[13.5px] leading-6 text-zinc-300">
+              Your agent builds it through Backenly&apos;s MCP server. Backenly provisions and runs the backend, and keeps
+              watching it after you publish.
             </p>
-            <GuideProgressBar completed={progress.completed} total={progress.total} className="mx-2.5 mb-3" />
-            <GuideChecklist progress={progress} selected={progress.currentStepId} />
-          </div>
+            <p className="mt-1.5 max-w-xl text-[12.5px] leading-relaxed text-zinc-500">
+              Describe what you want to your agent, not to this dashboard. Come here to review it, publish it and see
+              what Backenly is doing.
+            </p>
 
-          <div className="flex flex-col justify-between gap-6 p-5">
-            <div>
-              <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">Start here</p>
-              <h3 className="mt-1 text-[15px] font-semibold tracking-[-0.01em] text-zinc-50">{STEP_COPY.project.title}</h3>
-              <p className="mt-1 max-w-lg text-[12.5px] leading-relaxed text-zinc-400">{STEP_COPY.project.body}</p>
+            <div className="mt-5">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-600">
+                Step {progress.steps.findIndex((s) => s.id === 'project') + 1} · {STEP_COPY.project.title}
+              </p>
               {CLOUD_CONTROL_PLANE ? (
-                <div className="mt-4 flex flex-wrap items-center gap-3">
-                  <button
-                    type="button"
+                <div className="mt-2.5 flex flex-wrap items-center gap-x-4 gap-y-2">
+                  <PrimaryAction
+                    icon={Plus}
                     onClick={() => {
                       track('cta_clicked', 'project')
                       onCreateProject()
                     }}
-                    className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-white px-3.5 text-[13px] font-semibold text-black transition-colors hover:bg-zinc-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/35"
                   >
-                    <Plus className="h-4 w-4" aria-hidden />
                     Create your first project
-                  </button>
-                  <span className="text-[11.5px] text-zinc-500">Next, you&apos;ll connect your agent to it.</span>
+                  </PrimaryAction>
+                  <QuietAction href="/resources/how-backenly-works">How Backenly works</QuietAction>
                 </div>
               ) : (
-                <p className="mt-4 max-w-lg rounded-lg border border-white/[0.07] bg-white/[0.02] px-3 py-2.5 text-[12px] leading-relaxed text-zinc-400">
-                  This deployment hosts one project. Run{' '}
-                  <code className="rounded bg-white/[0.06] px-1 py-0.5 font-mono text-[11px] text-zinc-200">npm run bootstrap</code>{' '}
-                  on the server, then reload this page.
-                </p>
+                <div className="mt-2.5 space-y-2.5">
+                  <p className="max-w-lg rounded-lg border border-white/[0.07] bg-[#0f1015] px-3.5 py-2.5 text-[12px] leading-relaxed text-zinc-400">
+                    This deployment hosts one project. Run{' '}
+                    <code className="rounded bg-white/[0.06] px-1 py-0.5 font-mono text-[11px] text-zinc-200">npm run bootstrap</code>{' '}
+                    on the server, then reload this page.
+                  </p>
+                  <QuietAction href="/resources/how-backenly-works">How Backenly works</QuietAction>
+                </div>
               )}
+              <p className="mt-3 max-w-lg text-[11.5px] leading-relaxed text-zinc-500">{STEP_COPY.project.body}</p>
             </div>
-            <a
-              href="/resources/how-backenly-works"
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex w-fit items-center gap-1.5 text-[11.5px] text-zinc-500 transition-colors hover:text-zinc-200"
-            >
-              <BookOpen className="h-3.5 w-3.5" aria-hidden />
-              How Backenly works
-              <ArrowRight className="h-3 w-3" aria-hidden />
-            </a>
+          </div>
+
+          {/* ── Where this goes: the whole path, with progress ─────────── */}
+          <div className="border-t border-white/[0.06] bg-[#131419] px-4 py-5 lg:border-l lg:border-t-0">
+            <p className="flex items-baseline justify-between px-0.5 text-[12px]">
+              <span className="font-semibold text-zinc-200">Getting started</span>
+              <span className="font-mono text-[11px] tabular-nums text-zinc-500">
+                {progress.completed}/{progress.total}
+              </span>
+            </p>
+            <GuideProgressBar completed={progress.completed} total={progress.total} className="mb-3 mt-2.5 px-0.5" />
+            <div className="-mx-2">
+              <GuideChecklist progress={progress} selected={progress.currentStepId} />
+            </div>
           </div>
         </div>
-      </div>
+
+        {/* ── The model, in one picture ──────────────────────────────── */}
+        <div className="border-t border-white/[0.06] px-4 py-4 sm:px-5 sm:py-5">
+          <WorkflowDiagram bare />
+        </div>
+      </Panel>
     </section>
   )
 }
@@ -141,8 +142,9 @@ export function GettingStartedCard({ onCreateProject }: { onCreateProject: () =>
       ref={ref}
       tabIndex={-1}
       aria-labelledby="guide-heading"
-      className="mt-6 rounded-xl border border-white/[0.07] bg-[#16171d] p-4 shadow-[0_16px_44px_-28px_rgba(0,0,0,0.9)] focus:outline-none sm:mt-7 sm:p-5"
+      className={`${PANEL} mt-6 p-4 focus:outline-none sm:mt-7 sm:p-5`}
     >
+      <Hairline />
       {collapsed ? (
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
           <div className="min-w-0 flex-1">
@@ -154,7 +156,7 @@ export function GettingStartedCard({ onCreateProject }: { onCreateProject: () =>
                 {progress.completed}/{progress.total}
               </span>
             </div>
-            <GuideProgressBar completed={progress.completed} total={progress.total} className="mt-2 max-w-md" />
+            <GuideProgressBar completed={progress.completed} total={progress.total} className="mt-2.5 max-w-sm" />
           </div>
           <p className="min-w-0 truncate text-[12px] text-zinc-400 sm:max-w-[40%]">
             {next ? (

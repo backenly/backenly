@@ -16,6 +16,7 @@ import { useGuidePolling, useGuideStore, useVisibleGuide } from '@/lib/stores/us
 import { STEP_COPY } from './guide-copy'
 import { GuidePanel, GuideProgressBar } from './GuidePanel'
 import { guidePollMs } from './poll'
+import { Hairline } from './ui'
 
 export function GuideLauncher() {
   const guide = useVisibleGuide()
@@ -34,11 +35,12 @@ export function GuideLauncher() {
       onClick={() => setPanelOpen(true)}
       aria-haspopup="dialog"
       aria-expanded={panelOpen}
-      className="w-full rounded-lg border border-white/[0.07] bg-white/[0.02] px-3 py-2.5 text-left transition-colors hover:border-white/[0.12] hover:bg-white/[0.04] focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/35"
+      className="relative w-full overflow-hidden rounded-lg border border-white/[0.08] bg-[#16171d] px-3 py-2.5 text-left transition-colors hover:border-white/[0.14] focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/35"
     >
+      <Hairline />
       <span className="flex items-center justify-between gap-2">
         <span className="flex items-center gap-2 text-[12px] font-medium text-zinc-200">
-          <Compass className="h-3.5 w-3.5 text-zinc-400" aria-hidden />
+          <Compass className="h-3.5 w-3.5 text-violet-300/80" aria-hidden />
           Getting started
         </span>
         <span className="font-mono text-[11px] tabular-nums text-zinc-500">
@@ -123,18 +125,24 @@ export function GuideDrawer() {
             transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
             className="absolute inset-y-0 right-0 flex w-full max-w-[480px] flex-col border-l border-white/[0.12] bg-[#16171d] shadow-[0_12px_32px_-16px_rgba(0,0,0,0.85)] focus:outline-none"
           >
-            <div className="flex h-12 flex-shrink-0 items-center justify-end border-b border-white/[0.06] px-3">
-              <button
-                type="button"
-                onClick={close}
-                aria-label="Close Getting started"
-                className="rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-white/[0.04] hover:text-zinc-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/35"
-              >
-                <X className="h-4 w-4" aria-hidden />
-              </button>
-            </div>
-            <div className="flex-1 overflow-y-auto px-5 pb-8 pt-4">
-              <GuidePanel progress={progress} variant="drawer" onNavigate={close} headingId="guide-drawer-heading" />
+            <Hairline />
+            <div className="flex-1 overflow-y-auto px-5 pb-8 pt-5">
+              <GuidePanel
+                progress={progress}
+                variant="drawer"
+                onNavigate={close}
+                headingId="guide-drawer-heading"
+                headerExtra={
+                  <button
+                    type="button"
+                    onClick={close}
+                    aria-label="Close Getting started"
+                    className="inline-flex h-7 w-7 items-center justify-center rounded-md text-zinc-500 transition-colors hover:bg-white/[0.04] hover:text-zinc-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/35"
+                  >
+                    <X className="h-4 w-4" aria-hidden />
+                  </button>
+                }
+              />
             </div>
           </motion.div>
         </div>

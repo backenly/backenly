@@ -19,6 +19,7 @@ import { useGuidePolling, useGuideStore, useVisibleGuide } from '@/lib/stores/us
 import { ConnectionTroubleshooting } from './GuidePanel'
 import { StarterPrompt } from './StarterPrompt'
 import { ago } from './time'
+import { Eyebrow, Hairline, PANEL, QuietAction, SegmentedProgress } from './ui'
 
 const LIVE_POLL_MS = 4_000
 
@@ -26,6 +27,7 @@ export function AgentConnectionStatus({ projectId }: { projectId: string }) {
   const router = useRouter()
   const guide = useVisibleGuide()
   const track = useGuideStore((s) => s.track)
+  const setPanelOpen = useGuideStore((s) => s.setPanelOpen)
   const progress = guide?.progress
   const status = (id: string) => progress?.steps.find((s) => s.id === id)?.status
   const relevant =
@@ -104,33 +106,33 @@ export function AgentConnectionStatus({ projectId }: { projectId: string }) {
     )
   }
 
-  const ring = tone === 'ok' ? 'border-emerald-400/20' : tone === 'bad' ? 'border-rose-400/25' : 'border-violet-300/20'
+  const stepId = agent === 'done' ? (backendDone ? 'publish' : 'backend') : keyDone ? 'agent' : 'mcp_key'
+  const stepNumber = progress.steps.findIndex((s) => s.id === stepId) + 1
+  const eyebrowTone = tone === 'ok' ? 'ok' : tone === 'bad' ? 'bad' : 'live'
 
   return (
-    <section
-      aria-label="Agent connection"
-      className={`mb-6 rounded-xl border ${ring} bg-[#16171d] px-4 py-3.5 shadow-[0_16px_44px_-28px_rgba(0,0,0,0.9)]`}
-    >
-      <div className="flex items-start gap-3">
-        <span className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center" aria-hidden>
-          {tone === 'ok' ? (
-            <span className="flex h-5 w-5 items-center justify-center rounded-full bg-emerald-400/15 ring-1 ring-emerald-400/30">
-              <Check className="h-3 w-3 text-emerald-300" strokeWidth={2.5} />
-            </span>
-          ) : tone === 'bad' ? (
-            <span className="h-2 w-2 rounded-full bg-rose-400" />
-          ) : (
-            <span className="relative flex h-2 w-2">
-              <span className="absolute inline-flex h-full w-full rounded-full bg-violet-300/60 motion-safe:animate-ping" />
-              <span className="relative inline-flex h-2 w-2 rounded-full bg-violet-300" />
-            </span>
-          )}
-        </span>
-        <div className="min-w-0 flex-1 space-y-2">
-          <p className="text-[13px] font-semibold text-zinc-100" role="status" aria-live="polite">
+    <section aria-label="Agent connection" className={`${PANEL} mb-6`}>
+      <Hairline />
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_220px]">
+        <div className="min-w-0 space-y-2.5 px-5 py-4">
+          <Eyebrow tone={eyebrowTone} pulse={tone === 'wait'}>
+            Getting started · Step {stepNumber} of {progress.total}
+          </Eyebrow>
+          <p className="text-[15px] font-semibold leading-snug tracking-[-0.01em] text-white" role="status" aria-live="polite">
+            {tone === 'ok' && <Check className="mr-1.5 inline h-4 w-4 -translate-y-px text-emerald-300" strokeWidth={2.5} aria-hidden />}
             {title}
           </p>
           {body}
+        </div>
+        <div className="flex flex-col justify-center gap-2.5 border-t border-white/[0.06] bg-[#131419] px-5 py-4 lg:border-l lg:border-t-0">
+          <p className="flex items-baseline justify-between text-[11.5px] text-zinc-500">
+            Progress
+            <span className="font-mono tabular-nums text-zinc-300">
+              {progress.completed}/{progress.total}
+            </span>
+          </p>
+          <SegmentedProgress completed={progress.completed} total={progress.total} />
+          <QuietAction onClick={() => setPanelOpen(true)}>Open the guide</QuietAction>
         </div>
       </div>
     </section>

@@ -2,76 +2,95 @@
 
 /**
  * The one picture the guide exists to teach: where Backenly sits in the
- * workflow. Two phases, because that is the distinction a new user misses —
+ * workflow. Two phases, because that is the distinction a new user misses:
  * the agent builds (through MCP), then Backenly runs and watches what was built.
  *
- * Horizontal from md up, a vertical list below it. Decorative arrows are hidden
- * from assistive tech; the list itself carries the order.
+ * Five equal columns under two phase labels from md up; a vertical list below
+ * it. Connectors are decorative and hidden from assistive tech; the ordered
+ * list carries the sequence.
  */
 
-import { Bot, Cable, Database, Rocket, ShieldCheck, ChevronRight, type LucideIcon } from 'lucide-react'
+import { Bot, Cable, ChevronRight, Database, Rocket, ShieldCheck, type LucideIcon } from 'lucide-react'
 
 interface Node {
   icon: LucideIcon
   title: string
   caption: string
+  run?: boolean
 }
 
-const BUILD: Node[] = [
+const NODES: Node[] = [
   { icon: Bot, title: 'Your coding agent', caption: 'Claude Code, Cursor, Codex, Cline' },
   { icon: Cable, title: 'Backenly MCP', caption: 'The tools your agent calls' },
   { icon: Database, title: 'Your backend', caption: 'Postgres, auth, APIs, storage' },
+  { icon: Rocket, title: 'Publish', caption: 'A stable, versioned endpoint', run: true },
+  { icon: ShieldCheck, title: 'Backenly watches', caption: 'Detects and repairs what it safely can', run: true },
 ]
 
-const RUN: Node[] = [
-  { icon: Rocket, title: 'Publish', caption: 'A stable, versioned endpoint' },
-  { icon: ShieldCheck, title: 'Backenly watches', caption: 'Detects and repairs what it safely can' },
-]
-
-export function WorkflowDiagram({ compact = false }: { compact?: boolean }) {
+function PhaseLabel({ label, hint, run = false }: { label: string; hint: string; run?: boolean }) {
   return (
-    <div className="grid gap-3 md:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]" role="group" aria-label="How Backenly fits into your workflow">
-      <Phase label="Build" hint="through your agent" nodes={BUILD} compact={compact} />
-      <Phase label="Run" hint="Backenly keeps it healthy" nodes={RUN} compact={compact} offset={BUILD.length} />
-    </div>
+    <p className="flex items-center gap-2">
+      <span className={`text-[10px] font-semibold uppercase tracking-[0.14em] ${run ? 'text-violet-300/80' : 'text-zinc-500'}`}>
+        {label}
+      </span>
+      <span className="text-[11px] text-zinc-600">{hint}</span>
+      <span aria-hidden className={`h-px flex-1 ${run ? 'bg-violet-300/20' : 'bg-white/[0.07]'}`} />
+    </p>
   )
 }
 
-function Phase({
-  label,
-  hint,
-  nodes,
-  compact,
-  offset = 0,
-}: {
-  label: string
-  hint: string
-  nodes: Node[]
-  compact: boolean
-  offset?: number
-}) {
+/** `bare` drops the frame when the diagram already sits inside a panel. */
+export function WorkflowDiagram({ compact = false, bare = false }: { compact?: boolean; bare?: boolean }) {
   return (
-    <div className="min-w-0 rounded-lg border border-white/[0.07] bg-[#0f1015] p-3">
-      <p className="mb-2.5 flex items-baseline gap-2 px-0.5">
-        <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-500">{label}</span>
-        <span className="text-[11px] text-zinc-600">{hint}</span>
-      </p>
-      <ol className="flex flex-col gap-1.5 md:flex-row md:items-stretch md:gap-0" start={offset + 1}>
-        {nodes.map((n, i) => (
-          <li key={n.title} className="flex min-w-0 flex-1 flex-col md:flex-row md:items-stretch">
-            <div className="flex min-w-0 flex-1 items-center gap-2.5 self-stretch rounded-md border border-white/[0.06] bg-white/[0.02] px-2.5 py-2">
-              <span className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md border border-white/[0.08] bg-white/[0.03]">
-                <n.icon className="h-3.5 w-3.5 text-zinc-300" aria-hidden />
+    <div
+      role="group"
+      aria-label="How Backenly fits into your workflow"
+      className={bare ? '' : 'rounded-xl border border-white/[0.07] bg-[#0f1015] p-4'}
+    >
+      <div className="mb-3 hidden gap-4 md:grid md:grid-cols-5">
+        <div className="col-span-3">
+          <PhaseLabel label="Build" hint="through your agent" />
+        </div>
+        <div className="col-span-2">
+          <PhaseLabel label="Run" hint="Backenly keeps it healthy" run />
+        </div>
+      </div>
+      <ol className="grid gap-2 md:grid-cols-5 md:gap-4">
+        {NODES.map((n, i) => (
+          <li key={n.title} className="relative min-w-0">
+            {i === 0 && (
+              <div className="mb-2 md:hidden">
+                <PhaseLabel label="Build" hint="through your agent" />
+              </div>
+            )}
+            {i === 3 && (
+              <div className="mb-2 mt-2 md:hidden">
+                <PhaseLabel label="Run" hint="Backenly keeps it healthy" run />
+              </div>
+            )}
+            <div
+              className={`flex min-w-0 items-start gap-3 rounded-lg border px-3 py-3 md:h-full ${
+                n.run ? 'border-violet-300/15 bg-violet-300/[0.03]' : 'border-white/[0.07] bg-[#16171d]'
+              }`}
+            >
+              <span className="relative mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-md border border-white/[0.08] bg-white/[0.03]">
+                <n.icon className={`h-4 w-4 ${n.run ? 'text-violet-200' : 'text-zinc-300'}`} aria-hidden />
+                <span
+                  className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-[#0f1015] font-mono text-[9px] tabular-nums text-zinc-500 ring-1 ring-white/[0.1]"
+                  aria-hidden
+                >
+                  {i + 1}
+                </span>
               </span>
               <span className="min-w-0">
-                <span className="block text-[12px] font-medium leading-snug text-zinc-100">{n.title}</span>
-                {!compact && <span className="block text-[11px] leading-snug text-zinc-500">{n.caption}</span>}
+                <span className="block text-[12.5px] font-medium leading-snug text-zinc-100">{n.title}</span>
+                {!compact && <span className="mt-0.5 block text-[11px] leading-snug text-zinc-500">{n.caption}</span>}
               </span>
             </div>
-            {i < nodes.length - 1 && (
+            {i < NODES.length - 1 && (
               <ChevronRight
                 aria-hidden
-                className="mx-auto my-0.5 h-3.5 w-3.5 flex-shrink-0 rotate-90 self-center text-zinc-600 md:mx-1 md:my-0 md:rotate-0"
+                className="absolute -right-[13px] top-1/2 z-10 hidden h-3 w-3 -translate-y-1/2 text-zinc-600 md:block"
               />
             )}
           </li>

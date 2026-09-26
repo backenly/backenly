@@ -8,26 +8,22 @@
  * Every action here goes to the real surface that does the work (Connect,
  * Deploy, Autonomy). The guide never mints a key, publishes or approves
  * anything itself, so it cannot drift from how those surfaces behave.
+ *
+ * Visual language is the console's (./ui, lifted from WorkspaceHome): a live
+ * eyebrow, a headline that says what is next, discrete progress, a stepper
+ * whose rail shows how far along the user is, telemetry-style statuses.
  */
 
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useRouter } from 'next/navigation'
-import {
-  AlertTriangle,
-  ArrowRight,
-  Check,
-  Loader2,
-  Plus,
-  EyeOff,
-  ChevronDown,
-  LifeBuoy,
-} from 'lucide-react'
+import { AlertTriangle, Check, Loader2, Plus, EyeOff, ChevronDown, LifeBuoy } from 'lucide-react'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import type { GuideProgress, GuideStep, StepId, StepStatus } from '@/lib/onboarding/guide'
 import { useGuideStore } from '@/lib/stores/use-guide-store'
 import { STEP_COPY } from './guide-copy'
 import { StarterPrompt } from './StarterPrompt'
 import { AutonomyLoop } from './AutonomyLoop'
+import { Eyebrow, PrimaryAction, QuietAction, SecondaryAction, SegmentedProgress } from './ui'
 import { ago } from './time'
 
 type Variant = 'card' | 'drawer'
@@ -45,27 +41,8 @@ interface PanelProps {
   headerExtra?: ReactNode
 }
 
-// ── Progress ────────────────────────────────────────────────────────────────
-
-export function GuideProgressBar({ completed, total, className = '' }: { completed: number; total: number; className?: string }) {
-  const pct = total > 0 ? Math.round((completed / total) * 100) : 0
-  return (
-    <div
-      role="progressbar"
-      aria-label="Getting started progress"
-      aria-valuemin={0}
-      aria-valuemax={total}
-      aria-valuenow={completed}
-      aria-valuetext={`${completed} of ${total} steps complete`}
-      className={`h-1 overflow-hidden rounded-full bg-white/[0.06] ${className}`}
-    >
-      <div
-        className="h-full rounded-full bg-violet-300/80 motion-safe:transition-[width] motion-safe:duration-500"
-        style={{ width: `${pct}%` }}
-      />
-    </div>
-  )
-}
+/** Kept under its old name: the launcher and welcome draw the same progress. */
+export const GuideProgressBar = SegmentedProgress
 
 // ── Steps ───────────────────────────────────────────────────────────────────
 
@@ -77,42 +54,50 @@ const STATUS_LABEL: Record<StepStatus, string> = {
   failed: 'Needs attention',
 }
 
-function StatusMark({ status, current }: { status: StepStatus; current: boolean }) {
+/** The number in the mark: data is mono in this console, so steps are counted, not bulleted. */
+function StatusMark({ status, current, n }: { status: StepStatus; current: boolean; n: number }) {
+  const base = 'relative z-10 flex h-[22px] w-[22px] flex-shrink-0 items-center justify-center rounded-full'
   if (status === 'done') {
     return (
-      <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-emerald-400/15 ring-1 ring-emerald-400/30">
-        <Check className="h-3 w-3 text-emerald-300" strokeWidth={2.5} aria-hidden />
+      <span className={`${base} bg-[#16171d] ring-1 ring-emerald-400/35`}>
+        <span className="absolute inset-0 rounded-full bg-emerald-400/10" />
+        <Check className="relative h-3 w-3 text-emerald-300" strokeWidth={2.75} aria-hidden />
       </span>
     )
   }
   if (status === 'failed') {
     return (
-      <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-rose-400/10 ring-1 ring-rose-400/30">
-        <AlertTriangle className="h-2.5 w-2.5 text-rose-300" aria-hidden />
+      <span className={`${base} bg-[#16171d] ring-1 ring-rose-400/40`}>
+        <span className="absolute inset-0 rounded-full bg-rose-400/10" />
+        <AlertTriangle className="relative h-2.5 w-2.5 text-rose-300" aria-hidden />
       </span>
     )
   }
   if (status === 'in_progress') {
     return (
-      <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full ring-1 ring-amber-400/30">
+      <span className={`${base} bg-[#16171d] ring-1 ring-amber-400/35`}>
         <Loader2 className="h-3 w-3 text-amber-300 motion-safe:animate-spin" aria-hidden />
       </span>
     )
   }
   return (
     <span
-      className={`relative flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full ring-1 ${
-        current ? 'ring-violet-300/60' : 'ring-white/[0.14]'
+      className={`${base} bg-[#16171d] font-mono text-[10px] tabular-nums ring-1 ${
+        current ? 'text-violet-200 ring-violet-300/60' : 'text-zinc-500 ring-white/[0.12]'
       }`}
     >
-      {current && <span className="h-1.5 w-1.5 rounded-full bg-violet-300" aria-hidden />}
-      {status === 'waiting' && (
+      {current && status === 'waiting' && (
         <span className="absolute inset-0 rounded-full ring-1 ring-violet-300/40 motion-safe:animate-ping" aria-hidden />
       )}
+      <span aria-hidden>{n}</span>
     </span>
   )
 }
 
+/**
+ * The stepper. A rail runs through the marks, lit up to the last finished
+ * step, so "how far along am I" is readable without counting ticks.
+ */
 export function GuideChecklist({
   progress,
   selected,
@@ -123,29 +108,32 @@ export function GuideChecklist({
   onSelect?: (id: StepId) => void
 }) {
   return (
-    <ol className="space-y-0.5" aria-label="Getting started steps">
-      {progress.steps.map((step) => {
+    <ol className="relative" aria-label="Getting started steps">
+      {progress.steps.map((step, i) => {
         const copy = STEP_COPY[step.id]
         const current = step.id === progress.currentStepId
         const active = step.id === selected
-        const note = step.status !== 'done' ? copy.status?.[step.status] : undefined
+        const done = step.status === 'done'
+        const note = !done ? copy.status?.[step.status] : undefined
+        const last = i === progress.steps.length - 1
+        const nextDone = !last && progress.steps[i + 1].status === 'done'
         const label = (
           <>
-            <StatusMark status={step.status} current={current} />
-            <span className="min-w-0 flex-1">
+            <StatusMark status={step.status} current={current} n={i + 1} />
+            <span className="min-w-0 flex-1 py-0.5">
               <span
-                className={`block truncate text-[12.5px] ${
-                  step.status === 'done'
-                    ? 'text-zinc-400'
-                    : current || active
-                      ? 'font-medium text-zinc-50'
-                      : 'text-zinc-300'
+                className={`block truncate text-[12.5px] leading-5 ${
+                  done ? 'text-zinc-400' : current || active ? 'font-medium text-zinc-50' : 'text-zinc-300'
                 }`}
               >
-                {step.status === 'done' ? copy.doneTitle : copy.title}
+                {done ? copy.doneTitle : copy.title}
               </span>
               {note && (
-                <span className={`block truncate text-[11px] ${step.status === 'failed' ? 'text-rose-300/90' : 'text-zinc-500'}`}>
+                <span
+                  className={`block truncate font-mono text-[10.5px] ${
+                    step.status === 'failed' ? 'text-rose-300/90' : 'text-zinc-500'
+                  }`}
+                >
                   {note}
                 </span>
               )}
@@ -154,22 +142,29 @@ export function GuideChecklist({
           </>
         )
         return (
-          <li key={step.id} aria-current={current ? 'step' : undefined}>
+          <li key={step.id} aria-current={current ? 'step' : undefined} className="relative">
+            {/* The rail segment to the next mark: violet where both ends are done. */}
+            {!last && (
+              <span
+                aria-hidden
+                className={`absolute left-[21px] top-[30px] bottom-[-6px] w-px ${
+                  done && nextDone ? 'bg-violet-300/40' : 'bg-white/[0.08]'
+                }`}
+              />
+            )}
             {onSelect ? (
               <button
                 type="button"
                 onClick={() => onSelect(step.id)}
                 aria-pressed={active}
-                className={`flex w-full items-center gap-2.5 rounded-md border px-2.5 py-2 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/35 ${
-                  active
-                    ? 'border-white/[0.12] bg-white/[0.05]'
-                    : 'border-transparent hover:border-white/[0.06] hover:bg-white/[0.03]'
+                className={`relative flex w-full items-start gap-3 rounded-lg px-2.5 py-2 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/35 ${
+                  active ? 'bg-white/[0.05] shadow-[inset_2px_0_0_rgba(196,181,253,0.7)]' : 'hover:bg-white/[0.03]'
                 }`}
               >
                 {label}
               </button>
             ) : (
-              <div className="flex items-center gap-2.5 px-2.5 py-2">{label}</div>
+              <div className="relative flex items-start gap-3 px-2.5 py-2">{label}</div>
             )}
           </li>
         )
@@ -180,44 +175,13 @@ export function GuideChecklist({
 
 // ── One step, in detail ─────────────────────────────────────────────────────
 
-function Action({
-  children,
-  onClick,
-  primary = false,
-  icon = ArrowRight,
-  disabled = false,
-}: {
-  children: ReactNode
-  onClick: () => void
-  primary?: boolean
-  icon?: typeof ArrowRight
-  disabled?: boolean
-}) {
-  const Icon = icon
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      className={`inline-flex h-8 items-center gap-1.5 rounded-lg px-3 text-[12px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/35 disabled:cursor-not-allowed disabled:opacity-40 ${
-        primary
-          ? 'bg-white font-semibold text-black hover:bg-zinc-200'
-          : 'border border-white/10 bg-white/[0.04] font-medium text-zinc-200 hover:border-white/20 hover:bg-white/[0.08]'
-      }`}
-    >
-      {children}
-      <Icon className="h-3.5 w-3.5" aria-hidden />
-    </button>
-  )
-}
-
 function Callout({ tone, children }: { tone: 'info' | 'danger'; children: ReactNode }) {
   return (
     <div
-      className={`rounded-lg border px-3 py-2.5 text-[11.5px] leading-relaxed ${
+      className={`rounded-lg border px-3.5 py-3 text-[12px] leading-relaxed ${
         tone === 'danger'
           ? 'border-rose-400/20 bg-rose-400/[0.05] text-zinc-300'
-          : 'border-white/[0.07] bg-white/[0.02] text-zinc-400'
+          : 'border-white/[0.07] bg-[#0f1015] text-zinc-400'
       }`}
     >
       {children}
@@ -228,11 +192,21 @@ function Callout({ tone, children }: { tone: 'info' | 'danger'; children: ReactN
 /** A live dot and a sentence: what Backenly is waiting to see. */
 function Listening({ children }: { children: ReactNode }) {
   return (
-    <p className="flex items-center gap-2 text-[12px] text-zinc-300">
+    <p className="flex items-center gap-2.5 rounded-lg border border-violet-300/15 bg-violet-300/[0.04] px-3.5 py-2.5 text-[12px] text-zinc-300">
       <span className="relative flex h-2 w-2" aria-hidden>
         <span className="absolute inline-flex h-full w-full rounded-full bg-violet-300/60 motion-safe:animate-ping" />
         <span className="relative inline-flex h-2 w-2 rounded-full bg-violet-300" />
       </span>
+      {children}
+    </p>
+  )
+}
+
+/** A confirmed fact, in the console's telemetry voice. */
+function Confirmed({ children }: { children: ReactNode }) {
+  return (
+    <p className="flex items-center gap-2 text-[12px] text-emerald-300/90">
+      <Check className="h-3.5 w-3.5" strokeWidth={2.5} aria-hidden />
       {children}
     </p>
   )
@@ -245,30 +219,40 @@ function Listening({ children }: { children: ReactNode }) {
  */
 export function ConnectionTroubleshooting() {
   return (
-    <details className="group rounded-lg border border-white/[0.07] bg-white/[0.015] px-3 py-2">
-      <summary className="flex cursor-pointer list-none items-center gap-2 text-[11.5px] font-medium text-zinc-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/35 [&::-webkit-details-marker]:hidden">
+    <details className="group rounded-lg border border-white/[0.07] bg-[#0f1015] px-3.5 py-2.5">
+      <summary className="flex cursor-pointer list-none items-center gap-2 text-[12px] font-medium text-zinc-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/35 [&::-webkit-details-marker]:hidden">
         <LifeBuoy className="h-3.5 w-3.5 text-zinc-500" aria-hidden />
         Not connecting?
         <ChevronDown className="ml-auto h-3.5 w-3.5 text-zinc-500 transition-transform group-open:rotate-180" aria-hidden />
       </summary>
-      <ul className="mt-2 list-disc space-y-1.5 pl-4 text-[11.5px] leading-relaxed text-zinc-400 marker:text-zinc-600">
-        <li>
-          Start a new agent session after adding the server. Agents load MCP servers when a session starts, so one
-          that was already open will not see Backenly. In Claude Code, <code className="font-mono text-zinc-300">/mcp</code> should
-          list <code className="font-mono text-zinc-300">backenly</code>.
-        </li>
-        <li>
-          Use the key that starts with <code className="font-mono text-zinc-300">mcp_live_</code>. An app key from Settings is
-          refused on the MCP server.
-        </li>
-        <li>If the key was revoked or lost, generate a new one on Connect; each is shown only once.</li>
-        <li>
-          Then ask your agent to call <code className="font-mono text-zinc-300">read_backend_state</code>. This step completes
-          on that first call.
-        </li>
-      </ul>
+      <ol className="mt-2.5 space-y-2 text-[11.5px] leading-relaxed text-zinc-400">
+        {[
+          <>
+            Start a new agent session after adding the server. Agents load MCP servers when a session starts, so one
+            that was already open will not see Backenly. In Claude Code, <Code>/mcp</Code> should list <Code>backenly</Code>.
+          </>,
+          <>
+            Use the key that starts with <Code>mcp_live_</Code>. An app key from Settings is refused on the MCP server.
+          </>,
+          <>If the key was revoked or lost, generate a new one on Connect; each is shown only once.</>,
+          <>
+            Then ask your agent to call <Code>read_backend_state</Code>. This step completes on that first call.
+          </>,
+        ].map((item, i) => (
+          <li key={i} className="flex gap-2.5">
+            <span className="mt-px font-mono text-[10.5px] tabular-nums text-zinc-600" aria-hidden>
+              {i + 1}
+            </span>
+            <span className="min-w-0">{item}</span>
+          </li>
+        ))}
+      </ol>
     </details>
   )
+}
+
+function Code({ children }: { children: ReactNode }) {
+  return <code className="rounded bg-white/[0.06] px-1 py-px font-mono text-[11px] text-zinc-200">{children}</code>
 }
 
 function StepDetail({
@@ -291,6 +275,7 @@ function StepDetail({
   const base = focus ? `/app/projects/${focus.id}` : null
   const done = step.status === 'done'
   const statusText = done ? 'Done' : copy.status?.[step.status]
+  const tone = done ? 'ok' : step.status === 'failed' ? 'bad' : 'live'
 
   let content: ReactNode = null
   switch (step.id) {
@@ -300,34 +285,28 @@ function StepDetail({
 
     case 'project':
       content = done ? (
-        focus && (
-          <Action onClick={() => go('project', `/app/projects/${focus.id}`)}>Open {focus.name}</Action>
-        )
+        focus && <SecondaryAction onClick={() => go('project', `/app/projects/${focus.id}`)}>Open {focus.name}</SecondaryAction>
       ) : CLOUD_CONTROL_PLANE ? (
-        <Action
-          primary
-          icon={Plus}
-          onClick={newProject}
-        >
+        <PrimaryAction icon={Plus} onClick={newProject}>
           New project
-        </Action>
+        </PrimaryAction>
       ) : (
         <Callout tone="info">
-          This deployment hosts one project. Run{' '}
-          <code className="rounded bg-white/[0.06] px-1 py-0.5 font-mono text-[11px] text-zinc-200">npm run bootstrap</code> on
-          the server, then reload this page.
+          This deployment hosts one project. Run <Code>npm run bootstrap</Code> on the server, then reload this page.
         </Callout>
       )
       break
 
     case 'mcp_key':
       content = base && (
-        <div className="flex flex-wrap items-center gap-2">
-          <Action primary={!done} onClick={() => go('mcp_key', `${base}/connect`)}>
-            {done ? 'Manage keys' : 'Generate a key on Connect'}
-          </Action>
+        <div className="space-y-3">
           {done && focus && focus.mcpKeys === 0 && focus.oauthConnections > 0 && (
-            <span className="text-[11.5px] text-zinc-500">Connected with OAuth, so no key was needed.</span>
+            <Confirmed>Connected with OAuth, so no key was needed</Confirmed>
+          )}
+          {done ? (
+            <SecondaryAction onClick={() => go('mcp_key', `${base}/connect`)}>Manage keys</SecondaryAction>
+          ) : (
+            <PrimaryAction onClick={() => go('mcp_key', `${base}/connect`)}>Generate a key on Connect</PrimaryAction>
           )}
         </div>
       )
@@ -337,11 +316,10 @@ function StepDetail({
       content = (
         <div className="space-y-3">
           {done ? (
-            <p className="flex items-center gap-2 text-[12px] text-emerald-300/90">
-              <Check className="h-3.5 w-3.5" aria-hidden />
+            <Confirmed>
               Connected
               {focus?.lastAgentCallAt && <span className="text-zinc-500">· last call {ago(focus.lastAgentCallAt)}</span>}
-            </p>
+            </Confirmed>
           ) : step.status === 'failed' && progress.failingCall ? (
             <Callout tone="danger">
               <p className="font-medium text-rose-200">
@@ -353,11 +331,12 @@ function StepDetail({
           ) : step.status === 'waiting' ? (
             <Listening>Listening for your agent&apos;s first call</Listening>
           ) : null}
-          {base && (
-            <Action primary={!done} onClick={() => go('agent', `${base}/connect`)}>
-              {done ? 'Open Connect' : 'Open setup instructions'}
-            </Action>
-          )}
+          {base &&
+            (done ? (
+              <SecondaryAction onClick={() => go('agent', `${base}/connect`)}>Open Connect</SecondaryAction>
+            ) : (
+              <PrimaryAction onClick={() => go('agent', `${base}/connect`)}>Open setup instructions</PrimaryAction>
+            ))}
           {!done && <ConnectionTroubleshooting />}
         </div>
       )
@@ -365,7 +344,7 @@ function StepDetail({
 
     case 'backend':
       content = done ? (
-        base && <Action onClick={() => go('backend', `${base}/database`)}>Review it in Database</Action>
+        base && <SecondaryAction onClick={() => go('backend', `${base}/database`)}>Review it in Database</SecondaryAction>
       ) : (
         <StarterPrompt />
       )
@@ -381,14 +360,15 @@ function StepDetail({
             </Callout>
           )}
           {step.status === 'in_progress' && <Listening>Publishing {focus?.name}</Listening>}
-          {done && focus?.deployedAt && (
-            <p className="text-[12px] text-zinc-400">Published {ago(focus.deployedAt)}.</p>
-          )}
-          {base && (
-            <Action primary={!done} onClick={() => go('publish', `${base}/deploy`)}>
-              {done ? 'Open Deploy' : step.status === 'failed' ? 'See what failed' : 'Open Deploy'}
-            </Action>
-          )}
+          {done && focus?.deployedAt && <Confirmed>Published {ago(focus.deployedAt)}</Confirmed>}
+          {base &&
+            (done ? (
+              <SecondaryAction onClick={() => go('publish', `${base}/deploy`)}>Open Deploy</SecondaryAction>
+            ) : (
+              <PrimaryAction onClick={() => go('publish', `${base}/deploy`)}>
+                {step.status === 'failed' ? 'See what failed' : 'Open Deploy'}
+              </PrimaryAction>
+            ))}
         </div>
       )
       break
@@ -396,21 +376,20 @@ function StepDetail({
     case 'watching':
       content = (
         <div className="space-y-3">
-          <AutonomyLoop stacked={variant === 'drawer'} />
           {done && focus?.lastCheckedAt ? (
-            <p className="flex items-center gap-2 text-[12px] text-emerald-300/90">
-              <Check className="h-3.5 w-3.5" aria-hidden />
-              Last checked {ago(focus.lastCheckedAt)}
-            </p>
+            <Confirmed>Last checked {ago(focus.lastCheckedAt)}</Confirmed>
           ) : step.status === 'waiting' ? (
             <Listening>Waiting for the first check of your backend</Listening>
           ) : null}
+          <AutonomyLoop stacked={variant === 'drawer'} />
           {base && (
-            <div className="flex flex-wrap gap-2">
-              <Action primary={!done && step.status !== 'todo'} onClick={() => go('watching', `${base}/autonomy`)}>
-                Open Autonomy
-              </Action>
-              <Action onClick={() => go('watching', `${base}/monitoring`)}>Monitoring</Action>
+            <div className="flex flex-wrap items-center gap-3">
+              {!done && step.status !== 'todo' ? (
+                <PrimaryAction onClick={() => go('watching', `${base}/autonomy`)}>Open Autonomy</PrimaryAction>
+              ) : (
+                <SecondaryAction onClick={() => go('watching', `${base}/autonomy`)}>Open Autonomy</SecondaryAction>
+              )}
+              <QuietAction onClick={() => go('watching', `${base}/monitoring`)}>Monitoring</QuietAction>
             </div>
           )}
         </div>
@@ -419,24 +398,29 @@ function StepDetail({
   }
 
   return (
-    <section aria-labelledby={`guide-step-${step.id}`} className="min-w-0 space-y-3">
+    <section aria-labelledby={`guide-step-${step.id}`} className="min-w-0 space-y-4">
       <div>
-        <p className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">
-          Step {index + 1} of {progress.total}
+        <Eyebrow tone={tone} pulse={step.status === 'waiting' || step.status === 'in_progress'}>
+          <span>
+            Step {index + 1} of {progress.total}
+          </span>
           {statusText && (
             <span
-              className={`normal-case tracking-normal ${
+              className={`font-mono normal-case tracking-normal ${
                 done ? 'text-emerald-300/90' : step.status === 'failed' ? 'text-rose-300' : 'text-zinc-500'
               }`}
             >
               · {statusText}
             </span>
           )}
-        </p>
-        <h3 id={`guide-step-${step.id}`} className="mt-1 text-[15px] font-semibold tracking-[-0.01em] text-zinc-50">
+        </Eyebrow>
+        <h3
+          id={`guide-step-${step.id}`}
+          className="mt-2.5 text-[17px] font-semibold leading-snug tracking-[-0.01em] text-white"
+        >
           {done ? copy.doneTitle : copy.title}
         </h3>
-        <p className="mt-1 max-w-xl text-[12.5px] leading-relaxed text-zinc-400">{copy.body}</p>
+        <p className="mt-1.5 max-w-xl text-[13px] leading-6 text-zinc-400">{copy.body}</p>
       </div>
       {content}
     </section>
@@ -462,36 +446,29 @@ function Finished({
   return (
     <section aria-labelledby="guide-finished" className="space-y-4">
       <div>
-        <p className="flex items-center gap-2 text-[12px] font-medium text-emerald-300/90">
-          <Check className="h-3.5 w-3.5" aria-hidden />
-          All {progress.total} steps complete
-        </p>
-        <h3 id="guide-finished" className="mt-1.5 text-[17px] font-semibold tracking-[-0.01em] text-zinc-50">
+        <Eyebrow tone="ok">All {progress.total} steps complete</Eyebrow>
+        <h3 id="guide-finished" className="mt-2.5 text-[19px] font-semibold leading-snug tracking-[-0.01em] text-white">
           You&apos;re set up.
         </h3>
-        <p className="mt-1 max-w-xl text-[12.5px] leading-relaxed text-zinc-400">
+        <p className="mt-1.5 max-w-xl text-[13px] leading-6 text-zinc-400">
           Your agent builds through Backenly&apos;s MCP server, and Backenly runs and watches what it builds. To change
           the backend, describe the change to your agent. Come here to review, publish and see what Backenly did.
         </p>
       </div>
       <AutonomyLoop stacked={variant === 'drawer'} />
-      <div className="flex flex-wrap items-center gap-2">
-        {focus && (
-          <Action primary onClick={() => go('watching', `/app/projects/${focus.id}`)}>
-            Open {focus.name}
-          </Action>
-        )}
+      <div className="flex flex-wrap items-center gap-3">
+        {focus && <PrimaryAction onClick={() => go('watching', `/app/projects/${focus.id}`)}>Open {focus.name}</PrimaryAction>}
         {CLOUD_CONTROL_PLANE && (
-          <Action icon={Plus} onClick={newProject}>
+          <SecondaryAction icon={Plus} onClick={newProject}>
             Build another backend
-          </Action>
+          </SecondaryAction>
         )}
-        {focus && <Action onClick={() => go('watching', `/app/projects/${focus.id}/autonomy`)}>View Autonomy</Action>}
+        {focus && <QuietAction onClick={() => go('watching', `/app/projects/${focus.id}/autonomy`)}>View Autonomy</QuietAction>}
         <button
           type="button"
           onClick={hide}
           disabled={busy}
-          className="ml-auto inline-flex h-8 items-center rounded-lg px-3 text-[12px] font-medium text-zinc-400 transition-colors hover:bg-white/[0.04] hover:text-zinc-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/35 disabled:opacity-40"
+          className="ml-auto inline-flex h-8 items-center rounded-lg px-3 text-[12px] font-medium text-zinc-500 transition-colors hover:bg-white/[0.04] hover:text-zinc-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/35 disabled:opacity-40"
         >
           {busy ? 'Closing…' : 'Close the guide'}
         </button>
@@ -560,17 +537,27 @@ export function GuidePanel({
   const activeId = selected ?? progress.currentStepId ?? 'watching'
   const activeIndex = progress.steps.findIndex((s) => s.id === activeId)
   const activeStep = progress.steps[activeIndex]
+  const next = progress.currentStepId ? STEP_COPY[progress.currentStepId].title : null
 
   return (
     <div>
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0 flex-1">
-          <h2 id={headingId} className="text-[13px] font-semibold text-zinc-100">
+          <h2 id={headingId} className="flex items-baseline gap-2 text-[13px] font-semibold text-zinc-100">
             Getting started
+            <span className="font-mono text-[11px] font-medium tabular-nums text-zinc-500">
+              {progress.completed}/{progress.total}
+            </span>
           </h2>
-          <p className="mt-0.5 text-[11.5px] text-zinc-500">
-            <span className="font-mono tabular-nums text-zinc-300">{progress.completed}</span> of{' '}
-            <span className="font-mono tabular-nums">{progress.total}</span> complete · updates as you go
+          <p className="mt-0.5 truncate text-[12px] text-zinc-500">
+            {next ? (
+              <>
+                Next: <span className="text-zinc-300">{next}</span>
+              </>
+            ) : (
+              'Every step is done.'
+            )}
+            <span className="text-zinc-600"> · updates as you go</span>
           </p>
         </div>
         <div className="-mr-1 flex flex-shrink-0 items-center gap-1">
@@ -588,18 +575,26 @@ export function GuidePanel({
           {headerExtra}
         </div>
       </div>
-      <GuideProgressBar completed={progress.completed} total={progress.total} className="mt-3" />
+      <SegmentedProgress completed={progress.completed} total={progress.total} className="mt-3.5" />
       {actionError && <p className="mt-2 text-[11.5px] text-amber-300/90">{actionError}</p>}
 
       <div
         className={
           variant === 'card'
-            ? 'mt-4 grid gap-5 lg:grid-cols-[minmax(0,260px)_minmax(0,1fr)]'
-            : 'mt-4 space-y-4'
+            ? 'mt-5 grid gap-6 lg:grid-cols-[minmax(0,272px)_minmax(0,1fr)]'
+            : 'mt-5 space-y-5'
         }
       >
-        <GuideChecklist progress={progress} selected={showFinished ? null : activeId} onSelect={select} />
-        <div className={variant === 'card' ? 'min-w-0 lg:border-l lg:border-white/[0.06] lg:pl-5' : 'border-t border-white/[0.06] pt-4'}>
+        <div className={variant === 'card' ? '-ml-2.5' : '-mx-2.5'}>
+          <GuideChecklist progress={progress} selected={showFinished ? null : activeId} onSelect={select} />
+        </div>
+        <div
+          className={
+            variant === 'card'
+              ? 'min-w-0 lg:border-l lg:border-white/[0.06] lg:pl-6'
+              : 'border-t border-white/[0.06] pt-5'
+          }
+        >
           {showFinished ? (
             <Finished progress={progress} variant={variant} newProject={newProject} go={go} />
           ) : (
