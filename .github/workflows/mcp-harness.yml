@@ -84,5 +84,15 @@ jobs:
           BACKENLY_MCP_KEY: ${{ secrets.BACKENLY_MCP_KEY }}
           BACKENLY_API_URL: ${{ vars.BACKENLY_API_URL || 'https://backenly.com' }}
         run: |
-          npx tsx scripts/mcp-harness/run.ts \
+          npx tsx scripts/mcp-harness/run.ts --json acceptance-live.json \
             ${{ (github.event_name == 'schedule' || inputs.strict) && '--strict' || '' }}
+
+      # The results decide the acceptance matrix's deferred cases:
+      #   npx tsx scripts/mcp-acceptance/matrix.ts ... --live acceptance-live.json
+      - name: Keep the live results for the acceptance matrix
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-live
+          path: acceptance-live.json
+          if-no-files-found: ignore

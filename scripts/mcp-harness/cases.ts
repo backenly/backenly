@@ -649,4 +649,59 @@ export const CASES: Case[] = [
       }
     },
   },
+
+  // ── Final staging gate (scripts/mcp-acceptance/cases.ts) ─────────────────────
+  // These hold only on the deployed image: the docs files it serves, the
+  // function role function-roles.sql installs on RDS, the route it runs.
+
+  {
+    id: 'STAGING-docs-topics',
+    kind: 'guard',
+    title: 'fetch_docs serves the index and each topic from the deployed image',
+    async run({ c }) {
+      const index = await c.tool('fetch_docs')
+      expectOk(index, 'fetch_docs')
+      if (!String(index.data?.markdown ?? '').includes('## Topics')) fail('fetch_docs with no topic did not serve the index')
+      const fn = await c.tool('fetch_docs', { topic: 'functions' })
+      expectOk(fn, 'fetch_docs functions')
+      if (!String(fn.data?.markdown ?? '').startsWith('# Functions')) fail('fetch_docs functions did not serve docs/agents/functions.md')
+      if (fn.data?.topic !== 'functions') fail(`fetch_docs functions reported topic ${fn.data?.topic}`)
+    },
+  },
+
+  {
+    id: 'STAGING-deploy-code-isolation',
+    kind: 'guard',
+    title: 'deploy_code: agent-written SQL runs as the project, and the platform tables refuse it',
+    async run({ c, t }) {
+      const name = t('probe').replace(/_/g, '-')
+      const code = [
+        "import { NextResponse } from 'next/server'",
+        "import { prisma } from '@/lib/db'",
+        'export async function POST() {',
+        "  const rows = await prisma.$queryRawUnsafe('SELECT email FROM public.users LIMIT 1')",
+        '  return NextResponse.json({ rows })',
+        '}',
+      ].join('\n')
+      const d = await c.tool('functions', { action: 'deploy_code', name, trigger: 'http', code })
+      expectOk(d, 'functions deploy_code')
+      const run = await c.tool('functions', { action: 'invoke', functionId: d.data?.functionId })
+      if (run.ok) fail('a deployed function read public.users on the deployed image')
+      if (!/permission denied/i.test(JSON.stringify(run.body))) fail(`expected permission denied, got ${JSON.stringify(run.body).slice(0, 300)}`)
+    },
+  },
+
+  {
+    id: 'STAGING-migration-table-checks',
+    kind: 'guard',
+    title: 'apply_migration refuses CREATE TABLE of an existing table and ALTER of a missing one',
+    async run({ c, t }) {
+      const table = t('dup')
+      expectOk(await c.tool('apply_migration', { sql: `CREATE TABLE ${table} (name text)` }), 'first CREATE TABLE')
+      const again = await c.tool('apply_migration', { sql: `CREATE TABLE ${table} (other text)` })
+      if (again.ok || again.code !== 'TABLE_EXISTS') fail(`second CREATE TABLE answered ${again.code ?? 'ok'}, expected TABLE_EXISTS`)
+      const missing = await c.tool('apply_migration', { sql: `ALTER TABLE ${t('nope')} ADD COLUMN y text` })
+      if (missing.ok || missing.code !== 'TABLE_NOT_FOUND') fail(`ALTER of a missing table answered ${missing.code ?? 'ok'}, expected TABLE_NOT_FOUND`)
+    },
+  },
 ]

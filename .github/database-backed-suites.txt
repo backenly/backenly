@@ -538,3 +538,8 @@ tests/integration/mcp-domain-operations.spec.ts
 # real executor and worker, and checks the persisted run record.
 tests/integration/sandbox-function-logs.spec.ts
 tests/integration/apply-migration-existing-table.spec.ts
+# MCP acceptance (scripts/mcp-acceptance/cases.ts): two agent workflows, twice
+# each, and the acceptance cases no other suite covered. Real MCP route, real
+# keys, provisioned projects, runtime engine mode.
+tests/integration/mcp-golden-workflows.spec.ts
+tests/integration/mcp-acceptance-cases.spec.ts
