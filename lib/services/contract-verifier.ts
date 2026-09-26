@@ -399,6 +399,13 @@ export interface ContractAttribution {
    * not healthy: nothing is resolved and no heartbeat is written for them.
    */
   unknown: Map<string, Set<ContractSurface>>
+  /**
+   * How many projects each surface answered correctly on in this pass. A
+   * tenant finding may only claim the fault is "specific to this project" when
+   * this is at least one: that is the evidence, and a pass that probed one
+   * project has none.
+   */
+  answeredBySurface: Map<ContractSurface, number>
 }
 
 /**
@@ -437,6 +444,7 @@ export function attributeContractFailures(outcomes: ProjectProbeOutcome[]): Cont
   }
 
   const probedBySurface = new Map<ContractSurface, number>()
+  const answeredBySurface = new Map<ContractSurface, number>()
   const unreachableBySurface = new Map<ContractSurface, string[]>()
   const failingByKey = new Map<
     string,
@@ -446,7 +454,10 @@ export function attributeContractFailures(outcomes: ProjectProbeOutcome[]): Cont
   for (const { projectId, results } of outcomes) {
     for (const r of results) {
       probedBySurface.set(r.surface, (probedBySurface.get(r.surface) ?? 0) + 1)
-      if (r.ok) continue
+      if (r.ok) {
+        answeredBySurface.set(r.surface, (answeredBySurface.get(r.surface) ?? 0) + 1)
+        continue
+      }
       if (r.transport === 'unreachable') {
         unreachableBySurface.set(r.surface, [...(unreachableBySurface.get(r.surface) ?? []), projectId])
         markUnknown(projectId, r.surface)
@@ -498,7 +509,31 @@ export function attributeContractFailures(outcomes: ProjectProbeOutcome[]): Cont
     if (mine.length > 0) tenantBroken.set(projectId, mine)
   }
 
-  return { platformFaults, tenantBroken, unknown }
+  return { platformFaults, tenantBroken, unknown, answeredBySurface }
+}
+
+/**
+ * The finding's hint, saying only what this pass actually showed.
+ *
+ * It used to say "Other projects answered on this surface in the same pass"
+ * unconditionally, including on a pass that probed this one project and nothing
+ * else, which is a claim of evidence that did not exist. The count is the
+ * evidence: this project's own result on the surface failed, so every project
+ * that answered on it was another one.
+ */
+export function contractHint(surface: ContractSurface, answeredElsewhere: number): string {
+  const servedBy =
+    surface === 'storage' || surface === 'healthz'
+      ? 'The surface is served by the web app.'
+      : 'The surface is served by the runtime.'
+  if (answeredElsewhere > 0) {
+    const n = answeredElsewhere === 1 ? '1 other project' : `${answeredElsewhere} other projects`
+    return `${n} answered on this surface in the same pass, so the fault is specific to this project. ${servedBy}`
+  }
+  return (
+    'No other project answered on this surface in this pass to compare against, so a platform ' +
+    `fault has not been ruled out by comparison. ${servedBy}`
+  )
 }
 
 /**
@@ -512,6 +547,8 @@ export async function settleTenantContract(
   projectId: string,
   results: ProbeResult[],
   broken: ProbeResult[],
+  /** From the same pass's attribution: projects each surface answered on. */
+  answeredBySurface: ReadonlyMap<ContractSurface, number> = new Map(),
 ): Promise<RawFinding[]> {
   for (const r of results.filter(r => r.ok)) {
     await prisma.healthFinding.updateMany({
@@ -533,11 +570,7 @@ export async function settleTenantContract(
       httpStatus: r.status ?? null,
       durationMs: r.durationMs,
       probedAt: new Date().toISOString(),
-      hint:
-        'Other projects answered on this surface in the same pass, so the fault is specific to this ' +
-        (r.surface === 'storage' || r.surface === 'healthz'
-          ? 'project. The surface is served by the web app.'
-          : 'project. The surface is served by the runtime.'),
+      hint: contractHint(r.surface, answeredBySurface.get(r.surface) ?? 0),
     }
 
     // A broken surface is usually a symptom whose cause is outside this
