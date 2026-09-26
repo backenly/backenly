@@ -2,7 +2,7 @@
 
 All notable changes to `@backenly/mcp-server` are documented here. Follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.0] — Unreleased
+## [0.4.0] — 2026-09-26
 
 ### Changed
 - **Built on the official MCP SDK v2** (`@modelcontextprotocol/server`), replacing `@modelcontextprotocol/sdk` v1. One server now serves both protocol eras: 2025-era hosts that open with `initialize`, and 2026-07-28 hosts that open with `server/discover`. A catalog that loads after boot reaches either kind of host (`notifications/tools/list_changed`, or the host's `subscriptions/listen` stream).
