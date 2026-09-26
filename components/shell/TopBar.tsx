@@ -213,6 +213,7 @@ export function TopBar() {
         {/* Review inbox — lit only when something waits on the user. Lands on
             Autonomy, which owns the queue since the 2026-07-18 consolidation. */}
         <button
+          data-tour="review-inbox"
           onClick={() => go(`${basePath}/autonomy`)}
           title={
             pendingReview > 0
@@ -250,6 +251,7 @@ export function TopBar() {
 
         {/* Connect agent — the one build door, the primary violet action */}
         <button
+          data-tour="connect-agent"
           onClick={() => go(`${basePath}/connect`)}
           className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md bg-white text-black text-[12px] font-semibold hover:bg-zinc-200 transition-colors"
         >

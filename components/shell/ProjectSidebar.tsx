@@ -211,6 +211,7 @@ export function ProjectSidebar() {
                     return (
                       <button
                         key={item.id}
+                        data-tour={`nav-${item.id}`}
                         onClick={() => navigate(item)}
                         aria-current={active ? 'page' : undefined}
                         className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-md text-left transition-colors group ${

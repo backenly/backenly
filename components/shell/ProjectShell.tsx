@@ -27,6 +27,7 @@ import AutonomyToaster from '@/components/autonomy/AutonomyToaster'
 import AutonomyWelcomeBackBanner from '@/components/autonomy/AutonomyWelcomeBackBanner'
 import { ProjectAvailabilityGate } from '@cloud/project-availability'
 import { ProjectActivityBeacon } from './ProjectActivityBeacon'
+import { ConsoleTour } from '@/components/tour/ConsoleTour'
 
 export function ProjectShell({ children }: { children: ReactNode }) {
   const assistantOpen = useAssistantStore((s) => s.open)
@@ -61,6 +62,9 @@ export function ProjectShell({ children }: { children: ReactNode }) {
 
       {/* Assistant — chrome, not a place. Renders nothing while closed. */}
       <AssistantPanel />
+
+      {/* One-time console tour. Renders nothing for anyone who has seen it. */}
+      <ConsoleTour />
     </div>
   )
 }
