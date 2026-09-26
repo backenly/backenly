@@ -43,7 +43,7 @@ Exactly **23** are advertised over MCP; `tools/list` (or `backenly tools`) is th
 
 - **Read**: `read_backend_state` (call it first; `section` drills into `schema`, `users`, `functions`, `integrations`, `metrics`, `deploy`, `autonomy` and more), `get_table_schema` (columns, FKs, CHECK constraints with their permitted values, RLS; read it before any write), `run_query`.
 - **Write**: `apply_migration` (DDL), `db_insert` / `db_update` / `db_delete` (row writes as the owner; they bypass end-user RLS, so use them for seeding and repair, not to simulate a user), `set_rls` (a policy predicate installed verbatim; prefer it to describing a policy in prose).
-- **One tool per dashboard section**, each with an `action` its description lists: `auth`, `storage`, `functions` (Backenly writes the code from your spec), `realtime`, `integrations`, `monitoring`, `autonomy`, `webhooks`, `deploy`, `connect`, plus `branch` (preview branches: list / create / diff / merge).
+- **One tool per dashboard section**, each with an `action` its description lists: `auth`, `storage`, `functions` (`create` has Backenly write the code from your spec; `deploy_code` stores code you wrote, exactly as written), `realtime`, `integrations`, `monitoring`, `autonomy`, `webhooks`, `deploy`, `connect`, plus `branch` (preview branches: list / create / diff / merge).
 - **Everything else**: `backend_chat` (plain English; draws AI credits), `generate_types`, `fetch_docs`, `check_approval`.
 
 Older tool names that are no longer advertised still run by name through `backenly call` (for example `enable_auth`, `create_bucket`, `set_env_var`). REST is automatic: `/db/<table>` exists the moment the table does, so there is no API-generation step.
@@ -52,7 +52,7 @@ Older tool names that are no longer advertised still run by name through `backen
 
 ## Integrations
 
-Stripe, Resend, OpenAI, Anthropic and PostHog all connect from an agent. The key is verified with the provider before it is stored. Either the human pastes it on the Integrations page (keeps it out of the conversation) or you pass it: `integrations { action: "connect", integrationId: "stripe", apiKey: "sk_test_…", webhookSecret: "whsec_…" }`. Never put a provider key in app code. Functions reach providers as `ctx.integrations.stripe`, `.resend`, `.openai`, `.anthropic`, `.posthog`.
+Stripe, Resend, OpenAI, Anthropic and PostHog all connect from an agent. The key is checked with the provider before it is stored, where the provider allows it (a PostHog project key cannot be checked, and is stored as unverifiable). Either the human pastes it on the Integrations page (keeps it out of the conversation) or you pass it: `integrations { action: "connect", integrationId: "stripe", apiKey: "sk_test_…", webhookSecret: "whsec_…" }`. Never put a provider key in app code. Functions reach providers as `ctx.integrations.stripe`, `.email` (Resend or SendGrid), `.openai`, `.anthropic` and `.posthog`; `integrations { action: "capabilities" }` lists the exact methods.
 
 Stripe events arrive at `/api/v1/{projectId}/webhooks/stripe`, which verifies the signature and rejects everything until the signing secret is stored. The human must paste that URL into the Stripe dashboard; no provider API can do it for them.
 
@@ -83,4 +83,4 @@ Structured JSON: `{ ok: false, error, code }`. `RATE_LIMITED`: respect `retry-af
 
 - Every change is verified, snapshotted and reversible; the History page is the audit trail and the Autonomy page is the approvals inbox.
 - The backend is not static between sessions: the autonomy loop repairs what it safely can on every plan, so a gap you leave may already be closed next time.
-- Full docs: https://backenly.com/llms.txt · this file: https://backenly.com/skill.md
+- Docs index: https://backenly.com/llms.txt; each topic is https://backenly.com/docs/agents/<topic>.md, or `fetch_docs { topic }` · this file: https://backenly.com/skill.md

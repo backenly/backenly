@@ -293,6 +293,11 @@ function brainParams(tool: string): { properties: Record<string, JsonSchema>; re
   return { properties: def?.parameters?.properties ?? {}, required: def?.parameters?.required ?? [] }
 }
 
+/** The arguments an action's target tool requires, as its description lists them. */
+export function actionRequires(tool: string): string[] {
+  return brainParams(tool).required.filter((p) => p !== 'action')
+}
+
 /**
  * The advertised schema for a domain tool: `action` plus the union of the
  * arguments its actions take, generated from the brain tools' own definitions
