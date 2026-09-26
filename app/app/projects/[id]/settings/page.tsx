@@ -206,7 +206,7 @@ function GeneralTab({ projectId, onDeleted }: { projectId: string; onDeleted: ()
           <KitCardBody className="space-y-3">
             <InfoRow label="Project ID" value={projectId} onCopy={() => copy(projectId, 'id')} copied={copied === 'id'} />
             <InfoRow label="API base URL" value={apiBaseUrl} onCopy={() => copy(apiBaseUrl, 'url')} copied={copied === 'url'} disabled={apiBaseUrl === '—'} />
-            <InfoRow label="Region" value="EU · Hetzner" mono={false} />
+            <InfoRow label="Region" value="AWS · ap-south-1" mono={false} />
           </KitCardBody>
         </KitCard>
 
