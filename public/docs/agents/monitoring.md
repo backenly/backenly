@@ -16,9 +16,10 @@ Call as `monitoring { action: "<action>", … }`.
 | `usage` | plan usage against its limits | nothing | yes | no |
 | `incidents` | what was detected, fixed or queued while nobody was watching | nothing | yes | no |
 | `request_logs` | each request the runtime API served: method, path, status, latency, time | nothing | yes | no |
-| `set_alert` | an alert on error rate, p95 latency, request rate or integration failures | `type`, `threshold` | no | no |
 <!-- end generated -->
 
 `request_logs` lists each request the project's runtime API served (method, path without its query string, status, latency, time), newest first. Filter with `minStatus` (400 for failures), `pathPrefix` and `sinceMinutes`. Only traffic to the runtime API (`/db`, `/auth`, `/fn`, `/storage`, `/realtime`) is recorded, never the dashboard's. From the shell: `backenly logs --status 5xx --follow`.
 
 Function runs are in `functions` `logs`; webhook deliveries in `webhooks` `logs`.
+
+There is no alert action. Nothing evaluates alerts yet, so one could be stored but never fire; it is not offered until it can.

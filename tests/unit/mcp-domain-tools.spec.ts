@@ -64,7 +64,7 @@ jest.mock('@/lib/entitlements/policy', () => ({
 import { BRAIN_TOOLS, TOOL_TO_ACTION, isDestructiveTool } from '@/lib/ai/brain/tools'
 import { riskLevelForExecutorAction } from '@/lib/operational-memory/ledger'
 import { buildCatalog, isReadOnlyTool } from '@/lib/mcp/catalog'
-import { DOMAIN_TOOLS, domainDescription, domainInputSchema, needsApproval, resolveDomainAction } from '@/lib/mcp/domains'
+import { DOMAIN_TOOLS, domainDescription, domainInputSchema, getDomainTool, needsApproval, resolveDomainAction } from '@/lib/mcp/domains'
 import { runApprovedCall } from '@/lib/mcp/approvals'
 import { POST } from '@/app/api/mcp/tool/route'
 
@@ -261,10 +261,16 @@ describe('the tool route', () => {
     expect(body.supported).toEqual(['status', 'history', 'readiness', 'deploy', 'rollback'])
   })
 
+  it('does not offer an alert action while nothing evaluates alerts', () => {
+    // set_alert wrote to project.activeIntegrations._monitoring_alerts, which
+    // no code reads. Put back only with the thing that fires them.
+    expect(Object.values(getDomainTool('monitoring')!.actions).map((a) => a.tool)).not.toContain('set_alert')
+  })
+
   it('lets a read-only key run a read action and refuses it a write', async () => {
     mockReadOnly = true
     const read = await call('monitoring', { action: 'metrics' })
-    const write = await call('monitoring', { action: 'set_alert', type: 'error_rate', threshold: 5 })
+    const write = await call('autonomy', { action: 'set_level', level: 'OFF' })
 
     expect(isReadOnlyTool('get_metrics')).toBe(true)
     expect(read.status).toBe(200)
