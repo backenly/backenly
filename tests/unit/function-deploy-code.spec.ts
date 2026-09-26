@@ -99,6 +99,40 @@ describe('refused before anything is stored', () => {
   })
 })
 
+describe('what a route module can read from process.env', () => {
+  // Code deployed with deploy_code is the agent's own, so whatever the runner
+  // puts in the vm's process.env, a function can return. The platform's values
+  // must not be in it: each is set here and none may come back.
+  const PLATFORM = {
+    STRIPE_WEBHOOK_SECRET: 'platform-stripe-webhook-secret',
+    PAYMENT_WEBHOOK_SECRET: 'platform-payment-webhook-secret',
+    DATABASE_URL: 'postgresql://platform:platform-password@db.internal/backenly',
+    ENV_VAR_ENCRYPTION_KEY: 'platform-encryption-key',
+  }
+  const saved: Record<string, string | undefined> = {}
+  beforeAll(() => { for (const [k, v] of Object.entries(PLATFORM)) { saved[k] = process.env[k]; process.env[k] = v } })
+  afterAll(() => { for (const k of Object.keys(PLATFORM)) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k] } })
+
+  it('holds the project\'s own values and none of the platform\'s', async () => {
+    const { executeRouteModuleFunction } = await import('@/lib/services/ai-functions/route-module-runner')
+    const code = `
+      import { NextResponse } from 'next/server'
+      export async function GET() {
+        return NextResponse.json({ env: { ...process.env } })
+      }
+    `
+    const { returnValue } = await executeRouteModuleFunction(code, actor.projectId, { type: 'manual', data: {} }, 'GET /fn/env', {
+      authMaterial: { jwtSecret: 'this-project-jwt-secret', adminKey: 'bk_admin_this_project' },
+    })
+    const env = returnValue.body.env
+    expect(env.JWT_SECRET).toBe('this-project-jwt-secret')
+    expect(env.ADMIN_API_KEY).toBe('bk_admin_this_project')
+    const seen = JSON.stringify(returnValue.body)
+    for (const value of Object.values(PLATFORM)) expect(seen).not.toContain(value)
+    expect(Object.keys(env).sort()).toEqual(['ADMIN_API_KEY', 'AI_EXECUTION_TOKEN', 'JWT_SECRET', 'NODE_ENV'].filter((k) => k !== 'NODE_ENV' || process.env.NODE_ENV !== undefined))
+  })
+})
+
 describe('the sandbox worker answers for sandbox bodies', () => {
   it('accepts a body it can run', async () => {
     expect(await validateSandboxFunction(sandboxBody)).toEqual({ valid: true })
