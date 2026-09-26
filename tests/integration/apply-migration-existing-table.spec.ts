@@ -1,5 +1,5 @@
 /**
- * apply_migration and a table that already exists.
+ * apply_migration checks each statement against the tables that exist.
  *
  * create_table answered "Created table …" for a table that was already there
  * and changed nothing, so `CREATE TABLE organizations (tagline text)` after
@@ -97,6 +97,24 @@ it('leaves an existing table as it is for CREATE TABLE IF NOT EXISTS, says so, a
   expect(r.body.data.applied.map((a: any) => a.statement)).toEqual(['CREATE TABLE tags (label text)'])
   expect(await columns('posts')).not.toContain('subtitle')
   expect(await tables()).toContain('tags')
+}, 60_000)
+
+it('refuses ALTER TABLE on a table that does not exist, instead of creating it', async () => {
+  // add_column used to create the table it was pointed at, so a typo made a
+  // new table. Found by the acceptance suite: tests/integration/mcp-acceptance-cases.spec.ts.
+  const r = await migrate('CREATE TABLE drafts (body text);\nALTER TABLE no_such_table ADD COLUMN y text')
+  expect(r.status).toBe(400)
+  expect(r.body).toMatchObject({ ok: false, code: 'TABLE_NOT_FOUND', applied: [] })
+  expect(r.body.hint).toMatch(/read_backend_state/)
+  const t = await tables()
+  expect(t).not.toContain('no_such_table')
+  expect(t).not.toContain('drafts')
+}, 60_000)
+
+it('lets a migration alter a table it creates earlier in the same migration', async () => {
+  const r = await migrate('CREATE TABLE reviews (stars integer);\nALTER TABLE reviews ADD COLUMN body text;\nCREATE INDEX reviews_stars_idx ON reviews (stars)')
+  expect(r.body.ok).toBe(true)
+  expect(await columns('reviews')).toEqual(expect.arrayContaining(['stars', 'body']))
 }, 60_000)
 
 it('still creates a table that does not exist', async () => {

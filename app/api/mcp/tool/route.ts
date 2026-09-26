@@ -439,41 +439,60 @@ export async function POST(request: NextRequest) {
       ))
     }
 
-    // ── CREATE TABLE for a table that already exists ────────────────────────
+    // ── Every statement against the tables that actually exist ──────────────
     //
-    // create_table answered "Created table …" for a table that was already
-    // there and changed nothing, so a migration that declared new columns that
-    // way reported them created while none existed. Checked here, before any
-    // statement runs, like every other refusal: a plain CREATE TABLE of an
-    // existing table is refused and names ALTER TABLE; CREATE TABLE IF NOT
-    // EXISTS leaves it as it is, and the receipt says so.
+    // The executors were never asked. create_table answered "Created table …"
+    // for a table that was already there and changed nothing, so columns a
+    // migration declared that way were reported created and never existed. And
+    // add_column on a table that did not exist CREATED it, so a typo in
+    // `ALTER TABLE <name>` made a new table instead of failing.
+    //
+    // So each statement is checked, in order, against the tables that exist
+    // plus those the migration creates before it, and before anything runs,
+    // like every other refusal. CREATE TABLE of an existing table is refused
+    // and names ALTER TABLE; CREATE TABLE IF NOT EXISTS leaves it as it is and
+    // says so; a statement on a table that does not exist is refused.
     const existingNotes: string[] = []
-    const createNames = planned.filter((p) => p.tool === 'create_table').map((p) => String(p.args.tableName))
-    if (createNames.length) {
+    const tableOf = (p: { args: Record<string, unknown> }) => String(p.args.tableName ?? '')
+    const named = [...new Set(planned.map(tableOf).filter(Boolean))]
+    if (named.length) {
       const found = await prisma.$queryRaw<Array<{ table_name: string }>>`
         SELECT table_name FROM information_schema.tables
-        WHERE table_schema = ${workspaceSchemaName(auth.projectId)} AND table_name = ANY(${createNames})`
-      const existing = new Set(found.map((r) => r.table_name))
-      for (const step of planned.filter((p) => p.tool === 'create_table' && existing.has(String(p.args.tableName)))) {
-        const table = String(step.args.tableName)
-        if (!/^\s*create\s+table\s+if\s+not\s+exists\b/i.test(step.source)) {
-          recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 400, tool, error: 'TABLE_EXISTS' })
-          return withCors(NextResponse.json(
-            {
-              ok: false,
-              error: `Table ${table} already exists, so CREATE TABLE would change nothing. Nothing was applied.`,
-              code: 'TABLE_EXISTS',
-              statement: step.source,
-              hint: `To add columns use ALTER TABLE ${table} ADD COLUMN …; get_table_schema shows what ${table} has now.`,
-              applied: [],
-            },
-            { status: 400 },
-          ))
-        }
-        // IF NOT EXISTS: drop the statement and everything it expanded into.
-        planned = planned.filter((p) => p.source !== step.source && !p.source.startsWith(`${step.source} → `))
-        existingNotes.push(`${table} already existed; CREATE TABLE IF NOT EXISTS left it unchanged.`)
+        WHERE table_schema = ${workspaceSchemaName(auth.projectId)} AND table_name = ANY(${named})`
+      const willExist = new Set(found.map((r) => r.table_name))
+      const skipped = new Set<string>()
+      const refuse = (code: string, error: string, statement: string, hint: string) => {
+        recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 400, tool, error: code })
+        return withCors(NextResponse.json({ ok: false, error, code, statement, hint, applied: [] }, { status: 400 }))
       }
+      for (const step of planned) {
+        const table = tableOf(step)
+        if (!table || skipped.has(step.source)) continue
+        if (step.tool === 'create_table') {
+          if (!willExist.has(table)) { willExist.add(table); continue }
+          if (!/^\s*create\s+table\s+if\s+not\s+exists\b/i.test(step.source)) {
+            return refuse(
+              'TABLE_EXISTS',
+              `Table ${table} already exists, so CREATE TABLE would change nothing. Nothing was applied.`,
+              step.source,
+              `To add columns use ALTER TABLE ${table} ADD COLUMN …; get_table_schema shows what ${table} has now.`,
+            )
+          }
+          // IF NOT EXISTS: skip the statement and everything it expanded into.
+          skipped.add(step.source)
+          existingNotes.push(`${table} already existed; CREATE TABLE IF NOT EXISTS left it unchanged.`)
+          continue
+        }
+        if (!willExist.has(table)) {
+          return refuse(
+            'TABLE_NOT_FOUND',
+            `There is no table ${table} in this project, so "${step.source}" cannot run. Nothing was applied.`,
+            step.source,
+            `Check the name with read_backend_state { section: "tables" }, or create it first with CREATE TABLE ${table} (…).`,
+          )
+        }
+      }
+      planned = planned.filter((p) => ![...skipped].some((s) => p.source === s || p.source.startsWith(`${s} → `)))
     }
 
     const applied: { statement: string; tool: string; summary: string }[] = []
