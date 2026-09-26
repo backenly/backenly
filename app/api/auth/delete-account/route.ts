@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { withAuth } from '@/lib/auth/route-protection'
 import { deleteAccountCompletely, TooManyProjectsError } from '@/lib/projects/delete'
+import { clearSessionCookies } from '@/lib/auth/session'
 
 export const DELETE = withAuth(async (request: NextRequest, { user }) => {
   try {
@@ -13,11 +14,10 @@ export const DELETE = withAuth(async (request: NextRequest, { user }) => {
     // records, with nothing left pointing at them.
     await deleteAccountCompletely(user.userId)
 
-    // Clear auth cookie
-    const response = NextResponse.json({ success: true })
-    response.cookies.set('token', '', { maxAge: 0 })
-
-    return response
+    // Sign this browser out. The account's sessions went with the user row
+    // (Session cascades), but the browser still held both cookies: this used
+    // to clear one named `token`, which nothing ever sets.
+    return clearSessionCookies(NextResponse.json({ success: true }))
   } catch (error) {
     if (error instanceof TooManyProjectsError) {
       // Refused rather than attempted: an account this size would hold locks on

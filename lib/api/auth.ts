@@ -181,37 +181,62 @@ export async function resetPasswordWithCode(email: string, code: string, passwor
 /** Where signing out lands. Signing in again from there returns to the console. */
 export const SIGNED_OUT_URL = '/auth/login?redirect=%2Fapp'
 
+/** Where a deleted account lands. There is no console left to return to. */
+export const ACCOUNT_DELETED_URL = '/auth/login'
+
 /**
  * Sign the platform user out of this browser and leave the console. Every
  * sign-out control calls this. Rejects, leaving the user signed in and on the
- * page, when the server did not end the session.
+ * page, when the server did not confirm it cleared this browser's credentials.
  *
  * Four hand-written copies used to end only the server session. The
  * localStorage token and the `useUserSession` cache still said "signed in",
  * so the login page bounced to /app, the middleware bounced that back to
  * /auth/login?redirect=%2Fapp, and the user saw a blank frame, an "Already
  * signed in" card and a reload before the form settled.
- *
- * The exit is a full document replace, not a router push. The console keeps
- * the user and their projects in module memory so tabs switch instantly, and
- * only a new document drops it. Replacing the history entry keeps Back from
- * reopening the page that was signed out of.
  */
 export async function signOut(): Promise<void> {
   const token = localStorage.getItem('auth-token')
 
   // Always ask the server, even without a localStorage token: the httpOnly
-  // cookie is the session, and only the server can clear it.
+  // cookies are the session, and only the server can clear them. It does so
+  // whether or not the access session is still live, so anything but success
+  // means they may still be there. (A 401 used to be read as "already signed
+  // out" while the refresh cookie survived to sign the browser back in.)
   const response = await fetch(`${API_BASE}/auth/logout`, {
     method: 'POST',
     credentials: 'include',
     headers: token ? { Authorization: `Bearer ${token}` } : undefined,
   })
-  // 401 means there was no live session to end, which is the state asked for.
-  if (!response.ok && response.status !== 401) {
-    throw new Error(`Sign-out failed (${response.status})`)
-  }
+  if (!response.ok) throw new Error(`Sign-out failed (${response.status})`)
 
+  await leaveSignedOut(SIGNED_OUT_URL)
+}
+
+/**
+ * Delete the signed-in platform account, then leave as a signed-out browser.
+ * Rejects, changing nothing in this browser, when the server refused.
+ */
+export async function deleteAccount(): Promise<void> {
+  const response = await fetch(`${API_BASE}/auth/delete-account`, {
+    method: 'DELETE',
+    credentials: 'include',
+  })
+  if (!response.ok) throw await readAuthError(response, 'Failed to delete account')
+
+  await leaveSignedOut(ACCOUNT_DELETED_URL)
+}
+
+/**
+ * Forget this browser's platform session and load `destination` as a new
+ * document. Call only once the server has cleared the session cookies.
+ *
+ * A full document replace, not a router push. The console keeps the user and
+ * their projects in module memory so tabs switch instantly, and only a new
+ * document drops it. Replacing the history entry keeps Back from reopening the
+ * page that was left.
+ */
+async function leaveSignedOut(destination: string): Promise<void> {
   localStorage.removeItem('auth-token')
   localStorage.removeItem('current-project-id')
   localStorage.removeItem('user-info')
@@ -222,7 +247,7 @@ export async function signOut(): Promise<void> {
     // Non-critical: the document is replaced next, which drops the cache anyway
   }
 
-  window.location.replace(SIGNED_OUT_URL)
+  window.location.replace(destination)
 }
 
 export async function verifyEmail(token?: string): Promise<{ message: string; emailVerified: boolean }> {

@@ -256,6 +256,14 @@ __tests__/auth/deployment-claim.test.ts
 __tests__/auth/email-code.test.ts
 __tests__/auth/email-code-routes.test.ts
 
+# Signing out ends this browser's sessions from any state: live, access expired
+# with a live refresh cookie, cookie-only, Bearer and cookie drifted apart, or
+# already signed out. It ends only what the request presents, refuses
+# cross-site browser requests, and logout-all still needs a live session. The
+# refresh route is driven afterwards to prove the token cannot be replayed.
+# Fails 12/12 without a database, passes 12/12 with one.
+__tests__/auth/session-lifecycle-routes.test.ts
+
 # An OAuth sign-in carries no setup token, so it must not be able to claim a
 # self-hosted deployment - and the Google and GitHub callbacks used to create
 # the first account without asking. Needs a users table with ZERO rows, which a

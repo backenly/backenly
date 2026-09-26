@@ -88,7 +88,7 @@ function SignupForm() {
   const rawRedirect = searchParams.get('redirect') || '/app'
   const isAuthPath = rawRedirect.startsWith('/auth') || rawRedirect === '/login' || rawRedirect === '/signup'
   const redirectUrl = isAuthPath ? '/app' : rawRedirect
-  const { isLoggedIn } = useUserSession()
+  const { isLoggedIn } = useUserSession({ confirmSignedIn: true })
 
   useEffect(() => {
     if (isLoggedIn) {

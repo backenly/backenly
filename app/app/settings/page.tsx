@@ -28,7 +28,7 @@ import {
 } from '@/components/inspector/kit'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import { DeploymentRecoverySection } from '@/components/app/DeploymentRecoverySection'
-import { signOut } from '@/lib/api/auth'
+import { deleteAccount, signOut } from '@/lib/api/auth'
 
 type Section = 'profile' | 'security' | 'notifications' | 'recovery' | 'support' | 'danger'
 
@@ -164,12 +164,11 @@ export default function SettingsPage() {
     if (deleteConfirmText !== 'DELETE') return
     setDeletingAccount(true)
     try {
-      const response = await fetch('/api/auth/delete-account', { method: 'DELETE', credentials: 'include' })
-      if (response.ok) router.push('/login')
-      else showToast('Failed to delete account', 'error')
+      // On success the document is replaced; the modal stays on "Deleting…"
+      // until it is, rather than closing over the deleted account's settings.
+      await deleteAccount()
     } catch {
       showToast('Failed to delete account', 'error')
-    } finally {
       setDeletingAccount(false)
       setShowDeleteModal(false)
       setDeleteConfirmText('')

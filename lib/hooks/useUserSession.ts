@@ -46,13 +46,25 @@ export function invalidateSessionCache(): void {
 }
 
 /**
- * Fetch and verify the current session against /api/auth/me.
- * Deduplicates in-flight requests across multiple hook consumers.
+ * The current session, from memory when it is known, otherwise verified
+ * against /api/auth/me. Deduplicates in-flight requests across hook consumers.
  */
 export async function checkSession(): Promise<CacheRecord> {
   if (sessionCache !== null) {
     return sessionCache
   }
+  return fetchSession()
+}
+
+/**
+ * The session as the server sees it now, whatever memory says. Joins a check
+ * already in flight rather than starting another.
+ */
+export function revalidateSession(): Promise<CacheRecord> {
+  return fetchSession()
+}
+
+function fetchSession(): Promise<CacheRecord> {
   if (activeFetchPromise !== null) {
     return activeFetchPromise
   }
@@ -116,9 +128,21 @@ export async function checkSession(): Promise<CacheRecord> {
 
 /**
  * Hook to access and react to user authentication status in client components.
+ *
+ * Pass `confirmSignedIn` from a page that acts on "signed in", as the login
+ * and signup pages do by leaving for the console. The cache is module memory
+ * that nothing re-checks, so it can say "signed in" long after the session was
+ * revoked or expired. Acting on that sent a signed-out browser to /app, the
+ * console's 401 sent it back, and the login page sent it to /app again, over
+ * and over. With the option, a cached "signed in" is re-confirmed with the
+ * server before this hook reports it. A cached "signed out" is reported as is:
+ * showing a signed-in user the form is harmless, and costs no request.
  */
-export function useUserSession(): UserSessionState {
+export function useUserSession({ confirmSignedIn = false }: { confirmSignedIn?: boolean } = {}): UserSessionState {
   const [session, setSession] = useState<UserSessionState>(() => {
+    if (confirmSignedIn && sessionCache?.isLoggedIn) {
+      return { isLoggedIn: false, isLoading: true, user: null }
+    }
     return {
       isLoggedIn: sessionCache?.isLoggedIn ?? false,
       isLoading: sessionCache === null,
@@ -131,12 +155,14 @@ export function useUserSession(): UserSessionState {
 
     if (sessionCache === null) {
       void checkSession()
+    } else if (confirmSignedIn && sessionCache.isLoggedIn) {
+      void revalidateSession()
     }
 
     return () => {
       listeners.delete(setSession)
     }
-  }, [])
+  }, [confirmSignedIn])
 
   return session
 }

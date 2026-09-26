@@ -1,6 +1,6 @@
 import { readFileSync, readdirSync, statSync } from 'fs'
 import { join } from 'path'
-import { signOut, SIGNED_OUT_URL } from '@/lib/api/auth'
+import { ACCOUNT_DELETED_URL, deleteAccount, signOut, SIGNED_OUT_URL } from '@/lib/api/auth'
 import { checkSession, setSessionCache } from '@/lib/hooks/useUserSession'
 
 /**
@@ -103,11 +103,14 @@ describe('signOut', () => {
     expect(b.requests.map((r) => r.url)).toContain('/api/auth/me')
   })
 
-  it('treats 401 as nothing left to end, and still leaves', async () => {
+  it('does not read a 401 as "already signed out"', async () => {
+    // The route clears this browser's credentials whatever state the session is
+    // in, so a 401 means it did not run. Reading it as success once left a live
+    // refresh cookie behind that signed the browser straight back in.
     const b = browser({ token: 'jwt-1', reply: async () => ({ ok: false, status: 401 }) })
-    await signOut()
-    expect(b.store.has('auth-token')).toBe(false)
-    expect(b.replace).toHaveBeenCalledWith(SIGNED_OUT_URL)
+    await expect(signOut()).rejects.toThrow('Sign-out failed (401)')
+    expect(b.store.get('auth-token')).toBe('jwt-1')
+    expect(b.replace).not.toHaveBeenCalled()
   })
 
   it('leaves the user signed in and in place when the server could not end the session', async () => {
@@ -123,6 +126,36 @@ describe('signOut', () => {
   })
 })
 
+describe('deleteAccount', () => {
+  it('leaves the same way signing out does, once the server has deleted the account', async () => {
+    setSessionCache({ id: 'u1', email: 'a@b.c' }, true)
+    const b = browser({
+      token: 'jwt-1',
+      reply: async (url) => (url === '/api/auth/delete-account' ? ok : { ok: false, status: 401 }),
+    })
+    await deleteAccount()
+
+    expect(b.requests[0]).toMatchObject({ url: '/api/auth/delete-account', init: { method: 'DELETE', credentials: 'include' } })
+    expect(b.store.has('auth-token')).toBe(false)
+    expect(b.store.has('current-project-id')).toBe(false)
+    expect(b.store.has('user-info')).toBe(false)
+    expect(b.store.get('sidebarCollapsed')).toBe('true')
+    expect(b.replace).toHaveBeenCalledTimes(1)
+    expect(b.replace).toHaveBeenCalledWith(ACCOUNT_DELETED_URL)
+    expect((await checkSession()).isLoggedIn).toBe(false)
+  })
+
+  it('changes nothing in this browser when the server refused', async () => {
+    const b = browser({
+      token: 'jwt-1',
+      reply: async () => ({ ok: false, status: 409, json: async () => ({ error: 'Account has too many projects' }) }),
+    })
+    await expect(deleteAccount()).rejects.toThrow('Account has too many projects')
+    expect(b.store.get('auth-token')).toBe('jwt-1')
+    expect(b.replace).not.toHaveBeenCalled()
+  })
+})
+
 describe('sign-out stays in one place', () => {
   const ROOT = process.cwd()
 
@@ -134,12 +167,23 @@ describe('sign-out stays in one place', () => {
     })
   }
 
-  it('no control calls the platform logout endpoint itself', () => {
+  it.each(['logout', 'delete-account'])('no control calls /api/auth/%s itself', (endpoint) => {
     // app/api is the server; the platform's own client helper is lib/api/auth.ts.
+    const literal = new RegExp(`['"\`]/api/auth/${endpoint}`)
     const offenders = ['app', 'components', 'lib']
       .flatMap(sources)
-      .filter((path) => /['"`]\/api\/auth\/logout/.test(readFileSync(join(ROOT, path), 'utf8')))
+      .filter((path) => literal.test(readFileSync(join(ROOT, path), 'utf8')))
       .map((path) => path.replace(/\\/g, '/'))
     expect(offenders).toEqual([])
   })
+
+  it.each(['app/api/auth/logout/route.ts', 'app/api/auth/delete-account/route.ts'])(
+    '%s clears the cookies a session actually uses',
+    (route) => {
+      // delete-account used to clear a cookie named `token`, which nothing sets.
+      const src = readFileSync(join(ROOT, route), 'utf8')
+      expect(src).toContain('clearSessionCookies(')
+      expect(src).not.toMatch(/cookies\.(set|delete)\(\s*['"]token['"]/)
+    },
+  )
 })
