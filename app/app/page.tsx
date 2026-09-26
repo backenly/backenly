@@ -22,6 +22,7 @@ import { KitConfirmDialog } from '@/components/inspector/kit'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import { GettingStartedCard, GettingStartedWelcome } from '@/components/onboarding/GettingStartedCard'
 import { useGuidePolling, useGuideStore, useVisibleGuide } from '@/lib/stores/use-guide-store'
+import { HOSTING_REGION } from '@/lib/edition/hosting-region'
 
 type UserProfile = { id: string; name?: string; email?: string }
 
@@ -577,13 +578,13 @@ function NewProjectModal({
             the backend in Claude Code or Cursor and it lands here.
           </p>
 
-          {/* Honest region: one Hetzner region, no fake globe/selector */}
+          {/* Honest region: the one region there is, no fake globe/selector */}
           <div className="flex items-center gap-2 text-[11.5px] text-zinc-500">
             <span className="inline-flex items-center gap-1.5 rounded-md border border-white/[0.06] bg-white/[0.03] px-2 py-1 font-mono text-[11px] text-zinc-400">
               <span className="h-[5px] w-[5px] rounded-full bg-emerald-400" />
-              EU · Hetzner
+              {HOSTING_REGION.short}
             </span>
-            <span>Deployed to Backenly&apos;s single region.</span>
+            <span>Deployed to {HOSTING_REGION.label}, Backenly&apos;s single region.</span>
           </div>
 
           {error && (

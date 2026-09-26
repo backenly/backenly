@@ -16,8 +16,8 @@
  * platform questions; it never builds. Building goes through the one door:
  * the user's coding agent over MCP (Connect agent). Org switcher is Phase 6 —
  * it shows the account name until the Organization model exists. The
- * environment chip is honest: one Hetzner region, one env, so it's static
- * "Production".
+ * environment chip is honest: one region, one env, so it's static
+ * "Production"; its tooltip names the region (lib/edition/hosting-region.ts).
  */
 
 import { useEffect, useRef, useState, useTransition } from 'react'
@@ -39,6 +39,7 @@ import { Logo } from '@/components/Logo'
 import { OrgSwitcher } from '@cloud/org-switcher'
 import { getProjects, type Project } from '@/lib/api/projects'
 import { GettingStartedMenuItem } from '@/components/onboarding/GuideDrawer'
+import { HOSTING_REGION } from '@/lib/edition/hosting-region'
 
 interface MeUser {
   name?: string
@@ -201,7 +202,7 @@ export function TopBar() {
 
       {/* Environment chip — honest: one region, one env */}
       <span
-        title="Backenly runs one EU · Hetzner region today"
+        title={HOSTING_REGION.note}
         className="hidden md:inline-flex items-center gap-1.5 h-7 px-2 rounded-md bg-white/[0.03] border border-white/[0.06] text-[11px] font-mono text-zinc-400"
       >
         <span className="h-[5px] w-[5px] rounded-full bg-emerald-400" />
