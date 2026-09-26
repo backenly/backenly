@@ -245,7 +245,8 @@ describe('cloud: creation provisions a project, not a row', () => {
     expect(row.jwtSecret).toBeTruthy()
 
     // 6. The default key, returned once and never persisted in plaintext.
-    expect(apiKey).toMatch(/^sk_live_[0-9a-f]{64}$/)
+    // A project key, never a Stripe-shaped one (lib/auth/key-prefix.ts).
+    expect(apiKey).toMatch(/^proj_live_[0-9a-f]{64}$/)
     const keys = await prisma.apiKey.findMany({
       where: { projectId: project.id },
       select: { key: true, keyHash: true },

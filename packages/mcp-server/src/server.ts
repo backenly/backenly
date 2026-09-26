@@ -17,63 +17,44 @@
  * number is hardcoded here on purpose: `tools/list` on this server is the
  * authority, and lib/mcp/catalog.ts is the single definition behind it.
  *
- * The tool registry is fetched from /api/mcp/manifest on boot — so when
- * Backenly ships a new brain tool it lights up in every MCP host without
- * users updating this npm package.
+ * The tool registry, the connection instructions and the resource list are
+ * fetched from /api/mcp/manifest on boot, so when Backenly ships a new tool it
+ * lights up in every MCP host without users updating this npm package.
  *
- * Resources are a complementary surface: they let the host LLM browse the
- * project state ("list of tables", "list of APIs", "current deploy status")
- * as URIs it can read on demand. This is the difference between agentic
- * MCP servers and dumb tool wrappers — the model can consult state cheaply.
+ * The official MCP SDK owns the protocol, for both eras: a 2025-era host opens
+ * with `initialize`, a 2026-07-28 one with `server/discover`, and one factory
+ * serves either. What this package serves is what the remote endpoint
+ * (app/api/mcp) serves: calls go to the same two handlers (/api/mcp/tool and
+ * /api/mcp/chat) and come back in the same shape (./result.ts), so an agent
+ * sees the same thing whichever way it connected.
  */
 
-import { Server } from '@modelcontextprotocol/sdk/server/index.js'
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-  ListResourcesRequestSchema,
-  ReadResourceRequestSchema,
-} from '@modelcontextprotocol/sdk/types.js'
+import { ResourceNotFoundError, Server } from '@modelcontextprotocol/server'
+import type { CallToolResult, Tool } from '@modelcontextprotocol/server'
+import { serveStdio } from '@modelcontextprotocol/server/stdio'
 
 import { loadConfig, type ConfigOverrides } from './config.js'
-import { BackenlyClient, BackenlyHttpError } from './http.js'
+import { BackenlyClient, BackenlyHttpError, type ManifestResource, type ManifestTool } from './http.js'
+import { shapeToolResult, type McpToolResult } from './result.js'
 import { getPackageVersion } from './version.js'
 
-interface CatalogTool {
-  name: string
-  tier: string
-  description: string
-  inputSchema: any
-}
-
-interface ProjectResource {
-  uri: string
-  name: string
-  description: string
-  mimeType: string
-  /** Tool this resource delegates its read to. */
-  tool: string
-}
-
-// Tools handled locally by us instead of via /api/mcp/tool.
-const LOCAL_TOOLS = new Set(['backend_chat', 'db_query', 'db_insert', 'db_update', 'db_delete'])
-
-// Stable resources that exist on every project. Each maps to a read-only
-// brain tool we already have. We deliberately keep this list short — the
-// tool surface is the primary path. Resources are for cheap state browsing.
-const RESOURCES: ProjectResource[] = [
-  { uri: 'backenly://state',     name: 'Live backend state',  description: 'Tables, APIs, auth status, storage buckets, RLS policies, integrations. The single most useful resource — call this first to ground every decision.', mimeType: 'application/json', tool: 'read_backend_state' },
-  { uri: 'backenly://tables',    name: 'Tables',              description: 'Every table in this project with column and row counts.',                                                                                                       mimeType: 'application/json', tool: 'list_tables' },
-  { uri: 'backenly://apis',      name: 'REST endpoints',      description: 'Every generated REST endpoint (method + path).',                                                                                                                mimeType: 'application/json', tool: 'list_apis' },
-  { uri: 'backenly://buckets',   name: 'Storage buckets',     description: 'Storage buckets with public/private and file counts.',                                                                                                          mimeType: 'application/json', tool: 'list_buckets' },
-  { uri: 'backenly://triggers',  name: 'Event triggers',      description: 'Insert/update/delete triggers and their actions.',                                                                                                              mimeType: 'application/json', tool: 'list_triggers' },
-  { uri: 'backenly://rls',       name: 'RLS policies',        description: 'Row-level-security policies on every table.',                                                                                                                   mimeType: 'application/json', tool: 'list_permissions' },
-  { uri: 'backenly://functions', name: 'AI functions',        description: 'Server-side functions: triggers, schedules, active flag.',                                                                                                      mimeType: 'application/json', tool: 'list_ai_functions' },
-  { uri: 'backenly://deploy',    name: 'Deploy status',       description: 'Last deploy time, status, commit, environment.',                                                                                                                mimeType: 'application/json', tool: 'get_deploy_status' },
-  { uri: 'backenly://metrics',   name: 'Performance metrics', description: 'Request rate, p50/p95 latency, error rate over the last hour.',                                                                                                 mimeType: 'application/json', tool: 'get_metrics' },
-  { uri: 'backenly://errors',    name: 'Recent errors',       description: 'Recent 5xx + uncaught exceptions — endpoint, status, message, count.',                                                                                          mimeType: 'application/json', tool: 'get_errors' },
-  { uri: 'backenly://usage',     name: 'Plan usage',          description: 'AI credits used, storage, request count vs plan limits.',                                                                                                       mimeType: 'application/json', tool: 'get_usage' },
+/**
+ * The resources served when the manifest does not list them: a server older
+ * than manifest 1.1.0, or a boot that could not reach Backenly. Each reads
+ * through a side-effect free tool.
+ */
+const FALLBACK_RESOURCES: ManifestResource[] = [
+  { uri: 'backenly://state', name: 'Live backend state', description: 'Tables, APIs, auth status, storage buckets, RLS policies, integrations. Read this first to ground every decision.', mimeType: 'application/json', tool: 'read_backend_state' },
+  { uri: 'backenly://tables', name: 'Tables', description: 'Every table in this project with column and row counts.', mimeType: 'application/json', tool: 'list_tables' },
+  { uri: 'backenly://apis', name: 'REST endpoints', description: 'Every REST endpoint the project serves (method and path).', mimeType: 'application/json', tool: 'list_apis' },
+  { uri: 'backenly://buckets', name: 'Storage buckets', description: 'Storage buckets with their visibility and file counts.', mimeType: 'application/json', tool: 'list_buckets' },
+  { uri: 'backenly://triggers', name: 'Event triggers', description: 'Insert, update and delete triggers and their actions.', mimeType: 'application/json', tool: 'list_triggers' },
+  { uri: 'backenly://rls', name: 'RLS policies', description: 'Row-level security policies on every table.', mimeType: 'application/json', tool: 'list_permissions' },
+  { uri: 'backenly://functions', name: 'Functions', description: 'Server-side functions: triggers, schedules, on/off state.', mimeType: 'application/json', tool: 'list_ai_functions' },
+  { uri: 'backenly://deploy', name: 'Deploy status', description: 'The live version, when it shipped and its state.', mimeType: 'application/json', tool: 'get_deploy_status' },
+  { uri: 'backenly://metrics', name: 'Performance metrics', description: 'Request rate, p50/p95 latency and error rate over the last hour.', mimeType: 'application/json', tool: 'get_metrics' },
+  { uri: 'backenly://errors', name: 'Recent errors', description: 'Recent 5xx errors grouped by endpoint, with status, message and count.', mimeType: 'application/json', tool: 'get_errors' },
+  { uri: 'backenly://usage', name: 'Plan usage', description: 'AI credits, storage and request count against the plan limits.', mimeType: 'application/json', tool: 'get_usage' },
 ]
 
 /**
@@ -85,7 +66,7 @@ const RESOURCES: ProjectResource[] = [
  * session is fully capable, not broken — and tool CALLS still hit the live
  * backend, so everything works the moment the platform is reachable again.
  */
-const ESSENTIAL_FALLBACK: CatalogTool[] = [
+const ESSENTIAL_FALLBACK: ManifestTool[] = [
   {
     name: 'backend_chat',
     tier: 'chat',
@@ -117,10 +98,10 @@ const ESSENTIAL_FALLBACK: CatalogTool[] = [
     tier: 'read',
     description:
       'Fetch Backenly documentation as Markdown so you use the right tools without guessing. ' +
-      'No arguments for the full guide, or pass `topic` (e.g. "auth", "database", "storage").',
+      'No arguments for the index, or pass `topic` for one area (e.g. "database", "functions", "stripe", "errors").',
     inputSchema: {
       type: 'object',
-      properties: { topic: { type: 'string', description: 'Optional docs section.' } },
+      properties: { topic: { type: 'string', description: 'Optional topic; the index lists them all.' } },
       additionalProperties: false,
     },
   },
@@ -130,16 +111,19 @@ export async function startServer(overrides: ConfigOverrides = {}) {
   const config = loadConfig(overrides)
   const client = new BackenlyClient(config)
   const version = getPackageVersion()
+  const log = (line: string) => process.stderr.write(`[@backenly/mcp-server v${version}] ${line}\n`)
 
   // Human-readable project name, captured from the handshake so the greeting
   // the host injects on connect can name the project.
   let projectLabel = ''
 
-  // Tool catalog. Starts as the essential fallback so `tools/list` always has
-  // something useful; replaced with the live manifest below when it loads. The
+  // What the server serves. Starts as the local fallback so `tools/list` always
+  // has something useful; replaced by the live manifest when it loads. The
   // greeting's tool count is derived from THIS at connect time, so it can never
   // claim more tools than `tools/list` actually serves.
-  let tools: CatalogTool[] = ESSENTIAL_FALLBACK
+  let tools: ManifestTool[] = ESSENTIAL_FALLBACK
+  let resources: ManifestResource[] = FALLBACK_RESOURCES
+  let instructions: string | null = null
 
   // ── Boot handshake ─────────────────────────────────────────────────────────
   // Two failure classes, treated differently and never conflated:
@@ -156,127 +140,119 @@ export async function startServer(overrides: ConfigOverrides = {}) {
     const health = await client.health()
 
     if (config.projectId && health.projectId && config.projectId !== health.projectId) {
-      process.stderr.write(
-        `[@backenly/mcp-server v${version}] project mismatch — the --project you passed ` +
-          `(${config.projectId}) is not the project this key belongs to (${health.projectId}).\n` +
-          `Re-copy the install command from your project's Connect → Agents tab.\n`,
+      log(
+        `project mismatch — the --project you passed (${config.projectId}) is not the project this key ` +
+          `belongs to (${health.projectId}).\nRe-copy the install command from your project's Connect → Agents tab.`,
       )
       process.exit(1)
     }
 
     projectLabel = health.project?.name ?? health.projectId
-    process.stderr.write(
-      `[@backenly/mcp-server v${version}] connected to Backenly — project ` +
-        `${projectLabel} (${health.toolCount} tools available)\n`,
-    )
+    log(`connected to Backenly — project ${projectLabel} (${health.toolCount} tools available)`)
   } catch (err) {
     if (err instanceof BackenlyHttpError && err.isAuthFailure) {
-      process.stderr.write(
-        `[@backenly/mcp-server v${version}] Backenly rejected the API key (HTTP ${err.status}). ` +
-          `It is invalid, revoked, or scoped to a different project.\n` +
-          `Re-copy the install command from your project's Connect → Agents tab: https://backenly.com/app\n`,
+      log(
+        `Backenly rejected the API key (HTTP ${err.status}). It is invalid, revoked, or scoped to a different project.\n` +
+          `Re-copy the install command from your project's Connect → Agents tab: https://backenly.com/app`,
       )
       process.exit(1)
     }
     // Transient — log and carry on degraded. Tools still resolve once reachable.
     const msg = err instanceof Error ? err.message : String(err)
-    process.stderr.write(
-      `[@backenly/mcp-server v${version}] couldn't reach Backenly at boot (${msg}). ` +
-        `Starting in degraded mode — backend_chat still works and the full tool list loads once the platform is reachable.\n`,
+    log(
+      `couldn't reach Backenly at boot (${msg}). Starting in degraded mode — backend_chat still works ` +
+        `and the full tool list loads once the platform is reachable.`,
     )
   }
 
-  // Manifest is the source of the full tool catalog. On success it replaces the
+  // The manifest is the source of the full catalog. On success it replaces the
   // fallback; on an auth failure it's fatal (a wrong key that somehow passed the
   // health blip); on any other failure we keep the fallback and stay degraded.
+  let catalogLoaded = false
+  const adopt = (manifest: Awaited<ReturnType<BackenlyClient['manifest']>>): boolean => {
+    if (!manifest.tools?.length) return false
+    tools = manifest.tools
+    if (manifest.resources?.length) resources = manifest.resources
+    if (typeof manifest.instructions === 'string' && manifest.instructions) instructions = manifest.instructions
+    catalogLoaded = true
+    return true
+  }
   try {
-    const manifest = await client.manifest()
-    if (manifest.tools?.length) {
-      tools = manifest.tools
-    }
+    adopt(await client.manifest())
   } catch (err) {
     if (err instanceof BackenlyHttpError && err.isAuthFailure) {
-      process.stderr.write(
-        `[@backenly/mcp-server v${version}] Backenly rejected the API key (HTTP ${err.status}).\n` +
-          `Re-copy the install command from your project's Connect → Agents tab: https://backenly.com/app\n`,
+      log(
+        `Backenly rejected the API key (HTTP ${err.status}).\n` +
+          `Re-copy the install command from your project's Connect → Agents tab: https://backenly.com/app`,
       )
       process.exit(1)
     }
     const msg = err instanceof Error ? err.message : String(err)
-    process.stderr.write(
-      `[@backenly/mcp-server v${version}] tool catalog unavailable (${msg}) — serving ${tools.length} essential tools until it loads.\n`,
-    )
+    log(`tool catalog unavailable (${msg}) — serving ${tools.length} essential tools until it loads.`)
   }
 
-  // `instructions` ships in the MCP `initialize` response. Hosts like Claude
-  // Code inject it into the agent's context on connect, so the agent knows it
-  // is wired into Backenly, confirms the connection to the user, and asks what
-  // to build — instead of the connection landing silently.
-  const server = new Server(
-    { name: '@backenly/mcp-server', version },
-    {
-      capabilities: { tools: {}, resources: {} },
-      instructions: buildInstructions(projectLabel, tools.length),
-    },
-  )
+  // ── The server for the connection ──────────────────────────────────────────
+  // serveStdio calls the factory for the instance that serves the connection
+  // (and once more for a probe it discards if the host falls back to the 2025
+  // handshake), so the last instance built is the one serving. Handlers read
+  // the current catalog on every request, so a recovered catalog is served the
+  // moment it loads.
+  let serving: Server | null = null
 
-  // ── tools/list ────────────────────────────────────────────────────────────
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: tools.map((t) => ({
-      name: t.name,
-      description: t.description,
-      inputSchema: t.inputSchema,
-    })),
-  }))
+  const buildServer = (): Server => {
+    // `instructions` reaches the host on connect; hosts like Claude Code inject
+    // it into the agent's context, so the agent knows it is wired into Backenly
+    // and confirms the connection instead of the connection landing silently.
+    // `listChanged` because the tool list really can change: a catalog that
+    // failed to load at boot is replaced once it loads (see recoverCatalog).
+    const server = new Server(
+      { name: '@backenly/mcp-server', version },
+      {
+        capabilities: { tools: { listChanged: true }, resources: {} },
+        instructions: instructions ?? buildInstructions(projectLabel, tools.length),
+      },
+    )
 
-  // ── tools/call ────────────────────────────────────────────────────────────
-  server.setRequestHandler(CallToolRequestSchema, async (req) => {
-    const name = req.params.name
-    const args = (req.params.arguments ?? {}) as Record<string, unknown>
+    server.setRequestHandler('tools/list', async () => ({ tools: tools.map(toMcpTool) }))
 
-    try {
-      const result = await dispatch(client, name, args)
-      return {
-        content: [{
-          type: 'text',
-          text: typeof result === 'string' ? result : JSON.stringify(result, null, 2),
-        }],
+    server.setRequestHandler('tools/call', async (req) => {
+      const result = await callTool(client, req.params.name, (req.params.arguments ?? {}) as Record<string, unknown>)
+      return server.projectCallToolResult(result as CallToolResult, undefined)
+    })
+
+    server.setRequestHandler('resources/list', async () => ({
+      resources: resources.map(({ tool: _tool, ...r }) => r),
+    }))
+
+    server.setRequestHandler('resources/read', async (req) => {
+      const uri = req.params.uri
+      const resource = resources.find((r) => r.uri === uri)
+      if (!resource) {
+        throw new ResourceNotFoundError(uri, `Unknown resource: ${uri}. Available: ${resources.map((r) => r.uri).join(', ')}`)
       }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      return { isError: true, content: [{ type: 'text', text: msg }] }
-    }
+      const result = await callTool(client, resource.tool, {})
+      if (result.isError) {
+        throw new Error(String(result.structuredContent.error ?? `Could not read ${uri}`))
+      }
+      return { contents: [{ uri, mimeType: resource.mimeType, text: result.content[0].text }] }
+    })
+
+    serving = server
+    return server
+  }
+
+  // Surface uncaught failures to stderr instead of dying silently — helps the
+  // user file actionable bug reports.
+  process.on('uncaughtException', (err) => {
+    process.stderr.write(`[@backenly/mcp-server] uncaught: ${err.stack ?? err.message}\n`)
+  })
+  process.on('unhandledRejection', (reason) => {
+    process.stderr.write(`[@backenly/mcp-server] unhandled rejection: ${String(reason)}\n`)
   })
 
-  // ── resources/list ────────────────────────────────────────────────────────
-  server.setRequestHandler(ListResourcesRequestSchema, async () => ({
-    resources: RESOURCES.map((r) => ({
-      uri: r.uri,
-      name: r.name,
-      description: r.description,
-      mimeType: r.mimeType,
-    })),
-  }))
-
-  // ── resources/read ────────────────────────────────────────────────────────
-  server.setRequestHandler(ReadResourceRequestSchema, async (req) => {
-    const uri = req.params.uri
-    const resource = RESOURCES.find((r) => r.uri === uri)
-    if (!resource) {
-      throw new Error(`Unknown resource: ${uri}. Available: ${RESOURCES.map((r) => r.uri).join(', ')}`)
-    }
-
-    const result = await client.callTool(resource.tool, {})
-    if (!result.ok) {
-      throw new Error(result.error ?? `Could not read ${uri}`)
-    }
-    return {
-      contents: [{
-        uri,
-        mimeType: resource.mimeType,
-        text: JSON.stringify({ summary: result.summary, data: result.data }, null, 2),
-      }],
-    }
+  const handle = serveStdio(buildServer, {
+    legacy: 'serve',
+    onerror: (err) => process.stderr.write(`[@backenly/mcp-server] protocol error: ${err.message}\n`),
   })
 
   // ── Graceful shutdown ─────────────────────────────────────────────────────
@@ -291,219 +267,117 @@ export async function startServer(overrides: ConfigOverrides = {}) {
     shuttingDown = true
     process.stderr.write(`[@backenly/mcp-server] received ${signal}, shutting down…\n`)
     try {
-      await server.close()
+      await handle.close()
     } catch { /* best effort */ }
     process.exit(0)
   }
-  process.on('SIGINT',  () => { void shutdown('SIGINT')  })
+  process.on('SIGINT', () => { void shutdown('SIGINT') })
   process.on('SIGTERM', () => { void shutdown('SIGTERM') })
 
-  // Surface uncaught failures to stderr instead of dying silently — helps the
-  // user file actionable bug reports.
-  process.on('uncaughtException', (err) => {
-    process.stderr.write(`[@backenly/mcp-server] uncaught: ${err.stack ?? err.message}\n`)
-  })
-  process.on('unhandledRejection', (reason) => {
-    process.stderr.write(`[@backenly/mcp-server] unhandled rejection: ${String(reason)}\n`)
-  })
+  if (!catalogLoaded) recoverCatalog()
 
-  const transport = new StdioServerTransport()
-  await server.connect(transport)
+  // ── Catalog recovery ──────────────────────────────────────────────────────
+  // A manifest that failed at boot used to be fetched exactly once, so a brief
+  // outage during install left the session on the three fallback tools for its
+  // whole life while the log promised the full list would load. It is retried
+  // in the background until it loads, and the host is told the list changed:
+  // a 2025-era host gets `notifications/tools/list_changed`, a 2026-07-28 host
+  // gets it on its `subscriptions/listen` stream, and either re-reads the list.
+  // A key rejected mid-recovery stops the retries: every call will fail the
+  // same way, and saying so once is the useful thing.
+  function recoverCatalog(attempt = 0): void {
+    const override = Number(process.env.BACKENLY_MCP_CATALOG_RETRY_MS)
+    const delay = override > 0 ? override : CATALOG_RETRY_MS[Math.min(attempt, CATALOG_RETRY_MS.length - 1)]
+    const timer = setTimeout(async () => {
+      try {
+        if (!adopt(await client.manifest())) return recoverCatalog(attempt + 1)
+        log(`tool catalog loaded (${tools.length} tools).`)
+        await serving?.sendToolListChanged().catch(() => {})
+      } catch (err) {
+        if (err instanceof BackenlyHttpError && err.isAuthFailure) {
+          log(
+            `Backenly rejected the API key (HTTP ${err.status}) while loading the tool catalog. ` +
+              `Re-copy the install command from your project's Connect → Agents tab.`,
+          )
+          return
+        }
+        recoverCatalog(attempt + 1)
+      }
+    }, delay)
+    // Never the reason the process stays alive: stdio owns the lifetime.
+    timer.unref()
+  }
+}
+
+/** Retry delays for a catalog that failed to load at boot; the last repeats. */
+const CATALOG_RETRY_MS = [5_000, 15_000, 30_000, 60_000, 120_000]
+
+/** A manifest tool as tools/list serves it. The same mapping as the remote endpoint's. */
+function toMcpTool(t: ManifestTool): Tool {
+  return {
+    name: t.name,
+    ...(t.annotations?.title ? { title: t.annotations.title } : {}),
+    description: t.description,
+    inputSchema: t.inputSchema,
+    ...(t.annotations ? { annotations: t.annotations } : {}),
+  } as Tool
 }
 
 /**
- * The greeting + operating brief the host injects on connect. Kept short on
- * purpose — it costs context on every session, so it earns its place by making
- * the agent (a) confirm the connection, (b) know what Backenly can build, and
- * (c) ground itself in real state before touching anything.
+ * Run one tool through the handler the remote endpoint uses for it, and shape
+ * the result the way the remote endpoint does.
+ *
+ * backend_chat runs the brain at /api/mcp/chat; every other tool, the db_* row
+ * tools included, goes to /api/mcp/tool. Those used to go to /api/mcp/db/*,
+ * which answer in a different shape, so the same call looked different over
+ * stdio than over the remote endpoint.
+ *
+ * A refusal is the server's own body (its `code`, `hint`, `applied`), not a
+ * sentence made from it. Only a failure that never reached a response has no
+ * body, and then the result says so in the client's own words.
+ */
+async function callTool(client: BackenlyClient, name: string, args: Record<string, unknown>): Promise<McpToolResult> {
+  try {
+    const body =
+      name === 'backend_chat'
+        ? await client.chat(typeof args.message === 'string' ? args.message : '')
+        : await client.callTool(name, args)
+    return shapeToolResult(body, (body as { ok?: unknown })?.ok !== false)
+  } catch (err) {
+    if (err instanceof BackenlyHttpError && err.body) return shapeToolResult(err.body, false)
+    const message = err instanceof Error ? err.message : String(err)
+    const code = err instanceof BackenlyHttpError ? err.code : undefined
+    return shapeToolResult({ ok: false, error: message, ...(code ? { code } : {}) }, false)
+  }
+}
+
+/**
+ * The brief served when the manifest does not carry one: a server older than
+ * manifest 1.1.0, or a boot that could not reach Backenly. With a current
+ * manifest the package serves the remote endpoint's own text instead.
+ *
+ * It names no tool beyond backend_chat on purpose: without the manifest the
+ * package cannot know which tools the server offers, and a brief that promises
+ * tools the list does not have sends the agent looking for them.
  */
 function buildInstructions(projectLabel: string, toolCount: number | null): string {
   const project = projectLabel ? `"${projectLabel}"` : 'this project'
-  const via = toolCount ? `${toolCount} Backenly tools` : `Backenly's governed tools`
+  const via = toolCount ? `${toolCount} Backenly tools` : 'Backenly’s governed tools'
   return [
     `Backenly is connected. You now have live, governed access to ${project}'s backend`,
-    `through ${via} and the backenly:// resources — no backend code required.`,
+    `through ${via} and the backenly:// resources, with no backend code required.`,
     ``,
-    `WHAT THIS CONNECTION LETS YOU BUILD: database tables, REST APIs, auth & end-user`,
-    `accounts, file storage, realtime, event triggers, row-level-security policies, and`,
-    `serverless functions. Every change is planned, verified, journaled with a receipt, and`,
-    `reversible; destructive or auth-touching changes require explicit human approval.`,
+    `WHAT YOU CAN BUILD: database tables, REST APIs, auth and end-user accounts, file storage,`,
+    `realtime, webhooks, row-level-security policies and server-side functions. Every change is`,
+    `planned, verified and journaled; destructive or high-risk actions wait for a human's approval.`,
     ``,
-    `ON YOUR FIRST REPLY of this session, briefly tell the user that Backenly is connected to`,
-    `${project} and ask what they'd like to build or change. Keep it to a sentence or two —`,
-    `don't dump this whole list on them.`,
+    `ON YOUR FIRST REPLY of this session, briefly tell the user Backenly is connected to`,
+    `${project} and ask what they'd like to build or change. Keep it to a sentence or two.`,
     ``,
     `OPERATING RULES:`,
-    `- Ground decisions in real state: read the backenly://state resource (or call`,
-    `  read_backend_state) before proposing or making changes. Never guess at tables or config.`,
-    `- For natural-language builds ("add a posts table with comments"), use the backend_chat`,
-    `  tool. For precise reads and row writes, use the db_* and list_* tools directly.`,
+    `- Ground decisions in real state: read backenly://state or call read_backend_state before`,
+    `  proposing or making changes. Never guess at tables or config.`,
+    `- Use the tools this server lists. backend_chat takes any request in plain English.`,
     `- Never fabricate results. If a tool returns nothing or errors, say so plainly.`,
   ].join('\n')
-}
-
-/**
- * Turn a failed brain response into an error an agent can act on.
- *
- * ── Why this is not a one-liner ─────────────────────────────────────────────
- *
- * This used to be `throw new Error(result.error ?? 'Brain run failed.')`, and
- * the reported symptom was exactly that string with nothing attached: "Two of
- * three runs returned only `Brain run failed.` — no detail."
- *
- * Three separate things produced that, and all three are fixed:
- *
- *   1. The remote transport STRIPPED `partialEvents` before the agent saw it
- *      (app/api/mcp/route.ts) — the one field describing what actually ran.
- *   2. The stdio transport discarded the same field when building its error
- *      (http.ts) — the server sent a full account and the client kept a
- *      sentence.
- *   3. The fallback here was a bare string with no status, no code, and no
- *      instruction, reached whenever the body had `ok:false` without `error`.
- *
- * A failure that says only "it failed" costs an agent a whole turn of blind
- * retrying — and if the run was PARTIAL, the retry duplicates whatever already
- * landed. Which is why the trail matters more than the message.
- */
-function brainFailure(result: {
-  ok: boolean
-  error?: string
-  summary?: string
-  code?: string
-  retryable?: boolean
-  retryAfterMs?: number
-  partial?: boolean
-  applied?: string[]
-  toolsRun?: string[]
-  iterations?: number
-  events?: Array<{ type: string; [k: string]: any }>
-}): Error {
-  const parts: string[] = []
-  parts.push(result.error || result.summary || 'The brain run did not complete.')
-
-  // ── The classification the server now sends ────────────────────────────────
-  //
-  // `code` and `retryable` exist so an agent does not have to guess whether an
-  // identical retry is worth making. Dropping them here would have left the
-  // server-side fix invisible over stdio, which is the transport most clients use
-  // — the same shape of bug as the one being fixed (a field computed and then
-  // discarded one hop away).
-  if (result.code) parts.push(`Code: ${result.code}.`)
-  if (result.retryable) {
-    const wait = result.retryAfterMs ? `${Math.round(result.retryAfterMs / 1000)}s` : 'a moment'
-    parts.push(`This is transient — the same request is worth retrying after ${wait}.`)
-  } else if (result.retryable === false) {
-    parts.push('Retrying the identical request will fail the same way; change the request.')
-  }
-
-  // What actually landed outranks everything else here: retrying a partially
-  // applied run duplicates whatever already succeeded.
-  if (result.applied?.length) {
-    parts.push(
-      `ALREADY APPLIED — do not repeat these: ${result.applied.join('; ')}. ` +
-      `Verify with read_backend_state and ask only for what is missing.`,
-    )
-  } else if (result.partial === false) {
-    parts.push('Nothing was applied.')
-  } else if (result.toolsRun?.length) {
-    parts.push(
-      `Tools that ran before it stopped: ${result.toolsRun.join(', ')}. ` +
-      `Some of this may already be applied — check with read_backend_state before retrying.`,
-    )
-  }
-  if (result.iterations) parts.push(`Iterations: ${result.iterations}.`)
-
-  const failedStep = result.events?.find((e) => e.type === 'tool_fail')
-  if (failedStep) {
-    parts.push(`Failed at: ${failedStep.tool ?? 'unknown step'}${failedStep.error ? ` — ${failedStep.error}` : ''}.`)
-  }
-
-  if (!result.error && !result.summary) {
-    // No message at all from the server. Say THAT, rather than inventing a
-    // description of a failure nobody described.
-    parts.push(
-      'The server reported failure without a reason, which is itself a bug — ' +
-      'please report it. Retrying the same message is unlikely to help.',
-    )
-  }
-
-  return new Error(parts.join(' '))
-}
-
-async function dispatch(
-  client: BackenlyClient,
-  name: string,
-  args: Record<string, unknown>,
-): Promise<unknown> {
-  if (name === 'backend_chat') {
-    const message = String(args.message ?? '').trim()
-    if (!message) throw new Error('`message` is required.')
-    const result = await client.chat(message)
-    if (!result.ok) throw brainFailure(result)
-    return {
-      summary: result.summary,
-      needsUser: result.needsUser ?? false,
-      // ── Never default an unmeasured field ─────────────────────────────────────
-      //
-      // These used to be `?? []` and `?? 0`, and the server's partial-result path
-      // did not send them — so a body reading `{ applied: ["Securing profiles ·
-      // custom RLS"], partial: true, toolsRun: [], iterations: 0 }` reached the
-      // agent. A change applied by zero tools in zero iterations is not a fact
-      // the server reported; it is one this line invented, and it made the
-      // response unauditable.
-      //
-      // Absent now means absent. `verified` is forwarded for the same reason: an
-      // agent must be able to tell a verified partial from an unverified one
-      // without parsing prose.
-      ...(result.toolsRun ? { toolsRun: result.toolsRun } : {}),
-      ...(typeof result.iterations === 'number' ? { iterations: result.iterations } : {}),
-      ...(typeof result.verified === 'boolean' ? { verified: result.verified } : {}),
-      ...(result.verifyWith ? { verifyWith: result.verifyWith } : {}),
-      // ── The escalation object, forwarded ────────────────────────────────────
-      //
-      // A destructive request comes back `ok:true` with `status:
-      // "awaiting_approval"` and an `approval` object carrying the id to poll.
-      // This function returned four fields and dropped the rest, so the id
-      // survived only as prose inside `summary` — an agent had to regex it out to
-      // call check_approval. The structured fields are what make the branch
-      // mechanical.
-      ...(result.status ? { status: result.status } : {}),
-      ...(result.approval ? { approval: result.approval } : {}),
-      ...(result.applied?.length ? { applied: result.applied } : {}),
-      ...(result.partial ? { partial: true } : {}),
-    }
-  }
-
-  if (name === 'db_query')  return shapeOrThrow(await client.dbQuery(args))
-  if (name === 'db_insert') return shapeOrThrow(await client.dbInsert(args))
-  if (name === 'db_update') return shapeOrThrow(await client.dbUpdate(args))
-  if (name === 'db_delete') return shapeOrThrow(await client.dbDelete(args))
-
-  if (LOCAL_TOOLS.has(name)) {
-    throw new Error(`Tool "${name}" is local but not routed. This is a bug.`)
-  }
-  const result = await client.callTool(name, args)
-  if (!result.ok) {
-    // `code` is a stable slug the tool route sets on every failure
-    // (CONSTRAINT_CONFLICT, DUPLICATE_ROWS, COLUMN_NOT_FOUND, RLS_NOT_APPLIED,
-    // VERIFY_FAILED, …). Appending it costs nothing and saves an agent from
-    // pattern-matching prose to decide what to do next. `hint` is the route's
-    // named way forward — dropping it turns a recoverable refusal into a dead end.
-    const anyResult = result as Record<string, any>
-    const parts = [result.error ?? result.summary ?? `Tool "${name}" failed.`]
-    if (anyResult.code) parts.push(`Code: ${anyResult.code}.`)
-    if (anyResult.hint) parts.push(anyResult.hint)
-    if (Array.isArray(anyResult.applied) && anyResult.applied.length) {
-      parts.push(
-        `ALREADY APPLIED — do not repeat: ${anyResult.applied.map((a: any) => a.summary ?? a).join('; ')}.`,
-      )
-    }
-    throw new Error(parts.join(' '))
-  }
-  return { summary: result.summary, data: result.data, needsUser: result.needsUser ?? false }
-}
-
-function shapeOrThrow<T extends { ok: boolean; error?: string }>(result: T): T {
-  if (!result.ok) throw new Error(result.error ?? 'Operation failed.')
-  return result
 }

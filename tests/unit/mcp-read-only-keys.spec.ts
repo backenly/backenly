@@ -17,6 +17,7 @@
  */
 
 import { buildCatalog, isReadOnlyTool } from '@/lib/mcp/catalog'
+import { getDomainTool } from '@/lib/mcp/domains'
 import { READ_ONLY_TOOLS, isDestructiveTool } from '@/lib/ai/brain/tools'
 
 describe('the read-only catalog', () => {
@@ -32,7 +33,19 @@ describe('the read-only catalog', () => {
 
   it('offers no tool that can change the backend', () => {
     // Every advertised name must clear the same predicate the routes enforce.
-    for (const name of names(ro)) expect(isReadOnlyTool(name)).toBe(true)
+    // A domain tool is served narrowed, so it is every action IT OFFERS that
+    // must clear it: the route judges each call by the action's target.
+    for (const t of ro) {
+      const domain = getDomainTool(t.name)
+      if (!domain) {
+        expect(isReadOnlyTool(t.name)).toBe(true)
+        continue
+      }
+      for (const action of (t.inputSchema.properties.action as { enum: string[] }).enum) {
+        expect({ call: `${t.name}.${action}`, read: isReadOnlyTool(domain.actions[action].tool) })
+          .toEqual({ call: `${t.name}.${action}`, read: true })
+      }
+    }
   })
 
   it('offers no destructive tool', () => {
@@ -58,14 +71,9 @@ describe('the read-only catalog', () => {
       'db_update',
       'db_delete',
       'set_rls',
-      'enable_auth',
-      'create_bucket',
-      'generate_function',
-      'enable_realtime',
-      'create_api_key',
-      'set_env_var',
       'branch',
-      'get_database_credentials',
+      // Domain tools are not listed here: a read-only key is served each one
+      // narrowed to its read actions (asserted in mcp-domain-tools.spec.ts).
     ]
     for (const name of withheld) {
       expect(names(full)).toContain(name)      // it is a real advertised tool…

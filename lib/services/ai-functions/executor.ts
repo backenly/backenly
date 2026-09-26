@@ -83,6 +83,13 @@ export interface FunctionCallerContext {
    * endpoint's real logic can be exercised. Never set on public paths.
    */
   testRun?: boolean
+  /**
+   * Whether a failure hands the function to the model-backed auto-fixer, which
+   * rewrites its code. On by default. An agent invoking a function to test it
+   * turns it off: it needs the error, and code that changes under it without a
+   * word would make the next run test something it never wrote or saw.
+   */
+  selfHeal?: boolean
 }
 
 const EXECUTION_TIMEOUT_MS = 10_000
@@ -314,6 +321,29 @@ function getConnectedFromContext(integrations: IntegrationContext): string[] {
 
 // ─── Worker-based execution ───────────────────────────────────────────────────
 
+/**
+ * A sandbox run that failed, carrying the lines the function logged first.
+ *
+ * The worker sends its log lines in the message that ends the run, `done` or
+ * `error`, and never one at a time. This used to reject with a bare Error and
+ * resolve with the parent's own list, which only ever filled from per-line
+ * messages that were never sent, so every sandbox run was recorded with no
+ * log lines at all: after a success, and after the failure an agent most
+ * needed them for.
+ */
+export class SandboxRunError extends Error {
+  constructor(message: string, readonly logs: string[]) {
+    super(message)
+    this.name = 'SandboxRunError'
+  }
+}
+
+/** The lines a finished run logged: the ones the worker sent, else any streamed. */
+function workerLines(streamed: string[], msg: { logs?: unknown }): string[] {
+  const sent = Array.isArray(msg.logs) ? msg.logs.map((l) => String(l)) : []
+  return sent.length ? sent : streamed
+}
+
 function runInWorker(
   code: string,
   event: FunctionEvent,
@@ -344,7 +374,7 @@ function runInWorker(
     // Hard timeout: kill the worker after EXECUTION_TIMEOUT_MS
     const hardKillTimer = setTimeout(() => {
       worker.terminate().catch(() => {})
-      reject(new Error('Function timed out after 10s'))
+      reject(new SandboxRunError('Function timed out after 10s', logs))
     }, EXECUTION_TIMEOUT_MS)
 
     worker.on('message', async (msg: any) => {
@@ -372,33 +402,64 @@ function runInWorker(
       if (msg.type === 'done') {
         clearTimeout(hardKillTimer)
         worker.terminate().catch(() => {})
-        resolve({ logs, returnValue: msg.result })
+        resolve({ logs: workerLines(logs, msg), returnValue: msg.result })
         return
       }
 
       if (msg.type === 'error') {
         clearTimeout(hardKillTimer)
         worker.terminate().catch(() => {})
-        reject(new Error(msg.error))
+        reject(new SandboxRunError(msg.error, workerLines(logs, msg)))
         return
       }
     })
 
     worker.on('error', (err) => {
       clearTimeout(hardKillTimer)
-      reject(err)
+      reject(new SandboxRunError(err.message, logs))
     })
 
     worker.on('exit', (code) => {
       clearTimeout(hardKillTimer)
       if (code !== 0) {
-        reject(new Error(`Sandbox worker exited with code ${code}`))
+        reject(new SandboxRunError(`Sandbox worker exited with code ${code}`, logs))
       }
     })
 
     // Start execution — pass connectedIntegrations so worker can build ctx.integrations,
     // and decrypted envVars so worker can expose ctx.env (frozen).
     worker.postMessage({ type: 'run', id: runId, code, event, connectedIntegrations, envVars, integrationManifest })
+  })
+}
+
+/**
+ * Whether the sandbox would accept `code`, asked of the sandbox worker itself:
+ * the import rewrite, the blocked-pattern check, the ctx.require() package list
+ * and a compile of the wrapper the worker runs. The function body is never run.
+ * Deploying agent-written code checks this before storing it, so what is stored
+ * is what the runtime can execute.
+ */
+export function validateSandboxFunction(code: string): Promise<{ valid: boolean; error?: string }> {
+  return new Promise((resolve) => {
+    let settled = false
+    const worker = new Worker(SANDBOX_WORKER_PATH, {
+      env: {},
+      resourceLimits: { maxOldGenerationSizeMb: 64, maxYoungGenerationSizeMb: 16, codeRangeSizeMb: 8 },
+    })
+    const finish = (result: { valid: boolean; error?: string }) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      worker.terminate().catch(() => {})
+      resolve(result)
+    }
+    const timer = setTimeout(() => finish({ valid: false, error: 'The sandbox did not answer within 5s.' }), 5_000)
+    worker.on('message', (msg: any) => {
+      if (msg?.type === 'validated') finish(msg.error ? { valid: false, error: String(msg.error) } : { valid: true })
+    })
+    worker.on('error', (err) => finish({ valid: false, error: `The sandbox could not start: ${err.message}` }))
+    worker.on('exit', (exitCode) => finish({ valid: false, error: `The sandbox exited with code ${exitCode} before answering.` }))
+    worker.postMessage({ type: 'validate', id: `v${Date.now()}`, code })
   })
 }
 
@@ -687,7 +748,7 @@ export async function executeAiFunction(
       // auto-fixer would rewrite the module into a ctx.* sandbox body and
       // corrupt it — never use it here). Guarded so a failed fix can't loop.
       const prevError = fn.lastError ?? ''
-      if (!prevError.startsWith('AUTO-FIX')) {
+      if (caller.selfHeal !== false && !prevError.startsWith('AUTO-FIX')) {
         autoFixRouteModuleFunction(
           functionId, projectId, errorMsg, fn.generatedCode, fn.description, fn.triggerTable
         ).catch(() => {})
@@ -748,7 +809,9 @@ export async function executeAiFunction(
 
   const durationMs = Date.now() - startMs
   const errorMsg = lastError?.message || 'Unknown error'
-  const logs: string[] = []
+  // What the function logged before it failed, which is what an agent reads
+  // to find out why.
+  const logs: string[] = lastError instanceof SandboxRunError ? lastError.logs : []
 
   // Persist error log
   await persistExecutionLog(functionId, projectId, false, logs, errorMsg, durationMs, event.type)
@@ -759,7 +822,7 @@ export async function executeAiFunction(
   }).catch(() => {})
 
   const previousError = fn.lastError ?? ''
-  if (!previousError.startsWith('AUTO-FIX')) {
+  if (caller.selfHeal !== false && !previousError.startsWith('AUTO-FIX')) {
     autoFixAiFunction(
       functionId, projectId, errorMsg, fn.generatedCode,
       fn.description, fn.triggerType, fn.triggerTable

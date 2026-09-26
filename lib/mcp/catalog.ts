@@ -32,6 +32,8 @@
  */
 
 import { BRAIN_TOOLS, READ_ONLY_TOOLS, isDestructiveTool } from '@/lib/ai/brain/tools'
+import { DOMAIN_TOOLS, domainDescription, domainInputSchema, getDomainTool, readOnlyView } from '@/lib/mcp/domains'
+import { AGENT_DOC_TOPICS } from '@/lib/mcp/agent-docs'
 
 export type McpTier = 'chat' | 'read' | 'build' | 'data'
 
@@ -48,6 +50,83 @@ export interface McpToolDescriptor {
     properties: Record<string, unknown>
     required?: string[]
     additionalProperties?: boolean
+  }
+  /** MCP tool annotations, derived once in `annotationsFor`. */
+  annotations?: McpToolAnnotations
+}
+
+/**
+ * The MCP `ToolAnnotations` a host reads to tell a read from a write before it
+ * calls anything: whether to ask the user first, whether a retry is safe,
+ * whether the tool reaches outside this project.
+ *
+ * Both transports serve these from here, so the stdio package and the remote
+ * endpoint can never describe the same tool differently.
+ */
+export interface McpToolAnnotations {
+  title: string
+  readOnlyHint: boolean
+  destructiveHint: boolean
+  idempotentHint: boolean
+  openWorldHint: boolean
+}
+
+/**
+ * Writes that can remove or overwrite existing rows with no approval step in
+ * between. Everything else that mutates is additive, or reaches anything
+ * irreversible only through the human Review Queue (destructive brain tools are
+ * never dispatchable here at all).
+ */
+const OVERWRITES_DATA = new Set(['db_update', 'db_delete'])
+
+/** Writes that leave the same end state however many times they run. */
+const IDEMPOTENT_WRITES = new Set(['set_rls', 'set_env_var'])
+
+/** Titles where the name alone would read badly as a label. */
+const TITLES: Record<string, string> = {
+  backend_chat: 'Ask Backenly to build or change the backend',
+  run_query: 'Run a read-only SQL query',
+  get_table_schema: "Get a table's schema",
+  db_query: 'Read rows',
+  db_insert: 'Insert a row',
+  db_update: 'Update rows',
+  db_delete: 'Delete rows',
+  set_rls: 'Set row-level security',
+  set_env_var: 'Set an environment variable',
+  get_database_credentials: 'Get Postgres connection credentials',
+  generate_types: 'Generate TypeScript types',
+  branch: 'Preview branches',
+}
+
+/**
+ * Tools that reach a system outside this project: storing a provider key asks
+ * the provider whether it works, send_push delivers through OneSignal, and
+ * backend_chat can do either on the agent's behalf. Everything else acts on
+ * this project's own database and config.
+ */
+const OPEN_WORLD = new Set(['backend_chat', 'store_integration_key', 'send_push'])
+
+export function annotationsFor(name: string): McpToolAnnotations {
+  // A domain tool never performs a destructive update itself: its destructive
+  // and high-risk actions park the exact call for a human (lib/mcp/domains.ts).
+  const domain = getDomainTool(name)
+  if (domain) {
+    return {
+      title: domain.title,
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: !!domain.openWorld,
+    }
+  }
+  const readOnly = isReadOnlyTool(name)
+  const words = name.replace(/_/g, ' ')
+  return {
+    title: TITLES[name] ?? words.charAt(0).toUpperCase() + words.slice(1),
+    readOnlyHint: readOnly,
+    destructiveHint: !readOnly && OVERWRITES_DATA.has(name),
+    idempotentHint: readOnly || IDEMPOTENT_WRITES.has(name),
+    openWorldHint: OPEN_WORLD.has(name),
   }
 }
 
@@ -139,6 +218,12 @@ function tierOf(name: string): McpTier | null {
  * working — being unlisted costs an agent nothing, while being listed costs
  * every agent accuracy on every call.
  */
+/**
+ * The most tools the manifest may advertise. Asserted by test: raising it is a
+ * decision about every agent's selection accuracy, not a side effect.
+ */
+export const ADVERTISED_CAP = 23
+
 const MCP_SURFACE = new Set<string>([
   // Natural language — the fall-through for everything not listed here.
   'backend_chat',
@@ -210,9 +295,25 @@ const MCP_SURFACE = new Set<string>([
   // reads pg_policies back before reporting. `add_rls` remains for the named
   // templates and stays dispatchable.
   'set_rls',
-  // Capabilities with no SQL expression and no competing tool.
-  'enable_auth',
-  'create_bucket',
+  // ── One door per dashboard section (lib/mcp/domains.ts) ────────────────────
+  //
+  // These replaced the single-purpose capability tools (enable_auth,
+  // create_bucket, generate_function, enable_realtime, create_api_key,
+  // set_env_var, get_database_credentials), each of which covered one button of
+  // its section and left the rest behind backend_chat. Each is now one tool with
+  // an `action` enum, routed to the same brain tools; the old names stay
+  // dispatchable for pinned clients. Destructive and high-risk actions park the
+  // exact call for a human instead of running.
+  'auth',
+  'storage',
+  'functions',
+  'realtime',
+  'integrations',
+  'monitoring',
+  'autonomy',
+  'webhooks',
+  'deploy',
+  'connect',
   // ── Deliberately absent: generate_api ─────────────────────────────────────
   //
   // It contradicts what read_backend_state now says. Since the PostgREST
@@ -229,37 +330,23 @@ const MCP_SURFACE = new Set<string>([
   //
   // The slot it frees goes to generate_types, which the surface genuinely
   // lacked. Net advertised count is unchanged.
-  'generate_function',
-  'enable_realtime',
-  'create_api_key',
-  'set_env_var',
-  // ── Deliberately absent: trigger_deploy, delete_ai_function ───────────────
   //
-  // Both were reported as missing from a real build ("Project stuck
-  // not_deployed with no MCP tool to deploy", "No way to delete a function via
-  // MCP — my scratch diag-echo is stuck deployed"), and listing them here does
-  // nothing: `buildDispatchable()` skips every tool `isDestructiveTool()` names,
-  // so they would be filtered before reaching the manifest.
+  // ── Deploying and deleting a function: through their domain tools ─────────
   //
-  // That filter is the design, not an oversight. Shipping to production and
-  // deleting a deployed function are outward-facing and hard to reverse, so
-  // they route through backend_chat → the human Review Queue → check_approval.
-  // The agent CAN do both; it just cannot do them unilaterally.
+  // Both were reported missing from a real build ("Project stuck not_deployed
+  // with no MCP tool to deploy", "No way to delete a function via MCP"). The
+  // answer then was a sign pointing at backend_chat, because trigger_deploy and
+  // delete_ai_function are destructive and never dispatch directly. They are
+  // now `deploy {action:"deploy"}` and `functions {action:"delete"}`, which park
+  // the exact call for a human and run it verbatim once approved. The agent can
+  // request them deterministically; it still cannot do them unilaterally.
   //
-  // What was actually broken was the documentation. get_instructions listed the
-  // approval path as covering "drop_table / truncate_table / drop_column /
-  // delete_bucket" — an incomplete list that did not include deploying or
-  // deleting a function, so an agent looking for either concluded no path
-  // existed. Fixed in the guide rather than by widening the surface: the answer
-  // to "I could not find the door" is a sign, not a second door.
-  //
-  // Direct Postgres access.
-  'get_database_credentials',
   // ── Deliberately absent: adopt_external_schema ────────────────────────────
   //
-  // The slot pays for `set_rls`. This allowlist is capped at 20 by test, and the
-  // cap is the point — every addition has to displace something rather than
-  // quietly cost every other call its accuracy.
+  // The slot paid for `set_rls` when this allowlist was capped at 20. The cap is
+  // now ADVERTISED_CAP (the domain tools cost three net slots), and it is still
+  // the point: every addition has to displace something rather than quietly
+  // cost every other call its accuracy.
   //
   // This is the weakest tool on the list to give up. It is bookkeeping-only and
   // never emits DDL: it reconciles Backenly's metadata after someone changed the
@@ -295,7 +382,27 @@ const MCP_SURFACE = new Set<string>([
 export function buildCatalog(opts?: { readOnly?: boolean }): McpToolDescriptor[] {
   const advertised = buildDispatchable().filter((t) => MCP_SURFACE.has(t.name))
   if (!opts?.readOnly) return advertised
-  return advertised.filter((t) => isReadOnlyTool(t.name))
+  // A read-only key keeps each section's door, narrowed to its read actions:
+  // enum, description and schema are rebuilt from those alone, so no write
+  // action is ever shown. Everything else is served only if it is a read.
+  return advertised.flatMap((t) => {
+    if (isReadOnlyTool(t.name)) return [t]
+    const domain = getDomainTool(t.name)
+    const view = domain ? readOnlyView(domain) : null
+    if (!view) return []
+    return [{
+      ...t,
+      description: domainDescription(view),
+      inputSchema: domainInputSchema(view, { readOnly: true }),
+      annotations: {
+        ...annotationsFor(t.name),
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    }]
+  })
 }
 
 /**
@@ -370,15 +477,16 @@ export function buildDispatchable(): McpToolDescriptor[] {
     tier: 'read',
     description:
       'Fetch Backenly documentation as Markdown so you can answer questions and use the right tools without guessing. ' +
-      'Call with no arguments for the full agent guide (capabilities, API shape, tool vocabulary), or pass `topic` ' +
-      '(e.g. "auth", "database", "storage", "realtime", "functions", "mcp") to get just that section. ' +
-      'Prefer this over assuming endpoint shapes or tool names.',
+      'Call with no arguments for the index (connecting, the tools, approvals, read-only keys, headers), or pass `topic` ' +
+      'for one area in full. Prefer this over assuming endpoint shapes or tool names.',
     inputSchema: {
       type: 'object',
       properties: {
         topic: {
           type: 'string',
-          description: 'Optional section to narrow the docs, e.g. "auth", "database", "storage", "realtime", "functions", "integrations", "mcp".',
+          // Not an enum: older clients send the section names the single-file
+          // guide had ("mcp", …), which resolve through lib/mcp/agent-docs.ts.
+          description: `One topic: ${AGENT_DOC_TOPICS.map((t) => t.id).join(', ')}.`,
         },
       },
       additionalProperties: false,
@@ -641,10 +749,11 @@ export function buildDispatchable(): McpToolDescriptor[] {
     tier: 'build',
     description:
       'Apply a schema migration written as ordinary PostgreSQL DDL. Supports CREATE TABLE, ' +
-      'ALTER TABLE (ADD COLUMN / RENAME COLUMN / ALTER COLUMN SET NOT NULL / ADD CONSTRAINT) and CREATE INDEX; ' +
+      'ALTER TABLE (ADD COLUMN / RENAME COLUMN / ADD CONSTRAINT / ALTER COLUMN SET|DROP NOT NULL / SET|DROP DEFAULT) and CREATE [UNIQUE] INDEX; ' +
       'multiple statements in one call are applied in order. Write bare table names — your project schema is ' +
-      'already in scope. `id`, `created_at` and `updated_at` are provisioned automatically; declaring them is ' +
-      'harmless and they are skipped. Each statement is translated into a governed action, so the change stays ' +
+      'already in scope. Every table gets `id`, `"createdAt"` and `"updatedAt"` (camelCase) and `"deleted_at"` ' +
+      'automatically; a declared `id`, `created_at` or `updated_at` is skipped in their favour, so order by ' +
+      '`"createdAt"`. Each statement is translated into a governed action, so the change stays ' +
       'planned, verified and reversible — this is NOT raw SQL execution. Anything it cannot govern is refused ' +
       'with the exact tool to use instead, and a migration is all-or-nothing: if one statement is unsupported, ' +
       'none are applied. For row changes use db_insert/db_update/db_delete; for reads use run_query; for drops ' +
@@ -678,6 +787,18 @@ export function buildDispatchable(): McpToolDescriptor[] {
   // a STRING from an enum inside a chosen tool is a far easier decision for a
   // model than picking between 26 similarly-named tools, and it costs a fraction
   // of the context. The underlying tools are unchanged and still dispatchable.
+  // ── Domain tools — one door per dashboard section (lib/mcp/domains.ts) ─────
+  // Description and schema are generated from the brain tools each action
+  // routes to, so the advertised arguments can never drift from what runs.
+  for (const domain of DOMAIN_TOOLS) {
+    out.push({
+      name: domain.name,
+      tier: 'build',
+      description: domainDescription(domain),
+      inputSchema: domainInputSchema(domain),
+    })
+  }
+
   const stateIndex = out.findIndex((t) => t.name === 'read_backend_state')
   const stateDescriptor: McpToolDescriptor = {
     name: 'read_backend_state',
@@ -704,7 +825,7 @@ export function buildDispatchable(): McpToolDescriptor[] {
   if (stateIndex === -1) out.push(stateDescriptor)
   else out[stateIndex] = stateDescriptor
 
-  return out
+  return out.map((t) => ({ ...t, annotations: annotationsFor(t.name) }))
 }
 
 /**

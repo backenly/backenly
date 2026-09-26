@@ -271,6 +271,14 @@ __tests__/auth/oauth-claim-gate.test.ts
 # positive reads present so the refusals cannot pass because nothing works.
 __tests__/database/sql-workspace-isolation.test.ts
 
+# Function SQL ran on the app's own connection, whose role owns every platform
+# table and workspace schema, so generated function code could read public.users
+# or another tenant's tables; claims filter rows, not schemas. It now logs in as
+# the project's own role. The suite runs the real runner and asserts POSTGRES
+# refuses, including after RESET ROLE, with positive reads and writes present
+# so the refusals cannot pass because nothing works.
+__tests__/database/function-sql-isolation.test.ts
+
 # Cross-tenant schema history. The route called verifyToken and stopped, so any
 # authenticated account could read another tenant's schema snapshots and roll
 # back their schema. Underneath, getSchemaVersion looked up by version id alone
@@ -516,3 +524,22 @@ tests/integration/project-pause-lifecycle.spec.ts
 # directory. Mutation-checked: dropping the runtime stamp or the containment
 # check fails the matching tests.
 tests/integration/project-activity-clock.spec.ts
+
+# PR 2b of the MCP program: the section tools' new actions, end to end through
+# the real MCP route with real keys. Webhooks run against a loopback receiver
+# that verifies the signature; the delete is parked and runs only when a human
+# approves it. Runs as the cloud edition with only the plan lookup supplied,
+# because the single-tenant resolver rightly refuses a database of many projects.
+tests/integration/mcp-domain-operations.spec.ts
+
+# Sandbox function runs lost every ctx.log line, after a success and after a
+# failure: the worker sends them in the message that ends the run, and the
+# parent used a list only per-line messages (never sent) would fill. Runs the
+# real executor and worker, and checks the persisted run record.
+tests/integration/sandbox-function-logs.spec.ts
+tests/integration/apply-migration-existing-table.spec.ts
+# MCP acceptance (scripts/mcp-acceptance/cases.ts): two agent workflows, twice
+# each, and the acceptance cases no other suite covered. Real MCP route, real
+# keys, provisioned projects, runtime engine mode.
+tests/integration/mcp-golden-workflows.spec.ts
+tests/integration/mcp-acceptance-cases.spec.ts

@@ -8,7 +8,9 @@ const createJestConfig = nextJest({
 // Add any custom config to be passed to Jest
 const customJestConfig = {
   setupFilesAfterEnv: ['<rootDir>/jest.setup.js'],
-  testEnvironment: 'node', // Use node environment for API tests
+  // Node, plus closing every DB handle a test file opened when it ends
+  // (tests/helpers/db-release-environment.js).
+  testEnvironment: '<rootDir>/tests/helpers/db-release-environment.js',
   testTimeout: 20000, // 20 second timeout for integration tests
   moduleNameMapper: {
     // The SDK subpath exports resolve through `exports` in its package.json,

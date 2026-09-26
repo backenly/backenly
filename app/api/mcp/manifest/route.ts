@@ -9,14 +9,20 @@ export const dynamic = 'force-dynamic'
  *
  * Stable response shape — additive changes only. Removing a tool bumps
  * MANIFEST_VERSION (major) so the npm package can warn on incompatibility.
+ *
+ * `instructions` and `resources` are what the remote endpoint serves, built by
+ * the same functions (lib/mcp/protocol/shared.ts), so the stdio package serves
+ * them too instead of keeping copies that drift.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
 import { mcpGuard, recordMcpCall } from '@/lib/mcp/guard'
 import { buildCatalog } from '@/lib/mcp/catalog'
 import { corsHeaders, optionsResponse } from '@/lib/mcp/cors'
+import { prisma } from '@/lib/db/prisma'
+import { buildMcpInstructions, MCP_RESOURCES } from '@/lib/mcp/protocol/shared'
 
-const MANIFEST_VERSION = '1.0.0'
+const MANIFEST_VERSION = '1.1.0'
 const ENDPOINT = '/api/mcp/manifest'
 
 export function OPTIONS() {
@@ -33,6 +39,9 @@ export async function GET(request: NextRequest) {
   // this list as its tool registry, so filtering here is what stops a mutating
   // tool from ever entering the host's context.
   const tools = buildCatalog({ readOnly: auth.readOnly })
+  const project = await prisma.project
+    .findUnique({ where: { id: auth.projectId }, select: { name: true } })
+    .catch(() => null)
 
   const body = {
     ok: true as const,
@@ -51,6 +60,8 @@ export async function GET(request: NextRequest) {
       }, {}),
     },
     tools,
+    instructions: buildMcpInstructions(project?.name ?? auth.projectId, tools.length),
+    resources: MCP_RESOURCES,
   }
 
   recordMcpCall(

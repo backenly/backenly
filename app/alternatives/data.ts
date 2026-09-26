@@ -91,7 +91,7 @@ export const CRITERIA: Criterion[] = [
   {
     question: 'What can a coding agent do to your backend, and what happens on a bad turn?',
     why: 'If an agent is writing your code, its access to the backend is a real security boundary rather than a convenience feature. The useful questions are whether destructive operations are reachable at all, whether a key can be scoped down, and whether the constraint is something you configure or something the surface enforces.',
-    backenly: 'Twenty advertised MCP tools with destructive operations filtered out of the surface entirely, so they cannot be selected. Those requests become an approval queued for a person. Keys can be minted read-only, which withholds every write door including the natural-language one.',
+    backenly: 'Twenty-three advertised MCP tools with destructive operations filtered out of the surface entirely, so they cannot be selected. Those requests become an approval queued for a person. Keys can be minted read-only, which withholds every write door including the natural-language one.',
   },
   {
     question: 'What does leaving look like, concretely?',

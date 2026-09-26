@@ -15,17 +15,26 @@
  *   backenly diff                                     exit 1 if local types drifted from live schema
  *   backenly logs [--limit n] [--status 4xx] [--path /posts] [--follow]
  *   backenly query "select …"                         read-only SQL (SELECT/WITH/EXPLAIN)
+ *   backenly tools                                    the MCP tools, as the server advertises them
+ *   backenly call <tool> [key=value … | '<json>']     run any MCP tool
+ *   backenly chat "<request>"                         backend_chat: plain-English build request
  *
  * Auth resolution order: --key flag → BACKENLY_API_KEY env → .backenly/config.json
  * Keys are the same scoped, revocable keys the dashboard's Connect → Agents
  * page issues for MCP. Never commit them: `link` gitignores .backenly/.
+ *
+ * `tools` / `call` / `chat` exist for the session that just installed the MCP
+ * server. A host reads its MCP config when a conversation starts, so the tools
+ * registered mid-conversation are absent until the next one. These commands
+ * post to the same /api/mcp/* handlers with the same key, so the agent can keep
+ * working now, under the same governance, instead of stopping for a restart.
  */
 
 import fs from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
 
-const VERSION = '0.1.1'
+const VERSION = '0.2.0'
 const CONFIG_DIR = '.backenly'
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json')
 const DEFAULT_URL = 'https://backenly.com'
@@ -325,6 +334,152 @@ async function cmdQuery(flags, positional) {
   console.log(dim(`\n(${j.rowCount} rows${j.capped ? ', capped at 500' : ''} · ${j.ms}ms · read-only)`))
 }
 
+// ── MCP tools from the shell ────────────────────────────────────────────────
+
+async function cmdTools(flags) {
+  const auth = resolveAuth(flags)
+  const manifest = await apiJson('/api/mcp/manifest', auth)
+  const tools = manifest.tools ?? []
+  if (flags.json) {
+    console.log(JSON.stringify(tools, null, 2))
+    return
+  }
+  const width = Math.max(...tools.map((t) => t.name.length))
+  for (const t of tools) {
+    const kind = t.annotations?.readOnlyHint ? 'read ' : 'write'
+    const first = (t.description ?? '').split(/(?<=\.)\s/)[0]
+    console.log(`${bold(t.name.padEnd(width))}  ${dim(kind)}  ${first}`)
+  }
+  console.log(dim(`\n${tools.length} tools${manifest.server?.readOnly ? ' (read-only key)' : ''} · backenly call <tool> key=value …`))
+}
+
+/**
+ * Tool arguments, from whichever form was shell-safe for the caller:
+ *   key=value pairs      values parsed as JSON when they are JSON, else strings
+ *   one JSON object      '{"table":"posts"}'
+ *   --args '<json>'      the same, as a flag
+ *   --args -             JSON read from stdin (a heredoc, no quoting at all)
+ *   --args-file <path>   JSON read from a file (PowerShell mangles inline quotes)
+ */
+async function readToolArgs(flags, positional) {
+  let source = null
+  if (typeof flags['args-file'] === 'string') source = fs.readFileSync(flags['args-file'], 'utf8')
+  else if (flags.args === '-') source = await readStdin()
+  else if (typeof flags.args === 'string') source = flags.args
+  else if (positional.length === 1 && positional[0].trim().startsWith('{')) source = positional[0]
+
+  if (source !== null) {
+    let parsed
+    try {
+      parsed = JSON.parse(source)
+    } catch (e) {
+      die(`Arguments are not valid JSON: ${e.message}\n  Tip: use key=value pairs, or --args-file args.json`)
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) die('Arguments must be a JSON object.')
+    return parsed
+  }
+
+  const args = {}
+  for (const pair of positional) {
+    const eq = pair.indexOf('=')
+    if (eq <= 0) die(`Expected key=value, got "${pair}".`)
+    const key = pair.slice(0, eq)
+    const raw = pair.slice(eq + 1)
+    args[key] = parseValue(key, raw)
+  }
+  return args
+}
+
+function parseValue(key, raw) {
+  const text = raw.trim()
+  if (/^[\[{"]|^-?\d|^(true|false|null)$/.test(text)) {
+    try {
+      return JSON.parse(text)
+    } catch {
+      // An object or array that does not parse was almost always mangled by the
+      // shell (PowerShell strips inner double quotes from native arguments).
+      // Sending it on as a string would be a silent wrong write.
+      if (/^[\[{]/.test(text)) {
+        die(
+          `${key}= looks like JSON but does not parse (${text.slice(0, 40)}…). ` +
+          `Your shell may have stripped the quotes — put the arguments in a file and use --args-file.`,
+        )
+      }
+    }
+  }
+  return raw
+}
+
+function readStdin() {
+  return new Promise((resolve, reject) => {
+    let data = ''
+    process.stdin.setEncoding('utf8')
+    process.stdin.on('data', (c) => { data += c })
+    process.stdin.on('end', () => resolve(data))
+    process.stdin.on('error', reject)
+  })
+}
+
+/** POST to an MCP handler and print its answer. Exit code 1 when it says ok:false. */
+async function runMcp(auth, pathname, body) {
+  let res
+  try {
+    res = await fetch(auth.url + pathname, {
+      method: 'POST',
+      headers: { 'x-api-key': auth.key, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+  } catch (e) {
+    die(`Network error calling ${auth.url}${pathname}: ${e?.message ?? e}`)
+  }
+  const text = await res.text()
+  let j
+  try {
+    j = JSON.parse(text)
+  } catch {
+    die(`${pathname} returned HTTP ${res.status} with a non-JSON body.`)
+  }
+
+  const ok = j.ok !== false && res.ok
+  const out = leanForAgent(j)
+  if (isTTY) {
+    const mark = ok ? green('✔') : red('✖')
+    const line = j.summary ?? j.error ?? `HTTP ${res.status}`
+    console.log(`${mark} ${line}`)
+    const { summary: _s, ...rest } = out
+    if (Object.keys(rest).length) console.log(JSON.stringify(rest, null, 2))
+  } else {
+    console.log(JSON.stringify(out, null, 2))
+  }
+  if (!ok) process.exitCode = 1
+}
+
+/** Same trimming the remote MCP endpoint applies before an agent sees a result. */
+function leanForAgent(body) {
+  const { timing: _t, events, partialEvents, ...rest } = body
+  if (body.ok !== false) return rest
+  const trail = Array.isArray(partialEvents) ? partialEvents : Array.isArray(events) ? events : null
+  return trail && trail.length ? { ...rest, whatRanBeforeItFailed: trail.slice(-25) } : rest
+}
+
+async function cmdCall(flags, positional) {
+  const [tool, ...rest] = positional
+  if (!tool) die('Usage: backenly call <tool> [key=value …]   (list tools with: backenly tools)')
+  const auth = resolveAuth(flags)
+  const args = await readToolArgs(flags, rest)
+  if (tool === 'backend_chat') {
+    if (typeof args.message !== 'string' || !args.message.trim()) die('backend_chat needs message="…"')
+    return runMcp(auth, '/api/mcp/chat', { message: args.message })
+  }
+  return runMcp(auth, '/api/mcp/tool', { tool, args })
+}
+
+async function cmdChat(flags, positional) {
+  const message = positional.join(' ').trim()
+  if (!message) die('Usage: backenly chat "add a posts table with a title and an author"')
+  return runMcp(resolveAuth(flags), '/api/mcp/chat', { message })
+}
+
 async function cmdInstallSkill(flags) {
   // skill.md is public — no key required, so resolve only the URL.
   const cfg = readConfig()
@@ -386,6 +541,9 @@ function cmdHelp() {
   ${bold('backenly diff')} [--against <file>]                  exit 1 on schema/type drift (CI gate)
   ${bold('backenly logs')} [--limit n] [--status 4xx|5xx] [--path <substr>] [--follow]
   ${bold('backenly query')} "select …"                    read-only SQL against your workspace
+  ${bold('backenly tools')} [--json]                           the MCP tools this key can call
+  ${bold('backenly call')} <tool> [key=value …]               run any MCP tool (or --args-file a.json)
+  ${bold('backenly chat')} "<request>"                        plain-English build request (backend_chat)
   ${bold('backenly install-skill')} [--agent claude|cursor|all]  teach your coding agent Backenly
 
   Keys: scoped + revocable, from backenly.com → project → Connect → Agents.
@@ -412,6 +570,9 @@ const commands = {
   diff: cmdDiff,
   logs: cmdLogs,
   query: cmdQuery,
+  tools: cmdTools,
+  call: cmdCall,
+  chat: cmdChat,
   'install-skill': cmdInstallSkill,
   help: cmdHelp,
 }

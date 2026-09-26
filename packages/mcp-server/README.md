@@ -7,11 +7,11 @@ claude mcp add backenly -- npx -y @backenly/mcp-server \
   --project <projectId> --key mcp_live_...
 ```
 
-Restart your host, done. Your AI host now has governed agentic access to your Backenly backend.
+Run it before you open the agent: hosts read MCP config when a conversation starts, so the tools appear in the next conversation, not the one that ran the command. An agent that installs it mid-conversation keeps working through `npx -y @backenly/cli@latest call <tool>`, which reaches the same tools with the same key.
 
 ## What you get
 
-Eighteen advertised tools, not sixty. The catalog is an allowlist admitted on one
+Twenty-three advertised tools, not sixty. The catalog is an allowlist admitted on one
 rule — *is there exactly one tool here that answers a given request?* — because
 tool-selection accuracy degrades with catalog size and models misfire hardest
 between similarly-named tools. Everything else is reached through `backend_chat`.
@@ -30,6 +30,8 @@ The host LLM hands the request to Backenly's brain. Brain plans, executes, and r
 
 - `read_backend_state` — the single read-state door. Call with no arguments for the grounding overview; pass `section` (`schema`, `tables`, `apis`, `rls`, `metrics`, `errors`, `deploy`, `usage`, `autonomy`, …) to drill in. It replaces the ~26 `list_*` / `get_*` tools, which remain dispatchable.
 - `run_query` — standard read-only SQL over your workspace schema: joins, `GROUP BY`, aggregates, window functions, CTEs, `EXPLAIN`. Runs as a SELECT-only Postgres role scoped to the project, so isolation is a database grant rather than a parser. Secret-bearing columns come back redacted.
+- `get_table_schema` — everything about one table: columns, foreign keys, indexes, CHECK constraints with their permitted values, and live RLS policies. Read it before any write.
+- `generate_types` — TypeScript types (or a typed client, or OpenAPI) from the live catalog, with a `schemaHash` for drift checks.
 - `fetch_docs` — pull current Backenly docs instead of guessing.
 - `check_approval` — poll an escalated destructive request.
 
@@ -37,10 +39,11 @@ The host LLM hands the request to Backenly's brain. Brain plans, executes, and r
 
 - `apply_migration` — ordinary PostgreSQL DDL (`CREATE TABLE`, `ALTER TABLE`, `CREATE INDEX`), translated statement by statement into governed actions. All-or-nothing; anything it cannot govern is refused with the tool to use instead. Not raw SQL execution.
 - `db_insert` / `db_update` / `db_delete` — row writes. Owner-level: validates shapes but bypasses end-user RLS and triggers, so treat them as maintenance tools.
+- `set_rls` — a row-level security predicate installed verbatim and read back from `pg_policies`.
 
 ### Capabilities
 
-`enable_auth`, `create_bucket`, `generate_api`, `generate_function`, `enable_realtime`, `create_api_key`, `set_env_var` — the things no SQL statement expresses. Plus `get_database_credentials` (direct Postgres, read-write only after a human arms it) and `adopt_external_schema` (reconcile drift you made outside Backenly).
+One tool per dashboard section, each with an `action`: `auth`, `storage`, `functions`, `realtime`, `integrations`, `monitoring`, `autonomy`, `webhooks`, `deploy`, `connect`, plus `branch` (preview branches). Each tool's description lists its actions and their arguments. Destructive and high-risk actions (deploy, rollback, deletes, revoking a key) park the exact call for a human and run it verbatim once approved; poll `check_approval`. REST endpoints need no generation step, and older tool names such as `enable_auth` or `adopt_external_schema` stay callable by name without being advertised.
 
 ### Resources (11)
 
@@ -96,7 +99,7 @@ snippets. The host block then needs no key at all.
 npx @backenly/mcp-server init
 ```
 
-Restart your host. Backenly appears as a tool surface.
+Open a new conversation in your host. Backenly appears as a tool surface.
 
 ## How it works
 
@@ -111,6 +114,14 @@ backenly.com — brain, executor, runtime APIs
 ```
 
 The package contains **zero business logic** — it's a thin protocol adapter. Tool definitions, billing, rate limiting, and audit logging all live server-side. New brain tools appear in your host immediately without `npm update`.
+
+## Protocol
+
+Built on the official MCP TypeScript SDK (v2). It serves both protocol eras from one server: hosts that open with `initialize` (revisions 2024-11-05 through 2025-11-25) and hosts that speak 2026-07-28 (`server/discover`, per-request `_meta`). Requires **Node.js 20 or newer**.
+
+Every tool result carries the server's JSON body twice: as `structuredContent`, for hosts that read fields (`ok`, `code`, `hint`, `applied`, `approval`, …), and as text, for hosts that only read text. A failure adds a second text block saying what its fields mean for the next step. Fields the server did not send stay absent.
+
+What this package serves (tools, instructions, resources, result shapes) is what the remote endpoint (`https://backenly.com/api/mcp`) serves, and CI compares the two call for call.
 
 ## Reliability
 

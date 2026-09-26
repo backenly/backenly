@@ -117,7 +117,7 @@ Agent: Not available over MCP. Sent to the Review Queue as
       ],
     },
     capabilities: [
-      { name: 'MCP server', detail: '20 advertised tools over stdio or Streamable-HTTP; the dispatcher stays wider so pinned clients keep working.' },
+      { name: 'MCP server', detail: '23 advertised tools over stdio or Streamable-HTTP; the dispatcher stays wider so pinned clients keep working.' },
       { name: 'get_table_schema', detail: 'Columns, foreign keys with ON DELETE, indexes, CHECK constraints with permitted values, and live RLS policies with their roles.' },
       { name: 'apply_migration', detail: 'Ordinary PostgreSQL DDL, applied as written and translated into governed actions. All-or-nothing.' },
       { name: 'check_approval', detail: 'Polls an escalated operation: pending, executed, partial, failed, rejected, expired.' },
@@ -126,7 +126,7 @@ Agent: Not available over MCP. Sent to the Review Queue as
     ],
     limitations: [
       'MCP hosts read their manifest at process start. Tools are absent from the session that installed them until the host restarts — this is the single most common "it did not work" report, and it is not a bug.',
-      'The advertised surface is capped at 20 tools on purpose. Capabilities beyond it — preview-branch discard, vector search, schema adoption — are reached by describing them to backend_chat rather than by a named tool.',
+      'The advertised surface is capped at 23 tools on purpose. Capabilities beyond it — preview-branch discard, vector search, schema adoption — are reached by describing them to backend_chat rather than by a named tool.',
       'There is no raw-SQL path for mutating structure. Operations the migration parser cannot map are refused rather than passed through.',
       'Backenly exposes no SQL functions, so there is no rpc() surface. Custom logic runs as an event, cron, or HTTP function.',
     ],
