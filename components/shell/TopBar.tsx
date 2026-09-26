@@ -38,7 +38,6 @@ import {
 import { Logo } from '@/components/Logo'
 import { OrgSwitcher } from '@cloud/org-switcher'
 import { getProjects, type Project } from '@/lib/api/projects'
-import { GettingStartedMenuItem } from '@/components/onboarding/GuideDrawer'
 import { HOSTING_REGION } from '@/lib/edition/hosting-region'
 
 interface MeUser {
@@ -214,6 +213,7 @@ export function TopBar() {
         {/* Review inbox — lit only when something waits on the user. Lands on
             Autonomy, which owns the queue since the 2026-07-18 consolidation. */}
         <button
+          data-tour="review-inbox"
           onClick={() => go(`${basePath}/autonomy`)}
           title={
             pendingReview > 0
@@ -251,6 +251,7 @@ export function TopBar() {
 
         {/* Connect agent — the one build door, the primary violet action */}
         <button
+          data-tour="connect-agent"
           onClick={() => go(`${basePath}/connect`)}
           className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md bg-white text-black text-[12px] font-semibold hover:bg-zinc-200 transition-colors"
         >
@@ -284,8 +285,6 @@ export function TopBar() {
                 <Settings className="w-3.5 h-3.5" />
                 <span className="text-[12.5px] font-medium">Account settings</span>
               </button>
-              {/* Opens the guide's drawer in this workspace, reopening it if hidden. */}
-              <GettingStartedMenuItem onSelect={() => setAccountMenu(false)} />
               <button
                 onClick={() => { setAccountMenu(false); logout() }}
                 className="w-full flex items-center gap-2.5 px-3 py-2.5 text-left text-zinc-300 hover:text-rose-300 hover:bg-rose-500/[0.06] transition-colors"

@@ -33,7 +33,6 @@ import {
 } from 'lucide-react'
 import { Logo } from '@/components/Logo'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
-import { GettingStartedMenuItem } from '@/components/onboarding/GuideDrawer'
 
 interface MeUser {
   name?: string
@@ -231,13 +230,6 @@ export function OrgShell({ children }: { children: ReactNode }) {
                     <SettingsIcon className="w-3.5 h-3.5" />
                     <span className="text-[12.5px] font-medium">Account settings</span>
                   </button>
-                  {/* The guide lives on Projects at org level: reopen it, then go there. */}
-                  <GettingStartedMenuItem
-                    onSelect={() => {
-                      setAccountMenu(false)
-                      if (pathname !== '/app' && pathname !== '/app/') router.push('/app')
-                    }}
-                  />
                   <button
                     onClick={() => { setAccountMenu(false); logout() }}
                     className="w-full flex items-center gap-2.5 px-3 py-2.5 text-left text-zinc-300 hover:text-rose-300 hover:bg-rose-500/[0.06] transition-colors"
