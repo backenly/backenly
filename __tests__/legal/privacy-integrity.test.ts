@@ -132,8 +132,7 @@ describe('provider disclosure', () => {
     // Not a style check. Each of these is a live outbound path in this
     // repository, and the previous policy named three of them.
     for (const name of [
-      'Hetzner',
-      'Backblaze B2',
+      'Amazon Web Services',
       'Resend',
       'OpenAI',
       'Amplitude',
@@ -227,8 +226,17 @@ describe('disclosures that must be present while the behaviour is live', () => {
 
   it('states the hosting location without an absolute geographic negative', () => {
     const intl = JSON.stringify(PRIVACY_SECTIONS.find((s) => s.id === 'international'))
-    expect(intl).toMatch(/Singapore/)
+    expect(intl).toMatch(/Amazon Web Services/)
+    expect(intl).toMatch(/Asia Pacific \(Mumbai\)/)
+    expect(intl).toMatch(/India/)
     expect(intl).toMatch(/may process information in other countries/i)
+  })
+
+  it('does not name hosting providers Backenly Cloud has retired', () => {
+    // Cloud moved off Hetzner and Backblaze B2 to AWS. A policy still naming
+    // them tells a reader their data sits somewhere it does not.
+    const all = JSON.stringify(PRIVACY_SECTIONS) + JSON.stringify(PRIVACY_SUMMARY) + JSON.stringify(PROVIDERS)
+    expect(all).not.toMatch(/Hetzner|Backblaze|Singapore/i)
   })
 
   it('names the operating entity', () => {
