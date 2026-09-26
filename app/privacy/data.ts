@@ -59,7 +59,7 @@
  * reordering; verify-content-integrity.ts enforces their uniqueness and shape.
  */
 
-export const EFFECTIVE_DATE = 'September 3, 2026'
+export const EFFECTIVE_DATE = 'September 26, 2026'
 export const PRIVACY_EMAIL = 'support@backenly.com'
 
 export type Provider = {
@@ -74,8 +74,15 @@ export type Provider = {
 /**
  * Third parties that can receive personal or customer data.
  *
- * Deliberately NOT a location column. Only one location is verified (Hetzner,
- * Singapore) and it is stated in the "Where information is processed" section.
+ * Deliberately NOT a location column. Only one location is verified (Amazon
+ * Web Services, Asia Pacific (Mumbai)) and it is stated in the "Where
+ * information is processed" section.
+ *
+ * Hosting is one row because it is one provider. Backenly Cloud moved from
+ * Hetzner, with uploaded files on Backblaze B2, to AWS: the platform on ECS,
+ * databases on RDS, files on S3, all in ap-south-1. Both earlier providers were
+ * retired from Cloud, so neither is listed; naming a provider that no longer
+ * receives anything is as wrong as omitting one that does.
  * A column of "unknown" cells looks like diligence and is the opposite; the
  * prose there says the honest thing instead.
  *
@@ -91,16 +98,10 @@ export type Provider = {
  */
 export const PROVIDERS: Provider[] = [
   {
-    name: 'Hetzner',
-    purpose: 'Hosts the Backenly platform and your project databases',
-    data: 'All platform and project data',
-    href: 'https://www.hetzner.com/legal/privacy-policy/',
-  },
-  {
-    name: 'Backblaze B2',
-    purpose: 'Stores files uploaded to your projects',
-    data: 'Files your application uploads',
-    href: 'https://www.backblaze.com/company/privacy.html',
+    name: 'Amazon Web Services',
+    purpose: 'Hosts the Backenly platform, your project databases and the files uploaded to your projects',
+    data: 'All platform and project data, including files your application uploads',
+    href: 'https://aws.amazon.com/privacy/',
   },
   {
     name: 'Resend',
@@ -174,7 +175,7 @@ export const PRIVACY_SUMMARY = [
   'Each project database runs in its own PostgreSQL schema',
   'We currently record sessions on the web app, including dashboard pages',
   'Paddle is the seller on your subscription. We never see your card details',
-  'The platform runs on Hetzner infrastructure in Singapore',
+  'The platform runs on Amazon Web Services in the Asia Pacific (Mumbai) region, in India',
   'You can export your project database at any time',
   'Deleting a project starts deletion. It is not a recovery window',
 ]
@@ -381,7 +382,7 @@ export const PRIVACY_SECTIONS: PrivacySection[] = [
     id: 'international',
     title: 'Where information is processed',
     content:
-      'Backenly’s platform and your project databases run on Hetzner infrastructure in Singapore.',
+      'Backenly’s platform, your project databases and the files uploaded to your projects run on Amazon Web Services in the Asia Pacific (Mumbai) region, in India.',
     list: [
       'The providers listed above operate their own infrastructure and may process information in other countries, including the United States.',
     ],

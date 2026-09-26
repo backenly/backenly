@@ -29,6 +29,7 @@ import {
 } from '@/components/inspector/kit'
 import { ClientKeysPanel } from '@/components/hub/ClientKeysPanel'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
+import { HOSTING_REGION } from '@/lib/edition/hosting-region'
 
 type Tab = 'general' | 'keys' | 'access'
 
@@ -206,7 +207,7 @@ function GeneralTab({ projectId, onDeleted }: { projectId: string; onDeleted: ()
           <KitCardBody className="space-y-3">
             <InfoRow label="Project ID" value={projectId} onCopy={() => copy(projectId, 'id')} copied={copied === 'id'} />
             <InfoRow label="API base URL" value={apiBaseUrl} onCopy={() => copy(apiBaseUrl, 'url')} copied={copied === 'url'} disabled={apiBaseUrl === '—'} />
-            <InfoRow label="Region" value="EU · Hetzner" mono={false} />
+            <InfoRow label="Region" value={HOSTING_REGION.label} mono={false} />
           </KitCardBody>
         </KitCard>
 

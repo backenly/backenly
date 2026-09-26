@@ -537,3 +537,9 @@ tests/integration/mcp-domain-operations.spec.ts
 # parent used a list only per-line messages (never sent) would fill. Runs the
 # real executor and worker, and checks the persisted run record.
 tests/integration/sandbox-function-logs.spec.ts
+
+# The one-time console tour's record (lib/tours/seen.ts): marked once and
+# idempotently under concurrency, scoped to the user, cascading with them, and
+# FAILING CLOSED with the table missing (as in a release ahead of its
+# migration), so the tour cannot show on every visit.
+tests/integration/tours-seen.spec.ts

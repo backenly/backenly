@@ -81,6 +81,8 @@ model User {
   ownedOrganizations      Organization[]           @relation("OrgOwner")
   orgMemberships          OrganizationMember[]
   projectMemberships      ProjectMember[]
+  // Product tours this user has finished or skipped (lib/tours).
+  toursSeen               UserTourSeen[]
 
   @@index([email])
   @@index([provider, providerId])
@@ -2445,6 +2447,27 @@ model AuthEmailCode {
   @@unique([purpose, email])
   @@index([expiresAt])
   @@map("auth_email_codes")
+}
+
+// ============================================================================
+// PRODUCT TOURS — which one-time console tours a user has already seen
+//
+// A row means "never show this tour to this user again", written when the tour
+// is finished or skipped. Keyed by tour id so a later tour needs no migration.
+// Its own table rather than a column on `users`, because the session lookup
+// loads the whole user row: a column there would break sign-in for as long as
+// a release ran ahead of its migration. Without this table the tour simply
+// does not run (lib/tours/seen.ts fails closed).
+// ============================================================================
+
+model UserTourSeen {
+  userId String
+  tourId String
+  seenAt DateTime @default(now())
+  user   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, tourId])
+  @@map("user_tours_seen")
 }
 
 // ============================================================================
