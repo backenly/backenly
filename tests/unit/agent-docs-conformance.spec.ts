@@ -355,4 +355,12 @@ describe('what the docs no longer carry', () => {
   it('no longer says functions cannot take code you wrote', () => {
     for (const [, text] of DOCS) expect(text).not.toMatch(/does not accept code you wrote/)
   })
+
+  it('does not call apply_migration all-or-nothing, which it is not once running', () => {
+    // app/api/mcp/tool/route.ts runs the statements one after another and, when
+    // one fails, answers with `applied` and `remaining`.
+    const route = fs.readFileSync(path.join(ROOT, 'app', 'api', 'mcp', 'tool', 'route.ts'), 'utf8')
+    expect(route).toMatch(/remaining: planned\.slice\(i \+ 1\)/)
+    for (const [, text] of DOCS) expect(text).not.toMatch(/all[ -]or[ -]nothing/i)
+  })
 })

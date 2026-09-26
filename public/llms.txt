@@ -43,7 +43,7 @@ Exactly **23** tools are advertised; `tools/list` is the authority. Every tool e
 | `read_backend_state` | The read door for state. No arguments: the overview. `section` drills in: `schema`, `instructions`, `tables`, `apis`, `buckets`, `files`, `keys`, `users`, `rls`, `triggers`, `functions`, `cron`, `integrations`, `apps`, `env`, `webhooks`, `findings`, `incidents`, `metrics`, `errors`, `usage`, `deploy`, `readiness`, `autonomy`, `maintenance`, `realtime`. |
 | `get_table_schema` | One table in full: columns, keys, indexes, CHECK constraints with their permitted values, triggers, RLS policies. |
 | `run_query` | Read-only SQL over the project's schema, as a SELECT-only role. |
-| `apply_migration` | Schema changes as SQL, all or nothing; anything it cannot map is refused with the tool to use instead. |
+| `apply_migration` | Schema changes as SQL. Every statement is checked before any runs, and anything it cannot map is refused with the tool to use instead; a statement that fails while running stops the migration, and the response lists what was applied and what remains. |
 | `db_insert` / `db_update` / `db_delete` | Row writes as the owner, for seeding and repair. Update and delete need a non-empty filter. |
 | `set_rls` | Row-level security as exact SQL predicates, installed verbatim and read back. |
 | `generate_types` | TypeScript types, a typed client or OpenAPI from the live catalog. |
