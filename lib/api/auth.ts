@@ -178,30 +178,51 @@ export async function resetPasswordWithCode(email: string, code: string, passwor
   if (!response.ok) throw await readAuthError(response, 'Could not reset the password')
 }
 
-export async function logout(): Promise<void> {
+/** Where signing out lands. Signing in again from there returns to the console. */
+export const SIGNED_OUT_URL = '/auth/login?redirect=%2Fapp'
+
+/**
+ * Sign the platform user out of this browser and leave the console. Every
+ * sign-out control calls this. Rejects, leaving the user signed in and on the
+ * page, when the server did not end the session.
+ *
+ * Four hand-written copies used to end only the server session. The
+ * localStorage token and the `useUserSession` cache still said "signed in",
+ * so the login page bounced to /app, the middleware bounced that back to
+ * /auth/login?redirect=%2Fapp, and the user saw a blank frame, an "Already
+ * signed in" card and a reload before the form settled.
+ *
+ * The exit is a full document replace, not a router push. The console keeps
+ * the user and their projects in module memory so tabs switch instantly, and
+ * only a new document drops it. Replacing the history entry keeps Back from
+ * reopening the page that was signed out of.
+ */
+export async function signOut(): Promise<void> {
   const token = localStorage.getItem('auth-token')
-  
-  if (token) {
-    await fetch(`${API_BASE}/auth/logout`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`,
-      },
-    })
+
+  // Always ask the server, even without a localStorage token: the httpOnly
+  // cookie is the session, and only the server can clear it.
+  const response = await fetch(`${API_BASE}/auth/logout`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+  })
+  // 401 means there was no live session to end, which is the state asked for.
+  if (!response.ok && response.status !== 401) {
+    throw new Error(`Sign-out failed (${response.status})`)
   }
-  
-  // Clear all user-specific data
+
   localStorage.removeItem('auth-token')
   localStorage.removeItem('current-project-id')
   localStorage.removeItem('user-info')
-
   try {
     const { invalidateSessionCache } = await import('@/lib/hooks/useUserSession')
     invalidateSessionCache()
   } catch {
-    // Non-critical hook sync failure
+    // Non-critical: the document is replaced next, which drops the cache anyway
   }
+
+  window.location.replace(SIGNED_OUT_URL)
 }
 
 export async function verifyEmail(token?: string): Promise<{ message: string; emailVerified: boolean }> {

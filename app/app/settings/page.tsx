@@ -28,6 +28,7 @@ import {
 } from '@/components/inspector/kit'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import { DeploymentRecoverySection } from '@/components/app/DeploymentRecoverySection'
+import { signOut } from '@/lib/api/auth'
 
 type Section = 'profile' | 'security' | 'notifications' | 'recovery' | 'support' | 'danger'
 
@@ -177,9 +178,10 @@ export default function SettingsPage() {
 
   const handleLogout = async () => {
     try {
-      await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' })
-      router.push('/login')
-    } catch { /* noop */ }
+      await signOut()
+    } catch {
+      showToast('Could not sign out. Try again.', 'error')
+    }
   }
 
   // Reset is a code typed back with the new password, so it happens on the

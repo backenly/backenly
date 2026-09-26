@@ -38,6 +38,7 @@ import {
 import { Logo } from '@/components/Logo'
 import { OrgSwitcher } from '@cloud/org-switcher'
 import { getProjects, type Project } from '@/lib/api/projects'
+import { signOut } from '@/lib/api/auth'
 
 interface MeUser {
   name?: string
@@ -131,9 +132,8 @@ export function TopBar() {
     return user.email?.[0]?.toUpperCase() ?? '?'
   }
 
-  const logout = async () => {
-    await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' })
-    router.push('/login')
+  const logout = () => {
+    signOut().catch((error) => console.error('Sign-out failed:', error))
   }
 
   return (
