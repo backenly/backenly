@@ -30,6 +30,7 @@ import { parseMcpBody } from '@/lib/mcp/request-body'
 import { DB_TOOL_FAILURE_CODE, DB_TOOL_REQUESTS, isDbTool, type DbToolName } from '@/lib/mcp/db-tool-requests'
 import { parseMigration, MigrationParseError } from '@/lib/mcp/migration-parser'
 import { prisma } from '@/lib/db/prisma'
+import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 import { createTokenScope, runInTokenScope } from '@/lib/ai/token-meter'
 import { createHash } from 'crypto'
 import { DOCS_MAX_CHARS } from '@/lib/mcp/docs-limit'
@@ -449,8 +450,45 @@ export async function POST(request: NextRequest) {
       ))
     }
 
+    // ── CREATE TABLE for a table that already exists ────────────────────────
+    //
+    // create_table answered "Created table …" for a table that was already
+    // there and changed nothing, so a migration that declared new columns that
+    // way reported them created while none existed. Checked here, before any
+    // statement runs, like every other refusal: a plain CREATE TABLE of an
+    // existing table is refused and names ALTER TABLE; CREATE TABLE IF NOT
+    // EXISTS leaves it as it is, and the receipt says so.
+    const existingNotes: string[] = []
+    const createNames = planned.filter((p) => p.tool === 'create_table').map((p) => String(p.args.tableName))
+    if (createNames.length) {
+      const found = await prisma.$queryRaw<Array<{ table_name: string }>>`
+        SELECT table_name FROM information_schema.tables
+        WHERE table_schema = ${workspaceSchemaName(auth.projectId)} AND table_name = ANY(${createNames})`
+      const existing = new Set(found.map((r) => r.table_name))
+      for (const step of planned.filter((p) => p.tool === 'create_table' && existing.has(String(p.args.tableName)))) {
+        const table = String(step.args.tableName)
+        if (!/^\s*create\s+table\s+if\s+not\s+exists\b/i.test(step.source)) {
+          recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 400, tool, error: 'TABLE_EXISTS' })
+          return withCors(NextResponse.json(
+            {
+              ok: false,
+              error: `Table ${table} already exists, so CREATE TABLE would change nothing. Nothing was applied.`,
+              code: 'TABLE_EXISTS',
+              statement: step.source,
+              hint: `To add columns use ALTER TABLE ${table} ADD COLUMN …; get_table_schema shows what ${table} has now.`,
+              applied: [],
+            },
+            { status: 400 },
+          ))
+        }
+        // IF NOT EXISTS: drop the statement and everything it expanded into.
+        planned = planned.filter((p) => p.source !== step.source && !p.source.startsWith(`${step.source} → `))
+        existingNotes.push(`${table} already existed; CREATE TABLE IF NOT EXISTS left it unchanged.`)
+      }
+    }
+
     const applied: { statement: string; tool: string; summary: string }[] = []
-    const notes = planned.flatMap((p) => p.notes ?? [])
+    const notes = [...existingNotes, ...planned.flatMap((p) => p.notes ?? [])]
 
     for (let i = 0; i < planned.length; i++) {
       const step = planned[i]

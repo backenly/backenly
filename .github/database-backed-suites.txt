@@ -537,3 +537,4 @@ tests/integration/mcp-domain-operations.spec.ts
 # parent used a list only per-line messages (never sent) would fill. Runs the
 # real executor and worker, and checks the persisted run record.
 tests/integration/sandbox-function-logs.spec.ts
+tests/integration/apply-migration-existing-table.spec.ts
