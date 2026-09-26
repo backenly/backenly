@@ -60,7 +60,10 @@ import { FORWARDABLE_FN_HEADERS } from './forward-headers'
 
 // esbuild is a native binary package — load it lazily through a non-bundled
 // require so Next.js never tries to trace/bundle the binary into the server
-// output. It is a normal runtime dependency, always present in node_modules.
+// output. Because nothing can see this require, neither output tracing nor the
+// runtime bundler ships esbuild: both images copy it in explicitly and fail
+// their build if it cannot compile TypeScript (docker/web.Dockerfile,
+// docker/runtime.Dockerfile, pinned by tests/unit/esbuild-ships-in-images.spec.ts).
 let _esbuildTransformSync:
   | ((code: string, opts: any) => { code: string })
   | null = null

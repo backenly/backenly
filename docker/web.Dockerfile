@@ -105,6 +105,20 @@ WORKDIR /app
 # postbuild has already copied .next/static and public/ into it.
 COPY --from=build /src/.next/standalone ./
 
+# esbuild, and the platform binary it drives. Deploying a route-module function
+# validates it by compiling its TypeScript here (validateRouteModule in
+# lib/services/ai-functions/route-module-runner.ts), through a require that
+# output tracing cannot see: esbuild is a native binary and is loaded that way
+# on purpose, so the standalone tree never contained it. Every deploy_code on
+# the AWS images failed with "Cannot find module 'esbuild'" (measured on
+# staging 2026-09-26; the production v7 image lacked it as well).
+COPY --from=build /src/node_modules/esbuild ./node_modules/esbuild
+COPY --from=build /src/node_modules/@esbuild ./node_modules/@esbuild
+
+# Asserted, not assumed: the build fails unless this image can compile
+# TypeScript the way the function runner does.
+RUN node -e "const e=require('esbuild');const o=e.transformSync('export const n: number = 1',{loader:'ts',format:'cjs'});if(!o.code.includes('exports'))process.exit(1);console.log('esbuild '+e.version+' compiles TypeScript in this image')"
+
 # ── Containment at the boundary that can actually assert it ─────────────────
 #
 # next.config.js bounds ROUTE traces, and that works. It cannot bound
