@@ -358,6 +358,15 @@ export const CASES: Case[] = [
       const available = new Set(manifest.tools.map((t) => t.name))
       // Synthetic tools served by the route rather than the brain catalogue.
       for (const synthetic of ['fetch_docs', 'check_approval']) available.add(synthetic)
+      // Domain-tool ACTIONS. The instructions name them as actions, e.g.
+      // `storage { action: "create_bucket" }`, and they match the verb_noun
+      // shape, so the scraper reads them as tools. Measured on staging
+      // 2026-09-26: create_bucket and revoke_api_key failed this case although
+      // the text was right. An action counts only if some tool's own schema
+      // offers it, so a doc naming an action nothing accepts still fails here.
+      const actions = new Set(
+        manifest.tools.flatMap((t) => (t.inputSchema?.properties?.action?.enum ?? []) as string[]),
+      )
 
       // Names the doc tells an agent to call. Matched on the verb_noun tool
       // convention rather than "any backticked word" — the looser pattern
@@ -381,9 +390,9 @@ export const CASES: Case[] = [
       // rather than by loosening the pattern again.
       for (const example of ['list_products']) named.delete(example)
 
-      const missing = [...named].filter((n) => !available.has(n))
+      const missing = [...named].filter((n) => !available.has(n) && !actions.has(n))
       if (missing.length > 0) {
-        fail(`instructions reference tools that do not exist: ${missing.join(', ')}`)
+        fail(`instructions reference tools or actions that do not exist: ${missing.join(', ')}`)
       }
     },
   },

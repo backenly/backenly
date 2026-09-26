@@ -25,8 +25,14 @@ const skip = (reason: string): Evidence => ({ kind: 'skip', reason })
 const HARNESS = 'npx tsx scripts/mcp-harness/run.ts --endpoint "$BACKENLY_API_URL" --key "$BACKENLY_MCP_KEY" --strict --json acceptance-live.json'
 const HARNESS_ENV = ['BACKENLY_API_URL', 'BACKENLY_MCP_KEY']
 const THROWAWAY = 'A dedicated throwaway project on final staging, and a read-write MCP key for it (never a project with real data).'
-/** The CLI takes its endpoint from BACKENLY_API_URL; it has no --endpoint flag. */
-const CLI_READY = 'BACKENLY_API_URL exported (the CLI reads it), and the CLI linked: npx -y @backenly/cli@0.2.0 link --project "$BACKENLY_PROJECT_ID" --key "$BACKENLY_MCP_KEY".'
+/**
+ * `call` takes its endpoint from BACKENLY_API_URL, but `link` reads only --url
+ * and otherwise validates the key against https://backenly.com (CLI 0.2.0). A
+ * staging key linked without --url is refused as "not recognised". Measured on
+ * the v8 staging run, 2026-09-26.
+ */
+const CLI_LINK = 'npx -y @backenly/cli@0.2.0 link --project "$BACKENLY_PROJECT_ID" --key "$BACKENLY_MCP_KEY" --url "$BACKENLY_API_URL"'
+const CLI_READY = `BACKENLY_API_URL exported (call reads it), and the CLI linked to that endpoint: ${CLI_LINK}.`
 const HARNESS_CLEANUP = 'The harness prints DROP TABLE SQL for its hx_<run>_* tables; functions it deploys are named hx-<run>-*; delete the throwaway project when done.'
 const live = (harness: string[], expected: string, why: string): Evidence => ({
   kind: 'deferred',
@@ -36,7 +42,7 @@ const staging = (d: Omit<Deferral, 'harness'>): Evidence => ({ kind: 'deferred',
 
 const connect = (provider: string, envVar: string, extra = ''): Evidence => staging({
   command:
-    `npx -y @backenly/cli@0.2.0 link --project "$BACKENLY_PROJECT_ID" --key "$BACKENLY_MCP_KEY" && ` +
+    `${CLI_LINK} && ` +
     `npx -y @backenly/cli@0.2.0 call integrations action=connect integrationId=${provider} apiKey="$${envVar}"${extra} && ` +
     `npx -y @backenly/cli@0.2.0 call integrations action=verify integrationId=${provider}`,
   env: ['BACKENLY_API_URL', 'BACKENLY_PROJECT_ID', 'BACKENLY_MCP_KEY', envVar],
@@ -65,8 +71,11 @@ export const ACCEPTANCE_CASES: AcceptanceCase[] = [
     command:
       'curl -sS "$BACKENLY_API_URL/api/mcp" -H "x-api-key: $BACKENLY_MCP_KEY" -H "content-type: application/json" -H "accept: application/json, text/event-stream" ' +
       '-d \'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"gate","version":"0"}}}\' ; ' +
-      'curl -sS "$BACKENLY_API_URL/api/mcp" -H "x-api-key: $BACKENLY_MCP_KEY" -H "content-type: application/json" -H "accept: application/json, text/event-stream" -H "mcp-protocol-version: 2026-07-28" ' +
-      '-d \'{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}\' ; ' +
+      // 2026-07-28 requires the Mcp-Method header and a per-request _meta
+      // envelope; without them the endpoint refuses the call (-32602 or 400),
+      // correctly. The official SDK client sends both.
+      'curl -sS "$BACKENLY_API_URL/api/mcp" -H "x-api-key: $BACKENLY_MCP_KEY" -H "content-type: application/json" -H "accept: application/json, text/event-stream" -H "mcp-protocol-version: 2026-07-28" -H "mcp-method: tools/list" ' +
+      '-d \'{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}\' ; ' +
       'curl -sS -o /dev/null -w "%{http_code}\\n" "$BACKENLY_API_URL/api/mcp" -H "content-type: application/json" -d \'{"jsonrpc":"2.0","id":3,"method":"tools/list"}\'',
     env: ['BACKENLY_API_URL', 'BACKENLY_MCP_KEY'],
     preconditions: 'The final staging web image is serving /api/mcp.',
@@ -135,10 +144,13 @@ export const ACCEPTANCE_CASES: AcceptanceCase[] = [
   { id: 'STORAGE-CLEANUP', area: 'Storage', title: 'deleting a bucket waits for a human, and a rejection deletes nothing', evidence: gap('APPROVAL-REJECT') },
   { id: 'STORAGE-SIGNED-URL', area: 'Storage', title: 'a signed URL for an uploaded file downloads it', evidence: staging({
     command:
-      'curl -sS -X POST "$BACKENLY_API_URL/api/v1/$BACKENLY_PROJECT_ID/storage/upload" -H "x-api-key: $BACKENLY_RUNTIME_KEY" -F bucket=gate -F path=gate/README.md -F file=@README.md && ' +
-      'npx -y @backenly/cli@0.2.0 call storage action=signed_url bucketName=gate path=gate/README.md',
+      // A .txt, not README.md: a new bucket accepts .jpg .jpeg .png .gif .webp
+      // .pdf .txt .csv and refuses the rest, correctly.
+      'printf "v8 staging gate\\n" > gate.txt && ' +
+      'curl -sS -X POST "$BACKENLY_API_URL/api/v1/$BACKENLY_PROJECT_ID/storage/upload" -H "x-api-key: $BACKENLY_RUNTIME_KEY" -F bucket=gate -F path=gate/gate.txt -F file=@gate.txt && ' +
+      'npx -y @backenly/cli@0.2.0 call storage action=signed_url bucketName=gate path=gate/gate.txt',
     env: ['BACKENLY_API_URL', 'BACKENLY_PROJECT_ID', 'BACKENLY_MCP_KEY', 'BACKENLY_RUNTIME_KEY'],
-    preconditions: `${THROWAWAY} ${CLI_READY} A private bucket named gate (storage action=create_bucket bucketName=gate) and a runtime key.`,
+    preconditions: `${THROWAWAY} ${CLI_READY} A private bucket named gate (storage action=create_bucket bucketName=gate) and a service runtime key.`,
     expected: 'signed_url answers a URL; fetching it returns the file with HTTP 200; fetching the object without the signature does not.',
     cleanup: 'storage action=delete_bucket bucketName=gate parks for approval; approve it, or delete the throwaway project.',
     why: 'Cloud storage is native S3 through the task role; only the deployed image has it.',
@@ -161,7 +173,9 @@ export const ACCEPTANCE_CASES: AcceptanceCase[] = [
   { id: 'RT-DELIVERY', area: 'Realtime', title: 'an insert arrives as an SSE event', evidence: staging({
     command:
       'T=$(curl -sS -X POST "$BACKENLY_API_URL/api/v1/$BACKENLY_PROJECT_ID/realtime/ticket" -H "x-api-key: $BACKENLY_RUNTIME_KEY" | jq -r .ticket) && ' +
-      '(curl -sN "$BACKENLY_API_URL/api/v1/$BACKENLY_PROJECT_ID/realtime/subscribe?table=messages&ticket=$T" -H "accept: text/event-stream" --max-time 20 > sse.log &) && sleep 3 && ' +
+      // The stream is /realtime?table=&ticket= (what the ticket response itself
+      // names); /realtime/subscribe does not exist and answers 401.
+      '(curl -sN "$BACKENLY_API_URL/api/v1/$BACKENLY_PROJECT_ID/realtime?table=messages&ticket=$T" -H "accept: text/event-stream" --max-time 20 > sse.log &) && sleep 3 && ' +
       'npx -y @backenly/cli@0.2.0 call db_insert table=messages \'row={"room":"gate","body":"hello","author_id":"00000000-0000-4000-8000-000000000001"}\' && sleep 5 && grep \'"type":"insert"\' sse.log',
     env: ['BACKENLY_API_URL', 'BACKENLY_PROJECT_ID', 'BACKENLY_MCP_KEY', 'BACKENLY_RUNTIME_KEY'],
     preconditions: `${THROWAWAY} ${CLI_READY} A messages table with realtime enabled (the golden chat workflow's steps), and a runtime key.`,
@@ -218,9 +232,12 @@ export const ACCEPTANCE_CASES: AcceptanceCase[] = [
   { id: 'DEPLOY-STATUS-HISTORY', area: 'Deploy', title: 'status and history', evidence: ops('says plainly that nothing is published yet', 'lists published versions newest first') },
   { id: 'DEPLOY-ROLLBACK-EXACT', area: 'Deploy', title: 'a rollback parks with exactly the arguments sent', evidence: gap('DEPLOY-ROLLBACK-EXACT') },
   { id: 'DEPLOY-STAGING', area: 'Deploy', title: 'an approved deploy and rollback on the deployed pipeline', evidence: staging({
-    command: 'npx -y @backenly/cli@0.2.0 call deploy action=deploy ; npx -y @backenly/cli@0.2.0 call check_approval id=<approval id>',
+    // A rollback names its target; without one it is refused ("Provide
+    // deploymentId or version"), correctly.
+    command: 'npx -y @backenly/cli@0.2.0 call deploy action=deploy ; npx -y @backenly/cli@0.2.0 call check_approval id=<approval id> ; ' +
+      'npx -y @backenly/cli@0.2.0 call deploy action=history ; npx -y @backenly/cli@0.2.0 call deploy action=rollback version=<earlier version>',
     env: ['BACKENLY_API_URL', 'BACKENLY_PROJECT_ID', 'BACKENLY_MCP_KEY'],
-    preconditions: `${THROWAWAY} ${CLI_READY} A human who can approve on the project's Autonomy page.`,
+    preconditions: `${THROWAWAY} ${CLI_READY} A human who can approve on the project's Autonomy page. Every table in the project must have RLS: readiness blocks a deploy otherwise (correctly), and the harness's hx_ tables have none, so run this on a project the harness has not touched.`,
     expected: 'deploy parks with an approval id; after approval check_approval reports executed and deploy action=history lists the version; a rollback approval returns to the earlier version.',
     cleanup: 'None beyond the throwaway project.',
     why: 'Publishing runs the real deployment pipeline, which exists only on the deployed stack.',
