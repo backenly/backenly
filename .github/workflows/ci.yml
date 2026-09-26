@@ -205,7 +205,17 @@ jobs:
           npm run build --prefix packages/mcp-server
 
       - name: Unit tests
-        run: npx jest tests/unit --ci --verbose
+        run: npx jest tests/unit --ci --verbose --json --outputFile=jest-unit.json
+
+      # Read by the acceptance job, which judges each MCP acceptance case from
+      # the tests that ran here rather than running anything itself.
+      - name: Keep the unit results for the acceptance matrix
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jest-unit
+          path: jest-unit.json
+          if-no-files-found: ignore
 
       # tests/unit was not the only database-free suite, it was just the only
       # one anyone had pointed CI at. jest resolves 157 suites; the four paths
@@ -511,6 +521,63 @@ jobs:
           npx jest --runTestsByPath "${SUITES[@]}" --ci --runInBand --verbose --forceExit \
             --json --outputFile=jest-integration.json
           node scripts/assert-no-skipped-suites.js jest-integration.json
+
+      - name: Keep the integration results for the acceptance matrix
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jest-integration
+          path: jest-integration.json
+          if-no-files-found: ignore
+
+  # The MCP acceptance matrix (scripts/mcp-acceptance). Runs no tests of its
+  # own: each case names the tests that prove it, and this reads the results the
+  # jobs above wrote. A case whose tests failed, were skipped, or did not run is
+  # FAIL, never PASS, and cases only the final AWS staging image can show are
+  # listed as DEFERRED_TO_FINAL_STAGING_RELEASE_GATE with the command to run.
+  # `if: always()` so a failed job still produces the matrix that says why.
+  acceptance:
+    name: MCP acceptance matrix
+    needs: [static, integration, mcp-server]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Fetch the unit results
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: jest-unit
+          path: acceptance-input
+      - name: Fetch the integration results
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: jest-integration
+          path: acceptance-input
+      - name: Build the matrix
+        run: |
+          npx tsx scripts/mcp-acceptance/matrix.ts \
+            --unit acceptance-input/jest-unit.json \
+            --integration acceptance-input/jest-integration.json \
+            --job mcp-server=${{ needs.mcp-server.result }} \
+            --require-all --out acceptance-matrix
+      - name: Show the matrix
+        if: always()
+        run: '[ -f acceptance-matrix/acceptance-matrix.md ] && cat acceptance-matrix/acceptance-matrix.md >> "$GITHUB_STEP_SUMMARY" || true'
+      - name: Keep the matrix
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-matrix
+          path: acceptance-matrix/
+          if-no-files-found: ignore
 
   # Probe fixtures construct a violating state directly and assert the probe
   # FIRES. A probe that has never been observed producing a finding is presumed
