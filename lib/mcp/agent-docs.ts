@@ -43,7 +43,7 @@ export const AGENT_DOC_TOPICS: AgentDocTopic[] = [
   { id: 'anthropic', title: 'Anthropic', summary: 'Claude completions from functions', aliases: ['claude'] },
   { id: 'posthog', title: 'PostHog', summary: 'analytics events and feature flags from functions', aliases: ['analytics'] },
   { id: 'autonomy', title: 'Autonomy and approvals', summary: 'the maintenance loop, findings, and how a parked action is approved and polled', domain: 'autonomy', aliases: ['approvals', 'approval', 'findings', 'maintenance'] },
-  { id: 'monitoring', title: 'Monitoring', summary: 'metrics, errors, request logs, usage, alerts', domain: 'monitoring', aliases: ['metrics', 'logs', 'request-logs', 'alerts', 'usage'] },
+  { id: 'monitoring', title: 'Monitoring', summary: 'metrics, errors, request logs, usage', domain: 'monitoring', aliases: ['metrics', 'logs', 'request-logs', 'alerts', 'usage'] },
   { id: 'branches', title: 'Branches', summary: 'preview branches: create, diff, merge (Backenly Cloud)', aliases: ['branch', 'preview'] },
   { id: 'deploy', title: 'Deploy', summary: 'readiness, publishing, history and rollback', domain: 'deploy', aliases: ['deployments', 'rollback', 'readiness', 'publish'] },
   { id: 'webhooks', title: 'Webhooks', summary: 'signed outbound endpoints, test deliveries, replays, trigger webhooks', domain: 'webhooks', aliases: ['webhook', 'triggers'] },

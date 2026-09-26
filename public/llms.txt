@@ -62,7 +62,7 @@ One tool per dashboard section, each with an `action`:
 | `functions` | `create`, `deploy_code`, `list`, `get`, `invoke`, `logs`, `set_active`, `schedule`, `list_schedules`; `delete`, `delete_schedule` wait for approval | https://backenly.com/docs/agents/functions.md |
 | `realtime` | `enable`, `status`; `disable` waits for approval | https://backenly.com/docs/agents/realtime.md |
 | `integrations` | `list`, `capabilities`, `verify`, `connect`, `send_push`; `disconnect` waits for approval | https://backenly.com/docs/agents/integrations.md |
-| `monitoring` | `metrics`, `errors`, `usage`, `incidents`, `request_logs`, `set_alert` | https://backenly.com/docs/agents/monitoring.md |
+| `monitoring` | `metrics`, `errors`, `usage`, `incidents`, `request_logs` | https://backenly.com/docs/agents/monitoring.md |
 | `autonomy` | `status`, `findings`, `maintenance`, `set_level` | https://backenly.com/docs/agents/autonomy.md |
 | `webhooks` | `list`, `create`, `update`, `test`, `logs`, `replay`, `rotate_secret`, `triggers`, `trigger_deliveries`, `replay_trigger_delivery`, `rotate_trigger_secret`; `delete` waits for approval | https://backenly.com/docs/agents/webhooks.md |
 | `deploy` | `status`, `history`, `readiness`; `deploy`, `rollback` wait for approval | https://backenly.com/docs/agents/deploy.md |
@@ -99,7 +99,7 @@ Each is `https://backenly.com/docs/agents/<topic>.md`, or `fetch_docs { topic }`
 - [anthropic](https://backenly.com/docs/agents/anthropic.md): Claude completions from functions
 - [posthog](https://backenly.com/docs/agents/posthog.md): analytics events and feature flags from functions
 - [autonomy](https://backenly.com/docs/agents/autonomy.md): the maintenance loop, findings, and how a parked action is approved and polled
-- [monitoring](https://backenly.com/docs/agents/monitoring.md): metrics, errors, request logs, usage, alerts
+- [monitoring](https://backenly.com/docs/agents/monitoring.md): metrics, errors, request logs, usage
 - [branches](https://backenly.com/docs/agents/branches.md): preview branches: create, diff, merge (Backenly Cloud)
 - [deploy](https://backenly.com/docs/agents/deploy.md): readiness, publishing, history and rollback
 - [webhooks](https://backenly.com/docs/agents/webhooks.md): signed outbound endpoints, test deliveries, replays, trigger webhooks

@@ -135,14 +135,17 @@ export const DOMAIN_TOOLS: DomainTool[] = [
   {
     name: 'monitoring',
     title: 'Monitoring',
-    summary: 'How the running backend is behaving, and alerts on it.',
+    summary: 'How the running backend is behaving.',
+    // No set_alert: it stored an alert under project.activeIntegrations that
+    // nothing ever evaluates, so an agent was told an alert was set that could
+    // never fire (and the call failed besides: its `type` never reached the
+    // executor, which reads `metric`). It comes back with an evaluator.
     actions: {
       metrics: { tool: 'get_metrics', gloss: 'request rate, latency percentiles and error rate' },
       errors: { tool: 'get_errors', gloss: 'recent 5xx errors grouped by endpoint' },
       usage: { tool: 'get_usage', gloss: 'plan usage against its limits' },
       incidents: { tool: 'get_pending_incidents', gloss: 'what was detected, fixed or queued while nobody was watching' },
       request_logs: { tool: 'list_request_logs', gloss: 'each request the runtime API served: method, path, status, latency, time' },
-      set_alert: { tool: 'set_alert', gloss: 'an alert on error rate, p95 latency, request rate or integration failures' },
     },
   },
   {
