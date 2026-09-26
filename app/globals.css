@@ -49,9 +49,10 @@
   animation: heroFrameEnter 1450ms cubic-bezier(0.16, 1, 0.3, 1) 720ms forwards;
 }
 
-/* Launch chip: the violet top hairline sweeps, so the edge reads imminent
-   rather than static. TEMPORARY, paired with LaunchPill in app/page.tsx;
-   delete both together after the Product Hunt launch.
+/* Announcement bar: the violet bottom hairline sweeps, so the edge reads
+   imminent rather than static. TEMPORARY, paired with
+   components/site/AnnouncementBar.tsx; delete both together after the
+   Product Hunt launch.
 
    This is CSS rather than framer-motion on purpose. The first attempt used a
    motion.span with `repeat: Infinity` nested inside the hero's variant tree,
@@ -67,6 +68,19 @@
 
 .launch-sweep {
   animation: launchSweep 5000ms cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+
+/* Announcement bar glyph fields: a few brackets glow in turn, so the edges
+   read alive without anything moving. See components/site/AnnouncementBar.tsx. */
+@keyframes announceGlyph {
+  0%, 100% { opacity: 0.25; text-shadow: none; }
+  12%      { opacity: 1; text-shadow: 0 0 8px rgba(196, 181, 253, 0.8); }
+  30%      { opacity: 0.25; text-shadow: none; }
+}
+
+.announce-glyph {
+  opacity: 0.25;
+  animation: announceGlyph 4900ms ease-in-out infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -85,6 +99,9 @@
   .launch-sweep {
     animation: none;
     opacity: 0;
+  }
+  .announce-glyph {
+    animation: none;
   }
 }
 
