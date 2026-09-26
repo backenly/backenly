@@ -25,6 +25,8 @@ const skip = (reason: string): Evidence => ({ kind: 'skip', reason })
 const HARNESS = 'npx tsx scripts/mcp-harness/run.ts --endpoint "$BACKENLY_API_URL" --key "$BACKENLY_MCP_KEY" --strict --json acceptance-live.json'
 const HARNESS_ENV = ['BACKENLY_API_URL', 'BACKENLY_MCP_KEY']
 const THROWAWAY = 'A dedicated throwaway project on final staging, and a read-write MCP key for it (never a project with real data).'
+/** The CLI takes its endpoint from BACKENLY_API_URL; it has no --endpoint flag. */
+const CLI_READY = 'BACKENLY_API_URL exported (the CLI reads it), and the CLI linked: npx -y @backenly/cli@0.2.0 link --project "$BACKENLY_PROJECT_ID" --key "$BACKENLY_MCP_KEY".'
 const HARNESS_CLEANUP = 'The harness prints DROP TABLE SQL for its hx_<run>_* tables; functions it deploys are named hx-<run>-*; delete the throwaway project when done.'
 const live = (harness: string[], expected: string, why: string): Evidence => ({
   kind: 'deferred',
@@ -34,7 +36,7 @@ const staging = (d: Omit<Deferral, 'harness'>): Evidence => ({ kind: 'deferred',
 
 const connect = (provider: string, envVar: string, extra = ''): Evidence => staging({
   command:
-    `npx -y @backenly/cli@0.2.0 link --project "$BACKENLY_PROJECT_ID" --key "$BACKENLY_MCP_KEY" --endpoint "$BACKENLY_API_URL" && ` +
+    `npx -y @backenly/cli@0.2.0 link --project "$BACKENLY_PROJECT_ID" --key "$BACKENLY_MCP_KEY" && ` +
     `npx -y @backenly/cli@0.2.0 call integrations action=connect integrationId=${provider} apiKey="$${envVar}"${extra} && ` +
     `npx -y @backenly/cli@0.2.0 call integrations action=verify integrationId=${provider}`,
   env: ['BACKENLY_API_URL', 'BACKENLY_PROJECT_ID', 'BACKENLY_MCP_KEY', envVar],
@@ -116,7 +118,7 @@ export const ACCEPTANCE_CASES: AcceptanceCase[] = [
   { id: 'AUTH-PROVIDER', area: 'Auth', title: 'an OAuth provider configured with real credentials', evidence: staging({
     command: 'npx -y @backenly/cli@0.2.0 call auth action=add_oauth_provider provider=github clientId="$GITHUB_OAUTH_CLIENT_ID" clientSecret="$GITHUB_OAUTH_CLIENT_SECRET" && npx -y @backenly/cli@0.2.0 call read_backend_state section=users',
     env: ['BACKENLY_API_URL', 'BACKENLY_PROJECT_ID', 'BACKENLY_MCP_KEY', 'GITHUB_OAUTH_CLIENT_ID', 'GITHUB_OAUTH_CLIENT_SECRET'],
-    preconditions: `${THROWAWAY} A GitHub OAuth app whose callback is the staging project's /auth/github callback.`,
+    preconditions: `${THROWAWAY} ${CLI_READY} A GitHub OAuth app whose callback is the staging project's /auth/github callback.`,
     expected: 'add_oauth_provider answers ok and the secret is never echoed; GET /api/v1/{projectId}/auth/github redirects to github.com with the client id.',
     cleanup: 'npx -y @backenly/cli@0.2.0 call auth action=remove_oauth_provider provider=github (parks for approval), or delete the throwaway project.',
     why: 'Needs a real OAuth app and the deployed callback URL.',
@@ -136,7 +138,7 @@ export const ACCEPTANCE_CASES: AcceptanceCase[] = [
       'curl -sS -X POST "$BACKENLY_API_URL/api/v1/$BACKENLY_PROJECT_ID/storage/upload" -H "x-api-key: $BACKENLY_RUNTIME_KEY" -F bucket=gate -F path=gate/README.md -F file=@README.md && ' +
       'npx -y @backenly/cli@0.2.0 call storage action=signed_url bucketName=gate path=gate/README.md',
     env: ['BACKENLY_API_URL', 'BACKENLY_PROJECT_ID', 'BACKENLY_MCP_KEY', 'BACKENLY_RUNTIME_KEY'],
-    preconditions: `${THROWAWAY} A private bucket named gate (storage action=create_bucket bucketName=gate) and a runtime key.`,
+    preconditions: `${THROWAWAY} ${CLI_READY} A private bucket named gate (storage action=create_bucket bucketName=gate) and a runtime key.`,
     expected: 'signed_url answers a URL; fetching it returns the file with HTTP 200; fetching the object without the signature does not.',
     cleanup: 'storage action=delete_bucket bucketName=gate parks for approval; approve it, or delete the throwaway project.',
     why: 'Cloud storage is native S3 through the task role; only the deployed image has it.',
@@ -162,7 +164,7 @@ export const ACCEPTANCE_CASES: AcceptanceCase[] = [
       '(curl -sN "$BACKENLY_API_URL/api/v1/$BACKENLY_PROJECT_ID/realtime/subscribe?table=messages&ticket=$T" -H "accept: text/event-stream" --max-time 20 > sse.log &) && sleep 3 && ' +
       'npx -y @backenly/cli@0.2.0 call db_insert table=messages \'row={"room":"gate","body":"hello","author_id":"00000000-0000-4000-8000-000000000001"}\' && sleep 5 && grep \'"type":"insert"\' sse.log',
     env: ['BACKENLY_API_URL', 'BACKENLY_PROJECT_ID', 'BACKENLY_MCP_KEY', 'BACKENLY_RUNTIME_KEY'],
-    preconditions: `${THROWAWAY} A messages table with realtime enabled (the golden chat workflow's steps), and a runtime key.`,
+    preconditions: `${THROWAWAY} ${CLI_READY} A messages table with realtime enabled (the golden chat workflow's steps), and a runtime key.`,
     expected: 'sse.log contains a connected event and then an insert event for the row.',
     cleanup: 'None beyond the throwaway project.',
     why: 'Delivery runs through the runtime container\'s LISTEN hub and the ALB; CI runs neither.',
@@ -203,7 +205,7 @@ export const ACCEPTANCE_CASES: AcceptanceCase[] = [
       'npx -y @backenly/cli@0.2.0 call branch action=create name=gate && npx -y @backenly/cli@0.2.0 call branch action=list && ' +
       'npx -y @backenly/cli@0.2.0 call branch action=diff branchId=<id from list> && npx -y @backenly/cli@0.2.0 call branch action=merge branchId=<id>',
     env: ['BACKENLY_API_URL', 'BACKENLY_PROJECT_ID', 'BACKENLY_MCP_KEY'],
-    preconditions: `${THROWAWAY} The Cloud edition (branches are Backenly Cloud).`,
+    preconditions: `${THROWAWAY} ${CLI_READY} The Cloud edition (branches are Backenly Cloud).`,
     expected: 'create answers a branch that starts empty; diff lists what differs; merge applies it; a key bound to the merged branch is then refused with BRANCH_INACTIVE.',
     cleanup: 'backend_chat "discard branch gate" parks for approval; approve it, or delete the throwaway project.',
     why: 'Branch provisioning is part of the Cloud composition; the public CI builds the unset edition.',
@@ -218,7 +220,7 @@ export const ACCEPTANCE_CASES: AcceptanceCase[] = [
   { id: 'DEPLOY-STAGING', area: 'Deploy', title: 'an approved deploy and rollback on the deployed pipeline', evidence: staging({
     command: 'npx -y @backenly/cli@0.2.0 call deploy action=deploy ; npx -y @backenly/cli@0.2.0 call check_approval id=<approval id>',
     env: ['BACKENLY_API_URL', 'BACKENLY_PROJECT_ID', 'BACKENLY_MCP_KEY'],
-    preconditions: `${THROWAWAY} A human who can approve on the project's Autonomy page.`,
+    preconditions: `${THROWAWAY} ${CLI_READY} A human who can approve on the project's Autonomy page.`,
     expected: 'deploy parks with an approval id; after approval check_approval reports executed and deploy action=history lists the version; a rollback approval returns to the earlier version.',
     cleanup: 'None beyond the throwaway project.',
     why: 'Publishing runs the real deployment pipeline, which exists only on the deployed stack.',
