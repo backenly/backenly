@@ -27,7 +27,7 @@ import {
   RestApiDiagram,
   StorageDiagram,
 } from '@/components/landing/CapabilityDiagrams'
-import { HeroConsole } from '@/components/landing/HeroConsole'
+import { HeroFilm } from '@/components/landing/HeroFilm'
 import { ROUTES, SiteShell } from '@/components/site/SiteShell'
 import { useSettledReducedMotion } from '@/lib/hooks/useSettledReducedMotion'
 import { useUserSession } from '@/lib/hooks/useUserSession'
@@ -260,6 +260,18 @@ const heroItemVariants: Variants = {
   visible: { opacity: 1, y: 0, filter: 'blur(0px)' },
 }
 
+/**
+ * The hero film's entrance: the same rise, without the blur. Framer leaves
+ * `filter: blur(0px)` inline once the entrance ends, and a filter on an
+ * ancestor can keep a playing video off the browser's cheap overlay path for
+ * as long as the page is open. The text around it pays for the blur once; a
+ * 60fps film would pay for it on every frame.
+ */
+const heroFilmVariants: Variants = {
+  hidden: { opacity: 0, y: 24 },
+  visible: { opacity: 1, y: 0 },
+}
+
 const cardVariants: Variants = {
   hidden: { opacity: 0, y: 24, scale: 0.985 },
   visible: { opacity: 1, y: 0, scale: 1 },
@@ -370,13 +382,14 @@ function Hero() {
           </motion.div>
         </div>
 
-        {/* The dashboard, drawn in DOM — see components/landing/HeroConsole. */}
+        {/* The product film — see components/landing/HeroFilm for why it
+            replaced the drawn console, and what keeps it from going stale. */}
         <motion.div
-          variants={heroItemVariants}
-          transition={{ duration: quiet ? 0 : 0.9, ease: EASE_OUT }}
+          variants={heroFilmVariants}
+          transition={{ duration: quiet ? 0 : 1.1, ease: EASE_OUT }}
           className="mt-12 md:mt-16"
         >
-          <HeroConsole />
+          <HeroFilm />
         </motion.div>
       </div>
     </motion.section>
