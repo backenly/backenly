@@ -207,10 +207,13 @@ Use the CLI for this conversation and the MCP tools once they appear. Do not sta
 export function AgentInstallGuide({
   projectId,
   onKeyMinted,
+  onPromptCopied,
 }: {
   projectId: string
   /** Fired after a key is minted so the keys panel below can refresh its list. */
   onKeyMinted?: () => void
+  /** Fired when the setup prompt or an install command is copied. Carries no key. */
+  onPromptCopied?: () => void
 }) {
   const [key, setKey] = useState<string | null>(null)
   const [minting, setMinting] = useState(false)
@@ -256,6 +259,7 @@ export function AgentInstallGuide({
   async function copy(text: string, id: string) {
     try {
       await navigator.clipboard.writeText(text)
+      onPromptCopied?.()
       setCopied(id)
       setTimeout(() => setCopied(null), 1600)
     } catch {

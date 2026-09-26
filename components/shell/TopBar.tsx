@@ -38,6 +38,7 @@ import {
 import { Logo } from '@/components/Logo'
 import { OrgSwitcher } from '@cloud/org-switcher'
 import { getProjects, type Project } from '@/lib/api/projects'
+import { GettingStartedMenuItem } from '@/components/onboarding/GuideDrawer'
 
 interface MeUser {
   name?: string
@@ -282,6 +283,8 @@ export function TopBar() {
                 <Settings className="w-3.5 h-3.5" />
                 <span className="text-[12.5px] font-medium">Account settings</span>
               </button>
+              {/* Opens the guide's drawer in this workspace, reopening it if hidden. */}
+              <GettingStartedMenuItem onSelect={() => setAccountMenu(false)} />
               <button
                 onClick={() => { setAccountMenu(false); logout() }}
                 className="w-full flex items-center gap-2.5 px-3 py-2.5 text-left text-zinc-300 hover:text-rose-300 hover:bg-rose-500/[0.06] transition-colors"

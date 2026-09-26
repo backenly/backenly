@@ -81,6 +81,8 @@ model User {
   ownedOrganizations      Organization[]           @relation("OrgOwner")
   orgMemberships          OrganizationMember[]
   projectMemberships      ProjectMember[]
+  // The Getting Started guide's one piece of stored state (lib/onboarding).
+  onboarding              UserOnboarding?
 
   @@index([email])
   @@index([provider, providerId])
@@ -2445,6 +2447,41 @@ model AuthEmailCode {
   @@unique([purpose, email])
   @@index([expiresAt])
   @@map("auth_email_codes")
+}
+
+// ============================================================================
+// GETTING STARTED GUIDE — the user's own choice to hide or reopen it
+//
+// Step completion is never stored. Every step is derived on read from the
+// product state that proves it (a project, an MCP credential, a recorded agent
+// call, something built, a publish, an autonomy pass); see lib/onboarding. What
+// cannot be derived is a person's decision, so that is all this row holds, plus
+// which funnel milestones have already been reported so each is counted once.
+//
+// Its own table rather than columns on `users`, because the session lookup
+// loads the whole user row on every authenticated request: a column added there
+// would break sign-in for as long as a release ran ahead of its migration. A
+// missing `user_onboarding` table breaks only the guide, which reads it
+// defensively and falls back to showing nothing it cannot back up.
+// ============================================================================
+
+model UserOnboarding {
+  userId        String    @id
+  // First time the guide was shown. Set once; reported as onboarding_started.
+  startedAt     DateTime?
+  // Hidden by the user, or finished and acknowledged. Wins over everything.
+  dismissedAt   DateTime?
+  // Reopened from the account menu. Shows the guide even to an account that
+  // predates it, until the user hides it again.
+  reopenedAt    DateTime?
+  // Step ids whose completion has been reported to the funnel, so a step is
+  // counted once however many times the guide is read.
+  reportedSteps String[]  @default([])
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_onboarding")
 }
 
 // ============================================================================

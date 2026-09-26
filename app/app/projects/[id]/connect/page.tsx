@@ -43,6 +43,8 @@ import { AgentInstallGuide, AgentCapabilitiesCard } from '@/components/connect/A
 import { AgentKeysPanel } from '@/components/connect/AgentKeysPanel'
 import { FrontendRuntimeCards } from '@/components/connect/FrontendRuntimePanel'
 import { DirectDatabasePanel } from '@/components/connect/DirectDatabasePanel'
+import { AgentConnectionStatus } from '@/components/onboarding/AgentConnectionStatus'
+import { useGuideStore } from '@/lib/stores/use-guide-store'
 
 type Tab = 'agents' | 'direct'
 
@@ -97,11 +99,18 @@ export default function ProjectConnectPage() {
                 column roughly half the height of the right one, which read as
                 a hole in the page rather than a column. */}
             <div className="px-8 py-6 pb-10">
+              {/* Getting started: live verification of the agent's first call.
+                  Renders only while a new user is mid-setup on this project. */}
+              <AgentConnectionStatus projectId={projectId} />
               <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 items-start">
                 <div className="min-w-0 space-y-6">
                   <AgentInstallGuide
                     projectId={projectId}
-                    onKeyMinted={() => setKeysVersion((v) => v + 1)}
+                    onKeyMinted={() => {
+                      setKeysVersion((v) => v + 1)
+                      useGuideStore.getState().refresh()
+                    }}
+                    onPromptCopied={() => useGuideStore.getState().track('setup_copied', 'agent')}
                   />
                   <AgentCapabilitiesCard />
                 </div>

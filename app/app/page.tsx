@@ -20,6 +20,8 @@ import { getProjects, deleteProject, type Project } from '@/lib/api/projects'
 import { OrgShell } from '@/components/shell/OrgShell'
 import { KitConfirmDialog } from '@/components/inspector/kit'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
+import { GettingStartedCard, GettingStartedWelcome } from '@/components/onboarding/GettingStartedCard'
+import { useGuidePolling, useGuideStore, useVisibleGuide } from '@/lib/stores/use-guide-store'
 
 type UserProfile = { id: string; name?: string; email?: string }
 
@@ -71,6 +73,22 @@ export default function DashboardPage() {
   const [deleteBusy, setDeleteBusy] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const editInputRef = useRef<HTMLInputElement>(null)
+
+  // Getting Started guide. Loaded here so an empty account can be shown the
+  // welcome instead of a bare empty state; the card below keeps it fresh.
+  useGuidePolling(null)
+  const guide = useVisibleGuide()
+  const guideStatus = useGuideStore((s) => s.status)
+  const guideResolved = guideStatus === 'ready' || guideStatus === 'error'
+
+  // The guide's "New project" from inside a project lands here with a request
+  // to open this page's dialog, which is where projects are created.
+  const newProjectRequested = useGuideStore((s) => s.newProjectRequested)
+  const newModalOpen = showNewModal || newProjectRequested
+  const closeNewModal = () => {
+    setShowNewModal(false)
+    useGuideStore.getState().setNewProjectRequested(false)
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -266,9 +284,12 @@ export default function DashboardPage() {
           </div>
         </header>
 
+        {/* ── Getting started ───────────────────────────────────────────── */}
+        {!loading && !isEmpty && <GettingStartedCard onCreateProject={() => setShowNewModal(true)} />}
+
         {/* ── Project grid ──────────────────────────────────────────────── */}
         <section className="mt-6 sm:mt-7 flex flex-1 flex-col">
-          {loading ? (
+          {loading || (isEmpty && !query && !guideResolved) ? (
             <div className="grid content-start gap-3 sm:gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
               {[1, 2, 3].map((i) => (
                 <div
@@ -290,6 +311,8 @@ export default function DashboardPage() {
                 </div>
               ))}
             </div>
+          ) : isEmpty && !query && guide?.progress ? (
+            <GettingStartedWelcome progress={guide.progress} onCreateProject={() => setShowNewModal(true)} />
           ) : visibleProjects.length > 0 ? (
             <div className="grid content-start gap-3 sm:gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
               {visibleProjects.map((project) => (
@@ -358,7 +381,7 @@ export default function DashboardPage() {
         </section>
 
         {/* Mobile floating action button — safe-area bottom guard for iPhone home indicator */}
-        {CLOUD_CONTROL_PLANE && !showNewModal && !limitError && !deleteTarget && (
+        {CLOUD_CONTROL_PLANE && !newModalOpen && !limitError && !deleteTarget && (
           <button
             type="button"
             onClick={() => setShowNewModal(true)}
@@ -374,20 +397,25 @@ export default function DashboardPage() {
 
       {/* New Project modal */}
       <AnimatePresence>
-        {showNewModal && CLOUD_CONTROL_PLANE && (
+        {newModalOpen && CLOUD_CONTROL_PLANE && (
           <NewProjectModal
             creating={creating}
             error={createError}
-            onClose={() => { setShowNewModal(false); setCreateError(null) }}
+            onClose={() => { closeNewModal(); setCreateError(null) }}
             onCreate={async (name) => {
               setCreating(true)
               setCreateError(null)
               try {
                 const id = await createProject(name)
                 if (id) {
-                  router.push(`/app/projects/${id}`)
+                  // Mid-guide, the next step lives on Connect: go straight there
+                  // rather than to an empty Overview that only links to it.
+                  const keyStep = guide?.progress?.steps.find((step) => step.id === 'mcp_key')
+                  const next = keyStep && keyStep.status !== 'done' ? '/connect' : ''
+                  useGuideStore.getState().refresh()
+                  router.push(`/app/projects/${id}${next}`)
                 }
-                setShowNewModal(false)
+                closeNewModal()
               } catch {
                 setCreateError('Something went wrong creating the project. Please try again.')
               } finally {

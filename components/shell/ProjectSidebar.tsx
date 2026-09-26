@@ -35,6 +35,7 @@ import {
   ChevronRight,
 } from 'lucide-react'
 import { FrontendConnectionPill } from '@/components/inspector/FrontendConnectionPill'
+import { GuideLauncher } from '@/components/onboarding/GuideDrawer'
 
 // ── Section registry ─────────────────────────────────────────────────────────
 
@@ -258,6 +259,12 @@ export function ProjectSidebar() {
           )
         })}
       </nav>
+
+      {/* Getting started — present only while the guide is, so an account
+          that finished or hid it gets its sidebar back untouched. */}
+      <div className="px-3 pb-3 empty:hidden">
+        <GuideLauncher />
+      </div>
 
       {/* Frontend connection status — "is my Lovable/v0/Bolt app actually
           talking to this backend?" answered without leaving the workspace. */}

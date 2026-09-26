@@ -90,6 +90,16 @@ export type ProductEventType =
   | 'external_usage_started'
   | 'ai_prompt'
   | 'api_call'
+  // The Getting Started guide (app/api/onboarding). Step completions are
+  // derived from product state and reported once each, so the activation
+  // funnel (project -> MCP key -> agent call -> built -> published) reads
+  // from the same evidence the guide shows.
+  | 'onboarding_started'
+  | 'onboarding_step_completed'
+  | 'onboarding_action'
+  | 'onboarding_dismissed'
+  | 'onboarding_reopened'
+  | 'onboarding_completed'
 
 export interface ProductEvent {
   type: ProductEventType

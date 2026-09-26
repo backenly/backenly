@@ -98,6 +98,7 @@ const FORWARD_MIGRATIONS = [
   '20260922120000_auth_email_codes',
   '20260924120000_project_pause',
   '20260925120000_approval_exact_call',
+  '20260926120000_user_onboarding',
 ]
 
 describe('the assembled migration workspace', () => {

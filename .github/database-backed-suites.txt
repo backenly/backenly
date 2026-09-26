@@ -537,3 +537,13 @@ tests/integration/mcp-domain-operations.spec.ts
 # parent used a list only per-line messages (never sent) would fill. Runs the
 # real executor and worker, and checks the persisted run record.
 tests/integration/sandbox-function-logs.spec.ts
+
+# The Getting Started guide reads each step from the rows that prove it: an MCP
+# key the caller minted, a RECORDED agent call (driving the real /api/mcp/health
+# handler to show the dashboard's "Test connection" cannot complete it), a built
+# table, a LIVE project, an autonomy tick or observer scan. Also the stored
+# preference's once-only claims under concurrency, and a read with the
+# user_onboarding table missing, as in a release ahead of its migration.
+# Mutation-checked: reading lastUsed instead of recorded calls, or dropping the
+# per-user key scope, fails the matching tests.
+tests/integration/onboarding-guide.spec.ts
