@@ -30,6 +30,7 @@ import { parseMcpBody } from '@/lib/mcp/request-body'
 import { DB_TOOL_FAILURE_CODE, DB_TOOL_REQUESTS, isDbTool, type DbToolName } from '@/lib/mcp/db-tool-requests'
 import { parseMigration, MigrationParseError } from '@/lib/mcp/migration-parser'
 import { prisma } from '@/lib/db/prisma'
+import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 import { createTokenScope, runInTokenScope } from '@/lib/ai/token-meter'
 import { createHash } from 'crypto'
 import { DOCS_MAX_CHARS } from '@/lib/mcp/docs-limit'
@@ -449,8 +450,64 @@ export async function POST(request: NextRequest) {
       ))
     }
 
+    // ── Every statement against the tables that actually exist ──────────────
+    //
+    // The executors were never asked. create_table answered "Created table …"
+    // for a table that was already there and changed nothing, so columns a
+    // migration declared that way were reported created and never existed. And
+    // add_column on a table that did not exist CREATED it, so a typo in
+    // `ALTER TABLE <name>` made a new table instead of failing.
+    //
+    // So each statement is checked, in order, against the tables that exist
+    // plus those the migration creates before it, and before anything runs,
+    // like every other refusal. CREATE TABLE of an existing table is refused
+    // and names ALTER TABLE; CREATE TABLE IF NOT EXISTS leaves it as it is and
+    // says so; a statement on a table that does not exist is refused.
+    const existingNotes: string[] = []
+    const tableOf = (p: { args: Record<string, unknown> }) => String(p.args.tableName ?? '')
+    const named = [...new Set(planned.map(tableOf).filter(Boolean))]
+    if (named.length) {
+      const found = await prisma.$queryRaw<Array<{ table_name: string }>>`
+        SELECT table_name FROM information_schema.tables
+        WHERE table_schema = ${workspaceSchemaName(auth.projectId)} AND table_name = ANY(${named})`
+      const willExist = new Set(found.map((r) => r.table_name))
+      const skipped = new Set<string>()
+      const refuse = (code: string, error: string, statement: string, hint: string) => {
+        recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 400, tool, error: code })
+        return withCors(NextResponse.json({ ok: false, error, code, statement, hint, applied: [] }, { status: 400 }))
+      }
+      for (const step of planned) {
+        const table = tableOf(step)
+        if (!table || skipped.has(step.source)) continue
+        if (step.tool === 'create_table') {
+          if (!willExist.has(table)) { willExist.add(table); continue }
+          if (!/^\s*create\s+table\s+if\s+not\s+exists\b/i.test(step.source)) {
+            return refuse(
+              'TABLE_EXISTS',
+              `Table ${table} already exists, so CREATE TABLE would change nothing. Nothing was applied.`,
+              step.source,
+              `To add columns use ALTER TABLE ${table} ADD COLUMN …; get_table_schema shows what ${table} has now.`,
+            )
+          }
+          // IF NOT EXISTS: skip the statement and everything it expanded into.
+          skipped.add(step.source)
+          existingNotes.push(`${table} already existed; CREATE TABLE IF NOT EXISTS left it unchanged.`)
+          continue
+        }
+        if (!willExist.has(table)) {
+          return refuse(
+            'TABLE_NOT_FOUND',
+            `There is no table ${table} in this project, so "${step.source}" cannot run. Nothing was applied.`,
+            step.source,
+            `Check the name with read_backend_state { section: "tables" }, or create it first with CREATE TABLE ${table} (…).`,
+          )
+        }
+      }
+      planned = planned.filter((p) => ![...skipped].some((s) => p.source === s || p.source.startsWith(`${s} → `)))
+    }
+
     const applied: { statement: string; tool: string; summary: string }[] = []
-    const notes = planned.flatMap((p) => p.notes ?? [])
+    const notes = [...existingNotes, ...planned.flatMap((p) => p.notes ?? [])]
 
     for (let i = 0; i < planned.length; i++) {
       const step = planned[i]
