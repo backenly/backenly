@@ -87,10 +87,12 @@ export const DOMAIN_TOOLS: DomainTool[] = [
     name: 'functions',
     title: 'Functions',
     summary:
-      'Server-side functions and schedules. Backenly writes a function\'s code from your spec with its ' +
-      'own model, which draws AI credits; name the tables and integrations it uses.',
+      'Server-side functions and schedules. "create" has Backenly write a function\'s code from your spec with its ' +
+      'own model, which draws AI credits; name the tables and integrations it uses. "deploy_code" stores code you wrote, ' +
+      'exactly as written, after the runtime checks it can run.',
     actions: {
       create: { tool: 'generate_function', gloss: 'a function from a plain-English spec, fired by sign-up, a table event, HTTP or manually' },
+      deploy_code: { tool: 'deploy_function_code', gloss: 'your own source: a route module for trigger http, a ctx sandbox body for every other trigger; replaces the code of a function with the same name' },
       list: { tool: 'list_ai_functions', gloss: 'every function with its trigger and on/off state' },
       get: { tool: 'get_ai_function', gloss: 'one function in full: its code, trigger, endpoint, state and last error' },
       invoke: { tool: 'invoke_ai_function', gloss: 'run it once now and get its answer, return value and log lines; a failure is reported, never auto-repaired' },
@@ -133,14 +135,17 @@ export const DOMAIN_TOOLS: DomainTool[] = [
   {
     name: 'monitoring',
     title: 'Monitoring',
-    summary: 'How the running backend is behaving, and alerts on it.',
+    summary: 'How the running backend is behaving.',
+    // No set_alert: it stored an alert under project.activeIntegrations that
+    // nothing ever evaluates, so an agent was told an alert was set that could
+    // never fire (and the call failed besides: its `type` never reached the
+    // executor, which reads `metric`). It comes back with an evaluator.
     actions: {
       metrics: { tool: 'get_metrics', gloss: 'request rate, latency percentiles and error rate' },
       errors: { tool: 'get_errors', gloss: 'recent 5xx errors grouped by endpoint' },
       usage: { tool: 'get_usage', gloss: 'plan usage against its limits' },
       incidents: { tool: 'get_pending_incidents', gloss: 'what was detected, fixed or queued while nobody was watching' },
       request_logs: { tool: 'list_request_logs', gloss: 'each request the runtime API served: method, path, status, latency, time' },
-      set_alert: { tool: 'set_alert', gloss: 'an alert on error rate, p95 latency, request rate or integration failures' },
     },
   },
   {
@@ -289,6 +294,11 @@ type JsonSchema = Record<string, any>
 function brainParams(tool: string): { properties: Record<string, JsonSchema>; required: string[] } {
   const def = BRAIN_TOOLS.find((t) => t.function?.name === tool)?.function as any
   return { properties: def?.parameters?.properties ?? {}, required: def?.parameters?.required ?? [] }
+}
+
+/** The arguments an action's target tool requires, as its description lists them. */
+export function actionRequires(tool: string): string[] {
+  return brainParams(tool).required.filter((p) => p !== 'action')
 }
 
 /**

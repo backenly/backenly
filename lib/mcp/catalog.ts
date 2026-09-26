@@ -33,6 +33,7 @@
 
 import { BRAIN_TOOLS, READ_ONLY_TOOLS, isDestructiveTool } from '@/lib/ai/brain/tools'
 import { DOMAIN_TOOLS, domainDescription, domainInputSchema, getDomainTool, readOnlyView } from '@/lib/mcp/domains'
+import { AGENT_DOC_TOPICS } from '@/lib/mcp/agent-docs'
 
 export type McpTier = 'chat' | 'read' | 'build' | 'data'
 
@@ -476,15 +477,16 @@ export function buildDispatchable(): McpToolDescriptor[] {
     tier: 'read',
     description:
       'Fetch Backenly documentation as Markdown so you can answer questions and use the right tools without guessing. ' +
-      'Call with no arguments for the full agent guide (capabilities, API shape, tool vocabulary), or pass `topic` ' +
-      '(e.g. "auth", "database", "storage", "realtime", "functions", "mcp") to get just that section. ' +
-      'Prefer this over assuming endpoint shapes or tool names.',
+      'Call with no arguments for the index (connecting, the tools, approvals, read-only keys, headers), or pass `topic` ' +
+      'for one area in full. Prefer this over assuming endpoint shapes or tool names.',
     inputSchema: {
       type: 'object',
       properties: {
         topic: {
           type: 'string',
-          description: 'Optional section to narrow the docs, e.g. "auth", "database", "storage", "realtime", "functions", "integrations", "mcp".',
+          // Not an enum: older clients send the section names the single-file
+          // guide had ("mcp", …), which resolve through lib/mcp/agent-docs.ts.
+          description: `One topic: ${AGENT_DOC_TOPICS.map((t) => t.id).join(', ')}.`,
         },
       },
       additionalProperties: false,

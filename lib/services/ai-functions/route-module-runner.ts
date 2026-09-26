@@ -130,16 +130,23 @@ function assertNotBlocked(code: string): void {
 // When project auth material is unavailable the values are empty strings —
 // auth gates then fail closed (403), never open. The rest of process.env
 // (DATABASE_URL, SMTP creds, Paddle keys, ...) stays unreachable.
+//
+// STRIPE_WEBHOOK_SECRET and PAYMENT_WEBHOOK_SECRET used to be copied in from
+// the PLATFORM's environment, for the generated Stripe webhook template. That
+// handed every project the same platform value, which is never the secret of a
+// tenant's own Stripe account, and since functions { action: "deploy_code" }
+// stores code an agent wrote, any function could simply return it. A project's
+// signing secret lives in its own integration store and is verified by the
+// project's receiver (/api/v1/{projectId}/webhooks/stripe); the template now
+// reads an empty value and fails closed. Only NODE_ENV, which is not a secret,
+// still comes from the platform.
 function makeCuratedProcess(auth: ProjectFnAuth): { env: Record<string, string> } {
   const env: Record<string, string> = {
     ADMIN_API_KEY: auth.adminKey ?? '',
     AI_EXECUTION_TOKEN: auth.adminKey ?? '',
     JWT_SECRET: auth.jwtSecret ?? '',
   }
-  for (const key of ['NODE_ENV', 'STRIPE_WEBHOOK_SECRET', 'PAYMENT_WEBHOOK_SECRET']) {
-    const value = process.env[key]
-    if (value !== undefined) env[key] = value
-  }
+  if (process.env.NODE_ENV !== undefined) env.NODE_ENV = process.env.NODE_ENV
   return Object.freeze({ env: Object.freeze(env) }) as { env: Record<string, string> }
 }
 

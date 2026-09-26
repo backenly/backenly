@@ -34,6 +34,7 @@ import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 import { createTokenScope, runInTokenScope } from '@/lib/ai/token-meter'
 import { createHash } from 'crypto'
 import { DOCS_MAX_CHARS } from '@/lib/mcp/docs-limit'
+import { AGENT_DOCS_URL, AGENT_DOC_TOPICS, agentDocPublicPath, resolveDocTopic } from '@/lib/mcp/agent-docs'
 import { readOnlyView, resolveDomainAction, type DomainResolution } from '@/lib/mcp/domains'
 
 /**
@@ -202,20 +203,30 @@ export async function POST(request: NextRequest) {
   let dispatchName = effectiveTool
   const dispatchArgs: Record<string, unknown> = domainArgs ?? args
 
-  // fetch_docs — synthetic read-only tool. Serves the agent-facing docs
-  // (public/llms.txt) so a connected host LLM can self-serve context instead of
-  // hallucinating the API/tool vocabulary (§9.3). No brain call, no mutation.
+  // fetch_docs — synthetic read-only tool. Serves the agent-facing docs (the
+  // public/llms.txt index, or one topic from public/docs/agents) so a connected
+  // host LLM can self-serve context instead of hallucinating the API/tool
+  // vocabulary (§9.3). No brain call, no mutation.
   if (tool === 'fetch_docs') {
     const topic = typeof args.topic === 'string' ? args.topic.trim() : ''
-    const { markdown, matchedTopic } = await loadDocs(request, topic)
+    const { markdown, matchedTopic, unknownTopic } = await loadDocs(request, topic)
     recordMcpCall(
       { ...auth, endpoint: ENDPOINT, startedAt },
-      { statusCode: 200, tool, mutation: false, summary: matchedTopic ? `docs: ${matchedTopic}` : 'docs: full guide' },
+      { statusCode: 200, tool, mutation: false, summary: matchedTopic ? `docs: ${matchedTopic}` : 'docs: index' },
     )
     return withCors(NextResponse.json({
       ok: true,
-      summary: matchedTopic ? `Backenly docs — ${matchedTopic}` : 'Backenly agent guide',
-      data: { topic: matchedTopic ?? null, markdown },
+      summary: matchedTopic
+        ? `Backenly docs — ${matchedTopic}`
+        : unknownTopic
+          ? `No docs topic "${unknownTopic}"; served the index, which lists every topic`
+          : 'Backenly docs index',
+      data: {
+        topic: matchedTopic ?? null,
+        markdown,
+        topics: AGENT_DOC_TOPICS.map((t) => t.id),
+        ...(unknownTopic ? { unknownTopic } : {}),
+      },
       needsUser: false,
       timing: { ms: Date.now() - startedAt, heavy: false },
     }))
@@ -829,18 +840,24 @@ function jsonSafe<T>(value: T): T {
 // ── fetch_docs support ────────────────────────────────────────────────────────
 
 /**
- * Load the agent-facing docs (public/llms.txt) and, when a topic is given,
- * return just the matching section. Fetched from the request origin so it works
- * identically in dev, standalone, and behind nginx — no fs path assumptions.
- * Falls back to a terse pointer if the file can't be reached.
+ * The agent docs: the index (public/llms.txt) with no topic, or one topic's
+ * own file (public/docs/agents/<id>.md, lib/mcp/agent-docs.ts). A topic that is
+ * not one gets the index, with the real list first, rather than a guess: the
+ * old heading search answered "deploy" with whichever section mentioned it first.
+ * Falls back to a terse pointer if the index can't be reached.
  */
 async function loadDocs(
   request: NextRequest,
   topic: string,
-): Promise<{ markdown: string; matchedTopic: string | null }> {
-  let full = await readLlmsTxt(request)
+): Promise<{ markdown: string; matchedTopic: string | null; unknownTopic?: string }> {
+  if (topic) {
+    const hit = resolveDocTopic(topic)
+    const text = hit ? await readPublicDoc(request, agentDocPublicPath(hit.id)) : ''
+    if (hit && text) return { markdown: clamp(text, `${AGENT_DOCS_URL}/${hit.id}.md`), matchedTopic: hit.id }
+  }
 
-  if (!full) {
+  const index = await readPublicDoc(request, 'llms.txt')
+  if (!index) {
     return {
       markdown:
         '# Backenly docs\n\nFull docs: https://backenly.com/llms.txt\n\n' +
@@ -848,31 +865,36 @@ async function loadDocs(
       matchedTopic: null,
     }
   }
-
   if (topic) {
-    const section = extractSection(full, topic)
-    if (section) return { markdown: clamp(section), matchedTopic: topic }
+    const hit = resolveDocTopic(topic)
+    if (hit) {
+      // A real topic whose file this server could not read: say so, not "unknown".
+      const note = `The ${hit.id} topic could not be read here; it is at ${AGENT_DOCS_URL}/${hit.id}.md. The index follows.\n\n`
+      return { markdown: note + clamp(index, 'https://backenly.com/llms.txt'), matchedTopic: null }
+    }
+    const note = `There is no docs topic "${topic}". Topics: ${AGENT_DOC_TOPICS.map((t) => t.id).join(', ')}. The index follows.\n\n`
+    return { markdown: note + clamp(index, 'https://backenly.com/llms.txt'), matchedTopic: null, unknownTopic: topic }
   }
-
-  return { markdown: clamp(full), matchedTopic: null }
+  return { markdown: clamp(index, 'https://backenly.com/llms.txt'), matchedTopic: null }
 }
 
 /**
- * Load public/llms.txt reliably. The previous implementation self-fetched
+ * Load a file under public/ reliably. The previous implementation self-fetched
  * `request.nextUrl.origin/llms.txt`, which in the Next standalone server behind
  * nginx resolves to an internal origin that does NOT serve the static file — so
  * fetch_docs always returned the tiny fallback pointer instead of the real docs.
  * Try, in order: the file on disk (works in standalone + dev), the absolute app
- * URL, then the request origin. First hit wins.
+ * URL, then the request origin. First hit wins. `publicPath` is only ever one of
+ * the registry's own paths, never the caller's text.
  */
-async function readLlmsTxt(request: NextRequest): Promise<string> {
+async function readPublicDoc(request: NextRequest, publicPath: string): Promise<string> {
   // 1. Filesystem — public/ is copied next to the standalone server at build.
   try {
     const fs = await import('fs/promises')
     const path = await import('path')
     for (const p of [
-      path.join(process.cwd(), 'public', 'llms.txt'),
-      path.join(process.cwd(), '.next', 'standalone', 'public', 'llms.txt'),
+      path.join(process.cwd(), 'public', publicPath),
+      path.join(process.cwd(), '.next', 'standalone', 'public', publicPath),
     ]) {
       try {
         const txt = await fs.readFile(/*turbopackIgnore: true*/ p, 'utf8')
@@ -888,7 +910,7 @@ async function readLlmsTxt(request: NextRequest): Promise<string> {
   ].filter(Boolean) as string[]
   for (const origin of origins) {
     try {
-      const res = await fetch(`${origin}/llms.txt`, { cache: 'no-store' })
+      const res = await fetch(`${origin}/${publicPath}`, { cache: 'no-store' })
       if (res.ok) {
         const txt = await res.text()
         if (txt && txt.trim()) return txt
@@ -898,32 +920,8 @@ async function readLlmsTxt(request: NextRequest): Promise<string> {
   return ''
 }
 
-/** Pull the Markdown section whose heading best matches `topic`. */
-function extractSection(markdown: string, topic: string): string | null {
-  const lines = markdown.split('\n')
-  const needle = topic.toLowerCase()
-  let start = -1
-  let headingLevel = 0
-  for (let i = 0; i < lines.length; i++) {
-    const m = /^(#{2,4})\s+(.*)$/.exec(lines[i])
-    if (m && m[2].toLowerCase().includes(needle)) {
-      start = i
-      headingLevel = m[1].length
-      break
-    }
-  }
-  if (start === -1) return null
-  // Capture until the next heading at the same or higher level.
-  let end = lines.length
-  for (let i = start + 1; i < lines.length; i++) {
-    const m = /^(#{1,4})\s+/.exec(lines[i])
-    if (m && m[1].length <= headingLevel) { end = i; break }
-  }
-  return lines.slice(start, end).join('\n').trim()
-}
-
-function clamp(s: string): string {
-  return s.length <= DOCS_MAX_CHARS ? s : s.slice(0, DOCS_MAX_CHARS) + '\n\n…(truncated — see https://backenly.com/llms.txt)'
+function clamp(s: string, url: string): string {
+  return s.length <= DOCS_MAX_CHARS ? s : s.slice(0, DOCS_MAX_CHARS) + `\n\n…(truncated — see ${url})`
 }
 
 // ── Parking a domain action for a human ─────────────────────────────────────
