@@ -287,6 +287,17 @@ const nextConfig = {
           { key: 'Cache-Control', value: 'public, max-age=3600, stale-while-revalidate=86400' },
         ],
       },
+      {
+        // The hero film and its poster (components/landing/HeroFilm). Every
+        // file here carries its version in its name, so a re-render ships
+        // under a new name and these can be cached for good. Never replace a
+        // file under public/media in place: browsers that already hold it
+        // would keep the old one for a year.
+        source: '/media/:path*',
+        headers: [
+          { key: 'Cache-Control', value: 'public, max-age=31536000, immutable' },
+        ],
+      },
       // /api/v1/* CORS is decided dynamically in middleware.ts so we can
       // (a) per-project allowedOrigins and (b) avoid wildcard+credentials
       // mismatch. We intentionally do NOT set Access-Control-Allow-Origin

@@ -174,9 +174,10 @@ export function AutonomyFilm() {
   const open = step >= 1 && step <= 3 ? '1' : '0'
   const fixed = step >= 3 ? '13' : '12'
   // Units are the dashboard's, word for word (`readings` in WorkspaceHome, and
-  // LOOP in HeroConsole). This is the third depiction of the same instrument on
-  // the site; a visitor who watches this film, reads the hero, then signs up
-  // must not be shown three different vocabularies for one loop.
+  // the Overview recorded in the hero film, components/landing/HeroFilm). This
+  // is the third depiction of the same instrument on the site; a visitor who
+  // watches the hero, then this film, then signs up must not be shown three
+  // different vocabularies for one loop.
   // `short` is the phone variant, for the same reason LEDGER carries one: five
   // columns across 360px leaves ~62px each, and the full units wrapped to three
   // ragged lines that pushed every column to a different height. The short form
