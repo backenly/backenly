@@ -316,6 +316,14 @@ describe('a platform fault is never filed against a tenant', () => {
         select: { details: true },
       })
       expect(rows.length).toBeGreaterThan(0)
+      // And it does not claim evidence it does not have: nothing else was
+      // probed, so it may not say other projects answered (v8 qualification
+      // found the unconditional sentence on exactly this single-project pass).
+      for (const r of rows) {
+        const hint = String((r.details as any).hint)
+        expect(hint).toMatch(/^No other project answered on this surface/)
+        expect(hint).not.toMatch(/other projects? answered on this surface in the same pass/)
+      }
     } finally {
       await ingress.close()
       await dropProject(only)
@@ -340,6 +348,8 @@ describe('a platform fault is never filed against a tenant', () => {
       expect(rows).toHaveLength(1)
       expect(rows[0].projectId).toBe(broken.projectId)
       expect((rows[0].details as any).surface).toBe('db')
+      // The comparison that makes it this project's fault, stated with its count.
+      expect((rows[0].details as any).hint).toMatch(/^2 other projects answered on this surface in the same pass/)
 
       const beat = JSON.parse((await heartbeat(ps[1].projectId))!.value)
       expect(beat.ok).toBe(true)

@@ -303,121 +303,6 @@ export default function LandingPage() {
 }
 
 /* ─────────────────────────────────────────────────────────────
-   Launch chip  ·  TEMPORARY, comes out after the Product Hunt launch
-
-   Announces the launch above the hero headline. Flip SHOW_LAUNCH_PILL to
-   false to pull it in one edit. To remove it for good, delete this block,
-   its call site in `Hero`, `ROUTES.productHunt`, and the `.launch-sweep`
-   rules in app/globals.css.
-
-   TOMBSTONE, do not "improve" it back: a version that replaced the NEW
-   badge with Product Hunt's own brand mark and a hard date
-   (`[PH mark] Launching on Product Hunt | Sep 30 ->`) was built and
-   REJECTED by the founder, who preferred this one. If a date is ever
-   wanted, add it to the message; do not bring back the mark.
-
-   WHAT EACH PART IS, AND WHY IT IS NOT SOMETHING ELSE:
-
-   - THE BADGE IS WHITE ON BLACK, and that is the most on-system choice
-     available, not a fallback. `bg-white text-black` is this platform's
-     primary surface recipe: `KitButton primary` in components/inspector/kit.tsx
-     is exactly `bg-white text-black`, and `PRIMARY_CTA` below this chip is
-     the same. So the badge is a miniature of the page's own primary
-     surface, which is why it reads as a stamp rather than as decoration.
-     Contrast is 21:1.
-
-     A violet-tinted badge (the `Most popular` recipe from
-     app/pricing/page.tsx) was shipped first and the founder asked for
-     white instead. If a tinted badge is ever wanted again, that pricing
-     recipe is the one to copy: a TINT, never a violet FILL, because tags
-     are inside the neutral-first accent budget but filled accent surfaces
-     are not. Never Product Hunt orange, which would be a third colour.
-     Violet still carries the chip via the top hairline, the sweep and the
-     glow, so the brand is present without competing with the badge.
-   - THE VIOLET TOP HAIRLINE is `RuntimeStatusBar`'s in
-     components/inspector/kit.tsx, whose own comment calls it the
-     signature: "One violet hairline along the top edge." It sweeps, so
-     the edge reads imminent. The sweep is a CSS keyframe, NOT
-     framer-motion: nested in the hero's variant tree, a `motion.span`
-     with `repeat: Infinity` had the parent's `visible` label override its
-     own `animate`, so it ran once and froze at its end position. That is
-     invisible in a screenshot; it was caught by sampling the computed
-     transform over time. See app/globals.css.
-   - THE INTERNAL HAIRLINE splits the message from the action. Border plus
-     text plus arrow on one uniform gap is the most templated component on
-     the web. A hairline dividing content is this page's own device: see
-     the `border-t` over every summary column and over the closing CTA.
-   - RADIUS IS `rounded-md`, the same as `PRIMARY_CTA` below it. This
-     page's whole radius vocabulary is three `rounded-md` plus one
-     decorative circle, so a `rounded-full` chip read as imported from
-     another site. An earlier draft was exactly that and was rejected.
-   - NO BARE STATUS DOT. A violet dot reporting no state is the dot that
-     was deliberately deleted from the shared `Eyebrow` in kit.tsx. The
-     badge carries the colour instead, and it carries a word.
-
-   Two rules it already satisfied and still must:
-
-   - It is NOT an eyebrow. The 2026-09-18 redesign stripped every mono,
-     uppercase, wide-tracked label off this page, and the invariant is
-     checked by grepping this file for that class recipe and expecting
-     zero hits. Do NOT spell the recipe out here: the check is a plain
-     text search, so writing it even inside a comment trips it (this
-     paragraph did, on the first draft). The badge is a micro-label INSIDE
-     a chip, not a section opener, and its tracking is nowhere near the
-     banned value. `text-[11px]` is the one size here the page did not
-     already ship; a micro-label is a type role the page had no token for.
-   - It is NOT a second CTA. An external link, not an auth button. The
-     hero's second button was removed on purpose; `Start free` stays the
-     only signup CTA. It also holds the hero to four text elements, which
-     is the cap: chip, headline, subline, CTA.
-───────────────────────────────────────────────────────────── */
-
-const SHOW_LAUNCH_PILL = true
-
-function LaunchPill({ quiet }: { quiet: boolean }) {
-  return (
-    <motion.div
-      variants={heroItemVariants}
-      transition={{ duration: quiet ? 0 : 0.9, ease: EASE_OUT }}
-      className="mb-7"
-    >
-      <Link
-        href={ROUTES.productHunt}
-        target="_blank"
-        rel="noopener noreferrer"
-        // Without this the badge word leads the accessible name ("New
-        // Launching soon...") and the new tab is unannounced.
-        aria-label="Launching soon on Product Hunt. Opens in a new tab."
-        className={`group relative inline-flex items-stretch overflow-hidden rounded-md border ${EDGE} bg-white/[0.03] text-[14px] font-medium text-zinc-300 shadow-[0_16px_50px_-24px_rgba(139,92,246,0.55)] transition duration-200 hover:border-violet-400/30 hover:bg-white/[0.06] hover:text-white hover:shadow-[0_18px_60px_-22px_rgba(139,92,246,0.8)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60 focus-visible:ring-offset-2 focus-visible:ring-offset-black`}
-      >
-        <span aria-hidden className="pointer-events-none absolute inset-x-0 top-0 h-px overflow-hidden">
-          <span className="absolute inset-0 bg-gradient-to-r from-transparent via-violet-300/70 to-transparent" />
-          <span className="launch-sweep absolute inset-y-0 w-1/3 bg-gradient-to-r from-transparent via-violet-100 to-transparent" />
-        </span>
-
-        <span className="flex items-center gap-2.5 py-2 pl-2.5 pr-3.5">
-          <span className="rounded bg-white px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-black">
-            New
-          </span>
-          <span className="tracking-[-0.006em]">Launching soon on Product Hunt</span>
-        </span>
-
-        <span
-          aria-hidden
-          className="w-px shrink-0 bg-white/[0.10] transition-colors duration-200 group-hover:bg-white/25"
-        />
-        <span className="flex items-center px-2.5">
-          <ArrowRight
-            aria-hidden
-            className="h-3.5 w-3.5 shrink-0 text-zinc-500 transition duration-200 group-hover:translate-x-0.5 group-hover:text-zinc-300"
-          />
-        </span>
-      </Link>
-    </motion.div>
-  )
-}
-
-/* ─────────────────────────────────────────────────────────────
    Hero
 
    Copy is locked; see project-two-door-positioning. The headline names the
@@ -450,8 +335,6 @@ function Hero() {
       />
 
       <div className={`${CONTAINER} px-5 sm:px-6`}>
-        {SHOW_LAUNCH_PILL && <LaunchPill quiet={quiet} />}
-
         <motion.h1
           variants={heroItemVariants}
           transition={{ duration: quiet ? 0 : 0.9, ease: EASE_OUT }}

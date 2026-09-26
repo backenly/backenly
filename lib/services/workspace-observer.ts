@@ -256,6 +256,7 @@ export async function runContractSweep(options: {
           projectId,
           results,
           attribution.tenantBroken.get(projectId) ?? [],
+          attribution.answeredBySurface,
         )
 
         // The heartbeat, written on every pass whose outcome is KNOWN.
