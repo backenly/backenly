@@ -183,7 +183,7 @@ const INTEGRATION_CATALOG: IntegrationCategory[] = [
         name: 'Stripe',
         tagline: 'Payment processing',
         description:
-          'Subscriptions, one-time checkout, and usage billing. Backenly provisions the webhook endpoint, the plan schema, and a payment event log.',
+          'Subscriptions, one-time checkout, and usage billing, built by your agent in Backenly: checkout, plan schema, and a payment event log behind a signed webhook receiver.',
         logo: StripeLogo,
         brandColor: '#635BFF',
         enabled: false,
@@ -422,12 +422,30 @@ function ActivationModal({
     )
   }
 
+  /**
+   * The prompt handed to the user's coding agent once the key is stored.
+   *
+   * It used to be the bare intent ("Add subscription billing…"). An agent
+   * sitting in the user's app repo reads that as a request to write Stripe code
+   * in the repo, asks for the key again, and builds nothing in Backenly. So the
+   * prompt says where the work belongs, which door to use (with the CLI for a
+   * conversation whose MCP tools have not loaded yet), and that the key is
+   * already stored and must stay out of code.
+   */
   function buildFinalIntent(): string {
     const parts: string[] = [...selectedOptions]
     if (customIntent.trim()) parts.push(customIntent.trim())
-    if (parts.length === 0) return `Add ${provider.name} integration to this project`
-    if (parts.length === 1) return parts[0]
-    return parts.join('. ') + '.'
+    const intent =
+      parts.length === 0 ? `Add the ${provider.name} integration`
+      : parts.length === 1 ? parts[0]
+      : parts.join('. ')
+    return (
+      `In my Backenly backend (project ${projectId}): ${intent.replace(/\.$/, '')}. ` +
+      `Build it in Backenly with its tools: backend_chat over MCP, or ` +
+      `npx -y @backenly/cli@latest chat "…" if the MCP tools are not loaded in this conversation. ` +
+      `My ${provider.name} key is already stored in Backenly and Backenly functions reach it as ` +
+      `ctx.integrations.${provider.id}. Do not ask me for the key and do not put it in code.`
+    )
   }
 
   async function handleActivate() {
@@ -611,7 +629,7 @@ function ActivationModal({
               What do you want to use {provider.name} for?
             </p>
             <p className="text-[11.5px] text-zinc-500 mb-3">
-              Select one or more, or describe it yourself. Backenly will provision exactly what you need.
+              Select one or more, or describe it yourself. Your agent builds exactly this in Backenly.
             </p>
 
             <div className="space-y-1.5">
@@ -786,7 +804,7 @@ function ConnectorDetail({
             <EmptyState
               icon={Info}
               title="No connections"
-              description={`Add a connection to store your ${provider.name} key and unlock provisioning.`}
+              description={`Add a connection to store your ${provider.name} key so your agent can build with it.`}
               className="py-8"
             />
           </KitCard>
@@ -796,7 +814,7 @@ function ConnectorDetail({
       <section>
         <SectionTitle
           title="Features"
-          description={`What ${provider.name} provisions when connected.`}
+          description={`What your agent can build with ${provider.name}.`}
         />
         <KitChecklist items={provider.provisions} />
       </section>

@@ -17,6 +17,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { v1ApiMiddleware } from '@/lib/api/v1/middleware'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 export const dynamic = 'force-dynamic'
 
@@ -125,7 +126,7 @@ async function ensurePresenceTable(projectId: string): Promise<void> {
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 /** GET — list users online right now */
-export async function GET(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+async function handleGET(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
   const auth = await v1ApiMiddleware(request, params)
   if (auth.response) return auth.response
@@ -152,7 +153,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ proje
 }
 
 /** POST — join or heartbeat (upsert lastSeen) */
-export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
   const auth = await v1ApiMiddleware(request, params)
   if (auth.response) return auth.response
@@ -197,7 +198,7 @@ export async function POST(request: NextRequest, props: { params: Promise<{ proj
 }
 
 /** DELETE — explicit leave */
-export async function DELETE(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+async function handleDELETE(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
   const auth = await v1ApiMiddleware(request, params)
   if (auth.response) return auth.response
@@ -229,3 +230,7 @@ export async function DELETE(request: NextRequest, props: { params: Promise<{ pr
     return NextResponse.json({ error: err.message }, { status: 500 })
   }
 }
+
+export const GET = recordedV1(handleGET)
+export const POST = recordedV1(handlePOST)
+export const DELETE = recordedV1(handleDELETE)

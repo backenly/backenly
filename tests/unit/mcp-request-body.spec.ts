@@ -8,16 +8,11 @@
  * fire, so a green suite can never mean "the check never ran".
  */
 
-import { z } from 'zod'
 import { parseMcpBody } from '@/lib/mcp/request-body'
+import { DB_TOOL_REQUESTS } from '@/lib/mcp/db-tool-requests'
 
-const QuerySchema = z.object({
-  table: z.string().trim().min(1).max(63),
-  filter: z.record(z.unknown()).optional(),
-  limit: z.number().int().min(1).max(200).optional(),
-  offset: z.number().int().min(0).optional(),
-  orderBy: z.record(z.unknown()).optional(),
-})
+// The schema db_query is served with, on both surfaces, not a copy of it.
+const QuerySchema = DB_TOOL_REQUESTS.db_query
 
 describe('parseMcpBody', () => {
   it('accepts a well-formed body', () => {

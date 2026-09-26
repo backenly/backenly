@@ -6,12 +6,13 @@ import { createErrorResponse, createSuccessResponse, handleValidationError, Erro
 import { aiGenerateSchema } from '@/lib/api/v1/schemas'
 import { validateRequestBody } from '@/lib/validation/schemas'
 import OpenAI from 'openai'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 /**
  * POST /v1/{projectId}/ai/generate
  * Generate content using AI
  */
-export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, params)
@@ -78,3 +79,4 @@ export async function POST(request: NextRequest, props: { params: Promise<{ proj
   }
 }
 
+export const POST = recordedV1(handlePOST)

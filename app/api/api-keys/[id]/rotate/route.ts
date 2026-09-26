@@ -5,21 +5,7 @@ import { prisma } from '@/lib/db/postgres'
 import { requireAuth } from '@/lib/auth/middleware'
 import crypto from 'crypto'
 import { plaintextForStorage } from '@/lib/auth/api-key-plaintext'
-
-function generateApiKey(prefix: string): string {
-  const randomBytes = crypto.randomBytes(32).toString('hex')
-  return `${prefix}${randomBytes}`
-}
-
-function getKeyPrefix(role: string): string {
-  const prefixes: Record<string, string> = {
-    'admin': 'sk_live_',
-    'read-only': 'sk_read_',
-    'write': 'sk_test_',
-    'ai-only': 'sk_ai_',
-  }
-  return prefixes[role] || 'sk_'
-}
+import { mintKey } from '@/lib/auth/key-prefix'
 
 /**
  * Rotate an API key - generates a new key while keeping the same settings
@@ -77,9 +63,9 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
       }
     }
 
-    // Generate new key
-    const keyPrefix = getKeyPrefix(apiKey.role)
-    const fullKey = generateApiKey(keyPrefix)
+    // A new secret of the same kind (lib/auth/key-prefix.ts). A key issued with
+    // a legacy sk_ prefix comes back with the current one.
+    const { key: fullKey, prefix: keyPrefix } = mintKey(apiKey)
 
     // ── ROTATION DID NOT ROTATE ANYTHING ──────────────────────────────────
     //

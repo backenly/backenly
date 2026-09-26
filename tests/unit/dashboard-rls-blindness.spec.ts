@@ -79,7 +79,7 @@ describe('bootstrap answers the verb callers actually use (P1)', () => {
 
   it('the Next twin exposes POST too', () => {
     const s = read('app/api/v1/[projectId]/bootstrap/route.ts')
-    expect(s).toMatch(/export async function POST/)
+    expect(s).toMatch(/export (async function POST\b|const POST = recordedV1\()/)
   })
 
   it('both preflights advertise POST', () => {

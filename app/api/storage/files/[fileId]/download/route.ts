@@ -9,7 +9,14 @@ import jwt from 'jsonwebtoken'
 import { canAccessProject } from '@/lib/edition/guard'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { cacheControlFor, mayRead, type Reader } from '@/lib/storage/access-policy'
+import { isExportToken, verifyExportToken } from '@/lib/storage/export-token'
 import { isStorageUnavailable } from '@/lib/storage/errors'
+import {
+  getProjectServingState,
+  PAUSED_CODE,
+  PAUSED_MESSAGE,
+  pausedDetails,
+} from '@/lib/projects/serving-state'
 
 /**
  * GET /api/storage/files/{fileId}/download — stream the file bytes.
@@ -72,6 +79,24 @@ export async function GET(request: NextRequest, props: { params: Promise<{ fileI
     }
     if (reader === 'misconfigured') {
       return NextResponse.json({ error: 'Server misconfiguration' }, { status: 500 })
+    }
+
+    // A paused project stops serving its files through this route to everyone
+    // except its own members and holders of an EXPORT link, both of whom are
+    // taking their own data out. A public object served straight from a CDN
+    // never reaches this code, so a pause cannot stop that and nothing claims
+    // it does.
+    const exporting = reader.kind === 'signed' && reader.purpose === 'export'
+    if (reader.kind !== 'operator' && !exporting) {
+      const serving = await getProjectServingState(record.projectId)
+      if (serving.kind === 'paused') {
+        return NextResponse.json(
+          {
+            error: { code: PAUSED_CODE, message: PAUSED_MESSAGE, details: pausedDetails(record.projectId, serving) },
+          },
+          { status: 503 },
+        )
+      }
     }
 
     const decision = mayRead(
@@ -156,6 +181,11 @@ async function classifyReader(
     if (!secret) {
       console.error('[storage/download] STORAGE_SECRET is not set')
       return 'misconfigured'
+    }
+    // Two kinds of link, never interchangeable: an export link has its own
+    // prefix and its own HMAC domain (lib/storage/export-token.ts).
+    if (isExportToken(token)) {
+      return verifyExportToken(fileId, token, secret) ? { kind: 'signed', purpose: 'export' } : 'invalid-token'
     }
     return verifySignedToken(fileId, token, secret) ? { kind: 'signed' } : 'invalid-token'
   }

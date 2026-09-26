@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server'
 import { prisma } from '@/lib/db'
 import { verify } from 'jsonwebtoken'
 import crypto from 'crypto'
+import { ISSUED_PREFIX } from '@/lib/auth/key-prefix'
 
 /**
  * API Key Authentication System
@@ -271,7 +272,8 @@ export function timingSafeCompare(a: string, b: string): boolean {
  */
 export function generateApiKey(environment: 'live' | 'test' = 'live'): string {
   const randomBytes = crypto.randomBytes(24).toString('hex')
-  return `proj_${environment}_${randomBytes}`
+  const prefix = environment === 'live' ? ISSUED_PREFIX.project : 'proj_test_'
+  return `${prefix}${randomBytes}`
 }
 
 export interface CreateApiKeyResult {

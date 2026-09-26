@@ -113,7 +113,6 @@ console.log('🔍 Scanning for Section Boundary Violations...\n')
 const sections = [
   { path: 'app/app/api-builder', name: 'api-builder' },
   { path: 'app/app/connect', name: 'connect' },
-  { path: 'app/app/deploy', name: 'deploy' },
   { path: 'app/app/monitoring', name: 'monitoring' },
 ]
 

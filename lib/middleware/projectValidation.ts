@@ -16,6 +16,9 @@ import { NextRequest, NextResponse } from 'next/server'
 import { requireAuth } from '@/lib/auth/middleware'
 import { getProjectResolver } from '@/lib/edition'
 import { ProjectResolutionError } from '@/lib/edition/types'
+import { touchProjectActivity } from '@/lib/projects/activity'
+
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
 
 export interface ValidatedProjectRequest {
   projectId: string
@@ -212,6 +215,14 @@ export async function withProjectValidation<T>(
 ): Promise<NextResponse<T>> {
   try {
     const validated = await validateProjectAccess(request)
+    // A member CHANGING the project is using it. Reads are deliberately not
+    // counted: this wrapper also serves history, usage, health and every other
+    // panel the dashboard polls, and an open tab must not keep an abandoned
+    // backend awake. Opening the console is counted separately, once, by the
+    // activity beacon (app/api/projects/[id]/activity).
+    if (!SAFE_METHODS.has(request.method.toUpperCase())) {
+      void touchProjectActivity(validated.projectId)
+    }
     return await handler(validated)
   } catch (error) {
     if (error instanceof NextResponse) {

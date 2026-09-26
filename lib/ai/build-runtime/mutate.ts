@@ -20,6 +20,7 @@ import { emit } from '@/lib/events/bus'
 import { prisma } from '@/lib/db/prisma'
 import { enforceDbStorage } from '@/lib/quota/kernel'
 import { snapshotProjectDbStorage } from '@/lib/usage/db-storage'
+import { getProjectServingState, PAUSED_MESSAGE } from '@/lib/projects/serving-state'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -42,6 +43,7 @@ export interface MutationResult<T = unknown> {
   locked?:          boolean   // true = another operation is running
   budgetExceeded?:  boolean   // true = hourly limit or cooldown hit
   quotaExceeded?:   boolean   // true = Plan storage limit reached
+  paused?:          boolean   // true = the project is paused; resume it first
 }
 
 // ── Core kernel ───────────────────────────────────────────────────────────────
@@ -62,7 +64,18 @@ export async function runMutation<T>(
 ): Promise<MutationResult<T>> {
   const { projectId, kind, action, snapshotBefore = false, emitRefresh = true } = opts
 
-  // ── 0. Plan storage gate ──────────────────────────────────────────────────
+  // ── 0a. Paused project ────────────────────────────────────────────────────
+  // Nothing mutates a paused project, whoever asks: the dashboard, an agent,
+  // or a scheduled pass that selected it before it paused. Every governed write
+  // passes through here, so this one check covers all of them. Only an
+  // explicit `paused` refuses; a lookup blip falls through to the kernel's own
+  // steps, which need the same database and will report their own failure.
+  const serving = await getProjectServingState(projectId)
+  if (serving.kind === 'paused') {
+    return { ok: false, paused: true, error: PAUSED_MESSAGE }
+  }
+
+  // ── 0b. Plan storage gate ─────────────────────────────────────────────────
   // Structural / data-growing mutations are gated on the project's PostgreSQL
   // storage cap (measured value; soft — kernel warns at 80%, blocks at 100%).
   // Cheaper to check before taking the build lock. Fail-open inside kernel.

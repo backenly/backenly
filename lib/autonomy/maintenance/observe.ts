@@ -78,7 +78,8 @@ export async function measureWindow(
 ): Promise<TrafficWindow> {
   const requests = await prisma.apiRequestLog
     .findMany({
-      where: { projectId, timestamp: { gte: from, lt: to } },
+      // End-user traffic only; /api/ rows are the platform's AI rate limiter.
+      where: { projectId, timestamp: { gte: from, lt: to }, NOT: { path: { startsWith: '/api/' } } },
       select: { statusCode: true, duration: true },
     })
     .catch(() => [] as Array<{ statusCode: number; duration: number }>)

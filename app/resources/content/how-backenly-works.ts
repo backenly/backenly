@@ -23,7 +23,7 @@ export const article: ArticleData = {
             {
               label: '1',
               title: 'Your agent, over MCP',
-              body: 'A scoped key, a manifest of 20 tools, and a request. Either a specific tool like `apply_migration`, or plain English through `backend_chat`.',
+              body: 'A scoped key, a manifest of 23 tools, and a request. Either a specific tool like `apply_migration`, or plain English through `backend_chat`.',
             },
             {
               label: '2',

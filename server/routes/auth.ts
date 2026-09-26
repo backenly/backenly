@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express'
 import { prisma } from '@/lib/db'
 import { hashPassword, verifyPassword } from '@/lib/auth/password'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
-import { ensureAuthUsersTable, buildUserInsert, isReservedTestEmail } from '@/lib/services/end-user-auth-table'
+import { ensureAuthUsersTable, buildUserInsert, isReservedTestEmail, AuthNotProvisionedError } from '@/lib/services/end-user-auth-table'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import { sendError, sendSuccess, ErrorCodes } from '../lib/response'
 import {
@@ -20,6 +20,7 @@ import { z } from 'zod'
 import jwt from 'jsonwebtoken'
 import { JWTSecretManager, resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { asyncRoute } from '../lib/async-route'
+import { touchProjectActivity } from '@/lib/projects/activity'
 
 const router = Router()
 
@@ -155,7 +156,7 @@ async function handleSignUp(req: Request, res: Response) {
     // it — creates it when missing, self-heals a drifted one (e.g. an
     // AI-generated `users` table with no `role` column). This is what
     // previously failed signup with `column "role" does not exist`.
-    const schema = await ensureAuthUsersTable(projectId)
+    const schema = await ensureAuthUsersTable(projectId, { email })
     const schemaName = schema.schemaName
 
     // Service-role: workspace users tables may have FORCE ROW LEVEL SECURITY.
@@ -216,8 +217,14 @@ async function handleSignUp(req: Request, res: Response) {
       )
     }
 
+    // An end user signing up is the backend being used.
+    void touchProjectActivity(projectId)
     res.status(201).json({ data: { user, token } })
   } catch (error: any) {
+    if (error instanceof AuthNotProvisionedError) {
+      sendError(res, error.code, error.message, 503)
+      return
+    }
     console.error('Signup error:', error)
     // Never leak Prisma / Postgres internals to the end user's app.
     const safe = sanitizeDiagnostic(error)
@@ -344,6 +351,9 @@ async function handleSignIn(req: Request, res: Response) {
       resolveJwtSecret(project.jwtSecret),
       { expiresIn: '7d', algorithm: 'HS256' }
     )
+    // Only a SUCCESSFUL sign-in counts: failed attempts are not use, and
+    // counting them would let a credential-stuffing bot keep a project awake.
+    void touchProjectActivity(projectId)
     sendSuccess(res, { user: { id: user.id, email: user.email, name: user.name }, token })
   } catch (error: any) {
     console.error('Signin error:', error?.message ?? 'unknown')

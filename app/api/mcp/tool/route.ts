@@ -20,16 +20,22 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
-import { mcpGuard, recordMcpCall, refuseIfReadOnly } from '@/lib/mcp/guard'
+import { mcpGuard, recordMcpCall, refuseIfReadOnly, type McpGuardAuth } from '@/lib/mcp/guard'
 import { corsHeaders, optionsResponse } from '@/lib/mcp/cors'
 import { catalogByName, STATE_SECTIONS, BRANCH_ACTIONS, isReadOnlyTool } from '@/lib/mcp/catalog'
 import { dispatchTool, isDestructiveTool, READ_ONLY_TOOLS } from '@/lib/ai/brain/tools'
 import { dbQuery, dbInsert, dbUpdate, dbDelete } from '@/lib/mcp/runtime-db'
 import { dbErrorBody } from '@/lib/db/query-errors'
+import { parseMcpBody } from '@/lib/mcp/request-body'
+import { DB_TOOL_FAILURE_CODE, DB_TOOL_REQUESTS, isDbTool, type DbToolName } from '@/lib/mcp/db-tool-requests'
 import { parseMigration, MigrationParseError } from '@/lib/mcp/migration-parser'
 import { prisma } from '@/lib/db/prisma'
+import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 import { createTokenScope, runInTokenScope } from '@/lib/ai/token-meter'
 import { createHash } from 'crypto'
+import { DOCS_MAX_CHARS } from '@/lib/mcp/docs-limit'
+import { AGENT_DOCS_URL, AGENT_DOC_TOPICS, agentDocPublicPath, resolveDocTopic } from '@/lib/mcp/agent-docs'
+import { readOnlyView, resolveDomainAction, type DomainResolution } from '@/lib/mcp/domains'
 
 /**
  * Tools on this route that spend Backenly's model budget. See the gate in POST
@@ -91,19 +97,60 @@ export async function POST(request: NextRequest) {
 
   const { tool, args } = parsed
 
+  // ── Domain tools: resolve the action before anything reads `tool` ─────────
+  //
+  // `auth {action:"enable"}` is enable_auth, `deploy {action:"rollback"}` is
+  // rollback_deploy (lib/mcp/domains.ts). Every check below — read-only keys,
+  // the credit gate, metering — is about what actually runs, so it reads the
+  // resolved target, while the activity feed records `domain.action`.
+  const domain = resolveDomainAction(tool, args.action)
+  if (domain?.kind === 'unknown_action') {
+    recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 400, tool, error: 'UNKNOWN_ACTION' })
+    return withCors(NextResponse.json(
+      {
+        ok: false,
+        error: domain.action ? `Unknown ${tool} action "${domain.action}".` : `${tool} requires { action }.`,
+        code: 'UNKNOWN_ACTION',
+        // A read-only key is told only the actions it may use: the list of
+        // write actions is not something it should learn from an error.
+        supported: auth.readOnly
+          ? Object.keys(readOnlyView(domain.domain)?.actions ?? {})
+          : domain.supported,
+        hint: `The ${tool} tool description lists what each action does and the arguments it needs.`,
+      },
+      { status: 400 },
+    ))
+  }
+  const resolved = domain?.kind === 'ok' ? domain : null
+  const effectiveTool = resolved ? resolved.target : tool
+  const callLabel = resolved ? `${tool}.${resolved.action}` : tool
+  const domainArgs: Record<string, unknown> | null = resolved
+    ? Object.fromEntries(Object.entries(args).filter(([k]) => k !== 'action'))
+    : null
+
   // ── Read-only keys ────────────────────────────────────────────────────────
   //
   // Before anything else that could touch state. tools/list already hides every
   // mutating tool from a read-only key, so reaching here means the client was
   // pinned to an older manifest or is calling the dispatch surface directly —
-  // both of which must be refused rather than served.
-  if (auth.readOnly && !isReadOnlyTool(tool)) {
-    const res = refuseIfReadOnly(auth, tool)!
+  // both of which must be refused rather than served. For a domain tool it is
+  // the action's target that is judged: `monitoring {action:"metrics"}` is a read.
+  if (auth.readOnly && !isReadOnlyTool(effectiveTool)) {
+    const res = refuseIfReadOnly(auth, callLabel)!
     recordMcpCall(
       { ...auth, endpoint: ENDPOINT, startedAt },
-      { statusCode: 403, error: 'READ_ONLY_KEY' },
+      { statusCode: 403, tool: callLabel, error: 'READ_ONLY_KEY' },
     )
     return withCors(res)
+  }
+
+  // ── Destructive and high-risk domain actions wait for a human ─────────────
+  //
+  // Parked with the exact call. Approval runs that call verbatim (see
+  // runApprovedCall in lib/mcp/approvals.ts), so what executes is what the
+  // human read, not a model's re-reading of it.
+  if (resolved?.approval) {
+    return withCors(await parkForApproval(auth, resolved, domainArgs!, startedAt))
   }
 
   // ── Credit gate for the model-backed tools ────────────────────────────────
@@ -122,13 +169,13 @@ export async function POST(request: NextRequest) {
   // two modules are the only OpenAI callers on the path. GENERATE_API, by
   // contrast, is pure SQL generation and is deliberately NOT gated. Keep this
   // set in sync when a new model-backed tool lands.
-  if (MODEL_BACKED_TOOLS.has(tool)) {
+  if (MODEL_BACKED_TOOLS.has(effectiveTool)) {
     const { enforceAiCredits } = await import('@/lib/entitlements/policy')
     const credits = await enforceAiCredits(auth.userId)
     if (credits !== true) {
       recordMcpCall(
         { ...auth, endpoint: ENDPOINT, startedAt },
-        { statusCode: 402, tool, error: 'AI_CREDITS_EXHAUSTED' },
+        { statusCode: 402, tool: callLabel, error: 'AI_CREDITS_EXHAUSTED' },
       )
       return withCors(NextResponse.json(
         {
@@ -139,7 +186,7 @@ export async function POST(request: NextRequest) {
           requiredPlan: credits.requiredPlan,
           upgradeRequired: true,
           remedy:
-            `\`${tool}\` uses Backenly's model budget and this month's credits are spent. ` +
+            `\`${callLabel}\` uses Backenly's model budget and this month's credits are spent. ` +
             `Every other tool on this route is deterministic and still works. ` +
             `Credits reset on the 1st, or upgrade the plan.`,
           retryable: false,
@@ -153,23 +200,33 @@ export async function POST(request: NextRequest) {
   // The call is still RECORDED as read_backend_state — that is what the agent
   // invoked and what the activity feed should say — but dispatch targets the
   // resolved name.
-  let dispatchName = tool
-  const dispatchArgs: Record<string, unknown> = args
+  let dispatchName = effectiveTool
+  const dispatchArgs: Record<string, unknown> = domainArgs ?? args
 
-  // fetch_docs — synthetic read-only tool. Serves the agent-facing docs
-  // (public/llms.txt) so a connected host LLM can self-serve context instead of
-  // hallucinating the API/tool vocabulary (§9.3). No brain call, no mutation.
+  // fetch_docs — synthetic read-only tool. Serves the agent-facing docs (the
+  // public/llms.txt index, or one topic from public/docs/agents) so a connected
+  // host LLM can self-serve context instead of hallucinating the API/tool
+  // vocabulary (§9.3). No brain call, no mutation.
   if (tool === 'fetch_docs') {
     const topic = typeof args.topic === 'string' ? args.topic.trim() : ''
-    const { markdown, matchedTopic } = await loadDocs(request, topic)
+    const { markdown, matchedTopic, unknownTopic } = await loadDocs(request, topic)
     recordMcpCall(
       { ...auth, endpoint: ENDPOINT, startedAt },
-      { statusCode: 200, tool, mutation: false, summary: matchedTopic ? `docs: ${matchedTopic}` : 'docs: full guide' },
+      { statusCode: 200, tool, mutation: false, summary: matchedTopic ? `docs: ${matchedTopic}` : 'docs: index' },
     )
     return withCors(NextResponse.json({
       ok: true,
-      summary: matchedTopic ? `Backenly docs — ${matchedTopic}` : 'Backenly agent guide',
-      data: { topic: matchedTopic ?? null, markdown },
+      summary: matchedTopic
+        ? `Backenly docs — ${matchedTopic}`
+        : unknownTopic
+          ? `No docs topic "${unknownTopic}"; served the index, which lists every topic`
+          : 'Backenly docs index',
+      data: {
+        topic: matchedTopic ?? null,
+        markdown,
+        topics: AGENT_DOC_TOPICS.map((t) => t.id),
+        ...(unknownTopic ? { unknownTopic } : {}),
+      },
       needsUser: false,
       timing: { ms: Date.now() - startedAt, heavy: false },
     }))
@@ -393,8 +450,64 @@ export async function POST(request: NextRequest) {
       ))
     }
 
+    // ── Every statement against the tables that actually exist ──────────────
+    //
+    // The executors were never asked. create_table answered "Created table …"
+    // for a table that was already there and changed nothing, so columns a
+    // migration declared that way were reported created and never existed. And
+    // add_column on a table that did not exist CREATED it, so a typo in
+    // `ALTER TABLE <name>` made a new table instead of failing.
+    //
+    // So each statement is checked, in order, against the tables that exist
+    // plus those the migration creates before it, and before anything runs,
+    // like every other refusal. CREATE TABLE of an existing table is refused
+    // and names ALTER TABLE; CREATE TABLE IF NOT EXISTS leaves it as it is and
+    // says so; a statement on a table that does not exist is refused.
+    const existingNotes: string[] = []
+    const tableOf = (p: { args: Record<string, unknown> }) => String(p.args.tableName ?? '')
+    const named = [...new Set(planned.map(tableOf).filter(Boolean))]
+    if (named.length) {
+      const found = await prisma.$queryRaw<Array<{ table_name: string }>>`
+        SELECT table_name FROM information_schema.tables
+        WHERE table_schema = ${workspaceSchemaName(auth.projectId)} AND table_name = ANY(${named})`
+      const willExist = new Set(found.map((r) => r.table_name))
+      const skipped = new Set<string>()
+      const refuse = (code: string, error: string, statement: string, hint: string) => {
+        recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 400, tool, error: code })
+        return withCors(NextResponse.json({ ok: false, error, code, statement, hint, applied: [] }, { status: 400 }))
+      }
+      for (const step of planned) {
+        const table = tableOf(step)
+        if (!table || skipped.has(step.source)) continue
+        if (step.tool === 'create_table') {
+          if (!willExist.has(table)) { willExist.add(table); continue }
+          if (!/^\s*create\s+table\s+if\s+not\s+exists\b/i.test(step.source)) {
+            return refuse(
+              'TABLE_EXISTS',
+              `Table ${table} already exists, so CREATE TABLE would change nothing. Nothing was applied.`,
+              step.source,
+              `To add columns use ALTER TABLE ${table} ADD COLUMN …; get_table_schema shows what ${table} has now.`,
+            )
+          }
+          // IF NOT EXISTS: skip the statement and everything it expanded into.
+          skipped.add(step.source)
+          existingNotes.push(`${table} already existed; CREATE TABLE IF NOT EXISTS left it unchanged.`)
+          continue
+        }
+        if (!willExist.has(table)) {
+          return refuse(
+            'TABLE_NOT_FOUND',
+            `There is no table ${table} in this project, so "${step.source}" cannot run. Nothing was applied.`,
+            step.source,
+            `Check the name with read_backend_state { section: "tables" }, or create it first with CREATE TABLE ${table} (…).`,
+          )
+        }
+      }
+      planned = planned.filter((p) => ![...skipped].some((s) => p.source === s || p.source.startsWith(`${s} → `)))
+    }
+
     const applied: { statement: string; tool: string; summary: string }[] = []
-    const notes = planned.flatMap((p) => p.notes ?? [])
+    const notes = [...existingNotes, ...planned.flatMap((p) => p.notes ?? [])]
 
     for (let i = 0; i < planned.length; i++) {
       const step = planned[i]
@@ -502,26 +615,49 @@ export async function POST(request: NextRequest) {
     delete dispatchArgs.section
   }
 
+  // ── Readiness is a read here ──────────────────────────────────────────────
+  // The readiness executor APPLIES fixes (JWT generation, default RLS) unless
+  // told `autoFix: false`, and it defaults to fixing. This surface serves it as
+  // a read: `read_backend_state {section:"readiness"}` is side-effect free by
+  // contract and is offered to read-only keys. So a readiness call over MCP
+  // fixes nothing unless a read-write key asks for `autoFix: true` in so many
+  // words.
+  if (dispatchName === 'get_readiness') {
+    dispatchArgs.autoFix = dispatchArgs.autoFix === true && !auth.readOnly
+  }
+
   // Runtime data tools (db_query/insert/update/delete) live in the catalog but
   // are served by dedicated helpers, not the brain dispatch. Handle them here so
   // an agent can call them through the SAME /api/mcp/tool surface as every other
   // tool (previously they 404'd with "Unknown tool" unless the host knew to hit
-  // /api/mcp/db/*). The dedicated /api/mcp/db/* routes remain for lower latency.
+  // /api/mcp/db/*). The remote MCP endpoint and the stdio package both call
+  // them here; the dedicated /api/mcp/db/* routes remain for older clients.
   // run_query needs no special arm here: it is a brain tool, so the generic
   // dispatchTool path above already serves it from its single definition.
+  //
+  // The args are parsed with the schemas /api/mcp/db/* use
+  // (lib/mcp/db-tool-requests.ts), so a bad call is refused here exactly as it
+  // is there, with the offending keys named, and the helper runs on the parsed
+  // args rather than on what was sent.
 
-  const DB_TOOLS: Record<string, (projectId: string, input: any) => Promise<any>> = {
+  const DB_TOOLS: Record<DbToolName, (projectId: string, input: any) => Promise<any>> = {
     db_query: dbQuery, db_insert: dbInsert, db_update: dbUpdate, db_delete: dbDelete,
   }
-  if (tool in DB_TOOLS) {
+  if (isDbTool(tool)) {
+    const parsedArgs = parseMcpBody(DB_TOOL_REQUESTS[tool], args, tool)
+    if (!parsedArgs.ok) {
+      recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 400, tool, error: parsedArgs.error.code })
+      return withCors(NextResponse.json(parsedArgs.error, { status: 400 }))
+    }
+    const input = parsedArgs.data as { table: string }
     try {
-      const result = await DB_TOOLS[tool](auth.projectId, args as any)
+      const result = await DB_TOOLS[tool](auth.projectId, input)
       const mutation = tool !== 'db_query'
       const summary =
-        tool === 'db_query' ? `Read ${result.count ?? 0} row(s) from ${(args as any).table}`
-        : tool === 'db_insert' ? `Inserted 1 row into ${(args as any).table}`
-        : tool === 'db_update' ? `Updated ${result.updated ?? 0} row(s) in ${(args as any).table}`
-        : `Deleted ${result.deleted ?? 0} row(s) from ${(args as any).table}`
+        tool === 'db_query' ? `Read ${result.count ?? 0} row(s) from ${input.table}`
+        : tool === 'db_insert' ? `Inserted 1 row into ${input.table}`
+        : tool === 'db_update' ? `Updated ${result.updated ?? 0} row(s) in ${input.table}`
+        : `Deleted ${result.deleted ?? 0} row(s) from ${input.table}`
       recordMcpCall(
         { ...auth, endpoint: ENDPOINT, startedAt },
         { statusCode: 200, tool, mutation, summary },
@@ -533,7 +669,7 @@ export async function POST(request: NextRequest) {
     } catch (err) {
       // Same structured contract as the dedicated /api/mcp/db/* routes, so an
       // agent gets identical, self-correctable errors on either surface.
-      const body = dbErrorBody(err, 'DB_OP_FAILED')
+      const body = dbErrorBody(err, DB_TOOL_FAILURE_CODE[tool])
       recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 400, tool, error: body.error })
       return withCors(NextResponse.json(body, { status: 400 }))
     }
@@ -572,7 +708,9 @@ export async function POST(request: NextRequest) {
   // Checked against the DISPATCHABLE set, which is wider than the advertised
   // catalog — a client pinned to an older manifest still calls `list_tables`,
   // and 404-ing it would break a working setup for no reliability gain.
-  if (!catalog.has(dispatchName)) {
+  // A domain action's target is admitted by the domain table itself, which is
+  // narrower than the dispatchable set (it never names a control-loop tool).
+  if (!resolved && !catalog.has(dispatchName)) {
     const res = NextResponse.json(
       {
         ok: false,
@@ -601,13 +739,15 @@ export async function POST(request: NextRequest) {
   // Billed in `finally` because a dispatch that threw still burned the tokens
   // it burned. Fire-and-forget, mirroring the chat route: a billing write must
   // never turn a completed backend change into an error response.
-  const metered = MODEL_BACKED_TOOLS.has(tool)
+  const metered = MODEL_BACKED_TOOLS.has(effectiveTool)
   const tokenScope = createTokenScope()
 
   try {
     const result = await runInTokenScope(tokenScope, () => dispatchTool(dispatchName, dispatchArgs, {
       projectId: auth.projectId,
       userId: auth.userId,
+      apiKeyId: auth.keyId,
+      keyReadOnly: auth.readOnly,
       sessionToken: undefined,
       destructiveConfirmed: false,
       // Owner-held MCP key on the direct tool surface: destructive tools are
@@ -652,10 +792,11 @@ export async function POST(request: NextRequest) {
       { ...auth, endpoint: ENDPOINT, startedAt },
       {
         statusCode: result.ok ? 200 : 400,
-        tool,
+        tool: callLabel,
         mutation: isMutation,
         summary: result.summary,
         error: code,
+        data: result.data,
       },
     )
 
@@ -698,21 +839,25 @@ function jsonSafe<T>(value: T): T {
 
 // ── fetch_docs support ────────────────────────────────────────────────────────
 
-const DOCS_MAX_CHARS = 24_000
-
 /**
- * Load the agent-facing docs (public/llms.txt) and, when a topic is given,
- * return just the matching section. Fetched from the request origin so it works
- * identically in dev, standalone, and behind nginx — no fs path assumptions.
- * Falls back to a terse pointer if the file can't be reached.
+ * The agent docs: the index (public/llms.txt) with no topic, or one topic's
+ * own file (public/docs/agents/<id>.md, lib/mcp/agent-docs.ts). A topic that is
+ * not one gets the index, with the real list first, rather than a guess: the
+ * old heading search answered "deploy" with whichever section mentioned it first.
+ * Falls back to a terse pointer if the index can't be reached.
  */
 async function loadDocs(
   request: NextRequest,
   topic: string,
-): Promise<{ markdown: string; matchedTopic: string | null }> {
-  let full = await readLlmsTxt(request)
+): Promise<{ markdown: string; matchedTopic: string | null; unknownTopic?: string }> {
+  if (topic) {
+    const hit = resolveDocTopic(topic)
+    const text = hit ? await readPublicDoc(request, agentDocPublicPath(hit.id)) : ''
+    if (hit && text) return { markdown: clamp(text, `${AGENT_DOCS_URL}/${hit.id}.md`), matchedTopic: hit.id }
+  }
 
-  if (!full) {
+  const index = await readPublicDoc(request, 'llms.txt')
+  if (!index) {
     return {
       markdown:
         '# Backenly docs\n\nFull docs: https://backenly.com/llms.txt\n\n' +
@@ -720,31 +865,36 @@ async function loadDocs(
       matchedTopic: null,
     }
   }
-
   if (topic) {
-    const section = extractSection(full, topic)
-    if (section) return { markdown: clamp(section), matchedTopic: topic }
+    const hit = resolveDocTopic(topic)
+    if (hit) {
+      // A real topic whose file this server could not read: say so, not "unknown".
+      const note = `The ${hit.id} topic could not be read here; it is at ${AGENT_DOCS_URL}/${hit.id}.md. The index follows.\n\n`
+      return { markdown: note + clamp(index, 'https://backenly.com/llms.txt'), matchedTopic: null }
+    }
+    const note = `There is no docs topic "${topic}". Topics: ${AGENT_DOC_TOPICS.map((t) => t.id).join(', ')}. The index follows.\n\n`
+    return { markdown: note + clamp(index, 'https://backenly.com/llms.txt'), matchedTopic: null, unknownTopic: topic }
   }
-
-  return { markdown: clamp(full), matchedTopic: null }
+  return { markdown: clamp(index, 'https://backenly.com/llms.txt'), matchedTopic: null }
 }
 
 /**
- * Load public/llms.txt reliably. The previous implementation self-fetched
+ * Load a file under public/ reliably. The previous implementation self-fetched
  * `request.nextUrl.origin/llms.txt`, which in the Next standalone server behind
  * nginx resolves to an internal origin that does NOT serve the static file — so
  * fetch_docs always returned the tiny fallback pointer instead of the real docs.
  * Try, in order: the file on disk (works in standalone + dev), the absolute app
- * URL, then the request origin. First hit wins.
+ * URL, then the request origin. First hit wins. `publicPath` is only ever one of
+ * the registry's own paths, never the caller's text.
  */
-async function readLlmsTxt(request: NextRequest): Promise<string> {
+async function readPublicDoc(request: NextRequest, publicPath: string): Promise<string> {
   // 1. Filesystem — public/ is copied next to the standalone server at build.
   try {
     const fs = await import('fs/promises')
     const path = await import('path')
     for (const p of [
-      path.join(process.cwd(), 'public', 'llms.txt'),
-      path.join(process.cwd(), '.next', 'standalone', 'public', 'llms.txt'),
+      path.join(process.cwd(), 'public', publicPath),
+      path.join(process.cwd(), '.next', 'standalone', 'public', publicPath),
     ]) {
       try {
         const txt = await fs.readFile(/*turbopackIgnore: true*/ p, 'utf8')
@@ -760,7 +910,7 @@ async function readLlmsTxt(request: NextRequest): Promise<string> {
   ].filter(Boolean) as string[]
   for (const origin of origins) {
     try {
-      const res = await fetch(`${origin}/llms.txt`, { cache: 'no-store' })
+      const res = await fetch(`${origin}/${publicPath}`, { cache: 'no-store' })
       if (res.ok) {
         const txt = await res.text()
         if (txt && txt.trim()) return txt
@@ -770,30 +920,70 @@ async function readLlmsTxt(request: NextRequest): Promise<string> {
   return ''
 }
 
-/** Pull the Markdown section whose heading best matches `topic`. */
-function extractSection(markdown: string, topic: string): string | null {
-  const lines = markdown.split('\n')
-  const needle = topic.toLowerCase()
-  let start = -1
-  let headingLevel = 0
-  for (let i = 0; i < lines.length; i++) {
-    const m = /^(#{2,4})\s+(.*)$/.exec(lines[i])
-    if (m && m[2].toLowerCase().includes(needle)) {
-      start = i
-      headingLevel = m[1].length
-      break
-    }
-  }
-  if (start === -1) return null
-  // Capture until the next heading at the same or higher level.
-  let end = lines.length
-  for (let i = start + 1; i < lines.length; i++) {
-    const m = /^(#{1,4})\s+/.exec(lines[i])
-    if (m && m[1].length <= headingLevel) { end = i; break }
-  }
-  return lines.slice(start, end).join('\n').trim()
+function clamp(s: string, url: string): string {
+  return s.length <= DOCS_MAX_CHARS ? s : s.slice(0, DOCS_MAX_CHARS) + `\n\n…(truncated — see ${url})`
 }
 
-function clamp(s: string): string {
-  return s.length <= DOCS_MAX_CHARS ? s : s.slice(0, DOCS_MAX_CHARS) + '\n\n…(truncated — see https://backenly.com/llms.txt)'
+// ── Parking a domain action for a human ─────────────────────────────────────
+
+/** Argument names whose values never belong in a human-facing description. */
+const SECRET_ARG = /^(apiKey|clientSecret|webhookSecret|value|password|secret)$/i
+
+/** "Deploy: rollback (version=3)" — what the human reads on the approval card. */
+function describeCall(resolution: Extract<DomainResolution, { kind: 'ok' }>, args: Record<string, unknown>): string {
+  const shown = Object.entries(args)
+    .filter(([, v]) => v !== undefined && v !== null && v !== '')
+    .map(([k, v]) => `${k}=${SECRET_ARG.test(k) ? '•••' : typeof v === 'string' ? v : JSON.stringify(v)}`)
+    .join(', ')
+  const text = `${resolution.domain.title}: ${resolution.action}${shown ? ` (${shown})` : ''}`
+  return text.length > 280 ? text.slice(0, 277) + '…' : text
+}
+
+async function parkForApproval(
+  auth: McpGuardAuth,
+  resolution: Extract<DomainResolution, { kind: 'ok' }>,
+  args: Record<string, unknown>,
+  startedAt: number,
+): Promise<NextResponse> {
+  const callLabel = `${resolution.domain.name}.${resolution.action}`
+  const described = describeCall(resolution, args)
+  try {
+    const { createApprovalRequest } = await import('@/lib/mcp/approvals')
+    const row = await createApprovalRequest({
+      projectId: auth.projectId,
+      userId: auth.userId,
+      apiKeyId: auth.keyId,
+      message: `Requested by an agent over MCP: ${described}`,
+      danger: { tool: resolution.target, target: described, rowCount: null, reversible: false },
+      toolArgs: args,
+    })
+    recordMcpCall(
+      { ...auth, endpoint: ENDPOINT, startedAt },
+      { statusCode: 200, tool: callLabel, mutation: false, summary: `awaiting approval ${row.id}` },
+    )
+    return NextResponse.json({
+      ok: true,
+      status: 'awaiting_approval',
+      summary:
+        `${described} needs a human's approval and is waiting on the project's Autonomy page. ` +
+        `Nothing has changed yet.`,
+      approval: {
+        id: row.id,
+        status: 'pending',
+        poll: `check_approval with { "id": "${row.id}" }`,
+        note:
+          'The exact call you sent runs verbatim once a human approves it. Tell your human it is waiting, ' +
+          'then poll check_approval every 15-30s until it is executed, rejected, failed or expired (24h).',
+      },
+      needsUser: true,
+      timing: { ms: Date.now() - startedAt, heavy: false },
+    })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Could not create the approval request.'
+    recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 500, tool: callLabel, error: 'APPROVAL_FAILED' })
+    return NextResponse.json(
+      { ok: false, error: message, code: 'APPROVAL_FAILED', retryable: true, hint: 'Nothing was changed. Retry the call.' },
+      { status: 500 },
+    )
+  }
 }

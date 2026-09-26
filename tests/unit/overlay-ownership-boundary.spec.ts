@@ -368,6 +368,9 @@ describe('overlay-allowlist.json', () => {
         'app/api/cron/process-grace-periods/route.ts',
         'app/api/org/**',
         'app/api/projects/[id]/access/route.ts',
+        // Whether a paused project may resume, and resuming it: Cloud's
+        // inactivity-pause policy. The pause state itself is public.
+        'app/api/projects/[id]/availability/**',
         'app/api/referral/**',
         'app/api/users/route.ts',
         'app/app/billing/**',

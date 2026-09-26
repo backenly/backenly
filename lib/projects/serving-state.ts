@@ -4,6 +4,11 @@
  * One answer, read by the runtime's serving gate (server/lib/serving-gate.ts)
  * in front of EVERY `/api/v1/:projectId` and `/api/v2/:projectId` route.
  *
+ * Two things stop a project serving: founder lockdown (`lockedDownAt`) and an
+ * inactivity pause (`pausedAt`, set only by Backenly Cloud through
+ * lib/projects/pause-lifecycle.ts). Both are refusals this module must never
+ * lose to an error, so both get the fail-closed treatment below.
+ *
  * ── Why this exists ─────────────────────────────────────────────────────────
  *
  * Founder lockdown (`Project.lockedDownAt`) is described as sealing a project
@@ -26,8 +31,8 @@
  * EMERGENCY lockdown, and a database error must never be the thing that unseals
  * a sealed project. So, when the lookup fails:
  *
- *   cached locked      -> still locked, however stale. An error can only ever
- *                         keep a project refused, never release it.
+ *   cached locked      -> still locked (or paused), however stale. An error can
+ *   or paused             only ever keep a project refused, never release it.
  *   cached serving     -> serving, but only within STALE_SERVING_GRACE_MS of
  *                         when that answer stopped being fresh. One dropped
  *                         query should not take a live app down.
@@ -49,8 +54,9 @@
  *
  * The runtime and the web app are separate processes. Lockdown is written by
  * the web app, so this cache cannot be invalidated across the process boundary;
- * FRESH_MS is the bound on how long a newly locked project can keep serving
- * from a runtime that had just read it.
+ * FRESH_MS is the bound on how long a newly locked or paused project can keep
+ * serving from a runtime that had just read it, and on how long a resumed one
+ * keeps being refused.
  */
 import { prisma } from '@/lib/db/prisma'
 
@@ -58,6 +64,11 @@ export type ProjectServingState =
   | { kind: 'serving' }
   | { kind: 'not_found' }
   | { kind: 'locked'; reason: string | null }
+  /**
+   * Paused for inactivity (Backenly Cloud only; nothing public sets it). Holds
+   * the same fail-closed guarantee as a lock: an error never resumes a project.
+   */
+  | { kind: 'paused'; pausedAt: Date; reason: string | null }
   /** The lookup failed and there was nothing trustworthy to fall back on. */
   | { kind: 'unavailable' }
 
@@ -67,6 +78,8 @@ type KnownState = Exclude<ProjectServingState, { kind: 'unavailable' }>
 export interface ServingRow {
   lockedDownAt: Date | null
   lockedDownReason: string | null
+  pausedAt: Date | null
+  pauseReason: string | null
 }
 
 export interface ServingStateReaderOptions {
@@ -97,7 +110,10 @@ interface Entry {
 
 function toState(row: ServingRow | null): KnownState {
   if (!row) return { kind: 'not_found' }
+  // A lock outranks a pause: it is the operator sealing a compromised project,
+  // and resuming must not be the thing that appears to lift it.
   if (row.lockedDownAt) return { kind: 'locked', reason: row.lockedDownReason }
+  if (row.pausedAt) return { kind: 'paused', pausedAt: row.pausedAt, reason: row.pauseReason }
   return { kind: 'serving' }
 }
 
@@ -149,7 +165,7 @@ export function createServingStateReader(options: ServingStateReaderOptions): Se
         `[ServingState] Could not read project ${projectId}; failing closed:`,
         err?.message ?? err,
       )
-      if (cached?.state.kind === 'locked') return cached.state
+      if (cached?.state.kind === 'locked' || cached?.state.kind === 'paused') return cached.state
       if (cached?.state.kind === 'serving' && at - cached.freshUntil <= staleServingGraceMs) {
         return cached.state
       }
@@ -170,7 +186,7 @@ const reader = createServingStateReader({
   load: projectId =>
     prisma.project.findUnique({
       where: { id: projectId },
-      select: { lockedDownAt: true, lockedDownReason: true },
+      select: { lockedDownAt: true, lockedDownReason: true, pausedAt: true, pauseReason: true },
     }),
 })
 
@@ -180,4 +196,46 @@ export function getProjectServingState(projectId: string): Promise<ProjectServin
 
 export function invalidateProjectServingState(projectId: string): void {
   reader.invalidate(projectId)
+}
+
+// ── The paused answer, one contract for every door ───────────────────────────
+//
+// The runtime gate, the Next-owned v1 middleware, MCP and the storage download
+// route all refuse a paused project, and a client must see the same body from
+// each. The message says the API is paused and nothing more: a public file
+// served straight from a CDN is not stopped by a pause, so this must not
+// suggest the project's files went offline or became private.
+
+export const PAUSED_CODE = 'PROJECT_PAUSED'
+
+export const PAUSED_MESSAGE =
+  'This project is paused because it has not been used recently. ' +
+  'Its owner can resume it from the dashboard.'
+
+/** Where an owner resumes it, relative to the dashboard origin. */
+export function resumePath(projectId: string): string {
+  return `/app/projects/${projectId}`
+}
+
+export function pausedDetails(
+  projectId: string,
+  state: { pausedAt: Date; reason: string | null },
+): Record<string, string | null> {
+  const origin = process.env.NEXT_PUBLIC_APP_URL?.trim().replace(/\/$/, '')
+  // Absolute only when this process knows the dashboard's origin. A guessed
+  // host would send a self-hoster's users to somebody else's site.
+  const resumeUrl = origin ? `${origin}${resumePath(projectId)}` : null
+  return {
+    pausedAt: state.pausedAt.toISOString(),
+    reason: state.reason,
+    resumePath: resumePath(projectId),
+    resumeUrl,
+    // `hint` and `fixUrl` are the fields the SDK's BackenlyError already turns
+    // into a console banner, so a developer sees why every call is failing and
+    // where to fix it without opening the network tab.
+    hint:
+      'This project is paused, so every API call is refused until it is resumed. ' +
+      'Its owner can resume it from the Backenly dashboard.',
+    fixUrl: resumeUrl,
+  }
 }

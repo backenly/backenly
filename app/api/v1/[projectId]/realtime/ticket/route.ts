@@ -19,11 +19,12 @@ import { v1ApiMiddleware } from '@/lib/api/v1/middleware'
 import { prisma } from '@/lib/db/prisma'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { mintSseTicket, SSE_TICKET_TTL_SECONDS } from '@/lib/realtime/sse-ticket'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
   const middleware = await v1ApiMiddleware(request, params)
   if (middleware.response) return middleware.response
@@ -89,7 +90,7 @@ export async function POST(request: NextRequest, props: { params: Promise<{ proj
   )
 }
 
-export async function GET() {
+async function handleGET() {
   return NextResponse.json(
     {
       error:
@@ -100,3 +101,6 @@ export async function GET() {
     { status: 405, headers: { Allow: 'POST' } },
   )
 }
+
+export const GET = recordedV1(handleGET)
+export const POST = recordedV1(handlePOST)

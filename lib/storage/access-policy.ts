@@ -77,8 +77,12 @@ export function policyAllowsPublic(policy: unknown): boolean {
  */
 export type Reader =
   | { kind: 'anonymous' }
-  /** Presented a valid, unexpired signed link for THIS object. */
-  | { kind: 'signed' }
+  /**
+   * Presented a valid, unexpired signed link for THIS object. `purpose:
+   * 'export'` marks a link minted by the admin-only export route
+   * (lib/storage/export-token.ts), which still works while the project is paused.
+   */
+  | { kind: 'signed'; purpose?: 'export' }
   | { kind: 'operator'; userId: string }
   | { kind: 'endUser'; userId: string }
   /**
@@ -140,6 +144,16 @@ export function mayRead(object: StoredObject, reader: Reader): AccessDecision {
   // to show a project its own files.
   if (reader.kind === 'operator') {
     return ALLOW(`operator of the project may read under ${policy}`)
+  }
+
+  // ── An export link ──────────────────────────────────────────────────────
+  //
+  // Minted only by the admin-only export route, for one object, for an hour. It
+  // carries a project administrator's authority into a download that has no
+  // session, so it reads what the administrator could, `owner_only` included.
+  // An ordinary signed link can never pass for one (lib/storage/export-token.ts).
+  if (reader.kind === 'signed' && reader.purpose === 'export') {
+    return ALLOW(`export link minted by a project administrator, under ${policy}`)
   }
 
   // ── Identified, and entitled to nothing here ────────────────────────────

@@ -22,8 +22,10 @@
  *     identity, with the standard audit trail.
  */
 
+import { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
 import { runBrain, type BrainEvent } from '@/lib/ai/brain/agent'
+import { dispatchTool, type ToolDispatchContext, type ToolResult } from '@/lib/ai/brain/tools'
 
 export const APPROVAL_TTL_MS = 24 * 60 * 60 * 1000
 
@@ -61,6 +63,12 @@ export async function createApprovalRequest(input: {
   apiKeyId?: string
   message: string
   danger: DangerInfo
+  /**
+   * The exact arguments for `danger.tool`. When present, approval runs that
+   * call verbatim instead of replaying `message` through the brain, so what
+   * executes is what the human read. MCP domain tools always set it.
+   */
+  toolArgs?: Record<string, unknown>
 }) {
   const row = await prisma.agentApprovalRequest.create({
     data: {
@@ -72,6 +80,7 @@ export async function createApprovalRequest(input: {
       target: input.danger.target.slice(0, 300),
       rowCount: input.danger.rowCount,
       reversible: input.danger.reversible,
+      ...(input.toolArgs ? { toolArgs: input.toolArgs as Prisma.InputJsonValue } : {}),
       expiresAt: new Date(Date.now() + APPROVAL_TTL_MS),
     },
   })
@@ -176,6 +185,24 @@ export async function decideApproval(input: {
     return { ok: false, status: fresh?.status ?? 'unknown', error: 'Already decided elsewhere' }
   }
   await auditDecision(input, row.tool, row.target, 'approved')
+
+  // An exact call runs verbatim. Only requests without one (raised by
+  // backend_chat from prose) replay their message through the brain below.
+  const exactArgs = row.toolArgs
+  if (exactArgs && typeof exactArgs === 'object' && !Array.isArray(exactArgs)) {
+    const outcome = await runApprovedCall(row.tool, exactArgs as Record<string, unknown>, {
+      projectId: input.projectId,
+      userId: input.approverUserId,
+      sessionToken: undefined,
+      destructiveConfirmed: true,
+      createdThisTurn: new Set<string>(),
+    })
+    await prisma.agentApprovalRequest.update({
+      where: { id: row.id },
+      data: { status: outcome.status, executedAt: new Date(), resultSummary: outcome.summary.slice(0, 2000) },
+    })
+    return { ok: outcome.status === 'executed', status: outcome.status, resultSummary: outcome.summary }
+  }
 
   // Execute: replay the original message with destructive confirmation — the
   // exact resume path the dashboard confirmation card uses.
@@ -317,4 +344,51 @@ async function auditDecision(
       timestamp: new Date(),
     },
   }).catch(() => {})
+}
+
+/**
+ * Run an approved exact call: the tool and arguments the human read, verbatim,
+ * with destructive confirmation, and no model anywhere in the path.
+ *
+ * `executed` requires the tool to report success AND not to have stopped for a
+ * further confirmation. An executor can answer `ok` while only returning its
+ * own confirmation prompt (`needsUser`); counting that as executed would tell
+ * the agent a deploy shipped when it did not.
+ *
+ * `dispatch` is injectable so this can be tested without a database; in
+ * production it is the brain's own dispatcher.
+ */
+export async function runApprovedCall(
+  tool: string,
+  args: Record<string, unknown>,
+  ctx: ToolDispatchContext,
+  dispatch: (name: string, args: Record<string, unknown>, ctx: ToolDispatchContext) => Promise<ToolResult> = dispatchTool,
+  capMs: number = EXECUTE_CAP_MS,
+): Promise<{ status: 'executed' | 'failed'; summary: string }> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`Approved execution exceeded ${Math.round(capMs / 1000)}s`)),
+        capMs,
+      )
+      timer.unref?.()
+    })
+    const result = await Promise.race([dispatch(tool, args, ctx), timeout])
+    if (result.ok && !result.needsUser) return { status: 'executed', summary: result.summary }
+    if (result.ok) {
+      return {
+        status: 'failed',
+        summary:
+          `The approved call stopped for a further confirmation instead of running: ${result.summary}\n\n` +
+          `Nothing was applied. Raise the request again once whatever it asks for is in place.`,
+      }
+    }
+    return { status: 'failed', summary: `${result.summary}\n\nThe approved call reported failure; nothing was applied.` }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    return { status: 'failed', summary: `${message}\n\nThe approved call did not complete. Read the current state before asking again.` }
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
 }

@@ -9,6 +9,8 @@
  * Responsibilities:
  *
  *   1. Authenticate (delegates to `authenticateMcp`).
+ *   1b. Refuse a paused project, before any quota is spent.
+ *   1c. Stamp the project's activity clock (only once past 1b).
  *   2. Plan-level quota — `enforceAndTrackApiRequest`. A Free user who has
  *      blown their lifetime cap cannot grind through their quota over MCP.
  *   3. Per-key rate limit — ApiKey.rateLimit / rateLimitWindow. Sliding
@@ -22,12 +24,20 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/prisma'
+import { withholdSecrets } from '@/lib/mcp/withhold-secrets'
 import {
   authenticateMcp,
   mcpAuthFailureResponse,
   type McpAuthResult,
 } from './auth'
 import { enforceAndTrackApiRequest } from '@/lib/quota/kernel'
+import {
+  getProjectServingState,
+  PAUSED_CODE,
+  PAUSED_MESSAGE,
+  pausedDetails,
+} from '@/lib/projects/serving-state'
+import { touchProjectActivity } from '@/lib/projects/activity'
 
 export interface McpGuardAuth {
   keyId: string
@@ -56,6 +66,31 @@ export async function mcpGuard(request: NextRequest): Promise<McpGuardResult> {
   const auth = await authenticateMcp(request)
   const failure = mcpAuthFailureResponse(auth)
   if (failure) return { response: failure, auth: null }
+
+  // A paused project, refused BEFORE quota and rate limiting so a call that
+  // cannot run does not spend either. The agent gets a stable code and the
+  // place to resume, rather than a tool failure that reads like a bug in its
+  // own request.
+  const serving = await getProjectServingState(auth.projectId!)
+  if (serving.kind === 'paused') {
+    return {
+      auth: null,
+      response: NextResponse.json(
+        {
+          ok: false,
+          error: PAUSED_MESSAGE,
+          code: PAUSED_CODE,
+          ...pausedDetails(auth.projectId!, serving),
+        },
+        { status: 503 },
+      ),
+    }
+  }
+
+  // The owner's agent operating the backend is real use. Stamped after the
+  // pause check, so a refused call never moves the clock, and before quota,
+  // because an over-quota agent is still someone using this project.
+  void touchProjectActivity(auth.projectId!)
 
   // Plan-level lifetime / monthly quota (fail-open on infra error inside the
   // kernel itself — that lib already swallows DB failures to ALLOW).
@@ -146,7 +181,7 @@ export function refuseIfReadOnly(
       hint:
         'Reads still work — use run_query for SQL and read_backend_state for structure. ' +
         'To make changes, a human must issue a read-write MCP key from ' +
-        'Backenly → Project → MCP. An agent cannot upgrade its own key.',
+        'the Backenly dashboard under the project → Connect → Agents. An agent cannot upgrade its own key.',
     },
     { status: 403 },
   )
@@ -207,6 +242,11 @@ export interface McpCallContext {
 /**
  * Post-flight: write usage log + (for mutations) audit log. Fire-and-forget —
  * never block the response on telemetry writes.
+ *
+ * Both rows keep a slice of the summary, and a summary can carry a credential
+ * the tool just handed the agent (a new API key, a rotated signing secret), so
+ * it is stored with those withheld. Pass the tool's `data` so values it names
+ * are withheld too; it is read here and never stored.
  */
 export function recordMcpCall(
   ctx: McpCallContext,
@@ -216,9 +256,12 @@ export function recordMcpCall(
     mutation?: boolean
     summary?: string
     error?: string
+    data?: unknown
   },
 ): void {
   const responseTime = Date.now() - ctx.startedAt
+  const summary = result.summary === undefined ? undefined : withholdSecrets(result.summary, result.data)
+  const error = result.error === undefined ? undefined : withholdSecrets(result.error, result.data)
 
   prisma.apiKeyUsage
     .create({
@@ -231,8 +274,8 @@ export function recordMcpCall(
         metadata: {
           tool: result.tool,
           mutation: !!result.mutation,
-          summary: result.summary?.slice(0, 200),
-          error: result.error?.slice(0, 200),
+          summary: summary?.slice(0, 200),
+          error: error?.slice(0, 200),
         },
       },
     })
@@ -249,7 +292,7 @@ export function recordMcpCall(
           details: JSON.stringify({
             tool: result.tool,
             endpoint: ctx.endpoint,
-            summary: result.summary?.slice(0, 240),
+            summary: summary?.slice(0, 240),
             ms: responseTime,
             at: new Date().toISOString(),
           }),

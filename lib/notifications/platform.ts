@@ -10,6 +10,7 @@
  *   - job_completed / job_failed  (workspace job table events)
  *   - deploy_complete
  *   - system  (maintenance, feature announcements, etc.)
+ *   - health_alert  (a critical problem in one of their backends that needs them)
  *
  * Every `createPlatformNotification` call:
  *   1. Checks NotificationPreference — if inAppEnabled=false, skips DB insert.
@@ -32,6 +33,7 @@ export type PlatformNotificationType =
   | 'deploy_complete'
   | 'system'
   | 'autonomous_action'   // "While you were away" — autonomous background fixes and findings
+  | 'health_alert'        // A confirmed critical in one of their backends, still unresolved
 
 // All valid types — used for preference initialization
 export const ALL_NOTIFICATION_TYPES: PlatformNotificationType[] = [
@@ -43,6 +45,7 @@ export const ALL_NOTIFICATION_TYPES: PlatformNotificationType[] = [
   'deploy_complete',
   'system',
   'autonomous_action',
+  'health_alert',
 ]
 
 export interface CreateNotificationInput {

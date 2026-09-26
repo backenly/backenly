@@ -20,6 +20,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
+import { builtEvidenceWhere } from '@/lib/projects/backend-presence'
 
 /** Performance-agent finding families (`${category}_${location}` types). */
 const PERFORMANCE_REAPABLE_PREFIXES = [
@@ -30,7 +31,14 @@ const PERFORMANCE_REAPABLE_PREFIXES = [
 
 async function withdraw(
   rows: Array<{ id: string; details: unknown }>,
-  marker: 'evolution_reaper' | 'agent_reaper' | 'invariant_reaper',
+  marker:
+    | 'evolution_reaper'
+    | 'agent_reaper'
+    | 'invariant_reaper'
+    | 'not_built'
+    | 'platform_fault'
+    | 'locked_down'
+    | 'paused',
 ): Promise<number> {
   let withdrawn = 0
   for (const row of rows) {
@@ -370,8 +378,8 @@ export async function reapInvariantFindings(
 /**
  * Static finding types written exclusively by workspace-observer.ts's own
  * detectors (detectOrphanTables, detectApiDrift, detectBrokenWebhooks,
- * detectAuthSpike, detectDeployFailure, checkIntegrationHealth,
- * detectContractViolations) and by no other pipeline — verified by grepping
+ * detectAuthSpike, detectDeployFailure, checkIntegrationHealth) and by no
+ * other pipeline — verified by grepping
  * every `type: '<value>'` write site in the codebase before adding an entry
  * here. Getting this wrong in either direction is a real bug: omit a type
  * and it ghosts forever like the RLS/migration findings did; include a type
@@ -393,6 +401,9 @@ export async function reapInvariantFindings(
  *     but that probe is a permanent no-op under PostgREST (see the note in
  *     drift-detector.ts); every real finding of this type comes from the
  *     separate lib/core/ai-report-to-health-findings.ts pipeline instead.
+ *   - 'contract_surface_broken' — written and resolved only by the contract
+ *     sweep now. The observer no longer probes it, so listing it here would
+ *     withdraw every live sweep finding as "not detected" on each observer run.
  */
 const OBSERVER_LOCATABLE_REAPABLE_TYPES: ReadonlySet<string> = new Set([
   'orphan_table',
@@ -405,7 +416,6 @@ const OBSERVER_LOCATABLE_REAPABLE_TYPES: ReadonlySet<string> = new Set([
   'integration_smtp_unreachable',
   'oauth_config_invalid',
   'integration_connected_unused',
-  'contract_surface_broken',
 ])
 
 /**
@@ -465,4 +475,72 @@ export async function reapStaleFindings(
     reapMigrationFindings(projectId).catch(() => 0),
   ])
   return { arch, performance, drift, invariants, migration }
+}
+
+/**
+ * Withdraw, fleet-wide, every open finding that no longer describes something
+ * a tenant can act on. Run at the start of each contract sweep, so it is
+ * self-cleaning on every deployment and needs no one-off script.
+ *
+ *   not_built        Every open finding on a project with nothing built. A
+ *                    project that was only named has nothing that can be wrong,
+ *                    and the observer no longer scans one. This is what clears
+ *                    the rows the ungated first-load scan used to write.
+ *   platform_fault   Contract rows with `surface: 'runtime'`. That shape meant
+ *                    "the monitor could not reach the platform". The sweep
+ *                    reports that to the operator now and never files it.
+ *   locked_down      Contract rows on a locked-down project. It refuses traffic
+ *                    by design, so a refusal is the lockdown working.
+ *   paused           Contract rows on a paused project, for the same reason.
+ *
+ * Deleted projects are left alone; their rows cascade with them.
+ */
+export async function reapUnattributableFindings(): Promise<{
+  notBuilt: number
+  platformFault: number
+  lockedDown: number
+  paused: number
+}> {
+  const open = { in: ['open', 'pending_approval'] }
+
+  const [unbuilt, runtimeRows, lockedRows, pausedRows] = await Promise.all([
+    prisma.healthFinding.findMany({
+      where: { status: open, project: { deletedAt: null, NOT: builtEvidenceWhere() } },
+      select: { id: true, details: true },
+    }),
+    prisma.healthFinding.findMany({
+      where: {
+        status: open,
+        type: 'contract_surface_broken',
+        details: { path: ['surface'], equals: 'runtime' },
+      },
+      select: { id: true, details: true },
+    }),
+    prisma.healthFinding.findMany({
+      where: {
+        status: open,
+        type: 'contract_surface_broken',
+        project: { lockedDownAt: { not: null } },
+      },
+      select: { id: true, details: true },
+    }),
+    prisma.healthFinding.findMany({
+      where: {
+        status: open,
+        type: 'contract_surface_broken',
+        project: { pausedAt: { not: null } },
+      },
+      select: { id: true, details: true },
+    }),
+  ])
+
+  const seen = new Set<string>()
+  const once = (rows: Array<{ id: string; details: unknown }>) =>
+    rows.filter(r => (seen.has(r.id) ? false : (seen.add(r.id), true)))
+
+  const notBuilt = await withdraw(once(unbuilt), 'not_built')
+  const platformFault = await withdraw(once(runtimeRows), 'platform_fault')
+  const lockedDown = await withdraw(once(lockedRows), 'locked_down')
+  const paused = await withdraw(once(pausedRows), 'paused')
+  return { notBuilt, platformFault, lockedDown, paused }
 }

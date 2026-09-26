@@ -20,6 +20,19 @@ import { getOpenAIClient, trackCompletionCost } from '../openai-service'
 import { getModel } from '../model-router'
 import { answererPrompt } from './prompts'
 import { kickReconciler, shouldKickFor } from '@/lib/autonomy/event-trigger'
+import { WEBHOOK_EVENT_TYPES } from '@/lib/webhooks/events'
+
+/** Brain tools served by lib/email/agent-actions.ts. */
+const AUTH_EMAIL_TOOLS = new Set<string>([
+  'get_auth_email_settings', 'set_auth_smtp', 'test_auth_smtp', 'remove_auth_smtp',
+  'set_auth_email_template', 'reset_auth_email_template',
+])
+
+/** Brain tools served by lib/webhooks/agent-actions.ts. */
+const WEBHOOK_ENDPOINT_TOOLS = new Set<string>([
+  'list_webhooks', 'create_webhook', 'update_webhook', 'delete_webhook',
+  'test_webhook', 'list_webhook_logs', 'rotate_webhook_endpoint_secret', 'replay_webhook_log',
+])
 
 export type ToolName =
   // Read (live state)
@@ -87,6 +100,36 @@ export type ToolName =
   | 'rotate_webhook_secret'
   | 'list_webhook_deliveries'
   | 'replay_webhook_delivery'
+  // Outbound webhook endpoints (the Webhooks page, lib/webhooks)
+  | 'list_webhooks'
+  | 'create_webhook'
+  | 'update_webhook'
+  | 'delete_webhook'
+  | 'test_webhook'
+  | 'list_webhook_logs'
+  | 'rotate_webhook_endpoint_secret'
+  | 'replay_webhook_log'
+  // Functions: inspect, run, logs
+  | 'get_ai_function'
+  | 'invoke_ai_function'
+  | 'list_ai_function_logs'
+  | 'deploy_function_code'
+  // Monitoring
+  | 'list_request_logs'
+  // Deploy history
+  | 'list_deploy_versions'
+  // Integrations: what each can do, and whether its key still works
+  | 'list_integration_capabilities'
+  | 'verify_integration_key'
+  // Which project and credential this caller is acting as
+  | 'get_connection_identity'
+  // End-user auth email: sender and templates (the Auth page)
+  | 'get_auth_email_settings'
+  | 'set_auth_smtp'
+  | 'test_auth_smtp'
+  | 'remove_auth_smtp'
+  | 'set_auth_email_template'
+  | 'reset_auth_email_template'
   // Connect Frontend
   | 'connect_frontend'
   | 'disconnect_frontend'
@@ -174,6 +217,8 @@ const DESTRUCTIVE_TOOLS = new Set<ToolName>([
   'delete_ai_function',
   'delete_cron_job',
   'remove_integration_key',
+  // Drops the endpoint and its delivery history; not undoable from the dashboard
+  'delete_webhook',
   // DROP SCHEMA CASCADE on the branch — every experiment in it is gone.
   'discard_branch',
   // Affects end-users / data exposure
@@ -181,6 +226,8 @@ const DESTRUCTIVE_TOOLS = new Set<ToolName>([
   'remove_permission',
   // Breaks live sign-in flow for end-users using this provider
   'disable_oauth_provider',
+  // Password-reset and verification mail stops, or falls back to the deployment
+  'remove_auth_smtp',
 ])
 
 /**
@@ -222,6 +269,15 @@ export const READ_ONLY_TOOLS = new Set<ToolName>([
   'get_realtime_status',
   'list_findings',
   'get_pending_incidents',
+  'list_webhooks',
+  'list_webhook_logs',
+  'get_ai_function',
+  'list_ai_function_logs',
+  'list_request_logs',
+  'list_deploy_versions',
+  'list_integration_capabilities',
+  'get_connection_identity',
+  'get_auth_email_settings',
 ])
 
 export function isDestructiveTool(name: string): boolean {
@@ -236,6 +292,10 @@ export interface ToolDispatchContext {
   projectId: string
   /** Owner of the project — required for autonomy + audit-log writes. */
   userId?: string
+  /** The MCP key or OAuth connection making the call. Set by the MCP route only. */
+  apiKeyId?: string
+  /** Whether that caller is read-only, as the MCP guard decided it. */
+  keyReadOnly?: boolean
   sessionToken?: string
   /** The user's most recent message — needed for answer_question. */
   userMessage?: string
@@ -288,6 +348,14 @@ export interface ToolResult {
    */
   code?: string
 }
+
+/**
+ * Tools an agent calls over MCP that the brain's own model is not offered.
+ * deploy_function_code stores source its caller already wrote; the brain writes
+ * code through generate_function, which repairs what it writes, and two doors
+ * to one behaviour is what the catalog was cut down to avoid.
+ */
+export const AGENT_ONLY_TOOLS = new Set<string>(['deploy_function_code'])
 
 // ── OpenAI tool schema ────────────────────────────────────────────────────────
 
@@ -667,7 +735,7 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     },
     []),
   fn('list_webhook_deliveries',
-    'Read-only view of recent webhook deliveries: each attempt, status (SUCCESS / FAILED / DEAD), HTTP code, last error, attempt count. Use when the user asks "is my webhook working?" / "show recent deliveries" / "why did the X integration miss events?". Optional status filter narrows to failures or dead-letter rows.',
+    'Read-only view of recent TRIGGER webhook deliveries (a table trigger whose action calls a URL; the Webhooks page\'s endpoints use list_webhook_logs): each attempt, status (SUCCESS / FAILED / DEAD), HTTP code, last error, attempt count. Use when the user asks "is my webhook working?" / "show recent deliveries" / "why did the X integration miss events?". Optional status filter narrows to failures or dead-letter rows.',
     {
       status: { type: 'string', enum: ['SUCCESS', 'FAILED', 'DEAD'] },
       limit: { type: 'integer', minimum: 1, maximum: 100 },
@@ -677,6 +745,168 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     'Resend a previously-failed (DEAD) webhook delivery, signed with the trigger\'s current secret. Use when the user says "retry that delivery" / "replay the failed webhook" / "send that event again". The id comes from list_webhook_deliveries.',
     { id: { type: 'string', description: 'Delivery log id from list_webhook_deliveries.' } },
     ['id']),
+  // ── Outbound webhook endpoints: the project's Webhooks page ───────────────
+  // Distinct from the three trigger tools above, which serve a table trigger
+  // whose action is a webhook call. These manage the endpoints on the Webhooks
+  // page (lib/webhooks), signed as X-Webhook-Signature.
+  fn('list_webhooks',
+    'List the project\'s outbound webhook endpoints (the Webhooks page): event, target URL, on/off, delivery count, and whether row-event capture is healthy. Never returns signing secrets.',
+    {},
+    []),
+  fn('create_webhook',
+    'Create an outbound webhook endpoint that receives signed POSTs when rows change or an end user signs up. Returns the signing secret ONCE in data.secret; it belongs in the receiver\'s environment, never in code.',
+    {
+      eventType: { type: 'string', enum: [...WEBHOOK_EVENT_TYPES], description: 'The event that fires it.' },
+      targetUrl: { type: 'string', description: 'The https URL that receives the events.' },
+    },
+    ['eventType', 'targetUrl']),
+  fn('update_webhook',
+    'Change an outbound webhook endpoint: its target URL, its event, or switch it on or off.',
+    {
+      webhookId: { type: 'string', description: 'From list_webhooks.' },
+      targetUrl: { type: 'string', description: 'A new https URL.' },
+      eventType: { type: 'string', enum: [...WEBHOOK_EVENT_TYPES], description: 'A new event.' },
+      active: { type: 'boolean', description: 'false stops deliveries without deleting the endpoint.' },
+    },
+    ['webhookId']),
+  fn('delete_webhook',
+    'Delete an outbound webhook endpoint and its delivery history. To stop deliveries reversibly, set active false with update_webhook instead.',
+    { webhookId: { type: 'string', description: 'From list_webhooks.' } },
+    ['webhookId']),
+  fn('test_webhook',
+    'Send one real, signed test delivery to an outbound webhook endpoint now and report what its receiver answered. Carries no project data.',
+    { webhookId: { type: 'string', description: 'From list_webhooks.' } },
+    ['webhookId']),
+  fn('list_webhook_logs',
+    'Delivery history of one outbound webhook endpoint, newest first: status, HTTP code, attempts, error, the receiver\'s response and the payload.',
+    {
+      webhookId: { type: 'string', description: 'From list_webhooks.' },
+      limit: { type: 'integer', minimum: 1, maximum: 200 },
+    },
+    ['webhookId']),
+  fn('rotate_webhook_endpoint_secret',
+    'Issue a new signing secret for an outbound webhook endpoint. Returns it ONCE in data.secret; the receiver rejects deliveries until it has the new one.',
+    { webhookId: { type: 'string', description: 'From list_webhooks.' } },
+    ['webhookId']),
+  fn('replay_webhook_log',
+    'Send a FAILED or DEAD_LETTER delivery of an outbound webhook endpoint again: its original payload, signed with the current secret, as one new logged attempt. Delivered, in-flight and paused-project deliveries are refused.',
+    { deliveryId: { type: 'string', description: 'A delivery id from list_webhook_logs.' } },
+    ['deliveryId']),
+  // ── Functions: inspect, run, logs ─────────────────────────────────────────
+  fn('get_ai_function',
+    'One function in full: its code, trigger, HTTP endpoint, on/off state, run count and last error. Side-effect free.',
+    {
+      functionId: { type: 'string', description: 'From list_ai_functions. Either functionId or name.' },
+      name: { type: 'string', description: 'The function\'s name, as requested or as deployed (lowercase kebab-case).' },
+    },
+    []),
+  fn('invoke_ai_function',
+    'Run a function once now, as the project owner\'s test run, and return what its handler answered, its return value and its log lines. A failure is reported, not auto-repaired: the code is left exactly as it was. Counts as one invocation against the plan. A function that is switched off is refused, not switched on.',
+    {
+      functionId: { type: 'string', description: 'From list_ai_functions. Either functionId or name.' },
+      name: { type: 'string', description: 'The function\'s name.' },
+      event: { type: 'object', description: 'The JSON the function receives as its body (and query for GET).' },
+    },
+    []),
+  fn('list_ai_function_logs',
+    'Recent function runs, newest first, from every trigger: success or failure, error, captured ctx.log lines, duration. Optionally for one function. Kept 30 days.',
+    {
+      functionId: { type: 'string', description: 'Only this function.' },
+      name: { type: 'string', description: 'Only this function, by name.' },
+      limit: { type: 'integer', minimum: 1, maximum: 100 },
+    },
+    []),
+  fn('deploy_function_code',
+    'Deploy function source you wrote, exactly as written: no model reads or rewrites it. trigger "http" takes a route module ' +
+    '(`import { NextResponse } from \'next/server\'`, `export async function POST(req) { … }`) served at /api/v1/{projectId}/fn/{name}. ' +
+    'Every other trigger takes a sandbox body: statements using ctx.db, ctx.http, ctx.log, ctx.integrations.<provider> and ctx.env.KEY, ' +
+    'receiving `event`, optionally returning a value. The code is checked by the runtime that will run it and refused with the reason if it cannot run; ' +
+    'keys written into it are refused. Deploying a name that exists replaces its code (no version history is kept). ' +
+    `Source is limited to 64 KB. Test it with invoke_ai_function and read runs with list_ai_function_logs.`,
+    {
+      name: { type: 'string', description: 'The function\'s name, as requested or as deployed (lowercase kebab-case).' },
+      code: { type: 'string', description: 'The complete source: a route module for trigger "http", a sandbox body for every other trigger.' },
+      trigger: {
+        type: 'string',
+        enum: ['on_signup', 'on_insert', 'on_update', 'on_delete', 'http', 'manual'],
+        description: 'What fires the function. Use an event type for automatic behaviour; http for a directly-callable endpoint.',
+      },
+      table: { type: 'string', description: 'Required for on_insert / on_update / on_delete — the table whose row events fire the function.' },
+      method: {
+        type: 'string',
+        enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+        description: 'For trigger=http only — the HTTP verb of the endpoint. Defaults to the one the module exports.',
+      },
+      functionId: { type: 'string', description: 'To replace a specific existing function; its name must match.' },
+    },
+    ['name', 'code', 'trigger']),
+  // ── Monitoring: request log ───────────────────────────────────────────────
+  fn('list_request_logs',
+    'The requests this project\'s runtime API served, newest first: method, path (no query string), status, latency, time. Filter to failures with minStatus 400, or to one route with pathPrefix.',
+    {
+      method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] },
+      minStatus: { type: 'integer', minimum: 100, maximum: 599, description: 'e.g. 400 for failures, 500 for server errors.' },
+      pathPrefix: { type: 'string', description: 'e.g. "/db/orders" or "/fn/".' },
+      sinceMinutes: { type: 'integer', minimum: 1, maximum: 43200 },
+      limit: { type: 'integer', minimum: 1, maximum: 200 },
+    },
+    []),
+  // ── Deploy: version history ───────────────────────────────────────────────
+  fn('list_deploy_versions',
+    'Every published version, newest first: id, version number, change summary, when it was published, which one is serving, and which can be rolled back to (rollback_deploy takes the version or its id).',
+    {},
+    []),
+  // ── Integrations: capabilities and a key re-check ─────────────────────────
+  fn('list_integration_capabilities',
+    'What a function can call on each integration (the exact ctx.integrations.<id> method signatures), whether it is connected, and what its provider said about the key. For Stripe also the receiver URL and whether the signing secret is stored. Never returns a key.',
+    { integrationId: { type: 'string', description: 'One provider, e.g. "stripe", "resend", "openai", "anthropic", "posthog". Omit for all.' } },
+    []),
+  fn('verify_integration_key',
+    'Ask the provider again whether the stored key works, and record the answer: verified, rejected, unverifiable (the provider offers no check) or unreachable. A key revoked in the provider dashboard is only caught this way.',
+    { integrationId: { type: 'string', description: 'e.g. "stripe".' } },
+    ['integrationId']),
+  // ── Connection identity ───────────────────────────────────────────────────
+  fn('get_connection_identity',
+    'Which project this connection is bound to (id, name, published, paused) and which key or OAuth connection is calling (name, prefix, read-only or not, preview-branch binding). Check it before changing anything when more than one project is in play.',
+    {},
+    []),
+  // ── End-user auth email: sender and templates ─────────────────────────────
+  fn('get_auth_email_settings',
+    'How this project sends its end users\' verification, password-reset and magic-link emails: the SMTP sender in use (never its password), whether the last test send worked, and each template with the variables it may use.',
+    {},
+    []),
+  fn('set_auth_smtp',
+    'Save the SMTP server this project sends auth emails through. Omitting password on an edit keeps the stored one. Settings are unproven until test_auth_smtp succeeds.',
+    {
+      host: { type: 'string', description: 'e.g. "smtp.resend.com".' },
+      port: { type: 'integer', minimum: 1, maximum: 65535, description: '587 for STARTTLS; 465 is normalised to 587.' },
+      username: { type: 'string' },
+      password: { type: 'string', description: 'Stored encrypted and never returned.' },
+      fromAddress: { type: 'string', description: 'The sender address, verified with the provider.' },
+      fromName: { type: 'string' },
+      enabled: { type: 'boolean', description: 'false keeps the settings but stops using them.' },
+    },
+    ['host', 'port', 'username', 'fromAddress']),
+  fn('test_auth_smtp',
+    'Send one real test email to an address through the settings a send would use now, and record whether it worked.',
+    { to: { type: 'string', description: 'An address where the test can be checked.' } },
+    ['to']),
+  fn('remove_auth_smtp',
+    'Remove this project\'s SMTP settings. Auth emails then fall back to the deployment\'s sender if one exists, and otherwise stop.',
+    {},
+    []),
+  fn('set_auth_email_template',
+    'Replace the default verification, password_reset or magic_link email with the app\'s own subject and HTML. It must include {{ctaUrl}}; it may use {{appName}}, {{email}} and {{expiry}}.',
+    {
+      kind: { type: 'string', enum: ['verification', 'password_reset', 'magic_link'] },
+      subject: { type: 'string' },
+      bodyHtml: { type: 'string' },
+    },
+    ['kind', 'subject', 'bodyHtml']),
+  fn('reset_auth_email_template',
+    'Go back to Backenly\'s default template for one auth email.',
+    { kind: { type: 'string', enum: ['verification', 'password_reset', 'magic_link'] } },
+    ['kind']),
   fn('fix_backend',
     'Repair a broken subsystem. target: auth | api | table | deploy | realtime | storage | integration | workflow. Use when read_backend_state shows something is broken.',
     {
@@ -1017,6 +1247,7 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
       integrationId: { type: 'string', description: 'Provider id, e.g. "stripe", "resend", "openai", "replicate".' },
       apiKey: { type: 'string', description: 'The secret to store (encrypted). Omit to trigger the inline "paste your key" prompt.' },
       label: { type: 'string', description: 'Optional human label, e.g. "Stripe live key".' },
+      webhookSecret: { type: 'string', description: 'Stripe only: the endpoint signing secret (whsec_…). Until it is stored, the Stripe receiver rejects every event.' },
     },
     ['integrationId']),
   fn('remove_integration_key',
@@ -1124,6 +1355,9 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     },
     ['summary']),
 ]
+
+/** BRAIN_TOOLS as the brain's own model is offered them: without AGENT_ONLY_TOOLS. */
+export const BRAIN_MODEL_TOOLS = BRAIN_TOOLS.filter((t) => !AGENT_ONLY_TOOLS.has(t.function.name))
 
 function fn(
   name: string,
@@ -1484,7 +1718,7 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
   set_key_permissions: (a) => ({ action: 'SET_KEY_PERMISSIONS', params: { keyId: a.keyId, permissions: a.permissions } }),
 
   // Integrations
-  store_integration_key: (a) => ({ action: 'STORE_INTEGRATION_KEY', params: { integrationId: a.integrationId, apiKey: a.apiKey, label: a.label } }),
+  store_integration_key: (a) => ({ action: 'STORE_INTEGRATION_KEY', params: { integrationId: a.integrationId, apiKey: a.apiKey, label: a.label, webhookSecret: a.webhookSecret } }),
   remove_integration_key: (a) => ({ action: 'REMOVE_INTEGRATION_KEY', params: { integrationId: a.integrationId } }),
   delete_trigger: (a) => ({ action: 'DELETE_TRIGGER', params: { triggerId: a.triggerId, name: a.name } }),
 
@@ -1681,13 +1915,14 @@ export async function dispatchTool(
         '- `read_backend_state` with NO arguments — the grounding overview: tables, APIs, auth, storage, RLS.',
         '- `read_backend_state { section: "schema" }` — every table with record counts + all foreign-key relationships. Record counts reveal one-to-many joins (use COUNT(DISTINCT …), never a naive COUNT(*) over a join).',
         '- `get_table_schema { tableName }` — BEFORE any query/insert/migration on a table. Columns (type/nullable/default/PK), foreign keys, indexes, CHECK constraints WITH THEIR EXACT ALLOWED VALUES, triggers, and the live RLS policies. Reading this is what stops a write failing on a constraint you could have seen.',
-        '- Other sections: `tables`, `apis`, `functions`, `rls`, `triggers`, `keys`, `users`, `buckets`, `files`, `cron`, `env`, `integrations`, `webhooks`, `metrics`, `errors`, `usage`, `deploy`, `readiness`, `findings`, `incidents`, `autonomy`, `realtime`.',
+        '- Other sections: `tables`, `apis`, `functions`, `rls`, `triggers`, `keys`, `users`, `buckets`, `files`, `cron`, `env`, `integrations`, `apps`, `webhooks`, `metrics`, `errors`, `usage`, `deploy`, `readiness`, `findings`, `incidents`, `autonomy`, `maintenance`, `realtime`.',
         '',
         '## 2. Build',
-        '- `apply_migration { sql }` for schema. Ordinary PostgreSQL DDL: CREATE TABLE, ALTER TABLE ADD COLUMN / RENAME COLUMN / ADD CONSTRAINT, CREATE INDEX. Multiple statements, semicolon-separated. Your DDL is applied AS WRITTEN — declared NOT NULL, DEFAULT and nullability are honoured exactly, and `id`/`created_at`/`updated_at` are provisioned for you (declaring them is skipped and reported).',
-        '- `backend_chat { message }` for anything not expressible as DDL — auth rules, RLS policies, triggers, cron jobs, teams, webhooks, integrations — or for anything you would rather describe than specify ("add likes and comments to posts"). The brain plans, executes and verifies.',
-        '- Named capability tools: `enable_auth`, `create_bucket`, `generate_function`, `enable_realtime`, `create_api_key`, `set_env_var`, `generate_types`.',
-        '- **Unsure about a migration? Stage it.** `branch { action: "create", name: "add-payments" }` clones this project\'s schema AND data into an isolated PostgreSQL schema. Build against it, `branch { action: "diff", branchId }` to see exactly what would land, then `branch { action: "merge", branchId }`. `branch { action: "list" }` for ids. Up to 5 active. A merge applies new tables through the governed kernel and returns added columns / type changes / drops as review items rather than reshaping a live column silently. Discarding a branch is destructive — ask via `backend_chat`.',
+        '- `apply_migration { sql }` for schema. Ordinary PostgreSQL DDL: CREATE TABLE, ALTER TABLE ADD COLUMN / RENAME COLUMN / ADD CONSTRAINT, CREATE INDEX. Multiple statements, semicolon-separated. Your DDL is applied AS WRITTEN — declared NOT NULL, DEFAULT and nullability are honoured exactly. Every table also gets `id`, `"createdAt"`, `"updatedAt"` (camelCase) and `"deleted_at"`; a declared `id`, `created_at` or `updated_at` is skipped in their favour and reported, so order by `"createdAt"`.',
+        '- One tool per dashboard section, each with an `action`: `auth`, `storage`, `functions`, `realtime`, `integrations`, `monitoring`, `autonomy`, `webhooks`, `deploy`, `connect`. Each tool\'s description lists its actions and the arguments they need, e.g. `auth { action: "enable" }`, `storage { action: "create_bucket", bucketName }`, `integrations { action: "connect", integrationId, apiKey }`.',
+        '- `set_rls` for row-level security as exact SQL; `generate_types` for TypeScript types after a schema change.',
+        '- `backend_chat { message }` for anything you would rather describe than specify ("add likes and comments to posts"), or that no tool above covers. The brain plans, executes and verifies, and draws AI credits.',
+        '- **Unsure about a migration? Stage it.** `branch { action: "create", name: "add-payments" }` clones this project\'s schema into an isolated PostgreSQL schema; it starts EMPTY unless you pass `includeData: true`. Build against it, `branch { action: "diff", branchId }` to see exactly what would land, then `branch { action: "merge", branchId }`. `branch { action: "list" }` for ids. Up to 5 active. A merge applies new tables through the governed kernel and returns added columns / type changes / drops as review items rather than reshaping a live column silently. Discarding a branch is destructive — ask via `backend_chat`.',
         '- A table is served over REST as soon as it exists — exposure is derived from the live catalog, so there is no separate "generate the API" step, and no tool for one. If you are looking for something to call after creating a table: there is nothing to call.',
         '',
         '## 3. Data',
@@ -1697,11 +1932,11 @@ export async function dispatchTool(
         '',
         '## 4. The runtime API (the app you build)',
         `- Base URL: \`${base}\``,
-        '- Header `x-api-key: <proj_live_... runtime key>` on every call. (`sk_live_` is the Stripe prefix, NOT the Backenly one -- a Backenly project key always starts `proj_live_` or `proj_test_`.)',
+        '- Header `x-api-key: <proj_live_... runtime key>` on every call. A Backenly project key starts `proj_live_` (publishable, RLS-bound) or `svc_live_` (service role, server-side only). `sk_live_` is Stripe\'s secret-key prefix; only keys Backenly issued before it adopted these prefixes start with it, and they keep working.',
         '- **The project key is SAFE IN A BROWSER BUNDLE.** It identifies the project, it is not a user. On its own it can only read what your SELECT policies make public, and every write is refused until you also send `X-User-Token`. It is the equivalent of a publishable/anon key — ship it in your frontend. The key you must NEVER ship is a SERVICE-ROLE key, which bypasses RLS entirely.',
         '- End-user auth: `POST /auth/signup` and `POST /auth/signin` → `{ token }`. Send that token as header **`X-User-Token: <token>`** on data calls — RLS then scopes rows to that user. (An API key alone is NOT a user; owner writes without a user token are correctly denied on own-rows tables.)',
-        '- **CRUD paths — one form only:** `GET /db/<table>`, `POST /db/<table>`, `GET /db/<table>/<id>`, `PUT /db/<table>/<id>`, `DELETE /db/<table>/<id>`. The `/db/` prefix is required. There is no bare `/<table>` route.',
-        '- PostgREST grammar is also available at `/api/v2/<projectId>/<table>` — `?select=*,author(*)`, `?price=gte.100`, `?order=created_at.desc`. Same auth, same RLS.',
+        '- **CRUD paths — one form only:** `GET /db/<table>`, `POST /db/<table>`, `GET /db/<table>/<id>`, `PATCH /db/<table>/<id>` (PUT is accepted as the same update), `DELETE /db/<table>/<id>`. The `/db/` prefix is required. There is no bare `/<table>` route.',
+        '- PostgREST grammar is also available at `/api/v2/<projectId>/<table>` — `?select=*,author(*)`, `?price=gte.100`, `?order=createdAt.desc`. Same auth, same RLS.',
         '- Functions: `GET/POST /fn/<name>`. Function names are normalised to lowercase kebab-case (`list_products` deploys as `list-products`); `read_backend_state { section: "functions" }` gives each one\'s exact `url`.',
         // Spelled out because the bucket-scoped shape (/storage/{bucket}/upload)
         // is what several other platforms use, and guessing it produced four
@@ -1711,13 +1946,13 @@ export async function dispatchTool(
         '- Any /api/v1 path with no handler answers with JSON `{ error, code: "ROUTE_NOT_FOUND", availableRoutes }` — if you get one, the response names the routes that do exist. Never retry the same shape.',
         '',
         '## 5. Operations that need a human (and how to get them done)',
-        '- These are NOT executed directly over MCP. Describe what you want via `backend_chat`; you get back an `approval` id parked in the project\'s Review Queue, then poll `check_approval { id }` until it reports executed or rejected. The operation DOES happen — a human just confirms it first.',
-        '- The full list: dropping a table or column · truncating a table · deleting a bucket or file · **publishing/deploying the backend** · **deleting a function, trigger, or cron job** · revoking or rotating an API key · deleting an env var · disabling realtime · rolling back a deploy.',
-        '- So "I need to deploy" and "delete this function" both have a path — it runs through `backend_chat`, not a dedicated tool. There is no tool for them by design, not by omission.',
+        '- These never execute directly. Ask for them with their domain tool and the exact call is parked for a human on the project\'s Autonomy page: `deploy { action: "deploy" }`, `deploy { action: "rollback" }`, `functions { action: "delete" }`, `storage { action: "delete_bucket" }`, `connect { action: "revoke_api_key" }` and the others each tool\'s description marks. The response carries an `approval` id; poll `check_approval { id }` until it reports executed or rejected. Once approved, the call you sent runs verbatim.',
+        '- Dropping a table or column, truncating a table and discarding a branch have no domain action: describe them to `backend_chat`, which parks them the same way.',
+        '- The operation DOES happen — a human just confirms it first. You can request it; you cannot approve it.',
         '',
         '## 6. Ship',
         '- `read_backend_state { section: "readiness" }` first — the behavioural + security scorecard, with the exact blockers. Publishing runs this gate anyway and refuses on blockers, so reading it first saves a round trip.',
-        '- To publish: `backend_chat { message: "publish the backend" }` → approval id → `check_approval`.',
+        '- To publish: `deploy { action: "deploy" }` → approval id → `check_approval`.',
         '- `read_backend_state { section: "deploy" }` for current state.',
         '- Your backend is fully usable BEFORE publishing — `/db/*`, `/auth/*`, `/fn/*`, `/storage/*` and `/realtime/*` all work against an unpublished project with a valid API key. Publishing is about versioning and going public, not about switching the API on.',
         '',
@@ -2308,6 +2543,106 @@ export async function dispatchTool(
       ))
     }
 
+    // ── Outbound webhook endpoints (the Webhooks page) ────────────────────
+    // Same operations and gates as /api/projects/[id]/webhooks/*, in
+    // lib/webhooks/agent-actions.ts.
+    if (WEBHOOK_ENDPOINT_TOOLS.has(name)) {
+      if (!ctx.userId) return finalize({ ok: false, summary: 'Webhooks need a caller identity, and this call has none.' })
+      const w = await import('@/lib/webhooks/agent-actions')
+      const actor = { userId: ctx.userId, projectId: ctx.projectId }
+      const run: Record<string, () => Promise<{ ok: boolean; summary: string; data?: unknown; code?: string }>> = {
+        list_webhooks: () => w.listWebhooks(actor),
+        create_webhook: () => w.createProjectWebhook(actor, args),
+        update_webhook: () => w.updateProjectWebhook(actor, args),
+        delete_webhook: () => w.deleteProjectWebhook(actor, args),
+        test_webhook: () => w.testProjectWebhook(actor, args),
+        list_webhook_logs: () => w.listWebhookLogs(actor, args),
+        rotate_webhook_endpoint_secret: () => w.rotateProjectWebhookSecret(actor, args),
+        replay_webhook_log: () => w.replayWebhookDelivery(actor, args),
+      }
+      return finalize(await run[name]())
+    }
+
+    // ── Functions: inspect, run, logs, deploy agent-written code ──────────
+    if (name === 'get_ai_function' || name === 'invoke_ai_function' || name === 'list_ai_function_logs' || name === 'deploy_function_code') {
+      const f = await import('@/lib/services/ai-functions/agent-actions')
+      const actor = { userId: ctx.userId, projectId: ctx.projectId }
+      const result = name === 'get_ai_function'
+        ? await f.getFunction(actor, args)
+        : name === 'invoke_ai_function'
+          ? await f.invokeFunction(actor, args)
+          : name === 'deploy_function_code'
+            ? await f.deployFunctionCode(actor, args)
+            : await f.listFunctionLogs(actor, args)
+      return finalize(result)
+    }
+
+    // ── Monitoring: request log ───────────────────────────────────────────
+    if (name === 'list_request_logs') {
+      const { queryRequestLogs } = await import('@/lib/monitoring/request-log-query')
+      const rows = await queryRequestLogs(ctx.projectId, {
+        method: typeof args.method === 'string' ? args.method : undefined,
+        minStatus: typeof args.minStatus === 'number' ? args.minStatus : undefined,
+        pathPrefix: typeof args.pathPrefix === 'string' ? args.pathPrefix : undefined,
+        sinceMinutes: typeof args.sinceMinutes === 'number' ? args.sinceMinutes : undefined,
+        limit: typeof args.limit === 'number' ? args.limit : undefined,
+      })
+      const lines = rows.slice(0, 15).map((r) => `• ${r.timestamp} ${r.method} ${r.path} → ${r.status} (${r.latencyMs}ms)`)
+      return finalize({
+        ok: true,
+        summary: rows.length
+          ? `Requests served, newest first:\n${lines.join('\n')}` + (rows.length > 15 ? `\n…${rows.length - 15} more in data.requests.` : '')
+          : 'No requests match. Only traffic to this project\'s runtime API (/db, /auth, /fn, /storage, /realtime) is recorded.',
+        data: { requests: rows },
+      })
+    }
+
+    // ── Integrations: capabilities and a key re-check ─────────────────────
+    if (name === 'list_integration_capabilities' || name === 'verify_integration_key') {
+      const i = await import('@/lib/integrations/agent-actions')
+      return finalize(name === 'list_integration_capabilities'
+        ? await i.integrationCapabilities(ctx.projectId, args)
+        : await i.verifyIntegration(ctx.projectId, args))
+    }
+
+    // ── End-user auth email (the Auth page) ───────────────────────────────
+    if (AUTH_EMAIL_TOOLS.has(name)) {
+      const e = await import('@/lib/email/agent-actions')
+      const actor = { userId: ctx.userId, projectId: ctx.projectId }
+      const run: Record<string, () => Promise<{ ok: boolean; summary: string; data?: unknown; code?: string }>> = {
+        get_auth_email_settings: () => e.emailSettings(actor),
+        set_auth_smtp: () => e.setSmtp(actor, args),
+        test_auth_smtp: () => e.testSmtp(actor, args),
+        remove_auth_smtp: () => e.removeSmtp(actor),
+        set_auth_email_template: () => e.setEmailTemplate(actor, args),
+        reset_auth_email_template: () => e.resetEmailTemplate(actor, args),
+      }
+      return finalize(await run[name]())
+    }
+
+    // ── Connection identity ───────────────────────────────────────────────
+    if (name === 'get_connection_identity') {
+      const { connectionIdentity } = await import('@/lib/mcp/identity')
+      return finalize(await connectionIdentity(ctx))
+    }
+
+    // ── Deploy: version history ───────────────────────────────────────────
+    if (name === 'list_deploy_versions') {
+      const { listPublishedVersions } = await import('@/lib/deployment/published-versions')
+      const history = await listPublishedVersions(ctx.projectId)
+      if (!history) return finalize({ ok: false, summary: 'Project not found.' })
+      const lines = history.versions.slice(0, 15).map((v) =>
+        `• v${v.version} (${v.id}) ${v.publishedAt}: ${v.changeSummary}` +
+        (v.isActive ? ' [serving]' : '') + (v.canRollback ? '' : ' [cannot roll back to]'))
+      return finalize({
+        ok: true,
+        summary: history.versions.length
+          ? `Published versions, newest first:\n${lines.join('\n')}`
+          : 'Nothing has been published yet. The backend is fully usable unpublished; deploy { action: "deploy" } publishes a version.',
+        data: history,
+      })
+    }
+
     // ── Webhook delivery replay (DEAD → re-attempt) ───────────────────────
     if (name === 'replay_webhook_delivery') {
       const { replayDelivery } = await import('@/lib/services/trigger-service')
@@ -2812,6 +3147,29 @@ export function humanTitle(name: string, args: Record<string, unknown>): string 
     case 'rotate_webhook_secret': return `Rotating signing secret for ${args.triggerName ?? 'webhook'}`.trim()
     case 'list_webhook_deliveries': return 'Reading webhook delivery log'
     case 'replay_webhook_delivery': return `Replaying delivery ${args.id ?? ''}`.trim()
+    case 'list_webhooks': return 'Reading webhook endpoints'
+    case 'create_webhook': return `Creating a ${args.eventType ?? ''} webhook`.replace(/\s+/g, ' ')
+    case 'update_webhook': return `Updating webhook ${args.webhookId ?? ''}`.trim()
+    case 'delete_webhook': return `Deleting webhook ${args.webhookId ?? ''}`.trim()
+    case 'test_webhook': return `Sending a test delivery to ${args.webhookId ?? 'a webhook'}`
+    case 'list_webhook_logs': return `Reading deliveries of ${args.webhookId ?? 'a webhook'}`
+    case 'rotate_webhook_endpoint_secret': return `Rotating the signing secret of ${args.webhookId ?? 'a webhook'}`
+    case 'replay_webhook_log': return `Sending delivery ${args.deliveryId ?? ''} again`.replace(/\s+/g, ' ')
+    case 'get_ai_function': return `Reading function ${args.name ?? args.functionId ?? ''}`.trim()
+    case 'invoke_ai_function': return `Running function ${args.name ?? args.functionId ?? ''}`.trim()
+    case 'list_ai_function_logs': return 'Reading function runs'
+    case 'deploy_function_code': return `Deploying function ${args.name ?? ''}`.trim()
+    case 'list_request_logs': return 'Reading the request log'
+    case 'list_deploy_versions': return 'Reading published versions'
+    case 'list_integration_capabilities': return 'Reading what each integration can do'
+    case 'get_connection_identity': return 'Reading which project this connection is bound to'
+    case 'get_auth_email_settings': return 'Reading the auth email settings'
+    case 'set_auth_smtp': return 'Saving the auth email sender'
+    case 'test_auth_smtp': return 'Sending a test email'
+    case 'remove_auth_smtp': return 'Removing the auth email sender'
+    case 'set_auth_email_template': return `Saving the ${args.kind ?? ''} email template`.replace(/  +/g, ' ')
+    case 'reset_auth_email_template': return `Resetting the ${args.kind ?? ''} email template`.replace(/  +/g, ' ')
+    case 'verify_integration_key': return `Checking the ${args.integrationId ?? ''} key with its provider`.replace(/\s+/g, ' ')
     case 'fix_backend': return `Repairing ${args.target ?? 'backend'}`
     case 'apply_proposal': return 'Applying the recommendation list'
     case 'drop_table': return `Dropping table ${args.tableName ?? ''}`.trim()

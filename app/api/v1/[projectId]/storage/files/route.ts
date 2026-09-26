@@ -7,12 +7,13 @@ import { listFilesSchema, paginationSchema } from '@/lib/api/v1/schemas'
 import { validateQueryParams } from '@/lib/validation/schemas'
 import { storageService } from '@/lib/services/storage'
 import { prisma } from '@/lib/db'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 /**
  * GET /v1/{projectId}/storage/files
  * List files in storage bucket
  */
-export async function GET(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+async function handleGET(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, params)
@@ -101,3 +102,4 @@ export async function GET(request: NextRequest, props: { params: Promise<{ proje
   }
 }
 
+export const GET = recordedV1(handleGET)

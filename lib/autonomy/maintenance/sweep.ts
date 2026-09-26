@@ -171,10 +171,13 @@ export async function sweepProjectMaintenance(input: {
   // Oldest first: the finding that has been recurring longest is the one whose
   // subsystem has been failing longest.
   const finding = await prisma.healthFinding.findFirst({
-    // `open` only. A finding already proposed, approved, fixed or dismissed is
-    // somebody else's business, and re-planning from a dismissed one would
-    // override a decision a person already made.
-    where: { projectId, type: STRUCTURAL_FINDING, status: 'open' },
+    // `open` or `pending_approval`: still unresolved. The observer writes this
+    // finding as pending_approval (it has no inline fix), and reading `open`
+    // alone meant the sweep never once found a real one. Waiting for a person
+    // is not a hole: nothing below runs without an approval bound to this exact
+    // plan version. Fixed and dismissed stay out, because re-planning from a
+    // dismissed finding would override a decision a person already made.
+    where: { projectId, type: STRUCTURAL_FINDING, status: { in: ['open', 'pending_approval'] } },
     select: { id: true },
     orderBy: { detectedAt: 'asc' },
   })

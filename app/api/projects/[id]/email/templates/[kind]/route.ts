@@ -11,8 +11,8 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { withAuth } from '@/lib/auth/route-protection'
 import { canWriteProject } from '@/lib/edition/guard'
-import { prisma } from '@/lib/db/prisma'
-import { isTemplateKind, validateTemplate } from '@/lib/email/template-kinds'
+import { isTemplateKind } from '@/lib/email/template-kinds'
+import { revertProjectTemplate, saveProjectTemplate } from '@/lib/email/project-templates'
 
 export const PUT = withAuth(async (request: NextRequest, { user, params }) => {
   const { id: projectId, kind } = await params
@@ -29,22 +29,14 @@ export const PUT = withAuth(async (request: NextRequest, { user, params }) => {
 
   // Refused HERE, at the dashboard, while the operator is looking at it.
   // Discovering a broken template at send time means discovering it during
-  // somebody's password reset, and that person did not author it.
-  const errors = validateTemplate(subject, bodyHtml)
-  if (errors.length > 0) {
-    return NextResponse.json({ error: 'This template cannot be used', errors }, { status: 400 })
+  // somebody's password reset, and that person did not author it. Shared with
+  // the agent's auth set_email_template (lib/email/project-templates.ts).
+  const result = await saveProjectTemplate(projectId, kind, subject, bodyHtml)
+  if ('errors' in result) {
+    return NextResponse.json({ error: 'This template cannot be used', errors: result.errors }, { status: 400 })
   }
 
-  const saved = await prisma.projectEmailTemplate.upsert({
-    where: { projectId_kind: { projectId, kind } },
-    create: { projectId, kind, subject, bodyHtml },
-    update: { subject, bodyHtml },
-    select: { kind: true, subject: true, bodyHtml: true, updatedAt: true },
-  })
-
-  return NextResponse.json({
-    template: { ...saved, customised: true, updatedAt: saved.updatedAt.toISOString() },
-  })
+  return NextResponse.json({ template: result.template })
 })
 
 export const DELETE = withAuth(async (_request: NextRequest, { user, params }) => {
@@ -58,6 +50,5 @@ export const DELETE = withAuth(async (_request: NextRequest, { user, params }) =
 
   // deleteMany scoped by BOTH ids: a kind belonging to another project matches
   // nothing rather than being read and confirmed to exist.
-  const { count } = await prisma.projectEmailTemplate.deleteMany({ where: { projectId, kind } })
-  return NextResponse.json({ reverted: count > 0 })
+  return NextResponse.json({ reverted: await revertProjectTemplate(projectId, kind) })
 })

@@ -481,7 +481,11 @@ async function main(): Promise<void> {
   process.exit(exitCode)
 }
 
-main().catch(err => {
-  console.error(err)
-  process.exit(1)
-})
+// Guarded so tests can import auditCutoverSql and hold the SQL file to it
+// without starting a cutover.
+if (require.main === module) {
+  main().catch(err => {
+    console.error(err)
+    process.exit(1)
+  })
+}

@@ -22,6 +22,8 @@ export interface Project {
   lastMetricsUpdate?: Date | null
   createdAt: Date
   updatedAt: Date
+  /** Set while the project is paused for inactivity. Never set on a self-hosted deployment. */
+  pausedAt?: Date | string | null
   metrics?: {
     totalFunctions: number
     totalTables: number

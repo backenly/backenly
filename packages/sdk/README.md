@@ -31,10 +31,10 @@ await backend.auth.signOut()
 ```
 
 Every request after `signIn` carries the end-user's JWT automatically. The wire
-format is two headers — `Authorization: Bearer <apiKey>` identifies the
+format is two headers — `x-api-key: <apiKey>` identifies the
 *project*, `X-User-Token: <jwt>` identifies the *end-user*. Row-level security
 policies read the second one. If you are writing a client by hand instead of
-using this SDK, see the [REST reference](https://backenly.com/llms.txt) — the
+using this SDK, see the [REST reference](https://backenly.com/docs/agents/client-setup.md) — the
 two-header scheme is documented there and is not guessable.
 
 ## Realtime

@@ -25,11 +25,12 @@ import { NextRequest, NextResponse } from 'next/server'
 import { v1ApiMiddleware } from '@/lib/api/v1/middleware'
 import { listenerHub } from '@/lib/realtime/listener-hub'
 import { redeemRealtimeTicketParam } from '@/lib/realtime/ticket-auth'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-export async function GET(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+async function handleGET(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
   // ── Preferred: a short-lived single-use ticket ─────────────────────────────
   //
@@ -125,3 +126,5 @@ export async function GET(request: NextRequest, props: { params: Promise<{ proje
     },
   })
 }
+
+export const GET = recordedV1(handleGET)

@@ -19,7 +19,7 @@ import {
   LogOut, Mail, Lock, Trash2, HelpCircle, Key, Check, X,
   User, Shield, AlertTriangle, Sparkles, Smartphone, MessageSquare,
   Activity, Calendar, FolderKanban, Loader2, Copy, ShieldCheck, ShieldAlert,
-  Send, ArrowUpRight, CheckCircle2, LifeBuoy,
+  Send, ArrowUpRight, CheckCircle2, LifeBuoy, Bell,
 } from 'lucide-react'
 import { OrgShell } from '@/components/shell/OrgShell'
 import {
@@ -30,7 +30,7 @@ import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import { DeploymentRecoverySection } from '@/components/app/DeploymentRecoverySection'
 import { deleteAccount, signOut } from '@/lib/api/auth'
 
-type Section = 'profile' | 'security' | 'recovery' | 'support' | 'danger'
+type Section = 'profile' | 'security' | 'notifications' | 'recovery' | 'support' | 'danger'
 
 interface UserProfile {
   id: string
@@ -130,7 +130,7 @@ export default function SettingsPage() {
     // own org page (§5.4) — send legacy ?tab=billing there.
     const tab = new URLSearchParams(window.location.search).get('tab')
     if (tab === 'billing') { router.replace('/app/billing'); return }
-    if (tab && ['profile', 'security', 'support', 'danger'].includes(tab)) {
+    if (tab && ['profile', 'security', 'notifications', 'support', 'danger'].includes(tab)) {
       setActiveSection(tab as Section)
     }
     refreshUser()
@@ -272,6 +272,7 @@ export default function SettingsPage() {
   const TABS: { id: Section; label: string; icon: typeof User }[] = [
     { id: 'profile', label: 'Profile', icon: User },
     { id: 'security', label: 'Security', icon: Shield },
+    { id: 'notifications', label: 'Notifications', icon: Bell },
     // Self-host only, and absent rather than disabled in Cloud. Deployment
     // recovery reads the whole platform database - every tenant's projects,
     // users and secrets - which is right when the single account IS the
@@ -356,6 +357,8 @@ export default function SettingsPage() {
                 onLogout={handleLogout}
               />
             )}
+
+            {activeSection === 'notifications' && <NotificationsSection onToast={showToast} />}
 
             {activeSection === 'recovery' && !CLOUD_CONTROL_PLANE && <DeploymentRecoverySection />}
 
@@ -709,6 +712,124 @@ function SecuritySection({
         </KitCardBody>
       </KitCard>
     </div>
+  )
+}
+
+// ─── Notifications ────────────────────────────────────────────────────────────
+
+/**
+ * What each preference controls, in the order an owner cares about. Types the
+ * API returns but this list does not name are still shown, under their raw
+ * name, so a new type is never silently unmanageable.
+ */
+const NOTIFICATION_LABELS: Record<string, { label: string; description: string }> = {
+  health_alert: {
+    label: 'Backend health alerts',
+    description: 'A critical problem in one of your backends that Backenly could not resolve on its own.',
+  },
+  autonomous_action: {
+    label: 'Autonomous changes',
+    description: 'What Backenly repaired or changed while you were away.',
+  },
+  deploy_complete: { label: 'Deployments', description: 'A deployment finished.' },
+  job_failed: { label: 'Failed jobs', description: 'A background job in one of your backends failed.' },
+  job_completed: { label: 'Completed jobs', description: 'A background job in one of your backends finished.' },
+  credits_low: { label: 'Usage limits', description: 'You are close to a limit on your plan.' },
+  payment_failed: { label: 'Failed payments', description: 'A payment for your plan did not go through.' },
+  payment_success: { label: 'Receipts', description: 'A payment for your plan succeeded.' },
+  system: { label: 'Account notices', description: 'Changes to your account or subscription.' },
+}
+
+interface NotificationPref {
+  type: string
+  emailEnabled: boolean
+  inAppEnabled: boolean
+}
+
+function NotificationsSection({ onToast }: { onToast: (msg: string, kind?: 'success' | 'error') => void }) {
+  const [prefs, setPrefs] = useState<NotificationPref[] | null>(null)
+  const [saving, setSaving] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/notification-preferences', { credentials: 'include' })
+      .then(r => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+      .then(d => { if (!cancelled) setPrefs(Array.isArray(d?.preferences) ? d.preferences : []) })
+      .catch(() => { if (!cancelled) setPrefs([]) })
+    return () => { cancelled = true }
+  }, [])
+
+  const order = Object.keys(NOTIFICATION_LABELS)
+  const rows = (prefs ?? []).slice().sort((a, b) => {
+    const ia = order.indexOf(a.type)
+    const ib = order.indexOf(b.type)
+    return (ia === -1 ? order.length : ia) - (ib === -1 ? order.length : ib)
+  })
+
+  const update = async (type: string, channel: 'emailEnabled' | 'inAppEnabled', value: boolean) => {
+    const before = prefs
+    setSaving(`${type}:${channel}`)
+    setPrefs(p => (p ?? []).map(x => (x.type === type ? { ...x, [channel]: value } : x)))
+    try {
+      const res = await fetch('/api/notification-preferences', {
+        method: 'PATCH',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ preferences: [{ type, [channel]: value }] }),
+      })
+      if (!res.ok) throw new Error(String(res.status))
+    } catch {
+      setPrefs(before)
+      onToast('Could not save that preference', 'error')
+    } finally {
+      setSaving(null)
+    }
+  }
+
+  return (
+    <KitCard>
+      <KitCardHeader title="Notifications" description="Choose what Backenly tells you about, and where" />
+      <KitCardBody>
+        {prefs === null ? (
+          <div className="flex items-center gap-2 text-[12.5px] text-zinc-500">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading preferences…
+          </div>
+        ) : rows.length === 0 ? (
+          <p className="text-[12.5px] text-zinc-400">Preferences could not be loaded. Try again in a moment.</p>
+        ) : (
+          <div className="divide-y divide-white/[0.06]">
+            <div className="grid grid-cols-[1fr_auto_auto] gap-x-6 pb-2 text-[10.5px] font-medium uppercase tracking-wide text-zinc-500">
+              <span />
+              <span className="w-12 text-center">Email</span>
+              <span className="w-12 text-center">In app</span>
+            </div>
+            {rows.map(pref => {
+              const meta = NOTIFICATION_LABELS[pref.type] ?? { label: pref.type, description: '' }
+              return (
+                <div key={pref.type} className="grid grid-cols-[1fr_auto_auto] items-center gap-x-6 py-3">
+                  <div className="min-w-0">
+                    <p className="text-[13px] font-medium text-zinc-100">{meta.label}</p>
+                    {meta.description && <p className="mt-0.5 text-[11.5px] text-zinc-500">{meta.description}</p>}
+                  </div>
+                  {(['emailEnabled', 'inAppEnabled'] as const).map(channel => (
+                    <label key={channel} className="flex w-12 justify-center">
+                      <span className="sr-only">{`${meta.label}: ${channel === 'emailEnabled' ? 'email' : 'in app'}`}</span>
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 cursor-pointer accent-zinc-200 disabled:cursor-wait"
+                        checked={pref[channel]}
+                        disabled={saving === `${pref.type}:${channel}`}
+                        onChange={e => update(pref.type, channel, e.target.checked)}
+                      />
+                    </label>
+                  ))}
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </KitCardBody>
+    </KitCard>
   )
 }
 

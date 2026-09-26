@@ -179,7 +179,7 @@ const LIST: ComparisonData[] = [
       {
         aspect: 'Agent access',
         competitor: 'Official MCP server with a broader tool surface, read-only mode, and project scoping',
-        backenly: 'Twenty advertised tools; destructive operations are absent from the surface and route to approval',
+        backenly: 'Twenty-three advertised tools; destructive operations are absent from the surface and route to approval',
         practical: 'Different safety models rather than different reach. See the agent section below.',
       },
       {
