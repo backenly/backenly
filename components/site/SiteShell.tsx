@@ -8,6 +8,7 @@ import { Icon } from '@iconify/react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Menu, X } from 'lucide-react'
 import { registerSiteIcons } from '@/lib/icons/registry'
+import { AnnouncementBar } from '@/components/site/AnnouncementBar'
 import { BrandMark } from '@/components/site/BrandMark'
 import { SmoothScroll } from '@/components/site/SmoothScroll'
 import { useUserSession } from '@/lib/hooks/useUserSession'
@@ -39,7 +40,7 @@ export const ROUTES = {
    * Product Hunt.
    *
    * INTERIM AND DELIBERATE: this is Product Hunt's own home page, not a
-   * Backenly page. Founder's call, so the hero launch chip has somewhere
+   * Backenly page. Founder's call, so the announcement bar above the navbar has somewhere
    * valid to point while Backenly's upcoming page does not exist yet.
    * It is not a defect and does not block a release.
    *
@@ -130,6 +131,7 @@ export function SiteShell({ children }: { children: React.ReactNode }) {
           >
             Skip to content
           </a>
+          <AnnouncementBar href={ROUTES.productHunt} />
           <NavBar />
           {children}
           <SiteFooter />
