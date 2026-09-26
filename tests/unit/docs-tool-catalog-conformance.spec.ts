@@ -36,16 +36,28 @@ import { DOMAIN_TOOLS } from '@/lib/mcp/domains'
 const DOMAIN_ACTIONS = new Set(DOMAIN_TOOLS.flatMap((d) => Object.keys(d.actions)))
 import { BRAIN_TOOLS } from '@/lib/ai/brain/tools'
 
-const LLMS_TXT = fs.readFileSync(path.join(process.cwd(), 'public', 'llms.txt'), 'utf8')
+// The docs are an index (llms.txt) and one file per topic (public/docs/agents,
+// see lib/mcp/agent-docs.ts), plus the agent skill. Claims about the advertised
+// surface are made in the index; every name anywhere in them must be real.
+const PUBLIC = path.join(process.cwd(), 'public')
+const LLMS_TXT = fs.readFileSync(path.join(PUBLIC, 'llms.txt'), 'utf8')
+const DOC_FILES: Array<[string, string]> = [
+  ['llms.txt', LLMS_TXT],
+  ['skill.md', fs.readFileSync(path.join(PUBLIC, 'skill.md'), 'utf8')],
+  ...fs.readdirSync(path.join(PUBLIC, 'docs', 'agents')).map(
+    (f) => [`docs/agents/${f}`, fs.readFileSync(path.join(PUBLIC, 'docs', 'agents', f), 'utf8')] as [string, string],
+  ),
+]
+const ALL_DOCS = DOC_FILES.map(([, text]) => text).join('\n\n')
 
-/** Tool names the doc mentions inside backticks. */
-function mentionedTools(): Set<string> {
+/** Tool names the docs mention inside backticks. */
+function mentionedTools(text = ALL_DOCS): Set<string> {
   const out = new Set<string>()
-  for (const m of LLMS_TXT.matchAll(/`([a-z][a-z0-9_]{2,})`/g)) out.add(m[1])
+  for (const m of text.matchAll(/`([a-z][a-z0-9_]{2,})`/g)) out.add(m[1])
   return out
 }
 
-describe('llms.txt describes the real MCP surface', () => {
+describe('the agent docs describe the real MCP surface', () => {
   const advertised = buildCatalog().map((t) => t.name)
   const dispatchable = new Set(buildDispatchable().map((t) => t.name))
   /**
@@ -64,8 +76,8 @@ describe('llms.txt describes the real MCP surface', () => {
     ...dispatchable,
   ])
 
-  it('mentions every advertised tool', () => {
-    const mentioned = mentionedTools()
+  it('names every advertised tool in the index', () => {
+    const mentioned = mentionedTools(LLMS_TXT)
     const missing = advertised.filter((name) => !mentioned.has(name))
     expect(missing).toEqual([])
   })
@@ -129,8 +141,7 @@ describe('llms.txt describes the real MCP surface', () => {
         !dispatchable.has(name) &&
         !DOMAIN_ACTIONS.has(name) &&
         !new RegExp(`Older tool names[\\s\\S]{0,1200}\`${name}\``).test(LLMS_TXT) &&
-        !new RegExp(`Destructive tools[\\s\\S]{0,600}\`${name}\``).test(LLMS_TXT) &&
-        !new RegExp(`\`${name}\`[\\s\\S]{0,400}backend_chat`).test(LLMS_TXT),
+        !new RegExp(`\`${name}\`[\\s\\S]{0,400}backend_chat`).test(ALL_DOCS),
     )
     expect(unexplained).toEqual([])
   })
@@ -141,35 +152,38 @@ describe('llms.txt describes the real MCP surface', () => {
     // will offer it directly.
     expect(dispatchable.has('add_rls')).toBe(true)
     expect(advertised).not.toContain('add_rls')
-    expect(LLMS_TXT).toMatch(/add_rls[\s\S]{0,200}backend_chat|backend_chat[\s\S]{0,200}add_rls/)
+    expect(ALL_DOCS).toMatch(/add_rls[\s\S]{0,200}backend_chat|backend_chat[\s\S]{0,200}add_rls/)
   })
 
   it('documents the party/participants template, which owner-only RLS cannot express', () => {
-    expect(LLMS_TXT).toMatch(/participants/)
-    expect(LLMS_TXT).toMatch(/custom/)
+    expect(ALL_DOCS).toMatch(/participants/)
+    expect(ALL_DOCS).toMatch(/custom/)
   })
 
   it('explains that REST endpoints need no generation step', () => {
     // An agent that believes a table needs generate_api to be reachable ships a
     // schema it thinks is unusable, or burns a call per table proving otherwise.
-    expect(LLMS_TXT).toMatch(/REST endpoints are automatic/i)
+    expect(ALL_DOCS).toMatch(/REST endpoints are automatic/i)
   })
 
   it('distinguishes a failed approval from a partial one', () => {
-    expect(LLMS_TXT).toMatch(/partial/)
+    expect(ALL_DOCS).toMatch(/partial/)
   })
 
-  it('fits in one fetch_docs response, so the guide is never served truncated', () => {
-    expect(LLMS_TXT.length).toBeLessThanOrEqual(DOCS_MAX_CHARS)
-  })
+  it.each(DOC_FILES.map(([file, text]) => [file, text.length] as const))(
+    '%s fits in one fetch_docs response, so it is never served truncated',
+    (_file, length) => {
+      expect(length).toBeLessThanOrEqual(DOCS_MAX_CHARS)
+    },
+  )
 
-  it('names every read_backend_state section it can dispatch', () => {
+  it('names every read_backend_state section it can dispatch, in the index', () => {
     const missing = Object.keys(STATE_SECTIONS).filter((s) => !LLMS_TXT.includes(`\`${s}\``))
     expect(missing).toEqual([])
   })
 
   it('never teaches the project key as a Bearer token, which the runtime rejects', () => {
-    expect(LLMS_TXT).not.toMatch(/Authorization: Bearer <(?:apiKey|project key)>/)
+    expect(ALL_DOCS).not.toMatch(/Authorization: Bearer <(?:apiKey|project key|scoped-key|key)>/)
     expect(LLMS_TXT).toMatch(/x-api-key: <project key>/)
   })
 })

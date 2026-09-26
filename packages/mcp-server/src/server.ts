@@ -98,10 +98,10 @@ const ESSENTIAL_FALLBACK: ManifestTool[] = [
     tier: 'read',
     description:
       'Fetch Backenly documentation as Markdown so you use the right tools without guessing. ' +
-      'No arguments for the full guide, or pass `topic` (e.g. "auth", "database", "storage").',
+      'No arguments for the index, or pass `topic` for one area (e.g. "database", "functions", "stripe", "errors").',
     inputSchema: {
       type: 'object',
-      properties: { topic: { type: 'string', description: 'Optional docs section.' } },
+      properties: { topic: { type: 'string', description: 'Optional topic; the index lists them all.' } },
       additionalProperties: false,
     },
   },
