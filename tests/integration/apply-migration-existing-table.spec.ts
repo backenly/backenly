@@ -117,6 +117,59 @@ it('lets a migration alter a table it creates earlier in the same migration', as
   expect(await columns('reviews')).toEqual(expect.arrayContaining(['stars', 'body']))
 }, 60_000)
 
+describe('ADD COLUMN applies what it declares', () => {
+  // addColumnToTable took only a name and a type and stripped NOT NULL, so
+  // `ADD COLUMN c text NOT NULL DEFAULT 'x'` came back "✅ Added" as a
+  // nullable column with no default. Found by the acceptance suite.
+  beforeAll(async () => {
+    await prisma.$executeRawUnsafe(`INSERT INTO "${schema}".posts (title) VALUES ('existing row')`)
+  })
+
+  async function column(table: string, name: string) {
+    const rows = await prisma.$queryRaw<Array<{ is_nullable: string; column_default: string | null }>>`
+      SELECT is_nullable, column_default FROM information_schema.columns
+      WHERE table_schema = ${schema} AND table_name = ${table} AND column_name = ${name}`
+    return rows[0] ?? null
+  }
+
+  it('fills a NOT NULL DEFAULT column into the rows already there', async () => {
+    const r = await migrate("ALTER TABLE posts ADD COLUMN status text NOT NULL DEFAULT 'draft'")
+    expect(r.body.ok).toBe(true)
+    expect(await column('posts', 'status')).toMatchObject({ is_nullable: 'NO', column_default: expect.stringMatching(/draft/) })
+    const rows = await prisma.$queryRawUnsafe<Array<{ status: string }>>(`SELECT status FROM "${schema}".posts`)
+    expect(rows.map((x) => x.status)).toEqual(['draft'])
+  }, 60_000)
+
+  it('refuses a NOT NULL column with no default on a table with rows, and adds nothing', async () => {
+    const r = await migrate('ALTER TABLE posts ADD COLUMN must_have text NOT NULL')
+    expect(r.body).toMatchObject({ ok: false, code: 'MIGRATION_FAILED' })
+    expect(JSON.stringify(r.body)).toMatch(/already has rows that would have no value/)
+    expect(await column('posts', 'must_have')).toBeNull()
+  }, 60_000)
+
+  it('adds a UNIQUE column with its constraint', async () => {
+    const r = await migrate('ALTER TABLE posts ADD COLUMN slug text UNIQUE')
+    expect(r.body.ok).toBe(true)
+    const u = await prisma.$queryRaw<Array<{ n: number }>>`
+      SELECT count(*)::int AS n FROM information_schema.table_constraints tc
+      JOIN information_schema.constraint_column_usage cu ON cu.constraint_name = tc.constraint_name AND cu.table_schema = tc.table_schema
+      WHERE tc.table_schema = ${schema} AND tc.table_name = 'posts' AND tc.constraint_type = 'UNIQUE' AND cu.column_name = 'slug'`
+    expect(u[0].n).toBe(1)
+  }, 60_000)
+
+  it('refuses a default it would have to run as arbitrary SQL', async () => {
+    const r = await migrate("ALTER TABLE posts ADD COLUMN risky text DEFAULT md5('x')")
+    expect(r.body.ok).toBe(false)
+    expect(await column('posts', 'risky')).toBeNull()
+  }, 60_000)
+
+  it('still adds a plain column the way it always did', async () => {
+    const r = await migrate('ALTER TABLE posts ADD COLUMN subtitle_plain text')
+    expect(r.body.ok).toBe(true)
+    expect(await column('posts', 'subtitle_plain')).toMatchObject({ is_nullable: 'YES' })
+  }, 60_000)
+})
+
 it('still creates a table that does not exist', async () => {
   const r = await migrate('CREATE TABLE IF NOT EXISTS authors (name text)')
   expect(r.body.ok).toBe(true)

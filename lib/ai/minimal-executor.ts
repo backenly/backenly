@@ -5584,6 +5584,64 @@ async function executeAddColumn(
     }
     // ── END REAL DB CHECK ────────────────────────────────────────────────────
 
+    // ── A column declared with constraints is added as declared ──────────────
+    //
+    // addColumnToTable takes a name and a type and derives the rest, and it
+    // strips NOT NULL on purpose. So `ALTER TABLE t ADD COLUMN c text NOT NULL
+    // DEFAULT 'x' UNIQUE` (apply_migration's own grammar) came back "✅ Added"
+    // as a nullable column with no default and no constraint. When the caller
+    // declares any of them, the column is added in one statement exactly as
+    // declared: Postgres fills the default into existing rows, or refuses a NOT
+    // NULL it cannot satisfy (23502), and either way the result is the truth.
+    const spec = params.column && typeof params.column === 'object' ? params.column as Record<string, unknown> : null
+    const declared = !!spec && colsToAdd.length === 1 &&
+      (spec.nullable === false || spec.default !== undefined || spec.unique === true || typeof spec.fkTo === 'string')
+    if (declared) {
+      const name = String(spec!.name ?? colsToAdd[0].name)
+      const ident = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/
+      if (!ident.test(name)) return { success: false, message: `"${name}" is not a column name this path can add.` }
+      let defaultSql = ''
+      if (spec!.default !== undefined && spec!.default !== null) {
+        const d = String(spec!.default).trim()
+        const SAFE_DEFAULT = /^(?:'(?:[^']|'')*'(?:::[A-Za-z_ ]+)?|-?\d+(?:\.\d+)?|true|false|null|now\(\)|current_timestamp|current_date|gen_random_uuid\(\))$/i
+        if (!SAFE_DEFAULT.test(d)) {
+          return {
+            success: false,
+            message: `The default ${d} is not one this path applies. Use a literal ('text', 42, true), now(), CURRENT_TIMESTAMP, CURRENT_DATE or gen_random_uuid().`,
+          }
+        }
+        defaultSql = ` DEFAULT ${d}`
+      }
+      let referencesSql = ''
+      if (typeof spec!.fkTo === 'string') {
+        if (!ident.test(spec!.fkTo)) return { success: false, message: `"${spec!.fkTo}" is not a table this path can reference.` }
+        referencesSql = ` REFERENCES "${postgresSchema}"."${spec!.fkTo}"("id")`
+      }
+      const type = normalizeColumnType(String(spec!.type ?? colsToAdd[0].type), name)
+      const definition = `${type}${defaultSql}${spec!.nullable === false ? ' NOT NULL' : ''}${spec!.unique === true ? ' UNIQUE' : ''}${referencesSql}`
+      try {
+        await prisma.$executeRawUnsafe(`ALTER TABLE "${postgresSchema}"."${tableName}" ADD COLUMN "${name}" ${definition}`)
+      } catch (err: any) {
+        // Prisma reports this one as "Code: `23502`. Message: `N/A`", which an agent cannot act on.
+        if (String(err?.message ?? '').includes('23502')) {
+          return {
+            success: false,
+            message:
+              `Column "${name}" is NOT NULL with no default, and ${tableName} already has rows that would have no value for it, ` +
+              `so nothing was added. Give it a DEFAULT, or add it nullable, fill it, then ALTER COLUMN ${name} SET NOT NULL.`,
+          }
+        }
+        throw err
+      }
+      // A foreign key is indexed, as addColumnToTable and create_table do.
+      if (referencesSql) {
+        const indexName = `idx_${tableName}_${name.toLowerCase()}`.slice(0, 63)
+        await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "${indexName}" ON "${postgresSchema}"."${tableName}" ("${name}")`)
+      }
+      import('@/lib/services/workspace-validator').then(({ invalidateSchemaCache }) => invalidateSchemaCache(projectId, tableName)).catch(() => {})
+      return { success: true, message: `✅ Added "${name}" ${definition.replace(` REFERENCES "${postgresSchema}".`, ' REFERENCES ')} to table "${tableName}"` }
+    }
+
     const addedCols: string[] = []
     for (const col of colsToAdd) {
       await addColumnToTable(tableName, { name: col.name, type: col.type }, projectId, apiKey)
