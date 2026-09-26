@@ -43,6 +43,7 @@ cp "$ROOT/tools/managed-db/runner/package.json" "$CTX/"
 cp "$ROOT/tools/managed-db/runner/package-lock.json" "$CTX/"
 cp "$ROOT/tools/managed-db/runner/entrypoint.sh" "$CTX/"
 cp "$ROOT/tools/managed-db/runner/Dockerfile.migrate" "$CTX/"
+cp -r "$ROOT/tools/managed-db/runner/checks" "$CTX/checks"
 cp "$ROOT/prisma/schema.prisma" "$CTX/schema.prisma"
 cp -r "$ROOT/prisma/migrations-canonical" "$CTX/migrations-canonical"
 

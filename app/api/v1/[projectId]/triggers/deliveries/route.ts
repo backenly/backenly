@@ -12,6 +12,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { verifyToken } from '@/lib/auth/jwt'
 import { listDeliveryLogs, replayDelivery } from '@/lib/services/trigger-service'
 import { canAccessProject, canWriteProject } from '@/lib/edition/guard'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 /**
  * Authentication only: who is calling, or null.
@@ -33,7 +34,7 @@ async function authenticate(req: NextRequest): Promise<string | null> {
 
 // GET — list delivery logs
 // ?status=DEAD|SUCCESS|FAILED  ?limit=50
-export async function GET(req: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+async function handleGET(req: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
   const userId = await authenticate(req)
   if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
@@ -54,7 +55,7 @@ export async function GET(req: NextRequest, props: { params: Promise<{ projectId
 
 // POST — replay a dead delivery
 // Body: { id: string }
-export async function POST(req: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+async function handlePOST(req: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
   const userId = await authenticate(req)
   if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
@@ -75,3 +76,6 @@ export async function POST(req: NextRequest, props: { params: Promise<{ projectI
 
   return NextResponse.json({ success: true })
 }
+
+export const GET = recordedV1(handleGET)
+export const POST = recordedV1(handlePOST)

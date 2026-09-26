@@ -10,6 +10,7 @@
 import crypto from 'crypto'
 import { prisma } from '@/lib/db'
 import { plaintextForStorage } from '@/lib/auth/api-key-plaintext'
+import { mintKey } from '@/lib/auth/key-prefix'
 
 /**
  * Mint the project's first key and return the plaintext exactly once.
@@ -25,16 +26,15 @@ export async function createDefaultApiKey(
   userId: string,
 ): Promise<string | null> {
   try {
-    const apiKeyPrefix = 'sk_live_'
-    const plaintext = `${apiKeyPrefix}${crypto.randomBytes(32).toString('hex')}`
+    const { key: plaintext, prefix: apiKeyPrefix } = mintKey({ keyType: 'public', serviceRole: false })
     const keyHash = crypto.createHash('sha256').update(plaintext).digest('hex')
 
     await prisma.apiKey.create({
       data: {
         name: `${projectName} Default Key`,
         // Never persisted. The credential a frontend should embed is
-        // Project.anonKey; this one is issued with an sk_live_ prefix and role
-        // 'admin'. See lib/auth/api-key-plaintext.ts.
+        // Project.anonKey; this one is issued with role 'admin'. See
+        // lib/auth/api-key-plaintext.ts.
         key: plaintextForStorage(),
         keyHash, // SHA-256, for O(1) auth lookup
         keyPrefix: apiKeyPrefix,

@@ -87,7 +87,7 @@ export async function authenticateMcp(request: NextRequest): Promise<McpAuthResu
       code: 'INVALID_KEY',
       error:
         'This MCP key is not recognised. It may have been revoked from the dashboard. ' +
-        'Generate a new MCP key from Backenly → Project → MCP and re-run `init`.',
+        'Generate a new MCP key in the Backenly dashboard under your project → Connect → Agents.',
     }
   }
 
@@ -120,7 +120,7 @@ export async function authenticateMcp(request: NextRequest): Promise<McpAuthResu
       code: 'WRONG_SCOPE',
       error:
         'This key has scope="runtime" — that is an SDK key for browser clients, not an MCP key. ' +
-        'Generate an MCP key from Backenly → Project → MCP and use that one.',
+        'Generate an MCP key in the Backenly dashboard under your project → Connect → Agents, and use that one.',
     }
   }
 

@@ -43,6 +43,17 @@ export interface UserEntitlements {
    * not require a commercial lookup.
    */
   autonomyScanIntervalMin: number | null
+  /**
+   * Days without real use before a project owned under this plan is paused.
+   * `null` means never paused, which is what every self-hosted deployment and
+   * every paid plan answers. Only Backenly Cloud's idle sweep reads it.
+   */
+  inactivityPauseDays: number | null
+  /**
+   * Days after pausing that resuming stays free. `null` means resuming is
+   * always free. After the window a paused project can still be exported.
+   */
+  pausedFreeResumeDays: number | null
 
   logRetentionDays: number
   supportResponseHours: number | null

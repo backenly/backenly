@@ -22,12 +22,13 @@ import { prisma } from '@/lib/db'
 import { embedText, formatVectorLiteral } from '@/lib/ai/embeddings'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 const MAX_LIMIT = 50
 const DEFAULT_LIMIT = 10
 const SAFE_IDENT = /^[a-zA-Z_][a-zA-Z0-9_]{0,62}$/
 
-export async function GET(
+async function handleGET(
   request: NextRequest,
   props: { params: Promise<{ projectId: string; tableName: string }> }
 ) {
@@ -166,3 +167,5 @@ export async function GET(
     )
   }
 }
+
+export const GET = recordedV1(handleGET)

@@ -256,6 +256,33 @@ async function uninstallCaptureTrigger(projectId: string, tableName: string): Pr
   )
 }
 
+/**
+ * Throw away every captured event that has not become a delivery yet.
+ *
+ * Called when a project is paused (lib/projects/pause-lifecycle.ts). Holding
+ * these instead would turn them into deliveries weeks later, on resume, and a
+ * receiver would get an "insert" for a row that may have changed ten times
+ * since. Returns how many were discarded so the pause can record it; 0 when the
+ * project never installed row capture and has no outbox at all.
+ */
+export async function discardOutbox(projectId: string): Promise<number> {
+  const schema = workspaceSchemaName(projectId)
+  const present = (await queryWorkspaceSchema(
+    projectId,
+    `SELECT to_regclass($1) IS NOT NULL AS present`,
+    `"${schema}"."${OUTBOX_TABLE}"`,
+  )) as Array<{ present: boolean }>
+  if (!present?.[0]?.present) return 0
+
+  // executeInWorkspaceSchema answers the row count, which is exactly the number
+  // wanted here (see the RETURNING note in drainProject for the reverse case).
+  const deleted = await executeInWorkspaceSchema(
+    projectId,
+    `DELETE FROM "${schema}"."${OUTBOX_TABLE}"`,
+  )
+  return typeof deleted === 'number' ? deleted : 0
+}
+
 /** Tables in this project that currently carry the capture trigger. */
 export async function listCapturedTables(projectId: string): Promise<string[]> {
   const schema = workspaceSchemaName(projectId)
@@ -452,7 +479,9 @@ function resolveEventType(row: OutboxRow): RowEventType | null {
  */
 export async function drainWebhookOutbox(): Promise<number> {
   const projects = await prisma.webhook.findMany({
-    where: { active: true, eventType: { in: [...ROW_EVENT_TYPES] } },
+    // A paused project's outbox was emptied when it paused and nothing can
+    // write to it since, so there is nothing to drain.
+    where: { active: true, eventType: { in: [...ROW_EVENT_TYPES] }, project: { pausedAt: null } },
     select: { projectId: true },
     distinct: ['projectId'],
   })

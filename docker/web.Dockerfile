@@ -172,4 +172,14 @@ USER node
 # server.js calls process.chdir(__dirname) on startup, which is why .env has to
 # live beside it on the Hetzner host. In a container there is no .env at all:
 # configuration arrives as real environment variables.
-CMD ["node", "server.js"]
+#
+# HOSTNAME is set HERE, at exec, as well as in ENV above, because the ENV value
+# does not survive every platform. ECS Fargate replaces it with the task's own
+# hostname: measured on AWS staging 2026-09-25, Next logged
+# "Local: http://ip-10-20-10-179.ap-south-1.compute.internal:3000", so nothing
+# listened on loopback. The ALB still worked (it targets that address), which
+# is why it looked healthy, while everything in the task that calls
+# 127.0.0.1:3000 failed. The contract sweep reported "ingress_unreachable" every
+# minute and never verified a single project. `exec` keeps node as PID 1 so
+# SIGTERM still reaches it.
+CMD ["sh", "-c", "HOSTNAME=0.0.0.0 exec node server.js"]

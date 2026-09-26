@@ -150,7 +150,7 @@ describe('numbers stated in copy are tied to their source', () => {
     const { buildCatalog } = require('@/lib/mcp/catalog')
     const advertised = buildCatalog().length
 
-    const WORDS: Record<number, string> = { 19: 'nineteen', 20: 'twenty', 21: 'twenty-one' }
+    const WORDS: Record<number, string> = { 19: 'nineteen', 20: 'twenty', 21: 'twenty-one', 22: 'twenty-two', 23: 'twenty-three', 24: 'twenty-four' }
     expect(WORDS[advertised]).toBeDefined()
 
     const corpus = [

@@ -271,6 +271,14 @@ __tests__/auth/oauth-claim-gate.test.ts
 # positive reads present so the refusals cannot pass because nothing works.
 __tests__/database/sql-workspace-isolation.test.ts
 
+# Function SQL ran on the app's own connection, whose role owns every platform
+# table and workspace schema, so generated function code could read public.users
+# or another tenant's tables; claims filter rows, not schemas. It now logs in as
+# the project's own role. The suite runs the real runner and asserts POSTGRES
+# refuses, including after RESET ROLE, with positive reads and writes present
+# so the refusals cannot pass because nothing works.
+__tests__/database/function-sql-isolation.test.ts
+
 # Cross-tenant schema history. The route called verifyToken and stopped, so any
 # authenticated account could read another tenant's schema snapshots and roll
 # back their schema. Underneath, getSchemaVersion looked up by version id alone
@@ -410,6 +418,16 @@ tests/integration/dependency-failure-webhook-receiver.spec.ts
 # vacuous: "nothing was lost" is trivially true when there was nothing to lose.
 tests/integration/selfhost-failed-migration.spec.ts
 
+# ── Managed migration runner: ownership and failed-migration recovery ─────────
+#
+# The 2026-09-24 staging incident, rebuilt: a non-superuser admin builds the
+# chain, the tables move to the app role, the enums stay behind, and the pause
+# migration fails with 42501. Proves the ownership preflight refuses before
+# Prisma writes history, rollback resolves only a genuinely absent failed
+# attempt, and the enum repair converges and is idempotent. Real runner
+# entrypoint, real Prisma CLI, real PostgreSQL. Needs CREATE DATABASE/ROLE.
+tests/integration/migration-ownership-recovery.spec.ts
+
 # ── Credential rotation ─────────────────────────────────────────────────────
 #
 # A rotation proven only by "the new password works" is not proven: the point of
@@ -489,3 +507,39 @@ tests/integration/backup-role-contract.spec.ts
 # order is the property under test. Mutation-checked: unmounting the gate
 # fails 7 of the 8 locked-door assertions (bootstrap has its own check).
 tests/integration/runtime-serving-gate.spec.ts
+
+# The public half of the inactivity pause, against real Postgres: the
+# fail-closed lifecycle lock, the conditional pause write that loses to real
+# use arriving mid-snapshot, CANCELLED webhook deliveries and a discarded
+# outbox, idempotent resume, paused-project jobs left queued with attempts
+# unspent, and the mutation kernel refusing a paused project. Mutation-checked:
+# dropping the activity guard or the job filter fails the matching tests.
+tests/integration/project-pause-lifecycle.spec.ts
+
+# The inactivity clock (Project.lastActivityAt), which decides who Backenly
+# Cloud pauses: first use, the hourly write ceiling, a paused project's clock
+# never moving, a stamp making a stale pause decision lose, the real runtime
+# stamping served traffic and NOT refused or unauthenticated traffic, and the
+# snapshot download refusing a row that points outside its project's backup
+# directory. Mutation-checked: dropping the runtime stamp or the containment
+# check fails the matching tests.
+tests/integration/project-activity-clock.spec.ts
+
+# PR 2b of the MCP program: the section tools' new actions, end to end through
+# the real MCP route with real keys. Webhooks run against a loopback receiver
+# that verifies the signature; the delete is parked and runs only when a human
+# approves it. Runs as the cloud edition with only the plan lookup supplied,
+# because the single-tenant resolver rightly refuses a database of many projects.
+tests/integration/mcp-domain-operations.spec.ts
+
+# Sandbox function runs lost every ctx.log line, after a success and after a
+# failure: the worker sends them in the message that ends the run, and the
+# parent used a list only per-line messages (never sent) would fill. Runs the
+# real executor and worker, and checks the persisted run record.
+tests/integration/sandbox-function-logs.spec.ts
+tests/integration/apply-migration-existing-table.spec.ts
+# MCP acceptance (scripts/mcp-acceptance/cases.ts): two agent workflows, twice
+# each, and the acceptance cases no other suite covered. Real MCP route, real
+# keys, provisioned projects, runtime engine mode.
+tests/integration/mcp-golden-workflows.spec.ts
+tests/integration/mcp-acceptance-cases.spec.ts

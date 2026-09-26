@@ -126,7 +126,7 @@ export async function refreshEndUserToken(projectId: string, rawToken: string | 
     )
 
     // A token refresh means the end-user is still active this month.
-    trackEndUserActive(projectId, String(user.id)).catch(() => {})
+    trackEndUserActive(projectId, String(user.id), user.email).catch(() => {})
     // Stamp last_login so the Auth dashboard's "active · 30d" metric is real.
     stampLastLogin(projectId, user.id).catch(() => {})
 
@@ -331,7 +331,7 @@ export async function resetEndUserPassword(
     // Bring the users table to the auth contract so the password UPDATE below
     // targets columns that actually exist — handles `password` vs
     // `password_hash` and `updatedAt` vs `updated_at` schema drift.
-    const usersSchema = await ensureAuthUsersTable(projectId)
+    const usersSchema = await ensureAuthUsersTable(projectId, { email: null })
 
     const resets = await prisma.$queryRawUnsafe<any[]>(
       `SELECT id, email, expires_at, used_at
@@ -625,7 +625,7 @@ export async function verifyMagicLink(projectId: string, tokenRaw: unknown): Pro
     if ('error' in consumed) return err('BAD_REQUEST', consumed.error, 400)
     const email = consumed.email
 
-    const usersSchema = await ensureAuthUsersTable(projectId)
+    const usersSchema = await ensureAuthUsersTable(projectId, { email })
     await ensureEmailVerifiedColumn(schemaName)
 
     let users = await executeWithUserContext<any>(
@@ -664,7 +664,7 @@ export async function verifyMagicLink(projectId: string, tokenRaw: unknown): Pro
       { expiresIn: '7d' },
     )
 
-    trackEndUserActive(projectId, String(user.id)).catch(() => {})
+    trackEndUserActive(projectId, String(user.id), user.email).catch(() => {})
     stampLastLogin(projectId, user.id).catch(() => {})
 
     return ok({

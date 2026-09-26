@@ -478,6 +478,39 @@ export async function listBackups(projectId: string) {
   })
 }
 
+/**
+ * The on-disk file of one COMPLETED snapshot of this project, or null.
+ *
+ * For handing a snapshot to its owner (the download route). The row's
+ * `filePath` is checked to resolve inside this project's own backup directory
+ * before anything is opened: the path comes from the database, and a row that
+ * pointed anywhere else must not become a way to read an arbitrary file off the
+ * server. Returns null for another project's backup, a failed one, a path
+ * outside the directory, or a file that is no longer on disk.
+ */
+export async function resolveSnapshotFile(
+  projectId: string,
+  backupId: string,
+): Promise<{ filePath: string; filename: string; sizeBytes: number } | null> {
+  const row = await prisma.workspaceBackup.findFirst({
+    where: { id: backupId, projectId, status: 'completed' },
+    select: { filePath: true, filename: true },
+  })
+  if (!row) return null
+
+  const dir = path.resolve(getBackupDir(projectId))
+  const resolved = path.resolve(row.filePath)
+  if (!resolved.startsWith(dir + path.sep)) return null
+
+  try {
+    const stat = await fs.promises.stat(resolved)
+    if (!stat.isFile()) return null
+    return { filePath: resolved, filename: row.filename, sizeBytes: stat.size }
+  } catch {
+    return null
+  }
+}
+
 // ─── Retention Pruning ────────────────────────────────────────────────────────
 
 /**
@@ -582,9 +615,12 @@ export async function runDailyBackups(): Promise<{ ran: number; succeeded: numbe
   const today = new Date()
   today.setUTCHours(0, 0, 0, 0)
 
-  // Get all projects with an active workspace
+  // Get all projects with an active workspace. A paused project is skipped:
+  // nothing can write to it, so today's dump would equal the one taken when it
+  // paused. Skipping it also keeps that snapshot, because pruning below only
+  // ever touches projects backed up in this run.
   const projects = await prisma.project.findMany({
-    where: { deletedAt: null },
+    where: { deletedAt: null, pausedAt: null },
     select: { id: true },
   })
 

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { verifyToken } from '@/lib/auth/jwt'
 import { prisma } from '@/lib/db'
 import { rollbackDeploy } from '@/lib/deployment/rollback'
+import { listPublishedVersions } from '@/lib/deployment/published-versions'
 import { canAccessProject } from '@/lib/edition/guard'
 
 /**
@@ -29,57 +30,13 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
       return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
 
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-      select: { id: true, activeGraphId: true },
-    })
-
-    if (!project) {
+    // One authority, shared with the agent's deploy { action: "history" }.
+    const history = await listPublishedVersions(projectId)
+    if (!history) {
       return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
 
-    // Fetch all published deployment versions
-    const deployments = await prisma.deployment.findMany({
-      where: {
-        projectId,
-        environment: 'live',
-        status: 'live',
-        version: { not: null },
-      },
-      orderBy: { version: 'desc' },
-      select: {
-        id: true,
-        version: true,
-        graphSnapshotId: true,
-        changeSummary: true,
-        completedAt: true,
-        createdAt: true,
-        url: true,
-      },
-    })
-
-    // Mark which deployment is currently active. After a rollback + republish,
-    // several versions can share the same graphSnapshotId — only the newest
-    // match is "active", and rolling back to any snapshot that equals the
-    // live graph is a no-op the engine rejects, so those rows get no button.
-    const activeIdx = deployments.findIndex(d => d.graphSnapshotId === project.activeGraphId)
-    const versions = deployments.map((d, idx) => ({
-      id: d.id,
-      version: d.version,
-      graphSnapshotId: d.graphSnapshotId,
-      changeSummary: d.changeSummary || 'Published',
-      publishedAt: d.completedAt?.toISOString() || d.createdAt.toISOString(),
-      isActive: idx === activeIdx,
-      isCurrent: idx === 0, // Latest version
-      canRollback: !!d.graphSnapshotId && d.graphSnapshotId !== project.activeGraphId,
-    }))
-
-    return NextResponse.json({
-      success: true,
-      versions,
-      currentVersion: versions.find(v => v.isActive)?.version || versions[0]?.version || 0,
-      latestVersion: versions[0]?.version || 0,
-    })
+    return NextResponse.json({ success: true, ...history })
   } catch (error: any) {
     console.error('[Rollback API] GET Error:', error)
     return NextResponse.json({ error: 'Failed to load deployment versions' }, { status: 500 })

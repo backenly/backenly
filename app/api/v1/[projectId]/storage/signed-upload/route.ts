@@ -7,6 +7,7 @@ import { prisma } from '@/lib/db'
 import { assertQuotaAvailable, QuotaExceededError } from '@/lib/services/storageQuota'
 import { getS3Client, getS3Config, isS3Configured } from '@/lib/services/s3-config'
 import crypto from 'crypto'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 const ALLOWED_VIDEO_TYPES = new Set([
   'video/mp4', 'video/webm', 'video/ogg', 'video/quicktime',
@@ -60,7 +61,7 @@ const SIGNED_URL_TTL_SECONDS = parseInt(
  *   maxBytes: number,
  * }
  */
-export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, params)
@@ -248,3 +249,5 @@ export async function POST(request: NextRequest, props: { params: Promise<{ proj
     return createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Failed to generate signed upload URL', 500)
   }
 }
+
+export const POST = recordedV1(handlePOST)

@@ -51,7 +51,7 @@ function AppLayoutContent({ children }: { children: React.ReactNode }) {
 function isSelfGuarded(pathname: string | null): boolean {
   if (!pathname) return false
   if (pathname === '/app' || pathname === '/app/' || pathname === '/app/settings' || pathname === '/app/connect') return true
-  const selfGuardedPrefixes = ['/app/projects/', '/app/api-builder', '/app/deploy', '/app/usage', '/app/billing', '/app/members', '/app/referral']
+  const selfGuardedPrefixes = ['/app/projects/', '/app/api-builder', '/app/usage', '/app/billing', '/app/members', '/app/referral']
   return selfGuardedPrefixes.some((p) => pathname.startsWith(p))
 }
 

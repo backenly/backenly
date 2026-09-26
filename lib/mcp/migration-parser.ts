@@ -617,7 +617,14 @@ function maskLiterals(s: string): string {
  * An agent writing idiomatic SQL will almost always include them, and passing
  * them through would either duplicate the column or fight the platform's own
  * primary key. Dropping them silently is wrong too — the receipt reports it.
+ *
+ * The receipt must also say what REPLACES them. create_table adds camelCase
+ * `"createdAt"` / `"updatedAt"`, so an agent that declared `created_at` and is
+ * told only "skipped, provisioned automatically" goes on to order by a column
+ * that does not exist.
  */
+const MANAGED_REPLACEMENT =
+  'every table already gets id, "createdAt" and "updatedAt" (camelCase, quote them in SQL) and "deleted_at"'
 const MANAGED_COLUMNS = new Set(['id', 'created_at', 'updated_at'])
 
 function translateCreateTable(stmt: string): PlannedAction[] {
@@ -753,14 +760,14 @@ function translateCreateTable(stmt: string): PlannedAction[] {
     throw new MigrationParseError(
       `CREATE TABLE ${tableName} declares no columns Backenly can create.`,
       'NO_COLUMNS',
-      `id, created_at and updated_at are added automatically — declare at least one column of your own.`,
+      `${MANAGED_REPLACEMENT} — declare at least one column of your own.`,
       stmt,
     )
   }
 
   const notes: string[] = []
   if (dropped.length) {
-    notes.push(`${dropped.join(', ')} skipped — Backenly provisions these automatically.`)
+    notes.push(`${dropped.join(', ')} skipped: ${MANAGED_REPLACEMENT}. Order by "createdAt", not created_at.`)
   }
 
   const actions: PlannedAction[] = [{

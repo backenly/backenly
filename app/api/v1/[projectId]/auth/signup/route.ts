@@ -9,11 +9,12 @@ import { validateRequestBody } from '@/lib/validation/schemas'
 import { prisma } from '@/lib/db'
 import { hashPassword } from '@/lib/auth/password'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
-import { ensureAuthUsersTable, buildUserInsert, isReservedTestEmail } from '@/lib/services/end-user-auth-table'
+import { ensureAuthUsersTable, buildUserInsert, isReservedTestEmail, AuthNotProvisionedError } from '@/lib/services/end-user-auth-table'
 import { canAcceptNewEndUser, trackEndUserActive } from '@/lib/quota/kernel'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import jwt from 'jsonwebtoken'
 import crypto from 'crypto'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 /**
  * POST /v1/{projectId}/auth/signup
@@ -27,7 +28,7 @@ import crypto from 'crypto'
  * RETURNING clause are built from the live schema, so an AI-generated table
  * with a missing column (e.g. no `role`) can no longer 500 signup.
  */
-export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
   try {
     const projectId = params.projectId
@@ -84,7 +85,7 @@ export async function POST(request: NextRequest, props: { params: Promise<{ proj
     // missing, self-heals a drifted one (adds `role` / `is_blocked` / a
     // password column / timestamps as needed). All additions are
     // non-destructive metadata-only operations on PG 11+.
-    const schema = await ensureAuthUsersTable(projectId)
+    const schema = await ensureAuthUsersTable(projectId, { email })
     const schemaName = schema.schemaName
 
     // Check if user already exists in workspace schema.
@@ -136,9 +137,9 @@ export async function POST(request: NextRequest, props: { params: Promise<{ proj
 
     const user = created[0]
 
-    // Count this new end-user toward the project's MAU for the month (never for
-    // internal verifier accounts).
-    if (!isInternalTest) trackEndUserActive(projectId, String(user.id)).catch(() => {})
+    // Count this new end-user toward the project's MAU for the month. Verifier
+    // accounts are excluded inside trackEndUserActive itself.
+    trackEndUserActive(projectId, String(user.id), email).catch(() => {})
 
     const token = jwt.sign(
       { userId: user.id, email: user.email, projectId, role: user.role ?? 'user', jti: crypto.randomUUID() },
@@ -180,6 +181,9 @@ export async function POST(request: NextRequest, props: { params: Promise<{ proj
 
     return createSuccessResponse({ user, token })
   } catch (error: any) {
+    if (error instanceof AuthNotProvisionedError) {
+      return createErrorResponse(error.code, error.message, 503)
+    }
     console.error('Signup error:', error)
     const safe = sanitizeDiagnostic(error)
     return createErrorResponse(
@@ -189,3 +193,5 @@ export async function POST(request: NextRequest, props: { params: Promise<{ proj
     )
   }
 }
+
+export const POST = recordedV1(handlePOST)

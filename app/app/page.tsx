@@ -611,7 +611,11 @@ function ProjectCard({
   onCancelRename: () => void
   onDelete: (e: React.MouseEvent | React.KeyboardEvent, projectId: string, projectName: string) => void
 }) {
-  const status = getStatus((project as any).projectStatus)
+  // A paused project's API refuses every call, so its deploy status would
+  // mislead. Monochrome on purpose: paused is a state, not an alarm.
+  const status = project.pausedAt
+    ? { label: 'Paused', dot: 'bg-zinc-500', text: 'text-zinc-400' }
+    : getStatus((project as any).projectStatus)
   const updatedAt = (project as any).updatedAt
   const description = project.description?.trim() || 'No prompt saved for this backend yet.'
 

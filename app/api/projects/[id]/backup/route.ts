@@ -20,6 +20,8 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
 import { backupWorkspace, listBackups, restoreWorkspace } from '@/lib/services/workspace-backup'
+import { getProjectServingState } from '@/lib/projects/serving-state'
+
 export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
   const params = await props.params
   return withProjectValidation<any>(request, async (validated) => {
@@ -47,6 +49,17 @@ export async function PUT(request: NextRequest, props: { params: Promise<{ id: s
     const { projectId } = validated
     const body = await request.json().catch(() => ({}))
     const { backupId } = body
+
+    // A restore rewrites the project's data, and nothing writes to a paused
+    // project. Listing and taking snapshots stay open: those are how an owner
+    // gets their data out.
+    const serving = await getProjectServingState(projectId)
+    if (serving.kind === 'paused') {
+      return NextResponse.json(
+        { error: 'This project is paused. Resume it before restoring a snapshot.', code: 'PROJECT_PAUSED' },
+        { status: 409 },
+      )
+    }
 
     const result = await restoreWorkspace(projectId, backupId)
     if (!result.success) {

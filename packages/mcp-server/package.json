@@ -1,6 +1,6 @@
 {
   "name": "@backenly/mcp-server",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "mcpName": "io.github.backenly/backenly",
   "description": "Backenly MCP server — gives Claude Code, Cursor, Codex, Cline, and Claude Desktop direct access to your Backenly backend (tables, APIs, brain chat, runtime data).",
   "license": "MIT",
@@ -22,11 +22,12 @@
     "README.md"
   ],
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
+    "test": "node --test test/*.test.mjs",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
@@ -42,9 +43,10 @@
     "agentic"
   ],
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0"
+    "@modelcontextprotocol/server": "^2.1.0"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "^2.1.0",
     "@types/node": "^20.0.0",
     "typescript": "^5.0.0"
   },

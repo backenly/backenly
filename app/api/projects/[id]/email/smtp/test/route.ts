@@ -19,7 +19,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import nodemailer from 'nodemailer'
 import { withAuth } from '@/lib/auth/route-protection'
 import { canAdministerProject } from '@/lib/edition/guard'
-import { buildProjectSmtpTransport, getSmtpConfigView, recordSmtpTest } from '@/lib/email/project-smtp'
+import { getSmtpConfigView, isTestRecipient, sendProjectSmtpTest } from '@/lib/email/project-smtp'
 
 export const POST = withAuth(async (request: NextRequest, { user, params }) => {
   const { id: projectId } = await params
@@ -31,56 +31,27 @@ export const POST = withAuth(async (request: NextRequest, { user, params }) => {
   }
 
   const body = await request.json().catch(() => null)
-  const to = typeof body?.to === 'string' ? body.to.trim() : ''
-  if (!/^[^\s@]+@[^\s@.]+\.[^\s@]+$/.test(to)) {
+  if (!isTestRecipient(body?.to)) {
     return NextResponse.json(
       { error: 'A "to" address is required, so the test proves delivery somewhere you can check.' },
       { status: 400 },
     )
   }
 
-  const resolved = await buildProjectSmtpTransport(nodemailer, projectId)
-  if (!resolved) {
+  // Shared with the agent's auth test_smtp (lib/email/project-smtp.ts).
+  const result = await sendProjectSmtpTest(nodemailer, projectId, body.to.trim())
+  if (result.source === 'none') {
     return NextResponse.json(
-      {
-        success: false,
-        error:
-          'No SMTP settings for this project and no deployment fallback, so nothing was sent.',
-        smtp: await getSmtpConfigView(projectId),
-      },
+      { success: false, error: result.error, smtp: await getSmtpConfigView(projectId) },
       // 400, not 500: nothing is broken. Nothing is configured.
       { status: 400 },
     )
   }
 
-  try {
-    await resolved.transport.sendMail({
-      from: resolved.from,
-      to,
-      subject: 'Backenly SMTP test',
-      // Deliberately dull and carrying no project data. A test message is not a
-      // place to demonstrate templates, and it must be safe to send anywhere.
-      text:
-        'This is a test message from Backenly. If you are reading it, this ' +
-        "project's outgoing mail settings work.",
-    })
-    await recordSmtpTest(projectId, null)
-    return NextResponse.json({
-      success: true,
-      source: resolved.source,
-      smtp: await getSmtpConfigView(projectId),
-    })
-  } catch (err: any) {
-    // The provider's own words. An operator debugging a 535 needs to read it,
-    // and paraphrasing it into "send failed" is how a five-second fix becomes a
-    // support thread.
-    const message = String(err?.message ?? err)
-    await recordSmtpTest(projectId, message)
-    return NextResponse.json({
-      success: false,
-      source: resolved.source,
-      error: message.slice(0, 500),
-      smtp: await getSmtpConfigView(projectId),
-    })
-  }
+  return NextResponse.json({
+    success: result.sent,
+    source: result.source,
+    ...(result.error ? { error: result.error } : {}),
+    smtp: await getSmtpConfigView(projectId),
+  })
 })

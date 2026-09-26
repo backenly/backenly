@@ -6,6 +6,7 @@ import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/ap
 import { addToCart, cartWithTotals, resolveSessionId } from '@/lib/services/cart-store'
 import { prisma } from '@/lib/db'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 /**
  * POST /v1/{projectId}/cart/items
@@ -16,7 +17,7 @@ import { executeWithUserContext } from '@/lib/services/workspace-rls'
  * Validates productId against the workspace products table and snapshots
  * the current price + name so cart totals survive price changes.
  */
-export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, params)
@@ -83,3 +84,5 @@ export async function POST(request: NextRequest, props: { params: Promise<{ proj
     return createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Failed to add item to cart', 500)
   }
 }
+
+export const POST = recordedV1(handlePOST)

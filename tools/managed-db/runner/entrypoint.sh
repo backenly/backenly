@@ -1,14 +1,36 @@
 #!/bin/sh
 # The migration runner's entire surface.
 #
-# Two steady-state commands, plus baselining, which is a one-time action for an
-# existing database and is NOT part of a normal deploy. It therefore needs an
-# explicit confirmation naming the exact migration, so a routine release can
-# never resolve a migration as applied by accident.
+# Two steady-state commands, plus two one-time repairs to migration history:
+# `baseline` (resolve --applied) for an existing database, and `rollback`
+# (resolve --rolled-back) for a migration that failed. Neither is part of a
+# normal deploy, so each needs an explicit confirmation naming the exact
+# migration, and a routine release can never rewrite history by accident.
 set -eu
 
-PRISMA=/app/node_modules/.bin/prisma
-SCHEMA=/app/prisma/schema.prisma
+# Fixed paths in the image. The overrides exist for the test harness, which runs
+# this script against a real database with the repository's Prisma CLI. No
+# launcher sets them.
+PRISMA="${MIGRATE_PRISMA:-/app/node_modules/.bin/prisma}"
+SCHEMA="${MIGRATE_SCHEMA:-/app/prisma/schema.prisma}"
+CHECKS="${MIGRATE_CHECKS:-/app/checks}"
+
+# One catalog check from $CHECKS, which fails with the check's own message.
+run_check() {
+  "$PRISMA" db execute --schema "$SCHEMA" --file "$CHECKS/$1"
+}
+
+# Can this credential alter everything a migration may alter? Asked BEFORE
+# `migrate deploy`, because Prisma writes a failed history row the moment a
+# migration statement fails, and that row refuses every later deploy until it is
+# resolved. A refusal here leaves the database and its history untouched.
+preflight() {
+  if ! run_check ownership-preflight.sql; then
+    echo "refusing: ownership preflight failed; nothing was applied and no migration history was written"
+    exit 3
+  fi
+  echo "PREFLIGHT PASSED: the migration role can alter every migration-managed object"
+}
 
 # Which database did we actually connect to?
 #
@@ -39,7 +61,47 @@ case "${1:-}" in
     exec "$PRISMA" migrate status --schema "$SCHEMA"
     ;;
   deploy)
+    preflight
     exec "$PRISMA" migrate deploy --schema "$SCHEMA"
+    ;;
+  preflight)
+    # The same check deploy runs first, on its own, so an operator can prove a
+    # database is ready before a release rather than finding out during one.
+    preflight
+    ;;
+  rollback)
+    # Mark a FAILED migration as rolled back, so the next deploy retries it.
+    #
+    # Prisma refuses every deploy while a failed row is in _prisma_migrations.
+    # Resolving it asserts that the attempt left nothing behind, which is only
+    # true if it has been checked. So each migration this may resolve has an
+    # absence proof of its own, the resolve runs only when that proof passes,
+    # and a migration without one is refused. Prisma adds the last check: it
+    # refuses to roll back a migration that is not in a failed state.
+    #
+    # Afterwards `status` is NOT evidence. Measured with Prisma 5.22: once the
+    # row is marked rolled back, `migrate status` prints "Database schema is up
+    # to date!" although the migration is unapplied, and `deploy` applies it.
+    # `verify <id>` failing, then the deploy's "Applying migration" line, are.
+    MIGRATION="${2:-}"
+    [ -n "$MIGRATION" ] || { echo "rollback needs a migration id"; exit 2; }
+    if [ "${MIGRATE_ROLLBACK_CONFIRM:-}" != "$MIGRATION" ]; then
+      echo "refusing: rollback needs MIGRATE_ROLLBACK_CONFIRM to name the same migration"
+      exit 2
+    fi
+    case "$MIGRATION" in
+      20260924120000_project_pause) ;;
+      *)
+        echo "refusing: no absence proof is defined for \"$MIGRATION\", so it cannot be resolved as rolled back"
+        exit 2
+        ;;
+    esac
+    if ! run_check "$MIGRATION.absent.sql"; then
+      echo "refusing: the failed attempt left effects of $MIGRATION behind; investigate before resolving anything"
+      exit 3
+    fi
+    echo "ABSENT: $MIGRATION left none of its declared effects behind"
+    exec "$PRISMA" migrate resolve --rolled-back "$MIGRATION" --schema "$SCHEMA"
     ;;
   baseline)
     MIGRATION="${2:-}"
@@ -95,6 +157,10 @@ END $$;
 SQL
         echo "VERIFIED: $MIGRATION declared objects are all present"
         ;;
+      20260924120000_project_pause)
+        run_check "$MIGRATION.present.sql"
+        echo "VERIFIED: $MIGRATION declared objects are all present"
+        ;;
       *)
         echo "refusing: no verification is defined for \"$MIGRATION\""
         exit 2
@@ -102,7 +168,7 @@ SQL
     esac
     ;;
   *)
-    echo "usage: status | deploy | baseline <migration-id> | verify <migration-id>"
+    echo "usage: status | deploy | preflight | baseline <migration-id> | rollback <migration-id> | verify <migration-id>"
     exit 2
     ;;
 esac

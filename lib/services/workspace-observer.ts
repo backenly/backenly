@@ -3,9 +3,10 @@
  * ==================
  * The central health-check loop for the platform's "Runs Itself" pillar.
  *
- * Runs every 6 hours (scheduled in instrumentation.ts) AND is triggered
+ * Runs once a day (scheduled in instrumentation.ts) AND is triggered
  * immediately by schema changes, fix attempts, and deployment failures via
- * the event bus (lib/events/bus.ts).
+ * the event bus (lib/events/bus.ts). Only projects with something built are
+ * ever scanned; see lib/projects/backend-presence.ts.
  *
  * Per project it:
  *   1. Loads the latest WorkspaceSchemaSnapshot
@@ -30,6 +31,7 @@ import {
 } from './rls-ownership'
 import { notReservedTableSql, isReservedWorkspaceTable } from '@/lib/security/workspace-schema'
 import { createPlatformNotification } from '@/lib/notifications/platform'
+import { summariseFinding } from '@/lib/core/finding-summaries'
 import {
   detectFkColumnsMissingConstraints,
   detectTablesWithNoApiDefinition,
@@ -40,12 +42,22 @@ import {
 } from '@/lib/core/drift-detector'
 import { checkIntegrationHealth } from '@/lib/core/integration-health'
 import { verifyWorkflows } from '@/lib/core/workflow-verifier'
-import { detectContractViolations } from '@/lib/services/contract-verifier'
+import {
+  runContractVerification,
+  probePlatformIngress,
+  attributeContractFailures,
+  settleTenantContract,
+  type ProjectProbeOutcome,
+} from '@/lib/services/contract-verifier'
+import { isDataPlaneOutage } from '@/lib/core/fix-actions'
+import { reportPlatformFault, type PlatformFaultReport } from '@/lib/autonomy/platform-faults'
+import { reapUnattributableFindings } from '@/lib/core/finding-reaper'
 import { recordContractSweepResult } from '@/lib/autonomy/data-plane-liveness'
 import { writeFixHistory, checkEscalation, buildResolutionText } from '@/lib/memory/fix-history'
 import { generateFixPlansFromRawFindings, type FixPlan } from '@/lib/core/fix-plan-generator'
 import { runBuiltInVerification, type VerificationExecutionResult } from '@/lib/verification/verification-executor'
 import { FLAGS } from '@/lib/config/flags'
+import { watchableProjectsWhere, isWatchableProject } from '@/lib/projects/backend-presence'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -81,7 +93,8 @@ export interface ObserverResult {
  * healthz consult it). Gating the observer on it meant a project could take
  * real end-user signups while never being probed again after its first
  * event-driven scan — the platform serving traffic it had stopped watching.
- * Probing must cover exactly what serves, so the gate is "has tables".
+ * Probing must cover exactly what serves, so the gate is "something was
+ * built" (watchableProjectsWhere), the same one every entry point asks.
  */
 export async function runWorkspaceObserver(): Promise<{
   processed: number
@@ -89,11 +102,7 @@ export async function runWorkspaceObserver(): Promise<{
   errors: string[]
 }> {
   const projects = await prisma.project.findMany({
-    where: {
-      tables: { some: {} },
-      deletedAt: null,
-      OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
-    },
+    where: watchableProjectsWhere(),
     select: { id: true, userId: true },
   })
 
@@ -120,7 +129,7 @@ export async function runWorkspaceObserver(): Promise<{
 }
 
 /**
- * Contract-only sweep: probe every reachable project's live API surfaces and
+ * Contract-only sweep: probe every watchable project's live API surfaces and
  * persist the results. Runs far more often than the full observer.
  *
  * Split out because the two have opposite cost profiles. The full observer
@@ -135,47 +144,136 @@ export async function runWorkspaceObserver(): Promise<{
  * before anything noticed; that is the gap that let a signup outage last
  * sixty days. Cheap checks belong on a cheap-check schedule.
  *
- * Findings flow through the same writeFinding path as the observer, so
- * dedup, escalation, and auto-resolve behave identically.
+ * This is the ONLY writer and resolver of `contract_surface_broken`, and it
+ * judges nobody until it has seen everybody:
+ *
+ *   1. withdraw rows that no longer describe a tenant fault
+ *   2. check the ingress once; if it is not there, report the platform and stop
+ *   3. probe every watchable project
+ *   4. attribute each failure (lib/services/contract-verifier.ts)
+ *   5. report platform faults to the operator, heal the shared data plane if
+ *      that is what failed, and settle each project with only its own failures
+ *
+ * It never notifies a tenant. A contract failure reaches the owner through the
+ * Autonomy queue, and only when it is theirs.
  */
-export async function runContractSweep(): Promise<{
+export async function runContractSweep(options: {
+  /**
+   * Narrow the pass to these projects (still only the watchable ones). For an
+   * operator re-checking specific projects, and for tests. Fleet attribution
+   * then compares within this set only.
+   */
+  projectIds?: string[]
+} = {}): Promise<{
   processed: number
   broken: number
   errors: string[]
+  platformFaults: PlatformFaultReport[]
 }> {
-  const projects = await prisma.project.findMany({
-    where: {
-      tables: { some: {} },
-      deletedAt: null,
-      OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
-    },
-    select: { id: true },
-  })
-
   const errors: string[] = []
+  const platformFaults: PlatformFaultReport[] = []
   let broken = 0
 
+  await reapUnattributableFindings().catch((err: any) => {
+    errors.push(`[reap] ${err?.message ?? String(err)}`)
+  })
+
+  const projects = await prisma.project.findMany({
+    where: options.projectIds
+      ? { id: { in: options.projectIds }, ...watchableProjectsWhere() }
+      : watchableProjectsWhere(),
+    select: { id: true },
+  })
+  if (projects.length === 0) return { processed: 0, broken, errors, platformFaults }
+
+  const ingress = await probePlatformIngress()
+  if (!ingress.ok) {
+    // Nothing is probed, resolved or heartbeated. Liveness goes stale and
+    // reads "unknown" after the heartbeat window, which is the truth.
+    const fault: PlatformFaultReport = {
+      kind: 'ingress_unreachable',
+      detail: ingress.detail,
+      origin: ingress.origin,
+      projectIds: projects.map(p => p.id),
+    }
+    reportPlatformFault(fault)
+    platformFaults.push(fault)
+    return { processed: 0, broken, errors, platformFaults }
+  }
+
   const CONCURRENCY = 5
+  const outcomes: ProjectProbeOutcome[] = []
   for (let i = 0; i < projects.length; i += CONCURRENCY) {
     const batch = projects.slice(i, i + CONCURRENCY)
     const settled = await Promise.allSettled(
-      batch.map(async (p) => {
-        const findings = await detectContractViolations(p.id)
+      batch.map(async (p) => ({ projectId: p.id, results: await runContractVerification(p.id) })),
+    )
+    for (const outcome of settled) {
+      if (outcome.status === 'fulfilled') outcomes.push(outcome.value)
+      else errors.push(String(outcome.reason?.message ?? outcome.reason))
+    }
+  }
 
-        // The heartbeat, written on EVERY pass including clean ones.
-        //
-        // Before this, a clean sweep recorded nothing at all, so "no open
-        // contract_surface_broken finding" was ambiguous between "verified
-        // answering" and "never checked". The data-plane invariant
-        // (lib/autonomy/data-plane-liveness.ts) cannot tell those apart from the
-        // findings table alone, and reading the second as the first is exactly
-        // how detectMissingRls reported green while dead. Written before the
-        // per-finding handling below so a failure while WRITING findings still
-        // leaves an accurate record of when the probe last ran.
-        await recordContractSweepResult(
-          p.id,
-          findings.map(f => String((f.details as Record<string, unknown>)?.surface ?? 'unknown')),
+  const attribution = attributeContractFailures(outcomes)
+
+  for (const f of attribution.platformFaults) {
+    const fault: PlatformFaultReport = {
+      kind: f.kind,
+      detail: f.detail,
+      surface: f.surface,
+      status: f.status,
+      projectIds: f.projectIds,
+      origin: ingress.origin,
+    }
+    reportPlatformFault(fault)
+    platformFaults.push(fault)
+  }
+
+  // The data plane is shared. When it fails for everyone, the repair is a
+  // platform action taken once, not a finding per tenant. healDataPlane is
+  // single-flighted and re-verifies against its own PostgREST probe before it
+  // restarts anything.
+  const dataPlaneDown = attribution.platformFaults.some(
+    f =>
+      f.kind === 'surface_failing_fleetwide' &&
+      isDataPlaneOutage({ surface: f.surface, httpStatus: f.status === 'timeout' ? null : f.status ?? null }),
+  )
+  if (dataPlaneDown) {
+    try {
+      const { healDataPlane, describeHeal } = await import('@/lib/postgrest/supervisor')
+      const heal = await healDataPlane(null)
+      if (!heal.healthy) errors.push(`[data-plane heal] ${describeHeal(heal)}`)
+    } catch (err: any) {
+      errors.push(`[data-plane heal] ${err?.message ?? String(err)}`)
+    }
+  }
+
+  for (let i = 0; i < outcomes.length; i += CONCURRENCY) {
+    const batch = outcomes.slice(i, i + CONCURRENCY)
+    const settled = await Promise.allSettled(
+      batch.map(async ({ projectId, results }) => {
+        const findings = await settleTenantContract(
+          projectId,
+          results,
+          attribution.tenantBroken.get(projectId) ?? [],
         )
+
+        // The heartbeat, written on every pass whose outcome is KNOWN.
+        //
+        // Before it existed a clean sweep recorded nothing, so "no open
+        // contract_surface_broken finding" was ambiguous between "verified
+        // answering" and "never checked", and reading the second as the first
+        // is how detectMissingRls reported green while dead. A surface the
+        // platform could not settle this pass is unknown, not healthy, so that
+        // project gets no heartbeat and its liveness goes stale rather than
+        // green. Written before the findings so a failure while writing them
+        // still leaves an accurate record of when the probe last ran.
+        if (!attribution.unknown.has(projectId)) {
+          await recordContractSweepResult(
+            projectId,
+            findings.map(f => String((f.details as Record<string, unknown>)?.surface ?? 'unknown')),
+          )
+        }
 
         for (const finding of findings) {
           // Most broken surfaces are symptoms whose cause is outside this
@@ -191,13 +289,13 @@ export async function runContractSweep(): Promise<{
           if (finding.autoFixable && finding.fix) {
             try {
               await finding.fix()
-              await writeFinding(p.id, finding, 'auto_fixed', true, new Date())
+              await writeFinding(projectId, finding, 'auto_fixed', true, new Date())
             } catch (err: any) {
               finding.details.fixError = err?.message ?? String(err)
-              await writeFinding(p.id, finding, 'pending_approval', false)
+              await writeFinding(projectId, finding, 'pending_approval', false)
             }
           } else {
-            await writeFinding(p.id, finding, 'pending_approval', false)
+            await writeFinding(projectId, finding, 'pending_approval', false)
           }
         }
         return findings.length
@@ -209,13 +307,14 @@ export async function runContractSweep(): Promise<{
     }
   }
 
-  if (broken > 0 || errors.length > 0) {
+  if (broken > 0 || errors.length > 0 || platformFaults.length > 0) {
     console.warn(
-      `[ContractSweep] ${projects.length} projects | ${broken} broken surfaces | ${errors.length} scan errors`,
+      `[ContractSweep] ${projects.length} projects | ${broken} tenant surfaces broken | ` +
+      `${platformFaults.length} platform faults | ${errors.length} scan errors`,
     )
   }
 
-  return { processed: projects.length, broken, errors }
+  return { processed: outcomes.length, broken, errors, platformFaults }
 }
 
 /**
@@ -232,6 +331,34 @@ export async function runObserverForProject(projectId: string): Promise<Observer
     critical: 0,
     errors: [],
   }
+
+  // Nothing built means nothing can be wrong. This is the only gate, and it is
+  // here rather than at the callers because five of them reach this function
+  // (the dashboard's first-load kick, Re-scan, the event bus, the cron route
+  // and the daily sweep) and the one that did not check is the one that
+  // emailed a customer about a project they had only named. Not stamping
+  // lastObservedAt is deliberate: "never checked" is the truth.
+  if (!(await isWatchableProject(projectId))) return result
+
+  // One scan per project at a time in this process. The dashboard's first-load
+  // kick, Re-scan, the event bus and the settled-build pass can all land
+  // together, and two concurrent scans race writeFinding's find-then-create
+  // into duplicate rows.
+  if (observing.has(projectId)) {
+    result.errors.push('a scan of this project is already running')
+    return result
+  }
+  observing.add(projectId)
+  try {
+    return await observeProject(projectId, result)
+  } finally {
+    observing.delete(projectId)
+  }
+}
+
+const observing = new Set<string>()
+
+async function observeProject(projectId: string, result: ObserverResult): Promise<ObserverResult> {
 
   // Gather all raw findings in parallel — each detector is isolated
   const detectors = [
@@ -259,9 +386,10 @@ export async function runObserverForProject(projectId: string): Promise<Observer
     verifyWorkflows(projectId),
     // ── 3.5 API Coverage ─────────────────────────────────────────────────────
     detectApiCoverageGaps(projectId),
-    // ── Runtime contract — live HTTP probes of the advertised API surfaces
-    // (auth/db/storage/functions/healthz) through the real serving chain.
-    detectContractViolations(projectId),
+    // The runtime contract is NOT probed here. runContractSweep is its only
+    // writer and resolver, because only a pass that has seen every project can
+    // tell a tenant's broken surface from the platform's. Probing it here as
+    // well is what emailed a customer about an outage that was ours.
     // Daily, not per-minute, and deliberately so: this reports that repairs
     // across one area have stopped holding, which is a slow-moving structural
     // signal. It also has no executable fix (notify_only / Tier 3), so the
@@ -284,6 +412,10 @@ export async function runObserverForProject(projectId: string): Promise<Observer
 
   result.findingsDetected = allFindings.length
 
+  // Criticals still unresolved after this pass, with when each was first seen.
+  // Only these can reach the owner's inbox (see notifyCritical).
+  const outstandingCritical: Array<{ finding: RawFinding; firstDetectedAt: Date }> = []
+
   // Process each finding: auto-fix safe ones, queue others for approval
   for (const finding of allFindings) {
     // Pillar 5.3: If this finding type was previously fixed and has re-appeared,
@@ -305,7 +437,25 @@ export async function runObserverForProject(projectId: string): Promise<Observer
     let autoFixed = false
     let fixAppliedAt: Date | undefined
 
-    if (finding.autoFixable && finding.fix) {
+    // An inline fix is a mutation of the owner's schema, so it answers to the
+    // same flag and dial as every other repair. Refused, the finding is still
+    // recorded as detected, with the reason, and nothing is changed.
+    // Imported lazily: desired-state imports this module.
+    const permit =
+      finding.autoFixable && finding.fix
+        ? await (async () => {
+            const [{ permitInlineRepair }, { deriveTier }] = await Promise.all([
+              import('@/lib/authority/gate'),
+              import('@/lib/autonomy/desired-state'),
+            ])
+            return permitInlineRepair(projectId, finding.type, deriveTier(finding.type, finding.details))
+          })()
+        : null
+
+    if (finding.autoFixable && finding.fix && permit && !permit.allowed) {
+      status = 'open'
+      finding.details = { ...finding.details, notAppliedBecause: permit.reason }
+    } else if (finding.autoFixable && finding.fix) {
       try {
         await finding.fix()
         status = 'auto_fixed'
@@ -325,7 +475,10 @@ export async function runObserverForProject(projectId: string): Promise<Observer
       status = 'open'
     }
 
-    await writeFinding(projectId, finding, status, autoFixed, fixAppliedAt)
+    const written = await writeFinding(projectId, finding, status, autoFixed, fixAppliedAt)
+    if (finding.severity === 'critical' && status !== 'auto_fixed') {
+      outstandingCritical.push({ finding, firstDetectedAt: written.firstDetectedAt })
+    }
   }
 
   // Resolve workflow findings whose workflow is no longer broken. The verifier
@@ -465,9 +618,10 @@ export async function runObserverForProject(projectId: string): Promise<Observer
     }
   } catch { /* best-effort — a failed heal must never fail the scan */ }
 
-  // Notify project owner for critical findings
-  if (result.critical > 0) {
-    await notifyCritical(projectId, result.critical, allFindings.filter(f => f.severity === 'critical'))
+  // Tell the owner about criticals that are still theirs to deal with. Counted
+  // AFTER the fix attempts: a critical this pass repaired is not news.
+  if (outstandingCritical.length > 0) {
+    await notifyCritical(projectId, outstandingCritical)
   }
 
   // Phase 12 — generate fix plans from all collected findings when planner is on
@@ -636,7 +790,7 @@ async function writeFinding(
   status: FindingStatus,
   autoFixed: boolean,
   fixAppliedAt?: Date
-): Promise<void> {
+): Promise<{ firstDetectedAt: Date }> {
   // Upsert: if an open finding of the same type already exists, update it.
   //
   // Some types carry several INDEPENDENT instances at once, and keying the
@@ -675,8 +829,18 @@ async function writeFinding(
         ? { details: { path: [discriminatorKey], equals: discriminatorValue } }
         : {}),
     },
-    select: { id: true },
+    select: { id: true, details: true },
   })
+
+  // `detectedAt` moves on every write, so it cannot say how long a problem
+  // has persisted. `firstDetectedAt` is carried across updates for that: it is
+  // what lets an alert wait until a finding has been seen on more than one
+  // pass instead of paging on a single observation.
+  const now = new Date()
+  const carried = (existing?.details as Record<string, unknown> | null)?.firstDetectedAt
+  const firstDetectedAt =
+    typeof carried === 'string' && Number.isFinite(Date.parse(carried)) ? new Date(carried) : now
+  finding.details = { ...finding.details, firstDetectedAt: firstDetectedAt.toISOString() }
 
   if (existing) {
     await prisma.healthFinding.update({
@@ -725,45 +889,113 @@ async function writeFinding(
       automatic: true,
     })
   }
+
+  return { firstDetectedAt }
 }
 
 // ─── Notification ─────────────────────────────────────────────────────────────
 
-async function notifyCritical(
+/**
+ * How long a critical must have existed before it may be emailed. A finding
+ * seen on one pass only is an observation, not yet a problem worth a page:
+ * it has to still be there on a later pass.
+ */
+export const CRITICAL_ALERT_CONFIRM_MS = 10 * 60 * 1000
+
+/** At most one health email per project in this window. */
+export const CRITICAL_ALERT_WINDOW_MS = 24 * 60 * 60 * 1000
+
+const ALERT_PREF_TYPE = 'alerting'
+const ALERT_PREF_KEY = 'last_critical_email'
+
+/**
+ * Claim this project's alert slot, atomically.
+ *
+ * The old guard looked for a recent in-app notification and then inserted
+ * one. That was a race (two scans in flight both passed the check), it
+ * depended on the in-app row existing (an owner with in-app alerts off got an
+ * email on every scan), and any unrelated `system` notice for the project
+ * silenced a real outage. This is a compare-and-set on one row: the UPDATE only
+ * matches while the last alert is older than the window, and Postgres lets
+ * exactly one concurrent writer match.
+ */
+async function claimCriticalAlertSlot(projectId: string, now: Date): Promise<boolean> {
+  const where = { projectId_type_key: { projectId, type: ALERT_PREF_TYPE, key: ALERT_PREF_KEY } }
+  await prisma.projectPreference
+    .upsert({
+      where,
+      create: {
+        projectId, type: ALERT_PREF_TYPE, key: ALERT_PREF_KEY, value: '', confidence: 1,
+        lastSeen: new Date(0),
+      },
+      update: {},
+    })
+    .catch(() => {
+      /* a concurrent creator won; the conditional update below still decides */
+    })
+  const claimed = await prisma.projectPreference.updateMany({
+    where: {
+      projectId, type: ALERT_PREF_TYPE, key: ALERT_PREF_KEY,
+      lastSeen: { lt: new Date(now.getTime() - CRITICAL_ALERT_WINDOW_MS) },
+    },
+    data: { lastSeen: now, value: now.toISOString() },
+  })
+  return claimed.count === 1
+}
+
+/**
+ * Email the owner about criticals that are still theirs to deal with.
+ *
+ * Every rule here exists because a customer was paged for something that was
+ * not theirs, or not real:
+ *   - only findings still unresolved after this pass (the caller passes those)
+ *   - only findings first seen at least CRITICAL_ALERT_CONFIRM_MS ago
+ *   - at most one email per project per CRITICAL_ALERT_WINDOW_MS, claimed
+ *     atomically
+ *   - sent as `health_alert`, so it has its own preference and is never
+ *     silenced by, or confused with, account notices
+ *
+ * Platform faults never reach here: the contract sweep reports them to the
+ * operator and files nothing (lib/autonomy/platform-faults.ts).
+ */
+export async function notifyCritical(
   projectId: string,
-  count: number,
-  criticalFindings: RawFinding[]
+  outstanding: Array<{ finding: RawFinding; firstDetectedAt: Date }>,
 ): Promise<void> {
   try {
+    const now = new Date()
+    const confirmed = outstanding.filter(
+      o => now.getTime() - o.firstDetectedAt.getTime() >= CRITICAL_ALERT_CONFIRM_MS,
+    )
+    if (confirmed.length === 0) return
+
     const project = await prisma.project.findUnique({
       where: { id: projectId },
       select: { userId: true, name: true },
     })
     if (!project?.userId) return
 
-    // Dedup: don't send if a critical health alert was already sent in the last 24 hours
-    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000)
-    const recentAlert = await prisma.platformNotification.findFirst({
-      where: {
-        userId: project.userId,
-        type: 'system',
-        createdAt: { gte: oneDayAgo },
-        metadata: { path: ['projectId'], equals: projectId },
-      },
-      select: { id: true },
-    })
-    if (recentAlert) return
+    if (!(await claimCriticalAlertSlot(projectId, now))) return
 
     const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://backenly.com'
-    const autoFixUrl = `${appUrl}/app/projects/${projectId}/autonomy`
-    const typeList = criticalFindings.map(f => f.type.replace(/_/g, ' ')).join(', ')
+    const count = confirmed.length
+    const summaries = confirmed.map(o => summariseFinding(o.finding.type, o.finding.details))
 
     await createPlatformNotification({
       userId: project.userId,
-      type: 'system',
-      title: `${count} critical health issue${count > 1 ? 's' : ''} in "${project.name}"`,
-      body: `Backenly detected critical issues: ${typeList}. Review and approve fixes on the Autonomy page.`,
-      metadata: { projectId, count, types: criticalFindings.map(f => f.type), actionUrl: autoFixUrl },
+      type: 'health_alert',
+      title: `${count} critical issue${count > 1 ? 's' : ''} in "${project.name}"`,
+      body:
+        count > 1
+          ? 'Backenly found problems it could not resolve on its own. They are waiting for you on the Autonomy page.'
+          : 'Backenly found a problem it could not resolve on its own. It is waiting for you on the Autonomy page.',
+      metadata: {
+        projectId,
+        count,
+        types: confirmed.map(o => o.finding.type),
+        summaries,
+        actionUrl: `${appUrl}/app/projects/${projectId}/autonomy`,
+      },
     })
   } catch {
     // Non-fatal — notification failure must never break the observer loop

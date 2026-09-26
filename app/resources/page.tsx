@@ -85,7 +85,7 @@ export default function ResourcesPage() {
           }
           proof={[
             { label: 'Guides', value: `${articles.length}` },
-            { label: 'MCP tools documented', value: '20 advertised' },
+            { label: 'MCP tools documented', value: '23 advertised' },
             { label: 'Also available as', value: '/llms.txt · fetch_docs' },
           ]}
         />

@@ -53,7 +53,8 @@ import { verifyToken } from '@/lib/auth/jwt'
 import * as bcryptjs from 'bcryptjs'
 import * as jsonwebtoken from 'jsonwebtoken'
 import { loadProjectFnAuth, mintTestRunToken, ProjectFnAuth } from './project-fn-auth'
-import { makeRlsAwarePrisma } from './rls-aware-db'
+import { makeRlsAwarePrisma, refusingPrisma, type RlsAwarePrisma } from './rls-aware-db'
+import { functionDbClient, forgetFunctionDbClient } from './function-db-role'
 import type { RlsIdentity } from '@/lib/services/rls-session'
 import { FORWARDABLE_FN_HEADERS } from './forward-headers'
 
@@ -129,16 +130,23 @@ function assertNotBlocked(code: string): void {
 // When project auth material is unavailable the values are empty strings —
 // auth gates then fail closed (403), never open. The rest of process.env
 // (DATABASE_URL, SMTP creds, Paddle keys, ...) stays unreachable.
+//
+// STRIPE_WEBHOOK_SECRET and PAYMENT_WEBHOOK_SECRET used to be copied in from
+// the PLATFORM's environment, for the generated Stripe webhook template. That
+// handed every project the same platform value, which is never the secret of a
+// tenant's own Stripe account, and since functions { action: "deploy_code" }
+// stores code an agent wrote, any function could simply return it. A project's
+// signing secret lives in its own integration store and is verified by the
+// project's receiver (/api/v1/{projectId}/webhooks/stripe); the template now
+// reads an empty value and fails closed. Only NODE_ENV, which is not a secret,
+// still comes from the platform.
 function makeCuratedProcess(auth: ProjectFnAuth): { env: Record<string, string> } {
   const env: Record<string, string> = {
     ADMIN_API_KEY: auth.adminKey ?? '',
     AI_EXECUTION_TOKEN: auth.adminKey ?? '',
     JWT_SECRET: auth.jwtSecret ?? '',
   }
-  for (const key of ['NODE_ENV', 'STRIPE_WEBHOOK_SECRET', 'PAYMENT_WEBHOOK_SECRET']) {
-    const value = process.env[key]
-    if (value !== undefined) env[key] = value
-  }
+  if (process.env.NODE_ENV !== undefined) env.NODE_ENV = process.env.NODE_ENV
   return Object.freeze({ env: Object.freeze(env) }) as { env: Record<string, string> }
 }
 
@@ -335,16 +343,11 @@ class RunnerRequest {
 function buildRequire(
   projectId: string,
   auth: ProjectFnAuth,
-  identity: RlsIdentity = { userId: null, isServiceRole: false },
+  scopedPrisma: RlsAwarePrisma,
 ): (id: string) => any {
   const nextServer = makeNextServerShim()
   const projectVerifyToken = makeProjectVerifyToken(auth)
   const jwtShim = makeJsonwebtokenShim(projectId)
-  // Every raw query this function issues runs with the caller's identity set on
-  // the connection. Handing over the bare client instead is what made every
-  // generated read of an RLS-protected table return an empty list and every
-  // write fail 42501 — see lib/services/ai-functions/rls-aware-db.ts.
-  const scopedPrisma = makeRlsAwarePrisma(identity)
   return (id: string) => {
     switch (id) {
       case 'next/server':
@@ -367,6 +370,20 @@ function buildRequire(
         )
     }
   }
+}
+
+/**
+ * The database handle a function receives as `@/lib/db`: every raw query runs
+ * with the caller's identity set (rls-aware-db.ts), on a connection that logs in
+ * as the project's own function role (function-db-role.ts). Handing over the
+ * bare client instead is what made generated reads of RLS-protected tables come
+ * back empty, and what let function SQL read the platform's own tables.
+ */
+function scopedDb(projectId: string, identity: RlsIdentity): RlsAwarePrisma {
+  return makeRlsAwarePrisma(identity, async (opts) => {
+    if (opts?.refresh) await forgetFunctionDbClient(projectId)
+    return functionDbClient(projectId)
+  })
 }
 
 // ─── Method resolution ────────────────────────────────────────────────────────
@@ -433,7 +450,11 @@ export function validateRouteModule(code: string, expectedMethod?: string | null
     module: { exports: moduleExports },
     exports: moduleExports,
     // Dummy auth material — evaluation only defines the handlers; nothing runs.
-    require: buildRequire('00000000-0000-4000-8000-000000000000', { jwtSecret: null, adminKey: null }),
+    require: buildRequire(
+      '00000000-0000-4000-8000-000000000000',
+      { jwtSecret: null, adminKey: null },
+      refusingPrisma('The database is not reachable while a function is being validated.'),
+    ),
     console: { log() {}, error() {}, warn() {}, info() {} },
     URL, URLSearchParams, TextEncoder, TextDecoder, Buffer,
     fetch, setTimeout, clearTimeout,
@@ -597,7 +618,7 @@ export async function executeRouteModuleFunction(
   const sandbox: Record<string, any> = {
     module: { exports: moduleExports },
     exports: moduleExports,
-    require: buildRequire(projectId, auth, callerIdentity),
+    require: buildRequire(projectId, auth, scopedDb(projectId, callerIdentity)),
     console: {
       log: (...a: any[]) => logs.push(a.map(stringify).join(' ')),
       error: (...a: any[]) => logs.push(a.map(stringify).join(' ')),

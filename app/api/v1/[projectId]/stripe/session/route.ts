@@ -26,6 +26,7 @@ import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/ap
 import { getIntegrationKey } from '@/lib/services/integrationKeyStore'
 import { prisma } from '@/lib/db/prisma'
 import { executeInWorkspaceSchema } from '@/lib/services/workspaceDatabase'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 // ── Stripe REST helper ────────────────────────────────────────────────────────
 
@@ -82,7 +83,7 @@ function encodeStripeBody(
 
 // ── Route handler ─────────────────────────────────────────────────────────────
 
-export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, params)
@@ -264,3 +265,5 @@ export async function POST(request: NextRequest, props: { params: Promise<{ proj
     return createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Failed to create Stripe session', 500)
   }
 }
+
+export const POST = recordedV1(handlePOST)

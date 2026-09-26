@@ -7,6 +7,7 @@ import { z } from 'zod'
 import crypto from 'crypto'
 import { maskFromPrefix, plaintextForStorage } from '@/lib/auth/api-key-plaintext'
 import { canAdministerProject } from '@/lib/edition/guard'
+import { mintKey } from '@/lib/auth/key-prefix'
 
 const createApiKeySchema = z.object({
   name: z.string().min(1, 'Name is required'),
@@ -25,28 +26,6 @@ const createApiKeySchema = z.object({
   rateLimit: z.number().int().positive().optional().default(1000),
   rateLimitWindow: z.number().int().positive().optional().default(3600), // seconds
 })
-
-function generateApiKey(prefix: string): string {
-  const randomBytes = crypto.randomBytes(32).toString('hex')
-  return `${prefix}${randomBytes}`
-}
-
-function getKeyPrefix(keyType: string, role: string): string {
-  if (keyType === 'dashboard') {
-    return 'dk_admin_' // Dashboard keys
-  }
-  
-  // Public keys
-  const prefixes: Record<string, string> = {
-    'admin': 'sk_live_',
-    'read-only': 'sk_read_',
-    'write': 'sk_test_',
-    'ai-only': 'sk_ai_',
-    'client': 'sk_client_',
-    'service': 'sk_service_',
-  }
-  return prefixes[role] || 'sk_'
-}
 
 /**
  * Built from keyPrefix, never from the secret.
@@ -199,8 +178,8 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const keyPrefix = getKeyPrefix(data.keyType, data.role)
-    const fullKey = generateApiKey(keyPrefix)
+    // The prefix says what the key is (lib/auth/key-prefix.ts); its role is in the row.
+    const { key: fullKey, prefix: keyPrefix } = mintKey({ keyType: data.keyType, serviceRole: data.serviceRole })
     const keyHash = crypto.createHash('sha256').update(fullKey).digest('hex') // Hash for secure storage
     const permissions = data.permissions.length > 0 
       ? data.permissions 

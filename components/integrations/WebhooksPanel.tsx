@@ -32,7 +32,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   Webhook, Loader2, Plus, Trash2, Send, KeyRound, Power,
-  CheckCircle2, XCircle, AlertTriangle, Clock, ChevronRight, Pencil,
+  CheckCircle2, XCircle, AlertTriangle, Clock, ChevronRight, Pencil, Ban,
 } from 'lucide-react'
 import {
   KitButton, KitNote, KitConfirmDialog, KitModal, KitField, KitInput, KitBadge, EmptyState,
@@ -75,11 +75,15 @@ const STATUS_TONE: Record<string, 'operational' | 'failed' | 'attention' | 'neut
   DEAD_LETTER: 'failed',
   RETRYING: 'attention',
   PENDING: 'neutral',
+  // Withdrawn because the project was paused. Not a receiver failure, so it is
+  // not drawn as one.
+  CANCELLED: 'neutral',
 }
 
 function StatusIcon({ status }: { status: string }) {
   if (status === 'SUCCESS') return <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500/70" />
   if (status === 'RETRYING' || status === 'PENDING') return <Clock className="h-3.5 w-3.5 text-amber-500/70" />
+  if (status === 'CANCELLED') return <Ban className="h-3.5 w-3.5 text-zinc-500" />
   return <XCircle className="h-3.5 w-3.5 text-rose-500/70" />
 }
 
@@ -432,8 +436,10 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
                                 <td className="py-1.5 pr-3 align-top text-zinc-500">
                                   {log.attemptCount > 1 ? `${log.attemptCount} attempts` : ''}
                                 </td>
-                                <td className="py-1.5 align-top text-rose-400/80">
-                                  {log.error ?? ''}
+                                <td className={`py-1.5 align-top ${log.status === 'CANCELLED' ? 'text-zinc-500' : 'text-rose-400/80'}`}>
+                                  {log.status === 'CANCELLED' && log.error === 'project_paused'
+                                    ? 'not sent: the project was paused'
+                                    : log.error ?? ''}
                                 </td>
                               </tr>
                             ))}

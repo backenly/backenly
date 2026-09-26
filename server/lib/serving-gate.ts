@@ -12,7 +12,12 @@
  * keeps answering its own 404 exactly as before.
  */
 import type { NextFunction, Request, Response } from 'express'
-import { getProjectServingState } from '@/lib/projects/serving-state'
+import {
+  getProjectServingState,
+  PAUSED_CODE,
+  PAUSED_MESSAGE,
+  pausedDetails,
+} from '@/lib/projects/serving-state'
 import { ErrorCodes, sendError } from './response'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -29,23 +34,45 @@ export async function projectServingGate(req: Request, res: Response, next: Next
   // Not a project path (or not one this gate can judge): leave it to the routes.
   if (!projectId || !UUID_RE.test(projectId)) return next()
 
+  if (await refuseUnlessServing(res, projectId)) return
+  next()
+}
+
+/**
+ * Answer the request with a refusal if `projectId` may not serve right now.
+ * Returns true when it answered, so the caller stops.
+ *
+ * The gate above judges the project named in the URL. A handler that learns
+ * the project some other way, from the API key, must call this itself once it
+ * knows: the dynamic CRUD handler still serves the legacy `/api/v1/{table}`
+ * form, where the URL names no project at all and the gate has nothing to judge.
+ */
+export async function refuseUnlessServing(res: Response, projectId: string): Promise<boolean> {
   const state = await getProjectServingState(projectId)
 
   switch (state.kind) {
     case 'serving':
     case 'not_found':
-      return next()
+      return false
 
     case 'locked':
-      return sendError(res, ErrorCodes.FORBIDDEN, LOCKED_MESSAGE, 503)
+      sendError(res, ErrorCodes.FORBIDDEN, LOCKED_MESSAGE, 503)
+      return true
+
+    case 'paused':
+      // No Retry-After: nothing changes until the owner resumes it, and a
+      // client that backs off and retries would only keep asking.
+      sendError(res, PAUSED_CODE, PAUSED_MESSAGE, 503, pausedDetails(projectId, state))
+      return true
 
     case 'unavailable':
       res.setHeader('Retry-After', '5')
-      return sendError(
+      sendError(
         res,
         'PROJECT_STATE_UNAVAILABLE',
         'Could not confirm this project is available. Try again shortly.',
         503,
       )
+      return true
   }
 }

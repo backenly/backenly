@@ -130,6 +130,7 @@ const publicApiRoutes = [
   '/api/health',
   '/api/internal/',                 // Internal middleware-to-server endpoints
   '/api/v1/',                       // Project runtime API — API key auth
+  '/api/v2/',                       // PostgREST-grammar data API — API key auth, served by the runtime
   '/api/mcp',                       // MCP server — scope='mcp' API key auth at route level.
                                     // No trailing slash: also covers the bare /api/mcp remote
                                     // (Streamable-HTTP) endpoint, which authenticates itself.
@@ -189,13 +190,15 @@ async function handleCORS(request: NextRequest): Promise<NextResponse | null> {
     return null
   }
 
-  const isSdkRoute = pathname.startsWith(SDK_ROUTE_PREFIX)
+  // /api/v2 is the same audience as /api/v1: a customer's frontend calling its
+  // own project with an anon key, from its own origin.
+  const isSdkRoute = pathname.startsWith(SDK_ROUTE_PREFIX) || pathname.startsWith('/api/v2/')
   let allowedOrigin: string | null = null
 
   if (isSdkRoute) {
     // SDK routes: API-key authenticated. Per-project allowedOrigins, fall back
     // to allow-any if no restrictions configured.
-    const projectIdMatch = pathname.match(/^\/api\/v1\/([^/]+)/)
+    const projectIdMatch = pathname.match(/^\/api\/v[12]\/([^/]+)/)
     const projectId = projectIdMatch?.[1]
 
     if (projectId) {

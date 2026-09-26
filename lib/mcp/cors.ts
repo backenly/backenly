@@ -21,9 +21,11 @@ export function corsHeaders(): Record<string, string> {
     // Streamable-HTTP MCP hosts hitting the remote /api/mcp endpoint directly.
     // `authorization` carries the OAuth access token; omitting it made the
     // browser-login path unusable from any browser-based host, since the
-    // preflight would reject the only header that flow uses.
+    // preflight would reject the only header that flow uses. `mcp-method` and
+    // `mcp-name` are the standard headers a 2026-07-28 client adds to every
+    // request (SEP-2243).
     'access-control-allow-headers':
-      'content-type,accept,authorization,x-api-key,x-correlation-id,mcp-session-id,mcp-protocol-version',
+      'content-type,accept,authorization,x-api-key,x-correlation-id,mcp-session-id,mcp-protocol-version,mcp-method,mcp-name',
     // `www-authenticate` must be readable by the client or it cannot discover
     // the authorization server from a 401 — the whole point of the challenge.
     'access-control-expose-headers':
