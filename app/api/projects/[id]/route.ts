@@ -6,7 +6,12 @@ import { z } from 'zod'
 import { withAuth } from '@/lib/auth/route-protection'
 import { deleteProjectCompletely } from '@/lib/projects/delete'
 import { canAccessProject, canAdministerProject, canWriteProject } from '@/lib/edition/guard'
+import { getProjectQuota } from '@/lib/services/storageQuota'
 
+// Usage figures (storageUsed, apiRequests, activeUsers, ...) are measured by the
+// server and are deliberately NOT accepted here. They used to be, which let any
+// project writer set storageUsed to 0 and upload past the plan's quota. Zod
+// strips unknown keys, so a client that still sends them is ignored, not refused.
 const updateProjectSchema = z.object({
   name: z.string().min(1).max(100).optional(),
   description: z.string().optional().nullable(),
@@ -14,12 +19,6 @@ const updateProjectSchema = z.object({
   apiUrlDev: z.string().url().optional().nullable(),
   apiUrlStaging: z.string().url().optional().nullable(),
   apiUrlProd: z.string().url().optional().nullable(),
-  // Metrics update
-  apiRequests: z.number().int().min(0).optional(),
-  avgLatency: z.number().int().min(0).optional(),
-  errorCount: z.number().int().min(0).optional(),
-  storageUsed: z.number().int().min(0).optional(),
-  activeUsers: z.number().int().min(0).optional(),
 })
 
 // GET /api/projects/[id] - Get a single project
@@ -76,7 +75,8 @@ export const GET = withAuth(async (
     const serializedProject = {
       ...project,
       storageUsed: Number(project.storageUsed),
-      storageLimit: Number(project.storageLimit),
+      // The plan's effective cap, not the unused Project.storageLimit column.
+      storageLimit: Number((await getProjectQuota(project.id)).limit),
       maxFileSize: Number(project.maxFileSize),
       maxFilesPerBucket: project.maxFilesPerBucket, // Already Int, not BigInt
       metrics: {
@@ -141,18 +141,6 @@ export const PUT = withAuth(async (
     if (validatedData.apiUrlDev !== undefined) updateData.apiUrlDev = validatedData.apiUrlDev
     if (validatedData.apiUrlStaging !== undefined) updateData.apiUrlStaging = validatedData.apiUrlStaging
     if (validatedData.apiUrlProd !== undefined) updateData.apiUrlProd = validatedData.apiUrlProd
-    
-    // Update metrics if provided
-    if (validatedData.apiRequests !== undefined) updateData.apiRequests = validatedData.apiRequests
-    if (validatedData.avgLatency !== undefined) updateData.avgLatency = validatedData.avgLatency
-    if (validatedData.errorCount !== undefined) updateData.errorCount = validatedData.errorCount
-    if (validatedData.storageUsed !== undefined) updateData.storageUsed = BigInt(validatedData.storageUsed)
-    if (validatedData.activeUsers !== undefined) updateData.activeUsers = validatedData.activeUsers
-    
-    // Update lastMetricsUpdate if any metric was updated
-    if (Object.keys(validatedData).some(key => ['apiRequests', 'avgLatency', 'errorCount', 'storageUsed', 'activeUsers'].includes(key))) {
-      updateData.lastMetricsUpdate = new Date()
-    }
 
     const project = await prisma.project.update({
       where: { id: projectId },
@@ -175,7 +163,7 @@ export const PUT = withAuth(async (
     const serializedProject = {
       ...project,
       storageUsed: Number(project.storageUsed),
-      storageLimit: Number(project.storageLimit),
+      storageLimit: Number((await getProjectQuota(project.id)).limit),
       maxFileSize: Number(project.maxFileSize),
       maxFilesPerBucket: project.maxFilesPerBucket, // Already Int, not BigInt
       metrics: {

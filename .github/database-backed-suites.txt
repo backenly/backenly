@@ -551,3 +551,8 @@ tests/integration/apply-migration-existing-table.spec.ts
 # keys, provisioned projects, runtime engine mode.
 tests/integration/mcp-golden-workflows.spec.ts
 tests/integration/mcp-acceptance-cases.spec.ts
+
+# File storage is bounded by the owner's plan and measured by the server: not
+# the unused Project.storageLimit column (1 GiB on every project), not a
+# hardcoded 10 GB on the S3 path, and never a client-supplied storageUsed.
+__tests__/storage/storage-quota-follows-plan.test.ts

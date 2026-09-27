@@ -42,34 +42,27 @@ export interface QuotaStatus {
 
 /**
  * Get the storage quota for a project.
- * The limit comes from Project.storageLimit (set at project creation from the plan tier).
- * If storageLimit is 0, fall back to the user's subscription tier.
+ *
+ * The limit is the owner's Plan file-storage cap, and nothing else. `null` from
+ * the kernel means unlimited (a self-hosted install, or fail-open).
+ *
+ * Project.storageLimit is NOT consulted. It was meant as a per-project override,
+ * but nothing ever writes it, so every project carried its column default of
+ * 1 GiB, and because it took precedence that default capped every plan: Pro's
+ * advertised 100 GB was 1 GiB in practice.
  */
 export async function getProjectQuota(projectId: string): Promise<QuotaStatus> {
   const project = await prisma.project.findUnique({
     where: { id: projectId },
-    select: {
-      storageUsed: true,
-      storageLimit: true,
-      userId: true,
-      user: { select: { tier: true } },
-    },
+    select: { storageUsed: true },
   })
 
   if (!project) {
     return { used: BigInt(0), limit: DEFAULT_QUOTA, available: DEFAULT_QUOTA, percentUsed: 0, isExceeded: false }
   }
 
-  // Plan is the single source of truth. Developer-set project override
-  // (storageLimit > 0) still wins if present; otherwise the owner's Plan
-  // file-storage cap; null from the kernel = unlimited (or fail-open).
   const planLimitBytes = await getFileStorageLimitBytes(projectId)
-  const limit =
-    project.storageLimit > BigInt(0)
-      ? project.storageLimit
-      : planLimitBytes !== null
-        ? planLimitBytes
-        : UNLIMITED_BYTES
+  const limit = planLimitBytes !== null ? planLimitBytes : UNLIMITED_BYTES
   const used = project.storageUsed ?? BigInt(0)
   const available = limit > used ? limit - used : BigInt(0)
   const percentUsed = limit > BigInt(0) ? Number((used * BigInt(100)) / limit) : 0

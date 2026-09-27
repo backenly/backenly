@@ -7,6 +7,7 @@ import { clampIsPublic } from '@/lib/storage/access-policy'
 import { requireStorageSecret } from '@/lib/auth/jwt-secret'
 import { StorageUnavailableError } from '@/lib/storage/errors'
 import { signExportToken } from '@/lib/storage/export-token'
+import { getProjectQuota } from '@/lib/services/storageQuota'
 
 export interface StorageService {
   // Bucket operations
@@ -315,8 +316,6 @@ class LocalStorageService implements StorageService {
     const project = await prisma.project.findUnique({
       where: { id: options.projectId },
       select: {
-        storageUsed: true,
-        storageLimit: true,
         maxFileSize: true,
         maxFilesPerBucket: true,
       },
@@ -346,12 +345,12 @@ class LocalStorageService implements StorageService {
       )
     }
 
-    // Check total storage quota
-    const newTotalSize = project.storageUsed + fileSize
-    if (newTotalSize > project.storageLimit) {
-      const limitGB = Number(project.storageLimit) / (1024 * 1024 * 1024)
-      const usedGB = Number(project.storageUsed) / (1024 * 1024 * 1024)
-      const availableGB = Number(project.storageLimit - project.storageUsed) / (1024 * 1024 * 1024)
+    // Check total storage quota against the owner's plan (storageQuota.ts owns it)
+    const quota = await getProjectQuota(options.projectId)
+    if (quota.used + fileSize > quota.limit) {
+      const limitGB = Number(quota.limit) / (1024 * 1024 * 1024)
+      const usedGB = Number(quota.used) / (1024 * 1024 * 1024)
+      const availableGB = Number(quota.available) / (1024 * 1024 * 1024)
       throw new Error(
         `Storage quota exceeded. Used: ${usedGB.toFixed(2)}GB / ${limitGB.toFixed(2)}GB. ` +
         `Available: ${availableGB.toFixed(2)}GB. Please upgrade your plan or delete unused files.`
