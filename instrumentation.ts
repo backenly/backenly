@@ -568,13 +568,23 @@ export async function register() {
       })
 
       // ── DB storage snapshot — hourly ────────────────────────────────────────
-      // Measures actual pg_total_relation_size per workspace schema and writes
-      // ProjectUsage.dbStorageUsedMb so the billing dashboard reflects real
-      // end-user inserts (not only AI-build-time side-effects).
+      // Measures actual on-disk size of each project's workspace and branch
+      // schemas: ProjectUsage.dbStorageUsedMb for the quota check, and the
+      // `db_bytes` daily-maximum gauge in the usage ledger for billing.
       cron.schedule('0 * * * *', async () => {
         const { snapshotScheduledDbStorage } = await import('./lib/usage/db-storage')
         await snapshotScheduledDbStorage().catch((err: any) =>
           console.error('[DbStorageSnapshot] Error:', err?.message)
+        )
+      })
+
+      // ── File storage reconcile — hourly ─────────────────────────────────────
+      // `file_bytes` gauge from the storage metadata (non-deleted files), not
+      // the drifting Project.storageUsed counter. lib/usage/file-storage.ts.
+      cron.schedule('15 * * * *', async () => {
+        const { reconcileScheduledFileStorage } = await import('./lib/usage/file-storage')
+        await reconcileScheduledFileStorage().catch((err: any) =>
+          console.error('[FileStorageReconcile] Error:', err?.message)
         )
       })
 

@@ -561,3 +561,8 @@ __tests__/storage/storage-quota-follows-plan.test.ts
 # with an exactly-once id, a failed or ambiguous flush retried without double
 # counting, a SIGTERM spool replayed once, and an insert-only monthly close.
 __tests__/usage/usage-ledger.test.ts
+
+# Every meter measures what lib/usage/axes.ts says: streamed egress bytes once and
+# never for internal traffic, MAU once per user per month, database size including
+# branch schemas, file size from metadata, and function runs that executed.
+__tests__/usage/usage-meters.test.ts

@@ -31,10 +31,12 @@
  * on a real, measured limit breach.
  */
 
+import { randomUUID } from 'crypto'
 import { prisma } from '@/lib/db/prisma'
 import { getUserEntitlements } from '@/lib/entitlements'
 import { createPlatformNotification } from '@/lib/notifications/platform'
 import { isReservedTestEmail } from '@/lib/services/end-user-auth-table'
+import { recordUsage } from '@/lib/usage/ledger'
 
 // ─── Result type ─────────────────────────────────────────────────────────────
 
@@ -186,11 +188,18 @@ export async function trackEndUserActive(
   if (isReservedTestEmail(email)) return
   const month = thisMonth()
   try {
-    await prisma.projectActiveUser.upsert({
-      where: { projectId_endUserId_month: { projectId, endUserId, month } },
-      update: { lastSeenAt: new Date() },
-      create: { projectId, endUserId, month },
-    })
+    // (xmax = 0) is true only for a row this statement INSERTED, so the usage
+    // ledger hears about each (project, end user, month) exactly once, however
+    // many requests race to be the first of the month. The ledger's copy is the
+    // billing record: it is not deleted with the project, unlike this row.
+    const rows = await prisma.$queryRaw<Array<{ inserted: boolean }>>`
+      INSERT INTO "project_active_users" ("id", "projectId", "endUserId", "month", "lastSeenAt", "createdAt")
+      VALUES (${randomUUID()}, ${projectId}, ${endUserId}, ${month}, now(), now())
+      ON CONFLICT ("projectId", "endUserId", "month") DO UPDATE SET "lastSeenAt" = now()
+      RETURNING (xmax = 0) AS inserted`
+    if (rows[0]?.inserted) {
+      recordUsage({ projectId, axis: 'mau', quantity: 1, source: 'auth' })
+    }
     // Fire owner warning at 80% of MAU (non-blocking).
     const info = await planForProject(projectId)
     if (info && info.maxMau !== null) {
@@ -200,6 +209,32 @@ export async function trackEndUserActive(
   } catch {
     /* tracking must never break auth */
   }
+}
+
+// One tracking write per end user per UTC day per process, however many
+// requests they make. Bounded: cleared wholesale past the ceiling, which only
+// costs a few repeated (idempotent) upserts.
+const activityNoted = new Map<string, string>()
+const ACTIVITY_NOTED_CEILING = 100_000
+
+/**
+ * An end user made an authenticated data request: count them as active this
+ * month. MAU used to hear only about sign-ins and refreshes, so a returning user
+ * holding a still-valid seven-day token was invisible until it expired.
+ * Throttled to one write per user per day; never blocks, never throws.
+ */
+export function noteEndUserActivity(
+  projectId: string,
+  endUserId: string,
+  email: string | null | undefined,
+): void {
+  if (!projectId || !endUserId) return
+  const day = new Date().toISOString().slice(0, 10)
+  const key = `${projectId}:${endUserId}`
+  if (activityNoted.get(key) === day) return
+  if (activityNoted.size >= ACTIVITY_NOTED_CEILING) activityNoted.clear()
+  activityNoted.set(key, day)
+  trackEndUserActive(projectId, endUserId, email).catch(() => {})
 }
 
 /**

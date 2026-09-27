@@ -8,7 +8,7 @@ import { scanRequest } from '@/lib/services/waf'
 import crypto from 'crypto'
 import { markFrontendConnected, markExternalUsage } from '@/lib/projects/milestones'
 import { recordUsageMetrics } from '@/lib/platform-signals'
-import { enforceAndTrackApiRequest } from '@/lib/quota/kernel'
+import { enforceAndTrackApiRequest, noteEndUserActivity } from '@/lib/quota/kernel'
 import { getPlatformControls, recordSecurityEvent } from '@/lib/platform-controls'
 import { PAUSED_CODE, PAUSED_MESSAGE, pausedDetails } from '@/lib/projects/serving-state'
 import { touchProjectActivity } from '@/lib/projects/activity'
@@ -451,6 +451,9 @@ export async function v1ApiMiddleware(
         if (!blacklisted) {
           endUserId = String(payload.userId)
           endUserRole = (payload as any).role ?? 'user'
+          // An authenticated data request is use: count the end user active
+          // this month (throttled to one write a day, never blocks).
+          noteEndUserActivity(projectId, endUserId, typeof payload.email === 'string' ? payload.email : null)
         } else {
           return {
             context: {} as V1ApiContext,

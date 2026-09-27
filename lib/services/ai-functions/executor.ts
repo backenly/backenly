@@ -30,6 +30,7 @@ import { getProviderSpec } from './integration-registry'
 import { generateFixedFunctionCode } from './generator'
 import { isRouteModuleFunction, executeRouteModuleFunction, validateRouteModule } from './route-module-runner'
 import { enforceAiFunctionInvocation, trackAiFunctionInvocation } from '@/lib/entitlements/policy'
+import { recordUsage } from '@/lib/usage/ledger'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { safeFetch } from '@/lib/security/outbound-guard'
 import { isReservedTestEmail } from '@/lib/services/end-user-auth-table'
@@ -706,6 +707,10 @@ export async function executeAiFunction(
       }
     }
     trackAiFunctionInvocation(project.userId).catch(() => {})
+    // The billing record of the run (lib/usage/axes.ts `fn_runs`): counted
+    // here, after the plan check and before execution, so every invocation that
+    // actually runs the function counts once, whatever its outcome.
+    recordUsage({ projectId, axis: 'fn_runs', quantity: 1, source: 'executor', billingAccountId: project.userId })
   }
 
   // ─── Route-module path ──────────────────────────────────────────────────────

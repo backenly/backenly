@@ -16,7 +16,8 @@ import v2Routes from './routes/v2'
 import { nextProxy } from './routes/next-proxy'
 import { asyncRoute } from './lib/async-route'
 import { projectServingGate } from './lib/serving-gate'
-import { recordRuntimeRequest, INTERNAL_TRAFFIC_HEADER } from '@/lib/traffic/request-recorder'
+import { recordRuntimeRequest, INTERNAL_TRAFFIC_HEADER, isInternalTraffic } from '@/lib/traffic/request-recorder'
+import { meterNodeResponse } from '@/lib/usage/egress'
 
 const app = express()
 
@@ -106,11 +107,18 @@ app.use(cors({
 // See lib/traffic/request-recorder.ts for why this table was empty.
 app.use(['/api/v1/:projectId', '/api/v2/:projectId'], (req, res, next) => {
   const startedAt = Date.now()
+  // From the URL rather than req.params: a mount-path parameter is not reliably
+  // populated on an app-level use() across Express versions.
+  const projectId = /^\/api\/v[12]\/([^/?#]+)/.exec(req.originalUrl)?.[1] ?? null
+  // Egress is counted here only when this process is the edge. Behind Next (AWS,
+  // compose) every request carries the internal marker the forwarder adds, and
+  // Next has already counted the bytes. lib/usage/egress.ts.
+  if (projectId && !isInternalTraffic(req.get(INTERNAL_TRAFFIC_HEADER))) {
+    meterNodeResponse(res, projectId)
+  }
   res.on('finish', () => {
     recordRuntimeRequest({
-      // From the URL rather than req.params: a mount-path parameter is not
-      // reliably populated on an app-level use() across Express versions.
-      projectId: /^\/api\/v[12]\/([^/?#]+)/.exec(req.originalUrl)?.[1] ?? null,
+      projectId,
       method: req.method,
       pathname: req.originalUrl,
       statusCode: res.statusCode,

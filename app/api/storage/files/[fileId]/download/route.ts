@@ -17,6 +17,8 @@ import {
   PAUSED_MESSAGE,
   pausedDetails,
 } from '@/lib/projects/serving-state'
+import { INTERNAL_TRAFFIC_HEADER, isInternalTraffic } from '@/lib/traffic/request-recorder'
+import { recordEgress } from '@/lib/usage/egress'
 
 /**
  * GET /api/storage/files/{fileId}/download — stream the file bytes.
@@ -126,6 +128,12 @@ export async function GET(request: NextRequest, props: { params: Promise<{ fileI
     const file = await storageService.getFile(fileId, record.projectId)
     if (!file) {
       return NextResponse.json({ error: 'File not found' }, { status: 404 })
+    }
+
+    // Egress for the project that owns the file (lib/usage/egress.ts). This
+    // route is outside /api/v1, so recordedV1 does not see it.
+    if (!isInternalTraffic(request.headers.get(INTERNAL_TRAFFIC_HEADER))) {
+      recordEgress(record.projectId, file.buffer.length)
     }
 
     return new NextResponse(Buffer.from(file.buffer), {
