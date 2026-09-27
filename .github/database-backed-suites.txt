@@ -566,3 +566,7 @@ __tests__/usage/usage-ledger.test.ts
 # never for internal traffic, MAU once per user per month, database size including
 # branch schemas, file size from metadata, and function runs that executed.
 __tests__/usage/usage-meters.test.ts
+
+# Access-log egress (load balancer, S3 presigned downloads, CloudFront) is
+# attributed by path or key and each log object is ingested exactly once.
+__tests__/usage/usage-log-ingest.test.ts
