@@ -50,6 +50,12 @@ export async function register() {
 
     await import('./sentry.server.config')
 
+    // The usage ledger: replay any batch a previous process spooled on its way
+    // down, and spool on SIGTERM so this process's own last counts survive the
+    // shutdown Next.js runs after it. lib/usage/ledger.ts.
+    const { startUsageLedger } = await import('./lib/usage/ledger')
+    startUsageLedger()
+
     // Start the in-process cron scheduler.
     // On Vercel this is a no-op (VERCEL env is set); Vercel Cron calls
     // /api/cron/run-ai-jobs instead.  On self-hosted (Hetzner/PM2) this
@@ -571,6 +577,24 @@ export async function register() {
           console.error('[DbStorageSnapshot] Error:', err?.message)
         )
       })
+
+      // ── Usage: monthly close + marker pruning — daily 00:05 UTC ────────────
+      // Closes the previous UTC month. The first run of a month does the work;
+      // every later run is a no-op (insert-only close), which also covers a day
+      // the scheduler was down. lib/usage/close.ts.
+      cron.schedule('5 0 * * *', async () => {
+        const { closePreviousPeriod } = await import('./lib/usage/close')
+        const { pruneAppliedBatches } = await import('./lib/usage/ledger')
+        try {
+          const s = await closePreviousPeriod()
+          if (s.inserted > 0) {
+            console.log(`[UsageClose] ${s.period}: ${s.inserted} row(s) closed for ${s.accounts} account(s), ${s.alreadyClosed} already closed`)
+          }
+        } catch (err: any) {
+          console.error('[UsageClose] Error:', err?.message)
+        }
+        await pruneAppliedBatches().catch((err: any) => console.error('[UsageLedger] prune error:', err?.message))
+      }, { timezone: 'UTC' })
 
       console.log(
         '[CronScheduler] Started — user cron jobs + system tasks every minute, ' +

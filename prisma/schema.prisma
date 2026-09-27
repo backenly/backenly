@@ -2541,6 +2541,68 @@ model ProjectUsage {
 }
 
 // ============================================================================
+// USAGE LEDGER — billing-grade metering (lib/usage/ledger.ts)
+// ============================================================================
+
+// One row per project, axis, UTC day and measurement source. Counter axes add
+// up over the day; gauge axes keep the day's maximum. There is deliberately no
+// foreign key to Project: usage outlives a deleted project, and the month it
+// was used in stays attributed to the account that owned it.
+//
+// `billingAccountId` is the owning user's id today. It is a plain string so an
+// organization id can replace it later without rewriting history.
+model UsageDaily {
+  id               String   @id @default(uuid())
+  billingAccountId String
+  projectId        String
+  axis             String // lib/usage/axes.ts
+  day              DateTime @db.Date
+  quantity         BigInt   @default(0)
+  source           String // lib/usage/axes.ts USAGE_SOURCES
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([projectId, axis, day, source])
+  @@index([billingAccountId, day])
+  @@index([day])
+  @@map("usage_daily")
+}
+
+// One row per billing account, UTC calendar month and axis, written once by the
+// monthly close (lib/usage/close.ts). Insert-only: the close uses ON CONFLICT
+// DO NOTHING, so running it twice cannot add a second total, and the migration
+// installs a trigger that refuses UPDATE.
+model UsagePeriodClose {
+  id               String   @id @default(uuid())
+  billingAccountId String
+  period           String // YYYY-MM
+  axis             String
+  quantity         BigInt
+  unit             String
+  detail           Json?
+  closedAt         DateTime @default(now())
+
+  @@unique([billingAccountId, period, axis])
+  @@index([period])
+  @@map("usage_period_closes")
+}
+
+// Exactly-once application of usage. A ledger flush batch, a replayed spool
+// file and an ingested access-log object each carry an id that is inserted in
+// the SAME transaction as their increments, so a retry after an ambiguous
+// failure, a replay after a restart, or a second pass over a log bucket can
+// never count twice.
+model UsageAppliedBatch {
+  id        String   @id
+  kind      String // flush | spool | log
+  entries   Int
+  appliedAt DateTime @default(now())
+
+  @@index([appliedAt])
+  @@map("usage_applied_batches")
+}
+
+// ============================================================================
 // CREDIT BILL — Monthly invoice record for BUILDER (pay-as-you-go) users
 // Formula: finalCost = MAX($5, totalUsageCost)
 // ============================================================================

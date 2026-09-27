@@ -556,3 +556,8 @@ tests/integration/mcp-acceptance-cases.spec.ts
 # the unused Project.storageLimit column (1 GiB on every project), not a
 # hardcoded 10 GB on the S3 path, and never a client-supplied storageUsed.
 __tests__/storage/storage-quota-follows-plan.test.ts
+
+# The usage ledger counts every metered quantity exactly once: batches applied
+# with an exactly-once id, a failed or ambiguous flush retried without double
+# counting, a SIGTERM spool replayed once, and an insert-only monthly close.
+__tests__/usage/usage-ledger.test.ts
