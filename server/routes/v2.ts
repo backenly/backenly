@@ -52,6 +52,13 @@ import { getProjectIdFromAuth } from './dynamic'
 import { enforceRateLimitByKeyId } from '../lib/auth'
 import { asyncRoute } from '../lib/async-route'
 import { touchProjectActivity } from '@/lib/projects/activity'
+import {
+  isGrowingWrite,
+  projectRestriction,
+  restrictionDetails,
+  restrictionMessage,
+  RESTRICTED_CODE,
+} from '@/lib/usage/restrictions'
 
 const router = Router()
 
@@ -139,6 +146,18 @@ router.all('/:projectId/*', asyncRoute(async (req: Request, res: Response) => {
 
   // Authenticated, in quota, and past the serving gate: real use.
   void touchProjectActivity(projectId)
+
+  // Past the database grace period the data API is read-only, as on v1.
+  if (isGrowingWrite(req.method)) {
+    const restriction = await projectRestriction(projectId, 'db_bytes')
+    if (restriction.restricted) {
+      return res.status(403).json({
+        code: RESTRICTED_CODE,
+        message: restrictionMessage('db_bytes', restriction),
+        details: restrictionDetails('db_bytes', restriction),
+      })
+    }
+  }
 
   const operation = operationFor(req.method, Boolean(maybeId))
   if (!operation) {

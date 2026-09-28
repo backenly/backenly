@@ -32,6 +32,7 @@ import { generateUniqueStoragePath, enforceStorageQuota as enforceStorageLifecyc
 import { enforceStorageQuota as enforceStorageBillingQuota } from './quota-enforcement'
 import { getS3Client, getS3Config, s3ConfigurationProblem, checkS3Configuration } from './s3-config'
 import { StorageUnavailableError } from '@/lib/storage/errors'
+import { projectRestriction } from '@/lib/usage/restrictions'
 
 export class S3StorageService implements StorageService {
   private s3Client: S3Client
@@ -649,6 +650,15 @@ export class S3StorageService implements StorageService {
         return `${appUrl}/api/storage/files/${fileId}/download`
       }
       // Last resort (no app URL configured): fall through to a presigned URL.
+    }
+
+    // Past the egress grace period a presigned URL would let the bytes leave
+    // straight from the bucket, around the restriction. Hand out the app's own
+    // download URL instead: it answers the restriction, with its reason, to
+    // everyone except the project's members (lib/usage/restrictions.ts).
+    const appUrlForRestriction = (process.env.NEXT_PUBLIC_APP_URL || '').replace(/\/$/, '')
+    if (appUrlForRestriction && (await projectRestriction(projectId, 'egress_bytes')).restricted) {
+      return `${appUrlForRestriction}/api/storage/files/${fileId}/download`
     }
 
     // ============ PRESIGNED URLs ONLY (HARDENED) ============

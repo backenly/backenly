@@ -224,6 +224,33 @@ export async function sendPasswordResetCodeEmail(email: string, code: string): P
 }
 
 /**
+ * The code that must be entered before a usage spend limit is raised.
+ *
+ * Raising the limit lets Backenly charge the account more, so it is confirmed
+ * from the owner's mailbox rather than by any session or token alone: an agent
+ * holding a platform token can read the meter, never raise the limit.
+ */
+export async function sendSpendLimitCodeEmail(email: string, code: string, newLimitLabel: string): Promise<void> {
+  const subject = `${code} confirms your new Backenly spend limit`
+  const html = codeEmailHtml({
+    heading: 'Confirm your new spend limit',
+    intro:
+      `Enter this code to raise the monthly spend limit on your Backenly account to ` +
+      `<strong style="color: #e5e7eb;">${newLimitLabel}</strong>. It expires in ` +
+      `<strong style="color: #e5e7eb;">${CODE_MINUTES} minutes</strong>.`,
+    code,
+    footer:
+      "If you didn't ask to raise your spend limit, ignore this email and your limit stays as it is. " +
+      'Consider changing your password if you did not start this.',
+  })
+  const text =
+    `Your Backenly spend limit confirmation code is ${code}\n\n` +
+    `Enter it to raise your monthly spend limit to ${newLimitLabel}. It expires in ${CODE_MINUTES} minutes.\n\n` +
+    "If you didn't ask to raise your spend limit, ignore this email and your limit stays as it is."
+  await sendRequiredEmail('spend_limit_code', email, subject, html, text, { Code: code, 'New limit': newLimitLabel })
+}
+
+/**
  * Sent instead of a signup code when the address already has an account.
  *
  * The signup page answers identically either way, so it cannot be used to find

@@ -415,3 +415,42 @@ export async function getFileStorageLimitBytes(projectId: string): Promise<bigin
     return null
   }
 }
+
+// ─── API key rate ceiling (fair use, never billed) ───────────────────────────
+
+/**
+ * Refuse an API key rate its owner's plan does not allow, or return null.
+ *
+ * API requests are never billed; the plan's `apiRateLimitPerMin` is a fair-use
+ * ceiling on how fast any one key may be configured to go. A key's own limit
+ * is `rateLimit` requests per `rateLimitWindow` seconds, so the comparison is
+ * on the per-minute rate that works out to. The owner is the project's owner
+ * for a project key and the caller for an account-level key. A lookup failure
+ * refuses nothing: this bounds configuration, it never breaks it.
+ */
+export async function apiKeyRateCeilingViolation(
+  projectId: string | null,
+  callerUserId: string,
+  rateLimit: number,
+  rateLimitWindowSec: number,
+): Promise<string | null> {
+  try {
+    let ownerId = callerUserId
+    if (projectId) {
+      const project = await prisma.project.findUnique({ where: { id: projectId }, select: { userId: true } })
+      if (project?.userId) ownerId = project.userId
+    }
+    const ent = await getUserEntitlements(ownerId)
+    const perMin = ent?.apiRateLimitPerMin ?? null
+    if (perMin === null || rateLimitWindowSec <= 0) return null
+    const requested = (rateLimit * 60) / rateLimitWindowSec
+    if (requested <= perMin) return null
+    const allowed = Math.floor((perMin * rateLimitWindowSec) / 60)
+    return (
+      `The ${ent!.planName} plan allows up to ${perMin.toLocaleString()} requests per minute per API key. ` +
+      `For a ${rateLimitWindowSec}-second window that is at most ${allowed.toLocaleString()} requests.`
+    )
+  } catch {
+    return null
+  }
+}

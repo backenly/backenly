@@ -575,3 +575,8 @@ __tests__/usage/usage-log-ingest.test.ts
 # 10 GB plan), raised past the plan only by an enforce policy with a spend limit
 # and only by what the remaining limit buys; usage alerts are sent once each.
 __tests__/usage/pooled-quotas.test.ts
+
+# Past the grace period the data API is read-only (POST/PUT/PATCH refused, reads
+# and deletes kept) and files stop being served except to members; the plan's
+# fair-use ceiling bounds any one API key's configured rate.
+__tests__/usage/usage-restrictions.test.ts
