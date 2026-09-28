@@ -56,7 +56,6 @@
     "@iconify/react": "^6.0.2",
     "@modelcontextprotocol/server": "2.1.0",
     "@monaco-editor/react": "^4.6.0",
-    "@paddle/paddle-node-sdk": "^3.6.0",
     "@prisma/client": "^5.7.1",
     "@radix-ui/react-slot": "^1.2.4",
     "@sentry/nextjs": "^10.45.0",

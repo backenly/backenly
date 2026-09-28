@@ -33,6 +33,7 @@ import { enforceStorageQuota as enforceStorageBillingQuota } from './quota-enfor
 import { getS3Client, getS3Config, s3ConfigurationProblem, checkS3Configuration } from './s3-config'
 import { StorageUnavailableError } from '@/lib/storage/errors'
 import { projectRestriction } from '@/lib/usage/restrictions'
+import { signCdnUrl, signedCdnConfig } from '@/lib/storage/cdn'
 
 export class S3StorageService implements StorageService {
   private s3Client: S3Client
@@ -638,7 +639,9 @@ export class S3StorageService implements StorageService {
     // genuine CDN/public host (different from the S3 API endpoint) can serve the
     // object directly.
     if (file.isPublic) {
-      const cdnBase = this.publicCdnBase()
+      // A SIGNED CDN serves nothing unsigned, so a public file's permanent URL
+      // is the app route, which mints a fresh signed URL on every request.
+      const cdnBase = signedCdnConfig() ? null : this.publicCdnBase()
       if (cdnBase) {
         return `${cdnBase}/${file.path}`
       }
@@ -659,6 +662,13 @@ export class S3StorageService implements StorageService {
     const appUrlForRestriction = (process.env.NEXT_PUBLIC_APP_URL || '').replace(/\/$/, '')
     if (appUrlForRestriction && (await projectRestriction(projectId, 'egress_bytes')).restricted) {
       return `${appUrlForRestriction}/api/storage/files/${fileId}/download`
+    }
+
+    // Served from the edge when a signed CDN fronts the bucket (lib/storage/cdn.ts):
+    // the same short-lived grant, without the bucket's egress price.
+    const cdn = signedCdnConfig()
+    if (cdn) {
+      return signCdnUrl(file.path, generatePresignedUrlExpiry(expiresIn), cdn)
     }
 
     // ============ PRESIGNED URLs ONLY (HARDENED) ============

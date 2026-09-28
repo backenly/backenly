@@ -602,6 +602,21 @@ export async function register() {
         )
       })
 
+      // ── Usage anomalies — daily 00:40 UTC, for the day just completed ─────
+      // A project whose egress, function runs or new MAU jumped far past its
+      // own fourteen-day median becomes a finding in the Autonomy queue, with
+      // the evidence, and resolves itself once the day is back near normal.
+      // lib/usage/anomaly.ts.
+      cron.schedule('40 0 * * *', async () => {
+        const { evaluateUsageAnomalies } = await import('./lib/usage/anomaly')
+        try {
+          const r = await evaluateUsageAnomalies()
+          if (r.raised || r.resolved) console.log(`[UsageAnomaly] raised ${r.raised}, resolved ${r.resolved}`)
+        } catch (err: any) {
+          console.error('[UsageAnomaly] Error:', err?.message)
+        }
+      }, { timezone: 'UTC' })
+
       // ── Usage alerts — every 5 minutes ──────────────────────────────────────
       // 50/80/100% of each pooled quota and of the spend limit, each sent once
       // per account and month, plus the grace-period state the limit

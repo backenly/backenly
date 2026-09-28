@@ -116,3 +116,63 @@ export const SPEND_LIMIT_PRESETS_CENTS = [0, 5_000, 10_000, 25_000] as const
 
 /** The largest spend limit an owner can set without talking to Backenly. */
 export const SPEND_LIMIT_MAX_CENTS = 1_000_000
+
+// ─── What the pricing page states ────────────────────────────────────────────
+//
+// The Pro plan's included quantities as advertised. The Plan row (seeded by
+// the Cloud overlay) is what the quota kernel enforces; an overlay test holds
+// the two equal, so the page cannot promise a quota the product does not give.
+
+export const PRO_INCLUDED = {
+  mau: 200_000,
+  fnRuns: 2_000_000,
+  dbGib: 10,
+  fileGib: 100,
+} as const
+
+/**
+ * Whether usage-based pricing is shown on the public pricing page. A build-time
+ * switch (NEXT_PUBLIC_*), off unless the release that runs production in
+ * shadow mode or later turns it on: no rate is advertised before it can be
+ * measured.
+ */
+export function usagePricingPublished(value: string | undefined = process.env.NEXT_PUBLIC_USAGE_PRICING): boolean {
+  // Read as a literal process.env.NEXT_PUBLIC_* reference: that is the only
+  // form Next inlines into the client bundle the pricing page ships in.
+  return value === 'published'
+}
+
+/**
+ * Whether the egress rate may be advertised. Only once files are served by the
+ * CDN whose cost has been verified; until then egress is metered and capped but
+ * its price is not stated.
+ */
+export function egressPricePublished(value: string | undefined = process.env.NEXT_PUBLIC_EGRESS_TERMS): boolean {
+  return value === 'cdn'
+}
+
+export interface UsagePriceRow {
+  axis: OverageAxis
+  label: string
+  included: string
+  rate: string
+}
+
+/** The Pro usage table: included, then the rate past it. Egress only when publishable. */
+export function proUsagePriceRows(opts: { includeEgress: boolean }): UsagePriceRow[] {
+  const rate = (axis: OverageAxis, terms: EgressTerms = 'direct') => {
+    const p = overagePrice(axis, terms)
+    return `$${(p.cents / 100).toFixed(p.cents < 1 ? 3 : 2)} ${p.label}`
+  }
+  const rows: UsagePriceRow[] = [
+    { axis: 'mau', label: 'Monthly active users', included: PRO_INCLUDED.mau.toLocaleString('en-US'), rate: rate('mau') },
+    { axis: 'db_bytes', label: 'Database', included: `${PRO_INCLUDED.dbGib} GB`, rate: rate('db_bytes') },
+    { axis: 'file_bytes', label: 'File storage', included: `${PRO_INCLUDED.fileGib} GB`, rate: rate('file_bytes') },
+    { axis: 'fn_runs', label: 'Function runs', included: `${PRO_INCLUDED.fnRuns / 1_000_000}M`, rate: rate('fn_runs') },
+  ]
+  if (opts.includeEgress) {
+    const gib = (includedEgressMb('BUILDER', 'cdn') ?? 0) / 1024
+    rows.push({ axis: 'egress_bytes', label: 'Egress', included: `${gib} GB`, rate: rate('egress_bytes', 'cdn') })
+  }
+  return rows
+}

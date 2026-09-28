@@ -20,6 +20,7 @@ import {
 import { INTERNAL_TRAFFIC_HEADER, isInternalTraffic } from '@/lib/traffic/request-recorder'
 import { recordEgress } from '@/lib/usage/egress'
 import { projectRestriction, restrictionDetails, restrictionMessage, RESTRICTED_CODE } from '@/lib/usage/restrictions'
+import { DOWNLOAD_URL_TTL_SECONDS, signCdnUrl, signedCdnConfig } from '@/lib/storage/cdn'
 
 /**
  * GET /api/storage/files/{fileId}/download — stream the file bytes.
@@ -66,6 +67,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ fileI
         isPublic: true,
         uploadedBy: true,
         deletedAt: true,
+        path: true,
         bucket: { select: { accessPolicy: true } },
       },
     })
@@ -137,6 +139,16 @@ export async function GET(request: NextRequest, props: { params: Promise<{ fileI
         { error: decision.status === 401 ? 'Unauthorized' : 'Forbidden' },
         { status: decision.status },
       )
+    }
+
+    // Behind a signed CDN (Backenly Cloud's CloudFront) the bytes leave from the
+    // edge: every check above has passed, so hand the caller a short-lived
+    // signed URL for exactly this object. The CDN's logs meter the bytes.
+    const cdn = (process.env.STORAGE_DRIVER ?? '').toLowerCase() === 's3' ? signedCdnConfig() : null
+    if (cdn) {
+      const res = NextResponse.redirect(signCdnUrl(record.path, DOWNLOAD_URL_TTL_SECONDS, cdn), 302)
+      res.headers.set('Cache-Control', 'private, no-store')
+      return res
     }
 
     // `getFile` returns null ONLY for genuine absence, and throws

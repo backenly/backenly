@@ -13,7 +13,7 @@ them left the other still naming a production host.
 
 **Backenly** (live at https://backenly.com) is an **autonomous backend platform** that turns product descriptions into running backend infrastructure. It plans the backend, applies the infrastructure, verifies the runtime, and keeps every change reviewable and reversible. Developers describe their backend in natural language and Backenly automatically creates database tables, REST APIs, auth systems, storage, and more — no manual backend code required. (Category note: Backenly is **not** an "AI BaaS." It does not just generate resources — it manages backend change safely.)
 
-**Tech Stack:** Next.js 14, React 18, Express.js, PostgreSQL (Prisma), MongoDB (optional), OpenAI API, Paddle payments, TailwindCSS, TypeScript throughout.
+**Tech Stack:** Next.js 14, React 18, Express.js, PostgreSQL (Prisma), MongoDB (optional), OpenAI API, Stripe payments (Cloud), TailwindCSS, TypeScript throughout.
 
 **GitHub Repo:** https://github.com/backenly/backenly
 
@@ -55,7 +55,7 @@ Each project gets its own PostgreSQL schema: `workspace_{projectId}`.
 │   │   ├── ai/chat/route.ts      # Main AI chat entry point
 │   │   ├── ai-workspace/         # AI plan/apply/diff/detect routes
 │   │   ├── auth/                 # Platform auth (login, OAuth, JWT)
-│   │   ├── billing/              # Paddle subscription + AI usage
+│   │   ├── billing/              # Stripe subscription (Cloud overlay) + AI usage
 │   │   ├── database/             # Table & schema management
 │   │   ├── database-brain/       # AI-powered DB analysis & fixes
 │   │   ├── deployments/          # Deploy pipeline, logs, rollback
@@ -212,7 +212,7 @@ Key Prisma models (68 total):
 | `AiFunction` | Serverless AI functions |
 | `AppTrigger` | Event triggers (insert/update/delete/webhook) |
 | `PermissionPolicy` | Row-level security policies |
-| `Subscription` + `PaddleSubscription` | Billing |
+| `Subscription` | Billing (Stripe ids on the row; `PaddleSubscription` is a retired, retained table) |
 | `AuditLog` | Compliance audit trail |
 | `StorageBucket` + `StorageFile` | File storage |
 | `AgentMemory` | AI agent context/memory |
@@ -267,11 +267,11 @@ Architecture: `Client → EventSource → PostgreSQL LISTEN → NOTIFY → SSE s
 
 ---
 
-## Billing (Paddle)
+## Billing (Stripe, Cloud only)
 
-- Plans (internal code → display): SANDBOX → Free $0 · BUILDER → Pro $25/mo ($20 annual) · SCALE → Enterprise (custom, sales-led, no self-serve checkout) — seeded via `prisma/seed-billing.ts`. Internal codes are stable; only display names/prices/quotas change.
-- Integration: `lib/billing/`, `app/api/billing/`
-- Webhook: `app/api/billing/webhook/route.ts` (Paddle events)
+- Plans (internal code → display): SANDBOX → Free $0 · BUILDER → Pro $25/mo ($20 annual) · SCALE → Enterprise (custom, sales-led, no self-serve checkout) — seeded via the Cloud overlay's `prisma/seed-billing.ts`. Internal codes are stable; only display names/prices/quotas change.
+- Payments are Stripe, in the Cloud overlay (`lib/billing/`, `app/api/billing/`): Checkout Sessions, the customer portal, and `app/api/billing/webhook/route.ts` (Stripe events). Paddle is retired.
+- Usage pricing: quotas pool per billing account (`lib/usage/pool.ts`); past a quota only an `enforce` overage policy with an owner-set spend limit raises a cap (`lib/usage/overage.ts`); the month is billed from the usage ledger's close (`lib/usage/`, Cloud `lib/billing/usage-charges.ts`). Rates live in `lib/pricing/catalog.ts`. `BACKENLY_OVERAGE_MODE` is `off|shadow|enforce`.
 - AI usage tracked per user/month: `UserAiUsage` model
 - Grace periods for overdue subscriptions: `lib/billing/grace.ts`
 
@@ -313,14 +313,12 @@ GOOGLE_CLIENT_ID=  GOOGLE_CLIENT_SECRET=  GOOGLE_REDIRECT_URI=
 GITHUB_CLIENT_ID=  GITHUB_CLIENT_SECRET=  GITHUB_REDIRECT_URI=
 REPLIT_CLIENT_ID=  REPLIT_CLIENT_SECRET=
 
-# Payments (Paddle)
-PADDLE_VENDOR_ID=
-PADDLE_API_KEY=
-PADDLE_PUBLIC_KEY=
-PADDLE_WEBHOOK_SECRET=
-PADDLE_PLAN_ID_PRO=
-PADDLE_PLAN_ID_ENTERPRISE=
-PADDLE_ENVIRONMENT=sandbox|production
+# Payments (Stripe, Backenly Cloud only; a self-hosted install bills nobody)
+STRIPE_SECRET_KEY=
+STRIPE_WEBHOOK_SECRET=
+STRIPE_PRICE_PRO_MONTHLY=
+STRIPE_PRICE_PRO_ANNUAL=
+BACKENLY_OVERAGE_MODE=off|shadow|enforce
 
 # Security
 AI_EXECUTION_TOKEN=               # Authorizes AI execution calls
