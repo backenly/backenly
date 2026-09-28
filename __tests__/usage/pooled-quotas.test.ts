@@ -32,7 +32,7 @@ jest.mock('@/lib/entitlements', () => ({
   getOveragePolicy: () => Promise.resolve(policy),
 }))
 
-const { canAcceptNewEndUser, enforceDbStorage } = require('@/lib/quota/kernel')
+const { canAcceptNewEndUser, enforceDbStorage, enforceRealtimeConnection } = require('@/lib/quota/kernel')
 const { assertQuotaAvailable, getProjectQuota, QuotaExceededError } = require('@/lib/services/storageQuota')
 const { enforceAiFunctionInvocation } = require('@/lib/entitlements/policy')
 const { accountUsage } = require('@/lib/usage/pool')
@@ -168,6 +168,20 @@ describe('quotas pool across the owner\'s projects', () => {
     const other = await account()
     await activeUsers(other.a, 2)
     await expect(canAcceptNewEndUser(other.a)).resolves.toMatchObject({ allowed: true })
+  })
+
+  it('realtime: live streams of the owner\'s other projects count toward one cap', async () => {
+    ent = pro({ maxRealtimeConnections: 3 })
+    const { a, b } = await account()
+    const other = await account()
+    const live: Record<string, number> = { [b]: 3, [other.a]: 50 }
+    const count = (ids: string[]) => ids.reduce((sum, id) => sum + (live[id] ?? 0), 0)
+
+    await expect(enforceRealtimeConnection(a, 0, count)).resolves.toMatchObject({ allowed: false, used: 3, max: 3 })
+    live[b] = 2
+    await expect(enforceRealtimeConnection(a, 0, count)).resolves.toMatchObject({ allowed: true })
+    // Another owner's streams never count against this account.
+    await expect(enforceRealtimeConnection(other.b, 0, count)).resolves.toMatchObject({ allowed: false, used: 50 })
   })
 
   it('egress: the ledger\'s billed sources only, across projects', async () => {

@@ -293,11 +293,15 @@ export async function enforceRealtimeConnection(
     if (max === null || max === undefined) return ALLOW
     let existing = currentConnections
     if (countProjects) {
-      const others = await prisma.project.findMany({
-        where: { userId: project.userId, id: { not: projectId } },
-        select: { id: true },
+      // The billing account's projects, read from the account. This is not an
+      // access decision (the connection was already authorized for this
+      // project); it is which live streams share the account's quota.
+      const account = await prisma.user.findUnique({
+        where: { id: project.userId },
+        select: { projects: { select: { id: true } } },
       })
-      existing += countProjects(others.map((o) => o.id))
+      const others = (account?.projects ?? []).map((p) => p.id).filter((id) => id !== projectId)
+      existing += countProjects(others)
     }
     fireThresholdWarning(project.userId, 'realtime_connections', existing, max, thisMonth())
     if (existing >= max) {
