@@ -2,8 +2,10 @@
  * How far past its quotas an account may go, and what that is estimated to cost.
  *
  * The rule, per axis: usage may exceed the included quota only while the
- * account's overage mode is `enforce`, its plan allows overage, and the month's
- * estimated overage across ALL axes is still below the owner's spend limit.
+ * account's overage mode is `enforce`, its plan allows overage, the axis can be
+ * charged at all (catalog axisBillable: egress only once its billing is
+ * switched on), and the month's estimated overage across ALL axes is still
+ * below the owner's spend limit.
  * The remaining budget is what the next unit on any axis may spend, so the cap
  * on each axis is
  *
@@ -24,6 +26,8 @@
 import { getOveragePolicy, getUserEntitlements, type OveragePolicy, type UserEntitlements } from '@/lib/entitlements'
 import {
   OVERAGE_AXES,
+  axisBillable,
+  egressBillable,
   egressTerms,
   overageCents,
   planAllowsOverage,
@@ -46,7 +50,13 @@ export interface AxisLimit {
   cap: number | null
   /** Units past the included quantity so far. */
   overUnits: number
-  /** Estimated cents for those units (fractional). */
+  /**
+   * Usage past the quota can be charged on this axis (catalog axisBillable).
+   * False for egress until egress billing is switched on: then it has no
+   * estimate and no headroom, whatever the spend limit.
+   */
+  billable: boolean
+  /** Estimated cents for those units (fractional); 0 when not billable. */
   estimatedCents: number
 }
 
@@ -103,25 +113,29 @@ export function computeAccountLimits(
   usage: AccountUsage,
   policy: OveragePolicy | null,
   terms: EgressTerms = egressTerms(),
+  egressCharged: boolean = egressBillable(),
 ): AccountLimits {
-  const billable = planAllowsOverage(ent.planName)
   const rows = OVERAGE_AXES.map((axis) => {
     const used = usedQuantity(axis, usage)
     const included = includedQuantity(axis, ent)
     const overUnits = included === null ? 0 : Math.max(0, used - included)
+    const billable = axisBillable(ent.planName, axis, egressCharged)
     const estimatedCents = billable ? overageCents(axis, overUnits, terms) : 0
-    return { axis, used, included, overUnits, estimatedCents }
+    return { axis, used, included, overUnits, billable, estimatedCents }
   })
   const estimatedCents = rows.reduce((sum, r) => sum + r.estimatedCents, 0)
 
   const overageActive =
-    billable && policy !== null && policy.mode === 'enforce' && policy.spendLimitCents > 0
+    planAllowsOverage(ent.planName) && policy !== null && policy.mode === 'enforce' && policy.spendLimitCents > 0
   const spendLimitCents = overageActive ? policy!.spendLimitCents : 0
   const remaining = Math.max(0, spendLimitCents - estimatedCents)
 
   const axes = {} as Record<OverageAxis, AxisLimit>
   for (const r of rows) {
-    const headroom = overageActive && r.included !== null ? unitsForCents(r.axis, remaining, terms) : 0
+    // An axis that cannot be charged (egress until its billing is switched on)
+    // keeps its hard cap even while the spend limit opens the others.
+    const headroom =
+      overageActive && r.billable && r.included !== null ? unitsForCents(r.axis, remaining, terms) : 0
     // Past the quota, the units already used are inside the estimate, so the
     // cap exceeds current usage only by what the remaining budget buys.
     const cap = r.included === null ? null : Math.max(r.used, r.included) + headroom

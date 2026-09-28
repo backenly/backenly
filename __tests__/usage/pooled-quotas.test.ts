@@ -271,6 +271,32 @@ describe('only an enforce policy with a spend limit raises a cap', () => {
     // Unlimited axes stay unlimited.
     expect(computeAccountLimits(pro({ maxMonthlyActiveUsers: null }), usage, null).axes.mau.cap).toBeNull()
   })
+
+  it('egress keeps its hard cap and no estimate until egress billing is switched on', () => {
+    const over = {
+      billingAccountId: 'acct',
+      period: '2026-09',
+      mau: 3,
+      fnRuns: 10,
+      egressBytes: BigInt(3 * 1024 * 1024 * 1024), // 3 GiB against 1 GiB included
+      dbBytes: BigInt(0),
+      fileBytes: BigInt(0),
+    }
+    const enforce = { mode: 'enforce' as const, spendLimitCents: 10_000 }
+    const off = computeAccountLimits(pro(), over, enforce, 'direct', false)
+    expect(off.overageActive).toBe(true) // the limit still opens the other axes
+    expect(off.axes.mau.headroom).toBeGreaterThan(0)
+    expect(off.axes.egress_bytes.billable).toBe(false)
+    expect(off.axes.egress_bytes.estimatedCents).toBe(0)
+    expect(off.estimatedCents).toBe(0)
+    expect(off.axes.egress_bytes.headroom).toBe(0)
+    expect(off.axes.egress_bytes.cap).toBe(3 * 1024 * 1024 * 1024)
+
+    const on = computeAccountLimits(pro(), over, enforce, 'cdn', true)
+    expect(on.axes.egress_bytes.billable).toBe(true)
+    expect(on.axes.egress_bytes.estimatedCents).toBeCloseTo(18, 6) // 2 GiB x $0.09
+    expect(on.axes.egress_bytes.headroom).toBeGreaterThan(0)
+  })
 })
 
 describe('usage alerts', () => {
