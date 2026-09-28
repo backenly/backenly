@@ -578,6 +578,20 @@ export async function register() {
         )
       })
 
+      // ── Egress access-log ingest — every 15 minutes ────────────────────────
+      // Load balancer, S3 and CloudFront access logs into the usage ledger,
+      // each log object exactly once. A no-op until USAGE_LOG_SOURCES names the
+      // log buckets (Cloud infrastructure). lib/usage/log-ingest.ts.
+      cron.schedule('*/15 * * * *', async () => {
+        const { ingestConfiguredLogs } = await import('./lib/usage/log-ingest')
+        try {
+          const s = await ingestConfiguredLogs()
+          if (s && s.objects > 0) console.log(`[UsageLogIngest] ${s.objects} log object(s) applied, ${s.entries} usage row(s) updated`)
+        } catch (err: any) {
+          console.error('[UsageLogIngest] Error:', err?.message)
+        }
+      })
+
       // ── File storage reconcile — hourly ─────────────────────────────────────
       // `file_bytes` gauge from the storage metadata (non-deleted files), not
       // the drifting Project.storageUsed counter. lib/usage/file-storage.ts.
