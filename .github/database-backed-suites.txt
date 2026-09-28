@@ -566,3 +566,8 @@ __tests__/usage/usage-ledger.test.ts
 # never for internal traffic, MAU once per user per month, database size including
 # branch schemas, file size from metadata, and function runs that executed.
 __tests__/usage/usage-meters.test.ts
+
+# Quotas are the account's, pooled across its projects (6 GB + 5 GB is over a
+# 10 GB plan), raised past the plan only by an enforce policy with a spend limit
+# and only by what the remaining limit buys; usage alerts are sent once each.
+__tests__/usage/pooled-quotas.test.ts

@@ -21,7 +21,7 @@ import jwt from 'jsonwebtoken'
 import { JWTSecretManager, resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { asyncRoute } from '../lib/async-route'
 import { touchProjectActivity } from '@/lib/projects/activity'
-import { trackEndUserActive } from '@/lib/quota/kernel'
+import { canAcceptNewEndUser, trackEndUserActive } from '@/lib/quota/kernel'
 
 const router = Router()
 
@@ -172,6 +172,18 @@ async function handleSignUp(req: Request, res: Response) {
     if (existing.length > 0) {
       sendError(res, ErrorCodes.CONFLICT, 'An account with this email already exists', 409)
       return
+    }
+
+    // The account's MAU cap, as on the Next signup route: only a NEW end user
+    // is refused, existing users keep working. This route serves signups on
+    // the single-box layout, and skipping the check here made the cap depend
+    // on which process happened to answer.
+    if (!isInternalTest) {
+      const mau = await canAcceptNewEndUser(projectId)
+      if (!mau.allowed) {
+        sendError(res, ErrorCodes.FORBIDDEN, mau.message ?? 'Sign-ups are temporarily unavailable for this app.', 403)
+        return
+      }
     }
 
     const hashedPassword = await hashPassword(password)

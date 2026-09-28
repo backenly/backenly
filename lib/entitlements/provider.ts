@@ -1,7 +1,7 @@
 /**
  * The Cloud side of the Entitlements seam.
  *
- * Four operations, each one a thing the public product genuinely needs from
+ * Five operations, each one a thing the public product genuinely needs from
  * Backenly's commercial implementation and cannot answer for itself. The list
  * is deliberately short and deliberately concrete: this is a seam for the calls
  * that actually exist, not a plugin framework.
@@ -10,6 +10,7 @@
  *   bonusCredits                 granted credits that extend the monthly cap
  *   recordAiConsumption          charge a completed turn to the usage ledger
  *   initializeAccountEntitlements  set a new account up to have entitlements
+ *   overagePolicy                may this account go past its quotas, and how far
  *
  * The split follows one rule: deciding whether something MAY happen is public
  * policy, and recording commercial consumption is Cloud's. So enforceAiCredits
@@ -19,7 +20,7 @@
  * Every implementation must be safe to call in single-tenant, where the honest
  * answers are "no bonus", "nothing to record" and "nothing to initialize".
  */
-import type { UserEntitlements } from './types'
+import type { OveragePolicy, UserEntitlements } from './types'
 
 export interface CloudEntitlementsProvider {
   /** `null` means no active subscription. It does not mean unlimited. */
@@ -48,4 +49,13 @@ export interface CloudEntitlementsProvider {
    * would reintroduce the seed requirement that self-host exists without.
    */
   initializeAccountEntitlements(userId: string): Promise<void>
+
+  /**
+   * The account's overage mode and spend limit, or `null` when usage past a
+   * quota can never be charged (every quota is then a hard cap).
+   *
+   * Only the two commercial facts. What they allow, per axis, is public policy
+   * (lib/usage/overage.ts), so the same arithmetic runs whoever answers here.
+   */
+  overagePolicy(billingAccountId: string): Promise<OveragePolicy | null>
 }

@@ -734,7 +734,11 @@ const NOTIFICATION_LABELS: Record<string, { label: string; description: string }
   deploy_complete: { label: 'Deployments', description: 'A deployment finished.' },
   job_failed: { label: 'Failed jobs', description: 'A background job in one of your backends failed.' },
   job_completed: { label: 'Completed jobs', description: 'A background job in one of your backends finished.' },
-  credits_low: { label: 'Usage limits', description: 'You are close to a limit on your plan.' },
+  usage_limit: {
+    label: 'Usage limits',
+    description: 'Your usage or your spend limit crossed 50%, 80% or 100% this month.',
+  },
+  credits_low: { label: 'AI credits', description: 'You have used most of your AI credits for the month.' },
   payment_failed: { label: 'Failed payments', description: 'A payment for your plan did not go through.' },
   payment_success: { label: 'Receipts', description: 'A payment for your plan succeeded.' },
   system: { label: 'Account notices', description: 'Changes to your account or subscription.' },

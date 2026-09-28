@@ -345,8 +345,8 @@ class LocalStorageService implements StorageService {
       )
     }
 
-    // Check total storage quota against the owner's plan (storageQuota.ts owns it)
-    const quota = await getProjectQuota(options.projectId)
+    // Check the account's pooled storage against the owner's plan (storageQuota.ts owns it)
+    const quota = await getProjectQuota(options.projectId, BigInt(fileSize))
     if (quota.used + fileSize > quota.limit) {
       const limitGB = Number(quota.limit) / (1024 * 1024 * 1024)
       const usedGB = Number(quota.used) / (1024 * 1024 * 1024)

@@ -588,6 +588,22 @@ export async function register() {
         )
       })
 
+      // ── Usage alerts — every 5 minutes ──────────────────────────────────────
+      // 50/80/100% of each pooled quota and of the spend limit, each sent once
+      // per account and month, plus the grace-period state the limit
+      // behaviours read. lib/usage/alerts.ts.
+      cron.schedule('*/5 * * * *', async () => {
+        const { evaluateUsageAlerts } = await import('./lib/usage/alerts')
+        try {
+          const r = await evaluateUsageAlerts()
+          if (r.sent > 0 || r.failed > 0) {
+            console.log(`[UsageAlerts] ${r.accounts} account(s): ${r.sent} alert(s) sent, ${r.failed} failed`)
+          }
+        } catch (err: any) {
+          console.error('[UsageAlerts] Error:', err?.message)
+        }
+      })
+
       // ── Usage: monthly close + marker pruning — daily 00:05 UTC ────────────
       // Closes the previous UTC month. The first run of a month does the work;
       // every later run is a no-op (insert-only close), which also covers a day

@@ -59,10 +59,20 @@ const DEFAULT_QUOTAS: StorageQuota = {
   maxOrphansAllowed: 100,                             // Max 100 orphans before alert
 }
 
-/** The per-project byte cap: an explicit override, else the owner's plan. */
-async function projectSizeCap(projectId: string, quotas: StorageQuota): Promise<bigint> {
-  if (quotas.maxProjectSize !== undefined) return quotas.maxProjectSize
-  return (await getProjectQuota(projectId)).limit
+/**
+ * What an upload of `fileSize` is measured against: an explicit per-project
+ * override against this project's own bytes, else the owner's plan against the
+ * bytes of every project the owner has (storageQuota.ts owns that rule).
+ */
+async function sizeCheck(
+  projectId: string,
+  projectUsed: bigint,
+  fileSize: bigint,
+  quotas: StorageQuota,
+): Promise<{ used: bigint; cap: bigint }> {
+  if (quotas.maxProjectSize !== undefined) return { used: projectUsed, cap: quotas.maxProjectSize }
+  const quota = await getProjectQuota(projectId, fileSize)
+  return { used: quota.used, cap: quota.limit }
 }
 
 /**
@@ -144,13 +154,15 @@ export async function enforceStorageQuota(
     }
   }
   
-  // Check project storage limit
-  const projectedUsage = currentUsage + fileSize
-  const maxProjectSize = await projectSizeCap(projectId, quotas)
-  if (projectedUsage > maxProjectSize) {
+  // Check the storage limit (the account's, unless an explicit override is given)
+  const { used, cap } = await sizeCheck(projectId, currentUsage, fileSize, quotas)
+  if (used + fileSize > cap) {
     return {
       allowed: false,
-      reason: `Project storage quota exceeded (${formatBytes(maxProjectSize)} limit)`,
+      reason:
+        quotas.maxProjectSize !== undefined
+          ? `Project storage quota exceeded (${formatBytes(cap)} limit)`
+          : `Storage quota exceeded (${formatBytes(cap)} limit, shared by all of your projects)`,
       current: currentUsage,
     }
   }
@@ -506,15 +518,14 @@ export async function getStorageHealth(
     },
   })
   
-  const maxProjectSize = await projectSizeCap(projectId, DEFAULT_QUOTAS)
-  const quotaUsage = maxProjectSize > BigInt(0)
-    ? Number((project.storageUsed * BigInt(100)) / maxProjectSize)
-    : 0
+  // The quota is the account's: report the account's use of it.
+  const quota = await getProjectQuota(projectId)
+  const quotaUsage = quota.percentUsed
 
   const inconsistencies: string[] = []
 
   // Check for quota violations
-  if (project.storageUsed > maxProjectSize) {
+  if (quota.used > quota.limit) {
     inconsistencies.push('Storage quota exceeded')
   }
   

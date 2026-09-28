@@ -60,6 +60,8 @@ export function buildNotificationEmail(
       return buildPaymentFailedEmail(title, body, metadata)
     case 'credits_low':
       return buildCreditsLowEmail(title, body, metadata)
+    case 'usage_limit':
+      return buildUsageLimitEmail(title, body, metadata)
     case 'job_completed':
       return buildJobCompletedEmail(title, body, metadata)
     case 'job_failed':
@@ -124,9 +126,34 @@ function buildCreditsLowEmail(
         <div style="background:linear-gradient(90deg,#f59e0b,#ef4444);width:${Math.min(pct, 100)}%;height:100%;border-radius:4px;"></div>
       </div>
     </div>
-    ${button('Upgrade plan', `${APP_URL}/pricing`)}
+    ${button('View usage', `${APP_URL}/app/usage`)}
   `)
   return { subject: `🔔 AI credits running low (${pct}% used) — Backenly`, html }
+}
+
+function buildUsageLimitEmail(
+  title: string,
+  body: string,
+  metadata: Record<string, any>
+): NotificationEmailContent {
+  const used = Number(metadata.used ?? 0)
+  const limit = Number(metadata.limit ?? 0)
+  const pct = limit > 0 ? Math.round((used / limit) * 100) : 0
+  const html = shell(`
+    <h1 style="font-size:22px;font-weight:800;margin:0 0 8px;color:#fbbf24;">${title}</h1>
+    <p style="color:#9ca3af;margin:0 0 16px;font-size:15px;line-height:1.6;">${body}</p>
+    <div style="background:#111827;border-radius:8px;padding:14px 16px;margin:0 0 20px;">
+      <div style="display:flex;justify-content:space-between;margin-bottom:8px;">
+        <span style="color:#6b7280;font-size:13px;">Used</span>
+        <span style="color:#e5e7eb;font-size:13px;font-weight:600;">${metadata.usedLabel ?? used} / ${metadata.limitLabel ?? limit} (${pct}%)</span>
+      </div>
+      <div style="background:#1f2937;border-radius:4px;height:6px;overflow:hidden;">
+        <div style="background:linear-gradient(90deg,#f59e0b,#ef4444);width:${Math.min(pct, 100)}%;height:100%;border-radius:4px;"></div>
+      </div>
+    </div>
+    ${button('View usage', `${APP_URL}/app/usage`)}
+  `)
+  return { subject: `${title} — Backenly`, html }
 }
 
 function buildJobCompletedEmail(

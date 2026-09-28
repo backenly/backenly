@@ -23,7 +23,7 @@
  * are the same answers the old code produced against an unseeded database: no
  * subscription, no bonus, nothing to record, nothing to initialize.
  */
-import type { UserEntitlements } from '@/lib/entitlements/types'
+import type { OveragePolicy, UserEntitlements } from '@/lib/entitlements/types'
 
 /**
  * `null` means "no active subscription", which every caller already treats as a
@@ -57,4 +57,12 @@ export async function recordAiConsumption(_userId: string, _tokensUsed: number):
  */
 export async function initializeAccountEntitlements(_userId: string): Promise<void> {
   // no-op
+}
+
+/**
+ * Nothing past a quota can be charged, so every quota is a hard cap. With no
+ * commercial half there is no spend limit to read and no mode to be in.
+ */
+export async function overagePolicy(_billingAccountId: string): Promise<OveragePolicy | null> {
+  return null
 }

@@ -92,8 +92,11 @@ class ListenerHub {
     }
 
     try {
-      // reserved - 1 = connections that existed before this one.
-      const decision = await enforceRealtimeConnection(projectId, reserved - 1)
+      // reserved - 1 = connections that existed before this one. The cap is
+      // the account's, so the owner's other projects' live streams count too.
+      const decision = await enforceRealtimeConnection(projectId, reserved - 1, (others) =>
+        others.reduce((sum, id) => sum + this.connectionCount(id), 0),
+      )
       if (!decision.allowed) {
         release()
         return {

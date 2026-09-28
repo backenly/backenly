@@ -2602,6 +2602,54 @@ model UsageAppliedBatch {
   @@map("usage_applied_batches")
 }
 
+// The most a billing account lets Backenly charge beyond its included usage in
+// one month, in cents. No row means 0: nothing beyond the plan, every quota a
+// hard cap. Only a signed-in owner raises it (never an API key, an agent or an
+// MCP tool), and every change writes an audit_logs row.
+model UsageSpendLimit {
+  billingAccountId String   @id
+  limitCents       Int      @default(0)
+  updatedByUserId  String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@map("usage_spend_limits")
+}
+
+// A usage threshold an account crossed, recorded once per account, month, axis
+// and level so each alert is sent exactly once however many processes see it.
+// `level` is the percent of included usage ("50", "80", "100"), the percent of
+// the spend limit on axis "spend", or "cap" when the effective limit (included
+// plus spend-limit headroom) was reached.
+model UsageAlert {
+  id               String   @id @default(uuid())
+  billingAccountId String
+  period           String // YYYY-MM
+  axis             String
+  level            String
+  observed         BigInt
+  limit            BigInt
+  createdAt        DateTime @default(now())
+
+  @@unique([billingAccountId, period, axis, level])
+  @@index([billingAccountId, period])
+  @@map("usage_alerts")
+}
+
+// Since when an account has been at or over its effective limit on an axis
+// whose limit behaviour starts with a grace period (database and egress). Set
+// when first observed over, cleared as soon as usage is back under, so the
+// grace clock measures one continuous stretch rather than restarting monthly.
+model UsageLimitState {
+  billingAccountId String
+  axis             String
+  overSince        DateTime?
+  updatedAt        DateTime  @updatedAt
+
+  @@id([billingAccountId, axis])
+  @@map("usage_limit_states")
+}
+
 // ============================================================================
 // CREDIT BILL — Monthly invoice record for BUILDER (pay-as-you-go) users
 // Formula: finalCost = MAX($5, totalUsageCost)
