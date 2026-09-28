@@ -581,6 +581,11 @@ __tests__/usage/pooled-quotas.test.ts
 # fair-use ceiling bounds any one API key's configured rate.
 __tests__/usage/usage-restrictions.test.ts
 
+# A person and an agent read the same account usage: pooled usage against the
+# cap, the month-end forecast from the ledger, the estimated cost past the plan,
+# the spend limit and grace; and no MCP or brain tool can change the limit.
+__tests__/usage/usage-visibility.test.ts
+
 # The spend guard: a project whose daily egress, function runs or new MAU
 # jumps far past its own median becomes one Autonomy finding with ledger and
 # request-path evidence, refreshed while it lasts and resolved when it ends.

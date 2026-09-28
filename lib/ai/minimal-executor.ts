@@ -7781,47 +7781,55 @@ async function executeGetErrors(params: any, projectId: string): Promise<Executi
 
 /**
  * MONITORING: Get Usage
+ *
+ * The project owner's account usage this month, pooled across its projects
+ * (lib/usage/describe.ts): used against included and the cap, the month-end
+ * projection, the estimated cost of usage past the plan, the spend limit, and
+ * any grace or restriction. The same description the Usage page shows.
+ *
+ * Read-only by construction. There is no tool that changes the spend limit or
+ * enables overage: an agent can read the meter, only the owner raises the
+ * limit, from their own mailbox.
  */
 async function executeGetUsage(projectId: string): Promise<ExecutionResult> {
   try {
     const { prisma } = await import('@/lib/db')
-    
-    // Get API call count
-    const apiCalls = await prisma.log.count({
-      where: {
-        projectId,
-        type: 'api_request',
-        timestamp: {
-          gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) // Last 30 days
-        }
-      }
+    const project = await prisma.project.findUnique({ where: { id: projectId }, select: { userId: true } })
+    if (!project?.userId) {
+      return { success: false, message: 'This project has no owning account to read usage for.' }
+    }
+    const { describeAccountUsage } = await import('@/lib/usage/describe')
+    const usage = await describeAccountUsage(project.userId)
+    if (!usage) {
+      return { success: false, message: 'No plan is attached to the account that owns this project, so there is no usage to read.' }
+    }
+
+    const fmt = (n: number, unit: string) =>
+      unit === 'bytes' ? `${(n / 1024 ** 3).toFixed(2)} GB` : Math.round(n).toLocaleString('en-US')
+    const dollars = (cents: number) => `$${(cents / 100).toFixed(2)}`
+    const lines = usage.axes.map((a) => {
+      const of = a.included === null ? 'unlimited' : `${fmt(a.included, a.unit)} included`
+      const grace = a.grace ? (a.grace.restricted ? ' — RESTRICTED (grace ended)' : ` — over since ${a.grace.overSince.slice(0, 10)}, grace ends ${a.grace.graceEndsAt.slice(0, 10)}`) : ''
+      return `- ${a.label}: ${fmt(a.used, a.unit)} (${of}); projected ${fmt(a.projected, a.unit)}${grace}`
     })
-    
-    // Get storage usage (tables count)
-    const tables = await prisma.table.count({
-      where: { projectId }
-    })
-    
-    // Get API count
-    // Catalog count - the row count was permanently 0 after the cutover, so
-    // this status reported "Active APIs: 0" on backends serving traffic.
-    const { countExposedResources } = await import('@/lib/api/exposed-resources')
-    const apis = await countExposedResources(projectId)
-    
+    const overage =
+      usage.overage.mode === null
+        ? 'Usage past a quota is never charged on this deployment.'
+        : `Overage mode: ${usage.overage.mode}. Spend limit: ${dollars(usage.overage.spendLimitCents)}. ` +
+          `Estimated past-plan usage so far: ${dollars(usage.overage.estimatedCents)}; projected for the month: ${dollars(usage.overage.projectedCents)}.`
+
     return {
       success: true,
-      message: `📊 **Usage Statistics (Last 30 days):**\n\n` +
-        `🔌 **API Calls:** ${apiCalls.toLocaleString()}\n` +
-        `📊 **Database Tables:** ${tables}\n` +
-        `🚀 **Active APIs:** ${apis}`,
-      data: { apiCalls, tables, apis }
+      message: [
+        `Usage for ${usage.period} on the ${usage.planName} plan, across every project of this account:`,
+        ...lines,
+        overage,
+        'Projections assume the last seven days continue. Only the account owner can raise the spend limit.',
+      ].join('\n'),
+      data: usage,
     }
   } catch (error: any) {
-    return {
-      success: false,
-      message: `Failed to get usage: ${error.message}`,
-      error: error.message
-    }
+    return { success: false, message: `Failed to get usage: ${error.message}`, error: error.message }
   }
 }
 
