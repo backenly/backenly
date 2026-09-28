@@ -590,3 +590,8 @@ __tests__/usage/usage-visibility.test.ts
 # jumps far past its own median becomes one Autonomy finding with ledger and
 # request-path evidence, refreshed while it lasts and resolved when it ends.
 __tests__/usage/usage-anomaly.test.ts
+
+# Behind a signed CDN every file leaves from the edge, and only after the
+# bucket policy, pause and usage restriction have allowed it: a CloudFront
+# canned-policy signature over exactly that object, verified with the key.
+__tests__/storage/signed-cdn.test.ts
