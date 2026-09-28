@@ -2659,6 +2659,40 @@ model UsageLimitState {
   @@map("usage_limit_states")
 }
 
+// What usage past a plan's included quantity came to for one account, month
+// and axis, and what became of it. Computed from the closed month
+// (usage_period_closes), so it is one row per account, period and axis:
+// computing the same month again can never produce a second charge.
+//
+//   shadow    computed and shown, never charged (BACKENLY_OVERAGE_MODE=shadow)
+//   carried   under the minimum charge; rolled into a later month's invoice
+//   pending   an invoice is being created
+//   invoiced  on the Stripe invoice named by stripeInvoiceId
+//   charged   that invoice was paid
+//   failed    that invoice's payment failed (the payment grace flow applies)
+//   waived    not collected: carried when the subscription ended, or no
+//             payment method to charge
+model UsageCharge {
+  id               String   @id @default(uuid())
+  billingAccountId String
+  period           String // YYYY-MM
+  axis             String
+  // Units past the included quantity, in the closed unit of the axis
+  // (users, runs, bytes, or byte-months as bytes for storage).
+  overQuantity     BigInt
+  amountCents      Int
+  status           String
+  stripeInvoiceId  String?
+  detail           Json?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([billingAccountId, period, axis])
+  @@index([status])
+  @@index([stripeInvoiceId])
+  @@map("usage_charges")
+}
+
 // ============================================================================
 // CREDIT BILL — Monthly invoice record for BUILDER (pay-as-you-go) users
 // Formula: finalCost = MAX($5, totalUsageCost)
