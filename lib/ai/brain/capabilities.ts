@@ -600,7 +600,7 @@ export const MANUAL_CAPABILITIES: Capability[] = [
   {
     id: 'billing',
     name: 'Billing & subscription',
-    what: 'Plan changes and payment are handled by the user via the Billing page (Paddle). The chat agent does not change a user\'s plan.',
+    what: 'Plan changes and payment are handled by the user via the Billing page (Stripe). The chat agent does not change a user\'s plan or spend limit.',
     manualOnly: true,
   },
 ]
