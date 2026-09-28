@@ -420,6 +420,25 @@ export function getManualRemediationHint(
     // is that repairing individual gaps here has stopped working. So the hint
     // hands over the evidence rather than a command, because the next step is a
     // decision about the data model and Backenly cannot make it.
+    // No repair exists for a spike: it may be a launch as easily as a runaway.
+    // The hint hands over where the traffic went and what to check.
+    case 'usage_anomaly': {
+      const axis = String(details?.axis ?? '')
+      const paths = Array.isArray(details?.topPaths)
+        ? (details!.topPaths as Array<{ path?: string }>).map((p) => p?.path).filter(Boolean).slice(0, 3)
+        : []
+      const where = paths.length
+        ? `Start with ${paths.join(', ')}, which carried most of the day's requests.`
+        : axis === 'egress_bytes'
+          ? 'It did not go through the API, so look at file downloads: a public file shared widely, or a client re-downloading one in a loop.'
+          : 'Look at what changed that day: a deploy, a new client, or a job running more often than intended.'
+      return (
+        `This project's ${axis === 'egress_bytes' ? 'egress' : axis === 'fn_runs' ? 'function runs' : 'new end users'} ` +
+        `jumped far past its usual daily level. ${where} If it is expected growth, dismiss this; if it is not, ` +
+        'fix the cause before it reaches your plan limit or spend limit (the Usage page shows both).'
+      )
+    }
+
     case 'subsystem_repeat_failure': {
       const area = Array.isArray(details?.membership)
         ? (details!.membership as string[]).join(', ')
