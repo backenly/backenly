@@ -21,12 +21,12 @@
  *     such mechanism exists. Cancellation downgrades a subscription to FREE
  *     (lib/billing/grace.ts) and deletes nothing.
  *   • "Billing records are retained for seven years" — no mechanism, and the
- *     schema does the opposite: Subscription, PaddleSubscription,
+ *     schema does the opposite: Subscription, the retired PaddleSubscription,
  *     CreditLedgerEntry and UserAiUsage all cascade-delete with the User.
  *   • "Logs and diagnostics are retained for up to 90 days" — the enforced
  *     window is 30 days across three tables (lib/queue/worker.ts); most log
  *     tables have no limit at all.
- *   • Amplitude, Sentry, Resend, Cloudflare, Backblaze, Google and GitHub were
+ *   • Amplitude, Sentry, Resend, Cloudflare, Google and GitHub were
  *     undisclosed.
  *
  * THE RULE THIS FILE FOLLOWS
@@ -74,8 +74,8 @@ export type Provider = {
 /**
  * Third parties that can receive personal or customer data.
  *
- * Deliberately NOT a location column. Only one location is verified (Hetzner,
- * Singapore) and it is stated in the "Where information is processed" section.
+ * Deliberately NOT a location column. Only one location is verified (Amazon Web
+ * Services, Mumbai ap-south-1) and it is stated in the "Where information is processed" section.
  * A column of "unknown" cells looks like diligence and is the opposite; the
  * prose there says the honest thing instead.
  *
@@ -91,16 +91,10 @@ export type Provider = {
  */
 export const PROVIDERS: Provider[] = [
   {
-    name: 'Hetzner',
-    purpose: 'Hosts the Backenly platform and your project databases',
-    data: 'All platform and project data',
-    href: 'https://www.hetzner.com/legal/privacy-policy/',
-  },
-  {
-    name: 'Backblaze B2',
-    purpose: 'Stores files uploaded to your projects',
-    data: 'Files your application uploads',
-    href: 'https://www.backblaze.com/company/privacy.html',
+    name: 'Amazon Web Services',
+    purpose: 'Hosts the Backenly platform, your project databases and the files your projects store',
+    data: 'All platform and project data, including files your application uploads',
+    href: 'https://aws.amazon.com/privacy/',
   },
   {
     name: 'Resend',
@@ -127,10 +121,10 @@ export const PROVIDERS: Provider[] = [
     href: 'https://sentry.io/privacy/',
   },
   {
-    name: 'Paddle',
-    purpose: 'Sells and bills subscriptions as merchant of record',
-    data: 'Your email address and chosen plan. Paddle collects payment details directly',
-    href: 'https://www.paddle.com/legal/privacy',
+    name: 'Stripe',
+    purpose: 'Processes payments for subscriptions and for usage beyond a plan',
+    data: 'Your email address, your plan and any usage charges. Stripe collects payment details directly',
+    href: 'https://stripe.com/privacy',
   },
   {
     name: 'Cloudflare',
@@ -173,8 +167,8 @@ export const PRIVACY_SUMMARY = [
   'We do not run advertising and do not share your data with advertisers or data brokers',
   'Each project database runs in its own PostgreSQL schema',
   'We currently record sessions on the web app, including dashboard pages',
-  'Paddle is the seller on your subscription. We never see your card details',
-  'The platform runs on Hetzner infrastructure in Singapore',
+  'Stripe processes your payments. We never see your card details',
+  'The platform runs on Amazon Web Services in Mumbai, India',
   'You can export your project database at any time',
   'Deleting a project starts deletion. It is not a recovery window',
 ]
@@ -265,7 +259,7 @@ export const PRIVACY_SECTIONS: PrivacySection[] = [
         label: 'Billing',
         items: [
           'Your plan and subscription status',
-          'Paddle customer and subscription identifiers',
+          'Stripe customer, subscription and invoice identifiers',
           'Usage counters used to apply plan limits',
           'We never receive or store card numbers.',
         ],
@@ -354,10 +348,10 @@ export const PRIVACY_SECTIONS: PrivacySection[] = [
     id: 'payments',
     title: 'Payments',
     content:
-      'Paddle sells and bills Backenly subscriptions as the merchant of record. Paddle is the seller on your transaction rather than only a payment processor, and it handles your payment details directly under its own privacy policy.',
+      'Stripe processes payments for Backenly subscriptions and for usage beyond a plan. Backenly is the seller on your transaction; Stripe handles your payment details directly under its own privacy policy.',
     list: [
-      'We send Paddle your email address and the plan you selected.',
-      'Paddle sends back subscription identifiers and status.',
+      'We send Stripe your email address, the plan you selected, and any charges for usage beyond your plan.',
+      'Stripe sends back customer, subscription and invoice identifiers, and payment status.',
       'We never receive or store card numbers, expiry dates or security codes.',
     ],
   },
@@ -375,13 +369,13 @@ export const PRIVACY_SECTIONS: PrivacySection[] = [
     content: 'These third parties can receive information when you use Backenly.',
     providers: true,
     extra:
-      'Google and GitHub appear only if you choose to sign in with them. Paddle acts as the seller on your transaction rather than on our instructions. Providers you connect to your own projects are your relationships, not ours. The legal role of each provider depends on the service and the privacy law that applies.',
+      'Google and GitHub appear only if you choose to sign in with them. Providers you connect to your own projects are your relationships, not ours. The legal role of each provider depends on the service and the privacy law that applies.',
   },
   {
     id: 'international',
     title: 'Where information is processed',
     content:
-      'Backenly’s platform and your project databases run on Hetzner infrastructure in Singapore.',
+      'Backenly’s platform, your project databases and your stored files run on Amazon Web Services in the Mumbai (ap-south-1) region, India.',
     list: [
       'The providers listed above operate their own infrastructure and may process information in other countries, including the United States.',
     ],
@@ -413,7 +407,7 @@ export const PRIVACY_SECTIONS: PrivacySection[] = [
       'Security and anti-abuse records are kept afterwards, including blocklist entries, so that abuse cannot be reset by deleting and recreating an account. Some billing and audit records are also kept.',
     ],
     extra:
-      'Copies held by the providers listed above are subject to their own retention. Deleting your Backenly account does not delete analytics data held by Amplitude, error reports held by Sentry, or the transaction records Paddle keeps as merchant of record.',
+      'Copies held by the providers listed above are subject to their own retention. Deleting your Backenly account does not delete analytics data held by Amplitude, error reports held by Sentry, or the payment records Stripe keeps.',
   },
   {
     id: 'export',
