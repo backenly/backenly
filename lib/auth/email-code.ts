@@ -29,7 +29,10 @@ import type { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
 import { AUTH_LIMITS, consume, type RateLimitResult } from '@/lib/security/auth-rate-limit'
 
-export type EmailCodePurpose = 'signup' | 'password_reset'
+// spend_limit: raising a Backenly Cloud account's usage spend limit. The code
+// goes to the owner's own mailbox, so a token an agent holds can never raise
+// what the account may be charged; only the person who reads that mail can.
+export type EmailCodePurpose = 'signup' | 'password_reset' | 'spend_limit'
 
 export const EMAIL_CODE_LENGTH = 6
 export const EMAIL_CODE_TTL_MS = 10 * 60_000
