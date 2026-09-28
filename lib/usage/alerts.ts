@@ -213,6 +213,9 @@ async function setOverState(billingAccountId: string, axis: OverageAxis, over: b
  * instrumentation.ts; one account's failure never stops the rest.
  */
 export async function evaluateUsageAlerts(now: Date = new Date()): Promise<AlertEvaluation & { accounts: number; failed: number }> {
+  // A self-hosted install has no quotas, so there is nothing to alert on.
+  const { currentEdition } = await import('@/lib/edition')
+  if (currentEdition() === 'single-tenant') return { accounts: 0, recorded: 0, sent: 0, failed: 0 }
   const owners = await prisma.$queryRaw<Array<{ userId: string }>>`
     SELECT DISTINCT "userId" FROM "projects" WHERE "userId" IS NOT NULL`
   const total = { accounts: owners.length, recorded: 0, sent: 0, failed: 0 }

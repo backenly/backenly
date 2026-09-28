@@ -160,7 +160,11 @@ export async function accountLimits(
   const ent = opts.ent === undefined ? await getUserEntitlements(billingAccountId) : opts.ent
   let limits: AccountLimits | null = null
   if (ent) {
-    const [usage, policy] = await Promise.all([accountUsage(billingAccountId), getOveragePolicy(billingAccountId)])
+    // A plan with no finite quota (self-host, a contract plan) has nothing to
+    // compare usage against, so it is not read at all.
+    const metered = OVERAGE_AXES.some((axis) => includedQuantity(axis, ent) !== null)
+    const usage = metered ? await accountUsage(billingAccountId) : unmeteredUsage(billingAccountId)
+    const policy = await getOveragePolicy(billingAccountId)
     limits = computeAccountLimits(ent, usage, policy)
   }
   if (cache.size > 10_000) cache.clear()
@@ -188,6 +192,19 @@ export async function effectiveCap(
     return limits.axes[axis].cap ?? included
   } catch {
     return included
+  }
+}
+
+function unmeteredUsage(billingAccountId: string): AccountUsage {
+  const zero = BigInt(0)
+  return {
+    billingAccountId,
+    period: new Date().toISOString().slice(0, 7),
+    mau: 0,
+    fnRuns: 0,
+    egressBytes: zero,
+    dbBytes: zero,
+    fileBytes: zero,
   }
 }
 

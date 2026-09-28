@@ -45,24 +45,25 @@ export async function accountUsage(billingAccountId: string, at: Date = new Date
   const { start, end } = periodBounds(period)
   const sources = egressSources()
 
-  const [mauRows, aiUsage, egressRows, dbRows, fileRows] = await Promise.all([
-    prisma.$queryRaw<Array<{ n: number }>>`
+  // One query at a time: this runs inside request gates and a sweep, and five
+  // at once would take five pooled connections for a reading that is cached.
+  const mauRows = await prisma.$queryRaw<Array<{ n: number }>>`
       SELECT count(*)::int AS n
       FROM "project_active_users" a
       JOIN "projects" p ON p."id" = a."projectId"
-      WHERE p."userId" = ${billingAccountId} AND a."month" = ${period}`,
-    prisma.userAiUsage.findUnique({
-      where: { userId_date: { userId: billingAccountId, date: period } },
-      select: { aiFunctionInvocations: true },
-    }),
-    prisma.$queryRaw<Array<{ bytes: bigint | null }>>`
+      WHERE p."userId" = ${billingAccountId} AND a."month" = ${period}`
+  const aiUsage = await prisma.userAiUsage.findUnique({
+    where: { userId_date: { userId: billingAccountId, date: period } },
+    select: { aiFunctionInvocations: true },
+  })
+  const egressRows = await prisma.$queryRaw<Array<{ bytes: bigint | null }>>`
       SELECT COALESCE(SUM("quantity"), 0)::bigint AS bytes
       FROM "usage_daily"
       WHERE "billingAccountId" = ${billingAccountId}
         AND "axis" = 'egress_bytes'
         AND "day" >= ${start}::date AND "day" < ${end}::date
-        AND "source" = ANY(${sources}::text[])`,
-    prisma.$queryRaw<Array<{ mb: number | null }>>`
+        AND "source" = ANY(${sources}::text[])`
+  const dbRows = await prisma.$queryRaw<Array<{ mb: number | null }>>`
       SELECT COALESCE(SUM(latest."dbStorageUsedMb"), 0)::float8 AS mb
       FROM (
         SELECT DISTINCT ON (u."projectId") u."dbStorageUsedMb"
@@ -70,12 +71,11 @@ export async function accountUsage(billingAccountId: string, at: Date = new Date
         JOIN "projects" p ON p."id" = u."projectId"
         WHERE p."userId" = ${billingAccountId}
         ORDER BY u."projectId", u."month" DESC
-      ) latest`,
-    prisma.$queryRaw<Array<{ bytes: bigint | null }>>`
+      ) latest`
+  const fileRows = await prisma.$queryRaw<Array<{ bytes: bigint | null }>>`
       SELECT COALESCE(SUM(GREATEST("storageUsed", 0)), 0)::bigint AS bytes
       FROM "projects"
-      WHERE "userId" = ${billingAccountId}`,
-  ])
+      WHERE "userId" = ${billingAccountId}`
 
   return {
     billingAccountId,
