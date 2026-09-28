@@ -3,9 +3,12 @@
 /**
  * Usage (/app/usage) — IA restructure §5.2.
  *
- * Account-wide usage for the current billing cycle, read from the existing
- * /api/billing/usage endpoint (the same source the old settings billing meter
- * used). Flat kit — solid violet meters, mono numerals, no gradients/glows.
+ * Account-wide usage for the current billing cycle. The quota meters read
+ * /api/usage/account (lib/usage/describe.ts): usage pooled across every project
+ * of the account, the most each may reach, and the month-end projection; the
+ * same description an agent gets from the MCP usage read. AI credits and API
+ * requests still come from /api/billing/usage. Flat kit — solid violet meters,
+ * mono numerals, no gradients/glows.
  *
  * Honesty: we render only metrics the endpoint actually returns. "Autonomy runs
  * this cycle" and the per-day chart from the report need data sources that
@@ -17,7 +20,7 @@ import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { notFound, useRouter } from 'next/navigation'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
-import { Database, HardDrive, Bot, Activity, Users, ArrowUpRight, Loader2, AlertTriangle, ShieldCheck, Sparkles } from 'lucide-react'
+import { Database, HardDrive, Bot, Activity, Users, ArrowUpRight, Loader2, AlertTriangle, ShieldCheck, Sparkles, Globe, Wallet } from 'lucide-react'
 import { OrgShell } from '@/components/shell/OrgShell'
 import { SectionTitle, KitButton, KitNote, KitCard, KitCardHeader, KitCardBody } from '@/components/inspector/kit'
 
@@ -39,6 +42,33 @@ interface UsageData {
   resetAt: string
 }
 
+interface AxisDescription {
+  axis: 'mau' | 'fn_runs' | 'egress_bytes' | 'db_bytes' | 'file_bytes'
+  label: string
+  unit: 'users' | 'runs' | 'bytes'
+  used: number
+  included: number | null
+  cap: number | null
+  projected: number
+  estimatedCents: number
+  projectedCents: number
+  grace: { overSince: string; graceEndsAt: string; restricted: boolean } | null
+}
+
+interface AccountUsage {
+  period: string
+  planName: string
+  overage: {
+    mode: 'off' | 'shadow' | 'enforce' | null
+    spendLimitCents: number
+    active: boolean
+    estimatedCents: number
+    projectedCents: number
+  }
+  graceDays: number
+  axes: AxisDescription[]
+}
+
 interface AutonomyActivity {
   runsThisCycle: number
   perDay: { date: string; count: number }[]
@@ -54,6 +84,15 @@ function fmtStorage(mb: number): string {
   if (mb >= 1_024) return `${(mb / 1_024).toFixed(1).replace('.0', '')} GB`
   return `${Math.round(mb)} MB`
 }
+function fmtBytes(bytes: number): string {
+  return fmtStorage(bytes / (1024 * 1024))
+}
+function fmtCents(cents: number): string {
+  return `$${(cents / 100).toFixed(2)}`
+}
+function fmtDay(iso: string): string {
+  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+}
 function pct(used: number, max: number | null): number {
   if (max === null) return 0
   if (max === 0) return 100
@@ -67,6 +106,7 @@ function Meter({
   max,
   format,
   resetNote,
+  note,
 }: {
   icon: React.ElementType
   label: string
@@ -74,6 +114,8 @@ function Meter({
   max: number | null
   format: (v: number) => string
   resetNote?: string
+  /** A second line under the meter: the projection, or headroom past the plan. */
+  note?: string
 }) {
   const p = pct(used, max)
   const over = max !== null && (used > max || max === 0)
@@ -108,8 +150,195 @@ function Meter({
           <div className={`h-full rounded-full ${bar} transition-[width] duration-700`} style={{ width: `${p}%` }} />
         </div>
       )}
+      {note && <p className="mt-2 font-mono text-[10px] text-zinc-500">{note}</p>}
       {resetNote && <p className="mt-2 font-mono text-[10px] text-zinc-600">{resetNote}</p>}
     </div>
+  )
+}
+
+const AXIS_ICON: Record<AxisDescription['axis'], React.ElementType> = {
+  mau: Users,
+  fn_runs: Bot,
+  egress_bytes: Globe,
+  db_bytes: Database,
+  file_bytes: HardDrive,
+}
+
+/** One pooled quota: used against included, with the projection and any headroom past the plan. */
+function AxisMeter({ a, resetNote }: { a: AxisDescription; resetNote?: string }) {
+  const format = a.unit === 'bytes' ? fmtBytes : fmtNum
+  const counter = a.axis === 'mau' || a.axis === 'fn_runs' || a.axis === 'egress_bytes'
+  const notes: string[] = []
+  if (a.included !== null && a.projected > a.used) notes.push(`≈ ${format(a.projected)} by month end`)
+  if (a.included !== null && a.cap !== null && a.cap > a.included) {
+    notes.push(`up to ${format(a.cap)} within your spend limit`)
+  }
+  return (
+    <Meter
+      icon={AXIS_ICON[a.axis]}
+      label={a.label}
+      used={a.used}
+      max={a.included}
+      format={format}
+      note={notes.join(' · ') || undefined}
+      resetNote={counter ? resetNote : undefined}
+    />
+  )
+}
+
+/** Grace and restriction, stated with their dates. Only database and egress have one. */
+function GraceNotices({ axes, graceDays }: { axes: AxisDescription[]; graceDays: number }) {
+  const notices = axes.filter((a) => a.grace)
+  if (!notices.length) return null
+  return (
+    <div className="mt-4 flex flex-col gap-2">
+      {notices.map((a) => {
+        const g = a.grace!
+        const effect =
+          a.axis === 'db_bytes'
+            ? 'the data API is read-only (reads and deletes still work)'
+            : 'files are not served to your end users (API responses are never cut)'
+        return (
+          <KitNote key={a.axis} tone="warn" title={`${a.label} is over its limit`}>
+            {g.restricted
+              ? `Over since ${fmtDay(g.overSince)}. The ${graceDays}-day grace period ended on ${fmtDay(g.graceEndsAt)}, so ${effect}. It lifts within minutes of usage coming back under the limit or the limit being raised.`
+              : `Over since ${fmtDay(g.overSince)}. If it is still over on ${fmtDay(g.graceEndsAt)}, ${effect}.`}
+          </KitNote>
+        )
+      })}
+    </div>
+  )
+}
+
+/**
+ * Usage past the plan this month and the spend limit that bounds it. Shown only
+ * where it can apply (Cloud, with overage not off). Lowering the limit applies
+ * at once; raising it sends a code to the owner's email, and only that code
+ * raises it.
+ */
+function OverageCard({ usage, onChanged }: { usage: AccountUsage; onChanged: () => void }) {
+  const [presets, setPresets] = useState<number[]>([0, 5_000, 10_000, 25_000])
+  const [choice, setChoice] = useState<string>(String(usage.overage.spendLimitCents))
+  const [custom, setCustom] = useState('')
+  const [pending, setPending] = useState<{ requestedCents: number; sentTo: string } | null>(null)
+  const [code, setCode] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState<string | null>(null)
+
+  useEffect(() => {
+    fetch('/api/billing/spend-limit', { credentials: 'include' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d?.presetsCents) setPresets(d.presetsCents) })
+      .catch(() => {})
+  }, [])
+
+  const mode = usage.overage.mode
+  if (mode === null || mode === 'off') return null
+
+  const save = async () => {
+    const cents = choice === 'custom' ? Math.round(Number(custom) * 100) : Number(choice)
+    if (!Number.isFinite(cents) || cents < 0) { setMessage('Enter a whole-dollar amount.'); return }
+    setBusy(true); setMessage(null)
+    try {
+      const res = await fetch('/api/billing/spend-limit', {
+        method: 'PUT',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ limitCents: cents }),
+      })
+      const data = await res.json()
+      if (res.status === 202) setPending({ requestedCents: data.requestedCents, sentTo: data.sentTo })
+      else if (!res.ok) setMessage(data.error || 'Could not change the limit.')
+      else { setMessage('Spend limit updated.'); onChanged() }
+    } finally { setBusy(false) }
+  }
+
+  const confirm = async () => {
+    setBusy(true); setMessage(null)
+    try {
+      const res = await fetch('/api/billing/spend-limit/confirm', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code }),
+      })
+      const data = await res.json()
+      if (!res.ok) { setMessage(data.error || 'That code did not work.'); return }
+      setPending(null); setCode(''); setMessage('Spend limit raised.'); onChanged()
+    } finally { setBusy(false) }
+  }
+
+  return (
+    <KitCard className="mt-4">
+      <KitCardHeader
+        title="Usage beyond your plan"
+        description={
+          mode === 'shadow'
+            ? 'Estimated only. Usage past the plan is not billed yet.'
+            : 'Billed at the end of the month, never past your spend limit.'
+        }
+        actions={
+          <span className="inline-flex items-baseline gap-1.5">
+            <span className="font-mono text-[20px] font-medium tabular-nums leading-none text-white">{fmtCents(usage.overage.estimatedCents)}</span>
+            <span className="text-[11px] text-zinc-500">so far · ≈ {fmtCents(usage.overage.projectedCents)} by month end</span>
+          </span>
+        }
+      />
+      <KitCardBody>
+        <div className="flex flex-wrap items-center gap-2">
+          <Wallet className="h-3.5 w-3.5 text-zinc-500" />
+          <span className="text-[12.5px] text-zinc-300">Spend limit</span>
+          <select
+            className="rounded-md border border-white/[0.08] bg-[#0e0f13] px-2 py-1 font-mono text-[12px] text-zinc-200"
+            value={choice}
+            onChange={(e) => setChoice(e.target.value)}
+            disabled={busy || !!pending}
+          >
+            {presets.map((c) => (
+              <option key={c} value={String(c)}>{c === 0 ? 'Off ($0)' : fmtCents(c)}</option>
+            ))}
+            <option value="custom">Custom…</option>
+          </select>
+          {choice === 'custom' && (
+            <input
+              className="w-24 rounded-md border border-white/[0.08] bg-[#0e0f13] px-2 py-1 font-mono text-[12px] text-zinc-200"
+              placeholder="USD"
+              inputMode="numeric"
+              value={custom}
+              onChange={(e) => setCustom(e.target.value.replace(/[^0-9]/g, ''))}
+              disabled={busy || !!pending}
+            />
+          )}
+          <KitButton variant="secondary" size="sm" onClick={save} disabled={busy || !!pending}>
+            {busy && !pending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Save'}
+          </KitButton>
+          <span className="text-[11px] text-zinc-600">Current: {usage.overage.spendLimitCents === 0 ? 'Off' : fmtCents(usage.overage.spendLimitCents)}</span>
+        </div>
+        {pending && (
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <span className="text-[12px] text-zinc-400">
+              We sent a code to {pending.sentTo} to confirm raising the limit to {fmtCents(pending.requestedCents)}.
+            </span>
+            <input
+              className="w-24 rounded-md border border-white/[0.08] bg-[#0e0f13] px-2 py-1 font-mono text-[12px] tracking-[0.2em] text-zinc-200"
+              placeholder="000000"
+              inputMode="numeric"
+              maxLength={7}
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+            />
+            <KitButton variant="primary" size="sm" onClick={confirm} disabled={busy || code.replace(/\D/g, '').length !== 6}>
+              Confirm
+            </KitButton>
+          </div>
+        )}
+        {message && <p className="mt-2 text-[11.5px] text-zinc-400">{message}</p>}
+        <p className="mt-3 text-[11px] leading-relaxed text-zinc-600">
+          With the limit off, every quota is a hard cap. Limits are checked every few minutes, so usage can run a little past one.
+          Only you can raise it, from this page and your email; agents and API keys can read it but never change it.
+        </p>
+      </KitCardBody>
+    </KitCard>
   )
 }
 
@@ -121,6 +350,8 @@ export default function UsagePage() {
 
   const router = useRouter()
   const [usage, setUsage] = useState<UsageData | null>(null)
+  const [account, setAccount] = useState<AccountUsage | null>(null)
+  const [accountVersion, setAccountVersion] = useState(0)
   const [activity, setActivity] = useState<AutonomyActivity | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -151,6 +382,17 @@ export default function UsagePage() {
     loadActivity()
     return () => { cancelled = true }
   }, [router])
+
+  // The pooled quotas. If this cannot load, the meters below fall back to the
+  // plan summary rather than showing nothing.
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/usage/account', { credentials: 'include' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (!cancelled) setAccount(d) })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [accountVersion])
 
   const resetDate = usage
     ? new Date(usage.resetAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
@@ -188,7 +430,6 @@ export default function UsagePage() {
                 signal a user got was their agent being refused.
               */}
               <Meter icon={Sparkles} label="AI credits" used={usage.aiCreditsUsed} max={usage.monthlyAiCredits} format={fmtNum} resetNote={resetNote} />
-              <Meter icon={Bot} label="Function invocations" used={usage.aiFunctionInvocationsUsed} max={usage.maxAiFunctionInvocationsPerMonth} format={fmtNum} resetNote={resetNote} />
               <Meter
                 icon={Activity}
                 label="API requests"
@@ -197,10 +438,20 @@ export default function UsagePage() {
                 format={fmtNum}
                 resetNote={usage.apiQuotaIsLifetime ? 'Total · no reset' : resetNote}
               />
-              <Meter icon={Database} label="PostgreSQL storage" used={usage.dbStorageUsedMb} max={usage.maxPostgresStorageMb} format={fmtStorage} />
-              <Meter icon={HardDrive} label="File storage" used={usage.fileStorageUsedMb} max={usage.maxFileStorageMb} format={fmtStorage} />
-              <Meter icon={Users} label="Monthly active users" used={usage.monthlyActiveUsersUsed} max={usage.maxMonthlyActiveUsers} format={fmtNum} resetNote={resetNote} />
+              {account ? (
+                account.axes.map((a) => <AxisMeter key={a.axis} a={a} resetNote={resetNote} />)
+              ) : (
+                <>
+                  <Meter icon={Bot} label="Function invocations" used={usage.aiFunctionInvocationsUsed} max={usage.maxAiFunctionInvocationsPerMonth} format={fmtNum} resetNote={resetNote} />
+                  <Meter icon={Database} label="PostgreSQL storage" used={usage.dbStorageUsedMb} max={usage.maxPostgresStorageMb} format={fmtStorage} />
+                  <Meter icon={HardDrive} label="File storage" used={usage.fileStorageUsedMb} max={usage.maxFileStorageMb} format={fmtStorage} />
+                  <Meter icon={Users} label="Monthly active users" used={usage.monthlyActiveUsersUsed} max={usage.maxMonthlyActiveUsers} format={fmtNum} resetNote={resetNote} />
+                </>
+              )}
             </div>
+
+            {account && <GraceNotices axes={account.axes} graceDays={account.graceDays} />}
+            {account && <OverageCard usage={account} onChanged={() => setAccountVersion((v) => v + 1)} />}
 
             {activity && (
               <KitCard className="mt-4">

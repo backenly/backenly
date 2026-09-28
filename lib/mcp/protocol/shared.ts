@@ -37,7 +37,7 @@ export const MCP_RESOURCES: McpResourceDescriptor[] = [
   { uri: 'backenly://deploy', name: 'Deploy status', description: 'The live version, when it shipped and its state.', mimeType: 'application/json', tool: 'get_deploy_status' },
   { uri: 'backenly://metrics', name: 'Performance metrics', description: 'Request rate, p50/p95 latency and error rate over the last hour.', mimeType: 'application/json', tool: 'get_metrics' },
   { uri: 'backenly://errors', name: 'Recent errors', description: 'Recent 5xx errors grouped by endpoint, with status, message and count.', mimeType: 'application/json', tool: 'get_errors' },
-  { uri: 'backenly://usage', name: 'Plan usage', description: 'AI credits, storage and request count against the plan limits.', mimeType: 'application/json', tool: 'get_usage' },
+  { uri: 'backenly://usage', name: 'Plan usage', description: 'Account usage this month across all projects, against plan limits, with the month-end projection, estimated overage and spend limit. Read-only.', mimeType: 'application/json', tool: 'get_usage' },
 ]
 
 /** The resource list as MCP serves it: the delegate tool is an implementation detail. */
