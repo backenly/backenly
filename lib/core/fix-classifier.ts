@@ -364,6 +364,20 @@ export function classifyFix(
   // requires anything rated auto or approval to carry a real executor action,
   // and inventing one to satisfy that is precisely how `schema_not_registered`
   // shipped pointing at REGISTER_POSTGREST_SCHEMA, a verb that never existed.
+  // ── Usage anomaly (the spend guard) ─────────────────────────────────────────
+  //
+  // `notify_only`, honestly: there is no executor verb for "your traffic spiked",
+  // and whether a spike is a launch or a runaway is the owner's judgement.
+  if (type === 'usage_anomaly') {
+    return {
+      decision: 'notify_only',
+      reason: 'Usage on this project jumped far past its own usual daily level.',
+      riskNote:
+        'No automatic action. Throttling or blocking traffic could break a launch; ' +
+        'the owner decides whether this is growth or a fault.',
+    }
+  }
+
   if (type === 'subsystem_repeat_failure') {
     const n = Number(details?.confirmedRepairCount ?? 0)
     const area = String(details?.membership ?? '')

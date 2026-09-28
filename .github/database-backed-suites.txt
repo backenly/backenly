@@ -585,3 +585,8 @@ __tests__/usage/usage-restrictions.test.ts
 # cap, the month-end forecast from the ledger, the estimated cost past the plan,
 # the spend limit and grace; and no MCP or brain tool can change the limit.
 __tests__/usage/usage-visibility.test.ts
+
+# The spend guard: a project whose daily egress, function runs or new MAU
+# jumps far past its own median becomes one Autonomy finding with ledger and
+# request-path evidence, refreshed while it lasts and resolved when it ends.
+__tests__/usage/usage-anomaly.test.ts
