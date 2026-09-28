@@ -585,3 +585,8 @@ __tests__/usage/usage-restrictions.test.ts
 # cap, the month-end forecast from the ledger, the estimated cost past the plan,
 # the spend limit and grace; and no MCP or brain tool can change the limit.
 __tests__/usage/usage-visibility.test.ts
+
+# Behind a signed CDN every file leaves from the edge, and only after the
+# bucket policy, pause and usage restriction have allowed it: a CloudFront
+# canned-policy signature over exactly that object, verified with the key.
+__tests__/storage/signed-cdn.test.ts
