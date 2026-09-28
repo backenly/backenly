@@ -29,6 +29,13 @@ import {
 import { asyncRoute } from '../lib/async-route'
 import { refuseUnlessServing } from '../lib/serving-gate'
 import { touchProjectActivity } from '@/lib/projects/activity'
+import {
+  isGrowingWrite,
+  projectRestriction,
+  restrictionDetails,
+  restrictionMessage,
+  RESTRICTED_CODE,
+} from '@/lib/usage/restrictions'
 
 const router = Router()
 
@@ -490,6 +497,22 @@ async function handleDynamicRequest(req: Request, res: Response) {
   // half-migrated state that returned empty tables for two months without
   // anyone noticing. A data plane that fails loudly is worth more than one that
   // quietly answers differently.
+  // Past the database grace period the data API is read-only: writes that add
+  // or change rows are refused, reads and deletes are not (lib/usage/restrictions.ts).
+  if (isGrowingWrite(req.method)) {
+    const restriction = await projectRestriction(projectId!, 'db_bytes')
+    if (restriction.restricted) {
+      res.status(403).json({
+        error: {
+          code: RESTRICTED_CODE,
+          message: restrictionMessage('db_bytes', restriction),
+          details: restrictionDetails('db_bytes', restriction),
+        },
+      })
+      return
+    }
+  }
+
   const handled = await handleViaPostgrest(req, res, path, {
     projectId: projectId!,
     endUserId,

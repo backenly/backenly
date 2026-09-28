@@ -19,6 +19,7 @@ import {
 } from '@/lib/projects/serving-state'
 import { INTERNAL_TRAFFIC_HEADER, isInternalTraffic } from '@/lib/traffic/request-recorder'
 import { recordEgress } from '@/lib/usage/egress'
+import { projectRestriction, restrictionDetails, restrictionMessage, RESTRICTED_CODE } from '@/lib/usage/restrictions'
 
 /**
  * GET /api/storage/files/{fileId}/download — stream the file bytes.
@@ -97,6 +98,23 @@ export async function GET(request: NextRequest, props: { params: Promise<{ fileI
             error: { code: PAUSED_CODE, message: PAUSED_MESSAGE, details: pausedDetails(record.projectId, serving) },
           },
           { status: 503 },
+        )
+      }
+
+      // Past the egress grace period files are not served, to the same readers
+      // a pause stops (lib/usage/restrictions.ts). Members and export links
+      // still get their own data out.
+      const restriction = await projectRestriction(record.projectId, 'egress_bytes')
+      if (restriction.restricted) {
+        return NextResponse.json(
+          {
+            error: {
+              code: RESTRICTED_CODE,
+              message: restrictionMessage('egress_bytes', restriction),
+              details: restrictionDetails('egress_bytes', restriction),
+            },
+          },
+          { status: 403 },
         )
       }
     }

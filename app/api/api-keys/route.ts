@@ -8,6 +8,7 @@ import crypto from 'crypto'
 import { maskFromPrefix, plaintextForStorage } from '@/lib/auth/api-key-plaintext'
 import { canAdministerProject } from '@/lib/edition/guard'
 import { mintKey } from '@/lib/auth/key-prefix'
+import { apiKeyRateCeilingViolation } from '@/lib/quota/kernel'
 
 const createApiKeySchema = z.object({
   name: z.string().min(1, 'Name is required'),
@@ -176,6 +177,12 @@ export async function POST(request: NextRequest) {
           { status: 400 },
         )
       }
+    }
+
+    // The plan's fair-use ceiling on how fast one key may go (never billed).
+    const ceiling = await apiKeyRateCeilingViolation(projectId || null, auth.userId, data.rateLimit, data.rateLimitWindow)
+    if (ceiling) {
+      return NextResponse.json({ error: ceiling, code: 'PLAN_LIMIT_EXCEEDED' }, { status: 400 })
     }
 
     // The prefix says what the key is (lib/auth/key-prefix.ts); its role is in the row.

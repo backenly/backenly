@@ -24,6 +24,7 @@ import { prisma } from '@/lib/db/prisma'
 import { createPlatformNotification } from '@/lib/notifications/platform'
 import { OVERAGE_AXES, overagePrice, type OverageAxis } from '@/lib/pricing/catalog'
 import { accountLimits, type AccountLimits } from './overage'
+import { GRACE_DAYS } from './restrictions'
 
 export const INCLUDED_LEVELS = [50, 80, 100] as const
 export const SPEND_LEVELS = [50, 80, 100] as const
@@ -55,13 +56,13 @@ function atQuotaBehaviour(axis: OverageAxis): string {
     case 'mau':
       return 'New end users cannot sign up until the 1st; existing users keep working.'
     case 'db_bytes':
-      return 'Schema changes and bulk writes that grow the database are paused.'
+      return `Schema changes and bulk writes that grow the database are paused. If usage is still over in ${GRACE_DAYS} days, the data API becomes read-only (reads and deletes keep working) until it is back under.`
     case 'file_bytes':
       return 'New uploads are refused; existing files stay available.'
     case 'fn_runs':
       return 'Function invocations are refused until the 1st.'
     case 'egress_bytes':
-      return 'Nothing is cut off. Keep an eye on file downloads.'
+      return `Nothing is cut off yet. If usage is still over in ${GRACE_DAYS} days, files stop being served to end users until the month resets or the limit is raised. API responses are never cut.`
   }
 }
 

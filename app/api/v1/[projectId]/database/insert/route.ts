@@ -9,6 +9,7 @@ import { prisma } from '@/lib/db'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { validateInsertPayload } from '@/lib/services/workspace-validator'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
+import { projectRestriction, restrictionDetails, restrictionMessage } from '@/lib/usage/restrictions'
 
 /**
  * POST /v1/{projectId}/database/insert
@@ -32,6 +33,17 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     const capabilityCheck = requireCapability(context, request.nextUrl.pathname)
     if (capabilityCheck) {
       return capabilityCheck
+    }
+
+    // Past the database grace period the data API is read-only (lib/usage/restrictions.ts).
+    const restriction = await projectRestriction(params.projectId, 'db_bytes')
+    if (restriction.restricted) {
+      return createErrorResponse(
+        ErrorCodes.PLAN_LIMIT_EXCEEDED,
+        restrictionMessage('db_bytes', restriction),
+        403,
+        restrictionDetails('db_bytes', restriction),
+      )
     }
 
     const validation = await validateRequestBody(insertSchema, request)
