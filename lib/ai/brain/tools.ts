@@ -1044,7 +1044,7 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     'Read recent error log entries (5xx + uncaught exceptions) — endpoint, status, message, count, last seen.',
     { limit: { type: 'integer', minimum: 1, maximum: 100 } }),
   fn('get_usage',
-    'Read usage and quota burn for this project (AI credits used, storage MB, request count, plan limits). Use for "how close am I to my plan limit?".',
+    'Read the usage of this account this month, pooled across all of its projects: MAU, function runs, egress, database and file storage, each against what the plan includes and the most it may reach, the month-end projection, the estimated cost of usage past the plan, the spend limit, and any grace or restriction in force. Read-only: nothing can change the spend limit from here; only the account owner raises it. Use for "how close am I to my plan limit?" and "will this month cost extra?".',
     {}),
   fn('get_autonomy_status',
     'Read the autonomy dial + Trust Report for this project: current level (OFF/CONSERVATIVE/BALANCED/AGGRESSIVE), recent self-applied actions, pending approvals, and the autonomy circuit-breaker state. Use before set_autonomy_level.',
