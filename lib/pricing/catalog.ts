@@ -76,6 +76,38 @@ export function planAllowsOverage(planName: string): boolean {
 }
 
 /**
+ * THE switch for charging egress. Egress is always metered and always has a
+ * quota, but bytes past it are billable only when BOTH hold:
+ *
+ *   BACKENLY_EGRESS_BILLING=enabled   an explicit decision to charge egress,
+ *                                     made once the CDN path is qualified and
+ *                                     its rate is published; and
+ *   BACKENLY_EGRESS_TERMS=cdn         the CDN terms (and CDN rate) are live.
+ *
+ * So the direct rate, which is never advertised, can never be charged. While
+ * this is false, egress past its quota follows the no-overage path (grace, then
+ * restricted downloads) whatever the owner's spend limit, no estimate or
+ * invoice line includes it, and the spend limit buys no egress headroom.
+ */
+export function egressBillable(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.BACKENLY_EGRESS_BILLING === 'enabled' && egressTerms(env) === 'cdn'
+}
+
+/**
+ * Whether usage of one axis past its quota can be charged on a plan: the plan
+ * allows overage and, for egress, egressBillable() holds. Every estimate, cap
+ * and charge decides per axis through this.
+ */
+export function axisBillable(
+  planName: string,
+  axis: OverageAxis,
+  egressCharged: boolean = egressBillable(),
+): boolean {
+  if (!planAllowsOverage(planName)) return false
+  return axis !== 'egress_bytes' || egressCharged
+}
+
+/**
  * Overage unit prices. Bytes are priced per GiB (the same 1024-based unit as
  * the Plan row's MB quotas). Storage axes are priced per GiB-month and billed on
  * the month's average of daily maxima (lib/usage/close.ts).
