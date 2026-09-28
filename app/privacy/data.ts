@@ -59,7 +59,7 @@
  * reordering; verify-content-integrity.ts enforces their uniqueness and shape.
  */
 
-export const EFFECTIVE_DATE = 'September 3, 2026'
+export const EFFECTIVE_DATE = 'September 28, 2026'
 export const PRIVACY_EMAIL = 'support@backenly.com'
 
 export type Provider = {
@@ -282,6 +282,7 @@ export const PRIVACY_SECTIONS: PrivacySection[] = [
         items: [
           'Records of blocked malicious requests, including the IP address, browser user agent, and the request that was blocked',
           'Security events, which can include your email address and IP address',
+          'Access logs from our load balancer, file storage and file delivery network, covering requests to Backenly and to your projects’ APIs and files: the IP address, user agent, request path, timestamps and related request metadata',
         ],
       },
     ],
@@ -297,7 +298,7 @@ export const PRIVACY_SECTIONS: PrivacySection[] = [
       'Because you design that schema, we cannot tell you which categories of personal data it holds. If your application stores personal data about your users, you decide what and why.',
     ],
     extra:
-      'We derive one thing from it for our own purposes: a monthly count of the distinct end users who signed in to each project, which is how paid plans are metered. That record holds an identifier, not your users’ names or email addresses.',
+      'We derive usage measurements from it for our own purposes, which is how plans are metered: a monthly count of the distinct end users who signed in to each project, and the amounts of database storage, file storage, data transfer and function runs each project uses. These records hold identifiers and quantities, not your users’ names or email addresses and not the content of your data.',
   },
   {
     id: 'how-we-use-it',
@@ -375,8 +376,9 @@ export const PRIVACY_SECTIONS: PrivacySection[] = [
     id: 'international',
     title: 'Where information is processed',
     content:
-      'Backenly’s platform, your project databases and your stored files run on Amazon Web Services in the Mumbai (ap-south-1) region, India.',
+      'Backenly’s platform and your project databases run on Amazon Web Services in the Mumbai (ap-south-1) region, India, and the files your projects store are kept there.',
     list: [
+      'Files your projects serve to their users may be delivered through Amazon CloudFront, which can cache copies of that file content at edge locations outside India so it reaches users faster.',
       'The providers listed above operate their own infrastructure and may process information in other countries, including the United States.',
     ],
     extra:
@@ -392,6 +394,7 @@ export const PRIVACY_SECTIONS: PrivacySection[] = [
       'Successful webhook delivery records: 30 days',
       'Database performance samples: 14 days',
       'Project backups: 7 days',
+      'Load balancer, file storage and file delivery access logs (IP address, user agent, request path, timestamps and related request metadata): 35 days, for security, reliability and usage metering',
     ],
     extra:
       'Beyond those, your account data, project data and AI conversation history are kept while your account and project exist. Other operational records, including security, audit and billing records, are currently kept without a fixed limit. We are putting defined limits in place, and this section will state them once they are enforced rather than before.',
