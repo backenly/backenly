@@ -100,6 +100,7 @@ const FORWARD_MIGRATIONS = [
   '20260925120000_approval_exact_call',
   '20260927180000_usage_ledger',
   '20260928100000_usage_limits',
+  '20260928140000_stripe_subscription_fields',
 ]
 
 describe('the assembled migration workspace', () => {

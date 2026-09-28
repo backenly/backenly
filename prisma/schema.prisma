@@ -2022,6 +2022,14 @@ model Subscription {
   userId               String
   planId               String
   paddleSubscriptionId String?            @unique
+  // Stripe, which replaces Paddle for Backenly Cloud. The ids are Stripe's; the
+  // price is what Stripe charges, which is what decides the plan, and the
+  // interval and period are mirrored from Stripe rather than computed here.
+  stripeSubscriptionId String?            @unique
+  stripeCustomerId     String?
+  stripePriceId        String?
+  billingInterval      String? // monthly | annual
+  currentPeriodStart   DateTime?
   status               SubscriptionStatus @default(FREE)
   currentPeriodEnd     DateTime?
   // Failed-payment recovery only. Set when the provider reports past_due, and
@@ -2050,6 +2058,7 @@ model Subscription {
   @@index([planId])
   @@index([status])
   @@index([paddleSubscriptionId])
+  @@index([stripeCustomerId])
   @@index([organizationId])
   @@map("subscriptions")
 }
@@ -2411,12 +2420,12 @@ model WorkspaceBackup {
 }
 
 // ============================================================================
-// PROCESSED WEBHOOK EVENTS — DB-backed idempotency for Paddle webhooks
-// Prevents double-processing when Vercel spawns multiple function instances
+// PROCESSED WEBHOOK EVENTS — DB-backed idempotency for billing webhooks
+// Prevents double-processing when several instances receive the same event
 // ============================================================================
 
 model ProcessedWebhookEvent {
-  id          String   @id // Paddle eventId
+  id          String   @id // provider event id; Stripe's are stored as stripe:<evt id>
   processedAt DateTime @default(now())
 
   @@map("processed_webhook_events")
