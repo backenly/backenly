@@ -19,6 +19,7 @@ import {
 } from 'lucide-react'
 import { ROUTES, SiteShell } from '@/components/site/SiteShell'
 import { useUserSession } from '@/lib/hooks/useUserSession'
+import { egressPricePublished, proUsagePriceRows, usagePricingPublished } from '@/lib/pricing/catalog'
 
 type Plan = {
   name: string
@@ -272,6 +273,8 @@ export default function PricingPage() {
           </div>
         </section>
 
+        {usagePricingPublished() && <UsagePricingSection />}
+
         <section className="border-t border-white/[0.06] px-6 py-16 md:py-20">
           <div className="mx-auto max-w-6xl 2xl:max-w-7xl">
             <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
@@ -454,5 +457,76 @@ function ActionButton({
     >
       {children}
     </button>
+  )
+}
+
+/**
+ * "Scale capacity, not features": Pro's included quantities and what usage past
+ * them costs, with the spend limit that bounds it. Rendered only once usage
+ * pricing is published (lib/pricing/catalog.ts), and egress only once its CDN
+ * cost is verified, so no rate appears here before it can be measured.
+ */
+function UsagePricingSection() {
+  const rows = proUsagePriceRows({ includeEgress: egressPricePublished() })
+  return (
+    <section className="border-t border-white/[0.06] px-6 py-16 md:py-20">
+      <div className="mx-auto max-w-7xl 2xl:max-w-[100rem]">
+        <div className="grid gap-10 lg:grid-cols-[360px_minmax(0,1fr)] lg:items-start">
+          <div>
+            <p className="text-sm font-semibold text-zinc-500">Usage beyond Pro</p>
+            <h2 className="mt-3 text-3xl font-semibold leading-tight text-white md:text-4xl">
+              Scale capacity, not features.
+            </h2>
+            <p className="mt-5 text-base leading-7 text-zinc-400">
+              Pro&apos;s quotas are shared by every project on your account. Past them you choose: keep every quota a
+              hard cap, or let usage continue at the rates below up to a monthly spend limit you set. You pay for
+              capacity, never for Backenly doing its job.
+            </p>
+          </div>
+
+          <div className="flex flex-col gap-4">
+            <div className="overflow-hidden rounded-lg border border-white/10">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-white/[0.035] text-zinc-500">
+                  <tr>
+                    <th className="px-5 py-3 font-medium">On Pro</th>
+                    <th className="px-5 py-3 font-medium">Included</th>
+                    <th className="px-5 py-3 font-medium">Beyond that</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r) => (
+                    <tr key={r.axis} className="border-t border-white/[0.06]">
+                      <td className="px-5 py-3 text-zinc-200">{r.label}</td>
+                      <td className="px-5 py-3 font-mono text-zinc-300">{r.included}</td>
+                      <td className="px-5 py-3 font-mono text-zinc-300">{r.rate}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="rounded-lg border border-white/10 bg-white/[0.035] p-5">
+                <h3 className="text-base font-semibold text-white">A spend limit you set</h3>
+                <p className="mt-2 text-sm leading-6 text-zinc-400">
+                  Off by default, so every quota is a hard cap. Choose $50, $100, $250 or your own amount and nothing
+                  past it is ever billed. You are emailed at 50%, 80% and 100%. Only you can raise it: agents and API
+                  keys can read the meter, never the limit.
+                </p>
+              </div>
+              <div className="rounded-lg border border-white/10 bg-white/[0.035] p-5">
+                <h3 className="text-base font-semibold text-white">Never billed</h3>
+                <p className="mt-2 text-sm leading-6 text-zinc-400">
+                  Projects, tables, API requests, autonomy, the typed MCP tools, deploys and rollbacks. Realtime
+                  connections are a cap, not a meter. Usage is billed monthly, and amounts under $5 roll into the
+                  next month.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
   )
 }
