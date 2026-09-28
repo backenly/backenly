@@ -197,8 +197,8 @@ const LIST: ComparisonData[] = [
       {
         aspect: 'Billing shape',
         competitor: 'Pro starts at $25/month with metered dimensions above the included limits',
-        backenly: 'Pro is a flat $25/month',
-        practical: 'A difference in shape rather than headline price. Metered billing tracks what you use; a flat plan is easier to forecast and gives you a quota instead.',
+        backenly: 'Pro is $25/month, with quotas that are hard caps unless you set a spend limit',
+        practical: 'A difference in shape rather than headline price. Backenly bills nothing past $25 until you choose to, and then never past the limit you set; metered billing by default tracks what you use from the first unit past the quota.',
       },
     ],
     competitorStrengths: [
