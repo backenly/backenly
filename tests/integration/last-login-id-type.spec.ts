@@ -41,7 +41,9 @@ async function workspaceWith(kind: keyof typeof CASES): Promise<string> {
   const schema = `workspace_${project.id}`
   await prisma.$executeRawUnsafe(`CREATE SCHEMA IF NOT EXISTS "${schema}"`)
   await prisma.$executeRawUnsafe(
-    `CREATE TABLE "${schema}"."users" (${CASES[kind]}, email text UNIQUE NOT NULL, password text NOT NULL)`,
+    // last_login present from the start, so "not stamped yet" reads as NULL
+    // (stampLastLogin's own ADD COLUMN IF NOT EXISTS is then a no-op).
+    `CREATE TABLE "${schema}"."users" (${CASES[kind]}, email text UNIQUE NOT NULL, password text NOT NULL, last_login timestamptz)`,
   )
   return project.id
 }
