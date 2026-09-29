@@ -192,6 +192,15 @@ const nextConfig = {
   // experimental.instrumentationHook flag that used to enable it is gone. It
   // was not a no-op to leave in place: Next 16 rejects unrecognised keys under
   // `experimental`.
+  experimental: {
+    // With middleware present Next buffers every request body up to this size
+    // and silently truncates the rest, so its 10 MB default turned the 100 MB
+    // upload ceiling into 10 MB and answered bigger uploads with 500. It equals
+    // MAX_UPLOAD_REQUEST_BYTES in lib/storage/body-limits.ts (a unit test holds
+    // them equal); the middleware refuses any other route's body over 10 MB,
+    // so only the upload routes can use the larger buffer.
+    proxyClientMaxBodySize: 101 * 1024 * 1024,
+  },
   outputFileTracingIncludes: {
     '/api/**/*': ['./node_modules/.prisma/**/*'],
     // Cloud composition, named explicitly because it is read at RUNTIME by
