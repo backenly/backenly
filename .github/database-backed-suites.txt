@@ -596,6 +596,13 @@ __tests__/usage/usage-anomaly.test.ts
 # canned-policy signature over exactly that object, verified with the key.
 __tests__/storage/signed-cdn.test.ts
 
+# One scheduler per database: every web process schedules, and a job runs only
+# where the scheduler's session advisory lock is held. Two instances elect one
+# leader, a stopping leader hands over (a deploy), a killed session stops
+# leading and another takes over, and nothing leads without a database. Session
+# lock semantics are the property under test, so it needs a real Postgres.
+tests/integration/scheduler-leader-lock.spec.ts
+
 # Both storage drivers apply one per-file rule: the bucket's own limit under the
 # shared ceiling for uploads through the server. The local driver also applied
 # Project.maxFileSize, which nothing can set (10 MB everywhere), so a raised

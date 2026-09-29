@@ -61,8 +61,22 @@ export async function register() {
     // /api/cron/run-ai-jobs instead.  On self-hosted (Hetzner/PM2) this
     // is the only scheduler, so it must run here.
     if (!process.env.VERCEL) {
-      const { default: cron } = await import('node-cron')
+      const { default: nodeCron } = await import('node-cron')
       const { runDueCronJobs, runSystemTasks } = await import('./lib/services/cron-runner')
+
+      // Every process schedules; only the one holding the scheduler lock runs
+      // the jobs, so two instances (or an overlapping deploy) never run a job
+      // twice. Every `cron.schedule` below goes through this gate.
+      // lib/scheduler/leader.ts.
+      const { startSchedulerLeadership, leaderOnly } = await import('./lib/scheduler/leader')
+      startSchedulerLeadership()
+      const cron = {
+        schedule: (
+          expression: string,
+          task: () => unknown,
+          options?: Parameters<typeof nodeCron.schedule>[2],
+        ) => nodeCron.schedule(expression, leaderOnly(task), options),
+      }
 
       // Mark cron scheduler as alive in process memory (for health checks)
       ;(globalThis as any).__cronSchedulerStartedAt = new Date().toISOString()
@@ -652,7 +666,8 @@ export async function register() {
       }, { timezone: 'UTC' })
 
       console.log(
-        '[CronScheduler] Started — user cron jobs + system tasks every minute, ' +
+        '[CronScheduler] Started (jobs run only on the instance holding the scheduler lock) — ' +
+        'user cron jobs + system tasks every minute, ' +
         'autonomy reconciler tick every minute (1-min cadence on every plan), ' +
         'DB storage snapshot hourly, ' +
         'all AI background scans once daily (staggered 00:10–04:30 UTC)'
