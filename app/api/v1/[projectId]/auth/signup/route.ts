@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest } from 'next/server'
 import { consume, AUTH_LIMITS, clientIp } from '@/lib/security/auth-rate-limit'
 import { throttledV1Response } from '@/lib/security/rate-limit-response'
+import { carriesInternalToken, isPlatformProbe } from '@/lib/security/platform-probe'
 import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
 import { signUpSchema } from '@/lib/api/v1/schemas'
 import { validateRequestBody } from '@/lib/validation/schemas'
@@ -43,12 +44,20 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     // Keyed on both so one project under attack cannot lock out sign-up attempts for a
     // different project behind the same egress address.
     const ip = clientIp(request)
-    const limit = await consume(
+    const consumeIp = () => consume(
       `v1:endUserSignup:${projectId}:${ip}`,
       AUTH_LIMITS.endUserSignup.ip.limit,
       AUTH_LIMITS.endUserSignup.ip.windowMs,
     )
-    if (!limit.allowed) return throttledV1Response(limit)
+    // Backenly's own contract probe is not counted (lib/security/platform-probe.ts),
+    // and whether a request is the probe depends on the address in its body. So a
+    // request carrying the internal-traffic token is counted once that address is
+    // known, below; every other request is counted here, before anything else.
+    const mayBeProbe = carriesInternalToken(request)
+    if (!mayBeProbe) {
+      const limit = await consumeIp()
+      if (!limit.allowed) return throttledV1Response(limit)
+    }
 
     // Validate project exists
     const project = await prisma.project.findUnique({
@@ -76,6 +85,11 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     }
 
     const { email, password, name } = validation.data
+
+    if (mayBeProbe && !isPlatformProbe(request, email)) {
+      const limit = await consumeIp()
+      if (!limit.allowed) return throttledV1Response(limit)
+    }
 
     // Behavioral-verifier signups use reserved `.internal` emails. They must not
     // consume the project's MAU quota or trip its cap — they are throwaway rows
