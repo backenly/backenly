@@ -652,21 +652,13 @@ function StartupProgram() {
             ))}
           </ul>
 
-          <div className="mt-8 flex flex-col gap-3 sm:flex-row">
+          <div className="mt-8 flex flex-col sm:flex-row">
             <a
               href={startupApplyHref}
               className="inline-flex h-12 items-center justify-center gap-2 rounded-md bg-white px-5 text-sm font-semibold text-black transition hover:bg-zinc-200"
             >
               Apply for startup access
               <ArrowRight className="h-4 w-4" />
-            </a>
-            <a
-              href={ROUTES.founder}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex h-12 items-center justify-center rounded-md border border-white/12 bg-white/[0.03] px-5 text-sm font-semibold text-white transition hover:border-white/25 hover:bg-white/[0.06]"
-            >
-              Talk to the founder
             </a>
           </div>
           <p className="mt-4 max-w-xl text-xs leading-5 text-zinc-500">
