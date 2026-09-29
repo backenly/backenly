@@ -88,6 +88,22 @@
   }
 }
 
+/* Landing: the ChangePlayer's progress rail. The animation doubles as the
+   stage timer (components/landing/ChangePlayer.tsx advances on
+   `animationend`), so pausing it with `animation-play-state` pauses the story
+   too. Reduced motion is handled in the component, which removes the
+   animation and draws the rail full. */
+@keyframes changeProgress {
+  from { transform: scaleX(0); }
+  to   { transform: scaleX(1); }
+}
+
+.change-progress {
+  animation-name: changeProgress;
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
+}
+
 /* Lenis smooth scroll (buttery momentum on marketing pages).
    Only active once <SmoothScroll> attaches the .lenis class to <html>;
    with reduced-motion or JS off, none of this applies and scroll is native. */
