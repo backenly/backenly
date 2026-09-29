@@ -9,12 +9,36 @@
  *   - The rates shown are the rates billed: one catalog feeds both.
  */
 import {
+  axisBillable,
+  egressBillable,
   egressPricePublished,
   overageCents,
   proUsagePriceRows,
   usagePricingPublished,
   GIB,
 } from '@/lib/pricing/catalog'
+
+describe('charging egress: one switch, and never the direct rate', () => {
+  it('is billable only with the explicit flag AND the CDN terms', () => {
+    expect(egressBillable({})).toBe(false)
+    expect(egressBillable({ BACKENLY_EGRESS_BILLING: 'enabled' })).toBe(false)
+    expect(egressBillable({ BACKENLY_EGRESS_BILLING: 'enabled', BACKENLY_EGRESS_TERMS: 'direct' })).toBe(false)
+    expect(egressBillable({ BACKENLY_EGRESS_TERMS: 'cdn' })).toBe(false)
+    expect(egressBillable({ BACKENLY_EGRESS_BILLING: 'true', BACKENLY_EGRESS_TERMS: 'cdn' })).toBe(false)
+    expect(egressBillable({ BACKENLY_EGRESS_BILLING: 'enabled', BACKENLY_EGRESS_TERMS: 'cdn' })).toBe(true)
+  })
+
+  it('decides per axis: egress follows the switch, the rest follow the plan', () => {
+    for (const axis of ['mau', 'db_bytes', 'file_bytes', 'fn_runs'] as const) {
+      expect(axisBillable('BUILDER', axis, false)).toBe(true)
+      expect(axisBillable('SANDBOX', axis, true)).toBe(false)
+      expect(axisBillable('SCALE', axis, true)).toBe(false)
+    }
+    expect(axisBillable('BUILDER', 'egress_bytes', false)).toBe(false)
+    expect(axisBillable('BUILDER', 'egress_bytes', true)).toBe(true)
+    expect(axisBillable('SANDBOX', 'egress_bytes', true)).toBe(false)
+  })
+})
 
 describe('publishing', () => {
   it('shows usage pricing only when published', () => {

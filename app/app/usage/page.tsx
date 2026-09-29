@@ -50,6 +50,8 @@ interface AxisDescription {
   included: number | null
   cap: number | null
   projected: number
+  /** Usage past the plan can be charged on this axis (egress: not until egress billing is on). */
+  billable: boolean
   estimatedCents: number
   projectedCents: number
   grace: { overSince: string; graceEndsAt: string; restricted: boolean } | null
@@ -165,7 +167,7 @@ const AXIS_ICON: Record<AxisDescription['axis'], React.ElementType> = {
 }
 
 /** One pooled quota: used against included, with the projection and any headroom past the plan. */
-function AxisMeter({ a, resetNote }: { a: AxisDescription; resetNote?: string }) {
+function AxisMeter({ a, resetNote, planBillsOverage }: { a: AxisDescription; resetNote?: string; planBillsOverage: boolean }) {
   const format = a.unit === 'bytes' ? fmtBytes : fmtNum
   const counter = a.axis === 'mau' || a.axis === 'fn_runs' || a.axis === 'egress_bytes'
   const notes: string[] = []
@@ -173,6 +175,9 @@ function AxisMeter({ a, resetNote }: { a: AxisDescription; resetNote?: string })
   if (a.included !== null && a.cap !== null && a.cap > a.included) {
     notes.push(`up to ${format(a.cap)} within your spend limit`)
   }
+  // On a plan that bills other axes, say plainly which one it does not: the
+  // spend limit never buys more of it, and it is never on an invoice.
+  if (planBillsOverage && !a.billable && a.included !== null) notes.push('not billed past the plan')
   return (
     <Meter
       icon={AXIS_ICON[a.axis]}
@@ -439,7 +444,9 @@ export default function UsagePage() {
                 resetNote={usage.apiQuotaIsLifetime ? 'Total · no reset' : resetNote}
               />
               {account ? (
-                account.axes.map((a) => <AxisMeter key={a.axis} a={a} resetNote={resetNote} />)
+                account.axes.map((a) => (
+                  <AxisMeter key={a.axis} a={a} resetNote={resetNote} planBillsOverage={account.axes.some((x) => x.billable)} />
+                ))
               ) : (
                 <>
                   <Meter icon={Bot} label="Function invocations" used={usage.aiFunctionInvocationsUsed} max={usage.maxAiFunctionInvocationsPerMonth} format={fmtNum} resetNote={resetNote} />

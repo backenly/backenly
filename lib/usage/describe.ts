@@ -12,7 +12,7 @@
  * JSON-safe throughout (numbers and strings, no BigInt).
  */
 import { getOveragePolicy } from '@/lib/entitlements'
-import { OVERAGE_AXES, overageCents, planAllowsOverage, type OverageAxis } from '@/lib/pricing/catalog'
+import { OVERAGE_AXES, overageCents, type OverageAxis } from '@/lib/pricing/catalog'
 import { accountLimits } from './overage'
 import { forecastAccount } from './forecast'
 import { accountRestriction, GRACE_DAYS, type RestrictedAxis } from './restrictions'
@@ -45,6 +45,12 @@ export interface AxisDescription {
   cap: number | null
   /** Projected month-end quantity (storage: the month's average). */
   projected: number
+  /**
+   * Usage past the plan can be charged on this axis. Egress is metered and
+   * capped but not billable until egress billing is switched on; until then
+   * its estimates are 0 and it is never part of a charge.
+   */
+  billable: boolean
   /** Estimated cost of usage past the plan so far, in cents. */
   estimatedCents: number
   /** Estimated cost at the projected month-end quantity, in cents. */
@@ -79,8 +85,6 @@ export async function describeAccountUsage(
     forecastAccount(billingAccountId, now),
     getOveragePolicy(billingAccountId),
   ])
-  const billable = planAllowsOverage(limits.planName)
-
   const axes: AxisDescription[] = []
   for (const axis of OVERAGE_AXES) {
     const a = limits.axes[axis]
@@ -101,8 +105,9 @@ export async function describeAccountUsage(
       included: a.included,
       cap: a.cap,
       projected,
+      billable: a.billable,
       estimatedCents: Math.floor(a.estimatedCents),
-      projectedCents: billable ? Math.floor(overageCents(axis, projectedOver, limits.terms)) : 0,
+      projectedCents: a.billable ? Math.floor(overageCents(axis, projectedOver, limits.terms)) : 0,
       grace,
     })
   }

@@ -113,7 +113,7 @@ async function notify(
   } else if (level === '100') {
     const price = overagePrice(axis, limits.terms)
     title = `You've used all of your included ${resource}`
-    body = limits.overageActive
+    body = limits.overageActive && limits.axes[axis].billable
       ? `You've used ${usedLabel} of the ${limitLabel} included this month. Usage past it is billed at $${(price.cents / 100).toFixed(price.cents < 1 ? 4 : 2)} ${price.label}, within your $${(limits.spendLimitCents / 100).toFixed(0)} spend limit.`
       : `You've used ${usedLabel} of the ${limitLabel} included this month. ${atQuotaBehaviour(axis)}`
   } else {
@@ -152,7 +152,10 @@ export async function evaluateAccountAlerts(billingAccountId: string, now: Date 
 
     const pct = (a.used / a.included) * 100
     const levels: string[] = INCLUDED_LEVELS.filter((l) => pct >= l).map(String)
-    if (limits.overageActive && a.cap !== null && a.cap > a.included && a.used >= a.cap) levels.push('cap')
+    // "The most your spend limit allows" only means something on an axis the
+    // limit can buy: an axis that cannot be charged stops at its quota, which
+    // the 100% level already reports.
+    if (limits.overageActive && a.billable && a.cap !== null && a.cap > a.included && a.used >= a.cap) levels.push('cap')
     if (levels.length) {
       const inserted = await recordLevels(billingAccountId, limits.period, axis, levels, a.used, a.included)
       result.recorded += inserted.length
