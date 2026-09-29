@@ -88,30 +88,12 @@
   }
 }
 
-/* Landing: ChangePath (components/landing/ChangePath.tsx).
-   One light laps the track every 8s; each stage chip brightens as it passes
-   (each chip's animation-delay is set inline to the moment the pulse reaches
-   it). The parked branch marches slowly because it is waiting on a person.
-   Reduced motion turns all of it off and leaves the drawing at rest. */
-@keyframes pathPulse {
-  from { transform: translateX(-100%); }
-  to   { transform: translateX(900%); }
-}
-
-.path-pulse {
-  animation: pathPulse 8s linear infinite;
-}
-
-@keyframes pathNode {
-  0%   { border-color: rgba(221, 214, 254, 0.7); color: #fff; box-shadow: 0 0 0 1px rgba(167, 139, 250, 0.25), 0 0 28px -4px rgba(167, 139, 250, 0.6); }
-  22%  { border-color: rgba(255, 255, 255, 0.12); color: #e4e4e7; box-shadow: 0 0 0 0 rgba(167, 139, 250, 0), 0 0 0 0 rgba(167, 139, 250, 0); }
-  100% { border-color: rgba(255, 255, 255, 0.12); color: #e4e4e7; box-shadow: 0 0 0 0 rgba(167, 139, 250, 0), 0 0 0 0 rgba(167, 139, 250, 0); }
-}
-
-.path-node {
-  animation: pathNode 8s ease-out infinite;
-}
-
+/* Landing: ChangePath (components/landing/ChangePath.tsx). The drawing
+   assembles itself with framer-motion; these are the only two things that
+   keep moving afterwards, both on the branch that is still waiting for a
+   person: its dashed line marches, and a ring breathes out of its badge.
+   Reduced motion: the component never renders the ring, and this stops the
+   march. */
 @keyframes pathWait {
   to { stroke-dashoffset: -32; }
 }
@@ -120,23 +102,18 @@
   animation: pathWait 2.4s linear infinite;
 }
 
-@keyframes pathWaitDot {
-  0%   { transform: scale(1); opacity: 0.7; }
-  70%, 100% { transform: scale(3); opacity: 0; }
+@keyframes pathWaitRing {
+  0%        { transform: scale(0.9); opacity: 0.6; }
+  70%, 100% { transform: scale(1.9); opacity: 0; }
 }
 
-.path-wait-dot {
-  animation: pathWaitDot 2.4s ease-out infinite;
+.path-wait-ring {
+  animation: pathWaitRing 2.4s ease-out infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .path-pulse,
-  .path-wait-dot {
-    animation: none;
-    opacity: 0;
-  }
-  .path-node,
-  .path-wait {
+  .path-wait,
+  .path-wait-ring {
     animation: none;
   }
 }
