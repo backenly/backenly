@@ -1,40 +1,45 @@
 'use client'
 
 /**
- * ChangePath: a day on production, drawn as a timeline that assembles itself.
+ * ChangePath: one project over one day and one night, drawn as a timeline
+ * that assembles itself the first time it is seen.
  *
  * History: this replaced ChangePlayer (a tab list beside mocked dashboard
- * cards), which read as generated. The first ChangePath was a static line of
- * chips; the founder asked for the drawing to BUILD itself on load, in the
- * manner of InsForge's branch timeline. This is that, in Backenly's own terms.
+ * cards), which read as generated. The founder then asked for a drawing that
+ * builds itself, in the visual manner of InsForge's branch timeline: the
+ * ANIMATION style, not its scenario. A first cut copied the scenario too
+ * (three different agents on one project) and was rejected, rightly: nobody
+ * runs Claude Code, Cursor and Codex against one backend. Do not bring
+ * brand-name agents back into this drawing.
  *
- * THE SCENE. Production runs left to right. Three agents propose changes off
- * it, and each branch ends the way that kind of change really ends here:
+ * THE SCENE is the three things a Backenly user needs to understand, in the
+ * order they would meet them:
  *
- *   - Claude Code adds comments. Planned into typed actions, verified against
- *     the running backend, applied, and merged back into production. Green.
- *   - Cursor renames a column. A check fails, so it never reaches
- *     production: the restore point puts things back. Red.
- *   - Codex wants to drop a column with live rows. That is destructive, so it
- *     parks in the Review Queue and waits for a person. Amber, and it keeps
- *     pulsing, because it is still waiting.
+ *   1. 14:02, your agent adds comments. Planned into typed actions, verified
+ *      against the running backend, applied, merged. Governed building.
+ *   2. 17:40, your agent asks to drop a column with live rows. Destructive,
+ *      so it waits in the Review Queue until you approve; then it applies.
+ *      The human gate.
+ *   3. 03:12, nobody online. The line passes into night, and the autonomy
+ *      loop, with no agent and no person, sees orders got slow, adds the
+ *      missing index, verifies it, and merges the fix. Self-healing, the
+ *      thing only Backenly does.
  *
  * Everything named is a real product noun (typed actions, the Review Queue,
- * verification, restore points). Times and names are illustrative; the
- * section says so under the drawing.
+ * verification, the autonomy loop adding indexes; see the Overview recorded
+ * in HeroFilm). Times and names are illustrative, and the caption says so.
  *
  * HOW IT DRAWS. One SVG in a fixed 1260x470 coordinate space, scaled to the
  * container, shown from xl up (below that the text would scale under 10px, so
  * smaller screens get the same story as cards and an upright list). Lines draw
- * with framer's pathLength; dashed lines are drawn through a mask, because
+ * with framer's pathLength; dashed lines draw through a mask, because
  * pathLength works by rewriting stroke-dasharray and would erase the dashes.
  * The sequence starts the first time the figure is 35% on screen. Reduced
- * motion gets the finished drawing with no sequence and no pulses.
+ * motion gets the finished drawing with nothing moving.
  */
 
 import { useId, useRef } from 'react'
 import { motion, useInView, type Variants } from 'framer-motion'
-import { AGENT_MARKS } from '@/components/landing/AgentMarks'
 import { useSettledReducedMotion } from '@/lib/hooks/useSettledReducedMotion'
 
 const W = 1260
@@ -42,11 +47,9 @@ const H = 470
 const TRACK_Y = 240
 
 const GREEN = '#4ade80'
-const RED = '#f87171'
 const AMBER = '#fbbf24'
 const VIOLET = '#a78bfa'
 
-const mark = (id: string) => AGENT_MARKS.find((m) => m.id === id)!
 
 /* ── Motion factories ────────────────────────────────────────────────────── */
 
@@ -151,28 +154,42 @@ function Time({ x, above, children, delay, kit }: {
   )
 }
 
+type Actor = 'agent' | 'autonomy'
+
+/** Line glyphs on a 24 grid: a prompt for your agent, a loop for autonomy. */
+const ACTOR: Record<Actor, { name: string; d: string; color: string }> = {
+  agent: { name: 'Your agent', d: 'M4.5 7 L9.5 12 L4.5 17 M12 17.5 H19.5', color: '#e4e4e7' },
+  autonomy: { name: 'Autonomy', d: 'M19.5 12 A7.5 7.5 0 1 1 17.3 6.7 M19.8 3.8 V7.6 H16', color: VIOLET },
+}
+
 /**
- * Who asked for the change, and what. Mono throughout, so the pill's width can
+ * Who started the change, and why. Mono throughout, so the pill's width can
  * be computed from its characters (Geist Mono runs 0.6em per character).
  */
-function AgentPill({ cx, cy, agent, action, delay, kit }: {
-  cx: number; cy: number; agent: string; action: string; delay: number; kit: Kit
+function ActorPill({ cx, cy, actor, action, delay, kit }: {
+  cx: number; cy: number; actor: Actor; action: string; delay: number; kit: Kit
 }) {
-  const m = mark(agent)
+  const a = ACTOR[actor]
   const cw = 7.2 // 12px mono
-  const nameW = m.name.length * cw
-  const actionW = action.length * cw
-  const w = 16 + 16 + 8 + nameW + 10 + actionW + 16
+  const nameW = a.name.length * cw
+  const w = 16 + 16 + 8 + nameW + 10 + action.length * cw + 16
   const x = cx - w / 2
-  const y = cy - 18
   return (
     <motion.g variants={kit.rise(delay)}>
-      <rect x={x} y={y} width={w} height={36} rx={18} fill="#0c0d10" stroke="rgba(255,255,255,0.14)" />
+      <rect
+        x={x}
+        y={cy - 18}
+        width={w}
+        height={36}
+        rx={18}
+        fill="#0c0d10"
+        stroke={actor === 'autonomy' ? 'rgba(167,139,250,0.4)' : 'rgba(255,255,255,0.14)'}
+      />
       <svg x={x + 16} y={cy - 8} width={16} height={16} viewBox="0 0 24 24">
-        <path d={m.path} fill={agent === 'claude' ? '#d97757' : '#e4e4e7'} />
+        <path d={a.d} stroke={a.color} strokeWidth={2} fill="none" strokeLinecap="round" strokeLinejoin="round" />
       </svg>
-      <text x={x + 40} y={cy + 4} fontSize={12} className="fill-zinc-500 font-mono">
-        {m.name}
+      <text x={x + 40} y={cy + 4} fontSize={12} className="font-mono" fill={actor === 'autonomy' ? VIOLET : '#71717a'}>
+        {a.name}
       </text>
       <text x={x + 40 + nameW + 10} y={cy + 4} fontSize={12} className="fill-zinc-100 font-mono">
         {action}
@@ -206,13 +223,12 @@ function StageCard({ x, cy, badge, label, badgeFill = '#09090b', badgeText = '#f
   )
 }
 
-type Glyph = 'check' | 'up' | 'x' | 'restore'
+type Glyph = 'check' | 'up' | 'person'
 
 const GLYPHS: Record<Glyph, string> = {
   check: 'M-5 0.5 L-1.5 4 L5.5 -3.5',
   up: 'M0 5.5 V-5.5 M-4.5 -1 L0 -5.5 L4.5 -1',
-  x: 'M-4.5 -4.5 L4.5 4.5 M4.5 -4.5 L-4.5 4.5',
-  restore: 'M-5 -1 A5.2 5.2 0 1 1 -2.6 4.4 M-5.4 -5.2 V-0.8 H-1',
+  person: 'M0 -1 A3 3 0 1 0 0 -7 A3 3 0 1 0 0 -1 M-5.5 6 A5.5 5 0 0 1 5.5 6',
 }
 
 function Outcome({ cx, cy, glyph, color, label, below, delay, kit }: {
@@ -240,34 +256,56 @@ function Outcome({ cx, cy, glyph, color, label, below, delay, kit }: {
 
 /* ── The scene ───────────────────────────────────────────────────────────── */
 
-function Scene({ kit, quiet }: { kit: Kit; quiet: boolean }) {
+function Scene({ kit }: { kit: Kit }) {
   const ticks: number[] = []
   for (let x = 230; x < W - 20; x += 70) ticks.push(x)
-  const events = [300, 440, 830, 1000]
 
-  // Branch geometry. A and C rise above the line, B drops below it.
-  const A = { x: 300, card: 360, cy: 76 }
-  const aCardEnd = A.card + stageWidth('PLAN', '4 typed actions')
-  const B = { x: 440, card: 500, cy: 404 }
-  const bCardEnd = B.card + stageWidth('PLAN', 'rename posts.title')
-  const C = { x: 1000, card: 1040, cy: 76 }
-  const cCardEnd = C.card + stageWidth('REVIEW', 'waiting on you')
+  // Branch geometry. Day: A rises, B drops. Night: C rises.
+  const A = { x: 230, card: 290, cy: 76 }
+  const aEnd = A.card + stageWidth('PLAN', '4 typed actions')
+  const B = { x: 300, card: 360, cy: 404 }
+  const bEnd = B.card + stageWidth('REVIEW', '1,284 live rows')
+  const C = { x: 870, card: 920, cy: 76 }
+  const cEnd = C.card + stageWidth('HEAL', 'add index')
+  const NIGHT = 830
+  const nodes = [A.x, B.x, 720, 790, C.x, 1220]
 
   return (
     <>
       <defs>
-        {/* userSpaceOnUse: a horizontal line has a zero-height bounding box, and
-            a bounding-box gradient on one renders nothing at all. */}
         <linearGradient id="cp-track" gradientUnits="userSpaceOnUse" x1={168} x2={W} y1={0} y2={0}>
           <stop offset="0" stopColor="#fff" stopOpacity="0.22" />
-          <stop offset="0.9" stopColor="#fff" stopOpacity="0.22" />
+          <stop offset="0.93" stopColor="#fff" stopOpacity="0.22" />
           <stop offset="1" stopColor="#fff" stopOpacity="0" />
         </linearGradient>
-        <linearGradient id="cp-red-fade" gradientUnits="userSpaceOnUse" x1={888} x2={950} y1={0} y2={0}>
-          <stop offset="0" stopColor={RED} />
-          <stop offset="1" stopColor={RED} stopOpacity="0" />
+        {/* Night: a violet dusk that deepens to the right and fades off the
+            top and bottom of the figure. */}
+        <linearGradient id="cp-night-x" gradientUnits="userSpaceOnUse" x1={NIGHT} x2={W} y1={0} y2={0}>
+          <stop offset="0" stopColor="#4c1d95" stopOpacity="0" />
+          <stop offset="0.45" stopColor="#4c1d95" stopOpacity="0.2" />
+          <stop offset="1" stopColor="#4c1d95" stopOpacity="0.3" />
         </linearGradient>
+        <linearGradient id="cp-night-y" x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0" stopColor="#fff" stopOpacity="0" />
+          <stop offset="0.2" stopColor="#fff" stopOpacity="1" />
+          <stop offset="0.8" stopColor="#fff" stopOpacity="1" />
+          <stop offset="1" stopColor="#fff" stopOpacity="0" />
+        </linearGradient>
+        <mask id="cp-night-mask" maskUnits="userSpaceOnUse" x={NIGHT} y={-30} width={W - NIGHT} height={H + 30}>
+          <rect x={NIGHT} y={-30} width={W - NIGHT} height={H + 30} fill="url(#cp-night-y)" />
+        </mask>
       </defs>
+
+      {/* Night falls once the day's work has merged. */}
+      <motion.g variants={kit.fade(2.5, 0.9)}>
+        <rect x={NIGHT} y={-30} width={W - NIGHT} height={H + 30} fill="url(#cp-night-x)" mask="url(#cp-night-mask)" />
+        <svg x={NIGHT + 36} y={4} width={14} height={14} viewBox="0 0 24 24">
+          <path d="M20 14.5 A8.5 8.5 0 1 1 9.5 4 A7 7 0 0 0 20 14.5 Z" fill={VIOLET} fillOpacity={0.8} />
+        </svg>
+        <text x={NIGHT + 58} y={15} fontSize={12} className="font-mono" fill="#8b86a8">
+          nobody online
+        </text>
+      </motion.g>
 
       {/* Production, and the line it runs along. */}
       <motion.g variants={kit.rise(0)}>
@@ -282,7 +320,7 @@ function Scene({ kit, quiet }: { kit: Kit; quiet: boolean }) {
       </motion.g>
       <motion.path d={`M168 ${TRACK_Y} H${W}`} stroke="url(#cp-track)" strokeWidth={1.25} fill="none" variants={kit.draw(0.15, 1.6)} />
       {ticks
-        .filter((x) => !events.includes(x))
+        .filter((x) => nodes.every((n) => Math.abs(n - x) > 14))
         .map((x) => (
           <motion.circle
             key={x}
@@ -295,72 +333,55 @@ function Scene({ kit, quiet }: { kit: Kit; quiet: boolean }) {
           />
         ))}
 
-      {/* A · Claude Code adds comments: planned, verified, applied, merged. */}
-      <EventNode x={A.x} color={VIOLET} delay={0.45} kit={kit} />
-      <Time x={A.x} delay={0.5} kit={kit}>09:45</Time>
-      <Dashed d={`M${A.x} ${TRACK_Y - 8} V188`} delay={0.6} duration={0.3} kit={kit} />
-      <AgentPill cx={A.x} cy={170} agent="claude" action="add comments" delay={0.8} kit={kit} />
-      <Dashed d={`M${A.x} 152 V100 A24 24 0 0 1 ${A.x + 24} ${A.cy} H${A.card}`} delay={1.0} duration={0.45} kit={kit} />
-      <StageCard x={A.card} cy={A.cy} badge="PLAN" label="4 typed actions" delay={1.35} kit={kit} />
-      <Line d={`M${aCardEnd} ${A.cy} H632`} stroke={GREEN} delay={1.6} duration={0.3} kit={kit} />
-      <Outcome cx={650} cy={A.cy} glyph="check" color={GREEN} label="Verified 5/5" delay={1.85} kit={kit} />
-      <Line d={`M668 ${A.cy} H722`} stroke={GREEN} delay={2.0} duration={0.25} kit={kit} />
-      <Outcome cx={740} cy={A.cy} glyph="up" color={GREEN} label="Applied" delay={2.2} kit={kit} />
-      <Line d={`M758 ${A.cy} H800 A30 30 0 0 1 830 106 V${TRACK_Y - 8}`} stroke={GREEN} delay={2.35} duration={0.55} kit={kit} />
-      <EventNode x={830} color={GREEN} delay={2.85} kit={kit} />
-      <Time x={830} delay={2.9} kit={kit}>14:20</Time>
+      {/* 1 · Afternoon. Your agent adds comments: planned, verified, applied. */}
+      <EventNode x={A.x} color="#e4e4e7" delay={0.35} kit={kit} />
+      <Time x={A.x} delay={0.4} kit={kit}>14:02</Time>
+      <Dashed d={`M${A.x} ${TRACK_Y - 8} V188`} delay={0.5} duration={0.3} kit={kit} />
+      <ActorPill cx={A.x} cy={170} actor="agent" action="add comments" delay={0.7} kit={kit} />
+      <Dashed d={`M${A.x} 152 V100 A24 24 0 0 1 ${A.x + 24} ${A.cy} H${A.card}`} delay={0.9} duration={0.45} kit={kit} />
+      <StageCard x={A.card} cy={A.cy} badge="PLAN" label="4 typed actions" delay={1.25} kit={kit} />
+      <Line d={`M${aEnd} ${A.cy} H522`} stroke={GREEN} delay={1.5} duration={0.25} kit={kit} />
+      <Outcome cx={540} cy={A.cy} glyph="check" color={GREEN} label="Verified 5/5" delay={1.7} kit={kit} />
+      <Line d={`M558 ${A.cy} H612`} stroke={GREEN} delay={1.85} duration={0.25} kit={kit} />
+      <Outcome cx={630} cy={A.cy} glyph="up" color={GREEN} label="Applied" delay={2.05} kit={kit} />
+      <Line d={`M648 ${A.cy} H690 A30 30 0 0 1 720 106 V${TRACK_Y - 8}`} stroke={GREEN} delay={2.2} duration={0.5} kit={kit} />
+      <EventNode x={720} color={GREEN} delay={2.65} kit={kit} />
 
-      {/* B · Cursor renames a column: a check fails, the restore point wins. */}
-      <EventNode x={B.x} color={VIOLET} delay={0.75} kit={kit} />
-      <Time x={B.x} above delay={0.8} kit={kit}>11:45</Time>
-      <Dashed d={`M${B.x} ${TRACK_Y + 8} V292`} delay={1.1} duration={0.3} kit={kit} />
-      <AgentPill cx={B.x} cy={310} agent="cursor" action="rename title" delay={1.3} kit={kit} />
-      <Dashed d={`M${B.x} 328 V380 A24 24 0 0 0 ${B.x + 24} ${B.cy} H${B.card}`} delay={1.5} duration={0.45} kit={kit} />
-      <StageCard x={B.card} cy={B.cy} badge="PLAN" label="rename posts.title" delay={1.85} kit={kit} />
-      <Line d={`M${bCardEnd} ${B.cy} H762`} stroke={RED} delay={2.1} duration={0.3} kit={kit} />
-      <Outcome cx={780} cy={B.cy} glyph="x" color={RED} label="Check failed" below delay={2.35} kit={kit} />
-      <Line d={`M798 ${B.cy} H852`} stroke={RED} delay={2.5} duration={0.25} kit={kit} />
-      <Outcome cx={870} cy={B.cy} glyph="restore" color={RED} label="Restored" below delay={2.7} kit={kit} />
-      <Line d={`M888 ${B.cy} H950`} stroke="url(#cp-red-fade)" delay={2.85} duration={0.35} kit={kit} />
+      {/* 2 · Evening. A destructive ask waits for you; you approve; it applies. */}
+      <EventNode x={B.x} color="#e4e4e7" delay={0.65} kit={kit} />
+      <Time x={B.x} above delay={0.7} kit={kit}>17:40</Time>
+      <Dashed d={`M${B.x} ${TRACK_Y + 8} V292`} delay={1.0} duration={0.3} kit={kit} />
+      <ActorPill cx={B.x} cy={310} actor="agent" action="drop legacy_slug" delay={1.2} kit={kit} />
+      <Dashed d={`M${B.x} 328 V380 A24 24 0 0 0 ${B.x + 24} ${B.cy} H${B.card}`} delay={1.4} duration={0.45} kit={kit} />
+      <StageCard x={B.card} cy={B.cy} badge="REVIEW" label="1,284 live rows" badgeFill={AMBER} badgeText="#1c1407" delay={1.75} kit={kit} />
+      <Line d={`M${bEnd} ${B.cy} H612`} stroke={AMBER} delay={2.0} duration={0.25} kit={kit} />
+      <Outcome cx={630} cy={B.cy} glyph="person" color={AMBER} label="You approved" below delay={2.25} kit={kit} />
+      <Line d={`M648 ${B.cy} H702`} stroke={GREEN} delay={2.4} duration={0.25} kit={kit} />
+      <Outcome cx={720} cy={B.cy} glyph="up" color={GREEN} label="Applied" below delay={2.6} kit={kit} />
+      <Line d={`M738 ${B.cy} H760 A30 30 0 0 0 790 374 V${TRACK_Y + 8}`} stroke={GREEN} delay={2.75} duration={0.5} kit={kit} />
+      <EventNode x={790} color={GREEN} delay={3.2} kit={kit} />
 
-      {/* C · Codex wants to drop a column with live rows: it waits for you. */}
-      <EventNode x={C.x} color={VIOLET} delay={1.3} kit={kit} />
-      <Time x={C.x} delay={1.35} kit={kit}>16:05</Time>
-      <Dashed d={`M${C.x} ${TRACK_Y - 8} V188`} delay={1.6} duration={0.3} kit={kit} />
-      <AgentPill cx={C.x} cy={170} agent="codex" action="drop legacy_slug" delay={1.8} kit={kit} />
-      <Dashed d={`M${C.x} 152 V100 A24 24 0 0 1 ${C.x + 24} ${C.cy} H${C.card}`} delay={2.0} duration={0.4} kit={kit} />
-      <StageCard
-        x={C.card}
-        cy={C.cy}
-        badge="REVIEW"
-        label="waiting on you"
-        badgeFill={AMBER}
-        badgeText="#1c1407"
-        delay={2.35}
-        kit={kit}
-      />
+      {/* 3 · 03:12, nobody online. The autonomy loop heals it on its own. */}
+      <EventNode x={C.x} color={VIOLET} delay={3.1} kit={kit} />
+      <Time x={C.x} delay={3.15} kit={kit}>03:12</Time>
+      <Dashed d={`M${C.x} ${TRACK_Y - 8} V188`} delay={3.25} duration={0.3} kit={kit} stroke="rgba(167,139,250,0.55)" />
+      <ActorPill cx={C.x} cy={170} actor="autonomy" action="orders got slow" delay={3.45} kit={kit} />
       <Dashed
-        d={`M${cCardEnd} ${C.cy} H${W}`}
-        stroke={AMBER}
-        delay={2.6}
-        duration={0.2}
+        d={`M${C.x} 152 V100 A24 24 0 0 1 ${C.x + 24} ${C.cy} H${C.card}`}
+        delay={3.65}
+        duration={0.4}
         kit={kit}
-        className={quiet ? undefined : 'path-wait'}
+        stroke="rgba(167,139,250,0.55)"
       />
-      {/* Still waiting: the one thing in the scene that never settles. */}
-      {!quiet && (
-        <motion.g variants={kit.fade(2.8)}>
-          <circle
-            cx={C.card + 8 + (6 * 6.6 + 16) / 2}
-            cy={C.cy}
-            r={16}
-            fill="none"
-            stroke={AMBER}
-            className="path-wait-ring"
-            style={CENTRED}
-          />
-        </motion.g>
-      )}
+      <StageCard x={C.card} cy={C.cy} badge="HEAL" label="add index" badgeFill="#7c3aed" delay={4.0} kit={kit} />
+      <Line d={`M${cEnd} ${C.cy} H1132`} stroke={GREEN} delay={4.25} duration={0.2} kit={kit} />
+      <Outcome cx={1150} cy={C.cy} glyph="check" color={GREEN} label="Verified" delay={4.4} kit={kit} />
+      <Line d={`M1168 ${C.cy} H1190 A30 30 0 0 1 1220 106 V${TRACK_Y - 8}`} stroke={GREEN} delay={4.55} duration={0.5} kit={kit} />
+      <EventNode x={1220} color={GREEN} delay={5.0} kit={kit} />
+      <Time x={1220} delay={5.05} kit={kit}>03:14</Time>
+      <motion.text x={1220} y={TRACK_Y + 50} textAnchor="end" fontSize={12} fill="#8b86a8" variants={kit.fade(5.2)}>
+        Receipt waiting for you in the morning
+      </motion.text>
     </>
   )
 }
@@ -377,10 +398,10 @@ const STAGES: Stage[] = [
   { title: 'Record', body: 'Every change lands in one ledger, with its actor, its diff and a one-click way back.' },
 ]
 
-const OUTCOMES = [
-  { agent: 'claude', action: 'add comments', result: 'Verified 5/5, applied, merged', color: GREEN },
-  { agent: 'cursor', action: 'rename title', result: 'Check failed, restored', color: RED },
-  { agent: 'codex', action: 'drop legacy_slug', result: 'Waiting on you in the Review Queue', color: AMBER },
+const OUTCOMES: { actor: Actor; time: string; action: string; result: string; color: string }[] = [
+  { actor: 'agent', time: '14:02', action: 'add comments', result: 'Planned, verified 5/5, applied', color: GREEN },
+  { actor: 'agent', time: '17:40', action: 'drop legacy_slug', result: 'Waited for you, approved, applied', color: AMBER },
+  { actor: 'autonomy', time: '03:12', action: 'orders got slow', result: 'Index added and verified, nobody online', color: VIOLET },
 ]
 
 export function ChangePath() {
@@ -396,14 +417,14 @@ export function ChangePath() {
           viewBox={`0 0 ${W} ${H}`}
           className="block h-auto w-full select-none overflow-visible"
           role="img"
-          aria-label="A day on production. Claude Code adds comments: planned, verified 5 of 5, applied and merged. Cursor renames a column: a check fails and the restore point puts it back. Codex asks to drop a column with live rows: it waits in the Review Queue for a person."
+          aria-label="One day and night on production. At 14:02 your agent adds comments: planned into typed actions, verified 5 of 5, applied. At 17:40 it asks to drop a column with live rows: it waits in the Review Queue until you approve, then applies. At 03:12, with nobody online, the autonomy loop sees orders got slow, adds an index, verifies it, and leaves you a receipt."
           initial="hidden"
           animate={inView || quiet ? 'visible' : 'hidden'}
         >
-          <Scene kit={kit} quiet={quiet} />
+          <Scene kit={kit} />
         </motion.svg>
         <p className="mt-2 text-right text-[13px] text-zinc-600">
-          One day on one project, drawn from the real flow. Names and times are illustrative.
+          One project, one day and one night, drawn from the real flow. Names and times are illustrative.
         </p>
       </div>
 
@@ -423,14 +444,15 @@ export function ChangePath() {
       <div className="xl:hidden">
         <ul className="grid gap-3 sm:grid-cols-3">
           {OUTCOMES.map((o) => {
-            const m = mark(o.agent)
+            const a = ACTOR[o.actor]
             return (
-              <li key={o.agent} className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+              <li key={o.time} className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
                 <div className="flex items-center gap-2 font-mono text-[12px]">
+                  <span className="text-zinc-600">{o.time}</span>
                   <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0" aria-hidden>
-                    <path d={m.path} fill={o.agent === 'claude' ? '#d97757' : '#e4e4e7'} />
+                    <path d={a.d} stroke={a.color} strokeWidth={2} fill="none" strokeLinecap="round" strokeLinejoin="round" />
                   </svg>
-                  <span className="text-zinc-500">{m.name}</span>
+                  <span className={o.actor === 'autonomy' ? 'text-violet-300' : 'text-zinc-500'}>{a.name}</span>
                   <span className="truncate text-zinc-100">{o.action}</span>
                 </div>
                 <p className="mt-3 flex items-center gap-2 text-[14px] text-zinc-300">

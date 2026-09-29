@@ -353,8 +353,8 @@ function ChangeSection() {
       <div className={CONTAINER}>
         <Reveal>
           <SectionHead
-            title="Your agent moves fast. Every change still takes the same path."
-            body="Backenly does not just generate resources. It plans each change, holds anything destructive for a person, applies it with a way back, and proves it works before calling it done."
+            title="Your agent builds it by day. Backenly keeps it healthy by night."
+            body="Every change your agent makes is planned, verified, and reversible, and anything destructive waits for you. When something degrades at 3am, Backenly fixes it, proves the fix, and tells you in the morning."
           />
         </Reveal>
         <Reveal className="mt-[48px] md:mt-[64px]">

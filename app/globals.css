@@ -88,36 +88,6 @@
   }
 }
 
-/* Landing: ChangePath (components/landing/ChangePath.tsx). The drawing
-   assembles itself with framer-motion; these are the only two things that
-   keep moving afterwards, both on the branch that is still waiting for a
-   person: its dashed line marches, and a ring breathes out of its badge.
-   Reduced motion: the component never renders the ring, and this stops the
-   march. */
-@keyframes pathWait {
-  to { stroke-dashoffset: -32; }
-}
-
-.path-wait {
-  animation: pathWait 2.4s linear infinite;
-}
-
-@keyframes pathWaitRing {
-  0%        { transform: scale(0.9); opacity: 0.6; }
-  70%, 100% { transform: scale(1.9); opacity: 0; }
-}
-
-.path-wait-ring {
-  animation: pathWaitRing 2.4s ease-out infinite;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .path-wait,
-  .path-wait-ring {
-    animation: none;
-  }
-}
-
 /* Lenis smooth scroll (buttery momentum on marketing pages).
    Only active once <SmoothScroll> attaches the .lenis class to <html>;
    with reduced-motion or JS off, none of this applies and scroll is native. */
