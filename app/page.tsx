@@ -15,7 +15,7 @@ import {
   StorageDiagram,
 } from '@/components/landing/CapabilityDiagrams'
 import { AGENT_MARKS, AgentGlyph } from '@/components/landing/AgentMarks'
-import { ChangePlayer } from '@/components/landing/ChangePlayer'
+import { ChangePath } from '@/components/landing/ChangePath'
 import { ConnectTabs } from '@/components/landing/ConnectTabs'
 import { HeroFilm } from '@/components/landing/HeroFilm'
 import { ROUTES, SiteShell } from '@/components/site/SiteShell'
@@ -38,7 +38,7 @@ import { useUserSession } from '@/lib/hooks/useUserSession'
      Hero            what it is, and the real product on film
      Agent strip     it plugs into the agent you already use
      Change path     THE centrepiece: one change, planned, gated, applied,
-                     verified, recorded (components/landing/ChangePlayer)
+                     verified, recorded (components/landing/ChangePath)
      Primitives      what you get, as a bento with one lead cell
      Connect         how you point your agent at it, per host
      Autonomy        what happens when nobody is at the keyboard
@@ -318,23 +318,23 @@ function Hero() {
 ───────────────────────────────────────────────────────────── */
 
 function AgentStrip() {
+  // One quiet line, centred under the film, then the marks alone at one grey.
+  // No band, no boxed caption column: a logo row carries its own weight, and
+  // anything heavier competes with the hero it sits under.
   return (
-    <section aria-labelledby="agents-heading" className="relative border-y border-white/[0.06] bg-white/[0.012]">
-      <div className={`${CONTAINER} flex flex-col gap-7 py-9 lg:flex-row lg:items-center lg:gap-12`}>
-        <h2
-          id="agents-heading"
-          className="shrink-0 text-[14px] leading-[1.5] tracking-[-0.006em] text-zinc-500 lg:w-[210px]"
-        >
-          Driven from the agent you already use. Any MCP host works.
+    <section aria-labelledby="agents-heading" className="relative pb-[8px] pt-[8px]">
+      <div className={CONTAINER}>
+        <h2 id="agents-heading" className="text-center text-[14px] tracking-[-0.006em] text-zinc-500">
+          Works with the agent you already use, and any other MCP host
         </h2>
-        <ul className="grid flex-1 grid-cols-2 gap-x-6 gap-y-6 sm:grid-cols-4 lg:flex lg:items-center lg:justify-between">
+        <ul className="mx-auto mt-8 flex max-w-[1080px] flex-wrap items-center justify-center gap-x-10 gap-y-6 md:gap-x-14">
           {AGENT_MARKS.map((mark) => (
             <li
               key={mark.id}
-              className="flex items-center gap-2.5 text-zinc-500 transition-colors duration-300 hover:text-zinc-100"
+              className="flex items-center gap-2.5 text-zinc-400/80 transition-colors duration-300 hover:text-white"
             >
-              <AgentGlyph mark={mark} className="h-[20px] w-[20px] shrink-0" />
-              <span className="whitespace-nowrap text-[15px] font-medium tracking-[-0.012em]">{mark.name}</span>
+              <AgentGlyph mark={mark} className="h-[22px] w-[22px] shrink-0" />
+              <span className="whitespace-nowrap text-[17px] font-semibold tracking-[-0.03em]">{mark.name}</span>
             </li>
           ))}
         </ul>
@@ -358,7 +358,7 @@ function ChangeSection() {
           />
         </Reveal>
         <Reveal className="mt-[48px] md:mt-[64px]">
-          <ChangePlayer />
+          <ChangePath />
         </Reveal>
       </div>
     </section>
