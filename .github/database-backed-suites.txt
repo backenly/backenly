@@ -595,3 +595,10 @@ __tests__/usage/usage-anomaly.test.ts
 # bucket policy, pause and usage restriction have allowed it: a CloudFront
 # canned-policy signature over exactly that object, verified with the key.
 __tests__/storage/signed-cdn.test.ts
+
+# A table a developer creates over a READ_WRITE direct connection belongs to a
+# role the backup role's default privileges never named, so pg_dump failed for
+# that project on every run. backenly_direct_sync_schema now grants the backup
+# role (or backenly.backup_role) read on the schema it syncs, and never write.
+# Mutation-checked: the previous function fails the two grant tests.
+tests/integration/direct-access-backup-grants.spec.ts
