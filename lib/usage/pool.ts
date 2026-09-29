@@ -2,8 +2,8 @@
  * An account's usage this month, pooled across all of its projects.
  *
  * Plan quotas belong to the billing account, not to a project: a Pro owner's
- * 10 GB of database is shared by every project they own, however many that is.
- * Enforcing per project made the real cap N x 10 GB. Every quota check and
+ * 8 GB of database is shared by every project they own, however many that is.
+ * Enforcing per project made the real cap N x 8 GB. Every quota check and
  * every usage alert reads the account's total from here.
  *
  * These are the enforcement readings, taken from the operational tables that

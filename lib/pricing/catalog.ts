@@ -12,8 +12,10 @@
  * SCALE = Enterprise). A code that is not listed has no overage and no egress
  * quota, which is also what a self-hosted install answers.
  *
- * Rates are cents per unit and are PROVISIONAL until measured cost confirms
- * each one sits above its cost floor. Nothing here is advertised until then.
+ * Rates are cents per unit. A rate is advertised only once measured cost
+ * confirms it sits above its floor (OVERAGE_RATE_PUBLISHED), and only in a build
+ * that publishes usage pricing at all. One that is not yet published still feeds
+ * the shadow estimates, as its target.
  */
 
 import type { UsageAxisName } from '@/lib/usage/axes'
@@ -26,11 +28,11 @@ export type OverageAxis = Extract<UsageAxisName, 'mau' | 'db_bytes' | 'file_byte
 export const OVERAGE_AXES: readonly OverageAxis[] = ['mau', 'db_bytes', 'file_bytes', 'fn_runs', 'egress_bytes']
 
 /**
- * How file and API bytes leave AWS decides what egress costs Backenly, and so
- * what can be included and charged. `direct` is the load balancer and presigned
- * S3 (about $0.109/GB after the account's free 100 GB). `cdn` is a flat-rate
- * CloudFront distribution serving files, which only applies once it is live and
- * its real cost has been verified.
+ * How file and API bytes leave AWS: `direct` is the load balancer and presigned
+ * S3, `cdn` the CloudFront distribution serving files. Both cost about
+ * $0.109/GB pay-as-you-go in Mumbai, so Pro has one set of terms on either path
+ * (250 GB included, then $0.12/GB). The terms still decide whether egress can be
+ * CHARGED at all: see egressBillable.
  */
 export type EgressTerms = 'direct' | 'cdn'
 
@@ -58,8 +60,9 @@ const PLAN_USAGE_TERMS: Record<string, PlanUsageTerms> = {
   // from sending unbounded bytes at Backenly's cost.
   SANDBOX: { includedEgressGib: { direct: 5, cdn: 5 }, overage: false },
   // Pro: pooled quotas across every project, then overage within the owner's
-  // spend limit.
-  BUILDER: { includedEgressGib: { direct: 100, cdn: 250 }, overage: true },
+  // spend limit. 250 GB on either path: the included value customers compare
+  // plans on. It is the rate past it that must clear cost, not the quota.
+  BUILDER: { includedEgressGib: { direct: 250, cdn: 250 }, overage: true },
   // Enterprise: quotas and pricing are per contract.
   SCALE: { includedEgressGib: null, overage: false },
 }
@@ -117,16 +120,43 @@ export function overagePrice(axis: OverageAxis, terms: EgressTerms = egressTerms
     case 'mau':
       return { cents: 0.3, per: 1, label: 'per MAU' }
     case 'db_bytes':
-      return { cents: 15, per: GIB, label: 'per GB-month' }
+      // A TARGET, not published (OVERAGE_RATE_PUBLISHED). $0.15 was below cost:
+      // provisioned gp3 is $0.131/GB-month in Mumbai before the seven daily
+      // backup dumps, which sit on EFS at $0.33/GB-month. $0.25 clears cost once
+      // those dumps move to S3; it is published only after that move is measured.
+      return { cents: 25, per: GIB, label: 'per GB-month' }
     case 'file_bytes':
       return { cents: 3, per: GIB, label: 'per GB-month' }
     case 'fn_runs':
       return { cents: 200, per: 1_000_000, label: 'per 1M runs' }
     case 'egress_bytes':
-      return terms === 'cdn'
-        ? { cents: 9, per: GIB, label: 'per GB' }
-        : { cents: 12, per: GIB, label: 'per GB' }
+      // One rate on either path (`terms` is kept for its callers), above the
+      // $0.109/GB both cost pay-as-you-go. Matching the $0.09 some competitors
+      // charge needs CloudFront's flat-rate economics first; until then it would
+      // sell every extra GB at a loss.
+      return { cents: 12, per: GIB, label: 'per GB' }
   }
+}
+
+/**
+ * Which rates the pricing page states. A rate is published only once measured
+ * cost confirms it sits above its floor: marginal usage is never sold below
+ * cost, and a rate that may still move is never advertised as a commitment.
+ * Database waits for the backup dumps to move to S3 and for the resulting real
+ * GB-month cost; until then the page states its included 8 GB and no rate.
+ */
+export const OVERAGE_RATE_PUBLISHED: Readonly<Record<OverageAxis, boolean>> = {
+  mau: true,
+  db_bytes: false,
+  file_bytes: true,
+  fn_runs: true,
+  egress_bytes: true,
+}
+
+/** "$0.003 per MAU", "$2.00 per 1M runs": how a published rate reads on the page. */
+export function formatRate(axis: OverageAxis): string {
+  const p = overagePrice(axis, 'cdn')
+  return `$${(p.cents / 100).toFixed(p.cents < 1 ? 3 : 2)} ${p.label}`
 }
 
 /** Cents for `units` of an axis past its quota (fractional; round at the invoice). */
@@ -156,9 +186,9 @@ export const SPEND_LIMIT_MAX_CENTS = 1_000_000
 // the two equal, so the page cannot promise a quota the product does not give.
 
 export const PRO_INCLUDED = {
-  mau: 200_000,
+  mau: 100_000,
   fnRuns: 2_000_000,
-  dbGib: 10,
+  dbGib: 8,
   fileGib: 100,
 } as const
 
@@ -174,37 +204,23 @@ export function usagePricingPublished(value: string | undefined = process.env.NE
   return value === 'published'
 }
 
-/**
- * Whether the egress rate may be advertised. Only once files are served by the
- * CDN whose cost has been verified; until then egress is metered and capped but
- * its price is not stated.
- */
-export function egressPricePublished(value: string | undefined = process.env.NEXT_PUBLIC_EGRESS_TERMS): boolean {
-  return value === 'cdn'
-}
-
 export interface UsagePriceRow {
   axis: OverageAxis
   label: string
   included: string
-  rate: string
+  /** The published rate past the included amount, or null while it is not published. */
+  rate: string | null
 }
 
-/** The Pro usage table: included, then the rate past it. Egress only when publishable. */
-export function proUsagePriceRows(opts: { includeEgress: boolean }): UsagePriceRow[] {
-  const rate = (axis: OverageAxis, terms: EgressTerms = 'direct') => {
-    const p = overagePrice(axis, terms)
-    return `$${(p.cents / 100).toFixed(p.cents < 1 ? 3 : 2)} ${p.label}`
-  }
-  const rows: UsagePriceRow[] = [
+/** Pro's included amount of each billable axis, and its rate where that is published. */
+export function proUsagePriceRows(): UsagePriceRow[] {
+  const rate = (axis: OverageAxis) => (OVERAGE_RATE_PUBLISHED[axis] ? formatRate(axis) : null)
+  const egressGib = (includedEgressMb('BUILDER', 'cdn') ?? 0) / 1024
+  return [
     { axis: 'mau', label: 'Monthly active users', included: PRO_INCLUDED.mau.toLocaleString('en-US'), rate: rate('mau') },
     { axis: 'db_bytes', label: 'Database', included: `${PRO_INCLUDED.dbGib} GB`, rate: rate('db_bytes') },
     { axis: 'file_bytes', label: 'File storage', included: `${PRO_INCLUDED.fileGib} GB`, rate: rate('file_bytes') },
     { axis: 'fn_runs', label: 'Function runs', included: `${PRO_INCLUDED.fnRuns / 1_000_000}M`, rate: rate('fn_runs') },
+    { axis: 'egress_bytes', label: 'Egress', included: `${egressGib} GB`, rate: rate('egress_bytes') },
   ]
-  if (opts.includeEgress) {
-    const gib = (includedEgressMb('BUILDER', 'cdn') ?? 0) / 1024
-    rows.push({ axis: 'egress_bytes', label: 'Egress', included: `${gib} GB`, rate: rate('egress_bytes', 'cdn') })
-  }
-  return rows
 }

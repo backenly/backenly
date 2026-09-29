@@ -51,10 +51,9 @@ COPY . .
 ARG NEXT_PUBLIC_APP_URL=http://localhost:3000
 ARG NEXT_PUBLIC_API_URL=http://localhost:3001
 # Usage pricing on the public pricing page (lib/pricing/catalog.ts). Nothing is
-# advertised unless a release passes `published`; the egress rate additionally
-# needs `cdn`. The defaults are explicit non-publishing values, not empty ones.
+# advertised unless a release passes `published`, and then only the rates the
+# catalog publishes. The default is an explicit non-publishing value, not empty.
 ARG NEXT_PUBLIC_USAGE_PRICING=unpublished
-ARG NEXT_PUBLIC_EGRESS_TERMS=direct
 ARG NEXT_PUBLIC_SENTRY_DSN=""
 ARG NEXT_PUBLIC_TURNSTILE_SITE_KEY=""
 ARG NEXT_PUBLIC_ENABLE_PHASE_10_BUILD_HISTORY=true
@@ -64,7 +63,6 @@ ARG BACKENLY_EDITION=cloud
 ENV NEXT_PUBLIC_APP_URL=$NEXT_PUBLIC_APP_URL \
     NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL \
     NEXT_PUBLIC_USAGE_PRICING=$NEXT_PUBLIC_USAGE_PRICING \
-    NEXT_PUBLIC_EGRESS_TERMS=$NEXT_PUBLIC_EGRESS_TERMS \
     NEXT_PUBLIC_SENTRY_DSN=$NEXT_PUBLIC_SENTRY_DSN \
     NEXT_PUBLIC_TURNSTILE_SITE_KEY=$NEXT_PUBLIC_TURNSTILE_SITE_KEY \
     NEXT_PUBLIC_ENABLE_PHASE_10_BUILD_HISTORY=$NEXT_PUBLIC_ENABLE_PHASE_10_BUILD_HISTORY \
