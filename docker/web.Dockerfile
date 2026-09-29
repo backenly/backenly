@@ -97,9 +97,30 @@ RUN npx tsx scripts/verify-public-build-inputs.ts --artifact
 # ── Runtime ─────────────────────────────────────────────────────────────────
 FROM node:20-slim AS runtime
 
+# pg_dump and psql for project database backups and restores
+# (lib/services/workspace-backup.ts), which the web process runs every day.
+# The image carried neither: every scheduled backup failed with
+# "spawn pg_dump ENOENT" in staging and production alike. The server is
+# PostgreSQL 16, and pg_dump refuses a server newer than itself, so Debian's own
+# client (15 on bookworm) cannot back it up either. The client comes from the
+# PostgreSQL project's apt repository; its signing key is accepted only if the
+# fingerprint matches, and the build asserts the installed version below.
+ARG PG_CLIENT_MAJOR=16
+ARG PGDG_KEY_FINGERPRINT=B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8
 RUN apt-get update \
- && apt-get install -y --no-install-recommends openssl ca-certificates \
+ && apt-get install -y --no-install-recommends openssl ca-certificates curl gnupg \
+ && install -d /usr/share/postgresql-common/pgdg \
+ && curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+ && test "$(gpg --show-keys --with-colons /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc | awk -F: '/^fpr/ {print $10; exit}')" = "$PGDG_KEY_FINGERPRINT" \
+ && . /etc/os-release \
+ && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends "postgresql-client-${PG_CLIENT_MAJOR}" \
+ && apt-get purge -y curl gnupg \
+ && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/*
+RUN pg_dump --version | grep -E "^pg_dump \(PostgreSQL\) ${PG_CLIENT_MAJOR}\." \
+ && psql --version | grep -E "^psql \(PostgreSQL\) ${PG_CLIENT_MAJOR}\."
 
 WORKDIR /app
 
