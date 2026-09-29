@@ -22,7 +22,17 @@ export async function POST(request: NextRequest) {
       console.log('[Storage API] Uploading file for project:', projectId)
 
       try {
-        const formData = await request.formData()
+        let formData: FormData
+        try {
+          formData = await request.formData()
+        } catch {
+          // Not multipart, or a body with no Content-Length (which the middleware
+          // cannot size up front) that arrived cut short. The caller's to fix.
+          return NextResponse.json(
+            { success: false, code: 'INVALID_UPLOAD_BODY', message: 'The upload could not be read as multipart form data.' },
+            { status: 400 },
+          )
+        }
         const file = formData.get('file') as File
         const bucketId = formData.get('bucketId') as string
 

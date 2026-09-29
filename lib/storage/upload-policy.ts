@@ -10,6 +10,7 @@
  * One set of checks now, and one error type that carries its own status.
  */
 import path from 'path'
+import { MAX_BUFFERED_UPLOAD_FILE_BYTES } from '@/lib/storage/body-limits'
 
 export type UploadRejectionCode =
   | 'BUCKET_NOT_FOUND'
@@ -129,9 +130,11 @@ export function assertFileAllowed(bucket: BucketUploadRules, file: { name: strin
 /**
  * The most one upload may carry when it passes through the server, which holds
  * the whole file in memory on its way to storage. Direct-to-S3 multipart
- * uploads never pass through and are bounded by their own route.
+ * uploads never pass through and are bounded by their own route. The request
+ * body that carries it is sized in lib/storage/body-limits.ts, which is also
+ * what the middleware and Next's body buffer are set from.
  */
-export const MAX_BUFFERED_UPLOAD_BYTES = BigInt(100 * 1024 * 1024)
+export const MAX_BUFFERED_UPLOAD_BYTES = BigInt(MAX_BUFFERED_UPLOAD_FILE_BYTES)
 
 /**
  * The per-file rule, the same for both drivers: the bucket's own limit, which
