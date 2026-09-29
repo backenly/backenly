@@ -21,6 +21,7 @@ import jwt from 'jsonwebtoken'
 import { JWTSecretManager, resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { asyncRoute } from '../lib/async-route'
 import { touchProjectActivity } from '@/lib/projects/activity'
+import { emitEndUserCreated } from '@/lib/services/end-user-auth-events'
 import { canAcceptNewEndUser, trackEndUserActive } from '@/lib/quota/kernel'
 
 const router = Router()
@@ -214,6 +215,11 @@ async function handleSignUp(req: Request, res: Response) {
     // signup route always did this; this one, which serves single-box
     // installs, did not.
     trackEndUserActive(projectId, String(user.id), user.email).catch(() => {})
+
+    // auth.user.created, through the emitter the Next route also uses. This
+    // server never emitted it, so a single-box install's subscribers never heard
+    // of a sign-up. Reserved test accounts are skipped inside.
+    void emitEndUserCreated(projectId, user)
 
     // Non-blocking: fire on_signup AI functions. Synthetic verifier accounts are
     // filtered inside fireAiFunctionsOnSignup, not here — two signup routes call

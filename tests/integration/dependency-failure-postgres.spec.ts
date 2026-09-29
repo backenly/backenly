@@ -242,7 +242,7 @@ describe('every path works through the proxy first', () => {
 
   it('a write path creates an end user', async () => {
     const res = await endUserSignup('control@example.test', END_USER_PASSWORD)
-    expect(res.status).toBe(200)
+    expect(res.status).toBe(201)
     expect(await endUserEmails()).toContain('control@example.test')
   }, 120_000)
 })
@@ -298,7 +298,8 @@ describe('while the database transport is cut', () => {
 
   it('a write path does not report success', async () => {
     const res = await endUserSignup('written-during-outage@example.test', END_USER_PASSWORD)
-    expect(res.status).not.toBe(200)
+    // Signup succeeds with 201, so "not 200" would pass even if it succeeded.
+    expect(res.status >= 200 && res.status < 300).toBe(false)
   }, 120_000)
 
   it('an authorization wrapper reports an OUTAGE, not a rejected credential', async () => {
@@ -366,7 +367,7 @@ describe('once the database comes back', () => {
 
   it('the write path works again, and the row is really there', async () => {
     const res = await endUserSignup('after-recovery@example.test', END_USER_PASSWORD)
-    expect(res.status).toBe(200)
+    expect(res.status).toBe(201)
     expect(await endUserEmails()).toContain('after-recovery@example.test')
   }, 120_000)
 })
