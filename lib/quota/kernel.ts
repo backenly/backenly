@@ -21,8 +21,8 @@
  *
  * SEMANTICS (product decisions, locked):
  *   • Quotas belong to the billing account (the project owner today) and are
- *     POOLED across all of its projects: 10 GB of database is 10 GB for the
- *     account, not 10 GB per project (lib/usage/pool.ts).
+ *     POOLED across all of its projects: 8 GB of database is 8 GB for the
+ *     account, not 8 GB per project (lib/usage/pool.ts).
  *   • At the quota the gate blocks, unless the owner's spend limit allows
  *     overage (lib/usage/overage.ts effectiveCap). Alerts at 50/80/100% are
  *     sent once each by lib/usage/alerts.ts.

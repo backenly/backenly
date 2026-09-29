@@ -294,7 +294,7 @@ describe('only an enforce policy with a spend limit raises a cap', () => {
 
     const on = computeAccountLimits(pro(), over, enforce, 'cdn', true)
     expect(on.axes.egress_bytes.billable).toBe(true)
-    expect(on.axes.egress_bytes.estimatedCents).toBeCloseTo(18, 6) // 2 GiB x $0.09
+    expect(on.axes.egress_bytes.estimatedCents).toBeCloseTo(24, 6) // 2 GiB x $0.12
     expect(on.axes.egress_bytes.headroom).toBeGreaterThan(0)
   })
 })
