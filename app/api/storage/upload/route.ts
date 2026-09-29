@@ -14,6 +14,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { withTenantIsolation, TenantIsolationError } from '@/lib/tenant/isolation'
 import { storageService } from '@/lib/services/storage'
 import { assertQuotaAvailable, QuotaExceededError } from '@/lib/services/storageQuota'
+import { isUploadRejected } from '@/lib/storage/upload-policy'
 
 export async function POST(request: NextRequest) {
   try {
@@ -85,6 +86,15 @@ export async function POST(request: NextRequest) {
               },
             },
             { status: 413 }
+          )
+        }
+        // A refusal of the upload itself (a blocked type, a file over the
+        // bucket's limit, a name that exists under a deny policy) is the
+        // caller's to fix: answer with its own status, not 500.
+        if (isUploadRejected(error)) {
+          return NextResponse.json(
+            { success: false, message: error.message, code: error.code },
+            { status: error.status },
           )
         }
         console.error('[Storage API] Failed to upload file:', error)

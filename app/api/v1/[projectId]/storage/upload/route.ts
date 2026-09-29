@@ -8,6 +8,7 @@ import { storageService } from '@/lib/services/storage'
 import { prisma } from '@/lib/db'
 import { processImage, mimeToExtension } from '@/lib/storage/image-processor'
 import { assertQuotaAvailable, QuotaExceededError } from '@/lib/services/storageQuota'
+import { isUploadRejected } from '@/lib/storage/upload-policy'
 import path from 'path'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
@@ -204,19 +205,21 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       return createErrorResponse(ErrorCodes.FORBIDDEN, error.message, 413)
     }
 
-    console.error('Storage upload error:', error)
-
-    // Surface validation errors from the storage service as 400, not 500
-    if (
-      error.message?.includes('not allowed') ||
-      error.message?.includes('exceeds') ||
-      error.message?.includes('quota') ||
-      error.message?.includes('spoofing') ||
-      error.message?.includes('already exists')
-    ) {
-      return createErrorResponse(ErrorCodes.BAD_REQUEST, error.message, 400)
+    // A refusal of the upload itself (lib/storage/upload-policy.ts) carries its
+    // own status. This used to be recognised by words in the message, which
+    // missed any refusal worded differently and would have mislabelled a real
+    // failure that happened to contain "exceeds".
+    if (isUploadRejected(error)) {
+      const code =
+        error.status === 404 ? ErrorCodes.NOT_FOUND
+        : error.status === 403 ? ErrorCodes.FORBIDDEN
+        : error.status === 409 ? ErrorCodes.CONFLICT
+        : error.status === 413 ? ErrorCodes.PLAN_LIMIT_EXCEEDED
+        : ErrorCodes.VALIDATION_ERROR
+      return createErrorResponse(code, error.message, error.status, { reason: error.code })
     }
 
+    console.error('Storage upload error:', error)
     return createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Failed to upload file', 500)
   }
 }
