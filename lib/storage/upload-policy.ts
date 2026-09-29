@@ -126,8 +126,23 @@ export function assertFileAllowed(bucket: BucketUploadRules, file: { name: strin
   }
 }
 
-/** A file larger than its bucket's or its project's per-file limit. */
-export function assertFileSize(size: bigint, limits: { bucketMaxBytes: bigint; projectMaxBytes?: bigint | null }): void {
+/**
+ * The most one upload may carry when it passes through the server, which holds
+ * the whole file in memory on its way to storage. Direct-to-S3 multipart
+ * uploads never pass through and are bounded by their own route.
+ */
+export const MAX_BUFFERED_UPLOAD_BYTES = BigInt(100 * 1024 * 1024)
+
+/**
+ * The per-file rule, the same for both drivers: the bucket's own limit, which
+ * its owner sets, and never more than MAX_BUFFERED_UPLOAD_BYTES.
+ *
+ * Project.maxFileSize is deliberately not part of it. Nothing can set that
+ * column (it is 10 MB on every project), and the local driver used to apply
+ * it, so a bucket raised above 10 MB, and every local multipart upload over
+ * 10 MB, was refused on self-host while Backenly Cloud accepted the same file.
+ */
+export function assertFileSize(size: bigint, limits: { bucketMaxBytes: bigint }): void {
   const mb = (b: bigint) => Number(b) / (1024 * 1024)
   if (size > limits.bucketMaxBytes) {
     throw new UploadRejectedError(
@@ -135,10 +150,11 @@ export function assertFileSize(size: bigint, limits: { bucketMaxBytes: bigint; p
       `File size (${mb(size).toFixed(2)}MB) exceeds bucket's maximum allowed size (${mb(limits.bucketMaxBytes)}MB)`,
     )
   }
-  if (limits.projectMaxBytes !== undefined && limits.projectMaxBytes !== null && size > limits.projectMaxBytes) {
+  if (size > MAX_BUFFERED_UPLOAD_BYTES) {
     throw new UploadRejectedError(
       'FILE_TOO_LARGE',
-      `File size (${mb(size).toFixed(2)}MB) exceeds maximum allowed size (${mb(limits.projectMaxBytes)}MB)`,
+      `File size (${mb(size).toFixed(2)}MB) exceeds the ${mb(MAX_BUFFERED_UPLOAD_BYTES)}MB limit for a single upload. ` +
+        'Use a multipart upload for larger files.',
     )
   }
 }

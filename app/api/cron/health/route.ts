@@ -8,6 +8,7 @@ export const dynamic = 'force-dynamic'
 
 import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
+import { isSchedulerLeader } from '@/lib/scheduler/leader'
 
 export async function GET() {
   const schedulerStartedAt = (globalThis as any).__cronSchedulerStartedAt ?? null
@@ -28,6 +29,9 @@ export async function GET() {
     ok: true,
     mode: isVercel ? 'vercel-cron' : 'node-cron',
     schedulerStartedAt,
+    // Whether THIS instance runs the jobs. With several instances exactly one
+    // answers true; the others schedule but stand by (lib/scheduler/leader.ts).
+    schedulerLeader: isVercel ? null : isSchedulerLeader(),
     activeCronJobs,
     lastExecutedJob: lastRunJob
       ? { name: lastRunJob.name, lastRun: lastRunJob.lastRun, status: lastRunJob.status }

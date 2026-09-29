@@ -11,6 +11,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
+  MAX_BUFFERED_UPLOAD_BYTES,
   UploadRejectedError,
   assertFileAllowed,
   assertFileSize,
@@ -60,12 +61,25 @@ describe('type and extension', () => {
 
 describe('size', () => {
   const MB = BigInt(1024 * 1024)
-  it("answers 413 past the bucket's or the project's per-file limit", () => {
+  it("answers 413 past the bucket's per-file limit", () => {
     expect(refusal(() => assertFileSize(BigInt(6) * MB, { bucketMaxBytes: BigInt(5) * MB })))
       .toMatchObject({ code: 'FILE_TOO_LARGE', status: 413 })
-    expect(refusal(() => assertFileSize(BigInt(6) * MB, { bucketMaxBytes: BigInt(10) * MB, projectMaxBytes: BigInt(5) * MB })))
+    expect(refusal(() => assertFileSize(BigInt(4) * MB, { bucketMaxBytes: BigInt(5) * MB }))).toBeNull()
+  })
+
+  it('accepts what a raised bucket allows, past the 10 MB nothing could change', () => {
+    // Project.maxFileSize (10 MB on every project, no writer) is not part of
+    // the rule: a bucket its owner raised to 50 MB takes a 40 MB file on
+    // either driver.
+    expect(refusal(() => assertFileSize(BigInt(40) * MB, { bucketMaxBytes: BigInt(50) * MB }))).toBeNull()
+  })
+
+  it('never lets one upload through the server exceed the shared ceiling', () => {
+    // The 2 GB bucket the multipart route creates does not lift it.
+    expect(MAX_BUFFERED_UPLOAD_BYTES).toBe(BigInt(100) * MB)
+    expect(refusal(() => assertFileSize(MAX_BUFFERED_UPLOAD_BYTES, { bucketMaxBytes: BigInt(2048) * MB }))).toBeNull()
+    expect(refusal(() => assertFileSize(MAX_BUFFERED_UPLOAD_BYTES + BigInt(1), { bucketMaxBytes: BigInt(2048) * MB })))
       .toMatchObject({ code: 'FILE_TOO_LARGE', status: 413 })
-    expect(refusal(() => assertFileSize(BigInt(4) * MB, { bucketMaxBytes: BigInt(5) * MB, projectMaxBytes: null }))).toBeNull()
   })
 })
 
@@ -86,6 +100,10 @@ describe('one copy of the checks', () => {
     const src = readFileSync(join(ROOT, file), 'utf8')
     expect(src).toMatch(/from '@\/lib\/storage\/upload-policy'/)
     expect(src).toMatch(/assertFileAllowed\(bucket, file\)/)
+    // One per-file rule: the bucket's limit under the shared ceiling, never the
+    // unwritable Project.maxFileSize.
+    expect(src).toMatch(/assertFileSize\(fileSize, \{ bucketMaxBytes: bucket\.maxFileSizeBytes \}\)/)
+    expect(src).not.toMatch(/projectMaxBytes/)
     expect(src).not.toMatch(/const DANGEROUS_EXTENSIONS/)
     expect(src).not.toMatch(/extensionMimeMap/)
   })

@@ -595,3 +595,24 @@ __tests__/usage/usage-anomaly.test.ts
 # bucket policy, pause and usage restriction have allowed it: a CloudFront
 # canned-policy signature over exactly that object, verified with the key.
 __tests__/storage/signed-cdn.test.ts
+
+# One scheduler per database: every web process schedules, and a job runs only
+# where the scheduler's session advisory lock is held. Two instances elect one
+# leader, a stopping leader hands over (a deploy), a killed session stops
+# leading and another takes over, and nothing leads without a database. Session
+# lock semantics are the property under test, so it needs a real Postgres.
+tests/integration/scheduler-leader-lock.spec.ts
+
+# A table a developer creates over a READ_WRITE direct connection belongs to a
+# role the backup role's default privileges never named, so pg_dump failed for
+# that project on every run. backenly_direct_sync_schema now grants the backup
+# role (or backenly.backup_role) read on the schema it syncs, and never write.
+# Mutation-checked: the previous function fails the two grant tests.
+tests/integration/direct-access-backup-grants.spec.ts
+
+# Both storage drivers apply one per-file rule: the bucket's own limit under the
+# shared ceiling for uploads through the server. The local driver also applied
+# Project.maxFileSize, which nothing can set (10 MB everywhere), so a raised
+# bucket and every local multipart upload over 10 MB were refused on self-host.
+# Mutation-checked: the previous driver refuses the 12 MB file.
+tests/integration/local-upload-file-size.spec.ts

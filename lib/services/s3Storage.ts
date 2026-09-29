@@ -310,9 +310,7 @@ export class S3StorageService implements StorageService {
     // Block if user exceeded subscription storage limit
     await enforceStorageBillingQuota(options.projectId, Number(fileSize))
 
-    // The bucket's per-file limit. (This driver has never applied the project's
-    // maxFileSize, unlike the local one; enforcing it here would change what
-    // production accepts, so it is left as it was.)
+    // The per-file rule both drivers share (lib/storage/upload-policy.ts).
     assertFileSize(fileSize, { bucketMaxBytes: bucket.maxFileSizeBytes })
 
     // ============ OVERWRITE STRATEGY HANDLING ============
