@@ -10,7 +10,9 @@
  * WHAT IS OUT HERE
  *
  *   1. Backup dumps  — `<BACKUP_DIR>/<projectId>/*.sql.gz`, one full pg_dump of
- *                      the workspace per day (lib/services/workspace-backup.ts).
+ *                      the workspace per day (lib/services/workspace-backup.ts),
+ *                      and, when BACKUP_S3_BUCKET is set, the same dumps in the
+ *                      snapshot bucket (lib/services/snapshot-store.ts).
  *                      The densest copy of a customer's data on the box.
  *   2. Storage objects — local `<STORAGE_DIR>/<projectId>/<bucket>/…`, or S3
  *                      keys under the `<projectId>/` prefix
@@ -251,7 +253,16 @@ export async function purgeProjectExternals(
 ): Promise<PurgeReport> {
   assertValidProjectId(projectId)
 
-  const backups = await removeDirectory(backupRoot(), path.join(/*turbopackIgnore: true*/ backupRoot(), projectId))
+  const onDisk = await removeDirectory(backupRoot(), path.join(/*turbopackIgnore: true*/ backupRoot(), projectId))
+  // Both homes, always: snapshots taken before a deployment moved to the bucket
+  // stay on disk, and the ones after it are only in the bucket.
+  // Imported only then, like the storage purge below, so a disk-only install
+  // never loads the AWS SDK.
+  const inBucket = process.env.BACKUP_S3_BUCKET?.trim()
+    ? await (await import('@/lib/services/snapshot-store')).purgeProjectSnapshots(projectId)
+    : null
+  const backups: PurgeResourceStatus =
+    onDisk === 'purged' || (inBucket ?? 0) > 0 ? 'purged' : onDisk
 
   let storage: PurgeResourceStatus
   let objectsDeleted = 0
