@@ -595,3 +595,10 @@ __tests__/usage/usage-anomaly.test.ts
 # bucket policy, pause and usage restriction have allowed it: a CloudFront
 # canned-policy signature over exactly that object, verified with the key.
 __tests__/storage/signed-cdn.test.ts
+
+# Both storage drivers apply one per-file rule: the bucket's own limit under the
+# shared ceiling for uploads through the server. The local driver also applied
+# Project.maxFileSize, which nothing can set (10 MB everywhere), so a raised
+# bucket and every local multipart upload over 10 MB were refused on self-host.
+# Mutation-checked: the previous driver refuses the 12 MB file.
+tests/integration/local-upload-file-size.spec.ts

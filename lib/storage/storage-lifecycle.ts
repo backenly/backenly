@@ -30,6 +30,7 @@ import { PrismaClient } from '@prisma/client'
 import { S3Client, ListObjectsV2Command, DeleteObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3'
 import crypto from 'crypto'
 import { getProjectQuota } from '@/lib/services/storageQuota'
+import { MAX_BUFFERED_UPLOAD_BYTES } from '@/lib/storage/upload-policy'
 
 const prisma = new PrismaClient()
 
@@ -54,7 +55,7 @@ export interface StorageQuota {
  * Default quotas (production-safe)
  */
 const DEFAULT_QUOTAS: StorageQuota = {
-  maxFileSize: BigInt(100 * 1024 * 1024),            // 100 MB per file
+  maxFileSize: MAX_BUFFERED_UPLOAD_BYTES,            // the shared per-upload ceiling (upload-policy.ts)
   maxFileCount: 10000,                                // 10k files per project
   maxOrphansAllowed: 100,                             // Max 100 orphans before alert
 }

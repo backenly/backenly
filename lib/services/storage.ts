@@ -247,7 +247,6 @@ class LocalStorageService implements StorageService {
     const project = await prisma.project.findUnique({
       where: { id: options.projectId },
       select: {
-        maxFileSize: true,
         maxFilesPerBucket: true,
       },
     })
@@ -257,7 +256,7 @@ class LocalStorageService implements StorageService {
     }
 
     const fileSize = BigInt(file.buffer.length)
-    assertFileSize(fileSize, { bucketMaxBytes: bucket.maxFileSizeBytes, projectMaxBytes: project.maxFileSize })
+    assertFileSize(fileSize, { bucketMaxBytes: bucket.maxFileSizeBytes })
 
     // Check the account's pooled storage against the owner's plan (storageQuota.ts owns it)
     const quota = await getProjectQuota(options.projectId, BigInt(fileSize))
@@ -265,7 +264,8 @@ class LocalStorageService implements StorageService {
       const limitGB = Number(quota.limit) / (1024 * 1024 * 1024)
       const usedGB = Number(quota.used) / (1024 * 1024 * 1024)
       const availableGB = Number(quota.available) / (1024 * 1024 * 1024)
-      throw new Error(
+      throw new UploadRejectedError(
+        'STORAGE_QUOTA_EXCEEDED',
         `Storage quota exceeded. Used: ${usedGB.toFixed(2)}GB / ${limitGB.toFixed(2)}GB. ` +
         `Available: ${availableGB.toFixed(2)}GB. Please upgrade your plan or delete unused files.`
       )
