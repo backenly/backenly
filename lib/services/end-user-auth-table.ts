@@ -594,10 +594,27 @@ export async function stampLastLogin(
     true,
     `ALTER TABLE "${schemaName}"."users" ADD COLUMN IF NOT EXISTS "last_login" TIMESTAMP WITH TIME ZONE`,
   )
+  // Bind the id as the column's own type. A bare $1 arrives as text, and
+  // uuid = text has no operator, so on every workspace whose users.id is uuid
+  // this stamp failed (quietly: the callers catch it) and "active · 30d" never
+  // counted anyone. Casting by the id's shape instead, as buildUserInsert does
+  // for its VALUES, would break a text id that happens to hold a uuid. Matching
+  // the column's type also keeps its primary-key index usable.
+  const idType = await executeWithUserContext<{ data_type: string }>(
+    '',
+    true,
+    `SELECT data_type FROM information_schema.columns
+      WHERE table_schema = $1 AND table_name = 'users' AND column_name = 'id'`,
+    [schemaName],
+  )
+  const dataType = idType[0]?.data_type ?? ''
+  const cast = dataType === 'uuid'
+    ? '::uuid'
+    : ['smallint', 'integer', 'bigint'].includes(dataType) ? '::bigint' : ''
   await executeWithUserContext(
     '',
     true,
-    `UPDATE "${schemaName}"."users" SET "last_login" = NOW() WHERE id = $1`,
-    [userId],
+    `UPDATE "${schemaName}"."users" SET "last_login" = NOW() WHERE id = $1${cast}`,
+    [String(userId)],
   )
 }

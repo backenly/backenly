@@ -616,3 +616,9 @@ tests/integration/direct-access-backup-grants.spec.ts
 # bucket and every local multipart upload over 10 MB were refused on self-host.
 # Mutation-checked: the previous driver refuses the 12 MB file.
 tests/integration/local-upload-file-size.spec.ts
+
+# Sign-in stamps last_login whatever type users.id is. The id was bound as text
+# and uuid = text has no operator, so every uuid-keyed workspace failed the stamp
+# silently (callers catch it) and "active · 30d" never moved. Server-side type
+# resolution is the property, so it needs a real Postgres.
+tests/integration/last-login-id-type.spec.ts
