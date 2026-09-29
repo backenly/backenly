@@ -15,10 +15,12 @@
  * an operator cannot mistake one for the other. A generic "Backup" button that
  * could mean either is the thing this naming exists to prevent.
  *
- * Every path here is BACKUP_DIR/<projectId>/<timestamp>.sql.gz: created, read
- * and pruned at runtime, and absent when Next builds. The filesystem calls
- * therefore carry turbopackIgnore; without it the tracer cannot resolve them
- * and falls back to tracing the whole repository into .next/standalone.
+ * A snapshot lives on disk at BACKUP_DIR/<projectId>/<timestamp>.sql.gz, or,
+ * when BACKUP_S3_BUCKET is set, in that bucket (lib/services/snapshot-store.ts);
+ * each row records which. Paths are created, read and pruned at runtime, and
+ * absent when Next builds. The filesystem calls therefore carry turbopackIgnore;
+ * without it the tracer cannot resolve them and falls back to tracing the whole
+ * repository into .next/standalone.
  *
  * Features:
  *  - Daily scheduled backups (triggered by cron-runner.ts)
@@ -35,11 +37,24 @@ import { execFile } from 'child_process'
 import { randomBytes } from 'crypto'
 import { promisify } from 'util'
 import * as fs from 'fs'
+import * as os from 'os'
 import * as path from 'path'
 import * as zlib from 'zlib'
+import type { Readable } from 'stream'
 import { pipeline } from 'stream/promises'
 import { prisma } from '@/lib/db/prisma'
 import { isCloudEdition } from '@/lib/edition/cloud-only'
+import {
+  deleteSnapshot,
+  fetchSnapshotToFile,
+  isS3Location,
+  openS3Snapshot,
+  putSnapshot,
+  s3LocationBelongsTo,
+  snapshotBucket,
+  snapshotKey,
+  s3Location,
+} from '@/lib/services/snapshot-store'
 
 const execFileAsync = promisify(execFile)
 
@@ -57,6 +72,17 @@ const MIN_RETAINED_PER_PROJECT = 2
 
 function getBackupDir(projectId: string): string {
   return path.join(/*turbopackIgnore: true*/ BACKUP_DIR, projectId)
+}
+
+/**
+ * Where a dump is written while it is being taken. On disk-backed installs that
+ * is its final home; with BACKUP_S3_BUCKET it is scratch space on the task's own
+ * disk, emptied as soon as the upload is verified (lib/services/snapshot-store.ts).
+ */
+function getWorkDir(projectId: string): string {
+  return snapshotBucket()
+    ? path.join(/*turbopackIgnore: true*/ os.tmpdir(), 'backenly-snapshots', projectId)
+    : getBackupDir(projectId)
 }
 
 /**
@@ -230,11 +256,14 @@ export interface BackupResult {
  */
 export async function backupWorkspace(projectId: string): Promise<BackupResult> {
   const schemaName = `workspace_${projectId}`
-  const backupDir = getBackupDir(projectId)
+  const backupDir = getWorkDir(projectId)
   const filename = getBackupFilename()
   const sqlPath = path.join(/*turbopackIgnore: true*/ backupDir, filename.replace('.gz', ''))
   const gzPath = path.join(backupDir, filename)
   const createdAt = new Date().toISOString()
+  // Set once an upload is attempted, so a failure after it can remove the object.
+  const bucket = snapshotBucket()
+  let uploadedTo: string | null = null
 
   try {
     // Ensure backup directory exists
@@ -263,23 +292,34 @@ export async function backupWorkspace(projectId: string): Promise<BackupResult> 
 
     const stat = await fs.promises.stat(/*turbopackIgnore: true*/ gzPath)
 
+    // With a snapshot bucket, the dump's home is S3: upload it, prove it arrived
+    // whole, and only then drop the local copy. putSnapshot throws on anything
+    // short of a verified object, so the row below is never written as
+    // completed for a snapshot that is not actually stored.
+    let location = gzPath
+    if (bucket) {
+      uploadedTo = s3Location(bucket, snapshotKey(projectId, filename))
+      location = (await putSnapshot(projectId, filename, gzPath)).location
+      await fs.promises.unlink(/*turbopackIgnore: true*/ gzPath).catch(() => {})
+    }
+
     // Record in DB
     await prisma.workspaceBackup.create({
       data: {
         projectId,
         filename,
-        filePath: gzPath,
+        filePath: location,
         sizeBytes: stat.size,
         schemaName,
         status: 'completed',
       },
     })
 
-    console.log(`[Backup] Created backup for ${projectId}: ${filename} (${stat.size} bytes)`)
+    console.log(`[Backup] Created backup for ${projectId}: ${filename} (${stat.size} bytes${bucket ? ', S3' : ''})`)
 
     return {
       success: true,
-      filePath: gzPath,
+      filePath: location,
       filename,
       sizeBytes: stat.size,
       projectId,
@@ -316,9 +356,11 @@ export async function backupWorkspace(projectId: string): Promise<BackupResult> 
       },
     }).catch(() => {})
 
-    // Clean up any partial files
+    // Clean up any partial files, and any object an interrupted upload left: a
+    // failed snapshot must not leave bytes behind that nothing will ever prune.
     await fs.promises.unlink(/*turbopackIgnore: true*/ sqlPath).catch(() => {})
     await fs.promises.unlink(/*turbopackIgnore: true*/ gzPath).catch(() => {})
+    if (uploadedTo) await deleteSnapshot(uploadedTo).catch(() => {})
 
     return { success: false, error: message, projectId, createdAt }
   }
@@ -355,14 +397,23 @@ export async function restoreWorkspace(
     return { success: false, error: 'No completed backup found for this project' }
   }
 
-  if (!fs.existsSync(/*turbopackIgnore: true*/ backup.filePath)) {
+  // An S3 snapshot is copied to scratch space first; a disk one is read in place.
+  const fromS3 = isS3Location(backup.filePath)
+  if (fromS3 && !s3LocationBelongsTo(backup.filePath, projectId)) {
+    return { success: false, error: `Backup ${backup.filename} is not stored under this project` }
+  }
+  if (!fromS3 && !fs.existsSync(/*turbopackIgnore: true*/ backup.filePath)) {
     return { success: false, error: `Backup file not found on disk: ${backup.filename}` }
   }
+  const workDir = path.join(/*turbopackIgnore: true*/ os.tmpdir(), 'backenly-restore', projectId)
+  const gzPath = fromS3 ? path.join(workDir, backup.filename) : backup.filePath
 
   // Short enough to stay inside Postgres's 63-byte identifier limit:
   // workspace_<uuid> is already 46 characters.
   const asideName = `${schemaName}_pre${randomBytes(3).toString('hex')}`
-  const sqlPath = backup.filePath.replace('.gz', '.restore.sql')
+  const sqlPath = fromS3
+    ? path.join(workDir, backup.filename.replace('.gz', '.restore.sql'))
+    : backup.filePath.replace('.gz', '.restore.sql')
   let renamed = false
 
   try {
@@ -370,10 +421,19 @@ export async function restoreWorkspace(
     // the backup role. See buildConnection.
     const conn = buildConnection('write')
 
+    // Fetch (and checksum) the S3 copy BEFORE touching the live schema, for the
+    // same reason as decompressing first: a snapshot that is missing, damaged
+    // or not the dump that was taken must fail while the project's data is
+    // still there.
+    if (fromS3) {
+      await fs.promises.mkdir(/*turbopackIgnore: true*/ workDir, { recursive: true })
+      await fetchSnapshotToFile(backup.filePath, gzPath)
+    }
+
     // Decompress BEFORE touching the live schema. A corrupt or truncated
     // archive must fail while the project's data is still there.
     await pipeline(
-      fs.createReadStream(/*turbopackIgnore: true*/ backup.filePath),
+      fs.createReadStream(/*turbopackIgnore: true*/ gzPath),
       zlib.createGunzip(),
       fs.createWriteStream(/*turbopackIgnore: true*/ sqlPath)
     )
@@ -425,6 +485,7 @@ export async function restoreWorkspace(
       await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${asideName}" CASCADE`)
     }
     await fs.promises.unlink(/*turbopackIgnore: true*/ sqlPath).catch(() => {})
+    if (fromS3) await fs.promises.unlink(/*turbopackIgnore: true*/ gzPath).catch(() => {})
 
     console.log(`[Restore] Restored ${projectId} from ${backup.filename} (${count} relations)`)
 
@@ -456,6 +517,7 @@ export async function restoreWorkspace(
     }
 
     await fs.promises.unlink(/*turbopackIgnore: true*/ sqlPath).catch(() => {})
+    if (fromS3) await fs.promises.unlink(/*turbopackIgnore: true*/ gzPath).catch(() => {})
     return { success: false, error: message }
   }
 }
@@ -479,24 +541,35 @@ export async function listBackups(projectId: string) {
 }
 
 /**
- * The on-disk file of one COMPLETED snapshot of this project, or null.
+ * One COMPLETED snapshot of this project, ready to stream to its owner, or null.
  *
- * For handing a snapshot to its owner (the download route). The row's
- * `filePath` is checked to resolve inside this project's own backup directory
- * before anything is opened: the path comes from the database, and a row that
- * pointed anywhere else must not become a way to read an arbitrary file off the
- * server. Returns null for another project's backup, a failed one, a path
- * outside the directory, or a file that is no longer on disk.
+ * For the download route. The row's location comes from the database, so it is
+ * checked before anything is opened: a disk path must resolve inside this
+ * project's own backup directory, and an s3:// location must be the configured
+ * snapshot bucket under this project's own prefix. A row that pointed anywhere
+ * else must not become a way to read an arbitrary file off the server or another
+ * project's snapshot. Returns null for another project's backup, a failed one,
+ * a location outside those bounds, or a snapshot that is no longer stored.
  */
 export async function resolveSnapshotFile(
   projectId: string,
   backupId: string,
-): Promise<{ filePath: string; filename: string; sizeBytes: number } | null> {
+): Promise<{ filename: string; sizeBytes: number; open: () => Promise<Readable> } | null> {
   const row = await prisma.workspaceBackup.findFirst({
     where: { id: backupId, projectId, status: 'completed' },
-    select: { filePath: true, filename: true },
+    select: { filePath: true, filename: true, sizeBytes: true },
   })
   if (!row) return null
+
+  if (isS3Location(row.filePath)) {
+    if (!s3LocationBelongsTo(row.filePath, projectId)) return null
+    try {
+      const { stream, sizeBytes } = await openS3Snapshot(row.filePath)
+      return { filename: row.filename, sizeBytes, open: async () => stream }
+    } catch {
+      return null
+    }
+  }
 
   const dir = path.resolve(getBackupDir(projectId))
   const resolved = path.resolve(row.filePath)
@@ -505,7 +578,11 @@ export async function resolveSnapshotFile(
   try {
     const stat = await fs.promises.stat(resolved)
     if (!stat.isFile()) return null
-    return { filePath: resolved, filename: row.filename, sizeBytes: stat.size }
+    return {
+      filename: row.filename,
+      sizeBytes: stat.size,
+      open: async () => fs.createReadStream(/*turbopackIgnore: true*/ resolved),
+    }
   } catch {
     return null
   }
@@ -565,7 +642,14 @@ export async function pruneOldBackups(
     if (b.createdAt >= cutoff) continue
     if (protectedIds.has(b.id)) continue
     if (b.filePath) {
-      await fs.promises.unlink(/*turbopackIgnore: true*/ b.filePath).catch(() => {})
+      try {
+        await deleteSnapshot(b.filePath)
+      } catch (err: any) {
+        // An object that could not be deleted keeps its row, so tomorrow's run
+        // tries again instead of forgetting bytes that are still being billed.
+        console.error(`[Backup] Could not delete ${b.id}; keeping its row for the next run:`, sanitizeError(err?.message ?? ''))
+        continue
+      }
     }
     await prisma.workspaceBackup.delete({ where: { id: b.id } }).catch(() => {})
     pruned++
