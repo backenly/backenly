@@ -158,6 +158,14 @@ export type FindingType =
    * human makes. Classified `notify_only`.
    */
   | 'subsystem_repeat_failure'
+  // ── The spend guard (lib/usage/anomaly.ts) ────────────────────────────────
+  // A project's daily usage (egress, function runs, new MAU) far past its own
+  // fourteen-day median and past an absolute floor. Emitted per axis as
+  // `usage_anomaly_<axis>`. Evidence is the usage ledger and, for egress, the
+  // request paths that carried the day's traffic; it resolves itself once a
+  // day is back near the baseline. No executable repair: whether a spike is a
+  // launch or a runaway loop is the owner's call. Classified `notify_only`.
+  | 'usage_anomaly'
   // ── Phase 4 — medium/high-risk action queued from AI chat or orchestration
   // before it applies. details.executorAction/executorParams carry the exact
   // AIAction to run once approved — see lib/core/auto-fix-engine.ts's
@@ -331,6 +339,8 @@ export const ALL_FINDING_TYPES = [
   // Added 2026-09-14 in the same commit that introduced it, per the discipline
   // the five omissions above were each found in production for.
   'subsystem_repeat_failure',
+  // Added 2026-09-28 in the same commit that introduced it.
+  'usage_anomaly',
 ] as const satisfies ReadonlyArray<FindingType>
 
 // Canonical types — exact matches pass through untouched.
@@ -338,6 +348,8 @@ const CANONICAL: ReadonlySet<string> = new Set<string>(ALL_FINDING_TYPES)
 
 // Category prefix → canonical base. Most-specific first.
 const PREFIX_MAP: ReadonlyArray<readonly [string, FindingType]> = [
+  // One row per axis (`usage_anomaly_egress_bytes`), so recognised by prefix.
+  ['usage_anomaly', 'usage_anomaly'],
   // infra-intelligence emits one type per table (`infra_hot_table_users`), so
   // it can only be recognised by prefix. Must stay ABOVE any shorter prefix it
   // could be confused with.

@@ -12,6 +12,7 @@ import crypto from 'crypto'
 import { verify } from 'jsonwebtoken'
 import { prisma } from '@/lib/db'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
+import { noteEndUserActivity } from '@/lib/quota/kernel'
 
 export interface EndUserIdentity {
   userId: string
@@ -76,6 +77,9 @@ export async function resolveEndUserFromToken(
       }
     }
   }
+  // An authenticated data request is use: count the end user active this month
+  // (throttled to one write a day, never blocks).
+  noteEndUserActivity(projectId, String(payload.userId), typeof payload.email === 'string' ? payload.email : null)
   return { userId: String(payload.userId), role: payload.role ?? 'user' }
 }
 

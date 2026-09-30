@@ -132,13 +132,12 @@ describe('provider disclosure', () => {
     // Not a style check. Each of these is a live outbound path in this
     // repository, and the previous policy named three of them.
     for (const name of [
-      'Hetzner',
-      'Backblaze B2',
+      'Amazon Web Services',
       'Resend',
       'OpenAI',
       'Amplitude',
       'Sentry',
-      'Paddle',
+      'Stripe',
       'Cloudflare',
       'Google',
       'GitHub',
@@ -227,7 +226,7 @@ describe('disclosures that must be present while the behaviour is live', () => {
 
   it('states the hosting location without an absolute geographic negative', () => {
     const intl = JSON.stringify(PRIVACY_SECTIONS.find((s) => s.id === 'international'))
-    expect(intl).toMatch(/Singapore/)
+    expect(intl).toMatch(/Mumbai/)
     expect(intl).toMatch(/may process information in other countries/i)
   })
 

@@ -36,6 +36,8 @@ export function selfHostedEntitlements(): UserEntitlements {
     maxFileStorageMb: null,
     maxRealtimeConnections: null,
     maxAiFunctionInvocationsPerMonth: null,
+    includedEgressMb: null,
+    apiRateLimitPerMin: null,
     maxTriggersPerProject: null,
     maxTeamSeats: 1,
     maxDeploymentHistory: null,

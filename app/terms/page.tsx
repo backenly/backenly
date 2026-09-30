@@ -48,11 +48,12 @@ const sections: LegalSection[] = [
   {
     id: '4',
     title: 'Plans and Billing',
-    content: 'Backenly offers Free, Pro, and Enterprise plans. Billing for paid plans is processed by Paddle.',
+    content: 'Backenly offers Free, Pro, and Enterprise plans. Payments for paid plans, and for usage beyond a plan, are processed by Stripe.',
     list: [
       'Free: one permanent live project with limited monthly capacity',
       'Pro: additional capacity, custom domain, triggers, webhooks, rollback, team seats, and email support',
       'Enterprise: custom limits, SSO, priority support with an SLA, under an individual agreement',
+      'Usage beyond a plan: on Pro, usage past the included quotas is billed monthly in arrears at the rates published on the pricing page, and only after you set a monthly spend limit above zero. Each month’s usage charge will not exceed the spending limit in effect when that month closes. Amounts under $5 are carried to a later month’s invoice and are not collected if your subscription ends. You can lower or remove the limit at any time; raising it requires confirmation from your account email.',
     ],
     extra:
       'By subscribing to a paid plan, you authorize recurring billing. Fees are non-refundable except as stated in our Refund Policy. We may change pricing with reasonable notice.',
@@ -137,7 +138,7 @@ export default function TermsPage() {
           title="Terms of Service"
           subtitle="Please read these terms carefully before using Backenly. By using the service, you agree to be bound by them."
           proof={[
-            { label: 'Last updated', value: 'March 28, 2026' },
+            { label: 'Last updated', value: 'September 28, 2026' },
             { label: 'Scope', value: 'Backenly platform' },
             { label: 'Contact', value: 'support@backenly.com' },
           ]}

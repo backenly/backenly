@@ -551,3 +551,80 @@ tests/integration/apply-migration-existing-table.spec.ts
 # keys, provisioned projects, runtime engine mode.
 tests/integration/mcp-golden-workflows.spec.ts
 tests/integration/mcp-acceptance-cases.spec.ts
+
+# File storage is bounded by the owner's plan and measured by the server: not
+# the unused Project.storageLimit column (1 GiB on every project), not a
+# hardcoded 10 GB on the S3 path, and never a client-supplied storageUsed.
+__tests__/storage/storage-quota-follows-plan.test.ts
+
+# The usage ledger counts every metered quantity exactly once: batches applied
+# with an exactly-once id, a failed or ambiguous flush retried without double
+# counting, a SIGTERM spool replayed once, and an insert-only monthly close.
+__tests__/usage/usage-ledger.test.ts
+
+# Every meter measures what lib/usage/axes.ts says: streamed egress bytes once and
+# never for internal traffic, MAU once per user per month, database size including
+# branch schemas, file size from metadata, and function runs that executed.
+__tests__/usage/usage-meters.test.ts
+
+# Access-log egress (load balancer, S3 presigned downloads, CloudFront) is
+# attributed by path or key and each log object is ingested exactly once.
+__tests__/usage/usage-log-ingest.test.ts
+
+# Quotas are the account's, pooled across its projects (6 GB + 5 GB is over a
+# 10 GB plan), raised past the plan only by an enforce policy with a spend limit
+# and only by what the remaining limit buys; usage alerts are sent once each.
+__tests__/usage/pooled-quotas.test.ts
+
+# Past the grace period the data API is read-only (POST/PUT/PATCH refused, reads
+# and deletes kept) and files stop being served except to members; the plan's
+# fair-use ceiling bounds any one API key's configured rate.
+__tests__/usage/usage-restrictions.test.ts
+
+# A person and an agent read the same account usage: pooled usage against the
+# cap, the month-end forecast from the ledger, the estimated cost past the plan,
+# the spend limit and grace; and no MCP or brain tool can change the limit.
+__tests__/usage/usage-visibility.test.ts
+
+# The spend guard: a project whose daily egress, function runs or new MAU
+# jumps far past its own median becomes one Autonomy finding with ledger and
+# request-path evidence, refreshed while it lasts and resolved when it ends.
+__tests__/usage/usage-anomaly.test.ts
+
+# Behind a signed CDN every file leaves from the edge, and only after the
+# bucket policy, pause and usage restriction have allowed it: a CloudFront
+# canned-policy signature over exactly that object, verified with the key.
+__tests__/storage/signed-cdn.test.ts
+
+# One scheduler per database: every web process schedules, and a job runs only
+# where the scheduler's session advisory lock is held. Two instances elect one
+# leader, a stopping leader hands over (a deploy), a killed session stops
+# leading and another takes over, and nothing leads without a database. Session
+# lock semantics are the property under test, so it needs a real Postgres.
+tests/integration/scheduler-leader-lock.spec.ts
+
+# A table a developer creates over a READ_WRITE direct connection belongs to a
+# role the backup role's default privileges never named, so pg_dump failed for
+# that project on every run. backenly_direct_sync_schema now grants the backup
+# role (or backenly.backup_role) read on the schema it syncs, and never write.
+# Mutation-checked: the previous function fails the two grant tests.
+tests/integration/direct-access-backup-grants.spec.ts
+
+# Both storage drivers apply one per-file rule: the bucket's own limit under the
+# shared ceiling for uploads through the server. The local driver also applied
+# Project.maxFileSize, which nothing can set (10 MB everywhere), so a raised
+# bucket and every local multipart upload over 10 MB were refused on self-host.
+# Mutation-checked: the previous driver refuses the 12 MB file.
+tests/integration/local-upload-file-size.spec.ts
+
+# Sign-in stamps last_login whatever type users.id is. The id was bound as text
+# and uuid = text has no operator, so every uuid-keyed workspace failed the stamp
+# silently (callers catch it) and "active · 30d" never moved. Server-side type
+# resolution is the property, so it needs a real Postgres.
+tests/integration/last-login-id-type.spec.ts
+
+# The contract probe is exempt from the end-user auth limits only with the
+# internal-traffic token AND a reserved address; every other combination,
+# and every customer, keeps the 10-per-window budgets. The routes' own check
+# order against a real workspace is the property, so it needs a real Postgres.
+tests/integration/probe-auth-rate-limit.spec.ts

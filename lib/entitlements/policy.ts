@@ -424,10 +424,14 @@ export async function enforceAiFunctionInvocation(userId: string): Promise<true 
   if (max === null) return true
 
   const usage = await getMonthlyUsage(userId)
-  if (usage.aiFunctionInvocations >= max) {
+  if (usage.aiFunctionInvocations < max) return true
+  // Past the included runs, the owner's spend limit decides (lib/usage/overage.ts).
+  const { effectiveCap } = await import('@/lib/usage/overage')
+  const cap = await effectiveCap(userId, 'fn_runs', max, ent)
+  if (usage.aiFunctionInvocations >= cap) {
     return violation(
       ent.planName,
-      `You've used all ${max.toLocaleString()} AI Function invocations this month on the ${planDisplayName(ent.planName)} plan.`
+      `You've used all ${cap.toLocaleString()} function runs your ${planDisplayName(ent.planName)} plan allows this month, across all of your projects.`
     )
   }
   return true

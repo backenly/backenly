@@ -7,6 +7,8 @@ import { clampIsPublic } from '@/lib/storage/access-policy'
 import { requireStorageSecret } from '@/lib/auth/jwt-secret'
 import { StorageUnavailableError } from '@/lib/storage/errors'
 import { signExportToken } from '@/lib/storage/export-token'
+import { getProjectQuota } from '@/lib/services/storageQuota'
+import { UploadRejectedError, assertFileAllowed, assertFileSize } from '@/lib/storage/upload-policy'
 
 export interface StorageService {
   // Bucket operations
@@ -230,129 +232,40 @@ class LocalStorageService implements StorageService {
     })
 
     if (!bucket) {
-      throw new Error('Bucket not found')
+      throw new UploadRejectedError('BUCKET_NOT_FOUND', 'Bucket not found')
     }
 
     // Validate tenant ownership
     if (bucket.projectId !== options.projectId) {
-      throw new Error('Bucket does not belong to this project')
+      throw new UploadRejectedError('BUCKET_NOT_IN_PROJECT', 'Bucket does not belong to this project')
     }
 
-    // ============ P0: MIME TYPE & EXTENSION VALIDATION (SECURITY) ============
-    const fileExt = path.extname(file.name).toLowerCase()
-    const detectedMimeType = file.mimeType || 'application/octet-stream'
-
-    // Dangerous executable extensions
-    const DANGEROUS_EXTENSIONS = [
-      '.exe', '.bat', '.cmd', '.sh', '.bash', '.ps1', '.app', '.deb', '.rpm',
-      '.msi', '.dmg', '.pkg', '.run', '.bin', '.jar', '.dll', '.so', '.dylib',
-      '.scr', '.vbs', '.js', '.jse', '.wsf', '.wsh', '.com', '.pif', '.lnk'
-    ]
-
-    // Block executables if enabled
-    if (bucket.blockExecutables && DANGEROUS_EXTENSIONS.includes(fileExt)) {
-      throw new Error(
-        `Executable files are not allowed. File extension "${fileExt}" is blocked for security.`
-      )
-    }
-
-    // Validate file extension against whitelist
-    if (bucket.allowedExtensions.length > 0 && !bucket.allowedExtensions.includes(fileExt)) {
-      throw new Error(
-        `File extension "${fileExt}" is not allowed in this bucket. ` +
-        `Allowed extensions: ${bucket.allowedExtensions.join(', ')}`
-      )
-    }
-
-    // Validate MIME type against whitelist
-    if (bucket.allowedMimeTypes.length > 0 && !bucket.allowedMimeTypes.includes(detectedMimeType)) {
-      throw new Error(
-        `File type "${detectedMimeType}" is not allowed in this bucket. ` +
-        `Allowed types: ${bucket.allowedMimeTypes.join(', ')}`
-      )
-    }
-
-    // Cross-check: Ensure MIME type matches extension (prevent spoofing)
-    const extensionMimeMap: Record<string, string[]> = {
-      // Images
-      '.jpg': ['image/jpeg'],
-      '.jpeg': ['image/jpeg'],
-      '.png': ['image/png'],
-      '.gif': ['image/gif'],
-      '.webp': ['image/webp'],
-      '.svg': ['image/svg+xml'],
-      
-      // Documents
-      '.pdf': ['application/pdf'],
-      '.txt': ['text/plain'],
-      '.csv': ['text/csv', 'application/csv'],
-      
-      // Videos
-      '.mp4': ['video/mp4'],
-      '.webm': ['video/webm'],
-      '.ogv': ['video/ogg'],
-      '.mov': ['video/quicktime'],
-      '.avi': ['video/x-msvideo'],
-      
-      // Audio
-      '.mp3': ['audio/mpeg'],
-      '.wav': ['audio/wav', 'audio/x-wav'],
-      '.ogg': ['audio/ogg'],
-      '.m4a': ['audio/mp4'],
-    }
-
-    const expectedMimes = extensionMimeMap[fileExt]
-    if (expectedMimes && !expectedMimes.includes(detectedMimeType)) {
-      throw new Error(
-        `File extension "${fileExt}" does not match MIME type "${detectedMimeType}". ` +
-        `Possible file spoofing detected.`
-      )
-    }
-    // =========================================================================
+    // Type, extension and spoofing checks (lib/storage/upload-policy.ts, shared with the S3 driver)
+    assertFileAllowed(bucket, file)
 
     // ============ P0: STORAGE QUOTA VALIDATION ============
-    // Get project limits
     const project = await prisma.project.findUnique({
       where: { id: options.projectId },
       select: {
-        storageUsed: true,
-        storageLimit: true,
-        maxFileSize: true,
         maxFilesPerBucket: true,
       },
     })
 
     if (!project) {
-      throw new Error('Project not found')
+      throw new UploadRejectedError('PROJECT_NOT_FOUND', 'Project not found')
     }
 
     const fileSize = BigInt(file.buffer.length)
+    assertFileSize(fileSize, { bucketMaxBytes: bucket.maxFileSizeBytes })
 
-    // P1: Check bucket-level file size limit (overrides project default if smaller)
-    if (fileSize > bucket.maxFileSizeBytes) {
-      const maxSizeMB = Number(bucket.maxFileSizeBytes) / (1024 * 1024)
-      const fileSizeMB = Number(fileSize) / (1024 * 1024)
-      throw new Error(
-        `File size (${fileSizeMB.toFixed(2)}MB) exceeds bucket's maximum allowed size (${maxSizeMB}MB)`
-      )
-    }
-
-    // Check project-level file size limit
-    if (fileSize > project.maxFileSize) {
-      const maxSizeMB = Number(project.maxFileSize) / (1024 * 1024)
-      const fileSizeMB = Number(fileSize) / (1024 * 1024)
-      throw new Error(
-        `File size (${fileSizeMB.toFixed(2)}MB) exceeds maximum allowed size (${maxSizeMB}MB)`
-      )
-    }
-
-    // Check total storage quota
-    const newTotalSize = project.storageUsed + fileSize
-    if (newTotalSize > project.storageLimit) {
-      const limitGB = Number(project.storageLimit) / (1024 * 1024 * 1024)
-      const usedGB = Number(project.storageUsed) / (1024 * 1024 * 1024)
-      const availableGB = Number(project.storageLimit - project.storageUsed) / (1024 * 1024 * 1024)
-      throw new Error(
+    // Check the account's pooled storage against the owner's plan (storageQuota.ts owns it)
+    const quota = await getProjectQuota(options.projectId, BigInt(fileSize))
+    if (quota.used + fileSize > quota.limit) {
+      const limitGB = Number(quota.limit) / (1024 * 1024 * 1024)
+      const usedGB = Number(quota.used) / (1024 * 1024 * 1024)
+      const availableGB = Number(quota.available) / (1024 * 1024 * 1024)
+      throw new UploadRejectedError(
+        'STORAGE_QUOTA_EXCEEDED',
         `Storage quota exceeded. Used: ${usedGB.toFixed(2)}GB / ${limitGB.toFixed(2)}GB. ` +
         `Available: ${availableGB.toFixed(2)}GB. Please upgrade your plan or delete unused files.`
       )
@@ -393,7 +306,8 @@ class LocalStorageService implements StorageService {
 
       switch (strategy) {
         case 'deny':
-          throw new Error(
+          throw new UploadRejectedError(
+            'FILE_EXISTS',
             `File "${file.name}" already exists in this bucket. ` +
             `Overwriting is not allowed. Please rename your file or delete the existing one.`
           )

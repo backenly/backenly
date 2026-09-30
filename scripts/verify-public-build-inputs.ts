@@ -60,13 +60,6 @@ const REQUIRED: Record<string, { why: string; check?: (v: string) => string | nu
     why: 'client-side errors are reported nowhere without it',
     check: v => (/^https:\/\//.test(v) ? null : 'must be an https DSN'),
   },
-  NEXT_PUBLIC_PADDLE_CLIENT_TOKEN: {
-    why: 'checkout cannot open without it',
-  },
-  NEXT_PUBLIC_PADDLE_ENVIRONMENT: {
-    why: 'a sandbox value in a production build bills against the wrong Paddle account',
-    check: v => (v === 'production' ? null : `is '${v}', not 'production'`),
-  },
 }
 
 interface Use {
@@ -192,7 +185,9 @@ function compiledFiles(): string[] {
 
 /** Shape, never the value: these are public, but a log is not a place for them. */
 function describe(name: string, value: string): string {
-  if (name === 'NEXT_PUBLIC_APP_URL' || name === 'NEXT_PUBLIC_PADDLE_ENVIRONMENT') return value
+  // The URL and the pricing publication switch are recorded verbatim: a
+  // release record must say whether an image advertises usage pricing.
+  if (['NEXT_PUBLIC_APP_URL', 'NEXT_PUBLIC_USAGE_PRICING'].includes(name)) return value
   return `configured, ${value.length} chars`
 }
 
@@ -226,7 +221,7 @@ if (wantInputs) {
   for (const [name, sites] of [...uses.entries()].sort()) {
     if (name in REQUIRED) continue
     if (process.env[name]) {
-      console.log(`  ok        ${name} (supplied, ${sites.length} use site(s))`)
+      console.log(`  ok        ${name} (${describe(name, process.env[name]!)}, ${sites.length} use site(s))`)
       continue
     }
     const unguarded = sites.filter(s => !s.guarded)

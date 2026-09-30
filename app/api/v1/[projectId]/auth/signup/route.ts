@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest } from 'next/server'
 import { consume, AUTH_LIMITS, clientIp } from '@/lib/security/auth-rate-limit'
 import { throttledV1Response } from '@/lib/security/rate-limit-response'
+import { carriesInternalToken, isPlatformProbe } from '@/lib/security/platform-probe'
 import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
 import { signUpSchema } from '@/lib/api/v1/schemas'
 import { validateRequestBody } from '@/lib/validation/schemas'
@@ -15,6 +16,7 @@ import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import jwt from 'jsonwebtoken'
 import crypto from 'crypto'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
+import { emitEndUserCreated } from '@/lib/services/end-user-auth-events'
 
 /**
  * POST /v1/{projectId}/auth/signup
@@ -42,12 +44,20 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     // Keyed on both so one project under attack cannot lock out sign-up attempts for a
     // different project behind the same egress address.
     const ip = clientIp(request)
-    const limit = await consume(
+    const consumeIp = () => consume(
       `v1:endUserSignup:${projectId}:${ip}`,
       AUTH_LIMITS.endUserSignup.ip.limit,
       AUTH_LIMITS.endUserSignup.ip.windowMs,
     )
-    if (!limit.allowed) return throttledV1Response(limit)
+    // Backenly's own contract probe is not counted (lib/security/platform-probe.ts),
+    // and whether a request is the probe depends on the address in its body. So a
+    // request carrying the internal-traffic token is counted once that address is
+    // known, below; every other request is counted here, before anything else.
+    const mayBeProbe = carriesInternalToken(request)
+    if (!mayBeProbe) {
+      const limit = await consumeIp()
+      if (!limit.allowed) return throttledV1Response(limit)
+    }
 
     // Validate project exists
     const project = await prisma.project.findUnique({
@@ -75,6 +85,11 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     }
 
     const { email, password, name } = validation.data
+
+    if (mayBeProbe && !isPlatformProbe(request, email)) {
+      const limit = await consumeIp()
+      if (!limit.allowed) return throttledV1Response(limit)
+    }
 
     // Behavioral-verifier signups use reserved `.internal` emails. They must not
     // consume the project's MAU quota or trip its cap — they are throwaway rows
@@ -147,30 +162,12 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       { expiresIn: '7d' },
     )
 
-    // Notify webhook subscribers that an end user signed up.
-    //
-    // This event is emitted HERE rather than by a database trigger, because the
-    // `users` table deliberately carries none: it holds the bcrypt hash, and a
-    // row-level capture would put that hash in an outbox and then in an HTTP
-    // body aimed at whatever URL the operator configured. Realtime shipped
-    // exactly that leak for months by broadcasting row_to_json(NEW) from this
-    // table.
-    //
-    // So the payload is built field by field from a fixed list. `user` is
-    // whatever columns the schema-tolerant INSERT returned, and spreading it
-    // would silently start including any credential column a future migration
-    // adds.
-    import('@/lib/webhooks').then(({ triggerWebhooks }) => {
-      triggerWebhooks(projectId, 'auth.user.created', {
-        id: user.id,
-        email: user.email,
-        name: user.name ?? null,
-        role: user.role ?? 'user',
-        createdAt: user.created_at ?? user.createdAt ?? new Date().toISOString(),
-      }).catch((err: any) =>
-        console.warn('[Webhooks] auth.user.created failed (non-fatal):', err?.message)
-      )
-    }).catch(() => {})
+    // Notify webhook subscribers that an end user signed up. Emitted here, not
+    // by a database trigger: the `users` table deliberately carries none, since
+    // it holds the bcrypt hash (Realtime once leaked it by broadcasting
+    // row_to_json(NEW) from this table). The shared emitter builds the payload
+    // from a fixed field list and skips reserved test accounts.
+    void emitEndUserCreated(projectId, user)
 
     // Fire on_signup AI functions (non-blocking — never fails the signup)
     import('@/lib/services/ai-functions/executor').then(({ fireAiFunctionsOnSignup }) => {
@@ -179,7 +176,9 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       )
     }).catch(() => {})
 
-    return createSuccessResponse({ user, token })
+    // 201, as the runtime's signup answers and the contract probe expects: the
+    // two implementations of one endpoint must not disagree on success (#147).
+    return createSuccessResponse({ user, token }, undefined, 201)
   } catch (error: any) {
     if (error instanceof AuthNotProvisionedError) {
       return createErrorResponse(error.code, error.message, 503)

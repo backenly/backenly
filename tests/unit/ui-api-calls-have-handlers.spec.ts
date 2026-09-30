@@ -14,7 +14,13 @@ import fs from 'fs'
 import path from 'path'
 
 /** Served by backenly-cloud's overlay, not by this repository. */
-const CLOUD_OVERLAY_ROUTES = ['/api/projects/[id]/access', '/api/billing/usage']
+const CLOUD_OVERLAY_ROUTES = [
+  '/api/projects/[id]/access',
+  '/api/billing/usage',
+  // The spend limit: the Usage page reads and changes it (backenly-cloud #27).
+  '/api/billing/spend-limit',
+  '/api/billing/spend-limit/confirm',
+]
 
 /** Calls whose path is built at runtime, so no literal can be checked. */
 const DYNAMIC_CALLS: Record<string, string> = {

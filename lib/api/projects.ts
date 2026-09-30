@@ -54,11 +54,6 @@ export interface UpdateProjectData {
   apiUrlDev?: string | null
   apiUrlStaging?: string | null
   apiUrlProd?: string | null
-  apiRequests?: number
-  avgLatency?: number
-  errorCount?: number
-  storageUsed?: number
-  activeUsers?: number
 }
 
 // Memory cache for projects

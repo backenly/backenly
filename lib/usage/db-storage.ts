@@ -16,42 +16,57 @@
  * itself. Single-tenant answers with THE project, Cloud with its estate.
  */
 import { prisma } from '@/lib/db/prisma'
+import { projectSchemaPrefix, workspaceSchemaName } from '@/lib/security/workspace-schema'
+import { recordUsage } from '@/lib/usage/ledger'
 
 function thisMonth(): string {
   return new Date().toISOString().slice(0, 7) // YYYY-MM
 }
 
 /**
- * Snapshot one project's real database footprint into ProjectUsage.
+ * On-disk bytes of every schema a project owns: its workspace schema and each
+ * branch (or staging) schema of the same project. Tables, indexes and TOAST.
  *
- * Measures pg_total_relation_size across the project's workspace schema, so it
- * reflects what end-user inserts actually cost rather than only what the build
- * pipeline happened to create.
+ * The schemas are read from pg_namespace, matched as the canonical name or with
+ * `left(nspname, length(prefix)) = prefix`, the same rule project deletion uses:
+ * `_` is a LIKE wildcard and `workspace_` is full of them, so a LIKE here would
+ * be one escaping mistake away from measuring another tenant.
+ */
+export async function measureProjectDbBytes(projectId: string): Promise<bigint> {
+  const canonical = workspaceSchemaName(projectId)
+  const prefix = projectSchemaPrefix(projectId)
+  const rows = await prisma.$queryRaw<Array<{ total_bytes: bigint | null }>>`
+    SELECT COALESCE(SUM(pg_total_relation_size(c.oid)), 0)::bigint AS total_bytes
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE (n.nspname = ${canonical} OR left(n.nspname, length(${prefix})) = ${prefix})
+      AND c.relkind IN ('r', 'm', 'p')`
+  return BigInt(rows[0]?.total_bytes ?? 0)
+}
+
+/**
+ * Snapshot one project's real database footprint.
+ *
+ * Writes two things from ONE measurement: ProjectUsage (the current month's
+ * last reading, which the quota check reads) and a `db_bytes` gauge in the
+ * usage ledger, which keeps each day's maximum for billing.
  *
  * Never throws: this runs on write paths and on a scheduled sweep, and a failed
  * measurement must not fail the mutation that triggered it.
  */
-export async function snapshotProjectDbStorage(projectId: string): Promise<void> {
+export async function snapshotProjectDbStorage(projectId: string, billingAccountId?: string | null): Promise<void> {
   const month = thisMonth()
-  const schemaName = `workspace_${projectId}`
 
   try {
-    // Query total size of all tables in the workspace schema
-    const result = await prisma.$queryRawUnsafe<Array<{ total_bytes: bigint }>>(
-      `SELECT COALESCE(SUM(pg_total_relation_size(quote_ident(schemaname) || '.' || quote_ident(tablename))), 0) AS total_bytes
-       FROM pg_tables
-       WHERE schemaname = $1`,
-      schemaName
-    )
-
-    const totalBytes = Number(result[0]?.total_bytes ?? 0)
-    const totalMb = totalBytes / (1024 * 1024)
+    const totalBytes = await measureProjectDbBytes(projectId)
+    const totalMb = Number(totalBytes) / (1024 * 1024)
 
     await prisma.projectUsage.upsert({
       where: { projectId_month: { projectId, month } },
       update: { dbStorageUsedMb: totalMb },
       create: { projectId, month, dbStorageUsedMb: totalMb },
     })
+    recordUsage({ projectId, axis: 'db_bytes', quantity: totalBytes, source: 'pg', billingAccountId })
   } catch (err) {
     console.error(`[UsageTracker] DB storage snapshot failed for ${projectId}:`, err)
   }
@@ -72,5 +87,5 @@ export async function snapshotProjectDbStorage(projectId: string): Promise<void>
 export async function snapshotScheduledDbStorage(): Promise<void> {
   const { getFleetScheduler } = await import('@/lib/edition')
   const targets = await getFleetScheduler().maintenanceTargets()
-  await Promise.allSettled(targets.map(t => snapshotProjectDbStorage(t.id)))
+  await Promise.allSettled(targets.map(t => snapshotProjectDbStorage(t.id, t.userId)))
 }

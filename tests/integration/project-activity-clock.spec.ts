@@ -219,7 +219,12 @@ describe('the snapshot a download may hand out', () => {
     writeFileSync(file, 'abc')
     const row = await snapshotRow(id, file)
 
-    await expect(resolveSnapshotFile(id, row.id)).resolves.toMatchObject({ filePath: file, sizeBytes: 3 })
+    const snapshot = await resolveSnapshotFile(id, row.id)
+    expect(snapshot).toMatchObject({ sizeBytes: 3 })
+    // The opener reads exactly that file's bytes.
+    const chunks: Buffer[] = []
+    for await (const c of await snapshot!.open()) chunks.push(Buffer.from(c as Buffer))
+    expect(Buffer.concat(chunks).toString()).toBe('abc')
   }, 60_000)
 
   it('refuses a row that points outside that directory', async () => {

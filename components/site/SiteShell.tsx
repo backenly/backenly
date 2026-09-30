@@ -8,7 +8,6 @@ import { Icon } from '@iconify/react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Menu, X } from 'lucide-react'
 import { registerSiteIcons } from '@/lib/icons/registry'
-import { AnnouncementBar } from '@/components/site/AnnouncementBar'
 import { BrandMark } from '@/components/site/BrandMark'
 import { SmoothScroll } from '@/components/site/SmoothScroll'
 import { useUserSession } from '@/lib/hooks/useUserSession'
@@ -40,7 +39,7 @@ export const ROUTES = {
    * Product Hunt.
    *
    * INTERIM AND DELIBERATE: this is Product Hunt's own home page, not a
-   * Backenly page. Founder's call, so the announcement bar above the navbar has somewhere
+   * Backenly page. Founder's call, so the hero launch chip has somewhere
    * valid to point while Backenly's upcoming page does not exist yet.
    * It is not a defect and does not block a release.
    *
@@ -114,7 +113,7 @@ export function SiteShell({ children }: { children: React.ReactNode }) {
     <div>
       <SmoothScroll />
       <div
-        className="bg-black text-white antialiased relative min-h-screen overflow-x-hidden selection:bg-violet-500/30 selection:text-white font-light flex flex-col items-center"
+        className="bg-[#08090a] text-white antialiased relative min-h-screen overflow-x-hidden selection:bg-violet-500/30 selection:text-white font-light flex flex-col items-center"
         style={{ fontFamily: 'var(--font-geist-sans), sans-serif' }}
       >
         <div className="relative w-full min-h-screen flex flex-col z-20">
@@ -131,7 +130,6 @@ export function SiteShell({ children }: { children: React.ReactNode }) {
           >
             Skip to content
           </a>
-          <AnnouncementBar href={ROUTES.productHunt} />
           <NavBar />
           {children}
           <SiteFooter />
@@ -164,11 +162,11 @@ export function NavBar() {
       initial={{ opacity: 0, y: -18 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: reduceMotion ? 0 : 0.7, ease: [0.16, 1, 0.3, 1] }}
-      className="sticky top-0 z-40 w-full border-b border-white/[0.08] bg-black/[0.88] backdrop-blur-xl"
+      className="sticky top-0 z-40 w-full border-b border-white/[0.07] bg-[#08090a]/80 backdrop-blur-xl backdrop-saturate-150"
     >
       {/* Container tracks the landing's 100rem sections so the logo sits on
           the same left edge as the headline below it. */}
-      <div className="mx-auto flex h-[76px] w-full max-w-[100rem] items-center justify-between px-5 sm:px-6">
+      <div className="mx-auto flex h-[68px] w-full max-w-[100rem] items-center justify-between px-5 sm:px-6">
         <motion.div whileHover={{ y: -1 }} whileTap={{ scale: 0.985 }}>
           <Link
             href={ROUTES.home}
@@ -177,7 +175,7 @@ export function NavBar() {
             aria-label="Backenly"
           >
             <BrandMark size={28} />
-            <span className="text-xl font-semibold">Backenly</span>
+            <span className="text-[19px] font-semibold tracking-[-0.02em]">Backenly</span>
           </Link>
         </motion.div>
 
@@ -193,7 +191,7 @@ export function NavBar() {
             // Linear, Stripe, Supabase and Neon all set their marketing nav at
             // 16px. At 15px, next to an 18px wordmark, these read as secondary
             // captions rather than as the site's primary navigation.
-            className="flex items-center gap-1 text-[16px] font-medium text-zinc-400"
+            className="flex items-center gap-0.5 text-[15px] font-medium tracking-[-0.006em] text-zinc-400"
           >
             {NAV_LINKS.map((link) => (
               <DesktopNavLink key={link.label} link={link} pathname={pathname} />
@@ -212,7 +210,7 @@ export function NavBar() {
             target="_blank"
             rel="noopener noreferrer"
             aria-label="Backenly on GitHub"
-            className="group flex h-9 w-9 items-center justify-center rounded-full border border-white/[0.08] bg-white/[0.03] text-zinc-400 transition-colors hover:border-white/[0.16] hover:text-white"
+            className="group flex h-9 w-9 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.03] text-zinc-400 transition-colors hover:border-white/[0.16] hover:text-white"
           >
             <Icon icon="ri:github-fill" width={17} />
           </a>
@@ -222,7 +220,7 @@ export function NavBar() {
               target="_blank"
               rel="noopener noreferrer"
               aria-label="Backenly on Discord"
-              className="group flex h-9 w-9 items-center justify-center rounded-full border border-white/[0.08] bg-white/[0.03] text-zinc-400 transition-colors hover:border-white/[0.16] hover:text-white"
+              className="group flex h-9 w-9 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.03] text-zinc-400 transition-colors hover:border-white/[0.16] hover:text-white"
             >
               <Icon icon="ri:discord-fill" width={17} />
             </a>
@@ -230,7 +228,7 @@ export function NavBar() {
           <span className="h-6 w-px bg-white/[0.12]" aria-hidden />
           <Link
             href={isLoggedIn ? ROUTES.app : ROUTES.signup}
-            className="rounded-full bg-white px-5 py-2.5 text-[15px] font-semibold text-black transition-colors hover:bg-zinc-200"
+            className="inline-flex h-9 items-center rounded-lg bg-white px-4 text-[14px] font-semibold tracking-[-0.01em] text-black transition-colors hover:bg-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300 focus-visible:ring-offset-2 focus-visible:ring-offset-black"
           >
             {isLoggedIn ? 'Console' : 'Sign up'}
           </Link>
@@ -244,7 +242,7 @@ export function NavBar() {
           aria-label={mobileOpen ? 'Close menu' : 'Open menu'}
           aria-expanded={mobileOpen}
           whileTap={{ scale: 0.94 }}
-          className="flex h-10 w-10 items-center justify-center rounded-full border border-white/[0.08] bg-white/[0.04] text-zinc-300 transition-colors hover:bg-white/[0.08] hover:text-white lg:hidden"
+          className="flex h-10 w-10 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.04] text-zinc-300 transition-colors hover:bg-white/[0.08] hover:text-white lg:hidden"
         >
           {mobileOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
         </motion.button>
@@ -258,7 +256,7 @@ export function NavBar() {
             animate={{ opacity: 1, y: 0, scale: 1, filter: 'blur(0px)' }}
             exit={{ opacity: 0, y: -8, scale: 0.98, filter: 'blur(8px)' }}
             transition={{ duration: reduceMotion ? 0 : 0.26, ease: [0.16, 1, 0.3, 1] }}
-            className="absolute left-0 right-0 top-[76px] z-50 mx-4 rounded-lg border border-white/[0.08] bg-[#050505] shadow-[0_30px_60px_-20px_rgba(0,0,0,0.9)] backdrop-blur-xl lg:hidden"
+            className="absolute left-0 right-0 top-[68px] z-50 mx-4 rounded-lg border border-white/[0.08] bg-[#050505] shadow-[0_30px_60px_-20px_rgba(0,0,0,0.9)] backdrop-blur-xl lg:hidden"
           >
             <div className="flex flex-col gap-1 px-5 py-5">
               {NAV_LINKS.map((link, index) => (
@@ -283,7 +281,7 @@ export function NavBar() {
                 target="_blank"
                 rel="noopener noreferrer"
                 onClick={() => setMobileOpen(false)}
-                className="flex items-center justify-between rounded-full px-4 py-3 text-sm text-zinc-300 transition-colors hover:bg-white/[0.05] hover:text-white"
+                className="flex items-center justify-between rounded-lg px-4 py-3 text-sm text-zinc-300 transition-colors hover:bg-white/[0.05] hover:text-white"
               >
                 <span className="flex items-center gap-2">GitHub</span>
                 <Icon icon="solar:arrow-right-up-linear" width={13} className="text-zinc-500" />
@@ -295,7 +293,7 @@ export function NavBar() {
                   target="_blank"
                   rel="noopener noreferrer"
                   onClick={() => setMobileOpen(false)}
-                  className="flex items-center justify-between rounded-full px-4 py-3 text-sm text-zinc-300 transition-colors hover:bg-white/[0.05] hover:text-white"
+                  className="flex items-center justify-between rounded-lg px-4 py-3 text-sm text-zinc-300 transition-colors hover:bg-white/[0.05] hover:text-white"
                 >
                   <span className="flex items-center gap-2">Discord</span>
                   <Icon icon="solar:arrow-right-up-linear" width={13} className="text-zinc-500" />
@@ -305,7 +303,7 @@ export function NavBar() {
               <Link
                 href={isLoggedIn ? ROUTES.app : ROUTES.signup}
                 onClick={() => setMobileOpen(false)}
-                className="mt-4 flex items-center justify-center rounded-full bg-white py-3 text-sm font-semibold text-black transition-colors hover:bg-zinc-200"
+                className="mt-4 flex items-center justify-center rounded-lg bg-white py-3 text-sm font-semibold text-black transition-colors hover:bg-zinc-200"
               >
                 {isLoggedIn ? 'Console' : 'Sign up'}
               </Link>
@@ -379,7 +377,7 @@ function MobileLink({
   children: React.ReactNode
 }) {
   const classes = [
-    'flex items-center justify-between rounded-full px-4 py-3 text-sm transition-colors',
+    'flex items-center justify-between rounded-lg px-4 py-3 text-sm transition-colors',
     active ? 'bg-white/[0.1] text-white' : 'text-zinc-300 hover:bg-white/[0.05] hover:text-white',
   ].join(' ')
 
@@ -432,7 +430,7 @@ export function SiteFooter() {
   ]
 
   return (
-    <footer className="relative z-20 mt-auto border-t border-white/[0.08] bg-black/50 pb-8 pt-14 backdrop-blur-sm sm:pt-16">
+    <footer className="relative z-20 mt-auto border-t border-white/[0.07] pb-8 pt-14 sm:pt-16">
       {/* 88rem matches the landing sections, so the footer's left edge lines
           up with the content above it. Subpages run narrower content inside
           the same footer width, which reads fine; a misaligned landing edge
@@ -506,9 +504,7 @@ export function SiteFooter() {
           <p className="text-xs text-zinc-600">
             &copy; {new Date().getFullYear()} Backenly. All rights reserved.
           </p>
-          <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-zinc-600">
-            The autonomous backend platform
-          </p>
+          <p className="text-xs text-zinc-600">The autonomous backend platform</p>
         </div>
       </div>
     </footer>
@@ -524,7 +520,7 @@ function FooterCol({ title, links }: { title: string; links: { label: string; hr
         produced an h2 → h4 skip on every page on the site. The level is the only
         thing that changed; the type scale is set by the classes, not the tag.
       */}
-      <h2 className="mb-4 font-mono text-[11px] font-medium uppercase tracking-[0.16em] text-zinc-500">
+      <h2 className="mb-4 text-[14px] font-medium tracking-[-0.006em] text-zinc-200">
         {title}
       </h2>
       <ul className="space-y-2.5 text-sm text-zinc-400">

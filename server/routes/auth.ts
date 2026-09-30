@@ -21,6 +21,8 @@ import jwt from 'jsonwebtoken'
 import { JWTSecretManager, resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { asyncRoute } from '../lib/async-route'
 import { touchProjectActivity } from '@/lib/projects/activity'
+import { emitEndUserCreated } from '@/lib/services/end-user-auth-events'
+import { canAcceptNewEndUser, trackEndUserActive } from '@/lib/quota/kernel'
 
 const router = Router()
 
@@ -173,6 +175,18 @@ async function handleSignUp(req: Request, res: Response) {
       return
     }
 
+    // The account's MAU cap, as on the Next signup route: only a NEW end user
+    // is refused, existing users keep working. This route serves signups on
+    // the single-box layout, and skipping the check here made the cap depend
+    // on which process happened to answer.
+    if (!isInternalTest) {
+      const mau = await canAcceptNewEndUser(projectId)
+      if (!mau.allowed) {
+        sendError(res, ErrorCodes.FORBIDDEN, mau.message ?? 'Sign-ups are temporarily unavailable for this app.', 403)
+        return
+      }
+    }
+
     const hashedPassword = await hashPassword(password)
     const displayName = name || email.split('@')[0]
 
@@ -196,6 +210,16 @@ async function handleSignUp(req: Request, res: Response) {
       signingSecret,
       { expiresIn: '7d', algorithm: 'HS256' }
     )
+
+    // A new end user is active this month (MAU; never blocks). The Next.js
+    // signup route always did this; this one, which serves single-box
+    // installs, did not.
+    trackEndUserActive(projectId, String(user.id), user.email).catch(() => {})
+
+    // auth.user.created, through the emitter the Next route also uses. This
+    // server never emitted it, so a single-box install's subscribers never heard
+    // of a sign-up. Reserved test accounts are skipped inside.
+    void emitEndUserCreated(projectId, user)
 
     // Non-blocking: fire on_signup AI functions. Synthetic verifier accounts are
     // filtered inside fireAiFunctionsOnSignup, not here — two signup routes call
@@ -354,6 +378,7 @@ async function handleSignIn(req: Request, res: Response) {
     // Only a SUCCESSFUL sign-in counts: failed attempts are not use, and
     // counting them would let a credential-stuffing bot keep a project awake.
     void touchProjectActivity(projectId)
+    trackEndUserActive(projectId, String(user.id), user.email).catch(() => {})
     sendSuccess(res, { user: { id: user.id, email: user.email, name: user.name }, token })
   } catch (error: any) {
     console.error('Signin error:', error?.message ?? 'unknown')

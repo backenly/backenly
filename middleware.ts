@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server'
 import { jwtVerify } from 'jose'
 import { domainRoutingMiddleware, shouldUseDomainRouting } from '@/lib/middleware/domainRouting'
 import { extractTokenFromHeader } from '@/lib/auth/jwt'
+import { exceededBodyLimit, isUploadRoute, MAX_BUFFERED_UPLOAD_FILE_BYTES } from '@/lib/storage/body-limits'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 
 // ── Per-project CORS cache ────────────────────────────────────────────────────
@@ -304,6 +305,25 @@ export async function middleware(request: NextRequest) {
       if (allowedHeaders) response.headers.set('Access-Control-Allow-Headers', allowedHeaders)
     }
     return response
+  }
+
+  // A body larger than this route takes (lib/storage/body-limits.ts) is refused
+  // here, before any route runs: Next would otherwise hand the route the first
+  // N bytes of it, which the upload routes answered with 500. Upload routes get
+  // the upload ceiling, every other route the 10 MB it always had. Only a
+  // declared Content-Length can be judged before the body arrives.
+  const exceeded = exceededBodyLimit(pathname, request.headers.get('content-length'))
+  if (exceeded !== null) {
+    const upload = isUploadRoute(pathname)
+    const code = upload ? 'FILE_TOO_LARGE' : 'PAYLOAD_TOO_LARGE'
+    const message = upload
+      ? `An upload through the server carries at most ${MAX_BUFFERED_UPLOAD_FILE_BYTES / (1024 * 1024)} MB. Use a multipart upload for larger files.`
+      : `Request body is larger than the ${exceeded / (1024 * 1024)} MB this endpoint accepts.`
+    // Each surface's own error shape: v1 clients read { error: { code, message } }.
+    const body = pathname.startsWith('/api/v1/')
+      ? { error: { code, message } }
+      : { success: false, code, message }
+    return applyCorsHeaders(NextResponse.json(body, { status: 413 }))
   }
 
   // ✅ Public API routes

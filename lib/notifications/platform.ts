@@ -7,6 +7,7 @@
  * These notify the developer about events on THEIR account:
  *   - payment_success / payment_failed
  *   - credits_low  (AI usage >= 80% of plan limit)
+ *   - usage_limit  (a usage quota or the spend limit crossed a threshold; lib/usage/alerts.ts)
  *   - job_completed / job_failed  (workspace job table events)
  *   - deploy_complete
  *   - system  (maintenance, feature announcements, etc.)
@@ -28,6 +29,7 @@ export type PlatformNotificationType =
   | 'payment_success'
   | 'payment_failed'
   | 'credits_low'
+  | 'usage_limit'         // A usage quota or the spend limit crossed 50/80/100% (lib/usage/alerts.ts)
   | 'job_completed'
   | 'job_failed'
   | 'deploy_complete'
@@ -40,6 +42,7 @@ export const ALL_NOTIFICATION_TYPES: PlatformNotificationType[] = [
   'payment_success',
   'payment_failed',
   'credits_low',
+  'usage_limit',
   'job_completed',
   'job_failed',
   'deploy_complete',

@@ -33,6 +33,17 @@ export interface UserEntitlements {
   maxFileStorageMb: number | null
   maxRealtimeConnections: number | null
   maxAiFunctionInvocationsPerMonth: number | null
+  /**
+   * Egress included per month, in MB. `null` means unmetered. Like every usage
+   * quota it is pooled: all of the account's projects share it.
+   */
+  includedEgressMb: number | null
+  /**
+   * The fair-use ceiling on requests per minute for any one API key. `null`
+   * means no ceiling beyond the key's own setting. API requests are never
+   * billed; this only bounds what one key may be configured to send.
+   */
+  apiRateLimitPerMin: number | null
   maxTriggersPerProject: number | null
   maxTeamSeats: number
   maxDeploymentHistory: number | null
@@ -71,6 +82,25 @@ export interface UserEntitlements {
   isSandboxPlan: boolean
   sandboxExpiryDays: number | null
   isPayAsYouGo: boolean
+}
+
+/**
+ * Whether, and how far, an account may use more than its plan includes.
+ *
+ * Both facts are commercial, so only Cloud answers them; a deployment with no
+ * commercial half answers `null`, which means every quota is a hard cap.
+ *
+ *   mode             off      nothing past the quota, nothing estimated
+ *                    shadow   quotas stay hard caps; overage is estimated and
+ *                             recorded, never charged
+ *                    enforce  usage may pass the quota until the estimated
+ *                             overage reaches the spend limit, and is charged
+ *   spendLimitCents  the most the owner allows beyond the plan in one month.
+ *                    0 (the default) keeps every quota a hard cap.
+ */
+export interface OveragePolicy {
+  mode: 'off' | 'shadow' | 'enforce'
+  spendLimitCents: number
 }
 
 /**

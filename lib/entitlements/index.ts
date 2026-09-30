@@ -15,11 +15,15 @@
  * is what makes one alias work identically under tsc, next build, tsx and jest.
  */
 import { currentEdition } from '@/lib/edition'
-import { cloudEntitlements, initializeAccountEntitlements as cloudInitialize } from '@cloud/entitlements'
+import {
+  cloudEntitlements,
+  initializeAccountEntitlements as cloudInitialize,
+  overagePolicy as cloudOveragePolicy,
+} from '@cloud/entitlements'
 import { selfHostedEntitlements } from './self-hosted'
-import type { UserEntitlements } from './types'
+import type { OveragePolicy, UserEntitlements } from './types'
 
-export type { UserEntitlements, CloudEntitlementsProvider } from './types'
+export type { UserEntitlements, CloudEntitlementsProvider, OveragePolicy } from './types'
 export { selfHostedEntitlements } from './self-hosted'
 
 /**
@@ -50,4 +54,15 @@ export async function getUserEntitlements(userId: string): Promise<UserEntitleme
 export async function initializeAccountEntitlements(userId: string): Promise<void> {
   if (currentEdition() === 'single-tenant') return
   await cloudInitialize(userId)
+}
+
+/**
+ * Whether an account may go past its quotas, and within what spend limit.
+ *
+ * `null` means never: every quota is a hard cap. Single-tenant answers `null`
+ * without a database read; its quotas are unlimited anyway.
+ */
+export async function getOveragePolicy(billingAccountId: string): Promise<OveragePolicy | null> {
+  if (currentEdition() === 'single-tenant') return null
+  return cloudOveragePolicy(billingAccountId)
 }

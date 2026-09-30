@@ -51,16 +51,21 @@ export function createErrorResponse(
 }
 
 /**
- * Create a standardized success response
+ * Create a standardized success response. `status` is 200 unless the request
+ * created something (201).
  */
 export function createSuccessResponse<T>(
   data: T,
-  meta?: ApiSuccess<T>['meta']
+  meta?: ApiSuccess<T>['meta'],
+  status: 200 | 201 = 200,
 ): NextResponse<ApiSuccess<T>> {
-  return NextResponse.json({
-    data,
-    ...(meta && { meta }),
-  })
+  return NextResponse.json(
+    {
+      data,
+      ...(meta && { meta }),
+    },
+    { status },
+  )
 }
 
 /**

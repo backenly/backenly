@@ -19,6 +19,7 @@
 import 'dotenv/config'
 import { assertEditionCompositionOrExit } from '../lib/edition/cloud-extension'
 import { installProcessSafetyNet } from './lib/async-route'
+import { startUsageLedger, usageLedger } from '../lib/usage/ledger'
 import app from './app'
 
 // Before the socket, not after. This process serves every /api/v1/* request in
@@ -42,18 +43,28 @@ const server = app.listen(PORT, () => {
 // exiting is the recovery rather than a second outage. See async-route.ts.
 installProcessSafetyNet({ server })
 
-// Graceful shutdown
+// Metered usage this process records (function runs, egress on the single-box
+// layout) is applied in batches: replay what an earlier process spooled, and
+// spool on the way down. lib/usage/ledger.ts.
+startUsageLedger()
+
+// Graceful shutdown. The ledger is flushed AFTER the server stops accepting
+// requests, so the last requests' usage is in the flush, and before exit. The
+// ledger's own signal hook has already spooled it synchronously, so a flush
+// that cannot reach the database in time is replayed on the next start.
 process.on('SIGTERM', () => {
   console.log('[Runtime Server] SIGTERM received, shutting down gracefully...')
-  server.close(() => {
+  server.close(async () => {
     console.log('[Runtime Server] HTTP server closed')
+    await usageLedger().shutdown(5_000)
     process.exit(0)
   })
 })
 
 process.on('SIGINT', () => {
   console.log('[Runtime Server] SIGINT received, shutting down gracefully...')
-  server.close(() => {
+  server.close(async () => {
+    await usageLedger().shutdown(5_000)
     process.exit(0)
   })
 })

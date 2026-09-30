@@ -24,6 +24,7 @@
  */
 
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3'
+import { UploadRejectedError, assertFileAllowed, assertFileSize, uploadExtension } from '@/lib/storage/upload-policy'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import { prisma } from '@/lib/db'
 import crypto from 'crypto'
@@ -32,6 +33,8 @@ import { generateUniqueStoragePath, enforceStorageQuota as enforceStorageLifecyc
 import { enforceStorageQuota as enforceStorageBillingQuota } from './quota-enforcement'
 import { getS3Client, getS3Config, s3ConfigurationProblem, checkS3Configuration } from './s3-config'
 import { StorageUnavailableError } from '@/lib/storage/errors'
+import { projectRestriction } from '@/lib/usage/restrictions'
+import { signCdnUrl, signedCdnConfig } from '@/lib/storage/cdn'
 
 export class S3StorageService implements StorageService {
   private s3Client: S3Client
@@ -262,79 +265,18 @@ export class S3StorageService implements StorageService {
     })
 
     if (!bucket) {
-      throw new Error('Bucket not found')
+      throw new UploadRejectedError('BUCKET_NOT_FOUND', 'Bucket not found')
     }
 
     if (bucket.projectId !== options.projectId) {
-      throw new Error('Bucket does not belong to this project')
+      throw new UploadRejectedError('BUCKET_NOT_IN_PROJECT', 'Bucket does not belong to this project')
     }
 
-    // ============ SECURITY VALIDATIONS (same as LocalStorageService) ============
-    const fileExt = file.name.includes('.') ? file.name.substring(file.name.lastIndexOf('.')).toLowerCase() : ''
+    // Type, extension and spoofing checks (lib/storage/upload-policy.ts, shared with the local driver)
+    assertFileAllowed(bucket, file)
+    // Used below for versioned names and the stored object's Content-Type.
+    const fileExt = uploadExtension(file.name)
     const detectedMimeType = file.mimeType || 'application/octet-stream'
-
-    const DANGEROUS_EXTENSIONS = [
-      '.exe', '.bat', '.cmd', '.sh', '.bash', '.ps1', '.app', '.deb', '.rpm',
-      '.msi', '.dmg', '.pkg', '.run', '.bin', '.jar', '.dll', '.so', '.dylib',
-      '.scr', '.vbs', '.js', '.jse', '.wsf', '.wsh', '.com', '.pif', '.lnk'
-    ]
-
-    if (bucket.blockExecutables && DANGEROUS_EXTENSIONS.includes(fileExt)) {
-      throw new Error(
-        `Executable files are not allowed. File extension "${fileExt}" is blocked for security.`
-      )
-    }
-
-    if (bucket.allowedExtensions.length > 0 && !bucket.allowedExtensions.includes(fileExt)) {
-      throw new Error(
-        `File extension "${fileExt}" is not allowed in this bucket. ` +
-        `Allowed extensions: ${bucket.allowedExtensions.join(', ')}`
-      )
-    }
-
-    if (bucket.allowedMimeTypes.length > 0 && !bucket.allowedMimeTypes.includes(detectedMimeType)) {
-      throw new Error(
-        `File type "${detectedMimeType}" is not allowed in this bucket. ` +
-        `Allowed types: ${bucket.allowedMimeTypes.join(', ')}`
-      )
-    }
-
-    // Cross-check: Ensure MIME type matches extension (prevent spoofing)
-    const extensionMimeMap: Record<string, string[]> = {
-      // Images
-      '.jpg': ['image/jpeg'],
-      '.jpeg': ['image/jpeg'],
-      '.png': ['image/png'],
-      '.gif': ['image/gif'],
-      '.webp': ['image/webp'],
-      '.svg': ['image/svg+xml'],
-      
-      // Documents
-      '.pdf': ['application/pdf'],
-      '.txt': ['text/plain'],
-      '.csv': ['text/csv', 'application/csv'],
-      
-      // Videos
-      '.mp4': ['video/mp4'],
-      '.webm': ['video/webm'],
-      '.ogv': ['video/ogg'],
-      '.mov': ['video/quicktime'],
-      '.avi': ['video/x-msvideo'],
-      
-      // Audio
-      '.mp3': ['audio/mpeg'],
-      '.wav': ['audio/wav', 'audio/x-wav'],
-      '.ogg': ['audio/ogg'],
-      '.m4a': ['audio/mp4'],
-    }
-
-    const expectedMimes = extensionMimeMap[fileExt]
-    if (expectedMimes && !expectedMimes.includes(detectedMimeType)) {
-      throw new Error(
-        `File extension "${fileExt}" does not match MIME type "${detectedMimeType}". ` +
-        `Possible file spoofing detected.`
-      )
-    }
 
     // Get project quotas
     const project = await prisma.project.findUnique({
@@ -348,7 +290,7 @@ export class S3StorageService implements StorageService {
     })
 
     if (!project) {
-      throw new Error('Project not found')
+      throw new UploadRejectedError('PROJECT_NOT_FOUND', 'Project not found')
     }
 
     const fileSize = BigInt(file.buffer.length)
@@ -359,23 +301,17 @@ export class S3StorageService implements StorageService {
       options.projectId,
       fileSize
     )
-    
+
     if (!quotaCheck.allowed) {
-      throw new Error(quotaCheck.reason || 'Storage quota exceeded')
+      throw new UploadRejectedError('STORAGE_QUOTA_EXCEEDED', quotaCheck.reason || 'Storage quota exceeded')
     }
 
     // ============ BILLING QUOTA ENFORCEMENT ============
     // Block if user exceeded subscription storage limit
     await enforceStorageBillingQuota(options.projectId, Number(fileSize))
 
-    // Check bucket-level file size limit
-    if (fileSize > bucket.maxFileSizeBytes) {
-      const maxSizeMB = Number(bucket.maxFileSizeBytes) / (1024 * 1024)
-      const fileSizeMB = Number(fileSize) / (1024 * 1024)
-      throw new Error(
-        `File size (${fileSizeMB.toFixed(2)}MB) exceeds bucket's maximum allowed size (${maxSizeMB}MB)`
-      )
-    }
+    // The per-file rule both drivers share (lib/storage/upload-policy.ts).
+    assertFileSize(fileSize, { bucketMaxBytes: bucket.maxFileSizeBytes })
 
     // ============ OVERWRITE STRATEGY HANDLING ============
     const existingFile = await prisma.storageFile.findFirst({
@@ -395,7 +331,8 @@ export class S3StorageService implements StorageService {
 
       switch (strategy) {
         case 'deny':
-          throw new Error(
+          throw new UploadRejectedError(
+            'FILE_EXISTS',
             `File "${file.name}" already exists in this bucket. ` +
             `Overwriting is not allowed. Please rename your file or delete the existing one.`
           )
@@ -637,7 +574,9 @@ export class S3StorageService implements StorageService {
     // genuine CDN/public host (different from the S3 API endpoint) can serve the
     // object directly.
     if (file.isPublic) {
-      const cdnBase = this.publicCdnBase()
+      // A SIGNED CDN serves nothing unsigned, so a public file's permanent URL
+      // is the app route, which mints a fresh signed URL on every request.
+      const cdnBase = signedCdnConfig() ? null : this.publicCdnBase()
       if (cdnBase) {
         return `${cdnBase}/${file.path}`
       }
@@ -649,6 +588,22 @@ export class S3StorageService implements StorageService {
         return `${appUrl}/api/storage/files/${fileId}/download`
       }
       // Last resort (no app URL configured): fall through to a presigned URL.
+    }
+
+    // Past the egress grace period a presigned URL would let the bytes leave
+    // straight from the bucket, around the restriction. Hand out the app's own
+    // download URL instead: it answers the restriction, with its reason, to
+    // everyone except the project's members (lib/usage/restrictions.ts).
+    const appUrlForRestriction = (process.env.NEXT_PUBLIC_APP_URL || '').replace(/\/$/, '')
+    if (appUrlForRestriction && (await projectRestriction(projectId, 'egress_bytes')).restricted) {
+      return `${appUrlForRestriction}/api/storage/files/${fileId}/download`
+    }
+
+    // Served from the edge when a signed CDN fronts the bucket (lib/storage/cdn.ts):
+    // the same short-lived grant, without the bucket's egress price.
+    const cdn = signedCdnConfig()
+    if (cdn) {
+      return signCdnUrl(file.path, generatePresignedUrlExpiry(expiresIn), cdn)
     }
 
     // ============ PRESIGNED URLs ONLY (HARDENED) ============

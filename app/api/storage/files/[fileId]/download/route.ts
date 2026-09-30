@@ -17,6 +17,10 @@ import {
   PAUSED_MESSAGE,
   pausedDetails,
 } from '@/lib/projects/serving-state'
+import { INTERNAL_TRAFFIC_HEADER, isInternalTraffic } from '@/lib/traffic/request-recorder'
+import { recordEgress } from '@/lib/usage/egress'
+import { projectRestriction, restrictionDetails, restrictionMessage, RESTRICTED_CODE } from '@/lib/usage/restrictions'
+import { DOWNLOAD_URL_TTL_SECONDS, signCdnUrl, signedCdnConfig } from '@/lib/storage/cdn'
 
 /**
  * GET /api/storage/files/{fileId}/download — stream the file bytes.
@@ -63,6 +67,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ fileI
         isPublic: true,
         uploadedBy: true,
         deletedAt: true,
+        path: true,
         bucket: { select: { accessPolicy: true } },
       },
     })
@@ -97,6 +102,23 @@ export async function GET(request: NextRequest, props: { params: Promise<{ fileI
           { status: 503 },
         )
       }
+
+      // Past the egress grace period files are not served, to the same readers
+      // a pause stops (lib/usage/restrictions.ts). Members and export links
+      // still get their own data out.
+      const restriction = await projectRestriction(record.projectId, 'egress_bytes')
+      if (restriction.restricted) {
+        return NextResponse.json(
+          {
+            error: {
+              code: RESTRICTED_CODE,
+              message: restrictionMessage('egress_bytes', restriction),
+              details: restrictionDetails('egress_bytes', restriction),
+            },
+          },
+          { status: 403 },
+        )
+      }
     }
 
     const decision = mayRead(
@@ -119,6 +141,16 @@ export async function GET(request: NextRequest, props: { params: Promise<{ fileI
       )
     }
 
+    // Behind a signed CDN (Backenly Cloud's CloudFront) the bytes leave from the
+    // edge: every check above has passed, so hand the caller a short-lived
+    // signed URL for exactly this object. The CDN's logs meter the bytes.
+    const cdn = (process.env.STORAGE_DRIVER ?? '').toLowerCase() === 's3' ? signedCdnConfig() : null
+    if (cdn) {
+      const res = NextResponse.redirect(signCdnUrl(record.path, DOWNLOAD_URL_TTL_SECONDS, cdn), 302)
+      res.headers.set('Cache-Control', 'private, no-store')
+      return res
+    }
+
     // `getFile` returns null ONLY for genuine absence, and throws
     // StorageUnavailableError when the bytes could not be read. Both used to
     // arrive here as null and leave as 404, so during a storage outage this
@@ -126,6 +158,12 @@ export async function GET(request: NextRequest, props: { params: Promise<{ fileI
     const file = await storageService.getFile(fileId, record.projectId)
     if (!file) {
       return NextResponse.json({ error: 'File not found' }, { status: 404 })
+    }
+
+    // Egress for the project that owns the file (lib/usage/egress.ts). This
+    // route is outside /api/v1, so recordedV1 does not see it.
+    if (!isInternalTraffic(request.headers.get(INTERNAL_TRAFFIC_HEADER))) {
+      recordEgress(record.projectId, file.buffer.length)
     }
 
     return new NextResponse(Buffer.from(file.buffer), {

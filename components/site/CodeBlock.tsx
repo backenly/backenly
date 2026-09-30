@@ -184,6 +184,16 @@ function tokenize(code: string, rules: Rule[], keyPrefix = 't'): ReactNode[] {
   return out
 }
 
+/**
+ * Syntax-highlights `code` with the same grammars CodeBlock uses, for callers
+ * that draw their own chrome (the landing page's tabbed connect window).
+ * Falls back to plain text for a language with no grammar.
+ */
+export function highlight(code: string, language: string): ReactNode {
+  const rules = GRAMMARS[language.toLowerCase()]
+  return rules ? tokenize(code, rules) : code
+}
+
 export function CodeBlock({
   code,
   label,

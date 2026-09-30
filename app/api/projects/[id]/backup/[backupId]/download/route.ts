@@ -16,7 +16,6 @@
 
 export const dynamic = 'force-dynamic'
 
-import { createReadStream } from 'fs'
 import { Readable } from 'stream'
 import { NextRequest, NextResponse } from 'next/server'
 import { authenticateRequest } from '@/lib/auth/middleware'
@@ -43,8 +42,8 @@ export async function GET(
   }
 
   // Streamed, never buffered: a snapshot can be larger than the memory a web
-  // task can spare for one request.
-  const body = Readable.toWeb(createReadStream(snapshot.filePath)) as unknown as ReadableStream<Uint8Array>
+  // task can spare for one request. From disk or from the snapshot bucket alike.
+  const body = Readable.toWeb(await snapshot.open()) as unknown as ReadableStream<Uint8Array>
   const safeName = snapshot.filename.replace(/[^a-zA-Z0-9._-]/g, '_')
   return new NextResponse(body, {
     headers: {

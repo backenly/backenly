@@ -4,7 +4,7 @@
  * Resets monthly usage counters for all users at the start of each billing cycle.
  * Called by:
  *   - A scheduler/cron service on the 1st of each month (UTC midnight)
- *   - The Paddle webhook handler on `subscription.activated` / renewal events
+ *   - (Payment events never reset usage: counters are keyed by month.)
  *
  * Security: requires CRON_SECRET header to prevent unauthorized calls.
  * Usage records are keyed by YYYY-MM, so a new month automatically starts

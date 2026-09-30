@@ -50,13 +50,33 @@ export async function register() {
 
     await import('./sentry.server.config')
 
+    // The usage ledger: replay any batch a previous process spooled on its way
+    // down, and spool on SIGTERM so this process's own last counts survive the
+    // shutdown Next.js runs after it. lib/usage/ledger.ts.
+    const { startUsageLedger } = await import('./lib/usage/ledger')
+    startUsageLedger()
+
     // Start the in-process cron scheduler.
     // On Vercel this is a no-op (VERCEL env is set); Vercel Cron calls
     // /api/cron/run-ai-jobs instead.  On self-hosted (Hetzner/PM2) this
     // is the only scheduler, so it must run here.
     if (!process.env.VERCEL) {
-      const { default: cron } = await import('node-cron')
+      const { default: nodeCron } = await import('node-cron')
       const { runDueCronJobs, runSystemTasks } = await import('./lib/services/cron-runner')
+
+      // Every process schedules; only the one holding the scheduler lock runs
+      // the jobs, so two instances (or an overlapping deploy) never run a job
+      // twice. Every `cron.schedule` below goes through this gate.
+      // lib/scheduler/leader.ts.
+      const { startSchedulerLeadership, leaderOnly } = await import('./lib/scheduler/leader')
+      startSchedulerLeadership()
+      const cron = {
+        schedule: (
+          expression: string,
+          task: () => unknown,
+          options?: Parameters<typeof nodeCron.schedule>[2],
+        ) => nodeCron.schedule(expression, leaderOnly(task), options),
+      }
 
       // Mark cron scheduler as alive in process memory (for health checks)
       ;(globalThis as any).__cronSchedulerStartedAt = new Date().toISOString()
@@ -562,9 +582,9 @@ export async function register() {
       })
 
       // ── DB storage snapshot — hourly ────────────────────────────────────────
-      // Measures actual pg_total_relation_size per workspace schema and writes
-      // ProjectUsage.dbStorageUsedMb so the billing dashboard reflects real
-      // end-user inserts (not only AI-build-time side-effects).
+      // Measures actual on-disk size of each project's workspace and branch
+      // schemas: ProjectUsage.dbStorageUsedMb for the quota check, and the
+      // `db_bytes` daily-maximum gauge in the usage ledger for billing.
       cron.schedule('0 * * * *', async () => {
         const { snapshotScheduledDbStorage } = await import('./lib/usage/db-storage')
         await snapshotScheduledDbStorage().catch((err: any) =>
@@ -572,8 +592,82 @@ export async function register() {
         )
       })
 
+      // ── Egress access-log ingest — every 15 minutes ────────────────────────
+      // Load balancer, S3 and CloudFront access logs into the usage ledger,
+      // each log object exactly once. A no-op until USAGE_LOG_SOURCES names the
+      // log buckets (Cloud infrastructure). lib/usage/log-ingest.ts.
+      cron.schedule('*/15 * * * *', async () => {
+        const { ingestConfiguredLogs } = await import('./lib/usage/log-ingest')
+        try {
+          const s = await ingestConfiguredLogs()
+          if (s && s.objects > 0) console.log(`[UsageLogIngest] ${s.objects} log object(s) applied, ${s.entries} usage row(s) updated`)
+        } catch (err: any) {
+          console.error('[UsageLogIngest] Error:', err?.message)
+        }
+      })
+
+      // ── File storage reconcile — hourly ─────────────────────────────────────
+      // `file_bytes` gauge from the storage metadata (non-deleted files), not
+      // the drifting Project.storageUsed counter. lib/usage/file-storage.ts.
+      cron.schedule('15 * * * *', async () => {
+        const { reconcileScheduledFileStorage } = await import('./lib/usage/file-storage')
+        await reconcileScheduledFileStorage().catch((err: any) =>
+          console.error('[FileStorageReconcile] Error:', err?.message)
+        )
+      })
+
+      // ── Usage anomalies — daily 00:40 UTC, for the day just completed ─────
+      // A project whose egress, function runs or new MAU jumped far past its
+      // own fourteen-day median becomes a finding in the Autonomy queue, with
+      // the evidence, and resolves itself once the day is back near normal.
+      // lib/usage/anomaly.ts.
+      cron.schedule('40 0 * * *', async () => {
+        const { evaluateUsageAnomalies } = await import('./lib/usage/anomaly')
+        try {
+          const r = await evaluateUsageAnomalies()
+          if (r.raised || r.resolved) console.log(`[UsageAnomaly] raised ${r.raised}, resolved ${r.resolved}`)
+        } catch (err: any) {
+          console.error('[UsageAnomaly] Error:', err?.message)
+        }
+      }, { timezone: 'UTC' })
+
+      // ── Usage alerts — every 5 minutes ──────────────────────────────────────
+      // 50/80/100% of each pooled quota and of the spend limit, each sent once
+      // per account and month, plus the grace-period state the limit
+      // behaviours read. lib/usage/alerts.ts.
+      cron.schedule('*/5 * * * *', async () => {
+        const { evaluateUsageAlerts } = await import('./lib/usage/alerts')
+        try {
+          const r = await evaluateUsageAlerts()
+          if (r.sent > 0 || r.failed > 0) {
+            console.log(`[UsageAlerts] ${r.accounts} account(s): ${r.sent} alert(s) sent, ${r.failed} failed`)
+          }
+        } catch (err: any) {
+          console.error('[UsageAlerts] Error:', err?.message)
+        }
+      })
+
+      // ── Usage: monthly close + marker pruning — daily 00:05 UTC ────────────
+      // Closes the previous UTC month. The first run of a month does the work;
+      // every later run is a no-op (insert-only close), which also covers a day
+      // the scheduler was down. lib/usage/close.ts.
+      cron.schedule('5 0 * * *', async () => {
+        const { closePreviousPeriod } = await import('./lib/usage/close')
+        const { pruneAppliedBatches } = await import('./lib/usage/ledger')
+        try {
+          const s = await closePreviousPeriod()
+          if (s.inserted > 0) {
+            console.log(`[UsageClose] ${s.period}: ${s.inserted} row(s) closed for ${s.accounts} account(s), ${s.alreadyClosed} already closed`)
+          }
+        } catch (err: any) {
+          console.error('[UsageClose] Error:', err?.message)
+        }
+        await pruneAppliedBatches().catch((err: any) => console.error('[UsageLedger] prune error:', err?.message))
+      }, { timezone: 'UTC' })
+
       console.log(
-        '[CronScheduler] Started — user cron jobs + system tasks every minute, ' +
+        '[CronScheduler] Started (jobs run only on the instance holding the scheduler lock) — ' +
+        'user cron jobs + system tasks every minute, ' +
         'autonomy reconciler tick every minute (1-min cadence on every plan), ' +
         'DB storage snapshot hourly, ' +
         'all AI background scans once daily (staggered 00:10–04:30 UTC)'

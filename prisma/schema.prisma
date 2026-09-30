@@ -2022,6 +2022,14 @@ model Subscription {
   userId               String
   planId               String
   paddleSubscriptionId String?            @unique
+  // Stripe, which replaces Paddle for Backenly Cloud. The ids are Stripe's; the
+  // price is what Stripe charges, which is what decides the plan, and the
+  // interval and period are mirrored from Stripe rather than computed here.
+  stripeSubscriptionId String?            @unique
+  stripeCustomerId     String?
+  stripePriceId        String?
+  billingInterval      String? // monthly | annual
+  currentPeriodStart   DateTime?
   status               SubscriptionStatus @default(FREE)
   currentPeriodEnd     DateTime?
   // Failed-payment recovery only. Set when the provider reports past_due, and
@@ -2050,6 +2058,7 @@ model Subscription {
   @@index([planId])
   @@index([status])
   @@index([paddleSubscriptionId])
+  @@index([stripeCustomerId])
   @@index([organizationId])
   @@map("subscriptions")
 }
@@ -2411,12 +2420,12 @@ model WorkspaceBackup {
 }
 
 // ============================================================================
-// PROCESSED WEBHOOK EVENTS — DB-backed idempotency for Paddle webhooks
-// Prevents double-processing when Vercel spawns multiple function instances
+// PROCESSED WEBHOOK EVENTS — DB-backed idempotency for billing webhooks
+// Prevents double-processing when several instances receive the same event
 // ============================================================================
 
 model ProcessedWebhookEvent {
-  id          String   @id // Paddle eventId
+  id          String   @id // provider event id; Stripe's are stored as stripe:<evt id>
   processedAt DateTime @default(now())
 
   @@map("processed_webhook_events")
@@ -2538,6 +2547,150 @@ model ProjectUsage {
   @@index([projectId])
   @@index([month])
   @@map("project_usage")
+}
+
+// ============================================================================
+// USAGE LEDGER — billing-grade metering (lib/usage/ledger.ts)
+// ============================================================================
+
+// One row per project, axis, UTC day and measurement source. Counter axes add
+// up over the day; gauge axes keep the day's maximum. There is deliberately no
+// foreign key to Project: usage outlives a deleted project, and the month it
+// was used in stays attributed to the account that owned it.
+//
+// `billingAccountId` is the owning user's id today. It is a plain string so an
+// organization id can replace it later without rewriting history.
+model UsageDaily {
+  id               String   @id @default(uuid())
+  billingAccountId String
+  projectId        String
+  axis             String // lib/usage/axes.ts
+  day              DateTime @db.Date
+  quantity         BigInt   @default(0)
+  source           String // lib/usage/axes.ts USAGE_SOURCES
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([projectId, axis, day, source])
+  @@index([billingAccountId, day])
+  @@index([day])
+  @@map("usage_daily")
+}
+
+// One row per billing account, UTC calendar month and axis, written once by the
+// monthly close (lib/usage/close.ts). Insert-only: the close uses ON CONFLICT
+// DO NOTHING, so running it twice cannot add a second total, and the migration
+// installs a trigger that refuses UPDATE.
+model UsagePeriodClose {
+  id               String   @id @default(uuid())
+  billingAccountId String
+  period           String // YYYY-MM
+  axis             String
+  quantity         BigInt
+  unit             String
+  detail           Json?
+  closedAt         DateTime @default(now())
+
+  @@unique([billingAccountId, period, axis])
+  @@index([period])
+  @@map("usage_period_closes")
+}
+
+// Exactly-once application of usage. A ledger flush batch, a replayed spool
+// file and an ingested access-log object each carry an id that is inserted in
+// the SAME transaction as their increments, so a retry after an ambiguous
+// failure, a replay after a restart, or a second pass over a log bucket can
+// never count twice.
+model UsageAppliedBatch {
+  id        String   @id
+  kind      String // flush | spool | log
+  entries   Int
+  appliedAt DateTime @default(now())
+
+  @@index([appliedAt])
+  @@map("usage_applied_batches")
+}
+
+// The most a billing account lets Backenly charge beyond its included usage in
+// one month, in cents. No row means 0: nothing beyond the plan, every quota a
+// hard cap. Only a signed-in owner raises it (never an API key, an agent or an
+// MCP tool), and every change writes an audit_logs row.
+model UsageSpendLimit {
+  billingAccountId String   @id
+  limitCents       Int      @default(0)
+  updatedByUserId  String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@map("usage_spend_limits")
+}
+
+// A usage threshold an account crossed, recorded once per account, month, axis
+// and level so each alert is sent exactly once however many processes see it.
+// `level` is the percent of included usage ("50", "80", "100"), the percent of
+// the spend limit on axis "spend", or "cap" when the effective limit (included
+// plus spend-limit headroom) was reached.
+model UsageAlert {
+  id               String   @id @default(uuid())
+  billingAccountId String
+  period           String // YYYY-MM
+  axis             String
+  level            String
+  observed         BigInt
+  limit            BigInt
+  createdAt        DateTime @default(now())
+
+  @@unique([billingAccountId, period, axis, level])
+  @@index([billingAccountId, period])
+  @@map("usage_alerts")
+}
+
+// Since when an account has been at or over its effective limit on an axis
+// whose limit behaviour starts with a grace period (database and egress). Set
+// when first observed over, cleared as soon as usage is back under, so the
+// grace clock measures one continuous stretch rather than restarting monthly.
+model UsageLimitState {
+  billingAccountId String
+  axis             String
+  overSince        DateTime?
+  updatedAt        DateTime  @updatedAt
+
+  @@id([billingAccountId, axis])
+  @@map("usage_limit_states")
+}
+
+// What usage past a plan's included quantity came to for one account, month
+// and axis, and what became of it. Computed from the closed month
+// (usage_period_closes), so it is one row per account, period and axis:
+// computing the same month again can never produce a second charge.
+//
+//   shadow    computed and shown, never charged (BACKENLY_OVERAGE_MODE=shadow)
+//   carried   under the minimum charge; rolled into a later month's invoice
+//   pending   an invoice is being created
+//   invoiced  on the Stripe invoice named by stripeInvoiceId
+//   charged   that invoice was paid
+//   failed    that invoice's payment failed (the payment grace flow applies)
+//   waived    not collected: carried when the subscription ended, or no
+//             payment method to charge
+model UsageCharge {
+  id               String   @id @default(uuid())
+  billingAccountId String
+  period           String // YYYY-MM
+  axis             String
+  // Units past the included quantity, in the closed unit of the axis
+  // (users, runs, bytes, or byte-months as bytes for storage).
+  overQuantity     BigInt
+  amountCents      Int
+  status           String
+  stripeInvoiceId  String?
+  detail           Json?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([billingAccountId, period, axis])
+  @@index([status])
+  @@index([stripeInvoiceId])
+  @@map("usage_charges")
 }
 
 // ============================================================================
