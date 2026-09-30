@@ -24,6 +24,7 @@ import { useEffect, useRef, useState, useTransition } from 'react'
 import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
 import { useAssistantStore } from '@/lib/stores/use-assistant-store'
+import { useMobileNavStore } from '@/lib/stores/use-mobile-nav-store'
 import {
   ChevronDown,
   Check,
@@ -34,6 +35,8 @@ import {
   LogOut,
   Plus,
   Circle,
+  Menu,
+  X as CloseIcon,
 } from 'lucide-react'
 import { Logo } from '@/components/Logo'
 import { OrgSwitcher } from '@cloud/org-switcher'
@@ -136,35 +139,47 @@ export function TopBar() {
     signOut().catch((error) => console.error('Sign-out failed:', error))
   }
 
+  const isMobileNavOpen = useMobileNavStore((s) => s.isOpen)
+  const toggleMobileNav = useMobileNavStore((s) => s.toggle)
+
   return (
-    <header className="fixed top-0 left-0 right-0 h-12 z-30 bg-[#141519] border-b border-white/[0.07] flex items-center px-3 gap-1">
+    <header className="fixed top-0 left-0 right-0 h-12 z-30 bg-[#141519]/95 backdrop-blur-md border-b border-white/[0.07] flex items-center px-2.5 sm:px-3 gap-1">
+      {/* ── Mobile drawer trigger ────────────────────────────────────────── */}
+      <button
+        onClick={toggleMobileNav}
+        aria-label={isMobileNavOpen ? 'Close navigation' : 'Open navigation'}
+        className="md:hidden inline-flex items-center justify-center w-8 h-8 rounded-md text-zinc-400 hover:text-zinc-100 hover:bg-white/[0.06] transition-colors flex-shrink-0"
+      >
+        {isMobileNavOpen ? <CloseIcon className="w-4 h-4" /> : <Menu className="w-4 h-4" />}
+      </button>
+
       {/* ── Left: brand + breadcrumb ─────────────────────────────────────── */}
-      <Link href="/app" className="flex items-center pl-1 pr-2 group" aria-label="Backenly home">
+      <Link href="/app" className="flex items-center pl-1 pr-1.5 sm:pr-2 group flex-shrink-0" aria-label="Backenly home">
         <Logo />
       </Link>
 
-      <Separator />
+      <div className="hidden sm:flex items-center gap-1">
+        <Separator />
+        <OrgSwitcher
+          fallbackName={user?.name?.split(' ')[0] ?? user?.email?.split('@')[0] ?? 'Personal'}
+          plan="Free"
+        />
+        <Slash />
+      </div>
 
-      {/* Org switcher — renders as the old static chip for solo personal orgs,
-          becomes a dropdown once the user belongs to more than one org. */}
-      <OrgSwitcher
-        fallbackName={user?.name?.split(' ')[0] ?? user?.email?.split('@')[0] ?? 'Personal'}
-        plan="Free"
-      />
-
-      <Slash />
+      <div className="sm:hidden text-zinc-700 text-[13px] px-0.5">/</div>
 
       {/* Project switcher */}
-      <div className="relative" ref={projectMenuRef}>
+      <div className="relative min-w-0" ref={projectMenuRef}>
         <button
           onClick={() => setProjectMenu((o) => !o)}
-          className="flex items-center gap-1.5 h-8 px-2 rounded-md hover:bg-white/[0.05] transition-colors"
+          className="flex items-center gap-1.5 h-8 px-2 rounded-md hover:bg-white/[0.05] transition-colors max-w-[130px] sm:max-w-[200px]"
         >
-          <Circle className={`w-2 h-2 fill-current ${STATUS_DOT[currentProject?.projectStatus ?? 'PRIVATE']}`} />
-          <span className="text-[12.5px] font-medium text-zinc-100 truncate max-w-[180px]">
+          <Circle className={`w-2 h-2 fill-current flex-shrink-0 ${STATUS_DOT[currentProject?.projectStatus ?? 'PRIVATE']}`} />
+          <span className="text-[12.5px] font-medium text-zinc-100 truncate">
             {currentProject?.name ?? 'Project'}
           </span>
-          <ChevronDown className="w-3.5 h-3.5 text-zinc-500" />
+          <ChevronDown className="w-3.5 h-3.5 text-zinc-500 flex-shrink-0" />
         </button>
 
         {projectMenu && (

@@ -2,9 +2,16 @@ import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
 import { jwtVerify } from 'jose'
 import { domainRoutingMiddleware, shouldUseDomainRouting } from '@/lib/middleware/domainRouting'
-import { extractTokenFromHeader } from '@/lib/auth/jwt'
 import { exceededBodyLimit, isUploadRoute, MAX_BUFFERED_UPLOAD_FILE_BYTES } from '@/lib/storage/body-limits'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
+
+// Inlined rather than imported from lib/auth/jwt, which pulls jsonwebtoken and
+// node:crypto into the Edge middleware bundle.
+function extractTokenFromHeader(authHeader: string | null): string | null {
+  if (!authHeader) return null
+  if (!authHeader.startsWith('Bearer ')) return null
+  return authHeader.substring(7)
+}
 
 // ── Per-project CORS cache ────────────────────────────────────────────────────
 const _corsCache = new Map<string, { origins: string[]; expiresAt: number }>()

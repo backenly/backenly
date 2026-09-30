@@ -410,7 +410,7 @@ export function KitButton({
 
 export function KitTabs({ children, className = '' }: { children: ReactNode; className?: string }) {
   return (
-    <div className={`flex items-center gap-0.5 border-b ${KIT.hairline} ${className}`}>
+    <div className={`flex items-center gap-0.5 border-b ${KIT.hairline} overflow-x-auto no-scrollbar scrollbar-none ${className}`}>
       {children}
     </div>
   )
@@ -430,7 +430,7 @@ export function KitTab({
   return (
     <button
       onClick={onClick}
-      className={`relative px-3 py-2.5 text-[12.5px] font-medium transition-colors -mb-px border-b-2 focus:outline-none
+      className={`relative px-3 py-2.5 text-[12.5px] font-medium transition-colors -mb-px border-b-2 focus:outline-none flex-shrink-0 whitespace-nowrap
         ${active
           ? 'text-zinc-50 border-violet-400'
           : 'text-zinc-500 border-transparent hover:text-zinc-200'
@@ -497,7 +497,7 @@ export function ListRow({
 
 /** Standard outer wrapper for an inspector page's content area. */
 export function KitPage({ children, className = '' }: { children: ReactNode; className?: string }) {
-  return <div className={`px-8 py-6 ${className}`}>{children}</div>
+  return <div className={`px-4 sm:px-8 py-4 sm:py-6 ${className}`}>{children}</div>
 }
 
 /** Two-column layout used by Auth, Storage, Realtime, etc. */
@@ -511,9 +511,9 @@ export function KitColumns({
   sideWidth?: string
 }) {
   return (
-    <div className="flex gap-4 items-start">
-      <div className="flex-1 min-w-0 flex flex-col gap-4">{main}</div>
-      <div className={`${sideWidth} flex-shrink-0 flex flex-col gap-4`}>{side}</div>
+    <div className="flex flex-col lg:flex-row gap-4 items-start">
+      <div className="flex-1 w-full min-w-0 flex flex-col gap-4">{main}</div>
+      <div className={`w-full lg:${sideWidth} flex-shrink-0 flex flex-col gap-4`}>{side}</div>
     </div>
   )
 }
@@ -591,8 +591,8 @@ export const KitInput = forwardRef<HTMLInputElement, React.InputHTMLAttributes<H
       <input
         {...rest}
         ref={ref}
-        className={`w-full h-8 px-3 bg-[#0f1015] border ${KIT.border} ${KIT.radiusSm}
-          text-[12.5px] text-zinc-50 placeholder:text-zinc-600
+        className={`w-full h-9 sm:h-8 px-3 bg-[#0f1015] border ${KIT.border} ${KIT.radiusSm}
+          text-base sm:text-[12.5px] text-zinc-50 placeholder:text-zinc-600
           focus:outline-none focus:border-violet-400/40 focus:ring-2 focus:ring-violet-400/15
           transition-colors ${className}`}
       />
@@ -606,7 +606,7 @@ export function KitTextarea(props: React.TextareaHTMLAttributes<HTMLTextAreaElem
     <textarea
       {...rest}
       className={`w-full px-3 py-2 bg-[#0f1015] border ${KIT.border} ${KIT.radiusSm}
-        text-[12.5px] text-zinc-50 placeholder:text-zinc-600 resize-none
+        text-base sm:text-[12.5px] text-zinc-50 placeholder:text-zinc-600 resize-none
         focus:outline-none focus:border-violet-400/40 focus:ring-2 focus:ring-violet-400/15
         transition-colors ${className}`}
     />

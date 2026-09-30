@@ -1361,9 +1361,9 @@ export default function ProjectDatabasePage() {
       <div className="relative min-h-0 flex-1">
       <div className="absolute inset-0 flex">
 
-        {/* Sidebar - Table List (Hidden in visualization mode) */}
+        {/* Sidebar - Table List (Hidden in visualization mode; hidden on mobile when table selected) */}
         {showVisualization !== 'visualization' && showVisualization !== 'sql' && showVisualization !== 'history' && (
-          <div className={`flex w-[248px] flex-shrink-0 flex-col border-r border-white/[0.06] ${KIT.rail}`}>
+          <div className={`w-full md:w-[248px] flex-shrink-0 flex-col border-r border-white/[0.06] ${KIT.rail} ${selectedTable ? 'hidden md:flex' : 'flex'}`}>
 
             {/* Workspace row */}
             <div className="flex h-10 flex-shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] px-3">
@@ -1560,10 +1560,18 @@ export default function ProjectDatabasePage() {
               ) : selectedTable && selectedSchema ? (
                 <>
                   {/* Table Toolbar */}
-                  <div className="flex h-10 flex-shrink-0 items-center justify-between gap-3 border-b border-white/[0.06] px-4">
-                    <div className="flex items-baseline gap-2 min-w-0">
+                  <div className="flex h-10 flex-shrink-0 items-center justify-between gap-3 border-b border-white/[0.06] px-3 sm:px-4">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <button
+                        onClick={() => setSelectedTable(null)}
+                        className="md:hidden inline-flex items-center gap-1 text-[11.5px] text-zinc-400 hover:text-zinc-100 mr-1 p-1 -ml-1 rounded hover:bg-white/[0.05] transition-colors"
+                        aria-label="Back to tables"
+                      >
+                        <ChevronLeft className="w-3.5 h-3.5" />
+                        <span className="font-sans text-[11px]">Tables</span>
+                      </button>
                       <h2 className="truncate font-mono text-[13px] font-medium text-zinc-100">{selectedTable}</h2>
-                      <span className="whitespace-nowrap font-mono text-[11px] text-zinc-500 tabular-nums">
+                      <span className="hidden sm:inline whitespace-nowrap font-mono text-[11px] text-zinc-500 tabular-nums">
                         {totalRows.toLocaleString()} row{totalRows === 1 ? '' : 's'}
                       </span>
                     </div>
@@ -2014,19 +2022,24 @@ export default function ProjectDatabasePage() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
+            className="fixed inset-0 z-50 bg-black/70 flex items-end sm:items-center justify-center p-0 sm:p-4"
             onClick={() => setShowAddRowModal(false)}
           >
             <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 8 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 8 }}
+              initial={{ opacity: 0, y: 16 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 16 }}
               transition={{ duration: 0.15 }}
-              className="bg-[#16171d] border border-white/[0.12] rounded-xl shadow-[0_12px_32px_-16px_rgba(0,0,0,0.85)] w-full max-w-lg max-h-[80vh] flex flex-col"
+              className="bg-[#16171d] border-t sm:border border-white/[0.12] rounded-t-2xl sm:rounded-xl shadow-[0_12px_32px_-16px_rgba(0,0,0,0.85)] w-full sm:max-w-lg max-h-[88vh] sm:max-h-[80vh] flex flex-col pb-[max(1rem,env(safe-area-inset-bottom))] sm:pb-0"
               onClick={(e) => e.stopPropagation()}
             >
+              {/* Mobile pull handle */}
+              <div className="flex sm:hidden pt-2.5 pb-1 justify-center">
+                <div className="w-10 h-1 rounded-full bg-white/20" />
+              </div>
+
               {/* Header */}
-              <div className="flex items-center justify-between px-5 py-4 border-b border-white/[0.06]">
+              <div className="flex items-center justify-between px-5 py-3.5 sm:py-4 border-b border-white/[0.06]">
                 <div className="flex items-baseline gap-2">
                   <h2 className="text-[13px] font-semibold text-zinc-50">Insert row</h2>
                   <p className="font-mono text-[11px] text-zinc-500">{selectedTable}</p>
@@ -2123,19 +2136,24 @@ export default function ProjectDatabasePage() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
+            className="fixed inset-0 z-50 bg-black/70 flex items-end sm:items-center justify-center p-0 sm:p-4"
             onClick={() => !savingRow && !deletingRow && closeRowEditor()}
           >
             <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 8 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 8 }}
+              initial={{ opacity: 0, y: 16 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 16 }}
               transition={{ duration: 0.15 }}
-              className="bg-[#16171d] border border-white/[0.12] rounded-xl shadow-[0_12px_32px_-16px_rgba(0,0,0,0.85)] w-full max-w-lg max-h-[82vh] flex flex-col"
+              className="bg-[#16171d] border-t sm:border border-white/[0.12] rounded-t-2xl sm:rounded-xl shadow-[0_12px_32px_-16px_rgba(0,0,0,0.85)] w-full sm:max-w-lg max-h-[88vh] sm:max-h-[82vh] flex flex-col pb-[max(1rem,env(safe-area-inset-bottom))] sm:pb-0"
               onClick={(e) => e.stopPropagation()}
             >
+              {/* Mobile pull handle */}
+              <div className="flex sm:hidden pt-2.5 pb-1 justify-center">
+                <div className="w-10 h-1 rounded-full bg-white/20" />
+              </div>
+
               {/* Header */}
-              <div className="flex items-center justify-between px-5 py-4 border-b border-white/[0.06]">
+              <div className="flex items-center justify-between px-5 py-3.5 sm:py-4 border-b border-white/[0.06]">
                 <div className="flex items-baseline gap-2 min-w-0">
                   <h2 className="text-[13px] font-semibold text-zinc-50">Edit row</h2>
                   <p className="font-mono text-[11px] text-zinc-500 truncate">
@@ -2246,18 +2264,23 @@ export default function ProjectDatabasePage() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
+            className="fixed inset-0 z-50 bg-black/70 flex items-end sm:items-center justify-center p-0 sm:p-4"
             onClick={() => !addingColumn && setShowAddColumnModal(false)}
           >
             <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 8 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 8 }}
+              initial={{ opacity: 0, y: 16 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 16 }}
               transition={{ duration: 0.15 }}
-              className="bg-[#16171d] border border-white/[0.12] rounded-xl shadow-[0_12px_32px_-16px_rgba(0,0,0,0.85)] w-full max-w-md"
+              className="bg-[#16171d] border-t sm:border border-white/[0.12] rounded-t-2xl sm:rounded-xl shadow-[0_12px_32px_-16px_rgba(0,0,0,0.85)] w-full sm:max-w-md max-h-[88vh] flex flex-col pb-[max(1rem,env(safe-area-inset-bottom))] sm:pb-0"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="flex items-center justify-between px-5 py-4 border-b border-white/[0.06]">
+              {/* Mobile pull handle */}
+              <div className="flex sm:hidden pt-2.5 pb-1 justify-center">
+                <div className="w-10 h-1 rounded-full bg-white/20" />
+              </div>
+
+              <div className="flex items-center justify-between px-5 py-3.5 sm:py-4 border-b border-white/[0.06]">
                 <div className="flex items-baseline gap-2">
                   <h2 className="text-[13px] font-semibold text-zinc-50">Add column</h2>
                   <p className="font-mono text-[11px] text-zinc-500">{selectedTable}</p>
@@ -2469,18 +2492,23 @@ export default function ProjectDatabasePage() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
+            className="fixed inset-0 z-50 bg-black/70 flex items-end sm:items-center justify-center p-0 sm:p-4"
             onClick={() => !creatingTable && setShowCreateTableModal(false)}
           >
             <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 8 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 8 }}
+              initial={{ opacity: 0, y: 16 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 16 }}
               transition={{ duration: 0.15 }}
-              className="bg-[#16171d] border border-white/[0.12] rounded-xl shadow-[0_12px_32px_-16px_rgba(0,0,0,0.85)] w-full max-w-md"
+              className="bg-[#16171d] border-t sm:border border-white/[0.12] rounded-t-2xl sm:rounded-xl shadow-[0_12px_32px_-16px_rgba(0,0,0,0.85)] w-full sm:max-w-md max-h-[88vh] flex flex-col pb-[max(1rem,env(safe-area-inset-bottom))] sm:pb-0"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="flex items-center justify-between px-5 py-4 border-b border-white/[0.06]">
+              {/* Mobile pull handle */}
+              <div className="flex sm:hidden pt-2.5 pb-1 justify-center">
+                <div className="w-10 h-1 rounded-full bg-white/20" />
+              </div>
+
+              <div className="flex items-center justify-between px-5 py-3.5 sm:py-4 border-b border-white/[0.06]">
                 <h2 className="text-[13px] font-semibold text-zinc-50">New table</h2>
                 <button
                   onClick={() => !creatingTable && setShowCreateTableModal(false)}

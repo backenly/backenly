@@ -27,6 +27,7 @@ import {
   Upload, Download, Trash2, Copy, Search, Folder, File, Lock,
   Image as ImageIcon, FileText, AlertTriangle, Check,
   HardDrive, RefreshCw, Plus, X, Loader2, Sparkles, CheckSquare, Square,
+  ChevronLeft,
 } from 'lucide-react'
 import { Tooltip } from '@/components/ui/Tooltip'
 import {
@@ -98,6 +99,7 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set())
   const [isDragging, setIsDragging] = useState(false)
   const [uploadProgress, setUploadProgress] = useState<Record<string, number>>({})
+  const [mobilePane, setMobilePane] = useState<'buckets' | 'objects'>('buckets')
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const [buckets, setBuckets] = useState<StorageBucket[]>([])
@@ -432,8 +434,8 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
       <div className="relative min-h-0 flex-1">
         <div className="absolute inset-0 flex">
 
-          {/* ── Buckets rail ───────────────────────────────── */}
-          <div className={`flex w-[248px] flex-shrink-0 flex-col border-r border-white/[0.06] ${KIT.rail}`}>
+          {/* ── Buckets rail (responsive drill-down on mobile) ── */}
+          <div className={`w-full md:w-[248px] flex-shrink-0 flex-col border-r border-white/[0.06] ${KIT.rail} ${mobilePane === 'buckets' ? 'flex' : 'hidden md:flex'}`}>
             <div className="flex h-10 flex-shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] px-3">
               <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">Buckets</span>
               <div className="flex flex-shrink-0 items-center gap-0.5">
@@ -495,7 +497,7 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
                 <div className="space-y-px px-2">
                   {/* All buckets */}
                   <div
-                    onClick={() => { setSelectedBucket(ALL_BUCKETS); setSelectedBucketId(null) }}
+                    onClick={() => { setSelectedBucket(ALL_BUCKETS); setSelectedBucketId(null); setMobilePane('objects') }}
                     className={`group relative flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-[7px] transition-colors ${
                       selectedBucket === ALL_BUCKETS
                         ? 'bg-white/[0.05] text-zinc-50'
@@ -521,7 +523,7 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
                       return (
                         <div
                           key={bucket.id}
-                          onClick={() => { setSelectedBucket(bucket.name); setSelectedBucketId(bucket.id) }}
+                          onClick={() => { setSelectedBucket(bucket.name); setSelectedBucketId(bucket.id); setMobilePane('objects') }}
                           className={`group relative flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-[7px] transition-colors ${
                             active ? 'bg-white/[0.05] text-zinc-50' : 'text-zinc-400 hover:bg-white/[0.03] hover:text-zinc-100'
                           }`}
@@ -591,31 +593,41 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
           </div>
 
           {/* ── Object grid ────────────────────────────────── */}
-          <div className="flex min-w-0 flex-1 flex-col">
+          <div className={`min-w-0 flex-1 flex-col ${mobilePane === 'objects' ? 'flex' : 'hidden md:flex'}`}>
             {/* Toolbar */}
-            <div className="flex h-10 flex-shrink-0 items-center justify-between gap-3 border-b border-white/[0.06] px-4">
-              <div className="flex min-w-0 items-baseline gap-2">
-                <h2 className="truncate font-mono text-[13px] font-medium text-zinc-100">
-                  {selectedBucket === ALL_BUCKETS ? 'All buckets' : selectedBucket}
-                </h2>
-                <span className="whitespace-nowrap font-mono text-[11px] tabular-nums text-zinc-500">
-                  {filteredFiles.length.toLocaleString()} object{filteredFiles.length === 1 ? '' : 's'}
-                </span>
-                {selectedBucket !== ALL_BUCKETS && (
-                  <span className="whitespace-nowrap font-mono text-[11px] tabular-nums text-zinc-600">
-                    {formatFileSize(toNum(sizeFor(selectedBucket)))}
+            <div className="flex h-11 md:h-10 flex-shrink-0 items-center justify-between gap-2 md:gap-3 border-b border-white/[0.06] px-3 sm:px-4">
+              <div className="flex min-w-0 items-center gap-2">
+                <button
+                  onClick={() => setMobilePane('buckets')}
+                  className="flex md:hidden items-center gap-1 -ml-1 text-[11.5px] font-medium text-violet-400 hover:text-violet-300 py-1.5 px-2 rounded-lg bg-white/[0.04] transition-colors"
+                  aria-label="Back to buckets"
+                >
+                  <ChevronLeft className="h-3.5 w-3.5" />
+                  <span>Buckets</span>
+                </button>
+                <div className="flex min-w-0 items-baseline gap-2">
+                  <h2 className="truncate font-mono text-[13px] font-medium text-zinc-100">
+                    {selectedBucket === ALL_BUCKETS ? 'All buckets' : selectedBucket}
+                  </h2>
+                  <span className="whitespace-nowrap font-mono text-[11px] tabular-nums text-zinc-500">
+                    {filteredFiles.length.toLocaleString()} obj
                   </span>
-                )}
+                  {selectedBucket !== ALL_BUCKETS && (
+                    <span className="hidden sm:inline whitespace-nowrap font-mono text-[11px] tabular-nums text-zinc-600">
+                      {formatFileSize(toNum(sizeFor(selectedBucket)))}
+                    </span>
+                  )}
+                </div>
               </div>
 
               <div className="flex flex-shrink-0 items-center gap-2">
                 {selectedFiles.size > 0 && (
                   <>
-                    <span className="font-mono text-[11px] font-medium tabular-nums text-zinc-400">
+                    <span className="hidden sm:inline font-mono text-[11px] font-medium tabular-nums text-zinc-400">
                       {selectedFiles.size} selected
                     </span>
                     <KitButton variant="danger" size="sm" icon={Trash2} onClick={handleBulkDelete}>
-                      Delete
+                      <span className="hidden sm:inline">Delete</span>
                     </KitButton>
                     <span className="h-3 w-px bg-white/10" />
                   </>
@@ -624,10 +636,10 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
                   <Search className="absolute left-2.5 top-1/2 h-3 w-3 -translate-y-1/2 text-zinc-600" />
                   <input
                     type="text"
-                    placeholder="Search objects…"
+                    placeholder="Search…"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    className="h-7 w-52 rounded-lg border border-white/[0.07] bg-[#0f1015] pl-7 pr-3 text-[11.5px] text-zinc-300 transition-colors placeholder:text-zinc-600 focus:border-violet-400/40 focus:outline-none focus:ring-2 focus:ring-violet-400/15"
+                    className="h-7 w-28 sm:w-52 rounded-lg border border-white/[0.07] bg-[#0f1015] pl-7 pr-2.5 text-[11.5px] text-zinc-300 transition-colors placeholder:text-zinc-600 focus:border-violet-400/40 focus:outline-none focus:ring-2 focus:ring-violet-400/15"
                   />
                 </div>
               </div>
@@ -671,130 +683,132 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
                   />
                 </div>
               ) : (
-                <table className="w-full border-collapse">
-                  <thead className="sticky top-0 z-10">
-                    <tr className={KIT.gridHead}>
-                      <th className={`sticky left-0 z-20 w-10 border-b border-r border-white/[0.06] ${KIT.gridHead} px-2 py-2 text-center`}>
-                        <button
-                          onClick={handleSelectAll}
-                          className="text-zinc-600 transition-colors hover:text-zinc-300"
-                          title={selectedFiles.size === filteredFiles.length ? 'Deselect all' : 'Select all'}
-                        >
-                          {selectedFiles.size === filteredFiles.length && filteredFiles.length > 0 ? (
-                            <CheckSquare className="h-3.5 w-3.5 text-violet-300" />
-                          ) : (
-                            <Square className="h-3.5 w-3.5" />
-                          )}
-                        </button>
-                      </th>
-                      <th className="border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
-                        Name
-                      </th>
-                      {selectedBucket === ALL_BUCKETS && (
-                        <th className="border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
-                          Bucket
+                <div className="min-w-full overflow-x-auto">
+                  <table className="w-full min-w-[540px] md:min-w-full border-collapse">
+                    <thead className="sticky top-0 z-10">
+                      <tr className={KIT.gridHead}>
+                        <th className={`sticky left-0 z-20 w-10 border-b border-r border-white/[0.06] ${KIT.gridHead} px-2 py-2 text-center`}>
+                          <button
+                            onClick={handleSelectAll}
+                            className="text-zinc-600 transition-colors hover:text-zinc-300"
+                            title={selectedFiles.size === filteredFiles.length ? 'Deselect all' : 'Select all'}
+                          >
+                            {selectedFiles.size === filteredFiles.length && filteredFiles.length > 0 ? (
+                              <CheckSquare className="h-3.5 w-3.5 text-violet-300" />
+                            ) : (
+                              <Square className="h-3.5 w-3.5" />
+                            )}
+                          </button>
                         </th>
-                      )}
-                      <th className="border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
-                        Type
-                      </th>
-                      <th className="border-b border-white/[0.06] px-3 py-2 text-right text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
-                        Size
-                      </th>
-                      <th className="border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
-                        Access
-                      </th>
-                      <th className="border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
-                        Uploaded
-                      </th>
-                      <th className="w-20 border-b border-white/[0.06] px-3 py-2" />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredFiles.map((file) => {
-                      const FileIconComp = getFileIcon(file.mimeType)
-                      const isChecked = selectedFiles.has(file.id)
-                      const isActive = selectedFileId === file.id
-                      return (
-                        <tr
-                          key={file.id}
-                          onClick={() => setSelectedFileId(file.id)}
-                          className={`group/row cursor-pointer transition-colors ${
-                            isActive ? 'bg-white/[0.05]' : KIT.rowHoverOn
-                          }`}
-                        >
-                          <td
-                            className={`sticky left-0 z-10 border-b border-r border-white/[0.04] px-2 py-[9px] text-center transition-colors ${
-                              isActive ? 'bg-[#1a1b21]' : `${KIT.bg} ${KIT.rowHoverGroup}`
+                        <th className="border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
+                          Name
+                        </th>
+                        {selectedBucket === ALL_BUCKETS && (
+                          <th className="border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
+                            Bucket
+                          </th>
+                        )}
+                        <th className="border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
+                          Type
+                        </th>
+                        <th className="border-b border-white/[0.06] px-3 py-2 text-right text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
+                          Size
+                        </th>
+                        <th className="border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
+                          Access
+                        </th>
+                        <th className="border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
+                          Uploaded
+                        </th>
+                        <th className="w-20 border-b border-white/[0.06] px-3 py-2" />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredFiles.map((file) => {
+                        const FileIconComp = getFileIcon(file.mimeType)
+                        const isChecked = selectedFiles.has(file.id)
+                        const isActive = selectedFileId === file.id
+                        return (
+                          <tr
+                            key={file.id}
+                            onClick={() => setSelectedFileId(file.id)}
+                            className={`group/row cursor-pointer transition-colors ${
+                              isActive ? 'bg-white/[0.05]' : KIT.rowHoverOn
                             }`}
                           >
-                            <button
-                              onClick={(e) => { e.stopPropagation(); handleFileSelect(file.id) }}
-                              className="text-zinc-700 transition-colors hover:text-zinc-300"
+                            <td
+                              className={`sticky left-0 z-10 border-b border-r border-white/[0.04] px-2 py-[9px] text-center transition-colors ${
+                                isActive ? 'bg-[#1a1b21]' : `${KIT.bg} ${KIT.rowHoverGroup}`
+                              }`}
                             >
-                              {isChecked ? (
-                                <CheckSquare className="h-3.5 w-3.5 text-violet-300" />
-                              ) : (
-                                <Square className="h-3.5 w-3.5" />
-                              )}
-                            </button>
-                          </td>
-                          <td className="border-b border-white/[0.04] px-3 py-[9px]">
-                            <div className="flex min-w-0 items-center gap-2.5">
-                              <FileIconComp className="h-3.5 w-3.5 flex-shrink-0 text-zinc-600" />
-                              <span className="truncate font-mono text-[12px] text-zinc-200" title={file.name}>
-                                {file.name}
-                              </span>
-                            </div>
-                          </td>
-                          {selectedBucket === ALL_BUCKETS && (
-                            <td className="border-b border-white/[0.04] px-3 py-[9px] font-mono text-[11px] text-zinc-500">
-                              {file.bucket}
+                              <button
+                                onClick={(e) => { e.stopPropagation(); handleFileSelect(file.id) }}
+                                className="text-zinc-700 transition-colors hover:text-zinc-300"
+                              >
+                                {isChecked ? (
+                                  <CheckSquare className="h-3.5 w-3.5 text-violet-300" />
+                                ) : (
+                                  <Square className="h-3.5 w-3.5" />
+                                )}
+                              </button>
                             </td>
-                          )}
-                          <td className="border-b border-white/[0.04] px-3 py-[9px] font-mono text-[11px] text-zinc-500">
-                            {shortType(file.mimeType)}
-                          </td>
-                          <td className="border-b border-white/[0.04] px-3 py-[9px] text-right font-mono text-[11px] tabular-nums text-zinc-400">
-                            {formatFileSize(toNum(file.size))}
-                          </td>
-                          <td className="border-b border-white/[0.04] px-3 py-[9px]">
-                            <span className={`font-mono text-[10.5px] ${file.isPublic ? 'text-emerald-300/80' : 'text-zinc-600'}`}>
-                              {file.isPublic ? 'public' : 'private'}
-                            </span>
-                          </td>
-                          <td className="border-b border-white/[0.04] px-3 py-[9px] font-mono text-[10.5px] tabular-nums text-zinc-600">
-                            {timeAgo(file.createdAt)}
-                          </td>
-                          <td className="border-b border-white/[0.04] px-3 py-[9px]">
-                            <div className="flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover/row:opacity-100">
-                              <Tooltip content={copiedUrl === file.url ? 'Copied' : 'Copy URL'}>
-                                <button
-                                  onClick={(e) => { e.stopPropagation(); handleCopyLink(file.url) }}
-                                  className="rounded-md p-1.5 text-zinc-600 transition-colors hover:bg-white/[0.04] hover:text-zinc-100"
-                                >
-                                  {copiedUrl === file.url ? (
-                                    <Check className="h-3.5 w-3.5 text-emerald-300" />
-                                  ) : (
-                                    <Copy className="h-3.5 w-3.5" />
-                                  )}
-                                </button>
-                              </Tooltip>
-                              <Tooltip content="Delete">
-                                <button
-                                  onClick={(e) => { e.stopPropagation(); setFileToDelete(file) }}
-                                  className="rounded-md p-1.5 text-zinc-600 transition-colors hover:bg-rose-500/[0.08] hover:text-rose-300"
-                                >
-                                  <Trash2 className="h-3.5 w-3.5" />
-                                </button>
-                              </Tooltip>
-                            </div>
-                          </td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
+                            <td className="border-b border-white/[0.04] px-3 py-[9px]">
+                              <div className="flex min-w-0 items-center gap-2.5">
+                                <FileIconComp className="h-3.5 w-3.5 flex-shrink-0 text-zinc-600" />
+                                <span className="truncate font-mono text-[12px] text-zinc-200" title={file.name}>
+                                  {file.name}
+                                </span>
+                              </div>
+                            </td>
+                            {selectedBucket === ALL_BUCKETS && (
+                              <td className="border-b border-white/[0.04] px-3 py-[9px] font-mono text-[11px] text-zinc-500">
+                                {file.bucket}
+                              </td>
+                            )}
+                            <td className="border-b border-white/[0.04] px-3 py-[9px] font-mono text-[11px] text-zinc-500">
+                              {shortType(file.mimeType)}
+                            </td>
+                            <td className="border-b border-white/[0.04] px-3 py-[9px] text-right font-mono text-[11px] tabular-nums text-zinc-400">
+                              {formatFileSize(toNum(file.size))}
+                            </td>
+                            <td className="border-b border-white/[0.04] px-3 py-[9px]">
+                              <span className={`font-mono text-[10.5px] ${file.isPublic ? 'text-emerald-300/80' : 'text-zinc-600'}`}>
+                                {file.isPublic ? 'public' : 'private'}
+                              </span>
+                            </td>
+                            <td className="border-b border-white/[0.04] px-3 py-[9px] font-mono text-[10.5px] tabular-nums text-zinc-600">
+                              {timeAgo(file.createdAt)}
+                            </td>
+                            <td className="border-b border-white/[0.04] px-3 py-[9px]">
+                              <div className="flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover/row:opacity-100">
+                                <Tooltip content={copiedUrl === file.url ? 'Copied' : 'Copy URL'}>
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); handleCopyLink(file.url) }}
+                                    className="rounded-md p-1.5 text-zinc-600 transition-colors hover:bg-white/[0.04] hover:text-zinc-100"
+                                  >
+                                    {copiedUrl === file.url ? (
+                                      <Check className="h-3.5 w-3.5 text-emerald-300" />
+                                    ) : (
+                                      <Copy className="h-3.5 w-3.5" />
+                                    )}
+                                  </button>
+                                </Tooltip>
+                                <Tooltip content="Delete">
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); setFileToDelete(file) }}
+                                    className="rounded-md p-1.5 text-zinc-600 transition-colors hover:bg-rose-500/[0.08] hover:text-rose-300"
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                  </button>
+                                </Tooltip>
+                              </div>
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
               )}
             </div>
 
@@ -829,105 +843,119 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
 
           {/* ── Object detail ──────────────────────────────── */}
           {selectedFile && (
-            <div className={`flex w-[320px] flex-shrink-0 flex-col border-l border-white/[0.06] ${KIT.rail}`}>
-              <div className="flex h-10 flex-shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] px-3">
-                <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">Object</span>
-                <button
-                  onClick={() => setSelectedFileId(null)}
-                  className="rounded-md p-1.5 text-zinc-600 transition-colors hover:bg-white/[0.04] hover:text-zinc-200"
-                  title="Close"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              </div>
+            <>
+              {/* Mobile Backdrop Overlay */}
+              <div
+                className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm md:hidden"
+                onClick={() => setSelectedFileId(null)}
+              />
 
-              <div className="min-h-0 flex-1 overflow-y-auto">
-                {/* Preview */}
-                <div className="border-b border-white/[0.06] p-3">
-                  {selectedFile.mimeType?.startsWith('image/') ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={selectedFile.url}
-                      alt={selectedFile.name}
-                      className="max-h-56 w-full rounded-lg border border-white/[0.06] object-contain"
-                    />
-                  ) : (
-                    <div className="flex h-28 items-center justify-center rounded-lg border border-white/[0.06] bg-[#0f1015]">
-                      {(() => {
-                        const Icon = getFileIcon(selectedFile.mimeType)
-                        return <Icon className="h-5 w-5 text-zinc-700" />
-                      })()}
-                    </div>
-                  )}
-                  <p className="mt-2.5 break-all font-mono text-[12px] text-zinc-100">{selectedFile.name}</p>
+              {/* Responsive Drawer / Right Rail */}
+              <div className={`fixed inset-x-0 bottom-0 z-50 max-h-[85vh] rounded-t-2xl border-t border-white/10 md:static md:inset-auto md:z-auto md:flex md:w-[320px] md:max-h-none md:rounded-none md:border-t-0 md:border-l md:border-white/[0.06] flex-shrink-0 flex-col ${KIT.rail} shadow-2xl md:shadow-none pb-[max(1rem,env(safe-area-inset-bottom))] md:pb-0`}>
+                {/* Mobile Drag Handle */}
+                <div className="flex md:hidden pt-2.5 pb-1 justify-center">
+                  <div className="w-10 h-1 rounded-full bg-white/20" />
                 </div>
 
-                {/* Metadata */}
-                <dl className="divide-y divide-white/[0.04]">
-                  {[
-                    ['Size', formatFileSize(toNum(selectedFile.size))],
-                    ['Type', selectedFile.mimeType || '—'],
-                    ['Bucket', selectedFile.bucket],
-                    ['Access', selectedFile.isPublic ? 'public' : 'private'],
-                    ['Uploaded', new Date(selectedFile.createdAt).toLocaleString()],
-                  ].map(([label, value]) => (
-                    <div key={label} className="flex items-baseline justify-between gap-3 px-3 py-2.5">
-                      <dt className="flex-shrink-0 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">
-                        {label}
-                      </dt>
-                      <dd
-                        className={`min-w-0 truncate text-right font-mono text-[11.5px] tabular-nums ${
-                          label === 'Access' && selectedFile.isPublic ? 'text-emerald-300/80' : 'text-zinc-300'
-                        }`}
-                        title={String(value)}
-                      >
-                        {value}
-                      </dd>
-                    </div>
-                  ))}
-                </dl>
+                <div className="flex h-10 flex-shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] px-3">
+                  <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">Object Details</span>
+                  <button
+                    onClick={() => setSelectedFileId(null)}
+                    className="rounded-md p-1.5 text-zinc-600 transition-colors hover:bg-white/[0.04] hover:text-zinc-200"
+                    title="Close"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
 
-                {/* URL */}
-                <div className="border-t border-white/[0.06] p-3">
-                  <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">URL</p>
-                  <div className="flex items-center gap-1.5">
-                    <code className="min-w-0 flex-1 truncate rounded-md border border-white/[0.06] bg-[#0f1015] px-2 py-1.5 font-mono text-[10.5px] text-zinc-400">
-                      {selectedFile.url}
-                    </code>
-                    <button
-                      onClick={() => handleCopyLink(selectedFile.url)}
-                      className="flex-shrink-0 rounded-md p-1.5 text-zinc-600 transition-colors hover:bg-white/[0.04] hover:text-zinc-100"
-                      title="Copy URL"
-                    >
-                      {copiedUrl === selectedFile.url ? (
-                        <Check className="h-3.5 w-3.5 text-emerald-300" />
-                      ) : (
-                        <Copy className="h-3.5 w-3.5" />
-                      )}
-                    </button>
+                <div className="min-h-0 flex-1 overflow-y-auto">
+                  {/* Preview */}
+                  <div className="border-b border-white/[0.06] p-3">
+                    {selectedFile.mimeType?.startsWith('image/') ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={selectedFile.url}
+                        alt={selectedFile.name}
+                        className="max-h-56 w-full rounded-lg border border-white/[0.06] object-contain"
+                      />
+                    ) : (
+                      <div className="flex h-28 items-center justify-center rounded-lg border border-white/[0.06] bg-[#0f1015]">
+                        {(() => {
+                          const Icon = getFileIcon(selectedFile.mimeType)
+                          return <Icon className="h-5 w-5 text-zinc-700" />
+                        })()}
+                      </div>
+                    )}
+                    <p className="mt-2.5 break-all font-mono text-[12px] text-zinc-100">{selectedFile.name}</p>
+                  </div>
+
+                  {/* Metadata */}
+                  <dl className="divide-y divide-white/[0.04]">
+                    {[
+                      ['Size', formatFileSize(toNum(selectedFile.size))],
+                      ['Type', selectedFile.mimeType || '—'],
+                      ['Bucket', selectedFile.bucket],
+                      ['Access', selectedFile.isPublic ? 'public' : 'private'],
+                      ['Uploaded', new Date(selectedFile.createdAt).toLocaleString()],
+                    ].map(([label, value]) => (
+                      <div key={label} className="flex items-baseline justify-between gap-3 px-3 py-2.5">
+                        <dt className="flex-shrink-0 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">
+                          {label}
+                        </dt>
+                        <dd
+                          className={`min-w-0 truncate text-right font-mono text-[11.5px] tabular-nums ${
+                            label === 'Access' && selectedFile.isPublic ? 'text-emerald-300/80' : 'text-zinc-300'
+                          }`}
+                          title={String(value)}
+                        >
+                          {value}
+                        </dd>
+                      </div>
+                    ))}
+                  </dl>
+
+                  {/* URL */}
+                  <div className="border-t border-white/[0.06] p-3">
+                    <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">URL</p>
+                    <div className="flex items-center gap-1.5">
+                      <code className="min-w-0 flex-1 truncate rounded-md border border-white/[0.06] bg-[#0f1015] px-2 py-1.5 font-mono text-[10.5px] text-zinc-400">
+                        {selectedFile.url}
+                      </code>
+                      <button
+                        onClick={() => handleCopyLink(selectedFile.url)}
+                        className="flex-shrink-0 rounded-md p-1.5 text-zinc-600 transition-colors hover:bg-white/[0.04] hover:text-zinc-100"
+                        title="Copy URL"
+                      >
+                        {copiedUrl === selectedFile.url ? (
+                          <Check className="h-3.5 w-3.5 text-emerald-300" />
+                        ) : (
+                          <Copy className="h-3.5 w-3.5" />
+                        )}
+                      </button>
+                    </div>
                   </div>
                 </div>
-              </div>
 
-              {/* Actions */}
-              <div className="flex flex-shrink-0 items-center gap-2 border-t border-white/[0.06] p-3">
-                <a
-                  href={selectedFile.url}
-                  download={selectedFile.name}
-                  className="inline-flex h-7 flex-1 items-center justify-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-2.5 text-[11.5px] font-medium text-zinc-200 transition-colors hover:border-white/20 hover:bg-white/[0.08]"
-                >
-                  <Download className="h-3.5 w-3.5" />
-                  Download
-                </a>
-                <button
-                  onClick={() => setFileToDelete(selectedFile)}
-                  className="inline-flex h-7 items-center justify-center gap-1.5 rounded-lg border border-rose-500/25 bg-rose-500/[0.08] px-2.5 text-[11.5px] font-medium text-rose-300 transition-colors hover:border-rose-500/35 hover:bg-rose-500/[0.14]"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                  Delete
-                </button>
+                {/* Actions */}
+                <div className="flex flex-shrink-0 items-center gap-2 border-t border-white/[0.06] p-3">
+                  <a
+                    href={selectedFile.url}
+                    download={selectedFile.name}
+                    className="inline-flex h-8 flex-1 items-center justify-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-2.5 text-[11.5px] font-medium text-zinc-200 transition-colors hover:border-white/20 hover:bg-white/[0.08]"
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                    Download
+                  </a>
+                  <button
+                    onClick={() => setFileToDelete(selectedFile)}
+                    className="inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border border-rose-500/25 bg-rose-500/[0.08] px-2.5 text-[11.5px] font-medium text-rose-300 transition-colors hover:border-rose-500/35 hover:bg-rose-500/[0.14]"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    Delete
+                  </button>
+                </div>
               </div>
-            </div>
+            </>
           )}
         </div>
       </div>

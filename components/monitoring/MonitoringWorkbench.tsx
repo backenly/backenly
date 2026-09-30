@@ -300,49 +300,51 @@ export function MonitoringWorkbench({ projectId }: { projectId: string }) {
               />
             </div>
           ) : (
-            <table className="w-full border-collapse">
-              <thead className="sticky top-0 z-10">
-                <tr className={KIT.gridHead}>
-                  {['API route', 'Traffic', 'Speed', 'Slowest', 'Health'].map((h, i) => (
-                    <th
-                      key={h}
-                      className={`border-b border-white/[0.06] px-3 py-2 text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600 ${
-                        i === 0 ? 'text-left' : 'text-right'
-                      }`}
-                    >
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {performanceBreakdowns.map((b, idx) => (
-                  <tr key={idx} className={`transition-colors ${KIT.rowHoverOn}`}>
-                    <td className="border-b border-white/[0.04] px-3 py-[9px] font-mono text-[12px] text-zinc-300">
-                      {b.endpoint || b.function || b.database}
-                    </td>
-                    <td className="border-b border-white/[0.04] px-3 py-[9px] text-right font-mono text-[11px] tabular-nums text-zinc-500">
-                      {b.requests.toLocaleString()}
-                    </td>
-                    <td className="border-b border-white/[0.04] px-3 py-[9px] text-right font-mono text-[11px] tabular-nums text-zinc-500">
-                      {b.avgResponseTime}ms
-                    </td>
-                    <td className="border-b border-white/[0.04] px-3 py-[9px] text-right font-mono text-[11px] tabular-nums text-zinc-500">
-                      {b.p95}ms
-                    </td>
-                    <td className="border-b border-white/[0.04] px-3 py-[9px] text-right">
-                      <span
-                        className={`font-mono text-[11px] font-medium tabular-nums ${
-                          b.errorRate > 1 ? 'text-rose-300' : b.errorRate > 0.2 ? 'text-amber-500' : 'text-emerald-300/90'
+            <div className="min-w-full overflow-x-auto">
+              <table className="w-full min-w-[500px] border-collapse">
+                <thead className="sticky top-0 z-10">
+                  <tr className={KIT.gridHead}>
+                    {['API route', 'Traffic', 'Speed', 'Slowest', 'Health'].map((h, i) => (
+                      <th
+                        key={h}
+                        className={`border-b border-white/[0.06] px-3 py-2 text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600 ${
+                          i === 0 ? 'text-left' : 'text-right'
                         }`}
                       >
-                        {b.errorRate}%
-                      </span>
-                    </td>
+                        {h}
+                      </th>
+                    ))}
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {performanceBreakdowns.map((b, idx) => (
+                    <tr key={idx} className={`transition-colors ${KIT.rowHoverOn}`}>
+                      <td className="border-b border-white/[0.04] px-3 py-[9px] font-mono text-[12px] text-zinc-300">
+                        {b.endpoint || b.function || b.database}
+                      </td>
+                      <td className="border-b border-white/[0.04] px-3 py-[9px] text-right font-mono text-[11px] tabular-nums text-zinc-500">
+                        {b.requests.toLocaleString()}
+                      </td>
+                      <td className="border-b border-white/[0.04] px-3 py-[9px] text-right font-mono text-[11px] tabular-nums text-zinc-500">
+                        {b.avgResponseTime}ms
+                      </td>
+                      <td className="border-b border-white/[0.04] px-3 py-[9px] text-right font-mono text-[11px] tabular-nums text-zinc-500">
+                        {b.p95}ms
+                      </td>
+                      <td className="border-b border-white/[0.04] px-3 py-[9px] text-right">
+                        <span
+                          className={`font-mono text-[11px] font-medium tabular-nums ${
+                            b.errorRate > 1 ? 'text-rose-300' : b.errorRate > 0.2 ? 'text-amber-500' : 'text-emerald-300/90'
+                          }`}
+                        >
+                          {b.errorRate}%
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
       </div>
@@ -379,7 +381,7 @@ export function MonitoringWorkbench({ projectId }: { projectId: string }) {
           </div>
         )}
 
-        <div className="flex h-10 flex-shrink-0 items-center justify-between gap-3 border-b border-white/[0.06] px-4">
+        <div className="flex h-10 flex-shrink-0 items-center justify-between gap-3 border-b border-white/[0.06] px-3 sm:px-4">
           <div className="flex items-baseline gap-2">
             <h2 className="text-[13px] font-medium text-zinc-100">API request log</h2>
             <span className="font-mono text-[11px] tabular-nums text-zinc-500">
@@ -399,66 +401,68 @@ export function MonitoringWorkbench({ projectId }: { projectId: string }) {
               />
             </div>
           ) : (
-            <table className="w-full border-collapse">
-              <thead className="sticky top-0 z-10">
-                <tr className={KIT.gridHead}>
-                  {['Method', 'Endpoint', 'Status', 'Latency', 'When'].map((h) => (
-                    <th
-                      key={h}
-                      className="border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600"
-                    >
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {requestLog.map((req) => {
-                  const methodColor =
-                    req.method === 'POST'
-                      ? 'text-emerald-300/90'
-                      : req.method === 'PUT' || req.method === 'PATCH'
-                      ? 'text-violet-300/90'
-                      : req.method === 'DELETE'
-                      ? 'text-rose-300/90'
-                      : 'text-zinc-400'
-                  const statusColor =
-                    req.status >= 500
-                      ? 'text-rose-300'
-                      : req.status >= 400
-                      ? 'text-amber-500'
-                      : req.status >= 300
-                      ? 'text-sky-300/90'
-                      : 'text-emerald-300/90'
-                  return (
-                    <tr key={req.id} className={`transition-colors ${KIT.rowHoverOn}`}>
-                      <td className="w-20 border-b border-white/[0.04] px-3 py-[7px]">
-                        <span className={`font-mono text-[11px] font-semibold tracking-wide ${methodColor}`}>
-                          {req.method}
-                        </span>
-                      </td>
-                      <td className="border-b border-white/[0.04] px-3 py-[7px] font-mono text-[12px] text-zinc-300">
-                        {req.path}
-                      </td>
-                      <td className={`w-16 border-b border-white/[0.04] px-3 py-[7px] font-mono text-[11px] tabular-nums ${statusColor}`}>
-                        {req.status}
-                      </td>
-                      <td className="w-20 border-b border-white/[0.04] px-3 py-[7px] font-mono text-[11px] tabular-nums text-zinc-500">
-                        {req.latency}ms
-                      </td>
-                      <td className="w-36 border-b border-white/[0.04] px-3 py-[7px] font-mono text-[10.5px] tabular-nums text-zinc-600">
-                        {new Date(req.timestamp).toLocaleString('en-US', {
-                          month: 'short',
-                          day: 'numeric',
-                          hour: '2-digit',
-                          minute: '2-digit',
-                        })}
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
+            <div className="min-w-full overflow-x-auto">
+              <table className="w-full min-w-[540px] border-collapse">
+                <thead className="sticky top-0 z-10">
+                  <tr className={KIT.gridHead}>
+                    {['Method', 'Endpoint', 'Status', 'Latency', 'When'].map((h) => (
+                      <th
+                        key={h}
+                        className="border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600"
+                      >
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {requestLog.map((req) => {
+                    const methodColor =
+                      req.method === 'POST'
+                        ? 'text-emerald-300/90'
+                        : req.method === 'PUT' || req.method === 'PATCH'
+                        ? 'text-violet-300/90'
+                        : req.method === 'DELETE'
+                        ? 'text-rose-300/90'
+                        : 'text-zinc-400'
+                    const statusColor =
+                      req.status >= 500
+                        ? 'text-rose-300'
+                        : req.status >= 400
+                        ? 'text-amber-500'
+                        : req.status >= 300
+                        ? 'text-sky-300/90'
+                        : 'text-emerald-300/90'
+                    return (
+                      <tr key={req.id} className={`transition-colors ${KIT.rowHoverOn}`}>
+                        <td className="w-20 border-b border-white/[0.04] px-3 py-[7px]">
+                          <span className={`font-mono text-[11px] font-semibold tracking-wide ${methodColor}`}>
+                            {req.method}
+                          </span>
+                        </td>
+                        <td className="border-b border-white/[0.04] px-3 py-[7px] font-mono text-[12px] text-zinc-300">
+                          {req.path}
+                        </td>
+                        <td className={`w-16 border-b border-white/[0.04] px-3 py-[7px] font-mono text-[11px] tabular-nums ${statusColor}`}>
+                          {req.status}
+                        </td>
+                        <td className="w-20 border-b border-white/[0.04] px-3 py-[7px] font-mono text-[11px] tabular-nums text-zinc-500">
+                          {req.latency}ms
+                        </td>
+                        <td className="w-36 border-b border-white/[0.04] px-3 py-[7px] font-mono text-[10.5px] tabular-nums text-zinc-600">
+                          {new Date(req.timestamp).toLocaleString('en-US', {
+                            month: 'short',
+                            day: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
       </div>

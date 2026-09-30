@@ -174,7 +174,7 @@ export function MainWorkspace({ projectId, projectName }: MainWorkspaceProps) {
   return (
     <div className="h-full overflow-y-auto bg-[#101116]">
       <div className="pointer-events-none sticky top-0 z-0 h-px bg-gradient-to-r from-transparent via-violet-300/25 to-transparent" />
-      <div className="relative z-10 max-w-[1460px] mx-auto px-5 pt-5 pb-10 sm:px-6 lg:px-8">
+      <div className="relative z-10 max-w-[1460px] mx-auto px-3.5 pt-3.5 pb-8 sm:px-6 lg:px-8">
 
         {/* ── Initial load ────────────────────────────────── */}
         {/* Don't flash EmptyState while the first /state fetch is in flight —

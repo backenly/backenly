@@ -436,7 +436,7 @@ export function WorkspaceHome({
           Connect agent) live in the top bar. ──────────────────────────── */}
       <div className="space-y-3.5">
         <header className="min-w-0 px-1 pt-1">
-          <h1 className="truncate text-[22px] font-semibold leading-tight tracking-[-0.01em] text-white">
+          <h1 className="truncate text-xl sm:text-[22px] font-semibold leading-tight tracking-[-0.01em] text-white">
             {projectName ?? 'Untitled project'}
           </h1>
         </header>
@@ -625,7 +625,7 @@ function AgentPanel({
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -4 }}
                 transition={{ duration: 0.3, ease: [0.25, 0.46, 0.45, 0.94] }}
-                className="text-[19px] font-semibold leading-snug tracking-[-0.01em] text-white"
+                className="text-[17px] sm:text-[19px] font-semibold leading-snug tracking-[-0.01em] text-white"
               >
                 {agent.headline}
               </motion.h2>
@@ -636,7 +636,7 @@ function AgentPanel({
           </p>
 
           {(agent.cta || agent.quiet) && (
-            <div className="mt-4 flex items-center gap-3">
+            <div className="mt-4 flex flex-wrap items-center gap-3">
               {agent.cta && (
                 <button
                   onClick={agent.cta.onClick}
@@ -958,10 +958,11 @@ function SelfHealingLoop({
 
   return (
     <div
-      className="relative"
+      className="relative overflow-x-auto no-scrollbar -mx-5 px-5 sm:mx-0 sm:px-0"
       aria-label={off ? 'Autonomy loop off' : `Autonomy loop phase: ${phase}`}
     >
-      {/* ── Rail + phase nodes ───────────────────────────────────────────
+      <div className="min-w-[460px] sm:min-w-0">
+        {/* ── Rail + phase nodes ───────────────────────────────────────────
           A five-column grid, not justify-between: the node centers then sit at
           exactly 10/30/50/70/90% of the width, which is what lets the rail and
           the return arc below anchor to them at any viewport size. ──────── */}
@@ -1142,24 +1143,25 @@ function SelfHealingLoop({
         <AxisSpan className="col-span-2 pl-3" label="last 30 days" />
       </div>
 
-      {/* ── Return path — the reason it is a loop and not a pipeline ───── */}
-      <ReturnCircuit
-        off={off}
-        live={live}
-        label={
-          off ? (
-            <>
-              Loop paused
-              <span className="hidden lg:inline"> — findings are still recorded</span>
-            </>
-          ) : (
-            <>
-              Verify feeds the next Observe
-              <span className="hidden lg:inline">. No human at the top of the loop</span>
-            </>
-          )
-        }
-      />
+        {/* ── Return path — the reason it is a loop and not a pipeline ───── */}
+        <ReturnCircuit
+          off={off}
+          live={live}
+          label={
+            off ? (
+              <>
+                Loop paused
+                <span className="hidden lg:inline"> — findings are still recorded</span>
+              </>
+            ) : (
+              <>
+                Verify feeds the next Observe
+                <span className="hidden lg:inline">. No human at the top of the loop</span>
+              </>
+            )
+          }
+        />
+      </div>
     </div>
   )
 }

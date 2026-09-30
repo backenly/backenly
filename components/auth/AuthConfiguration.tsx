@@ -324,7 +324,7 @@ export function AuthConfiguration() {
 
 
   return (
-    <div className="px-8 py-6">
+    <div className="px-3.5 sm:px-8 py-4 sm:py-6">
       <Toast
         message={toast?.message || ''}
         type={toast?.type || 'info'}
@@ -354,15 +354,15 @@ export function AuthConfiguration() {
 
       {/* Identity metrics — one dense rail of mono counters, matching the
           workspace home inventory rail. */}
-      <div className="mb-4 rounded-xl border border-white/[0.07] bg-[#16171d] shadow-[0_16px_44px_-28px_rgba(0,0,0,0.9)]">
-        <div className="grid grid-cols-2 sm:grid-cols-4 divide-x divide-white/[0.06]">
-          <div className="flex items-baseline gap-2 px-4 py-3">
+      <div className="mb-4 rounded-xl border border-white/[0.07] bg-[#16171d] shadow-[0_16px_44px_-28px_rgba(0,0,0,0.9)] overflow-hidden">
+        <div className="grid grid-cols-2 sm:grid-cols-4 divide-y sm:divide-y-0 sm:divide-x divide-white/[0.06]">
+          <div className="flex items-baseline gap-2 px-3 sm:px-4 py-3">
             <span className="font-mono text-[16px] font-medium tabular-nums leading-none text-white">
               {statsLoading ? '—' : (stats?.totalUsers ?? 0).toLocaleString()}
             </span>
             <span className="text-[11px] text-zinc-500 leading-none">identities</span>
           </div>
-          <div className="flex items-baseline gap-2 px-4 py-3">
+          <div className="flex items-baseline gap-2 px-3 sm:px-4 py-3 border-l sm:border-l-0 border-white/[0.06]">
             <span className="font-mono text-[16px] font-medium tabular-nums leading-none text-white">
               {statsLoading ? '—' : (stats?.activeUsers ?? 0).toLocaleString()}
             </span>
@@ -373,13 +373,13 @@ export function AuthConfiguration() {
               </span>
             ) : null}
           </div>
-          <div className="flex items-baseline gap-2 px-4 py-3">
+          <div className="flex items-baseline gap-2 px-3 sm:px-4 py-3">
             <span className="font-mono text-[16px] font-medium tabular-nums leading-none text-white">
               {statsLoading ? '—' : (stats?.verifications ?? 0).toLocaleString()}
             </span>
             <span className="text-[11px] text-zinc-500 leading-none">verified</span>
           </div>
-          <div className="flex items-baseline gap-2 px-4 py-3">
+          <div className="flex items-baseline gap-2 px-3 sm:px-4 py-3 border-l sm:border-l-0 border-white/[0.06]">
             <span className="font-mono text-[16px] font-medium tabular-nums leading-none text-white">
               {statsLoading ? '—' : (stats?.signups24h ?? 0).toLocaleString()}
             </span>
@@ -394,8 +394,8 @@ export function AuthConfiguration() {
       </div>
 
       {/* Main: methods + sidebar */}
-      <div className="flex gap-6 items-start">
-        <div className="flex-1 min-w-0 flex flex-col gap-6">
+      <div className="flex flex-col lg:flex-row gap-6 items-start">
+        <div className="w-full flex-1 min-w-0 flex flex-col gap-6">
           <KitCard>
             <KitCardHeader
               title="Sign-in methods"
@@ -424,7 +424,7 @@ export function AuthConfiguration() {
 
             {/* Social providers */}
             <div className="px-4 py-4">
-              <div className="flex items-center justify-between mb-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 mb-3">
                 <SectionLabel>Social sign-in</SectionLabel>
                 <span className="text-[11px] text-zinc-600">Your own OAuth credentials, stored encrypted per project</span>
               </div>
@@ -472,7 +472,7 @@ export function AuthConfiguration() {
         </div>
 
         {/* Right sidebar */}
-        <div className="w-80 flex-shrink-0 flex flex-col gap-6">
+        <div className="w-full lg:w-80 flex-shrink-0 flex flex-col gap-6">
           <KitCard>
             <div className="px-4 py-3 border-b border-white/[0.06] flex items-center gap-2">
               <Shield className="w-3 h-3 text-emerald-400/70" />

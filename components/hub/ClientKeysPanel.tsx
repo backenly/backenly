@@ -174,7 +174,7 @@ export function ClientKeysPanel() {
         }
       />
 
-      <div className="px-8 pb-24 pt-8">
+      <div className="px-4 sm:px-8 pb-24 pt-4 sm:pt-8">
         <div className="max-w-3xl">
           {loading ? (
             <div className="flex items-center gap-2 text-[13px] text-zinc-500 py-10 justify-center">
@@ -217,7 +217,7 @@ export function ClientKeysPanel() {
                     key={key.id}
                     initial={{ opacity: 0, y: 4 }}
                     animate={{ opacity: 1, y: 0 }}
-                    className={`group relative ${KIT.surface} border ${KIT.border} ${KIT.radius} ${KIT.inset} p-5`}
+                    className={`group relative ${KIT.surface} border ${KIT.border} ${KIT.radius} ${KIT.inset} p-3.5 sm:p-5`}
                   >
                     <div className="flex items-start justify-between gap-4 mb-4">
                       <div className="min-w-0">
@@ -236,7 +236,7 @@ export function ClientKeysPanel() {
                       </div>
                       <button
                         onClick={() => handleDeleteApiKey(key.id, key.name)}
-                        className="p-1.5 rounded-md text-zinc-500 hover:text-rose-300 hover:bg-rose-500/10 transition-colors opacity-0 group-hover:opacity-100"
+                        className="p-1.5 rounded-md text-zinc-500 hover:text-rose-300 hover:bg-rose-500/10 transition-colors opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
                         title="Delete key"
                       >
                         <Trash2 className="w-4 h-4" />
@@ -276,7 +276,7 @@ export function ClientKeysPanel() {
                       )}
                     </div>
 
-                    <div className="flex items-center gap-5 mt-3 text-[12px] text-zinc-500">
+                    <div className="flex flex-wrap items-center gap-x-5 gap-y-2 mt-3 text-[12px] text-zinc-500">
                       <span className="inline-flex items-center gap-1.5">
                         <Activity className="w-3.5 h-3.5 text-zinc-600" />
                         {key.rateLimit ?? 1000} req/{Math.max(1, Math.round((key.rateLimitWindow ?? 3600) / 3600))}h
@@ -300,17 +300,21 @@ export function ClientKeysPanel() {
       <AnimatePresence>
         {showCreateModal && (
           <div
-            className="fixed inset-0 z-[70] flex items-center justify-center p-4"
+            className="fixed inset-0 z-[70] flex items-end sm:items-center justify-center p-0 sm:p-4"
             onClick={(e) => { if (e.target === e.currentTarget) { setShowCreateModal(false); setNewKeyName(''); setNewKeyRole('admin') } }}
           >
-            <div className="absolute inset-0 bg-black/70" />
+            <div className="absolute inset-0 bg-black/70 backdrop-blur-sm sm:backdrop-blur-none" />
             <motion.div
-              initial={{ opacity: 0, scale: 0.97, y: 8 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.97, y: 8 }}
-              transition={{ duration: 0.16, ease: 'easeOut' }}
-              className={`relative w-full max-w-md ${KIT.surface} border ${KIT.border} ${KIT.radius} ${KIT.inset} overflow-hidden`}
+              initial={{ y: '100%', opacity: 0.6 }}
+              animate={{ y: 0, opacity: 1 }}
+              exit={{ y: '100%', opacity: 0 }}
+              transition={{ type: 'spring', damping: 28, stiffness: 300 }}
+              className={`relative w-full max-w-md ${KIT.surface} border-t sm:border ${KIT.border} rounded-t-2xl sm:${KIT.radius} ${KIT.inset} overflow-hidden pb-safe sm:pb-0`}
             >
+              {/* Drag handle */}
+              <div className="sm:hidden pt-2.5 pb-1 flex justify-center">
+                <div className="h-1 w-10 rounded-full bg-white/20" />
+              </div>
               <div className="flex items-center justify-between px-5 py-4 border-b border-white/[0.08]">
                 <div className="flex items-center gap-2.5">
                   <span className={`w-8 h-8 ${KIT.radiusSm} ${KIT.accentBg} border ${KIT.accentBorder} flex items-center justify-center`}>
@@ -376,16 +380,20 @@ export function ClientKeysPanel() {
       {/* ── Created key reveal (one-time) ────────────────────────────────── */}
       <AnimatePresence>
         {createdKey && (
-          <div className="fixed inset-0 z-[80] flex items-center justify-center p-4">
-            <div className="absolute inset-0 bg-black/75" />
+          <div className="fixed inset-0 z-[80] flex items-end sm:items-center justify-center p-0 sm:p-4">
+            <div className="absolute inset-0 bg-black/75 backdrop-blur-sm sm:backdrop-blur-none" />
             <motion.div
-              initial={{ opacity: 0, scale: 0.97, y: 8 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.97, y: 8 }}
-              transition={{ duration: 0.16, ease: 'easeOut' }}
-              className={`relative w-full max-w-lg ${KIT.surface} border ${KIT.border} ${KIT.radius} ${KIT.inset} overflow-hidden`}
+              initial={{ y: '100%', opacity: 0.6 }}
+              animate={{ y: 0, opacity: 1 }}
+              exit={{ y: '100%', opacity: 0 }}
+              transition={{ type: 'spring', damping: 28, stiffness: 300 }}
+              className={`relative w-full max-w-lg ${KIT.surface} border-t sm:border ${KIT.border} rounded-t-2xl sm:${KIT.radius} ${KIT.inset} overflow-hidden pb-safe sm:pb-0`}
             >
-              <div className="px-6 py-6">
+              {/* Drag handle */}
+              <div className="sm:hidden pt-2.5 pb-1 flex justify-center">
+                <div className="h-1 w-10 rounded-full bg-white/20" />
+              </div>
+              <div className="px-5 sm:px-6 py-5 sm:py-6">
                 <div className="flex items-center gap-3 mb-1">
                   <span className="w-9 h-9 rounded-md bg-emerald-500/[0.10] border border-emerald-500/25 flex items-center justify-center">
                     <Check className="w-4 h-4 text-emerald-300" />

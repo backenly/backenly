@@ -171,10 +171,17 @@ export function AssistantPanel() {
   const suggestions = suggestionsFor(pathname)
 
   return (
-    <aside
-      className="fixed top-12 right-0 bottom-0 z-20 w-full sm:w-[380px] bg-[#16171d] border-l border-white/[0.07] flex flex-col"
-      aria-label="Assistant"
-    >
+    <>
+      {/* Mobile backdrop */}
+      <div
+        onClick={() => setOpen(false)}
+        className="sm:hidden fixed inset-0 top-12 bg-black/60 backdrop-blur-sm z-30 transition-opacity"
+        aria-hidden="true"
+      />
+      <aside
+        className="fixed top-12 right-0 bottom-0 z-40 w-full sm:w-[380px] bg-[#16171d] border-l border-white/[0.07] flex flex-col shadow-2xl pb-[max(0.5rem,env(safe-area-inset-bottom))]"
+        aria-label="Assistant"
+      >
       {/* ── Header ── */}
       <div className="flex items-center gap-2 h-11 px-3.5 border-b border-white/[0.07] flex-shrink-0">
         <Sparkles className="w-3.5 h-3.5 text-zinc-400" />
@@ -302,5 +309,6 @@ export function AssistantPanel() {
         </p>
       </div>
     </aside>
+    </>
   )
 }

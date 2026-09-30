@@ -200,8 +200,8 @@ function UsersGrid({
               <input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search email or provider…"
-                className="h-7 w-56 rounded-lg border border-white/[0.07] bg-[#0f1015] pl-7 pr-3 text-[11.5px] text-zinc-300 transition-colors placeholder:text-zinc-600 focus:border-violet-400/40 focus:outline-none focus:ring-2 focus:ring-violet-400/15"
+                placeholder="Search…"
+                className="h-7 w-32 sm:w-56 rounded-lg border border-white/[0.07] bg-[#0f1015] pl-7 pr-3 text-[11.5px] text-zinc-300 transition-colors placeholder:text-zinc-600 focus:border-violet-400/40 focus:outline-none focus:ring-2 focus:ring-violet-400/15"
               />
             </div>
             <button
@@ -240,57 +240,59 @@ function UsersGrid({
               />
             </div>
           ) : (
-            <table className="w-full border-collapse">
-              <thead className="sticky top-0 z-10">
-                <tr className={KIT.gridHead}>
-                  <th className={`sticky left-0 z-20 w-12 border-b border-r border-white/[0.06] ${KIT.gridHead} px-2 py-2 text-right text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-700`}>
-                    #
-                  </th>
-                  {['Email', 'Provider', 'Signed up', 'Last active'].map((h) => (
-                    <th
-                      key={h}
-                      className="border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600"
-                    >
-                      {h}
+            <div className="min-w-full overflow-x-auto">
+              <table className="w-full min-w-[500px] border-collapse">
+                <thead className="sticky top-0 z-10">
+                  <tr className={KIT.gridHead}>
+                    <th className={`sticky left-0 z-20 w-12 border-b border-r border-white/[0.06] ${KIT.gridHead} px-2 py-2 text-right text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-700`}>
+                      #
                     </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map((u, i) => {
-                  const isActive = selectedId === u.id
-                  return (
-                    <tr
-                      key={u.id}
-                      onClick={() => setSelectedId(u.id)}
-                      className={`group/row cursor-pointer transition-colors ${isActive ? 'bg-white/[0.05]' : KIT.rowHoverOn}`}
-                    >
-                      <td
-                        className={`sticky left-0 z-10 border-b border-r border-white/[0.04] px-2 py-[9px] text-right font-mono text-[11px] tabular-nums text-zinc-700 transition-colors ${
-                          isActive ? 'bg-[#1a1b21]' : `${KIT.bg} ${KIT.rowHoverGroup}`
-                        }`}
+                    {['Email', 'Provider', 'Signed up', 'Last active'].map((h) => (
+                      <th
+                        key={h}
+                        className="border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600"
                       >
-                        {i + 1}
-                      </td>
-                      <td className="border-b border-white/[0.04] px-3 py-[9px]">
-                        <span className="truncate font-mono text-[12px] text-zinc-200" title={u.email}>
-                          {u.email}
-                        </span>
-                      </td>
-                      <td className="border-b border-white/[0.04] px-3 py-[9px] font-mono text-[11px] text-zinc-500">
-                        {u.provider}
-                      </td>
-                      <td className="border-b border-white/[0.04] px-3 py-[9px] font-mono text-[11px] tabular-nums text-zinc-500">
-                        {formatDate(u.createdAt)}
-                      </td>
-                      <td className="border-b border-white/[0.04] px-3 py-[9px] font-mono text-[11px] tabular-nums text-zinc-600">
-                        {u.lastLogin ? formatDate(u.lastLogin) : '—'}
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.map((u, i) => {
+                    const isActive = selectedId === u.id
+                    return (
+                      <tr
+                        key={u.id}
+                        onClick={() => setSelectedId(u.id)}
+                        className={`group/row cursor-pointer transition-colors ${isActive ? 'bg-white/[0.05]' : KIT.rowHoverOn}`}
+                      >
+                        <td
+                          className={`sticky left-0 z-10 border-b border-r border-white/[0.04] px-2 py-[9px] text-right font-mono text-[11px] tabular-nums text-zinc-700 transition-colors ${
+                            isActive ? 'bg-[#1a1b21]' : `${KIT.bg} ${KIT.rowHoverGroup}`
+                          }`}
+                        >
+                          {i + 1}
+                        </td>
+                        <td className="border-b border-white/[0.04] px-3 py-[9px]">
+                          <span className="truncate font-mono text-[12px] text-zinc-200" title={u.email}>
+                            {u.email}
+                          </span>
+                        </td>
+                        <td className="border-b border-white/[0.04] px-3 py-[9px] font-mono text-[11px] text-zinc-500">
+                          {u.provider}
+                        </td>
+                        <td className="border-b border-white/[0.04] px-3 py-[9px] font-mono text-[11px] tabular-nums text-zinc-500">
+                          {formatDate(u.createdAt)}
+                        </td>
+                        <td className="border-b border-white/[0.04] px-3 py-[9px] font-mono text-[11px] tabular-nums text-zinc-600">
+                          {u.lastLogin ? formatDate(u.lastLogin) : '—'}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
 
@@ -305,60 +307,75 @@ function UsersGrid({
         </div>
       </div>
 
-      {/* Identity detail */}
+      {/* Identity detail: responsive bottom sheet on mobile, rail on desktop */}
       {selected && (
-        <div className={`hidden w-[300px] flex-shrink-0 flex-col border-l border-white/[0.06] lg:flex ${KIT.rail}`}>
-          <div className="flex h-10 flex-shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] px-3">
-            <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">Identity</span>
-            <button
-              onClick={() => setSelectedId(null)}
-              className="rounded-md p-1.5 text-zinc-600 transition-colors hover:bg-white/[0.04] hover:text-zinc-200"
-              title="Close"
-            >
-              <X className="h-3.5 w-3.5" />
-            </button>
-          </div>
+        <>
+          {/* Mobile backdrop overlay */}
+          <div
+            className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm lg:hidden"
+            onClick={() => setSelectedId(null)}
+          />
 
-          <div className="min-h-0 flex-1 overflow-y-auto">
-            <div className="border-b border-white/[0.06] p-3">
-              <p className="break-all font-mono text-[12px] text-zinc-100">{selected.email}</p>
+          <div
+            className={`fixed inset-x-0 bottom-0 z-50 max-h-[85vh] rounded-t-2xl border-t border-white/10 lg:static lg:inset-auto lg:z-auto lg:flex lg:w-[300px] lg:max-h-none lg:rounded-none lg:border-t-0 lg:border-l lg:border-white/[0.06] flex-shrink-0 flex-col ${KIT.rail} shadow-2xl lg:shadow-none pb-[max(1rem,env(safe-area-inset-bottom))] lg:pb-0`}
+          >
+            {/* Mobile drag handle */}
+            <div className="flex lg:hidden pt-2.5 pb-1 justify-center">
+              <div className="w-10 h-1 rounded-full bg-white/20" />
             </div>
-            <dl className={`divide-y ${KIT.divide}`}>
-              {[
-                ['Provider', selected.provider],
-                ['Signed up', new Date(selected.createdAt).toLocaleString()],
-                ['Last active', selected.lastLogin ? new Date(selected.lastLogin).toLocaleString() : '—'],
-              ].map(([label, value]) => (
-                <div key={label} className="flex items-baseline justify-between gap-3 px-3 py-2.5">
-                  <dt className="flex-shrink-0 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">
-                    {label}
-                  </dt>
-                  <dd className="min-w-0 truncate text-right font-mono text-[11.5px] tabular-nums text-zinc-300" title={value}>
-                    {value}
-                  </dd>
-                </div>
-              ))}
-            </dl>
-            <div className="border-t border-white/[0.06] p-3">
-              <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">User ID</p>
-              <div className="flex items-center gap-1.5">
-                <code className="min-w-0 flex-1 truncate rounded-md border border-white/[0.06] bg-[#0f1015] px-2 py-1.5 font-mono text-[10.5px] text-zinc-400">
-                  {selected.id}
-                </code>
-                <button
-                  onClick={() => copyId(selected.id)}
-                  className="flex-shrink-0 rounded-md p-1.5 text-zinc-600 transition-colors hover:bg-white/[0.04] hover:text-zinc-100"
-                  title="Copy user ID"
-                >
-                  {copied ? <Check className="h-3.5 w-3.5 text-emerald-300" /> : <Copy className="h-3.5 w-3.5" />}
-                </button>
+
+            <div className="flex h-10 flex-shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] px-3">
+              <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">Identity Details</span>
+              <button
+                onClick={() => setSelectedId(null)}
+                className="rounded-md p-1.5 text-zinc-600 transition-colors hover:bg-white/[0.04] hover:text-zinc-200"
+                title="Close"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              <div className="border-b border-white/[0.06] p-3">
+                <p className="break-all font-mono text-[12px] text-zinc-100">{selected.email}</p>
               </div>
-              <p className="mt-1.5 text-[11px] leading-snug text-zinc-600">
-                Use this in RLS policies and as the foreign key from your own tables.
-              </p>
+              <dl className={`divide-y ${KIT.divide}`}>
+                {[
+                  ['Provider', selected.provider],
+                  ['Signed up', new Date(selected.createdAt).toLocaleString()],
+                  ['Last active', selected.lastLogin ? new Date(selected.lastLogin).toLocaleString() : '—'],
+                ].map(([label, value]) => (
+                  <div key={label} className="flex items-baseline justify-between gap-3 px-3 py-2.5">
+                    <dt className="flex-shrink-0 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">
+                      {label}
+                    </dt>
+                    <dd className="min-w-0 truncate text-right font-mono text-[11.5px] tabular-nums text-zinc-300" title={value}>
+                      {value}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+              <div className="border-t border-white/[0.06] p-3">
+                <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">User ID</p>
+                <div className="flex items-center gap-1.5">
+                  <code className="min-w-0 flex-1 truncate rounded-md border border-white/[0.06] bg-[#0f1015] px-2 py-1.5 font-mono text-[10.5px] text-zinc-400">
+                    {selected.id}
+                  </code>
+                  <button
+                    onClick={() => copyId(selected.id)}
+                    className="flex-shrink-0 rounded-md p-1.5 text-zinc-600 transition-colors hover:bg-white/[0.04] hover:text-zinc-100"
+                    title="Copy user ID"
+                  >
+                    {copied ? <Check className="h-3.5 w-3.5 text-emerald-300" /> : <Copy className="h-3.5 w-3.5" />}
+                  </button>
+                </div>
+                <p className="mt-1.5 text-[11px] leading-snug text-zinc-600">
+                  Use this in RLS policies and as the foreign key from your own tables.
+                </p>
+              </div>
             </div>
           </div>
-        </div>
+        </>
       )}
     </>
   )

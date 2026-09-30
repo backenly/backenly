@@ -23,7 +23,7 @@ import { useRouter } from 'next/navigation'
 import {
   Play, Trash2, Power, Clock, Check, AlertCircle, Loader2, Database,
   UserPlus, RefreshCw, MousePointerClick, Globe, Plug2, Zap, ChevronRight,
-  AlertTriangle, Info, Search, Link2, KeyRound, Copy,
+  AlertTriangle, Info, Search, Link2, KeyRound, Copy, ChevronLeft,
 } from 'lucide-react'
 import { KitButton, KitConfirmDialog, EmptyState, KIT } from '@/components/inspector/kit'
 
@@ -398,6 +398,7 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
   const [tab, setTab] = useState<'overview' | 'invocations'>('overview')
   const [filter, setFilter] = useState('all')
   const [query, setQuery] = useState('')
+  const [mobilePane, setMobilePane] = useState<'list' | 'detail'>('list')
 
   const [cleaningUp, setCleaningUp] = useState(false)
   const [runningAll, setRunningAll] = useState(false)
@@ -674,7 +675,7 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
         <div className="absolute inset-0 flex">
 
           {/* ── Rail ───────────────────────────────────── */}
-          <div className={`flex w-[280px] flex-shrink-0 flex-col border-r border-white/[0.06] ${KIT.rail}`}>
+          <div className={`w-full md:w-[280px] flex-shrink-0 flex-col border-r border-white/[0.06] ${KIT.rail} ${mobilePane === 'list' ? 'flex' : 'hidden md:flex'}`}>
             <div className="flex h-10 flex-shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] px-3">
               <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">Functions</span>
               <button
@@ -748,7 +749,7 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
                     return (
                       <div
                         key={fn.id}
-                        onClick={() => setSelectedId(fn.id)}
+                        onClick={() => { setSelectedId(fn.id); setMobilePane('detail') }}
                         className={`group flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-[7px] transition-colors ${
                           active ? 'bg-white/[0.05]' : 'hover:bg-white/[0.03]'
                         } ${fn.status === 'inactive' ? 'opacity-55' : ''}`}
@@ -798,7 +799,7 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
           </div>
 
           {/* ── Detail ─────────────────────────────────── */}
-          <div className="flex min-w-0 flex-1 flex-col">
+          <div className={`min-w-0 flex-1 flex-col ${mobilePane === 'detail' ? 'flex' : 'hidden md:flex'}`}>
             {!selected ? (
               <div className="flex h-full flex-col items-center justify-center px-8">
                 <EmptyState
@@ -825,12 +826,22 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
             ) : (
               <>
                 {/* Toolbar */}
-                <div className="flex h-10 flex-shrink-0 items-center justify-between gap-3 border-b border-white/[0.06] px-4">
-                  <div className="flex min-w-0 items-baseline gap-2">
-                    <h2 className="truncate font-mono text-[13px] font-medium text-zinc-100">{selected.name}</h2>
-                    <span className="whitespace-nowrap font-mono text-[11px] tabular-nums text-zinc-500">
-                      {selected.runCount.toLocaleString()} run{selected.runCount === 1 ? '' : 's'}
-                    </span>
+                <div className="flex h-11 md:h-10 flex-shrink-0 items-center justify-between gap-3 border-b border-white/[0.06] px-3 sm:px-4">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <button
+                      onClick={() => setMobilePane('list')}
+                      className="flex md:hidden items-center gap-1 -ml-1 text-[11.5px] font-medium text-violet-400 hover:text-violet-300 py-1.5 px-2 rounded-lg bg-white/[0.04] transition-colors"
+                      aria-label="Back to functions"
+                    >
+                      <ChevronLeft className="h-3.5 w-3.5" />
+                      <span>Functions</span>
+                    </button>
+                    <div className="flex min-w-0 items-baseline gap-2">
+                      <h2 className="truncate font-mono text-[13px] font-medium text-zinc-100">{selected.name}</h2>
+                      <span className="hidden sm:inline whitespace-nowrap font-mono text-[11px] tabular-nums text-zinc-500">
+                        {selected.runCount.toLocaleString()} run{selected.runCount === 1 ? '' : 's'}
+                      </span>
+                    </div>
                   </div>
                   <div className="flex flex-shrink-0 items-center gap-0.5">
                     {isAdminGated(selected) && (

@@ -32,14 +32,14 @@ export function ProjectShell({ children }: { children: ReactNode }) {
   const assistantOpen = useAssistantStore((s) => s.open)
 
   return (
-    <div className="min-h-screen bg-[#101116]">
+    <div className="min-h-screen bg-[#101116] overflow-x-hidden">
       <TopBar />
       <ProjectSidebar />
 
-      {/* Content region — offset by the fixed top bar (48px), sidebar (248px),
+      {/* Content region — offset by the fixed top bar (48px), sidebar (248px on desktop),
           and the assistant panel (380px) when it's open on large screens. */}
       <div
-        className={`pt-12 pl-[248px] transition-[padding] duration-150 ${
+        className={`pt-12 pl-0 md:pl-[248px] transition-[padding] duration-150 pb-[max(1rem,env(safe-area-inset-bottom))] ${
           assistantOpen ? 'lg:pr-[380px]' : ''
         }`}
       >
