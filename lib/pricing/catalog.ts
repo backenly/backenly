@@ -12,10 +12,13 @@
  * SCALE = Enterprise). A code that is not listed has no overage and no egress
  * quota, which is also what a self-hosted install answers.
  *
- * Rates are cents per unit. A rate is advertised only once measured cost
- * confirms it sits above its floor (OVERAGE_RATE_PUBLISHED), and only in a build
- * that publishes usage pricing at all. One that is not yet published still feeds
- * the shadow estimates, as its target.
+ * Rates are cents per unit, and this file is the only place they are written:
+ * the pricing page, the quota kernel's spend-limit headroom, the usage page and
+ * alerts, and the monthly invoice lines all read them from here. A rate is
+ * published only once measured cost confirms it sits above its floor
+ * (OVERAGE_RATE_PUBLISHED), and an unpublished rate is never charged, capped or
+ * estimated: axisBillable refuses it. So a rate cannot be billed before it is
+ * advertised.
  */
 
 import type { UsageAxisName } from '@/lib/usage/axes'
@@ -98,15 +101,18 @@ export function egressBillable(env: NodeJS.ProcessEnv = process.env): boolean {
 
 /**
  * Whether usage of one axis past its quota can be charged on a plan: the plan
- * allows overage and, for egress, egressBillable() holds. Every estimate, cap
- * and charge decides per axis through this.
+ * allows overage, the axis's rate is PUBLISHED, and, for egress, egressBillable()
+ * holds. Every estimate, cap and charge decides per axis through this, so an
+ * unpublished rate never becomes chargeable by being set in overagePrice.
  */
 export function axisBillable(
   planName: string,
   axis: OverageAxis,
   egressCharged: boolean = egressBillable(),
+  published: Readonly<Record<OverageAxis, boolean>> = OVERAGE_RATE_PUBLISHED,
 ): boolean {
   if (!planAllowsOverage(planName)) return false
+  if (!published[axis]) return false
   return axis !== 'egress_bytes' || egressCharged
 }
 
@@ -120,11 +126,12 @@ export function overagePrice(axis: OverageAxis, terms: EgressTerms = egressTerms
     case 'mau':
       return { cents: 0.3, per: 1, label: 'per MAU' }
     case 'db_bytes':
-      // A TARGET, not published (OVERAGE_RATE_PUBLISHED). $0.15 was below cost:
-      // provisioned gp3 is $0.131/GB-month in Mumbai before the seven daily
-      // backup dumps, which sit on EFS at $0.33/GB-month. $0.25 clears cost once
-      // those dumps move to S3; it is published only after that move is measured.
-      return { cents: 25, per: GIB, label: 'per GB-month' }
+      // Measured 2026-09-30, after the daily snapshots moved to S3 (release
+      // v11.5): a database GB-month costs $0.178-0.283 on Single-AZ RDS (gp3 at
+      // $0.131 with headroom, seven compressed snapshots in S3, backup storage
+      // past the free allowance), $0.207 in the central case, $0.371 on
+      // Multi-AZ. $0.30 clears every Single-AZ case.
+      return { cents: 30, per: GIB, label: 'per GB-month' }
     case 'file_bytes':
       return { cents: 3, per: GIB, label: 'per GB-month' }
     case 'fn_runs':
@@ -139,15 +146,15 @@ export function overagePrice(axis: OverageAxis, terms: EgressTerms = egressTerms
 }
 
 /**
- * Which rates the pricing page states. A rate is published only once measured
- * cost confirms it sits above its floor: marginal usage is never sold below
- * cost, and a rate that may still move is never advertised as a commitment.
- * Database waits for the backup dumps to move to S3 and for the resulting real
- * GB-month cost; until then the page states its included 8 GB and no rate.
+ * Which rates are PUBLISHED: stated on the pricing page and, only then,
+ * chargeable (axisBillable). A rate is published once measured cost confirms it
+ * sits above its floor: marginal usage is never sold below cost, and a rate that
+ * may still move is never advertised as a commitment. Egress is published and
+ * still charged only once egressBillable() holds.
  */
 export const OVERAGE_RATE_PUBLISHED: Readonly<Record<OverageAxis, boolean>> = {
   mau: true,
-  db_bytes: false,
+  db_bytes: true,
   file_bytes: true,
   fn_runs: true,
   egress_bytes: true,

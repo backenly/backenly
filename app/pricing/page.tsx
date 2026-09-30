@@ -26,7 +26,6 @@ import {
 import { ROUTES, SiteShell } from '@/components/site/SiteShell'
 import { useUserSession } from '@/lib/hooks/useUserSession'
 import {
-  includedEgressMb,
   PRO_INCLUDED,
   proUsagePriceRows,
   usagePricingPublished,
@@ -242,20 +241,6 @@ function comparisonGroups(published: boolean): MatrixGroup[] {
   return groups
 }
 
-/** What $25 buys, stated as the whole package rather than one unit rate. */
-const proPackage = [
-  `${PRO_INCLUDED.mau.toLocaleString('en-US')} MAU`,
-  `${PRO_INCLUDED.dbGib} GB database`,
-  `${PRO_INCLUDED.fileGib} GB files`,
-  `${(includedEgressMb('BUILDER', 'cdn') ?? 0) / 1024} GB egress`,
-  `${PRO_INCLUDED.fnRuns / 1_000_000}M function runs`,
-  '3,000 AI credits',
-  'Unlimited projects',
-  'No extra charge for MCP',
-  'No extra charge for autonomous healing',
-  'No API-request fee',
-]
-
 /**
  * Backenly for Startups: two months of Pro at no cost for early-stage teams.
  *
@@ -402,19 +387,6 @@ export default function PricingPage() {
               {plans.map((plan) => (
                 <PlanCard key={plan.name} plan={plan} onCta={handleCta} />
               ))}
-            </div>
-
-            {/* The whole Pro package in one line of chips: the value is the
-                bundle, not any single unit rate. */}
-            <div className="mt-6 rounded-lg border border-white/10 bg-white/[0.03] px-5 py-4">
-              <p className="text-sm font-semibold text-zinc-200">Everything in Pro, for $25 a month</p>
-              <ul className="mt-3 flex flex-wrap gap-2">
-                {proPackage.map((item) => (
-                  <li key={item} className="rounded-md border border-white/10 bg-black/30 px-2.5 py-1 text-xs text-zinc-300">
-                    {item}
-                  </li>
-                ))}
-              </ul>
             </div>
 
             {/* Portability guarantee: stated where buying decisions happen, not

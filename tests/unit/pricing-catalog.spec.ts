@@ -41,6 +41,20 @@ describe('charging egress: one switch, and never the direct rate', () => {
     expect(axisBillable('BUILDER', 'egress_bytes', true)).toBe(true)
     expect(axisBillable('SANDBOX', 'egress_bytes', true)).toBe(false)
   })
+
+  it('never charges a rate that is not published, whatever its price', () => {
+    const dbHeldBack = { ...OVERAGE_RATE_PUBLISHED, db_bytes: false }
+    expect(axisBillable('BUILDER', 'db_bytes', false, dbHeldBack)).toBe(false)
+    expect(axisBillable('BUILDER', 'mau', false, dbHeldBack)).toBe(true)
+    const egressHeldBack = { ...OVERAGE_RATE_PUBLISHED, egress_bytes: false }
+    expect(axisBillable('BUILDER', 'egress_bytes', true, egressHeldBack)).toBe(false)
+  })
+
+  it('bills only published rates today', () => {
+    for (const axis of ['mau', 'db_bytes', 'file_bytes', 'fn_runs', 'egress_bytes'] as const) {
+      if (axisBillable('BUILDER', axis, true)) expect(OVERAGE_RATE_PUBLISHED[axis]).toBe(true)
+    }
+  })
 })
 
 describe('publishing', () => {
@@ -50,10 +64,10 @@ describe('publishing', () => {
     expect(usagePricingPublished('published')).toBe(true)
   })
 
-  it('publishes every rate that clears cost, and holds the database rate back', () => {
+  it('publishes every rate, the database one included once its cost was measured', () => {
     expect(OVERAGE_RATE_PUBLISHED).toEqual({
       mau: true,
-      db_bytes: false,
+      db_bytes: true,
       file_bytes: true,
       fn_runs: true,
       egress_bytes: true,
@@ -65,7 +79,7 @@ describe('the Pro usage table', () => {
   it('lists what Pro includes and each published rate past it', () => {
     expect(proUsagePriceRows()).toEqual([
       { axis: 'mau', label: 'Monthly active users', included: '100,000', rate: '$0.003 per MAU' },
-      { axis: 'db_bytes', label: 'Database', included: '8 GB', rate: null },
+      { axis: 'db_bytes', label: 'Database', included: '8 GB', rate: '$0.30 per GB-month' },
       { axis: 'file_bytes', label: 'File storage', included: '100 GB', rate: '$0.03 per GB-month' },
       { axis: 'fn_runs', label: 'Function runs', included: '2M', rate: '$2.00 per 1M runs' },
       { axis: 'egress_bytes', label: 'Egress', included: '250 GB', rate: '$0.12 per GB' },
@@ -91,8 +105,9 @@ describe('the Pro usage table', () => {
     expect(formatRate('egress_bytes')).toBe('$0.12 per GB')
   })
 
-  it('prices database overage at its target in shadow, never below the old sub-cost $0.15', () => {
-    expect(overageCents('db_bytes', 2 * GIB)).toBeCloseTo(50, 9)
-    expect(formatRate('db_bytes')).toBe('$0.25 per GB-month')
+  it('prices database overage at the published $0.30 per GB-month, above its measured cost', () => {
+    expect(overageCents('db_bytes', GIB)).toBeCloseTo(30, 9)
+    expect(overageCents('db_bytes', 2.5 * GIB)).toBeCloseTo(75, 9)
+    expect(formatRate('db_bytes')).toBe('$0.30 per GB-month')
   })
 })
