@@ -3703,26 +3703,26 @@ async function executeSingleAction(
 
       // ========== DATABASE BACKUPS ==========
       case 'BACKUP_DATABASE': {
-        const { backupWorkspace } = await import('@/lib/services/workspace-backup')
+        const { backupWorkspace, snapshotForJson } = await import('@/lib/services/workspace-backup')
         const result = await backupWorkspace(projectId)
         if (!result.success) return { success: false, message: `Backup failed: ${result.error}` }
         return {
           success: true,
-          message: `✅ Backup created: **${result.filename}** (${Math.round((result.sizeBytes || 0) / 1024)} KB). Your data is safe. Backups run daily and are kept for 7 days.`,
-          data: result,
+          message: `✅ Backup created: **${result.filename}** (${(result.sizeBytes ?? BigInt(0)) / BigInt(1024)} KB). Your data is safe. Backups run daily and are kept for 7 days.`,
+          data: snapshotForJson(result),
         }
       }
 
       case 'LIST_BACKUPS': {
-        const { listBackups } = await import('@/lib/services/workspace-backup')
+        const { listBackups, snapshotForJson } = await import('@/lib/services/workspace-backup')
         const backups = await listBackups(projectId)
         if (backups.length === 0) {
           return { success: true, message: 'No backups yet. I\'ll create one daily automatically. You can also ask "backup my database" anytime.' }
         }
         const list = backups.map(b =>
-          `• **${b.filename}** — ${b.status} — ${Math.round((b.sizeBytes || 0) / 1024)} KB — ${new Date(b.createdAt).toLocaleString()}`
+          `• **${b.filename}** — ${b.status} — ${b.sizeBytes / BigInt(1024)} KB — ${new Date(b.createdAt).toLocaleString()}`
         ).join('\n')
-        return { success: true, message: `**Backups** (${backups.length}):\n${list}`, data: backups }
+        return { success: true, message: `**Backups** (${backups.length}):\n${list}`, data: backups.map(snapshotForJson) }
       }
 
       case 'RESTORE_DATABASE': {

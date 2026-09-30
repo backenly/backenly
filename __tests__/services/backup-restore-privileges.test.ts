@@ -246,7 +246,7 @@ describe('without BACKUP_DATABASE_URL, on a role that cannot bypass RLS', () => 
     const rows = await prisma.workspaceBackup.findMany({ where: { projectId } })
     expect(rows).toHaveLength(1)
     expect(rows[0].status).toBe('failed')
-    expect(rows[0].sizeBytes).toBe(0)
+    expect(rows[0].sizeBytes).toBe(BigInt(0))
     const completed = await prisma.workspaceBackup.count({ where: { projectId, status: 'completed' } })
     expect(completed).toBe(0)
   }, 120_000)

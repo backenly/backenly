@@ -102,6 +102,7 @@ const FORWARD_MIGRATIONS = [
   '20260928100000_usage_limits',
   '20260928140000_stripe_subscription_fields',
   '20260928160000_usage_charges',
+  '20260930120000_snapshot_size_bigint',
 ]
 
 describe('the assembled migration workspace', () => {
