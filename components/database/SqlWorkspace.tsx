@@ -163,6 +163,20 @@ export function SqlWorkspace({ projectId }: { projectId: string }) {
           </button>
         </div>
 
+        {/* Quick snippets horizontal scroll strip for mobile / tablet */}
+        <div className="flex lg:hidden items-center gap-2 overflow-x-auto border-b border-white/[0.06] bg-[#0c0d11] px-3 py-2 no-scrollbar">
+          <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600 flex-shrink-0">Snippets:</span>
+          {SNIPPETS.map(s => (
+            <button
+              key={s.label}
+              onClick={() => { setSql(s.sql); editorRef.current?.focus() }}
+              className="flex-shrink-0 rounded-md bg-white/[0.05] hover:bg-white/[0.1] px-2.5 py-1 text-[11px] font-mono text-zinc-300 border border-white/[0.06] transition-colors"
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+
         <textarea
           ref={editorRef}
           value={sql}
@@ -171,7 +185,7 @@ export function SqlWorkspace({ projectId }: { projectId: string }) {
           spellCheck={false}
           aria-label="SQL query"
           placeholder="SELECT * FROM your_table LIMIT 10"
-          className="h-40 flex-shrink-0 resize-none border-b border-white/[0.06] bg-[#0f1015] px-4 py-3 font-mono text-[12.5px] leading-relaxed text-zinc-100 placeholder:text-zinc-600 focus:outline-none"
+          className="h-36 sm:h-40 flex-shrink-0 resize-none border-b border-white/[0.06] bg-[#0f1015] px-4 py-3 font-mono text-base sm:text-[12.5px] leading-relaxed text-zinc-100 placeholder:text-zinc-600 focus:outline-none"
         />
 
         <div className="min-h-0 flex-1 overflow-auto">
@@ -216,7 +230,7 @@ export function SqlWorkspace({ projectId }: { projectId: string }) {
               </div>
             </div>
           ) : (
-            <>
+            <div className="min-w-full overflow-x-auto">
               <div className="flex flex-wrap items-center gap-3 border-b border-white/[0.06] px-4 py-2">
                 <span className="font-mono text-[10.5px] tabular-nums text-zinc-500">
                   {result.rowCount} {result.rowCount === 1 ? 'row' : 'rows'} · {result.ms}ms
@@ -236,7 +250,7 @@ export function SqlWorkspace({ projectId }: { projectId: string }) {
                   </span>
                 )}
               </div>
-              <table className="w-full border-collapse">
+              <table className="w-full min-w-[500px] border-collapse">
                 <thead className="sticky top-0 z-10 bg-[#0e0f13]">
                   <tr>
                     {result.fields.map(f => (
@@ -268,13 +282,13 @@ export function SqlWorkspace({ projectId }: { projectId: string }) {
                   ))}
                 </tbody>
               </table>
-            </>
+            </div>
           )}
         </div>
       </div>
 
-      {/* ── Snippets and history ───────────────────────────── */}
-      <aside className="flex w-56 flex-shrink-0 flex-col border-l border-white/[0.06]">
+      {/* ── Snippets and history (hidden on mobile, visible on desktop) ───────────────────────────── */}
+      <aside className="hidden lg:flex w-56 flex-shrink-0 flex-col border-l border-white/[0.06]">
         <div className="flex h-10 flex-shrink-0 items-center border-b border-white/[0.06] px-3">
           <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">Snippets</span>
         </div>

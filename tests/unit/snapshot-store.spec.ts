@@ -139,13 +139,43 @@ describe('locations', () => {
   })
 })
 
+describe('sizes past 2 GiB', () => {
+  // A compressed snapshot passes 2^31 bytes at about 8 GB of data, and the
+  // column that recorded it was a 32-bit INTEGER. Sizes are bigint throughout;
+  // these are the two crossings to a number and back, held at the boundary.
+  const GIB = BigInt(1024 * 1024 * 1024)
+  const TWO_POW_31 = BigInt(2147483648)
+
+  it('carries 2^31, 5 GiB and the largest exact byte count to a number without loss', () => {
+    expect(store.snapshotBytesToNumber(TWO_POW_31)).toBe(2147483648)
+    expect(store.snapshotBytesToNumber(TWO_POW_31 - BigInt(1))).toBe(2147483647)
+    expect(store.snapshotBytesToNumber(BigInt(5) * GIB + BigInt(7))).toBe(5368709127)
+    expect(store.snapshotBytesToNumber(BigInt(Number.MAX_SAFE_INTEGER))).toBe(Number.MAX_SAFE_INTEGER)
+    expect(JSON.stringify({ sizeBytes: store.snapshotBytesToNumber(BigInt(5) * GIB + BigInt(7)) })).toBe('{"sizeBytes":5368709127}')
+  })
+
+  it('refuses a size a number cannot carry exactly, instead of rounding it', () => {
+    expect(() => store.snapshotBytesToNumber(BigInt(Number.MAX_SAFE_INTEGER) + BigInt(1))).toThrow(RangeError)
+    expect(() => store.snapshotBytesToNumber(BigInt(-1))).toThrow(RangeError)
+  })
+
+  it('reads the SDK byte counts past 2^31 exactly, and refuses anything that is not one', () => {
+    expect(store.snapshotBytesFromNumber(2147483648)).toBe(TWO_POW_31)
+    expect(store.snapshotBytesFromNumber(5368709127)).toBe(BigInt(5) * GIB + BigInt(7))
+    expect(() => store.snapshotBytesFromNumber(undefined)).toThrow(RangeError)
+    expect(() => store.snapshotBytesFromNumber(1.5)).toThrow(RangeError)
+    expect(() => store.snapshotBytesFromNumber(-1)).toThrow(RangeError)
+    expect(() => store.snapshotBytesFromNumber(2 ** 60)).toThrow(RangeError)
+  })
+})
+
 describe('the round trip', () => {
   it('uploads, verifies, downloads byte-identical, and deletes', async () => {
     const src = join(dir, 'dump.sql.gz')
     const bytes = randomBytes(256 * 1024 + 17)
     writeFileSync(src, bytes)
     const put = await store.putSnapshot(PROJECT, 'dump.sql.gz', src, s3)
-    expect(put.sizeBytes).toBe(bytes.length)
+    expect(put.sizeBytes).toBe(BigInt(bytes.length))
     expect(put.location).toBe(`s3://snapshots-test/workspace-snapshots/${PROJECT}/dump.sql.gz`)
 
     const dest = join(dir, 'back.sql.gz')

@@ -55,6 +55,29 @@ function client(s3?: S3Client): S3Client {
   return s3 ?? getS3Client()
 }
 const SHA_META = 'sha256'
+const MAX_EXACT_BYTES = BigInt(Number.MAX_SAFE_INTEGER)
+
+/**
+ * A snapshot's size is a bigint wherever it is stored or compared
+ * (WorkspaceBackup.sizeBytes is BIGINT): a compressed dump passes 2 GiB at about
+ * 8 GB of data. These are the only two crossings to and from a number, for a
+ * JSON body and for the AWS SDK's ContentLength, and each refuses a value it
+ * cannot carry exactly rather than rounding it.
+ */
+export function snapshotBytesToNumber(bytes: bigint): number {
+  if (bytes < BigInt(0) || bytes > MAX_EXACT_BYTES) {
+    throw new RangeError(`snapshot size ${bytes.toString()} bytes is not exactly representable as a number`)
+  }
+  return Number(bytes)
+}
+
+/** A byte count the AWS SDK reported, as the bigint every snapshot size is kept in. */
+export function snapshotBytesFromNumber(value: number | undefined): bigint {
+  if (value === undefined || !Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError(`not a byte count: ${String(value)}`)
+  }
+  return BigInt(value)
+}
 
 /** The bucket new snapshots go to, or null to keep them on disk. */
 export function snapshotBucket(): string | null {
@@ -125,11 +148,11 @@ export async function putSnapshot(
   filename: string,
   localPath: string,
   s3?: S3Client,
-): Promise<{ location: string; sizeBytes: number; sha256: string }> {
+): Promise<{ location: string; sizeBytes: bigint; sha256: string }> {
   const bucket = snapshotBucket()
   if (!bucket) throw new Error('BACKUP_S3_BUCKET is not set')
   const key = snapshotKey(projectId, filename)
-  const { size } = await fsp.stat(/*turbopackIgnore: true*/ localPath)
+  const { size } = await fsp.stat(/*turbopackIgnore: true*/ localPath, { bigint: true })
   const sha256 = await sha256OfFile(localPath)
 
   await client(s3).send(
@@ -137,7 +160,7 @@ export async function putSnapshot(
       Bucket: bucket,
       Key: key,
       Body: createReadStream(/*turbopackIgnore: true*/ localPath),
-      ContentLength: size,
+      ContentLength: snapshotBytesToNumber(size),
       ContentType: 'application/gzip',
       ChecksumSHA256: sha256,
       ServerSideEncryption: 'AES256',
@@ -148,8 +171,8 @@ export async function putSnapshot(
   // Arrived, and arrived whole: the size and the checksum S3 recorded must be
   // exactly what left the disk.
   const head = await client(s3).send(new HeadObjectCommand({ Bucket: bucket, Key: key, ChecksumMode: 'ENABLED' }))
-  if (Number(head.ContentLength) !== size) {
-    throw new Error(`snapshot upload incomplete: ${head.ContentLength} of ${size} bytes stored`)
+  if (head.ContentLength === undefined || snapshotBytesFromNumber(head.ContentLength) !== size) {
+    throw new Error(`snapshot upload incomplete: ${head.ContentLength} of ${size.toString()} bytes stored`)
   }
   if (head.Metadata?.[SHA_META] !== sha256) {
     throw new Error('snapshot upload unverified: stored checksum does not match the dump')
@@ -187,11 +210,11 @@ export async function fetchSnapshotToFile(
 export async function openS3Snapshot(
   location: string,
   s3?: S3Client,
-): Promise<{ stream: Readable; sizeBytes: number }> {
+): Promise<{ stream: Readable; sizeBytes: bigint }> {
   const { bucket, key } = parseS3Location(location)
   const res = await client(s3).send(new GetObjectCommand({ Bucket: bucket, Key: key, ChecksumMode: 'ENABLED' }))
   if (!res.Body) throw new Error('snapshot object has no body')
-  return { stream: res.Body as Readable, sizeBytes: Number(res.ContentLength ?? 0) }
+  return { stream: res.Body as Readable, sizeBytes: snapshotBytesFromNumber(res.ContentLength) }
 }
 
 /** Delete a snapshot wherever it is. A snapshot already gone is not an error. */

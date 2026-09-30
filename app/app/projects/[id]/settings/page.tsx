@@ -59,7 +59,7 @@ export default function ProjectSettingsPage() {
         badge={{ label: 'Managed', variant: 'managed' }}
       />
 
-      <div className="px-8 pt-4">
+      <div className="px-4 sm:px-8 pt-4">
         <KitTabs>
           <KitTab active={tab === 'general'} onClick={() => setTab('general')}>
             <SlidersHorizontal className="w-3.5 h-3.5" />
@@ -206,7 +206,7 @@ function GeneralTab({ projectId, onDeleted }: { projectId: string; onDeleted: ()
           <KitCardBody className="space-y-3">
             <InfoRow label="Project ID" value={projectId} onCopy={() => copy(projectId, 'id')} copied={copied === 'id'} />
             <InfoRow label="API base URL" value={apiBaseUrl} onCopy={() => copy(apiBaseUrl, 'url')} copied={copied === 'url'} disabled={apiBaseUrl === '—'} />
-            <InfoRow label="Region" value="EU · Hetzner" mono={false} />
+            <InfoRow label="Region" value="AWS · ap-south-1" mono={false} />
           </KitCardBody>
         </KitCard>
 
@@ -221,7 +221,7 @@ function GeneralTab({ projectId, onDeleted }: { projectId: string; onDeleted: ()
               Deleting a project permanently removes its schema, tables, users, storage, and every receipt. This
               cannot be undone. Type <span className="font-mono text-zinc-200">{project?.name}</span> to confirm.
             </p>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
               <KitInput
                 value={deleteText}
                 onChange={(e) => setDeleteText(e.target.value)}
@@ -232,6 +232,7 @@ function GeneralTab({ projectId, onDeleted }: { projectId: string; onDeleted: ()
                 variant="danger"
                 onClick={confirmDelete}
                 disabled={deleteText !== (project?.name ?? '') || deleting}
+                className="w-full sm:w-auto justify-center"
               >
                 {deleting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
                 Delete project
@@ -353,7 +354,7 @@ function AccessTab({ projectId }: { projectId: string }) {
                 {data.members.map((m) => {
                   const orgWide = !m.restricted || m.isOwner || m.role === 'ADMIN'
                   return (
-                    <div key={m.userId} className="flex items-center justify-between gap-3 py-2.5 first:pt-0 last:pb-0">
+                    <div key={m.userId} className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 py-3 first:pt-0 last:pb-0">
                       <div className="min-w-0">
                         <div className="flex items-center gap-1.5">
                           <span className="text-[13px] text-zinc-100 truncate">{m.name || m.email}</span>
@@ -362,7 +363,7 @@ function AccessTab({ projectId }: { projectId: string }) {
                         </div>
                         {m.name && <p className="text-[11.5px] text-zinc-500 truncate">{m.email}</p>}
                       </div>
-                      <div className="flex items-center gap-2.5 flex-shrink-0">
+                      <div className="flex flex-wrap items-center gap-2 sm:gap-2.5 flex-shrink-0">
                         {/* Access state */}
                         {orgWide ? (
                           <span className="inline-flex items-center gap-1 text-[11px] text-zinc-400">

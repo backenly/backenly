@@ -19,7 +19,7 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
-import { backupWorkspace, listBackups, restoreWorkspace } from '@/lib/services/workspace-backup'
+import { backupWorkspace, listBackups, restoreWorkspace, snapshotForJson } from '@/lib/services/workspace-backup'
 import { getProjectServingState } from '@/lib/projects/serving-state'
 
 export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
@@ -27,7 +27,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
   return withProjectValidation<any>(request, async (validated) => {
     const { projectId } = validated
     const backups = await listBackups(projectId)
-    return NextResponse.json({ success: true, data: backups })
+    return NextResponse.json({ success: true, data: backups.map(snapshotForJson) })
   })
 }
 
@@ -39,7 +39,7 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
     if (!result.success) {
       return NextResponse.json({ error: result.error }, { status: 500 })
     }
-    return NextResponse.json({ success: true, data: result }, { status: 201 })
+    return NextResponse.json({ success: true, data: snapshotForJson(result) }, { status: 201 })
   })
 }
 

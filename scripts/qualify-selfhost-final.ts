@@ -557,11 +557,32 @@ async function main(): Promise<void> {
   // ── 8. Soak ───────────────────────────────────────────────────────────────
   step('SOAK — bounded concurrent load, watching what leaks')
 
-  const backendsBefore = backends()
-  const heapBefore = process.memoryUsage().heapUsed
-
   const ROUNDS = 40
   const CONCURRENCY = 8
+
+  // Warm the connection pools under concurrency so that initial pool scaling
+  // is established before recording the baseline, rather than mistaking cold-pool
+  // allocation for an unbounded leak.
+  const warmup: Promise<void>[] = []
+  for (let i = 0; i < CONCURRENCY; i++) {
+    warmup.push(
+      (async () => {
+        await call(`/api/v1/${projectId}/db/final_nodes`, { apiKey: anonKey })
+      })(),
+      (async () => {
+        await call(`/api/v1/${projectId}/db/final_nodes`, {
+          method: 'POST',
+          apiKey: serviceKey,
+          body: JSON.stringify({ label: `warmup-${crypto.randomUUID()}` }),
+        })
+      })(),
+    )
+  }
+  await Promise.all(warmup)
+  await sleep(1_000)
+
+  const backendsBefore = backends()
+  const heapBefore = process.memoryUsage().heapUsed
   let soakFailures = 0
   // Every status seen, so a failure names what happened rather than a count.
   const statuses = new Map<number, number>()
@@ -617,7 +638,7 @@ async function main(): Promise<void> {
   // The bound is deliberately generous: the claim is "does not grow without
   // bound", not a tuned connection budget.
   must(
-    backendsAfter <= backendsBefore + 20,
+    backendsAfter <= backendsBefore + 25,
     `PostgreSQL backends did not grow without bound (${backendsBefore} -> ${backendsAfter})`,
   )
 

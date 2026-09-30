@@ -5,13 +5,14 @@
  * `Project.lastActivityAt` is what Backenly Cloud's idle sweep measures, so
  * what moves it decides who gets paused. This suite pins the clock's own rules,
  * its interplay with the race-safe pause, that real runtime traffic moves it
- * and refused traffic does not, and that the snapshot download cannot be
- * pointed at a file outside the project's own backup directory.
+ * and refused traffic does not, that the snapshot download cannot be
+ * pointed at a file outside the project's own backup directory, and that a
+ * snapshot size past 2 GiB is recorded, listed and served exactly.
  */
 import http from 'http'
 import os from 'os'
 import path from 'path'
-import { mkdirSync, rmSync, writeFileSync } from 'fs'
+import { closeSync, ftruncateSync, mkdirSync, openSync, rmSync, writeFileSync } from 'fs'
 import type { AddressInfo } from 'net'
 import { randomBytes, randomUUID } from 'crypto'
 
@@ -27,10 +28,15 @@ import { applyPauseTransition, withProjectLifecycleLock } from '@/lib/projects/p
 // the containment tests below pass for the wrong reason.
 const BACKUP_ROOT = path.join(os.tmpdir(), `activity-clock-${randomBytes(4).toString('hex')}`)
 let resolveSnapshotFile: typeof import('@/lib/services/workspace-backup').resolveSnapshotFile
+let listBackups: typeof import('@/lib/services/workspace-backup').listBackups
+let snapshotForJson: typeof import('@/lib/services/workspace-backup').snapshotForJson
 beforeAll(() => {
   process.env.BACKUP_DIR = BACKUP_ROOT
   jest.isolateModules(() => {
-    resolveSnapshotFile = require('@/lib/services/workspace-backup').resolveSnapshotFile
+    const backup = require('@/lib/services/workspace-backup')
+    resolveSnapshotFile = backup.resolveSnapshotFile
+    listBackups = backup.listBackups
+    snapshotForJson = backup.snapshotForJson
   })
 })
 
@@ -197,7 +203,7 @@ describe('what the runtime counts', () => {
 })
 
 describe('the snapshot a download may hand out', () => {
-  async function snapshotRow(projectId: string, filePath: string, status = 'completed') {
+  async function snapshotRow(projectId: string, filePath: string, status = 'completed', sizeBytes = BigInt(3)) {
     return prisma.workspaceBackup.create({
       data: {
         projectId,
@@ -205,7 +211,7 @@ describe('the snapshot a download may hand out', () => {
         filePath,
         schemaName: `workspace_${projectId}`,
         status,
-        sizeBytes: 3,
+        sizeBytes,
       },
       select: { id: true },
     })
@@ -220,7 +226,7 @@ describe('the snapshot a download may hand out', () => {
     const row = await snapshotRow(id, file)
 
     const snapshot = await resolveSnapshotFile(id, row.id)
-    expect(snapshot).toMatchObject({ sizeBytes: 3 })
+    expect(snapshot).toMatchObject({ sizeBytes: BigInt(3) })
     // The opener reads exactly that file's bytes.
     const chunks: Buffer[] = []
     for await (const c of await snapshot!.open()) chunks.push(Buffer.from(c as Buffer))
@@ -250,4 +256,48 @@ describe('the snapshot a download may hand out', () => {
     await expect(resolveSnapshotFile(other, ok.id)).resolves.toBeNull()
     await expect(resolveSnapshotFile(owner, failed.id)).resolves.toBeNull()
   }, 60_000)
+
+  describe('past 2 GiB', () => {
+    // The column was a 32-bit INTEGER: a row of 2^31 bytes or more could not be
+    // written at all, so a snapshot of a project near Pro's 8 GB was lost.
+    const GIB = BigInt(1024 * 1024 * 1024)
+
+    it('records, lists and serializes 2^31 and 5 GiB exactly', async () => {
+      const id = await project()
+      const atBoundary = BigInt(2147483648)
+      const fiveGib = BigInt(5) * GIB + BigInt(7)
+      await snapshotRow(id, path.join(BACKUP_ROOT, id, 'a.sql.gz'), 'completed', atBoundary)
+      await snapshotRow(id, path.join(BACKUP_ROOT, id, 'b.sql.gz'), 'completed', fiveGib)
+
+      const rows = await listBackups(id)
+      expect(rows.map((r) => r.sizeBytes).sort()).toEqual([atBoundary, fiveGib])
+      expect(typeof rows[0].sizeBytes).toBe('bigint')
+
+      // What the snapshots API and the executor put in a JSON body.
+      const body = JSON.parse(JSON.stringify(rows.map(snapshotForJson)))
+      expect(body.map((r: { sizeBytes: number }) => r.sizeBytes).sort((a: number, b: number) => a - b)).toEqual([2147483648, 5368709127])
+    }, 60_000)
+
+    // A sparse file: 2^31 + 1 bytes long without writing them. Linux (CI)
+    // allocates nothing; NTFS would, so it does not run on Windows.
+    ;(process.platform === 'win32' ? it.skip : it)('serves a file larger than 2 GiB with its exact size', async () => {
+      const id = await project()
+      const dir = path.join(BACKUP_ROOT, id)
+      mkdirSync(dir, { recursive: true })
+      const file = path.join(dir, 'big.sql.gz')
+      const fd = openSync(file, 'w')
+      try {
+        ftruncateSync(fd, 2147483649)
+      } finally {
+        closeSync(fd)
+      }
+      const row = await snapshotRow(id, file, 'completed', BigInt(2147483649))
+
+      const snapshot = await resolveSnapshotFile(id, row.id)
+      expect(snapshot?.sizeBytes).toBe(BigInt(2147483649))
+      // The download route's Content-Length.
+      expect(String(snapshot!.sizeBytes)).toBe('2147483649')
+      rmSync(file, { force: true })
+    }, 60_000)
+  })
 })

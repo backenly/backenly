@@ -68,7 +68,7 @@ export default function ProjectConnectPage() {
     <div className="min-h-screen bg-[#101116] flex flex-col text-white">
       {/* Tab strip sits directly under the global TopBar; each tab body owns its
           own header (Agents header below; Direct brings its own). */}
-      <div className="px-8 pt-4">
+      <div className="px-3.5 sm:px-8 pt-4">
         <KitTabs>
           <KitTab active={tab === 'agents'} onClick={() => setTab('agents')}>
             <Bot className="w-3.5 h-3.5" />
@@ -96,7 +96,7 @@ export default function ProjectConnectPage() {
                 just raised, and the three-step funnel alone left the left
                 column roughly half the height of the right one, which read as
                 a hole in the page rather than a column. */}
-            <div className="px-8 py-6 pb-10">
+            <div className="px-3.5 sm:px-8 py-4 sm:py-6 pb-10">
               <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 items-start">
                 <div className="min-w-0 space-y-6">
                   <AgentInstallGuide
@@ -154,7 +154,7 @@ function DirectTab({ projectId }: { projectId: string }) {
         description="REST and Postgres coordinates for anything that doesn't speak MCP."
         badge={{ label: 'Managed', variant: 'managed' }}
       />
-      <div className="px-8 py-6 pb-10">
+      <div className="px-3.5 sm:px-8 py-4 sm:py-6 pb-10 space-y-6">
         <KitCard>
           <KitCardHeader
             title="REST API"

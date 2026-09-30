@@ -15,7 +15,7 @@
  */
 
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { Radio, WifiOff, Circle, RefreshCw, AlertTriangle, Trash2 } from 'lucide-react'
+import { Radio, WifiOff, Circle, RefreshCw, AlertTriangle, Trash2, ChevronLeft } from 'lucide-react'
 import { getAuthToken } from '@/lib/api/auth'
 import { KitNote, EmptyState, KIT } from '@/components/inspector/kit'
 
@@ -86,6 +86,7 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
   const [events, setEvents] = useState<LiveEvent[]>([])
   const [eventCount, setEventCount] = useState(0)
   const [tableFilter, setTableFilter] = useState<string | null>(null)
+  const [mobilePane, setMobilePane] = useState<'tables' | 'feed'>('tables')
 
   const esRef = useRef<EventSource | null>(null)
   const counterRef = useRef(0)
@@ -441,7 +442,7 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
         <div className="absolute inset-0 flex">
 
           {/* ── Streaming rail ─────────────────────────── */}
-          <div className={`flex w-[248px] flex-shrink-0 flex-col border-r border-white/[0.06] ${KIT.rail}`}>
+          <div className={`w-full md:w-[248px] flex-shrink-0 flex-col border-r border-white/[0.06] ${KIT.rail} ${mobilePane === 'tables' ? 'flex' : 'hidden md:flex'}`}>
             <div className="flex h-10 flex-shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] px-3">
               <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">Streaming</span>
               <button
@@ -467,7 +468,7 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
               ) : (
                 <div className="space-y-px px-2">
                   <div
-                    onClick={() => setTableFilter(null)}
+                    onClick={() => { setTableFilter(null); setMobilePane('feed') }}
                     className={`group flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-[7px] transition-colors ${
                       tableFilter === null
                         ? 'bg-white/[0.05] text-zinc-50'
@@ -490,7 +491,7 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
                     return (
                       <div
                         key={t}
-                        onClick={() => setTableFilter(active ? null : t)}
+                        onClick={() => { setTableFilter(active ? null : t); setMobilePane('feed') }}
                         className={`group flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-[7px] transition-colors ${
                           active ? 'bg-white/[0.05] text-zinc-50' : 'text-zinc-400 hover:bg-white/[0.03] hover:text-zinc-100'
                         }`}
@@ -518,15 +519,25 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
           </div>
 
           {/* ── Event stream ───────────────────────────── */}
-          <div className="flex min-w-0 flex-1 flex-col">
-            <div className="flex h-10 flex-shrink-0 items-center justify-between gap-3 border-b border-white/[0.06] px-4">
-              <div className="flex min-w-0 items-baseline gap-2">
-                <h2 className="truncate font-mono text-[13px] font-medium text-zinc-100">
-                  {tableFilter ?? 'Live feed'}
-                </h2>
-                <span className="whitespace-nowrap font-mono text-[11px] tabular-nums text-zinc-500">
-                  {visibleEvents.length} event{visibleEvents.length === 1 ? '' : 's'}
-                </span>
+          <div className={`min-w-0 flex-1 flex-col ${mobilePane === 'feed' ? 'flex' : 'hidden md:flex'}`}>
+            <div className="flex h-11 md:h-10 flex-shrink-0 items-center justify-between gap-3 border-b border-white/[0.06] px-3 sm:px-4">
+              <div className="flex min-w-0 items-center gap-2">
+                <button
+                  onClick={() => setMobilePane('tables')}
+                  className="flex md:hidden items-center gap-1 -ml-1 text-[11.5px] font-medium text-violet-400 hover:text-violet-300 py-1.5 px-2 rounded-lg bg-white/[0.04] transition-colors"
+                  aria-label="Back to tables"
+                >
+                  <ChevronLeft className="h-3.5 w-3.5" />
+                  <span>Tables</span>
+                </button>
+                <div className="flex min-w-0 items-baseline gap-2">
+                  <h2 className="truncate font-mono text-[13px] font-medium text-zinc-100">
+                    {tableFilter ?? 'Live feed'}
+                  </h2>
+                  <span className="whitespace-nowrap font-mono text-[11px] tabular-nums text-zinc-500">
+                    {visibleEvents.length} event{visibleEvents.length === 1 ? '' : 's'}
+                  </span>
+                </div>
               </div>
               <span className="flex-shrink-0 font-mono text-[10.5px] tabular-nums text-zinc-700">
                 last 100 retained
@@ -543,53 +554,55 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
                   />
                 </div>
               ) : (
-                <table className="w-full border-collapse">
-                  <thead className="sticky top-0 z-10">
-                    <tr className={KIT.gridHead}>
-                      <th className="w-24 border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
-                        Time
-                      </th>
-                      <th className="w-24 border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
-                        Type
-                      </th>
-                      <th className="border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
-                        Source
-                      </th>
-                      <th className="w-28 border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
-                        Payload
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {visibleEvents.map((ev) => (
-                      <tr key={ev.id} className={`transition-colors ${KIT.rowHoverOn}`}>
-                        <td className="border-b border-white/[0.04] px-3 py-[7px] font-mono text-[10.5px] tabular-nums text-zinc-600">
-                          {new Date(ev.timestamp * 1000).toLocaleTimeString([], {
-                            hour12: false,
-                            hour: '2-digit',
-                            minute: '2-digit',
-                            second: '2-digit',
-                          })}
-                        </td>
-                        <td className="border-b border-white/[0.04] px-3 py-[7px]">
-                          <EventType type={ev.type} />
-                        </td>
-                        <td className="border-b border-white/[0.04] px-3 py-[7px] font-mono text-[11.5px]">
-                          {ev.table ? (
-                            <span className="text-zinc-300">{ev.table}</span>
-                          ) : ev.channel ? (
-                            <span className="text-sky-300/90">#{ev.channel}</span>
-                          ) : (
-                            <span className="text-zinc-700">—</span>
-                          )}
-                        </td>
-                        <td className="border-b border-white/[0.04] px-3 py-[7px] font-mono text-[10.5px] text-zinc-600">
-                          {ev.truncated ? 'truncated' : '—'}
-                        </td>
+                <div className="min-w-full overflow-x-auto">
+                  <table className="w-full min-w-[440px] border-collapse">
+                    <thead className="sticky top-0 z-10">
+                      <tr className={KIT.gridHead}>
+                        <th className="w-24 border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
+                          Time
+                        </th>
+                        <th className="w-24 border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
+                          Type
+                        </th>
+                        <th className="border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
+                          Source
+                        </th>
+                        <th className="w-28 border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
+                          Payload
+                        </th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {visibleEvents.map((ev) => (
+                        <tr key={ev.id} className={`transition-colors ${KIT.rowHoverOn}`}>
+                          <td className="border-b border-white/[0.04] px-3 py-[7px] font-mono text-[10.5px] tabular-nums text-zinc-600">
+                            {new Date(ev.timestamp * 1000).toLocaleTimeString([], {
+                              hour12: false,
+                              hour: '2-digit',
+                              minute: '2-digit',
+                              second: '2-digit',
+                            })}
+                          </td>
+                          <td className="border-b border-white/[0.04] px-3 py-[7px]">
+                            <EventType type={ev.type} />
+                          </td>
+                          <td className="border-b border-white/[0.04] px-3 py-[7px] font-mono text-[11.5px]">
+                            {ev.table ? (
+                              <span className="text-zinc-300">{ev.table}</span>
+                            ) : ev.channel ? (
+                              <span className="text-sky-300/90">#{ev.channel}</span>
+                            ) : (
+                              <span className="text-zinc-700">—</span>
+                            )}
+                          </td>
+                          <td className="border-b border-white/[0.04] px-3 py-[7px] font-mono text-[10.5px] text-zinc-600">
+                            {ev.truncated ? 'truncated' : '—'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               )}
             </div>
           </div>

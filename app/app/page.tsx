@@ -549,11 +549,11 @@ function NewProjectModal({
             the backend in Claude Code or Cursor and it lands here.
           </p>
 
-          {/* Honest region: one Hetzner region, no fake globe/selector */}
+          {/* Honest region: one AWS region, no fake globe/selector */}
           <div className="flex items-center gap-2 text-[11.5px] text-zinc-500">
             <span className="inline-flex items-center gap-1.5 rounded-md border border-white/[0.06] bg-white/[0.03] px-2 py-1 font-mono text-[11px] text-zinc-400">
               <span className="h-[5px] w-[5px] rounded-full bg-emerald-400" />
-              EU · Hetzner
+              AWS · ap-south-1
             </span>
             <span>Deployed to Backenly&apos;s single region.</span>
           </div>

@@ -52,6 +52,7 @@ import {
   putSnapshot,
   s3LocationBelongsTo,
   snapshotBucket,
+  snapshotBytesToNumber,
   snapshotKey,
   s3Location,
 } from '@/lib/services/snapshot-store'
@@ -243,7 +244,8 @@ export interface BackupResult {
   success: boolean
   filePath?: string
   filename?: string
-  sizeBytes?: number
+  /** Compressed bytes. A bigint: a snapshot passes 2 GiB at about 8 GB of data. */
+  sizeBytes?: bigint
   error?: string
   projectId: string
   createdAt: string
@@ -290,7 +292,7 @@ export async function backupWorkspace(projectId: string): Promise<BackupResult> 
     // Remove uncompressed file
     await fs.promises.unlink(/*turbopackIgnore: true*/ sqlPath).catch(() => {})
 
-    const stat = await fs.promises.stat(/*turbopackIgnore: true*/ gzPath)
+    const stat = await fs.promises.stat(/*turbopackIgnore: true*/ gzPath, { bigint: true })
 
     // With a snapshot bucket, the dump's home is S3: upload it, prove it arrived
     // whole, and only then drop the local copy. putSnapshot throws on anything
@@ -349,7 +351,7 @@ export async function backupWorkspace(projectId: string): Promise<BackupResult> 
         projectId,
         filename,
         filePath: '',
-        sizeBytes: 0,
+        sizeBytes: BigInt(0),
         schemaName,
         status: 'failed',
         error: message,
@@ -524,6 +526,17 @@ export async function restoreWorkspace(
 
 // ─── List Backups ─────────────────────────────────────────────────────────────
 
+/**
+ * A snapshot row or result as a JSON body carries it: the size as an exact
+ * number of bytes (JSON has no bigint, and NextResponse.json throws on one).
+ * The conversion refuses a size a number cannot hold exactly, which is far
+ * beyond any snapshot (2^53 bytes); it never rounds.
+ */
+export function snapshotForJson<T extends { sizeBytes?: bigint }>(row: T): Omit<T, 'sizeBytes'> & { sizeBytes?: number } {
+  const { sizeBytes, ...rest } = row
+  return sizeBytes === undefined ? rest : { ...rest, sizeBytes: snapshotBytesToNumber(sizeBytes) }
+}
+
 export async function listBackups(projectId: string) {
   return prisma.workspaceBackup.findMany({
     where: { projectId },
@@ -554,7 +567,7 @@ export async function listBackups(projectId: string) {
 export async function resolveSnapshotFile(
   projectId: string,
   backupId: string,
-): Promise<{ filename: string; sizeBytes: number; open: () => Promise<Readable> } | null> {
+): Promise<{ filename: string; sizeBytes: bigint; open: () => Promise<Readable> } | null> {
   const row = await prisma.workspaceBackup.findFirst({
     where: { id: backupId, projectId, status: 'completed' },
     select: { filePath: true, filename: true, sizeBytes: true },
@@ -576,7 +589,7 @@ export async function resolveSnapshotFile(
   if (!resolved.startsWith(dir + path.sep)) return null
 
   try {
-    const stat = await fs.promises.stat(resolved)
+    const stat = await fs.promises.stat(resolved, { bigint: true })
     if (!stat.isFile()) return null
     return {
       filename: row.filename,

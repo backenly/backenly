@@ -2404,8 +2404,8 @@ model WorkspaceBackup {
   id         String   @id @default(uuid())
   projectId  String
   filename   String // e.g. "2024-01-15-02-00.sql.gz"
-  filePath   String // absolute path on disk
-  sizeBytes  Int      @default(0)
+  filePath   String // where it is stored: an absolute path on disk, or s3://bucket/key (lib/services/snapshot-store.ts)
+  sizeBytes  BigInt   @default(0) // compressed bytes; BIGINT because a dump passes 2 GiB at about 8 GB of data
   schemaName String // workspace_{projectId}
   status     String // completed | failed
   error      String?

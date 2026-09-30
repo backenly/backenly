@@ -33,8 +33,10 @@ import {
   Settings,
   ChevronDown,
   ChevronRight,
+  X,
 } from 'lucide-react'
 import { FrontendConnectionPill } from '@/components/inspector/FrontendConnectionPill'
+import { useMobileNavStore } from '@/lib/stores/use-mobile-nav-store'
 
 // ── Section registry ─────────────────────────────────────────────────────────
 
@@ -163,11 +165,20 @@ export function ProjectSidebar() {
   const projectId = params.id as string
   const basePath = `/app/projects/${projectId}`
 
+  const isMobileNavOpen = useMobileNavStore((s) => s.isOpen)
+  const closeMobileNav = useMobileNavStore((s) => s.close)
+
   const [isPending, startTransition] = useTransition()
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const counts = useLiveCounts(projectId)
 
+  // Auto-close drawer on route change
+  useEffect(() => {
+    closeMobileNav()
+  }, [pathname, closeMobileNav])
+
   const navigate = (item: NavItem) => {
+    closeMobileNav()
     startTransition(() => router.push(`${basePath}${item.href}`))
   }
 
@@ -181,8 +192,8 @@ export function ProjectSidebar() {
   const countFor = (item: NavItem): number | undefined =>
     item.countKey ? counts[item.countKey] : undefined
 
-  return (
-    <aside className="w-[248px] flex-shrink-0 border-r border-white/[0.07] bg-[#141519] flex flex-col fixed left-0 top-12 bottom-0 z-20">
+  const renderNavList = () => (
+    <>
       <nav className="flex-1 overflow-y-auto px-3 py-3">
         {NAV.map((group, gi) => {
           const isCollapsed = group.label ? collapsed.has(group.label) : false
@@ -213,7 +224,7 @@ export function ProjectSidebar() {
                         key={item.id}
                         onClick={() => navigate(item)}
                         aria-current={active ? 'page' : undefined}
-                        className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-md text-left transition-colors group ${
+                        className={`w-full flex items-center gap-2.5 px-2.5 py-2.5 sm:py-2 rounded-md text-left transition-colors group ${
                           active
                             ? 'bg-white/[0.06] border border-white/[0.12] shadow-[inset_3px_0_0_rgba(196,181,253,0.78)]'
                             : 'border border-transparent hover:bg-white/[0.045] hover:border-white/[0.06]'
@@ -259,15 +270,51 @@ export function ProjectSidebar() {
         })}
       </nav>
 
-      {/* Frontend connection status — "is my Lovable/v0/Bolt app actually
-          talking to this backend?" answered without leaving the workspace. */}
+      {/* Frontend connection status */}
       <div className="px-3.5 py-3 border-t border-white/[0.07]">
         <FrontendConnectionPill projectId={projectId} variant="compact" />
       </div>
+    </>
+  )
 
-      {isPending && (
-        <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-violet-300/50 to-transparent" />
+  return (
+    <>
+      {/* ── Desktop Sidebar ──────────────────────────────────────────────── */}
+      <aside className="hidden md:flex w-[248px] flex-shrink-0 border-r border-white/[0.07] bg-[#141519] flex-col fixed left-0 top-12 bottom-0 z-20">
+        {renderNavList()}
+        {isPending && (
+          <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-violet-300/50 to-transparent" />
+        )}
+      </aside>
+
+      {/* ── Mobile Drawer ────────────────────────────────────────────────── */}
+      {isMobileNavOpen && (
+        <div className="md:hidden">
+          {/* Backdrop */}
+          <div
+            onClick={closeMobileNav}
+            className="fixed inset-0 top-12 bg-black/60 backdrop-blur-sm z-40 transition-opacity"
+            aria-hidden="true"
+          />
+          {/* Drawer */}
+          <aside
+            className="fixed top-12 bottom-0 left-0 w-[280px] max-w-[85vw] bg-[#141519] border-r border-white/[0.08] shadow-2xl z-50 flex flex-col pb-[max(1rem,env(safe-area-inset-bottom))]"
+            aria-label="Mobile navigation"
+          >
+            <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-white/[0.07] flex-shrink-0">
+              <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">Navigation</span>
+              <button
+                onClick={closeMobileNav}
+                className="inline-flex items-center justify-center w-7 h-7 rounded-md text-zinc-400 hover:text-zinc-100 hover:bg-white/[0.06] transition-colors"
+                aria-label="Close navigation"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            {renderNavList()}
+          </aside>
+        </div>
       )}
-    </aside>
+    </>
   )
 }
