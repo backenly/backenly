@@ -460,6 +460,10 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
   // reverse so a child never outlives the parent it references.
   const seededParentRows: Array<{ table: string; id: string }> = []
 
+  // A test user ID to satisfy NOT NULL owner columns and jwt_claim() defaults.
+  const dummyUserId = crypto.randomUUID()
+  const USER_ID_COLS = new Set(['user_id', 'userid', 'author_id', 'authorid', 'owner_id', 'ownerid', 'created_by', 'createdby'])
+
   try {
     const cols = await loadColumns(schemaName, tableName)
     if (cols.length === 0) {
@@ -502,7 +506,7 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
         buildInsertSql(schemaName, refTable, allRefCols, allRefVals, allRefColInfoMap)
 
       try {
-        const refInserted = await executeWithUserContext<any>('', true, refSql, refParams)
+        const refInserted = await executeWithUserContext<any>(dummyUserId, true, refSql, refParams)
         if (!refInserted[0]) continue
         const parentId = String(refInserted[0].id ?? refInserted[0][Object.keys(refInserted[0])[0]])
         // Recorded BEFORE anything else can fail, so cleanup can always find it.
@@ -527,10 +531,19 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
 
     // ── INSERT ────────────────────────────────────────────────────────────────
     const checkOverrides = await loadCheckConstraintValues(schemaName, tableName)
-    const { insertCols, insertVals, colInfoMap } = buildInsertParts(cols, { ...checkOverrides, ...fkOverrides })
+
+    // Fill owner and NOT NULL columns that weren't seeded via explicit FKs
+    const ownerOverrides: Record<string, string> = {}
+    for (const c of cols) {
+      if (USER_ID_COLS.has(c.column_name.toLowerCase()) && !fkOverrides[c.column_name]) {
+        ownerOverrides[c.column_name] = dummyUserId
+      }
+    }
+
+    const { insertCols, insertVals, colInfoMap } = buildInsertParts(cols, { ...checkOverrides, ...fkOverrides, ...ownerOverrides })
     const { sql: insertSql, params: insertParams } = buildInsertSql(schemaName, tableName, insertCols, insertVals, colInfoMap)
 
-    const inserted = await executeWithUserContext<any>('', true, insertSql, insertParams)
+    const inserted = await executeWithUserContext<any>(dummyUserId, true, insertSql, insertParams)
     if (!inserted[0]) {
       return { ...base, error: 'INSERT returned no row', details: [...base.details, '✗ INSERT failed'] }
     }
@@ -539,7 +552,7 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
 
     // ── READ ──────────────────────────────────────────────────────────────────
     const readSql = `SELECT * FROM "${schemaName}"."${tableName}" WHERE id = $1::uuid`
-    const readRows = await executeWithUserContext<any>('', true, readSql, [testId])
+    const readRows = await executeWithUserContext<any>(dummyUserId, true, readSql, [testId])
     if (readRows.length === 0) {
       return { ...base, error: 'READ returned 0 rows after INSERT', details: [...base.details, '✗ READ failed'] }
     }
@@ -552,7 +565,7 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
     )
     if (textCol) {
       const updateSql = `UPDATE "${schemaName}"."${tableName}" SET "${textCol.column_name}" = $1 WHERE id = $2::uuid RETURNING id`
-      const updated = await executeWithUserContext<any>('', true, updateSql, ['__bv_updated__', testId])
+      const updated = await executeWithUserContext<any>(dummyUserId, true, updateSql, ['__bv_updated__', testId])
       if (updated.length > 0) {
         base.details.push(`✓ UPDATE succeeded on column '${textCol.column_name}'`)
       } else {
@@ -564,7 +577,7 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
 
     // ── DELETE ────────────────────────────────────────────────────────────────
     const deleteSql = `DELETE FROM "${schemaName}"."${tableName}" WHERE id = $1::uuid RETURNING id`
-    const deleted = await executeWithUserContext<any>('', true, deleteSql, [testId])
+    const deleted = await executeWithUserContext<any>(dummyUserId, true, deleteSql, [testId])
     if (deleted.length === 0) {
       return { ...base, error: 'DELETE matched 0 rows', details: [...base.details, '✗ DELETE failed'] }
     }
@@ -573,7 +586,7 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
     base.details.push('✓ DELETE succeeded')
 
     // ── POST-DELETE READ — must return 0 rows ─────────────────────────────────
-    const postDeleteRows = await executeWithUserContext<any>('', true, readSql, [deletedId])
+    const postDeleteRows = await executeWithUserContext<any>(dummyUserId, true, readSql, [deletedId])
     if (postDeleteRows.length > 0) {
       return {
         ...base,
@@ -598,7 +611,7 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
     // silently leaks the row rather than erroring.
     if (testId) {
       try {
-        await executeWithUserContext('', true, `DELETE FROM "${schemaName}"."${tableName}" WHERE id = $1::uuid`, [testId])
+        await executeWithUserContext(dummyUserId, true, `DELETE FROM "${schemaName}"."${tableName}" WHERE id = $1::uuid`, [testId])
       } catch {
         // Last resort: try without user context
         try {
@@ -610,7 +623,7 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
     for (const parent of [...seededParentRows].reverse()) {
       const delSql = `DELETE FROM "${schemaName}"."${parent.table}" WHERE id = $1::uuid`
       try {
-        await executeWithUserContext('', true, delSql, [parent.id])
+        await executeWithUserContext(dummyUserId, true, delSql, [parent.id])
       } catch {
         try { await prisma.$executeRawUnsafe(delSql, parent.id) } catch { /* non-fatal */ }
       }
