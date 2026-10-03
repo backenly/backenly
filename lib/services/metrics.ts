@@ -72,9 +72,10 @@ export interface RuntimeWindowStats {
   stabilityPct: number
 }
 
-// SQL fragment shared by every query: scope to one project's *runtime* traffic
-// and drop the internal AI rate-limiter rows.
-const RUNTIME_PATH_FILTER = Prisma.sql`AND "path" NOT LIKE '/api/%'`
+// SQL fragment shared by every query: scope to one project's *production*
+// runtime traffic. Drops the internal AI rate-limiter rows and a preview
+// branch's rows, whose failure tests would otherwise read as production errors.
+const RUNTIME_PATH_FILTER = Prisma.sql`AND "path" NOT LIKE '/api/%' AND "branchId" IS NULL`
 
 // ─── Time-range helpers ───────────────────────────────────────────────────────
 

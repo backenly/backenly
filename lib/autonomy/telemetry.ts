@@ -88,6 +88,8 @@ export async function computeHealthSignal(
         projectId,
         timestamp: { gte: new Date(now - baselineSpanMs) },
         NOT: { path: { startsWith: '/api/' } },
+        // Production only: a preview branch's failure tests are not an incident.
+        branchId: null,
       },
       select: { statusCode: true, duration: true, timestamp: true },
     })

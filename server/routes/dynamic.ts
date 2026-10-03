@@ -29,6 +29,7 @@ import {
 import { asyncRoute } from '../lib/async-route'
 import { refuseUnlessServing } from '../lib/serving-gate'
 import { touchProjectActivity } from '@/lib/projects/activity'
+import { ENVIRONMENT_HEADER, environmentHeaderValue } from '@/lib/branches/key-scope'
 import {
   isGrowingWrite,
   projectRestriction,
@@ -60,21 +61,6 @@ interface AuthResolution {
   branchName?: string
   error?: string
   code?: string
-}
-
-/**
- * Which environment answered, on every data-plane response.
- *
- * A preview key and a main key hit the same URL, so nothing in a response said
- * which schema served it. A test an agent runs "against the preview" could not
- * tell that it was in fact reading production, which is the one mistake a
- * preview environment exists to prevent. Exposed to browsers in server/app.ts
- * and middleware.ts, so a frontend's test can assert it too.
- */
-export const ENVIRONMENT_HEADER = 'X-Backenly-Environment'
-
-export function environmentHeaderValue(branchName?: string | null): string {
-  return branchName ? `branch:${branchName}` : 'main'
 }
 
 /**

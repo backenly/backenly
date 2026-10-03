@@ -22,7 +22,7 @@
 import { NextResponse } from 'next/server'
 import { recordRuntimeRequest, INTERNAL_TRAFFIC_HEADER, isInternalTraffic } from './request-recorder'
 import { meterResponseBody } from '@/lib/usage/egress'
-import { refuseBranchKeyOffDataPlane } from '@/lib/branches/key-scope'
+import { branchIdForRequest, refuseBranchKeyOffDataPlane } from '@/lib/branches/key-scope'
 
 export function recordedV1<R extends Request, C, T extends Response>(
   handler: (request: R, context: C) => T | Promise<T>,
@@ -32,10 +32,10 @@ export function recordedV1<R extends Request, C, T extends Response>(
     let statusCode = 500
     const internalHeader = request.headers.get(INTERNAL_TRAFFIC_HEADER)
     const paramsPromise = Promise.resolve((context as { params?: unknown } | undefined)?.params)
+    // Next always hands an absolute URL; the base only keeps a relative one (as
+    // some callers construct) from throwing before the route runs.
+    const url = new URL(request.url, 'http://localhost')
     try {
-      // Next always hands an absolute URL; the base only keeps a relative one
-      // (as some callers construct) from throwing before the route runs.
-      const url = new URL(request.url, 'http://localhost')
       const refusal = await refuseBranchKeyOffDataPlane(url.pathname, request.headers, url)
       if (refusal) {
         statusCode = refusal.status
@@ -50,16 +50,23 @@ export function recordedV1<R extends Request, C, T extends Response>(
       return typeof projectId === 'string' ? meterResponseBody(response, projectId) : response
     } finally {
       // Resolved after the handler, which has already awaited the same promise.
-      paramsPromise
-        .then(params => {
+      // The key's branch keeps preview traffic out of production's health
+      // signals; an internal request is never recorded, so it skips the lookup.
+      const durationMs = Date.now() - startedAt
+      const branch = isInternalTraffic(internalHeader)
+        ? Promise.resolve(null)
+        : branchIdForRequest(request.headers, url)
+      Promise.all([paramsPromise, branch])
+        .then(([params, branchId]) => {
           const projectId = (params as { projectId?: unknown } | undefined)?.projectId
           recordRuntimeRequest({
             projectId: typeof projectId === 'string' ? projectId : null,
             method: request.method,
-            pathname: new URL(request.url).pathname,
+            pathname: url.pathname,
             statusCode,
-            durationMs: Date.now() - startedAt,
+            durationMs,
             internalHeader,
+            branchId,
           })
         })
         .catch(() => {})
