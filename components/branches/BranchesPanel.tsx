@@ -5,7 +5,8 @@
  *
  * Talks to the routes shipped in app/api/projects/[id]/branches:
  *   GET    /branches            list
- *   POST   /branches {name}     create (full structural + data clone)
+ *   POST   /branches {name, includeData}
+ *                               create (schema clone; rows only when asked)
  *   GET    /branches/[id]       schema diff vs main
  *   POST   /branches/[id]       merge (additive auto, rest → review items)
  *   DELETE /branches/[id]       discard (drops the clone)
@@ -75,6 +76,7 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
   const [loading, setLoading] = useState(true)
   const [creating, setCreating] = useState(false)
   const [newName, setNewName] = useState('')
+  const [includeData, setIncludeData] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [openDiff, setOpenDiff] = useState<{ id: string; name: string; diff: SchemaDiff } | null>(null)
@@ -105,11 +107,12 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
       const res = await fetch(base, {
         method: 'POST', credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name }),
+        body: JSON.stringify({ name, includeData }),
       })
       const j = await res.json()
       if (!res.ok || !j.success) { setError(j.error || 'Could not create branch.'); return }
       setNewName('')
+      setIncludeData(false)
       await load()
     } catch {
       setError('Network error creating branch.')
@@ -164,7 +167,7 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
     <div className="space-y-4">
       <SettingsCard
         title="New preview branch"
-        description="A full clone of this project's schema and rows. Your agent builds against it while production keeps serving."
+        description="A copy of this project's schema in its own isolated space, with the same row security and its own id sequences. It starts empty. An API key bound to the branch reads and writes it through the data API, while production keeps serving."
         onSubmit={create}
         footer={<span className="tabular-nums">{active.length} of 5 branches active</span>}
         actions={
@@ -185,6 +188,22 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
             />
           </KitField>
         </div>
+        <label className="mt-4 flex max-w-[560px] cursor-pointer items-start gap-3 rounded-[8px] border border-white/[0.07] bg-white/[0.02] px-3.5 py-3">
+          <input
+            type="checkbox"
+            checked={includeData}
+            onChange={(e) => setIncludeData(e.target.checked)}
+            disabled={creating}
+            className="mt-[3px] h-4 w-4 flex-shrink-0 accent-violet-400"
+          />
+          <span className="min-w-0">
+            <span className="block text-[13px] font-medium text-zinc-100">Copy production rows</span>
+            <span className="mt-0.5 block text-[12.5px] leading-[18px] text-zinc-500">
+              Off by default. Turn on only to reproduce a problem that depends on real data: the copy includes your
+              end users&apos; records, and anyone holding a key for this branch can read them.
+            </span>
+          </span>
+        </label>
       </SettingsCard>
 
       {error && (
@@ -315,7 +334,7 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
           <EmptyState
             icon={GitBranch}
             title="No preview branches"
-            description="Create one to let an agent build against an isolated copy of your backend, then merge the changes back safely."
+            description="Create one to test against an isolated copy of your schema, then merge new tables back through the governed path."
           />
         ) : (
           <ul className="divide-y divide-white/[0.06]">

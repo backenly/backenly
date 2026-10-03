@@ -79,7 +79,11 @@ export async function connectionIdentity(ctx: {
       `Connected to project "${project.name}" (${project.id})` +
       (key ? ` through "${key.name}" (${key.keyPrefix}…), ${access}` : '') +
       (key?.branch ? `, bound to preview branch "${key.branch.name}"` : '') +
-      `. Every change made through this connection lands in this project${key?.branch ? '’s branch' : ''}. ` +
+      // Branch binding steers the data API a key serves; it does not move the
+      // tools. Every MCP change still lands on the main schema, so saying it
+      // "lands in this project's branch" told an agent its migrations were
+      // isolated when they were live.
+      `. Every change made through this connection lands in this project's main schema. ` +
       'To work on a different project, re-point the connection: npx @backenly/cli link --project <id> --key <key>, ' +
       'or run Connect for that project in the dashboard. Creating a project is done in the dashboard.',
     data,

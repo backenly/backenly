@@ -4,11 +4,11 @@ export const dynamic = 'force-dynamic'
  * Preview branches — list + create.
  *
  * GET  /api/projects/[id]/branches
- * POST /api/projects/[id]/branches   Body: { name: string }
+ * POST /api/projects/[id]/branches   Body: { name: string, includeData?: boolean }
  *
- * A branch is a full structural+data clone of the workspace schema —
- * effectively free on Backenly's multi-tenant architecture. Merge and
- * discard live on the [branchId] route.
+ * A branch is a structural clone of the workspace schema, with rows only when
+ * includeData is asked for, and is effectively free on Backenly's
+ * multi-tenant architecture. Merge and discard live on the [branchId] route.
  */
 
 import { NextRequest, NextResponse } from 'next/server'

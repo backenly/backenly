@@ -704,13 +704,16 @@ export function buildDispatchable(): McpToolDescriptor[] {
     tier: 'build',
     description:
       'Work with preview branches: a clone of this project\'s SCHEMA in an isolated PostgreSQL schema, with its own ' +
-      'row-security policies and its own sequences. Use one before any migration you are not certain about — build ' +
-      'against the clone, diff it, then merge.\n' +
+      'row-security policies and its own sequences, for testing an app against an isolated copy while production ' +
+      'keeps serving. apply_migration and the other build tools still change MAIN, not a branch.\n' +
       'A branch starts EMPTY. It does not copy production rows unless you pass includeData:true, which protects your ' +
       'real data from whatever the experiment does to it. Seed what you need instead.\n' +
       'To run an app against a branch, issue a key bound to it: create_api_key with that branchId. The environment is ' +
-      'a property of the KEY — no header switches it, and a key on a merged or discarded branch is refused rather ' +
-      'than falling back to production.\n' +
+      'a property of the KEY — no header switches it. That key reads and writes the branch through the data API ' +
+      '(/api/v1/{projectId}/db and /api/v2), and every response says which environment answered in the ' +
+      'X-Backenly-Environment header. Any other endpoint (auth, functions, storage, realtime) refuses the key with ' +
+      'BRANCH_SURFACE_UNAVAILABLE, and a key on a merged or discarded branch is refused, rather than either falling ' +
+      'back to production.\n' +
       'Actions: "list" (existing branches + their ids) · "create" (needs `name`, lowercase kebab-case, max 5 active) · ' +
       '"diff" (needs `branchId` — exactly what would land) · "merge" (needs `branchId` — new tables apply through the ' +
       'governed kernel; added columns, type changes and drops come back as review items rather than reshaping a live ' +
