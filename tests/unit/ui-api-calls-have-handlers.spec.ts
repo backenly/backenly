@@ -23,6 +23,8 @@ const CLOUD_OVERLAY_ROUTES = [
   // The spend limit: the Usage page reads and changes it (backenly-cloud #27).
   '/api/billing/spend-limit',
   '/api/billing/spend-limit/confirm',
+  // Back from Stripe Checkout, the Usage page reports the prepayment paid.
+  '/api/billing/spend-limit/prepay',
 ]
 
 /** Calls whose path is built at runtime, so no literal can be checked. */

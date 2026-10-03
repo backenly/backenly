@@ -237,11 +237,11 @@ function comparisonGroups(published: boolean): MatrixGroup[] {
       rows: [
         {
           label: 'Usage past the included amounts',
-          cells: ['Hard caps, never billed', { value: 'Only up to your spend limit', then: 'Off by default: every quota is a hard cap' }, 'Per contract'],
+          cells: ['Hard caps, never billed', { value: 'Prepaid, only up to your spend limit', then: 'Off by default: every quota is a hard cap' }, 'Per contract'],
         },
         {
           label: 'Spend limit',
-          hint: 'Only an owner can raise it; agents and API keys can only read it',
+          hint: 'Paid in advance. Only an owner can raise it; agents and API keys can only read it',
           cells: [false, { value: '$50, $100, $250 or your own', then: 'Emails at 50%, 80% and 100%' }, 'Per contract'],
         },
       ],
@@ -337,7 +337,7 @@ const faqs = [
 /** Shown only in a build that publishes usage pricing. */
 const usageFaq = {
   q: 'What happens when I go past what Pro includes?',
-  a: 'Nothing is billed unless you choose it. Pro’s quotas are shared by every project on your account, and your spend limit is off by default, so each quota is a hard cap. Set a limit ($50, $100, $250 or your own) and usage continues at the rates in the table, never past that limit, with emails at 50%, 80% and 100%. Usage is billed monthly, amounts under $5 roll into the next month, and projects, API requests, autonomy, the typed MCP tools, deploys and rollbacks are never billed at all.',
+  a: 'Nothing is billed unless you choose it. Pro’s quotas are shared by every project on your account, and your spend limit is off by default, so each quota is a hard cap. Set a limit ($50, $100, $250 or your own) and pay it in advance; usage then continues at the rates in the table, never past that limit, with emails at 50%, 80% and 100%. Each month’s usage is drawn from what you paid and the rest carries over, and projects, API requests, autonomy, the typed MCP tools, deploys and rollbacks are never billed at all.',
 }
 
 export default function PricingPage() {
@@ -740,7 +740,7 @@ function ComparisonSection({ published, onCta }: { published: boolean; onCta: ()
           title="Capacity changes. The core runtime stays."
           lede={
             published
-              ? 'Pro’s quotas are shared by every project on your account. Past them, nothing is billed unless you set a spend limit; with one, usage continues at the rates shown, never past it.'
+              ? 'Pro’s quotas are shared by every project on your account. Past them, nothing is billed unless you set a spend limit and pay it in advance; with one, usage continues at the rates shown, never past it.'
               : 'Running at company scale? Enterprise adds custom limits, SSO, onboarding and migration help, and a 12-hour SLA.'
           }
         />
