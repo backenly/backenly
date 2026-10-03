@@ -12,10 +12,17 @@
  *
  * The wrapper keeps the handler's own signature, so Next's route-export type
  * check sees exactly what it saw before.
+ *
+ * Being the one wrapper every route passes through also makes it the place a
+ * key bound to a preview branch is refused off the data plane: none of these
+ * routes is branch-aware, so serving one would read or write production. The
+ * refusal is recorded like any other response. lib/branches/key-scope.ts.
  */
 
+import { NextResponse } from 'next/server'
 import { recordRuntimeRequest, INTERNAL_TRAFFIC_HEADER, isInternalTraffic } from './request-recorder'
 import { meterResponseBody } from '@/lib/usage/egress'
+import { refuseBranchKeyOffDataPlane } from '@/lib/branches/key-scope'
 
 export function recordedV1<R extends Request, C, T extends Response>(
   handler: (request: R, context: C) => T | Promise<T>,
@@ -26,6 +33,14 @@ export function recordedV1<R extends Request, C, T extends Response>(
     const internalHeader = request.headers.get(INTERNAL_TRAFFIC_HEADER)
     const paramsPromise = Promise.resolve((context as { params?: unknown } | undefined)?.params)
     try {
+      // Next always hands an absolute URL; the base only keeps a relative one
+      // (as some callers construct) from throwing before the route runs.
+      const url = new URL(request.url, 'http://localhost')
+      const refusal = await refuseBranchKeyOffDataPlane(url.pathname, request.headers, url)
+      if (refusal) {
+        statusCode = refusal.status
+        return NextResponse.json(refusal.body, { status: refusal.status }) as unknown as T
+      }
       const response = await handler(request, context)
       statusCode = response.status
       // Backenly's own synthetic requests are neither recorded nor metered.
