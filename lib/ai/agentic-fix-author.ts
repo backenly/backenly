@@ -48,7 +48,7 @@ const MAX_REASON_LEN = 220
  * Actions the fix author is allowed to emit. Curated to:
  *   - Exclude all destructive operations (DROP/TRUNCATE/REMOVE/BLOCK)
  *   - Exclude billing/auth credential mutations (those need user input)
- *   - Exclude cross-tenant operations (CREATE_STAGING, PROMOTE_STAGING)
+ *   - Exclude operations that copy or replace whole schemas
  *
  * Anything outside this list → reject + fall through. The deterministic
  * fix-loop still gets to report the failure to the user.

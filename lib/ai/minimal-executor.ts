@@ -104,8 +104,6 @@ export interface AIAction {
     // Typed data migrations — backfill / split / merge / cast / normalize with
     // dry-run + per-table checkpoint. See lib/execution/data-migration.ts.
     | 'RUN_DATA_MIGRATION'
-    // Staging environment
-    | 'CREATE_STAGING' | 'PROMOTE_STAGING' | 'DROP_STAGING'
     // Per-endpoint rate limiting
     | 'SET_RATE_LIMIT' | 'LIST_RATE_LIMITS' | 'REMOVE_RATE_LIMIT'
     // Custom code generation (GAP 4)
@@ -1613,14 +1611,6 @@ COLUMN TYPE MIGRATION:
   params: { tableName: string, columnName: string, newType: string, castExpression?: string }
   Use when: "change price from INTEGER to DECIMAL", "convert status to BOOLEAN", "make quantity a FLOAT"
   NEVER use ADD_COLUMN for type changes — use ALTER_COLUMN_TYPE
-
-STAGING ENVIRONMENT:
-- CREATE_STAGING - Copy production schema+data to a staging environment (workspace_{id}_staging)
-  Use when: "create staging environment", "test this in staging", "create a copy for testing"
-- PROMOTE_STAGING - Sync staging back to production
-  Use when: "promote staging to production", "go live with staging", "push staging to prod"
-- DROP_STAGING - Delete the staging environment
-  Use when: "drop staging", "delete staging environment", "remove staging"
 
 PER-ENDPOINT RATE LIMITING:
 - SET_RATE_LIMIT - Configure request rate limit on a table's API
@@ -3680,16 +3670,6 @@ async function executeSingleAction(
           data: result,
         }
       }
-
-      // ========== STAGING ENVIRONMENT ==========
-      case 'CREATE_STAGING':
-        return await executeCreateStaging(projectId)
-
-      case 'PROMOTE_STAGING':
-        return await executePromoteStaging(action.params, projectId)
-
-      case 'DROP_STAGING':
-        return await executeDropStaging(projectId)
 
       // ========== PER-ENDPOINT RATE LIMITS ==========
       case 'SET_RATE_LIMIT':
@@ -6295,10 +6275,6 @@ const INFO_HELP_TEXT = `💡 **I can help you build your backend!**
 - "Backup my database" — creates a pg_dump snapshot
 - "Restore my database to yesterday" — point-in-time restore
 - "List my backups" — show backup history
-
-🧪 **Staging:**
-- "Create a staging environment" — copy production to a staging schema
-- "Promote staging to production" — sync staging → production
 
 ⚡ **AI Functions:**
 - "When a user signs up, send them a welcome email"
@@ -13157,137 +13133,6 @@ async function executeAlterColumnType(params: any, projectId: string): Promise<E
       message: `Failed to change column type: ${error.message}\n\nThis usually means existing data cannot be safely cast. Try exporting your data first, or specify a custom cast expression.`,
       error: error.message,
     }
-  }
-}
-
-// ============================================================================
-// GAP 7 — STAGING ENVIRONMENTS
-// Creates workspace_{projectId}_staging schema as a snapshot of production.
-// ============================================================================
-
-async function executeCreateStaging(projectId: string): Promise<ExecutionResult> {
-  try {
-    const { prisma } = await import('@/lib/db')
-    const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
-    const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
-    const stagingSchema = `${postgresSchema}_staging`
-
-    // Check if staging already exists
-    const existing = await prisma.$queryRawUnsafe<{schema_name: string}[]>(
-      `SELECT schema_name FROM information_schema.schemata WHERE schema_name = $1`,
-      stagingSchema
-    )
-    if (existing.length > 0) {
-      return {
-        success: true,
-        message: `ℹ️ Staging environment already exists (\`${stagingSchema}\`).\n\nYour staging schema is ready. Make changes there first, then say "promote staging to production" when ready.`,
-      }
-    }
-
-    // Create staging schema and copy all tables + data from production
-    await prisma.$executeRawUnsafe(`CREATE SCHEMA "${stagingSchema}"`)
-
-    // Copy schema structure (tables, indexes, constraints) via pg_dump + psql approach
-    // Since we're in-process, we use PostgreSQL's CREATE TABLE ... AS SELECT
-    const tables = await prisma.$queryRawUnsafe<{tablename: string}[]>(
-      `SELECT tablename FROM pg_tables WHERE schemaname = $1`,
-      postgresSchema
-    )
-
-    for (const { tablename } of tables) {
-      await prisma.$executeRawUnsafe(`
-        CREATE TABLE "${stagingSchema}"."${tablename}"
-        (LIKE "${postgresSchema}"."${tablename}" INCLUDING ALL)
-      `)
-      await prisma.$executeRawUnsafe(`
-        INSERT INTO "${stagingSchema}"."${tablename}"
-        SELECT * FROM "${postgresSchema}"."${tablename}"
-      `)
-    }
-
-    return {
-      success: true,
-      message: `✅ **Staging environment created.**\n\n`
-        + `- **Schema**: \`${stagingSchema}\`\n`
-        + `- **Tables copied**: ${tables.length}\n`
-        + `- **Data**: full copy of production at this moment\n\n`
-        + `Make changes in staging by prefixing requests with "in staging, ..."\n`
-        + `When ready: "promote staging to production"`,
-      data: { stagingSchema, tablesCopied: tables.length },
-    }
-  } catch (error: any) {
-    return { success: false, message: `Failed to create staging: ${error.message}`, error: error.message }
-  }
-}
-
-async function executePromoteStaging(params: any, projectId: string): Promise<ExecutionResult> {
-  try {
-    const { prisma } = await import('@/lib/db')
-    const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
-    const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
-    const stagingSchema = `${postgresSchema}_staging`
-
-    const existing = await prisma.$queryRawUnsafe<{schema_name: string}[]>(
-      `SELECT schema_name FROM information_schema.schemata WHERE schema_name = $1`,
-      stagingSchema
-    )
-    if (existing.length === 0) {
-      return { success: false, message: 'No staging environment found. Say "create staging environment" first.' }
-    }
-
-    // Snapshot production before promoting
-    const { snapshotSchema } = await import('@/lib/versioning/schema-versions')
-    await snapshotSchema(projectId, 'Before staging promotion', 'ai-executor').catch(() => {})
-
-    const tables = await prisma.$queryRawUnsafe<{tablename: string}[]>(
-      `SELECT tablename FROM pg_tables WHERE schemaname = $1`,
-      stagingSchema
-    )
-
-    // For each table, replace production data with staging data
-    for (const { tablename } of tables) {
-      // Check table exists in production
-      const prodExists = await prisma.$queryRawUnsafe<{tablename: string}[]>(
-        `SELECT tablename FROM pg_tables WHERE schemaname = $1 AND tablename = $2`,
-        postgresSchema, tablename
-      )
-      if (prodExists.length > 0) {
-        await prisma.$executeRawUnsafe(`TRUNCATE TABLE "${postgresSchema}"."${tablename}" CASCADE`)
-        await prisma.$executeRawUnsafe(
-          `INSERT INTO "${postgresSchema}"."${tablename}" SELECT * FROM "${stagingSchema}"."${tablename}"`
-        )
-      } else {
-        // New table in staging — create it in production
-        await prisma.$executeRawUnsafe(
-          `CREATE TABLE "${postgresSchema}"."${tablename}" (LIKE "${stagingSchema}"."${tablename}" INCLUDING ALL)`
-        )
-        await prisma.$executeRawUnsafe(
-          `INSERT INTO "${postgresSchema}"."${tablename}" SELECT * FROM "${stagingSchema}"."${tablename}"`
-        )
-      }
-    }
-
-    return {
-      success: true,
-      message: `✅ **Staging promoted to production.**\n\n${tables.length} tables synced from staging → production.\n\nProduction snapshot saved before promotion (check schema versions if you need to roll back).`,
-    }
-  } catch (error: any) {
-    return { success: false, message: `Failed to promote staging: ${error.message}`, error: error.message }
-  }
-}
-
-async function executeDropStaging(projectId: string): Promise<ExecutionResult> {
-  try {
-    const { prisma } = await import('@/lib/db')
-    const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
-    const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
-    const stagingSchema = `${postgresSchema}_staging`
-
-    await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${stagingSchema}" CASCADE`)
-
-    return { success: true, message: `✅ Staging environment dropped. Production is unaffected.` }
-  } catch (error: any) {
-    return { success: false, message: `Failed to drop staging: ${error.message}`, error: error.message }
   }
 }
 
