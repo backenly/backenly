@@ -73,6 +73,7 @@ export async function goLive(
       publicUrl: true,
       userId: true,
       activeGraphId: true,
+      authManifest: true,
     },
   })
 
@@ -85,11 +86,14 @@ export async function goLive(
   }
 
   // ─── Empty-Backend Guard ───────────────────────────────────────────────────
-  // Refuse to deploy if no workspace tables have been created yet.
+  // Refuse to deploy if no backend features (tables, APIs, auth) exist.
   // This prevents the "Backend is live" card from appearing when the AI
   // accidentally triggers deploy (e.g. a build prompt containing "deploy-ready").
   const tableCount = await prisma.table.count({ where: { projectId } })
-  if (tableCount === 0) {
+  const apiCount = await prisma.apiDefinition.count({ where: { projectId } })
+  const hasAuth = (project.authManifest as any)?.enabled === true
+
+  if (tableCount === 0 && apiCount === 0 && !hasAuth) {
     return {
       kind: 'error',
       success: false,
@@ -128,6 +132,11 @@ export async function goLive(
     const willBeVersion = (latestVersion?.version ?? 0) + 1
     const wasAlreadyLive = project.projectStatus === 'LIVE'
 
+    const featureLines: string[] = []
+    if (tableCount > 0) featureLines.push(`• ${tableCount} table${tableCount === 1 ? '' : 's'}\n`)
+    if (apiCount > 0) featureLines.push(`• ${apiCount} API${apiCount === 1 ? '' : 's'}\n`)
+    if (hasAuth) featureLines.push(`• Authentication enabled\n`)
+
     return {
       kind: 'confirmation',
       success: true,
@@ -136,7 +145,7 @@ export async function goLive(
       readinessScore: readinessReport.score,
       message:
         `You're about to ${wasAlreadyLive ? `publish v${willBeVersion}` : 'go live'}:\n\n` +
-        `• ${tableCount} table${tableCount === 1 ? '' : 's'}\n` +
+        featureLines.join('') +
         `• Readiness: ${readinessReport.score}/100\n` +
         (wasAlreadyLive
           ? `• Replaces the currently-live deployment\n\n`
