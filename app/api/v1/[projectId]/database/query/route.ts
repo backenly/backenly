@@ -7,15 +7,14 @@ import { querySchema, PAGINATION_DEFAULT_LIMIT, PAGINATION_MAX_LIMIT } from '@/l
 import { validateRequestBody } from '@/lib/validation/schemas'
 import { prisma } from '@/lib/db'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 /**
  * GET /v1/{projectId}/database/query?table=<name>&limit=&offset=&sort=&order=
  * Query database tables in the project's workspace schema (browser-friendly)
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+async function handleGET(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, params)
     if (middleware.response) return middleware.response
@@ -163,10 +162,8 @@ export async function GET(
  * POST /v1/{projectId}/database/query
  * Query database tables with filters/select/orderBy (advanced)
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, params)
     if (middleware.response) {
@@ -286,3 +283,5 @@ export async function POST(
   }
 }
 
+export const GET = recordedV1(handleGET)
+export const POST = recordedV1(handlePOST)

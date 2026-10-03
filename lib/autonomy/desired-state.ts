@@ -42,6 +42,7 @@ import { verifyWorkflows } from '@/lib/core/workflow-verifier'
 import { classifyFix } from '@/lib/core/fix-classifier'
 import { checksFromDesiredState, type CheckState } from './fix-acceptance'
 import { normalizeFindingType } from '@/lib/core/types'
+import { FLAGS } from '@/lib/config/flags'
 import type { FindingType, FindingSeverity, RawFinding } from '@/lib/core/types'
 import {
   detectMissingHotPathIndexes,
@@ -62,6 +63,7 @@ import { detectIndexBloat } from './index-bloat'
 import { detectIntentDrift } from './intent-conformance'
 import { detectBehaviouralRegression } from './baseline/detect'
 import { detectMigrationResidue } from './migration-residue'
+import { detectSubsystemRecurrence } from './subsystem-recurrence'
 import { hasCapability, type PlatformCapability } from './platform-capabilities'
 
 // ── Bounded-autonomy tiers (graded by blast radius) ───────────────────────────
@@ -120,6 +122,32 @@ export interface Invariant {
    * that let detectMissingRls read green while it was dead.
    */
   requires?: PlatformCapability
+  /**
+   * How this guarantee is held.
+   *
+   *   observed         a probe establishes its truth or violation.
+   *   by_construction  the engine makes it true and no probe can fail it.
+   *
+   * The distinction exists because the catalogue was advertising a count of
+   * guarantees Backenly CHECKS, and three of its members could not fire. Two
+   * different reasons were hiding under one number: one is genuinely held by
+   * PostgREST and needs no probe, and the other was simply inert.
+   *
+   * A `by_construction` invariant is still worth stating to a user - "every
+   * table is reachable" is a real promise - but it must not be counted among
+   * the things that are actively watched, because nothing is watching it.
+   */
+  assurance?: 'observed' | 'by_construction'
+  /**
+   * A DEPLOYMENT-level switch this probe needs, beyond server capability.
+   *
+   * Same contract as `requires`: when it is off the probe does not run and the
+   * invariant reports UNCHECKED rather than satisfied. `requires` asks what the
+   * server can do; this asks what this deployment has turned on, and the
+   * failure mode is identical - a probe returning [] because it was gated is
+   * indistinguishable from one that looked and found nothing.
+   */
+  enabled?: () => boolean
 }
 
 /**
@@ -128,6 +156,19 @@ export interface Invariant {
  * an invariant here never duplicates detection logic.
  */
 export const INVARIANTS: readonly Invariant[] = [
+  {
+    // A real, implemented probe that is off in most deployments. Its first
+    // line is `if (!FLAGS.ENABLE_SUBSYSTEM_RECURRENCE_FINDING) return []`,
+    // which is the exact shape the `requires` note warns about: gated and
+    // looked-and-found-nothing are indistinguishable to the caller. Declaring
+    // the gate here makes it report UNCHECKED instead of satisfied.
+    enabled: () => FLAGS.ENABLE_SUBSYSTEM_RECURRENCE_FINDING,
+    id: 'repairs_in_one_area_are_holding',
+    title: 'Repeated repairs in one area of the schema are actually holding',
+    rationale:
+      'The loop escalates a single gap that keeps coming back. It cannot see several DIFFERENT gaps repaired across one foreign-key-connected area — four independent stories to the loop, one story to an engineer. When repairs stop holding across an area, the individual fixes are treating symptoms and the area itself needs a structural decision.',
+    probe: detectSubsystemRecurrence,
+  },
   {
     id: 'user_data_is_rls_protected',
     title: 'Every table holding user data is protected by row-level security',
@@ -232,19 +273,17 @@ export const INVARIANTS: readonly Invariant[] = [
     probe: detectUnregisteredSchema,
   },
   {
+    // Held by the engine, not by a probe. Its own rationale below already
+    // says so; this makes the catalogue agree, so it stops being counted
+    // among the guarantees Backenly actively watches.
+    assurance: 'by_construction',
     id: 'every_table_has_an_api',
     title: 'Every table is reachable through the REST API',
     rationale:
       'Under PostgREST this holds by construction: a table is served because it exists in the catalog and the role holds a grant on it, so reachability is not a state that can drift. The probe is retained as a satisfied invariant rather than deleted, because "every table is reachable" is still a guarantee worth stating to the user — it is simply now guaranteed by the engine instead of by a registry someone had to remember to write. Exposure decisions live in lib/postgrest/exposure.ts.',
     probe: detectTablesWithNoApiDefinition,
   },
-  {
-    id: 'api_coverage_is_complete',
-    title: 'Every table has full CRUD and no dead endpoints',
-    rationale:
-      'Partial CRUD or endpoints pointing at dropped tables cause runtime failures in the deployed app.',
-    probe: detectApiCoverageGaps,
-  },
+
   // ── Registered 2026-07-30 so their auto-applied fixes can be verified ───────
   //
   // These three probes already existed and were already read-only; they were
@@ -427,6 +466,11 @@ export async function computeDesiredStateDiff(projectId: string): Promise<Desire
       // healthy backend, which is the failure this branch exists to prevent.
       const cap = inv.requires ? capStates.get(inv.requires) : undefined
       if (cap && !cap.available) return { inv, findings: null }
+      // Gated off in this deployment. Reported unchecked, never satisfied.
+      if (inv.enabled && !inv.enabled()) return { inv, findings: null }
+      // Held by the engine. There is nothing to probe and nothing to report
+      // as unchecked either - it is simply true.
+      if (inv.assurance === 'by_construction') return { inv, findings: [] }
       return { inv, findings: await inv.probe(projectId) }
     }),
   )
@@ -563,6 +607,13 @@ export function gapIdentity(
  * probe cannot silently leave a false claim of coverage behind.
  */
 const INVARIANT_EMITS: Readonly<Record<string, readonly FindingType[]>> = {
+  // Listed despite having no auto-fix, for the same reason
+  // service_role_keys_stay_server_side is: it is genuinely re-detectable. The
+  // probe recomputes from the live catalog and a rolling window, so the finding
+  // withdraws itself once repairs stop recurring in that area -- or once the
+  // component's membership changes, which produces a different identity and
+  // leaves the old one undetected.
+  repairs_in_one_area_are_holding: ['subsystem_repeat_failure'],
   user_data_is_rls_protected: ['missing_rls'],
   rls_policies_are_not_wide_open: ['rls_expression_invalid'],
   // Genuinely re-detectable, which is why it is listed despite having no
@@ -602,7 +653,6 @@ const INVARIANT_EMITS: Readonly<Record<string, readonly FindingType[]>> = {
   // recheckGap would read the type as covered, find it absent (because nothing
   // looks for it), and certify every fix as verified.
   every_table_has_an_api: [],
-  api_coverage_is_complete: [],
   rls_is_not_deny_all: ['rls_denies_everything'],
   live_tables_are_adopted: ['orphan_table'],
   declared_workflows_still_work: ['workflow_broken'],

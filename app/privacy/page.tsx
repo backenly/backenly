@@ -1,309 +1,118 @@
-import Link from 'next/link'
-import { Mail, ShieldCheck } from 'lucide-react'
 import { SiteShell } from '@/components/site/SiteShell'
-import { Card, PageHero, Section, SecondaryButton, Tag } from '@/components/site/kit'
+import { DataTable, Page, PageHero } from '@/components/site/kit'
+import { LEGAL_TEXT, LegalBody, LegalFooter, LegalList, LegalSection } from '@/components/site/legal'
+import { HEADING, PANEL } from '@/components/site/tokens'
+import {
+  EFFECTIVE_DATE,
+  PRIVACY_EMAIL,
+  PRIVACY_SECTIONS,
+  PRIVACY_SUMMARY,
+  PROVIDERS,
+  type PrivacySection,
+} from './data'
 
-type PrivacySection = {
-  id: string
-  title: string
-  content: string
-  list?: string[]
-  extra?: string
-  subsections?: { label: string; items: string[] }[]
-}
-
-const summary = [
-  "We do not sell your data",
-  'Your project data is isolated by design',
-  'OpenAI is used only to provide AI features',
-  'Payments are handled by Paddle',
-  'Infrastructure is hosted on Hetzner',
-  'You can request deletion of your data',
-]
-
-const sections: PrivacySection[] = [
-  {
-    id: '1',
-    title: 'Who We Are',
-    content:
-      'Backenly operates the backenly.com platform, an autonomous backend platform for developers and product teams. This Privacy Policy explains how we collect, use, store, and protect personal information when you use our website and services.',
-  },
-  {
-    id: '2',
-    title: 'Information We Collect',
-    content: 'We collect the following categories of information:',
-    subsections: [
-      {
-        label: 'Account information',
-        items: ['Name and email address', 'Password hashes', 'Profile preferences and settings'],
-      },
-      {
-        label: 'Project and usage data',
-        items: [
-          'Projects you create and their configurations',
-          'Database schemas and API definitions generated with AI',
-          'API key metadata and hashed keys',
-          'AI conversation history for project context',
-        ],
-      },
-      {
-        label: 'Technical data',
-        items: [
-          'IP address and browser or device type',
-          'Pages visited, features used, and time spent',
-          'Error logs and diagnostic information',
-          'Performance metrics and request latency',
-        ],
-      },
-      {
-        label: 'Payment data',
-        items: [
-          'Billing plan and subscription status',
-          'Payment details processed by Paddle. We do not store raw card numbers.',
-        ],
-      },
-    ],
-  },
-  {
-    id: '3',
-    title: 'How We Use Your Information',
-    content: 'We use the information we collect to:',
-    list: [
-      'Provide, operate, and improve the Backenly platform',
-      'Authenticate identity and secure accounts',
-      'Process payments and manage subscriptions',
-      'Generate backend configurations based on your instructions',
-      'Send transactional emails and important notices',
-      'Respond to support requests and resolve issues',
-      'Analyze aggregate usage trends and prevent abuse',
-      'Comply with legal obligations',
-    ],
-    extra:
-      'We do not use your data to train AI models without explicit consent. Project data is used only to provide the Service to you.',
-  },
-  {
-    id: '4',
-    title: 'Multi-Tenant Data Isolation',
-    content:
-      'Backenly is architected with strong data isolation. Each project runs in a dedicated PostgreSQL schema named workspace_{projectId}. This means:',
-    list: [
-      'Project data is not stored in shared customer tables',
-      'End users of your application are separate from platform users',
-      'AI queries are scoped to your project only',
-      'Cross-tenant data access is prevented by design',
-    ],
-  },
-  {
-    id: '5',
-    title: 'Data Storage and Security',
-    content: 'We implement security controls including:',
-    list: [
-      'TLS encryption for data in transit',
-      'API keys hashed before storage',
-      'Passwords hashed with bcrypt',
-      'Project-scoped JWT secrets',
-      'Restricted production access',
-      'Regular security reviews and dependency updates',
-    ],
-    extra: 'Our infrastructure is hosted on Hetzner. We do not store data in the United States.',
-  },
-  {
-    id: '6',
-    title: 'Data Sharing and Third Parties',
-    content: 'We do not sell personal information. We share data only in limited circumstances:',
-    list: [
-      'Paddle for payment processing',
-      'OpenAI for AI backend generation requests',
-      'Hetzner for infrastructure hosting',
-      'Legal compliance when required by law or court order',
-      'Business transfers with appropriate notice',
-    ],
-    extra: 'We require third-party processors to maintain appropriate data protection standards.',
-  },
-  {
-    id: '7',
-    title: 'Cookies and Tracking',
-    content: 'We use minimal cookies and similar technologies:',
-    list: [
-      'Session cookies to keep you logged in',
-      'Preference cookies to remember UI settings',
-      'Privacy-respecting analytics for aggregate usage patterns',
-    ],
-    extra:
-      'We do not use third-party advertising cookies or tracking pixels. Disabling cookies may affect core product features.',
-  },
-  {
-    id: '8',
-    title: 'Data Retention',
-    content: 'We retain your data according to the following rules:',
-    list: [
-      'Active account data is retained while the account exists',
-      'Cancelled account data is retained for 30 days before deletion',
-      'AI conversation history is retained for the lifetime of the project',
-      'Billing records are retained for seven years',
-      'Logs and diagnostics are retained for up to 90 days',
-    ],
-  },
-  {
-    id: '9',
-    title: 'Your Rights',
-    content: 'Depending on your location, you may have rights to access, correct, delete, export, restrict, or object to processing of your personal data.',
-    extra:
-      'To exercise these rights, contact support@backenly.com. We will respond within 30 days.',
-  },
-  {
-    id: '10',
-    title: "Children's Privacy",
-    content:
-      'Backenly is not intended for users under 16 years of age. We do not knowingly collect personal information from children under 16.',
-  },
-  {
-    id: '11',
-    title: 'Changes to This Policy',
-    content:
-      'We may update this Privacy Policy periodically. We will notify you of material changes by email or a prominent notice within the Service.',
-  },
-  {
-    id: '12',
-    title: 'Contact Us',
-    content:
-      'If you have questions, concerns, or requests related to this Privacy Policy, contact support@backenly.com.',
-  },
-]
-
+/**
+ * Presentation only. Every claim lives in ./data.ts, which documents what the
+ * policy rewrite corrected and why session replay is disclosed in the present
+ * tense.
+ *
+ * Deliberately restrained: no proof cards asserting product claims in a legal
+ * document and no coloured trust badge on the summary. The document is set as a
+ * document, in one readable column with a contents rail beside it.
+ */
 export default function PrivacyPage() {
   return (
     <SiteShell>
-      <main className="relative z-20">
+      <Page>
         <PageHero
-          eyebrow="Legal"
+          size="compact"
+          trail={[{ label: 'Home', href: '/' }, { label: 'Privacy Policy' }]}
           title="Privacy Policy"
-          subtitle="We believe your data belongs to you. This policy explains what we collect, why we collect it, and how we keep it protected."
-          proof={[
-            { label: 'Last updated', value: 'March 28, 2026' },
-            { label: 'Architecture', value: 'Workspace isolation' },
-            { label: 'Contact', value: 'support@backenly.com' },
-          ]}
-        />
+          lede="What Backenly collects, why, who else receives it, how long we keep it, and what happens when you ask us to delete it."
+        >
+          <p className="mt-7 text-[14px] text-zinc-500">
+            Effective <span className="text-zinc-300">{EFFECTIVE_DATE}</span>
+          </p>
+        </PageHero>
 
-        <Section width="wide" className="!pt-0">
-          <div className="grid gap-8 lg:grid-cols-[320px_1fr]">
-            <aside className="space-y-5 lg:sticky lg:top-8 lg:self-start">
-              <Card>
-                <div className="flex items-center gap-3">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-md border border-emerald-300/20 bg-emerald-400/10">
-                    <ShieldCheck className="h-5 w-5 text-emerald-300" />
-                  </div>
-                  <div>
-                    <Tag>Privacy summary</Tag>
-                    <p className="mt-2 text-sm text-zinc-400">The short version.</p>
-                  </div>
-                </div>
-                <ul className="mt-5 space-y-3">
-                  {summary.map((item) => (
-                    <li key={item} className="flex gap-3 text-sm leading-6 text-zinc-400">
-                      <span aria-hidden className="mt-2.5 h-1 w-1 shrink-0 rounded-full bg-zinc-600" />
-                      <span>{item}</span>
-                    </li>
-                  ))}
-                </ul>
-              </Card>
-
-              <Card>
-                <Tag>Contents</Tag>
-                <div className="mt-5 grid gap-2">
-                  {sections.map((section) => (
-                    <a
-                      key={section.id}
-                      href={`#section-${section.id}`}
-                      className="flex gap-3 rounded-md px-2 py-2 text-sm text-zinc-400 transition hover:bg-white/[0.04] hover:text-white"
-                    >
-                      <span className="w-5 shrink-0 text-zinc-600">{section.id}.</span>
-                      <span>{section.title}</span>
-                    </a>
-                  ))}
-                </div>
-              </Card>
-            </aside>
-
-            <div className="space-y-5">
-              {sections.map((section) => (
-                <PrivacyBlock key={section.id} section={section} />
+        <LegalBody toc={PRIVACY_SECTIONS.map((s) => ({ id: s.id, label: s.title }))}>
+          <aside aria-labelledby="short-version" className={`mb-14 p-6 md:p-8 ${PANEL}`}>
+            <h2 id="short-version" className={`text-[19px] text-white ${HEADING}`}>
+              The short version
+            </h2>
+            <ul className="mt-5 flex list-disc flex-col gap-2.5 pl-5 marker:text-zinc-600">
+              {PRIVACY_SUMMARY.map((item) => (
+                <li key={item} className="pl-1.5 text-[15px] leading-[1.7] text-zinc-300">
+                  {item}
+                </li>
               ))}
-            </div>
-          </div>
-        </Section>
+            </ul>
+          </aside>
 
-        <Section width="default" className="!pt-0">
-          <Card className="flex flex-col gap-5 md:flex-row md:items-center md:justify-between">
-            <div>
-              <h2 className="text-xl font-semibold text-white">Privacy questions?</h2>
-              <p className="mt-2 text-sm leading-6 text-zinc-400">
-                Email support@backenly.com for data access, deletion, or privacy requests.
-              </p>
-            </div>
-            <SecondaryButton href="mailto:support@backenly.com" external>
-              <Mail className="h-4 w-4" />
-              Contact support
-            </SecondaryButton>
-          </Card>
-          <div className="mt-6 flex flex-wrap gap-4 text-sm text-zinc-500">
-            <Link href="/terms" className="hover:text-white">
-              Terms of Service
-            </Link>
-            <Link href="/refund-policy" className="hover:text-white">
-              Refund Policy
-            </Link>
-          </div>
-        </Section>
-      </main>
+          {PRIVACY_SECTIONS.map((section) => (
+            <PrivacyBlock key={section.id} section={section} />
+          ))}
+
+          <LegalFooter
+            current="privacy"
+            title="Privacy questions?"
+            body={`Email ${PRIVACY_EMAIL} for access, deletion or any other privacy request.`}
+            email={PRIVACY_EMAIL}
+          />
+        </LegalBody>
+      </Page>
     </SiteShell>
   )
 }
 
 function PrivacyBlock({ section }: { section: PrivacySection }) {
   return (
-    <section id={`section-${section.id}`} className="rounded-lg border border-white/10 bg-white/[0.035] p-6">
-      <div className="flex items-start gap-4">
-        <span className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-white/10 bg-black/30 text-xs font-semibold text-zinc-400">
-          {section.id}
-        </span>
-        <div>
-          <h2 className="text-lg font-semibold text-white">{section.title}</h2>
-          <p className="mt-3 text-sm leading-7 text-zinc-400">{section.content}</p>
+    <LegalSection id={section.id} title={section.title}>
+      <p className={LEGAL_TEXT}>{section.content}</p>
 
-          {section.subsections && (
-            <div className="mt-5 grid gap-x-8 gap-y-5 border-t border-white/10 pt-5 md:grid-cols-2">
-              {section.subsections.map((subsection) => (
-                <div key={subsection.label}>
-                  <h3 className="text-sm font-semibold text-zinc-200">{subsection.label}</h3>
-                  <ul className="mt-3 space-y-2">
-                    {subsection.items.map((item) => (
-                      <li key={item} className="flex gap-3 text-sm leading-6 text-zinc-400">
-                        <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-violet-300" />
-                        <span>{item}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ))}
+      {section.subsections && (
+        <div className="grid gap-x-10 gap-y-7 border-t border-white/[0.07] pt-6 md:grid-cols-2">
+          {section.subsections.map((subsection) => (
+            <div key={subsection.label}>
+              <h3 className={`text-[15px] text-white ${HEADING}`}>{subsection.label}</h3>
+              <ul className="mt-3 flex list-disc flex-col gap-2 pl-5 marker:text-zinc-600">
+                {subsection.items.map((item) => (
+                  <li key={item} className="pl-1.5 text-[15px] leading-[1.7] text-zinc-300">
+                    {item}
+                  </li>
+                ))}
+              </ul>
             </div>
-          )}
-
-          {section.list && (
-            <ul className="mt-4 space-y-2">
-              {section.list.map((item) => (
-                <li key={item} className="flex gap-3 text-sm leading-6 text-zinc-400">
-                  <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-violet-300" />
-                  <span>{item}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-
-          {section.extra && <p className="mt-4 text-sm leading-7 text-zinc-500">{section.extra}</p>}
+          ))}
         </div>
-      </div>
-    </section>
+      )}
+
+      {section.list && <LegalList items={section.list} />}
+
+      {section.providers && (
+        <DataTable
+          caption="Providers that can receive personal or customer data"
+          columns={['Provider', 'What we use it for', 'What it can receive']}
+          rows={PROVIDERS.map((provider) => [
+            <a
+              key={provider.name}
+              href={provider.href}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-white underline decoration-white/25 underline-offset-4 transition-colors duration-200 hover:decoration-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300"
+            >
+              {provider.name}
+            </a>,
+            provider.purpose,
+            provider.data,
+          ])}
+        />
+      )}
+
+      {/* `extra` carries some of the most consequential sentences on the page
+          (international processing, retention), so it is set at full body
+          contrast rather than as a muted footnote. */}
+      {section.extra && <p className={LEGAL_TEXT}>{section.extra}</p>}
+    </LegalSection>
   )
 }

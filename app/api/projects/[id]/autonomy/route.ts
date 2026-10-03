@@ -24,8 +24,9 @@ import {
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { id: string } },
+  props: { params: Promise<{ id: string }> },
 ) {
+  const params = await props.params
   return withProjectValidation<any>(request, async (validated) => {
     const url = new URL(request.url)
     const windowDays = Math.max(
@@ -39,8 +40,9 @@ export async function GET(
 
 export async function PATCH(
   request: NextRequest,
-  { params }: { params: { id: string } },
+  props: { params: Promise<{ id: string }> },
 ) {
+  const params = await props.params
   return withProjectValidation<any>(request, async (validated) => {
     const body = await request.json().catch(() => ({}))
     const requested = coerceAutonomyLevel((body as { level?: unknown }).level)

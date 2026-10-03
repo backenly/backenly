@@ -38,15 +38,14 @@ import { NextRequest, NextResponse } from 'next/server'
 import { verifySession } from '@/lib/auth/session'
 import { prisma } from '@/lib/db/postgres'
 import { extractMetadataFromIntent, validateMetadata, type ExtractedMetadata } from '@/lib/ai/intent-extractor'
+import { canAccessProject, canWriteProject } from '@/lib/edition/guard'
 
 /**
  * GET /api/projects/[projectId]/metadata
  * Retrieve stored metadata for a project
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     // DEBUG: Log all cookies received
     const allCookies = request.cookies.getAll()
@@ -76,15 +75,8 @@ export async function GET(
     console.log('✅ [Metadata API GET] Session valid for user:', session.userId)
     const projectId = params.id
 
-    // Verify project ownership
-    const project = await prisma.project.findFirst({
-      where: {
-        id: projectId,
-        userId: session.userId,
-      },
-    })
-
-    if (!project) {
+    // Verify project access
+    if (!(await canAccessProject(session.userId, projectId))) {
       return NextResponse.json(
         { error: 'Project not found' },
         { status: 404 }
@@ -113,10 +105,8 @@ export async function GET(
  * POST /api/projects/[projectId]/metadata
  * Extract and store metadata from user's project prompt
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     // DEBUG: Log all cookies received
     const allCookies = request.cookies.getAll()
@@ -156,14 +146,7 @@ export async function POST(
     }
 
     // Verify project ownership
-    const project = await prisma.project.findFirst({
-      where: {
-        id: projectId,
-        userId: session.userId,
-      },
-    })
-
-    if (!project) {
+    if (!(await canWriteProject(session.userId, projectId))) {
       return NextResponse.json(
         { error: 'Project not found' },
         { status: 404 }

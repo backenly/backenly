@@ -1,0 +1,307 @@
+{
+  "id": "provisioning/postgrest-schema-registry.sql",
+  "bucket": "known_provisioning_effect",
+  "source": "scripts/sql/postgrest-schema-registry.sql",
+  "derivation": "replayed",
+  "confidence": "derived",
+  "notes": "Observed by replaying scripts/sql/postgrest-schema-registry.sql into a throwaway cluster (PostgreSQL 16.4, compiled by Visual C++ build 1940, 64-bit) on top of the schema.prisma projection, in the order scripts/postgrest-install.sh applies. Roles, grants and default privileges are cluster or database state rather than schema objects, and are reported in the provisioning inventory instead of here.",
+  "entries": [
+    {
+      "key": "column public.backenly_pgrst_schema_registry.created_at",
+      "expect": {
+        "type": "timestamp with time zone",
+        "type_schema": "pg_catalog",
+        "udt": "timestamptz",
+        "typtype": "b",
+        "not_null": true,
+        "default_expr": "now()",
+        "identity": "",
+        "generated": "",
+        "collation": null
+      }
+    },
+    {
+      "key": "column public.backenly_pgrst_schema_registry.schema_name",
+      "expect": {
+        "type": "text",
+        "type_schema": "pg_catalog",
+        "udt": "text",
+        "typtype": "b",
+        "not_null": true,
+        "default_expr": null,
+        "identity": "",
+        "generated": "",
+        "collation": null
+      }
+    },
+    {
+      "key": "constraint public.backenly_pgrst_schema_registry.backenly_pgrst_schema_registry_pkey",
+      "expect": {
+        "type": "p",
+        "definition": "PRIMARY KEY (schema_name)",
+        "deferrable": false,
+        "deferred": false,
+        "validated": true
+      }
+    },
+    {
+      "key": "event_trigger backenly_pgrst_schema_create",
+      "expect": {
+        "event": "ddl_command_end",
+        "enabled": "O",
+        "function": "public.backenly_pgrst_on_schema_create",
+        "tags": [
+          "CREATE SCHEMA"
+        ]
+      }
+    },
+    {
+      "key": "event_trigger backenly_pgrst_schema_drop",
+      "expect": {
+        "event": "sql_drop",
+        "enabled": "O",
+        "function": "public.backenly_pgrst_on_schema_drop",
+        "tags": null
+      }
+    },
+    {
+      "key": "index public.backenly_pgrst_schema_registry.backenly_pgrst_schema_registry_pkey",
+      "expect": {
+        "definition": "CREATE UNIQUE INDEX backenly_pgrst_schema_registry_pkey ON public.backenly_pgrst_schema_registry USING btree (schema_name)",
+        "unique": true,
+        "primary": true,
+        "method": "btree",
+        "predicate": null,
+        "constraint_backed": true
+      }
+    },
+    {
+      "key": "routine postgrest.pre_config()",
+      "expect": {
+        "result": "void",
+        "kind": "f",
+        "language": "sql",
+        "security_definer": true,
+        "volatility": "v",
+        "strict": false,
+        "leakproof": false,
+        "config": [
+          "search_path=pg_catalog, public"
+        ],
+        "body_sha256": "BFxafWuSeqVQtfPVf3lxFr2cvaJSIcNJIEDVibAqKq8="
+      }
+    },
+    {
+      "key": "routine public.backenly_app_role()",
+      "expect": {
+        "result": "text",
+        "kind": "f",
+        "language": "sql",
+        "security_definer": false,
+        "volatility": "s",
+        "strict": false,
+        "leakproof": false,
+        "config": null,
+        "body_sha256": "1ZFaM1v+D4RiVWK/N0mA0WVqTerTSLCfXOkxCSuDX1U="
+      }
+    },
+    {
+      "key": "routine public.backenly_pgrst_apply_owner_defaults(target_schema text)",
+      "expect": {
+        "result": "integer",
+        "kind": "f",
+        "language": "plpgsql",
+        "security_definer": true,
+        "volatility": "v",
+        "strict": false,
+        "leakproof": false,
+        "config": [
+          "search_path=pg_catalog, public"
+        ],
+        "body_sha256": "b41XakIKs8VLxoypFb3E+8SkTrXy2iPa7TnSA0LR7x0="
+      }
+    },
+    {
+      "key": "routine public.backenly_pgrst_apply_soft_delete(target_schema text)",
+      "expect": {
+        "result": "integer",
+        "kind": "f",
+        "language": "plpgsql",
+        "security_definer": true,
+        "volatility": "v",
+        "strict": false,
+        "leakproof": false,
+        "config": [
+          "search_path=pg_catalog, public"
+        ],
+        "body_sha256": "BdnGOFcpNIlMyIBGGnP2EsGqX1tOxagrwf/05w0PTHw="
+      }
+    },
+    {
+      "key": "routine public.backenly_pgrst_current_schemas()",
+      "expect": {
+        "result": "text",
+        "kind": "f",
+        "language": "sql",
+        "security_definer": true,
+        "volatility": "s",
+        "strict": false,
+        "leakproof": false,
+        "config": [
+          "search_path=pg_catalog, public"
+        ],
+        "body_sha256": "KbBYvfcHnSKJ0UpLWf+CkwoijG8FWly4uPCLCltlZco="
+      }
+    },
+    {
+      "key": "routine public.backenly_pgrst_cutover_blockers(target_schema text)",
+      "expect": {
+        "result": "TABLE(table_name text, reason text)",
+        "kind": "f",
+        "language": "plpgsql",
+        "security_definer": true,
+        "volatility": "v",
+        "strict": false,
+        "leakproof": false,
+        "config": [
+          "search_path=pg_catalog, public"
+        ],
+        "body_sha256": "gzsXAIXbbzXcNmYwRZexcbQq/gnC1+BSLHeAAdeHJ3g="
+      }
+    },
+    {
+      "key": "routine public.backenly_pgrst_on_schema_create()",
+      "expect": {
+        "result": "event_trigger",
+        "kind": "f",
+        "language": "plpgsql",
+        "security_definer": true,
+        "volatility": "v",
+        "strict": false,
+        "leakproof": false,
+        "config": [
+          "search_path=pg_catalog, public"
+        ],
+        "body_sha256": "RRxs/AtWvJW/kSElIsmMzAI3mB+rsnezY/lGZ2pxF7k="
+      }
+    },
+    {
+      "key": "routine public.backenly_pgrst_on_schema_drop()",
+      "expect": {
+        "result": "event_trigger",
+        "kind": "f",
+        "language": "plpgsql",
+        "security_definer": true,
+        "volatility": "v",
+        "strict": false,
+        "leakproof": false,
+        "config": [
+          "search_path=pg_catalog, public"
+        ],
+        "body_sha256": "M82dPGvHuOUBf045j5tn2S/CVHqizAdEcSKAp5H1Q2g="
+      }
+    },
+    {
+      "key": "routine public.backenly_pgrst_prune_schemas()",
+      "expect": {
+        "result": "text",
+        "kind": "f",
+        "language": "plpgsql",
+        "security_definer": true,
+        "volatility": "v",
+        "strict": false,
+        "leakproof": false,
+        "config": [
+          "search_path=pg_catalog, public"
+        ],
+        "body_sha256": "FJibIxSiGKYPOK+ZByuyEPQczn7ocR54pw+SCH5j5EU="
+      }
+    },
+    {
+      "key": "routine public.backenly_pgrst_register_schema(target_schema text)",
+      "expect": {
+        "result": "text",
+        "kind": "f",
+        "language": "plpgsql",
+        "security_definer": true,
+        "volatility": "v",
+        "strict": false,
+        "leakproof": false,
+        "config": [
+          "search_path=pg_catalog, public"
+        ],
+        "body_sha256": "ZFezoz+xqQ2ov39fDbW4ufQ8WzcRYcR8Ott26mPhrw8="
+      }
+    },
+    {
+      "key": "routine public.backenly_pgrst_reload()",
+      "expect": {
+        "result": "void",
+        "kind": "f",
+        "language": "plpgsql",
+        "security_definer": true,
+        "volatility": "v",
+        "strict": false,
+        "leakproof": false,
+        "config": [
+          "search_path=pg_catalog, public"
+        ],
+        "body_sha256": "DemE0m7a7YN+3bf3U872CxLhpDk4T+gl4iiAYWIOcTw="
+      }
+    },
+    {
+      "key": "routine public.backenly_pgrst_revoke_internal(target_schema text)",
+      "expect": {
+        "result": "integer",
+        "kind": "f",
+        "language": "plpgsql",
+        "security_definer": true,
+        "volatility": "v",
+        "strict": false,
+        "leakproof": false,
+        "config": [
+          "search_path=pg_catalog, public"
+        ],
+        "body_sha256": "JHTY9E9AMH+mr+A7tME4tHbB4eDIR5dMCqNU2T9XHOY="
+      }
+    },
+    {
+      "key": "routine public.backenly_pgrst_unregister_schema(target_schema text)",
+      "expect": {
+        "result": "text",
+        "kind": "f",
+        "language": "plpgsql",
+        "security_definer": true,
+        "volatility": "v",
+        "strict": false,
+        "leakproof": false,
+        "config": [
+          "search_path=pg_catalog, public"
+        ],
+        "body_sha256": "6QoaiYv+yRXQpfySkKa72A6pmfjd6QLMG46Wjz7dtJ0="
+      }
+    },
+    {
+      "key": "schema backenly_pgrst_idle",
+      "expect": {
+        "name": "backenly_pgrst_idle"
+      }
+    },
+    {
+      "key": "schema postgrest",
+      "expect": {
+        "name": "postgrest"
+      }
+    },
+    {
+      "key": "table public.backenly_pgrst_schema_registry",
+      "expect": {
+        "kind": "r",
+        "persistence": "p",
+        "partition": false,
+        "rls": false,
+        "force_rls": false
+      }
+    }
+  ]
+}

@@ -52,6 +52,33 @@ export interface Hypothesis {
    * important: a hypothesis that predicts everything explains nothing.
    */
   predicts: Record<string, string | undefined>
+  /**
+   * False when no evidence this platform can gather could ever settle it.
+   *
+   * `split_brain_writers` is the case: confirming it needs analysis of function
+   * source, and there is no AST tooling here. Such a hypothesis may be RAISED —
+   * it is a real possibility and hiding it would be dishonest — but it must
+   * never be concluded on, and `structural.ts` has always enforced that for the
+   * leader.
+   *
+   * It must also never be the reason a DIFFERENT, properly confirmed hypothesis
+   * goes unacted on. No test can separate the two, so as a blocking runner-up
+   * it does not express uncertainty that further evidence could resolve; it
+   * expresses a permanent veto. Left that way, raising it can only ever
+   * suppress a conclusion and never inform one — and because its deciding
+   * observation is true of any table with more than two write shapes, the veto
+   * applies to nearly every live project.
+   *
+   * So it is carried into the verdict as a standing caveat instead. The repair
+   * it warns about is the one the maintenance ladder is built to catch:
+   * dual-write and reconciliation compare the two representations
+   * independently, and a second writer that keeps changing one of them shows up
+   * as `inconsistent` rather than as silent drift.
+   *
+   * Defaults to confirmable when absent, so an ordinary hypothesis is
+   * unaffected.
+   */
+  confirmable?: boolean
   /** The repair implied if this hypothesis wins. */
   remedy: {
     summary: string

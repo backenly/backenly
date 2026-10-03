@@ -14,7 +14,20 @@
  */
 
 import { type NextRequest, NextResponse } from 'next/server'
-import { authenticateRequest } from '@/lib/auth/middleware'
+import { authenticateRequest, requireAdmin } from '@/lib/auth/middleware'
+
+/**
+ * Approving or rejecting a mined correction pattern. PLATFORM ADMIN ONLY.
+ *
+ * CorrectionPattern carries no projectId - it is DEPLOYMENT-WIDE learning
+ * state, mined across projects and consumed by the autonomy loop. Reviewing one
+ * is therefore not an annotation on your own data; it changes what the platform
+ * believes about how to fix things, for every project on the deployment.
+ *
+ * This required only authenticateRequest, so any signed-in account could
+ * approve or reject patterns and steer that behaviour. Nothing in the dashboard
+ * calls it, which is why it went unnoticed.
+ */
 import { prisma } from '@/lib/db/prisma'
 
 export const dynamic = 'force-dynamic'
@@ -25,11 +38,11 @@ const STATUS_MAP: Record<string, string> = {
   archive: 'ARCHIVED',
 }
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { id: string } },
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const auth = await authenticateRequest(request)
+  const adminError = await requireAdmin(request)
+  if (adminError) return adminError
   if (!auth.authenticated) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }

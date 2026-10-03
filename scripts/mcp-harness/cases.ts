@@ -358,6 +358,15 @@ export const CASES: Case[] = [
       const available = new Set(manifest.tools.map((t) => t.name))
       // Synthetic tools served by the route rather than the brain catalogue.
       for (const synthetic of ['fetch_docs', 'check_approval']) available.add(synthetic)
+      // Domain-tool ACTIONS. The instructions name them as actions, e.g.
+      // `storage { action: "create_bucket" }`, and they match the verb_noun
+      // shape, so the scraper reads them as tools. Measured on staging
+      // 2026-09-26: create_bucket and revoke_api_key failed this case although
+      // the text was right. An action counts only if some tool's own schema
+      // offers it, so a doc naming an action nothing accepts still fails here.
+      const actions = new Set(
+        manifest.tools.flatMap((t) => (t.inputSchema?.properties?.action?.enum ?? []) as string[]),
+      )
 
       // Names the doc tells an agent to call. Matched on the verb_noun tool
       // convention rather than "any backticked word" — the looser pattern
@@ -371,10 +380,19 @@ export const CASES: Case[] = [
       }
       // Destructive tools are named in §5 precisely to say they are refused.
       for (const d of ['drop_table', 'truncate_table', 'drop_column', 'delete_bucket']) named.delete(d)
+      // Illustrative FUNCTION names, not tools. The functions section explains
+      // that a user's function name is normalised to kebab-case, and the only
+      // way to show that is to write one out: "`list_products` deploys as
+      // `list-products`". It matches the verb_noun shape, so the scraper reads
+      // it as a tool the agent was told to call. This is the third variant of
+      // the same over-broad-match bug (the pattern previously pulled `https`
+      // out of a URL and `approval` out of prose), so it is excluded by name
+      // rather than by loosening the pattern again.
+      for (const example of ['list_products']) named.delete(example)
 
-      const missing = [...named].filter((n) => !available.has(n))
+      const missing = [...named].filter((n) => !available.has(n) && !actions.has(n))
       if (missing.length > 0) {
-        fail(`instructions reference tools that do not exist: ${missing.join(', ')}`)
+        fail(`instructions reference tools or actions that do not exist: ${missing.join(', ')}`)
       }
     },
   },
@@ -524,9 +542,17 @@ export const CASES: Case[] = [
         fail(`documented base URL "${apiBase}" does not match this project`)
       }
 
-      // §4 says calls carry an sk_live runtime key.
-      if (!runtimeKey.startsWith('sk_live_')) {
-        fail(`§4 documents an sk_live_ runtime key; got "${runtimeKey.slice(0, 12)}…"`)
+      // §4 says calls carry a proj_live_ / proj_test_ runtime key.
+      //
+      // This asserted sk_live_ until 2026-08-19, which the product had already
+      // stopped issuing. get_instructions says so in as many words: "`sk_live_`
+      // is the Stripe prefix, NOT the Backenly one -- a Backenly project key
+      // always starts `proj_live_` or `proj_test_`". So the harness was failing
+      // the runtime contract for matching the documentation. It went stale
+      // unnoticed because BACKENLY_MCP_KEY was never set, so this case had
+      // never once executed.
+      if (!/^proj_(live|test)_/.test(runtimeKey)) {
+        fail(`§4 documents a proj_live_/proj_test_ runtime key; got "${runtimeKey.slice(0, 12)}…"`)
       }
       // The token itself was obtained by the bootstrap through POST /auth/signup,
       // which is §4's first claim — reaching this case at all proves it.
@@ -630,6 +656,61 @@ export const CASES: Case[] = [
       if (!Array.isArray(available) || !available.includes('occurred_at')) {
         fail(`unknown-column error must list the real columns, got: ${JSON.stringify(unknown.body)}`)
       }
+    },
+  },
+
+  // ── Final staging gate (scripts/mcp-acceptance/cases.ts) ─────────────────────
+  // These hold only on the deployed image: the docs files it serves, the
+  // function role function-roles.sql installs on RDS, the route it runs.
+
+  {
+    id: 'STAGING-docs-topics',
+    kind: 'guard',
+    title: 'fetch_docs serves the index and each topic from the deployed image',
+    async run({ c }) {
+      const index = await c.tool('fetch_docs')
+      expectOk(index, 'fetch_docs')
+      if (!String(index.data?.markdown ?? '').includes('## Topics')) fail('fetch_docs with no topic did not serve the index')
+      const fn = await c.tool('fetch_docs', { topic: 'functions' })
+      expectOk(fn, 'fetch_docs functions')
+      if (!String(fn.data?.markdown ?? '').startsWith('# Functions')) fail('fetch_docs functions did not serve docs/agents/functions.md')
+      if (fn.data?.topic !== 'functions') fail(`fetch_docs functions reported topic ${fn.data?.topic}`)
+    },
+  },
+
+  {
+    id: 'STAGING-deploy-code-isolation',
+    kind: 'guard',
+    title: 'deploy_code: agent-written SQL runs as the project, and the platform tables refuse it',
+    async run({ c, t }) {
+      const name = t('probe').replace(/_/g, '-')
+      const code = [
+        "import { NextResponse } from 'next/server'",
+        "import { prisma } from '@/lib/db'",
+        'export async function POST() {',
+        "  const rows = await prisma.$queryRawUnsafe('SELECT email FROM public.users LIMIT 1')",
+        '  return NextResponse.json({ rows })',
+        '}',
+      ].join('\n')
+      const d = await c.tool('functions', { action: 'deploy_code', name, trigger: 'http', code })
+      expectOk(d, 'functions deploy_code')
+      const run = await c.tool('functions', { action: 'invoke', functionId: d.data?.functionId })
+      if (run.ok) fail('a deployed function read public.users on the deployed image')
+      if (!/permission denied/i.test(JSON.stringify(run.body))) fail(`expected permission denied, got ${JSON.stringify(run.body).slice(0, 300)}`)
+    },
+  },
+
+  {
+    id: 'STAGING-migration-table-checks',
+    kind: 'guard',
+    title: 'apply_migration refuses CREATE TABLE of an existing table and ALTER of a missing one',
+    async run({ c, t }) {
+      const table = t('dup')
+      expectOk(await c.tool('apply_migration', { sql: `CREATE TABLE ${table} (name text)` }), 'first CREATE TABLE')
+      const again = await c.tool('apply_migration', { sql: `CREATE TABLE ${table} (other text)` })
+      if (again.ok || again.code !== 'TABLE_EXISTS') fail(`second CREATE TABLE answered ${again.code ?? 'ok'}, expected TABLE_EXISTS`)
+      const missing = await c.tool('apply_migration', { sql: `ALTER TABLE ${t('nope')} ADD COLUMN y text` })
+      if (missing.ok || missing.code !== 'TABLE_NOT_FOUND') fail(`ALTER of a missing table answered ${missing.code ?? 'ok'}, expected TABLE_NOT_FOUND`)
     },
   },
 ]

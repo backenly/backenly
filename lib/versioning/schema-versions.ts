@@ -100,11 +100,28 @@ export async function listSchemaVersions(projectId: string): Promise<Array<{
 }
 
 /**
- * Get a specific schema version snapshot.
+ * Get a specific schema version snapshot, scoped to the project that owns it.
+ *
+ * `projectId` is REQUIRED, and the lookup filters on it rather than checking
+ * afterwards, because this used to be a `findUnique` on the version id alone.
+ * A version id is a uuid from a different namespace than a project id, so
+ * holding one said nothing about which project it belonged to — and the only
+ * caller that could have compared them never saw `projectId`, since this
+ * function strips it from what it returns.
+ *
+ * The result was that `rollbackToVersion` would happily roll a project back to
+ * ANOTHER project's snapshot: destroying the caller's schema using a shape it
+ * had never had, and disclosing the other tenant's table structure on the way.
+ *
+ * Scoping the query makes that unrepresentable instead of relying on every
+ * caller to remember a check.
  */
-export async function getSchemaVersion(versionId: string): Promise<SchemaVersionRecord | null> {
-  const record = await prisma.schemaVersion.findUnique({
-    where: { id: versionId },
+export async function getSchemaVersion(
+  versionId: string,
+  projectId: string,
+): Promise<SchemaVersionRecord | null> {
+  const record = await prisma.schemaVersion.findFirst({
+    where: { id: versionId, projectId },
   })
   if (!record) return null
   return {
@@ -129,7 +146,9 @@ export async function rollbackToVersion(
   projectId: string,
   targetVersionId: string
 ): Promise<{ success: boolean; statementsExecuted: string[]; message: string }> {
-  const target = await getSchemaVersion(targetVersionId)
+  // Scoped to this project. Unscoped, a caller could name any version in the
+  // system and roll their own schema into another tenant's shape.
+  const target = await getSchemaVersion(targetVersionId, projectId)
   if (!target) {
     return { success: false, statementsExecuted: [], message: 'Version not found.' }
   }

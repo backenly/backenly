@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express'
 import { prisma } from '@/lib/db'
 import { hashPassword, verifyPassword } from '@/lib/auth/password'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
-import { ensureAuthUsersTable, buildUserInsert, isReservedTestEmail } from '@/lib/services/end-user-auth-table'
+import { ensureAuthUsersTable, buildUserInsert, isReservedTestEmail, AuthNotProvisionedError } from '@/lib/services/end-user-auth-table'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import { sendError, sendSuccess, ErrorCodes } from '../lib/response'
 import {
@@ -11,6 +11,7 @@ import {
   forgotEndUserPassword,
   resetEndUserPassword,
   requestEmailVerification,
+  ensureEmailVerifiedColumn,
   verifyEndUserEmail,
   requestMagicLink,
   verifyMagicLink,
@@ -19,6 +20,10 @@ import { getAuthEmailContext } from '@/lib/services/end-user-auth-email'
 import { z } from 'zod'
 import jwt from 'jsonwebtoken'
 import { JWTSecretManager, resolveJwtSecret } from '@/lib/services/jwtSecretManager'
+import { asyncRoute } from '../lib/async-route'
+import { touchProjectActivity } from '@/lib/projects/activity'
+import { emitEndUserCreated } from '@/lib/services/end-user-auth-events'
+import { canAcceptNewEndUser, trackEndUserActive } from '@/lib/quota/kernel'
 
 const router = Router()
 
@@ -154,7 +159,7 @@ async function handleSignUp(req: Request, res: Response) {
     // it — creates it when missing, self-heals a drifted one (e.g. an
     // AI-generated `users` table with no `role` column). This is what
     // previously failed signup with `column "role" does not exist`.
-    const schema = await ensureAuthUsersTable(projectId)
+    const schema = await ensureAuthUsersTable(projectId, { email })
     const schemaName = schema.schemaName
 
     // Service-role: workspace users tables may have FORCE ROW LEVEL SECURITY.
@@ -170,6 +175,25 @@ async function handleSignUp(req: Request, res: Response) {
       sendError(res, ErrorCodes.CONFLICT, 'An account with this email already exists', 409)
       return
     }
+
+    // The account's MAU cap, as on the Next signup route: only a NEW end user
+    // is refused, existing users keep working. This route serves signups on
+    // the single-box layout, and skipping the check here made the cap depend
+    // on which process happened to answer.
+    if (!isInternalTest) {
+      const mau = await canAcceptNewEndUser(projectId)
+      if (!mau.allowed) {
+        sendError(res, ErrorCodes.FORBIDDEN, mau.message ?? 'Sign-ups are temporarily unavailable for this app.', 403)
+        return
+      }
+    }
+
+    // Email verification is the project's choice, exactly as on the Next
+    // signup route: off by default, and the column goes in BEFORE the insert
+    // when it is on (see ensureEmailVerifiedColumn on grandfathering).
+    const requireVerification =
+      !isInternalTest && (await getAuthEmailContext(projectId)).requireEmailVerification
+    if (requireVerification) await ensureEmailVerifiedColumn(schemaName)
 
     const hashedPassword = await hashPassword(password)
     const displayName = name || email.split('@')[0]
@@ -195,6 +219,16 @@ async function handleSignUp(req: Request, res: Response) {
       { expiresIn: '7d', algorithm: 'HS256' }
     )
 
+    // A new end user is active this month (MAU; never blocks). The Next.js
+    // signup route always did this; this one, which serves single-box
+    // installs, did not.
+    trackEndUserActive(projectId, String(user.id), user.email).catch(() => {})
+
+    // auth.user.created, through the emitter the Next route also uses. This
+    // server never emitted it, so a single-box install's subscribers never heard
+    // of a sign-up. Reserved test accounts are skipped inside.
+    void emitEndUserCreated(projectId, user)
+
     // Non-blocking: fire on_signup AI functions. Synthetic verifier accounts are
     // filtered inside fireAiFunctionsOnSignup, not here — two signup routes call
     // it and a guard at the call site only ever covers one of them.
@@ -204,19 +238,25 @@ async function handleSignUp(req: Request, res: Response) {
       )
     }).catch(() => {})
 
-    // Non-blocking: send the branded verification email (24h token). Signup
-    // never waits on SMTP — verification is enforced (if enabled) at signin.
-    // Skip entirely for synthetic verifier accounts (…@*.internal): issuing a
-    // token would leave an orphaned `_email_verifications` row in the
-    // developer's Tables after the verifier deletes the throwaway user.
-    if (!isReservedTestEmail(email)) {
+    // Non-blocking: the branded verification email (24h token), only where the
+    // project requires verification. This used to go to every new user of every
+    // project, which sent an unasked-for "verify your email" and added the
+    // column to tables that never wanted it. Signup never waits on SMTP;
+    // sign-in enforces. Reserved verifier accounts are excluded above.
+    if (requireVerification) {
       requestEmailVerification(projectId, email).catch(
         (err: any) => console.warn('[EmailVerification] signup send failed (non-fatal):', err?.message)
       )
     }
 
+    // An end user signing up is the backend being used.
+    void touchProjectActivity(projectId)
     res.status(201).json({ data: { user, token } })
   } catch (error: any) {
+    if (error instanceof AuthNotProvisionedError) {
+      sendError(res, error.code, error.message, 503)
+      return
+    }
     console.error('Signup error:', error)
     // Never leak Prisma / Postgres internals to the end user's app.
     const safe = sanitizeDiagnostic(error)
@@ -343,6 +383,10 @@ async function handleSignIn(req: Request, res: Response) {
       resolveJwtSecret(project.jwtSecret),
       { expiresIn: '7d', algorithm: 'HS256' }
     )
+    // Only a SUCCESSFUL sign-in counts: failed attempts are not use, and
+    // counting them would let a credential-stuffing bot keep a project awake.
+    void touchProjectActivity(projectId)
+    trackEndUserActive(projectId, String(user.id), user.email).catch(() => {})
     sendSuccess(res, { user: { id: user.id, email: user.email, name: user.name }, token })
   } catch (error: any) {
     console.error('Signin error:', error?.message ?? 'unknown')
@@ -516,26 +560,26 @@ async function handleMagicPage(req: Request, res: Response) {
 }
 
 // Primary routes
-router.post('/:projectId/auth/signup', handleSignUp)
-router.post('/:projectId/auth/signin', handleSignIn)
-router.post('/:projectId/auth/refresh-token', handleRefreshToken)
-router.post('/:projectId/auth/logout', handleLogout)
-router.post('/:projectId/auth/verify-email', handleVerifyEmail)
-router.get('/:projectId/auth/verify-email', handleVerifyEmailPage)
-router.post('/:projectId/auth/resend-verification', handleResendVerification)
-router.post('/:projectId/auth/magic-link', handleMagicLinkRequest)
-router.post('/:projectId/auth/magic-link/verify', handleMagicLinkVerify)
-router.get('/:projectId/auth/magic', handleMagicPage)
-router.post('/:projectId/auth/forgot-password', handleForgotPassword)
-router.post('/:projectId/auth/reset-password', handleResetPassword)
+router.post('/:projectId/auth/signup', asyncRoute(handleSignUp))
+router.post('/:projectId/auth/signin', asyncRoute(handleSignIn))
+router.post('/:projectId/auth/refresh-token', asyncRoute(handleRefreshToken))
+router.post('/:projectId/auth/logout', asyncRoute(handleLogout))
+router.post('/:projectId/auth/verify-email', asyncRoute(handleVerifyEmail))
+router.get('/:projectId/auth/verify-email', asyncRoute(handleVerifyEmailPage))
+router.post('/:projectId/auth/resend-verification', asyncRoute(handleResendVerification))
+router.post('/:projectId/auth/magic-link', asyncRoute(handleMagicLinkRequest))
+router.post('/:projectId/auth/magic-link/verify', asyncRoute(handleMagicLinkVerify))
+router.get('/:projectId/auth/magic', asyncRoute(handleMagicPage))
+router.post('/:projectId/auth/forgot-password', asyncRoute(handleForgotPassword))
+router.post('/:projectId/auth/reset-password', asyncRoute(handleResetPassword))
 
 // Aliases — AI platforms (Lovable, Replit, Base44) generate /auth/login and
 // /auth/register instead of Backenly's /auth/signin and /auth/signup.
 // Without these, requests fall through to the dynamic catch-all which tries
 // to validate an Authorization header and returns 401 "Invalid or expired token".
-router.post('/:projectId/auth/login', handleSignIn)
-router.post('/:projectId/auth/register', handleSignUp)
+router.post('/:projectId/auth/login', asyncRoute(handleSignIn))
+router.post('/:projectId/auth/register', asyncRoute(handleSignUp))
 // Alias — /auth/refresh for SDKs that use the short form.
-router.post('/:projectId/auth/refresh', handleRefreshToken)
+router.post('/:projectId/auth/refresh', asyncRoute(handleRefreshToken))
 
 export default router

@@ -5,6 +5,7 @@ import { prisma } from '@/lib/db'
 import { z } from 'zod'
 import { provisionWorkspaceDatabase } from '@/lib/services/databaseProvisioning'
 import { withAuth } from '@/lib/auth/route-protection'
+import { canWriteProject } from '@/lib/edition/guard'
 
 const createWorkspaceSchema = z.object({
   name: z.string().min(1).max(100),
@@ -98,15 +99,8 @@ export const POST = withAuth(async (request: NextRequest, { user }) => {
     const validatedData = createWorkspaceSchema.parse(body)
     projectIdForConflict = validatedData.projectId
 
-    // Security: Verify user owns the project
-    const project = await prisma.project.findFirst({
-      where: {
-        id: validatedData.projectId,
-        userId: user.userId,
-      },
-    });
-
-    if (!project) {
+    // Security: verify the caller may write to the project
+    if (!(await canWriteProject(user.userId, validatedData.projectId))) {
       return NextResponse.json(
         {
           success: false,

@@ -171,15 +171,22 @@ export function AssistantPanel() {
   const suggestions = suggestionsFor(pathname)
 
   return (
-    <aside
-      className="fixed top-12 right-0 bottom-0 z-20 w-full sm:w-[380px] bg-[#16171d] border-l border-white/[0.07] flex flex-col"
-      aria-label="Assistant"
-    >
+    <>
+      {/* Mobile backdrop */}
+      <div
+        onClick={() => setOpen(false)}
+        className="sm:hidden fixed inset-0 top-12 bg-black/60 backdrop-blur-sm z-30 transition-opacity"
+        aria-hidden="true"
+      />
+      <aside
+        className="fixed top-12 right-0 bottom-0 z-40 w-full sm:w-[380px] bg-[#0f1012] border-l border-white/[0.07] flex flex-col shadow-2xl pb-[max(0.5rem,env(safe-area-inset-bottom))]"
+        aria-label="Assistant"
+      >
       {/* ── Header ── */}
       <div className="flex items-center gap-2 h-11 px-3.5 border-b border-white/[0.07] flex-shrink-0">
         <Sparkles className="w-3.5 h-3.5 text-zinc-400" />
         <span className="text-[12.5px] font-semibold text-zinc-100">Assistant</span>
-        <span className="text-[10px] font-mono text-zinc-600 mt-px">answers only</span>
+        <span className="text-[12px] font-mono text-zinc-600 mt-px">answers only</span>
         <div className="ml-auto flex items-center gap-0.5">
           {messages.length > 0 && (
             <button
@@ -209,7 +216,7 @@ export function AssistantPanel() {
             <p className="text-[12.5px] text-zinc-300 font-medium mb-1">
               Ask about the platform.
             </p>
-            <p className="text-[11.5px] text-zinc-500 leading-relaxed mb-5">
+            <p className="text-[12.5px] text-zinc-500 leading-relaxed mb-5">
               How features work, where things live, how to wire your coding
               agent or frontend to this project. Building itself happens
               through your agent (Connect) or the Database section.
@@ -219,7 +226,7 @@ export function AssistantPanel() {
                 <button
                   key={s}
                   onClick={() => send(s)}
-                  className="text-left px-3 py-2 rounded-md bg-white/[0.03] border border-white/[0.06] text-[11.5px] text-zinc-400 hover:text-zinc-200 hover:border-white/[0.14] transition-colors"
+                  className="text-left px-3 py-2 rounded-md bg-white/[0.03] border border-white/[0.06] text-[12.5px] text-zinc-400 hover:text-zinc-200 hover:border-white/[0.14] transition-colors"
                 >
                   {s}
                 </button>
@@ -252,12 +259,12 @@ export function AssistantPanel() {
                         a: (props: any) => <a className="text-violet-300 underline underline-offset-2" target="_blank" rel="noreferrer" {...props} />,
                         code: ({ className, children, ...props }: any) =>
                           /language-/.test(className || '') ? (
-                            <code className={`${className} text-[11px]`} {...props}>{children}</code>
+                            <code className={`${className} text-[12px]`} {...props}>{children}</code>
                           ) : (
-                            <code className="px-1 py-0.5 rounded bg-white/[0.06] font-mono text-[11px] text-zinc-200" {...props}>{children}</code>
+                            <code className="px-1 py-0.5 rounded bg-white/[0.06] font-mono text-[12px] text-zinc-200" {...props}>{children}</code>
                           ),
                         pre: (props: any) => (
-                          <pre className="rounded-md bg-[#0f1015] border border-white/[0.06] p-2.5 mb-2 overflow-x-auto font-mono text-[11px] leading-relaxed" {...props} />
+                          <pre className="rounded-md bg-[#08090a] border border-white/[0.06] p-2.5 mb-2 overflow-x-auto font-mono text-[12px] leading-relaxed" {...props} />
                         ),
                       }}
                     >
@@ -297,10 +304,11 @@ export function AssistantPanel() {
             <ArrowUp className="w-3.5 h-3.5" />
           </button>
         </div>
-        <p className="text-[10px] text-zinc-600 mt-1.5 px-0.5">
+        <p className="text-[12px] text-zinc-600 mt-1.5 px-0.5">
           Answers questions only. Building happens through your connected agent.
         </p>
       </div>
     </aside>
+    </>
   )
 }

@@ -8,15 +8,15 @@ import { validateRequestBody } from '@/lib/validation/schemas'
 import { prisma } from '@/lib/db'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { validateUpdatePayload } from '@/lib/services/workspace-validator'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
+import { projectRestriction, restrictionDetails, restrictionMessage } from '@/lib/usage/restrictions'
 
 /**
  * POST /v1/{projectId}/database/update
  * Update rows in the project's workspace schema table
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, params)
     if (middleware.response) {
@@ -33,6 +33,17 @@ export async function POST(
     const capabilityCheck = requireCapability(context, request.nextUrl.pathname)
     if (capabilityCheck) {
       return capabilityCheck
+    }
+
+    // Past the database grace period the data API is read-only (lib/usage/restrictions.ts).
+    const restriction = await projectRestriction(params.projectId, 'db_bytes')
+    if (restriction.restricted) {
+      return createErrorResponse(
+        ErrorCodes.PLAN_LIMIT_EXCEEDED,
+        restrictionMessage('db_bytes', restriction),
+        403,
+        restrictionDetails('db_bytes', restriction),
+      )
     }
 
     const validation = await validateRequestBody(updateSchema, request)
@@ -133,4 +144,4 @@ export async function POST(
   }
 }
 
-
+export const POST = recordedV1(handlePOST)

@@ -17,8 +17,9 @@ import { Router, Request, Response } from 'express'
 import { createHash } from 'crypto'
 import { prisma } from '@/lib/db'
 import { generateApiKey } from '@/lib/auth/apiKeyAuth'
-import { recordSecurityEvent, getPlatformControls } from '@/lib/platform/controls'
+import { recordSecurityEvent, getPlatformControls } from '@/lib/platform-controls'
 import { sendError, sendSuccess, ErrorCodes } from '../lib/response'
+import { asyncRoute } from '../lib/async-route'
 
 const router = Router()
 
@@ -189,8 +190,8 @@ const handleBootstrap = async (req: Request, res: Response) => {
   })
 }
 
-router.get('/:projectId/bootstrap', handleBootstrap)
-router.post('/:projectId/bootstrap', handleBootstrap)
+router.get('/:projectId/bootstrap', asyncRoute(handleBootstrap))
+router.post('/:projectId/bootstrap', asyncRoute(handleBootstrap))
 
 // CORS preflight for bootstrap (arbitrary origins).
 router.options('/:projectId/bootstrap', (_req, res) => {

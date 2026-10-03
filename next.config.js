@@ -17,6 +17,18 @@ const enforcedScriptSrc = [
 
 const nextConfig = {
   reactStrictMode: true,
+  allowedDevOrigins: [
+    '192.168.*',
+    '10.*',
+    '*.local',
+    'localhost',
+    '127.0.0.1',
+    '*.trycloudflare.com',
+    '*.loca.lt',
+    '*.ngrok-free.app',
+    '*.ngrok.io',
+    '*.pinggy.link',
+  ],
 
   // ── IA restructure route migration (IA restructure §14) ────────
   // Every section that moved to the single project workspace keeps a permanent
@@ -65,18 +77,53 @@ const nextConfig = {
       { source: '/docs', destination: '/resources', permanent: false },
 
       // /mcp and /quickstart were two pages answering "how do I connect my
-      // agent", and they drifted: /mcp still advertised a 60-tool catalog long
-      // after it was cut to 18. Merged into /quickstart, which absorbed the MCP
-      // keywords. Permanent so the indexed /mcp URL passes its equity across —
-      // the npm package homepage and older install prompts still point at it.
-      { source: '/mcp', destination: '/quickstart', permanent: true },
+      // agent". /mcp was merged into /quickstart, then /quickstart itself was
+      // removed — the connect flow lives in the product, not on a marketing
+      // page. Both URLs are indexed and both are still printed as the homepage
+      // of the published @backenly/mcp-server and @backenly/sdk packages, so
+      // they must keep resolving. Permanent, pointing at the docs hub.
+      { source: '/mcp', destination: '/resources', permanent: true },
+      { source: '/quickstart', destination: '/resources', permanent: true },
 
       // Audience repositioning 2026-07-18: marketing slugs renamed away from
       // "vibe coders" / "non-technical founders" to agent-era audience names.
       // Old URLs are indexed — keep permanent redirects.
       { source: '/use-cases/vibe-coders', destination: '/use-cases/ai-assisted-developers', permanent: true },
       { source: '/use-cases/non-technical-founders', destination: '/use-cases/founders', permanent: true },
-      { source: '/resources/how-vibe-coders-can-build-full-stack-apps-faster', destination: '/resources/full-stack-development-with-ai-coding-agents', permanent: true },
+      // Repointed 2026-08-29: this used to land on
+      // /resources/full-stack-development-with-ai-coding-agents, which is now
+      // itself redirected. Chaining two 301s costs a round trip and dilutes the
+      // signal, so it goes straight to the final destination.
+      { source: '/resources/how-vibe-coders-can-build-full-stack-apps-faster', destination: '/use-cases/ai-assisted-developers', permanent: true },
+
+      // ── Resources rebuilt as documentation 2026-08-29 ──────────────────────
+      //
+      // /resources is where /docs, /mcp and /quickstart already redirect and
+      // what the footer calls "Documentation", but it was shaped as an SEO blog
+      // and had no connect guide at all — three redirects landing on nothing.
+      // It is now seven task- and mechanism-shaped guides.
+      //
+      // Two of the retired articles duplicated sections that already exist
+      // (/features/ai-backend-generation, /comparisons/*) and two were written
+      // for the "non-technical founder" audience the rest of the site moved
+      // away from in the 2026-07-18 repositioning above. Every old slug is
+      // indexed, so each one points at its nearest real replacement.
+      { source: '/resources/what-is-ai-backend-generation', destination: '/features/ai-backend-generation', permanent: true },
+      { source: '/resources/how-to-build-a-backend-without-coding', destination: '/resources/your-first-backend', permanent: true },
+      { source: '/resources/best-backend-tools-for-non-technical-founders', destination: '/comparisons', permanent: true },
+      { source: '/resources/full-stack-development-with-ai-coding-agents', destination: '/use-cases/ai-assisted-developers', permanent: true },
+      { source: '/resources/backend-development-for-ai-app-builders', destination: '/use-cases/ai-product-backends', permanent: true },
+
+      // ── Use cases became workflows, not audience segments 2026-08-29 ───────
+      //
+      // "Startup MVPs" and "Side projects" are demographics, not use cases, and
+      // could only ever be filled with adjectives. They have no single honest
+      // successor, so they land on the index rather than being pointed at a
+      // workflow the visitor may not have come for. "AI app builders" does have
+      // a 1:1 replacement.
+      { source: '/use-cases/ai-app-builders', destination: '/use-cases/ai-product-backends', permanent: true },
+      { source: '/use-cases/startup-mvps', destination: '/use-cases', permanent: true },
+      { source: '/use-cases/side-projects', destination: '/use-cases', permanent: true },
     ]
   },
 
@@ -113,8 +160,11 @@ const nextConfig = {
         destination: '/api/mcp/oauth/authorization-server',
       },
     ]
-    // Only proxy /api/v1/* when RUNTIME_API_URL is set. In production the
-    // Next.js route handlers in app/api/v1/ serve these requests directly.
+    // Only when RUNTIME_API_URL is set. This rarely fires: a rewrite in this
+    // position runs only when no route matches, and under /api/v1/{projectId}/
+    // the [...unmatched] catch-all matches everything, so that route is what
+    // forwards the runtime's paths (lib/runtime/forward-to-runtime.ts). This
+    // still covers /api/v1/* paths outside a project.
     if (process.env.RUNTIME_API_URL) {
       rules.push({
         source: '/api/v1/:path*',
@@ -133,14 +183,87 @@ const nextConfig = {
   // reason backenly-nextjs has accumulated 300+ crash-restarts). scripts/
   // deploy.sh sets this, builds off to the side, then renames into place.
   distDir: process.env.NEXT_DIST_DIR || '.next',
-  eslint: {
-    ignoreDuringBuilds: true,
-  },
+  // No `eslint` key: Next 16 removed `next lint`, so the build no longer runs
+  // ESLint at all and rejects the option as unrecognised. Linting is its own
+  // step now, `npm run lint` -> eslint, enforced by the `static` CI job. That
+  // job is what actually keeps main green; ignoreDuringBuilds meant the build
+  // never enforced it anyway.
+  // instrumentation.ts is loaded unconditionally since Next 15, so the
+  // experimental.instrumentationHook flag that used to enable it is gone. It
+  // was not a no-op to leave in place: Next 16 rejects unrecognised keys under
+  // `experimental`.
   experimental: {
-    instrumentationHook: true,
-    outputFileTracingIncludes: {
-      '/api/**/*': ['./node_modules/.prisma/**/*'],
-    },
+    // With middleware present Next buffers every request body up to this size
+    // and silently truncates the rest, so its 10 MB default turned the 100 MB
+    // upload ceiling into 10 MB and answered bigger uploads with 500. It equals
+    // MAX_UPLOAD_REQUEST_BYTES in lib/storage/body-limits.ts (a unit test holds
+    // them equal); the middleware refuses any other route's body over 10 MB,
+    // so only the upload routes can use the larger buffer.
+    proxyClientMaxBodySize: 101 * 1024 * 1024,
+  },
+  outputFileTracingIncludes: {
+    '/api/**/*': ['./node_modules/.prisma/**/*'],
+    // Cloud composition, named explicitly because it is read at RUNTIME by
+    // lib/edition/cloud-extension.ts and cannot be traced:
+    //
+    //   overlay-allowlist.json   findRepoRoot() walks up looking for this
+    //   lib/cloud/manifest.json  the manifest itself
+    //   lib/cloud/**             the extension module the manifest names,
+    //                            whose path is only known from that JSON
+    //
+    // These reached .next/standalone before only as a side effect of the
+    // whole-project tracing this change removes. Without naming them, an
+    // explicit BACKENLY_EDITION=cloud container would find no composition and
+    // refuse to start — correctly, but for the wrong reason.
+    //
+    // In a single-tenant build lib/cloud does not exist and the glob matches
+    // nothing, which is the intended outcome rather than an error.
+    '/**/*': ['./overlay-allowlist.json', './lib/cloud/**/*'],
+  },
+  // CONTAINMENT, not a root-cause fix.
+  //
+  // The tracer pulls far more of this repository into .next/standalone than the
+  // server can execute — 315 MB and 18,105 files, including 78 files under
+  // __tests__, 142 under tests/ and the docs tree. The mechanism was bisected
+  // across several controlled builds and never identified; a plausible
+  // contributor is that some filesystem calls take computed paths the tracer
+  // cannot resolve, so it falls back to including everything nearby.
+  //
+  // Rather than keep hunting, the directories below are named as things that
+  // CANNOT legitimately be a production runtime dependency. Each was checked
+  // rather than assumed: nothing under lib/, app/, server/ or instrumentation.ts
+  // imports, requires, or exec()s anything in scripts/ — every mention of it is
+  // a comment or documentation string. The deployment scripts run on the host
+  // from the git checkout, never from .next/standalone, so excluding them from
+  // the TRACE does not affect deploy.sh or backup.sh.
+  //
+  // Deliberately NOT excluded, because real runtime assets live there:
+  // prisma/, public/, lib/, app/, packages/, node_modules/.prisma.
+  // MEASURED SCOPE, not a guess. Route traces obey this: it takes 78 files
+  // under __tests__ out of the standalone output.
+  //
+  // It does NOT remove tests/, docs/, scripts/ or the compose files, and that
+  // is not a pattern bug. Reading the .nft.json manifests the build itself
+  // produced, every one of those survivors is referenced by exactly one
+  // manifest — server/instrumentation.js.nft.json — and by no route manifest at
+  // all. instrumentation.js is not a route, so a route-keyed exclusion cannot
+  // reach it. That single trace carries 2,435 entries, including 772 under
+  // lib/ and 468 under app/: instrumentation.ts is the tracer's doorway into
+  // most of the repository, which is the real shape of the over-tracing.
+  //
+  // The rest of the containment therefore lives at the CONTAINER boundary,
+  // where it can be asserted rather than hoped for — see docker/web.Dockerfile.
+  outputFileTracingExcludes: {
+    '/*': [
+      './__tests__/**/*',
+      './tests/**/*',
+      './docs/**/*',
+      './scripts/**/*',
+      './docker-compose*.yml',
+      './docker/docker-compose*.yml',
+      './.github/**/*',
+      './coverage/**/*',
+    ],
   },
   images: {
     remotePatterns: [
@@ -173,6 +296,17 @@ const nextConfig = {
           { key: 'Cache-Control', value: 'public, max-age=3600, stale-while-revalidate=86400' },
         ],
       },
+      {
+        // The hero film and its poster (components/landing/HeroFilm). Every
+        // file here carries its version in its name, so a re-render ships
+        // under a new name and these can be cached for good. Never replace a
+        // file under public/media in place: browsers that already hold it
+        // would keep the old one for a year.
+        source: '/media/:path*',
+        headers: [
+          { key: 'Cache-Control', value: 'public, max-age=31536000, immutable' },
+        ],
+      },
       // /api/v1/* CORS is decided dynamically in middleware.ts so we can
       // (a) per-project allowedOrigins and (b) avoid wildcard+credentials
       // mismatch. We intentionally do NOT set Access-Control-Allow-Origin
@@ -189,7 +323,9 @@ const nextConfig = {
         source: '/:path*',
         headers: [
           { key: 'X-DNS-Prefetch-Control', value: 'on' },
-          { key: 'Strict-Transport-Security', value: 'max-age=63072000; includeSubDomains; preload' },
+          ...(!isDevelopment
+            ? [{ key: 'Strict-Transport-Security', value: 'max-age=63072000; includeSubDomains; preload' }]
+            : []),
           { key: 'X-Frame-Options', value: 'SAMEORIGIN' },
           { key: 'X-Content-Type-Options', value: 'nosniff' },
           // X-XSS-Protection removed — the legacy header is deprecated and
@@ -212,14 +348,14 @@ const nextConfig = {
               "img-src 'self' data: https: blob:",
               // Tighten connect-src — we explicitly allow Sentry, Paddle, and
               // the project's own backend. Wildcard `https:` / `wss:` removed.
-              "connect-src 'self' https://api.backenly.com https://*.backenly.com https://*.ingest.sentry.io https://*.sentry.io https://api.paddle.com https://sandbox-api.paddle.com https://buy.paddle.com https://sandbox-buy.paddle.com https://api.openai.com https://*.amplitude.com wss://*.backenly.com https://challenges.cloudflare.com",
+              `connect-src 'self' ${isDevelopment ? 'ws: wss:' : ''} https://api.backenly.com https://*.backenly.com https://*.ingest.sentry.io https://*.sentry.io https://api.paddle.com https://sandbox-api.paddle.com https://buy.paddle.com https://sandbox-buy.paddle.com https://api.openai.com https://*.amplitude.com wss://*.backenly.com https://challenges.cloudflare.com`,
               "frame-src 'self' https://buy.paddle.com https://sandbox-buy.paddle.com https://app.supademo.com https://challenges.cloudflare.com",
               "frame-ancestors 'self'",
               "base-uri 'self'",
               "form-action 'self'",
               "object-src 'none'",
-              "upgrade-insecure-requests",
-            ].join('; '),
+              !isDevelopment ? "upgrade-insecure-requests" : null,
+            ].filter(Boolean).join('; '),
           },
           {
             // Report-only strict CSP — does NOT block anything. Browsers send

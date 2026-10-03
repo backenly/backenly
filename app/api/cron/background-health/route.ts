@@ -15,7 +15,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/prisma'
 import { runMonitoredHealthScan } from '@/lib/ai/background-monitor'
-import { activeProjectsWhere } from '@/lib/autonomy/activity-gate'
+import { getFleetScheduler } from '@/lib/edition'
 
 function chunk<T>(arr: T[], size: number): T[][] {
   const out: T[][] = []
@@ -33,12 +33,21 @@ export async function POST(request: NextRequest) {
   const startedAt = Date.now()
 
   // Active projects: have at least one table and showed a sign of life in the
-  // last 7 days. Shared with the in-process cron tick — see
-  // lib/autonomy/activity-gate.ts for why "alive" is no longer "somebody chatted".
-  const activeProjects = await prisma.project.findMany({
-    where: activeProjectsWhere(7),
-    select: { id: true, userId: true, name: true },
-  }).catch(() => [])
+  // last 7 days. The RULE is still lib/autonomy/activity-gate.ts and is shared
+  // with the in-process cron tick; the edition decides only the SET it runs
+  // over, so a self-hosted deployment scans its own project rather than every
+  // row that happens to be in its database.
+  const targets = await getFleetScheduler().activeTargets({ windowDays: 7 })
+  // Names are for the log lines only. See the comment in archive-cleanup for
+  // why they are read back by id rather than carried by the seam.
+  const names = new Map(
+    (
+      await prisma.project
+        .findMany({ where: { id: { in: targets.map(t => t.id) } }, select: { id: true, name: true } })
+        .catch(() => [])
+    ).map(p => [p.id, p.name] as const),
+  )
+  const activeProjects = targets.map(t => ({ ...t, name: names.get(t.id) ?? t.id }))
 
   console.log(`[BackgroundHealth] Scanning ${activeProjects.length} active projects`)
 

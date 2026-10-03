@@ -96,6 +96,14 @@ describe('CREATE TABLE', () => {
     expect(Object.keys(a.args).sort()).toEqual(['columns', 'tableName'])
   })
 
+  it('names the camelCase columns that replace a skipped created_at', () => {
+    // "skipped, provisioned automatically" let an agent go on ordering by a
+    // created_at that was never built; the table has "createdAt".
+    const a = parseOne('CREATE TABLE posts (title text, created_at timestamptz)')
+    expect(a.notes?.join(' ')).toMatch(/"createdAt"/)
+    expect(a.notes?.join(' ')).toMatch(/not created_at/)
+  })
+
   it('reads an inline REFERENCES as a foreign key', () => {
     const a = parseOne('CREATE TABLE posts (author_id uuid REFERENCES users(id), title text)')
     expect((a.args.columns as any[])[0]).toEqual({ name: 'author_id', type: 'uuid', fkTo: 'users', nullable: true })

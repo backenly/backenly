@@ -16,15 +16,67 @@
  */
 export async function register() {
   if (process.env.NEXT_RUNTIME === 'nodejs') {
+    // FIRST, before Sentry, the scheduler, or anything that could start doing
+    // work. A cloud deployment missing its private overlay must not reach the
+    // point of serving a request: the single-tenant resolver it would otherwise
+    // fall back to treats every authenticated account as the operator of the
+    // project it asked for. A no-op unless BACKENLY_EDITION is explicitly cloud,
+    // so OSS, local dev and CI are untouched.
+    const { assertEditionCompositionOrExit } = await import('./lib/edition/cloud-extension')
+    assertEditionCompositionOrExit('Next server')
+
+    // Also before anything serves a request: a deployment that runs several
+    // instances while the auth limiter keeps per-process counters has a
+    // brute-force budget of (limit x instances) on every auth surface, and
+    // nothing about raising a replica count would prompt anybody to notice.
+    // Failing at startup is the point - the alternative is serving traffic
+    // with a control that is quietly weaker than it reads.
+    const { assertRateLimitStoreSupportsTopology, assertSharedStoreIsOperational } =
+      await import('./lib/security/rate-limit-store')
+    try {
+      assertRateLimitStoreSupportsTopology()
+      // And then prove it. The check above reads configuration; this one makes
+      // the store answer. A declared-but-unreachable Redis would otherwise boot
+      // cleanly and fail closed on the first sign-in, which reports a typo as
+      // an auth outage at the worst moment to be diagnosing one.
+      const store = await assertSharedStoreIsOperational()
+      console.log(`[RateLimit] ${store}`)
+    } catch (err) {
+      console.error('')
+      console.error(err instanceof Error ? err.message : String(err))
+      console.error('')
+      process.exit(1)
+    }
+
     await import('./sentry.server.config')
+
+    // The usage ledger: replay any batch a previous process spooled on its way
+    // down, and spool on SIGTERM so this process's own last counts survive the
+    // shutdown Next.js runs after it. lib/usage/ledger.ts.
+    const { startUsageLedger } = await import('./lib/usage/ledger')
+    startUsageLedger()
 
     // Start the in-process cron scheduler.
     // On Vercel this is a no-op (VERCEL env is set); Vercel Cron calls
     // /api/cron/run-ai-jobs instead.  On self-hosted (Hetzner/PM2) this
     // is the only scheduler, so it must run here.
     if (!process.env.VERCEL) {
-      const { default: cron } = await import('node-cron')
+      const { default: nodeCron } = await import('node-cron')
       const { runDueCronJobs, runSystemTasks } = await import('./lib/services/cron-runner')
+
+      // Every process schedules; only the one holding the scheduler lock runs
+      // the jobs, so two instances (or an overlapping deploy) never run a job
+      // twice. Every `cron.schedule` below goes through this gate.
+      // lib/scheduler/leader.ts.
+      const { startSchedulerLeadership, leaderOnly } = await import('./lib/scheduler/leader')
+      startSchedulerLeadership()
+      const cron = {
+        schedule: (
+          expression: string,
+          task: () => unknown,
+          options?: Parameters<typeof nodeCron.schedule>[2],
+        ) => nodeCron.schedule(expression, leaderOnly(task), options),
+      }
 
       // Mark cron scheduler as alive in process memory (for health checks)
       ;(globalThis as any).__cronSchedulerStartedAt = new Date().toISOString()
@@ -61,14 +113,10 @@ export async function register() {
       // project) and skips findings that already carry a diagnosis, so a tick
       // with nothing escalated costs one indexed query per project.
       cron.schedule('*/10 * * * *', async () => {
-        const { prisma } = await import('./lib/db/prisma')
         const { diagnoseEscalatedFindings } = await import('./lib/autonomy/escalation-diagnosis')
-        const { activeProjectsWhere } = await import('./lib/autonomy/activity-gate')
+        const { getFleetScheduler } = await import('./lib/edition')
 
-        const activeProjects = await prisma.project.findMany({
-          where: activeProjectsWhere(),
-          select: { id: true },
-        }).catch(() => [])
+        const activeProjects = await getFleetScheduler().activeTargets()
         if (activeProjects.length === 0) return
 
         const CONCURRENCY = 5
@@ -101,14 +149,10 @@ export async function register() {
       // Daily, and after the observer's own pass, because it runs the full
       // desired-state diff per project.
       cron.schedule('40 0 * * *', async () => {
-        const { prisma } = await import('./lib/db/prisma')
         const { checkSensorHealth, summariseSensorHealth } = await import('./lib/autonomy/sensor-health')
-        const { activeProjectsWhere } = await import('./lib/autonomy/activity-gate')
+        const { getFleetScheduler } = await import('./lib/edition')
 
-        const activeProjects = await prisma.project.findMany({
-          where: activeProjectsWhere(),
-          select: { id: true },
-        }).catch(() => [])
+        const activeProjects = await getFleetScheduler().activeTargets()
 
         for (const p of activeProjects) {
           try {
@@ -167,15 +211,14 @@ export async function register() {
       // no paid ones. It is wired up now because the day that stops being true
       // is exactly the day nobody thinks to check, and the failure is silent in
       // the direction that costs money — a lapsed payer keeps their paid plan.
+      //
+      // The scheduler owns the cadence; what actually runs is Backenly's own
+      // business, and in single-tenant it is nothing at all. Going through the
+      // platform seam is what lets the billing implementation move to the
+      // private overlay without this file ever importing it.
       cron.schedule('10 3 * * *', async () => {
-        const { runDailyGraceCheck } = await import('./lib/billing/grace')
-        const res = await runDailyGraceCheck().catch((err: any) => {
-          console.error('[GraceCheck] Cron error:', err?.message)
-          return null
-        })
-        if (res && res.processed > 0) {
-          console.log(`[GraceCheck] Downgraded ${res.processed} expired grace period(s) to FREE`)
-        }
+        const { runScheduledBackOfficeMaintenance } = await import('./lib/platform-signals')
+        await runScheduledBackOfficeMaintenance()
       })
 
       // Daily backup at 02:05 UTC (staggered from cleanup at 02:00)
@@ -229,14 +272,10 @@ export async function register() {
 
       // Autonomous background health scan once daily — 01:00 UTC
       cron.schedule('0 1 * * *', async () => {
-        const { prisma } = await import('./lib/db/prisma')
         const { runMonitoredHealthScan } = await import('./lib/ai/background-monitor')
 
-        const { activeProjectsWhere } = await import('./lib/autonomy/activity-gate')
-        const activeProjects = await prisma.project.findMany({
-          where: activeProjectsWhere(7),
-          select: { id: true, userId: true },
-        }).catch(() => [])
+        const { getFleetScheduler } = await import('./lib/edition')
+        const activeProjects = await getFleetScheduler().activeTargets({ windowDays: 7 })
 
         const CONCURRENCY = 10
         for (let i = 0; i < activeProjects.length; i += CONCURRENCY) {
@@ -276,14 +315,10 @@ export async function register() {
         if (g.__infraScanRunning) return
         g.__infraScanRunning = true
         try {
-          const { prisma } = await import('./lib/db/prisma')
           const { runAndStoreInfraIntelligence } = await import('./lib/ai/infra-intelligence')
 
-          const { activeProjectsWhere } = await import('./lib/autonomy/activity-gate')
-          const loadedProjects = await prisma.project.findMany({
-            where: activeProjectsWhere(),
-            select: { id: true, userId: true },
-          }).catch(() => [])
+          const { getFleetScheduler } = await import('./lib/edition')
+          const loadedProjects = await getFleetScheduler().activeTargets()
 
           const CONCURRENCY = 5
           for (let i = 0; i < loadedProjects.length; i += CONCURRENCY) {
@@ -305,14 +340,10 @@ export async function register() {
       // Detects project stage (MVP→Growth→Scale→Enterprise), plans migration
       // steps, identifies service extraction candidates and tech debt.
       cron.schedule('20 3 * * *', async () => {
-        const { prisma } = await import('./lib/db/prisma')
         const { runAndStoreArchitectureEvolution } = await import('./lib/ai/architecture-evolution')
 
-        const { activeProjectsWhere } = await import('./lib/autonomy/activity-gate')
-        const activeProjects = await prisma.project.findMany({
-          where: activeProjectsWhere(),
-          select: { id: true, userId: true },
-        }).catch(() => [])
+        const { getFleetScheduler } = await import('./lib/edition')
+        const activeProjects = await getFleetScheduler().activeTargets()
 
         const CONCURRENCY = 5
         for (let i = 0; i < activeProjects.length; i += CONCURRENCY) {
@@ -330,14 +361,10 @@ export async function register() {
       // Analyses AuditLog API call patterns + SDK telemetry.
       // Auto-adds missing indexes; queues schema changes for approval.
       cron.schedule('0 4 * * *', async () => {
-        const { prisma } = await import('./lib/db/prisma')
         const { runAndStoreFrontendCoevolution } = await import('./lib/ai/frontend-coevolution')
 
-        const { activeProjectsWhere } = await import('./lib/autonomy/activity-gate')
-        const activeProjects = await prisma.project.findMany({
-          where: activeProjectsWhere(7),
-          select: { id: true, userId: true },
-        }).catch(() => [])
+        const { getFleetScheduler } = await import('./lib/edition')
+        const activeProjects = await getFleetScheduler().activeTargets({ windowDays: 7 })
 
         const CONCURRENCY = 5
         for (let i = 0; i < activeProjects.length; i += CONCURRENCY) {
@@ -371,7 +398,6 @@ export async function register() {
       // kicks (after mutations) flow through the same dispatcher, so they
       // honor the same rules. The cron is the backstop for drift detection.
       cron.schedule('* * * * *', async () => {
-        const { prisma } = await import('./lib/db/prisma')
         const { runReconciler } = await import('./lib/autonomy/reconciler')
         const { FLAGS } = await import('./lib/config/flags')
 
@@ -408,11 +434,8 @@ export async function register() {
         // reconciler does real work per project, no point burning DB on dead
         // projects. See lib/autonomy/activity-gate.ts for what counts as alive
         // and why it is no longer "somebody chatted about it".
-        const { activeProjectsWhere } = await import('./lib/autonomy/activity-gate')
-        const activeProjects = await prisma.project.findMany({
-          where: activeProjectsWhere(),
-          select: { id: true },
-        }).catch(() => [])
+        const { getFleetScheduler } = await import('./lib/edition')
+        const activeProjects = await getFleetScheduler().activeTargets()
 
         // Per-project failure isolation — one bad project never stalls the
         // whole tick. Concurrency 5; the reconciler is deterministic (no model
@@ -439,6 +462,88 @@ export async function register() {
         )
       })
 
+      // ── Tier C: run an APPROVED maintenance ladder ─────────────────────────
+      //
+      // This was missing, and it is why the whole Phase 6b stack — thirteen
+      // modules, seven mutation primitives, two migrations — had never
+      // executed outside a hand-typed CLI run.
+      //
+      // `sweepProjectMaintenance` had exactly one caller in the tree:
+      // GET /api/cron/autonomy. Nothing invokes that route on its own. There is
+      // no crontab entry, no systemd timer, and Vercel-style cron declarations
+      // do not fire on a self-hosted box, so on every OSS install Tier A and
+      // Tier B ran from this scheduler and Tier C simply never happened. The
+      // route stays as an ad-hoc operator entry point; this is the mechanism.
+      //
+      // Every gate still applies and none of them is relaxed by being reached
+      // from here: both maintenance flags are read inside the sweep, the plan
+      // is rebuilt from the live catalog, the executor re-reads the catalog
+      // again before mutating, and a Tier-2 rung still needs consent bound to
+      // this exact plan version. With no approval on file the sweep reports
+      // `awaiting_approval` and writes nothing.
+      //
+      // Every 10 minutes, not every minute. A ladder is a schema migration, not
+      // a probe: the finding it answers is `subsystem_repeat_failure`, which is
+      // measured over a 30-day window and does not change between minutes.
+      cron.schedule('*/10 * * * *', async () => {
+        const { FLAGS } = await import('./lib/config/flags')
+        if (!FLAGS.ENABLE_MAINTENANCE_SCHEDULER) return
+
+        const { sweepProjectMaintenance } = await import('./lib/autonomy/maintenance/sweep')
+        const { getFleetScheduler } = await import('./lib/edition')
+
+        const activeProjects = await getFleetScheduler().activeTargets()
+        if (activeProjects.length === 0) return
+
+        const CONCURRENCY = 5
+        const tally: Record<string, number> = {}
+        for (let i = 0; i < activeProjects.length; i += CONCURRENCY) {
+          const batch = activeProjects.slice(i, i + CONCURRENCY)
+          const results = await Promise.allSettled(
+            batch.map(p => sweepProjectMaintenance({ projectId: p.id })),
+          )
+          for (const r of results) {
+            const key = r.status === 'fulfilled' ? r.value.disposition : 'errored'
+            tally[key] = (tally[key] ?? 0) + 1
+          }
+        }
+        // ── Steady states are not events ──────────────────────────────────
+        //
+        // A capability refusal is a SUCCESSFUL tick: the kernel found work,
+        // proved it cannot guarantee the recovery, and declined. It is
+        // fulfilled, not rejected, and it is never counted as `errored` — only
+        // a real exception is. Monitoring must not read a correctly denying
+        // safety kernel as a broken job every ten minutes.
+        //
+        // But it is also a CONDITION rather than something that happened, and
+        // a condition reprinted 144 times a day is one everybody learns to
+        // filter — which is how the thing you wanted noticed stops being
+        // noticed. `no_finding` was already excluded for that reason; these
+        // are excluded for the same one and throttled to hourly instead, the
+        // same way the shadow-mode warning above is.
+        const STEADY = new Set(['no_finding', 'unsupported_recovery', 'disabled'])
+        const events = Object.entries(tally).filter(([k]) => !STEADY.has(k))
+        if (events.length > 0) {
+          console.log(
+            `[MaintenanceSweep] ${activeProjects.length} projects — ` +
+            events.map(([k, n]) => `${k}: ${n}`).join(', '),
+          )
+        }
+
+        const steady = Object.entries(tally).filter(([k]) => STEADY.has(k) && k !== 'no_finding')
+        if (steady.length > 0) {
+          const g = globalThis as any
+          if (Date.now() - (g.__maintenanceSteadyLoggedAt ?? 0) > 60 * 60 * 1000) {
+            g.__maintenanceSteadyLoggedAt = Date.now()
+            console.log(
+              `[MaintenanceSweep] ${activeProjects.length} projects — ` +
+              steady.map(([k, n]) => `${k}: ${n}`).join(', ') +
+              '. Ticking normally; nothing was executed because the safety kernel declined.',
+            )
+          }
+        }
+      })
+
       // ── Database behaviour baseline — hourly, on the hour ───────────────────
       //
       // Records query latency, sequential scans, table size and connection
@@ -455,14 +560,10 @@ export async function register() {
         if (g.__baselineCollectorRunning) return
         g.__baselineCollectorRunning = true
         try {
-          const { prisma } = await import('./lib/db/prisma')
           const { collectBaseline, pruneBaseline } = await import('./lib/autonomy/baseline/collector')
-          const { activeProjectsWhere } = await import('./lib/autonomy/activity-gate')
+          const { getFleetScheduler } = await import('./lib/edition')
 
-          const projects = await prisma.project.findMany({
-            where: activeProjectsWhere(),
-            select: { id: true },
-          }).catch(() => [])
+          const projects = await getFleetScheduler().activeTargets()
 
           const CONCURRENCY = 5
           for (let i = 0; i < projects.length; i += CONCURRENCY) {
@@ -481,18 +582,92 @@ export async function register() {
       })
 
       // ── DB storage snapshot — hourly ────────────────────────────────────────
-      // Measures actual pg_total_relation_size per workspace schema and writes
-      // ProjectUsage.dbStorageUsedMb so the billing dashboard reflects real
-      // end-user inserts (not only AI-build-time side-effects).
+      // Measures actual on-disk size of each project's workspace and branch
+      // schemas: ProjectUsage.dbStorageUsedMb for the quota check, and the
+      // `db_bytes` daily-maximum gauge in the usage ledger for billing.
       cron.schedule('0 * * * *', async () => {
-        const { snapshotAllProjectsDbStorage } = await import('./lib/billing/usage-tracker')
-        await snapshotAllProjectsDbStorage().catch((err: any) =>
+        const { snapshotScheduledDbStorage } = await import('./lib/usage/db-storage')
+        await snapshotScheduledDbStorage().catch((err: any) =>
           console.error('[DbStorageSnapshot] Error:', err?.message)
         )
       })
 
+      // ── Egress access-log ingest — every 15 minutes ────────────────────────
+      // Load balancer, S3 and CloudFront access logs into the usage ledger,
+      // each log object exactly once. A no-op until USAGE_LOG_SOURCES names the
+      // log buckets (Cloud infrastructure). lib/usage/log-ingest.ts.
+      cron.schedule('*/15 * * * *', async () => {
+        const { ingestConfiguredLogs } = await import('./lib/usage/log-ingest')
+        try {
+          const s = await ingestConfiguredLogs()
+          if (s && s.objects > 0) console.log(`[UsageLogIngest] ${s.objects} log object(s) applied, ${s.entries} usage row(s) updated`)
+        } catch (err: any) {
+          console.error('[UsageLogIngest] Error:', err?.message)
+        }
+      })
+
+      // ── File storage reconcile — hourly ─────────────────────────────────────
+      // `file_bytes` gauge from the storage metadata (non-deleted files), not
+      // the drifting Project.storageUsed counter. lib/usage/file-storage.ts.
+      cron.schedule('15 * * * *', async () => {
+        const { reconcileScheduledFileStorage } = await import('./lib/usage/file-storage')
+        await reconcileScheduledFileStorage().catch((err: any) =>
+          console.error('[FileStorageReconcile] Error:', err?.message)
+        )
+      })
+
+      // ── Usage anomalies — daily 00:40 UTC, for the day just completed ─────
+      // A project whose egress, function runs or new MAU jumped far past its
+      // own fourteen-day median becomes a finding in the Autonomy queue, with
+      // the evidence, and resolves itself once the day is back near normal.
+      // lib/usage/anomaly.ts.
+      cron.schedule('40 0 * * *', async () => {
+        const { evaluateUsageAnomalies } = await import('./lib/usage/anomaly')
+        try {
+          const r = await evaluateUsageAnomalies()
+          if (r.raised || r.resolved) console.log(`[UsageAnomaly] raised ${r.raised}, resolved ${r.resolved}`)
+        } catch (err: any) {
+          console.error('[UsageAnomaly] Error:', err?.message)
+        }
+      }, { timezone: 'UTC' })
+
+      // ── Usage alerts — every 5 minutes ──────────────────────────────────────
+      // 50/80/100% of each pooled quota and of the spend limit, each sent once
+      // per account and month, plus the grace-period state the limit
+      // behaviours read. lib/usage/alerts.ts.
+      cron.schedule('*/5 * * * *', async () => {
+        const { evaluateUsageAlerts } = await import('./lib/usage/alerts')
+        try {
+          const r = await evaluateUsageAlerts()
+          if (r.sent > 0 || r.failed > 0) {
+            console.log(`[UsageAlerts] ${r.accounts} account(s): ${r.sent} alert(s) sent, ${r.failed} failed`)
+          }
+        } catch (err: any) {
+          console.error('[UsageAlerts] Error:', err?.message)
+        }
+      })
+
+      // ── Usage: monthly close + marker pruning — daily 00:05 UTC ────────────
+      // Closes the previous UTC month. The first run of a month does the work;
+      // every later run is a no-op (insert-only close), which also covers a day
+      // the scheduler was down. lib/usage/close.ts.
+      cron.schedule('5 0 * * *', async () => {
+        const { closePreviousPeriod } = await import('./lib/usage/close')
+        const { pruneAppliedBatches } = await import('./lib/usage/ledger')
+        try {
+          const s = await closePreviousPeriod()
+          if (s.inserted > 0) {
+            console.log(`[UsageClose] ${s.period}: ${s.inserted} row(s) closed for ${s.accounts} account(s), ${s.alreadyClosed} already closed`)
+          }
+        } catch (err: any) {
+          console.error('[UsageClose] Error:', err?.message)
+        }
+        await pruneAppliedBatches().catch((err: any) => console.error('[UsageLedger] prune error:', err?.message))
+      }, { timezone: 'UTC' })
+
       console.log(
-        '[CronScheduler] Started — user cron jobs + system tasks every minute, ' +
+        '[CronScheduler] Started (jobs run only on the instance holding the scheduler lock) — ' +
+        'user cron jobs + system tasks every minute, ' +
         'autonomy reconciler tick every minute (1-min cadence on every plan), ' +
         'DB storage snapshot hourly, ' +
         'all AI background scans once daily (staggered 00:10–04:30 UTC)'

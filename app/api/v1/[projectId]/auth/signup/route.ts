@@ -1,17 +1,24 @@
 export const dynamic = 'force-dynamic'
 
 import { NextRequest } from 'next/server'
+import { consume, AUTH_LIMITS, clientIp } from '@/lib/security/auth-rate-limit'
+import { throttledV1Response } from '@/lib/security/rate-limit-response'
+import { carriesInternalToken, isPlatformProbe } from '@/lib/security/platform-probe'
 import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
 import { signUpSchema } from '@/lib/api/v1/schemas'
 import { validateRequestBody } from '@/lib/validation/schemas'
 import { prisma } from '@/lib/db'
 import { hashPassword } from '@/lib/auth/password'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
-import { ensureAuthUsersTable, buildUserInsert, isReservedTestEmail } from '@/lib/services/end-user-auth-table'
-import { canAcceptNewEndUser, trackEndUserActive } from '@/lib/billing/quota-kernel'
+import { ensureAuthUsersTable, buildUserInsert, isReservedTestEmail, AuthNotProvisionedError } from '@/lib/services/end-user-auth-table'
+import { canAcceptNewEndUser, trackEndUserActive } from '@/lib/quota/kernel'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import jwt from 'jsonwebtoken'
 import crypto from 'crypto'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
+import { emitEndUserCreated } from '@/lib/services/end-user-auth-events'
+import { getAuthEmailContext } from '@/lib/services/end-user-auth-email'
+import { ensureEmailVerifiedColumn, requestEmailVerification } from '@/lib/services/end-user-auth-flows'
 
 /**
  * POST /v1/{projectId}/auth/signup
@@ -25,12 +32,34 @@ import crypto from 'crypto'
  * RETURNING clause are built from the live schema, so an AI-generated table
  * with a missing column (e.g. no `role`) can no longer 500 signup.
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   try {
     const projectId = params.projectId
+
+    // Throttled per IP AND per project. This surface had no rate limiting of
+    // any kind: it is unauthenticated by design, because it is how a
+    // customer's own users sign in, but the platform's own /api/auth/login has
+    // IP brute-force protection and this had none. That left credential
+    // stuffing against every end user of every project unthrottled.
+    //
+    // Keyed on both so one project under attack cannot lock out sign-up attempts for a
+    // different project behind the same egress address.
+    const ip = clientIp(request)
+    const consumeIp = () => consume(
+      `v1:endUserSignup:${projectId}:${ip}`,
+      AUTH_LIMITS.endUserSignup.ip.limit,
+      AUTH_LIMITS.endUserSignup.ip.windowMs,
+    )
+    // Backenly's own contract probe is not counted (lib/security/platform-probe.ts),
+    // and whether a request is the probe depends on the address in its body. So a
+    // request carrying the internal-traffic token is counted once that address is
+    // known, below; every other request is counted here, before anything else.
+    const mayBeProbe = carriesInternalToken(request)
+    if (!mayBeProbe) {
+      const limit = await consumeIp()
+      if (!limit.allowed) return throttledV1Response(limit)
+    }
 
     // Validate project exists
     const project = await prisma.project.findUnique({
@@ -59,6 +88,11 @@ export async function POST(
 
     const { email, password, name } = validation.data
 
+    if (mayBeProbe && !isPlatformProbe(request, email)) {
+      const limit = await consumeIp()
+      if (!limit.allowed) return throttledV1Response(limit)
+    }
+
     // Behavioral-verifier signups use reserved `.internal` emails. They must not
     // consume the project's MAU quota or trip its cap — they are throwaway rows
     // cleaned up moments later and never shown to the developer.
@@ -68,7 +102,7 @@ export async function POST(
     // missing, self-heals a drifted one (adds `role` / `is_blocked` / a
     // password column / timestamps as needed). All additions are
     // non-destructive metadata-only operations on PG 11+.
-    const schema = await ensureAuthUsersTable(projectId)
+    const schema = await ensureAuthUsersTable(projectId, { email })
     const schemaName = schema.schemaName
 
     // Check if user already exists in workspace schema.
@@ -96,6 +130,15 @@ export async function POST(
       }
     }
 
+    // Email verification is the project's choice (ProjectAuthConfig, off by
+    // default). A project that never turned it on is left exactly as it was: no
+    // column added, no email sent. One that did gets the column BEFORE this
+    // insert, because ensureEmailVerifiedColumn grandfathers rows that exist
+    // when it first adds the column, and this new account must not be one.
+    const requireVerification =
+      !isInternalTest && (await getAuthEmailContext(projectId)).requireEmailVerification
+    if (requireVerification) await ensureEmailVerifiedColumn(schemaName)
+
     const hashedPassword = await hashPassword(password)
     const displayName = name || email.split('@')[0]
 
@@ -120,15 +163,22 @@ export async function POST(
 
     const user = created[0]
 
-    // Count this new end-user toward the project's MAU for the month (never for
-    // internal verifier accounts).
-    if (!isInternalTest) trackEndUserActive(projectId, String(user.id)).catch(() => {})
+    // Count this new end-user toward the project's MAU for the month. Verifier
+    // accounts are excluded inside trackEndUserActive itself.
+    trackEndUserActive(projectId, String(user.id), email).catch(() => {})
 
     const token = jwt.sign(
       { userId: user.id, email: user.email, projectId, role: user.role ?? 'user', jti: crypto.randomUUID() },
       jwtSecret,
       { expiresIn: '7d' },
     )
+
+    // Notify webhook subscribers that an end user signed up. Emitted here, not
+    // by a database trigger: the `users` table deliberately carries none, since
+    // it holds the bcrypt hash (Realtime once leaked it by broadcasting
+    // row_to_json(NEW) from this table). The shared emitter builds the payload
+    // from a fixed field list and skips reserved test accounts.
+    void emitEndUserCreated(projectId, user)
 
     // Fire on_signup AI functions (non-blocking — never fails the signup)
     import('@/lib/services/ai-functions/executor').then(({ fireAiFunctionsOnSignup }) => {
@@ -137,8 +187,23 @@ export async function POST(
       )
     }).catch(() => {})
 
-    return createSuccessResponse({ user, token })
+    // Non-blocking: the branded verification email (24h token), only where the
+    // project requires verification. Sign-in enforces it; signup never waits on
+    // SMTP. Reserved verifier accounts never get here (requireVerification is
+    // false for them), so no orphaned `_email_verifications` row is left behind.
+    if (requireVerification) {
+      requestEmailVerification(projectId, email).catch(
+        (err: any) => console.warn('[EmailVerification] signup send failed (non-fatal):', err?.message)
+      )
+    }
+
+    // 201, as the runtime's signup answers and the contract probe expects: the
+    // two implementations of one endpoint must not disagree on success (#147).
+    return createSuccessResponse({ user, token }, undefined, 201)
   } catch (error: any) {
+    if (error instanceof AuthNotProvisionedError) {
+      return createErrorResponse(error.code, error.message, 503)
+    }
     console.error('Signup error:', error)
     const safe = sanitizeDiagnostic(error)
     return createErrorResponse(
@@ -148,3 +213,5 @@ export async function POST(
     )
   }
 }
+
+export const POST = recordedV1(handlePOST)

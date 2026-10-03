@@ -1,0 +1,197 @@
+# Database-free test suites that CI runs in the `static` job.
+#
+# jest resolves 157 suites. CI ran 92 of them (tests/unit, tests/probes,
+# tests/core, __tests__/autonomy); the other 65 were never named anywhere,
+# which is how they stopped running without anyone deciding they should (#7).
+#
+# Every suite below was verified to need no database: pointed at the same
+# unroutable placeholder URL the `static` job already sets, all 31 pass, with
+# 530 assertions and none skipped. That last part matters — a suite that passes
+# by skipping everything spends the suite's credibility vouching for nothing.
+#
+# They are listed file by file rather than by directory because the directories
+# are mixed. Three of the six __tests__/security suites need a real database,
+# as do two of the five in tests/ai; adding the parent directory would put a
+# guaranteed failure on the blocking path.
+#
+# To re-verify this list, or to check a suite before adding one:
+#
+#   DATABASE_URL=postgresql://ci:ci@127.0.0.1:1/unused \
+#   TEST_DATABASE_URL=$DATABASE_URL DIRECT_URL=$DATABASE_URL \
+#   JWT_SECRET=ci-not-a-real-secret \
+#   npx jest --runTestsByPath <path> --ci
+#
+# A suite that fails with PrismaClientInitializationError needs a database and
+# belongs in the `autonomy` job instead, not here.
+
+__tests__/billing/model-backed-tools-are-charged.test.ts
+__tests__/integration/auth-flow.test.ts
+
+__tests__/lib/auth/middleware.test.ts
+__tests__/lib/auth/rbac.test.ts
+__tests__/lib/services/apiKeyUsage.test.ts
+
+__tests__/security/ai-data-access.test.ts
+__tests__/security/tenant-isolation.test.ts
+__tests__/suite1.basic-lifecycle.test.ts
+tests/ai/brain-build-signals.test.ts
+tests/ai/cross-turn-referential.test.ts
+tests/ai/proposals.test.ts
+tests/ai/updated-at-trigger-diagnosis.test.ts
+tests/auth/email-eligibility.test.ts
+
+tests/blueprints/blueprint-routing.test.ts
+tests/blueprints/plan-coverage.test.ts
+tests/blueprints/resume-routing.test.ts
+tests/build-runs/flag.test.ts
+tests/build-runtime/build-runtime.test.ts
+tests/build-runtime/marketplace-regression.test.ts
+tests/build-runtime/reliability-regression.test.ts
+tests/chat-execution-pipeline.test.ts
+tests/concurrency/concurrency-hardening.test.ts
+tests/execution/route-module-runner-contract.test.ts
+tests/migration/upgrade-safety.test.ts
+tests/observability/operator-health.test.ts
+tests/qa/launch-hardening.test.ts
+tests/security-isolation.test.ts
+tests/security/webhook-security.test.ts
+tests/verification/execution.test.ts
+
+__tests__/email/send-outcome.test.ts
+__tests__/legal/privacy-integrity.test.ts
+__tests__/observability/pgrst-clock-diagnostic.test.ts
+__tests__/observability/pgrst-handler-response-preserved.test.ts
+__tests__/projects/purge-safety.test.ts
+__tests__/security/api-key-plaintext.test.ts
+
+# Self-hosted runs without billing and refuses a second project (commit 3).
+# Database-free on purpose: both paths short-circuit on the edition before
+# touching Prisma, and asserting that they do is half the point.
+__tests__/edition/single-tenant-runtime.test.ts
+
+# The Entitlements seam: single-tenant resolves without a Plan or Subscription
+# row, cloud delegates to the @cloud/* provider, and the alias stays
+# overlay-first in all three configs. Database-free because proving the
+# single-tenant path never reaches Prisma is the assertion itself.
+__tests__/edition/entitlements-seam.test.ts
+
+# The quota kernel enforces the numbers the seam hands it. Covers the two
+# fields it used to read straight off a Plan row (apiQuotaIsLifetime and
+# maxMonthlyActiveUsers) and the fail-open path. Prisma and the seam are both
+# mocked, so no database.
+__tests__/edition/quota-kernel-entitlements.test.ts
+
+# REGRESSION: a self-hosted install may deploy, add a domain and create a
+# trigger. The enforcement family used to read Subscription directly, so with
+# no Subscription row it blocked all three while entitlements said allowed.
+# Database-free because the assertion is that no Plan or Subscription row is
+# ever read.
+__tests__/edition/self-host-enforcement.test.ts
+
+# The PlatformSignals seam: single-tenant reacts to nothing and never
+# consults the Cloud provider, the seam absorbs provider failures rather than
+# failing a signup that already succeeded, and the three signup flows report
+# rather than importing the referral implementation.
+__tests__/edition/platform-signals-seam.test.ts
+
+# REGRESSION: the sandbox lifecycle primitive performs an already-authorized
+# transition and no longer re-derives commercial policy. That was the SECOND
+# reason a self-hosted deploy failed. Pins the deploy route ordering, because
+# removing a gate is only safe if the caller really does gate.
+__tests__/edition/sandbox-lifecycle.test.ts
+
+# The lib/platform/controls split. Its public half is load-bearing: the Phase 3
+# self-hosted signup slot, the operator kill switches, the security audit log
+# and project lockdown all stay in OSS. Only the scoring of a stranger is
+# Cloud, and the ordering (slot, switches, blocklist, then Cloud) is pinned.
+__tests__/edition/platform-controls-split.test.ts
+
+# The structural boundary. Every Phase 6 seam can be undone by one import that
+# compiles, passes every behavioural test and works in Cloud. This reads the
+# tracked import graph, which is the only thing that notices.
+__tests__/edition/public-private-boundary.test.ts
+
+# The shape of a public checkout after the Phase 6 ownership cut: the back
+# office is gone, the product is not, the Phase 7 surfaces are untouched, and
+# db:seed works with no billing seeder. A seventy-file removal can lose
+# something quietly in either direction; this is what notices.
+__tests__/edition/oss-surface.test.ts
+
+# The self-hosted build must not present itself as a hosted SaaS. A cold install
+# found marketing at the root, a hardcoded Free plan chip, an Upgrade CTA and a
+# Usage page whose endpoint ships only with the overlay. None of that shows up
+# in a diff, and it regresses the moment a nav item or a fetch is added without
+# thinking about edition. Reads committed files only; no database.
+__tests__/edition/self-host-surface-separation.test.ts
+
+# README.md is the acceptance script for a self-hosted install, so it is checked
+# against the module bootstrap renders its prerequisite guidance from. Compares
+# committed text to committed code; no database.
+__tests__/bootstrap/readme-matches-bootstrap.test.ts
+
+# The documented self-host path must stay executable. Four defects found by
+# running the README on a clean Ubuntu machine; the runtime half of finding 4
+# lives in scripts/test/sql-file-access.sh. Reads committed text; no database.
+__tests__/setup/self-host-path.test.ts
+
+# The Phase 8 product default: an unconfigured Backenly is a self-hosted,
+# single-project deployment. Database-free on purpose - currentEdition() reads
+# one environment variable and never touches Prisma, and the suite deletes the
+# variable outright so it cannot pass on a leftover value from the runner.
+__tests__/edition/default-edition.test.ts
+
+# Building Backenly must not require an AI credential. lib/services/aiWorkspace.ts
+# constructed its OpenAI client at module scope, which made OPENAI_API_KEY a
+# BUILD-time requirement for the whole app; the Phase 8 unset-edition build job
+# is what exposed it. Database-free: it imports one module and reads one file.
+__tests__/edition/build-time-credentials.test.ts
+
+# WORKSPACE_DIR must move every workspace reader and writer together. Only
+# purge.ts honoured it before, and its own comment recorded the hazard: setting
+# the variable without changing the writers aimed project deletion at a
+# directory nothing writes to. Database-free: it writes a Prisma schema into a
+# temp dir and purges it, with all three purge roots redirected there.
+__tests__/workspace-paths/workspace-dir-contract.test.ts
+
+# Three Stage B suites and the credential-safety suite were added without being
+# named in any manifest, so verify-suite-accounting.ts failed: 188 categorised
+# against 192 canonical. None of them ran on a blocking job. All four were
+# checked the way the header asks, against the unroutable placeholder URL:
+# 9, 11, 6 and 9 tests, all passing, none skipped.
+__tests__/deployment/deploy-preflight.test.ts
+__tests__/deployment/standalone-env.test.ts
+__tests__/services/backup-credential-safety.test.ts
+__tests__/services/workspace-model-detection.test.ts
+
+# Two backups of one project in the same second must not share a path. The
+# minute-precision filename made the second dump overwrite the first and orphan
+# its row; seen on production 2026-09-07. Database-free: it calls one pure
+# function, including with the clock frozen.
+__tests__/services/backup-filename-uniqueness.test.ts
+
+# Native AWS S3 must count as configured. isS3Configured() required an endpoint
+# and static keys, which native AWS + an ECS Task Role have neither of, so the
+# S3 path was silently disabled at seven call sites and the storage constructor
+# threw outright. Database-free: pure config resolution.
+__tests__/storage/s3-native-aws-config.test.ts
+
+# A private bucket must never be handed out as a public URL base. With no
+# endpoint the old host comparison ran against '', so any STORAGE_S3_PUBLIC_URL
+# looked like a CDN. Database-free: reads env and builds a string.
+__tests__/storage/public-url-contract.test.ts
+__tests__/security/outbound-guard.test.ts
+__tests__/security/integration-credential-egress.test.ts
+
+# The self-host installer's .env editor. `npm run selfhost` is documented as
+# safe to rerun, so this asserts the two properties that pull against each
+# other: never overwrite a configured secret (a rerun must not sign out every
+# session or break a running PostgREST), and always overwrite a template
+# placeholder (.env.example ships a JWT_SECRET that is public knowledge, so
+# treating it as configured is worse than leaving the file empty). Pure string
+# handling, checked against the real .env.example.
+__tests__/selfhost/env-file.test.ts
+
+# The shared session hook behind the landing and navbar CTAs. Exercises the
+# module-level cache, in-flight request deduplication and the logged-out
+# fallback against a mocked fetch, so it never reaches Prisma. jsdom.
+__tests__/hooks/useUserSession.test.ts

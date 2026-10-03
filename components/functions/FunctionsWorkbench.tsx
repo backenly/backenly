@@ -19,13 +19,18 @@
  */
 
 import { useState, useEffect, useMemo, useCallback } from 'react'
-import { useRouter } from 'next/navigation'
+import Link from 'next/link'
 import {
-  Play, Trash2, Power, Clock, Check, AlertCircle, Loader2, Database,
-  UserPlus, RefreshCw, MousePointerClick, Globe, Plug2, Zap, ChevronRight,
-  AlertTriangle, Info, Search, Link2, KeyRound, Copy,
+  Play, Trash2, Power, Clock, Check, AlertCircle, Database,
+  UserPlus, RefreshCw, MousePointerClick, Globe, Zap, ChevronRight,
+  AlertTriangle, Info, Search, Link2, KeyRound, ChevronLeft, Plus, Cable, X,
 } from 'lucide-react'
-import { KitButton, KitConfirmDialog, EmptyState, KIT } from '@/components/inspector/kit'
+import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
+import {
+  AgentPrompt, BarDivider, CommandBar, CopyField, EmptyState, IconButton, INPUT_BASE, KIT, KitButton,
+  KitConfirmDialog, KitModal, KitTab, KitTabs, NoticeStrip, Spinner, StatusDot,
+} from '@/components/inspector/kit'
+import { FOCUS_INSET } from '@/components/console/tokens'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -105,22 +110,31 @@ function TriggerIcon({ kind, className = 'h-3 w-3' }: { kind: string; className?
   }
 }
 
-// Muted mono tints, no pill chrome: endpoints = sky, inserts = emerald,
-// updates/signup = violet, deletes = rose, schedules + manual = neutral.
+// The trigger is the one thing that tells two functions apart at a glance, so
+// only its icon carries a tint; the label stays neutral and readable.
 function getTriggerStyle(kind: string): string {
   switch (kind) {
-    case 'http': return 'text-sky-300/90'
-    case 'on_signup': return 'text-violet-300/90'
-    case 'on_db_insert': return 'text-emerald-300/90'
-    case 'on_db_update': return 'text-violet-300/90'
-    case 'on_db_delete': return 'text-rose-300/90'
-    case 'cron': return 'text-zinc-300'
+    case 'http': return 'text-sky-300/80'
+    case 'on_signup': return 'text-violet-300/80'
+    case 'on_db_insert': return 'text-emerald-300/80'
+    case 'on_db_update': return 'text-violet-300/80'
+    case 'on_db_delete': return 'text-rose-300/80'
     default: return 'text-zinc-500'
   }
 }
 
+const STATUS_TONE = { active: 'operational', inactive: 'paused', error: 'failed' } as const
+const STATUS_LABEL = { active: 'Active', inactive: 'Disabled', error: 'Errored' } as const
+
+/** Prompts for the New function dialog: what people actually ask for first. */
+const EXAMPLE_PROMPTS = [
+  'When a user signs up, send them a welcome email.',
+  'Add POST /checkout that validates the cart, creates an order and returns its id.',
+  'Every night at 02:00, delete sessions older than 30 days.',
+]
+
 function formatRelativeTime(dateStr: string | null): string {
-  if (!dateStr) return 'Never run'
+  if (!dateStr) return 'Never'
   const diffMs = Date.now() - new Date(dateStr).getTime()
   if (diffMs < 60_000) return 'just now'
   if (diffMs < 3_600_000) return `${Math.floor(diffMs / 60_000)}m ago`
@@ -214,8 +228,8 @@ function InvocationsTab({ projectId, functionId }: { projectId: string; function
 
   if (loading && logs.length === 0) {
     return (
-      <div className="flex items-center justify-center py-12">
-        <Loader2 className="h-4 w-4 animate-spin text-white/30" />
+      <div className="flex items-center justify-center py-16 text-zinc-500">
+        <Spinner className="h-4 w-4" />
       </div>
     )
   }
@@ -225,55 +239,61 @@ function InvocationsTab({ projectId, functionId }: { projectId: string; function
       <EmptyState
         icon={Clock}
         title="No invocations yet"
-        description="Runs appear here the moment this function fires, with its logs, duration, and any error."
+        description="Runs appear here the moment this function fires, with its logs, duration and any error."
       />
     )
   }
 
   return (
-    <div className={`divide-y ${KIT.divide}`}>
-      {logs.map((log) => (
-        <div key={log.id} className="px-4 py-3">
-          <div className="mb-1.5 flex items-center justify-between gap-3">
-            <div className="flex min-w-0 items-center gap-2">
-              {log.success ? (
-                <Check className="h-3 w-3 flex-shrink-0 text-emerald-400/80" />
-              ) : (
-                <AlertCircle className="h-3 w-3 flex-shrink-0 text-rose-300" />
-              )}
-              <span className={`font-mono text-[11px] font-medium ${log.success ? 'text-zinc-300' : 'text-rose-300'}`}>
-                {log.success ? 'success' : 'failed'}
-              </span>
-              <span className="font-mono text-[10px] text-zinc-600">{log.triggerType}</span>
+    <div>
+      <div className="grid h-[36px] grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-4 border-b border-white/[0.06] bg-[#0e0f11] px-5 text-[12px] font-medium text-zinc-500">
+        <span>Result</span>
+        <span className="w-16 text-right">Duration</span>
+        <span className="w-44 text-right">When</span>
+      </div>
+      <ol className="divide-y divide-white/[0.05]">
+        {logs.map((log) => (
+          <li key={log.id} className="px-5 py-3">
+            <div className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-4">
+              <div className="flex min-w-0 items-center gap-3">
+                {/* The log records whether the handler returned, not its HTTP status. */}
+                <StatusDot tone={log.success ? 'operational' : 'failed'} label={log.success ? 'Completed' : 'Failed'} />
+                <span className="truncate font-mono text-[12px] text-zinc-500">{log.triggerType}</span>
+              </div>
+              <span className="w-16 whitespace-nowrap text-right text-[12.5px] tabular-nums text-zinc-300">{log.durationMs} ms</span>
+              <time
+                dateTime={new Date(log.createdAt).toISOString()}
+                title={new Date(log.createdAt).toLocaleString()}
+                className="w-44 whitespace-nowrap text-right text-[12.5px] tabular-nums text-zinc-500"
+              >
+                {new Date(log.createdAt).toLocaleString(undefined, {
+                  month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit',
+                })}
+              </time>
             </div>
-            <div className="flex flex-shrink-0 items-center gap-3 font-mono text-[10.5px] tabular-nums text-zinc-600">
-              <span>{log.durationMs}ms</span>
-              <span>{new Date(log.createdAt).toLocaleString()}</span>
-            </div>
-          </div>
 
-          {log.logs.length > 0 && (
-            <div className="space-y-0.5">
-              {log.logs.map((line, i) => (
-                <div key={i} className="font-mono text-[11px] leading-5 text-zinc-500">
-                  <span className="mr-2 text-zinc-700">›</span>
-                  {line}
-                </div>
-              ))}
-            </div>
-          )}
-
-          {log.error && <div className="mt-1 font-mono text-[11px] text-rose-300">{log.error}</div>}
-        </div>
-      ))}
+            {(log.logs.length > 0 || log.error) && (
+              <div className="mt-2.5 rounded-[7px] border border-white/[0.06] bg-[#08090a] px-3 py-2">
+                {log.logs.map((line, i) => (
+                  <div key={i} className="whitespace-pre-wrap break-words font-mono text-[12px] leading-[19px] text-zinc-400">
+                    {line}
+                  </div>
+                ))}
+                {log.error && (
+                  <div className="whitespace-pre-wrap break-words font-mono text-[12px] leading-[19px] text-rose-300">{log.error}</div>
+                )}
+              </div>
+            )}
+          </li>
+        ))}
+      </ol>
 
       {logs.length >= limit && (
-        <button
-          onClick={() => setLimit((l) => l + 50)}
-          className="w-full py-2.5 text-[11.5px] text-zinc-500 transition-colors hover:text-zinc-300"
-        >
-          Load more
-        </button>
+        <div className="border-t border-white/[0.05] px-5 py-3">
+          <KitButton size="sm" variant="ghost" onClick={() => setLimit((l) => l + 50)} loading={loading}>
+            Load 50 more
+          </KitButton>
+        </div>
       )}
     </div>
   )
@@ -287,43 +307,39 @@ function RunResult({ result, onClose }: { result: TestRunResult; onClose: () => 
   const httpStatus: number | undefined = isHttp ? rv.status : undefined
   const httpBody = isHttp ? rv.body : rv
   const client4xx = httpStatus != null && httpStatus >= 400 && httpStatus < 500
+  // A 5xx is the handler failing, whatever the runner reported.
+  const server5xx = httpStatus != null && httpStatus >= 500
 
   // A plan-limit block is not a code failure — the function is fine, the quota
   // is the constraint.
   if (result.errorCode === 'PLAN_LIMIT_EXCEEDED') {
     return (
-      <div className="rounded-lg border border-white/[0.07] bg-black/25 p-3.5">
-        <div className="mb-2 flex items-center justify-between">
-          <span className="flex items-center gap-1.5 text-[11px] font-semibold text-violet-300">
-            <AlertTriangle className="h-3 w-3" />
-            Plan limit reached
-          </span>
-          <button onClick={onClose} className="text-[10.5px] text-zinc-600 transition-colors hover:text-zinc-400">
-            close
-          </button>
-        </div>
-        <p className="mb-2.5 text-[11.5px] leading-relaxed text-zinc-400">
-          {result.error} Your function code is fine. It wasn&apos;t run because the monthly invocation
-          quota is used up. It resets on the 1st.
+      <ResultFrame
+        tone="attention"
+        heading="Plan limit reached"
+        onClose={onClose}
+      >
+        <p className="text-[13px] leading-[20px] text-zinc-300">
+          {result.error} Your function code is fine. It wasn&apos;t run because this month&apos;s invocation quota is
+          used up, and it resets on the 1st.
         </p>
-        <a
-          href="/app/settings?tab=billing"
-          className="inline-flex items-center gap-1.5 text-[11px] font-medium text-violet-300 transition-colors hover:text-violet-200"
-        >
-          Upgrade for a higher quota →
-        </a>
-      </div>
+        {CLOUD_CONTROL_PLANE && (
+          <Link href="/app/billing" className="mt-3 inline-flex text-[13px] font-medium text-zinc-100 underline decoration-white/25 underline-offset-4 hover:decoration-white/60">
+            See plans with a higher quota
+          </Link>
+        )}
+      </ResultFrame>
     )
   }
 
-  // A 4xx from a handler means the endpoint WORKED and answered. Only thrown
-  // errors are real failures.
-  const headColor = !result.success ? 'text-rose-300' : client4xx ? 'text-violet-300' : 'text-emerald-300'
-  const headText = !result.success
-    ? 'Failed'
+  // A 4xx from a handler means the endpoint WORKED and answered. Thrown errors
+  // and 5xx responses are real failures.
+  const tone = !result.success || server5xx ? 'failed' : client4xx ? 'attention' : 'operational'
+  const heading = !result.success
+    ? 'Run failed'
     : httpStatus != null
-    ? `Returned HTTP ${httpStatus} · ${result.durationMs}ms`
-    : `Completed in ${result.durationMs}ms`
+    ? `Returned HTTP ${httpStatus}`
+    : 'Run completed'
 
   let bodyStr = ''
   if (httpBody != null) {
@@ -335,69 +351,82 @@ function RunResult({ result, onClose }: { result: TestRunResult; onClose: () => 
   }
 
   return (
-    <div className="rounded-lg border border-white/[0.07] bg-black/25 p-3.5">
-      <div className="mb-2.5 flex items-center justify-between">
-        <span className={`flex items-center gap-1.5 text-[11px] font-semibold ${headColor}`}>
-          {!result.success ? (
-            <AlertCircle className="h-3 w-3" />
-          ) : client4xx ? (
-            <AlertTriangle className="h-3 w-3" />
-          ) : (
-            <Check className="h-3 w-3" />
-          )}
-          {headText}
-        </span>
-        <button onClick={onClose} className="text-[10.5px] text-zinc-600 transition-colors hover:text-zinc-400">
-          close
-        </button>
-      </div>
-
+    <ResultFrame tone={tone} heading={heading} meta={`${result.durationMs} ms`} onClose={onClose}>
       {client4xx && (
-        <p className="mb-2 text-[10.5px] leading-relaxed text-violet-300/70">
+        <p className="mb-3 text-[13px] leading-[20px] text-zinc-400">
           {httpStatus === 400
-            ? 'The endpoint ran and validated its input. It needs required parameters this test run didn’t send, and will work when your app calls it with a real payload.'
+            ? 'The endpoint ran and validated its input. It needs parameters this test run didn’t send, and will answer normally when your app calls it with a real payload.'
             : httpStatus === 401 || httpStatus === 403
-            ? 'Test runs call the endpoint with your project’s admin credentials. This response means the endpoint additionally checks ownership of specific records or a credential this test didn’t carry. The auth gate itself is working.'
+            ? 'Test runs call the endpoint with your project’s admin credentials. This response means the endpoint also checks ownership of specific records, or a credential this run didn’t carry. The auth gate itself is working.'
             : httpStatus === 404
             ? 'The endpoint ran correctly. The test run’s synthetic user has no matching records yet, so it answered 404 as designed.'
-            : `The endpoint ran and answered HTTP ${httpStatus}, a client-side response from its own validation logic, not a code failure.`}
+            : `The endpoint ran and answered HTTP ${httpStatus}, a response from its own validation logic rather than a code failure.`}
         </p>
       )}
 
-      {result.logs.length > 0 && (
-        <div className="space-y-0.5">
+      {(result.logs.length > 0 || bodyStr || result.error) && (
+        <div className="rounded-[7px] border border-white/[0.06] bg-[#08090a] px-3 py-2.5">
           {result.logs.map((log, i) => (
-            <div key={i} className="font-mono text-[11px] leading-5 text-zinc-400">
-              <span className="mr-2 text-zinc-700">›</span>
+            <div key={i} className="whitespace-pre-wrap break-words font-mono text-[12px] leading-[19px] text-zinc-400">
               {log}
             </div>
           ))}
+          {bodyStr && (
+            <pre className={`max-h-56 overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-[19px] text-zinc-300 ${result.logs.length ? 'mt-2 border-t border-white/[0.06] pt-2' : ''}`}>
+              {bodyStr.slice(0, 2000)}
+              {bodyStr.length > 2000 ? '\n…(truncated)' : ''}
+            </pre>
+          )}
+          {result.error && (
+            <div className="whitespace-pre-wrap break-words font-mono text-[12px] leading-[19px] text-rose-300">{result.error}</div>
+          )}
         </div>
       )}
+    </ResultFrame>
+  )
+}
 
-      {bodyStr && (
-        <pre className="mt-2 max-h-48 overflow-x-auto whitespace-pre-wrap break-words rounded-md border border-white/[0.08] bg-black/30 px-3 py-2 font-mono text-[11px] text-zinc-400">
-          {bodyStr.slice(0, 2000)}
-          {bodyStr.length > 2000 ? '\n…(truncated)' : ''}
-        </pre>
-      )}
-
-      {result.error && <div className="mt-1 font-mono text-[11px] text-rose-300">{result.error}</div>}
-    </div>
+function ResultFrame({
+  tone,
+  heading,
+  meta,
+  onClose,
+  children,
+}: {
+  tone: 'operational' | 'attention' | 'failed'
+  heading: string
+  meta?: string
+  onClose: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <section
+      aria-live="polite"
+      className="rounded-[10px] border border-white/[0.08] bg-[#111214] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
+    >
+      <div className="flex h-[40px] items-center justify-between gap-3 border-b border-white/[0.06] pl-4 pr-1.5">
+        <div className="flex min-w-0 items-center gap-3">
+          <StatusDot tone={tone} label={<span className="text-[13px] font-medium">{heading}</span>} />
+          {meta && <span className="text-[12px] tabular-nums text-zinc-500">{meta}</span>}
+        </div>
+        <IconButton icon={X} label="Dismiss result" onClick={onClose} />
+      </div>
+      <div className="p-4">{children}</div>
+    </section>
   )
 }
 
 // ─── Workbench ───────────────────────────────────────────────────────────────
 
 export function FunctionsWorkbench({ projectId }: { projectId: string }) {
-  const router = useRouter()
-
   const [functions, setFunctions] = useState<AiFunction[]>([])
   const [loading, setLoading] = useState(true)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [tab, setTab] = useState<'overview' | 'invocations'>('overview')
   const [filter, setFilter] = useState('all')
   const [query, setQuery] = useState('')
+  const [mobilePane, setMobilePane] = useState<'list' | 'detail'>('list')
+  const [showNew, setShowNew] = useState(false)
 
   const [cleaningUp, setCleaningUp] = useState(false)
   const [runningAll, setRunningAll] = useState(false)
@@ -489,6 +518,8 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
       })
       const data = await res.json()
       setRunResult(data.result)
+      // The run is recorded server-side; refresh so Runs and Last run move.
+      fetchFunctions()
     } catch (err: any) {
       setRunResult({ success: false, logs: [], error: err.message, durationMs: 0 })
     } finally {
@@ -583,90 +614,65 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
   // ── Render ───────────────────────────────────────────────────────────────
 
   const endpointUrl = selected ? getEndpointUrl(selected) : null
+  const endpointMethod = selected ? (selected.triggerTable || '').split(/\s+/)[0].toUpperCase() : ''
 
   return (
-    <div className={`flex h-[calc(100vh-48px)] flex-col overflow-hidden ${KIT.bg}`}>
+    <div className={`console-fill flex flex-col overflow-hidden ${KIT.bg}`}>
 
       {/* ── Command bar ───────────────────────────────────── */}
-      <div className="flex h-11 flex-shrink-0 items-center justify-between gap-4 border-b border-white/[0.06] px-4">
-        <div className="flex min-w-0 items-center gap-2.5">
-          <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-600">
-            <Zap className="h-3 w-3" />
-            Inspector
-          </span>
-          <span className="h-3 w-px bg-white/10" />
-          <h1 className="text-[13px] font-semibold text-zinc-100">Functions</h1>
-          <span
-            className={`inline-flex items-center gap-1.5 font-mono text-[10.5px] font-medium ${
-              errorFns.length > 0 ? 'text-rose-300' : activeFns.length > 0 ? 'text-emerald-300/90' : 'text-zinc-400'
-            }`}
-          >
-            <span
-              className={`h-[5px] w-[5px] rounded-full ${
-                errorFns.length > 0 ? 'bg-rose-400' : activeFns.length > 0 ? 'bg-emerald-400' : 'bg-zinc-500'
-              }`}
-            />
-            {errorFns.length > 0 ? `${errorFns.length} errored` : activeFns.length > 0 ? 'operational' : 'idle'}
-          </span>
-          {functions.length > 0 && (
-            <span className="font-mono text-[10.5px] tabular-nums text-zinc-500">{functions.length}</span>
-          )}
-        </div>
+      <CommandBar
+        title="Functions"
+        context={
+          functions.length > 0 ? (
+            <>
+              <StatusDot
+                tone={activeFns.length > 0 ? 'operational' : 'paused'}
+                label={<span className="tabular-nums">{activeFns.length} of {functions.length} active</span>}
+              />
+              {errorFns.length > 0 && <StatusDot tone="failed" label={`${errorFns.length} errored`} />}
+              <span className="hidden tabular-nums sm:inline">
+                {totalRuns.toLocaleString()} {totalRuns === 1 ? 'run' : 'runs'}
+              </span>
+            </>
+          ) : undefined
+        }
+      >
+        <KitButton size="sm" icon={Plus} onClick={() => setShowNew(true)}>
+          New function
+        </KitButton>
+      </CommandBar>
 
-        <div className="flex flex-shrink-0 items-center gap-3">
-          <span className="hidden font-mono text-[10.5px] tabular-nums text-zinc-600 sm:inline">
-            {activeFns.length} active<span className="text-zinc-700"> · </span>
-            {totalRuns.toLocaleString()} run{totalRuns === 1 ? '' : 's'}
-          </span>
-          <button
-            onClick={() => router.push(`/app/projects/${projectId}/connect`)}
-            className="inline-flex h-7 items-center gap-1.5 rounded-lg bg-white px-2.5 text-[11.5px] font-semibold text-black transition-colors hover:bg-zinc-200 focus:outline-none focus:ring-2 focus:ring-violet-400/50"
-          >
-            <Plug2 className="h-3 w-3" />
-            New function
-          </button>
-        </div>
-      </div>
-
-      {/* Advisories — flush strips, not floating cards */}
-      {schemaFns.length > 0 && (
-        <div className="flex h-9 flex-shrink-0 items-center gap-2.5 border-b border-white/[0.06] px-4">
-          <Info className="h-3.5 w-3.5 flex-shrink-0 text-zinc-600" />
-          <p className="min-w-0 flex-1 truncate text-[11.5px] text-zinc-500">
-            <span className="font-medium text-zinc-300">
-              {schemaFns.length} auto-generated validation-schema endpoint{schemaFns.length !== 1 ? 's' : ''}
-            </span>
-            <span className="text-zinc-600">. Safe to keep; they return live form-validation schemas.</span>
-          </p>
-          <button
-            onClick={() => setConfirmCleanup(true)}
-            disabled={cleaningUp}
-            className="flex flex-shrink-0 items-center gap-1 rounded-md border border-white/[0.08] px-2.5 py-1 text-[11px] font-medium text-zinc-400 transition-colors hover:border-white/[0.12] hover:bg-white/[0.04] hover:text-zinc-200 disabled:opacity-50"
-          >
-            {cleaningUp ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
-            {cleaningUp ? 'Deleting…' : 'Delete all'}
-          </button>
-        </div>
-      )}
-
+      {/* Advisories — flush strips under the bar, never floating cards. */}
       {untestedActiveFns.length > 0 && (
-        <div className="flex h-9 flex-shrink-0 items-center gap-2.5 border-b border-white/[0.06] px-4">
-          <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 text-violet-300" />
-          <p className="min-w-0 flex-1 truncate text-[11.5px] text-zinc-400">
-            <span className="font-semibold text-zinc-200">
-              {untestedActiveFns.length} active function{untestedActiveFns.length !== 1 ? 's' : ''} never tested
-            </span>
-            <span className="text-zinc-600">. Verify at least one run before going live.</span>
-          </p>
-          <button
-            onClick={handleRunAllUntested}
-            disabled={runningAll}
-            className="flex flex-shrink-0 items-center gap-1 rounded-md border border-white/[0.14] bg-white/[0.06] px-2.5 py-1 text-[11px] font-semibold text-zinc-100 transition-colors hover:bg-white/[0.10] disabled:opacity-50"
-          >
-            {runningAll ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
-            {runningAll ? 'Running…' : 'Run all'}
-          </button>
-        </div>
+        <NoticeStrip
+          icon={AlertCircle}
+          tone="attention"
+          action={
+            <KitButton size="sm" icon={Play} loading={runningAll} onClick={handleRunAllUntested}>
+              {runningAll ? 'Running…' : 'Run all once'}
+            </KitButton>
+          }
+        >
+          <strong>
+            {untestedActiveFns.length} active {untestedActiveFns.length === 1 ? 'function has' : 'functions have'} never run.
+          </strong>{' '}
+          Run each once before your app depends on it.
+        </NoticeStrip>
+      )}
+      {schemaFns.length > 0 && (
+        <NoticeStrip
+          icon={Info}
+          action={
+            <KitButton size="sm" variant="ghost" icon={Trash2} loading={cleaningUp} onClick={() => setConfirmCleanup(true)}>
+              {cleaningUp ? 'Removing…' : 'Remove all'}
+            </KitButton>
+          }
+        >
+          <strong>
+            {schemaFns.length} auto-generated validation-schema {schemaFns.length === 1 ? 'endpoint' : 'endpoints'}.
+          </strong>{' '}
+          <span className="text-zinc-500">Safe to keep: they serve live form-validation schemas to your frontend.</span>
+        </NoticeStrip>
       )}
 
       {/* ── Workbench ─────────────────────────────────────── */}
@@ -674,46 +680,48 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
         <div className="absolute inset-0 flex">
 
           {/* ── Rail ───────────────────────────────────── */}
-          <div className={`flex w-[280px] flex-shrink-0 flex-col border-r border-white/[0.06] ${KIT.rail}`}>
-            <div className="flex h-10 flex-shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] px-3">
-              <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">Functions</span>
-              <button
+          <div className={`w-full flex-shrink-0 flex-col border-r border-white/[0.06] md:w-[288px] ${KIT.rail} ${mobilePane === 'list' ? 'flex' : 'hidden md:flex'}`}>
+            <div className="flex h-[44px] flex-shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] pl-4 pr-2">
+              <span className="text-[13px] font-medium text-zinc-200">All functions</span>
+              <IconButton
+                icon={RefreshCw}
+                label="Refresh"
                 onClick={() => { setLoading(true); fetchFunctions() }}
-                className="rounded-md p-1.5 text-zinc-600 transition-colors hover:bg-white/[0.04] hover:text-zinc-200"
-                title="Refresh"
-              >
-                <RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} />
-              </button>
+                className={loading ? '[&_svg]:animate-spin' : ''}
+              />
             </div>
 
             {functions.length > 0 && (
               <div className="flex-shrink-0 space-y-2 border-b border-white/[0.06] p-2">
                 <div className="relative">
-                  <Search className="absolute left-2.5 top-1/2 h-3 w-3 -translate-y-1/2 text-zinc-600" />
+                  <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-600" />
                   <input
-                    type="text"
+                    type="search"
+                    aria-label="Search functions"
                     placeholder="Search functions…"
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
-                    className="h-7 w-full rounded-lg border border-white/[0.07] bg-[#0f1015] pl-7 pr-3 text-[11.5px] text-zinc-300 transition-colors placeholder:text-zinc-600 focus:border-violet-400/40 focus:outline-none focus:ring-2 focus:ring-violet-400/15"
+                    className={`${INPUT_BASE} h-[30px] pl-8 pr-2.5`}
                   />
                 </div>
-                <div className="flex flex-wrap items-center gap-1">
+                <div role="radiogroup" aria-label="Filter by trigger" className="flex flex-wrap items-center gap-1">
                   {TRIGGER_FILTERS.map((f) => {
                     const count = filterCounts[f.key] ?? 0
                     if (f.key !== 'all' && count === 0) return null
-                    const active = filter === f.key
+                    const on = filter === f.key
                     return (
                       <button
                         key={f.key}
+                        type="button"
+                        role="radio"
+                        aria-checked={on}
                         onClick={() => setFilter(f.key)}
-                        className={`rounded-md border px-2 py-0.5 text-[10.5px] font-medium transition-colors ${
-                          active
-                            ? 'border-white/[0.14] bg-white/[0.08] text-zinc-100'
-                            : 'border-white/[0.07] text-zinc-500 hover:border-white/[0.10] hover:text-zinc-300'
+                        className={`inline-flex h-[24px] items-center gap-1.5 rounded-[6px] px-2 text-[12px] font-medium transition-colors ${FOCUS_INSET} ${
+                          on ? 'bg-white/[0.09] text-zinc-50' : 'text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-200'
                         }`}
                       >
-                        {f.label} <span className="tabular-nums opacity-50">{count}</span>
+                        {f.label}
+                        <span className={`tabular-nums ${on ? 'text-zinc-400' : 'text-zinc-600'}`}>{count}</span>
                       </button>
                     )
                   })}
@@ -723,101 +731,101 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
 
             <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden py-1.5">
               {loading && functions.length === 0 ? (
-                <div className="flex items-center justify-center py-8">
-                  <Loader2 className="h-4 w-4 animate-spin text-white/30" />
+                <div className="space-y-1 px-2">
+                  {[0, 1, 2, 3].map((i) => (
+                    <div key={i} className="flex items-center gap-3 rounded-[7px] px-2.5 py-2.5">
+                      <span className="h-[6px] w-[6px] rounded-full bg-white/[0.08]" />
+                      <div className="flex-1 space-y-1.5">
+                        <span className="block h-2.5 w-2/3 animate-pulse rounded bg-white/[0.06]" />
+                        <span className="block h-2 w-1/3 animate-pulse rounded bg-white/[0.04]" />
+                      </div>
+                    </div>
+                  ))}
                 </div>
               ) : functions.length === 0 ? (
-                <div className="space-y-3 px-4 py-6 text-center">
-                  <Zap className="mx-auto h-4 w-4 text-zinc-600" />
-                  <div>
-                    <p className="mb-0.5 text-[12px] font-semibold text-zinc-200">No functions yet</p>
-                    <p className="text-[11px] leading-relaxed text-zinc-500">
-                      Tell your coding agent what should happen and Backenly wires it up.
-                    </p>
-                  </div>
+                <div className="px-4 py-5">
+                  <p className="text-[13px] font-medium text-zinc-200">No functions yet</p>
+                  <p className="mt-1 text-[12.5px] leading-[19px] text-zinc-500">
+                    Tell your coding agent what should happen and Backenly wires it up.
+                  </p>
                 </div>
               ) : visibleFunctions.length === 0 ? (
-                <p className="px-4 py-6 text-center text-[11.5px] leading-relaxed text-zinc-600">
+                <p className="px-4 py-5 text-[12.5px] leading-[19px] text-zinc-500">
                   No function matches{query.trim() ? ` “${query.trim()}”` : ' this filter'}.
                 </p>
               ) : (
-                <div className="space-y-px px-2">
+                <ul className="space-y-px px-2">
                   {visibleFunctions.map((fn) => {
                     const active = selectedId === fn.id
                     const kind = getTriggerKind(fn)
                     return (
-                      <div
-                        key={fn.id}
-                        onClick={() => setSelectedId(fn.id)}
-                        className={`group flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-[7px] transition-colors ${
-                          active ? 'bg-white/[0.05]' : 'hover:bg-white/[0.03]'
-                        } ${fn.status === 'inactive' ? 'opacity-55' : ''}`}
-                      >
-                        <div
-                          className={`h-[5px] w-[5px] flex-shrink-0 rounded-full ${
-                            fn.status === 'active'
-                              ? 'bg-emerald-400'
-                              : fn.status === 'error'
-                              ? 'bg-rose-400'
-                              : 'bg-zinc-700'
+                      <li key={fn.id}>
+                        <button
+                          type="button"
+                          aria-current={active ? 'true' : undefined}
+                          onClick={() => { setSelectedId(fn.id); setMobilePane('detail') }}
+                          className={`group flex w-full items-center gap-3 rounded-[7px] px-2.5 py-2 text-left transition-colors ${FOCUS_INSET} ${
+                            active ? 'bg-white/[0.07]' : 'hover:bg-white/[0.04]'
                           }`}
-                          title={fn.status}
-                        />
-                        <div className="min-w-0 flex-1">
-                          <div
-                            className={`truncate font-mono text-[12px] ${active ? 'text-zinc-50' : 'text-zinc-300'}`}
-                          >
-                            {fn.name}
-                          </div>
-                          <div
-                            className={`mt-0.5 flex items-center gap-1 truncate font-mono text-[10px] ${getTriggerStyle(kind)}`}
-                          >
-                            <TriggerIcon kind={kind} className="h-2.5 w-2.5 flex-shrink-0" />
-                            <span className="truncate">{getTriggerLabel(fn)}</span>
-                          </div>
-                        </div>
-                        <ChevronRight
-                          className={`h-3 w-3 flex-shrink-0 transition-colors ${
-                            active ? 'text-zinc-500' : 'text-transparent group-hover:text-zinc-700'
-                          }`}
-                        />
-                      </div>
+                        >
+                          <StatusDot tone={STATUS_TONE[fn.status] ?? 'neutral'} className="flex-shrink-0" />
+                          <span className="min-w-0 flex-1">
+                            <span
+                              className={`block truncate font-mono text-[12.5px] leading-[18px] ${
+                                active ? 'text-zinc-50' : fn.status === 'inactive' ? 'text-zinc-500' : 'text-zinc-200'
+                              }`}
+                            >
+                              {fn.name}
+                            </span>
+                            <span className="mt-0.5 flex items-center gap-1.5 truncate text-[12px] leading-[16px] text-zinc-500">
+                              <TriggerIcon kind={kind} className={`h-3 w-3 flex-shrink-0 ${getTriggerStyle(kind)}`} />
+                              <span className="truncate">{getTriggerLabel(fn)}</span>
+                            </span>
+                          </span>
+                          <ChevronRight
+                            className={`h-3.5 w-3.5 flex-shrink-0 md:hidden ${active ? 'text-zinc-500' : 'text-zinc-700'}`}
+                          />
+                        </button>
+                      </li>
                     )
                   })}
-                </div>
+                </ul>
               )}
             </div>
 
             {functions.length > 0 && (
-              <div className="flex h-7 flex-shrink-0 items-center border-t border-white/[0.06] px-3 font-mono text-[10.5px] tabular-nums text-zinc-600">
+              <div className="flex h-[36px] flex-shrink-0 items-center border-t border-white/[0.06] px-4 text-[12px] tabular-nums text-zinc-500">
                 {query.trim() || filter !== 'all'
                   ? `${visibleFunctions.length} of ${functions.length}`
-                  : `${functions.length} function${functions.length === 1 ? '' : 's'}`}
+                  : `${functions.length} ${functions.length === 1 ? 'function' : 'functions'}`}
               </div>
             )}
           </div>
 
           {/* ── Detail ─────────────────────────────────── */}
-          <div className="flex min-w-0 flex-1 flex-col">
+          <div className={`min-w-0 flex-1 flex-col ${mobilePane === 'detail' ? 'flex' : 'hidden md:flex'}`}>
             {!selected ? (
-              <div className="flex h-full flex-col items-center justify-center px-8">
+              <div className="flex h-full flex-col items-center justify-center overflow-y-auto px-6">
                 <EmptyState
                   icon={Zap}
                   title={functions.length === 0 ? 'No functions yet' : 'Select a function'}
                   description={
                     functions.length === 0
-                      ? 'Tell your connected coding agent what should happen, like a welcome email on signup or a webhook on new orders. Functions run automatically, no deployment needed.'
-                      : 'Pick a function from the list to see its trigger, endpoint, and invocation history.'
+                      ? 'Functions run your backend logic: a welcome email on signup, a webhook on new orders, an endpoint your app calls. Your coding agent writes them; they run without a deploy.'
+                      : 'Pick a function to see its trigger, endpoint and invocation history.'
                   }
                   action={
                     functions.length === 0 ? (
-                      <KitButton
-                        variant="primary"
-                        icon={Plug2}
-                        onClick={() => router.push(`/app/projects/${projectId}/connect`)}
-                      >
-                        Create with your agent
-                      </KitButton>
+                      <div className="flex w-full flex-col items-center gap-4">
+                        <AgentPrompt prompt={EXAMPLE_PROMPTS[0]} />
+                        <Link
+                          href={`/app/projects/${projectId}/connect`}
+                          className="inline-flex h-[32px] items-center gap-1.5 rounded-[7px] border border-white/[0.10] bg-white/[0.04] px-3 text-[13px] font-medium text-zinc-100 transition-colors hover:bg-white/[0.08]"
+                        >
+                          <Cable className="h-3.5 w-3.5" />
+                          Connect your agent
+                        </Link>
+                      </div>
                     ) : undefined
                   }
                 />
@@ -825,167 +833,135 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
             ) : (
               <>
                 {/* Toolbar */}
-                <div className="flex h-10 flex-shrink-0 items-center justify-between gap-3 border-b border-white/[0.06] px-4">
-                  <div className="flex min-w-0 items-baseline gap-2">
-                    <h2 className="truncate font-mono text-[13px] font-medium text-zinc-100">{selected.name}</h2>
-                    <span className="whitespace-nowrap font-mono text-[11px] tabular-nums text-zinc-500">
-                      {selected.runCount.toLocaleString()} run{selected.runCount === 1 ? '' : 's'}
-                    </span>
+                <div className="flex h-[44px] flex-shrink-0 items-center justify-between gap-3 border-b border-white/[0.06] px-3 sm:px-4">
+                  <div className="flex min-w-0 items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setMobilePane('list')}
+                      className="-ml-1 flex h-[32px] w-[32px] flex-shrink-0 items-center justify-center rounded-[7px] bg-white/[0.04] text-zinc-200 transition-colors hover:bg-white/[0.07] md:hidden"
+                      aria-label="Back to functions"
+                    >
+                      <ChevronLeft className="h-4 w-4" />
+                    </button>
+                    <h2 className="truncate font-mono text-[13px] font-medium text-zinc-50">{selected.name}</h2>
+                    <StatusDot
+                      tone={STATUS_TONE[selected.status] ?? 'neutral'}
+                      label={STATUS_LABEL[selected.status] ?? selected.status}
+                      className="hidden sm:inline-flex"
+                    />
                   </div>
-                  <div className="flex flex-shrink-0 items-center gap-0.5">
+                  <div className="flex flex-shrink-0 items-center gap-1">
                     {isAdminGated(selected) && (
-                      <button
+                      <IconButton
+                        icon={copied === 'adminkey' ? Check : KeyRound}
+                        label={copied === 'adminkey' ? 'Admin key copied' : 'Copy admin key (sent as x-admin-key)'}
                         onClick={copyAdminKey}
-                        title="Copy admin key (send as x-admin-key header)"
-                        className={`rounded-md p-1.5 transition-colors ${
-                          copied === 'adminkey'
-                            ? 'bg-emerald-500/[0.08] text-emerald-300'
-                            : 'text-zinc-600 hover:bg-white/[0.04] hover:text-zinc-100'
-                        }`}
-                      >
-                        {copied === 'adminkey' ? <Check className="h-3.5 w-3.5" /> : <KeyRound className="h-3.5 w-3.5" />}
-                      </button>
+                        className={copied === 'adminkey' ? '!text-emerald-300' : ''}
+                      />
                     )}
                     {endpointUrl && (
-                      <button
+                      <IconButton
+                        icon={copied === 'url' ? Check : Link2}
+                        label={copied === 'url' ? 'Endpoint URL copied' : 'Copy endpoint URL'}
                         onClick={() => copy(endpointUrl, 'url')}
-                        title="Copy endpoint URL"
-                        className={`rounded-md p-1.5 transition-colors ${
-                          copied === 'url'
-                            ? 'bg-emerald-500/[0.08] text-emerald-300'
-                            : 'text-zinc-600 hover:bg-white/[0.04] hover:text-zinc-100'
-                        }`}
-                      >
-                        {copied === 'url' ? <Check className="h-3.5 w-3.5" /> : <Link2 className="h-3.5 w-3.5" />}
-                      </button>
+                        className={copied === 'url' ? '!text-emerald-300' : ''}
+                      />
                     )}
-                    <button
+                    <IconButton
+                      icon={Power}
+                      label={selected.status === 'inactive' ? 'Enable function' : 'Disable function'}
                       onClick={() => handleToggle(selected)}
-                      title={selected.status === 'inactive' ? 'Enable' : 'Disable'}
-                      className={`rounded-md p-1.5 transition-colors ${
-                        selected.status === 'active'
-                          ? 'text-emerald-300 hover:bg-emerald-500/[0.08]'
-                          : 'text-zinc-600 hover:bg-white/[0.04] hover:text-zinc-100'
-                      }`}
-                    >
-                      <Power className="h-3.5 w-3.5" />
-                    </button>
-                    <button
-                      onClick={() => setConfirmDelete(selected)}
-                      title="Delete"
-                      className="rounded-md p-1.5 text-zinc-600 transition-colors hover:bg-rose-500/[0.08] hover:text-rose-300"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
-                    <span className="mx-1 h-3 w-px bg-white/10" />
-                    <button
+                      active={selected.status !== 'inactive'}
+                    />
+                    <IconButton icon={Trash2} label="Delete function" onClick={() => setConfirmDelete(selected)} className="hover:!text-rose-300" />
+                    <BarDivider />
+                    <KitButton
+                      size="sm"
+                      variant="primary"
+                      icon={Play}
+                      loading={running}
                       onClick={() => handleRun(selected)}
-                      disabled={running || selected.status === 'inactive'}
-                      className="inline-flex h-7 items-center gap-1.5 rounded-lg bg-white px-2.5 text-[11.5px] font-semibold text-black transition-colors hover:bg-zinc-200 focus:outline-none focus:ring-2 focus:ring-violet-400/50 disabled:cursor-not-allowed disabled:opacity-40"
+                      disabled={selected.status === 'inactive'}
+                      title={selected.status === 'inactive' ? 'Enable the function to run it' : 'Run it once with an empty event'}
                     >
-                      {running ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
                       {running ? 'Running…' : 'Test run'}
-                    </button>
+                    </KitButton>
                   </div>
                 </div>
 
                 {/* Tabs */}
-                <div className="flex h-9 flex-shrink-0 items-center gap-0.5 border-b border-white/[0.06] px-3">
-                  {([
-                    ['overview', 'Overview'],
-                    ['invocations', 'Invocations'],
-                  ] as const).map(([key, label]) => (
-                    <button
-                      key={key}
-                      onClick={() => setTab(key)}
-                      className={`-mb-px border-b-2 px-3 py-2 text-[12px] font-medium transition-colors focus:outline-none ${
-                        tab === key
-                          ? 'border-violet-400 text-zinc-50'
-                          : 'border-transparent text-zinc-500 hover:text-zinc-200'
-                      }`}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
+                <KitTabs className="flex-shrink-0 px-3 sm:px-4">
+                  <KitTab active={tab === 'overview'} onClick={() => setTab('overview')}>Overview</KitTab>
+                  <KitTab active={tab === 'invocations'} onClick={() => setTab('invocations')} count={selected.runCount}>
+                    Invocations
+                  </KitTab>
+                </KitTabs>
 
                 {/* Tab body */}
                 <div className="min-h-0 flex-1 overflow-y-auto">
                   {tab === 'overview' ? (
-                    <div className="space-y-4 p-4">
+                    <div className="max-w-[880px] space-y-6 px-4 py-5 sm:px-5">
                       {selected.description && (
-                        <p className="max-w-3xl text-[12.5px] leading-5 text-zinc-400">{selected.description}</p>
+                        <p className="max-w-[72ch] text-[13px] leading-[20px] text-zinc-300 [text-wrap:pretty]">{selected.description}</p>
                       )}
 
                       {selected.status === 'error' && selected.lastError && (
-                        <div className="rounded-lg border border-rose-500/15 bg-rose-500/[0.05] px-3 py-2.5 font-mono text-[11px] leading-5 text-rose-300/90">
-                          {selected.lastError}
+                        <div className="rounded-[10px] border border-rose-400/20 bg-rose-500/[0.05] px-4 py-3">
+                          <p className="text-[12px] font-medium text-rose-200">Last error</p>
+                          <p className="mt-1 whitespace-pre-wrap break-words font-mono text-[12px] leading-[19px] text-rose-300/90">
+                            {selected.lastError}
+                          </p>
                         </div>
                       )}
 
                       {runResult && <RunResult result={runResult} onClose={() => setRunResult(null)} />}
 
                       {/* Contract */}
-                      <dl className={`overflow-hidden rounded-lg border ${KIT.border} divide-y ${KIT.divide}`}>
-                        {[
-                          ['Trigger', getTriggerLabel(selected)],
-                          ['Status', selected.status],
+                      <dl className="overflow-hidden rounded-[10px] border border-white/[0.07] bg-[#111214]">
+                        {([
+                          ['Trigger', (
+                            <span key="t" className="inline-flex items-center gap-1.5">
+                              <TriggerIcon kind={getTriggerKind(selected)} className={`h-3.5 w-3.5 ${getTriggerStyle(getTriggerKind(selected))}`} />
+                              {getTriggerLabel(selected)}
+                            </span>
+                          )],
+                          ['Status', (
+                            <StatusDot key="s" tone={STATUS_TONE[selected.status] ?? 'neutral'} label={STATUS_LABEL[selected.status] ?? selected.status} />
+                          )],
                           ['Runs', selected.runCount.toLocaleString()],
                           ['Last run', formatRelativeTime(selected.lastRun)],
                           ['Created', new Date(selected.createdAt).toLocaleString()],
-                        ].map(([label, value]) => (
-                          <div key={label} className="flex items-baseline justify-between gap-4 px-3.5 py-2.5">
-                            <dt className="flex-shrink-0 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">
-                              {label}
-                            </dt>
-                            <dd
-                              className={`min-w-0 truncate text-right font-mono text-[11.5px] tabular-nums ${
-                                label === 'Status'
-                                  ? selected.status === 'active'
-                                    ? 'text-emerald-300/90'
-                                    : selected.status === 'error'
-                                    ? 'text-rose-300'
-                                    : 'text-zinc-500'
-                                  : 'text-zinc-300'
-                              }`}
-                            >
-                              {value}
-                            </dd>
+                        ] as Array<[string, React.ReactNode]>).map(([label, value], i) => (
+                          <div
+                            key={label}
+                            className={`grid grid-cols-[120px_minmax(0,1fr)] items-center gap-4 px-4 py-2.5 ${i > 0 ? 'border-t border-white/[0.05]' : ''}`}
+                          >
+                            <dt className="text-[13px] text-zinc-500">{label}</dt>
+                            <dd className="min-w-0 truncate text-[13px] tabular-nums text-zinc-200">{value}</dd>
                           </div>
                         ))}
                       </dl>
 
                       {/* Endpoint */}
                       {endpointUrl && (
-                        <div>
-                          <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">
-                            Endpoint
-                          </p>
-                          <div className="flex items-center gap-1.5">
-                            <code className="min-w-0 flex-1 truncate rounded-md border border-white/[0.06] bg-[#0f1015] px-2.5 py-2 font-mono text-[11px] text-zinc-400">
-                              <span className="text-sky-300/90">
-                                {(selected.triggerTable || '').split(/\s+/)[0].toUpperCase()}
-                              </span>{' '}
-                              {endpointUrl}
-                            </code>
-                            <button
-                              onClick={() => copy(endpointUrl, 'url2')}
-                              className="flex-shrink-0 rounded-md p-2 text-zinc-600 transition-colors hover:bg-white/[0.04] hover:text-zinc-100"
-                              title="Copy endpoint URL"
-                            >
-                              {copied === 'url2' ? (
-                                <Check className="h-3.5 w-3.5 text-emerald-300" />
-                              ) : (
-                                <Copy className="h-3.5 w-3.5" />
-                              )}
-                            </button>
-                          </div>
+                        <section>
+                          <h3 className="mb-2 text-[13px] font-medium text-zinc-200">Endpoint</h3>
+                          <CopyField
+                            value={endpointUrl}
+                            display={
+                              <>
+                                <span className="mr-2 text-sky-300/90">{endpointMethod}</span>
+                                {endpointUrl}
+                              </>
+                            }
+                          />
                           {isAdminGated(selected) && (
-                            <p className="mt-1.5 text-[11px] leading-snug text-zinc-600">
-                              Admin-gated. Send the project admin key as an <code className="font-mono text-zinc-500">x-admin-key</code> header.
+                            <p className="mt-2 text-[12.5px] leading-[19px] text-zinc-500">
+                              Admin-gated: send the project admin key as the{' '}
+                              <code className="font-mono text-zinc-300">x-admin-key</code> header.
                             </p>
                           )}
-                        </div>
+                        </section>
                       )}
                     </div>
                   ) : (
@@ -997,6 +973,33 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
           </div>
         </div>
       </div>
+
+      {/* New function: created by the agent, so this is the sentence to send it. */}
+      <KitModal
+        open={showNew}
+        onClose={() => setShowNew(false)}
+        title="New function"
+        description="Functions are written by your coding agent and run without a deploy. Describe what should happen; these are good first asks."
+        width="max-w-lg"
+        footer={
+          <>
+            <KitButton variant="ghost" onClick={() => setShowNew(false)}>Close</KitButton>
+            <Link
+              href={`/app/projects/${projectId}/connect`}
+              className="inline-flex h-[32px] items-center gap-1.5 rounded-[7px] bg-white px-3 text-[13px] font-medium text-zinc-950 transition-colors hover:bg-zinc-200"
+            >
+              <Cable className="h-3.5 w-3.5" />
+              Connect your agent
+            </Link>
+          </>
+        }
+      >
+        <div className="space-y-2">
+          {EXAMPLE_PROMPTS.map((p) => (
+            <AgentPrompt key={p} prompt={p} />
+          ))}
+        </div>
+      </KitModal>
 
       {/* Dialogs */}
       <KitConfirmDialog
@@ -1018,9 +1021,9 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
         open={confirmCleanup}
         onCancel={() => setConfirmCleanup(false)}
         onConfirm={performCleanup}
-        title={`Delete ${schemaFns.length} schema endpoint${schemaFns.length !== 1 ? 's' : ''}?`}
+        title={`Remove ${schemaFns.length} schema endpoint${schemaFns.length !== 1 ? 's' : ''}?`}
         description="These auto-generated validation-schema endpoints will be removed permanently. Your frontend will no longer be able to fetch live form-validation schemas from them."
-        confirmLabel="Delete all"
+        confirmLabel="Remove all"
         danger
         busy={cleaningUp}
       />

@@ -23,6 +23,36 @@ import {
   UnauthorizedError,
   ForbiddenError 
 } from './server'
+import {
+  isDatabaseUnavailable,
+  DATABASE_UNAVAILABLE_BODY,
+} from '@/lib/errors/dependency-unavailable'
+
+/**
+ * The answer for an error that is NOT an authorization decision.
+ *
+ * Every wrapper below used to end with a catch-all that returned 401 or 403,
+ * so a database outage was reported to a signed-in operator as rejected
+ * credentials - and the obvious response, signing out and back in, destroys
+ * the session and cannot succeed while the same database is down.
+ *
+ * This still refuses the request. The handler does not run and nothing is
+ * granted; only the reason given changes, from a fabricated authorization
+ * decision to what actually happened. See lib/errors/dependency-unavailable.
+ */
+function notAnAuthDecision(error: unknown, logLabel: string): NextResponse {
+  if (isDatabaseUnavailable(error)) {
+    console.error(`[${logLabel}] dependency unavailable:`, (error as any)?.code ?? error)
+    return NextResponse.json(DATABASE_UNAVAILABLE_BODY, {
+      status: 503,
+      headers: { 'Retry-After': '15' },
+    })
+  }
+  // A bug, not a credential problem. Reporting it as 401 is how it stays
+  // unfound: the logs fill with authentication failures nobody investigates.
+  console.error(`[${logLabel}] unexpected error:`, error)
+  return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
+}
 
 type RouteHandler<T = any> = (
   request: NextRequest,
@@ -53,10 +83,7 @@ export function withAuth(
           { status: 401 }
         )
       }
-      return NextResponse.json(
-        { error: 'Authentication failed' },
-        { status: 401 }
-      )
+      return notAnAuthDecision(error, 'withAuth')
     }
   }
 }
@@ -103,13 +130,7 @@ export function withProjectAccess(
           { status: isNotFound ? 404 : 403 }
         )
       }
-      return NextResponse.json(
-        { 
-          code: 'ACCESS_DENIED',
-          error: 'Access denied' 
-        },
-        { status: 403 }
-      )
+      return notAnAuthDecision(error, 'withProjectAccess')
     }
   }
 }
@@ -148,10 +169,7 @@ export function withRole(
           { status: 403 }
         )
       }
-      return NextResponse.json(
-        { error: 'Access denied' },
-        { status: 403 }
-      )
+      return notAnAuthDecision(error, 'withRole')
     }
   }
 }
@@ -186,10 +204,13 @@ export function withApiKey(
       
       return await handler(request, ctx)
     } catch (error: any) {
-      return NextResponse.json(
-        { error: error.message || 'Invalid API key' },
-        { status: 401 }
-      )
+      // An outage must not be reported as a bad key, and the raw message must
+      // not be echoed: `error.message` here could be a Prisma connection error
+      // naming the host, returned to an unauthenticated caller.
+      if (!(error instanceof UnauthorizedError) && !(error instanceof ForbiddenError)) {
+        return notAnAuthDecision(error, 'withApiKey')
+      }
+      return NextResponse.json({ error: 'Invalid API key' }, { status: 401 })
     }
   }
 }

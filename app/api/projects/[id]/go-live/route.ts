@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getProjectContext, UnauthorizedError, ForbiddenError } from '@/lib/auth/server'
 import { goLive } from '@/lib/deployment/go-live'
-import { markDeployed } from '@/lib/analytics/logger'
+import { markDeployed } from '@/lib/projects/milestones'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 
 /**
@@ -11,10 +11,8 @@ import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
  * - First publish: PRIVATE -> DEPLOYING -> LIVE (creates v1)
  * - Subsequent: Creates new versioned deployment snapshot (v2, v3, ...)
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const projectId = params.id
     const { user } = await getProjectContext(projectId)

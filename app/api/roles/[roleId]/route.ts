@@ -2,7 +2,17 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/postgres'
-import { requireAuth } from '@/lib/auth/middleware'
+import { requireAdmin } from '@/lib/auth/middleware'
+
+/**
+ * Role definitions. PLATFORM ADMIN ONLY.
+ *
+ * Every verb called `requireAuth` and discarded the result, so any
+ * authenticated account could read, edit or delete a role - including editing
+ * its `permissions` array. Granting yourself an admin role was one request;
+ * editing what "admin" MEANS was another, and the second is worse because it
+ * changes the privilege of every account already holding that role.
+ */
 import { z } from 'zod'
 
 const updateRoleSchema = z.object({
@@ -11,15 +21,14 @@ const updateRoleSchema = z.object({
   permissions: z.array(z.string()).optional(),
 })
 
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ roleId: string }> }) {
+  const params = await props.params;
   try {
-    await requireAuth(request)
+    const adminError = await requireAdmin(request)
+    if (adminError) return adminError
     
     const role = await prisma.role.findUnique({
-      where: { id: params.id },
+      where: { id: params.roleId },
       include: {
         _count: {
           select: { users: true },
@@ -52,17 +61,16 @@ export async function GET(
   }
 }
 
-export async function PUT(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function PUT(request: NextRequest, props: { params: Promise<{ roleId: string }> }) {
+  const params = await props.params;
   try {
-    await requireAuth(request)
+    const adminError = await requireAdmin(request)
+    if (adminError) return adminError
     const body = await request.json()
     const data = updateRoleSchema.parse(body)
     
     const role = await prisma.role.update({
-      where: { id: params.id },
+      where: { id: params.roleId },
       data,
       include: {
         _count: {
@@ -96,16 +104,15 @@ export async function PUT(
   }
 }
 
-export async function DELETE(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function DELETE(request: NextRequest, props: { params: Promise<{ roleId: string }> }) {
+  const params = await props.params;
   try {
-    await requireAuth(request)
+    const adminError = await requireAdmin(request)
+    if (adminError) return adminError
     
     // Check if role is in use
     const role = await prisma.role.findUnique({
-      where: { id: params.id },
+      where: { id: params.roleId },
       include: {
         _count: {
           select: { users: true },
@@ -128,7 +135,7 @@ export async function DELETE(
     }
     
     await prisma.role.delete({
-      where: { id: params.id },
+      where: { id: params.roleId },
     })
     
     return NextResponse.json({ message: 'Role deleted successfully' })

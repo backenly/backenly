@@ -12,8 +12,10 @@ import {
   stampLastLogin,
   isReservedTestEmail,
 } from '@/lib/services/end-user-auth-table'
-import { canAcceptNewEndUser, trackEndUserActive } from '@/lib/billing/quota-kernel'
+import { canAcceptNewEndUser, trackEndUserActive } from '@/lib/quota/kernel'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
+import { asyncRoute } from '../lib/async-route'
+import { touchProjectActivity } from '@/lib/projects/activity'
 
 /**
  * END-USER OAUTH RUNTIME (Express)
@@ -452,7 +454,7 @@ async function handleOAuthCallback(req: Request, res: Response) {
     const providerUser = await fetchProviderUser(provider, tokenData.access_token)
 
     // 3. Bring the users table to the auth contract, then add OAuth columns.
-    const baseSchema = await ensureAuthUsersTable(projectId)
+    const baseSchema = await ensureAuthUsersTable(projectId, { email: providerUser.email })
     const schemaName = baseSchema.schemaName
     await prisma.$executeRawUnsafe(
       `ALTER TABLE "${schemaName}"."users"
@@ -520,8 +522,10 @@ async function handleOAuthCallback(req: Request, res: Response) {
     prisma.workspaceOAuthConfig
       .update({ where: { projectId_provider: { projectId, provider } }, data: { lastUsed: new Date() } })
       .catch(() => {})
-    if (!isReservedTestEmail(userEmail)) trackEndUserActive(projectId, String(userId)).catch(() => {})
+    trackEndUserActive(projectId, String(userId), userEmail).catch(() => {})
     stampLastLogin(projectId, userId).catch(() => {})
+    // A completed end-user sign-in is the backend being used.
+    void touchProjectActivity(projectId)
 
     // 6. Project-scoped JWT.
     const token = jwt.sign(
@@ -567,7 +571,7 @@ async function handleOAuthCallback(req: Request, res: Response) {
 
 // Callback registered before the bare provider route so the extra path segment
 // is matched unambiguously (Express distinguishes by segment count anyway).
-router.get('/:projectId/auth/:provider/callback', handleOAuthCallback)
-router.get('/:projectId/auth/:provider', handleOAuthInit)
+router.get('/:projectId/auth/:provider/callback', asyncRoute(handleOAuthCallback))
+router.get('/:projectId/auth/:provider', asyncRoute(handleOAuthInit))
 
 export default router

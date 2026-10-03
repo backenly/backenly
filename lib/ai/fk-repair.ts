@@ -10,6 +10,8 @@
  * Uses ON DELETE SET NULL for optional assignment columns (assigned_to, actor_id).
  */
 
+import { deriveFkBase } from '@/lib/db/fk-shape'
+
 const SET_NULL_COLUMNS = ['assigned_to', 'assignee_id', 'updated_by', 'deleted_by', 'approved_by', 'actor_id']
 
 /**
@@ -155,14 +157,10 @@ export async function repairForeignKeysGlobally(projectId: string): Promise<numb
  * primary key `id`). Shared by the autonomy drift-detector and the single-column
  * repair so both infer the referenced table with identical rules.
  */
-export function deriveFkBase(columnName: string): string | null {
-  const lower = columnName.toLowerCase()
-  if (lower === 'id') return null
-  if (lower.endsWith('_id')) return lower.slice(0, -3)
-  // camelCase: userId → user (only when the column actually has an uppercase)
-  if (/[a-z]id$/.test(lower) && columnName !== columnName.toLowerCase()) return lower.slice(0, -2)
-  return null
-}
+// Re-exported, not redefined. The table editor needs the same rule to avoid
+// offering a foreign key the executor will refuse, and a second copy of it in
+// the UI is exactly the hand-synced drift this repo has paid for before.
+export { deriveFkBase } from '@/lib/db/fk-shape'
 
 /**
  * Build a case-insensitive map (lowercase → actual DB name) of every base table

@@ -21,6 +21,8 @@
 import { prisma } from '@/lib/db/prisma'
 import crypto from 'crypto'
 import { emit } from '@/lib/events/bus'
+import { safeFetch, assertAllowedUrl, BlockedOutboundError } from '@/lib/security/outbound-guard'
+import { WEBHOOK_EVENT_TYPES, isWebhookEventType, type WebhookEventType } from './events'
 
 // ─── Retry schedule ───────────────────────────────────────────────────────────
 
@@ -30,7 +32,8 @@ const MAX_ATTEMPTS = RETRY_DELAYS_MS.length
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-export type WebhookEventType = 'row.inserted' | 'row.updated' | 'row.deleted' | 'auth.user.created'
+export type { WebhookEventType }
+export { WEBHOOK_EVENT_TYPES, isWebhookEventType }
 
 export interface WebhookPayload {
   event: WebhookEventType
@@ -44,6 +47,15 @@ export interface WebhookDeliveryResult {
   statusCode?: number
   error?: string
   responseBody?: string
+  /**
+   * The egress guard refused the destination.
+   *
+   * Distinct from an ordinary failure because retrying cannot change the
+   * answer: the URL resolves somewhere this deployment will not send traffic,
+   * and it will still resolve there in thirty minutes. Retrying it four more
+   * times would only bury the real message under identical ones.
+   */
+  blocked?: boolean
 }
 
 // ─── HMAC Signing ─────────────────────────────────────────────────────────────
@@ -88,25 +100,39 @@ export async function deliverSingleAttempt(
   const payloadString = JSON.stringify(payload)
   const signature = generateWebhookSignature(payloadString, secret)
 
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 10_000)
-
   try {
-    const response = await fetch(targetUrl, {
+    // safeFetch, NOT fetch. This function used to call `fetch(targetUrl)` on a
+    // URL the caller supplies, from the unsandboxed web process, and store up
+    // to 1 KB of the reply. That is a server-side request forgery primitive
+    // with a persistence layer attached: the reachable set included the
+    // PostgREST data plane on loopback:3002, the runtime on :3001, the whole
+    // VPC, and 169.254.169.254.
+    //
+    // The guard the function runtime already used covers all of it — scheme,
+    // literal address, connect-time DNS (so a rebind cannot win the race),
+    // every redirect hop re-validated, and a response size cap. Webhooks get
+    // their own private-egress opt-in because "my webhook may reach the
+    // container next to me" is the operator's decision to make, and is not the
+    // same decision as "generated function code may reach my LAN".
+    const response = await safeFetch(targetUrl, {
       method: 'POST',
+      egressScope: 'webhook',
       headers: {
         'Content-Type': 'application/json',
         'X-Webhook-Signature': signature,
         'X-Webhook-Event': payload.event,
         'X-Webhook-Attempt': String(attemptNumber),
         'X-Webhook-ID': webhookId,
+        'X-Webhook-Delivery': logId,
         'User-Agent': 'Backenly-Webhook/1.0',
       },
       body: payloadString,
-      signal: controller.signal,
+      timeoutMs: 10_000,
+      // A receiver's body is diagnostic only. Anything past this is not going
+      // to help an operator read an error message.
+      maxBytes: 64 * 1024,
     })
 
-    clearTimeout(timer)
     const responseBody = await response.text().catch(() => null)
 
     if (response.ok) {
@@ -130,15 +156,17 @@ export async function deliverSingleAttempt(
     return {
       success: false,
       statusCode: response.status,
-      error: `HTTP ${response.status}: ${response.statusText}`,
+      error: `HTTP ${response.status}`,
       responseBody: responseBody?.slice(0, 1000) ?? undefined,
     }
   } catch (err: any) {
-    clearTimeout(timer)
-    return {
-      success: false,
-      error: err.name === 'AbortError' ? 'Request timed out (10 s)' : err.message,
+    // A refused destination is a permanent configuration fault, not a transient
+    // one. Reported distinctly so the operator reads "this URL is not allowed"
+    // instead of watching five identical timeouts and guessing.
+    if (err instanceof BlockedOutboundError) {
+      return { success: false, error: `Destination refused: ${err.message}`, blocked: true }
     }
+    return { success: false, error: err?.message ?? String(err) }
   }
 }
 
@@ -181,6 +209,24 @@ async function _scheduleRetry(
   attemptNumber: number
 ): Promise<void> {
   const nextAttempt = attemptNumber + 1
+
+  // A refused destination is terminal on the first attempt. FAILED rather than
+  // DEAD_LETTER: dead-letter means "we tried and they never answered", and
+  // raising that alarm for a URL we declined to dial would be describing the
+  // wrong problem to whoever reads the notification.
+  if (lastResult.blocked) {
+    await prisma.webhookLog.update({
+      where: { id: logId },
+      data: {
+        status: 'FAILED',
+        attemptCount: attemptNumber,
+        error: lastResult.error ?? 'Destination refused by the egress guard',
+        statusCode: null,
+        nextRetryAt: null,
+      },
+    })
+    return
+  }
 
   if (nextAttempt > MAX_ATTEMPTS) {
     // All retries exhausted → dead letter
@@ -245,6 +291,9 @@ export async function retryFailedWebhooks(): Promise<number> {
       status: 'RETRYING',
       nextRetryAt: { lte: now },
       attemptCount: { lt: MAX_ATTEMPTS },
+      // Pausing cancels these; this keeps one created by a drain that was
+      // already in flight from being delivered before that cancellation lands.
+      webhook: { project: { pausedAt: null } },
     },
     include: {
       webhook: {
@@ -333,11 +382,27 @@ export async function triggerWebhooks(
 
 // ─── Webhook Management ───────────────────────────────────────────────────────
 
+/**
+ * Reject a destination before it is ever stored.
+ *
+ * Validating at write time is a usability control, not the security boundary:
+ * it tells the operator their URL is unusable while they are looking at the
+ * form, instead of leaving them to discover it in a delivery log. The boundary
+ * is `safeFetch` at delivery time, because a hostname that is public today can
+ * point at 169.254.169.254 tomorrow and nothing re-validates a stored row.
+ *
+ * Both layers are required. Neither is redundant.
+ */
+export function assertDeliverableUrl(targetUrl: string): void {
+  assertAllowedUrl(targetUrl, 'webhook')
+}
+
 export async function createWebhook(
   projectId: string,
   eventType: WebhookEventType,
   targetUrl: string
 ) {
+  assertDeliverableUrl(targetUrl)
   return prisma.webhook.create({
     data: { projectId, eventType, targetUrl, secret: crypto.randomBytes(32).toString('hex') },
   })
@@ -351,12 +416,191 @@ export async function getProjectWebhooks(projectId: string) {
   })
 }
 
-export async function getWebhookLogs(webhookId: string, limit = 50) {
-  return prisma.webhookLog.findMany({
-    where: { webhookId },
-    orderBy: { createdAt: 'desc' },
-    take: limit,
+/**
+ * One webhook, or null — scoped by project, never by id alone.
+ *
+ * `findUnique({ where: { id } })` is the shape that produced this program's
+ * cross-tenant findings: a child id is not proof of ownership, and a route
+ * that authorizes a project and then looks a child up without it has checked
+ * nothing. The projectId is in the WHERE clause so the query cannot return
+ * another tenant's row even if a caller gets the authorization wrong.
+ */
+export async function getWebhook(projectId: string, webhookId: string) {
+  return prisma.webhook.findFirst({
+    where: { id: webhookId, projectId },
+    include: { _count: { select: { logs: true } } },
   })
+}
+
+/** Hard ceiling on a page of delivery history. */
+const MAX_LOG_PAGE = 200
+
+/**
+ * Delivery history for one webhook, scoped by project.
+ *
+ * `limit` is clamped rather than trusted: the previous route passed
+ * `parseInt(searchParams.get('limit'))` straight through, so `?limit=abc` sent
+ * Prisma a NaN and `?limit=9999999` asked Postgres for every row this project
+ * had ever delivered.
+ */
+export async function getWebhookLogs(projectId: string, webhookId: string, limit = 50) {
+  const take = Number.isFinite(limit) ? Math.min(Math.max(Math.trunc(limit), 1), MAX_LOG_PAGE) : 50
+  return prisma.webhookLog.findMany({
+    where: { webhookId, webhook: { projectId } },
+    orderBy: { createdAt: 'desc' },
+    take,
+  })
+}
+
+/**
+ * Change a webhook's destination or event.
+ *
+ * Returns null when the webhook does not belong to this project, which the
+ * route turns into the same 404 a missing one gets.
+ */
+export async function updateWebhook(
+  projectId: string,
+  webhookId: string,
+  changes: { eventType?: WebhookEventType; targetUrl?: string; active?: boolean }
+) {
+  if (changes.targetUrl !== undefined) assertDeliverableUrl(changes.targetUrl)
+
+  const existing = await prisma.webhook.findFirst({
+    where: { id: webhookId, projectId },
+    select: { id: true },
+  })
+  if (!existing) return null
+
+  return prisma.webhook.update({ where: { id: webhookId }, data: changes })
+}
+
+/**
+ * Issue a new signing secret and return it once.
+ *
+ * There is no read-back anywhere else: the list route never returns `secret`,
+ * and neither does this module's `getWebhook`. An operator who loses it
+ * rotates rather than retrieves, which means a leaked dashboard response can
+ * never be replayed into a forged signature.
+ */
+export async function rotateWebhookSecret(projectId: string, webhookId: string) {
+  const existing = await prisma.webhook.findFirst({
+    where: { id: webhookId, projectId },
+    select: { id: true },
+  })
+  if (!existing) return null
+
+  const secret = crypto.randomBytes(32).toString('hex')
+  await prisma.webhook.update({ where: { id: webhookId }, data: { secret } })
+  return { secret }
+}
+
+/**
+ * Deliver a test event to one webhook, now, and report what happened.
+ *
+ * This performs a REAL request through the same `deliverSingleAttempt` every
+ * production delivery uses, and writes a REAL WebhookLog. It is not a
+ * simulation and it does not fabricate a history row: an operator who clicks
+ * "Send test" and sees SUCCESS has learned that their endpoint is reachable,
+ * that their secret verifies, and that their receiver returned 2xx — which is
+ * the only reason to offer the button.
+ *
+ * One attempt, no retry ladder: the operator is standing there watching, and a
+ * test that quietly succeeds on attempt four thirty minutes later answers a
+ * question nobody asked.
+ */
+export async function sendTestDelivery(projectId: string, webhookId: string) {
+  const webhook = await prisma.webhook.findFirst({ where: { id: webhookId, projectId } })
+  if (!webhook) return null
+
+  const payload: WebhookPayload = {
+    event: webhook.eventType as WebhookEventType,
+    timestamp: new Date().toISOString(),
+    projectId,
+    data: {
+      test: true,
+      message: 'Test delivery from Backenly. No project data is included.',
+    },
+  }
+
+  return deliverOnceAndRecord(webhook, payload)
+}
+
+/** Why a delivery cannot be sent again, or null when it can. */
+export function replayRefusal(status: string, active: boolean): string | null {
+  if (!active) return 'the webhook is disabled; enable it first'
+  if (status === 'SUCCESS') return 'it was delivered; sending it again would deliver the event twice'
+  if (status === 'PENDING' || status === 'RETRYING') return 'it is still being retried'
+  if (status === 'CANCELLED') {
+    return 'it was withdrawn when the project was paused, so sending it now would fire a stale event'
+  }
+  return null
+}
+
+/**
+ * Send a failed delivery again: the original payload, signed with the
+ * webhook's current secret, as ONE new attempt with its own log row.
+ *
+ * Only FAILED and DEAD_LETTER deliveries qualify (replayRefusal). The original
+ * row is left as it was, so the history still says what happened the first
+ * time; the new row says what happened now.
+ */
+export async function redeliverWebhookLog(projectId: string, logId: string) {
+  const original = await prisma.webhookLog.findFirst({
+    where: { id: logId, webhook: { projectId } },
+    include: { webhook: true },
+  })
+  if (!original) return null
+
+  const refusal = replayRefusal(original.status, original.webhook.active)
+  if (refusal) return { refused: refusal, status: original.status }
+
+  const result = await deliverOnceAndRecord(original.webhook, original.payload as unknown as WebhookPayload)
+  return { replayOf: original.id, ...result }
+}
+
+/**
+ * One attempt, recorded honestly: a REAL WebhookLog row, and a failure written
+ * as FAILED rather than left looking like a delivery still in progress.
+ */
+async function deliverOnceAndRecord(
+  webhook: { id: string; eventType: string; targetUrl: string; secret: string },
+  payload: WebhookPayload,
+) {
+  const log = await prisma.webhookLog.create({
+    data: {
+      webhookId: webhook.id,
+      eventType: webhook.eventType,
+      payload: payload as any,
+      signature: generateWebhookSignature(JSON.stringify(payload), webhook.secret),
+    },
+  })
+
+  const result = await deliverSingleAttempt(
+    webhook.id,
+    webhook.targetUrl,
+    webhook.secret,
+    payload,
+    log.id,
+    1,
+  )
+
+  // deliverSingleAttempt only writes the log on success, so a failed attempt
+  // would otherwise sit at PENDING for ever and read as "still trying".
+  if (!result.success) {
+    await prisma.webhookLog.update({
+      where: { id: log.id },
+      data: {
+        status: 'FAILED',
+        attemptCount: 1,
+        error: result.error ?? null,
+        statusCode: result.statusCode ?? null,
+        responseBody: result.responseBody?.slice(0, 1000) ?? null,
+        nextRetryAt: null,
+      },
+    })
+  }
+
+  return { logId: log.id, ...result }
 }
 
 export async function deleteWebhook(webhookId: string, projectId: string) {

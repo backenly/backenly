@@ -1,54 +1,56 @@
 'use client'
 
 /**
- * TopBar — the single persistent top bar across the project workspace.
+ * TopBar: the single persistent bar across the project workspace.
  *
- * Replaces the three ad-hoc headers (the monolith's logo bar, the inspector
- * page headers, the app-shell header) with one breadcrumb chrome, per
- * IA restructure §4:
+ *   ◆ / account Pro / ● project ▾  Production       Search ⌘K  ⎔  Ask  Connect agent  (A)
  *
- *   [◆] Org ▾ [Free] / project ▾ / [Production]   [📥 n] [Assistant] [Connect agent] [A]
+ * The breadcrumb names where you are; the right cluster holds the only
+ * global actions. "Ask" toggles the Q&A Assistant (⌘/Ctrl+J), which answers
+ * platform questions and never builds. Building goes through the one door:
+ * the user's coding agent over MCP (Connect agent, the primary action).
  *
- * Locked kit language: #141519 surface, hairline border, mono numerals, violet
- * only for the primary action (Connect agent) and the lit review inbox.
- *
- * "Assistant" toggles the global Q&A panel — ⌘/Ctrl+J does the same. It answers
- * platform questions; it never builds. Building goes through the one door:
- * the user's coding agent over MCP (Connect agent). Org switcher is Phase 6 —
- * it shows the account name until the Organization model exists. The
- * environment chip is honest: one Hetzner region, one env, so it's static
- * "Production".
+ * The environment label is honest: one environment today. Its tooltip names
+ * the AWS region only on Backenly Cloud, because a self-hosted deployment runs
+ * wherever its operator put it.
  */
 
-import { useEffect, useRef, useState, useTransition } from 'react'
+import { useCallback, useEffect, useState, useTransition } from 'react'
 import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
+import { AnimatePresence } from 'framer-motion'
+import { Cable, Check, ChevronsUpDown, Inbox, Plus, Sparkles } from 'lucide-react'
 import { useAssistantStore } from '@/lib/stores/use-assistant-store'
-import {
-  ChevronDown,
-  Check,
-  Inbox,
-  Sparkles,
-  Cable,
-  Settings,
-  LogOut,
-  Plus,
-  Circle,
-} from 'lucide-react'
-import { Logo } from '@/components/Logo'
-import { OrgSwitcher } from '@/components/shell/OrgSwitcher'
+import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import { getProjects, type Project } from '@/lib/api/projects'
-
-interface MeUser {
-  name?: string
-  email?: string
-}
+import { BUTTON_BASE, BUTTON_VARIANTS, Kbd } from '@/components/inspector/kit'
+import { FOCUS, R_CONTROL } from '@/components/console/tokens'
+import {
+  AccountMenu,
+  AccountScope,
+  BrandHome,
+  ConsoleBar,
+  Crumb,
+  MenuItem,
+  MenuPanel,
+  MenuSeparator,
+  MobileNavButton,
+  SearchTrigger,
+  useDismiss,
+} from './ConsoleChrome'
 
 const STATUS_DOT: Record<string, string> = {
-  LIVE: 'text-emerald-400',
-  DEPLOYING: 'text-amber-400',
-  FAILED: 'text-rose-400',
-  PRIVATE: 'text-zinc-500',
+  LIVE: 'bg-emerald-400',
+  DEPLOYING: 'bg-amber-400',
+  FAILED: 'bg-rose-400',
+  PRIVATE: 'bg-zinc-500',
+}
+
+const STATUS_LABEL: Record<string, string> = {
+  LIVE: 'Live',
+  DEPLOYING: 'Deploying',
+  FAILED: 'Failed',
+  PRIVATE: 'Not published',
 }
 
 export function TopBar() {
@@ -73,28 +75,20 @@ export function TopBar() {
   }, [toggleAssistant])
 
   const [, startTransition] = useTransition()
-  const [user, setUser] = useState<MeUser | null>(null)
   const [projects, setProjects] = useState<Project[]>([])
   const [pendingReview, setPendingReview] = useState(0)
-
   const [projectMenu, setProjectMenu] = useState(false)
-  const [accountMenu, setAccountMenu] = useState(false)
-  const projectMenuRef = useRef<HTMLDivElement>(null)
-  const accountMenuRef = useRef<HTMLDivElement>(null)
+  const closeProjectMenu = useCallback(() => setProjectMenu(false), [])
+  const projectMenuRef = useDismiss(projectMenu, closeProjectMenu)
 
   const currentProject = projects.find((p) => p.id === projectId)
+  const status = currentProject?.projectStatus ?? 'PRIVATE'
 
-  // ── Data ────────────────────────────────────────────────────────────────
   useEffect(() => {
-    fetch('/api/auth/me')
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => { if (d?.user) setUser(d.user) })
-      .catch(() => {})
-
     getProjects().then(setProjects).catch(() => {})
   }, [])
 
-  // Review inbox count — lit only when a change is actually waiting on the user.
+  // Review inbox — lit only when a change is actually waiting on the user.
   useEffect(() => {
     if (!projectId) return
     let cancelled = false
@@ -106,201 +100,157 @@ export function TopBar() {
         const findings = j.data?.findings ?? []
         const pending = findings.filter((f: any) => f.status === 'pending_approval').length
         if (!cancelled) setPendingReview(pending)
-      } catch { /* silent */ }
+      } catch {
+        /* silent */
+      }
     }
     poll()
     const t = setInterval(poll, 30_000)
-    return () => { cancelled = true; clearInterval(t) }
-  }, [projectId])
-
-  // ── Menu dismissal ──────────────────────────────────────────────────────
-  useEffect(() => {
-    function onClick(e: MouseEvent) {
-      if (projectMenuRef.current && !projectMenuRef.current.contains(e.target as Node)) setProjectMenu(false)
-      if (accountMenuRef.current && !accountMenuRef.current.contains(e.target as Node)) setAccountMenu(false)
+    return () => {
+      cancelled = true
+      clearInterval(t)
     }
-    document.addEventListener('mousedown', onClick)
-    return () => document.removeEventListener('mousedown', onClick)
-  }, [])
+  }, [projectId])
 
   const go = (href: string) => startTransition(() => router.push(href))
 
-  const initials = () => {
-    if (!user) return '?'
-    if (user.name) return user.name.split(' ').map((n) => n[0]).join('').toUpperCase().slice(0, 2)
-    return user.email?.[0]?.toUpperCase() ?? '?'
-  }
-
-  const logout = async () => {
-    await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' })
-    router.push('/login')
-  }
-
   return (
-    <header className="fixed top-0 left-0 right-0 h-12 z-30 bg-[#141519] border-b border-white/[0.07] flex items-center px-3 gap-1">
-      {/* ── Left: brand + breadcrumb ─────────────────────────────────────── */}
-      <Link href="/app" className="flex items-center pl-1 pr-2 group" aria-label="Backenly home">
-        <Logo />
-      </Link>
+    <ConsoleBar>
+      <MobileNavButton />
+      <BrandHome />
 
-      <Separator />
-
-      {/* Org switcher — renders as the old static chip for solo personal orgs,
-          becomes a dropdown once the user belongs to more than one org. */}
-      <OrgSwitcher
-        fallbackName={user?.name?.split(' ')[0] ?? user?.email?.split('@')[0] ?? 'Personal'}
-        plan="Free"
-      />
-
-      <Slash />
+      <div className="hidden min-w-0 items-center sm:flex">
+        <Crumb />
+        <AccountScope />
+      </div>
+      <Crumb />
 
       {/* Project switcher */}
-      <div className="relative" ref={projectMenuRef}>
+      <div className="relative min-w-0" ref={projectMenuRef}>
         <button
+          type="button"
           onClick={() => setProjectMenu((o) => !o)}
-          className="flex items-center gap-1.5 h-8 px-2 rounded-md hover:bg-white/[0.05] transition-colors"
+          aria-haspopup="menu"
+          aria-expanded={projectMenu}
+          className={`flex h-[32px] min-w-0 max-w-[160px] items-center gap-2 ${R_CONTROL} px-2 transition-colors hover:bg-white/[0.05] sm:max-w-[240px] ${FOCUS}`}
         >
-          <Circle className={`w-2 h-2 fill-current ${STATUS_DOT[currentProject?.projectStatus ?? 'PRIVATE']}`} />
-          <span className="text-[12.5px] font-medium text-zinc-100 truncate max-w-[180px]">
-            {currentProject?.name ?? 'Project'}
-          </span>
-          <ChevronDown className="w-3.5 h-3.5 text-zinc-500" />
+          <span className={`h-[7px] w-[7px] flex-shrink-0 rounded-full ${STATUS_DOT[status]}`} aria-hidden />
+          <span className="truncate text-[13px] font-medium text-zinc-100">{currentProject?.name ?? 'Project'}</span>
+          <ChevronsUpDown className="h-3.5 w-3.5 flex-shrink-0 text-zinc-500" strokeWidth={1.75} />
         </button>
 
-        {projectMenu && (
-          <div className="absolute top-full left-0 mt-1 w-[280px] bg-[#1c1d23] border border-white/[0.10] rounded-lg shadow-[0_12px_32px_-16px_rgba(0,0,0,0.85)] overflow-hidden z-40">
-            <div className="max-h-[320px] overflow-y-auto py-1">
-              {projects.map((p) => {
-                const active = p.id === projectId
-                return (
-                  <button
-                    key={p.id}
-                    onClick={() => { setProjectMenu(false); go(`/app/projects/${p.id}`) }}
-                    className="w-full flex items-center gap-2.5 px-3 py-2 text-left hover:bg-white/[0.05] transition-colors"
-                  >
-                    <Circle className={`w-2 h-2 fill-current flex-shrink-0 ${STATUS_DOT[p.projectStatus ?? 'PRIVATE']}`} />
-                    <span className="text-[12.5px] text-zinc-200 truncate flex-1">{p.name}</span>
-                    {active && <Check className="w-3.5 h-3.5 text-violet-300 flex-shrink-0" />}
-                  </button>
-                )
-              })}
-            </div>
-            <button
-              onClick={() => { setProjectMenu(false); go('/app') }}
-              className="w-full flex items-center gap-2.5 px-3 py-2.5 text-left border-t border-white/[0.07] text-zinc-300 hover:text-zinc-50 hover:bg-white/[0.05] transition-colors"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span className="text-[12.5px] font-medium">New project</span>
-            </button>
-          </div>
-        )}
+        <AnimatePresence>
+          {projectMenu && (
+            <MenuPanel width="w-[300px]">
+              <p className="px-2.5 pb-1 pt-1.5 text-[12px] font-medium text-zinc-500">Projects</p>
+              <div className="max-h-[320px] overflow-y-auto">
+                {projects.map((p) => {
+                  const active = p.id === projectId
+                  const s = p.projectStatus ?? 'PRIVATE'
+                  return (
+                    <MenuItem
+                      key={p.id}
+                      onClick={() => {
+                        setProjectMenu(false)
+                        go(`/app/projects/${p.id}`)
+                      }}
+                      trailing={
+                        active ? (
+                          <Check className="h-4 w-4 flex-shrink-0 text-zinc-200" strokeWidth={2} />
+                        ) : (
+                          <span className="text-[12px] text-zinc-600">{STATUS_LABEL[s]}</span>
+                        )
+                      }
+                    >
+                      <span className="flex items-center gap-2.5">
+                        <span className={`h-[7px] w-[7px] flex-shrink-0 rounded-full ${STATUS_DOT[s]}`} aria-hidden />
+                        <span className="truncate">{p.name}</span>
+                      </span>
+                    </MenuItem>
+                  )
+                })}
+              </div>
+              <MenuSeparator />
+              <MenuItem
+                icon={Plus}
+                onClick={() => {
+                  setProjectMenu(false)
+                  go('/app')
+                }}
+              >
+                {CLOUD_CONTROL_PLANE ? 'New project' : 'All projects'}
+              </MenuItem>
+            </MenuPanel>
+          )}
+        </AnimatePresence>
       </div>
 
-      <Slash />
-
-      {/* Environment chip — honest: one region, one env */}
       <span
-        title="Backenly runs one EU · Hetzner region today"
-        className="hidden md:inline-flex items-center gap-1.5 h-7 px-2 rounded-md bg-white/[0.03] border border-white/[0.06] text-[11px] font-mono text-zinc-400"
+        title={
+          CLOUD_CONTROL_PLANE
+            ? 'Backenly Cloud runs one environment, in AWS ap-south-1, today'
+            : 'This deployment runs one environment'
+        }
+        className="ml-1 hidden h-[22px] items-center gap-1.5 rounded-[5px] border border-white/[0.07] px-1.5 text-[12px] text-zinc-400 lg:inline-flex"
       >
-        <span className="h-[5px] w-[5px] rounded-full bg-emerald-400" />
+        <span className="h-[6px] w-[6px] rounded-full bg-emerald-400" aria-hidden />
         Production
       </span>
 
       {/* ── Right cluster ────────────────────────────────────────────────── */}
       <div className="ml-auto flex items-center gap-1.5">
+        <SearchTrigger />
+
         {/* Review inbox — lit only when something waits on the user. Lands on
-            Autonomy, which owns the queue since the 2026-07-18 consolidation. */}
-        <button
-          onClick={() => go(`${basePath}/autonomy`)}
+            Autonomy, which owns the queue since the 2026-07-18 consolidation.
+            No count badge (2026-07-23, founder): the lifted chrome + tooltip
+            carry "something is waiting"; a numbered dot is exactly the badge
+            noise the no-badges rule bans elsewhere. The count lives in the
+            queue itself and on the Overview loop. */}
+        <Link
+          href={`${basePath}/autonomy`}
           title={
             pendingReview > 0
               ? `${pendingReview} change${pendingReview === 1 ? '' : 's'} waiting on your approval`
               : 'Review queue'
           }
-          aria-label="Review queue"
-          className={`relative inline-flex items-center justify-center w-8 h-8 mr-0.5 rounded-md border transition-colors ${
+          aria-label={
             pendingReview > 0
-              ? 'bg-white/[0.06] border-white/[0.14] text-zinc-100 hover:bg-white/[0.10]'
-              : 'border-transparent text-zinc-400 hover:text-zinc-100 hover:bg-white/[0.05]'
+              ? `Review queue, ${pendingReview} waiting on your approval`
+              : 'Review queue'
+          }
+          className={`relative inline-flex h-[32px] w-[32px] items-center justify-center ${R_CONTROL} border transition-colors ${FOCUS} ${
+            pendingReview > 0
+              ? 'border-white/[0.14] bg-white/[0.07] text-zinc-50 hover:bg-white/[0.10]'
+              : 'border-transparent text-zinc-500 hover:bg-white/[0.05] hover:text-zinc-100'
           }`}
         >
-          {/* No count badge (2026-07-23, founder): the lifted chrome + tooltip
-              carry "something is waiting"; a numbered dot is exactly the badge
-              noise the no-badges rule bans elsewhere. The count lives in the
-              queue itself and on the Overview loop. */}
-          <Inbox className="w-4 h-4" />
-        </button>
+          <Inbox className="h-4 w-4" strokeWidth={1.75} />
+        </Link>
 
         {/* Assistant — the Q&A helper (answers, never builds). ⌘J does the same. */}
         <button
+          type="button"
           onClick={toggleAssistant}
           title={assistantOpen ? 'Hide the assistant (⌘J)' : 'Ask how anything works (⌘J)'}
           aria-pressed={assistantOpen}
-          className={`inline-flex items-center gap-1.5 h-8 px-3 rounded-md border text-[12px] font-semibold transition-colors ${
-            assistantOpen
-              ? 'bg-white/[0.12] border-white/[0.18] text-zinc-50'
-              : 'bg-white/[0.06] border-white/[0.12] text-zinc-100 hover:bg-white/[0.10] hover:border-white/[0.18]'
+          className={`${BUTTON_BASE} h-[32px] px-2.5 text-[13px] ${
+            assistantOpen ? 'bg-white/[0.10] text-zinc-50' : 'text-zinc-400 hover:bg-white/[0.05] hover:text-zinc-100'
           }`}
         >
-          <Sparkles className="w-3.5 h-3.5" />
-          <span className="hidden sm:inline">Assistant</span>
+          <Sparkles className="h-[15px] w-[15px]" strokeWidth={1.75} />
+          <span className="hidden sm:inline">Ask</span>
+          <Kbd className="ml-0.5 hidden xl:inline-flex">⌘J</Kbd>
         </button>
 
-        {/* Connect agent — the one build door, the primary violet action */}
-        <button
-          onClick={() => go(`${basePath}/connect`)}
-          className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md bg-white text-black text-[12px] font-semibold hover:bg-zinc-200 transition-colors"
-        >
-          <Cable className="w-3.5 h-3.5" />
+        {/* Connect agent — the one build door, the primary action. */}
+        <Link href={`${basePath}/connect`} className={`${BUTTON_BASE} ${BUTTON_VARIANTS.primary} h-[32px] px-3 text-[13px]`}>
+          <Cable className="h-[15px] w-[15px]" strokeWidth={2} />
           <span className="hidden sm:inline">Connect agent</span>
-        </button>
+        </Link>
 
-
-        {/* Avatar menu */}
-        <div className="relative" ref={accountMenuRef}>
-          <button
-            onClick={() => setAccountMenu((o) => !o)}
-            className="w-7 h-7 ml-1 rounded-full bg-white/[0.08] ring-1 ring-white/[0.12] flex items-center justify-center text-[11px] font-semibold text-zinc-100 hover:ring-white/25 transition-colors"
-            aria-label="Account menu"
-          >
-            {initials()}
-          </button>
-
-          {accountMenu && (
-            <div className="absolute top-full right-0 mt-1 w-[220px] bg-[#1c1d23] border border-white/[0.10] rounded-lg shadow-[0_12px_32px_-16px_rgba(0,0,0,0.85)] overflow-hidden z-40">
-              {user && (
-                <div className="px-3 py-2.5 border-b border-white/[0.07]">
-                  <p className="text-[12px] font-medium text-zinc-200 truncate">{user.name ?? user.email?.split('@')[0]}</p>
-                  <p className="text-[11px] text-zinc-500 truncate">{user.email}</p>
-                </div>
-              )}
-              <button
-                onClick={() => { setAccountMenu(false); go('/app/settings') }}
-                className="w-full flex items-center gap-2.5 px-3 py-2.5 text-left text-zinc-300 hover:text-zinc-50 hover:bg-white/[0.05] transition-colors"
-              >
-                <Settings className="w-3.5 h-3.5" />
-                <span className="text-[12.5px] font-medium">Account settings</span>
-              </button>
-              <button
-                onClick={() => { setAccountMenu(false); logout() }}
-                className="w-full flex items-center gap-2.5 px-3 py-2.5 text-left text-zinc-300 hover:text-rose-300 hover:bg-rose-500/[0.06] transition-colors"
-              >
-                <LogOut className="w-3.5 h-3.5" />
-                <span className="text-[12.5px] font-medium">Log out</span>
-              </button>
-            </div>
-          )}
-        </div>
+        <AccountMenu />
       </div>
-    </header>
+    </ConsoleBar>
   )
-}
-
-function Separator() {
-  return <div className="h-5 w-px bg-white/[0.08] mx-1 hidden sm:block" />
-}
-
-function Slash() {
-  return <span className="text-zinc-700 text-[13px] px-0.5 hidden sm:inline">/</span>
 }

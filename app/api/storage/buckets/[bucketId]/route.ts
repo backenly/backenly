@@ -8,10 +8,8 @@ import { prisma } from '@/lib/db'
 import { runMutation, mutationHttpStatus } from '@/lib/ai/build-runtime/mutate'
 
 // GET /api/storage/buckets/[bucketId] — Get bucket info + stats
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { bucketId: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ bucketId: string }> }) {
+  const params = await props.params;
   try {
     return await withTenantIsolation(request, async (projectId) => {
       const bucket = await storageService.getBucket(params.bucketId, projectId)
@@ -43,10 +41,8 @@ export async function GET(
 //
 // Goes through runMutation() to enforce:
 //   budget → lock → snapshot → execute → audit → trace → UI sync → release
-export async function DELETE(
-  request: NextRequest,
-  { params }: { params: { bucketId: string } }
-) {
+export async function DELETE(request: NextRequest, props: { params: Promise<{ bucketId: string }> }) {
+  const params = await props.params;
   try {
     return await withTenantIsolation(request, async (projectId) => {
       // Ownership check BEFORE acquiring lock (read-only, safe)
@@ -90,10 +86,8 @@ export async function DELETE(
 }
 
 // PATCH /api/storage/buckets/[bucketId] — Update bucket security settings (GOVERNED)
-export async function PATCH(
-  request: NextRequest,
-  { params }: { params: { bucketId: string } }
-) {
+export async function PATCH(request: NextRequest, props: { params: Promise<{ bucketId: string }> }) {
+  const params = await props.params;
   try {
     return await withTenantIsolation(request, async (projectId) => {
       const bucketRecord = await prisma.storageBucket.findUnique({

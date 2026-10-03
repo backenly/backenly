@@ -3,7 +3,8 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { verifyToken } from '@/lib/auth/jwt'
-import { getUserEntitlements } from '@/lib/billing'
+import { getUserEntitlements } from '@/lib/entitlements'
+import { canAccessProject } from '@/lib/edition/guard'
 
 const QUOTA_DISABLED = process.env.DISABLE_QUOTA_ENFORCEMENT === 'true'
 
@@ -16,10 +17,8 @@ const QUOTA_DISABLED = process.env.DISABLE_QUOTA_ENFORCEMENT === 'true'
  *   GROWTH         : last 30 versions
  *   PRO            : full history (unlimited)
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     // Authenticate
     const sessionToken = request.cookies.get('auth-token')?.value
@@ -35,8 +34,15 @@ export async function GET(
     const projectId = params.id
 
     // Verify project access
-    const project = await prisma.project.findFirst({
-      where: { id: projectId, userId },
+    if (!(await canAccessProject(userId, projectId))) {
+      return NextResponse.json(
+        { error: 'Project not found' },
+        { status: 404 }
+      )
+    }
+
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
       select: { id: true, activeGraphId: true },
     })
 

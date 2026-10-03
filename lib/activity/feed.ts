@@ -223,6 +223,15 @@ function labelForAudit(
     if (a.includes('start'))                                         return { kind: 'deploy', label: 'Deployment started' }
     return { kind: 'deploy', label: 'Deployment update' }
   }
+  // Written by lib/projects/pause-lifecycle.ts. Says the API was paused and
+  // nothing more: a public file served from a CDN is not stopped by a pause.
+  if (a === 'project_paused') {
+    return {
+      kind: 'general',
+      label: meta?.reason === 'inactivity' ? 'API paused after a period without use' : 'API paused',
+    }
+  }
+  if (a === 'project_resumed')                         return { kind: 'general', label: 'Project resumed' }
   if (t.includes('webhook'))                           return { kind: 'webhook', label: 'Webhook configured' }
   if (t.includes('rls') || t.includes('permission'))   return { kind: 'rls',     label: 'Permission policy updated' }
 

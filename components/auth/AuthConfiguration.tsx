@@ -1,20 +1,13 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
+import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { Toast } from '@/components/ui/Toast'
+import { Mail, Shield, ExternalLink, KeyRound, ArrowRight } from 'lucide-react'
 import {
-  Mail, Check, Users, ArrowRight, Shield, Copy, ExternalLink,
-  KeyRound, Settings2,
-} from 'lucide-react'
-import { motion, AnimatePresence } from 'framer-motion'
-import { InspectorGovernanceFooter } from '@/components/inspector/InspectorPageHeader'
-import {
-  KitCard, KitCardHeader,
-  KitButton, KitBadge, KitChecklist, KitNote,
-  EmptyState,
-  KitField, KitInput, KitMoreLink,
-  SectionLabel,
+  CopyField, KitButton, KitChecklist, KitField, KitInput, KitModal, KitNote, SettingsCard, Stat, StatStrip,
+  StatusDot,
 } from '@/components/inspector/kit'
 
 type ProviderId = 'google' | 'github'
@@ -103,35 +96,13 @@ function timeAgo(iso?: string | null): string {
 // Identity avatars stay neutral — color is reserved for state, not decoration.
 const AVATAR_TONE = 'bg-white/[0.04] border-white/[0.10] text-zinc-300'
 
-// ─── Copy field (used for redirect URI + snippet) ─────────────────────────────
-
-function CopyValue({ value, mono = true }: { value: string; mono?: boolean }) {
-  const [copied, setCopied] = useState(false)
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(value)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1600)
-    } catch { /* clipboard unavailable */ }
-  }
+function delta(value: number | undefined) {
+  if (!value) return undefined
   return (
-    <div className="flex items-center gap-2 bg-[#0f1015] border border-white/[0.07] rounded-lg pl-3 pr-1.5 py-1.5 min-w-0">
-      <span className={`flex-1 min-w-0 truncate text-[12px] text-zinc-300 ${mono ? 'font-mono' : ''}`}>
-        {value}
-      </span>
-      <button
-        onClick={copy}
-        title="Copy"
-        className={`flex-shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium transition-colors ${
-          copied
-            ? 'text-emerald-300 bg-emerald-500/[0.10]'
-            : 'text-zinc-400 hover:text-zinc-100 hover:bg-white/[0.06]'
-        }`}
-      >
-        {copied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-        {copied ? 'Copied' : 'Copy'}
-      </button>
-    </div>
+    <span className={value > 0 ? 'text-emerald-300/90' : 'text-rose-300'}>
+      {value > 0 ? '+' : '−'}
+      {Math.abs(value)}% vs previous period
+    </span>
   )
 }
 
@@ -272,10 +243,11 @@ export function AuthConfiguration() {
     }
   }, [loadAll])
 
-  const handleSaveWorkspaceOAuth = async (provider: ProviderId, clientId: string, clientSecret: string) => {
+  /** Resolves true only when the credentials were stored, so the dialog can stay open on failure. */
+  const handleSaveWorkspaceOAuth = async (provider: ProviderId, clientId: string, clientSecret: string): Promise<boolean> => {
     if (!currentProjectId) {
       setToast({ message: 'No project selected', type: 'error' })
-      return
+      return false
     }
 
     setSaving(true)
@@ -301,9 +273,14 @@ export function AuthConfiguration() {
 
       setToast({ message: `${PROVIDER_META[provider].name} sign-in activated`, type: 'success' })
       if (currentProjectId) fetchEnabledProviders(currentProjectId)
+      return true
     } catch (error) {
       console.error('Error saving workspace OAuth:', error)
-      setToast({ message: 'Failed to save configuration', type: 'error' })
+      setToast({
+        message: error instanceof Error && error.message ? error.message : 'The credentials could not be saved. Try again.',
+        type: 'error',
+      })
+      return false
     } finally {
       setSaving(false)
     }
@@ -323,8 +300,14 @@ export function AuthConfiguration() {
     `${origin || 'https://backenly.com'}/api/v1/${currentProjectId ?? '{projectId}'}/auth/${provider}/callback`
 
 
+  const emailActive = emailProviderEnabled || (stats?.totalUsers ?? 0) > 0
+  const modalProvider = showWorkspaceOAuthModal
+  const modalMeta = modalProvider ? PROVIDER_META[modalProvider] : null
+  const modalIsUpdate = modalProvider ? enabledProviders.has(modalProvider) : false
+  const usersHref = currentProjectId ? `/app/projects/${currentProjectId}/auth?tab=users` : '/app'
+
   return (
-    <div className="px-8 py-6">
+    <div className="mx-auto w-full max-w-[1200px] px-4 py-6 sm:px-6 lg:px-8">
       <Toast
         message={toast?.message || ''}
         type={toast?.type || 'info'}
@@ -333,318 +316,224 @@ export function AuthConfiguration() {
       />
 
       {loadError && (
-        <div className="mb-4">
+        <div className="mb-5">
           <KitNote
             tone="danger"
             icon={Shield}
             actions={
-              <KitButton
-                size="sm"
-                variant="secondary"
-                onClick={() => currentProjectId && loadAll(currentProjectId)}
-              >
+              <KitButton size="sm" variant="secondary" onClick={() => currentProjectId && loadAll(currentProjectId)}>
                 Retry
               </KitButton>
             }
           >
-            Couldn&apos;t load some auth data. The numbers below may be incomplete.
+            Some auth data couldn&apos;t be loaded, so the numbers below may be incomplete.
           </KitNote>
         </div>
       )}
 
-      {/* Identity metrics — one dense rail of mono counters, matching the
-          workspace home inventory rail. */}
-      <div className="mb-4 rounded-xl border border-white/[0.07] bg-[#16171d] shadow-[0_16px_44px_-28px_rgba(0,0,0,0.9)]">
-        <div className="grid grid-cols-2 sm:grid-cols-4 divide-x divide-white/[0.06]">
-          <div className="flex items-baseline gap-2 px-4 py-3">
-            <span className="font-mono text-[16px] font-medium tabular-nums leading-none text-white">
-              {statsLoading ? '—' : (stats?.totalUsers ?? 0).toLocaleString()}
-            </span>
-            <span className="text-[11px] text-zinc-500 leading-none">identities</span>
-          </div>
-          <div className="flex items-baseline gap-2 px-4 py-3">
-            <span className="font-mono text-[16px] font-medium tabular-nums leading-none text-white">
-              {statsLoading ? '—' : (stats?.activeUsers ?? 0).toLocaleString()}
-            </span>
-            <span className="text-[11px] text-zinc-500 leading-none">active · 30d</span>
-            {!statsLoading && stats?.activeUsersDelta ? (
-              <span className={`font-mono text-[10.5px] font-medium tabular-nums leading-none ${stats.activeUsersDelta > 0 ? 'text-emerald-300/90' : 'text-rose-300'}`}>
-                {stats.activeUsersDelta > 0 ? '+' : ''}{stats.activeUsersDelta}%
+      <StatStrip className="mb-8">
+        <Stat label="Users" value={(stats?.totalUsers ?? 0).toLocaleString()} loading={statsLoading} />
+        <Stat
+          label="Active in 30 days"
+          value={(stats?.activeUsers ?? 0).toLocaleString()}
+          hint={delta(stats?.activeUsersDelta)}
+          loading={statsLoading}
+        />
+        <Stat label="Verified email" value={(stats?.verifications ?? 0).toLocaleString()} loading={statsLoading} />
+        <Stat
+          label="New in 24 hours"
+          value={(stats?.signups24h ?? 0).toLocaleString()}
+          hint={delta(stats?.signupsDelta)}
+          loading={statsLoading}
+        />
+      </StatStrip>
+
+      <div className="grid grid-cols-1 items-start gap-8 lg:grid-cols-[minmax(0,1fr)_320px]">
+        <SettingsCard
+          title="Sign-in methods"
+          description="How the people using your app create an account and sign in. Social providers use your own OAuth app, stored encrypted for this project."
+        >
+          <ul className="-mx-5 divide-y divide-white/[0.06] border-t border-white/[0.06] sm:-mx-6">
+            <li className="flex items-center gap-4 px-5 py-4 sm:px-6">
+              <span className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-[8px] border border-white/[0.08] bg-[#08090a]">
+                <Mail className="h-4 w-4 text-zinc-300" strokeWidth={1.75} />
               </span>
-            ) : null}
-          </div>
-          <div className="flex items-baseline gap-2 px-4 py-3">
-            <span className="font-mono text-[16px] font-medium tabular-nums leading-none text-white">
-              {statsLoading ? '—' : (stats?.verifications ?? 0).toLocaleString()}
-            </span>
-            <span className="text-[11px] text-zinc-500 leading-none">verified</span>
-          </div>
-          <div className="flex items-baseline gap-2 px-4 py-3">
-            <span className="font-mono text-[16px] font-medium tabular-nums leading-none text-white">
-              {statsLoading ? '—' : (stats?.signups24h ?? 0).toLocaleString()}
-            </span>
-            <span className="text-[11px] text-zinc-500 leading-none">new · 24h</span>
-            {!statsLoading && stats?.signupsDelta ? (
-              <span className={`font-mono text-[10.5px] font-medium tabular-nums leading-none ${stats.signupsDelta > 0 ? 'text-emerald-300/90' : 'text-rose-300'}`}>
-                {stats.signupsDelta > 0 ? '+' : ''}{stats.signupsDelta}%
-              </span>
-            ) : null}
-          </div>
-        </div>
-      </div>
-
-      {/* Main: methods + sidebar */}
-      <div className="flex gap-6 items-start">
-        <div className="flex-1 min-w-0 flex flex-col gap-6">
-          <KitCard>
-            <KitCardHeader
-              title="Sign-in methods"
-              description="Choose how end-users authenticate with this backend."
-            />
-
-            {/* Email & Password */}
-            <div className="px-4 py-3 border-b border-white/[0.05]">
-              <div className="flex items-center gap-3">
-                <Mail className="w-3.5 h-3.5 text-zinc-500 flex-shrink-0" />
-                <div className="flex-1 min-w-0">
-                  <h4 className="text-[12.5px] font-medium text-zinc-200">Email &amp; password</h4>
-                  <p className="text-[11.5px] text-zinc-500 mt-0.5">Secure registration and login with JWT sessions.</p>
-                </div>
-                {/* "active" only once auth is genuinely on: the agent enabled it,
-                    OAuthConfig/policy configured, or real end-users exist. A bare
-                    jwtSecret (seeded at creation) is not activation, so a
-                    never-built project reads "not set up", not a false green. */}
-                {emailProviderEnabled || (stats?.totalUsers ?? 0) > 0 ? (
-                  <KitBadge tone="operational">active</KitBadge>
-                ) : (
-                  <KitBadge tone="neutral">not set up</KitBadge>
-                )}
+              <div className="min-w-0 flex-1">
+                <p className="text-[13px] font-medium text-zinc-100">Email and password</p>
+                <p className="mt-0.5 text-[12.5px] leading-[18px] text-zinc-500">
+                  {/* "Active" only once auth is genuinely on: the agent enabled
+                      it, or real end users exist. A bare jwtSecret (seeded at
+                      creation) is not activation. */}
+                  {emailActive
+                    ? 'Sign-up, sign-in and password reset with JWT sessions.'
+                    : 'Turns on when your agent adds sign-up to the app, or when the first user signs up.'}
+                </p>
               </div>
-            </div>
+              <StatusDot tone={emailActive ? 'operational' : 'neutral'} label={emailActive ? 'Active' : 'Not set up'} />
+            </li>
 
-            {/* Social providers */}
-            <div className="px-4 py-4">
-              <div className="flex items-center justify-between mb-3">
-                <SectionLabel>Social sign-in</SectionLabel>
-                <span className="text-[11px] text-zinc-600">Your own OAuth credentials, stored encrypted per project</span>
-              </div>
-              <div className="grid gap-2">
-                {(['google', 'github'] as ProviderId[]).map((pid) => {
-                  const meta = PROVIDER_META[pid]
-                  const enabled = enabledProviders.has(pid)
-                  const Mark = meta.Mark
-                  return (
-                    <button
-                      key={pid}
-                      onClick={() => openOAuthModal(pid)}
-                      className={`flex items-center gap-3 px-3.5 py-3 rounded-lg border text-left transition-colors group focus:outline-none ${
-                        enabled
-                          ? 'bg-white/[0.015] border-emerald-500/20 hover:border-emerald-500/30'
-                          : 'bg-white/[0.015] border-white/[0.07] hover:border-white/[0.14] hover:bg-white/[0.025]'
-                      }`}
-                    >
-                      <div className="w-8 h-8 rounded-lg border bg-[#0f1015] border-white/[0.07] flex items-center justify-center flex-shrink-0">
-                        <Mark className={meta.markClass} />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <h4 className="text-[12.5px] font-medium text-zinc-200">{meta.name}</h4>
-                        <p className="text-[11.5px] text-zinc-500 mt-0.5">{meta.tagline}</p>
-                      </div>
-                      {enabled ? (
-                        <span className="flex items-center gap-2.5">
-                          <KitBadge tone="operational">connected</KitBadge>
-                          <span className="hidden group-hover:inline-flex items-center gap-1 text-[11px] font-medium text-zinc-400">
-                            <Settings2 className="w-3 h-3" /> Manage
-                          </span>
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1 text-[11.5px] font-medium text-zinc-500 group-hover:text-zinc-200 transition-colors">
-                          Set up <ArrowRight className="w-3 h-3" />
-                        </span>
-                      )}
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
-          </KitCard>
+            {(['google', 'github'] as ProviderId[]).map((pid) => {
+              const meta = PROVIDER_META[pid]
+              const enabled = enabledProviders.has(pid)
+              const Mark = meta.Mark
+              return (
+                <li key={pid} className="flex items-center gap-4 px-5 py-4 sm:px-6">
+                  <span className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-[8px] border border-white/[0.08] bg-[#08090a]">
+                    <Mark className={meta.markClass} />
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[13px] font-medium text-zinc-100">{meta.name}</p>
+                    <p className="mt-0.5 text-[12.5px] leading-[18px] text-zinc-500">{meta.tagline}</p>
+                  </div>
+                  <div className="flex flex-shrink-0 items-center gap-3">
+                    {enabled && <StatusDot tone="operational" label="Connected" className="hidden sm:inline-flex" />}
+                    <KitButton size="sm" variant={enabled ? 'ghost' : 'secondary'} onClick={() => openOAuthModal(pid)}>
+                      {enabled ? 'Manage' : 'Set up'}
+                    </KitButton>
+                  </div>
+                </li>
+              )
+            })}
+          </ul>
+        </SettingsCard>
 
-        </div>
-
-        {/* Right sidebar */}
-        <div className="w-80 flex-shrink-0 flex flex-col gap-6">
-          <KitCard>
-            <div className="px-4 py-3 border-b border-white/[0.06] flex items-center gap-2">
-              <Shield className="w-3 h-3 text-emerald-400/70" />
-              <SectionLabel>Security posture</SectionLabel>
-            </div>
-            <div className="px-4 py-4">
-              <KitChecklist items={[
-                'Tokens signed with this project’s isolated secret',
-                'Passwords hashed with bcrypt, never reversible',
-                'Identities isolated in a per-project schema',
-                'Sessions revocable server-side on logout',
-              ]} />
-            </div>
-          </KitCard>
-
-          <KitCard>
-            <div className="px-4 py-3 border-b border-white/[0.06] flex items-center justify-between">
-              <SectionLabel>Recent identities</SectionLabel>
+        <div className="space-y-8">
+          <section>
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="text-[13px] font-medium text-zinc-100">Recent sign-ups</h2>
               {recent.length > 0 && (
-                <KitMoreLink onClick={() => currentProjectId && router.push(`/app/projects/${currentProjectId}/auth?tab=users`)}>
-                  All
-                </KitMoreLink>
+                <Link href={usersHref} className="inline-flex items-center gap-1 text-[12.5px] text-zinc-400 transition-colors hover:text-zinc-100">
+                  All users <ArrowRight className="h-3.5 w-3.5" />
+                </Link>
               )}
             </div>
             {recent.length === 0 ? (
-              <EmptyState
-                icon={Users}
-                title="No identities yet"
-                description="The first sign-up from your app appears here instantly."
-              />
+              <p className="rounded-[10px] border border-dashed border-white/[0.08] px-4 py-5 text-[12.5px] leading-[19px] text-zinc-500">
+                No one has signed up yet. The first account created from your app appears here straight away.
+              </p>
             ) : (
-              <>
-                <div className="divide-y divide-white/[0.04]">
-                  {recent.map((u) => (
-                    <div key={u.id} className="flex items-center gap-3 px-4 py-[11px]">
-                      <div className={`w-7 h-7 rounded-full border flex items-center justify-center flex-shrink-0 text-[11px] font-semibold uppercase ${AVATAR_TONE}`}>
-                        {(u.email || '?').slice(0, 1)}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-[12.5px] font-medium text-zinc-200 truncate">{u.email}</p>
-                        <p className="font-mono text-[10.5px] text-zinc-600 mt-0.5 truncate tabular-nums">
-                          {(u.provider || 'email').toLowerCase()} · {timeAgo(u.createdAt)}
-                        </p>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-                <button
-                  onClick={() => currentProjectId && router.push(`/app/projects/${currentProjectId}/auth?tab=users`)}
-                  className="group w-full flex items-center justify-center gap-1.5 px-4 py-2.5 border-t border-white/[0.06] text-[11.5px] font-medium text-zinc-500 hover:text-zinc-200 transition-colors focus:outline-none"
-                >
-                  Manage all users
-                  <ArrowRight className="w-3 h-3 transition-transform group-hover:translate-x-0.5" />
-                </button>
-              </>
+              <ul className="overflow-hidden rounded-[10px] border border-white/[0.07] bg-[#111214] divide-y divide-white/[0.05]">
+                {recent.map((u) => (
+                  <li key={u.id} className="flex items-center gap-3 px-4 py-2.5">
+                    <span className={`flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full border text-[12px] font-semibold uppercase ${AVATAR_TONE}`}>
+                      {(u.email || '?').slice(0, 1)}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[13px] text-zinc-200">{u.email}</span>
+                      <span className="mt-0.5 block truncate text-[12px] tabular-nums text-zinc-500">
+                        {(u.provider || 'email').toLowerCase()} · {timeAgo(u.createdAt)}
+                      </span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
             )}
-          </KitCard>
+          </section>
+
+          <section>
+            <h2 className="mb-3 text-[13px] font-medium text-zinc-100">How identities are protected</h2>
+            <KitChecklist
+              items={[
+                'Tokens signed with this project’s own secret',
+                'Passwords hashed with bcrypt, never reversible',
+                'Identities kept in this project’s own schema',
+                'Sessions revocable server-side on sign-out',
+              ]}
+            />
+          </section>
         </div>
       </div>
 
-      <InspectorGovernanceFooter />
-
-      {/* OAuth setup modal */}
-      <AnimatePresence>
-        {showWorkspaceOAuthModal && (() => {
-          const provider = showWorkspaceOAuthModal
-          const meta = PROVIDER_META[provider]
-          const Mark = meta.Mark
-          const isUpdate = enabledProviders.has(provider)
-          return (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4"
-              onClick={() => setShowWorkspaceOAuthModal(null)}
-            >
-              <motion.div
-                initial={{ scale: 0.96, opacity: 0, y: 8 }}
-                animate={{ scale: 1, opacity: 1, y: 0 }}
-                exit={{ scale: 0.96, opacity: 0, y: 4 }}
-                onClick={(e) => e.stopPropagation()}
-                className="bg-[#16171d] border border-white/[0.12] rounded-xl max-w-lg w-full shadow-[0_12px_32px_-16px_rgba(0,0,0,0.85)] overflow-hidden"
+      {/* OAuth setup */}
+      <KitModal
+        open={!!modalProvider}
+        onClose={() => setShowWorkspaceOAuthModal(null)}
+        width="max-w-lg"
+        title={modalMeta ? (modalIsUpdate ? `Manage ${modalMeta.name} sign-in` : `Connect ${modalMeta.name}`) : ''}
+        description="Credentials are stored encrypted and scoped to this project."
+        footer={
+          modalProvider && modalMeta ? (
+            <>
+              <span className="mr-auto hidden items-center gap-1.5 text-[12.5px] text-zinc-500 sm:inline-flex">
+                <KeyRound className="h-3.5 w-3.5" /> Encrypted at rest
+              </span>
+              <KitButton variant="ghost" onClick={() => setShowWorkspaceOAuthModal(null)}>
+                Cancel
+              </KitButton>
+              <KitButton
+                variant="primary"
+                loading={saving}
+                onClick={async () => {
+                  const ok = await handleSaveWorkspaceOAuth(modalProvider, configClientId, configClientSecret)
+                  if (ok) setShowWorkspaceOAuthModal(null)
+                }}
+                disabled={!configClientId || !configClientSecret}
               >
-                <div className="px-6 pt-5 pb-4 border-b border-white/[0.06] flex items-center gap-3.5">
-                  <div className="w-9 h-9 rounded-lg bg-[#0f1015] border border-white/[0.08] flex items-center justify-center">
-                    <Mark className="w-[18px] h-[18px]" />
-                  </div>
-                  <div className="min-w-0">
-                    <h3 className="text-[14px] font-semibold text-zinc-50 tracking-[-0.01em]">
-                      {isUpdate ? `Manage ${meta.name} sign-in` : `Connect ${meta.name}`}
-                    </h3>
-                    <p className="text-[12px] text-zinc-500 mt-0.5">Credentials are stored encrypted, scoped to this project.</p>
-                  </div>
-                </div>
-
-                <div className="px-6 py-5 space-y-5">
-                  {/* Step 1 */}
-                  <div className="flex gap-3">
-                    <span className="w-5 h-5 rounded-full bg-white/[0.05] border border-white/[0.10] text-zinc-400 text-[11px] font-semibold flex items-center justify-center flex-shrink-0 mt-px">1</span>
-                    <div className="min-w-0 flex-1">
-                      <p className="text-[13px] text-zinc-200 font-medium">
-                        Create an OAuth client in{' '}
-                        <a href={meta.console} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-violet-300 hover:text-violet-200 transition-colors">
-                          {meta.consoleName} <ExternalLink className="w-3 h-3" />
-                        </a>
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Step 2 — the redirect URI is where most OAuth setups fail;
-                      hand it over ready to paste. */}
-                  <div className="flex gap-3">
-                    <span className="w-5 h-5 rounded-full bg-white/[0.05] border border-white/[0.10] text-zinc-400 text-[11px] font-semibold flex items-center justify-center flex-shrink-0 mt-px">2</span>
-                    <div className="min-w-0 flex-1">
-                      <p className="text-[13px] text-zinc-200 font-medium mb-2">Add this authorized redirect URI</p>
-                      <CopyValue value={callbackUrl(provider)} />
-                    </div>
-                  </div>
-
-                  {/* Step 3 */}
-                  <div className="flex gap-3">
-                    <span className="w-5 h-5 rounded-full bg-white/[0.05] border border-white/[0.10] text-zinc-400 text-[11px] font-semibold flex items-center justify-center flex-shrink-0 mt-px">3</span>
-                    <div className="min-w-0 flex-1 space-y-4">
-                      <p className="text-[13px] text-zinc-200 font-medium">Paste the credentials {meta.name} gives you</p>
-                      <KitField label="Client ID">
-                        <KitInput
-                          type="text"
-                          value={configClientId}
-                          onChange={(e) => setConfigClientId(e.target.value)}
-                          placeholder={isUpdate ? 'Enter new client ID to replace the stored one' : 'Paste your client ID'}
-                          autoComplete="off"
-                        />
-                      </KitField>
-                      <KitField label="Client Secret">
-                        <KitInput
-                          type="password"
-                          value={configClientSecret}
-                          onChange={(e) => setConfigClientSecret(e.target.value)}
-                          placeholder={isUpdate ? 'Enter new client secret' : 'Paste your client secret'}
-                          autoComplete="new-password"
-                        />
-                      </KitField>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="px-6 py-4 border-t border-white/[0.06] flex items-center justify-between gap-2">
-                  <span className="inline-flex items-center gap-1.5 text-[11.5px] text-zinc-500">
-                    <KeyRound className="w-3 h-3" /> Encrypted at rest
-                  </span>
-                  <div className="flex gap-2">
-                    <KitButton variant="ghost" onClick={() => setShowWorkspaceOAuthModal(null)}>
-                      Cancel
-                    </KitButton>
-                    <KitButton
-                      variant="primary"
-                      onClick={async () => {
-                        await handleSaveWorkspaceOAuth(provider, configClientId, configClientSecret)
-                        setShowWorkspaceOAuthModal(null)
-                      }}
-                      disabled={!configClientId || !configClientSecret || saving}
-                    >
-                      {saving ? 'Saving…' : isUpdate ? 'Update credentials' : 'Activate'}
-                    </KitButton>
-                  </div>
-                </div>
-              </motion.div>
-            </motion.div>
-          )
-        })()}
-      </AnimatePresence>
+                {saving ? 'Saving…' : modalIsUpdate ? 'Update credentials' : 'Activate'}
+              </KitButton>
+            </>
+          ) : undefined
+        }
+      >
+        {modalProvider && modalMeta && (
+          <ol className="space-y-5">
+            <OAuthStep n={1} title={
+              <>
+                Create an OAuth client in{' '}
+                <a
+                  href={modalMeta.console}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 text-zinc-50 underline decoration-white/25 underline-offset-4 hover:decoration-white/60"
+                >
+                  {modalMeta.consoleName} <ExternalLink className="h-3 w-3" />
+                </a>
+              </>
+            } />
+            {/* The redirect URI is where most OAuth setups fail; hand it over ready to paste. */}
+            <OAuthStep n={2} title="Add this authorized redirect URI">
+              <CopyField value={callbackUrl(modalProvider)} />
+            </OAuthStep>
+            <OAuthStep n={3} title={`Paste the credentials ${modalMeta.name} gives you`}>
+              <div className="space-y-3">
+                <KitField label="Client ID">
+                  <KitInput
+                    type="text"
+                    value={configClientId}
+                    onChange={(e) => setConfigClientId(e.target.value)}
+                    placeholder={modalIsUpdate ? 'New client ID, replaces the stored one' : 'Client ID'}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </KitField>
+                <KitField label="Client secret">
+                  <KitInput
+                    type="password"
+                    value={configClientSecret}
+                    onChange={(e) => setConfigClientSecret(e.target.value)}
+                    placeholder={modalIsUpdate ? 'New client secret' : 'Client secret'}
+                    autoComplete="new-password"
+                  />
+                </KitField>
+              </div>
+            </OAuthStep>
+          </ol>
+        )}
+      </KitModal>
     </div>
+  )
+}
+
+function OAuthStep({ n, title, children }: { n: number; title: React.ReactNode; children?: React.ReactNode }) {
+  return (
+    <li className="flex gap-3">
+      <span className="mt-px flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full border border-white/[0.10] bg-white/[0.04] text-[11.5px] font-medium tabular-nums text-zinc-400">
+        {n}
+      </span>
+      <div className="min-w-0 flex-1">
+        <p className="text-[13px] font-medium leading-[20px] text-zinc-100">{title}</p>
+        {children && <div className="mt-2">{children}</div>}
+      </div>
+    </li>
   )
 }

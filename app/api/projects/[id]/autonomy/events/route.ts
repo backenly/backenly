@@ -28,8 +28,9 @@ const MAX_LIMIT = 50
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { id: string } },
+  props: { params: Promise<{ id: string }> },
 ) {
+  const params = await props.params
   return withProjectValidation<any>(request, async (validated) => {
     const url = new URL(request.url)
 

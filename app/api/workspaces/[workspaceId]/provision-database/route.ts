@@ -12,13 +12,28 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { provisionWorkspaceDatabase } from '@/lib/services/databaseProvisioning'
+import { withAuth } from '@/lib/auth/route-protection'
+import { canAdministerProject } from '@/lib/edition/guard'
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
+
+/**
+ * ── This route had NO authentication ────────────────────────────────────────
+ *
+ * It took a workspace id from the path and provisioned/rebuilt that workspace's
+ * database. No session, no ownership check, and no UI calling it. Anyone able
+ * to reach the server and name a workspace could act on it.
+ *
+ * Found by the route-authorization sweep. A workspace belongs to a project, so
+ * the check is: resolve the workspace, then ask whether this caller may
+ * administer its project. Resolving FIRST and authorizing SECOND is safe here
+ * because the lookup reveals nothing to the caller - a failed authorization
+ * returns 404 either way, so the endpoint is not an oracle for workspace ids.
+ */
+export const POST = withAuth(async (request: NextRequest, { user, params }) => {
   try {
-    const { id } = await params
+    // Keyed by the folder segment, [workspaceId]. It was read as `id` before,
+    // which Next never supplied, so this was undefined at runtime (#9).
+    const { workspaceId: id } = await params
 
     // Get workspace
     const workspace = await prisma.workspace.findUnique({
@@ -38,6 +53,18 @@ export async function POST(
           error: 'Workspace not found',
         },
         { status: 404 }
+      )
+    }
+
+
+    // The authorization this route never had. A workspace belongs to a
+    // project, so "may this caller administer that project" is the question.
+    // 404, matching the not-found answer above, so the two are indistinguishable
+    // and the endpoint cannot be used to discover which workspaces exist.
+    if (!(await canAdministerProject(user.userId, workspace.projectId))) {
+      return NextResponse.json(
+        { success: false, error: 'Workspace not found' },
+        { status: 404 },
       )
     }
 
@@ -78,5 +105,5 @@ export async function POST(
       { status: 500 }
     )
   }
-}
+})
 

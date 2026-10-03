@@ -26,6 +26,14 @@ import {
 } from '@/lib/execution/sql-recorder'
 import { runAutoFix } from '@/lib/core/auto-fix-engine'
 
+// The autonomous path now enforces the deployment's live-execution flag at the
+// mutation boundary. `runAutoFix` never checked it before — only `runReconciler`
+// did — so a test calling `runReconcilerLive` directly could execute while the
+// operator's emergency lever was off. Setting it here keeps these suites testing
+// what they are for (executor and verification semantics) rather than the flag.
+process.env.ENABLE_AUTONOMY_RECONCILER = 'true'
+process.env.ENABLE_AUTONOMY_LIVE_EXECUTION = 'true'
+
 describe('what counts as a statement worth recording', () => {
   test.each([
     'CREATE INDEX idx ON t (c)',

@@ -5,6 +5,10 @@ import { prisma } from '@/lib/db/postgres'
 import { requireAuth } from '@/lib/auth/middleware'
 import { z } from 'zod'
 import crypto from 'crypto'
+import { maskFromPrefix, plaintextForStorage } from '@/lib/auth/api-key-plaintext'
+import { canAdministerProject } from '@/lib/edition/guard'
+import { mintKey } from '@/lib/auth/key-prefix'
+import { apiKeyRateCeilingViolation } from '@/lib/quota/kernel'
 
 const createApiKeySchema = z.object({
   name: z.string().min(1, 'Name is required'),
@@ -24,44 +28,16 @@ const createApiKeySchema = z.object({
   rateLimitWindow: z.number().int().positive().optional().default(3600), // seconds
 })
 
-function generateApiKey(prefix: string): string {
-  const randomBytes = crypto.randomBytes(32).toString('hex')
-  return `${prefix}${randomBytes}`
-}
-
-function getKeyPrefix(keyType: string, role: string): string {
-  if (keyType === 'dashboard') {
-    return 'dk_admin_' // Dashboard keys
-  }
-  
-  // Public keys
-  const prefixes: Record<string, string> = {
-    'admin': 'sk_live_',
-    'read-only': 'sk_read_',
-    'write': 'sk_test_',
-    'ai-only': 'sk_ai_',
-    'client': 'sk_client_',
-    'service': 'sk_service_',
-  }
-  return prefixes[role] || 'sk_'
-}
-
 /**
- * Mask an API key for safe display.
- * Shows the prefix + first 4 chars + "..." + last 4 chars.
- * E.g.  sk_live_abcd1234...ef567890
- * The plaintext key should only ever be returned ONCE — immediately after creation.
+ * Built from keyPrefix, never from the secret.
+ *
+ * This used to take the plaintext key and render prefix + first4 … last4, so
+ * the list endpoint could only mask a key the database was still storing in the
+ * clear. The display was the last thing depending on that storage, and four
+ * trailing characters are not worth keeping a live credential recoverable for.
+ * Losing them is the whole user-visible cost of this change.
  */
-function maskApiKey(key: string | null): string {
-  if (!key) return ''
-  if (key.length <= 20) return key.slice(0, 8) + '...'
-  // Find the prefix boundary (e.g. "sk_live_", "dk_admin_")
-  const prefixMatch = key.match(/^[a-z_]+_/)
-  const prefix = prefixMatch ? prefixMatch[0] : ''
-  const rest = key.slice(prefix.length)
-  if (rest.length <= 8) return prefix + rest
-  return prefix + rest.slice(0, 4) + '...' + rest.slice(-4)
-}
+const maskApiKey = maskFromPrefix
 
 function getDefaultPermissions(role: string, keyType: string): string[] {
   // Dashboard keys use legacy permissions
@@ -116,10 +92,11 @@ export async function GET(request: NextRequest) {
         name: key.name,
         // Security: never return the full plaintext key on subsequent reads.
         // The plaintext key is returned ONCE — immediately after creation — and
-        // must be stored by the client at that point. All subsequent reads return
-        // only the masked version (e.g. sk_live_abc...xyz) so accidental logging
-        // or screenshots cannot expose live credentials.
-        key: maskApiKey(key.key),
+        // must be stored by the client at that point. All subsequent reads
+        // return only a mask derived from keyPrefix, which is non-secret
+        // metadata, so this path no longer depends on the key being stored in
+        // recoverable form at all.
+        key: maskApiKey(key.keyPrefix),
         keyPrefix: key.keyPrefix,
         keyType: key.keyType,
         role: key.role,
@@ -165,14 +142,10 @@ export async function POST(request: NextRequest) {
     
     // Validate user has access to this project (if projectId provided)
     if (projectId) {
-      const project = await prisma.project.findFirst({
-        where: {
-          id: projectId,
-          userId: auth.userId,
-        },
-      })
-      
-      if (!project) {
+      // ADMIN: generateApiKey below mints a real credential granting access to
+      // this project. Issuing one is administration, the same rule applied to
+      // ai-functions admin-key, which is a GET that hands back a credential.
+      if (!(await canAdministerProject(auth.userId, projectId))) {
         return NextResponse.json(
           { error: 'Project not found or access denied' },
           { status: 403 }
@@ -206,8 +179,14 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const keyPrefix = getKeyPrefix(data.keyType, data.role)
-    const fullKey = generateApiKey(keyPrefix)
+    // The plan's fair-use ceiling on how fast one key may go (never billed).
+    const ceiling = await apiKeyRateCeilingViolation(projectId || null, auth.userId, data.rateLimit, data.rateLimitWindow)
+    if (ceiling) {
+      return NextResponse.json({ error: ceiling, code: 'PLAN_LIMIT_EXCEEDED' }, { status: 400 })
+    }
+
+    // The prefix says what the key is (lib/auth/key-prefix.ts); its role is in the row.
+    const { key: fullKey, prefix: keyPrefix } = mintKey({ keyType: data.keyType, serviceRole: data.serviceRole })
     const keyHash = crypto.createHash('sha256').update(fullKey).digest('hex') // Hash for secure storage
     const permissions = data.permissions.length > 0 
       ? data.permissions 
@@ -220,7 +199,24 @@ export async function POST(request: NextRequest) {
     const apiKey = await prisma.apiKey.create({
       data: {
         name: data.name,
-        key: fullKey, // Development only: store full key for API Tester
+        // Plaintext is persisted ONLY for genuinely public keys.
+        //
+        // This line read `key: fullKey` unconditionally, commented "Development
+        // only: store full key for API Tester", with no NODE_ENV gate anywhere
+        // in the file — so every secret and service-role credential ever issued
+        // was stored in the clear beside its hash. The stated reason was also
+        // already gone: nothing in the tree consumes ApiKey.key for an API
+        // Tester. A leaked backup therefore handed over working MCP keys, which
+        // can create, alter and drop customer tables.
+        //
+        // Public keys keep their plaintext deliberately. They are designed to
+        // be embedded in frontend code, and Project.anonKey stores one in the
+        // clear for the same reason.
+        // Never persisted. See lib/auth/api-key-plaintext.ts — in particular
+        // why `keyType: 'public'` is NOT a safe exemption: every sk_* secret in
+        // the system is a keyType 'public' row. The full key is returned to the
+        // caller once, in the response below, and then it is unrecoverable.
+        key: plaintextForStorage(),
         keyHash, // SECURE: SHA-256 hash for validation
         keyPrefix,
         keyType: data.keyType,

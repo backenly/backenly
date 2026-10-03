@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { Icon } from '@iconify/react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { login } from '@/lib/api/auth'
+import { useUserSession } from '@/lib/hooks/useUserSession'
 import { GlobalLoading } from '@/components/ui/GlobalLoading'
 import { registerSiteIcons } from '@/lib/icons/registry'
 import {
@@ -22,6 +23,28 @@ import {
 
 registerSiteIcons()
 
+/**
+ * What the OAuth callbacks' `?error=` codes mean, in words.
+ *
+ * `email_not_verified` is the one people will actually meet: signing in with a
+ * provider is treated as proof of the address, so an address the provider has
+ * not verified cannot be accepted, and saying nothing would leave them
+ * clicking the same button again.
+ */
+const OAUTH_ERRORS: Record<string, string> = {
+  invalid_session: 'Your session has expired. Please log in again.',
+  email_not_verified:
+    'That account has no verified email address with the provider. Verify your email there and try again, or sign in with a password.',
+  no_email: 'That provider did not share an email address, so there is nothing to sign you in as.',
+  claim_requires_setup_token:
+    'This deployment has not been claimed yet. Its operator claims it on the sign-up page with the setup token that npm run selfhost printed; Google and GitHub sign-in work after that.',
+  blocked: 'This account cannot sign in. Contact support if you think that is wrong.',
+  signup_not_allowed: 'New accounts are not being accepted right now.',
+  token_failed: 'Sign-in with that provider did not complete. Please try again.',
+  userinfo_failed: 'Sign-in with that provider did not complete. Please try again.',
+  oauth_failed: 'Sign-in with that provider did not complete. Please try again.',
+}
+
 function LoginForm() {
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -33,15 +56,25 @@ function LoginForm() {
   const [showEmailForm, setShowEmailForm] = useState(false)
   const [oauthProviders, setOauthProviders] = useState<{ google: boolean; github: boolean } | null>(null)
 
-  // Get redirect URL — sanitize to prevent loops back to /auth/*
+  // The OAuth callbacks redirect here with ?error=... on every refusal. Only
+  // invalid_session was ever explained, so the rest bounced people back to a
+  // login form that looked like nothing had happened.
   const rawRedirect = searchParams.get('redirect') || '/app'
   const isAuthPath = rawRedirect.startsWith('/auth') || rawRedirect === '/login' || rawRedirect === '/signup'
   const redirectUrl = isAuthPath ? '/app' : rawRedirect
   const errorParam = searchParams.get('error')
+  const { isLoggedIn } = useUserSession({ confirmSignedIn: true })
 
   useEffect(() => {
-    if (errorParam === 'invalid_session') {
-      setErrors({ password: 'Your session has expired. Please log in again.' })
+    if (isLoggedIn && !errorParam) {
+      router.replace(redirectUrl)
+    }
+  }, [isLoggedIn, errorParam, redirectUrl, router])
+
+  useEffect(() => {
+    const message = errorParam ? OAUTH_ERRORS[errorParam] : null
+    if (message) {
+      setErrors({ password: message })
       setIsSubmitting(false)
     }
   }, [errorParam])
@@ -82,6 +115,22 @@ function LoginForm() {
       setErrors({ password: error instanceof Error ? error.message : 'Login failed' })
       setIsSubmitting(false)
     }
+  }
+
+  if (isLoggedIn && !errorParam) {
+    return (
+      <AuthChrome>
+        <AuthCard
+          eyebrow="Account"
+          title="Already signed in"
+          subtitle="Redirecting to your projects..."
+        >
+          <div className="flex h-24 items-center justify-center">
+            <div className="h-6 w-6 animate-spin rounded-full border-2 border-white/20 border-t-white" />
+          </div>
+        </AuthCard>
+      </AuthChrome>
+    )
   }
 
   return (

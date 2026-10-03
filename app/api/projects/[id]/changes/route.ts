@@ -12,8 +12,9 @@ import { prisma } from '@/lib/db'
  */
 export async function GET(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  props: { params: Promise<{ id: string }> }
 ) {
+  const params = await props.params
   return withProjectValidation(request, async (validated) => {
     const { projectId } = validated
 

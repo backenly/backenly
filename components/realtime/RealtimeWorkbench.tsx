@@ -15,9 +15,13 @@
  */
 
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { Radio, WifiOff, Circle, RefreshCw, AlertTriangle, Trash2 } from 'lucide-react'
+import { Radio, WifiOff, Circle, RefreshCw, AlertTriangle, Trash2, ChevronLeft } from 'lucide-react'
 import { getAuthToken } from '@/lib/api/auth'
-import { KitNote, EmptyState, KIT } from '@/components/inspector/kit'
+import {
+  AgentPrompt, CommandBar, CopyField, EmptyState, IconButton, KIT, KitButton, NoticeStrip, StatusDot,
+  type StatusTone,
+} from '@/components/inspector/kit'
+import { FOCUS_INSET } from '@/components/console/tokens'
 
 interface RealtimeStatusData {
   triggeredTables: string[]
@@ -43,7 +47,7 @@ const DB_EVENT_TYPES = new Set(['insert', 'update', 'delete', 'presence', 'broad
 // Errors we will not auto-retry on — retrying just burns connection slots until
 // the user changes something (paying plan, signing in again).
 const FATAL_PATTERNS = [
-  /reached its limit/i,   // realtime concurrency cap (quota-kernel)
+  /reached its limit/i,   // realtime concurrency cap (quota kernel)
   /unauthor/i,            // 401-shape
   /api key/i,             // auth failure
 ]
@@ -60,21 +64,33 @@ function backoffMs(attempt: number): number {
 }
 
 const EVENT_STYLES: Record<string, string> = {
-  insert:    'text-emerald-300/90',
-  update:    'text-violet-300/90',
-  delete:    'text-rose-300/90',
-  presence:  'text-sky-300/90',
-  broadcast: 'text-sky-300/90',
+  insert:    'text-emerald-300',
+  update:    'text-violet-300',
+  delete:    'text-rose-300',
+  presence:  'text-sky-300',
+  broadcast: 'text-sky-300',
   connected: 'text-zinc-400',
 }
 
+const EVENT_BAR: Record<string, string> = {
+  insert:    'bg-emerald-400/70',
+  update:    'bg-violet-300/70',
+  delete:    'bg-rose-400/70',
+  presence:  'bg-sky-300/70',
+  broadcast: 'bg-sky-300/70',
+}
+
+/** Event kinds are SQL verbs and channel names: machine text, set as such. */
 function EventType({ type }: { type: string }) {
   return (
-    <span className={`flex-shrink-0 font-mono text-[10.5px] font-semibold tracking-wide ${EVENT_STYLES[type] ?? 'text-zinc-500'}`}>
+    <span className={`flex-shrink-0 font-mono text-[11.5px] font-medium tracking-[0.02em] ${EVENT_STYLES[type] ?? 'text-zinc-500'}`}>
       {type.toUpperCase()}
     </span>
   )
 }
+
+const TH = 'h-[36px] whitespace-nowrap border-b border-white/[0.06] px-3 text-left text-[12px] font-medium text-zinc-500'
+const TD = 'h-[36px] whitespace-nowrap border-b border-white/[0.04] px-3'
 
 export function RealtimeWorkbench({ projectId }: { projectId: string }) {
   const [status, setStatus] = useState<RealtimeStatusData | null>(null)
@@ -86,6 +102,7 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
   const [events, setEvents] = useState<LiveEvent[]>([])
   const [eventCount, setEventCount] = useState(0)
   const [tableFilter, setTableFilter] = useState<string | null>(null)
+  const [mobilePane, setMobilePane] = useState<'tables' | 'feed'>('tables')
 
   const esRef = useRef<EventSource | null>(null)
   const counterRef = useRef(0)
@@ -296,23 +313,14 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
       ? 'Offline'
       : 'Connecting…'
 
-  const stateDot =
+  const stateTone: StatusTone =
     connState === 'connected'
-      ? 'bg-emerald-400'
+      ? 'operational'
       : connState === 'reconnecting'
-      ? 'bg-amber-400'
+      ? 'attention'
       : connState === 'fatal'
-      ? 'bg-rose-400'
-      : 'bg-zinc-600'
-
-  const stateTone =
-    connState === 'connected'
-      ? 'text-emerald-300/90'
-      : connState === 'reconnecting'
-      ? 'text-amber-500'
-      : connState === 'fatal'
-      ? 'text-rose-300'
-      : 'text-zinc-400'
+      ? 'failed'
+      : 'neutral'
 
   // Empty-state copy never contradicts the command-bar state.
   const emptyState = (() => {
@@ -320,16 +328,22 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
       return {
         icon: Radio,
         title: `No ${tableFilter} events yet`,
-        description: `${events.length} event${events.length === 1 ? '' : 's'} on other tables this session. Choose All to see everything.`,
+        description: `${events.length} event${events.length === 1 ? '' : 's'} on other tables this session. Choose All events to see everything.`,
       }
     }
     switch (connState) {
       case 'connected':
-        return {
-          icon: Radio,
-          title: 'Listening',
-          description: 'Stream is open. Any insert, update, delete, or broadcast will appear here in real time.',
-        }
+        return triggeredCount === 0
+          ? {
+              icon: Radio,
+              title: 'Connected, nothing streaming',
+              description: 'Realtime is opt-in per table. Once a table streams, every insert, update and delete on it appears here as it happens.',
+            }
+          : {
+              icon: Radio,
+              title: 'Listening',
+              description: 'The stream is open. Inserts, updates, deletes and broadcasts appear here as they happen.',
+            }
       case 'reconnecting':
         return {
           icon: RefreshCw,
@@ -350,90 +364,69 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
   const breakdown = (['insert', 'update', 'delete', 'broadcast', 'presence'] as const)
     .map((type) => ({ type, count: events.filter((e) => e.type === type).length }))
     .filter((r) => r.count > 0)
+  // Payload size only matters when the server had to cut one short.
+  const anyTruncated = visibleEvents.some((e) => e.truncated)
+  const breakdownMax = Math.max(1, ...breakdown.map((b) => b.count))
+
+  const selectTable = (t: string | null) => {
+    setTableFilter(t)
+    setMobilePane('feed')
+  }
 
   // ── Render ──────────────────────────────────────────────────────────────
 
   return (
-    <div className={`flex h-[calc(100vh-48px)] flex-col overflow-hidden ${KIT.bg}`}>
+    <div className={`console-fill flex flex-col overflow-hidden ${KIT.bg}`}>
 
       {/* ── Command bar ───────────────────────────────────── */}
-      <div className="flex h-11 flex-shrink-0 items-center justify-between gap-4 border-b border-white/[0.06] px-4">
-        <div className="flex min-w-0 items-center gap-2.5">
-          <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-600">
-            <Radio className="h-3 w-3" />
-            Inspector
-          </span>
-          <span className="h-3 w-px bg-white/10" />
-          <h1 className="text-[13px] font-semibold text-zinc-100">Realtime</h1>
-          <span className={`inline-flex items-center gap-1.5 font-mono text-[10.5px] font-medium ${stateTone}`}>
-            <span className={`h-[5px] w-[5px] rounded-full ${stateDot} ${connState === 'connected' ? 'animate-pulse' : ''}`} />
-            {stateText}
-          </span>
-        </div>
-
-        <div className="flex flex-shrink-0 items-center gap-3">
-          <span className="hidden font-mono text-[10.5px] tabular-nums text-zinc-600 sm:inline">
-            {loadingStatus ? '—' : onlineUsers} online<span className="text-zinc-700"> · </span>
-            {triggeredCount} streaming<span className="text-zinc-700"> · </span>
-            {eventCount} event{eventCount === 1 ? '' : 's'}
-          </span>
-          {events.length > 0 && (
-            <button
-              onClick={() => { setEvents([]); setEventCount(0); setTableFilter(null) }}
-              className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-2.5 text-[11.5px] font-medium text-zinc-300 transition-colors hover:border-white/20 hover:bg-white/[0.08]"
-            >
-              <Trash2 className="h-3 w-3" />
-              Clear
-            </button>
-          )}
-        </div>
-      </div>
+      <CommandBar
+        title="Realtime"
+        context={
+          <>
+            <StatusDot tone={stateTone} label={stateText} pulse={connState === 'connected'} />
+            <span className="hidden tabular-nums sm:inline">
+              {loadingStatus ? '–' : onlineUsers} online
+              <span className="text-zinc-700"> · </span>
+              {triggeredCount} {triggeredCount === 1 ? 'table' : 'tables'} streaming
+            </span>
+          </>
+        }
+      >
+        {events.length > 0 && (
+          <KitButton
+            size="sm"
+            variant="ghost"
+            icon={Trash2}
+            onClick={() => { setEvents([]); setEventCount(0); setTableFilter(null) }}
+          >
+            Clear feed
+          </KitButton>
+        )}
+      </CommandBar>
 
       {/* Advisories */}
       {statusError === 'auth' && (
-        <div className="flex-shrink-0 border-b border-white/[0.06] px-4 py-2.5">
-          <KitNote
-            tone="warn"
-            icon={WifiOff}
-            title="Session expired"
-            actions={
-              <button
-                onClick={() => window.location.reload()}
-                className="flex-shrink-0 text-[12px] font-semibold text-amber-500 underline underline-offset-2 hover:text-amber-400"
-              >
-                Reload
-              </button>
-            }
-          >
-            Your sign-in token is stale. Reload the page or sign back in. The numbers here are last known, not live.
-          </KitNote>
-        </div>
+        <NoticeStrip
+          icon={WifiOff}
+          tone="attention"
+          action={<KitButton size="sm" onClick={() => window.location.reload()}>Reload</KitButton>}
+        >
+          <strong>Your session expired.</strong> The numbers here are the last known values, not live ones.
+        </NoticeStrip>
       )}
       {statusError === 'network' && (
-        <div className="flex-shrink-0 border-b border-white/[0.06] px-4 py-2.5">
-          <KitNote tone="info" icon={Circle}>
-            Couldn&apos;t refresh status. Showing last known values; retrying automatically.
-          </KitNote>
-        </div>
+        <NoticeStrip icon={Circle}>
+          Couldn&apos;t refresh status. Showing the last known values and retrying automatically.
+        </NoticeStrip>
       )}
       {connState === 'fatal' && fatalReason && (
-        <div className="flex-shrink-0 border-b border-white/[0.06] px-4 py-2.5">
-          <KitNote
-            tone="warn"
-            icon={AlertTriangle}
-            title="Realtime is offline"
-            actions={
-              <button
-                onClick={() => window.location.reload()}
-                className="flex-shrink-0 text-[12px] font-semibold text-amber-500 underline underline-offset-2 hover:text-amber-400"
-              >
-                Reload
-              </button>
-            }
-          >
-            {fatalReason}
-          </KitNote>
-        </div>
+        <NoticeStrip
+          icon={AlertTriangle}
+          tone="danger"
+          action={<KitButton size="sm" onClick={() => window.location.reload()}>Reload</KitButton>}
+        >
+          <strong>Realtime is offline.</strong> {fatalReason}
+        </NoticeStrip>
       )}
 
       {/* ── Workbench ─────────────────────────────────────── */}
@@ -441,213 +434,214 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
         <div className="absolute inset-0 flex">
 
           {/* ── Streaming rail ─────────────────────────── */}
-          <div className={`flex w-[248px] flex-shrink-0 flex-col border-r border-white/[0.06] ${KIT.rail}`}>
-            <div className="flex h-10 flex-shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] px-3">
-              <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">Streaming</span>
-              <button
+          <div className={`w-full flex-shrink-0 flex-col border-r border-white/[0.06] md:w-[256px] ${KIT.rail} ${mobilePane === 'tables' ? 'flex' : 'hidden md:flex'}`}>
+            <div className="flex h-[44px] flex-shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] pl-4 pr-2">
+              <span className="text-[13px] font-medium text-zinc-200">Tables</span>
+              <IconButton
+                icon={RefreshCw}
+                label="Refresh status"
                 onClick={fetchStatus}
-                className="rounded-md p-1.5 text-zinc-600 transition-colors hover:bg-white/[0.04] hover:text-zinc-200"
-                title="Refresh"
-              >
-                <RefreshCw className={`h-3 w-3 ${loadingStatus ? 'animate-spin' : ''}`} />
-              </button>
+                className={loadingStatus ? '[&_svg]:animate-spin' : ''}
+              />
             </div>
 
             <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden py-1.5">
               {activeTables.length === 0 ? (
-                <div className="space-y-3 px-4 py-6 text-center">
-                  <Radio className="mx-auto h-4 w-4 text-zinc-600" />
-                  <div>
-                    <p className="mb-0.5 text-[12px] font-semibold text-zinc-200">No triggers yet</p>
-                    <p className="text-[11px] leading-relaxed text-zinc-500">
-                      Create a table through your coding agent to start streaming.
-                    </p>
-                  </div>
+                <div className="px-4 py-4">
+                  <p className="text-[13px] font-medium text-zinc-200">No tables streaming</p>
+                  <p className="mt-1 text-[12.5px] leading-[19px] text-zinc-500">
+                    Realtime is opt-in. Ask your agent to turn it on for the tables your app listens to.
+                  </p>
                 </div>
               ) : (
-                <div className="space-y-px px-2">
-                  <div
-                    onClick={() => setTableFilter(null)}
-                    className={`group flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-[7px] transition-colors ${
-                      tableFilter === null
-                        ? 'bg-white/[0.05] text-zinc-50'
-                        : 'text-zinc-400 hover:bg-white/[0.03] hover:text-zinc-100'
-                    }`}
-                  >
-                    <div
-                      className={`h-[5px] w-[5px] flex-shrink-0 rounded-full ${
-                        tableFilter === null ? 'bg-violet-300' : 'bg-white/[0.12] group-hover:bg-white/25'
+                <ul className="space-y-px px-2">
+                  <li>
+                    <button
+                      type="button"
+                      aria-current={tableFilter === null ? 'true' : undefined}
+                      onClick={() => selectTable(null)}
+                      className={`flex h-[32px] w-full items-center gap-2.5 rounded-[7px] px-2.5 text-left transition-colors ${FOCUS_INSET} ${
+                        tableFilter === null
+                          ? 'bg-white/[0.07] text-zinc-50'
+                          : 'text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-100'
                       }`}
-                    />
-                    <span className="flex-1 truncate text-[12px] font-medium">All events</span>
-                    <span className="flex-shrink-0 font-mono text-[10.5px] tabular-nums text-zinc-600">{events.length}</span>
-                  </div>
+                    >
+                      <Radio className="h-3.5 w-3.5 flex-shrink-0 text-zinc-500" strokeWidth={1.75} />
+                      <span className="flex-1 truncate text-[13px] font-medium">All events</span>
+                      <span className="flex-shrink-0 text-[12px] tabular-nums text-zinc-500">{events.length}</span>
+                    </button>
+                  </li>
 
                   {activeTables.map((t) => {
                     const active = tableFilter === t
                     const streaming = status?.triggeredTables.includes(t)
                     const count = events.filter((e) => e.table === t).length
                     return (
-                      <div
-                        key={t}
-                        onClick={() => setTableFilter(active ? null : t)}
-                        className={`group flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-[7px] transition-colors ${
-                          active ? 'bg-white/[0.05] text-zinc-50' : 'text-zinc-400 hover:bg-white/[0.03] hover:text-zinc-100'
-                        }`}
-                      >
-                        <div
-                          className={`h-[5px] w-[5px] flex-shrink-0 rounded-full ${
-                            active ? 'bg-violet-300' : streaming ? 'bg-emerald-400/70' : 'bg-white/[0.12] group-hover:bg-white/25'
+                      <li key={t}>
+                        <button
+                          type="button"
+                          aria-current={active ? 'true' : undefined}
+                          onClick={() => selectTable(active ? null : t)}
+                          title={streaming ? 'Streaming: change trigger installed' : 'Seen this session'}
+                          className={`flex h-[32px] w-full items-center gap-2.5 rounded-[7px] px-2.5 text-left transition-colors ${FOCUS_INSET} ${
+                            active ? 'bg-white/[0.07] text-zinc-50' : 'text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-100'
                           }`}
-                          title={streaming ? 'Trigger installed' : 'Seen this session'}
-                        />
-                        <span className="flex-1 truncate font-mono text-[12px]">{t}</span>
-                        {count > 0 && (
-                          <span className="flex-shrink-0 font-mono text-[10.5px] tabular-nums text-zinc-600">{count}</span>
-                        )}
-                      </div>
+                        >
+                          <span className="flex w-3.5 flex-shrink-0 justify-center">
+                            <StatusDot tone={streaming ? 'operational' : 'neutral'} />
+                          </span>
+                          <span className="flex-1 truncate font-mono text-[12.5px]">{t}</span>
+                          {count > 0 && (
+                            <span className="flex-shrink-0 text-[12px] tabular-nums text-zinc-500">{count}</span>
+                          )}
+                        </button>
+                      </li>
                     )
                   })}
-                </div>
+                </ul>
               )}
             </div>
 
-            <div className="flex h-7 flex-shrink-0 items-center border-t border-white/[0.06] px-3 font-mono text-[10.5px] tabular-nums text-zinc-600">
-              {triggeredCount} table{triggeredCount === 1 ? '' : 's'} streaming
+            <div className="flex h-[36px] flex-shrink-0 items-center border-t border-white/[0.06] px-4 text-[12px] tabular-nums text-zinc-500">
+              {triggeredCount} {triggeredCount === 1 ? 'table' : 'tables'} streaming
             </div>
           </div>
 
           {/* ── Event stream ───────────────────────────── */}
-          <div className="flex min-w-0 flex-1 flex-col">
-            <div className="flex h-10 flex-shrink-0 items-center justify-between gap-3 border-b border-white/[0.06] px-4">
-              <div className="flex min-w-0 items-baseline gap-2">
-                <h2 className="truncate font-mono text-[13px] font-medium text-zinc-100">
-                  {tableFilter ?? 'Live feed'}
+          <div className={`min-w-0 flex-1 flex-col ${mobilePane === 'feed' ? 'flex' : 'hidden md:flex'}`}>
+            <div className="flex h-[44px] flex-shrink-0 items-center justify-between gap-3 border-b border-white/[0.06] px-3 sm:px-4">
+              <div className="flex min-w-0 items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setMobilePane('tables')}
+                  className="-ml-1 flex h-[32px] w-[32px] flex-shrink-0 items-center justify-center rounded-[7px] bg-white/[0.04] text-zinc-200 transition-colors hover:bg-white/[0.07] md:hidden"
+                  aria-label="Back to tables"
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                </button>
+                <h2 className={`truncate text-[13px] font-medium text-zinc-100 ${tableFilter ? 'font-mono' : ''}`}>
+                  {tableFilter ?? 'All events'}
                 </h2>
-                <span className="whitespace-nowrap font-mono text-[11px] tabular-nums text-zinc-500">
-                  {visibleEvents.length} event{visibleEvents.length === 1 ? '' : 's'}
+                <span className="whitespace-nowrap text-[12px] tabular-nums text-zinc-500">
+                  {visibleEvents.length} {visibleEvents.length === 1 ? 'event' : 'events'}
                 </span>
               </div>
-              <span className="flex-shrink-0 font-mono text-[10.5px] tabular-nums text-zinc-700">
-                last 100 retained
-              </span>
+              <span className="flex-shrink-0 text-[12px] text-zinc-600">Newest first · last 100 kept</span>
             </div>
 
-            <div className="min-h-0 flex-1 overflow-y-auto">
+            <div className="min-h-0 flex-1 overflow-y-auto" aria-live="polite" aria-relevant="additions">
               {visibleEvents.length === 0 ? (
-                <div className="flex h-full flex-col items-center justify-center px-8">
+                <div className="flex min-h-full flex-col items-center justify-center px-6">
                   <EmptyState
                     icon={emptyState.icon}
                     title={emptyState.title}
                     description={emptyState.description}
+                    action={
+                      connState === 'connected' && triggeredCount === 0 && !tableFilter ? (
+                        <AgentPrompt prompt="Enable realtime on the orders table so the app gets live updates." />
+                      ) : undefined
+                    }
                   />
                 </div>
               ) : (
-                <table className="w-full border-collapse">
-                  <thead className="sticky top-0 z-10">
-                    <tr className={KIT.gridHead}>
-                      <th className="w-24 border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
-                        Time
-                      </th>
-                      <th className="w-24 border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
-                        Type
-                      </th>
-                      <th className="border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
-                        Source
-                      </th>
-                      <th className="w-28 border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
-                        Payload
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {visibleEvents.map((ev) => (
-                      <tr key={ev.id} className={`transition-colors ${KIT.rowHoverOn}`}>
-                        <td className="border-b border-white/[0.04] px-3 py-[7px] font-mono text-[10.5px] tabular-nums text-zinc-600">
-                          {new Date(ev.timestamp * 1000).toLocaleTimeString([], {
-                            hour12: false,
-                            hour: '2-digit',
-                            minute: '2-digit',
-                            second: '2-digit',
-                          })}
-                        </td>
-                        <td className="border-b border-white/[0.04] px-3 py-[7px]">
-                          <EventType type={ev.type} />
-                        </td>
-                        <td className="border-b border-white/[0.04] px-3 py-[7px] font-mono text-[11.5px]">
-                          {ev.table ? (
-                            <span className="text-zinc-300">{ev.table}</span>
-                          ) : ev.channel ? (
-                            <span className="text-sky-300/90">#{ev.channel}</span>
-                          ) : (
-                            <span className="text-zinc-700">—</span>
-                          )}
-                        </td>
-                        <td className="border-b border-white/[0.04] px-3 py-[7px] font-mono text-[10.5px] text-zinc-600">
-                          {ev.truncated ? 'truncated' : '—'}
-                        </td>
+                <div className="min-w-full overflow-x-auto">
+                  <table className="w-full min-w-[440px] border-collapse">
+                    <thead className="sticky top-0 z-10">
+                      <tr className={KIT.gridHead}>
+                        <th className={`${TH} w-28`}>Time</th>
+                        <th className={`${TH} w-28`}>Event</th>
+                        <th className={TH}>Source</th>
+                        {anyTruncated && <th className={`${TH} w-28`}>Payload</th>}
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {visibleEvents.map((ev) => (
+                        <tr key={ev.id} className={`transition-colors ${KIT.rowHoverOn}`}>
+                          <td className={`${TD} text-[12.5px] tabular-nums text-zinc-500`}>
+                            {new Date(ev.timestamp * 1000).toLocaleTimeString([], {
+                              hour12: false,
+                              hour: '2-digit',
+                              minute: '2-digit',
+                              second: '2-digit',
+                            })}
+                          </td>
+                          <td className={TD}>
+                            <EventType type={ev.type} />
+                          </td>
+                          <td className={`${TD} font-mono text-[12.5px]`}>
+                            {ev.table ? (
+                              <span className="text-zinc-200">{ev.table}</span>
+                            ) : ev.channel ? (
+                              <span className="text-sky-300/90">#{ev.channel}</span>
+                            ) : (
+                              <span className="text-zinc-600">none</span>
+                            )}
+                          </td>
+                          {anyTruncated && (
+                            <td className={`${TD} text-[12.5px]`}>
+                              {ev.truncated && <span className="text-amber-200/90">Truncated</span>}
+                            </td>
+                          )}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               )}
             </div>
           </div>
 
           {/* ── Session inspector ──────────────────────── */}
-          <div className={`hidden w-[280px] flex-shrink-0 flex-col border-l border-white/[0.06] lg:flex ${KIT.rail}`}>
-            <div className="flex h-10 flex-shrink-0 items-center border-b border-white/[0.06] px-3">
-              <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">Session</span>
+          <div className={`hidden w-[288px] flex-shrink-0 flex-col border-l border-white/[0.06] lg:flex ${KIT.rail}`}>
+            <div className="flex h-[44px] flex-shrink-0 items-center border-b border-white/[0.06] px-4">
+              <span className="text-[13px] font-medium text-zinc-200">This session</span>
             </div>
 
             <div className="min-h-0 flex-1 overflow-y-auto">
-              <dl className={`divide-y ${KIT.divide}`}>
-                {[
-                  ['Connection', stateText],
-                  ['Online', loadingStatus ? '—' : String(onlineUsers)],
-                  ['Tables streaming', loadingStatus ? '—' : String(triggeredCount)],
-                  ['Events this session', String(eventCount)],
-                ].map(([label, value]) => (
-                  <div key={label} className="flex items-baseline justify-between gap-3 px-3 py-2.5">
-                    <dt className="flex-shrink-0 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">
-                      {label}
-                    </dt>
-                    <dd
-                      className={`min-w-0 truncate text-right font-mono text-[11.5px] tabular-nums ${
-                        label === 'Connection' ? stateTone : 'text-zinc-300'
-                      }`}
-                    >
-                      {value}
-                    </dd>
+              <dl className="divide-y divide-white/[0.05]">
+                {([
+                  ['Connection', <StatusDot key="c" tone={stateTone} label={stateText} />],
+                  ['Online now', loadingStatus ? '–' : onlineUsers.toLocaleString()],
+                  ['Tables streaming', loadingStatus ? '–' : triggeredCount.toLocaleString()],
+                  ['Events received', eventCount.toLocaleString()],
+                ] as Array<[string, React.ReactNode]>).map(([label, value]) => (
+                  <div key={label} className="flex items-center justify-between gap-3 px-4 py-2.5">
+                    <dt className="flex-shrink-0 text-[13px] text-zinc-500">{label}</dt>
+                    <dd className="min-w-0 truncate text-right text-[13px] tabular-nums text-zinc-200">{value}</dd>
                   </div>
                 ))}
               </dl>
 
               {breakdown.length > 0 && (
-                <div className="border-t border-white/[0.06] p-3">
-                  <p className="mb-2.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">
-                    Event breakdown
-                  </p>
-                  <div className="space-y-2">
+                <section className="border-t border-white/[0.06] px-4 py-4">
+                  <h3 className="mb-3 text-[13px] font-medium text-zinc-200">By event</h3>
+                  <ul className="space-y-2.5">
                     {breakdown.map(({ type, count }) => (
-                      <div key={type} className="flex items-center justify-between">
-                        <EventType type={type} />
-                        <span className="font-mono text-[11.5px] font-medium tabular-nums text-zinc-300">{count}</span>
-                      </div>
+                      <li key={type}>
+                        <div className="mb-1 flex items-center justify-between">
+                          <EventType type={type} />
+                          <span className="text-[12.5px] tabular-nums text-zinc-300">{count}</span>
+                        </div>
+                        <div className="h-[3px] overflow-hidden rounded-full bg-white/[0.05]">
+                          <div
+                            className={`h-full rounded-full ${EVENT_BAR[type] ?? 'bg-zinc-500'}`}
+                            style={{ width: `${(count / breakdownMax) * 100}%` }}
+                          />
+                        </div>
+                      </li>
                     ))}
-                  </div>
-                </div>
+                  </ul>
+                </section>
               )}
 
               {status?.channel && (
-                <div className="border-t border-white/[0.06] p-3">
-                  <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">
-                    PG channel
+                <section className="border-t border-white/[0.06] px-4 py-4">
+                  <h3 className="text-[13px] font-medium text-zinc-200">Postgres channel</h3>
+                  <p className="mb-2 mt-0.5 text-[12.5px] leading-[19px] text-zinc-500">
+                    Changes are published with NOTIFY on this channel.
                   </p>
-                  <code className="block break-all rounded-md border border-white/[0.06] bg-[#0f1015] px-2 py-1.5 font-mono text-[10.5px] leading-relaxed text-zinc-400">
-                    {status.channel}
-                  </code>
-                </div>
+                  <CopyField value={status.channel} />
+                </section>
               )}
             </div>
           </div>

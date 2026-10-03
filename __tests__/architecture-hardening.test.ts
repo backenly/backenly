@@ -54,8 +54,17 @@ describe('ARCHITECTURE HARDENING VALIDATION', () => {
     await new Promise(resolve => setTimeout(resolve, 100))
     
     const duration = Date.now() - startTime
-    expect(duration).toBeGreaterThanOrEqual(100)
-    expect(duration).toBeLessThan(200) // Shouldn't take much longer
+    // Lower bound carries a millisecond of slack on purpose. setTimeout is not
+    // required to fire no earlier than its delay as measured by Date.now():
+    // the two use different clocks and Date.now() has millisecond granularity,
+    // so a 100ms sleep legitimately measures 99. Asserting >= 100 exactly was
+    // testing Node's timer rather than anything in this repository, and it
+    // failed on a 2-core CI runner at 99ms the first time this suite ran on
+    // the blocking path (#7).
+    expect(duration).toBeGreaterThanOrEqual(95)
+    // The upper bound is the assertion that means something: the await must
+    // actually resolve promptly rather than hang or leak.
+    expect(duration).toBeLessThan(200)
     
     console.log('✅ Async operations handled properly')
   })

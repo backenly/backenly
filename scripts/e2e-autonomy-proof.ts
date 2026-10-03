@@ -28,7 +28,6 @@ const rows = <T = any>(sql: string) => prisma.$queryRawUnsafe<T[]>(sql)
 
 let userId = ''
 let projectId = ''
-let planId = ''
 let schema = ''
 
 const pass: string[] = []
@@ -53,14 +52,13 @@ async function setup() {
     },
   })
 
-  // Subscribe exactly the way signup does — createFreeSubscription resolves the
-  // seeded SANDBOX plan. Deliberately NOT a hand-built plan row: the entitlements
-  // the loop reads come from prisma/seed-billing.ts, so a fixture that mints its
-  // own plan would prove the loop works on a plan no real user ever has. This
-  // path fails loudly if the seed has not been run, which is the point.
-  const { createFreeSubscription } = await import('@/lib/billing')
-  const sub = await createFreeSubscription(userId)
-  planId = sub.planId
+  // Entitle the account exactly the way signup does, through the seam. In a
+  // public checkout that is a no-op and the loop runs on self-hosted
+  // entitlements; composed Cloud resolves the seeded plan. Either way the
+  // fixture does not mint a plan row of its own, so it can never prove the
+  // loop works on a plan no real user has.
+  const { initializeAccountEntitlements } = await import('@/lib/entitlements')
+  await initializeAccountEntitlements(userId)
 
   await prisma.project.create({
     data: { id: projectId, name: 'e2e-autonomy-proof', userId, autonomyLevel: 'AGGRESSIVE' } as any,

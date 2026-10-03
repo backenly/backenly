@@ -1,0 +1,91 @@
+{
+  "generatedAt": "2026-09-03",
+  "note": "Known-failing tests, by name. Regenerate ONLY when a failure is deliberately accepted or genuinely fixed, never to make a red check green. See scripts/test-baseline.ts.",
+  "failures": {
+    "__tests__/concurrency-convergence.test.ts": [
+      "CONCURRENCY CONVERGENCE TEST Real Database Concurrency should converge to correct state under concurrent field additions",
+      "CONCURRENCY CONVERGENCE TEST Real Database Concurrency should handle idempotent mutations correctly"
+    ],
+    "__tests__/deterministic-executor.test.ts": [
+      "Deterministic Mutation Executor Deterministic Behavior should produce same result for same intent on same graph state"
+    ],
+    "__tests__/invariants/mutation-safety.test.ts": [
+      "Mutation Safety - Core Engine Protection TEST 1: 100 concurrent CREATE_TABLE operations maintain version lineage",
+      "Mutation Safety - Core Engine Protection TEST 2: Validation failure produces zero state change",
+      "Mutation Safety - Core Engine Protection TEST 4: Deterministic replay produces identical graph state",
+      "Mutation Safety - Core Engine Protection TEST 5: Execution context correctly tracks mutation lifecycle"
+    ],
+    "__tests__/lib/services/databaseBrain.test.ts": [
+      "Database Brain Service runAnalysis should handle errors gracefully",
+      "Database Brain Service runAnalysis should run analysis and return issues"
+    ],
+    "__tests__/lib/services/monitoring.test.ts": [
+      "Monitoring Service (ApiRequestLog-backed) getMetricStats projects each metric type off the same real aggregate",
+      "Monitoring Service (ApiRequestLog-backed) getMetrics (chart buckets) buckets request volume to the real total",
+      "Monitoring Service (ApiRequestLog-backed) getPerformanceBreakdown groups by METHOD + normalized path with correct error rates",
+      "Monitoring Service (ApiRequestLog-backed) getRuntimeWindowStats aggregates only runtime traffic and excludes /api/* rows"
+    ],
+    "__tests__/load/concurrency.test.ts": [
+      "PHASE 5: Load Testing & Concurrency Validation should handle 200 concurrent advisory requests"
+    ],
+    "__tests__/load/execution-engine-performance.test.ts": [
+      "Execution Engine Performance Tests TEST 1: 50 concurrent mutations on same project (execution engine only)",
+      "Execution Engine Performance Tests TEST 2: 100 concurrent mutations across projects (execution engine only)",
+      "Execution Engine Performance Tests TEST 3: Verify integration mode bypasses AI planning"
+    ],
+    "__tests__/suite2.relationships.test.ts": [
+      "SUITE 2: Relationship + Memory Integrity STEPS 6-10: Advanced relationship operations"
+    ],
+    "__tests__/suite3.conflicts.test.ts": [
+      "SUITE 3: Conflict & Invariant Enforcement TEST 2: Safe Deletes - Remove non-existent table",
+      "SUITE 3: Conflict & Invariant Enforcement TEST 3: Referential Integrity - Strict rejection on dependent removal"
+    ],
+    "__tests__/suite4.safety.test.ts": [
+      "SUITE 4: Safety + Adversarial Testing CASE 1: Mixed Valid + Malicious - Atomic Refusal Required",
+      "SUITE 4: Safety + Adversarial Testing CASE 4: Massive Prompt Noise - Secret Detection Must Fire",
+      "SUITE 4: Safety + Adversarial Testing CASE 5: Conversation Separation - No Mutation",
+      "SUITE 4: Safety + Adversarial Testing TEST 10: Conversational Query Variations - All Must Be Read-Only",
+      "SUITE 4: Safety + Adversarial Testing TEST 8: Secret Pattern Variants - Must Catch All"
+    ],
+    "__tests__/suite5.advisory.test.ts": [
+      "SUITE 5: Advisory Layer Coherence TEST 8: Advisory Query Must Not Mutate"
+    ],
+    "tests/error-communication.test.ts": [
+      "PHASE 6: Error Communication System Error Classes ExternalServiceError should identify failing service",
+      "PHASE 6: Error Communication System Error Response Formatting should handle unknown error types",
+      "PHASE 6: Error Communication System Success Criteria: No Generic Errors Retryable errors should have actionText"
+    ],
+    "tests/field-extraction.test.ts": [
+      "Intent Field Extraction - Phase 2 Hardening Ambiguous Prompts T3.1: Vague prompt - should NOT generate empty schema",
+      "Intent Field Extraction - Phase 2 Hardening Ambiguous Prompts T3.2: Implicit field requirements",
+      "Intent Field Extraction - Phase 2 Hardening Complex Prompts T2.1: Blog with users, posts, and comments",
+      "Intent Field Extraction - Phase 2 Hardening Complex Prompts T2.2: E-commerce with products and reviews",
+      "Intent Field Extraction - Phase 2 Hardening Field Type Accuracy T5.1: Type inference - email, number, boolean, date",
+      "Intent Field Extraction - Phase 2 Hardening Multi-Entity Prompts T4.2: Social media platform",
+      "Intent Field Extraction - Phase 2 Hardening Simple Prompts T1.1: User profile with explicit fields",
+      "Intent Field Extraction - Phase 2 Hardening Simple Prompts T1.2: Product with price and description",
+      "Intent Field Extraction - Phase 2 Hardening Simple Prompts T1.3: Article with title and content"
+    ],
+    "tests/storage-provisioning.test.ts": [
+      "PHASE 3: Storage Provisioning Truth Guarantee TEST 1: Provisioning Confirmation T1.1: Bucket must be created AND verified before returning success",
+      "PHASE 3: Storage Provisioning Truth Guarantee TEST 1: Provisioning Confirmation T1.2: System must NEVER claim success if verification fails",
+      "PHASE 3: Storage Provisioning Truth Guarantee TEST 2: Backend Verification T2.1: Verify bucket existence checks both DB and physical storage",
+      "PHASE 3: Storage Provisioning Truth Guarantee TEST 2: Backend Verification T2.3: Verification must enforce tenant isolation",
+      "PHASE 3: Storage Provisioning Truth Guarantee TEST 3: Panel Synchronization T3.1: List buckets shows real-time provisioning status",
+      "PHASE 3: Storage Provisioning Truth Guarantee TEST 3: Panel Synchronization T3.2: No ghost states - every listed bucket must be verified",
+      "PHASE 3: Storage Provisioning Truth Guarantee TEST 3: Panel Synchronization T3.3: UI must reflect actual upload capability",
+      "PHASE 3: Storage Provisioning Truth Guarantee TEST 4: Failure Transparency T4.1: Failed provisioning returns actionable error message",
+      "PHASE 3: Storage Provisioning Truth Guarantee TEST 4: Failure Transparency T4.3: Status API returns clear messages",
+      "PHASE 3: Storage Provisioning Truth Guarantee TEST 5: Async Polling T5.1: Polling succeeds when bucket is ready",
+      "PHASE 3: Storage Provisioning Truth Guarantee TEST 5: Async Polling T5.3: Polling respects max attempts limit",
+      "PHASE 3: Storage Provisioning Truth Guarantee TEST 6: Upload Capability Lifecycle T6.1: Upload capability is enabled only after provisioning completes",
+      "PHASE 3: Storage Provisioning Truth Guarantee TEST 6: Upload Capability Lifecycle T6.2: Bucket visibility in list matches actual provisioning state",
+      "PHASE 3: Storage Provisioning Truth Guarantee TEST 6: Upload Capability Lifecycle T6.3: File operations respect bucket provisioning state",
+      "PHASE 3: Storage Provisioning Truth Guarantee TEST 7: Integration - Full Lifecycle T7.1: End-to-end bucket creation → verification → list → delete",
+      "PHASE 3: Storage Provisioning Truth Guarantee TEST 7: Integration - Full Lifecycle T7.2: Multiple buckets maintain independent states"
+    ],
+    "tests/timeline-granularity.test.ts": [
+      "PHASE 5: Timeline Granularity Upgrade Timeline Entry Generation should include both legacy details and granular changes"
+    ]
+  }
+}

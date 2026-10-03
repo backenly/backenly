@@ -86,7 +86,15 @@ export async function detectUnregisteredSchema(projectId: string): Promise<RawFi
         schema,
         tableCount,
         registeredCount: registered.length,
-        remediation: `npx tsx scripts/repair-postgrest-registrations.ts --apply`,
+        // Per-project, because that is what this finding is about and what
+        // every edition can do. The instance-wide repair sweep is fleet tooling
+        // and lives in the Cloud control plane; naming it here would send a
+        // self-hoster looking for a script their checkout does not ship. The
+        // fix below performs this repair automatically anyway.
+        remediation:
+          'Re-register this project schema with ensureSchemaRegistered(projectId) ' +
+          '(lib/postgrest/registration.ts). Autonomy applies this fix itself when ' +
+          'live execution is enabled.',
       },
       // Auto-fixable, and safely so. Registration is idempotent, additive, and
       // restores the state a correctly-created project would already be in: it

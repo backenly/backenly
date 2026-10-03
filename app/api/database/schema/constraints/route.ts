@@ -4,7 +4,13 @@ export const dynamic = 'force-dynamic'
  * Constraint-level schema mutations from the inspector.
  *
  *   POST /api/database/schema/constraints
- *     { tableName, columnName, constraintType: 'not_null'|'unique'|'check'|'foreign_key', expression? }
+ *     { tableName, columnName, constraintType: 'not_null'|'unique'|'check'|'foreign_key',
+ *       expression?, referencedTable? }
+ *
+ * `referencedTable` names the target of a foreign key. Without it the executor
+ * infers one from the column name, which is right for the AI path and wrong for
+ * a picker: an operator's explicit choice would be discarded in favour of a
+ * guess that happens to look reasonable.
  *
  * Funnels through the canonical `tableLifecycle` service so the inspector and
  * the AI brain share one path — same governance, same self-heal.
@@ -17,7 +23,7 @@ import { addWorkspaceConstraint, type ConstraintType } from '@/lib/services/tabl
 export const POST = withProjectAccess(async (request: NextRequest, { projectId }) => {
   try {
     const body = await request.json().catch(() => ({}))
-    const { tableName, columnName, constraintType, expression } = body ?? {}
+    const { tableName, columnName, constraintType, expression, referencedTable } = body ?? {}
     if (!tableName || !columnName || !constraintType) {
       return NextResponse.json(
         { error: 'tableName, columnName, and constraintType are required' },
@@ -29,6 +35,7 @@ export const POST = withProjectAccess(async (request: NextRequest, { projectId }
       columnName,
       constraintType: constraintType as ConstraintType,
       expression,
+      referencedTable,
     })
     if (!result.success) {
       const status =

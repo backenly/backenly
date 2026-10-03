@@ -177,6 +177,109 @@ describe('concludeInvestigation', () => {
     }
   })
 
+  describe('a hypothesis nothing can settle', () => {
+    // `split_brain_writers` is the real case: confirming it needs analysis of
+    // function source and this platform has no AST tooling. It may be raised —
+    // it is a genuine possibility — but no evidence will ever separate it from
+    // anything, so as a blocking runner-up it is a permanent veto rather than
+    // uncertainty awaiting a test.
+    //
+    // Measured in production: the maintenance diagnosis for a project whose
+    // covariation probe had CONFIRMED duplicated_lifecycle_state still returned
+    // inconclusive, because split_brain_writers survived beside it. Its
+    // deciding observation is true of any table with more than two write
+    // shapes, so that veto applied to nearly every live project and no plan
+    // could be built anywhere.
+    const U = (id: string, prior: number, predicts: Record<string, string | undefined>): Hypothesis => ({
+      ...H(id, prior, predicts),
+      confirmable: false,
+    })
+
+    // The unsettlable one makes no prediction about `t`, so the evidence
+    // neither credits nor refutes it and it survives untouched beside the
+    // leader — which is exactly the production shape: `write_statement_shapes`
+    // raised it, and no probe that ran afterwards spoke to it at all.
+    it('does not hold a confirmed leader at ambiguous', () => {
+      let state = initialState('s', [H('a', 0.7, { t: 'x' }), U('unsettlable', 0.3, {})])
+      state = applyObservation(state, { testId: 't', outcome: 'x' })
+      const v = concludeInvestigation(state, [T('t')])
+
+      expect(v.kind).toBe('conclusive')
+      if (v.kind === 'conclusive') expect(v.hypothesis.id).toBe('a')
+    })
+
+    it('is still reported among the candidates rather than hidden', () => {
+      // Not vetoing is not the same as not existing. The caveat has to reach
+      // the person who can actually settle it.
+      let state = initialState('s', [H('a', 0.7, { t: 'x' }), U('unsettlable', 0.3, {})])
+      state = applyObservation(state, { testId: 't', outcome: 'x' })
+      expect(liveHypotheses(state).map(h => h.id)).toContain('unsettlable')
+    })
+
+    it('is never concluded ON, even with the field to itself', () => {
+      // The other half of the rule, and the one that keeps this from being a
+      // loophole: it may not win by elimination either.
+      let state = initialState('s', [U('unsettlable', 0.7, { t: 'x' }), H('a', 0.3, {})])
+      state = applyObservation(state, { testId: 't', outcome: 'x' })
+      const v = concludeInvestigation(state, [T('t')])
+      expect(v.kind).toBe('ambiguous')
+    })
+
+    it('does not cap a confirmed leader below the bar with mass nothing can take', () => {
+      // The production numbers. duplicated_lifecycle_state was CONFIRMED by its
+      // deciding probe and still sat at 0.714 against a bar of 0.85, because
+      // split_brain_writers held the other 0.286 and no evidence could ever
+      // move it. The bar was unreachable rather than demanding.
+      let state = initialState('s', [H('a', 0.25, { t: 'x' }), U('unsettlable', 0.1, { u: 'seen' })])
+      state = applyObservation(state, { testId: 'u', outcome: 'seen' })
+      state = applyObservation(state, { testId: 't', outcome: 'x' })
+
+      const live = liveHypotheses(state).sort((x, y) => y.confidence - x.confidence)
+      expect(live[0].id).toBe('a')
+      expect(live[0].confidence).toBeLessThan(0.85)
+
+      const v = concludeInvestigation(state, [T('t'), T('u')])
+      expect(v.kind).toBe('conclusive')
+      // The reported confidence is the TRUE posterior, not the renormalised
+      // one. Nothing downstream is told the system is more certain than it is.
+      if (v.kind === 'conclusive') expect(v.confidence).toBeLessThan(0.85)
+    })
+
+    it('still refuses when most of the belief is somewhere it cannot look', () => {
+      // The guard that keeps the rule above from being plain renormalisation.
+      // A leader holding a minority of the posterior would read 1.0 among the
+      // settleable hypotheses, which is exactly the case where the evidence is
+      // weakest and confidence should not be manufactured.
+      let state = initialState('s', [H('a', 0.1, { t: 'x' }), U('unsettlable', 0.9, { u: 'seen' })])
+      state = applyObservation(state, { testId: 'u', outcome: 'seen' })
+      state = applyObservation(state, { testId: 't', outcome: 'x' })
+
+      const live = liveHypotheses(state).sort((x, y) => y.confidence - x.confidence)
+      expect(live[0].id).toBe('unsettlable')
+
+      const v = concludeInvestigation(state, [T('t'), T('u')])
+      expect(v.kind).toBe('ambiguous')
+    })
+
+    it('leaves an ordinary field completely unaffected', () => {
+      // No unconfirmable hypothesis means settleable mass is the whole mass, so
+      // the bar is ACT_THRESHOLD exactly as before. The majority requirement is
+      // implied by it, since 0.85 > 0.5.
+      let state = initialState('s', [H('a', 0.5, { t: 'x' }), H('b', 0.5, { t: 'y' })])
+      state = applyObservation(state, { testId: 't', outcome: 'x' })
+      expect(concludeInvestigation(state, [T('t')]).kind).toBe('conclusive')
+
+      let weak = initialState('s', [H('c', 0.51, {}), H('d', 0.49, {})])
+      expect(concludeInvestigation(weak, []).kind).toBe('ambiguous')
+    })
+
+    it('still loses outright when the evidence refutes it', () => {
+      let state = initialState('s', [H('a', 0.5, { t: 'x' }), U('unsettlable', 0.5, { t: 'y' })])
+      state = applyObservation(state, { testId: 't', outcome: 'x' })
+      expect(liveHypotheses(state).map(h => h.id)).not.toContain('unsettlable')
+    })
+  })
+
   it('refuses on a bare lead without margin', () => {
     // Two hypotheses a hair apart mean the evidence barely separated them, even
     // if the leader clears the absolute bar.

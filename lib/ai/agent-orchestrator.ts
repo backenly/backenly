@@ -22,6 +22,9 @@ import { emitTrace } from './execution-tracer'
 import { shouldSkipLLM, schemaFingerprint, getCachedResult, setCachedResult, recordLLMUsage } from './cost-governor'
 import type { AgentInput, AgentFinding, AgentResult, OrchestratorResult } from './agents/types'
 import type { PlannerOutput } from './agents/types'
+import { P, loopPrincipals, type Principal } from '@/lib/principal'
+import { authorizeAutonomousFix, revalidateAtMutationBoundary } from '@/lib/authority/gate'
+import { prisma } from '@/lib/db/prisma'
 
 export type { OrchestratorResult, PlannerOutput }
 
@@ -203,6 +206,15 @@ export async function runAllAgents(
 export async function executeAutoFixes(
   projectId: string,
   plan: PlannerOutput,
+  /**
+   * Who asked for this run.
+   *
+   * Passed rather than assumed, because the two callers differ: the background
+   * monitor is Backenly acting on its own, and the agents API is somebody
+   * asking it to. Omitted records an explicit unknown with the reason, never a
+   * plausible default.
+   */
+  requestedBy?: Principal,
 ): Promise<string[]> {
   const phase1 = plan.executionPlan.find(p => p.canAutoRun)
   if (!phase1 || phase1.actions.length === 0) return []
@@ -228,6 +240,42 @@ export async function executeAutoFixes(
         `stopping auto-fix batch after ${applied.length} applied. ${breaker.reason ?? ''}`,
       )
       break
+    }
+
+    // ── THE GATE ─────────────────────────────────────────────────────────
+    //
+    // This path mutates through its own pg.Pool and the AI executor, never
+    // through runAutoFix, so it does not inherit the gate that lives there.
+    // Before Phase 5B it was a genuine autonomous bypass: the circuit breaker
+    // above bounds HOW MUCH it may do, and bounded the wrong question — a
+    // budget is not authority.
+    const gate = await authorizeAutonomousFix({
+      projectId,
+      // The orchestrator's own vocabulary. An unmapped category is
+      // unregistered, which the decision reads as FREEZE — the correct answer
+      // for a repair whose dependencies nobody has declared.
+      findingType: String((finding as any).type ?? (finding as any).category ?? 'unknown'),
+      tableName:
+        typeof (finding as any).location === 'string'
+          ? ((finding as any).location as string).split('.').pop() ?? null
+          : null,
+      loop: 'reconciler',
+    })
+
+    if (!gate.mayExecute) {
+      console.warn(
+        `[AgentOrchestrator] ${gate.decision.decision} for "${finding.title}" — ` +
+          `${gate.decision.reasons[0] ?? 'authority insufficient'}`,
+      )
+      continue
+    }
+
+    const stillValid = await revalidateAtMutationBoundary(gate, projectId)
+    if (!stillValid.stillValid) {
+      console.warn(
+        `[AgentOrchestrator] authority lapsed before "${finding.title}": ${stillValid.reason}`,
+      )
+      continue
     }
 
     try {
@@ -266,12 +314,23 @@ export async function executeAutoFixes(
       // Record into the breaker ledger so this path is counted consistently
       // with the auto-fix-engine paths (it previously wrote no audit at all).
       if (didApply) {
-        await recordAutonomousAction(projectId, 'AGENT_AUTO_FIXED', {
-          title: finding.title,
-          category: finding.category,
-          location: finding.location,
-          via: finding.fix.sql ? 'sql' : 'executor',
-        })
+        await recordAutonomousAction(
+          projectId,
+          'AGENT_AUTO_FIXED',
+          {
+            title: finding.title,
+            category: finding.category,
+            location: finding.location,
+            via: finding.fix.sql ? 'sql' : 'executor',
+          },
+          await loopPrincipals(
+            prisma,
+            projectId,
+            'agent_orchestrator',
+            requestedBy ??
+              P.unknown('auto-fix run started without a recorded requester'),
+          ),
+        )
       }
     } catch (err: any) {
       console.warn(`[AgentOrchestrator] Auto-fix failed for "${finding.title}":`, err?.message)

@@ -2,6 +2,7 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { authenticateRequest } from '@/lib/auth/middleware'
+import { canWriteProject } from '@/lib/edition/guard'
 import { applyChangesFromPlan, type BackendChangePlan } from '@/lib/services/aiWorkspace'
 import { prisma } from '@/lib/db/postgres'
 import { runMutation, mutationHttpStatus } from '@/lib/ai/build-runtime/mutate'
@@ -28,6 +29,17 @@ export async function POST(request: NextRequest) {
     }
     if (!projectId) {
       return NextResponse.json({ error: 'Project ID is required' }, { status: 400 })
+    }
+
+    // Ownership, before the project id is used for anything.
+    //
+    // This route authenticated the caller and then took `projectId` straight
+    // from the request body, so any signed-in account could name another
+    // tenant's project and apply schema changes to it. Authentication answers who is
+    // asking; it says nothing about what they may touch.
+    if (!(await canWriteProject(auth.userId, projectId))) {
+      // 404, not 403: the endpoint must not confirm which project ids exist.
+      return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
 
     const selectedIndices = selectedChanges.map((idx: string | number) => parseInt(String(idx), 10))

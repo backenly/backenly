@@ -24,24 +24,33 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import {
-  Upload, Download, Trash2, Copy, Search, Folder, File,
+  Upload, Download, Trash2, Copy, Search, Folder, File, Lock,
   Image as ImageIcon, FileText, AlertTriangle, Check,
   HardDrive, RefreshCw, Plus, X, Loader2, Sparkles, CheckSquare, Square,
+  ChevronLeft,
 } from 'lucide-react'
 import { Tooltip } from '@/components/ui/Tooltip'
 import {
   getBuckets, getFiles, uploadFile, deleteFile, deleteFiles,
-  getStorageStats, deleteBucket, createBucket,
+  getStorageStats, deleteBucket,
   type StorageBucket, type StorageFile, type StorageStats,
+  getBucketsWithCaveat, updateBucketPolicy,
 } from '@/lib/api/storage'
 import { getCurrentProjectId } from '@/lib/api/client'
 import { getProject, type Project } from '@/lib/api/projects'
 import {
-  KitButton, KitNote, KitModal, KitConfirmDialog, KitField, KitInput,
-  EmptyState, KIT,
+  AgentPrompt, CommandBar, EmptyState, IconButton, INPUT_BASE, KIT, KitButton, KitConfirmDialog, KitField,
+  KitInput, KitModal, KitNote,
 } from '@/components/inspector/kit'
+import { FOCUS_INSET } from '@/components/console/tokens'
+import { POLICY_LABELS, type AccessPolicy } from '@/lib/storage/access-policy'
+import { BucketPolicyDialog } from '@/components/storage/BucketPolicyDialog'
 
 const ALL_BUCKETS = '__all__'
+
+const TH_BASE = 'h-[36px] whitespace-nowrap border-b border-white/[0.06] px-3 text-[12px] font-medium text-zinc-500'
+const TH = `${TH_BASE} text-left`
+const TD = 'h-[40px] whitespace-nowrap border-b border-white/[0.04] px-3'
 
 const toNum = (v: number | string | bigint | null | undefined): number => {
   if (v === null || v === undefined) return 0
@@ -56,16 +65,16 @@ const formatFileSize = (bytes: number): string => {
   return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB'
 }
 
-const getFileIcon = (mimeType: string | null) => {
-  if (!mimeType) return File
-  if (mimeType.startsWith('image/')) return ImageIcon
-  if (mimeType.includes('pdf') || mimeType.includes('document')) return FileText
-  return File
+/** The type icon as an element, so no component identity is created during render. */
+function FileTypeIcon({ mimeType, className, strokeWidth = 1.75 }: { mimeType: string | null; className?: string; strokeWidth?: number }) {
+  if (mimeType?.startsWith('image/')) return <ImageIcon className={className} strokeWidth={strokeWidth} />
+  if (mimeType && (mimeType.includes('pdf') || mimeType.includes('document'))) return <FileText className={className} strokeWidth={strokeWidth} />
+  return <File className={className} strokeWidth={strokeWidth} />
 }
 
 /** Short type label for the grid — "image/jpeg" reads as "jpeg" in a column. */
 const shortType = (mimeType: string | null): string => {
-  if (!mimeType) return '—'
+  if (!mimeType) return 'file'
   const sub = mimeType.split('/')[1]
   return (sub || mimeType).split(';')[0]
 }
@@ -96,6 +105,7 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set())
   const [isDragging, setIsDragging] = useState(false)
   const [uploadProgress, setUploadProgress] = useState<Record<string, number>>({})
+  const [mobilePane, setMobilePane] = useState<'buckets' | 'objects'>('buckets')
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const [buckets, setBuckets] = useState<StorageBucket[]>([])
@@ -111,12 +121,18 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
   const [fileToDelete, setFileToDelete] = useState<StorageFile | null>(null)
   const [deletingFile, setDeletingFile] = useState(false)
   const [bucketToDelete, setBucketToDelete] = useState<{ id: string; name: string; fileCount: number } | null>(null)
+  /**
+   * The bucket whose read policy is being changed.
+   *
+   * Policy is the control that decides who may read this bucket's objects, and
+   * the dashboard previously could not show it, let alone change it: the list
+   * response carried `isPublic` only.
+   */
+  const [bucketPolicyTarget, setBucketPolicyTarget] = useState<StorageBucket | null>(null)
+  /** Deployment-level, reported by the server. See BucketPolicyDialog. */
+  const [cdnServesPublicObjects, setCdnServesPublicObjects] = useState(false)
   const [deletingBucket, setDeletingBucket] = useState(false)
   const [pendingUpload, setPendingUpload] = useState<File[] | null>(null)
-  const [showNewBucket, setShowNewBucket] = useState(false)
-  const [newBucketName, setNewBucketName] = useState('')
-  const [newBucketPublic, setNewBucketPublic] = useState(false)
-  const [creatingBucket, setCreatingBucket] = useState(false)
 
   useEffect(() => {
     const init = async () => {
@@ -150,11 +166,13 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
     if (!activePid) return
     try {
       setLoading(true)
-      const [bucketsData, filesData, statsData] = await Promise.all([
-        getBuckets(activePid),
+      const [bucketsResult, filesData, statsData] = await Promise.all([
+        getBucketsWithCaveat(activePid),
         getFiles({ projectId: activePid }),
         getStorageStats(activePid),
       ])
+      const bucketsData = bucketsResult.buckets
+      setCdnServesPublicObjects(bucketsResult.cdnServesPublicObjects)
       setBuckets(bucketsData)
       setFiles(filesData)
       setStats(statsData)
@@ -186,7 +204,12 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
   const totalBuckets = buckets.length
 
   const maxStorage = project?.storageLimit ? toNum(project.storageLimit) : 1 * 1024 * 1024 * 1024
-  const storagePercentage = maxStorage > 0 ? (totalStorage / maxStorage) * 100 : 0
+  // lib/services/storageQuota.ts reports "no cap" (self-hosted, or a plan
+  // lookup that failed open) as 2^63-1 bytes. Drawn as a quota, that read
+  // "0 B / 8589934592.0 GB" and a meter that can never move. Anything beyond
+  // exact integer range is not a real limit, so it is shown as none.
+  const unlimitedStorage = maxStorage > Number.MAX_SAFE_INTEGER
+  const storagePercentage = !unlimitedStorage && maxStorage > 0 ? (totalStorage / maxStorage) * 100 : 0
   const isStorageWarning = storagePercentage >= 80
   const isStorageCritical = storagePercentage >= 95
 
@@ -294,32 +317,13 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
     e.target.value = ''
   }
 
-  const handleCreateBucket = async () => {
-    const name = newBucketName.trim()
-    if (!name) return
-    setCreatingBucket(true)
-    try {
-      const bucket = await createBucket({ name, projectId: projectId ?? undefined, isPublic: newBucketPublic })
-      setShowNewBucket(false)
-      setNewBucketName('')
-      setNewBucketPublic(false)
-      await fetchData()
-      setSelectedBucket(bucket.name)
-      setSelectedBucketId(bucket.id)
-    } catch (error: any) {
-      setActionError(error?.message || 'Failed to create the bucket. Try again.')
-    } finally {
-      setCreatingBucket(false)
-    }
-  }
-
   const activeUploads = Object.entries(uploadProgress)
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
     <div
-      className={`flex h-[calc(100vh-48px)] flex-col overflow-hidden ${KIT.bg}`}
+      className={`console-fill flex flex-col overflow-hidden ${KIT.bg}`}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
@@ -327,59 +331,63 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
       <input ref={fileInputRef} type="file" multiple onChange={handleFileInputChange} className="hidden" />
 
       {/* ── Command bar ─────────────────────────────────────────
-          Identity, live quota, and the one primary action. A browser needs
-          vertical room more than a 22px title and a description. */}
-      <div className="flex h-11 flex-shrink-0 items-center justify-between gap-4 border-b border-white/[0.06] px-4">
-        <div className="flex min-w-0 items-center gap-2.5">
-          <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-600">
-            <HardDrive className="h-3 w-3" />
-            Inspector
+          Identity, the live quota, and the one primary action. A browser
+          needs vertical room more than a 22px title and a description. */}
+      <CommandBar
+        title="Storage"
+        context={
+          totalFiles > 0 ? (
+            <span className="tabular-nums">
+              {totalFiles.toLocaleString()} {totalFiles === 1 ? 'object' : 'objects'}
+            </span>
+          ) : undefined
+        }
+      >
+        {/* Quota — a meter, not a panel. */}
+        <div className="hidden items-center gap-2.5 sm:flex" title={unlimitedStorage ? 'This deployment sets no storage limit' : undefined}>
+          <span className="text-[12.5px] tabular-nums text-zinc-400">
+            {formatFileSize(totalStorage)}
+            <span className="text-zinc-600">{unlimitedStorage ? ' used, no limit' : ` of ${formatFileSize(maxStorage)}`}</span>
           </span>
-          <span className="h-3 w-px bg-white/10" />
-          <h1 className="text-[13px] font-semibold text-zinc-100">Storage</h1>
-          <span className="inline-flex items-center gap-1.5 font-mono text-[10.5px] font-medium text-zinc-400">
-            <span className="h-[5px] w-[5px] rounded-full bg-zinc-500" />
-            Governed
-          </span>
-          {totalFiles > 0 && (
-            <span className="font-mono text-[10.5px] tabular-nums text-zinc-500">{totalFiles.toLocaleString()}</span>
+          {!unlimitedStorage && (
+            <>
+              <div
+                className="h-[4px] w-24 overflow-hidden rounded-full bg-white/[0.07]"
+                role="meter"
+                aria-label="Storage used"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={Math.round(storagePercentage)}
+              >
+                <div
+                  className={`h-full rounded-full transition-[width] duration-500 ${
+                    isStorageCritical ? 'bg-rose-400' : isStorageWarning ? 'bg-amber-400' : 'bg-zinc-300'
+                  }`}
+                  style={{ width: `${Math.max(Math.min(storagePercentage, 100), totalStorage > 0 ? 2 : 0)}%` }}
+                />
+              </div>
+              <span
+                className={`text-[12.5px] tabular-nums ${
+                  isStorageCritical ? 'text-rose-300' : isStorageWarning ? 'text-amber-200' : 'text-zinc-500'
+                }`}
+              >
+                {storagePercentage.toFixed(storagePercentage < 10 ? 1 : 0)}%
+              </span>
+            </>
           )}
         </div>
-
-        <div className="flex flex-shrink-0 items-center gap-3">
-          {/* Quota — a meter, not a panel. */}
-          <div className="hidden items-center gap-2 sm:flex">
-            <span className="font-mono text-[10.5px] tabular-nums text-zinc-500">
-              {formatFileSize(totalStorage)}
-              <span className="text-zinc-700"> / {formatFileSize(maxStorage)}</span>
-            </span>
-            <div className="h-[3px] w-24 overflow-hidden rounded-full bg-white/[0.06]">
-              <div
-                className={`h-full rounded-full transition-all duration-500 ${
-                  isStorageCritical ? 'bg-rose-400' : isStorageWarning ? 'bg-amber-400' : 'bg-violet-400/60'
-                }`}
-                style={{ width: `${Math.min(storagePercentage, 100)}%` }}
-              />
-            </div>
-            <span
-              className={`font-mono text-[10.5px] tabular-nums ${
-                isStorageCritical ? 'text-rose-300' : isStorageWarning ? 'text-amber-500' : 'text-zinc-600'
-              }`}
-            >
-              {storagePercentage.toFixed(1)}%
-            </span>
-          </div>
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            disabled={uploading || isStorageCritical || totalBuckets === 0}
-            className="inline-flex h-7 items-center gap-1.5 rounded-lg bg-white px-2.5 text-[11.5px] font-semibold text-black transition-colors hover:bg-zinc-200 focus:outline-none focus:ring-2 focus:ring-violet-400/50 disabled:cursor-not-allowed disabled:opacity-40"
-            title={totalBuckets === 0 ? 'Create a bucket first' : 'Upload files'}
-          >
-            {uploading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Upload className="h-3 w-3" />}
-            {uploading ? 'Uploading…' : 'Upload'}
-          </button>
-        </div>
-      </div>
+        <KitButton
+          variant="primary"
+          size="sm"
+          icon={Upload}
+          loading={uploading}
+          onClick={() => fileInputRef.current?.click()}
+          disabled={isStorageCritical || totalBuckets === 0}
+          title={totalBuckets === 0 ? 'Create a bucket first' : 'Upload files'}
+        >
+          {uploading ? 'Uploading…' : 'Upload'}
+        </KitButton>
+      </CommandBar>
 
       {/* Quota + action notices — flush strips, never floating cards. */}
       {actionError && (
@@ -390,7 +398,7 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
             actions={
               <button
                 onClick={() => setActionError(null)}
-                className="text-[11px] font-medium text-zinc-500 transition-colors hover:text-zinc-200 focus:outline-none"
+                className="text-[12px] font-medium text-zinc-500 transition-colors hover:text-zinc-200 focus:outline-none"
               >
                 Dismiss
               </button>
@@ -418,38 +426,26 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
       <div className="relative min-h-0 flex-1">
         <div className="absolute inset-0 flex">
 
-          {/* ── Buckets rail ───────────────────────────────── */}
-          <div className={`flex w-[248px] flex-shrink-0 flex-col border-r border-white/[0.06] ${KIT.rail}`}>
-            <div className="flex h-10 flex-shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] px-3">
-              <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">Buckets</span>
+          {/* ── Buckets rail (responsive drill-down on mobile) ── */}
+          <div className={`w-full md:w-[248px] flex-shrink-0 flex-col border-r border-white/[0.06] ${KIT.rail} ${mobilePane === 'buckets' ? 'flex' : 'hidden md:flex'}`}>
+            <div className="flex h-[44px] flex-shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] pl-4 pr-2">
+              <span className="text-[13px] font-medium text-zinc-200">Buckets</span>
               <div className="flex flex-shrink-0 items-center gap-0.5">
-                <button
-                  onClick={() => fetchData()}
-                  className="rounded-md p-1.5 text-zinc-600 transition-colors hover:bg-white/[0.04] hover:text-zinc-200"
-                  title="Refresh"
-                >
-                  <RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} />
-                </button>
-                <button
-                  onClick={() => setShowNewBucket(true)}
-                  className="rounded-md p-1.5 text-zinc-600 transition-colors hover:bg-white/[0.06] hover:text-violet-300"
-                  title="New bucket"
-                >
-                  <Plus className="h-3 w-3" />
-                </button>
+                <IconButton icon={RefreshCw} label="Refresh" onClick={() => fetchData()} className={loading ? '[&_svg]:animate-spin' : ''} />
               </div>
             </div>
 
             {buckets.length > 0 && (
               <div className="flex-shrink-0 border-b border-white/[0.06] p-2">
                 <div className="relative">
-                  <Search className="absolute left-2.5 top-1/2 h-3 w-3 -translate-y-1/2 text-zinc-600" />
+                  <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-600" />
                   <input
-                    type="text"
+                    type="search"
+                    aria-label="Search buckets"
                     placeholder="Search buckets…"
                     value={bucketFilter}
                     onChange={(e) => setBucketFilter(e.target.value)}
-                    className="h-7 w-full rounded-lg border border-white/[0.07] bg-[#0f1015] pl-7 pr-3 text-[11.5px] text-zinc-300 transition-colors placeholder:text-zinc-600 focus:border-violet-400/40 focus:outline-none focus:ring-2 focus:ring-violet-400/15"
+                    className={`${INPUT_BASE} h-[30px] pl-8 pr-2.5`}
                   />
                 </div>
               </div>
@@ -461,44 +457,32 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
                   <Loader2 className="h-4 w-4 animate-spin text-white/30" />
                 </div>
               ) : buckets.length === 0 ? (
-                <div className="space-y-3 px-4 py-6 text-center">
-                  <Folder className="mx-auto h-4 w-4 text-zinc-600" />
-                  <div>
-                    <p className="mb-0.5 text-[12px] font-semibold text-zinc-200">No buckets yet</p>
-                    <p className="text-[11px] leading-relaxed text-zinc-500">
-                      Ask your coding agent for file uploads and Backenly creates one with governed access.
-                    </p>
-                  </div>
-                  <button
-                    onClick={() => setShowNewBucket(true)}
-                    className="flex h-7 w-full items-center justify-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-3 text-[11.5px] font-medium text-zinc-300 transition-colors hover:border-white/20 hover:bg-white/[0.08]"
-                  >
-                    <Plus className="h-3 w-3" />
-                    New bucket
-                  </button>
+                <div className="px-4 py-5">
+                  <p className="text-[13px] font-medium text-zinc-200">No buckets yet</p>
+                  <p className="mt-1 text-[12.5px] leading-[19px] text-zinc-500">
+                    Your agent creates a bucket when your app needs uploads, with the read rule you ask for.
+                  </p>
                 </div>
               ) : (
                 <div className="space-y-px px-2">
                   {/* All buckets */}
-                  <div
-                    onClick={() => { setSelectedBucket(ALL_BUCKETS); setSelectedBucketId(null) }}
-                    className={`group relative flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-[7px] transition-colors ${
+                  <button
+                    type="button"
+                    aria-current={selectedBucket === ALL_BUCKETS ? 'true' : undefined}
+                    onClick={() => { setSelectedBucket(ALL_BUCKETS); setSelectedBucketId(null); setMobilePane('objects') }}
+                    className={`group relative flex h-[32px] w-full items-center gap-2.5 rounded-[7px] px-2.5 text-left transition-colors ${FOCUS_INSET} ${
                       selectedBucket === ALL_BUCKETS
-                        ? 'bg-white/[0.05] text-zinc-50'
-                        : 'text-zinc-400 hover:bg-white/[0.03] hover:text-zinc-100'
+                        ? 'bg-white/[0.07] text-zinc-50'
+                        : 'text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-100'
                     }`}
                   >
-                    <div
-                      className={`h-[5px] w-[5px] flex-shrink-0 rounded-full transition-colors ${
-                        selectedBucket === ALL_BUCKETS ? 'bg-violet-300' : 'bg-white/[0.12] group-hover:bg-white/25'
-                      }`}
-                    />
-                    <span className="flex-1 truncate text-[12px] font-medium">All buckets</span>
-                    <span className="flex-shrink-0 font-mono text-[10.5px] tabular-nums text-zinc-600">{totalFiles}</span>
-                  </div>
+                    <Folder className="h-3.5 w-3.5 flex-shrink-0 text-zinc-500" strokeWidth={1.75} />
+                    <span className="flex-1 truncate text-[13px] font-medium">All buckets</span>
+                    <span className="flex-shrink-0 text-[12px] tabular-nums text-zinc-500">{totalFiles}</span>
+                  </button>
 
                   {visibleBuckets.length === 0 ? (
-                    <p className="px-2.5 py-6 text-center text-[11.5px] leading-relaxed text-zinc-600">
+                    <p className="px-2.5 py-6 text-center text-[12.5px] leading-relaxed text-zinc-600">
                       No bucket matches “{bucketFilter}”.
                     </p>
                   ) : (
@@ -507,26 +491,38 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
                       return (
                         <div
                           key={bucket.id}
-                          onClick={() => { setSelectedBucket(bucket.name); setSelectedBucketId(bucket.id) }}
-                          className={`group relative flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-[7px] transition-colors ${
-                            active ? 'bg-white/[0.05] text-zinc-50' : 'text-zinc-400 hover:bg-white/[0.03] hover:text-zinc-100'
+                          role="button"
+                          tabIndex={0}
+                          aria-current={active ? 'true' : undefined}
+                          onClick={() => { setSelectedBucket(bucket.name); setSelectedBucketId(bucket.id); setMobilePane('objects') }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault()
+                              setSelectedBucket(bucket.name); setSelectedBucketId(bucket.id); setMobilePane('objects')
+                            }
+                          }}
+                          className={`group relative flex h-[32px] cursor-pointer items-center gap-2.5 rounded-[7px] px-2.5 transition-colors ${FOCUS_INSET} ${
+                            active ? 'bg-white/[0.07] text-zinc-50' : 'text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-100'
                           }`}
                         >
-                          <div
-                            className={`h-[5px] w-[5px] flex-shrink-0 rounded-full transition-colors ${
-                              active ? 'bg-violet-300' : 'bg-white/[0.12] group-hover:bg-white/25'
-                            }`}
-                          />
-                          <span className={`flex-1 truncate font-mono text-[12px] ${active ? 'text-zinc-50' : ''}`}>
+                          <Folder className={`h-3.5 w-3.5 flex-shrink-0 ${active ? 'text-zinc-300' : 'text-zinc-600'}`} strokeWidth={1.75} />
+                          <span className={`flex-1 truncate font-mono text-[12.5px] ${active ? 'text-zinc-50' : ''}`}>
                             {bucket.name}
                           </span>
-                          {bucket.isPublic && (
-                            <span className="flex-shrink-0 font-mono text-[10px] text-emerald-300/70 group-hover:opacity-0">
-                              public
-                            </span>
-                          )}
+                          {/* The POLICY, not a derived boolean. `public` next to a
+                              bucket whose policy is `owner_only` would be telling
+                              the operator the opposite of what is enforced. */}
                           <span
-                            className={`flex-shrink-0 font-mono text-[10.5px] tabular-nums transition-all group-hover:opacity-0 ${
+                            className={`flex-shrink-0 text-[11.5px] group-hover:opacity-0 group-focus-within:opacity-0 ${
+                              bucket.accessPolicy === 'public_read' || bucket.accessPolicy === 'cdn_cacheable'
+                                ? 'text-amber-200/80'
+                                : 'text-zinc-600'
+                            }`}
+                          >
+                            {POLICY_LABELS[(bucket.accessPolicy ?? 'private') as AccessPolicy]?.title ?? bucket.accessPolicy}
+                          </span>
+                          <span
+                            className={`flex-shrink-0 text-[12px] tabular-nums transition-all group-hover:opacity-0 group-focus-within:opacity-0 ${
                               active ? 'text-zinc-400' : 'text-zinc-600'
                             }`}
                           >
@@ -535,12 +531,24 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
                           <button
                             onClick={(e) => {
                               e.stopPropagation()
+                              setBucketPolicyTarget(bucket)
+                            }}
+                            className="absolute right-8 rounded-[5px] p-1 opacity-0 transition-all hover:bg-white/[0.08] focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
+                            title="Who may read this bucket"
+                            aria-label={`Read access for ${bucket.name}`}
+                          >
+                            <Lock className="h-3.5 w-3.5 text-zinc-400" />
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation()
                               setBucketToDelete({ id: bucket.id, name: bucket.name, fileCount: countFor(bucket.name) })
                             }}
-                            className="absolute right-2 rounded-md p-1 opacity-0 transition-all hover:bg-rose-500/15 group-hover:opacity-100"
+                            className="absolute right-2 rounded-[5px] p-1 opacity-0 transition-all hover:bg-rose-500/15 focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
                             title="Delete bucket"
+                            aria-label={`Delete ${bucket.name}`}
                           >
-                            <Trash2 className="h-3 w-3 text-rose-300/70" />
+                            <Trash2 className="h-3.5 w-3.5 text-rose-300/70" />
                           </button>
                         </div>
                       )
@@ -551,7 +559,7 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
             </div>
 
             {buckets.length > 0 && (
-              <div className="flex h-7 flex-shrink-0 items-center border-t border-white/[0.06] px-3 font-mono text-[10.5px] tabular-nums text-zinc-600">
+              <div className="flex h-[36px] flex-shrink-0 items-center border-t border-white/[0.06] px-4 text-[12px] tabular-nums text-zinc-500">
                 {bucketFilter.trim()
                   ? `${visibleBuckets.length} of ${buckets.length}`
                   : `${buckets.length} bucket${buckets.length === 1 ? '' : 's'}`}
@@ -560,43 +568,54 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
           </div>
 
           {/* ── Object grid ────────────────────────────────── */}
-          <div className="flex min-w-0 flex-1 flex-col">
+          <div className={`min-w-0 flex-1 flex-col ${mobilePane === 'objects' ? 'flex' : 'hidden md:flex'}`}>
             {/* Toolbar */}
-            <div className="flex h-10 flex-shrink-0 items-center justify-between gap-3 border-b border-white/[0.06] px-4">
-              <div className="flex min-w-0 items-baseline gap-2">
-                <h2 className="truncate font-mono text-[13px] font-medium text-zinc-100">
-                  {selectedBucket === ALL_BUCKETS ? 'All buckets' : selectedBucket}
-                </h2>
-                <span className="whitespace-nowrap font-mono text-[11px] tabular-nums text-zinc-500">
-                  {filteredFiles.length.toLocaleString()} object{filteredFiles.length === 1 ? '' : 's'}
-                </span>
-                {selectedBucket !== ALL_BUCKETS && (
-                  <span className="whitespace-nowrap font-mono text-[11px] tabular-nums text-zinc-600">
-                    {formatFileSize(toNum(sizeFor(selectedBucket)))}
+            <div className="flex h-[44px] flex-shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] px-3 sm:px-4 md:gap-3">
+              <div className="flex min-w-0 items-center gap-2">
+                <button
+                  onClick={() => setMobilePane('buckets')}
+                  className="-ml-1 flex items-center gap-1 rounded-[7px] bg-white/[0.04] px-2 py-1.5 text-[12.5px] font-medium text-zinc-200 transition-colors hover:bg-white/[0.07] md:hidden"
+                  aria-label="Back to buckets"
+                >
+                  <ChevronLeft className="h-3.5 w-3.5" />
+                  <span>Buckets</span>
+                </button>
+                <div className="flex min-w-0 items-baseline gap-2">
+                  <h2 className={`truncate text-[13px] font-medium text-zinc-100 ${selectedBucket === ALL_BUCKETS ? '' : 'font-mono'}`}>
+                    {selectedBucket === ALL_BUCKETS ? 'All buckets' : selectedBucket}
+                  </h2>
+                  <span className="whitespace-nowrap text-[12px] tabular-nums text-zinc-500">
+                    {filteredFiles.length.toLocaleString()} {filteredFiles.length === 1 ? 'object' : 'objects'}
                   </span>
-                )}
+                  {selectedBucket !== ALL_BUCKETS && (
+                    <span className="hidden sm:inline whitespace-nowrap text-[12px] tabular-nums text-zinc-600">
+                      {formatFileSize(toNum(sizeFor(selectedBucket)))}
+                    </span>
+                  )}
+                </div>
               </div>
 
               <div className="flex flex-shrink-0 items-center gap-2">
                 {selectedFiles.size > 0 && (
                   <>
-                    <span className="font-mono text-[11px] font-medium tabular-nums text-zinc-400">
+                    <span className="hidden sm:inline text-[12px] font-medium tabular-nums text-zinc-400">
                       {selectedFiles.size} selected
                     </span>
                     <KitButton variant="danger" size="sm" icon={Trash2} onClick={handleBulkDelete}>
-                      Delete
+                      <span className="hidden sm:inline">Delete</span>
                     </KitButton>
                     <span className="h-3 w-px bg-white/10" />
                   </>
                 )}
                 <div className="relative">
-                  <Search className="absolute left-2.5 top-1/2 h-3 w-3 -translate-y-1/2 text-zinc-600" />
+                  <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-600" />
                   <input
-                    type="text"
+                    type="search"
+                    aria-label="Search objects"
                     placeholder="Search objects…"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    className="h-7 w-52 rounded-lg border border-white/[0.07] bg-[#0f1015] pl-7 pr-3 text-[11.5px] text-zinc-300 transition-colors placeholder:text-zinc-600 focus:border-violet-400/40 focus:outline-none focus:ring-2 focus:ring-violet-400/15"
+                    className={`${INPUT_BASE} h-[30px] w-32 pl-8 pr-2.5 sm:w-56`}
                   />
                 </div>
               </div>
@@ -628,159 +647,171 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
                     }
                     action={
                       totalBuckets === 0 ? (
-                        <KitButton
-                          variant="primary"
-                          icon={Sparkles}
-                          onClick={() => router.push(projectId ? `/app/projects/${projectId}/connect` : '/app')}
-                        >
-                          Connect your agent
-                        </KitButton>
+                        <div className="flex w-full flex-col items-center gap-4">
+                          <AgentPrompt prompt="Add profile photo uploads: a private bucket, and only the owner can read their files." />
+                          <KitButton
+                            icon={Sparkles}
+                            onClick={() => router.push(projectId ? `/app/projects/${projectId}/connect` : '/app')}
+                          >
+                            Connect your agent
+                          </KitButton>
+                        </div>
                       ) : undefined
                     }
                   />
                 </div>
               ) : (
-                <table className="w-full border-collapse">
-                  <thead className="sticky top-0 z-10">
-                    <tr className={KIT.gridHead}>
-                      <th className={`sticky left-0 z-20 w-10 border-b border-r border-white/[0.06] ${KIT.gridHead} px-2 py-2 text-center`}>
-                        <button
-                          onClick={handleSelectAll}
-                          className="text-zinc-600 transition-colors hover:text-zinc-300"
-                          title={selectedFiles.size === filteredFiles.length ? 'Deselect all' : 'Select all'}
-                        >
-                          {selectedFiles.size === filteredFiles.length && filteredFiles.length > 0 ? (
-                            <CheckSquare className="h-3.5 w-3.5 text-violet-300" />
-                          ) : (
-                            <Square className="h-3.5 w-3.5" />
-                          )}
-                        </button>
-                      </th>
-                      <th className="border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
-                        Name
-                      </th>
-                      {selectedBucket === ALL_BUCKETS && (
-                        <th className="border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
-                          Bucket
+                <div className="min-w-full overflow-x-auto">
+                  {/* With the detail pane open the grid gives up Type and
+                      Uploaded, both of which the pane shows, rather than
+                      wrapping sizes and bucket names onto two lines. */}
+                  <table className="w-full min-w-[540px] border-collapse md:min-w-full">
+                    <thead className="sticky top-0 z-10">
+                      <tr className={KIT.gridHead}>
+                        <th className={`sticky left-0 z-20 w-10 border-b border-r border-white/[0.06] ${KIT.gridHead} px-2 text-center`}>
+                          <button
+                            type="button"
+                            role="checkbox"
+                            aria-checked={selectedFiles.size === filteredFiles.length && filteredFiles.length > 0}
+                            aria-label={selectedFiles.size === filteredFiles.length ? 'Deselect all objects' : 'Select all objects'}
+                            onClick={handleSelectAll}
+                            className={`rounded-[4px] text-zinc-600 transition-colors hover:text-zinc-300 ${FOCUS_INSET}`}
+                          >
+                            {selectedFiles.size === filteredFiles.length && filteredFiles.length > 0 ? (
+                              <CheckSquare className="h-3.5 w-3.5 text-violet-300" />
+                            ) : (
+                              <Square className="h-3.5 w-3.5" />
+                            )}
+                          </button>
                         </th>
-                      )}
-                      <th className="border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
-                        Type
-                      </th>
-                      <th className="border-b border-white/[0.06] px-3 py-2 text-right text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
-                        Size
-                      </th>
-                      <th className="border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
-                        Access
-                      </th>
-                      <th className="border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
-                        Uploaded
-                      </th>
-                      <th className="w-20 border-b border-white/[0.06] px-3 py-2" />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredFiles.map((file) => {
-                      const FileIconComp = getFileIcon(file.mimeType)
-                      const isChecked = selectedFiles.has(file.id)
-                      const isActive = selectedFileId === file.id
-                      return (
-                        <tr
-                          key={file.id}
-                          onClick={() => setSelectedFileId(file.id)}
-                          className={`group/row cursor-pointer transition-colors ${
-                            isActive ? 'bg-white/[0.05]' : KIT.rowHoverOn
-                          }`}
-                        >
-                          <td
-                            className={`sticky left-0 z-10 border-b border-r border-white/[0.04] px-2 py-[9px] text-center transition-colors ${
-                              isActive ? 'bg-[#1a1b21]' : `${KIT.bg} ${KIT.rowHoverGroup}`
+                        <th className={TH}>Name</th>
+                        {selectedBucket === ALL_BUCKETS && <th className={TH}>Bucket</th>}
+                        {!selectedFile && <th className={`${TH} hidden xl:table-cell`}>Type</th>}
+                        <th className={`${TH_BASE} text-right`}>Size</th>
+                        <th className={TH}>Access</th>
+                        {!selectedFile && <th className={`${TH} hidden lg:table-cell`}>Uploaded</th>}
+                        <th className={`${TH} w-20`}>
+                          <span className="sr-only">Actions</span>
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredFiles.map((file) => {
+                        const isChecked = selectedFiles.has(file.id)
+                        const isActive = selectedFileId === file.id
+                        return (
+                          <tr
+                            key={file.id}
+                            onClick={() => setSelectedFileId(file.id)}
+                            aria-selected={isActive}
+                            className={`group/row cursor-pointer transition-colors ${
+                              isActive ? 'bg-white/[0.05]' : KIT.rowHoverOn
                             }`}
                           >
-                            <button
-                              onClick={(e) => { e.stopPropagation(); handleFileSelect(file.id) }}
-                              className="text-zinc-700 transition-colors hover:text-zinc-300"
+                            <td
+                              className={`sticky left-0 z-10 border-b border-r border-white/[0.04] px-2 text-center transition-colors ${
+                                isActive ? 'bg-[#141518]' : `${KIT.bg} ${KIT.rowHoverGroup}`
+                              }`}
                             >
-                              {isChecked ? (
-                                <CheckSquare className="h-3.5 w-3.5 text-violet-300" />
-                              ) : (
-                                <Square className="h-3.5 w-3.5" />
-                              )}
-                            </button>
-                          </td>
-                          <td className="border-b border-white/[0.04] px-3 py-[9px]">
-                            <div className="flex min-w-0 items-center gap-2.5">
-                              <FileIconComp className="h-3.5 w-3.5 flex-shrink-0 text-zinc-600" />
-                              <span className="truncate font-mono text-[12px] text-zinc-200" title={file.name}>
-                                {file.name}
-                              </span>
-                            </div>
-                          </td>
-                          {selectedBucket === ALL_BUCKETS && (
-                            <td className="border-b border-white/[0.04] px-3 py-[9px] font-mono text-[11px] text-zinc-500">
-                              {file.bucket}
+                              <button
+                                type="button"
+                                role="checkbox"
+                                aria-checked={isChecked}
+                                aria-label={`Select ${file.name}`}
+                                onClick={(e) => { e.stopPropagation(); handleFileSelect(file.id) }}
+                                className={`rounded-[4px] text-zinc-700 transition-colors hover:text-zinc-300 ${FOCUS_INSET}`}
+                              >
+                                {isChecked ? (
+                                  <CheckSquare className="h-3.5 w-3.5 text-violet-300" />
+                                ) : (
+                                  <Square className="h-3.5 w-3.5" />
+                                )}
+                              </button>
                             </td>
-                          )}
-                          <td className="border-b border-white/[0.04] px-3 py-[9px] font-mono text-[11px] text-zinc-500">
-                            {shortType(file.mimeType)}
-                          </td>
-                          <td className="border-b border-white/[0.04] px-3 py-[9px] text-right font-mono text-[11px] tabular-nums text-zinc-400">
-                            {formatFileSize(toNum(file.size))}
-                          </td>
-                          <td className="border-b border-white/[0.04] px-3 py-[9px]">
-                            <span className={`font-mono text-[10.5px] ${file.isPublic ? 'text-emerald-300/80' : 'text-zinc-600'}`}>
-                              {file.isPublic ? 'public' : 'private'}
-                            </span>
-                          </td>
-                          <td className="border-b border-white/[0.04] px-3 py-[9px] font-mono text-[10.5px] tabular-nums text-zinc-600">
-                            {timeAgo(file.createdAt)}
-                          </td>
-                          <td className="border-b border-white/[0.04] px-3 py-[9px]">
-                            <div className="flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover/row:opacity-100">
-                              <Tooltip content={copiedUrl === file.url ? 'Copied' : 'Copy URL'}>
-                                <button
-                                  onClick={(e) => { e.stopPropagation(); handleCopyLink(file.url) }}
-                                  className="rounded-md p-1.5 text-zinc-600 transition-colors hover:bg-white/[0.04] hover:text-zinc-100"
-                                >
-                                  {copiedUrl === file.url ? (
-                                    <Check className="h-3.5 w-3.5 text-emerald-300" />
-                                  ) : (
-                                    <Copy className="h-3.5 w-3.5" />
-                                  )}
-                                </button>
-                              </Tooltip>
-                              <Tooltip content="Delete">
-                                <button
-                                  onClick={(e) => { e.stopPropagation(); setFileToDelete(file) }}
-                                  className="rounded-md p-1.5 text-zinc-600 transition-colors hover:bg-rose-500/[0.08] hover:text-rose-300"
-                                >
-                                  <Trash2 className="h-3.5 w-3.5" />
-                                </button>
-                              </Tooltip>
-                            </div>
-                          </td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
+                            <td className={`${TD} max-w-0 w-full`}>
+                              {/* The name is the row's keyboard target; the row itself is a mouse convenience. */}
+                              <button
+                                type="button"
+                                onClick={(e) => { e.stopPropagation(); setSelectedFileId(file.id) }}
+                                className={`flex min-w-0 max-w-full items-center gap-2.5 rounded-[5px] text-left ${FOCUS_INSET}`}
+                              >
+                                <FileTypeIcon mimeType={file.mimeType} className="h-3.5 w-3.5 flex-shrink-0 text-zinc-600" />
+                                <span className={`truncate font-mono text-[12.5px] ${isActive ? 'text-zinc-50' : 'text-zinc-200'}`} title={file.name}>
+                                  {file.name}
+                                </span>
+                              </button>
+                            </td>
+                            {selectedBucket === ALL_BUCKETS && (
+                              <td className={`${TD} font-mono text-[12px] text-zinc-500`}>{file.bucket}</td>
+                            )}
+                            {!selectedFile && (
+                              <td className={`${TD} hidden font-mono text-[12px] text-zinc-500 xl:table-cell`}>
+                                {shortType(file.mimeType)}
+                              </td>
+                            )}
+                            <td className={`${TD} text-right text-[12.5px] tabular-nums text-zinc-300`}>
+                              {formatFileSize(toNum(file.size))}
+                            </td>
+                            <td className={TD}>
+                              <span className={`text-[12.5px] ${file.isPublic ? 'text-amber-200/90' : 'text-zinc-500'}`}>
+                                {file.isPublic ? 'Public' : 'Private'}
+                              </span>
+                            </td>
+                            {!selectedFile && (
+                              <td className={`${TD} hidden text-[12.5px] tabular-nums text-zinc-500 lg:table-cell`}>
+                                <time dateTime={new Date(file.createdAt).toISOString()} title={new Date(file.createdAt).toLocaleString()}>
+                                  {timeAgo(file.createdAt)}
+                                </time>
+                              </td>
+                            )}
+                            <td className={`${TD} pr-2`}>
+                              <div className="flex items-center justify-end gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover/row:opacity-100">
+                                <Tooltip content={copiedUrl === file.url ? 'Copied' : 'Copy URL'}>
+                                  <button
+                                    type="button"
+                                    aria-label={`Copy URL for ${file.name}`}
+                                    onClick={(e) => { e.stopPropagation(); handleCopyLink(file.url) }}
+                                    className={`rounded-[6px] p-1.5 text-zinc-500 transition-colors hover:bg-white/[0.06] hover:text-zinc-100 ${FOCUS_INSET}`}
+                                  >
+                                    {copiedUrl === file.url ? (
+                                      <Check className="h-3.5 w-3.5 text-emerald-300" />
+                                    ) : (
+                                      <Copy className="h-3.5 w-3.5" />
+                                    )}
+                                  </button>
+                                </Tooltip>
+                                <Tooltip content="Delete">
+                                  <button
+                                    type="button"
+                                    aria-label={`Delete ${file.name}`}
+                                    onClick={(e) => { e.stopPropagation(); setFileToDelete(file) }}
+                                    className={`rounded-[6px] p-1.5 text-zinc-500 transition-colors hover:bg-rose-500/[0.10] hover:text-rose-300 ${FOCUS_INSET}`}
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                  </button>
+                                </Tooltip>
+                              </div>
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
               )}
             </div>
 
             {/* Grid footer — counts, and live upload progress in the same strip. */}
-            <div className="flex h-10 flex-shrink-0 items-center justify-between gap-4 border-t border-white/[0.06] px-4">
-              <span className="font-mono text-[10.5px] tabular-nums text-zinc-600">
-                {filteredFiles.length === 0
-                  ? '0 objects'
-                  : `1-${filteredFiles.length} of ${filteredFiles.length}`}
-                {searchQuery.trim() && bucketFiles.length !== filteredFiles.length && (
-                  <span className="text-zinc-700"> · filtered from {bucketFiles.length}</span>
-                )}
+            <div className="flex h-[36px] flex-shrink-0 items-center justify-between gap-4 border-t border-white/[0.06] px-4">
+              <span className="text-[12px] tabular-nums text-zinc-500">
+                {searchQuery.trim() && bucketFiles.length !== filteredFiles.length
+                  ? `${filteredFiles.length.toLocaleString()} of ${bucketFiles.length.toLocaleString()} objects match`
+                  : `${filteredFiles.length.toLocaleString()} ${filteredFiles.length === 1 ? 'object' : 'objects'}`}
               </span>
 
               {activeUploads.length > 0 && (
                 <div className="flex min-w-0 flex-1 items-center justify-end gap-3">
-                  <span className="truncate font-mono text-[10.5px] text-zinc-500">
+                  <span className="truncate font-mono text-[12px] text-zinc-500">
                     Uploading {activeUploads.length} file{activeUploads.length === 1 ? '' : 's'}
                   </span>
                   <div className="h-[3px] w-32 overflow-hidden rounded-full bg-white/[0.06]">
@@ -798,105 +829,99 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
 
           {/* ── Object detail ──────────────────────────────── */}
           {selectedFile && (
-            <div className={`flex w-[320px] flex-shrink-0 flex-col border-l border-white/[0.06] ${KIT.rail}`}>
-              <div className="flex h-10 flex-shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] px-3">
-                <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">Object</span>
-                <button
-                  onClick={() => setSelectedFileId(null)}
-                  className="rounded-md p-1.5 text-zinc-600 transition-colors hover:bg-white/[0.04] hover:text-zinc-200"
-                  title="Close"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              </div>
+            <>
+              {/* Mobile Backdrop Overlay */}
+              <div
+                className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm md:hidden"
+                onClick={() => setSelectedFileId(null)}
+              />
 
-              <div className="min-h-0 flex-1 overflow-y-auto">
-                {/* Preview */}
-                <div className="border-b border-white/[0.06] p-3">
-                  {selectedFile.mimeType?.startsWith('image/') ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={selectedFile.url}
-                      alt={selectedFile.name}
-                      className="max-h-56 w-full rounded-lg border border-white/[0.06] object-contain"
-                    />
-                  ) : (
-                    <div className="flex h-28 items-center justify-center rounded-lg border border-white/[0.06] bg-[#0f1015]">
-                      {(() => {
-                        const Icon = getFileIcon(selectedFile.mimeType)
-                        return <Icon className="h-5 w-5 text-zinc-700" />
-                      })()}
-                    </div>
-                  )}
-                  <p className="mt-2.5 break-all font-mono text-[12px] text-zinc-100">{selectedFile.name}</p>
+              {/* Responsive Drawer / Right Rail */}
+              <div className={`fixed inset-x-0 bottom-0 z-50 max-h-[85vh] rounded-t-2xl border-t border-white/10 md:static md:inset-auto md:z-auto md:flex md:w-[320px] md:max-h-none md:rounded-none md:border-t-0 md:border-l md:border-white/[0.06] flex-shrink-0 flex-col ${KIT.rail} shadow-2xl md:shadow-none pb-[max(1rem,env(safe-area-inset-bottom))] md:pb-0`}>
+                {/* Mobile Drag Handle */}
+                <div className="flex md:hidden pt-2.5 pb-1 justify-center">
+                  <div className="w-10 h-1 rounded-full bg-white/20" />
                 </div>
 
-                {/* Metadata */}
-                <dl className="divide-y divide-white/[0.04]">
-                  {[
-                    ['Size', formatFileSize(toNum(selectedFile.size))],
-                    ['Type', selectedFile.mimeType || '—'],
-                    ['Bucket', selectedFile.bucket],
-                    ['Access', selectedFile.isPublic ? 'public' : 'private'],
-                    ['Uploaded', new Date(selectedFile.createdAt).toLocaleString()],
-                  ].map(([label, value]) => (
-                    <div key={label} className="flex items-baseline justify-between gap-3 px-3 py-2.5">
-                      <dt className="flex-shrink-0 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">
-                        {label}
-                      </dt>
-                      <dd
-                        className={`min-w-0 truncate text-right font-mono text-[11.5px] tabular-nums ${
-                          label === 'Access' && selectedFile.isPublic ? 'text-emerald-300/80' : 'text-zinc-300'
-                        }`}
-                        title={String(value)}
-                      >
-                        {value}
-                      </dd>
-                    </div>
-                  ))}
-                </dl>
+                <div className="flex h-[44px] flex-shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] pl-4 pr-2">
+                  <span className="text-[13px] font-medium text-zinc-200">Details</span>
+                  <IconButton icon={X} label="Close details" onClick={() => setSelectedFileId(null)} />
+                </div>
 
-                {/* URL */}
-                <div className="border-t border-white/[0.06] p-3">
-                  <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">URL</p>
-                  <div className="flex items-center gap-1.5">
-                    <code className="min-w-0 flex-1 truncate rounded-md border border-white/[0.06] bg-[#0f1015] px-2 py-1.5 font-mono text-[10.5px] text-zinc-400">
-                      {selectedFile.url}
-                    </code>
-                    <button
-                      onClick={() => handleCopyLink(selectedFile.url)}
-                      className="flex-shrink-0 rounded-md p-1.5 text-zinc-600 transition-colors hover:bg-white/[0.04] hover:text-zinc-100"
-                      title="Copy URL"
-                    >
-                      {copiedUrl === selectedFile.url ? (
-                        <Check className="h-3.5 w-3.5 text-emerald-300" />
-                      ) : (
-                        <Copy className="h-3.5 w-3.5" />
-                      )}
-                    </button>
+                <div className="min-h-0 flex-1 overflow-y-auto">
+                  {/* Preview */}
+                  <div className="border-b border-white/[0.06] p-3">
+                    <ObjectPreview key={selectedFile.id} file={selectedFile} />
+                    <p className="mt-2.5 break-all font-mono text-[12.5px] text-zinc-100">{selectedFile.name}</p>
+                  </div>
+
+                  {/* Metadata */}
+                  <dl className="divide-y divide-white/[0.04]">
+                    {[
+                      ['Size', formatFileSize(toNum(selectedFile.size))],
+                      ['Type', selectedFile.mimeType || 'Unknown'],
+                      ['Bucket', selectedFile.bucket],
+                      ['Access', selectedFile.isPublic ? 'Public' : 'Private'],
+                      ['Uploaded', new Date(selectedFile.createdAt).toLocaleString()],
+                    ].map(([label, value]) => (
+                      <div key={label} className="flex items-baseline justify-between gap-3 px-4 py-2.5">
+                        <dt className="flex-shrink-0 text-[12px] font-medium text-zinc-500">
+                          {label}
+                        </dt>
+                        <dd
+                          className={`min-w-0 truncate text-right text-[12.5px] tabular-nums ${
+                            label === 'Access' && selectedFile.isPublic ? 'text-amber-200/90' : 'text-zinc-300'
+                          }`}
+                          title={String(value)}
+                        >
+                          {value}
+                        </dd>
+                      </div>
+                    ))}
+                  </dl>
+
+                  {/* URL */}
+                  <div className="border-t border-white/[0.06] p-3">
+                    <p className="mb-1.5 text-[12px] font-medium text-zinc-500">URL</p>
+                    <div className="flex items-center gap-1.5">
+                      <code className="min-w-0 flex-1 truncate rounded-md border border-white/[0.06] bg-[#08090a] px-2 py-1.5 font-mono text-[12px] text-zinc-400">
+                        {selectedFile.url}
+                      </code>
+                      <button
+                        onClick={() => handleCopyLink(selectedFile.url)}
+                        className="flex-shrink-0 rounded-md p-1.5 text-zinc-600 transition-colors hover:bg-white/[0.04] hover:text-zinc-100"
+                        title="Copy URL"
+                      >
+                        {copiedUrl === selectedFile.url ? (
+                          <Check className="h-3.5 w-3.5 text-emerald-300" />
+                        ) : (
+                          <Copy className="h-3.5 w-3.5" />
+                        )}
+                      </button>
+                    </div>
                   </div>
                 </div>
-              </div>
 
-              {/* Actions */}
-              <div className="flex flex-shrink-0 items-center gap-2 border-t border-white/[0.06] p-3">
-                <a
-                  href={selectedFile.url}
-                  download={selectedFile.name}
-                  className="inline-flex h-7 flex-1 items-center justify-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-2.5 text-[11.5px] font-medium text-zinc-200 transition-colors hover:border-white/20 hover:bg-white/[0.08]"
-                >
-                  <Download className="h-3.5 w-3.5" />
-                  Download
-                </a>
-                <button
-                  onClick={() => setFileToDelete(selectedFile)}
-                  className="inline-flex h-7 items-center justify-center gap-1.5 rounded-lg border border-rose-500/25 bg-rose-500/[0.08] px-2.5 text-[11.5px] font-medium text-rose-300 transition-colors hover:border-rose-500/35 hover:bg-rose-500/[0.14]"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                  Delete
-                </button>
+                {/* Actions */}
+                <div className="flex flex-shrink-0 items-center gap-2 border-t border-white/[0.06] p-3">
+                  <a
+                    href={selectedFile.url}
+                    download={selectedFile.name}
+                    className="inline-flex h-8 flex-1 items-center justify-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-2.5 text-[12.5px] font-medium text-zinc-200 transition-colors hover:border-white/20 hover:bg-white/[0.08]"
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                    Download
+                  </a>
+                  <button
+                    onClick={() => setFileToDelete(selectedFile)}
+                    className="inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border border-rose-500/25 bg-rose-500/[0.08] px-2.5 text-[12.5px] font-medium text-rose-300 transition-colors hover:border-rose-500/35 hover:bg-rose-500/[0.14]"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    Delete
+                  </button>
+                </div>
               </div>
-            </div>
+            </>
           )}
         </div>
       </div>
@@ -909,7 +934,7 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
           onDrop={handleDrop}
           className="fixed inset-0 z-50 flex items-center justify-center bg-[#09090b]/90"
         >
-          <div className="rounded-xl border border-dashed border-violet-400/30 bg-[#16171d] px-14 py-12 text-center">
+          <div className="rounded-xl border border-dashed border-violet-400/30 bg-[#0f1012] px-14 py-12 text-center">
             <Upload className="mx-auto mb-3 h-4 w-4 text-violet-300" />
             <p className="mb-1 text-[14px] font-semibold tracking-[-0.01em] text-zinc-50">Drop to upload</p>
             <p className="text-[12px] text-zinc-500">
@@ -979,55 +1004,23 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
         busy={deletingBucket}
       />
 
-      {/* New bucket */}
-      <KitModal
-        open={showNewBucket}
-        onClose={() => setShowNewBucket(false)}
-        title="New bucket"
-        description="Buckets group objects and carry their own access rule."
-        footer={
-          <>
-            <KitButton variant="ghost" onClick={() => setShowNewBucket(false)} disabled={creatingBucket}>
-              Cancel
-            </KitButton>
-            <KitButton
-              variant="primary"
-              onClick={handleCreateBucket}
-              disabled={creatingBucket || !newBucketName.trim()}
-            >
-              {creatingBucket ? 'Creating…' : 'Create bucket'}
-            </KitButton>
-          </>
-        }
-      >
-        <div className="space-y-4">
-          <KitField label="Name" hint="Lowercase, no spaces. This becomes part of every object's URL.">
-            <KitInput
-              autoFocus
-              value={newBucketName}
-              onChange={(e) => setNewBucketName(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter' && newBucketName.trim()) handleCreateBucket() }}
-              placeholder="avatars"
-            />
-          </KitField>
-          <button
-            onClick={() => setNewBucketPublic((v) => !v)}
-            className="flex w-full items-start gap-2.5 rounded-lg border border-white/[0.07] bg-white/[0.02] px-3 py-2.5 text-left transition-colors hover:border-white/[0.14]"
-          >
-            {newBucketPublic ? (
-              <CheckSquare className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-violet-300" />
-            ) : (
-              <Square className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-zinc-600" />
-            )}
-            <span className="min-w-0">
-              <span className="block text-[12px] font-medium text-zinc-200">Public bucket</span>
-              <span className="mt-0.5 block text-[11.5px] leading-snug text-zinc-500">
-                Anyone with an object URL can read it. Leave off for user data.
-              </span>
-            </span>
-          </button>
-        </div>
-      </KitModal>
+      {/* Who may read a bucket */}
+      {bucketPolicyTarget && (
+        <BucketPolicyDialog
+          bucketName={bucketPolicyTarget.name}
+          current={bucketPolicyTarget.accessPolicy ?? 'private'}
+          // Read from the server's own view of its storage configuration, not
+          // guessed in the browser: whether a CDN serves public objects decides
+          // whether this policy can be revoked at all.
+          cdnCaveat={cdnServesPublicObjects}
+          onClose={() => setBucketPolicyTarget(null)}
+          onSave={async (policy) => {
+            await updateBucketPolicy(bucketPolicyTarget.id, policy)
+            setBucketPolicyTarget(null)
+            await fetchData()
+          }}
+        />
+      )}
 
       {/* Bucket picker — when an upload lands with no bucket selected */}
       <KitModal
@@ -1053,11 +1046,37 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
             >
               <Folder className="h-3.5 w-3.5 flex-shrink-0 text-zinc-600" />
               <span className="flex-1 truncate font-mono text-[12.5px] text-zinc-200">{b.name}</span>
-              <span className="font-mono text-[10.5px] tabular-nums text-zinc-600">{countFor(b.name)} files</span>
+              <span className="text-[12px] tabular-nums text-zinc-600">{countFor(b.name)} files</span>
             </button>
           ))}
         </div>
       </KitModal>
+    </div>
+  )
+}
+
+/**
+ * The object preview. An image renders itself; anything else, and any image
+ * the browser cannot decode or is not allowed to fetch, shows its type icon
+ * rather than a broken-image glyph.
+ */
+function ObjectPreview({ file }: { file: StorageFile }) {
+  const [failed, setFailed] = useState(false)
+  if (file.mimeType?.startsWith('image/') && !failed) {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src={file.url}
+        alt=""
+        onError={() => setFailed(true)}
+        className="max-h-56 w-full rounded-[8px] border border-white/[0.06] bg-[#08090a] object-contain"
+      />
+    )
+  }
+  return (
+    <div className="flex h-28 flex-col items-center justify-center gap-2 rounded-[8px] border border-white/[0.06] bg-[#08090a]">
+      <FileTypeIcon mimeType={file.mimeType} className="h-5 w-5 text-zinc-600" strokeWidth={1.5} />
+      <span className="text-[12px] text-zinc-600">{failed ? 'No preview available' : shortType(file.mimeType)}</span>
     </div>
   )
 }

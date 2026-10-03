@@ -25,7 +25,7 @@ import { prisma } from '@/lib/db'
 import { hashPassword } from '@/lib/auth/password'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { ensureAuthUsersTable, introspectAuthUsersTable, stampLastLogin, isReservedTestEmail } from '@/lib/services/end-user-auth-table'
-import { trackEndUserActive } from '@/lib/billing/quota-kernel'
+import { trackEndUserActive } from '@/lib/quota/kernel'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import jwt from 'jsonwebtoken'
 import crypto from 'crypto'
@@ -126,7 +126,7 @@ export async function refreshEndUserToken(projectId: string, rawToken: string | 
     )
 
     // A token refresh means the end-user is still active this month.
-    trackEndUserActive(projectId, String(user.id)).catch(() => {})
+    trackEndUserActive(projectId, String(user.id), user.email).catch(() => {})
     // Stamp last_login so the Auth dashboard's "active · 30d" metric is real.
     stampLastLogin(projectId, user.id).catch(() => {})
 
@@ -331,7 +331,7 @@ export async function resetEndUserPassword(
     // Bring the users table to the auth contract so the password UPDATE below
     // targets columns that actually exist — handles `password` vs
     // `password_hash` and `updatedAt` vs `updated_at` schema drift.
-    const usersSchema = await ensureAuthUsersTable(projectId)
+    const usersSchema = await ensureAuthUsersTable(projectId, { email: null })
 
     const resets = await prisma.$queryRawUnsafe<any[]>(
       `SELECT id, email, expires_at, used_at
@@ -440,11 +440,34 @@ async function ensureTokenTable(schemaName: string, tableName: string): Promise<
   ).catch(() => {})
 }
 
-/** Ensure the users table can record verification state (metadata-only ADD). */
-async function ensureEmailVerifiedColumn(schemaName: string): Promise<void> {
-  await prisma.$executeRawUnsafe(
-    `ALTER TABLE "${schemaName}"."users" ADD COLUMN IF NOT EXISTS "email_verified" BOOLEAN NOT NULL DEFAULT FALSE`,
-  ).catch(() => {})
+/**
+ * Ensure the users table can record verification state (metadata-only ADD).
+ *
+ * Accounts that already exist when the column is first added are recorded as
+ * VERIFIED: they signed up while the project asked nothing of them, and adding
+ * the column used to mark every one of them unverified, so a project that then
+ * required verification locked out its whole existing user base at sign-in.
+ * Rows inserted afterwards start unverified (the default flips to FALSE in the
+ * same transaction, and buildUserInsert writes `false` explicitly anyway).
+ *
+ * Once the column exists this is a catalog read, not an ALTER, so it takes no
+ * table lock on the sign-up path.
+ */
+export async function ensureEmailVerifiedColumn(schemaName: string): Promise<void> {
+  const present = await prisma.$queryRawUnsafe<unknown[]>(
+    `SELECT 1 FROM information_schema.columns
+      WHERE table_schema = $1 AND table_name = 'users' AND column_name = 'email_verified'`,
+    schemaName,
+  ).catch(() => [] as unknown[])
+  if (present.length > 0) return
+  await prisma.$transaction([
+    prisma.$executeRawUnsafe(
+      `ALTER TABLE "${schemaName}"."users" ADD COLUMN IF NOT EXISTS "email_verified" BOOLEAN NOT NULL DEFAULT TRUE`,
+    ),
+    prisma.$executeRawUnsafe(
+      `ALTER TABLE "${schemaName}"."users" ALTER COLUMN "email_verified" SET DEFAULT FALSE`,
+    ),
+  ]).catch(() => {})
 }
 
 /** Look up a single-use token row and validate expiry/reuse. */
@@ -625,7 +648,7 @@ export async function verifyMagicLink(projectId: string, tokenRaw: unknown): Pro
     if ('error' in consumed) return err('BAD_REQUEST', consumed.error, 400)
     const email = consumed.email
 
-    const usersSchema = await ensureAuthUsersTable(projectId)
+    const usersSchema = await ensureAuthUsersTable(projectId, { email })
     await ensureEmailVerifiedColumn(schemaName)
 
     let users = await executeWithUserContext<any>(
@@ -664,7 +687,7 @@ export async function verifyMagicLink(projectId: string, tokenRaw: unknown): Pro
       { expiresIn: '7d' },
     )
 
-    trackEndUserActive(projectId, String(user.id)).catch(() => {})
+    trackEndUserActive(projectId, String(user.id), user.email).catch(() => {})
     stampLastLogin(projectId, user.id).catch(() => {})
 
     return ok({

@@ -21,7 +21,8 @@ import { prisma } from '@/lib/db/prisma'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 
-export async function GET(req: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(req: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params
   return withProjectValidation<any>(req, async ({ projectId }) => {
    try {
     const now = new Date()

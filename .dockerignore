@@ -18,3 +18,29 @@ __tests__
 jest.config.js
 jest.setup.js
 
+# ── Runtime data, never build input ─────────────────────────────────────────
+#
+# WORKSPACE_DIR=/app/workspace and BACKUP_DIR=/app/backups are EFS mounts at
+# run time. On a developer machine the same paths fill up with real project
+# scaffolding - 1,415 entries here - and none of it belongs in an image.
+#
+# Left out, this is not merely wasteful. The scaffolding is COPY'd into the
+# build stage, some of it is traced into .next/standalone, and it ships inside
+# the layer where the EFS mount then hides it: present in the artifact,
+# invisible from the running container. The containment assertion in
+# docker/web.Dockerfile is what caught it, by finding two
+# workspace/<uuid>/docker-compose.yml files that survived the exclusion sweep.
+#
+# It was also most of the build: excluding these cuts the context transfer from
+# minutes to seconds.
+workspace
+backups
+tmp
+
+# Every env file. The build takes its public values as --build-arg (see
+# scripts/verify-public-build-inputs.ts) and needs none of these; .env and
+# .env.local were already excluded, while .env.vercel and .env.bak-rotate were
+# not, and were being sent to the daemon.
+.env*
+!.env.example
+

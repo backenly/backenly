@@ -12,15 +12,17 @@ const updatePolicySchema = z.object({
   description: z.string().optional(),
 })
 
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ policyId: string }> }) {
+  const params = await props.params;
   try {
-    await requireAuth(request)
+    // Read is admin-gated too. PUT and DELETE already were, which made the
+    // open GET easy to miss: an auth policy describes how access is decided,
+    // and reading one tells you how to work around it.
+    const adminError = await requireAdmin(request)
+    if (adminError) return adminError
     
     const policy = await prisma.authPolicy.findUnique({
-      where: { id: params.id },
+      where: { id: params.policyId },
     })
     
     if (!policy) {
@@ -40,10 +42,8 @@ export async function GET(
   }
 }
 
-export async function PUT(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function PUT(request: NextRequest, props: { params: Promise<{ policyId: string }> }) {
+  const params = await props.params;
   // 🔒 Platform-wide policy mutation — founder/admin only.
   const adminError = await requireAdmin(request)
   if (adminError) return adminError
@@ -53,7 +53,7 @@ export async function PUT(
     const data = updatePolicySchema.parse(body)
     
     const policy = await prisma.authPolicy.update({
-      where: { id: params.id },
+      where: { id: params.policyId },
       data: {
         ...data,
         updatedAt: new Date(),
@@ -77,17 +77,15 @@ export async function PUT(
   }
 }
 
-export async function DELETE(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function DELETE(request: NextRequest, props: { params: Promise<{ policyId: string }> }) {
+  const params = await props.params;
   // 🔒 Platform-wide policy deletion — founder/admin only.
   const adminError = await requireAdmin(request)
   if (adminError) return adminError
 
   try {
     await prisma.authPolicy.delete({
-      where: { id: params.id },
+      where: { id: params.policyId },
     })
     
     return NextResponse.json({ message: 'Policy deleted successfully' })

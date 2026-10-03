@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { withAuth } from '@/lib/auth/route-protection'
 import { prisma } from '@/lib/db'
 import { z } from 'zod'
+import { canAccessProject } from '@/lib/edition/guard'
 
 const querySchema = z.object({
   projectId: z.string().uuid(),
@@ -47,15 +48,7 @@ export const GET = withAuth(async (request: NextRequest, { user }) => {
       limit: searchParams.get('limit') ?? undefined,
     })
 
-    const project = await prisma.project.findFirst({
-      where: {
-        id: parsed.projectId,
-        userId: user.userId,
-      },
-      select: { id: true },
-    })
-
-    if (!project) {
+    if (!(await canAccessProject(user.userId, parsed.projectId))) {
       return NextResponse.json(
         { success: false, error: 'Invalid project access' },
         { status: 403 }

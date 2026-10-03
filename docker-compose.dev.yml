@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # PostgreSQL Database
   postgres:
@@ -22,7 +20,7 @@ services:
       - -c
       - pg_stat_statements.max=10000
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-backenly}
+      POSTGRES_USER: ${POSTGRES_USER:-backenly_user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
       POSTGRES_DB: ${POSTGRES_DB:-backenly}
     ports:
@@ -34,7 +32,11 @@ services:
       # without further grants.
       - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-backenly}"]
+      # -h 127.0.0.1 is load-bearing. During initdb the entrypoint runs a
+      # TEMPORARY server on the unix socket only, so a socket pg_isready
+      # reports ready, the container is marked healthy, and the server then
+      # restarts. TCP is up only for the real one.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${POSTGRES_USER:-backenly_user}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -56,6 +58,54 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - backenly-dev-network
+
+  # PostgREST — the data plane. /db/* is served by this process, not by Next.
+  #
+  # Here because "Requires PostgREST" was the whole instruction: nothing in the
+  # repository installed it and there was no config to copy, so the documented
+  # quickstart could not produce a running data plane. An acceptance install on
+  # a clean Ubuntu machine got as far as bootstrap and stopped.
+  #
+  # Pinned to the version production runs. PostgREST reads schema-cache and role
+  # settings from the database, so a version drift between the two changes what
+  # the data plane will serve.
+  postgrest:
+    image: postgrest/postgrest:v14.15
+    container_name: backenly-postgrest-dev
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Connects as the authenticator, which is NOINHERIT and can do nothing
+      # except SET ROLE to anon / authenticated / service_role.
+      #
+      # The password does not exist yet on a first `up`: it is issued later by
+      # `setup-postgrest-roles.ts --apply`, which prints it once. Until it is put
+      # in .env this container restarts in a loop, which is the correct and
+      # visible behaviour — it must not serve anything before the role exists.
+      PGRST_DB_URI: postgres://backenly_authenticator:${POSTGREST_AUTHENTICATOR_PASSWORD:-unset}@postgres:5432/${POSTGRES_DB:-backenly}
+      PGRST_DB_ANON_ROLE: anon
+      # Must match POSTGREST_JWT_SECRET in .env. The gateway mints short-lived
+      # internal tokens with it; PostgREST holds exactly one JWT secret and so
+      # cannot validate Backenly's per-project end-user tokens directly.
+      PGRST_JWT_SECRET: ${POSTGREST_JWT_SECRET:-}
+      PGRST_SERVER_PORT: 3000
+      # Deliberately NOT setting PGRST_DB_SCHEMAS. The served-schema list comes
+      # from postgrest.pre_config(), which reads
+      # public.backenly_pgrst_schema_registry. Pinning the list here would stop a
+      # newly provisioned project from ever appearing.
+      #
+      # db-pre-config runs at startup AND on every `NOTIFY pgrst, 'reload config'`,
+      # which is how backenly_pgrst_register_schema reaches a RUNNING PostgREST
+      # with no restart. It replaced `ALTER ROLE ... SET pgrst.db_schemas`, which
+      # requires true superuser and so cannot work on a managed database.
+      PGRST_DB_PRE_CONFIG: postgrest.pre_config
+    ports:
+      # POSTGREST_URL in .env.example is http://127.0.0.1:3002.
+      - "${POSTGREST_PORT:-3002}:3000"
     networks:
       - backenly-dev-network
 

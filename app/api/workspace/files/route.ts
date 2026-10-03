@@ -1,5 +1,6 @@
 export const dynamic = 'force-dynamic'
 
+import { projectWorkspaceDir } from '@/lib/workspace/paths'
 import { NextRequest, NextResponse } from 'next/server'
 import { requireAuth } from '@/lib/auth/middleware'
 import { prisma } from '@/lib/db/postgres'
@@ -54,7 +55,7 @@ export async function GET(request: NextRequest) {
     // Also scan FILE SYSTEM for files that might not be in DB yet
     const fs = await import('fs/promises')
     const path = await import('path')
-    const workspaceDir = path.join(process.cwd(), 'workspace', projectId)
+    const workspaceDir = projectWorkspaceDir(projectId)
     
     const fileSystemFiles: any[] = []
     

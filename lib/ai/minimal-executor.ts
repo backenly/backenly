@@ -17,6 +17,7 @@ import { generateDomainEndpoints as _generateDomainEndpoints } from './build-run
 import { USER_ROLE_ID_BASES as _SEMANTIC_USER_ROLE_ID_BASES, USER_SEMANTIC_COLS as _SEMANTIC_USER_COLS } from './semantic-relations'
 import { writeDecisionEntry, extractFkInferences } from '@/lib/memory/decision-memory'
 import { riskLevelForExecutorAction, queuePendingActionFinding } from '@/lib/operational-memory/ledger'
+import { plaintextForStorage } from '@/lib/auth/api-key-plaintext'
 
 export interface AIAction {
   /** Optional trace explaining why this action was chosen — aids debugging hallucinations */
@@ -3702,26 +3703,26 @@ async function executeSingleAction(
 
       // ========== DATABASE BACKUPS ==========
       case 'BACKUP_DATABASE': {
-        const { backupWorkspace } = await import('@/lib/services/workspace-backup')
+        const { backupWorkspace, snapshotForJson } = await import('@/lib/services/workspace-backup')
         const result = await backupWorkspace(projectId)
         if (!result.success) return { success: false, message: `Backup failed: ${result.error}` }
         return {
           success: true,
-          message: `✅ Backup created: **${result.filename}** (${Math.round((result.sizeBytes || 0) / 1024)} KB). Your data is safe. Backups run daily and are kept for 7 days.`,
-          data: result,
+          message: `✅ Backup created: **${result.filename}** (${(result.sizeBytes ?? BigInt(0)) / BigInt(1024)} KB). Your data is safe. Backups run daily and are kept for 7 days.`,
+          data: snapshotForJson(result),
         }
       }
 
       case 'LIST_BACKUPS': {
-        const { listBackups } = await import('@/lib/services/workspace-backup')
+        const { listBackups, snapshotForJson } = await import('@/lib/services/workspace-backup')
         const backups = await listBackups(projectId)
         if (backups.length === 0) {
           return { success: true, message: 'No backups yet. I\'ll create one daily automatically. You can also ask "backup my database" anytime.' }
         }
         const list = backups.map(b =>
-          `• **${b.filename}** — ${b.status} — ${Math.round((b.sizeBytes || 0) / 1024)} KB — ${new Date(b.createdAt).toLocaleString()}`
+          `• **${b.filename}** — ${b.status} — ${b.sizeBytes / BigInt(1024)} KB — ${new Date(b.createdAt).toLocaleString()}`
         ).join('\n')
-        return { success: true, message: `**Backups** (${backups.length}):\n${list}`, data: backups }
+        return { success: true, message: `**Backups** (${backups.length}):\n${list}`, data: backups.map(snapshotForJson) }
       }
 
       case 'RESTORE_DATABASE': {
@@ -5583,6 +5584,64 @@ async function executeAddColumn(
     }
     // ── END REAL DB CHECK ────────────────────────────────────────────────────
 
+    // ── A column declared with constraints is added as declared ──────────────
+    //
+    // addColumnToTable takes a name and a type and derives the rest, and it
+    // strips NOT NULL on purpose. So `ALTER TABLE t ADD COLUMN c text NOT NULL
+    // DEFAULT 'x' UNIQUE` (apply_migration's own grammar) came back "✅ Added"
+    // as a nullable column with no default and no constraint. When the caller
+    // declares any of them, the column is added in one statement exactly as
+    // declared: Postgres fills the default into existing rows, or refuses a NOT
+    // NULL it cannot satisfy (23502), and either way the result is the truth.
+    const spec = params.column && typeof params.column === 'object' ? params.column as Record<string, unknown> : null
+    const declared = !!spec && colsToAdd.length === 1 &&
+      (spec.nullable === false || spec.default !== undefined || spec.unique === true || typeof spec.fkTo === 'string')
+    if (declared) {
+      const name = String(spec!.name ?? colsToAdd[0].name)
+      const ident = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/
+      if (!ident.test(name)) return { success: false, message: `"${name}" is not a column name this path can add.` }
+      let defaultSql = ''
+      if (spec!.default !== undefined && spec!.default !== null) {
+        const d = String(spec!.default).trim()
+        const SAFE_DEFAULT = /^(?:'(?:[^']|'')*'(?:::[A-Za-z_ ]+)?|-?\d+(?:\.\d+)?|true|false|null|now\(\)|current_timestamp|current_date|gen_random_uuid\(\))$/i
+        if (!SAFE_DEFAULT.test(d)) {
+          return {
+            success: false,
+            message: `The default ${d} is not one this path applies. Use a literal ('text', 42, true), now(), CURRENT_TIMESTAMP, CURRENT_DATE or gen_random_uuid().`,
+          }
+        }
+        defaultSql = ` DEFAULT ${d}`
+      }
+      let referencesSql = ''
+      if (typeof spec!.fkTo === 'string') {
+        if (!ident.test(spec!.fkTo)) return { success: false, message: `"${spec!.fkTo}" is not a table this path can reference.` }
+        referencesSql = ` REFERENCES "${postgresSchema}"."${spec!.fkTo}"("id")`
+      }
+      const type = normalizeColumnType(String(spec!.type ?? colsToAdd[0].type), name)
+      const definition = `${type}${defaultSql}${spec!.nullable === false ? ' NOT NULL' : ''}${spec!.unique === true ? ' UNIQUE' : ''}${referencesSql}`
+      try {
+        await prisma.$executeRawUnsafe(`ALTER TABLE "${postgresSchema}"."${tableName}" ADD COLUMN "${name}" ${definition}`)
+      } catch (err: any) {
+        // Prisma reports this one as "Code: `23502`. Message: `N/A`", which an agent cannot act on.
+        if (String(err?.message ?? '').includes('23502')) {
+          return {
+            success: false,
+            message:
+              `Column "${name}" is NOT NULL with no default, and ${tableName} already has rows that would have no value for it, ` +
+              `so nothing was added. Give it a DEFAULT, or add it nullable, fill it, then ALTER COLUMN ${name} SET NOT NULL.`,
+          }
+        }
+        throw err
+      }
+      // A foreign key is indexed, as addColumnToTable and create_table do.
+      if (referencesSql) {
+        const indexName = `idx_${tableName}_${name.toLowerCase()}`.slice(0, 63)
+        await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "${indexName}" ON "${postgresSchema}"."${tableName}" ("${name}")`)
+      }
+      import('@/lib/services/workspace-validator').then(({ invalidateSchemaCache }) => invalidateSchemaCache(projectId, tableName)).catch(() => {})
+      return { success: true, message: `✅ Added "${name}" ${definition.replace(` REFERENCES "${postgresSchema}".`, ' REFERENCES ')} to table "${tableName}"` }
+    }
+
     const addedCols: string[] = []
     for (const col of colsToAdd) {
       await addColumnToTable(tableName, { name: col.name, type: col.type }, projectId, apiKey)
@@ -6680,10 +6739,8 @@ async function executeCreateKey(params: any, projectId: string): Promise<Executi
     //
     // Backenly's own generator is used now, and the prefix distinguishes the two
     // real kinds: `proj_live_…` is publishable, `svc_live_…` bypasses RLS.
-    const { generateApiKey } = await import('@/lib/auth/apiKeyAuth')
-    const keyValue = serviceRole
-      ? `svc_live_${crypto.randomBytes(24).toString('hex')}`
-      : generateApiKey('live')
+    const { mintKey } = await import('@/lib/auth/key-prefix')
+    const { key: keyValue } = mintKey({ serviceRole: Boolean(serviceRole) })
     const keyPrefix = keyValue.substring(0, 12)
     const keyHash = crypto.createHash('sha256').update(keyValue).digest('hex')
         
@@ -6692,7 +6749,8 @@ async function executeCreateKey(params: any, projectId: string): Promise<Executi
         projectId,
         userId: project.userId,
         name: description || 'AI Generated Key',
-        key: keyValue,
+        // Returned to the caller once, below. Never persisted.
+        key: plaintextForStorage(),
         keyHash,
         keyPrefix,
         permissions: Array.isArray(permissions) ? permissions : ['read', 'write'],
@@ -7723,47 +7781,55 @@ async function executeGetErrors(params: any, projectId: string): Promise<Executi
 
 /**
  * MONITORING: Get Usage
+ *
+ * The project owner's account usage this month, pooled across its projects
+ * (lib/usage/describe.ts): used against included and the cap, the month-end
+ * projection, the estimated cost of usage past the plan, the spend limit, and
+ * any grace or restriction. The same description the Usage page shows.
+ *
+ * Read-only by construction. There is no tool that changes the spend limit or
+ * enables overage: an agent can read the meter, only the owner raises the
+ * limit, from their own mailbox.
  */
 async function executeGetUsage(projectId: string): Promise<ExecutionResult> {
   try {
     const { prisma } = await import('@/lib/db')
-    
-    // Get API call count
-    const apiCalls = await prisma.log.count({
-      where: {
-        projectId,
-        type: 'api_request',
-        timestamp: {
-          gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) // Last 30 days
-        }
-      }
+    const project = await prisma.project.findUnique({ where: { id: projectId }, select: { userId: true } })
+    if (!project?.userId) {
+      return { success: false, message: 'This project has no owning account to read usage for.' }
+    }
+    const { describeAccountUsage } = await import('@/lib/usage/describe')
+    const usage = await describeAccountUsage(project.userId)
+    if (!usage) {
+      return { success: false, message: 'No plan is attached to the account that owns this project, so there is no usage to read.' }
+    }
+
+    const fmt = (n: number, unit: string) =>
+      unit === 'bytes' ? `${(n / 1024 ** 3).toFixed(2)} GB` : Math.round(n).toLocaleString('en-US')
+    const dollars = (cents: number) => `$${(cents / 100).toFixed(2)}`
+    const lines = usage.axes.map((a) => {
+      const of = a.included === null ? 'unlimited' : `${fmt(a.included, a.unit)} included`
+      const grace = a.grace ? (a.grace.restricted ? ' — RESTRICTED (grace ended)' : ` — over since ${a.grace.overSince.slice(0, 10)}, grace ends ${a.grace.graceEndsAt.slice(0, 10)}`) : ''
+      return `- ${a.label}: ${fmt(a.used, a.unit)} (${of}); projected ${fmt(a.projected, a.unit)}${grace}`
     })
-    
-    // Get storage usage (tables count)
-    const tables = await prisma.table.count({
-      where: { projectId }
-    })
-    
-    // Get API count
-    // Catalog count - the row count was permanently 0 after the cutover, so
-    // this status reported "Active APIs: 0" on backends serving traffic.
-    const { countExposedResources } = await import('@/lib/api/exposed-resources')
-    const apis = await countExposedResources(projectId)
-    
+    const overage =
+      usage.overage.mode === null
+        ? 'Usage past a quota is never charged on this deployment.'
+        : `Overage mode: ${usage.overage.mode}. Spend limit: ${dollars(usage.overage.spendLimitCents)}. ` +
+          `Estimated past-plan usage so far: ${dollars(usage.overage.estimatedCents)}; projected for the month: ${dollars(usage.overage.projectedCents)}.`
+
     return {
       success: true,
-      message: `📊 **Usage Statistics (Last 30 days):**\n\n` +
-        `🔌 **API Calls:** ${apiCalls.toLocaleString()}\n` +
-        `📊 **Database Tables:** ${tables}\n` +
-        `🚀 **Active APIs:** ${apis}`,
-      data: { apiCalls, tables, apis }
+      message: [
+        `Usage for ${usage.period} on the ${usage.planName} plan, across every project of this account:`,
+        ...lines,
+        overage,
+        'Projections assume the last seven days continue. Only the account owner can raise the spend limit.',
+      ].join('\n'),
+      data: usage,
     }
   } catch (error: any) {
-    return {
-      success: false,
-      message: `Failed to get usage: ${error.message}`,
-      error: error.message
-    }
+    return { success: false, message: `Failed to get usage: ${error.message}`, error: error.message }
   }
 }
 
@@ -9737,14 +9803,20 @@ async function executeRotateKey(params: any, projectId: string): Promise<Executi
     const existing = await prisma.apiKey.findFirst({ where: { id: keyId, projectId } })
     if (!existing) return { success: false, message: `API key "${keyId}" not found` }
 
-    // Generate new key
-    const newKeyValue = `sk_live_${crypto.randomBytes(24).toString('hex')}`
+    // A new secret of the same kind: service, MCP or project (lib/auth/key-prefix.ts).
+    // This minted `sk_live_`, Stripe's secret-key prefix, for every key.
+    const { mintKey } = await import('@/lib/auth/key-prefix')
+    const { key: newKeyValue } = mintKey(existing)
     const newPrefix = newKeyValue.substring(0, 12)
     const newHash = crypto.createHash('sha256').update(newKeyValue).digest('hex')
 
     await prisma.apiKey.update({
       where: { id: keyId },
-      data: { key: newKeyValue, keyPrefix: newPrefix, keyHash: newHash },
+      // The rotated secret goes back to the caller below and is never stored.
+      // This path was missed when the other four issuance sites were fixed,
+      // because the guard that protects them enumerated files by hand and this
+      // one was not on the list. See lib/auth/api-key-plaintext.ts.
+      data: { key: plaintextForStorage(), keyPrefix: newPrefix, keyHash: newHash },
     })
 
     return {
@@ -11949,10 +12021,11 @@ async function executeFixStorage(params: any, projectId: string): Promise<Execut
           // The old path checked a directory the storage engine never uses, so
           // FIX_STORAGE always "passed" while real bucket dirs could be missing.
           const storageDir = process.env.STORAGE_DIR || path.join(process.cwd(), 'storage')
-          const bucketDir = path.join(storageDir, bucket.name)
+          const bucketDir = path.join(/*turbopackIgnore: true*/ storageDir, bucket.name)
 
           try {
-            await fs.access(bucketDir)
+            // turbopackIgnore: runtime storage directory, not a build input.
+            await fs.access(/*turbopackIgnore: true*/ bucketDir)
             healthy.push(bucket.name)
           } catch {
             // Directory missing — recreate it

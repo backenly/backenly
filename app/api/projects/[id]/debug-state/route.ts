@@ -1,16 +1,32 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { loadGraph } from '@/lib/orchestration/backend-state-graph'
+import { withAuth } from '@/lib/auth/route-protection'
+import { canAccessProject } from '@/lib/edition/guard'
 
 /**
  * Debug endpoint to view the complete backend state graph
  * This shows you exactly what was created: tables, auth, storage, APIs
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+
+/**
+ * ── This route had NO authentication ────────────────────────────────────────
+ *
+ * It took a project id from the path and answered. Anyone able to reach the
+ * server and name a project could read the complete backend state graph: every table, auth provider, storage bucket and API - without a session, let alone
+ * ownership. Found by the route-authorization sweep; no UI called it, which is
+ * why nothing ever noticed.
+ *
+ * A read is not harmless here: it discloses how somebody else's backend is
+ * built. 404 rather than 403, so the endpoint is not an oracle for project ids.
+ */
+export const GET = withAuth(async (request: NextRequest, { user, params: routeParams }) => {
+  const params = await routeParams
   try {
     const projectId = params.id
+
+    if (!(await canAccessProject(user.userId, projectId))) {
+      return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+    }
 
     // Load the current backend state graph
     const graph = await loadGraph(projectId)
@@ -71,4 +87,4 @@ export async function GET(
       { status: 500 }
     )
   }
-}
+})

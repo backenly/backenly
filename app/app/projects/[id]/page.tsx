@@ -32,9 +32,7 @@ export default function OverviewPage() {
       .catch(() => {})
   }, [projectId])
 
-  return (
-    <div className="h-[calc(100vh-48px)] flex flex-col overflow-y-auto">
-      <MainWorkspace projectId={projectId} projectName={projectName} />
-    </div>
-  )
+  // A document surface: the page scrolls with the window (the console frame
+  // owns scrolling), so no fixed-height wrapper here.
+  return <MainWorkspace projectId={projectId} projectName={projectName} />
 }

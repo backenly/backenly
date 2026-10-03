@@ -7,9 +7,11 @@
  * These notify the developer about events on THEIR account:
  *   - payment_success / payment_failed
  *   - credits_low  (AI usage >= 80% of plan limit)
+ *   - usage_limit  (a usage quota or the spend limit crossed a threshold; lib/usage/alerts.ts)
  *   - job_completed / job_failed  (workspace job table events)
  *   - deploy_complete
  *   - system  (maintenance, feature announcements, etc.)
+ *   - health_alert  (a critical problem in one of their backends that needs them)
  *
  * Every `createPlatformNotification` call:
  *   1. Checks NotificationPreference — if inAppEnabled=false, skips DB insert.
@@ -27,22 +29,26 @@ export type PlatformNotificationType =
   | 'payment_success'
   | 'payment_failed'
   | 'credits_low'
+  | 'usage_limit'         // A usage quota or the spend limit crossed 50/80/100% (lib/usage/alerts.ts)
   | 'job_completed'
   | 'job_failed'
   | 'deploy_complete'
   | 'system'
   | 'autonomous_action'   // "While you were away" — autonomous background fixes and findings
+  | 'health_alert'        // A confirmed critical in one of their backends, still unresolved
 
 // All valid types — used for preference initialization
 export const ALL_NOTIFICATION_TYPES: PlatformNotificationType[] = [
   'payment_success',
   'payment_failed',
   'credits_low',
+  'usage_limit',
   'job_completed',
   'job_failed',
   'deploy_complete',
   'system',
   'autonomous_action',
+  'health_alert',
 ]
 
 export interface CreateNotificationInput {
@@ -195,6 +201,30 @@ export async function notifyPaymentFailed(userId: string, graceUntil?: Date): Pr
       ? `We couldn't process your payment. You have a grace period until ${graceUntil.toLocaleDateString()} — please update your billing details.`
       : `We couldn't process your payment. Please update your billing details to keep your subscription active.`,
     metadata: { graceUntil: graceUntil?.toISOString() },
+  })
+}
+
+/**
+ * Notify developer that their subscription is scheduled to end.
+ *
+ * A voluntary cancellation used to send notifyPaymentFailed, telling customers
+ * "We couldn't process your payment" about a payment that never failed and a
+ * grace period that no longer exists. `endsAt` is the provider's date, so this
+ * states when paid access actually stops.
+ *
+ * Deliberately typed `system` rather than adding a ninth notification type:
+ * the type union drives preference initialisation and the email template switch,
+ * and neither belongs in a billing-semantics change.
+ */
+export async function notifySubscriptionCanceled(userId: string, endsAt?: Date): Promise<void> {
+  await createPlatformNotification({
+    userId,
+    type: 'system',
+    title: 'Subscription cancelled',
+    body: endsAt
+      ? `Your subscription is cancelled and stays active until ${endsAt.toLocaleDateString()}. After that your account moves to the free plan. You can resubscribe any time.`
+      : `Your subscription is cancelled and stays active until the end of the period you have paid for. After that your account moves to the free plan.`,
+    metadata: { endsAt: endsAt?.toISOString() },
   })
 }
 

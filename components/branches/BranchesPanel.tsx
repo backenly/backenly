@@ -10,15 +10,28 @@
  *   POST   /branches/[id]       merge (additive auto, rest → review items)
  *   DELETE /branches/[id]       discard (drops the clone)
  *
- * Aesthetic: components/inspector/kit primitives, #16171d panels, mono
- * numerals, violet only for action — same language as every other section.
+ * Built from the console kit like every other section. Discarding drops the
+ * clone, so it asks first.
  */
 
 import { useEffect, useState, useCallback } from 'react'
-import { GitBranch, Plus, RefreshCw, Loader2, Check, X, ArrowRight, AlertTriangle } from 'lucide-react'
+import { AlertTriangle, ArrowRight, Check, GitBranch, Plus, RefreshCw, Trash2, X } from 'lucide-react'
 import {
-  KitCard, KitCardHeader, KitCardBody, KitButton, KitBadge, KitInput,
-  ListRow, EmptyState, SectionLabel,
+  EmptyState,
+  IconButton,
+  KitButton,
+  KitCard,
+  KitCardBody,
+  KitCardHeader,
+  KitConfirmDialog,
+  KitField,
+  KitInput,
+  KitNote,
+  OverflowMenu,
+  SectionLabel,
+  SettingsCard,
+  Skeleton,
+  Tag,
 } from '@/components/inspector/kit'
 
 interface Branch {
@@ -66,6 +79,7 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
   const [error, setError] = useState<string | null>(null)
   const [openDiff, setOpenDiff] = useState<{ id: string; name: string; diff: SchemaDiff } | null>(null)
   const [mergeOutcome, setMergeOutcome] = useState<{ name: string; result: MergeResult } | null>(null)
+  const [confirmDiscard, setConfirmDiscard] = useState<Branch | null>(null)
 
   const base = `/api/projects/${projectId}/branches`
 
@@ -143,81 +157,119 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
     }
   }
 
-  const active = branches.filter(b => b.status === 'active')
+  const active = branches.filter((b) => b.status === 'active')
+  const atLimit = active.length >= 5
 
   return (
     <div className="space-y-4">
-      {/* Create */}
-      <KitCard>
-        <KitCardHeader
-          title="New preview branch"
-          description="A full clone of your schema + data. Build against it, then merge back through the governed path"
-        />
-        <KitCardBody className="flex items-center gap-2">
-          <div className="flex-1 max-w-xs">
+      <SettingsCard
+        title="New preview branch"
+        description="A full clone of this project's schema and rows. Your agent builds against it while production keeps serving."
+        onSubmit={create}
+        footer={<span className="tabular-nums">{active.length} of 5 branches active</span>}
+        actions={
+          <KitButton type="submit" variant="primary" icon={Plus} loading={creating} disabled={!newName.trim() || atLimit}>
+            {creating ? 'Cloning…' : 'Create branch'}
+          </KitButton>
+        }
+      >
+        <div className="max-w-[360px]">
+          <KitField label="Branch name" hint="Lowercase letters, numbers and dashes.">
             <KitInput
               placeholder="add-payments"
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') create() }}
               disabled={creating}
+              className="font-mono"
+              aria-label="Branch name"
             />
-          </div>
-          <KitButton variant="primary" icon={creating ? Loader2 : Plus} onClick={create} disabled={creating || !newName.trim()}>
-            {creating ? 'Cloning…' : 'Create branch'}
-          </KitButton>
-          <span className="text-[11px] text-zinc-600">{active.length}/5 active</span>
-        </KitCardBody>
-      </KitCard>
+          </KitField>
+        </div>
+      </SettingsCard>
 
       {error && (
-        <div className="flex items-center gap-2 rounded-lg border border-rose-500/20 bg-rose-500/[0.06] px-4 py-2.5">
-          <AlertTriangle className="w-3.5 h-3.5 text-rose-300 flex-shrink-0" />
-          <p className="text-[12px] text-rose-200">{error}</p>
-        </div>
+        <KitNote tone="danger" icon={AlertTriangle}>
+          {error}
+        </KitNote>
       )}
 
       {mergeOutcome && (
-        <KitCard className="border-emerald-500/20">
-          <KitCardHeader title={`Merged “${mergeOutcome.name}”`} description={mergeOutcome.result.fullyMerged ? 'fully merged' : 'partially merged; some changes need the governed path'} />
-          <KitCardBody className="space-y-2">
+        <KitNote
+          tone={mergeOutcome.result.fullyMerged ? 'success' : 'warn'}
+          icon={mergeOutcome.result.fullyMerged ? Check : AlertTriangle}
+          title={
+            mergeOutcome.result.fullyMerged
+              ? `Merged ${mergeOutcome.name}`
+              : `Merged ${mergeOutcome.name} in part. Some changes need the review path.`
+          }
+          actions={<IconButton icon={X} label="Dismiss" onClick={() => setMergeOutcome(null)} />}
+        >
+          <ul className="mt-1 space-y-1">
             {mergeOutcome.result.applied.map((a, i) => (
-              <p key={i} className="flex items-baseline gap-2 text-[12px] text-zinc-300"><Check className="w-3 h-3 text-emerald-400 self-center flex-shrink-0" />{a}</p>
+              <li key={`a${i}`} className="flex items-start gap-2 text-zinc-300">
+                <Check className="mt-[3px] h-3.5 w-3.5 flex-shrink-0 text-emerald-400" />
+                {a}
+              </li>
             ))}
             {mergeOutcome.result.review.map((r, i) => (
-              <p key={i} className="flex items-baseline gap-2 text-[12px] text-amber-200/90"><ArrowRight className="w-3 h-3 text-amber-400 self-center flex-shrink-0" />{r}</p>
+              <li key={`r${i}`} className="flex items-start gap-2 text-amber-100/90">
+                <ArrowRight className="mt-[3px] h-3.5 w-3.5 flex-shrink-0 text-amber-300" />
+                {r}
+              </li>
             ))}
-          </KitCardBody>
-        </KitCard>
+          </ul>
+        </KitNote>
       )}
 
       {/* Diff detail */}
       {openDiff && (
-        <KitCard className="border-violet-400/20">
+        <KitCard className="overflow-hidden">
           <KitCardHeader
-            title={`“${openDiff.name}” vs main`}
-            actions={<KitButton size="sm" variant="ghost" icon={X} onClick={() => setOpenDiff(null)}>Close</KitButton>}
+            title={
+              <span>
+                <span className="font-mono">{openDiff.name}</span> compared with production
+              </span>
+            }
+            actions={<IconButton icon={X} label="Close the comparison" onClick={() => setOpenDiff(null)} />}
           />
           <KitCardBody>
             {openDiff.diff.identical ? (
-              <p className="text-[12.5px] text-zinc-500">No differences. This branch matches main.</p>
+              <p className="text-[13px] text-zinc-500">No differences. This branch matches production.</p>
             ) : (
-              <div className="space-y-3">
+              <div className="space-y-4">
                 {openDiff.diff.addedTables.length > 0 && (
                   <div>
                     <SectionLabel>New tables</SectionLabel>
                     <div className="mt-1.5 flex flex-wrap gap-1.5">
-                      {openDiff.diff.addedTables.map(t => <KitBadge key={t.tableName} tone="operational">{t.tableName}</KitBadge>)}
+                      {openDiff.diff.addedTables.map((t) => (
+                        <Tag key={t.tableName} tone="good" mono>
+                          + {t.tableName}
+                        </Tag>
+                      ))}
                     </div>
                   </div>
                 )}
-                {openDiff.diff.altered.map(a => (
+                {openDiff.diff.altered.map((a) => (
                   <div key={a.table}>
-                    <SectionLabel>{a.table}</SectionLabel>
+                    <SectionLabel>
+                      <span className="font-mono">{a.table}</span>
+                    </SectionLabel>
                     <div className="mt-1.5 flex flex-wrap gap-1.5">
-                      {a.addedColumns.map(c => <KitBadge key={c.name} tone="operational">+ {c.name} {c.dataType}</KitBadge>)}
-                      {a.droppedColumns.map(c => <KitBadge key={c} tone="failed">− {c}</KitBadge>)}
-                      {a.typeChanged.map(t => <KitBadge key={t.column} tone="attention">{t.column}: {t.from}→{t.to}</KitBadge>)}
+                      {a.addedColumns.map((c) => (
+                        <Tag key={c.name} tone="good" mono>
+                          + {c.name} {c.dataType}
+                        </Tag>
+                      ))}
+                      {a.droppedColumns.map((c) => (
+                        <Tag key={c} tone="bad" mono>
+                          − {c}
+                        </Tag>
+                      ))}
+                      {a.typeChanged.map((t) => (
+                        <Tag key={t.column} tone="warn" mono>
+                          {t.column}: {t.from} to {t.to}
+                        </Tag>
+                      ))}
                     </div>
                   </div>
                 ))}
@@ -225,12 +277,17 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
                   <div>
                     <SectionLabel>Dropped tables</SectionLabel>
                     <div className="mt-1.5 flex flex-wrap gap-1.5">
-                      {openDiff.diff.droppedTables.map(t => <KitBadge key={t} tone="failed">{t}</KitBadge>)}
+                      {openDiff.diff.droppedTables.map((t) => (
+                        <Tag key={t} tone="bad" mono>
+                          − {t}
+                        </Tag>
+                      ))}
                     </div>
                   </div>
                 )}
-                <p className="text-[11px] text-zinc-600 pt-1 leading-relaxed">
-                  New tables merge automatically through the governed kernel. Column and type changes come back as review items in the approval path, never silent DDL.
+                <p className="max-w-[72ch] text-[12.5px] leading-[19px] text-zinc-500">
+                  New tables merge automatically through the governed kernel. Column and type changes come back as
+                  review items in the approval path, never as silent DDL.
                 </p>
               </div>
             )}
@@ -239,13 +296,21 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
       )}
 
       {/* List */}
-      <KitCard>
+      <KitCard className="overflow-hidden">
         <KitCardHeader
-          title="Branches"
-          actions={<button onClick={load} className="text-zinc-600 hover:text-zinc-300 transition-colors" aria-label="Refresh"><RefreshCw className="w-3.5 h-3.5" /></button>}
+          title={
+            <span className="flex items-baseline gap-2">
+              Active branches
+              {!loading && <span className="text-[12px] font-normal tabular-nums text-zinc-500">{active.length}</span>}
+            </span>
+          }
+          actions={<IconButton icon={RefreshCw} label="Refresh branches" onClick={load} />}
         />
         {loading ? (
-          <KitCardBody><p className="text-[12px] text-zinc-600">Loading…</p></KitCardBody>
+          <div className="space-y-3 px-4 py-4" aria-hidden>
+            <Skeleton className="h-[14px] w-40" />
+            <Skeleton className="h-[14px] w-28" />
+          </div>
         ) : active.length === 0 ? (
           <EmptyState
             icon={GitBranch}
@@ -253,28 +318,48 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
             description="Create one to let an agent build against an isolated copy of your backend, then merge the changes back safely."
           />
         ) : (
-          <div className="divide-y divide-white/[0.05]">
-            {active.map(b => (
-              <ListRow
-                key={b.id}
-                icon={GitBranch}
-                iconTone="violet"
-                title={b.name}
-                subtitle={`created ${timeAgo(b.createdAt)}`}
-                right={
-                  <>
-                    <KitButton size="sm" variant="ghost" onClick={() => viewDiff(b)} disabled={busy === b.id}>
-                      {busy === b.id ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Diff'}
-                    </KitButton>
-                    <KitButton size="sm" variant="primary" onClick={() => merge(b)} disabled={busy === b.id}>Merge</KitButton>
-                    <KitButton size="sm" variant="danger" onClick={() => discard(b)} disabled={busy === b.id}>Discard</KitButton>
-                  </>
-                }
-              />
+          <ul className="divide-y divide-white/[0.06]">
+            {active.map((b) => (
+              <li key={b.id} className="flex flex-wrap items-center gap-3 px-4 py-3">
+                <GitBranch className="h-4 w-4 flex-shrink-0 text-zinc-500" strokeWidth={1.75} />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate font-mono text-[13px] text-zinc-100">{b.name}</p>
+                  <p className="text-[12px] text-zinc-500">Created {timeAgo(b.createdAt)}</p>
+                </div>
+                <div className="flex flex-shrink-0 items-center gap-1.5">
+                  <KitButton size="sm" variant="ghost" onClick={() => viewDiff(b)} loading={busy === b.id && !confirmDiscard}>
+                    Compare
+                  </KitButton>
+                  <KitButton size="sm" onClick={() => merge(b)} disabled={busy === b.id}>
+                    Merge
+                  </KitButton>
+                  <OverflowMenu
+                    label={`More actions for ${b.name}`}
+                    items={[{ label: 'Discard branch', icon: Trash2, danger: true, onClick: () => setConfirmDiscard(b) }]}
+                  />
+                </div>
+              </li>
             ))}
-          </div>
+          </ul>
         )}
       </KitCard>
+
+      <KitConfirmDialog
+        open={!!confirmDiscard}
+        danger
+        busy={!!confirmDiscard && busy === confirmDiscard.id}
+        title={confirmDiscard ? `Discard ${confirmDiscard.name}?` : 'Discard branch'}
+        description="The branch's cloned schema and every row in it are dropped. Production is not touched. This cannot be undone."
+        confirmLabel="Discard branch"
+        onCancel={() => {
+          if (!busy) setConfirmDiscard(null)
+        }}
+        onConfirm={async () => {
+          if (!confirmDiscard) return
+          await discard(confirmDiscard)
+          setConfirmDiscard(null)
+        }}
+      />
     </div>
   )
 }

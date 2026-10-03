@@ -1,4 +1,5 @@
 import { prisma } from '@/lib/db/postgres'
+import type { NextResponse } from 'next/server'
 import { generateToken, verifyToken, JWTPayload } from './jwt'
 import crypto from 'crypto'
 
@@ -171,18 +172,56 @@ export async function refreshAccessToken(refreshToken: string): Promise<{
 }
 
 /**
- * Delete a session
+ * End the sessions a browser presents: its access tokens (cookie and Bearer)
+ * and its refresh token. Returns how many sessions ended.
+ *
+ * Needs no live session. The refresh token outlives the access token by weeks,
+ * so a browser whose access session has expired still holds a credential that
+ * signs it back in, and refusing to act until it proves a live session left
+ * exactly that credential working. Possession is the authority instead: every
+ * value is a secret matched exactly, so a caller can only end sessions whose
+ * credentials it already holds.
  */
-export async function deleteSession(token: string): Promise<void> {
-  sessionCache.delete(token)
-  await prisma.session.deleteMany({ where: { token } })
+export async function revokePresentedSessions(presented: {
+  accessTokens: string[]
+  refreshToken?: string | null
+}): Promise<number> {
+  const match = [
+    ...(presented.accessTokens.length > 0 ? [{ token: { in: presented.accessTokens } }] : []),
+    ...(presented.refreshToken ? [{ refreshToken: presented.refreshToken }] : []),
+  ]
+  for (const token of presented.accessTokens) sessionCache.delete(token)
+  if (match.length === 0) return 0
+
+  const sessions = await prisma.session.findMany({ where: { OR: match }, select: { id: true, token: true } })
+  // A session found by its refresh token may carry an access token this
+  // browser no longer holds; it must stop verifying too.
+  for (const session of sessions) sessionCache.delete(session.token)
+  if (sessions.length === 0) return 0
+
+  const { count } = await prisma.session.deleteMany({ where: { id: { in: sessions.map((s) => s.id) } } })
+  return count
 }
 
 /**
  * Delete all sessions for a user
  */
 export async function deleteAllUserSessions(userId: string): Promise<void> {
+  // Evict first, so this process stops honouring them now rather than when
+  // the 15-second verification cache expires.
+  const sessions = await prisma.session.findMany({ where: { userId }, select: { token: true } })
+  for (const session of sessions) sessionCache.delete(session.token)
   await prisma.session.deleteMany({ where: { userId } })
+}
+
+/**
+ * Clear the two cookies that carry a platform session in the browser. The
+ * server-side session must be ended separately; this is the browser's copy.
+ */
+export function clearSessionCookies<T extends NextResponse>(response: T): T {
+  response.cookies.delete('auth-token')
+  response.cookies.delete('refresh-token')
+  return response
 }
 
 /**

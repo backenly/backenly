@@ -2,12 +2,17 @@
  * Proposal system tests
  * =====================
  * Coverage:
- *   - Apply-intent detection (detectApplyIntent) — pure, no mocks
  *   - Renderer — affordance + apply report (pure)
  *   - Applier — dispatches executeAction, aggregates report (mocked executor + store)
  *
  * Store + generator are not unit-tested here (Prisma + LLM); they are
  * exercised by the integration suite.
+ *
+ * Apply-intent detection used to be covered here too, against
+ * `app/api/ai/chat/pipeline/proposal-stage`. That module went with the chat
+ * door; APPLY_PROPOSAL is now an intent the brain classifier returns, not a
+ * regex over the user's message, so there is no detectApplyIntent left to
+ * test. The block was removed rather than retargeted (#7).
  */
 
 import { describe, it, expect, jest, beforeEach } from '@jest/globals'
@@ -28,7 +33,6 @@ jest.mock('@/lib/db/prisma', () => ({
 
 import { applyProposal } from '../../lib/ai/proposals/apply'
 import { buildApplyAffordance, renderApplyReport } from '../../lib/ai/proposals/renderer'
-import { detectApplyIntent } from '../../app/api/ai/chat/pipeline/proposal-stage'
 import type { Proposal, ProposalItem } from '../../lib/ai/proposals/types'
 
 /** Per-test fake executor. Reset in each test's body. */
@@ -56,39 +60,6 @@ function buildFixtureProposal(items: Partial<ProposalItem>[]): Proposal {
     executableCount: items.filter(p => p.executable).length,
   }
 }
-
-// ── Detection — pure regex behaviour ────────────────────────────────────────
-
-describe('detectApplyIntent', () => {
-  it('classifies bare "apply" / "implement those" as executable_only', () => {
-    for (const m of ['apply', 'apply it', 'implement those', 'do it', 'go ahead and apply', 'implement these']) {
-      expect(detectApplyIntent(m).kind).toBe('executable_only')
-    }
-  })
-
-  it('classifies "apply all" / "implement everything" as all', () => {
-    for (const m of ['apply all', 'implement everything', 'do all of them', 'run everything']) {
-      expect(detectApplyIntent(m).kind).toBe('all')
-    }
-  })
-
-  it('parses numeric subsets ("apply 1, 3 and 5")', () => {
-    const r = detectApplyIntent('apply 1, 3 and 5')
-    expect(r.kind).toBe('subset')
-    if (r.kind === 'subset') expect(r.indices).toEqual([1, 3, 5])
-  })
-
-  it('binds broad referential follow-ups ("start implementing all these updates")', () => {
-    expect(detectApplyIntent('start implementing all these updates').kind).toBe('executable_only')
-    expect(detectApplyIntent('apply all those fixes').kind).toBe('executable_only')
-  })
-
-  it('does NOT match concrete builds or chatter', () => {
-    for (const m of ['add a users table', 'create the comments column', 'hi', 'what tables do I have', 'thanks']) {
-      expect(detectApplyIntent(m).kind).toBe('none')
-    }
-  })
-})
 
 // ── Renderer — pure ─────────────────────────────────────────────────────────
 

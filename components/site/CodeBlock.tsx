@@ -184,6 +184,16 @@ function tokenize(code: string, rules: Rule[], keyPrefix = 't'): ReactNode[] {
   return out
 }
 
+/**
+ * Syntax-highlights `code` with the same grammars CodeBlock uses, for callers
+ * that draw their own chrome (the landing page's tabbed connect window).
+ * Falls back to plain text for a language with no grammar.
+ */
+export function highlight(code: string, language: string): ReactNode {
+  const rules = GRAMMARS[language.toLowerCase()]
+  return rules ? tokenize(code, rules) : code
+}
+
 export function CodeBlock({
   code,
   label,
@@ -210,28 +220,36 @@ export function CodeBlock({
     }
   }
 
+  // The same window as the landing page's connect tabs (components/landing/
+  // ConnectTabs.tsx): one surface, one radius, one header height, so a code
+  // sample on a docs page is visibly the same object as the one on `/`.
+  // Sizes are px, because the root font-size is 13px (see tokens.ts).
   return (
-    <div className="group relative overflow-hidden rounded-lg border border-white/10 bg-[#0a0a0c]">
-      <div className="flex items-center justify-between border-b border-white/[0.06] px-4 py-2">
-        <span className="font-mono text-xs text-zinc-500">{label ?? language}</span>
+    <div className="group relative min-w-0 overflow-hidden rounded-2xl border border-white/[0.09] bg-[#0b0c0f] shadow-[0_1px_0_0_rgba(255,255,255,0.05)_inset,0_30px_90px_-40px_rgba(0,0,0,0.9)]">
+      <div className="flex items-center justify-between gap-3 border-b border-white/[0.07] bg-white/[0.015] py-2 pl-5 pr-3">
+        <span className="min-w-0 truncate font-mono text-[12px] text-zinc-500">{label ?? language}</span>
+        {/* The label swap is the only confirmation a copy gets, so it has to
+            be announced: without aria-live the button silently relabels and a
+            screen reader user never learns the copy succeeded. */}
         <button
           type="button"
           onClick={copy}
-          className="inline-flex items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.03] px-2.5 py-1 text-xs font-medium text-zinc-400 transition hover:border-white/25 hover:text-white"
+          className="inline-flex h-8 shrink-0 cursor-pointer items-center gap-1.5 rounded-md border border-white/[0.09] bg-white/[0.03] px-2.5 text-[12px] font-medium text-zinc-400 transition-colors duration-200 hover:border-white/20 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/60"
           aria-label="Copy code"
+          aria-live="polite"
         >
           {copied ? (
             <>
-              <Check className="h-3.5 w-3.5 text-emerald-400" /> Copied
+              <Check aria-hidden className="h-3.5 w-3.5 text-violet-300" /> Copied
             </>
           ) : (
             <>
-              <Copy className="h-3.5 w-3.5" /> Copy
+              <Copy aria-hidden className="h-3.5 w-3.5" /> Copy
             </>
           )}
         </button>
       </div>
-      <pre className="overflow-x-auto px-4 py-4 text-[13px] leading-relaxed">
+      <pre className="overflow-x-auto px-5 py-5 text-[13px] leading-[1.75]">
         <code className="font-mono text-[#d4d4d4] [font-variant-ligatures:none]">{rendered}</code>
       </pre>
     </div>

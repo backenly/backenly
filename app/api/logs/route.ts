@@ -77,25 +77,39 @@ export async function GET(request: NextRequest) {
         }
       }
 
-      // Get logs with pagination (automatically scoped to project)
-      const [logs, allLogs] = await Promise.all([
+      // Counted in the database, not in this process.
+      //
+      // This previously ran a SECOND findMany with no take, loading every
+      // matching row into memory to get `.length` and four `.filter().length`
+      // counts. On the page it powers — an explorer whose default view is
+      // "everything, newest first" — that is a full table read on every
+      // keystroke of the search box, and it grows without bound as a
+      // deployment runs. The rows were then thrown away.
+      //
+      // count() and groupBy() answer both questions using the severity and
+      // projectId indexes and return a handful of rows each.
+      const [logs, total, severityGroups] = await Promise.all([
         tenantPrisma.log.findMany({
           where,
           orderBy: { timestamp: 'desc' },
           skip,
           take: limit,
         }),
-        tenantPrisma.log.findMany({ where }),
+        tenantPrisma.log.count({ where }),
+        tenantPrisma.log.groupBy({
+          by: ['severity'],
+          where,
+          _count: { _all: true },
+        }),
       ])
 
-      const total = allLogs.length
-
-      // Get summary stats (scoped to this project)
-      const severityCounts = {
-        error: allLogs.filter(l => l.severity === 'error').length,
-        warning: allLogs.filter(l => l.severity === 'warning').length,
-        info: allLogs.filter(l => l.severity === 'info').length,
-        debug: allLogs.filter(l => l.severity === 'debug').length,
+      // Zeroes are kept explicit. A severity missing from the group-by means
+      // none matched, and the UI renders a count of 0 rather than a gap.
+      const severityCounts = { error: 0, warning: 0, info: 0, debug: 0 }
+      for (const g of severityGroups as Array<{ severity: string; _count: { _all: number } }>) {
+        if (g.severity in severityCounts) {
+          severityCounts[g.severity as keyof typeof severityCounts] = g._count._all
+        }
       }
 
       return NextResponse.json({

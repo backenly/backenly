@@ -23,8 +23,9 @@
 --   4. backenly_direct_drop_role    — terminate sessions, strip policies,
 --                                     reassign owned objects, drop.
 --   5. backenly_direct_sync_schema  — idempotent grants/ownership/RLS-policy
---                                     sync for a workspace schema. Called after
---                                     every governed DDL mutation and on adopt.
+--                                     sync for a workspace schema, including the
+--                                     backup role's read. Called after every
+--                                     governed DDL mutation and on adopt.
 --   6. backenly_capture_ddl/_drop   — event triggers that record every DDL
 --                                     statement executed BY a bkn_% role into
 --                                     public.schema_drift_events (the evidence
@@ -40,6 +41,38 @@
 -- capture functions resolve the table at call time, so ordering only matters
 -- for the first external DDL statement.
 -- ============================================================================
+
+-- ── App role resolution ──────────────────────────────────────────────────────
+--
+-- The role the Backenly application connects as. It is NOT the installer: these
+-- files are installed by a superuser, and the app then calls the SECURITY
+-- DEFINER functions below with far less privilege.
+--
+-- Resolved rather than hardcoded because nineteen sites across these files
+-- named `backenly_user` literally, so an install against a database whose app
+-- role is `postgres` — the default on a fresh Ubuntu PostgreSQL, and what CI
+-- uses — aborted with `role "backenly_user" does not exist` before creating a
+-- single function.
+--
+-- Override per database or per session:
+--   ALTER DATABASE mydb SET backenly.app_role = 'myrole';
+--
+-- This body is IDENTICAL to the one in scripts/sql/postgrest-ddl-sync.sql,
+-- scripts/sql/postgrest-schema-registry.sql and the managed-DB cutover, and
+-- tests/unit/backenly-app-role-definition.spec.ts keeps it that way. This file
+-- installs after postgrest-install.sh, so it used to have the last word with an
+-- older body whose final fallback was the literal 'backenly_user': on a managed
+-- database with no such role, reinstalling direct access silently pointed
+-- every grant made through this function at a role nothing could receive.
+CREATE OR REPLACE FUNCTION public.backenly_app_role() RETURNS text
+LANGUAGE sql STABLE AS $fn$
+  SELECT coalesce(
+    nullif(current_setting('backenly.app_role', true), ''),
+    (SELECT rolname::text FROM pg_roles WHERE rolname = 'backenly_app'),
+    (SELECT rolname::text FROM pg_roles WHERE rolname = 'backenly_user'),
+    current_user::text
+  )
+$fn$;
 
 -- ── 1. Remote-access group (pg_hba matches +backenly_external) ───────────────
 DO $$
@@ -111,8 +144,6 @@ END
 $fn$;
 
 REVOKE ALL ON FUNCTION public.backenly_direct_create_role(text, text, text, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.backenly_direct_create_role(text, text, text, text) TO backenly_user;
-
 -- ── 3. Rotate password ────────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION public.backenly_direct_set_password(
   p_role     text,
@@ -135,8 +166,6 @@ END
 $fn$;
 
 REVOKE ALL ON FUNCTION public.backenly_direct_set_password(text, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.backenly_direct_set_password(text, text) TO backenly_user;
-
 -- ── 4. Drop a role cleanly ────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION public.backenly_direct_drop_role(
   p_role text
@@ -166,7 +195,7 @@ BEGIN
 
   -- Tables a READ_WRITE role created belong to it — hand them to the platform
   -- role so the backend they describe keeps working after revocation.
-  EXECUTE format('REASSIGN OWNED BY %I TO backenly_user', p_role);
+  EXECUTE format('REASSIGN OWNED BY %I TO %I', p_role, public.backenly_app_role());
   EXECUTE format('DROP OWNED BY %I', p_role); -- strips remaining grants
   EXECUTE format('DROP ROLE %I', p_role);
   RETURN true;
@@ -174,8 +203,6 @@ END
 $fn$;
 
 REVOKE ALL ON FUNCTION public.backenly_direct_drop_role(text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.backenly_direct_drop_role(text) TO backenly_user;
-
 -- ── 5. Idempotent grants / ownership / RLS-policy sync for one schema ────────
 --
 -- Called: at provision, after every governed DDL mutation, and on drift adopt.
@@ -194,6 +221,7 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public
 AS $fn$
 DECLARE
   t record;
+  v_backup text;
 BEGIN
   IF p_schema !~ '^workspace_[0-9a-fA-F][0-9a-fA-F-]{10,60}$' THEN
     RAISE EXCEPTION 'backenly_direct_sync_schema: invalid schema %', p_schema;
@@ -223,7 +251,7 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = p_owner) THEN
       EXECUTE format('CREATE ROLE %I NOLOGIN', p_owner);
     END IF;
-    EXECUTE format('GRANT %I TO backenly_user', p_owner);
+    EXECUTE format('GRANT %I TO %I', p_owner, public.backenly_app_role());
     EXECUTE format('GRANT %I TO %I', p_owner, p_rw);
     EXECUTE format('ALTER SCHEMA %I OWNER TO %I', p_schema, p_owner);
     FOR t IN
@@ -257,6 +285,24 @@ BEGIN
     EXECUTE format('GRANT USAGE, CREATE ON SCHEMA %I TO %I', p_schema, p_rw);
     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE, REFERENCES ON ALL TABLES IN SCHEMA %I TO %I', p_schema, p_rw);
     EXECUTE format('GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA %I TO %I', p_schema, p_rw);
+  END IF;
+
+  -- ── The backup role ────────────────────────────────────────────────────────
+  -- Backups dump each workspace as the read-only backup role
+  -- (scripts/setup-backup-role.ts). Its default privileges name the roles that
+  -- created tables when it last converged, and a table created over a
+  -- READ_WRITE connection belongs to bkn_rw_* (then bkn_own_*), which did not
+  -- exist then. Without this grant pg_dump fails "permission denied" for that
+  -- project on every run until someone reruns the converge. Every external
+  -- table passes through here on adoption, so this is where it is closed.
+  -- The role is BYPASSRLS, so it needs no policy. Name it with
+  --   ALTER DATABASE <db> SET backenly.backup_role = '<role>';
+  -- when BACKENLY_BACKUP_ROLE is not the default. No role, no grant.
+  v_backup := coalesce(nullif(current_setting('backenly.backup_role', true), ''), 'backenly_backup');
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = v_backup) THEN
+    EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', p_schema, v_backup);
+    EXECUTE format('GRANT SELECT ON ALL TABLES IN SCHEMA %I TO %I', p_schema, v_backup);
+    EXECUTE format('GRANT SELECT ON ALL SEQUENCES IN SCHEMA %I TO %I', p_schema, v_backup);
   END IF;
 
   -- ── RLS pass-through policies ───────────────────────────────────────────────
@@ -295,8 +341,6 @@ END
 $fn$;
 
 REVOKE ALL ON FUNCTION public.backenly_direct_sync_schema(text, text, text, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.backenly_direct_sync_schema(text, text, text, text) TO backenly_user;
-
 -- ── 6. DDL drift capture — the observed-drift half of the open loop ──────────
 --
 -- Fires on EVERY DDL statement in the cluster, but returns immediately unless
@@ -379,3 +423,16 @@ CREATE EVENT TRIGGER backenly_drop_watch ON sql_drop
 -- Done. Verify with:
 --   \df public.backenly_direct_*
 --   SELECT evtname, evtevent FROM pg_event_trigger WHERE evtname LIKE 'backenly%';
+
+DO $grant$
+DECLARE r text := public.backenly_app_role();
+BEGIN
+  -- Skipped rather than failed when the role is absent: the functions are still
+  -- installed and a later run grants them, which is what makes this re-runnable.
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_direct_create_role(text, text, text, text) TO %I', r);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_direct_set_password(text, text) TO %I', r);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_direct_drop_role(text) TO %I', r);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_direct_sync_schema(text, text, text, text) TO %I', r);
+  END IF;
+END $grant$;

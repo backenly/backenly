@@ -7,6 +7,7 @@ import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { resolveEndUserFromToken } from '../lib/end-user-identity'
 import { applyIncludes, UnknownRelationError } from '@/lib/services/relational-include'
 import { workspaceTableExists } from '@/lib/mcp/schema-introspection'
+import { asyncRoute } from '../lib/async-route'
 
 const router = Router()
 
@@ -105,7 +106,7 @@ function buildWhere(where: Record<string, any> | undefined, startIdx = 1) {
 
 // ── POST /api/v1/:projectId/database/query ─────────────────────────────────────
 
-router.post('/:projectId/database/query', v1AuthMiddleware, async (req: Request, res: Response) => {
+router.post('/:projectId/database/query', asyncRoute(v1AuthMiddleware), asyncRoute(async (req: Request, res: Response) => {
   const ctx = req.v1Context!
 
   if (!checkPermission(res, ctx, ['read', 'admin'])) return
@@ -170,11 +171,11 @@ router.post('/:projectId/database/query', v1AuthMiddleware, async (req: Request,
     console.error('Database query error:', error)
     sendError(res, ErrorCodes.INTERNAL_ERROR, 'Failed to execute database query', 500)
   }
-})
+}))
 
 // ── POST /api/v1/:projectId/database/insert ────────────────────────────────────
 
-router.post('/:projectId/database/insert', v1AuthMiddleware, async (req: Request, res: Response) => {
+router.post('/:projectId/database/insert', asyncRoute(v1AuthMiddleware), asyncRoute(async (req: Request, res: Response) => {
   const ctx = req.v1Context!
 
   if (!checkPermission(res, ctx, ['write', 'admin'])) return
@@ -236,11 +237,11 @@ router.post('/:projectId/database/insert', v1AuthMiddleware, async (req: Request
     console.error('Database insert error:', error)
     sendError(res, ErrorCodes.INTERNAL_ERROR, 'Failed to insert data', 500)
   }
-})
+}))
 
 // ── POST /api/v1/:projectId/database/update ────────────────────────────────────
 
-router.post('/:projectId/database/update', v1AuthMiddleware, async (req: Request, res: Response) => {
+router.post('/:projectId/database/update', asyncRoute(v1AuthMiddleware), asyncRoute(async (req: Request, res: Response) => {
   const ctx = req.v1Context!
 
   if (!checkPermission(res, ctx, ['write', 'admin'])) return
@@ -305,11 +306,11 @@ router.post('/:projectId/database/update', v1AuthMiddleware, async (req: Request
     console.error('Database update error:', error)
     sendError(res, ErrorCodes.INTERNAL_ERROR, 'Failed to update data', 500)
   }
-})
+}))
 
 // ── POST /api/v1/:projectId/database/delete ────────────────────────────────────
 
-router.post('/:projectId/database/delete', v1AuthMiddleware, async (req: Request, res: Response) => {
+router.post('/:projectId/database/delete', asyncRoute(v1AuthMiddleware), asyncRoute(async (req: Request, res: Response) => {
   const ctx = req.v1Context!
 
   if (!checkPermission(res, ctx, ['write', 'admin'])) return
@@ -366,6 +367,6 @@ router.post('/:projectId/database/delete', v1AuthMiddleware, async (req: Request
     console.error('Database delete error:', error)
     sendError(res, ErrorCodes.INTERNAL_ERROR, 'Failed to delete data', 500)
   }
-})
+}))
 
 export default router

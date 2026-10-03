@@ -17,6 +17,25 @@ import { NextRequest, NextResponse } from 'next/server'
 import { runLifecycleCleanup, getStorageHealth } from '@/lib/storage/storage-lifecycle'
 import { getS3Client, getS3Config } from '@/lib/services/s3-config'
 import { prisma } from '@/lib/db'
+import { getFleetScheduler } from '@/lib/edition'
+
+/**
+ * The projects this sweep covers, with the fields it reports on.
+ *
+ * WHICH projects comes from FleetScheduler -- single-tenant answers with THE
+ * project, Cloud with its estate. The fields come from a read scoped to those
+ * ids, because FleetScheduler answers "which projects" and is deliberately not
+ * a project data service: giving it a `select` would make it a Prisma client
+ * with extra steps, and the public product would be back to knowing how to
+ * query the fleet.
+ */
+async function sweepTargets() {
+  const targets = await getFleetScheduler().maintenanceTargets()
+  return prisma.project.findMany({
+    where: { id: { in: targets.map(t => t.id) } },
+    select: { id: true, name: true, storageUsed: true },
+  })
+}
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 300 // 5 minutes
@@ -53,10 +72,8 @@ export async function POST(request: NextRequest) {
       dryRun: false,
     })
     
-    // Check health for all projects
-    const projects = await prisma.project.findMany({
-      select: { id: true, name: true },
-    })
+    // Health for every project this sweep covers.
+    const projects = await sweepTargets()
     
     const healthChecks = await Promise.all(
       projects.map(async (project) => {
@@ -133,10 +150,8 @@ export async function GET(request: NextRequest) {
 
   try {
     
-    // Get health for all projects
-    const projects = await prisma.project.findMany({
-      select: { id: true, name: true, storageUsed: true },
-    })
+    // Get health for every project this sweep covers.
+    const projects = await sweepTargets()
     
     const health = await Promise.all(
       projects.map(async (project) => ({

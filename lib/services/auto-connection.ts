@@ -11,6 +11,25 @@
  * Frontend requests route to Backenly backend automatically.
  */
 
+/**
+ * The public origin this deployment hands to a connected frontend.
+ *
+ * ONE authority, because five inline copies is what broke it. Three sites wrote
+ * `process.env.NEXT_PUBLIC_URL || 'https://backenly.com'` and two interpolated
+ * the variable bare. NEXT_PUBLIC_URL is supplied by no build, so those two
+ * compiled to the literal text "undefined" and handed out
+ * `undefined/api/proxy` as a URL.
+ *
+ * NEXT_PUBLIC_APP_URL comes first: it is the value every build actually sets,
+ * and on a self-host deployment it is the operator's own origin rather than
+ * ours. The constant is the last resort, not the first.
+ *
+ * These are read at MODULE level on purpose. `next build` compiles
+ * NEXT_PUBLIC_* in as literals, so there is nothing to defer to run time.
+ */
+const PUBLIC_ORIGIN =
+  process.env.NEXT_PUBLIC_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://backenly.com'
+
 export interface AutoConnectionConfig {
   projectId: string
   delegationToken: string
@@ -73,7 +92,7 @@ async function autoConnectReplit(config: AutoConnectionConfig) {
   await injectReplitEnvironment(config.appUrl, {
     BACKENLY_PROJECT_ID: config.projectId,
     BACKENLY_TOKEN: config.delegationToken,
-    BACKENLY_API_URL: process.env.NEXT_PUBLIC_URL || 'https://backenly.com',
+    BACKENLY_API_URL: PUBLIC_ORIGIN,
   })
   
   // Register webhook to intercept API calls
@@ -94,7 +113,7 @@ async function autoConnectLovable(config: AutoConnectionConfig) {
       provider: 'backenly',
       projectId: config.projectId,
       token: config.delegationToken,
-      apiUrl: process.env.NEXT_PUBLIC_URL || 'https://backenly.com',
+      apiUrl: PUBLIC_ORIGIN,
     },
   })
   
@@ -109,7 +128,7 @@ async function autoConnectBolt(config: AutoConnectionConfig) {
   
   // Inject Backenly proxy via Bolt configuration
   await injectBoltProxy(config.appUrl, {
-    proxyUrl: `${process.env.NEXT_PUBLIC_URL}/api/proxy`,
+    proxyUrl: `${PUBLIC_ORIGIN}/api/proxy`,
     projectId: config.projectId,
     token: config.delegationToken,
   })
@@ -151,7 +170,7 @@ async function registerReplitWebhook(appUrl: string, token: string) {
   console.log('[Auto-Connection] Registering Replit webhook...')
   
   // Webhook will route all API calls to Backenly backend
-  const webhookUrl = `${process.env.NEXT_PUBLIC_URL}/api/webhook/replit?token=${token}`
+  const webhookUrl = `${PUBLIC_ORIGIN}/api/webhook/replit?token=${token}`
   
   // Simulated API call
   // await replitAPI.registerWebhook(appUrl, webhookUrl)
@@ -208,7 +227,7 @@ export function generateFrontendSDK(config: AutoConnectionConfig): string {
 window.__BACKENLY__ = {
   projectId: '${config.projectId}',
   token: '${config.delegationToken}',
-  apiUrl: '${process.env.NEXT_PUBLIC_URL || 'https://backenly.com'}',
+  apiUrl: '${PUBLIC_ORIGIN}',
 };
 
 // Intercept fetch calls and route to Backenly

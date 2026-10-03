@@ -2,43 +2,48 @@
 
 /**
  * Connect — the agent-native hub (IA restructure §6.14 / §9).
- * Supersedes the old `?hub=connect-frontend` / `?hub=mcp` overlays and the
- * standalone /mcp + inspector/connected-apps pages (redirects in next.config).
- * THE build door — backend change flows through the user's coding agent over
+ * THE build door: backend change flows through the user's coding agent over
  * MCP (the in-app chat door was removed 2026-07-17).
  *
  * Two tabs, each a self-contained surface:
- *   • Agents — the ONE agent-wiring surface, full-width split: the setup
- *              funnel (scoped key mint → one-paste prompt → per-agent command,
- *              §9.1) on the left; capabilities card + key management + live MCP
- *              usage (AgentKeysPanel) on the right.
+ *   • Agents — the ONE agent-wiring surface: the setup sequence (scoped key →
+ *              one-paste prompt → per-agent command, §9.1) and what the agent
+ *              gets, beside key management and live MCP usage.
  *   • Direct — everything that calls the data plane without MCP: REST
  *              coordinates + TypeScript types / OpenAPI spec, frontend runtime
  *              telemetry + the origin allowlist (FrontendRuntimeCards), and
  *              real Postgres credentials + pg_dump exports
  *              (DirectDatabasePanel). Key MANAGEMENT lives only in Settings →
- *              API Keys; this tab links there instead of embedding a second
+ *              API keys; this tab links there instead of embedding a second
  *              copy of the manager.
  *
- * The "Frontend SDK" tab was removed 2026-07-19: its copy-paste snippet
- * surfaced the same projectId + anon key the Agents funnel and llms.txt
- * already hand the agent — a duplicate credentials surface for an audience
- * whose agent does the wiring (the install flow draws the line at CLI +
- * agents + direct connect, with no human SDK page). Its non-redundant cards
- * (connection health + registered frontends) live on in the Direct tab.
+ * The "Frontend SDK" tab was removed 2026-07-19 (a duplicate credentials
+ * surface for an audience whose agent does the wiring).
  *
  * Deep links: `?tab=direct` opens the Direct tab (FrontendConnectionPill's
  * click target). Read from window.location on mount — NOT useSearchParams,
- * which would demand a Suspense boundary at export time.
+ * which would demand a Suspense boundary at export time — and written back
+ * with replaceState when the tab changes.
  */
 
 import { useEffect, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
-import { Cable, Bot, KeyRound, Copy, Check, TerminalSquare, FileCode2, FileJson, ArrowUpRight } from 'lucide-react'
+import { Bot, KeyRound, TerminalSquare, FileCode2, FileJson } from 'lucide-react'
 import { setCurrentProjectId } from '@/lib/api/client'
 import { getProject, type Project } from '@/lib/api/projects'
-import { InspectorPageHeader } from '@/components/inspector/InspectorPageHeader'
-import { KitTabs, KitTab, KitCard, KitCardHeader, KitCardBody, KitButton } from '@/components/inspector/kit'
+import {
+  BUTTON_BASE,
+  BUTTON_VARIANTS,
+  CopyField,
+  DetailList,
+  DetailRow,
+  KitButton,
+  KitTab,
+  KitTabs,
+  PageHeader,
+  SettingsCard,
+} from '@/components/inspector/kit'
+import { PAGE_GUTTER, PAGE_WIDTH } from '@/components/console/tokens'
 import { AgentInstallGuide, AgentCapabilitiesCard } from '@/components/connect/AgentInstallGuide'
 import { AgentKeysPanel } from '@/components/connect/AgentKeysPanel'
 import { FrontendRuntimeCards } from '@/components/connect/FrontendRuntimePanel'
@@ -46,11 +51,22 @@ import { DirectDatabasePanel } from '@/components/connect/DirectDatabasePanel'
 
 type Tab = 'agents' | 'direct'
 
+const HEADERS: Record<Tab, { title: string; description: string }> = {
+  agents: {
+    title: 'Connect your coding agent',
+    description: 'One scoped key and one pasted prompt. Your agent reads the real schema and builds through governed, reversible changes.',
+  },
+  direct: {
+    title: 'Direct access',
+    description: 'REST and Postgres coordinates for anything that doesn’t speak MCP: your frontend, scripts, BI tools, backups.',
+  },
+}
+
 export default function ProjectConnectPage() {
   const params = useParams()
   const projectId = params.id as string
   const [tab, setTab] = useState<Tab>('agents')
-  // Bumped when AgentInstallGuide mints a key so the keys list below refreshes.
+  // Bumped when AgentInstallGuide mints a key so the keys list refreshes.
   const [keysVersion, setKeysVersion] = useState(0)
 
   if (projectId && typeof window !== 'undefined') setCurrentProjectId(projectId)
@@ -64,51 +80,45 @@ export default function ProjectConnectPage() {
     if (t === 'direct') setTab('direct')
   }, [])
 
-  return (
-    <div className="min-h-screen bg-[#101116] flex flex-col text-white">
-      {/* Tab strip sits directly under the global TopBar; each tab body owns its
-          own header (Agents header below; Direct brings its own). */}
-      <div className="px-8 pt-4">
-        <KitTabs>
-          <KitTab active={tab === 'agents'} onClick={() => setTab('agents')}>
-            <Bot className="w-3.5 h-3.5" />
-            Agents
-          </KitTab>
-          <KitTab active={tab === 'direct'} onClick={() => setTab('direct')}>
-            <KeyRound className="w-3.5 h-3.5" />
-            Direct
-          </KitTab>
-        </KitTabs>
-      </div>
+  const selectTab = (next: Tab) => {
+    setTab(next)
+    const url = new URL(window.location.href)
+    if (next === 'agents') url.searchParams.delete('tab')
+    else url.searchParams.set('tab', next)
+    window.history.replaceState(null, '', url.toString())
+  }
 
-      <div className="flex-1">
+  return (
+    <div className="pb-16">
+      <PageHeader
+        title={HEADERS[tab].title}
+        description={HEADERS[tab].description}
+        tabs={
+          <KitTabs>
+            <KitTab active={tab === 'agents'} onClick={() => selectTab('agents')}>
+              <Bot />
+              Agents
+            </KitTab>
+            <KitTab active={tab === 'direct'} onClick={() => selectTab('direct')}>
+              <TerminalSquare />
+              Direct
+            </KitTab>
+          </KitTabs>
+        }
+      />
+
+      <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pt-7`}>
         {tab === 'agents' && (
-          <>
-            <InspectorPageHeader
-              icon={Cable}
-              title="Connect your coding agent"
-              description="One scoped key, one pasted prompt."
-              badge={{ label: 'MCP', variant: 'beta' }}
-            />
-            {/* Full-width split: setup on the left, live state on the right.
-                Capabilities sits under the funnel rather than above the keys —
-                "what your agent gets" answers the question the pasted prompt
-                just raised, and the three-step funnel alone left the left
-                column roughly half the height of the right one, which read as
-                a hole in the page rather than a column. */}
-            <div className="px-8 py-6 pb-10">
-              <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 items-start">
-                <div className="min-w-0 space-y-6">
-                  <AgentInstallGuide
-                    projectId={projectId}
-                    onKeyMinted={() => setKeysVersion((v) => v + 1)}
-                  />
-                  <AgentCapabilitiesCard />
-                </div>
-                <AgentKeysPanel projectId={projectId} refreshSignal={keysVersion} />
-              </div>
+          // Setup on the left, live state on the right. "What your agent gets"
+          // sits under the setup sequence: it answers the question the pasted
+          // prompt just raised.
+          <div className="grid grid-cols-1 items-start gap-10 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] xl:gap-12">
+            <div className="min-w-0 space-y-10">
+              <AgentInstallGuide projectId={projectId} onKeyMinted={() => setKeysVersion((v) => v + 1)} />
+              <AgentCapabilitiesCard />
             </div>
-          </>
+            <AgentKeysPanel projectId={projectId} refreshSignal={keysVersion} />
+          </div>
         )}
         {tab === 'direct' && <DirectTab projectId={projectId} />}
       </div>
@@ -117,110 +127,67 @@ export default function ProjectConnectPage() {
 }
 
 // ── Direct ────────────────────────────────────────────────────────────────────
-// The non-MCP door: REST coordinates + typed contracts up top, frontend runtime
-// telemetry + origin allowlist in the middle (FrontendRuntimeCards), real
-// Postgres credentials + pg_dump below (DirectDatabasePanel, the open-loop
-// surface §direct-access). Keys are managed in ONE place — Settings → API Keys —
-// so this tab links there rather than embedding a duplicate manager.
+// REST coordinates + typed contracts, frontend runtime telemetry + origin
+// allowlist, then real Postgres credentials + pg_dump. Keys are managed in ONE
+// place (Settings → API keys), so this tab links there.
 
 function DirectTab({ projectId }: { projectId: string }) {
   const router = useRouter()
   const [project, setProject] = useState<Project | null>(null)
-  const [copied, setCopied] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
     getProject(projectId)
       .then((p) => { if (!cancelled) setProject(p) })
-      .catch(() => { /* rows fall back to em-dash */ })
+      .catch(() => { /* rows fall back to their unset state */ })
     return () => { cancelled = true }
   }, [projectId])
 
-  const apiBaseUrl = project?.apiUrlProd || project?.apiUrlStaging || project?.apiUrlDev || '—'
-
-  const copy = async (key: string, value: string) => {
-    try {
-      await navigator.clipboard.writeText(value)
-      setCopied(key)
-      setTimeout(() => setCopied((c) => (c === key ? null : c)), 1600)
-    } catch { /* clipboard blocked — non-fatal */ }
-  }
+  const apiBaseUrl = project?.apiUrlProd || project?.apiUrlStaging || project?.apiUrlDev || null
 
   return (
-    <>
-      <InspectorPageHeader
-        icon={TerminalSquare}
-        title="Direct access"
-        description="REST and Postgres coordinates for anything that doesn't speak MCP."
-        badge={{ label: 'Managed', variant: 'managed' }}
-      />
-      <div className="px-8 py-6 pb-10">
-        <KitCard>
-          <KitCardHeader
-            title="REST API"
-            description="Governed REST endpoints for every table. Authenticate with an API key."
-            actions={
-              <KitButton
-                variant="secondary"
-                icon={KeyRound}
-                onClick={() => router.push(`/app/projects/${projectId}/settings?tab=keys`)}
-              >
-                Manage API keys
-              </KitButton>
-            }
-          />
-          <KitCardBody className="space-y-3">
-            <DirectRow label="API base URL" value={apiBaseUrl} copied={copied === 'url'} onCopy={apiBaseUrl !== '—' ? () => copy('url', apiBaseUrl) : undefined} />
-            <DirectRow label="Project ID" value={projectId} copied={copied === 'id'} onCopy={() => copy('id', projectId)} />
-            {/* Typed contracts for whatever consumes the REST surface. */}
-            <div className="flex items-center gap-3 pt-1 border-t border-white/[0.06]">
-              <a
-                href={`/api/projects/${projectId}/types?file=types`}
-                download="backenly.types.d.ts"
-                className="group inline-flex items-center gap-1.5 text-[11.5px] text-zinc-400 hover:text-zinc-100 transition-colors pt-2"
-              >
-                <FileCode2 className="w-3 h-3" />
-                TypeScript types
-                <ArrowUpRight className="w-2.5 h-2.5 opacity-0 group-hover:opacity-100 transition-opacity" />
-              </a>
-              <span className="h-3 w-px bg-white/[0.08] mt-2" aria-hidden />
-              <a
-                href={`/api/projects/${projectId}/openapi`}
-                download={`openapi-${projectId}.json`}
-                className="group inline-flex items-center gap-1.5 text-[11.5px] text-zinc-400 hover:text-zinc-100 transition-colors pt-2"
-              >
-                <FileJson className="w-3 h-3" />
-                OpenAPI spec
-                <ArrowUpRight className="w-2.5 h-2.5 opacity-0 group-hover:opacity-100 transition-opacity" />
-              </a>
-            </div>
-          </KitCardBody>
-        </KitCard>
+    <div className="max-w-[960px] space-y-6">
+      <SettingsCard
+        title="REST API"
+        description="Every table is served as governed REST endpoints. Authenticate with an API key."
+        footer="Generated from the live schema, so they always match what the runtime serves."
+        actions={
+          <>
+            <a
+              href={`/api/projects/${projectId}/types?file=types`}
+              download="backenly.types.d.ts"
+              className={`${BUTTON_BASE} ${BUTTON_VARIANTS.ghost} h-[28px] px-2.5 text-[12px]`}
+            >
+              <FileCode2 className="h-3.5 w-3.5" />
+              TypeScript types
+            </a>
+            <a
+              href={`/api/projects/${projectId}/openapi`}
+              download={`openapi-${projectId}.json`}
+              className={`${BUTTON_BASE} ${BUTTON_VARIANTS.ghost} h-[28px] px-2.5 text-[12px]`}
+            >
+              <FileJson className="h-3.5 w-3.5" />
+              OpenAPI spec
+            </a>
+            <KitButton size="sm" variant="secondary" icon={KeyRound} onClick={() => router.push(`/app/projects/${projectId}/settings?tab=keys`)}>
+              Manage API keys
+            </KitButton>
+          </>
+        }
+      >
+        <DetailList>
+          <DetailRow label="API base URL">
+            {apiBaseUrl ? <CopyField value={apiBaseUrl} /> : <span className="text-zinc-500">Set when the project is first published</span>}
+          </DetailRow>
+          <DetailRow label="Project ID">
+            <CopyField value={projectId} />
+          </DetailRow>
+        </DetailList>
+      </SettingsCard>
 
-        <FrontendRuntimeCards projectId={projectId} />
+      <FrontendRuntimeCards projectId={projectId} />
 
-        <DirectDatabasePanel projectId={projectId} />
-      </div>
-    </>
-  )
-}
-
-function DirectRow({ label, value, onCopy, copied }: { label: string; value: string; onCopy?: () => void; copied?: boolean }) {
-  return (
-    <div className="flex items-center justify-between gap-3">
-      <span className="text-[12px] text-zinc-500 flex-shrink-0">{label}</span>
-      <div className="flex items-center gap-2 min-w-0">
-        <span className="text-[12px] font-mono text-zinc-200 truncate">{value}</span>
-        {onCopy && (
-          <button
-            onClick={onCopy}
-            className="p-1 rounded hover:bg-white/[0.06] text-zinc-500 hover:text-zinc-200 transition-colors"
-            aria-label={`Copy ${label}`}
-          >
-            {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-          </button>
-        )}
-      </div>
+      <DirectDatabasePanel projectId={projectId} />
     </div>
   )
 }

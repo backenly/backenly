@@ -12,10 +12,8 @@ import { ProviderCredentialsService } from '@/lib/services/provider-credentials'
 import { withTenantIsolation, TenantIsolationError } from '@/lib/tenant/isolation'
 
 // GET /api/provider-credentials/[provider] - Get credentials
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { provider: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ provider: string }> }) {
+  const params = await props.params;
   try {
     return await withTenantIsolation(request, async (projectId) => {
       const credentials = await ProviderCredentialsService.getCredentials(
@@ -51,10 +49,8 @@ export async function GET(
 }
 
 // DELETE /api/provider-credentials/[provider] - Delete credentials
-export async function DELETE(
-  request: NextRequest,
-  { params }: { params: { provider: string } }
-) {
+export async function DELETE(request: NextRequest, props: { params: Promise<{ provider: string }> }) {
+  const params = await props.params;
   try {
     return await withTenantIsolation(request, async (projectId) => {
       await ProviderCredentialsService.deleteCredentials(

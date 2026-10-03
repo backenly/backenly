@@ -16,12 +16,12 @@
  * the Reliability tile beside it (also 5xx-based). Client 4xx noise lives in
  * Monitoring where it can be explored, not on the headline strip.
  *
- * Flat kit: mono tabular numerals, hairlines, zinc by default, violet/amber/rose
- * only to signal a status worth noticing.
+ * One strip split by hairlines (kit StatStrip), tabular Geist numerals, zinc by
+ * default, amber/rose only for a reading worth noticing.
  */
 
 import { useEffect, useState } from 'react'
-import { Activity, Gauge, Timer, AlertTriangle } from 'lucide-react'
+import { Stat, StatStrip } from '@/components/inspector/kit'
 
 interface StatsResponse {
   responseTime: { value: number; status: string }
@@ -35,10 +35,13 @@ interface ObservabilityStripProps {
   projectId: string
 }
 
-const STATUS_TEXT: Record<string, string> = {
-  healthy: 'text-zinc-100',
-  warning: 'text-amber-300',
-  critical: 'text-rose-300',
+type Tone = 'neutral' | 'good' | 'warn' | 'bad'
+
+// A healthy reading stays neutral: colour is for the reading that needs you.
+const STATUS_TONE: Record<string, Tone> = {
+  healthy: 'neutral',
+  warning: 'warn',
+  critical: 'bad',
 }
 
 export function ObservabilityStrip({ projectId }: ObservabilityStripProps) {
@@ -59,49 +62,44 @@ export function ObservabilityStrip({ projectId }: ObservabilityStripProps) {
   const hasTraffic = (stats?.requests.value ?? 0) > 0
   const failed = stats?.serverErrors ?? { value: 0, status: 'healthy' }
 
-  const tiles: Array<{ key: string; icon: any; label: string; value: string; text: string; hint?: string }> = [
+  const tiles: Array<{ key: string; label: string; value: string; tone: Tone; hint?: string }> = [
     {
-      // The 24h window is stated once by the section heading above the strip,
-      // so the tiles no longer each carry a "· 24h" suffix.
-      key: 'requests', icon: Activity, label: 'Requests',
-      value: fmtCount(stats?.requests.value ?? 0), text: 'text-zinc-100',
+      // The 24h window is stated once by the heading above the strip, so the
+      // readings do not each carry a "24h" suffix.
+      key: 'requests', label: 'Requests',
+      value: fmtCount(stats?.requests.value ?? 0), tone: 'neutral',
     },
     {
-      key: 'reliability', icon: Gauge, label: 'Reliability',
+      key: 'reliability', label: 'Reliability',
       value: stats?.uptime.hasData ? `${stats.uptime.value}%` : '—',
-      text: stats?.uptime.hasData ? STATUS_TEXT[stats.uptime.status] ?? 'text-zinc-100' : 'text-zinc-600',
+      tone: stats?.uptime.hasData ? STATUS_TONE[stats.uptime.status] ?? 'neutral' : 'neutral',
       hint: stats?.uptime.hasData ? undefined : 'No traffic yet',
     },
     {
-      key: 'latency', icon: Timer, label: 'Avg response',
-      value: hasTraffic ? `${stats?.responseTime.value ?? 0}ms` : '—',
-      text: hasTraffic ? STATUS_TEXT[stats?.responseTime.status ?? 'healthy'] ?? 'text-zinc-100' : 'text-zinc-600',
+      key: 'latency', label: 'Average response',
+      value: hasTraffic ? `${stats?.responseTime.value ?? 0} ms` : '—',
+      tone: hasTraffic ? STATUS_TONE[stats?.responseTime.status ?? 'healthy'] ?? 'neutral' : 'neutral',
     },
     {
-      key: 'failures', icon: AlertTriangle, label: 'Failed',
+      key: 'failures', label: 'Server errors',
       value: fmtCount(failed.value),
-      text: failed.value > 0 ? STATUS_TEXT[failed.status] ?? 'text-amber-300' : 'text-zinc-100',
+      tone: failed.value > 0 ? STATUS_TONE[failed.status] ?? 'warn' : 'neutral',
     },
   ]
 
   return (
-    <div className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-white/[0.07] bg-white/[0.05] lg:grid-cols-4">
-      {tiles.map((t) => {
-        const Icon = t.icon
-        return (
-          <div key={t.key} className="bg-[#16171d] px-4 py-3.5">
-            <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
-              <Icon className="h-3 w-3" />
-              {t.label}
-            </div>
-            <div className={`mt-1.5 font-mono text-[19px] font-medium tabular-nums leading-none ${loaded ? t.text : 'text-zinc-700'}`}>
-              {loaded ? t.value : '·'}
-            </div>
-            {t.hint && <div className="mt-1 text-[10px] text-zinc-600">{t.hint}</div>}
-          </div>
-        )
-      })}
-    </div>
+    <StatStrip>
+      {tiles.map((t) => (
+        <Stat
+          key={t.key}
+          label={t.label}
+          value={t.value}
+          hint={t.hint}
+          tone={t.tone}
+          loading={!loaded}
+        />
+      ))}
+    </StatStrip>
   )
 }
 

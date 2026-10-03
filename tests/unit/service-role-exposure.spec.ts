@@ -47,6 +47,26 @@ describe('detectBrowserOrigin — browsers are refused', () => {
     expect(v.origin).toBe('https://someone-elses-site.com')
   })
 
+  it('refuses a real browser that sends Sec-Fetch-Mode and a browser UA', () => {
+    // The pairing that makes the fix above safe. Mode alone is now ambiguous,
+    // so it needs corroboration from a header page JavaScript also cannot set —
+    // and a browser always sends both. Without this test, "Node is allowed"
+    // could be satisfied by a guard that had stopped detecting anything.
+    const v = detectBrowserOrigin({
+      'sec-fetch-mode': 'cors',
+      'user-agent':
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36',
+    })
+    expect(v.isBrowser).toBe(true)
+    expect(v.signal).toBe('sec_fetch')
+  })
+
+  it('refuses a real browser on Sec-Fetch-Site alone, whatever its UA', () => {
+    // Site and Dest are sent by every browser and by no Node client, so they
+    // stay sufficient on their own.
+    expect(detectBrowserOrigin({ 'sec-fetch-site': 'cross-site' }).isBrowser).toBe(true)
+  })
+
   it('detects a browser that sent only Sec-Fetch-Dest', () => {
     // Not every request carries Site or Mode; any member of the family is proof.
     const v = detectBrowserOrigin({ 'sec-fetch-dest': 'empty' })
@@ -80,8 +100,38 @@ describe('detectBrowserOrigin — servers are not refused', () => {
     expect(detectBrowserOrigin({}).isBrowser).toBe(false)
   })
 
-  it('allows Node/undici, which sends a UA but no Sec-Fetch and no Origin', () => {
-    const v = detectBrowserOrigin({ 'user-agent': 'node' })
+  it('allows Node’s built-in fetch, which DOES send Sec-Fetch-Mode', () => {
+    // The exact headers Node 20 puts on the wire, measured against a real
+    // server rather than assumed:
+    //
+    //   content-type, x-api-key, accept, accept-language,
+    //   sec-fetch-mode: cors, user-agent: node, accept-encoding
+    //
+    // The previous version of this test was called "sends a UA but no
+    // Sec-Fetch" and supplied only a user-agent, so it passed against a fixture
+    // that does not exist. The guard accepted ANY Sec-Fetch-* member, so every
+    // service-role call from a Next.js API route, a server component or any
+    // Node 18+ backend was refused and told to move the key to a server it was
+    // already on. Found by the final qualification, which could not write
+    // through /db/* with a service-role key.
+    const v = detectBrowserOrigin({
+      'content-type': 'application/json',
+      accept: '*/*',
+      'accept-language': '*',
+      'sec-fetch-mode': 'cors',
+      'user-agent': 'node',
+      'accept-encoding': 'gzip, deflate',
+    })
+    expect(v.isBrowser).toBe(false)
+    expect(v.signal).toBeNull()
+  })
+
+  it('allows a Node client that sets a browser-ish Origin but is not one', () => {
+    const v = detectBrowserOrigin({
+      'sec-fetch-mode': 'cors',
+      'user-agent': 'node',
+      origin: 'https://app.example.com',
+    })
     expect(v.isBrowser).toBe(false)
   })
 

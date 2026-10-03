@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { getActiveSuggestions } from '@/lib/suggestions'
 import { verifyToken } from '@/lib/auth/jwt'
+import { canAccessProject } from '@/lib/edition/guard'
 
 /**
  * GET /api/projects/[projectId]/suggestions
@@ -10,10 +11,8 @@ import { verifyToken } from '@/lib/auth/jwt'
  * Returns active suggestions for the current graph version.
  * Suggestions are non-mutating, advisory-only analysis.
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     // Authenticate
     const sessionToken = request.cookies.get('auth-token')?.value
@@ -25,8 +24,18 @@ export async function GET(
     }
 
     const decoded = await verifyToken(sessionToken)
+    const callerId = decoded.userId
     const userId = decoded.userId
     const projectId = params.id
+
+    // Ownership. verifyToken answers "who is this"; it does not answer "may
+    // they read this project". The result was not even captured here, so the
+    // project id from the path went straight through unchecked.
+    // 404 rather than 403 so the endpoint is not an oracle for project ids.
+    if (!(await canAccessProject(callerId, projectId))) {
+      return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+    }
+
 
     // Verify project access (implicit via getActiveSuggestions)
     const suggestions = await getActiveSuggestions(projectId)

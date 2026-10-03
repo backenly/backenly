@@ -22,6 +22,11 @@ packages/*/*.tsbuildinfo
 # misc
 .DS_Store
 *.pem
+# The one exception: Amazon's PUBLIC RDS root certificates, which the images
+# trust so node-postgres can verify an RDS chain. Certificates only, no keys;
+# tests/unit/rds-ca-bundle-is-pinned.spec.ts holds it to a reviewed SHA-256.
+# Every other .pem stays ignored, because that is where private keys live.
+!docker/certs/rds-ca-ap-south-1.pem
 
 # debug
 npm-debug.log*
@@ -60,6 +65,7 @@ next-env.d.ts
 # User-generated workspaces (IMPORTANT for production)
 /workspace/
 /tmp/
+/tmp-*
 
 # Storage
 /storage/
@@ -80,9 +86,15 @@ public/*.pdf
 .secrets.local.md
 
 # Local Claude Code state — machine-specific, and has held credentials.
-# Ignore the whole dir; only explicitly re-allow shared, secret-free config.
-.claude/
+# Ignore the contents; only explicitly re-allow shared, secret-free config.
+#
+# This MUST be `.claude/*`, not `.claude/`. Git does not descend into an
+# excluded DIRECTORY, so a negation under one can never re-include anything:
+# `.claude/` plus `!.claude/settings.json` silently ignored settings.json too,
+# and .claude/rules/ is only tracked today because it was force-added.
+.claude/*
 !.claude/settings.json
+!.claude/rules/
 
 # Playwright run artifacts. These were tracked, so every test run left the tree
 # dirty with churn nobody reviews — and with parallel sessions running in this
@@ -134,3 +146,90 @@ public/backenly-supabase.esm.js
 # live session, so neither belongs in a public repo.
 .video-out/
 *.storageState.json
+
+# jest --json reports written by CI for the no-vacuous-suites guard
+jest-static.json
+jest-integration.json
+
+# Private Cloud overlay, applied by scripts/apply-overlay.sh on a Cloud build.
+#
+# Every path below is reserved for the overlay in overlay-allowlist.json and
+# holds ZERO tracked public files. That was true of only lib/cloud and
+# config/cloud until Phase 7 emptied the transition list; it is now true of the
+# whole ownership map, which is why the list can be completed here.
+#
+# Without it, a composed Cloud checkout reports all hundred-odd overlay files as
+# untracked changes. That is not merely noise: it puts the private control plane
+# one `git add -A` away from being committed to a PUBLIC repository, on a box
+# where someone is most likely to be running git under time pressure.
+#
+# Bracketed Next.js segments are escaped. Unescaped, [id] is a gitignore
+# CHARACTER CLASS matching a single 'i' or 'd', so the pattern would silently
+# match nothing.
+#
+# This is bookkeeping, not a boundary. The ownership authority is
+# scripts/verify-overlay-boundary.ts, which asks git what is TRACKED; .gitignore
+# cannot make an overlay add-only and is not relied on to. Nor can it hide a
+# public file that belongs under one of these paths, because no such file may
+# exist -- that is what the verifier fails on.
+/__tests__/analytics/amplitude-config.test.tsx
+/__tests__/analytics/amplitude-resilience.test.tsx
+/__tests__/billing/cancellation-and-grace.test.ts
+/__tests__/billing/free-plan-resolution.test.ts
+/__tests__/cloud/
+/__tests__/lib/agent-ops.test.ts
+/__tests__/security/admin-step-up.test.ts
+/app/admin/
+/app/api/admin/
+/app/api/billing/
+/app/api/cron/grace-check/route.ts
+/app/api/cron/process-grace-periods/route.ts
+/app/api/org/
+/app/api/projects/\[id\]/access/route.ts
+/app/api/projects/\[id\]/availability/
+/app/api/referral/
+/app/api/users/route.ts
+/app/app/billing/
+/app/app/invite/
+/app/app/members/
+/app/app/referral/
+/components/app/AmplitudeAnalytics.tsx
+/components/cloud/
+/config/cloud/
+/lib/admin/
+/lib/analytics/
+/lib/billing/
+/lib/cloud/
+/lib/fleet/
+/lib/org/
+/lib/platform/
+/lib/trust/
+/prisma/seed-billing.ts
+/scripts/fleet/
+/tests/auth/email-trust.test.ts
+/tests/core/autonomy-entitlements-are-seeded.test.ts
+
+# Maintenance-window state snapshots (scripts/maintenance-freeze.sh)
+.maintenance/
+
+# Runtime container bundle (scripts/build-runtime-bundle.mjs)
+/dist-runtime
+
+# RDS rehearsal build artifacts (scripts/run-rds-rehearsal-fargate.ts).
+# Both are regenerated per run and platform-specific: the base64 bundle is
+# emitted where esbuild works, the compiled launcher is what actually runs where
+# the AWS CLI is authenticated. Committing either would let a stale blob rehearse
+# last week's logic and report PASS.
+.rehearsal.b64
+.rehearsal-launcher.cjs
+
+# Local research evidence (Supabase comparison captures, screenshots). Never committed.
+evidence/
+.playwright/
+
+# Local agent tooling (skills installed per-machine). Not product code.
+.agents/
+skills-lock.json
+
+# Ad-hoc audit output. The reviewed baseline in .github/ is what is tracked.
+route-authorization.json

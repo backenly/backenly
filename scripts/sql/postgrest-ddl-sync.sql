@@ -26,6 +26,96 @@
 -- Run as superuser:
 --   psql -d backenly -f postgrest-ddl-sync.sql
 
+-- ── App role resolution ──────────────────────────────────────────────────────
+--
+-- The role the Backenly application connects as. It is NOT the installer: these
+-- files are installed by a superuser, and the app then calls the SECURITY
+-- DEFINER functions below with far less privilege.
+--
+-- Resolved rather than hardcoded because nineteen sites across these files
+-- named `backenly_user` literally, so an install against a database whose app
+-- role is `postgres` — the default on a fresh Ubuntu PostgreSQL, and what CI
+-- uses — aborted with `role "backenly_user" does not exist` before creating a
+-- single function.
+--
+-- Override per database or per session:
+--   ALTER DATABASE mydb SET backenly.app_role = 'myrole';
+CREATE OR REPLACE FUNCTION public.backenly_app_role() RETURNS text
+LANGUAGE sql STABLE AS $fn$
+  -- Resolved, not a constant.
+  --
+  -- The old fallback was the literal 'backenly_user'. That is the INSTALLER
+  -- role, which is precisely what the application role is meant not to be, and
+  -- on a managed deployment it may not exist at all: measured on RDS, where the
+  -- app had always run as the master credential, this function returned
+  -- 'backenly_user' while no such role was present in the cluster. Every grant
+  -- routed through it was therefore aimed at a name nothing could be granted
+  -- to, silently.
+  --
+  -- The explicit setting still wins wherever an operator established one. Where
+  -- none exists - and a custom parameter cannot always BE established, since
+  -- RDS refuses ALTER DATABASE/ROLE SET of a placeholder from a non-superuser -
+  -- this falls through to a role that actually exists, in the order the
+  -- credential split intends.
+  SELECT coalesce(
+    nullif(current_setting('backenly.app_role', true), ''),
+    (SELECT rolname::text FROM pg_roles WHERE rolname = 'backenly_app'),
+    (SELECT rolname::text FROM pg_roles WHERE rolname = 'backenly_user'),
+    current_user::text
+  )
+$fn$;
+
+-- ── PostgREST roles ─────────────────────────────────────────────────────────
+--
+-- Established here rather than left to setup-postgrest-roles.ts, because the
+-- event triggers in these files GRANT to these roles, and a grant to a role
+-- that does not exist aborts the DDL that fired the trigger.
+--
+-- That deadlocked the documented install order on a fresh cluster. Found on CI:
+--
+--   1. install this SQL           the CREATE SCHEMA event trigger is now live
+--   2. npm run bootstrap          CREATE SCHEMA workspace_<uuid> fires it, which
+--                                 reaches backenly_pgrst_prepare_schema, which
+--                                 runs GRANT USAGE ON SCHEMA ... TO anon
+--                                 ERROR: role "anon" does not exist
+--   3. setup-postgrest-roles.ts   would create the roles, but it grants per
+--                                 workspace schema and so refuses to run until
+--                                 the schema from step 2 exists
+--
+-- Step 2 is unreachable and step 3 cannot precede it. The roles a trigger
+-- depends on are part of installing that trigger, so they are created here and
+-- step 3 keeps its real job: passwords, role membership and per-schema grants.
+--
+-- Guarded because roles are CLUSTER-WIDE. On a cluster already running Backenly
+-- every branch below is skipped. Nothing here ALTERs an existing role: doing so
+-- is what took the data plane down once already, pinned by
+-- __tests__/bootstrap/postgrest-roles-idempotency.test.ts.
+DO $roles$
+BEGIN
+  -- Powerless until something grants to them, which is per workspace schema.
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    CREATE ROLE anon NOLOGIN;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    CREATE ROLE authenticated NOLOGIN;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+    CREATE ROLE service_role NOLOGIN;
+  END IF;
+
+  -- The login role PostgREST authenticates as. It is granted EXECUTE on
+  -- postgrest.pre_config() below, which is how PostgREST learns which schemas
+  -- to serve, so registration needs it to exist just as much as grants need anon.
+  --
+  -- Created with NO PASSWORD, so it cannot authenticate yet. NOINHERIT is
+  -- load-bearing: with INHERIT it would passively hold the union of every role
+  -- it can switch into, and a request that failed to SET ROLE would run with
+  -- service_role's reach.
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'backenly_authenticator') THEN
+    CREATE ROLE backenly_authenticator LOGIN NOINHERIT;
+  END IF;
+END $roles$;
+
 -- ── Prepare a schema for PostgREST ──────────────────────────────────────────
 -- Grants + default privileges + internal-table revocation, idempotent. Called at
 -- cutover; safe to re-run at any time.
@@ -53,13 +143,13 @@ BEGIN
   -- both because tables arrive from the app connection and from migrations run
   -- as the owner, and a default set for only one of them leaves the other's
   -- tables unreachable.
-  EXECUTE format(
-    'ALTER DEFAULT PRIVILEGES FOR ROLE backenly_user IN SCHEMA %I
+  EXECUTE (
+    format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I
        GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO authenticated, service_role',
-    target_schema);
-  EXECUTE format(
-    'ALTER DEFAULT PRIVILEGES FOR ROLE backenly_user IN SCHEMA %I
-       GRANT SELECT ON TABLES TO anon', target_schema);
+      public.backenly_app_role(), target_schema));
+  EXECUTE (
+    format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I
+       GRANT SELECT ON TABLES TO anon', public.backenly_app_role(), target_schema));
 
   -- Runs LAST: the blanket grants above would otherwise have just handed out
   -- SELECT on the credential tables they are meant to exclude.
@@ -136,4 +226,74 @@ CREATE EVENT TRIGGER backenly_pgrst_ddl_sync
   EXECUTE FUNCTION public.backenly_pgrst_on_ddl();
 
 REVOKE ALL ON FUNCTION public.backenly_pgrst_prepare_schema(text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.backenly_pgrst_prepare_schema(text) TO backenly_user;
+
+DO $grant$
+DECLARE r text := public.backenly_app_role();
+BEGIN
+  -- Skipped rather than failed when the role is absent: the functions are still
+  -- installed and a later run grants them, which is what makes this re-runnable.
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_pgrst_prepare_schema(text) TO %I', r);
+  END IF;
+END $grant$;
+
+-- ── The definer must be able to set defaults FOR the app role ───────────────
+--
+-- `backenly_pgrst_prepare_schema` is SECURITY DEFINER and runs
+-- `ALTER DEFAULT PRIVILEGES FOR ROLE <app role>`. PostgreSQL permits that only
+-- to a role that is a MEMBER of the role whose defaults are being set. The
+-- definer is the function's owner, so unless that owner is a member of the app
+-- role, the statement raises 42501 for every caller — and nothing in the
+-- install notices, because the functions are created correctly.
+--
+-- What that costs is out of all proportion to the missing grant. The CREATE
+-- SCHEMA event trigger reaches register_schema, register_schema performs
+-- prepare_schema, and a failing event trigger ABORTS THE STATEMENT THAT FIRED
+-- IT. So `CREATE SCHEMA workspace_<uuid>` fails outright and rolls back: the
+-- deployment cannot provision a single new project, while every existing
+-- workspace keeps working and every health check stays green.
+--
+-- Measured on AWS staging on 2026-09-22, where the functions are owned by the
+-- managed instance's administrative role and the application runs as a separate
+-- unprivileged role that the owner was never made a member of.
+--
+-- This runs LAST in the install, after both files, so the owner it reads is the
+-- owner the cluster will actually run these functions as. It grants to that
+-- OWNER rather than to CURRENT_USER: on a re-install the two differ, because
+-- CREATE OR REPLACE FUNCTION leaves ownership alone.
+--
+-- It raises rather than warns. A warning here is a silent promise that project
+-- creation works, and the whole point of this block is that nothing else in the
+-- system reports the failure until a customer's first project.
+DO $membership$
+DECLARE
+  r     text := public.backenly_app_role();
+  owner text;
+BEGIN
+  IF r IS NULL OR NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
+    -- The app role arrives with setup-app-role on a fresh cluster. Skipped
+    -- rather than failed, for the same reason the EXECUTE grant above is.
+    RETURN;
+  END IF;
+
+  SELECT pg_get_userbyid(p.proowner) INTO owner
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public' AND p.proname = 'backenly_pgrst_prepare_schema';
+
+  IF owner IS NULL OR pg_has_role(owner, r, 'MEMBER') THEN
+    -- Already satisfied, including the common case where the owner IS the app
+    -- role because one credential installed and runs everything.
+    RETURN;
+  END IF;
+
+  BEGIN
+    EXECUTE format('GRANT %I TO %I', r, owner);
+  EXCEPTION WHEN insufficient_privilege THEN
+    -- RAISE takes % placeholders only; %I belongs to format(). Quoting the
+    -- names for the hand-run command is done with format() below.
+    RAISE EXCEPTION
+      'Installed, but role % cannot set default privileges for role %: it is not a member of it, so every CREATE SCHEMA workspace_<uuid> will fail with 42501 and no project can be provisioned. Re-run this install as a role that may administer %, or grant it by hand: %',
+      owner, r, r, format('GRANT %I TO %I;', r, owner);
+  END;
+END $membership$;

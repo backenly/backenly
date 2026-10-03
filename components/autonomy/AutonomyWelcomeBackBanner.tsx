@@ -83,7 +83,7 @@ export default function AutonomyWelcomeBackBanner() {
   if (!projectId || !data || !data.shouldShow || dismissed) return null
 
   return (
-    <div className="mx-4 mt-4 rounded-lg border border-violet-500/15 bg-[#16171d] px-4 py-3 sm:mx-6 lg:mx-8">
+    <div className="mx-4 mt-4 rounded-lg border border-violet-500/15 bg-[#0f1012] px-4 py-3 sm:mx-6 lg:mx-8">
       <div className="flex items-start gap-3">
         <Cpu className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-violet-300/80" />
         <div className="min-w-0 flex-1">
@@ -93,7 +93,7 @@ export default function AutonomyWelcomeBackBanner() {
               <button
                 type="button"
                 onClick={() => setExpanded(e => !e)}
-                className="mt-1 inline-flex items-center gap-1 text-[11.5px] text-violet-300/90 hover:text-violet-200"
+                className="mt-1 inline-flex items-center gap-1 text-[12.5px] text-violet-300/90 hover:text-violet-200"
               >
                 {expanded ? 'Hide details' : `See ${data.examples.length} ${data.examples.length === 1 ? 'item' : 'items'}`}
                 <ArrowRight className={`h-3 w-3 transition ${expanded ? 'rotate-90' : ''}`} />
@@ -102,8 +102,8 @@ export default function AutonomyWelcomeBackBanner() {
                 <ul className="mt-3 space-y-2">
                   {data.examples.map(e => (
                     <li key={e.id} className="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2">
-                      <div className="text-[11.5px] font-medium text-zinc-200">{e.what}</div>
-                      <div className="mt-0.5 text-[11.5px] leading-relaxed text-zinc-500">Because {e.why}</div>
+                      <div className="text-[12.5px] font-medium text-zinc-200">{e.what}</div>
+                      <div className="mt-0.5 text-[12.5px] leading-relaxed text-zinc-500">Because {e.why}</div>
                     </li>
                   ))}
                 </ul>

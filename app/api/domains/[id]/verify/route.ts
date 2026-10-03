@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { withAuth } from '@/lib/auth/route-protection'
 import { verifyDomain } from '@/lib/domains'
-import { enforceCustomDomain } from '@/lib/billing'
+import { enforceCustomDomain } from '@/lib/entitlements/policy'
 import { prisma } from '@/lib/db/prisma'
 
 /**

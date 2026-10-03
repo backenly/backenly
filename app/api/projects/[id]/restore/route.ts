@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { verifyToken } from '@/lib/auth/jwt'
+import { canAdministerProject } from '@/lib/edition/guard'
 import { sanitizeError } from '@/lib/errors/sanitize'
 import { createExecutionContextFromRequest } from '@/lib/context/execution-context'
 import { undoToGraph } from '@/lib/orchestration/graph-pointer'
 import { reconcileWorkspaceToGraph } from '@/lib/orchestration/graph-reconciler'
 import { recordRollbackMemory } from '@/lib/operational-memory/ledger'
 import { prisma } from '@/lib/db'
-import { getUserEntitlements } from '@/lib/billing'
+import { getUserEntitlements } from '@/lib/entitlements'
 import type { BackendStateGraph } from '@/lib/orchestration/backend-state-graph'
 
 const QUOTA_DISABLED = process.env.DISABLE_QUOTA_ENFORCEMENT === 'true'
@@ -17,10 +18,8 @@ const QUOTA_DISABLED = process.env.DISABLE_QUOTA_ENFORCEMENT === 'true'
  * Restore the backend to a specific previous state.
  * Requires Growth plan or higher (allowDeploymentRollback).
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const body = await request.json()
     const { graphId, sequenceNumber } = body
@@ -54,6 +53,25 @@ export async function POST(
     const decoded = await verifyToken(sessionToken)
     const userId = decoded.userId
     const projectId = params.id
+
+
+    // Ownership, which this route verified a token but never checked.
+    //
+    // It confirmed the caller was SOME signed-in user, checked THEIR plan
+    // entitlement, then rolled back the project named in the path. So any
+    // authenticated account on a qualifying plan could roll back another
+    // tenant's deployment. Authentication is not authorization, and an
+    // entitlement check is about the caller's billing, not their access.
+    //
+    // canAdministerProject, not canAccessProject: a rollback rewrites live
+    // state and is not something a read-only collaborator should trigger.
+    // 404 rather than 403 so the endpoint is not an oracle for project ids.
+    if (!(await canAdministerProject(userId, projectId))) {
+      return NextResponse.json(
+        { success: false, error: 'Project not found' },
+        { status: 404 },
+      )
+    }
 
     // 2. Check plan entitlement (allowDeploymentRollback — Growth+)
     if (!QUOTA_DISABLED) {

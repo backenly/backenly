@@ -2,7 +2,8 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
-import { motion } from 'framer-motion'
+import { AlertCircle, Cable, LayoutGrid, RotateCw } from 'lucide-react'
+import { AgentPrompt, EmptyState as EmptyStateBlock, KitButton, Skeleton } from '@/components/inspector/kit'
 
 import { WorkspaceHome } from './WorkspaceHome'
 
@@ -14,44 +15,26 @@ interface MainWorkspaceProps {
 // ── Empty state ───────────────────────────────────────────────────────────────
 
 function EmptyState({ onConnect }: { onConnect: () => void }) {
+  // Honest empty state. Nothing is "built" until the agent genuinely creates
+  // it, so no tables, routes or auth are fabricated here. The one real next
+  // step is connecting an agent, and the most useful thing to hand over is
+  // the first sentence to send it.
   return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      transition={{ duration: 0.4 }}
-      className="flex flex-col items-center justify-center min-h-[70vh] px-6"
-    >
-      <div className="w-full max-w-sm">
-        {/* Icon */}
-        <div className="w-10 h-10 rounded-xl bg-[#16171d] border border-white/10 shadow-[0_18px_55px_-42px_rgba(0,0,0,0.9)] flex items-center justify-center mb-5 mx-auto">
-          <svg className="w-4.5 h-4.5 text-zinc-500" fill="none" viewBox="0 0 20 20" stroke="currentColor" strokeWidth={1.4}>
-            <rect x="2" y="2" width="6" height="6" rx="1" />
-            <rect x="12" y="2" width="6" height="6" rx="1" />
-            <rect x="2" y="12" width="6" height="6" rx="1" />
-            <rect x="12" y="12" width="6" height="6" rx="1" />
-          </svg>
-        </div>
-
-        {/* Headline — honest empty state. Nothing is "built" until the agent
-            genuinely creates it, so we don't fabricate tables, routes, or auth
-            here. The one real next step is connecting an agent. */}
-        <p className="text-[14px] font-semibold text-white text-center mb-1.5 tracking-tight">
-          Connect your coding agent
-        </p>
-        <p className="text-[12px] text-zinc-500 text-center leading-relaxed mb-5">
-          This backend is empty. Point Claude Code, Codex, or any MCP client at
-          it and Backenly builds your tables, APIs and auth here, then keeps
-          them running.
-        </p>
-
-        <button
-          onClick={onConnect}
-          className="mx-auto flex h-9 items-center justify-center rounded-lg bg-white px-4 text-[12.5px] font-semibold text-black transition-colors hover:bg-zinc-200"
-        >
-          Connect your agent
-        </button>
-      </div>
-    </motion.div>
+    <div className="flex min-h-[70vh] flex-col items-center justify-center">
+      <EmptyStateBlock
+        icon={LayoutGrid}
+        title="Connect your coding agent"
+        description="This backend is empty. Point Claude Code, Codex, Cursor or any MCP client at it and Backenly builds your tables, APIs and auth here, then keeps them running."
+        action={
+          <div className="flex w-full flex-col items-center gap-4">
+            <KitButton variant="primary" icon={Cable} onClick={onConnect}>
+              Connect your agent
+            </KitButton>
+            <AgentPrompt prompt="Build a backend for my app: users, the tables it needs, and the APIs my frontend calls." />
+          </div>
+        }
+      />
+    </div>
   )
 }
 
@@ -61,32 +44,18 @@ function EmptyState({ onConnect }: { onConnect: () => void }) {
 
 function StateErrorPanel({ onRetry }: { onRetry: () => void }) {
   return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      transition={{ duration: 0.4 }}
-      className="flex flex-col items-center justify-center min-h-[70vh] px-6"
-    >
-      <div className="w-full max-w-sm rounded-xl bg-[#16171d] border border-white/10 shadow-[0_18px_55px_-42px_rgba(0,0,0,0.9)] px-6 py-7 text-center">
-        <div className="w-10 h-10 rounded-xl bg-white/[0.035] border border-white/10 flex items-center justify-center mb-4 mx-auto">
-          <svg className="w-4.5 h-4.5 text-zinc-500" fill="none" viewBox="0 0 20 20" stroke="currentColor" strokeWidth={1.4}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M10 6v4m0 3.5h.01M10 18a8 8 0 100-16 8 8 0 000 16z" />
-          </svg>
-        </div>
-        <p className="text-[14px] font-semibold text-white mb-1.5 tracking-tight">
-          Couldn&apos;t load your backend
-        </p>
-        <p className="text-[12px] text-zinc-500 leading-relaxed mb-5">
-          Your tables and data are safe. The dashboard just couldn&apos;t reach them right now, and this is usually temporary.
-        </p>
-        <button
-          onClick={onRetry}
-          className="px-4 py-2 rounded-lg bg-white hover:bg-zinc-200 transition-colors text-[12px] font-semibold text-black"
-        >
-          Try again
-        </button>
-      </div>
-    </motion.div>
+    <div className="flex min-h-[70vh] flex-col items-center justify-center">
+      <EmptyStateBlock
+        icon={AlertCircle}
+        title="Couldn’t load your backend"
+        description="Your tables and data are safe. The dashboard couldn’t reach them just now, which is usually temporary."
+        action={
+          <KitButton variant="primary" icon={RotateCw} onClick={onRetry}>
+            Try again
+          </KitButton>
+        }
+      />
+    </div>
   )
 }
 
@@ -172,18 +141,12 @@ export function MainWorkspace({ projectId, projectName }: MainWorkspaceProps) {
   const hasContent = backendState?.hasContent
 
   return (
-    <div className="h-full overflow-y-auto bg-[#101116]">
-      <div className="pointer-events-none sticky top-0 z-0 h-px bg-gradient-to-r from-transparent via-violet-300/25 to-transparent" />
-      <div className="relative z-10 max-w-[1460px] mx-auto px-5 pt-5 pb-10 sm:px-6 lg:px-8">
+    <div className="mx-auto w-full max-w-[1200px] px-4 pb-16 pt-7 sm:px-6 sm:pt-9 lg:px-8">
 
         {/* ── Initial load ────────────────────────────────── */}
         {/* Don't flash EmptyState while the first /state fetch is in flight —
             projects with content would briefly render as brand-new. */}
-        {!hasContent && stateStatus === 'loading' && (
-          <div className="flex flex-col items-center justify-center min-h-[70vh]">
-            <div className="w-6 h-6 rounded-full border-2 border-white/10 border-t-violet-500 animate-spin" />
-          </div>
-        )}
+        {!hasContent && stateStatus === 'loading' && <OverviewSkeleton />}
 
         {/* ── State load failure ──────────────────────────── */}
         {!hasContent && stateStatus === 'error' && (
@@ -197,12 +160,7 @@ export function MainWorkspace({ projectId, projectName }: MainWorkspaceProps) {
 
         {/* ── Backend overview ────────────────────────────── */}
         {hasContent && (
-          <motion.div
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.35, ease: [0.25, 0.46, 0.45, 0.94] }}
-            className="space-y-8"
-          >
+          <div>
             {/* WorkspaceHome — full project home: agent panel + self-healing
                 loop, 24h observability, and the four resource cards. */}
             <WorkspaceHome
@@ -217,9 +175,19 @@ export function MainWorkspace({ projectId, projectName }: MainWorkspaceProps) {
               }
               blockedCount={blockedCount}
             />
-          </motion.div>
+          </div>
         )}
-      </div>
+    </div>
+  )
+}
+
+/** The Overview's shape while /state loads: name, agent panel, loop, strip. */
+function OverviewSkeleton() {
+  return (
+    <div aria-busy="true" aria-label="Loading overview" className="space-y-3">
+      <Skeleton className="mb-6 h-[28px] w-56" />
+      <Skeleton className="h-[168px] w-full rounded-[10px]" />
+      <Skeleton className="h-[300px] w-full rounded-[10px]" />
     </div>
   )
 }

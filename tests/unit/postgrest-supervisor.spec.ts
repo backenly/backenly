@@ -59,6 +59,7 @@ function execSucceeds() {
 beforeEach(() => {
   jest.clearAllMocks()
   delete process.env.POSTGREST_RESTART_COMMAND
+  delete process.env.POSTGREST_LOCAL_RESTART_COMMAND
   // Default: lock is free, no restart history.
   mockQueryRaw.mockResolvedValue([{ acquired: true }])
   mockAuditFindFirst.mockResolvedValue(null)
@@ -69,7 +70,7 @@ beforeEach(() => {
 
 describe('the platform probe decides, not the finding', () => {
   it('does not restart when PostgREST answers, however loudly the project reported', async () => {
-    process.env.POSTGREST_RESTART_COMMAND = 'restart-me'
+    process.env.POSTGREST_LOCAL_RESTART_COMMAND = 'restart-me'
     execSucceeds()
     mockDiagnoseAndHeal.mockResolvedValue({
       status: HEALTHY, prunedSchemas: 0, restartRequired: false, notes: [],
@@ -84,7 +85,7 @@ describe('the platform probe decides, not the finding', () => {
   })
 
   it('reports a prune-only recovery as exactly that', async () => {
-    process.env.POSTGREST_RESTART_COMMAND = 'restart-me'
+    process.env.POSTGREST_LOCAL_RESTART_COMMAND = 'restart-me'
     mockDiagnoseAndHeal.mockResolvedValue({
       status: HEALTHY, prunedSchemas: 2, restartRequired: false, notes: ['Pruned 2 dangling schema(s).'],
     })
@@ -140,7 +141,7 @@ describe('platform-wide single flight', () => {
 
 describe('restart rate ceiling', () => {
   it('refuses to restart again inside the cooldown window', async () => {
-    process.env.POSTGREST_RESTART_COMMAND = 'restart-me'
+    process.env.POSTGREST_LOCAL_RESTART_COMMAND = 'restart-me'
     execSucceeds()
     mockDiagnoseAndHeal.mockResolvedValue({
       status: DOWN, prunedSchemas: 0, restartRequired: true, notes: [],
@@ -156,7 +157,7 @@ describe('restart rate ceiling', () => {
   })
 
   it('records the restart BEFORE running it, so a mid-restart crash still cools down', async () => {
-    process.env.POSTGREST_RESTART_COMMAND = 'restart-me'
+    process.env.POSTGREST_LOCAL_RESTART_COMMAND = 'restart-me'
     mockDiagnoseAndHeal.mockResolvedValue({
       status: DOWN, prunedSchemas: 0, restartRequired: true, notes: [],
     })
@@ -193,7 +194,64 @@ describe('restart channel', () => {
     expect(r.outcome).toBe('restart_channel_unconfigured')
     expect(r.healthy).toBe(false)
     expect(mockExec).not.toHaveBeenCalled()
-    expect(r.notes.join(' ')).toMatch(/POSTGREST_RESTART_COMMAND/)
+    expect(r.notes.join(' ')).toMatch(/POSTGREST_LOCAL_RESTART_COMMAND/)
+  })
+
+  it('uses the deprecated variable when only it is set, and names the replacement', async () => {
+    // A host predating the rename must not lose its emergency fallback merely
+    // because nobody renamed the variable on the box.
+    process.env.POSTGREST_RESTART_COMMAND = 'legacy-restart'
+    mockDiagnoseAndHeal.mockResolvedValue({
+      status: DOWN, prunedSchemas: 0, restartRequired: true, notes: [],
+    })
+
+    const r = await healDataPlane('p1')
+
+    expect(mockExec).toHaveBeenCalledTimes(1)
+    expect(mockExec.mock.calls[0][0]).toBe('legacy-restart')
+    const notes = r.notes.join(' ')
+    expect(notes).toMatch(/deprecated/i)
+    expect(notes).toMatch(/POSTGREST_LOCAL_RESTART_COMMAND/)
+  })
+
+  it('prefers the new variable when both are set', async () => {
+    process.env.POSTGREST_RESTART_COMMAND = 'legacy-restart'
+    process.env.POSTGREST_LOCAL_RESTART_COMMAND = 'preferred-restart'
+    mockDiagnoseAndHeal.mockResolvedValue({
+      status: DOWN, prunedSchemas: 0, restartRequired: true, notes: [],
+    })
+
+    await healDataPlane('p1')
+
+    expect(mockExec.mock.calls[0][0]).toBe('preferred-restart')
+  })
+
+  it('never shells out when no restart channel is configured', async () => {
+    // The branch that matters under an orchestrator: unavailable must stay
+    // UNHEALTHY rather than read as healed, and must not run an empty command.
+    mockDiagnoseAndHeal.mockResolvedValue({
+      status: DOWN, prunedSchemas: 0, restartRequired: true, notes: [],
+    })
+
+    const r = await healDataPlane('p1')
+
+    expect(mockExec).not.toHaveBeenCalled()
+    expect(r.restarted).toBe(false)
+    expect(r.healthy).toBe(false)
+    expect(r.outcome).toBe('restart_channel_unconfigured')
+  })
+
+  it('does not put the command text in the notes', async () => {
+    // Operators may legitimately put credentials in this command, and notes
+    // travel into findings a customer can read.
+    process.env.POSTGREST_LOCAL_RESTART_COMMAND = 'systemctl restart postgrest --token=SUPERSECRET'
+    mockDiagnoseAndHeal.mockResolvedValue({
+      status: DOWN, prunedSchemas: 0, restartRequired: true, notes: [],
+    })
+
+    const r = await healDataPlane('p1')
+
+    expect(r.notes.join(' ')).not.toContain('SUPERSECRET')
   })
 })
 
@@ -201,7 +259,7 @@ describe('restart channel', () => {
 
 describe('recovery is verified, never assumed', () => {
   it('reports healed only once the plane answers again', async () => {
-    process.env.POSTGREST_RESTART_COMMAND = 'restart-me'
+    process.env.POSTGREST_LOCAL_RESTART_COMMAND = 'restart-me'
     execSucceeds()
     mockDiagnoseAndHeal.mockResolvedValue({
       status: DOWN, prunedSchemas: 1, restartRequired: true, notes: [],
@@ -218,7 +276,7 @@ describe('recovery is verified, never assumed', () => {
   it('does NOT report success when the command exits 0 but the plane stays down', async () => {
     // The exact failure the auto-fix engine's re-check guard exists to prevent:
     // a fix recorded as applied while the backend is still serving 502s.
-    process.env.POSTGREST_RESTART_COMMAND = 'restart-me'
+    process.env.POSTGREST_LOCAL_RESTART_COMMAND = 'restart-me'
     execSucceeds()
     mockDiagnoseAndHeal.mockResolvedValue({
       status: DOWN, prunedSchemas: 0, restartRequired: true, notes: [],
@@ -279,6 +337,6 @@ describe('describeHeal', () => {
       status: DOWN, prunedSchemas: 0, restartRequired: true, notes: [],
     })
     const r = await healDataPlane('p1')
-    expect(r.notes.join(' ')).toMatch(/POSTGREST_RESTART_COMMAND/)
+    expect(r.notes.join(' ')).toMatch(/POSTGREST_LOCAL_RESTART_COMMAND/)
   })
 })

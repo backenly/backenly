@@ -130,7 +130,7 @@ async function scenarioAuthSignupAndSignin(
     const signupBody = await signupRes.json().catch(() => ({}))
 
     checks.push({
-      label: 'POST /auth/signup returns 200',
+      label: 'POST /auth/signup succeeds',
       status: signupRes.ok ? 'pass' : 'fail',
       detail: signupRes.ok
         ? `User created: ${signupBody?.user?.id ?? '(id not in body)'}`

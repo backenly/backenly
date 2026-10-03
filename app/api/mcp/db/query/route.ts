@@ -11,22 +11,14 @@ export const dynamic = 'force-dynamic'
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { z } from 'zod'
 import { mcpGuard, recordMcpCall } from '@/lib/mcp/guard'
 import { corsHeaders, optionsResponse } from '@/lib/mcp/cors'
 import { dbQuery } from '@/lib/mcp/runtime-db'
 import { dbErrorBody } from '@/lib/db/query-errors'
 import { parseMcpBody } from '@/lib/mcp/request-body'
+import { DB_TOOL_FAILURE_CODE, DB_TOOL_REQUESTS } from '@/lib/mcp/db-tool-requests'
 
 const ENDPOINT = '/api/mcp/db/query'
-
-const RequestSchema = z.object({
-  table: z.string().trim().min(1).max(63),
-  filter: z.record(z.unknown()).optional(),
-  limit: z.number().int().min(1).max(200).optional(),
-  offset: z.number().int().min(0).optional(),
-  orderBy: z.record(z.unknown()).optional(),
-})
 
 export function OPTIONS() { return optionsResponse() }
 
@@ -36,7 +28,7 @@ export async function POST(request: NextRequest) {
   if (guard.response) return withCors(guard.response)
   const auth = guard.auth!
 
-  const body = parseMcpBody(RequestSchema, await request.json().catch(() => null), 'db_query')
+  const body = parseMcpBody(DB_TOOL_REQUESTS.db_query, await request.json().catch(() => null), 'db_query')
   if (!body.ok) {
     recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 400, tool: 'db_query', error: body.error.code })
     return withCors(NextResponse.json(body.error, { status: 400 }))
@@ -50,7 +42,7 @@ export async function POST(request: NextRequest) {
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Query failed'
     recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 400, tool: 'db_query', error: msg })
-    return withCors(NextResponse.json(dbErrorBody(err, 'QUERY_FAILED'), { status: 400 }))
+    return withCors(NextResponse.json(dbErrorBody(err, DB_TOOL_FAILURE_CODE.db_query), { status: 400 }))
   }
 }
 

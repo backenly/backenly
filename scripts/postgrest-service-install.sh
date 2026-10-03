@@ -124,5 +124,5 @@ echo "Next — give the autonomy loop its restart channel so it can repair a"
 echo "wedged schema cache (PGRST002), which Restart=always cannot see because"
 echo "the process never exits:"
 echo
-echo "  POSTGREST_RESTART_COMMAND=\"systemctl restart postgrest\"   # in the app env"
+echo "  POSTGREST_LOCAL_RESTART_COMMAND=\"systemctl restart postgrest\"   # in the app env"
 echo

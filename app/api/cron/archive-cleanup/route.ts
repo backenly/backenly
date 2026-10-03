@@ -11,6 +11,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { cleanupOldArchives } from '@/lib/rollback/non-destructive-restore'
+import { getFleetScheduler } from '@/lib/edition'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 300 // 5 minutes
@@ -36,10 +37,23 @@ export async function POST(request: NextRequest) {
 
     console.log('[Archive Cleanup] Starting automatic cleanup...')
 
-    // Get all projects
-    const projects = await prisma.project.findMany({
+    // WHICH projects is an edition question: single-tenant answers with THE
+    // project, Cloud with its estate. Cleaning up ONE project's archives is
+    // product and is unchanged below.
+    //
+    // Maintenance rather than active targets: a project nobody has touched in
+    // months is exactly the one whose 90-day archives are due for deletion.
+    const targets = await getFleetScheduler().maintenanceTargets()
+
+    // Names are for the log lines only, read back by id rather than asked of
+    // the scheduler. FleetScheduler answers "which projects" and is not a
+    // project data service; widening it to carry display fields is how a narrow
+    // seam turns into a second Prisma client.
+    const named = await prisma.project.findMany({
+      where: { id: { in: targets.map(t => t.id) } },
       select: { id: true, name: true },
     })
+    const projects = named
 
     console.log(`[Archive Cleanup] Found ${projects.length} projects`)
 

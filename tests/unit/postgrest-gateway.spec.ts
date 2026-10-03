@@ -127,6 +127,92 @@ describe('buildUpstreamHeaders — tenancy isolation', () => {
   })
 })
 
+// ── The framing of the incoming request never reaches PostgREST ─────────────
+//
+// On AWS every runtime request arrives through Next's forwarder
+// (lib/runtime/forward-to-runtime.ts), which streams the body, so writes arrive
+// with `transfer-encoding: chunked`. The gateway copied it onto a request whose
+// body it had re-serialized itself, undici refused it ("invalid
+// transfer-encoding header"), and every /db and /api/v2 write answered 502
+// UPSTREAM_UNAVAILABLE while reads worked. Found qualifying v8 on staging.
+
+describe('buildUpstreamHeaders — the incoming framing stays behind', () => {
+  const mint = () => mintInternalToken(internalClaimsFor({ projectId: PROJECT }), SECRET)
+
+  it.each([
+    'transfer-encoding', 'te', 'trailer', 'upgrade', 'keep-alive',
+    'proxy-authenticate', 'proxy-authorization', 'content-encoding', 'expect',
+  ])('drops %s', header => {
+    const headers = buildUpstreamHeaders(
+      { [header]: 'x', 'content-type': 'application/json' },
+      { projectId: PROJECT, internalToken: mint(), method: 'POST' },
+    )
+    expect(headers[header]).toBeUndefined()
+    // Non-vacuity: an ordinary header in the same call still goes through.
+    expect(headers['content-type']).toBe('application/json')
+  })
+
+  it('drops headers the incoming Connection header names as hop-by-hop', () => {
+    const headers = buildUpstreamHeaders(
+      { connection: 'close, X-Hop-Only', 'x-hop-only': '1', 'x-keep': '2' },
+      { projectId: PROJECT, internalToken: mint(), method: 'POST' },
+    )
+    expect(headers['x-hop-only']).toBeUndefined()
+    expect(headers['x-keep']).toBe('2')
+  })
+
+  it('is case-insensitive about the framing header too', () => {
+    const headers = buildUpstreamHeaders(
+      { 'Transfer-Encoding': 'chunked' },
+      { projectId: PROJECT, internalToken: mint(), method: 'POST' },
+    )
+    expect(Object.keys(headers).map(k => k.toLowerCase())).not.toContain('transfer-encoding')
+  })
+
+  it('a chunked incoming write reaches a real upstream through real fetch', async () => {
+    // The exact failure, end to end: headers as the runtime receives them
+    // behind Next, a body the gateway re-serialized, and Node's own fetch.
+    // Before the fix this threw "fetch failed" (cause: invalid
+    // transfer-encoding header) and never reached the server.
+    const http = await import('node:http')
+    const seen: { body: string; headers: Record<string, unknown> }[] = []
+    const server = http.createServer((req, res) => {
+      let body = ''
+      req.on('data', c => (body += c))
+      req.on('end', () => {
+        seen.push({ body, headers: req.headers })
+        res.writeHead(201, { 'content-type': 'application/json' })
+        res.end('[{"id":1}]')
+      })
+    })
+    await new Promise<void>(r => server.listen(0, '127.0.0.1', () => r()))
+    try {
+      const port = (server.address() as { port: number }).port
+      const headers = buildUpstreamHeaders(
+        {
+          'transfer-encoding': 'chunked',
+          connection: 'keep-alive',
+          'content-type': 'application/json',
+          'x-api-key': 'proj_live_caller_key',
+        },
+        { projectId: PROJECT, internalToken: mint(), method: 'POST' },
+      )
+      const res = await fetch(`http://127.0.0.1:${port}/items`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ title: 'first' }),
+      })
+      expect(res.status).toBe(201)
+      expect(seen).toHaveLength(1)
+      expect(seen[0].body).toBe('{"title":"first"}')
+      expect(seen[0].headers['content-profile']).toBe(`workspace_${PROJECT}`)
+      expect(seen[0].headers['x-api-key']).toBeUndefined()
+    } finally {
+      await new Promise<void>(r => server.close(() => r()))
+    }
+  })
+})
+
 describe('internal token', () => {
   it('anon by default — no identity is assumed', () => {
     expect(internalClaimsFor({ projectId: PROJECT })).toMatchObject({ role: 'anon' })

@@ -49,6 +49,26 @@
   animation: heroFrameEnter 1450ms cubic-bezier(0.16, 1, 0.3, 1) 720ms forwards;
 }
 
+/* Launch bar: the violet hairline sweeps, so the edge reads imminent
+   rather than static. TEMPORARY, paired with components/site/LaunchBar.tsx;
+   delete both together after the Product Hunt launch.
+
+   This is CSS rather than framer-motion on purpose. The first attempt used a
+   motion.span with `repeat: Infinity` nested inside the hero's variant tree,
+   and the parent's `visible` label overrode the child's own `animate`, so the
+   sweep ran exactly once and then froze at its end position. Measured, not
+   guessed: its transform sat at a constant translateX(431px) across 1.6s.
+   CSS also keeps an infinite animation off the JS thread and gets the
+   reduced-motion gate below for free, with no hydration branch. */
+@keyframes launchSweep {
+  0%        { transform: translateX(-120%); }
+  55%, 100% { transform: translateX(420%); }
+}
+
+.launch-sweep {
+  animation: launchSweep 5000ms cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .hero-enter,
   .hero-frame-enter {
@@ -56,6 +76,15 @@
     animation: none;
     transform: none;
     filter: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Hide it rather than just stopping it, so the bright bar does not sit
+     parked at the right edge. The static violet hairline stays. */
+  .launch-sweep {
+    animation: none;
+    opacity: 0;
   }
 }
 
@@ -918,4 +947,110 @@ html {
 }
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.14);
+}
+
+/* ─── Console shell ──────────────────────────────────────────────────────────
+   The dashboard frame (components/shell). The chrome is one night surface; the
+   work sits on a canvas inset into it on md+, full-bleed below. These two
+   numbers are the only place the frame's geometry is written down, so the
+   full-height instruments can fit the viewport exactly. */
+:root {
+  --console-bar: 48px; /* top bar */
+  --console-gap: 8px;  /* canvas inset from the chrome, md+ */
+}
+
+/* Exactly the canvas's inner height, for pages that own the viewport and
+   scroll internally (Database, Storage, Functions, Realtime, Monitoring,
+   Auth). The 2px is the canvas's own top and bottom border. */
+.console-fill {
+  height: calc(100vh - var(--console-bar));
+  height: calc(100dvh - var(--console-bar));
+}
+@media (min-width: 768px) {
+  .console-fill {
+    height: calc(100vh - var(--console-bar) - var(--console-gap) - 2px);
+    height: calc(100dvh - var(--console-bar) - var(--console-gap) - 2px);
+    /* The canvas cannot clip (overflow:hidden would break sticky headers on
+       document pages), so a full-height instrument rounds its own corners to
+       the canvas's inner radius. Instruments already clip their panes. */
+    border-radius: 13px;
+  }
+}
+
+/* The canvas's minimum height, so short pages still read as one sheet. */
+.console-canvas-min {
+  min-height: calc(100vh - var(--console-bar));
+  min-height: calc(100dvh - var(--console-bar));
+}
+@media (min-width: 768px) {
+  .console-canvas-min {
+    min-height: calc(100vh - var(--console-bar) - var(--console-gap));
+    min-height: calc(100dvh - var(--console-bar) - var(--console-gap));
+  }
+}
+
+/* One entrance per page: the content settles in as the route changes.
+   Opacity ONLY. A transform (even a finished translateY(0) held by the fill
+   mode) makes this element the containing block for every position:fixed
+   descendant, and every dialog inside a page would then anchor to the page
+   instead of the viewport. */
+@keyframes consoleEnter {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.console-enter {
+  animation: consoleEnter 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .console-enter { animation: none; }
+}
+
+/* ── Smooth animation utilities (CSS fallback) ── */
+@keyframes slideInFromLeft {
+  from {
+    transform: translateX(-100%);
+    opacity: 0.8;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes slideInFromBottom {
+  from {
+    transform: translateY(100%);
+    opacity: 0.8;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes fadeInSimple {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.animate-in {
+  animation-duration: 250ms;
+  animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+  animation-fill-mode: both;
+}
+
+.fade-in {
+  animation-name: fadeInSimple;
+}
+
+.slide-in-from-left {
+  animation-name: slideInFromLeft;
+}
+
+.slide-in-from-bottom {
+  animation-name: slideInFromBottom;
 }

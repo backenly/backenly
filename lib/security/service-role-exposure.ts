@@ -94,20 +94,34 @@ function header(headers: HeaderBag, name: string): string | null {
  */
 export function detectBrowserOrigin(headers: HeaderBag): BrowserOriginVerdict {
   const origin = header(headers, 'origin') ?? refererOrigin(headers)
+  const ua = header(headers, 'user-agent') ?? ''
+  const looksLikeBrowser = /Mozilla\/|AppleWebKit\/|Chrome\/|Safari\/|Firefox\/|Edg\//.test(ua)
 
-  // Primary: a header page JavaScript is forbidden from setting. Any Sec-Fetch-*
-  // member is enough — Dest and Mode are present on requests where Site is not.
-  const secFetch =
-    header(headers, 'sec-fetch-site') ??
-    header(headers, 'sec-fetch-mode') ??
-    header(headers, 'sec-fetch-dest')
-  if (secFetch) return { isBrowser: true, signal: 'sec_fetch', origin }
+  // ── Primary: headers page JavaScript is forbidden from setting ────────────
+  //
+  // Site and Dest are the two a browser always sends and NODE'S FETCH NEVER
+  // DOES. That distinction is the whole fix: this used to accept any Sec-Fetch-*
+  // member, including Mode — and Node's built-in fetch sends
+  // `sec-fetch-mode: cors` on every request.
+  //
+  // So every service-role call from a Next.js API route, a server component or
+  // any Node 18+ backend was refused, told it "came from a browser", and
+  // advised to move the key to a server. It was already on one. Measured on
+  // Node 20: content-type, x-api-key, accept, accept-language,
+  // sec-fetch-mode: cors, user-agent: node.
+  const strongSignal = header(headers, 'sec-fetch-site') ?? header(headers, 'sec-fetch-dest')
+  if (strongSignal) return { isBrowser: true, signal: 'sec_fetch', origin }
+
+  // Mode alone is ambiguous, so it needs corroboration from a header page
+  // JavaScript also cannot set. A real browser sends both; Node's fetch sends
+  // `user-agent: node` and cannot be made to send Mozilla/... by page script.
+  if (header(headers, 'sec-fetch-mode') && looksLikeBrowser) {
+    return { isBrowser: true, signal: 'sec_fetch', origin }
+  }
 
   // Secondary: pre-Sec-Fetch browsers still announce an Origin, but so can a
   // server. Require the User-Agent to look like a browser as well, so a Node
   // client that sets Origin for its own reasons is not refused.
-  const ua = header(headers, 'user-agent') ?? ''
-  const looksLikeBrowser = /Mozilla\/|AppleWebKit\/|Chrome\/|Safari\/|Firefox\/|Edg\//.test(ua)
   if (origin && looksLikeBrowser) {
     return { isBrowser: true, signal: 'origin_with_browser_ua', origin }
   }

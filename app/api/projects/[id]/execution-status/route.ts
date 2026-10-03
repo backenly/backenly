@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { verifyToken } from '@/lib/auth/jwt'
 import { prisma } from '@/lib/db'
+import { canAccessProject } from '@/lib/edition/guard'
 
 /**
  * GET /api/projects/[projectId]/execution-status
@@ -10,10 +11,8 @@ import { prisma } from '@/lib/db'
  * Fallback polling endpoint for SSE failures
  * Used when Server-Sent Events fail on serverless infrastructure
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     // Authenticate
     const sessionToken = request.cookies.get('auth-token')?.value
@@ -29,11 +28,7 @@ export async function GET(
     const projectId = params.id
 
     // Verify project ownership
-    const project = await prisma.project.findFirst({
-      where: { id: projectId, userId },
-    })
-
-    if (!project) {
+    if (!(await canAccessProject(userId, projectId))) {
       return NextResponse.json(
         { error: 'Project not found', code: 'PROJECT_NOT_FOUND' },
         { status: 404 }

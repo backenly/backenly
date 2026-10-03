@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { getBillingUsage } from '@/lib/services/billing'
 import { authenticateRequest } from '@/lib/auth/middleware'
+import { canAccessProject } from '@/lib/edition/guard'
 
 // GET /api/settings/billing - Get billing usage data
 export async function GET(request: NextRequest) {
@@ -24,6 +25,15 @@ export async function GET(request: NextRequest) {
     if (!projectId) {
       console.error('❌ [API/Billing] Missing projectId parameter')
       return NextResponse.json({ error: 'projectId is required' }, { status: 400 })
+    }
+
+
+    // Ownership. authenticateRequest established WHO is asking; the projectId
+    // came from the query string and went straight to the service, so any
+    // signed-in account could read another tenant's billing usage.
+    // 404, so the endpoint is not an oracle for project ids.
+    if (!auth.userId || !(await canAccessProject(auth.userId, projectId))) {
+      return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
 
     console.log('🔄 [API/Billing] Fetching usage for project:', projectId)

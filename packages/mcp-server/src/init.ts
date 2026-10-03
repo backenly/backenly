@@ -91,7 +91,7 @@ export async function runInit(flags: InitFlags) {
   // detecting which hosts the user might be using — but since we don't know,
   // we just show all of them.
   printHostSnippets()
-  write('\n  Setup complete. Restart your MCP host and Backenly is wired in.\n\n')
+  write('\n  Setup complete. Open a new conversation in your MCP host and Backenly is wired in.\n\n')
 
   rl.close()
 }

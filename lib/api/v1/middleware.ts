@@ -6,9 +6,12 @@ import { checkUsage, getUsageMessage } from '@/lib/scaling/usage-monitor'
 import { applySoftRateLimit } from '@/lib/scaling/usage-monitor'
 import { scanRequest } from '@/lib/services/waf'
 import crypto from 'crypto'
-import { markFrontendConnected, markExternalUsage, trackUsage } from '@/lib/analytics/logger'
-import { enforceAndTrackApiRequest } from '@/lib/billing/quota-kernel'
-import { getPlatformControls, recordSecurityEvent } from '@/lib/platform/controls'
+import { markFrontendConnected, markExternalUsage } from '@/lib/projects/milestones'
+import { recordUsageMetrics } from '@/lib/platform-signals'
+import { enforceAndTrackApiRequest, noteEndUserActivity } from '@/lib/quota/kernel'
+import { getPlatformControls, recordSecurityEvent } from '@/lib/platform-controls'
+import { PAUSED_CODE, PAUSED_MESSAGE, pausedDetails } from '@/lib/projects/serving-state'
+import { touchProjectActivity } from '@/lib/projects/activity'
 import jwt from 'jsonwebtoken'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 
@@ -249,6 +252,21 @@ export async function v1ApiMiddleware(
     }
   }
 
+  // Paused for inactivity: the same answer the runtime's serving gate gives,
+  // from the row this middleware already loaded. Reached directly only when a
+  // request bypasses the runtime; in production the gate refuses it first.
+  if (project.pausedAt) {
+    return {
+      context: {} as V1ApiContext,
+      response: createErrorResponse(
+        PAUSED_CODE,
+        PAUSED_MESSAGE,
+        503,
+        pausedDetails(projectId, { pausedAt: project.pausedAt, reason: project.pauseReason }),
+      ),
+    }
+  }
+
   const path = request.nextUrl.pathname
   const isStatusEndpoint =
     path === `/api/v1/${projectId}` ||
@@ -289,9 +307,13 @@ export async function v1ApiMiddleware(
   // Publish?) rather than a bug fix. Reinstating it here alone would restore the
   // inconsistency, not the protection.
   //
-  // What still blocks a request, and is genuinely enforced: `lockedDownAt`
-  // (above), platform maintenance / read-only (below), API-key scope, quota,
-  // and RLS. Those are real gates on every surface.
+  // What still blocks a request on every surface: `lockedDownAt`, which the
+  // runtime's serving gate (server/lib/serving-gate.ts) enforces in front of
+  // all of /api/v1 and /api/v2 as well as here, API-key scope, quota, and RLS.
+  //
+  // Platform maintenance / read-only (below) are NOT yet every-surface gates:
+  // they are checked here and in the bootstrap routes only, not on the Express
+  // /db, /v2, auth or realtime paths.
   void isStatusEndpoint
 
   const platformControls = await getPlatformControls()
@@ -429,6 +451,9 @@ export async function v1ApiMiddleware(
         if (!blacklisted) {
           endUserId = String(payload.userId)
           endUserRole = (payload as any).role ?? 'user'
+          // An authenticated data request is use: count the end user active
+          // this month (throttled to one write a day, never blocks).
+          noteEndUserActivity(projectId, endUserId, typeof payload.email === 'string' ? payload.email : null)
         } else {
           return {
             context: {} as V1ApiContext,
@@ -455,8 +480,11 @@ export async function v1ApiMiddleware(
       markExternalUsage(projectId, userId)
     }
     // Track API call
-    trackUsage(userId, projectId, { apiCalls: 1 })
+    recordUsageMetrics(userId, projectId, { apiCalls: 1 })
   }
+
+  // Every check above passed: this is the backend being used.
+  void touchProjectActivity(projectId)
 
   return {
     context: {

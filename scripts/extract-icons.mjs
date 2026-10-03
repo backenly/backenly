@@ -63,6 +63,7 @@ const RI = [
   'eye-line',
   'eye-off-line',
   'github-fill',
+  'discord-fill',
 ]
 // Real brand marks for the Connect Frontend chips (framework + AI builders).
 const SI = [

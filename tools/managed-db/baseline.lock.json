@@ -1,0 +1,9 @@
+{
+  "migration": "00000000000000_baseline",
+  "sha256": "sha256:555e26393c5038d2ba7ae84fd18ee3f28d1a35220bebb9663e59cef7e5f7a8ff",
+  "bytes": 123274,
+  "prismaVersion": "5.22.0",
+  "schemaSha256": "sha256:0d2224f18880891f0dd7c03d745f90e5d24dcf9ee3920d13e9a3ffdcc9cdd966",
+  "generatedAt": "2026-09-15T21:02:13.266Z",
+  "command": "prisma migrate diff --from-empty --to-schema-datamodel prisma/schema.prisma --script"
+}

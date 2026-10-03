@@ -1,7 +1,26 @@
 /**
- * WORKSPACE BACKUP SERVICE
- * ========================
- * Automated pg_dump backups for each project's workspace_{projectId} schema.
+ * PROJECT DATABASE SNAPSHOT SERVICE
+ * =================================
+ * pg_dump of one project's workspace_{projectId} schema: its tables, rows,
+ * indexes, constraints, RLS policies, and the triggers and functions inside it.
+ *
+ * WHAT A SNAPSHOT IS NOT
+ * ----------------------
+ * Not storage files. Not platform accounts. Not API keys. Not project
+ * configuration or env. Not function source. Not deployment configuration.
+ *
+ * It is for schema and data rollback and for moving a project. It is NOT
+ * disaster recovery, and it must never be presented as though it were - that
+ * is what lib/recovery/ is for, and the two are deliberately named apart so
+ * an operator cannot mistake one for the other. A generic "Backup" button that
+ * could mean either is the thing this naming exists to prevent.
+ *
+ * A snapshot lives on disk at BACKUP_DIR/<projectId>/<timestamp>.sql.gz, or,
+ * when BACKUP_S3_BUCKET is set, in that bucket (lib/services/snapshot-store.ts);
+ * each row records which. Paths are created, read and pruned at runtime, and
+ * absent when Next builds. The filesystem calls therefore carry turbopackIgnore;
+ * without it the tracer cannot resolve them and falls back to tracing the whole
+ * repository into .next/standalone.
  *
  * Features:
  *  - Daily scheduled backups (triggered by cron-runner.ts)
@@ -11,18 +30,34 @@
  *  - Backups stored in BACKUP_DIR (default: ./backups/) as compressed SQL
  *
  * Each backup file:
- *   backups/{projectId}/{YYYY-MM-DD-HH-mm}.sql.gz
+ *   backups/{projectId}/{YYYY-MM-DD-HH-mm-ss}-{random}.sql.gz
  */
 
-import { exec } from 'child_process'
+import { execFile } from 'child_process'
+import { randomBytes } from 'crypto'
 import { promisify } from 'util'
 import * as fs from 'fs'
+import * as os from 'os'
 import * as path from 'path'
 import * as zlib from 'zlib'
+import type { Readable } from 'stream'
 import { pipeline } from 'stream/promises'
 import { prisma } from '@/lib/db/prisma'
+import { isCloudEdition } from '@/lib/edition/cloud-only'
+import {
+  deleteSnapshot,
+  fetchSnapshotToFile,
+  isS3Location,
+  openS3Snapshot,
+  putSnapshot,
+  s3LocationBelongsTo,
+  snapshotBucket,
+  snapshotBytesToNumber,
+  snapshotKey,
+  s3Location,
+} from '@/lib/services/snapshot-store'
 
-const execAsync = promisify(exec)
+const execFileAsync = promisify(execFile)
 
 const BACKUP_DIR = process.env.BACKUP_DIR || path.join(process.cwd(), 'backups')
 const RETENTION_DAYS = 7
@@ -37,13 +72,46 @@ const MIN_RETAINED_PER_PROJECT = 2
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function getBackupDir(projectId: string): string {
-  return path.join(BACKUP_DIR, projectId)
+  return path.join(/*turbopackIgnore: true*/ BACKUP_DIR, projectId)
 }
 
-function getBackupFilename(): string {
+/**
+ * Where a dump is written while it is being taken. On disk-backed installs that
+ * is its final home; with BACKUP_S3_BUCKET it is scratch space on the task's own
+ * disk, emptied as soon as the upload is verified (lib/services/snapshot-store.ts).
+ */
+function getWorkDir(projectId: string): string {
+  return snapshotBucket()
+    ? path.join(/*turbopackIgnore: true*/ os.tmpdir(), 'backenly-snapshots', projectId)
+    : getBackupDir(projectId)
+}
+
+/**
+ * A filename that is unique per backup, not per minute.
+ *
+ * This used to be minute-precision, so two backups of the same project inside
+ * one minute resolved to the SAME path: the second dump overwrote the first
+ * file, and the first `workspace_backups` row was left describing content that
+ * no longer existed. Observed on production 2026-09-07, when an on-demand
+ * verification backup landed in the same minute as the scheduled one — two rows
+ * (5419 and 5423 bytes) pointing at a single 5423-byte file.
+ *
+ * Seconds alone only narrows the window: a retry, or two projects' jobs
+ * finishing together, still collide inside one second. The random suffix is
+ * what makes the name independent of how often backups run, so no future
+ * cadence change can reintroduce the overwrite.
+ *
+ * Nothing parses this name — restore resolves `filePath` from the row, and
+ * pruning works from rows — so the format is free to change. Historical files
+ * keep their old names and remain valid.
+ */
+export function getBackupFilename(): string {
   const now = new Date()
   const pad = (n: number) => String(n).padStart(2, '0')
-  return `${now.getUTCFullYear()}-${pad(now.getUTCMonth() + 1)}-${pad(now.getUTCDate())}-${pad(now.getUTCHours())}-${pad(now.getUTCMinutes())}.sql.gz`
+  const stamp =
+    `${now.getUTCFullYear()}-${pad(now.getUTCMonth() + 1)}-${pad(now.getUTCDate())}` +
+    `-${pad(now.getUTCHours())}-${pad(now.getUTCMinutes())}-${pad(now.getUTCSeconds())}`
+  return `${stamp}-${randomBytes(4).toString('hex')}.sql.gz`
 }
 
 /**
@@ -67,16 +135,97 @@ function getBackupFilename(): string {
  * application requests, and giving it BYPASSRLS would silently disable every
  * RLS policy on every tenant at once — the same shape as the cutover-script
  * vulnerability that exposed password hashes. It needs a role that is read-only
- * AND bypasses RLS, used by nothing but this dump. See docs for the DDL.
+ * AND bypasses RLS, used by nothing but this dump.
+ *
+ * The DDL, and the reasoning, are in README.md under "Backups". The privilege
+ * set is deliberately minimal and is proven rather than asserted:
+ * __tests__/services/backup-restore-privileges.test.ts builds a NOSUPERUSER
+ * NOBYPASSRLS application role and a NOSUPERUSER BYPASSRLS backup role with
+ * CONNECT, USAGE and SELECT and nothing else, and runs the whole round trip
+ * against them.
  */
-function buildPgDumpArgs(): string {
+/**
+ * Connection arguments for pg_dump/psql, with the password kept OUT of argv.
+ *
+ * This used to return `"<full postgresql:// URL>"` for interpolation into a
+ * shell string. That put the production password on the command line, and
+ * Node's exec error includes the whole command it ran — so every pg_dump
+ * failure wrote the live credential into the Web error log, and into the
+ * `workspace_backups.error` column. Measured on production 2026-09-06: 450 log
+ * lines carrying the DB URI with credentials.
+ *
+ * Discrete flags plus PGPASSWORD in the CHILD environment fixes the class of
+ * bug, not just the symptom: there is no longer any string containing the
+ * password for an error message to capture.
+ */
+export function buildConnection(
+  purpose: 'read' | 'write' = 'read',
+): { args: string[]; env: NodeJS.ProcessEnv } {
+  // Only the DUMP wants BACKUP_DATABASE_URL. Restoring over that connection
+  // makes the backup role the OWNER of the restored schema and every table in
+  // it, because pg_dump runs with --no-owner and psql creates whatever it
+  // replays as the role it connected with.
+  //
+  // That is not cosmetic. The application role loses ownership of its own
+  // workspace, explicit grants are gone (--no-privileges never carried them),
+  // and FORCE ROW LEVEL SECURITY keys on the owner — so a "successful" restore
+  // silently rewrites who the policies bind. It is invisible on the Compose
+  // stack, where one superuser is both roles, and breaks the project anywhere
+  // the two are separate.
+  //
+  // So the backup role stays what its own docstring above describes: read-only
+  // with BYPASSRLS. Writing back is the application's own connection.
   const url =
-    process.env.BACKUP_DATABASE_URL ||
+    (purpose === 'read' ? process.env.BACKUP_DATABASE_URL : '') ||
     process.env.DATABASE_URL ||
     process.env.DIRECT_URL ||
     ''
   if (!url) throw new Error('DATABASE_URL not set — cannot run pg_dump')
-  return `"${url}"` // pg_dump accepts full connection URL
+
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    throw new Error('DATABASE_URL is not a valid connection URL')
+  }
+
+  const args = [
+    '--host', parsed.hostname,
+    '--port', parsed.port || '5432',
+    '--username', decodeURIComponent(parsed.username),
+    '--dbname', parsed.pathname.replace(/^\//, ''),
+    '--no-password',
+  ]
+
+  const env: NodeJS.ProcessEnv = { ...process.env }
+  if (parsed.password) env.PGPASSWORD = decodeURIComponent(parsed.password)
+  const sslmode = parsed.searchParams.get('sslmode')
+  if (sslmode) env.PGSSLMODE = sslmode
+
+  return { args, env }
+}
+
+/**
+ * Strip anything credential-shaped from a message before it is logged or stored.
+ *
+ * Defence in depth. With the password out of argv nothing should reach here,
+ * but a message is written to logs AND persisted to the database, so it is the
+ * wrong place to rely on an upstream guarantee.
+ */
+export function sanitizeError(message: string): string {
+  let out = String(message ?? '')
+  // postgres://user:secret@host -> postgres://user:***@host
+  out = out.replace(/(\b[a-z]+:\/\/[^:\s/]+:)[^@\s]*(@)/gi, '$1***$2')
+  // Any literal occurrence of the live password, however it got there.
+  for (const key of ['PGPASSWORD', 'BACKUP_DATABASE_URL', 'DATABASE_URL', 'DIRECT_URL']) {
+    const raw = process.env[key]
+    if (!raw) continue
+    const secret = key === 'PGPASSWORD' ? raw : (() => {
+      try { return decodeURIComponent(new URL(raw).password) } catch { return '' }
+    })()
+    if (secret && secret.length >= 8) out = out.split(secret).join('***')
+  }
+  return out
 }
 
 /**
@@ -95,7 +244,8 @@ export interface BackupResult {
   success: boolean
   filePath?: string
   filename?: string
-  sizeBytes?: number
+  /** Compressed bytes. A bigint: a snapshot passes 2 GiB at about 8 GB of data. */
+  sizeBytes?: bigint
   error?: string
   projectId: string
   createdAt: string
@@ -108,52 +258,70 @@ export interface BackupResult {
  */
 export async function backupWorkspace(projectId: string): Promise<BackupResult> {
   const schemaName = `workspace_${projectId}`
-  const backupDir = getBackupDir(projectId)
+  const backupDir = getWorkDir(projectId)
   const filename = getBackupFilename()
-  const sqlPath = path.join(backupDir, filename.replace('.gz', ''))
+  const sqlPath = path.join(/*turbopackIgnore: true*/ backupDir, filename.replace('.gz', ''))
   const gzPath = path.join(backupDir, filename)
   const createdAt = new Date().toISOString()
+  // Set once an upload is attempted, so a failure after it can remove the object.
+  const bucket = snapshotBucket()
+  let uploadedTo: string | null = null
 
   try {
     // Ensure backup directory exists
-    await fs.promises.mkdir(backupDir, { recursive: true })
+    await fs.promises.mkdir(/*turbopackIgnore: true*/ backupDir, { recursive: true })
 
-    const connArgs = buildPgDumpArgs()
+    const conn = buildConnection('read')
 
-    // Dump only the workspace schema (data + structure, no roles)
-    const pgDumpCmd = `pg_dump ${connArgs} --schema="${schemaName}" --no-privileges --no-owner --file="${sqlPath}"`
-
-    await execAsync(pgDumpCmd, { timeout: 120_000 })
+    // Dump only the workspace schema (data + structure, no roles).
+    // execFile, not exec: no shell, no command string, nothing for an error to
+    // quote back containing the credential.
+    await execFileAsync(
+      'pg_dump',
+      [...conn.args, '--schema', schemaName, '--no-privileges', '--no-owner', '--file', sqlPath],
+      { timeout: 120_000, env: conn.env },
+    )
 
     // Compress the dump
     await pipeline(
-      fs.createReadStream(sqlPath),
+      fs.createReadStream(/*turbopackIgnore: true*/ sqlPath),
       zlib.createGzip({ level: 6 }),
-      fs.createWriteStream(gzPath)
+      fs.createWriteStream(/*turbopackIgnore: true*/ gzPath)
     )
 
     // Remove uncompressed file
-    await fs.promises.unlink(sqlPath).catch(() => {})
+    await fs.promises.unlink(/*turbopackIgnore: true*/ sqlPath).catch(() => {})
 
-    const stat = await fs.promises.stat(gzPath)
+    const stat = await fs.promises.stat(/*turbopackIgnore: true*/ gzPath, { bigint: true })
+
+    // With a snapshot bucket, the dump's home is S3: upload it, prove it arrived
+    // whole, and only then drop the local copy. putSnapshot throws on anything
+    // short of a verified object, so the row below is never written as
+    // completed for a snapshot that is not actually stored.
+    let location = gzPath
+    if (bucket) {
+      uploadedTo = s3Location(bucket, snapshotKey(projectId, filename))
+      location = (await putSnapshot(projectId, filename, gzPath)).location
+      await fs.promises.unlink(/*turbopackIgnore: true*/ gzPath).catch(() => {})
+    }
 
     // Record in DB
     await prisma.workspaceBackup.create({
       data: {
         projectId,
         filename,
-        filePath: gzPath,
+        filePath: location,
         sizeBytes: stat.size,
         schemaName,
         status: 'completed',
       },
     })
 
-    console.log(`[Backup] Created backup for ${projectId}: ${filename} (${stat.size} bytes)`)
+    console.log(`[Backup] Created backup for ${projectId}: ${filename} (${stat.size} bytes${bucket ? ', S3' : ''})`)
 
     return {
       success: true,
-      filePath: gzPath,
+      filePath: location,
       filename,
       sizeBytes: stat.size,
       projectId,
@@ -164,13 +332,16 @@ export async function backupWorkspace(projectId: string): Promise<BackupResult> 
     // row-level security policy") reads like a database fault, so four days of
     // total backup failure looked like something transient. It is a missing
     // credential, and the message now says so.
-    const isRlsBlock = /row-level security policy/i.test(err?.message ?? '')
+    // Sanitize FIRST, then classify. Everything downstream of this line is
+    // logged and persisted, so nothing credential-shaped may survive it.
+    const raw = sanitizeError(err?.message ?? '')
+    const isRlsBlock = /row-level security policy/i.test(raw)
     const message = isRlsBlock && usingAppCredentialForBackup()
-      ? `${err.message} — pg_dump is running as the application role, which does not ` +
+      ? `${raw} — pg_dump is running as the application role, which does not ` +
         `bypass RLS, and these tables use FORCE ROW LEVEL SECURITY (the owner is ` +
         `subject to policies too). Set BACKUP_DATABASE_URL to a read-only role with ` +
         `BYPASSRLS. Do NOT grant BYPASSRLS to the application role.`
-      : err.message
+      : raw
 
     console.error(`[Backup] Failed for ${projectId}:`, message)
 
@@ -180,16 +351,18 @@ export async function backupWorkspace(projectId: string): Promise<BackupResult> 
         projectId,
         filename,
         filePath: '',
-        sizeBytes: 0,
+        sizeBytes: BigInt(0),
         schemaName,
         status: 'failed',
         error: message,
       },
     }).catch(() => {})
 
-    // Clean up any partial files
-    await fs.promises.unlink(sqlPath).catch(() => {})
-    await fs.promises.unlink(gzPath).catch(() => {})
+    // Clean up any partial files, and any object an interrupted upload left: a
+    // failed snapshot must not leave bytes behind that nothing will ever prune.
+    await fs.promises.unlink(/*turbopackIgnore: true*/ sqlPath).catch(() => {})
+    await fs.promises.unlink(/*turbopackIgnore: true*/ gzPath).catch(() => {})
+    if (uploadedTo) await deleteSnapshot(uploadedTo).catch(() => {})
 
     return { success: false, error: message, projectId, createdAt }
   }
@@ -226,40 +399,143 @@ export async function restoreWorkspace(
     return { success: false, error: 'No completed backup found for this project' }
   }
 
-  if (!fs.existsSync(backup.filePath)) {
+  // An S3 snapshot is copied to scratch space first; a disk one is read in place.
+  const fromS3 = isS3Location(backup.filePath)
+  if (fromS3 && !s3LocationBelongsTo(backup.filePath, projectId)) {
+    return { success: false, error: `Backup ${backup.filename} is not stored under this project` }
+  }
+  if (!fromS3 && !fs.existsSync(/*turbopackIgnore: true*/ backup.filePath)) {
     return { success: false, error: `Backup file not found on disk: ${backup.filename}` }
   }
+  const workDir = path.join(/*turbopackIgnore: true*/ os.tmpdir(), 'backenly-restore', projectId)
+  const gzPath = fromS3 ? path.join(workDir, backup.filename) : backup.filePath
+
+  // Short enough to stay inside Postgres's 63-byte identifier limit:
+  // workspace_<uuid> is already 46 characters.
+  const asideName = `${schemaName}_pre${randomBytes(3).toString('hex')}`
+  const sqlPath = fromS3
+    ? path.join(workDir, backup.filename.replace('.gz', '.restore.sql'))
+    : backup.filePath.replace('.gz', '.restore.sql')
+  let renamed = false
 
   try {
-    const connArgs = buildPgDumpArgs()
+    // 'write': restoring over BACKUP_DATABASE_URL would re-own the schema to
+    // the backup role. See buildConnection.
+    const conn = buildConnection('write')
 
-    // Drop and recreate the schema
-    await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`)
-    await prisma.$executeRawUnsafe(`CREATE SCHEMA "${schemaName}"`)
+    // Fetch (and checksum) the S3 copy BEFORE touching the live schema, for the
+    // same reason as decompressing first: a snapshot that is missing, damaged
+    // or not the dump that was taken must fail while the project's data is
+    // still there.
+    if (fromS3) {
+      await fs.promises.mkdir(/*turbopackIgnore: true*/ workDir, { recursive: true })
+      await fetchSnapshotToFile(backup.filePath, gzPath)
+    }
 
-    // Decompress and restore
-    const sqlPath = backup.filePath.replace('.gz', '.restore.sql')
+    // Decompress BEFORE touching the live schema. A corrupt or truncated
+    // archive must fail while the project's data is still there.
     await pipeline(
-      fs.createReadStream(backup.filePath),
+      fs.createReadStream(/*turbopackIgnore: true*/ gzPath),
       zlib.createGunzip(),
-      fs.createWriteStream(sqlPath)
+      fs.createWriteStream(/*turbopackIgnore: true*/ sqlPath)
     )
 
-    const psqlCmd = `psql ${connArgs} --file="${sqlPath}" --single-transaction`
-    await execAsync(psqlCmd, { timeout: 300_000 })
+    // Move the live schema aside rather than dropping it.
+    //
+    // The previous implementation ran DROP + CREATE and then fed in a dump
+    // whose own first statement is `CREATE SCHEMA`. That collided, the
+    // --single-transaction restore aborted, psql still exited 0 because
+    // ON_ERROR_STOP was not set, and the function reported success over a
+    // schema it had just emptied. Every restore was silent total data loss.
+    //
+    // Renaming keeps the old data recoverable for the whole operation, so a
+    // failure anywhere below is survivable instead of terminal.
+    await prisma.$executeRawUnsafe(
+      `ALTER SCHEMA "${schemaName}" RENAME TO "${asideName}"`
+    ).then(
+      () => { renamed = true },
+      // Nothing to move aside is fine: restoring into an absent schema is the
+      // disaster-recovery case, and the dump creates it.
+      () => { renamed = false },
+    )
 
-    await fs.promises.unlink(sqlPath).catch(() => {})
+    // ON_ERROR_STOP is what makes psql's exit code mean anything. Without it
+    // the restore above reported success over an aborted transaction.
+    await execFileAsync(
+      'psql',
+      [...conn.args, '--file', sqlPath, '--single-transaction', '-v', 'ON_ERROR_STOP=1'],
+      { timeout: 300_000, env: conn.env },
+    )
 
-    console.log(`[Restore] Restored ${projectId} from ${backup.filename}`)
+    // Belt and braces: psql exiting 0 is necessary, not sufficient. Confirm the
+    // schema exists and actually holds relations before destroying the aside.
+    const [{ count }] = await prisma.$queryRawUnsafe<{ count: bigint }[]>(
+      `SELECT count(*)::bigint AS count
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = $1 AND c.relkind IN ('r', 'v', 'm', 'p')`,
+      schemaName,
+    )
+    if (Number(count) === 0) {
+      throw new Error(
+        `restore produced an empty schema: psql reported success but ${schemaName} holds no relations`
+      )
+    }
+
+    // Only now is the old copy safe to destroy.
+    if (renamed) {
+      await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${asideName}" CASCADE`)
+    }
+    await fs.promises.unlink(/*turbopackIgnore: true*/ sqlPath).catch(() => {})
+    if (fromS3) await fs.promises.unlink(/*turbopackIgnore: true*/ gzPath).catch(() => {})
+
+    console.log(`[Restore] Restored ${projectId} from ${backup.filename} (${count} relations)`)
 
     return { success: true, restoredFrom: backup.filename }
   } catch (err: any) {
-    console.error(`[Restore] Failed for ${projectId}:`, err.message)
-    return { success: false, error: err.message }
+    const message = sanitizeError(err?.message ?? '')
+    console.error(`[Restore] Failed for ${projectId}:`, message)
+
+    // Put the project back. The half-restored schema is the thing to discard;
+    // the aside is the thing to keep.
+    if (renamed) {
+      try {
+        await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`)
+        await prisma.$executeRawUnsafe(`ALTER SCHEMA "${asideName}" RENAME TO "${schemaName}"`)
+        console.error(`[Restore] Rolled ${projectId} back to its pre-restore state`)
+      } catch (rollbackErr: any) {
+        // Worth shouting about: the data still exists under asideName, and an
+        // operator needs to know that name to get it back by hand.
+        console.error(
+          `[Restore] ROLLBACK FAILED for ${projectId}. The pre-restore schema is ` +
+            `retained as "${asideName}" and must be renamed back manually: ` +
+            sanitizeError(rollbackErr?.message ?? '')
+        )
+        return {
+          success: false,
+          error: `${message} — rollback also failed; pre-restore data retained as ${asideName}`,
+        }
+      }
+    }
+
+    await fs.promises.unlink(/*turbopackIgnore: true*/ sqlPath).catch(() => {})
+    if (fromS3) await fs.promises.unlink(/*turbopackIgnore: true*/ gzPath).catch(() => {})
+    return { success: false, error: message }
   }
 }
 
 // ─── List Backups ─────────────────────────────────────────────────────────────
+
+/**
+ * A snapshot row or result as a JSON body carries it: the size as an exact
+ * number of bytes (JSON has no bigint, and NextResponse.json throws on one).
+ * The conversion refuses a size a number cannot hold exactly, which is far
+ * beyond any snapshot (2^53 bytes); it never rounds.
+ */
+export function snapshotForJson<T extends { sizeBytes?: bigint }>(row: T): Omit<T, 'sizeBytes'> & { sizeBytes?: number } {
+  const { sizeBytes, ...rest } = row
+  return sizeBytes === undefined ? rest : { ...rest, sizeBytes: snapshotBytesToNumber(sizeBytes) }
+}
 
 export async function listBackups(projectId: string) {
   return prisma.workspaceBackup.findMany({
@@ -275,6 +551,54 @@ export async function listBackups(projectId: string) {
       createdAt: true,
     },
   })
+}
+
+/**
+ * One COMPLETED snapshot of this project, ready to stream to its owner, or null.
+ *
+ * For the download route. The row's location comes from the database, so it is
+ * checked before anything is opened: a disk path must resolve inside this
+ * project's own backup directory, and an s3:// location must be the configured
+ * snapshot bucket under this project's own prefix. A row that pointed anywhere
+ * else must not become a way to read an arbitrary file off the server or another
+ * project's snapshot. Returns null for another project's backup, a failed one,
+ * a location outside those bounds, or a snapshot that is no longer stored.
+ */
+export async function resolveSnapshotFile(
+  projectId: string,
+  backupId: string,
+): Promise<{ filename: string; sizeBytes: bigint; open: () => Promise<Readable> } | null> {
+  const row = await prisma.workspaceBackup.findFirst({
+    where: { id: backupId, projectId, status: 'completed' },
+    select: { filePath: true, filename: true, sizeBytes: true },
+  })
+  if (!row) return null
+
+  if (isS3Location(row.filePath)) {
+    if (!s3LocationBelongsTo(row.filePath, projectId)) return null
+    try {
+      const { stream, sizeBytes } = await openS3Snapshot(row.filePath)
+      return { filename: row.filename, sizeBytes, open: async () => stream }
+    } catch {
+      return null
+    }
+  }
+
+  const dir = path.resolve(getBackupDir(projectId))
+  const resolved = path.resolve(row.filePath)
+  if (!resolved.startsWith(dir + path.sep)) return null
+
+  try {
+    const stat = await fs.promises.stat(resolved, { bigint: true })
+    if (!stat.isFile()) return null
+    return {
+      filename: row.filename,
+      sizeBytes: stat.size,
+      open: async () => fs.createReadStream(/*turbopackIgnore: true*/ resolved),
+    }
+  } catch {
+    return null
+  }
 }
 
 // ─── Retention Pruning ────────────────────────────────────────────────────────
@@ -331,7 +655,14 @@ export async function pruneOldBackups(
     if (b.createdAt >= cutoff) continue
     if (protectedIds.has(b.id)) continue
     if (b.filePath) {
-      await fs.promises.unlink(b.filePath).catch(() => {})
+      try {
+        await deleteSnapshot(b.filePath)
+      } catch (err: any) {
+        // An object that could not be deleted keeps its row, so tomorrow's run
+        // tries again instead of forgetting bytes that are still being billed.
+        console.error(`[Backup] Could not delete ${b.id}; keeping its row for the next run:`, sanitizeError(err?.message ?? ''))
+        continue
+      }
     }
     await prisma.workspaceBackup.delete({ where: { id: b.id } }).catch(() => {})
     pruned++
@@ -354,13 +685,39 @@ export async function pruneOldBackups(
  * Called by cron-runner.ts once per day (02:00 UTC).
  * Skips projects that already have a backup today.
  */
+export function scheduledSnapshotsEnabled(): boolean {
+  // Cloud runs them as part of the service. Self-host does NOT, unless the
+  // operator asks.
+  //
+  // Not because scheduled snapshots are a Cloud feature - the whole product is
+  // un-gated now - but because turning them on would start writing a dump of
+  // every project to BACKUP_DIR every day, on every existing install, on
+  // upgrade. Seven days of retention against an unknown disk is not a change to
+  // make on somebody's behalf while they are not looking.
+  //
+  // The panel states whether they are on rather than leaving it to be
+  // discovered, because a backup schedule nobody knows about is the same
+  // problem in the other direction.
+  if (isCloudEdition()) return true
+  const raw = process.env.BACKENLY_SCHEDULED_SNAPSHOTS?.trim().toLowerCase()
+  return raw === 'true' || raw === '1'
+}
+
 export async function runDailyBackups(): Promise<{ ran: number; succeeded: number; failed: number }> {
+  // The scheduler ticks on every deployment. Return rather than throw: an
+  // install that has not opted in has nothing to do here, and an exception once
+  // a day would read as a broken scheduler.
+  if (!scheduledSnapshotsEnabled()) return { ran: 0, succeeded: 0, failed: 0 }
+
   const today = new Date()
   today.setUTCHours(0, 0, 0, 0)
 
-  // Get all projects with an active workspace
+  // Get all projects with an active workspace. A paused project is skipped:
+  // nothing can write to it, so today's dump would equal the one taken when it
+  // paused. Skipping it also keeps that snapshot, because pruning below only
+  // ever touches projects backed up in this run.
   const projects = await prisma.project.findMany({
-    where: { deletedAt: null },
+    where: { deletedAt: null, pausedAt: null },
     select: { id: true },
   })
 

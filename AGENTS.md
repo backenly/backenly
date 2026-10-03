@@ -13,7 +13,7 @@ them left the other still naming a production host.
 
 **Backenly** (live at https://backenly.com) is an **autonomous backend platform** that turns product descriptions into running backend infrastructure. It plans the backend, applies the infrastructure, verifies the runtime, and keeps every change reviewable and reversible. Developers describe their backend in natural language and Backenly automatically creates database tables, REST APIs, auth systems, storage, and more — no manual backend code required. (Category note: Backenly is **not** an "AI BaaS." It does not just generate resources — it manages backend change safely.)
 
-**Tech Stack:** Next.js 14, React 18, Express.js, PostgreSQL (Prisma), MongoDB (optional), OpenAI API, Paddle payments, TailwindCSS, TypeScript throughout.
+**Tech Stack:** Next.js 14, React 18, Express.js, PostgreSQL (Prisma), MongoDB (optional), OpenAI API, Stripe payments (Cloud), TailwindCSS, TypeScript throughout.
 
 **GitHub Repo:** https://github.com/backenly/backenly
 
@@ -55,7 +55,7 @@ Each project gets its own PostgreSQL schema: `workspace_{projectId}`.
 │   │   ├── ai/chat/route.ts      # Main AI chat entry point
 │   │   ├── ai-workspace/         # AI plan/apply/diff/detect routes
 │   │   ├── auth/                 # Platform auth (login, OAuth, JWT)
-│   │   ├── billing/              # Paddle subscription + AI usage
+│   │   ├── billing/              # Stripe subscription (Cloud overlay) + AI usage
 │   │   ├── database/             # Table & schema management
 │   │   ├── database-brain/       # AI-powered DB analysis & fixes
 │   │   ├── deployments/          # Deploy pipeline, logs, rollback
@@ -212,7 +212,7 @@ Key Prisma models (68 total):
 | `AiFunction` | Serverless AI functions |
 | `AppTrigger` | Event triggers (insert/update/delete/webhook) |
 | `PermissionPolicy` | Row-level security policies |
-| `Subscription` + `PaddleSubscription` | Billing |
+| `Subscription` | Billing (Stripe ids on the row; `PaddleSubscription` is a retired, retained table) |
 | `AuditLog` | Compliance audit trail |
 | `StorageBucket` + `StorageFile` | File storage |
 | `AgentMemory` | AI agent context/memory |
@@ -267,11 +267,11 @@ Architecture: `Client → EventSource → PostgreSQL LISTEN → NOTIFY → SSE s
 
 ---
 
-## Billing (Paddle)
+## Billing (Stripe, Cloud only)
 
-- Plans (internal code → display): SANDBOX → Free $0 · BUILDER → Pro $25/mo ($20 annual) · SCALE → Enterprise (custom, sales-led, no self-serve checkout) — seeded via `prisma/seed-billing.ts`. Internal codes are stable; only display names/prices/quotas change.
-- Integration: `lib/billing/`, `app/api/billing/`
-- Webhook: `app/api/billing/webhook/route.ts` (Paddle events)
+- Plans (internal code → display): SANDBOX → Free $0 · BUILDER → Pro $25/mo ($20 annual) · SCALE → Enterprise (custom, sales-led, no self-serve checkout) — seeded via the Cloud overlay's `prisma/seed-billing.ts`. Internal codes are stable; only display names/prices/quotas change.
+- Payments are Stripe, in the Cloud overlay (`lib/billing/`, `app/api/billing/`): Checkout Sessions, the customer portal, and `app/api/billing/webhook/route.ts` (Stripe events). Paddle is retired.
+- Usage pricing: quotas pool per billing account (`lib/usage/pool.ts`); past a quota only an `enforce` overage policy with an owner-set spend limit raises a cap (`lib/usage/overage.ts`); the month is billed from the usage ledger's close (`lib/usage/`, Cloud `lib/billing/usage-charges.ts`). Rates live in `lib/pricing/catalog.ts`. `BACKENLY_OVERAGE_MODE` is `off|shadow|enforce`.
 - AI usage tracked per user/month: `UserAiUsage` model
 - Grace periods for overdue subscriptions: `lib/billing/grace.ts`
 
@@ -313,14 +313,12 @@ GOOGLE_CLIENT_ID=  GOOGLE_CLIENT_SECRET=  GOOGLE_REDIRECT_URI=
 GITHUB_CLIENT_ID=  GITHUB_CLIENT_SECRET=  GITHUB_REDIRECT_URI=
 REPLIT_CLIENT_ID=  REPLIT_CLIENT_SECRET=
 
-# Payments (Paddle)
-PADDLE_VENDOR_ID=
-PADDLE_API_KEY=
-PADDLE_PUBLIC_KEY=
-PADDLE_WEBHOOK_SECRET=
-PADDLE_PLAN_ID_PRO=
-PADDLE_PLAN_ID_ENTERPRISE=
-PADDLE_ENVIRONMENT=sandbox|production
+# Payments (Stripe, Backenly Cloud only; a self-hosted install bills nobody)
+STRIPE_SECRET_KEY=
+STRIPE_WEBHOOK_SECRET=
+STRIPE_PRICE_PRO_MONTHLY=
+STRIPE_PRICE_PRO_ANNUAL=
+BACKENLY_OVERAGE_MODE=off|shadow|enforce
 
 # Security
 AI_EXECUTION_TOKEN=               # Authorizes AI execution calls
@@ -359,71 +357,73 @@ npx jest path/to/file.spec.ts    # Single file
 
 ## Self-Hosting / Deployment
 
-Backenly runs as two Node processes behind a reverse proxy, against a
-PostgreSQL instance you control:
+There are TWO deployment contexts. Do not mix them.
 
-| Process | What it serves |
-|---------|----------------|
-| Next.js | The dashboard UI and all platform APIs under `/app/api/` |
-| Express runtime | The public end-user runtime, `/api/v1/*` (see `server/`) |
+### Backenly OSS / self-host
 
-`docker-compose.yml` brings up the whole stack — both processes plus Postgres —
-and is the supported way to run it. `ecosystem.config.js` is a PM2 alternative
-for a plain VM.
+`npm run selfhost` is the supported OSS install path. It provisions the local
+Docker dependencies and configures a single-project deployment. Self-hosters may
+run the Node processes with their own process manager and may use local storage
+or a supported S3-compatible provider.
 
-### Deploying an update
+Hostnames, credentials, proxy configuration and provider-specific secrets belong
+in the operator's environment, never in this public repository.
 
-`scripts/deploy.sh` is the single entry point. It pulls, syncs the Prisma schema
-if `prisma/schema.prisma` changed anywhere in the pulled range, builds, restarts
-the processes **only after `postbuild` completes**, and then health-checks.
+### Backenly Cloud
 
-```bash
-# On the host, from the checkout:
-git pull && bash scripts/deploy.sh
+Backenly Cloud no longer deploys from this repository directly and no longer
+runs on Hetzner.
+
+Cloud production/staging run on AWS. The private repositories are:
+
+- `backenly/backenly-cloud` — add-only Cloud overlay, public SHA pin and release records.
+- `backenly/backenly-infra` — Terraform for AWS staging/production.
+
+Cloud runs Web/Runtime/PostgREST on ECS Fargate, PostgreSQL on RDS, persistent
+volumes on EFS, native object storage on AWS S3 via IAM task roles, images in
+ECR, secrets in Secrets Manager, and ingress through ALB/ACM.
+
+For Cloud, NEVER deploy with SSH, `git pull` on a server, PM2, or
+`scripts/deploy.sh`. The old Hetzner path is retired. Backblaze B2 is also
+retired from Backenly Cloud; do not reintroduce B2 endpoints or static storage
+credentials into Cloud configuration. This does NOT remove generic
+S3-compatible storage support for OSS self-hosters.
+
+Cloud source is composed from an exact pair:
+
+```text
+backenly/backenly       @ <public SHA>
+backenly/backenly-cloud @ <cloud SHA>, with PUBLIC_BASE_SHA == <public SHA>
 ```
 
-Prefer it over running the steps by hand — the ordering constraints below are
-the ones people get wrong:
+The AWS release is then performed from a known merged
+`backenly/backenly-infra` SHA with immutable ECR digests and Terraform.
+Staging qualification precedes production promotion. Release facts are recorded
+in `backenly-cloud/releases/*.yml`.
 
-- **Never restart before `npm run build` (including `postbuild`) has finished.**
-  `postbuild` copies static assets into the standalone output; restarting early
-  serves a build with no CSS or JS.
-- **Run `npm run db:generate` after any `schema.prisma` change**, before the
-  build. A stale Prisma client fails at runtime, not at build time.
-- **Pass `--update-env` when restarting** if `.env` changed, or the process
-  keeps the old environment.
+See `.claude/rules/repository-workflow.md` for the durable Git/branch/release
+rules that coding agents must follow.
 
-### Required PostgreSQL configuration
+### Required PostgreSQL configuration for self-host
 
 One server-level setting is not optional if you want the full detector set:
 
 ```conf
-shared_preload_libraries = 'pg_stat_statements'   # postgresql.conf, needs a restart
+shared_preload_libraries = 'pg_stat_statements'
 ```
 ```sql
 CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
 ```
 
-`docker-compose.dev.yml` and `docker/postgres-init/` do both for you. On a
-database without it, `measured_slow_queries_are_indexed` cannot run —
-`lib/autonomy/platform-capabilities.ts` detects that and the invariant is
-reported as UNCHECKED (`DesiredStateReport.disabled`), never as satisfied.
+`docker-compose.dev.yml` and `docker/postgres-init/` configure this for the
+supported self-host path. If a probe depends on a server capability, declare it
+as `requires` rather than returning an empty healthy-looking result.
 
-If you add another probe that depends on a server-level capability, declare it
-as `requires` on the invariant rather than returning `[]` when it is absent. An
-empty result is indistinguishable from a healthy backend, which is how
-`detectMissingRls` read green for months while it was dead.
+### Public-repository secret boundary
 
-### Host-specific configuration
-
-Deployment details — hostnames, credentials, proxy config, log paths — belong in
-your own environment, never in this repository. Configure them through `.env`
-(see `.env.example`) and your process manager.
-
-> Nothing in this repo should ever name a real host or hold a real credential.
-> `npx tsx scripts/preflight-oss.ts` enforces that: it scans the working tree
-> and the git history for credential shapes, public IP literals, session JWTs,
-> and personal email addresses, and exits nonzero if it finds any.
+Nothing in this repo should contain a real production credential or private
+Cloud infrastructure detail. `npx tsx scripts/preflight-oss.ts` enforces the
+public-tree credential/host hygiene checks.
 
 ---
 
@@ -475,3 +475,13 @@ your own environment, never in this repository. Configure them through `.env`
 - **Never** skip `npm run db:generate` after editing `schema.prisma`
 - **Never** use `BYPASS_AI_ENFORCEMENT=true` in production
 - **Never** mock the database in tests
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->

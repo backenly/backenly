@@ -16,8 +16,8 @@ set -euo pipefail
 
 # Resolve the checkout from this script's OWN location rather than hardcoding a
 # path. The hardcoded /opt/backenly did not exist on the production host (the
-# live checkout is /var/www/backenly/backenly, which is where PM2 runs
-# backenly-nextjs and backenly-runtime from), so `set -e` aborted this script on
+# live checkout sits elsewhere, and is where PM2 runs backenly-nextjs and
+# backenly-runtime from), so `set -e` aborted this script on
 # its second line and the documented one-liner could never have worked there.
 # Deriving the directory makes the same script correct on every host; APP_DIR
 # still overrides it for unusual setups.
@@ -60,6 +60,40 @@ NEW_SHA=$(git rev-parse HEAD)
 
 if [ "$OLD_SHA" = "$NEW_SHA" ]; then
   echo "deploy: no new commits (HEAD $NEW_SHA) — rebuilding anyway"
+fi
+
+# Compose the edition BEFORE anything expensive or destructive happens.
+#
+# Cloud is this public repository plus the private add-only overlay from
+# backenly/backenly-cloud. compose-cloud.sh fetches it, refuses if the two
+# revisions were not written for each other, and applies the overlay through
+# scripts/apply-overlay.sh, which is all-or-nothing.
+#
+# Placed here on purpose: before npm install, before db:push, before the build,
+# and a long way before the .next swap and the PM2 restart. Every failure mode
+# below — private repo unreachable, SHA mismatch, an overlay that would clobber
+# public source — aborts with the live site still serving the previous build.
+#
+# Single-tenant returns immediately and never touches the private repository, so
+# a self-hosted operator running this script is unaffected.
+echo "deploy: composing edition"
+bash scripts/compose-cloud.sh
+
+# Managed Cloud hosts only. A self-hosted operator running this script is
+# unaffected, because for them an unset edition legitimately means single-tenant
+# and must simply work.
+#
+# On a Cloud host "unset" is never an intention, it is a lost variable. Stage A
+# proved how quiet that failure is: the prepared release reported
+# `single-tenant (default)` and "this checkout would start", and would have gone
+# live serving a multi-tenant database with single-tenant project rules. This
+# runs before the build, the swap and the restart, so a refusal costs nothing.
+if [ -n "${BACKENLY_MANAGED_DEPLOY:-}" ]; then
+  echo "deploy: managed Cloud host, running deploy preflight"
+  if ! node node_modules/tsx/dist/cli.mjs scripts/verify-deploy-preflight.ts; then
+    echo "deploy: PREFLIGHT REFUSED. Nothing has been changed." >&2
+    exit 1
+  fi
 fi
 
 # Dependencies first — package.json can gain build-time deps (2026-07-16:

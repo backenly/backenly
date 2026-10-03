@@ -3,7 +3,11 @@ import './globals.css'
 import { GeistSans } from 'geist/font/sans'
 import { GeistMono } from 'geist/font/mono'
 import { CommandPalette } from '@/components/app/CommandPalette'
-import { AmplitudeAnalytics } from '@/components/app/AmplitudeAnalytics'
+// Resolved overlay-first: Backenly's analytics in composed Cloud, nothing in
+// OSS. This layout is public and single-copy, so it cannot import a
+// Cloud-only component directly; the alias is what makes one file work in
+// both editions. See lib/edition/oss/analytics-mount.tsx.
+import { CloudAnalyticsMount } from '@cloud/analytics-mount'
 import { ErrorBoundaryWrapper } from './error-boundary-wrapper'
 import { safeJsonLd } from '@/lib/security/safe-jsonld'
 
@@ -175,7 +179,7 @@ export default function RootLayout({
         />
       </head>
       <body className="overflow-x-hidden bg-black antialiased">
-        <AmplitudeAnalytics />
+        <CloudAnalyticsMount />
         <ErrorBoundaryWrapper>
           {children}
           <CommandPalette />

@@ -15,13 +15,13 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import { withAuth } from '@/lib/auth/route-protection'
-import { prisma } from '@/lib/db'
 import {
   setEnvVar,
   deleteEnvVar,
   listEnvVars,
   EnvVarValidationError,
 } from '@/lib/services/projectEnvVars'
+import { canAccessProject, canAdministerProject, canWriteProject } from '@/lib/edition/guard'
 
 function extractProjectId(request: NextRequest): string | null {
   const parts = new URL(request.url).pathname.split('/').filter(Boolean)
@@ -29,13 +29,6 @@ function extractProjectId(request: NextRequest): string | null {
   return i >= 0 && parts[i + 1] ? parts[i + 1] : null
 }
 
-async function assertOwner(projectId: string, userId: string): Promise<boolean> {
-  const project = await prisma.project.findFirst({
-    where: { id: projectId, userId },
-    select: { id: true },
-  })
-  return !!project
-}
 
 const setSchema = z.object({
   key: z.string().min(1).max(64),
@@ -48,7 +41,7 @@ export const GET = withAuth(async (request, { user }) => {
   if (!projectId) {
     return NextResponse.json({ error: 'Invalid project id' }, { status: 400 })
   }
-  if (!(await assertOwner(projectId, user.userId))) {
+  if (!(await canAccessProject(user.userId, projectId))) {
     return NextResponse.json({ error: 'Project not found or access denied' }, { status: 404 })
   }
 
@@ -61,7 +54,7 @@ export const POST = withAuth(async (request, { user }) => {
   if (!projectId) {
     return NextResponse.json({ error: 'Invalid project id' }, { status: 400 })
   }
-  if (!(await assertOwner(projectId, user.userId))) {
+  if (!(await canWriteProject(user.userId, projectId))) {
     return NextResponse.json({ error: 'Project not found or access denied' }, { status: 404 })
   }
 
@@ -95,7 +88,7 @@ export const DELETE = withAuth(async (request, { user }) => {
   if (!projectId) {
     return NextResponse.json({ error: 'Invalid project id' }, { status: 400 })
   }
-  if (!(await assertOwner(projectId, user.userId))) {
+  if (!(await canAdministerProject(user.userId, projectId))) {
     return NextResponse.json({ error: 'Project not found or access denied' }, { status: 404 })
   }
 

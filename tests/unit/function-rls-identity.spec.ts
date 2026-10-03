@@ -30,34 +30,43 @@
  * session first, and the identity comes only from verified request material.
  */
 
-import { makeRlsAwarePrisma } from '@/lib/services/ai-functions/rls-aware-db'
+import { makeRlsAwarePrisma, type FunctionDbConnector } from '@/lib/services/ai-functions/rls-aware-db'
 import { jwtClaimsJson, claimRoleFor } from '@/lib/services/rls-session'
 
-// The transaction seam. `makeRlsAwarePrisma` calls prisma.$transaction, so a
-// stub records exactly what the wrapper runs and in what order.
+// The transaction seam. `makeRlsAwarePrisma` runs every statement in a
+// transaction on the client its connector returns (the project's own login),
+// so a stub client records exactly what the wrapper runs and in what order.
 const executed: Array<{ kind: string; sql: string; params: unknown[] }> = []
+const SCHEMA = 'workspace_11111111-2222-4333-8444-555555555555'
 
-jest.mock('@/lib/db', () => ({
-  prisma: {
-    $transaction: async (fn: (tx: any) => Promise<any>) => {
-      const tx = {
-        $executeRawUnsafe: async (sql: string, ...params: unknown[]) => {
-          executed.push({ kind: 'execute', sql, params })
-          return 1
-        },
-        $queryRawUnsafe: async (sql: string, ...params: unknown[]) => {
-          executed.push({ kind: 'query', sql, params })
-          return [{ ok: true }]
-        },
-        $executeRaw: async (...a: unknown[]) => { executed.push({ kind: 'executeTagged', sql: String(a[0]), params: a }); return 1 },
-        $queryRaw: async (...a: unknown[]) => { executed.push({ kind: 'queryTagged', sql: String(a[0]), params: a }); return [] },
-      }
-      return fn(tx)
-    },
+const fakeClient = {
+  $transaction: async (fn: (tx: any) => Promise<any>) => {
+    const tx = {
+      $executeRawUnsafe: async (sql: string, ...params: unknown[]) => {
+        executed.push({ kind: 'execute', sql, params })
+        return 1
+      },
+      $queryRawUnsafe: async (sql: string, ...params: unknown[]) => {
+        executed.push({ kind: 'query', sql, params })
+        return [{ ok: true }]
+      },
+      $executeRaw: async (...a: unknown[]) => { executed.push({ kind: 'executeTagged', sql: String(a[0]), params: a }); return 1 },
+      $queryRaw: async (...a: unknown[]) => { executed.push({ kind: 'queryTagged', sql: String(a[0]), params: a }); return [] },
+    }
+    return fn(tx)
   },
-}))
+}
 
-beforeEach(() => { executed.length = 0 })
+const connects: Array<{ refresh?: boolean } | undefined> = []
+const connect: FunctionDbConnector = async (opts) => {
+  connects.push(opts)
+  return { client: fakeClient as any, schema: SCHEMA, role: 'bkn_fn_0123456789ab' }
+}
+
+beforeEach(() => {
+  executed.length = 0
+  connects.length = 0
+})
 
 /** The set_config statement, wherever it landed in the recorded sequence. */
 function claimsStatement() {
@@ -71,7 +80,7 @@ describe('every raw entry point sets the claims first', () => {
     ['$queryRawUnsafe', (db: any) => db.$queryRawUnsafe('SELECT 1')],
     ['$executeRawUnsafe', (db: any) => db.$executeRawUnsafe('UPDATE t SET x = 1')],
   ])('%s runs inside a claims-carrying transaction', async (_name, call) => {
-    const db = makeRlsAwarePrisma(IDENTITY)
+    const db = makeRlsAwarePrisma(IDENTITY, connect)
     await call(db)
 
     const claims = claimsStatement()
@@ -83,7 +92,7 @@ describe('every raw entry point sets the claims first', () => {
   })
 
   it('binds the caller\'s sub, not a placeholder', async () => {
-    const db = makeRlsAwarePrisma(IDENTITY)
+    const db = makeRlsAwarePrisma(IDENTITY, connect)
     await db.$queryRawUnsafe('SELECT * FROM orders')
 
     const claims = claimsStatement()!
@@ -94,7 +103,7 @@ describe('every raw entry point sets the claims first', () => {
   it('sets both dialects, so policies on either contract match', async () => {
     // PostgREST reads request.jwt.claims; the legacy Express predicates read
     // app.*. A half-migrated project must not be a silent outage.
-    const db = makeRlsAwarePrisma(IDENTITY)
+    const db = makeRlsAwarePrisma(IDENTITY, connect)
     await db.$queryRawUnsafe('SELECT 1')
     const claims = claimsStatement()!
     expect(claims.sql).toContain('app.current_user_id')
@@ -105,13 +114,13 @@ describe('every raw entry point sets the claims first', () => {
     // is_local = true — the third argument to set_config. Without it the
     // identity survives onto the next borrower of the connection, turning a
     // silent-empty bug into a cross-user data leak.
-    const db = makeRlsAwarePrisma(IDENTITY)
+    const db = makeRlsAwarePrisma(IDENTITY, connect)
     await db.$queryRawUnsafe('SELECT 1')
     expect(claimsStatement()!.sql).toMatch(/set_config\([^)]*,\s*\$\d+,\s*true\)/)
   })
 
   it('sets the claims once for a caller-opened transaction, covering every statement', async () => {
-    const db = makeRlsAwarePrisma(IDENTITY)
+    const db = makeRlsAwarePrisma(IDENTITY, connect)
     await db.$transaction(async tx => {
       await tx.$queryRawUnsafe('SELECT 1')
       await tx.$executeRawUnsafe('UPDATE t SET x = 1')
@@ -121,6 +130,62 @@ describe('every raw entry point sets the claims first', () => {
     expect(claimsCalls).toHaveLength(1)
     expect(executed.indexOf(claimsCalls[0])).toBe(0)
     expect(executed).toHaveLength(4)
+  })
+})
+
+describe('the connection function SQL runs on', () => {
+  const IDENTITY = { userId: 'u-123', isServiceRole: false }
+
+  it('connects on the first query, so a handler that never queries opens nothing', async () => {
+    const db = makeRlsAwarePrisma(IDENTITY, connect)
+    expect(connects).toHaveLength(0)
+    await db.$queryRawUnsafe('SELECT 1')
+    await db.$queryRawUnsafe('SELECT 2')
+    expect(connects).toEqual([undefined])
+  })
+
+  it('pins search_path to the project schema in the statement that sets the claims', async () => {
+    // Prisma sets its own search_path on every connection it opens, so the
+    // role's default cannot be relied on; an unqualified name must mean the
+    // project's table, never a platform one.
+    const db = makeRlsAwarePrisma(IDENTITY, connect)
+    await db.$queryRawUnsafe('SELECT * FROM orders')
+    const first = executed[0]
+    expect(first.sql).toMatch(/set_config\('search_path', \$1, true\)/)
+    expect(first.params[0]).toBe(`"${SCHEMA}", public`)
+    expect(first.sql).toContain('request.jwt.claims')
+  })
+
+  it('re-derives the login once when the server refuses it, before any statement ran', async () => {
+    let refusals = 1
+    const refusing: FunctionDbConnector = async (opts) => {
+      connects.push(opts)
+      if (refusals-- > 0) {
+        return { client: { $transaction: async () => { throw Object.assign(new Error('auth'), { errorCode: 'P1000' }) } } as any, schema: SCHEMA, role: 'bkn_fn_0123456789ab' }
+      }
+      return { client: fakeClient as any, schema: SCHEMA, role: 'bkn_fn_0123456789ab' }
+    }
+    const db = makeRlsAwarePrisma(IDENTITY, refusing)
+    await expect(db.$queryRawUnsafe('SELECT 1')).resolves.toEqual([{ ok: true }])
+    expect(connects).toEqual([undefined, { refresh: true }])
+  })
+
+  it('retries nothing else: a statement that failed may already have run', async () => {
+    const failing: FunctionDbConnector = async (opts) => {
+      connects.push(opts)
+      return { client: { $transaction: async () => { throw Object.assign(new Error('boom'), { code: 'P2010' }) } } as any, schema: SCHEMA, role: 'bkn_fn_0123456789ab' }
+    }
+    const db = makeRlsAwarePrisma(IDENTITY, failing)
+    await expect(db.$queryRawUnsafe('INSERT INTO t VALUES (1)')).rejects.toThrow('boom')
+    expect(connects).toEqual([undefined])
+  })
+
+  it('fails every query with the connector error when no login can be established', async () => {
+    const unavailable: FunctionDbConnector = async () => { throw new Error('login unavailable') }
+    const db = makeRlsAwarePrisma(IDENTITY, unavailable)
+    await expect(db.$queryRawUnsafe('SELECT 1')).rejects.toThrow('login unavailable')
+    await expect(db.$executeRawUnsafe('SELECT 1')).rejects.toThrow('login unavailable')
+    expect(executed).toHaveLength(0)
   })
 })
 
@@ -150,7 +215,7 @@ describe('the platform schema stays out of reach', () => {
     // `prisma.user` / `prisma.project` / `prisma.apiKey` address the PLATFORM's
     // public schema. They were reachable from generated functions before. The
     // generator already told the model they do not exist; this makes it true.
-    const db = makeRlsAwarePrisma({ userId: 'u-1' }) as any
+    const db = makeRlsAwarePrisma({ userId: 'u-1' }, connect) as any
     expect(db.user).toBeUndefined()
     expect(db.project).toBeUndefined()
     expect(db.apiKey).toBeUndefined()

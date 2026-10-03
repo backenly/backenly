@@ -1,45 +1,50 @@
-import { Metadata } from 'next'
-import { safeJsonLd } from "@/lib/security/safe-jsonld"
-import { BookOpen, Compass, Layers3 } from 'lucide-react'
+import type { Metadata } from 'next'
+import Link from 'next/link'
+import { ArrowRight } from 'lucide-react'
+import { safeJsonLd } from '@/lib/security/safe-jsonld'
 import { SiteShell } from '@/components/site/SiteShell'
-import { articles } from './data'
+import { ConnectTabs } from '@/components/landing/ConnectTabs'
 import {
-  Card,
-  InlineArrow,
+  ArrowLink,
+  ButtonLink,
+  HorizonClose,
+  JsonLd,
+  NextLinks,
+  Page,
   PageHero,
-  PrimaryButton,
   Section,
-  SectionIntro,
-  LinkCard,
-  Tag,
-  ChipRow,
-  ChipLink,
+  SectionHead,
 } from '@/components/site/kit'
+import { Reveal } from '@/components/site/Reveal'
+import { StartButton } from '@/components/site/StartButton'
+import { HEADING, TITLE } from '@/components/site/tokens'
+import { articles } from './data'
+import { LANES } from './content'
 
 const APP_URL = 'https://backenly.com'
 
 export const metadata: Metadata = {
-  title: 'Resources — Guides on Autonomous Backends & Agent-Native Development',
+  title: 'Documentation: Backenly',
   description:
-    'Practical guides on building production backends that run themselves: choosing an autonomous backend over no-code and traditional BaaS, designing for real users, and driving your backend from a coding agent over MCP.',
+    'How Backenly works and how to use it: connecting a coding agent over MCP, the build loop and its verification checks, the data API and its two grammars, the row-level security model, what the autonomy loop does after launch, and self-hosting.',
   keywords: [
+    'Backenly documentation',
+    'MCP backend server',
+    'PostgREST REST API',
+    'row-level security postgres',
     'autonomous backend platform',
-    'backend for coding agents',
-    'AI backend development guide',
-    'how to build a production backend',
-    'BaaS alternative',
   ],
   openGraph: {
-    title: 'Backenly Resources — Autonomous Backends & Agent-Native Development',
+    title: 'Backenly Documentation',
     description:
-      'Practical guides on building production backends that plan, apply, verify, and heal themselves — and connect cleanly to coding agents over MCP.',
+      'Connect an agent over MCP, build a backend, read the verification evidence, and understand what keeps operating it afterwards.',
     url: `${APP_URL}/resources`,
     type: 'website',
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'Backenly Resources — Autonomous Backends & Agent-Native Development',
-    description: 'Guides on building production backends that run themselves and connect to your coding agent.',
+    title: 'Backenly Documentation',
+    description: 'How Backenly works and how to use it.',
   },
   alternates: { canonical: `${APP_URL}/resources` },
 }
@@ -47,127 +52,178 @@ export const metadata: Metadata = {
 const collectionSchema = {
   '@context': 'https://schema.org',
   '@type': 'CollectionPage',
-  name: 'Backenly Resources',
-  description: 'Practical guides on building production backends that run themselves, choosing an autonomous backend over no-code and BaaS, and connecting coding agents cleanly.',
+  name: 'Backenly Documentation',
+  description:
+    'Guides covering agent setup over MCP, the governed build loop, the data API, the access-control model, post-launch autonomy, and self-hosting.',
   url: `${APP_URL}/resources`,
   publisher: { '@type': 'Organization', name: 'Backenly', url: APP_URL },
+  hasPart: articles.map((a) => ({
+    '@type': 'TechArticle',
+    headline: a.title,
+    url: `${APP_URL}/resources/${a.slug}`,
+    description: a.answers,
+  })),
 }
 
-const learningPaths = [
-  {
-    icon: Compass,
-    title: 'Choose the right backend',
-    body: 'Understand where an autonomous backend fits against no-code tools, traditional engineering, and BaaS platforms — and what "runs itself" actually means.',
-  },
-  {
-    icon: Layers3,
-    title: 'Design production-ready foundations',
-    body: 'Think through data models, auth boundaries, storage, realtime, and the operational surface — monitoring, rollback, and governance — before real users arrive.',
-  },
-  {
-    icon: BookOpen,
-    title: 'Build with coding agents',
-    body: 'Connect Claude Code or Cursor over MCP — your agent reads the live schema and builds against real tables, auth, and storage, never a throwaway mock.',
-  },
-]
+/* ─────────────────────────────────────────────────────────────
+   /resources: the documentation hub.
+
+   The guides are ordered as a reading path (content/index.ts), so the hub
+   draws them as one: numbered in the order to read them, on two shelves,
+   each row carrying the question the guide answers rather than a summary of
+   it. A reader scanning this page is holding a question, and matching it is
+   the whole job of a row. Under the path, the real connect commands, because
+   the first guide's answer fits in one of them.
+───────────────────────────────────────────────────────────── */
 
 export default function ResourcesPage() {
+  // Reading-order position across both shelves, so the numbers run 1..n.
+  const position = new Map(articles.map((a, index) => [a.slug, index + 1]))
+
   return (
     <SiteShell>
-      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: safeJsonLd(collectionSchema) }} />
-      <main className="relative z-20">
+      <JsonLd json={safeJsonLd(collectionSchema)} />
+      <Page>
         <PageHero
-          align="center"
-          eyebrow="Resources"
-          title="Guides for backends that run themselves"
-          subtitle="Practical guides on backend architecture, operating a backend with real users on it, and driving backend changes from a coding agent over MCP. Every claim in these guides describes the live product."
+          trail={[{ label: 'Home', href: '/' }, { label: 'Documentation' }]}
+          title="How Backenly works, and how to use it"
+          lede="Seven guides, in reading order: connect an agent, build and verify a backend, call it from a frontend, and understand what keeps it running."
           actions={
-            <PrimaryButton href="/auth/signup">
-              Start building free
-              <InlineArrow />
-            </PrimaryButton>
+            <>
+              <ButtonLink href="/resources/connect-your-coding-agent">
+                Start here
+                <ArrowRight aria-hidden className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
+              </ButtonLink>
+              <ButtonLink href="/llms.txt" variant="secondary">
+                Full reference for agents
+              </ButtonLink>
+            </>
           }
-          proof={[
-            { label: 'Audience', value: 'Developers and founders' },
-            { label: 'Focus', value: 'Autonomous backends' },
-            { label: 'Code samples', value: 'Real SDK surface' },
-          ]}
         />
 
-        <Section aria-label="Learning paths" width="wide" className="!pt-0">
-          <SectionIntro
-            align="center"
-            eyebrow="Learning paths"
-            title="Start with the decision, then go deeper"
-            body="The guides are organized around three decisions: which backend approach fits your product, what to get right before real users arrive, and how to wire your tools to it."
-          />
-          <div className="mt-10 grid gap-5 md:grid-cols-3">
-            {learningPaths.map((path) => {
-              const Icon = path.icon
+        <Section flush aria-label="Guides">
+          {LANES.map((lane, laneIndex) => {
+            const inLane = articles.filter((a) => a.lane === lane.id)
+            if (inLane.length === 0) return null
 
-              return (
-                <Card key={path.title}>
-                  <div className="flex h-10 w-10 items-center justify-center rounded-md border border-white/10 bg-black/35">
-                    <Icon className="h-5 w-5 text-zinc-200" />
-                  </div>
-                  <h2 className="mt-5 text-lg font-semibold text-white">{path.title}</h2>
-                  <p className="mt-3 text-sm leading-6 text-zinc-400">{path.body}</p>
-                </Card>
-              )
-            })}
-          </div>
-        </Section>
-
-        {/* Article list */}
-        <Section aria-label="Articles and guides" width="wide">
-          <SectionIntro
-            eyebrow="Latest guides"
-            title="Practical reading for shipping teams"
-            body="Each guide covers one decision — with the trade-offs, the failure modes, and working code where it helps."
-          />
-          <div className="grid gap-5 md:grid-cols-2">
-            {articles.map((article, index) => (
-              <LinkCard
-                key={article.slug}
-                href={`/resources/${article.slug}`}
-                className={index === 0 ? 'md:col-span-2 md:p-8' : ''}
+            return (
+              <div
+                key={lane.id}
+                className={`grid gap-8 lg:grid-cols-[minmax(0,4fr)_minmax(0,8fr)] lg:gap-16 ${
+                  laneIndex === 0 ? '' : 'mt-20 md:mt-28'
+                }`}
               >
-                <div className="flex flex-wrap items-center gap-3 mb-3">
-                  <Tag>{article.category}</Tag>
-                  <span className="text-xs text-neutral-500">{article.readTime}</span>
-                  <span className="text-xs text-neutral-600">{article.date}</span>
-                </div>
-                <h2 className={`${index === 0 ? 'text-2xl md:text-3xl' : 'text-lg'} font-semibold text-white leading-tight mb-3`}>
-                  {article.title}
-                </h2>
-                <p className="text-sm text-neutral-400 font-extralight leading-relaxed">
-                  {article.description}
-                </p>
-                <p className="mt-4 text-sm font-semibold text-zinc-200 group-hover:text-white transition-colors">
-                  Read article
-                </p>
-              </LinkCard>
-            ))}
+                <Reveal className="lg:sticky lg:top-28 lg:self-start">
+                  <h2 className={`text-[26px] text-white md:text-[34px] ${TITLE}`}>{lane.title}</h2>
+                  <p className="mt-4 max-w-[40ch] text-[16px] leading-[1.65] text-zinc-400">{lane.body}</p>
+                </Reveal>
+                <Reveal delay={0.06}>
+                  <ol>
+                    {inLane.map((a, index) => (
+                      <li key={a.slug}>
+                        <Link
+                          href={`/resources/${a.slug}`}
+                          className={`group grid grid-cols-[32px_minmax(0,1fr)_auto] items-start gap-5 py-7 transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-300 ${
+                            index === 0 ? 'border-t border-white/[0.10]' : 'border-t border-white/[0.07]'
+                          }`}
+                        >
+                          <span className="flex h-8 w-8 items-center justify-center rounded-full border border-white/[0.12] text-[13px] font-medium tabular-nums text-zinc-400 transition-colors duration-200 group-hover:border-violet-300/40 group-hover:text-white">
+                            {position.get(a.slug)}
+                          </span>
+                          <span className="min-w-0">
+                            <span className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] text-zinc-500">
+                              <span>{a.category}</span>
+                              <span aria-hidden className="h-3 w-px bg-white/[0.12]" />
+                              <span>{a.readMinutes} min read</span>
+                            </span>
+                            <span className={`mt-2 block text-[19px] text-white md:text-[21px] ${HEADING}`}>{a.title}</span>
+                            <span className="mt-2 block max-w-[62ch] text-[15px] leading-[1.65] text-zinc-400 [text-wrap:pretty]">
+                              {a.answers}
+                            </span>
+                          </span>
+                          <ArrowRight
+                            aria-hidden
+                            className="mt-9 hidden h-4 w-4 text-zinc-600 transition-[color,transform] duration-200 group-hover:translate-x-0.5 group-hover:text-white sm:block"
+                          />
+                        </Link>
+                      </li>
+                    ))}
+                  </ol>
+                </Reveal>
+              </div>
+            )
+          })}
+        </Section>
+
+        <Section aria-labelledby="quickstart">
+          <div className="grid gap-12 lg:grid-cols-[minmax(0,4fr)_minmax(0,7fr)] lg:gap-16">
+            <Reveal>
+              <SectionHead
+                id="quickstart"
+                title="The first guide, in one command"
+                lede="Mint a key in the dashboard, run the line for your host, and start a new session. The key is scoped to one project and revocable."
+              />
+              <ArrowLink href="/resources/connect-your-coding-agent" className="mt-8">
+                Every host, step by step
+              </ArrowLink>
+            </Reveal>
+            <Reveal delay={0.06}>
+              <ConnectTabs />
+            </Reveal>
           </div>
         </Section>
 
-        {/* Internal links */}
-        <Section width="prose" className="!py-12">
-          <ChipRow label="Explore Backenly:">
-            {[
-              { href: '/features', label: 'Features' },
-              { href: '/use-cases', label: 'Use cases' },
-              { href: '/comparisons', label: 'Comparisons' },
-              { href: '/alternatives', label: 'Alternatives' },
-              { href: '/pricing', label: 'Pricing' },
-            ].map((link) => (
-              <ChipLink key={link.href} href={link.href}>
-                {link.label}
-              </ChipLink>
-            ))}
-          </ChipRow>
+        <Section aria-labelledby="elsewhere">
+          <Reveal>
+            <SectionHead
+              id="elsewhere"
+              title="Reference that lives elsewhere"
+              lede="Some of what you might want is better read at its source than paraphrased here."
+            />
+          </Reveal>
+          <Reveal delay={0.06}>
+            <NextLinks
+              className="mt-10"
+              items={[
+                {
+                  href: '/llms.txt',
+                  meta: 'For agents',
+                  title: 'llms.txt',
+                  body: 'Every endpoint, the full tool table, plan limits and the architecture. Also fetchable at run time with fetch_docs.',
+                },
+                {
+                  href: 'https://github.com/backenly/backenly',
+                  meta: 'Apache-2.0',
+                  title: 'The source',
+                  body: 'Everything the hosted product runs, including the autonomy engine. Client libraries are MIT.',
+                },
+                {
+                  href: '/pricing',
+                  meta: 'Plan limits',
+                  title: 'Pricing',
+                  body: 'Capacity per plan, kept in one place so no guide restates a number that can move.',
+                },
+                {
+                  href: '/use-cases',
+                  meta: 'Workflows',
+                  title: 'Use cases',
+                  body: 'Five workflows, with what Backenly does, what stays yours, and where each one stops.',
+                },
+              ]}
+            />
+          </Reveal>
         </Section>
-      </main>
+
+        <HorizonClose
+          title="Read it, then run it"
+          lede="One free project, no card. Connect your agent and check every guide against a live backend."
+        >
+          <StartButton />
+          <ButtonLink href="/contact" variant="secondary">
+            Ask a question
+          </ButtonLink>
+        </HorizonClose>
+      </Page>
     </SiteShell>
   )
 }

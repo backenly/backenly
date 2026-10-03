@@ -5,6 +5,7 @@ export const maxDuration = 300
 
 import { NextRequest, NextResponse } from 'next/server'
 import { authenticateRequest } from '@/lib/auth/middleware'
+import { canAccessProject } from '@/lib/edition/guard'
 import { generateBackendChangePlan } from '@/lib/services/aiWorkspace'
 
 // POST /api/ai-workspace/generate-plan — Generate a backend change plan using AI
@@ -23,6 +24,19 @@ export async function POST(request: NextRequest) {
 
     if (!prompt || typeof prompt !== 'string') {
       return NextResponse.json({ error: 'Prompt is required' }, { status: 400 })
+    }
+
+    // Ownership, before the project id reaches anything that reads it.
+    //
+    // This route authenticated the caller and then took `projectId` straight
+    // from the request body. Authentication answers who is asking; it says
+    // nothing about which project they may plan changes against.
+    if (!projectId) {
+      return NextResponse.json({ error: 'Project ID is required' }, { status: 400 })
+    }
+    if (!(await canAccessProject(auth.userId, projectId))) {
+      // 404, not 403: the endpoint must not confirm which project ids exist.
+      return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
 
     if (!process.env.OPENAI_API_KEY) {

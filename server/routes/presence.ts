@@ -16,6 +16,7 @@ import { Router, Request, Response } from 'express'
 import { prisma } from '@/lib/db'
 import { v1AuthMiddleware } from '../lib/auth'
 import { workspaceSchemaName, workspaceChannelName, quoteIdent } from '@/lib/security/workspace-schema'
+import { asyncRoute } from '../lib/async-route'
 
 const router = Router()
 
@@ -79,7 +80,7 @@ async function ensurePresenceTable(projectId: string): Promise<void> {
   bootstrappedProjects.add(projectId)
 }
 
-router.get('/:projectId/presence', v1AuthMiddleware, async (req: Request, res: Response) => {
+router.get('/:projectId/presence', asyncRoute(v1AuthMiddleware), asyncRoute(async (req: Request, res: Response) => {
   const { projectId } = req.params
   try {
     const qSchema = quoteIdent(workspaceSchemaName(projectId))
@@ -94,9 +95,9 @@ router.get('/:projectId/presence', v1AuthMiddleware, async (req: Request, res: R
   } catch {
     res.status(500).json({ error: 'Presence lookup failed' })
   }
-})
+}))
 
-router.post('/:projectId/presence', v1AuthMiddleware, async (req: Request, res: Response) => {
+router.post('/:projectId/presence', asyncRoute(v1AuthMiddleware), asyncRoute(async (req: Request, res: Response) => {
   const { projectId } = req.params
   try {
     const qSchema = quoteIdent(workspaceSchemaName(projectId))
@@ -129,9 +130,9 @@ router.post('/:projectId/presence', v1AuthMiddleware, async (req: Request, res: 
   } catch {
     res.status(500).json({ error: 'Presence update failed' })
   }
-})
+}))
 
-router.delete('/:projectId/presence', v1AuthMiddleware, async (req: Request, res: Response) => {
+router.delete('/:projectId/presence', asyncRoute(v1AuthMiddleware), asyncRoute(async (req: Request, res: Response) => {
   const { projectId } = req.params
   try {
     const qSchema = quoteIdent(workspaceSchemaName(projectId))
@@ -153,6 +154,6 @@ router.delete('/:projectId/presence', v1AuthMiddleware, async (req: Request, res
   } catch {
     res.status(500).json({ error: 'Presence delete failed' })
   }
-})
+}))
 
 export default router

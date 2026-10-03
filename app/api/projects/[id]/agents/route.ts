@@ -13,11 +13,13 @@ import { NextRequest, NextResponse } from 'next/server'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
 import { runAllAgents, executeAutoFixes } from '@/lib/ai/agent-orchestrator'
 import { prisma } from '@/lib/db/prisma'
+import { P } from '@/lib/principal'
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: { id: string } },
+  props: { params: Promise<{ id: string }> },
 ) {
+  const params = await props.params
   return withProjectValidation<any>(request, async (validated) => {
     const autoFix = request.nextUrl.searchParams.get('fix') === 'auto'
 
@@ -25,7 +27,13 @@ export async function POST(
 
     let appliedFixes: string[] = []
     if (autoFix) {
-      appliedFixes = await executeAutoFixes(validated.projectId, plan)
+      // A person asked for this run through the API, so they are the
+      // requester. Backenly still executes it.
+      appliedFixes = await executeAutoFixes(
+        validated.projectId,
+        plan,
+        validated.userId ? P.user(validated.userId) : P.unknown('agents route had no authenticated user'),
+      )
     }
 
     return NextResponse.json({
@@ -73,8 +81,9 @@ export async function POST(
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { id: string } },
+  props: { params: Promise<{ id: string }> },
 ) {
+  const params = await props.params
   return withProjectValidation<any>(request, async (validated) => {
     const findings = await prisma.healthFinding.findMany({
       where: {

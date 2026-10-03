@@ -15,6 +15,10 @@
  *
  *   npx tsx scripts/preflight-oss.ts           # working tree + history
  *   npx tsx scripts/preflight-oss.ts --tree    # working tree only (faster)
+ *   npx tsx scripts/preflight-oss.ts --credentials-only
+ *                                             # credential rules only, no OSS
+ *                                             # release-artifact checks. Used by
+ *                                             # backenly-cloud CI on its own tree.
  *
  * Exit 0 = safe to publish. Nonzero = do not publish.
  */
@@ -170,9 +174,50 @@ const RULES: Rule[] = [
     // thing it exists to suppress. The gate must not become the leak.
     //
     // Excludes the private and reserved ranges, which are meaningless to a
-    // remote attacker: 10/8, 127/8, 192.168/16, 172.16-31/12, 169.254/16,
-    // 0.x, 224+/4 multicast+reserved, and 255.x.
-    pattern: /\b(?!0\.)(?!10\.)(?!127\.)(?!169\.254\.)(?!192\.168\.)(?!172\.(?:1[6-9]|2\d|3[01])\.)(?!22[4-9]\.)(?!2[3-5]\d\.)(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b/g,
+    // remote attacker: 10/8, 127/8, 100.64/10, 192.168/16, 172.16-31/12,
+    // 169.254/16, 0.x, 224+/4 multicast+reserved, and 255.x.
+    //
+    // Three IANA-reserved ranges were missing from that list until
+    // lib/security/outbound-guard.ts became the first code to name them — in a
+    // table of ranges it exists to BLOCK:
+    //
+    //   100.64/10     RFC 6598 carrier-grade NAT
+    //   192.88.99/24  6to4 relay anycast
+    //   198.18/15     RFC 2544 benchmarking
+    //
+    // The gate reported blocklist entries as "Names the production host", which
+    // is the same false-positive class as the Chrome user-agent and RFC 5737
+    // cases below: shape-identical to a routable address, definitionally not
+    // one. The irony is worth noting, because it will recur — an egress
+    // blocklist is a list of addresses nobody should reach, so it reads to a
+    // shape-based scanner exactly like a list of addresses someone did reach.
+    // Every false positive spends credibility this gate cannot afford, since it
+    // guards the repository's single largest risk and only works if its output
+    // is read rather than skimmed.
+    //
+    // Also excludes `N.0.0.0`, and that trailing exclusion is load-bearing
+    // rather than tidy. A dotted quad whose last three octets are all zero is a
+    // NETWORK address, never a reachable host — no production server is ever
+    // named that way, so nothing this rule exists to catch can hide there.
+    //
+    // What DOES live in that shape is Chrome's reduced User-Agent, which since
+    // 2023 always reports `Chrome/<major>.0.0.0`. One such string in a test
+    // fixture (tests/unit/service-role-exposure.spec.ts) failed this gate on
+    // every push for weeks, and a gate that cries wolf on every commit is a gate
+    // people learn to ignore — which costs more than the false positive did.
+    //
+    // The RFC 5737 documentation ranges are excluded for that same reason, and
+    // it is not a hypothetical: 203.0.113.x in
+    // __tests__/observability/pgrst-clock-diagnostic.test.ts (a sample EXTERNAL
+    // address, testing that classifySource distinguishes it from loopback) made
+    // this gate the only red job on main, reported as "Names the production
+    // host". It named nothing. 192.0.2.0/24, 198.51.100.0/24 and 203.0.113.0/24
+    // exist precisely so examples and fixtures can show a routable-looking
+    // address without naming a real one, so a test using them is doing the
+    // correct thing and must not be punished for it. This gate guards the
+    // repository's single largest risk; its credibility is the asset, and every
+    // false positive spends some.
+    pattern: /\b(?!0\.)(?!10\.)(?!127\.)(?!100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)(?!169\.254\.)(?!192\.168\.)(?!192\.0\.0\.)(?!192\.0\.2\.)(?!192\.88\.99\.)(?!198\.1[89]\.)(?!198\.51\.100\.)(?!203\.0\.113\.)(?!172\.(?:1[6-9]|2\d|3[01])\.)(?!22[4-9]\.)(?!2[3-5]\d\.)(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b(?<!\.0\.0\.0)/g,
     impact: 'Names the production host — the first step of any real attack is finding it.',
     treeOnly: true,
   },
@@ -535,6 +580,10 @@ function checkReleaseArtifacts(): string[] {
 
 function main() {
   const treeOnly = process.argv.includes('--tree')
+  // Credential rules only, no OSS release-artifact expectations. This is what
+  // backenly-cloud's CI runs over its own tree: private is not a secret store,
+  // but it owes nobody a LICENSE.
+  const credentialsOnly = process.argv.includes('--credentials-only')
 
   console.log('\n  Open-source preflight')
   // Stated up front because it is otherwise baffling: a file edited and not yet
@@ -580,10 +629,23 @@ function main() {
     }
   }
 
-  const artifactProblems = checkReleaseArtifacts()
-  console.log(
-    `  release files  ${artifactProblems.length === 0 ? 'complete' : `${artifactProblems.length} missing/incomplete`}`,
-  )
+  // LICENSE, NOTICE, SECURITY.md and a compose file are what an OSS RELEASE
+  // owes its readers. backenly-cloud is private and publishes nothing, so
+  // holding it to them would fail its CI for missing artifacts it should not
+  // have — while the part that matters there, "no credential was committed",
+  // applies to both repositories and applies harder to the private one, which
+  // gets cloned onto every build host and CI runner.
+  //
+  // So the credential rules are reusable on their own. One set of patterns,
+  // two repositories, no second scanner to drift.
+  const artifactProblems = credentialsOnly ? [] : checkReleaseArtifacts()
+  if (credentialsOnly) {
+    console.log('  release files  not checked (--credentials-only)')
+  } else {
+    console.log(
+      `  release files  ${artifactProblems.length === 0 ? 'complete' : `${artifactProblems.length} missing/incomplete`}`,
+    )
+  }
   if (artifactProblems.length > 0) {
     console.log('\n  RELEASE ARTIFACTS:\n')
     for (const p of artifactProblems) console.log(`    - ${p}\n`)
@@ -591,7 +653,11 @@ function main() {
 
   const total = treeFindings.length + historyFindings.length + artifactProblems.length
   if (total === 0) {
-    console.log('\n  No credential patterns found; release files complete. Safe to publish.\n')
+    console.log(
+      credentialsOnly
+        ? '\n  No credential patterns found.\n'
+        : '\n  No credential patterns found; release files complete. Safe to publish.\n',
+    )
     process.exit(0)
   }
 

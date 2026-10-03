@@ -13,29 +13,46 @@ import { NextRequest, NextResponse } from 'next/server'
 import { verifyToken } from '@/lib/auth/jwt'
 import { prisma } from '@/lib/db'
 import { listTriggers, createTrigger, deleteTrigger } from '@/lib/services/trigger-service'
-import { enforceTriggerCreation } from '@/lib/billing'
+import { enforceTriggerCreation } from '@/lib/entitlements/policy'
+import { canAccessProject, canAdministerProject, canWriteProject } from '@/lib/edition/guard'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
-async function authenticate(req: NextRequest, projectId: string) {
+/**
+ * Authentication only: who is calling, or null.
+ *
+ * This was `authenticate(req, projectId)` and it did two jobs behind one shape:
+ * read the session AND check owner-only project access, with both failures
+ * answered 401. An organization member who simply lacked access was told to
+ * re-authenticate, which cannot help. Authorization now happens per handler,
+ * against the authority the operation actually needs.
+ */
+async function authenticate(req: NextRequest): Promise<string | null> {
   const token = req.cookies.get('auth-token')?.value
-  if (!token) return { error: 'Unauthorized' }
+  if (!token) return null
   let decoded: Awaited<ReturnType<typeof verifyToken>> | null = null
   try { decoded = await verifyToken(token) } catch { decoded = null }
-  if (!decoded) return { error: 'Invalid token' }
-  const project = await prisma.project.findFirst({ where: { id: projectId, userId: decoded.userId } })
-  if (!project) return { error: 'Project not found or access denied' }
-  return { userId: decoded.userId }
+  if (!decoded) return null
+  return decoded.userId
 }
 
-export async function GET(req: NextRequest, { params }: { params: { projectId: string } }) {
-  const auth = await authenticate(req, params.projectId)
-  if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: 401 })
+async function handleGET(req: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
+  const userId = await authenticate(req)
+  if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!(await canAccessProject(userId, params.projectId))) {
+    return NextResponse.json({ error: 'Project not found or access denied' }, { status: 404 })
+  }
   const triggers = await listTriggers(params.projectId)
   return NextResponse.json({ triggers })
 }
 
-export async function POST(req: NextRequest, { params }: { params: { projectId: string } }) {
-  const auth = await authenticate(req, params.projectId)
-  if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: 401 })
+async function handlePOST(req: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
+  const userId = await authenticate(req)
+  if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!(await canWriteProject(userId, params.projectId))) {
+    return NextResponse.json({ error: 'Project not found or access denied' }, { status: 404 })
+  }
 
   const body = await req.json()
   const { name, description, sourceTable, event, conditions, actionType, targetTable, fieldMappings, staticFields, webhookUrl } = body
@@ -46,7 +63,7 @@ export async function POST(req: NextRequest, { params }: { params: { projectId: 
 
   // ─── Plan enforcement: trigger limit per project ──────────────────────
   const currentTriggerCount = await prisma.appTrigger.count({ where: { projectId: params.projectId } })
-  const triggerCheck = await enforceTriggerCreation(auth.userId, params.projectId, currentTriggerCount)
+  const triggerCheck = await enforceTriggerCreation(userId, params.projectId, currentTriggerCount)
   if (triggerCheck !== true) {
     return NextResponse.json(
       {
@@ -67,9 +84,13 @@ export async function POST(req: NextRequest, { params }: { params: { projectId: 
   return NextResponse.json({ trigger }, { status: 201 })
 }
 
-export async function DELETE(req: NextRequest, { params }: { params: { projectId: string } }) {
-  const auth = await authenticate(req, params.projectId)
-  if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: 401 })
+async function handleDELETE(req: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
+  const userId = await authenticate(req)
+  if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!(await canAdministerProject(userId, params.projectId))) {
+    return NextResponse.json({ error: 'Project not found or access denied' }, { status: 404 })
+  }
 
   const triggerId = req.nextUrl.searchParams.get('id')
   if (!triggerId) return NextResponse.json({ error: 'id query parameter is required' }, { status: 400 })
@@ -77,3 +98,7 @@ export async function DELETE(req: NextRequest, { params }: { params: { projectId
   await deleteTrigger(params.projectId, triggerId)
   return NextResponse.json({ success: true })
 }
+
+export const GET = recordedV1(handleGET)
+export const POST = recordedV1(handlePOST)
+export const DELETE = recordedV1(handleDELETE)

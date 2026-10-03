@@ -1,21 +1,26 @@
 export const dynamic = 'force-dynamic'
 
 import { NextRequest } from 'next/server'
+import { clampIsPublic } from '@/lib/storage/access-policy'
 import { v1ApiMiddleware, requirePermission, requireCapability } from '@/lib/api/v1/middleware'
 import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
 import { storageService } from '@/lib/services/storage'
 import { prisma } from '@/lib/db'
 import { processImage, mimeToExtension } from '@/lib/storage/image-processor'
 import { assertQuotaAvailable, QuotaExceededError } from '@/lib/services/storageQuota'
+import { isUploadRejected, MAX_BUFFERED_UPLOAD_BYTES } from '@/lib/storage/upload-policy'
 import path from 'path'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
-// ── Global hard limits (defence-in-depth before any bucket config) ─────────
-// Default is 500 MB to support video/asset uploads via this endpoint.
-// For files larger than 500 MB use /storage/upload-multipart or /storage/signed-upload
-// which bypass the server entirely when STORAGE_DRIVER=s3.
-const GLOBAL_MAX_FILE_SIZE_BYTES = parseInt(
-  process.env.STORAGE_GLOBAL_MAX_FILE_SIZE || String(500 * 1024 * 1024), // 500 MB default
-  10
+// ── Global hard limit (defence-in-depth before any bucket config) ──────────
+// The file travels through this server in memory, so it is bounded by the
+// shared ceiling for buffered uploads (lib/storage/upload-policy.ts, 100 MB),
+// which the middleware and Next's body buffer are sized for. The 500 MB default
+// this used to state could never be reached. Larger files: /storage/upload-multipart
+// or /storage/signed-upload, which bypass the server when STORAGE_DRIVER=s3.
+const GLOBAL_MAX_FILE_SIZE_BYTES = Math.min(
+  parseInt(process.env.STORAGE_GLOBAL_MAX_FILE_SIZE || String(MAX_BUFFERED_UPLOAD_BYTES), 10),
+  Number(MAX_BUFFERED_UPLOAD_BYTES),
 )
 
 // Completely blocked file types regardless of bucket settings
@@ -50,10 +55,8 @@ const BLOCKED_EXTENSIONS = new Set([
  *   path      — desired file path/name inside the bucket
  *   isPublic  — 'true' | 'false'
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, params)
     if (middleware.response) {
@@ -73,7 +76,14 @@ export async function POST(
     }
 
     // ── Parse multipart form data ─────────────────────────────────────────
-    const formData = await request.formData()
+    // A body that is not multipart, or one with no Content-Length (which the
+    // middleware cannot size up front) that arrived cut short, is the caller's.
+    let formData: FormData
+    try {
+      formData = await request.formData()
+    } catch {
+      return createErrorResponse(ErrorCodes.BAD_REQUEST, 'The upload could not be read as multipart form data.', 400)
+    }
     const file = formData.get('file') as File | null
     const bucketName = (formData.get('bucket') as string | null) || 'default'
     const filePath = (formData.get('path') as string | null) || ''
@@ -110,9 +120,9 @@ export async function POST(
       const limitMB = GLOBAL_MAX_FILE_SIZE_BYTES / (1024 * 1024)
       const fileMB = (file.size / (1024 * 1024)).toFixed(1)
       return createErrorResponse(
-        ErrorCodes.BAD_REQUEST,
-        `File size (${fileMB} MB) exceeds the maximum allowed size of ${limitMB} MB.`,
-        400
+        'FILE_TOO_LARGE',
+        `File size (${fileMB} MB) exceeds the ${limitMB} MB a single upload may carry. Use a multipart upload for larger files.`,
+        413
       )
     }
 
@@ -194,26 +204,33 @@ export async function POST(
       url: fileRecord.url,
       size: Number(fileRecord.size),
       contentType: finalMimeType,
-      isPublic: isPublic || bucketRecord.isPublic,
+      // Clamped to the bucket, never OR'd with it. `isPublic || bucket.isPublic`
+      // let a request body mark an object world-readable inside a private
+      // bucket, which the serving path then honoured.
+      isPublic: clampIsPublic(isPublic, (bucketRecord as any).accessPolicy),
     })
   } catch (error: any) {
     if (error instanceof QuotaExceededError) {
       return createErrorResponse(ErrorCodes.FORBIDDEN, error.message, 413)
     }
 
-    console.error('Storage upload error:', error)
-
-    // Surface validation errors from the storage service as 400, not 500
-    if (
-      error.message?.includes('not allowed') ||
-      error.message?.includes('exceeds') ||
-      error.message?.includes('quota') ||
-      error.message?.includes('spoofing') ||
-      error.message?.includes('already exists')
-    ) {
-      return createErrorResponse(ErrorCodes.BAD_REQUEST, error.message, 400)
+    // A refusal of the upload itself (lib/storage/upload-policy.ts) carries its
+    // own status. This used to be recognised by words in the message, which
+    // missed any refusal worded differently and would have mislabelled a real
+    // failure that happened to contain "exceeds".
+    if (isUploadRejected(error)) {
+      const code =
+        error.status === 404 ? ErrorCodes.NOT_FOUND
+        : error.status === 403 ? ErrorCodes.FORBIDDEN
+        : error.status === 409 ? ErrorCodes.CONFLICT
+        : error.status === 413 ? ErrorCodes.PLAN_LIMIT_EXCEEDED
+        : ErrorCodes.VALIDATION_ERROR
+      return createErrorResponse(code, error.message, error.status, { reason: error.code })
     }
 
+    console.error('Storage upload error:', error)
     return createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Failed to upload file', 500)
   }
 }
+
+export const POST = recordedV1(handlePOST)

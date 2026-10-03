@@ -7,7 +7,7 @@
  * invariant is asserted rather than trusted.
  */
 
-import { buildCatalog, buildDispatchable } from '@/lib/mcp/catalog'
+import { ADVERTISED_CAP, buildCatalog, buildDispatchable } from '@/lib/mcp/catalog'
 import { READ_ONLY_TOOLS } from '@/lib/ai/brain/tools'
 
 describe('run_query registration', () => {
@@ -61,9 +61,13 @@ describe('run_query registration', () => {
   })
 
   it('stays small enough for reliable tool selection', () => {
-    // Selection accuracy degrades past ~20 tools and collapses past ~50. This
-    // surface was 71. The bound is the whole point of the redesign, so it is
-    // asserted rather than left to drift back.
-    expect(catalog.length).toBeLessThanOrEqual(20)
+    // Selection accuracy degrades as a catalog grows and collapses past ~50.
+    // This surface was 71. The bound is the whole point of the redesign, so it
+    // is asserted rather than left to drift back. It moved from 20 to 23 once,
+    // on purpose, when one domain tool per dashboard section replaced the
+    // single-purpose capability tools (2026-09-25); moving it again is a
+    // decision, so the number itself is pinned here too.
+    expect(ADVERTISED_CAP).toBe(23)
+    expect(catalog.length).toBeLessThanOrEqual(ADVERTISED_CAP)
   })
 })

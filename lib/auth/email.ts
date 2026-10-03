@@ -1,5 +1,8 @@
 import nodemailer from 'nodemailer'
 import { buildEnvSmtpTransport } from '@/lib/email/smtp-transport'
+import { observeSend, reportUnconfigured } from '@/lib/email/send-outcome'
+import { EmailNotConfiguredError } from '@/lib/email/platform-delivery'
+import { EMAIL_CODE_TTL_MS } from '@/lib/auth/email-code'
 
 function getTransporter() {
   // Shared builder normalizes port 465 -> 587 (STARTTLS) so email works on
@@ -33,13 +36,11 @@ export async function sendVerificationEmail(email: string, verifyUrl: string): P
   const transporter = getTransporter()
 
   if (transporter) {
-    await transporter.sendMail({ from, to: email, subject, html })
+    await observeSend('verification', email, () =>
+      transporter.sendMail({ from, to: email, subject, html }),
+    )
   } else {
-    console.log('\n========== EMAIL VERIFICATION ==========')
-    console.log(`To: ${email}`)
-    console.log(`Subject: ${subject}`)
-    console.log(`Verify URL: ${verifyUrl}`)
-    console.log('========================================\n')
+    reportUnconfigured({ kind: 'verification', email, preview: { 'Verify URL': verifyUrl } })
   }
 }
 
@@ -70,12 +71,11 @@ export async function sendOrgInviteEmail(
   `
   const transporter = getTransporter()
   if (transporter) {
-    await transporter.sendMail({ from, to: email, subject, html })
+    await observeSend('org_invite', email, () =>
+      transporter.sendMail({ from, to: email, subject, html }),
+    )
   } else {
-    console.log('\n========== ORG INVITE ==========')
-    console.log(`To: ${email}`)
-    console.log(`Accept URL: ${opts.acceptUrl}`)
-    console.log('================================\n')
+    reportUnconfigured({ kind: 'org_invite', email, preview: { 'Accept URL': opts.acceptUrl } })
   }
 }
 
@@ -111,49 +111,176 @@ export async function sendAccountLockedEmail(email: string, lockedUntil: Date): 
   const transporter = getTransporter()
 
   if (transporter) {
-    await transporter.sendMail({ from, to: email, subject, html })
+    await observeSend('account_locked', email, () =>
+      transporter.sendMail({ from, to: email, subject, html }),
+    )
   } else {
-    console.log('\n========== ACCOUNT LOCKED EMAIL ==========')
-    console.log(`To: ${email}`)
-    console.log(`Subject: ${subject}`)
-    console.log(`Locked until: ${lockedUntilStr}`)
-    console.log(`Unlock URL: ${unlockUrl}`)
-    console.log('==========================================\n')
+    reportUnconfigured({
+      kind: 'account_locked',
+      email,
+      preview: { 'Locked until': lockedUntilStr, 'Unlock URL': unlockUrl },
+    })
   }
 }
 
-export async function sendPasswordResetEmail(email: string, resetUrl: string): Promise<void> {
+/**
+ * Mail a flow cannot continue without: a code the person has to type back.
+ *
+ * Unlike the notices above, this THROWS when there is no transport, rather
+ * than resolving as though it sent. The caller awaits it through
+ * `deliverPlatformEmail`, which turns that into an honest refusal instead of a
+ * page telling someone to wait for an email that is never coming. The
+ * development preview still prints first, so a local run stays debuggable.
+ */
+async function sendRequiredEmail(
+  kind: string,
+  email: string,
+  subject: string,
+  html: string,
+  text: string,
+  preview: Record<string, string>,
+): Promise<void> {
   const from = process.env.SMTP_FROM || 'Backenly <noreply@backenly.com>'
-  const subject = 'Reset your Backenly password'
+  const transporter = getTransporter()
+  if (!transporter) {
+    reportUnconfigured({ kind, email, preview })
+    throw new EmailNotConfiguredError()
+  }
+  await observeSend(kind, email, () => transporter.sendMail({ from, to: email, subject, html, text }))
+}
+
+/**
+ * A platform notice whose delivery the caller must KNOW about.
+ *
+ * The same transport and the same honesty as the code emails: it throws when
+ * there is no transport and lets a provider error through, so a caller that
+ * wraps it in `deliverPlatformEmail` learns whether the message was really
+ * accepted. Exported for notices composed elsewhere, such as Backenly Cloud's
+ * inactivity-pause warning, which must not record a warning as delivered when
+ * it was not: the pause refuses to proceed without one.
+ */
+export async function sendPlatformNotice(input: {
+  kind: string
+  to: string
+  subject: string
+  html: string
+  text: string
+}): Promise<void> {
+  await sendRequiredEmail(input.kind, input.to, input.subject, input.html, input.text, {
+    subject: input.subject,
+  })
+}
+
+function codeEmailHtml(opts: { heading: string; intro: string; code: string; footer: string }): string {
+  return `
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; padding: 32px 24px; background: #0A0E1A; color: #f0f0f5; border-radius: 16px;">
+      <h1 style="font-size: 24px; font-weight: 800; margin: 0 0 8px; color: #ffffff;">${opts.heading}</h1>
+      <p style="color: #9ca3af; margin: 0 0 24px; font-size: 15px;">${opts.intro}</p>
+      <div style="font-family: 'SFMono-Regular', Menlo, Consolas, monospace; font-size: 32px; font-weight: 700; letter-spacing: 8px; color: #ffffff; background: #16171d; border: 1px solid #2a2b33; border-radius: 12px; padding: 16px 20px; text-align: center; margin: 0 0 24px;">
+        ${opts.code}
+      </div>
+      <p style="color: #6b7280; font-size: 13px; margin: 0;">${opts.footer}</p>
+    </div>
+  `
+}
+
+const CODE_MINUTES = Math.round(EMAIL_CODE_TTL_MS / 60_000)
+
+/** The code that must be entered before a new Backenly account is created. */
+export async function sendSignupCodeEmail(email: string, code: string): Promise<void> {
+  const subject = `${code} is your Backenly verification code`
+  const html = codeEmailHtml({
+    heading: 'Confirm your email',
+    intro:
+      `Enter this code to finish creating your Backenly account for <strong style="color: #e5e7eb;">${email}</strong>. ` +
+      `It expires in <strong style="color: #e5e7eb;">${CODE_MINUTES} minutes</strong>.`,
+    code,
+    footer: "If you didn't try to create a Backenly account, you can ignore this email. No account is created without this code.",
+  })
+  const text =
+    `Your Backenly verification code is ${code}\n\n` +
+    `Enter it to finish creating your account for ${email}. It expires in ${CODE_MINUTES} minutes.\n\n` +
+    "If you didn't try to create a Backenly account, you can ignore this email."
+  await sendRequiredEmail('signup_code', email, subject, html, text, { Code: code })
+}
+
+/** The code that must be entered before a password is replaced. */
+export async function sendPasswordResetCodeEmail(email: string, code: string): Promise<void> {
+  const subject = `${code} is your Backenly password reset code`
+  const html = codeEmailHtml({
+    heading: 'Reset your password',
+    intro:
+      `Enter this code to choose a new password for your Backenly account (<strong style="color: #e5e7eb;">${email}</strong>). ` +
+      `It expires in <strong style="color: #e5e7eb;">${CODE_MINUTES} minutes</strong>.`,
+    code,
+    footer:
+      "If you didn't ask to reset your password, you can ignore this email. Your password stays the same unless this code is entered.",
+  })
+  const text =
+    `Your Backenly password reset code is ${code}\n\n` +
+    `Enter it to choose a new password for ${email}. It expires in ${CODE_MINUTES} minutes.\n\n` +
+    "If you didn't ask to reset your password, you can ignore this email."
+  await sendRequiredEmail('password_reset_code', email, subject, html, text, { Code: code })
+}
+
+/**
+ * The code that must be entered before a usage spend limit is raised.
+ *
+ * Raising the limit lets Backenly charge the account more, so it is confirmed
+ * from the owner's mailbox rather than by any session or token alone: an agent
+ * holding a platform token can read the meter, never raise the limit.
+ */
+export async function sendSpendLimitCodeEmail(email: string, code: string, newLimitLabel: string): Promise<void> {
+  const subject = `${code} confirms your new Backenly spend limit`
+  const html = codeEmailHtml({
+    heading: 'Confirm your new spend limit',
+    intro:
+      `Enter this code to raise the monthly spend limit on your Backenly account to ` +
+      `<strong style="color: #e5e7eb;">${newLimitLabel}</strong>. It expires in ` +
+      `<strong style="color: #e5e7eb;">${CODE_MINUTES} minutes</strong>.`,
+    code,
+    footer:
+      "If you didn't ask to raise your spend limit, ignore this email and your limit stays as it is. " +
+      'Consider changing your password if you did not start this.',
+  })
+  const text =
+    `Your Backenly spend limit confirmation code is ${code}\n\n` +
+    `Enter it to raise your monthly spend limit to ${newLimitLabel}. It expires in ${CODE_MINUTES} minutes.\n\n` +
+    "If you didn't ask to raise your spend limit, ignore this email and your limit stays as it is."
+  await sendRequiredEmail('spend_limit_code', email, subject, html, text, { Code: code, 'New limit': newLimitLabel })
+}
+
+/**
+ * Sent instead of a signup code when the address already has an account.
+ *
+ * The signup page answers identically either way, so it cannot be used to find
+ * out who has an account. The owner of the address learns what happened, and
+ * how to get back in, from their own inbox.
+ */
+export async function sendAccountExistsEmail(email: string): Promise<void> {
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'
+  const loginUrl = `${appUrl}/auth/login`
+  const resetUrl = `${appUrl}/auth/forgot-password?email=${encodeURIComponent(email)}`
+  const subject = 'You already have a Backenly account'
   const html = `
     <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; padding: 32px 24px; background: #0A0E1A; color: #f0f0f5; border-radius: 16px;">
-      <h1 style="font-size: 24px; font-weight: 800; margin: 0 0 8px; color: #ffffff;">Reset your password</h1>
+      <h1 style="font-size: 24px; font-weight: 800; margin: 0 0 8px; color: #ffffff;">You already have an account</h1>
       <p style="color: #9ca3af; margin: 0 0 24px; font-size: 15px;">
-        We received a request to reset the password for your Backenly account (<strong style="color: #e5e7eb;">${email}</strong>).
-        Click the button below to choose a new password. This link expires in <strong style="color: #e5e7eb;">1 hour</strong>.
+        Someone tried to sign up for Backenly with <strong style="color: #e5e7eb;">${email}</strong>, which already has an account.
+        If that was you, sign in instead, or reset your password if you've forgotten it.
       </p>
-      <a href="${resetUrl}" style="display: inline-block; background: linear-gradient(135deg, #7c3aed, #2563eb); color: #ffffff; font-weight: 700; font-size: 15px; text-decoration: none; padding: 12px 28px; border-radius: 12px; margin-bottom: 24px;">
-        Reset password
+      <a href="${loginUrl}" style="display: inline-block; background: #7c3aed; color: #ffffff; font-weight: 700; font-size: 15px; text-decoration: none; padding: 12px 28px; border-radius: 12px; margin-bottom: 16px;">
+        Sign in
       </a>
       <p style="color: #6b7280; font-size: 13px; margin: 0;">
-        If you didn't request a password reset, you can safely ignore this email — your password won't change.
-        <br/><br/>
-        Or copy this URL into your browser:<br/>
-        <span style="color: #a78bfa; word-break: break-all;">${resetUrl}</span>
+        <a href="${resetUrl}" style="color: #a78bfa;">Reset your password</a>.
+        If this wasn't you, you can ignore this email. Nothing about your account has changed.
       </p>
     </div>
   `
-
-  const transporter = getTransporter()
-
-  if (transporter) {
-    await transporter.sendMail({ from, to: email, subject, html })
-  } else {
-    // Development: log the reset link so you can test without SMTP
-    console.log('\n========== PASSWORD RESET EMAIL ==========')
-    console.log(`To: ${email}`)
-    console.log(`Subject: ${subject}`)
-    console.log(`Reset URL: ${resetUrl}`)
-    console.log('==========================================\n')
-  }
+  const text =
+    `Someone tried to sign up for Backenly with ${email}, which already has an account.\n\n` +
+    `Sign in: ${loginUrl}\nReset your password: ${resetUrl}\n\n` +
+    "If this wasn't you, you can ignore this email. Nothing about your account has changed."
+  await sendRequiredEmail('account_exists', email, subject, html, text, { 'Sign in': loginUrl })
 }

@@ -8,10 +8,11 @@ import { Router, Request, Response } from 'express'
 import { prisma } from '@/lib/db'
 import { v1AuthMiddleware, checkPermission, checkCapability } from '../lib/auth'
 import { sendError, sendSuccess, ErrorCodes } from '../lib/response'
+import { asyncRoute } from '../lib/async-route'
 
 const router = Router()
 
-router.get('/:projectId/logs', v1AuthMiddleware, async (req: Request, res: Response) => {
+router.get('/:projectId/logs', asyncRoute(v1AuthMiddleware), asyncRoute(async (req: Request, res: Response) => {
   const ctx = req.v1Context!
 
   if (!checkPermission(res, ctx, ['read', 'admin'])) return
@@ -55,6 +56,6 @@ router.get('/:projectId/logs', v1AuthMiddleware, async (req: Request, res: Respo
     console.error('Logs fetch error:', error)
     sendError(res, ErrorCodes.INTERNAL_ERROR, 'Failed to fetch logs', 500)
   }
-})
+}))
 
 export default router

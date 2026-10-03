@@ -14,7 +14,15 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectAccess } from '@/lib/auth/route-protection'
+import { isCloudEdition } from '@/lib/edition/cloud-only'
 import { diffBranch, mergeBranch, discardBranch } from '@/lib/branches/engine'
+
+// Preview branches are a Backenly Cloud capability. On a self-hosted
+// deployment the surface does not exist, so this answers 404 rather than 403:
+// 403 would imply the feature is here and withheld.
+const cloudOnly404 = () =>
+  NextResponse.json({ error: 'Not found', code: 'CLOUD_ONLY_FEATURE' }, { status: 404 })
+
 
 function branchIdFrom(req: NextRequest): string {
   const parts = req.nextUrl.pathname.split('/').filter(Boolean)
@@ -22,6 +30,7 @@ function branchIdFrom(req: NextRequest): string {
 }
 
 export const GET = withProjectAccess(async (req: NextRequest, { projectId }) => {
+  if (!isCloudEdition()) return cloudOnly404()
   const result = await diffBranch(projectId, branchIdFrom(req))
   if (!result.ok) {
     const fail = result as Extract<typeof result, { ok: false }>
@@ -32,6 +41,7 @@ export const GET = withProjectAccess(async (req: NextRequest, { projectId }) => 
 })
 
 export const POST = withProjectAccess(async (req: NextRequest, { user, projectId }) => {
+  if (!isCloudEdition()) return cloudOnly404()
   const result = await mergeBranch(projectId, user.userId, branchIdFrom(req))
   if (!result.ok) {
     const fail = result as Extract<typeof result, { ok: false }>
@@ -48,6 +58,7 @@ export const POST = withProjectAccess(async (req: NextRequest, { user, projectId
 })
 
 export const DELETE = withProjectAccess(async (req: NextRequest, { user, projectId }) => {
+  if (!isCloudEdition()) return cloudOnly404()
   const result = await discardBranch(projectId, user.userId, branchIdFrom(req))
   if (!result.ok) {
     const fail = result as Extract<typeof result, { ok: false }>

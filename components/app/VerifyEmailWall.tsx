@@ -15,7 +15,7 @@
  * before the gate existed), and keying the wall on `!emailVerified` alone would
  * lock every one of them out of a product they already use.
  *
- * This is UX, not enforcement. The server gate in lib/auth/account-standing.ts
+ * This is UX, not enforcement. The server gate in lib/platform-controls/account-standing.ts
  * stays exactly where it is — a wall rendered in the browser is trivially
  * skipped with a direct API call, which is precisely what a bot does.
  */
@@ -60,7 +60,7 @@ export function VerifyEmailWall({ email, onLogout }: VerifyEmailWallProps) {
 
   return (
     <div className="min-h-screen bg-black flex items-center justify-center px-5">
-      <div className="w-full max-w-[440px] rounded-2xl border border-white/[0.10] bg-[#16171d] p-8 shadow-[0_24px_64px_-32px_rgba(0,0,0,0.9)]">
+      <div className="w-full max-w-[440px] rounded-2xl border border-white/[0.10] bg-[#0f1012] p-8 shadow-[0_24px_64px_-32px_rgba(0,0,0,0.9)]">
         <div className="flex justify-center mb-6">
           <div className="w-11 h-11 rounded-xl border border-violet-500/25 bg-violet-500/10 flex items-center justify-center">
             <Mail className="w-5 h-5 text-violet-300" />
@@ -102,17 +102,17 @@ export function VerifyEmailWall({ email, onLogout }: VerifyEmailWallProps) {
         </button>
 
         {state === 'throttled' && (
-          <p className="mt-3 text-[11.5px] text-amber-400/90 text-center">
+          <p className="mt-3 text-[12.5px] text-amber-400/90 text-center">
             Too many requests. Please wait a few minutes before trying again.
           </p>
         )}
         {state === 'error' && (
-          <p className="mt-3 text-[11.5px] text-amber-400/90 text-center">
+          <p className="mt-3 text-[12.5px] text-amber-400/90 text-center">
             Could not send just now. Please try again shortly.
           </p>
         )}
 
-        <p className="mt-5 text-[11.5px] leading-relaxed text-zinc-500 text-center">
+        <p className="mt-5 text-[12.5px] leading-relaxed text-zinc-500 text-center">
           Don&apos;t see it? Check your spam folder. Already clicked the link?{' '}
           <button
             type="button"

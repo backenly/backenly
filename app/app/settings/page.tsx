@@ -3,10 +3,10 @@
 /**
  * Account Settings (/app/settings) — IA restructure §5.6.
  *
- * Rebuilt to live INSIDE the org shell (§5) and speak the locked flat kit (§11):
- * #16171d panels, hairline borders, mono numerals, violet only for action/
- * attention — no ambient glows, no gradient cover cards, no "Back" button. The
- * org sidebar is the only navigation; sub-sections are in-page tabs.
+ * Lives inside the org shell (§5) on the console kit: the standard document
+ * header with the sections as tabs under it, hairline panels, and the plan
+ * shown only on Cloud, where there is one. The org sidebar is the only
+ * navigation.
  *
  * Billing was promoted to its own org page (§5.4) — any legacy ?tab=billing
  * deep link redirects there. Every auth handler (profile, 2FA, password,
@@ -19,16 +19,21 @@ import {
   LogOut, Mail, Lock, Trash2, HelpCircle, Key, Check, X,
   User, Shield, AlertTriangle, Sparkles, Smartphone, MessageSquare,
   Activity, Calendar, FolderKanban, Loader2, Copy, ShieldCheck, ShieldAlert,
-  Send, ArrowUpRight, CheckCircle2,
+  Send, ArrowUpRight, CheckCircle2, LifeBuoy, Bell,
 } from 'lucide-react'
 import { OrgShell } from '@/components/shell/OrgShell'
 import {
-  SectionTitle, KitCard, KitCardHeader, KitCardBody, KitButton,
+  KitCard, KitCardHeader, KitCardBody, KitButton,
   KitField, KitInput, KitNote, KitBadge, KitTabs, KitTab,
+  INPUT_BASE, PageHeader, Skeleton, StatusDot, Tag,
 } from '@/components/inspector/kit'
-import { GlobalLoading } from '@/components/ui/GlobalLoading'
+import { FLOAT, PAGE_GUTTER, PAGE_WIDTH, RAISE } from '@/components/console/tokens'
+import { usePlanName } from '@/components/shell/ConsoleChrome'
+import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
+import { DeploymentRecoverySection } from '@/components/app/DeploymentRecoverySection'
+import { deleteAccount, signOut } from '@/lib/api/auth'
 
-type Section = 'profile' | 'security' | 'support' | 'danger'
+type Section = 'profile' | 'security' | 'notifications' | 'recovery' | 'support' | 'danger'
 
 interface UserProfile {
   id: string
@@ -73,10 +78,13 @@ function planLabelFor(tier?: string): string {
   return 'Free'
 }
 
+let cachedSettingsUser: UserProfile | null = null
+
 export default function SettingsPage() {
   const router = useRouter()
-  const [user, setUser] = useState<UserProfile | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [user, setUser] = useState<UserProfile | null>(() => cachedSettingsUser)
+  const planName = usePlanName()
+  const [loading, setLoading] = useState(() => !cachedSettingsUser)
   const [activeSection, setActiveSection] = useState<Section>('profile')
   const [toast, setToast] = useState<{ kind: 'success' | 'error'; msg: string } | null>(null)
 
@@ -111,8 +119,9 @@ export default function SettingsPage() {
       if (!response.ok) { router.push('/login'); return }
       const data = await response.json()
       const u = data.user ?? data
+      cachedSettingsUser = u
       setUser(u)
-      setNewName(u?.name || '')
+      setNewName((prev) => prev || u?.name || '')
     } catch {
       router.push('/login')
     } finally {
@@ -125,7 +134,7 @@ export default function SettingsPage() {
     // own org page (§5.4) — send legacy ?tab=billing there.
     const tab = new URLSearchParams(window.location.search).get('tab')
     if (tab === 'billing') { router.replace('/app/billing'); return }
-    if (tab && ['profile', 'security', 'support', 'danger'].includes(tab)) {
+    if (tab && ['profile', 'security', 'notifications', 'support', 'danger'].includes(tab)) {
       setActiveSection(tab as Section)
     }
     refreshUser()
@@ -159,12 +168,11 @@ export default function SettingsPage() {
     if (deleteConfirmText !== 'DELETE') return
     setDeletingAccount(true)
     try {
-      const response = await fetch('/api/auth/delete-account', { method: 'DELETE', credentials: 'include' })
-      if (response.ok) router.push('/login')
-      else showToast('Failed to delete account', 'error')
+      // On success the document is replaced; the modal stays on "Deleting…"
+      // until it is, rather than closing over the deleted account's settings.
+      await deleteAccount()
     } catch {
       showToast('Failed to delete account', 'error')
-    } finally {
       setDeletingAccount(false)
       setShowDeleteModal(false)
       setDeleteConfirmText('')
@@ -173,26 +181,19 @@ export default function SettingsPage() {
 
   const handleLogout = async () => {
     try {
-      await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' })
-      router.push('/login')
-    } catch { /* noop */ }
+      await signOut()
+    } catch {
+      showToast('Could not sign out. Try again.', 'error')
+    }
   }
 
-  const handlePasswordReset = async () => {
+  // Reset is a code typed back with the new password, so it happens on the
+  // recovery page rather than as a fire-and-forget request with a toast that
+  // said "sent" whether or not anything was.
+  const handlePasswordReset = () => {
     if (!user?.email) return
     setResetLoading(true)
-    try {
-      const res = await fetch('/api/auth/forgot-password', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: user.email }),
-      })
-      showToast(res.ok ? 'Password reset link sent to your email' : 'Could not send reset link. Try again', res.ok ? 'success' : 'error')
-    } catch {
-      showToast('Could not send reset link. Try again', 'error')
-    } finally {
-      setResetLoading(false)
-    }
+    router.push(`/auth/forgot-password?email=${encodeURIComponent(user.email)}`)
   }
 
   const handle2FABegin = async () => {
@@ -268,8 +269,6 @@ export default function SettingsPage() {
     setTwoFABackupCodes(null)
   }
 
-  if (loading) return <GlobalLoading message="Loading your settings..." />
-
   const initials = user?.name
     ? user.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)
     : user?.email?.[0]?.toUpperCase() ?? 'U'
@@ -277,6 +276,16 @@ export default function SettingsPage() {
   const TABS: { id: Section; label: string; icon: typeof User }[] = [
     { id: 'profile', label: 'Profile', icon: User },
     { id: 'security', label: 'Security', icon: Shield },
+    { id: 'notifications', label: 'Notifications', icon: Bell },
+    // Self-host only, and absent rather than disabled in Cloud. Deployment
+    // recovery reads the whole platform database - every tenant's projects,
+    // users and secrets - which is right when the single account IS the
+    // operator of the machine, and is one tenant exporting everybody in Cloud.
+    // The route refuses by edition too; this stops the dashboard offering a
+    // control for work that would be refused.
+    ...(CLOUD_CONTROL_PLANE
+      ? []
+      : [{ id: 'recovery' as Section, label: 'Recovery', icon: LifeBuoy }]),
     { id: 'support', label: 'Support', icon: HelpCircle },
     { id: 'danger', label: 'Danger zone', icon: AlertTriangle },
   ]
@@ -286,9 +295,7 @@ export default function SettingsPage() {
       {/* Toast */}
       {toast && (
         <div className="fixed top-16 right-6 z-50">
-          <div className={`flex items-center gap-2.5 rounded-lg border px-3.5 py-2.5 bg-[#1c1d23] shadow-[0_16px_44px_-28px_rgba(0,0,0,0.9)] ${
-            toast.kind === 'success' ? 'border-emerald-500/25' : 'border-rose-500/25'
-          }`}>
+          <div role="status" aria-live="polite" className={`flex items-center gap-2.5 rounded-[10px] px-3.5 py-2.5 ${RAISE} ${FLOAT}`}>
             {toast.kind === 'success'
               ? <CheckCircle2 className="h-4 w-4 text-emerald-400" />
               : <AlertTriangle className="h-4 w-4 text-rose-400" />}
@@ -297,55 +304,71 @@ export default function SettingsPage() {
         </div>
       )}
 
-      <div className="mx-auto w-full max-w-[1000px] px-6 py-8 lg:px-10">
-        <SectionTitle
+      <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pb-16`}>
+        <PageHeader
+          className="!px-0"
           title="Settings"
-          description="Manage your profile, security and account."
+          description="Your profile, sign-in and security, and the account itself."
           actions={
-            <KitButton variant="secondary" size="sm" icon={LogOut} onClick={handleLogout}>
+            <KitButton variant="secondary" icon={LogOut} onClick={handleLogout}>
               Sign out
             </KitButton>
           }
+          tabs={
+            <KitTabs>
+              {TABS.map(({ id, label, icon: Icon }) => (
+                <KitTab key={id} active={activeSection === id} onClick={() => setActiveSection(id)}>
+                  <Icon />
+                  {label}
+                </KitTab>
+              ))}
+            </KitTabs>
+          }
         />
+        <div className="h-6" />
 
-        <KitTabs className="mb-5">
-          {TABS.map(({ id, label, icon: Icon }) => (
-            <KitTab key={id} active={activeSection === id} onClick={() => setActiveSection(id)}>
-              <Icon className="h-3.5 w-3.5" />
-              {label}
-            </KitTab>
-          ))}
-        </KitTabs>
+        {loading ? (
+          <div className="max-w-[760px] space-y-4" aria-hidden>
+            <Skeleton className="h-[150px] w-full rounded-[10px]" />
+            <Skeleton className="h-[180px] w-full rounded-[10px]" />
+          </div>
+        ) : (
+          <>
+            {activeSection === 'profile' && (
+              <ProfileSection
+                user={user}
+                initials={initials}
+                planLabel={CLOUD_CONTROL_PLANE ? planName ?? planLabelFor(user?.tier) : null}
+                editingName={editingName}
+                setEditingName={setEditingName}
+                newName={newName}
+                setNewName={setNewName}
+                savingName={savingName}
+                onSaveName={handleSaveName}
+              />
+            )}
 
-        {activeSection === 'profile' && (
-          <ProfileSection
-            user={user}
-            initials={initials}
-            planLabel={planLabelFor(user?.tier)}
-            editingName={editingName}
-            setEditingName={setEditingName}
-            newName={newName}
-            setNewName={setNewName}
-            savingName={savingName}
-            onSaveName={handleSaveName}
-          />
+            {activeSection === 'security' && (
+              <SecuritySection
+                user={user}
+                resetLoading={resetLoading}
+                onPasswordReset={handlePasswordReset}
+                on2FAEnroll={handle2FABegin}
+                on2FADisableOpen={() => { setTwoFAModal('disable'); setTwoFACode('') }}
+                twoFALoading={twoFALoading}
+                onLogout={handleLogout}
+              />
+            )}
+
+            {activeSection === 'notifications' && <NotificationsSection onToast={showToast} />}
+
+            {activeSection === 'recovery' && !CLOUD_CONTROL_PLANE && <DeploymentRecoverySection />}
+
+            {activeSection === 'support' && <SupportSection userEmail={user?.email} />}
+
+            {activeSection === 'danger' && <DangerSection onOpenDelete={() => setShowDeleteModal(true)} />}
+          </>
         )}
-
-        {activeSection === 'security' && (
-          <SecuritySection
-            user={user}
-            onPasswordReset={handlePasswordReset}
-            resetLoading={resetLoading}
-            on2FAEnroll={handle2FABegin}
-            on2FADisableOpen={() => { setTwoFAModal('disable'); setTwoFACode('') }}
-            twoFALoading={twoFALoading}
-            onLogout={handleLogout}
-          />
-        )}
-
-        {activeSection === 'support' && <SupportSection userEmail={user?.email} />}
-
-        {activeSection === 'danger' && <DangerSection onOpenDelete={() => setShowDeleteModal(true)} />}
       </div>
 
       {/* Delete account modal */}
@@ -415,8 +438,8 @@ export default function SettingsPage() {
                   <img src={twoFASetup.qrCodeUrl} alt="2FA QR code" className="h-44 w-44" />
                 </div>
                 <div className="mt-4">
-                  <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">Or enter manually</p>
-                  <div className="flex items-center gap-2 rounded-lg border border-white/[0.07] bg-[#0f1015] px-3 py-2">
+                  <p className="mb-1.5 text-[12px] font-medium text-zinc-500">Or enter manually</p>
+                  <div className="flex items-center gap-2 rounded-lg border border-white/[0.07] bg-[#08090a] px-3 py-2">
                     <code className="flex-1 break-all font-mono text-[12px] text-violet-200/90">{twoFASetup.secret}</code>
                     <button
                       onClick={() => { navigator.clipboard.writeText(twoFASetup.secret); showToast('Secret copied') }}
@@ -435,7 +458,7 @@ export default function SettingsPage() {
                       onChange={(e) => setTwoFACode(e.target.value.replace(/\D/g, ''))}
                       placeholder="123456"
                       autoFocus
-                      className="w-full rounded-lg border border-white/[0.07] bg-[#0f1015] px-4 py-2.5 text-center font-mono text-lg tracking-[0.4em] text-white outline-none transition-colors placeholder:text-zinc-600 focus:border-violet-400/40 focus:ring-2 focus:ring-violet-400/15"
+                      className="w-full rounded-lg border border-white/[0.07] bg-[#08090a] px-4 py-2.5 text-center font-mono text-lg tracking-[0.4em] text-white outline-none transition-colors placeholder:text-zinc-600 focus:border-violet-400/40 focus:ring-2 focus:ring-violet-400/15"
                     />
                   </KitField>
                 </div>
@@ -454,9 +477,9 @@ export default function SettingsPage() {
               <ModalHeader icon={ShieldCheck} title="Save your backup codes" subtitle="Each can be used once" onClose={closeTwoFAModal} />
               <div className="p-5">
                 <KitNote icon={AlertTriangle} tone="warn">
-                  Store these somewhere safe. We won't show them again.
+                  Store these somewhere safe. We won&apos;t show them again.
                 </KitNote>
-                <div className="mt-4 grid grid-cols-2 gap-2 rounded-lg border border-white/[0.07] bg-[#0f1015] p-4">
+                <div className="mt-4 grid grid-cols-2 gap-2 rounded-lg border border-white/[0.07] bg-[#08090a] p-4">
                   {twoFABackupCodes.map((code, i) => (
                     <div key={i} className="rounded-md border border-white/[0.06] bg-white/[0.02] px-2.5 py-1.5 text-center font-mono text-[12.5px] text-violet-100/90">
                       {code}
@@ -511,7 +534,7 @@ function ProfileSection({
 }: {
   user: UserProfile | null
   initials: string
-  planLabel: string
+  planLabel: string | null
   editingName: boolean
   setEditingName: (v: boolean) => void
   newName: string
@@ -524,16 +547,16 @@ function ProfileSection({
       {/* Identity */}
       <KitCard>
         <div className="flex flex-wrap items-center gap-4 px-5 py-5">
-          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-white/[0.08] bg-white/[0.04] text-lg font-semibold text-zinc-100">
+          <div className="flex h-[52px] w-[52px] items-center justify-center rounded-full bg-[linear-gradient(135deg,#27272a,#18181b)] text-[16px] font-semibold text-zinc-100 ring-1 ring-inset ring-white/[0.12]">
             {initials}
           </div>
           <div className="min-w-0 flex-1">
-            <h2 className="text-[17px] font-semibold leading-tight text-white">{user?.name || 'Unnamed user'}</h2>
-            <p className="mt-0.5 text-[12.5px] text-zinc-500">{user?.email}</p>
+            <h2 className="text-[17px] font-semibold leading-[24px] tracking-[-0.014em] text-zinc-50">{user?.name || 'Unnamed user'}</h2>
+            <p className="text-[13px] text-zinc-500">{user?.email}</p>
           </div>
-          <div className="flex items-center gap-2">
-            {user?.emailVerified && <KitBadge tone="operational">Verified</KitBadge>}
-            <KitBadge tone="beta" icon={Sparkles}>{planLabel}</KitBadge>
+          <div className="flex items-center gap-3">
+            {user?.emailVerified && <StatusDot tone="operational" label="Email verified" />}
+            {planLabel && <Tag>{planLabel} plan</Tag>}
           </div>
         </div>
         <div className="grid grid-cols-2 border-t border-white/[0.06] divide-x divide-white/[0.04] sm:grid-cols-4">
@@ -554,7 +577,8 @@ function ProfileSection({
               <input
                 value={user?.email || ''}
                 disabled
-                className="h-8 w-full cursor-not-allowed rounded-lg border border-white/[0.07] bg-white/[0.02] pl-9 pr-3 text-[12.5px] text-zinc-400"
+                aria-label="Email address"
+                className={`${INPUT_BASE} h-[36px] cursor-not-allowed pl-9 pr-3 text-zinc-400 sm:h-[32px]`}
               />
             </div>
           </KitField>
@@ -563,17 +587,20 @@ function ProfileSection({
             {editingName ? (
               <div className="flex items-center gap-2">
                 <KitInput value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Enter your name" autoFocus />
-                <KitButton variant="primary" onClick={onSaveName} disabled={savingName} icon={savingName ? undefined : Check}>
-                  {savingName ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Save'}
+                <KitButton variant="primary" onClick={onSaveName} loading={savingName} icon={Check}>
+                  Save
                 </KitButton>
-                <KitButton variant="ghost" onClick={() => { setEditingName(false); setNewName(user?.name || '') }} icon={X}>{''}</KitButton>
+                <KitButton variant="ghost" onClick={() => { setEditingName(false); setNewName(user?.name || '') }}>
+                  Cancel
+                </KitButton>
               </div>
             ) : (
               <div className="flex items-center gap-2">
                 <input
                   value={user?.name || 'Not set'}
                   disabled
-                  className={`h-8 flex-1 cursor-not-allowed rounded-lg border border-white/[0.07] bg-white/[0.02] px-3 text-[12.5px] ${user?.name ? 'text-zinc-200' : 'italic text-zinc-600'}`}
+                  aria-label="Display name"
+                  className={`${INPUT_BASE} h-[36px] flex-1 cursor-not-allowed px-3 sm:h-[32px] ${user?.name ? 'text-zinc-200' : 'italic text-zinc-500'}`}
                 />
                 <KitButton variant="secondary" onClick={() => setEditingName(true)}>Edit</KitButton>
               </div>
@@ -613,7 +640,7 @@ function SecuritySection({
             </div>
             <div className="min-w-0 flex-1">
               <p className="text-[13px] font-medium text-zinc-100">{providerLabel(user?.provider)}</p>
-              <p className="mt-0.5 text-[11.5px] text-zinc-500">
+              <p className="mt-0.5 text-[12.5px] text-zinc-500">
                 {isEmailUser ? 'Signed in with email and password' : `Managed by ${providerLabel(user?.provider)}`}
               </p>
             </div>
@@ -640,7 +667,7 @@ function SecuritySection({
             </div>
             <div className="min-w-0 flex-1">
               <p className="text-[13px] font-medium text-zinc-100">Authenticator app</p>
-              <p className="mt-0.5 text-[11.5px] text-zinc-500">
+              <p className="mt-0.5 text-[12.5px] text-zinc-500">
                 {twoFAOn ? 'A code is required from your authenticator on every sign-in.' : 'Use Google Authenticator, 1Password, Authy or similar.'}
               </p>
             </div>
@@ -660,7 +687,7 @@ function SecuritySection({
               </div>
               <div className="min-w-0 flex-1">
                 <p className="text-[13px] font-medium text-zinc-100">Send password reset link</p>
-                <p className="mt-0.5 text-[11.5px] text-zinc-500">We'll email a secure link to {user?.email}.</p>
+                <p className="mt-0.5 text-[12.5px] text-zinc-500">We&apos;ll email a secure link to {user?.email}.</p>
               </div>
               <KitButton variant="secondary" size="sm" icon={resetLoading ? undefined : Mail} onClick={onPasswordReset} disabled={resetLoading}>
                 {resetLoading ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Sending…</> : 'Send link'}
@@ -668,7 +695,7 @@ function SecuritySection({
             </div>
           ) : (
             <p className="text-[12.5px] text-zinc-400">
-              Your password is managed by <span className="font-medium text-zinc-200">{providerLabel(user?.provider)}</span>. Update it in your provider's account settings.
+              Your password is managed by <span className="font-medium text-zinc-200">{providerLabel(user?.provider)}</span>. Update it in your provider&apos;s account settings.
             </p>
           )}
         </KitCardBody>
@@ -684,13 +711,135 @@ function SecuritySection({
             </div>
             <div className="min-w-0 flex-1">
               <p className="text-[13px] font-medium text-zinc-100">This browser</p>
-              <p className="mt-0.5 text-[11.5px] text-zinc-500">Last signed in {fmtRelative(user?.lastLogin)}.</p>
+              <p className="mt-0.5 text-[12.5px] text-zinc-500">Last signed in {fmtRelative(user?.lastLogin)}.</p>
             </div>
             <KitButton variant="secondary" size="sm" icon={LogOut} onClick={onLogout}>Sign out</KitButton>
           </div>
         </KitCardBody>
       </KitCard>
     </div>
+  )
+}
+
+// ─── Notifications ────────────────────────────────────────────────────────────
+
+/**
+ * What each preference controls, in the order an owner cares about. Types the
+ * API returns but this list does not name are still shown, under their raw
+ * name, so a new type is never silently unmanageable.
+ */
+const NOTIFICATION_LABELS: Record<string, { label: string; description: string }> = {
+  health_alert: {
+    label: 'Backend health alerts',
+    description: 'A critical problem in one of your backends that Backenly could not resolve on its own.',
+  },
+  autonomous_action: {
+    label: 'Autonomous changes',
+    description: 'What Backenly repaired or changed while you were away.',
+  },
+  deploy_complete: { label: 'Deployments', description: 'A deployment finished.' },
+  job_failed: { label: 'Failed jobs', description: 'A background job in one of your backends failed.' },
+  job_completed: { label: 'Completed jobs', description: 'A background job in one of your backends finished.' },
+  usage_limit: {
+    label: 'Usage limits',
+    description: 'Your usage or your spend limit crossed 50%, 80% or 100% this month.',
+  },
+  credits_low: { label: 'AI credits', description: 'You have used most of your AI credits for the month.' },
+  payment_failed: { label: 'Failed payments', description: 'A payment for your plan did not go through.' },
+  payment_success: { label: 'Receipts', description: 'A payment for your plan succeeded.' },
+  system: { label: 'Account notices', description: 'Changes to your account or subscription.' },
+}
+
+interface NotificationPref {
+  type: string
+  emailEnabled: boolean
+  inAppEnabled: boolean
+}
+
+function NotificationsSection({ onToast }: { onToast: (msg: string, kind?: 'success' | 'error') => void }) {
+  const [prefs, setPrefs] = useState<NotificationPref[] | null>(null)
+  const [saving, setSaving] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/notification-preferences', { credentials: 'include' })
+      .then(r => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+      .then(d => { if (!cancelled) setPrefs(Array.isArray(d?.preferences) ? d.preferences : []) })
+      .catch(() => { if (!cancelled) setPrefs([]) })
+    return () => { cancelled = true }
+  }, [])
+
+  const order = Object.keys(NOTIFICATION_LABELS)
+  const rows = (prefs ?? []).slice().sort((a, b) => {
+    const ia = order.indexOf(a.type)
+    const ib = order.indexOf(b.type)
+    return (ia === -1 ? order.length : ia) - (ib === -1 ? order.length : ib)
+  })
+
+  const update = async (type: string, channel: 'emailEnabled' | 'inAppEnabled', value: boolean) => {
+    const before = prefs
+    setSaving(`${type}:${channel}`)
+    setPrefs(p => (p ?? []).map(x => (x.type === type ? { ...x, [channel]: value } : x)))
+    try {
+      const res = await fetch('/api/notification-preferences', {
+        method: 'PATCH',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ preferences: [{ type, [channel]: value }] }),
+      })
+      if (!res.ok) throw new Error(String(res.status))
+    } catch {
+      setPrefs(before)
+      onToast('Could not save that preference', 'error')
+    } finally {
+      setSaving(null)
+    }
+  }
+
+  return (
+    <KitCard>
+      <KitCardHeader title="Notifications" description="Choose what Backenly tells you about, and where" />
+      <KitCardBody>
+        {prefs === null ? (
+          <div className="flex items-center gap-2 text-[12.5px] text-zinc-500">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading preferences…
+          </div>
+        ) : rows.length === 0 ? (
+          <p className="text-[12.5px] text-zinc-400">Preferences could not be loaded. Try again in a moment.</p>
+        ) : (
+          <div className="divide-y divide-white/[0.06]">
+            <div className="grid grid-cols-[1fr_auto_auto] gap-x-6 pb-2 text-[12px] font-medium text-zinc-500">
+              <span />
+              <span className="w-12 text-center">Email</span>
+              <span className="w-12 text-center">In app</span>
+            </div>
+            {rows.map(pref => {
+              const meta = NOTIFICATION_LABELS[pref.type] ?? { label: pref.type, description: '' }
+              return (
+                <div key={pref.type} className="grid grid-cols-[1fr_auto_auto] items-center gap-x-6 py-3">
+                  <div className="min-w-0">
+                    <p className="text-[13px] font-medium text-zinc-100">{meta.label}</p>
+                    {meta.description && <p className="mt-0.5 text-[12.5px] text-zinc-500">{meta.description}</p>}
+                  </div>
+                  {(['emailEnabled', 'inAppEnabled'] as const).map(channel => (
+                    <label key={channel} className="flex w-12 justify-center">
+                      <span className="sr-only">{`${meta.label}: ${channel === 'emailEnabled' ? 'email' : 'in app'}`}</span>
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 cursor-pointer accent-zinc-200 disabled:cursor-wait"
+                        checked={pref[channel]}
+                        disabled={saving === `${pref.type}:${channel}`}
+                        onChange={e => update(pref.type, channel, e.target.checked)}
+                      />
+                    </label>
+                  ))}
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </KitCardBody>
+    </KitCard>
   )
 }
 
@@ -765,7 +914,7 @@ function SupportSection({ userEmail }: { userEmail?: string }) {
                         <p className="text-[13px] font-medium text-zinc-100">{c.title}</p>
                         <ArrowUpRight className="h-3.5 w-3.5 text-zinc-600 transition-colors group-hover:text-zinc-300" />
                       </div>
-                      <p className="mt-0.5 text-[11.5px] leading-snug text-zinc-500">{c.cardDesc}</p>
+                      <p className="mt-0.5 text-[12.5px] leading-snug text-zinc-500">{c.cardDesc}</p>
                     </div>
                   </button>
                 )
@@ -847,7 +996,7 @@ function InlineForm({
         </div>
         <p className="mt-4 text-[14px] font-semibold text-white">{successTitle}</p>
         <p className="mt-1.5 max-w-[320px] text-[12.5px] leading-relaxed text-zinc-500">{successMsg}</p>
-        {userEmail && <p className="mt-3 text-[11.5px] text-zinc-600">Reply will be sent to <span className="text-zinc-400">{userEmail}</span></p>}
+        {userEmail && <p className="mt-3 text-[12.5px] text-zinc-600">Reply will be sent to <span className="text-zinc-400">{userEmail}</span></p>}
         <div className="mt-5 flex items-center gap-2">
           <KitButton variant="secondary" size="sm" onClick={() => setSent(false)}>Submit another</KitButton>
           <KitButton variant="ghost" size="sm" onClick={onBack}>Done</KitButton>
@@ -864,7 +1013,7 @@ function InlineForm({
         </div>
         <div className="min-w-0">
           <p className="text-[13px] font-semibold text-zinc-100">{title}</p>
-          <p className="truncate text-[11.5px] text-zinc-500">{formDesc}</p>
+          <p className="truncate text-[12.5px] text-zinc-500">{formDesc}</p>
         </div>
       </div>
 
@@ -872,16 +1021,16 @@ function InlineForm({
         {userEmail && (
           <div className="flex items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2">
             <Mail className="h-3.5 w-3.5 flex-shrink-0 text-zinc-600" />
-            <span className="text-[11.5px] text-zinc-500">Sending as</span>
-            <span className="truncate text-[11.5px] font-medium text-zinc-300">{userEmail}</span>
+            <span className="text-[12.5px] text-zinc-500">Sending as</span>
+            <span className="truncate text-[12.5px] font-medium text-zinc-300">{userEmail}</span>
           </div>
         )}
 
-        <KitField label={<span className="flex items-center justify-between"><span>{primaryLabel}</span><span className="font-mono text-[10.5px] tabular-nums text-zinc-600">{primary.length}/{PRIMARY_MAX}</span></span>} hint={primaryHint}>
+        <KitField label={<span className="flex items-center justify-between"><span>{primaryLabel}</span><span className="text-[12px] tabular-nums text-zinc-600">{primary.length}/{PRIMARY_MAX}</span></span>} hint={primaryHint}>
           <KitInput value={primary} onChange={(e) => setPrimary(e.target.value)} maxLength={PRIMARY_MAX} placeholder={primaryPlaceholder} disabled={busy} />
         </KitField>
 
-        <KitField label={<span className="flex items-center justify-between"><span>{secondaryLabel}</span><span className="font-mono text-[10.5px] tabular-nums text-zinc-600">{secondary.length}/{SECONDARY_MAX}</span></span>} hint={secondaryHint}>
+        <KitField label={<span className="flex items-center justify-between"><span>{secondaryLabel}</span><span className="text-[12px] tabular-nums text-zinc-600">{secondary.length}/{SECONDARY_MAX}</span></span>} hint={secondaryHint}>
           <textarea
             value={secondary}
             onChange={(e) => setSecondary(e.target.value)}
@@ -889,7 +1038,7 @@ function InlineForm({
             placeholder={secondaryPlaceholder}
             disabled={busy}
             rows={6}
-            className="w-full resize-none rounded-lg border border-white/[0.07] bg-[#0f1015] px-3 py-2.5 text-[12.5px] leading-relaxed text-zinc-50 outline-none transition-colors placeholder:text-zinc-600 focus:border-violet-400/40 focus:ring-2 focus:ring-violet-400/15"
+            className="w-full resize-none rounded-lg border border-white/[0.07] bg-[#08090a] px-3 py-2.5 text-[12.5px] leading-relaxed text-zinc-50 outline-none transition-colors placeholder:text-zinc-600 focus:border-violet-400/40 focus:ring-2 focus:ring-violet-400/15"
           />
         </KitField>
 
@@ -920,7 +1069,7 @@ function DangerSection({ onOpenDelete }: { onOpenDelete: () => void }) {
         <AlertTriangle className="h-4 w-4 text-rose-400" />
         <div>
           <h2 className="text-[13px] font-semibold text-white">Danger zone</h2>
-          <p className="text-[11.5px] text-zinc-500">Irreversible and destructive actions.</p>
+          <p className="text-[12.5px] text-zinc-500">Irreversible and destructive actions.</p>
         </div>
       </div>
       <KitCardBody>
@@ -942,10 +1091,10 @@ function Stat({ icon: Icon, label, value }: { icon: React.ElementType; label: st
   return (
     <div className="px-4 py-3.5">
       <div className="flex items-center gap-1.5">
-        <Icon className="h-3 w-3 text-zinc-600" />
-        <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">{label}</p>
+        <Icon className="h-3.5 w-3.5 text-zinc-600" strokeWidth={1.75} />
+        <p className="text-[12px] text-zinc-500">{label}</p>
       </div>
-      <p className="mt-1.5 truncate text-[13px] font-medium text-zinc-200">{value}</p>
+      <p className="mt-1 truncate text-[13px] font-medium tabular-nums text-zinc-100">{value}</p>
     </div>
   )
 }
@@ -953,8 +1102,8 @@ function Stat({ icon: Icon, label, value }: { icon: React.ElementType; label: st
 function ModalShell({ children, onClose, accent = 'default' }: { children: React.ReactNode; onClose: () => void; accent?: 'default' | 'danger' }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/70" onClick={onClose} />
-      <div className={`relative w-full max-w-md overflow-hidden rounded-xl border bg-[#16171d] shadow-[0_16px_44px_-28px_rgba(0,0,0,0.9)] ${accent === 'danger' ? 'border-rose-500/20' : 'border-white/[0.07]'}`}>
+      <div className="absolute inset-0 bg-black/65" onClick={onClose} />
+      <div role="dialog" aria-modal="true" className={`relative w-full max-w-md overflow-hidden rounded-[14px] ${RAISE} ${FLOAT} ${accent === 'danger' ? 'ring-1 ring-rose-400/25' : ''}`}>
         {children}
       </div>
     </div>
@@ -965,10 +1114,10 @@ function ModalHeader({ icon: Icon, title, subtitle, onClose }: { icon: React.Ele
   return (
     <div className="flex items-center justify-between border-b border-white/[0.06] px-5 py-4">
       <div className="flex items-center gap-2.5">
-        <Icon className="h-4 w-4 text-violet-300" />
+        <Icon className="h-4 w-4 text-zinc-400" strokeWidth={1.75} />
         <div>
-          <h3 className="text-base font-semibold leading-none text-white">{title}</h3>
-          {subtitle && <p className="mt-1 text-[11.5px] text-zinc-500">{subtitle}</p>}
+          <h3 className="text-[15px] font-semibold leading-[22px] tracking-[-0.012em] text-zinc-50">{title}</h3>
+          {subtitle && <p className="text-[13px] text-zinc-400">{subtitle}</p>}
         </div>
       </div>
       <button onClick={onClose} className="rounded-md p-1 text-zinc-500 transition hover:bg-white/[0.06] hover:text-white" aria-label="Close">

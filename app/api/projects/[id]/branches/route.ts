@@ -13,14 +13,24 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectAccess } from '@/lib/auth/route-protection'
+import { isCloudEdition } from '@/lib/edition/cloud-only'
 import { createBranch, listBranches } from '@/lib/branches/engine'
 
+// Preview branches are a Backenly Cloud capability. On a self-hosted
+// deployment the surface does not exist, so this answers 404 rather than 403:
+// 403 would imply the feature is here and withheld.
+const cloudOnly404 = () =>
+  NextResponse.json({ error: 'Not found', code: 'CLOUD_ONLY_FEATURE' }, { status: 404 })
+
+
 export const GET = withProjectAccess(async (_req: NextRequest, { projectId }) => {
+  if (!isCloudEdition()) return cloudOnly404()
   const branches = await listBranches(projectId)
   return NextResponse.json({ success: true, branches })
 })
 
 export const POST = withProjectAccess(async (req: NextRequest, { user, projectId }) => {
+  if (!isCloudEdition()) return cloudOnly404()
   let body: { name?: string; includeData?: boolean }
   try {
     body = await req.json()

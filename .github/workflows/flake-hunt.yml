@@ -1,0 +1,127 @@
+name: Flake hunt
+
+# Runs one suite repeatedly in a CI-shaped environment and reports how often it
+# fails.
+#
+# WHY THIS EXISTS
+# ---------------
+# It was built to chase an intermittent `probe fixtures` job. That job was not
+# intermittent. Reading the CI logs rather than the note I had written about
+# them: the failures were in `integration suites`, they were the same single
+# assertion every time, and they were deterministic red between fe080cef (which
+# added a `carry_constraints` rung) and 5386616c (which renumbered the fixture).
+# The bisect that supposedly exonerated a commit had in fact compared two
+# different trees and was correct.
+#
+# The harness is kept anyway, because the reason it was reached for stands: an
+# intermittent job is worse than a red one. A red job is honest; an intermittent
+# job launders noise into evidence, and every later diagnosis inherits the
+# doubt. The next time a job looks flaky this answers the question with a
+# measured rate over N runs in the real CI environment, instead of an anecdote
+# and a re-run. It also records a clean result, so "it is stable" becomes a
+# green run rather than a claim.
+#
+# First, though, read the failing assertion. That is what would have settled
+# this in one minute instead of 38 runs.
+#
+# Retries are deliberately NOT offered here. They would hide the exact signal
+# this is trying to measure, and for a deterministic failure they would hide a
+# real defect.
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: 'Jest path pattern to hammer'
+        required: true
+        default: 'tests/probes'
+      iterations:
+        description: 'How many times to run it'
+        required: true
+        default: '10'
+
+jobs:
+  hunt:
+    name: flake hunt
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: backenly_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Identical to the `probe fixtures` job, so a failure here is a failure
+      # there. Any divergence would make this harness measure the wrong thing.
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/backenly_test
+      DIRECT_URL: postgresql://postgres:postgres@localhost:5432/backenly_test
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/backenly_test
+      JWT_SECRET: ci-not-a-real-secret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Push schema to the test database
+        run: npx prisma db push --accept-data-loss --skip-generate
+      - run: npx prisma generate
+
+      - name: Hammer the suite
+        id: hammer
+        run: |
+          set -uo pipefail
+          SUITE='${{ github.event.inputs.suite }}'
+          N='${{ github.event.inputs.iterations }}'
+          FAILED=0
+          echo "## Flake hunt: \`$SUITE\` x $N" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| run | result | tests |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          for i in $(seq 1 "$N"); do
+            OUT=$(npx jest "$SUITE" --ci --runInBand --forceExit 2>&1)
+            CODE=$?
+            LINE=$(echo "$OUT" | grep -E "^Tests:" | head -1 | sed 's/|/ /g')
+            if [ "$CODE" -eq 0 ]; then
+              echo "| $i | pass | ${LINE:-n/a} |" >> "$GITHUB_STEP_SUMMARY"
+              # Echoed to the log as well as the summary: a harness whose job is
+              # proving stability must leave evidence on success, not only on
+              # failure. Without this a green hunt is provable only from the
+              # exit code, which is exactly the kind of unverifiable claim this
+              # work exists to stop making.
+              echo "run $i: PASS  ${LINE:-n/a}"
+            else
+              echo "run $i: FAIL  ${LINE:-n/a}"
+              FAILED=$((FAILED + 1))
+              echo "| $i | **FAIL** | ${LINE:-n/a} |" >> "$GITHUB_STEP_SUMMARY"
+              # Keep the whole output of a failing run: the point of the hunt
+              # is the evidence, and the next run would otherwise overwrite it.
+              echo "$OUT" > "flake-run-$i.log"
+              echo "::group::failing run $i"
+              echo "$OUT" | tail -120
+              echo "::endgroup::"
+            fi
+          done
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**$FAILED of $N runs failed.**" >> "$GITHUB_STEP_SUMMARY"
+          echo "failed=$FAILED" >> "$GITHUB_OUTPUT"
+          echo "total=$N" >> "$GITHUB_OUTPUT"
+          # Non-zero when anything failed, so "prove it is stable" is a green
+          # run rather than a reading of the summary.
+          [ "$FAILED" -eq 0 ]
+
+      - name: Keep the failing runs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flake-logs
+          path: flake-run-*.log
+          if-no-files-found: ignore

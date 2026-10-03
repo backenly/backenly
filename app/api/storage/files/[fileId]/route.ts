@@ -12,10 +12,8 @@ import { withTenantIsolation, TenantIsolationError } from '@/lib/tenant/isolatio
  * (The previous `[fileId]/[versionId]` layout read `params.id`, a segment that
  * never existed — so every call resolved `undefined` and 404'd.)
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { fileId: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ fileId: string }> }) {
+  const params = await props.params;
   try {
     return await withTenantIsolation(request, async (projectId) => {
       const files = await storageService.listFiles(undefined, projectId, { limit: 1000 })
@@ -43,10 +41,8 @@ export async function GET(
 /**
  * DELETE /api/storage/files/{fileId} — delete a single file
  */
-export async function DELETE(
-  request: NextRequest,
-  { params }: { params: { fileId: string } }
-) {
+export async function DELETE(request: NextRequest, props: { params: Promise<{ fileId: string }> }) {
+  const params = await props.params;
   try {
     const auth = await authenticateRequest(request)
     if (!auth.authenticated || !auth.userId) {

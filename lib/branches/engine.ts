@@ -67,6 +67,8 @@ async function readSchemaSnapshot(projectId: string, schemaName: string) {
   return { projectId, schemaName, tables: [...tables.values()], generatedAt: new Date().toISOString() }
 }
 
+import { assertCloudEdition, isCloudEdition } from '@/lib/edition/cloud-only'
+
 export interface CreateBranchOptions {
   /**
    * Copy main's rows into the branch. OFF by default, and that default is the
@@ -90,6 +92,7 @@ export async function createBranch(
   rawName: string,
   options: CreateBranchOptions = {},
 ) {
+  assertCloudEdition('Preview branches')
   // Normalize BEFORE validation and use the slug everywhere — the validator
   // lowercases internally, so "Add-Payments" must become "add-payments" here
   // or the schema identifier and registry would carry the un-normalized form.
@@ -227,6 +230,7 @@ export async function diffBranch(projectId: string, branchId: string): Promise<
   | { ok: true; diff: SchemaDiff; branch: string }
   | { ok: false; error: string }
 > {
+  assertCloudEdition('Preview branches')
   const branch = await prisma.workspaceBranch.findFirst({
     where: { id: branchId, projectId, status: 'active' },
   })
@@ -240,6 +244,7 @@ export async function diffBranch(projectId: string, branchId: string): Promise<
 }
 
 export async function mergeBranch(projectId: string, userId: string, branchId: string) {
+  assertCloudEdition('Preview branches')
   const result = await diffBranch(projectId, branchId)
   // Re-shape the early return explicitly — passing `result` through would leak
   // diffBranch's ok-variant into mergeBranch's inferred return union (this
@@ -304,6 +309,7 @@ export async function mergeBranch(projectId: string, userId: string, branchId: s
 }
 
 export async function discardBranch(projectId: string, userId: string, branchId: string) {
+  assertCloudEdition('Preview branches')
   const branch = await prisma.workspaceBranch.findFirst({
     where: { id: branchId, projectId, status: { in: ['active', 'merged'] } },
   })
@@ -332,6 +338,10 @@ export async function discardBranch(projectId: string, userId: string, branchId:
 }
 
 export async function listBranches(projectId: string) {
+  // Not a refusal: "which branches exist here" has a correct answer on a
+  // self-hosted deployment, and it is none. Throwing would make every caller
+  // that merely lists handle an exception for an empty result.
+  if (!isCloudEdition()) return []
   return prisma.workspaceBranch.findMany({
     where: { projectId, status: { not: 'discarded' } },
     orderBy: { createdAt: 'desc' },

@@ -3,8 +3,8 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { withAuth } from '@/lib/auth/route-protection'
 import { getActiveIncidents, getIncidents, createIncident, CreateIncidentData } from '@/lib/services/incidents'
-import { prisma } from '@/lib/db'
 import { z } from 'zod'
+import { canAccessProject, canWriteProject } from '@/lib/edition/guard'
 
 const querySchema = z.object({
   status: z.enum(['active', 'resolved', 'acknowledged']).optional(),
@@ -40,14 +40,7 @@ export const GET = withAuth(async (request: NextRequest, { user }) => {
       limit: searchParams.get('limit') ?? undefined,
     })
 
-    const project = await prisma.project.findFirst({
-      where: {
-        id: parsed.projectId,
-        userId: user.userId,
-      },
-    })
-
-    if (!project) {
+    if (!(await canAccessProject(user.userId, parsed.projectId))) {
       return NextResponse.json(
         { error: 'Invalid project access' },
         { status: 403 }
@@ -107,14 +100,7 @@ export const POST = withAuth(async (request: NextRequest, { user }) => {
     const body = await request.json()
     const validated = createIncidentSchema.parse(body)
 
-    const project = await prisma.project.findFirst({
-      where: {
-        id: validated.projectId,
-        userId: user.userId,
-      },
-    })
-
-    if (!project) {
+    if (!(await canWriteProject(user.userId, validated.projectId))) {
       return NextResponse.json(
         { error: 'Invalid project access' },
         { status: 403 }

@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { requireAuth } from '@/lib/auth/middleware'
+import { canAccessProject } from '@/lib/edition/guard'
 
 /**
  * GET /api/database/tables/[tableId]/columns
@@ -11,10 +12,8 @@ import { requireAuth } from '@/lib/auth/middleware'
  * 🔒 Requires auth + project ownership. Previously this endpoint had no
  * ownership check — any authed user could read any project's table schema.
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { tableId: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ tableId: string }> }) {
+  const params = await props.params;
   try {
     const user = await requireAuth(request)
     const { searchParams } = new URL(request.url)
@@ -28,11 +27,7 @@ export async function GET(
     }
 
     // Ownership check before any data is returned.
-    const owned = await prisma.project.findFirst({
-      where: { id: projectId, userId: user.userId },
-      select: { id: true },
-    })
-    if (!owned) {
+    if (!(await canAccessProject(user.userId, projectId))) {
       return NextResponse.json({ error: 'Project not found or access denied' }, { status: 403 })
     }
 

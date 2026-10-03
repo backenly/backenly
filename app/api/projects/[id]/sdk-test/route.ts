@@ -3,15 +3,14 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { verifySession } from '@/lib/auth/session'
 import { prisma } from '@/lib/db'
+import { canWriteProject } from '@/lib/edition/guard'
 
 /**
  * POST /api/projects/[id]/sdk-test
  * Test SDK connection - verifies project exists and user has access
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const token = request.cookies.get('auth-token')?.value
     if (!token) {
@@ -32,11 +31,12 @@ export async function POST(
     const projectId = params.id
 
     // Verify project exists and user has access
-    const project = await prisma.project.findFirst({
-      where: {
-        id: projectId,
-        userId: session.userId,
-      },
+    if (!(await canWriteProject(session.userId, projectId))) {
+      return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+    }
+
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
       select: {
         id: true,
         name: true,

@@ -1,0 +1,8 @@
+{
+  "name": "backenly-migration-runner",
+  "private": true,
+  "description": "Layer 3 migration runner. Prisma CLI only: it applies canonical migrations and does nothing else.",
+  "dependencies": {
+    "prisma": "5.22.0"
+  }
+}

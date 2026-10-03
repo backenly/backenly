@@ -220,6 +220,32 @@ export async function revokeDirectAccess(projectId: string, mode: DirectAccessMo
 
 // ── Status ────────────────────────────────────────────────────────────────────
 
+/**
+ * Whether the privileged SECURITY DEFINER helpers a superuser installs via
+ * scripts/setup-direct-access.sql are present in this database.
+ *
+ * Exists so a caller can decline to attempt what is not installed. Calling
+ * provisionDirectAccess without them raises `function ... does not exist`, and
+ * Prisma logs every failed query at `error` level before the caller ever sees
+ * the exception. Bootstrap ran that path twice on its EXPECTED first run, so a
+ * normal install opened with raw Prisma error blocks and read as a crash.
+ *
+ * A catalog probe rather than a caught failure: the question "is this
+ * installed" has a cheap direct answer, and asking it directly is also what
+ * lets one clear advisory replace one error block per mode.
+ */
+export async function directAccessHelpersInstalled(): Promise<boolean> {
+  const rows = await prisma.$queryRaw<Array<{ present: boolean }>>`
+    SELECT EXISTS (
+      SELECT 1
+      FROM pg_proc p
+      JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE n.nspname = 'public'
+        AND p.proname = 'backenly_direct_create_role'
+    ) AS present`
+  return rows[0]?.present === true
+}
+
 export async function getDirectAccessStatus(projectId: string): Promise<DirectAccessStatus> {
   assertValidProjectId(projectId)
   const [schema, rows, pendingDriftEvents] = await Promise.all([

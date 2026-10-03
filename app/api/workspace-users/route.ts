@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { verifySession } from '@/lib/auth/session';
 import { cookies } from 'next/headers';
 import { getWorkspaceUsers } from '@/lib/services/workspaceAuth';
+import { canAccessProject } from '@/lib/edition/guard';
 
 /**
  * GET /api/workspace-users?projectId=xxx - Get all users from workspace database
@@ -32,6 +33,15 @@ export async function GET(request: NextRequest) {
         { error: 'projectId is required' },
         { status: 400 }
       );
+    }
+
+    // Ownership. verifySession established WHO is asking and nothing more, so
+    // the projectId from the query string went straight to the service. Any
+    // signed-in account could therefore list another project's end users.
+    //
+    // 404 rather than 403, so the endpoint is not an oracle for project ids.
+    if (!session.userId || !(await canAccessProject(session.userId, projectId))) {
+      return NextResponse.json({ error: 'Project not found' }, { status: 404 });
     }
 
     // Get users

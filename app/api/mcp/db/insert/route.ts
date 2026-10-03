@@ -3,19 +3,14 @@ export const dynamic = 'force-dynamic'
 /** POST /api/mcp/db/insert — insert one row. */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { z } from 'zod'
 import { mcpGuard, recordMcpCall, refuseIfReadOnly } from '@/lib/mcp/guard'
 import { corsHeaders, optionsResponse } from '@/lib/mcp/cors'
 import { dbInsert } from '@/lib/mcp/runtime-db'
 import { dbErrorBody } from '@/lib/db/query-errors'
 import { parseMcpBody } from '@/lib/mcp/request-body'
+import { DB_TOOL_FAILURE_CODE, DB_TOOL_REQUESTS } from '@/lib/mcp/db-tool-requests'
 
 const ENDPOINT = '/api/mcp/db/insert'
-
-const RequestSchema = z.object({
-  table: z.string().trim().min(1).max(63),
-  row: z.record(z.unknown()).refine((r) => Object.keys(r).length > 0, 'row must include at least one column'),
-})
 
 export function OPTIONS() { return optionsResponse() }
 
@@ -25,15 +20,16 @@ export async function POST(request: NextRequest) {
   if (guard.response) return withCors(guard.response)
   const auth = guard.auth!
 
-  // A read-only key never reaches a write. stdio calls this route directly,
-  // so the check cannot live only in /api/mcp/tool.
+  // A read-only key never reaches a write. stdio packages before 0.4.0 and the
+  // reliability harness call this route directly, so the check cannot live
+  // only in /api/mcp/tool.
   const ro = refuseIfReadOnly(auth, 'db_insert')
   if (ro) {
     recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 403, tool: 'db_insert', error: 'READ_ONLY_KEY' })
     return withCors(ro)
   }
 
-  const body = parseMcpBody(RequestSchema, await request.json().catch(() => null), 'db_insert')
+  const body = parseMcpBody(DB_TOOL_REQUESTS.db_insert, await request.json().catch(() => null), 'db_insert')
   if (!body.ok) {
     recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 400, tool: 'db_insert', error: body.error.code })
     return withCors(NextResponse.json(body.error, { status: 400 }))
@@ -47,7 +43,7 @@ export async function POST(request: NextRequest) {
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Insert failed'
     recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 400, tool: 'db_insert', error: msg })
-    return withCors(NextResponse.json(dbErrorBody(err, 'INSERT_FAILED'), { status: 400 }))
+    return withCors(NextResponse.json(dbErrorBody(err, DB_TOOL_FAILURE_CODE.db_insert), { status: 400 }))
   }
 }
 

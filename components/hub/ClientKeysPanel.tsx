@@ -1,17 +1,32 @@
 'use client'
 
+/**
+ * API keys: every key for this project (apps, scripts, agents), rendered under
+ * Settings → API keys. The page owns the header; this panel is the table, the
+ * create dialog and the one-time reveal.
+ *
+ * The server returns the full plaintext key exactly once, at creation. Every
+ * later read is masked by design, so a listed key shows its prefix and "Shown
+ * once, at creation" rather than handing out a broken masked string to copy.
+ */
+
 import { useState, useEffect } from 'react'
 import { useParams } from 'next/navigation'
 import { Toast } from '@/components/ui/Toast'
-import { motion, AnimatePresence } from 'framer-motion'
+import { KeyRound, Trash2, Plus, Check, Eye, EyeOff, AlertTriangle, Shield } from 'lucide-react'
 import {
-  KeyRound, Trash2, Plus, Copy, Check, Eye, EyeOff, AlertTriangle,
-  Shield, Loader2, Activity, X, ChevronDown,
-} from 'lucide-react'
-import { InspectorPageHeader } from '@/components/inspector/InspectorPageHeader'
-import {
-  KIT, KitButton, KitBadge, KitField, KitInput, EmptyState, KitNote,
+  CopyButton,
+  EmptyState,
+  IconButton,
+  KitButton,
+  KitConfirmDialog,
+  KitInput,
+  KitModal,
+  KitNote,
+  Skeleton,
+  Tag,
 } from '@/components/inspector/kit'
+import { PAGE_GUTTER, PAGE_WIDTH } from '@/components/console/tokens'
 
 interface ApiKey {
   id: string
@@ -33,14 +48,32 @@ interface ApiKey {
   resetAt?: string | null
 }
 
-// Role → semantic badge tone. Violet (beta) marks elevated/admin keys; the rest
-// use neutral/semantic tones so the list doesn't read as one accent wash.
-const ROLE_TONE: Record<string, 'beta' | 'operational' | 'managed' | 'neutral'> = {
-  admin: 'beta',
-  write: 'operational',
-  'read-only': 'managed',
+type NewRole = 'admin' | 'read-only' | 'write' | 'client'
+
+// Elevated keys get the accent so they stand out in the list; the rest stay
+// neutral, so the table does not read as one accent wash.
+const ROLE_TAG: Record<string, 'violet' | 'good' | 'neutral'> = {
+  admin: 'violet',
+  write: 'good',
+  'read-only': 'neutral',
   client: 'neutral',
 }
+
+const ROLE_LABEL: Record<string, string> = {
+  admin: 'Admin',
+  write: 'Write',
+  'read-only': 'Read only',
+  client: 'Client',
+  'ai-only': 'AI only',
+  service: 'Service',
+}
+
+const ROLE_OPTIONS: Array<{ value: NewRole; label: string; body: string }> = [
+  { value: 'admin', label: 'Admin', body: 'Full access. Server-side only, never in a browser.' },
+  { value: 'write', label: 'Write', body: 'Read and write data, no administration.' },
+  { value: 'read-only', label: 'Read only', body: 'Reads data, changes nothing.' },
+  { value: 'client', label: 'Client', body: 'Safe to embed in a frontend app.' },
+]
 
 export function ClientKeysPanel() {
   const params = useParams()
@@ -51,11 +84,11 @@ export function ClientKeysPanel() {
   const [creating, setCreating] = useState(false)
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [newKeyName, setNewKeyName] = useState('')
-  const [newKeyRole, setNewKeyRole] = useState<'admin' | 'read-only' | 'write' | 'client'>('admin')
+  const [newKeyRole, setNewKeyRole] = useState<NewRole>('admin')
   const [createdKey, setCreatedKey] = useState<string | null>(null)
   const [revealedKeys, setRevealedKeys] = useState<Set<string>>(new Set())
-  const [copiedKey, setCopiedKey] = useState<string | null>(null)
-  const [createdCopied, setCreatedCopied] = useState(false)
+  const [pendingDelete, setPendingDelete] = useState<{ id: string; name: string } | null>(null)
+  const [deleting, setDeleting] = useState(false)
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' | 'warning' } | null>(null)
 
   useEffect(() => {
@@ -69,10 +102,6 @@ export function ClientKeysPanel() {
       const response = await fetch(`/api/api-keys?projectId=${projectId}`, { credentials: 'include' })
       if (!response.ok) throw new Error('Failed to fetch API keys')
       const data = await response.json()
-      // The server only ever returns a masked key on list reads (the raw key is
-      // shown exactly once, at creation). So every listed key renders as
-      // "Shown once, at creation" — the honest state — and the reveal/copy
-      // affordance only lights up for the just-created key held in memory.
       setApiKeys(data.apiKeys || [])
     } catch (error: any) {
       setToast({ message: error.message || 'Failed to load API keys', type: 'error' })
@@ -81,9 +110,15 @@ export function ClientKeysPanel() {
     }
   }
 
+  const resetCreate = () => {
+    setShowCreateModal(false)
+    setNewKeyName('')
+    setNewKeyRole('admin')
+  }
+
   const handleCreateApiKey = async () => {
     if (!newKeyName.trim()) {
-      setToast({ message: 'Please enter a key name', type: 'warning' })
+      setToast({ message: 'Name the key so you can recognise it later.', type: 'warning' })
       return
     }
     try {
@@ -107,10 +142,8 @@ export function ClientKeysPanel() {
       }
       const data = await response.json()
       setCreatedKey(data.apiKey.key)
-      setNewKeyName('')
-      setNewKeyRole('admin')
+      resetCreate()
       await loadApiKeys()
-      setToast({ message: 'API key created', type: 'success' })
     } catch (error: any) {
       setToast({ message: error.message || 'Failed to create API key', type: 'error' })
     } finally {
@@ -118,10 +151,11 @@ export function ClientKeysPanel() {
     }
   }
 
-  const handleDeleteApiKey = async (keyId: string, keyName: string) => {
-    if (!confirm(`Delete the API key "${keyName}"? This cannot be undone and any app using it will stop working immediately.`)) return
+  const confirmDelete = async () => {
+    if (!pendingDelete) return
+    setDeleting(true)
     try {
-      const response = await fetch(`/api/api-keys/${keyId}?projectId=${projectId}`, {
+      const response = await fetch(`/api/api-keys/${pendingDelete.id}?projectId=${projectId}`, {
         method: 'DELETE',
         credentials: 'include',
       })
@@ -129,309 +163,251 @@ export function ClientKeysPanel() {
         const error = await response.json()
         throw new Error(error.error || 'Failed to delete API key')
       }
-      setToast({ message: 'API key deleted', type: 'success' })
+      setToast({ message: `Deleted “${pendingDelete.name}”`, type: 'success' })
+      setPendingDelete(null)
       await loadApiKeys()
     } catch (error: any) {
       setToast({ message: error.message || 'Failed to delete API key', type: 'error' })
+    } finally {
+      setDeleting(false)
     }
   }
 
   const toggleRevealKey = (keyId: string) => {
-    setRevealedKeys(prev => {
-      const newSet = new Set(prev)
-      if (newSet.has(keyId)) newSet.delete(keyId)
-      else newSet.add(keyId)
-      return newSet
+    setRevealedKeys((prev) => {
+      const next = new Set(prev)
+      if (next.has(keyId)) next.delete(keyId)
+      else next.add(keyId)
+      return next
     })
-  }
-
-  const handleCopyKey = (key: string, keyId: string) => {
-    navigator.clipboard.writeText(key)
-    setCopiedKey(keyId)
-    setToast({ message: 'Copied to clipboard', type: 'success' })
-    setTimeout(() => setCopiedKey(null), 2000)
   }
 
   const formatDate = (dateString: string) =>
-    new Date(dateString).toLocaleDateString('en-US', {
-      year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
-    })
+    new Date(dateString).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
 
   return (
-    <div className="h-full overflow-y-auto bg-[#101116]">
-      {toast && <Toast message={toast.message} type={toast.type} isVisible={true} onClose={() => setToast(null)} />}
+    <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pt-6`}>
+      {toast && <Toast message={toast.message} type={toast.type} isVisible onClose={() => setToast(null)} />}
 
-      <InspectorPageHeader
-        icon={KeyRound}
-        title="API Keys"
-        description="Every key for this project: apps, scripts, and agents. Client keys are safe to embed; admin keys must stay server-side."
-        badge={{ label: 'Managed', variant: 'managed' }}
-        stat={loading ? undefined : `${apiKeys.length} ${apiKeys.length === 1 ? 'key' : 'keys'}`}
-        actions={
-          <KitButton variant="primary" icon={Plus} onClick={() => setShowCreateModal(true)} disabled={creating}>
-            New key
-          </KitButton>
-        }
-      />
+      <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h2 className="text-[15px] font-semibold leading-[22px] tracking-[-0.012em] text-zinc-100">API keys</h2>
+          <p className="mt-1 max-w-[68ch] text-[13px] leading-[20px] text-zinc-400">
+            Keys for apps, scripts and agents. Client keys are safe to embed; admin keys stay server-side.
+          </p>
+        </div>
+        <KitButton variant="primary" icon={Plus} onClick={() => setShowCreateModal(true)} disabled={creating}>
+          New key
+        </KitButton>
+      </div>
 
-      <div className="px-8 pb-24 pt-8">
-        <div className="max-w-3xl">
-          {loading ? (
-            <div className="flex items-center gap-2 text-[13px] text-zinc-500 py-10 justify-center">
-              <Loader2 className="w-4 h-4 animate-spin" />
-              Loading keys…
-            </div>
-          ) : apiKeys.length === 0 ? (
-            <div className={`${KIT.surface} border ${KIT.border} ${KIT.radius} ${KIT.inset}`}>
-              <EmptyState
-                icon={KeyRound}
-                title="No API keys yet"
-                description="Create your first key to start making authenticated requests from your app."
-                action={
-                  <KitButton variant="primary" icon={Plus} onClick={() => setShowCreateModal(true)}>
-                    Create key
-                  </KitButton>
-                }
-              />
-            </div>
-          ) : (
-            <div className="flex flex-col gap-3">
+      {loading ? (
+        <div className="space-y-2">
+          <Skeleton className="h-[52px] w-full rounded-[10px]" />
+          <Skeleton className="h-[52px] w-full rounded-[10px]" />
+        </div>
+      ) : apiKeys.length === 0 ? (
+        <div className="rounded-[10px] border border-dashed border-white/[0.10]">
+          <EmptyState
+            icon={KeyRound}
+            title="No API keys yet"
+            description="Create a key to make authenticated requests from your app, a script or a server."
+            action={
+              <KitButton variant="primary" icon={Plus} onClick={() => setShowCreateModal(true)}>
+                Create a key
+              </KitButton>
+            }
+          />
+        </div>
+      ) : (
+        <div className="overflow-x-auto rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
+          <table className="w-full min-w-[760px] text-left">
+            <thead>
+              <tr className="border-b border-white/[0.06] text-[12px] text-zinc-500">
+                <th scope="col" className="h-[38px] whitespace-nowrap px-4 font-medium">Name</th>
+                <th scope="col" className="h-[38px] whitespace-nowrap px-4 font-medium">Key</th>
+                <th scope="col" className="h-[38px] whitespace-nowrap px-4 font-medium">Rate limit</th>
+                <th scope="col" className="h-[38px] whitespace-nowrap px-4 font-medium">Created</th>
+                <th scope="col" className="h-[38px] whitespace-nowrap px-4 font-medium">Last used</th>
+                <th scope="col" className="h-[38px] w-[56px] px-4 font-medium"><span className="sr-only">Actions</span></th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-white/[0.05]">
               {apiKeys.map((key) => {
                 const isRevealed = revealedKeys.has(key.id)
-                const isCopied = copiedKey === key.id
-                // The server only returns the full plaintext key ONCE, at
-                // creation — every later read is masked (e.g. sk_live_ab…cd) by
-                // design. So we can only reveal/copy a genuinely usable value
-                // when we still hold the raw key (recovered from localStorage).
-                // Otherwise we show the masked identifier honestly rather than
-                // handing the user a broken "sk_live_ab…cd" string to copy.
-                const realKey = key.key && !key.key.includes('…') && !key.key.includes('...') && key.key.length >= 24
-                  ? key.key
-                  : null
-                const maskedKey = key.key && !realKey ? key.key : key.keyPrefix + '••••••••••••'
-                const displayKey = realKey
-                  ? (isRevealed ? realKey : key.keyPrefix + '••••••••••••')
-                  : maskedKey
+                // A usable plaintext exists only for a key still held from its
+                // creation; everything else is the masked identifier.
+                const realKey =
+                  key.key && !key.key.includes('…') && !key.key.includes('...') && key.key.length >= 24 ? key.key : null
+                const maskedKey = key.key && !realKey ? key.key : key.keyPrefix + '••••••••'
+                const displayKey = realKey ? (isRevealed ? realKey : key.keyPrefix + '••••••••') : maskedKey
                 return (
-                  <motion.div
-                    key={key.id}
-                    initial={{ opacity: 0, y: 4 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className={`group relative ${KIT.surface} border ${KIT.border} ${KIT.radius} ${KIT.inset} p-5`}
-                  >
-                    <div className="flex items-start justify-between gap-4 mb-4">
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2.5">
-                          <h3 className="text-[14px] font-semibold text-zinc-50 truncate">{key.name}</h3>
-                          <KitBadge tone={ROLE_TONE[key.role] ?? 'neutral'} className="uppercase">
-                            {key.role}
-                          </KitBadge>
-                        </div>
-                        <div className="flex items-center gap-3 mt-1 text-[12px] text-zinc-500">
-                          <span>Created {formatDate(key.createdAt)}</span>
-                          {key.lastUsed && (
-                            <span className="text-emerald-400/80">Last used {formatDate(key.lastUsed)}</span>
-                          )}
-                        </div>
+                  <tr key={key.id} className="group transition-colors hover:bg-white/[0.02]">
+                    <td className="px-4 py-3 align-middle">
+                      <div className="flex items-center gap-2">
+                        <span className="max-w-[220px] truncate text-[13px] font-medium text-zinc-100">{key.name}</span>
+                        <Tag tone={ROLE_TAG[key.role] ?? 'neutral'}>{ROLE_LABEL[key.role] ?? key.role}</Tag>
                       </div>
-                      <button
-                        onClick={() => handleDeleteApiKey(key.id, key.name)}
-                        className="p-1.5 rounded-md text-zinc-500 hover:text-rose-300 hover:bg-rose-500/10 transition-colors opacity-0 group-hover:opacity-100"
-                        title="Delete key"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-
-                    <div className="flex items-center gap-2 bg-[#0f1015] border border-white/[0.08] rounded-md px-3 py-2.5">
-                      <code className="flex-1 min-w-0 text-[12.5px] font-mono text-zinc-200 truncate">
-                        {displayKey}
-                      </code>
-                      {realKey ? (
-                        <>
-                          <button
-                            onClick={() => toggleRevealKey(key.id)}
-                            className="p-1.5 rounded-md text-zinc-400 hover:text-zinc-100 hover:bg-white/[0.06] transition-colors"
-                            title={isRevealed ? 'Hide' : 'Reveal'}
-                          >
-                            {isRevealed ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                          </button>
-                          <button
-                            onClick={() => handleCopyKey(realKey, key.id)}
-                            className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[12px] font-medium transition-colors ${
-                              isCopied
-                                ? 'bg-emerald-500/[0.12] border border-emerald-500/25 text-emerald-300'
-                                : 'bg-white/[0.05] border border-white/[0.09] text-zinc-200 hover:bg-white/[0.09]'
-                            }`}
-                          >
-                            {isCopied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                            {isCopied ? 'Copied' : 'Copy'}
-                          </button>
-                        </>
+                      <p className="mt-0.5 max-w-[260px] truncate text-[12px] text-zinc-500">
+                        {key.capabilities && key.capabilities.length > 0 ? key.capabilities.join(', ') : 'Full access'}
+                      </p>
+                    </td>
+                    <td className="px-4 py-3 align-middle">
+                      <div className="flex items-center gap-1">
+                        <code className="max-w-[240px] truncate font-mono text-[12px] text-zinc-300">{displayKey}</code>
+                        {realKey ? (
+                          <>
+                            <IconButton
+                              icon={isRevealed ? EyeOff : Eye}
+                              label={isRevealed ? 'Hide key' : 'Reveal key'}
+                              onClick={() => toggleRevealKey(key.id)}
+                            />
+                            <CopyButton value={realKey} label="Copy key" />
+                          </>
+                        ) : (
+                          <span className="ml-1 inline-flex items-center gap-1 whitespace-nowrap text-[12px] text-zinc-600">
+                            <Shield className="h-3 w-3" /> Shown once
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-3 align-middle text-[13px] tabular-nums text-zinc-400">
+                      {(key.rateLimit ?? 1000).toLocaleString()} / {Math.max(1, Math.round((key.rateLimitWindow ?? 3600) / 3600))} h
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-3 align-middle text-[13px] tabular-nums text-zinc-400">
+                      {formatDate(key.createdAt)}
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-3 align-middle text-[13px] tabular-nums">
+                      {key.lastUsed ? (
+                        <span className="text-zinc-300">{formatDate(key.lastUsed)}</span>
                       ) : (
-                        <span className="inline-flex items-center gap-1.5 text-[11px] text-zinc-500 whitespace-nowrap pl-1">
-                          <Shield className="w-3 h-3" />
-                          Shown once, at creation
-                        </span>
+                        <span className="text-zinc-600">Never</span>
                       )}
-                    </div>
+                    </td>
+                    <td className="px-4 py-3 text-right align-middle">
+                      <IconButton
+                        icon={Trash2}
+                        label={`Delete ${key.name}`}
+                        onClick={() => setPendingDelete({ id: key.id, name: key.name })}
+                        className="hover:!bg-rose-500/10 hover:!text-rose-300 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100"
+                      />
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
 
-                    <div className="flex items-center gap-5 mt-3 text-[12px] text-zinc-500">
-                      <span className="inline-flex items-center gap-1.5">
-                        <Activity className="w-3.5 h-3.5 text-zinc-600" />
-                        {key.rateLimit ?? 1000} req/{Math.max(1, Math.round((key.rateLimitWindow ?? 3600) / 3600))}h
-                      </span>
-                      <span className="inline-flex items-center gap-1.5 min-w-0">
-                        <Shield className="w-3.5 h-3.5 text-zinc-600 flex-shrink-0" />
-                        <span className="truncate">
-                          {key.capabilities && key.capabilities.length > 0 ? key.capabilities.join(', ') : 'Full access'}
-                        </span>
-                      </span>
-                    </div>
-                  </motion.div>
+      {/* ── Create ─────────────────────────────────────────────────────── */}
+      <KitModal
+        open={showCreateModal}
+        onClose={resetCreate}
+        title="New API key"
+        description="The key is shown once, right after you create it."
+        width="max-w-[480px]"
+        footer={
+          <>
+            <KitButton variant="ghost" onClick={resetCreate} disabled={creating}>
+              Cancel
+            </KitButton>
+            <KitButton variant="primary" icon={Plus} loading={creating} onClick={handleCreateApiKey} disabled={!newKeyName.trim()}>
+              {creating ? 'Creating…' : 'Create key'}
+            </KitButton>
+          </>
+        }
+      >
+        <form
+          className="space-y-5"
+          onSubmit={(e) => {
+            e.preventDefault()
+            if (newKeyName.trim()) handleCreateApiKey()
+          }}
+        >
+          <label className="block">
+            <span className="mb-1.5 block text-[12.5px] font-medium text-zinc-300">Name</span>
+            <KitInput
+              name="key-name"
+              autoComplete="off"
+              value={newKeyName}
+              onChange={(e) => setNewKeyName(e.target.value)}
+              placeholder="Production mobile app…"
+            />
+          </label>
+
+          <fieldset>
+            <legend className="mb-2 text-[12.5px] font-medium text-zinc-300">Access</legend>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {ROLE_OPTIONS.map((opt) => {
+                const on = newKeyRole === opt.value
+                return (
+                  <label
+                    key={opt.value}
+                    className={`relative flex cursor-pointer flex-col rounded-[8px] border px-3 py-2.5 transition-colors ${
+                      on ? 'border-violet-300/40 bg-violet-400/[0.06]' : 'border-white/[0.08] hover:border-white/[0.14]'
+                    } focus-within:ring-2 focus-within:ring-violet-300/60`}
+                  >
+                    <input
+                      type="radio"
+                      name="key-role"
+                      value={opt.value}
+                      checked={on}
+                      onChange={() => setNewKeyRole(opt.value)}
+                      className="sr-only"
+                    />
+                    <span className="flex items-center justify-between text-[13px] font-medium text-zinc-100">
+                      {opt.label}
+                      {on && <Check className="h-3.5 w-3.5 text-violet-200" strokeWidth={2.25} />}
+                    </span>
+                    <span className="mt-0.5 text-[12px] leading-[17px] text-zinc-500">{opt.body}</span>
+                  </label>
                 )
               })}
             </div>
-          )}
-        </div>
-      </div>
+          </fieldset>
+        </form>
+      </KitModal>
 
-      {/* ── Create key modal ─────────────────────────────────────────────── */}
-      <AnimatePresence>
-        {showCreateModal && (
-          <div
-            className="fixed inset-0 z-[70] flex items-center justify-center p-4"
-            onClick={(e) => { if (e.target === e.currentTarget) { setShowCreateModal(false); setNewKeyName(''); setNewKeyRole('admin') } }}
-          >
-            <div className="absolute inset-0 bg-black/70" />
-            <motion.div
-              initial={{ opacity: 0, scale: 0.97, y: 8 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.97, y: 8 }}
-              transition={{ duration: 0.16, ease: 'easeOut' }}
-              className={`relative w-full max-w-md ${KIT.surface} border ${KIT.border} ${KIT.radius} ${KIT.inset} overflow-hidden`}
-            >
-              <div className="flex items-center justify-between px-5 py-4 border-b border-white/[0.08]">
-                <div className="flex items-center gap-2.5">
-                  <span className={`w-8 h-8 ${KIT.radiusSm} ${KIT.accentBg} border ${KIT.accentBorder} flex items-center justify-center`}>
-                    <KeyRound className="w-4 h-4 text-violet-300" />
-                  </span>
-                  <h3 className="text-[15px] font-semibold text-zinc-50">New API key</h3>
-                </div>
-                <button
-                  onClick={() => { setShowCreateModal(false); setNewKeyName(''); setNewKeyRole('admin') }}
-                  className="w-7 h-7 rounded-md flex items-center justify-center text-zinc-400 hover:text-zinc-100 hover:bg-white/[0.06] transition-colors"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-
-              <div className="px-5 py-5 space-y-5">
-                <KitField label="Key name" hint="A label to recognise this key later, e.g. Production mobile app.">
-                  <KitInput
-                    value={newKeyName}
-                    onChange={(e) => setNewKeyName(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === 'Enter' && newKeyName.trim()) handleCreateApiKey() }}
-                    placeholder="e.g. Production mobile app"
-                    autoFocus
-                  />
-                </KitField>
-
-                <KitField label="Access role" hint="Controls what this key is allowed to do.">
-                  <div className="relative">
-                    <select
-                      value={newKeyRole}
-                      onChange={(e) => setNewKeyRole(e.target.value as any)}
-                      className={`w-full px-3.5 py-2.5 bg-[#0f1015] border ${KIT.border} ${KIT.radiusSm} text-[13.5px] text-zinc-50 appearance-none cursor-pointer focus:outline-none focus:border-violet-500/50 focus:ring-2 focus:ring-violet-500/15 transition-colors`}
-                    >
-                      <option value="admin" className="bg-[#0f1015]">Admin (full access)</option>
-                      <option value="write" className="bg-[#0f1015]">Write (read + write)</option>
-                      <option value="read-only" className="bg-[#0f1015]">Read only</option>
-                      <option value="client" className="bg-[#0f1015]">Client (frontend apps)</option>
-                    </select>
-                    <ChevronDown className="w-4 h-4 text-zinc-500 absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                  </div>
-                </KitField>
-              </div>
-
-              <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-white/[0.08] bg-white/[0.012]">
-                <KitButton variant="ghost" onClick={() => { setShowCreateModal(false); setNewKeyName(''); setNewKeyRole('admin') }} disabled={creating}>
-                  Cancel
-                </KitButton>
-                <KitButton
-                  variant="primary"
-                  icon={creating ? Loader2 : Plus}
-                  onClick={handleCreateApiKey}
-                  disabled={creating || !newKeyName.trim()}
-                  className={creating ? '[&_svg]:animate-spin' : ''}
-                >
-                  {creating ? 'Generating…' : 'Generate key'}
-                </KitButton>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
-
-      {/* ── Created key reveal (one-time) ────────────────────────────────── */}
-      <AnimatePresence>
+      {/* ── One-time reveal ────────────────────────────────────────────── */}
+      <KitModal
+        open={!!createdKey}
+        onClose={() => setCreatedKey(null)}
+        title="Key created"
+        description="Copy it now. Backenly stores only a hash, so it can never be shown again."
+        width="max-w-[540px]"
+        footer={
+          <KitButton variant="primary" onClick={() => setCreatedKey(null)}>
+            I’ve saved it
+          </KitButton>
+        }
+      >
         {createdKey && (
-          <div className="fixed inset-0 z-[80] flex items-center justify-center p-4">
-            <div className="absolute inset-0 bg-black/75" />
-            <motion.div
-              initial={{ opacity: 0, scale: 0.97, y: 8 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.97, y: 8 }}
-              transition={{ duration: 0.16, ease: 'easeOut' }}
-              className={`relative w-full max-w-lg ${KIT.surface} border ${KIT.border} ${KIT.radius} ${KIT.inset} overflow-hidden`}
-            >
-              <div className="px-6 py-6">
-                <div className="flex items-center gap-3 mb-1">
-                  <span className="w-9 h-9 rounded-md bg-emerald-500/[0.10] border border-emerald-500/25 flex items-center justify-center">
-                    <Check className="w-4 h-4 text-emerald-300" />
-                  </span>
-                  <div>
-                    <h3 className="text-[15.5px] font-semibold text-zinc-50 tracking-tight">Key created</h3>
-                    <p className="text-[12.5px] text-zinc-400">Copy it now. It won&apos;t be shown again.</p>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2 bg-[#0f1015] border border-white/[0.08] rounded-md px-3 py-3 mt-5">
-                  <code className="flex-1 min-w-0 text-[13px] font-mono text-zinc-100 break-all select-all">
-                    {createdKey}
-                  </code>
-                </div>
-
-                <KitButton
-                  variant="primary"
-                  icon={createdCopied ? Check : Copy}
-                  onClick={() => {
-                    navigator.clipboard.writeText(createdKey)
-                    setCreatedCopied(true)
-                    setToast({ message: 'Copied to clipboard', type: 'success' })
-                    setTimeout(() => setCreatedCopied(false), 2000)
-                  }}
-                  className="w-full justify-center mt-3"
-                >
-                  {createdCopied ? 'Copied to clipboard' : 'Copy to clipboard'}
-                </KitButton>
-
-                <div className="mt-4">
-                  <KitNote tone="warn" icon={AlertTriangle}>
-                    This is your only chance to save this key. Backenly stores only a hash, so the raw key can never be shown again.
-                  </KitNote>
-                </div>
-              </div>
-
-              <div className="flex items-center justify-end px-6 py-4 border-t border-white/[0.08] bg-white/[0.012]">
-                <KitButton variant="secondary" onClick={() => { setCreatedKey(null); setShowCreateModal(false) }}>
-                  I&apos;ve saved it
-                </KitButton>
-              </div>
-            </motion.div>
+          <div className="space-y-4">
+            <div className="flex items-start gap-2 rounded-[8px] border border-white/[0.08] bg-[#08090a] p-3">
+              <code className="min-w-0 flex-1 select-all break-all font-mono text-[12.5px] leading-[20px] text-zinc-100">
+                {createdKey}
+              </code>
+              <CopyButton value={createdKey} label="Copy key" showLabel />
+            </div>
+            <KitNote tone="warn" icon={AlertTriangle}>
+              This is your only chance to save this key. Store it in your secrets manager or an environment variable.
+            </KitNote>
           </div>
         )}
-      </AnimatePresence>
+      </KitModal>
+
+      {/* ── Delete ─────────────────────────────────────────────────────── */}
+      <KitConfirmDialog
+        open={!!pendingDelete}
+        onCancel={() => setPendingDelete(null)}
+        onConfirm={confirmDelete}
+        danger
+        busy={deleting}
+        title={`Delete “${pendingDelete?.name ?? ''}”?`}
+        description="Any app or script using this key stops working immediately. This cannot be undone."
+        confirmLabel="Delete key"
+      />
     </div>
   )
 }

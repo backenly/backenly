@@ -29,6 +29,8 @@
 import { PrismaClient } from '@prisma/client'
 import { S3Client, ListObjectsV2Command, DeleteObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3'
 import crypto from 'crypto'
+import { getProjectQuota } from '@/lib/services/storageQuota'
+import { MAX_BUFFERED_UPLOAD_BYTES } from '@/lib/storage/upload-policy'
 
 const prisma = new PrismaClient()
 
@@ -38,7 +40,12 @@ const prisma = new PrismaClient()
  * HARD LIMITS - Cannot be exceeded
  */
 export interface StorageQuota {
-  maxProjectSize: bigint      // Max storage per project (bytes)
+  /**
+   * Max storage per project (bytes). Unset means the owner's plan decides, via
+   * getProjectQuota. A hardcoded 10 GB used to sit here, below Pro's advertised
+   * 100 GB, so the plan was not the limit on the S3 path.
+   */
+  maxProjectSize?: bigint
   maxFileSize: bigint          // Max single file size (bytes)
   maxFileCount: number         // Max files per project
   maxOrphansAllowed: number    // Max orphaned files before alert
@@ -48,10 +55,25 @@ export interface StorageQuota {
  * Default quotas (production-safe)
  */
 const DEFAULT_QUOTAS: StorageQuota = {
-  maxProjectSize: BigInt(10 * 1024 * 1024 * 1024),  // 10 GB per project
-  maxFileSize: BigInt(100 * 1024 * 1024),            // 100 MB per file
+  maxFileSize: MAX_BUFFERED_UPLOAD_BYTES,            // the shared per-upload ceiling (upload-policy.ts)
   maxFileCount: 10000,                                // 10k files per project
   maxOrphansAllowed: 100,                             // Max 100 orphans before alert
+}
+
+/**
+ * What an upload of `fileSize` is measured against: an explicit per-project
+ * override against this project's own bytes, else the owner's plan against the
+ * bytes of every project the owner has (storageQuota.ts owns that rule).
+ */
+async function sizeCheck(
+  projectId: string,
+  projectUsed: bigint,
+  fileSize: bigint,
+  quotas: StorageQuota,
+): Promise<{ used: bigint; cap: bigint }> {
+  if (quotas.maxProjectSize !== undefined) return { used: projectUsed, cap: quotas.maxProjectSize }
+  const quota = await getProjectQuota(projectId, fileSize)
+  return { used: quota.used, cap: quota.limit }
 }
 
 /**
@@ -133,12 +155,15 @@ export async function enforceStorageQuota(
     }
   }
   
-  // Check project storage limit
-  const projectedUsage = currentUsage + fileSize
-  if (projectedUsage > quotas.maxProjectSize) {
+  // Check the storage limit (the account's, unless an explicit override is given)
+  const { used, cap } = await sizeCheck(projectId, currentUsage, fileSize, quotas)
+  if (used + fileSize > cap) {
     return {
       allowed: false,
-      reason: `Project storage quota exceeded (${formatBytes(quotas.maxProjectSize)} limit)`,
+      reason:
+        quotas.maxProjectSize !== undefined
+          ? `Project storage quota exceeded (${formatBytes(cap)} limit)`
+          : `Storage quota exceeded (${formatBytes(cap)} limit, shared by all of your projects)`,
       current: currentUsage,
     }
   }
@@ -494,14 +519,14 @@ export async function getStorageHealth(
     },
   })
   
-  const quotaUsage = Number(
-    (project.storageUsed * BigInt(100)) / DEFAULT_QUOTAS.maxProjectSize
-  )
-  
+  // The quota is the account's: report the account's use of it.
+  const quota = await getProjectQuota(projectId)
+  const quotaUsage = quota.percentUsed
+
   const inconsistencies: string[] = []
-  
+
   // Check for quota violations
-  if (project.storageUsed > DEFAULT_QUOTAS.maxProjectSize) {
+  if (quota.used > quota.limit) {
     inconsistencies.push('Storage quota exceeded')
   }
   

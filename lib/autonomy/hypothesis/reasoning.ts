@@ -225,8 +225,32 @@ export function concludeInvestigation(
 
   const sorted = [...live].sort((a, b) => b.confidence - a.confidence)
   const leader = sorted[0]
+
+  // The margin is measured against the closest rival that evidence could still
+  // separate from the leader.
+  //
+  // A hypothesis marked `confirmable: false` cannot be settled by anything this
+  // platform can gather, so as a blocking runner-up it is not uncertainty
+  // awaiting evidence — it is a permanent veto, and one that applies to nearly
+  // every project, since its deciding observation is true of any table with
+  // more than two write shapes. Vetoing every confirmed diagnosis forever is
+  // not caution; it is the loop never concluding anything.
+  //
+  // It stays in `candidates`, is still reported, and may still never be
+  // concluded ON — `structural.ts` enforces that for the leader. It simply does
+  // not get to hold a confirmed rival at ambiguous.
+  //
+  // The leader itself must be confirmable. Without this an unconfirmable
+  // hypothesis at the top would sail through on an empty field, which is the
+  // exact opposite of the rule.
+  const separableRunnerUp = sorted.slice(1).find(h => h.confirmable !== false)
   const runnerUp = sorted[1]
-  const margin = runnerUp ? leader.confidence - runnerUp.confidence : 1
+  const margin =
+    leader.confirmable === false
+      ? 0
+      : separableRunnerUp
+        ? leader.confidence - separableRunnerUp.confidence
+        : 1
 
   // A leader may only be concluded on once the evidence that COULD refute it has
   // been gathered. Skipping this produced a real wrong answer: PostgREST was
@@ -237,7 +261,43 @@ export function concludeInvestigation(
     t => !state.spentTests.includes(t.id) && leader.predicts[t.id] !== undefined,
   )
 
-  if (leader.confidence >= ACT_THRESHOLD && margin >= LEAD_MARGIN && !refutable) {
+  // The confidence bar, measured against the belief that evidence could move.
+  //
+  // Removing the tie-break veto above was not enough on its own. An
+  // unconfirmable hypothesis also holds POSTERIOR MASS, and nothing can ever
+  // take that mass away — in production `split_brain_writers` held 0.286 of it,
+  // capping a confirmed leader at 0.714 against a bar of 0.85. No evidence
+  // could close that gap on any project, so the bar was unreachable rather than
+  // demanding.
+  //
+  // So the leader is judged on the share of belief that is actually decidable,
+  // while ACT_THRESHOLD itself is untouched. Two conditions, and the second is
+  // what keeps the first honest:
+  //
+  //   1. it clears ACT_THRESHOLD among the settleable hypotheses, and
+  //   2. it holds a strict majority of the TOTAL posterior.
+  //
+  // Without (2) this would be plain renormalisation, which reads 1.0 for a
+  // leader holding 0.3 against 0.7 of unmeasurable mass — inflating confidence
+  // exactly where the evidence is weakest. With it, such a leader stays
+  // ambiguous, which is the right answer: most of the belief is somewhere this
+  // platform cannot look.
+  //
+  // The reported confidence stays the true posterior. Nothing downstream is
+  // told the system is more certain than it is.
+  const settleableMass = live
+    .filter(h => h.confirmable !== false)
+    .reduce((sum, h) => sum + h.confidence, 0)
+  const confidenceAmongSettleable =
+    settleableMass > 0 ? leader.confidence / settleableMass : 0
+  const holdsMajority = leader.confidence > 0.5
+
+  const clearsBar =
+    leader.confirmable !== false &&
+    holdsMajority &&
+    confidenceAmongSettleable >= ACT_THRESHOLD
+
+  if (clearsBar && margin >= LEAD_MARGIN && !refutable) {
     return { kind: 'conclusive', hypothesis: leader, confidence: leader.confidence }
   }
 

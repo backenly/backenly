@@ -45,8 +45,9 @@ function maskKey(prefix: string, prefixDb: string | null | undefined): string {
 
 export async function GET(
   req: NextRequest,
-  { params }: { params: { id: string } },
+  props: { params: Promise<{ id: string }> },
 ) {
+  const params = await props.params
   return withProjectValidation<any>(req, async ({ projectId }) => {
     // Belt-and-suspenders: withProjectValidation already JSON-wraps thrown
     // errors, but a Prisma error (e.g. an MCP-schema column missing before
@@ -110,8 +111,9 @@ export async function GET(
 
 export async function POST(
   req: NextRequest,
-  { params }: { params: { id: string } },
+  props: { params: Promise<{ id: string }> },
 ) {
+  const params = await props.params
   return withProjectValidation<any>(req, async ({ projectId, userId }) => {
     let body: { label?: string; name?: string; readOnly?: boolean } = {}
     try { body = await req.json() ?? {} } catch { /* allow empty */ }

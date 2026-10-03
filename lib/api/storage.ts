@@ -4,6 +4,8 @@ export interface StorageBucket {
   id: string
   name: string
   isPublic: boolean
+  /** 'public_read' | 'cdn_cacheable' | 'private' | 'owner_only'. */
+  accessPolicy?: string
   fileCount?: number
   totalSize?: number // BigInt converted to number for JSON
 }
@@ -59,6 +61,26 @@ export async function getBuckets(projectId?: string): Promise<StorageBucket[]> {
   const data: BucketsResponse = await apiRequest<BucketsResponse>(`/api/storage/buckets`)
   return data.buckets
 }
+/**
+ * The buckets plus the deployment-level caveat, for surfaces that need both.
+ *
+ * `getBuckets` stays as it is so existing callers are untouched; this is the
+ * shape the storage panel needs, because the CDN caveat is a property of the
+ * deployment rather than of any one bucket.
+ */
+export async function getBucketsWithCaveat(
+  projectId?: string,
+): Promise<{ buckets: StorageBucket[]; cdnServesPublicObjects: boolean }> {
+  const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''
+  const res = await apiRequest<{ buckets: StorageBucket[]; cdnServesPublicObjects?: boolean }>(
+    `/api/storage/buckets${qs}`,
+  )
+  return {
+    buckets: res.buckets ?? [],
+    cdnServesPublicObjects: Boolean(res.cdnServesPublicObjects),
+  }
+}
+
 
 // Create bucket
 export async function createBucket(
@@ -72,6 +94,25 @@ export async function createBucket(
 }
 
 // Delete bucket
+/**
+ * Change which policy governs reads from a bucket.
+ *
+ * Takes effect on the NEXT request for any object in it, because the serving
+ * path evaluates the bucket's current policy rather than a flag copied onto each
+ * file at upload. That is the whole point: before, this call returned success
+ * and every existing object stayed readable.
+ */
+export async function updateBucketPolicy(
+  bucketId: string,
+  accessPolicy: string,
+): Promise<StorageBucket> {
+  const res = await apiRequest<{ bucket: StorageBucket }>(
+    `/api/storage/buckets/${bucketId}`,
+    { method: 'PATCH', body: JSON.stringify({ accessPolicy }) },
+  )
+  return res.bucket
+}
+
 export async function deleteBucket(bucketId: string): Promise<void> {
   await apiRequest(`/api/storage/buckets/${bucketId}`, {
     method: 'DELETE',

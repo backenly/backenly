@@ -1,27 +1,10 @@
 'use client'
 
-import { useRef, useState } from 'react'
+import { useId, useRef, useState, type PointerEvent, type ReactNode } from 'react'
 import Link from 'next/link'
-import {
-  AnimatePresence,
-  motion,
-  useReducedMotion,
-  type Variants,
-} from 'framer-motion'
-import {
-  ArrowRight,
-  Calendar,
-  ChevronDown,
-  Gauge,
-  GitBranch,
-  Moon,
-  Play,
-  ShieldCheck,
-  Terminal,
-  UsersRound,
-} from 'lucide-react'
-import type { LucideIcon } from 'lucide-react'
-import { AutonomyFilm } from '@/components/site/AutonomyFilm'
+import { AnimatePresence, motion, type Variants } from 'framer-motion'
+import { ArrowRight, BookOpen, Calendar, GitBranch, Plug, Plus, ShieldCheck, Terminal, Users } from 'lucide-react'
+import { Icon } from '@iconify/react'
 import {
   AuthDiagram,
   DatabaseDiagram,
@@ -30,273 +13,242 @@ import {
   RestApiDiagram,
   StorageDiagram,
 } from '@/components/landing/CapabilityDiagrams'
-import { HeroConsole } from '@/components/landing/HeroConsole'
+import { AGENT_MARKS, AgentGlyph } from '@/components/landing/AgentMarks'
+import { ChangePath } from '@/components/landing/ChangePath'
+import { ConnectTabs } from '@/components/landing/ConnectTabs'
+import { HeroFilm } from '@/components/landing/HeroFilm'
 import { ROUTES, SiteShell } from '@/components/site/SiteShell'
+import { BODY, HEADING, LEDE, MEASURE, TITLE } from '@/components/site/tokens'
+import { useSettledReducedMotion } from '@/lib/hooks/useSettledReducedMotion'
+import { useUserSession } from '@/lib/hooks/useUserSession'
 
 /* ─────────────────────────────────────────────────────────────
-   Content
+   The landing page, rebuilt 2026-09-29.
+
+   The brief: an infrastructure landing page in the class of Linear, Supabase
+   and Vercel. The previous page was disciplined but flat. Every section
+   opened the same way (left headline, grey paragraph, content) on pure black,
+   so nothing on it was memorable and the product's actual difference, that it
+   GOVERNS change rather than just generating resources, was a sentence in a
+   subline.
+
+   The structure now follows the argument a sceptical engineer needs:
+
+     Hero            what it is, and the real product on film
+     Agent strip     it plugs into the agent you already use
+     Change path     THE centrepiece: one day and night on production, with
+                     a key, a receipt and three time-keyed explanations
+                     (components/landing/ChangePath). It also carries what
+                     the separate autonomy section used to, which is gone.
+     Primitives      what you get, as a bento with one lead cell
+     Connect         how you point your agent at it, per host
+     FAQ             the trust questions, answered plainly
+     Closing         one ask
+
+   RULES THAT STILL HOLD FROM EARLIER ROUNDS (they were founder decisions):
+
+   - Hero copy is locked (see project-two-door-positioning). Only its
+     presentation moves.
+   - No mono, uppercase, wide-tracked eyebrows over section headlines. The
+     headline names the section by itself.
+   - No self-host vs Cloud band and no "No lock-in" band. Open source lives in
+     the FAQ, the footer, and the GitHub button.
+   - Every claim on this page must be true of the product today. No invented
+     customer logos, testimonials, counts or benchmarks. The agent strip shows
+     MCP hosts the server runs in, not partners.
+
+   SIZES ARE `px`. app/globals.css sets the root font-size to 13px, so 1rem is
+   13px here and every rem-based Tailwind size renders at 81%. See
+   components/site/tokens.ts before converting anything to rem.
 ───────────────────────────────────────────────────────────── */
 
-const capabilities: Capability[] = [
-  {
-    title: 'Database',
-    body: 'A PostgreSQL schema of your own per project: tables, relations, indexes, constraints, and pgvector columns. Isolation is a Postgres grant, not a WHERE clause.',
-    diagram: DatabaseDiagram,
-  },
-  {
-    title: 'REST APIs',
-    // Trimmed to the same three lines as its neighbours: it was the one
-    // four-line paragraph in the row, and since the diagrams are
-    // bottom-aligned, that fourth line spent itself as dead air over the other
-    // five drawings.
-    body: 'PostgREST serves every table from the catalog, so the API is the schema: filters, ordering, pagination, and embedded resources, plus OpenAPI and typed clients.',
-    diagram: RestApiDiagram,
-  },
-  {
-    title: 'Auth',
-    body: 'Sign-up, OAuth, magic links, and verification emails for your end users. Every project signs with its own secret, so a token from one backend is worthless in another.',
-    diagram: AuthDiagram,
-  },
-  {
-    title: 'Storage',
-    body: 'Buckets, uploads, metadata, and expiring signed URLs. Local disk while you build, any S3-compatible provider when you ship. The file API does not change.',
-    diagram: StorageDiagram,
-  },
-  {
-    title: 'Realtime',
-    body: 'Subscribe to inserts, updates, and deletes as they land, plus presence and broadcast channels. Delivered over SSE, so there is no socket server to run.',
-    diagram: RealtimeDiagram,
-  },
-  {
-    title: 'Functions & triggers',
-    body: 'Run a function on insert, update, delete, or signup. Or run it on a cron schedule with no event at all. Webhooks and rate limits are part of the same surface.',
-    diagram: FunctionsDiagram,
-  },
-]
+/* ── Tokens local to this page ───────────────────────────────────────────── */
 
-const capabilitySummaries = [
-  {
-    icon: ShieldCheck,
-    title: 'Row-level security by description',
-    body: 'Say who can read and write what; Backenly writes and enforces the Postgres policies.',
-  },
-  {
-    icon: GitBranch,
-    title: 'Branches for risky work',
-    body: 'Clone the backend into a branch, let your agent experiment, review the diff, merge what works.',
-  },
-  {
-    icon: UsersRound,
-    title: 'Teams and organizations',
-    body: 'Invite teammates and clients with roles. Every actor writes to the same change ledger.',
-  },
-]
+/** The page ground: a cool near-black, not #000, so panels can sit above it. */
+const GROUND = 'bg-[#08090a]'
 
+/** Aligns with the navbar and footer. 100rem is 1300px here, not 1600px. */
+const CONTAINER = 'mx-auto w-full max-w-[100rem] px-5 sm:px-6'
 
+/**
+ * Vertical rhythm. Sections own their TOP padding only, so a boundary is one
+ * gap rather than two stacked into a well of empty black. The closing section
+ * owns the bottom of the page.
+ */
+const SECTION = 'relative pt-[88px] md:pt-[144px]'
 
-const autonomyItems = [
-  {
-    icon: Moon,
-    title: 'Runs without a session',
-    body: 'Detection alone is table stakes. Backenly closes the loop: detect, fix safely, verify, document. No prompt, no session, nobody at the keyboard.',
-  },
-  {
-    icon: ShieldCheck,
-    title: 'Safe by construction',
-    body: 'Only deterministic, reversible fixes are applied on their own, and every fix snapshots first. Anything risky becomes a prepared proposal waiting for one click.',
-  },
-  {
-    icon: Gauge,
-    title: 'Included on every plan',
-    body: 'Every plan heals every minute, Free included. The loop runs no model, so it never spends your AI credits.',
-  },
-]
+const DISPLAY =
+  'font-semibold leading-[1.02] tracking-[-0.045em] md:leading-[0.98]'
 
-type Capability = {
-  title: string
-  body: string
-  /** Shows the primitive working. See components/landing/CapabilityDiagrams. */
-  diagram: () => JSX.Element
-}
+const PRIMARY_CTA =
+  'group inline-flex h-[46px] items-center justify-center gap-2 whitespace-nowrap rounded-lg bg-white px-5 text-[15px] font-semibold tracking-[-0.01em] text-black shadow-[0_0_0_1px_rgba(255,255,255,0.1),0_8px_30px_-8px_rgba(255,255,255,0.35)] transition-[background-color,transform,box-shadow] duration-200 hover:bg-zinc-200 hover:shadow-[0_0_0_1px_rgba(255,255,255,0.14),0_10px_40px_-8px_rgba(255,255,255,0.45)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300 focus-visible:ring-offset-2 focus-visible:ring-offset-[#08090a]'
 
-/* ─────────────────────────────────────────────────────────────
-   Motion
-───────────────────────────────────────────────────────────── */
+const SECONDARY_CTA =
+  'group inline-flex h-[46px] items-center justify-center gap-2 whitespace-nowrap rounded-lg border border-white/[0.12] bg-white/[0.03] px-5 text-[15px] font-medium tracking-[-0.01em] text-zinc-200 transition-[background-color,border-color,color,transform] duration-200 hover:border-white/25 hover:bg-white/[0.07] hover:text-white active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300 focus-visible:ring-offset-2 focus-visible:ring-offset-[#08090a]'
 
+/* ── Motion ──────────────────────────────────────────────────────────────── */
+
+/**
+ * One orchestrated entrance for the hero, and a quiet rise for each major
+ * block after it. Nothing loops except the product itself.
+ *
+ * `useSettledReducedMotion` rather than framer's hook: the server has no media
+ * query, and letting the preference pick different initial props made server
+ * and client disagree at hydration. This hook reads it after hydration, so the
+ * first render is identical and reduced-motion visitors then snap to rest.
+ */
 const EASE_OUT = [0.16, 1, 0.3, 1] as const
 
-// Scroll-triggered reveals stay on GPU-composited properties only
-// (opacity + transform). Animating `filter: blur()` here forces a full-layer
-// re-raster every frame exactly as the section scrolls in — the main cause of
-// scroll stutter. Blur-in is kept only for the one-time hero entrance.
-const revealVariants: Variants = {
-  hidden: {
-    opacity: 0,
-    y: 34,
-    scale: 0.985,
-  },
-  visible: {
-    opacity: 1,
-    y: 0,
-    scale: 1,
-    transition: {
-      duration: 0.9,
-      ease: EASE_OUT,
-    },
-  },
+const heroItem: Variants = {
+  hidden: { opacity: 0, y: 14, filter: 'blur(8px)' },
+  visible: { opacity: 1, y: 0, filter: 'blur(0px)' },
 }
 
-const heroStaggerVariants: Variants = {
-  hidden: {},
-  visible: {
-    transition: {
-      staggerChildren: 0.12,
-      delayChildren: 0.05,
-    },
-  },
+/**
+ * The film rises without the blur: framer leaves `filter` inline after the
+ * entrance, and a filter on an ancestor can keep a playing video off the
+ * browser's cheap compositing path for as long as the page is open.
+ */
+const heroFilm: Variants = {
+  hidden: { opacity: 0, y: 28 },
+  visible: { opacity: 1, y: 0 },
 }
 
-const heroItemVariants: Variants = {
-  hidden: {
-    opacity: 0,
-    y: 18,
-    filter: 'blur(10px)',
-  },
-  visible: {
-    opacity: 1,
-    y: 0,
-    filter: 'blur(0px)',
-    transition: {
-      duration: 0.9,
-      ease: EASE_OUT,
-    },
-  },
-}
-
-const staggerVariants: Variants = {
-  hidden: {},
-  visible: {
-    transition: {
-      staggerChildren: 0.105,
-      delayChildren: 0.1,
-    },
-  },
-}
-
-const cardVariants: Variants = {
-  hidden: {
-    opacity: 0,
-    y: 24,
-    scale: 0.985,
-  },
-  visible: {
-    opacity: 1,
-    y: 0,
-    scale: 1,
-    transition: {
-      duration: 0.72,
-      ease: EASE_OUT,
-    },
-  },
+const rise: Variants = {
+  hidden: { opacity: 0, y: 22 },
+  visible: { opacity: 1, y: 0 },
 }
 
 export default function LandingPage() {
   return (
     <SiteShell>
-      <main className="relative overflow-x-hidden">
+      <main id="main-content" className={`relative overflow-x-clip ${GROUND}`}>
+        <Grain />
         <Hero />
-        <CapabilitiesSection />
-        <AutonomySection />
-        <DemoClipsSection />
+        <AgentStrip />
+        <ChangeSection />
+        <PrimitivesSection />
+        <ConnectSection />
         <FaqSection />
-        <ClosingCTA />
+        <ClosingSection />
       </main>
     </SiteShell>
   )
 }
 
+/**
+ * Film grain over the whole page. Fixed and pointer-events-none, so it costs
+ * one composited layer instead of repainting with the scroll. It breaks the
+ * banding in the large gradients and takes the digital flatness off the black.
+ */
+function Grain() {
+  return (
+    <div
+      aria-hidden
+      className="pointer-events-none fixed inset-0 z-30 opacity-[0.035] mix-blend-overlay"
+      style={{
+        backgroundImage:
+          "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>\")",
+      }}
+    />
+  )
+}
+
 /* ─────────────────────────────────────────────────────────────
    Hero
+
+   Left-aligned, stacked: headline, subline, actions, then the film. The
+   old layout pushed the one CTA to the far right edge, where it read as
+   belonging to nothing. Actions now sit directly under the sentence they act
+   on, the way Linear and Vercel set theirs.
+
+   The light is the point of the composition: a cold white key light from the
+   top left, a violet fill behind the film, and a horizon line the film sits
+   on. All static gradients, no blur filters, so it costs nothing per frame.
 ───────────────────────────────────────────────────────────── */
 
 function Hero() {
-  const sectionRef = useRef<HTMLElement>(null)
-  const reduceMotion = useReducedMotion()
+  const quiet = useSettledReducedMotion()
+  const { isLoggedIn } = useUserSession()
 
   return (
     <motion.section
-      ref={sectionRef}
-      // Generous air between the navbar and the headline, like the benchmark —
-      // the headline should start after a beat of ground, not under the nav.
-      className="relative isolate overflow-hidden px-0 pb-14 pt-16 sm:pt-20 md:pb-20 md:pt-28 xl:pt-32"
-      initial={reduceMotion ? false : 'hidden'}
+      className="relative isolate pb-[64px] pt-[56px] sm:pt-[72px] md:pb-[88px] md:pt-[96px]"
+      initial="hidden"
       animate="visible"
-      variants={heroStaggerVariants}
+      variants={{
+        hidden: {},
+        visible: { transition: { staggerChildren: quiet ? 0 : 0.1, delayChildren: quiet ? 0 : 0.05 } },
+      }}
     >
-      {/* Fade to black that the console panel sits against. */}
+      {/* Key light, top left, behind the headline. */}
       <div
         aria-hidden
-        className="absolute inset-0 -z-10 bg-[linear-gradient(to_bottom,rgba(0,0,0,0.12),rgba(0,0,0,0.74)_68%,#000_100%)]"
+        className="pointer-events-none absolute -top-[240px] left-[-10%] -z-10 h-[820px] w-[1100px] max-w-none bg-[radial-gradient(closest-side,rgba(255,255,255,0.075),transparent)]"
       />
+      {/* Violet fill, the brand's one colour, low and wide behind the film. */}
       <div
         aria-hidden
-        className="absolute inset-x-0 top-0 -z-10 h-px bg-[linear-gradient(to_right,transparent,rgba(255,255,255,0.22),transparent)]"
+        className="pointer-events-none absolute left-1/2 top-[420px] -z-10 h-[900px] w-[1500px] max-w-none -translate-x-1/2 bg-[radial-gradient(closest-side,rgba(139,92,246,0.16),rgba(139,92,246,0.04)_55%,transparent)]"
       />
 
-      <div className="mx-auto w-full max-w-[100rem] px-5 sm:px-6">
-        {/* Wide like the benchmark: the headline runs most of the container
-            and the paragraph holds long lines — a narrow column centered in
-            an 88rem band read as timid. */}
-        {/* The headline names the CATEGORY — "autonomous backend", the locked
-            positioning and the one word the agent-cloud competitors cannot
-            claim. Deliberately NOT "cloud platform": we do not run your app's
-            compute, and borrowing that phrase would read as a clone of the
-            two YC heros it came from. The old headline pair moved into the
-            subline — it is the explanation, not the claim. */}
+      <div className={CONTAINER}>
         <motion.h1
-          variants={heroItemVariants}
-          className="max-w-6xl text-[clamp(2.3rem,9vw,3.1rem)] font-semibold leading-[1.06] tracking-tight text-white [text-wrap:balance] sm:text-6xl md:text-[4.4rem] xl:text-[5rem]"
+          variants={heroItem}
+          transition={{ duration: quiet ? 0 : 0.95, ease: EASE_OUT }}
+          // One vertical falloff across the whole headline, white to a cool
+          // grey, the way a lit object reads. Not a second colour on one
+          // phrase: that is the most common tell of a generated hero.
+          className={`bg-gradient-to-b from-white from-40% to-zinc-400 bg-clip-text pb-2 text-[38px] text-transparent [text-wrap:balance] sm:text-[60px] md:text-[76px] xl:text-[88px] ${DISPLAY}`}
         >
           The autonomous backend
           <span className="block">built for coding agents</span>
         </motion.h1>
 
-        <div className="mt-8 flex flex-col gap-8 md:flex-row md:items-center md:justify-between md:gap-12">
-          <div className="max-w-4xl">
-            <motion.p
-              variants={heroItemVariants}
-              className="text-[16px] leading-7 text-zinc-400 [text-wrap:pretty] md:text-[21px] md:leading-9"
-            >
-              Real Postgres, APIs, auth, storage, and realtime, driven by your
-              agent over MCP, with every change governed, verified, and
-              reversible.
-            </motion.p>
+        <motion.p
+          variants={heroItem}
+          transition={{ duration: quiet ? 0 : 0.95, ease: EASE_OUT }}
+          className={`mt-7 max-w-[54ch] text-[17px] text-zinc-400 [text-wrap:pretty] md:mt-8 md:text-[20px] ${LEDE}`}
+        >
+          Real Postgres, APIs, auth, storage, and realtime, driven by your agent over MCP, with
+          every change governed, verified, and reversible.
+        </motion.p>
+
+        <motion.div
+          variants={heroItem}
+          transition={{ duration: quiet ? 0 : 0.95, ease: EASE_OUT }}
+          className="mt-9 flex flex-col gap-3 sm:flex-row sm:items-center"
+        >
+          <Link href={isLoggedIn ? ROUTES.app : ROUTES.signup} className={PRIMARY_CTA}>
+            {isLoggedIn ? 'Go to console' : 'Start free'}
+            <ArrowRight aria-hidden className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
+          </Link>
+          <a href={ROUTES.github} target="_blank" rel="noopener noreferrer" className={SECONDARY_CTA}>
+            <Icon icon="ri:github-fill" width={18} aria-hidden />
+            Star on GitHub
+          </a>
+          <span className="mt-1 text-[13px] text-zinc-500 sm:ml-3 sm:mt-0">
+            Free plan, no card. Apache-2.0.
+          </span>
+        </motion.div>
+
+        <motion.div
+          variants={heroFilm}
+          transition={{ duration: quiet ? 0 : 1.2, ease: EASE_OUT }}
+          className="relative mt-[56px] md:mt-[80px]"
+        >
+          {/* The horizon: a lit edge along the top of the frame. */}
+          <div
+            aria-hidden
+            className="pointer-events-none absolute -top-px left-[8%] right-[8%] z-10 h-px bg-[linear-gradient(to_right,transparent,rgba(196,181,253,0.7),rgba(255,255,255,0.9),rgba(196,181,253,0.7),transparent)]"
+          />
+          <div
+            aria-hidden
+            className="pointer-events-none absolute -top-[60px] left-1/2 z-0 h-[120px] w-[70%] -translate-x-1/2 bg-[radial-gradient(closest-side,rgba(167,139,250,0.28),transparent)]"
+          />
+          <div className="relative rounded-[18px] border border-white/[0.08] bg-white/[0.02] p-1.5 shadow-[0_60px_160px_-40px_rgba(0,0,0,1)] sm:p-2">
+            <HeroFilm />
           </div>
-
-          <motion.div
-            variants={heroItemVariants}
-            className="flex shrink-0 flex-col gap-3 sm:flex-row"
-          >
-            <Link
-              href={ROUTES.signup}
-              className="group inline-flex h-12 items-center justify-center gap-2 whitespace-nowrap rounded-md bg-white px-6 text-sm font-semibold text-black shadow-[0_12px_45px_-14px_rgba(255,255,255,0.4)] transition duration-200 hover:bg-zinc-200 active:scale-[0.985] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60 focus-visible:ring-offset-2 focus-visible:ring-offset-black md:text-[15px]"
-            >
-              Start free
-              <ArrowRight className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
-            </Link>
-            <Link
-              href="/quickstart"
-              className="inline-flex h-12 items-center justify-center gap-2 whitespace-nowrap rounded-md border border-white/14 bg-white/[0.03] px-6 text-sm font-semibold text-white transition duration-200 hover:border-white/25 hover:bg-white/[0.06] active:scale-[0.985] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60 focus-visible:ring-offset-2 focus-visible:ring-offset-black md:text-[15px]"
-            >
-              <Terminal className="h-4 w-4" />
-              Connect your agent
-            </Link>
-          </motion.div>
-        </div>
-
-        {/* The dashboard, drawn in DOM — see components/landing/HeroConsole. */}
-        <motion.div variants={heroItemVariants} className="mt-12 md:mt-16">
-          <HeroConsole />
         </motion.div>
       </div>
     </motion.section>
@@ -304,303 +256,315 @@ function Hero() {
 }
 
 /* ─────────────────────────────────────────────────────────────
-   Capabilities — the primitives
+   Agent strip
 
-   An engineering-drawing band: faint crosshair ground, hairline rules
-   between transparent cells, and diagrams drawn as line art on top of it.
-   The previous version boxed the grid into its own rounded, bordered slab —
-   one more "component" sitting on the page — and boxed every diagram again
-   inside it; boxes-inside-boxes is the strongest single tell of template
-   output. Flat rules, open left and right edges, one shared ground.
+   Directly under the hero, where a logo wall goes, and honest about what it
+   is: the hosts the MCP server runs in. Not customers, not partners.
 ───────────────────────────────────────────────────────────── */
 
-/**
- * Hairlines between cells, never around them. Per-cell borders replace the
- * old gap-px lit-background trick because the cells are transparent now —
- * the crosshair ground has to run through the whole band uninterrupted.
- * Index-mapped for the 1 / md:2 / lg:3 column layouts of six cells.
- */
-const CELL_RULES = [
-  '',
-  'border-t md:border-l md:border-t-0',
-  'border-t lg:border-l lg:border-t-0',
-  'border-t md:border-l lg:border-l-0',
-  'border-t lg:border-l',
-  'border-t md:border-l',
-]
-
-function CapabilitiesSection() {
+function AgentStrip() {
+  // One quiet line, centred under the film, then the marks alone at one grey.
+  // No band, no boxed caption column: a logo row carries its own weight, and
+  // anything heavier competes with the hero it sits under.
   return (
-    <section
-      id="capabilities"
-      className="relative scroll-mt-20 px-5 py-16 sm:px-6 sm:py-20 md:scroll-mt-24 md:py-28"
-    >
-
-      <div className="mx-auto max-w-[100rem]">
-        <Reveal>
-          <SectionHeader
-            eyebrow="Platform surface"
-            title="The primitives are built in, not bolted on"
-            body="Choosing the platform that runs itself doesn’t mean giving anything up. Everything a production backend needs is already here, wired together, governed, and watched."
-          />
-        </Reveal>
-
-        <Stagger className="mt-14 grid border-y border-white/[0.08] md:grid-cols-2 lg:grid-cols-3">
-          {capabilities.map((capability, index) => (
-            <CapabilityCard key={capability.title} capability={capability} index={index} />
+    <section aria-labelledby="agents-heading" className="relative pb-[8px] pt-[8px]">
+      <div className={CONTAINER}>
+        <h2 id="agents-heading" className="text-center text-[14px] tracking-[-0.006em] text-zinc-500">
+          Works with the agent you already use, and any other MCP host
+        </h2>
+        <ul className="mx-auto mt-8 flex max-w-[1080px] flex-wrap items-center justify-center gap-x-10 gap-y-6 md:gap-x-14">
+          {AGENT_MARKS.map((mark) => (
+            <li
+              key={mark.id}
+              className="flex items-center gap-2.5 text-zinc-400/80 transition-colors duration-300 hover:text-white"
+            >
+              <AgentGlyph mark={mark} className="h-[22px] w-[22px] shrink-0" />
+              <span className="whitespace-nowrap text-[17px] font-semibold tracking-[-0.03em]">{mark.name}</span>
+            </li>
           ))}
-        </Stagger>
-
-        <Stagger className="mt-12 grid gap-8 border-t border-white/[0.06] pt-10 md:grid-cols-3 md:gap-6">
-          {capabilitySummaries.map((item) => (
-            <IconRow key={item.title} item={item} />
-          ))}
-        </Stagger>
+        </ul>
       </div>
     </section>
   )
 }
 
-function CapabilityCard({ capability, index }: { capability: Capability; index: number }) {
-  const Diagram = capability.diagram
+/* ─────────────────────────────────────────────────────────────
+   Change path: the centrepiece
+───────────────────────────────────────────────────────────── */
+
+function ChangeSection() {
+  return (
+    <section id="how-it-works" className={`${SECTION} scroll-mt-20`}>
+      <div className={CONTAINER}>
+        <Reveal>
+          <SectionHead
+            title="Every change tested and reversible"
+            body="One day on production. Your agent ships a feature and asks for something risky, then at 3am, with nobody online, Backenly fixes a slow query on its own."
+          />
+        </Reveal>
+        <Reveal className="mt-[48px] md:mt-[64px]">
+          <ChangePath />
+        </Reveal>
+      </div>
+    </section>
+  )
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Primitives: a bento with one lead cell
+
+   Six primitives and one "also built in" row, set 2+1 / 1+1+1 / 1+2 so the
+   grid has a rhythm instead of six identical tiles. The drawings are the
+   line-art figures in components/landing/CapabilityDiagrams: each one shows
+   the primitive working, and none of them is a screenshot that can go stale.
+───────────────────────────────────────────────────────────── */
+
+type Primitive = {
+  title: string
+  body: string
+  diagram: () => JSX.Element
+  className?: string
+}
+
+const primitives: Primitive[] = [
+  {
+    title: 'Postgres, a schema of your own',
+    body: 'Tables, relations, indexes, constraints and pgvector, in a PostgreSQL schema per project. Isolation is a Postgres grant, not a WHERE clause.',
+    diagram: DatabaseDiagram,
+  },
+  {
+    title: 'Auth',
+    body: 'Sign-up, OAuth, magic links and verification emails for your users. Each project signs with its own secret.',
+    diagram: AuthDiagram,
+  },
+  {
+    title: 'REST APIs',
+    body: 'PostgREST serves every table from the catalog: filters, ordering, pagination, embedded resources, OpenAPI.',
+    diagram: RestApiDiagram,
+  },
+  {
+    title: 'Realtime',
+    body: 'Inserts, updates and deletes as they land, plus presence and broadcast. Delivered over SSE, with no socket server to run.',
+    diagram: RealtimeDiagram,
+  },
+  {
+    title: 'Storage',
+    body: 'Buckets, uploads, metadata and expiring signed URLs, on local disk or any S3-compatible provider.',
+    diagram: StorageDiagram,
+  },
+  {
+    title: 'Functions and triggers',
+    body: 'Run code on insert, update, delete or signup, or on a cron schedule. Webhooks and rate limits included.',
+    diagram: FunctionsDiagram,
+  },
+]
+
+const alsoBuiltIn = [
+  {
+    icon: ShieldCheck,
+    title: 'Row-level security by description',
+    body: 'Say who can read and write what. Backenly writes and enforces the Postgres policies.',
+  },
+  {
+    icon: GitBranch,
+    title: 'Branches for risky work',
+    body: 'Clone the backend, let your agent experiment, review the diff, merge what works.',
+  },
+  {
+    icon: Users,
+    title: 'Teams and organizations',
+    body: 'Invite teammates with roles. Every actor writes to the same change ledger.',
+  },
+]
+
+const databaseFacts = ['Standard PostgreSQL', 'pgvector', 'Direct connection strings', 'pg_dump exports']
+
+function PrimitivesSection() {
+  const [database, auth, rest, realtime, storage, functions] = primitives
 
   return (
-    <motion.article
-      variants={cardVariants}
-      // overflow-hidden is load-bearing: the REST window is cropped by this
-      // edge on purpose. Transparent over the crosshair ground; hover only
-      // lifts the cell a hair's worth.
-      className={`group relative flex flex-col overflow-hidden border-white/[0.08] p-7 transition-colors duration-500 hover:bg-white/[0.015] md:p-8 ${CELL_RULES[index] ?? 'border-t'}`}
-    >
-      {/* Hover rail: the only thing that marks the active cell, so the grid
-          stays quiet until the cursor picks one. White, not brand-colored —
-          the band is monochrome. */}
-      <span
-        aria-hidden
-        className="pointer-events-none absolute inset-x-0 top-0 h-px origin-left scale-x-0 bg-[linear-gradient(to_right,transparent,rgba(255,255,255,0.35),transparent)] transition-transform duration-500 ease-out group-hover:scale-x-100 motion-reduce:transition-none"
-      />
-      <h3 className="text-xl font-semibold tracking-tight text-white">{capability.title}</h3>
-      {/* Three-line floor from md up (3 × leading-7). The diagrams are
-          bottom-aligned, so the dead air above one is the row's tallest cell
-          minus this one; a floor keeps a paragraph that wraps one line further
-          from spending that line as space over its neighbours' drawings. */}
-      <p className="mt-2.5 max-w-[46ch] text-[15px] leading-7 text-zinc-400 md:min-h-[84px]">
-        {capability.body}
-      </p>
+    <section id="capabilities" className={`${SECTION} scroll-mt-20`}>
+      <div className={CONTAINER}>
+        <Reveal>
+          <SectionHead
+            title="Every primitive, wired together from the first table"
+            body="Not a kit of parts for you to assemble. One backend, where the database, the API, auth, storage, realtime and functions already know about each other."
+          />
+        </Reveal>
+
+        <Reveal className="mt-[48px] grid gap-3 md:mt-[64px] md:grid-cols-2 lg:grid-cols-3">
+          {/* Lead cell: the database, twice as wide, text and drawing side by side. */}
+          <BentoCell className="md:col-span-2">
+            <div className="grid h-full gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)] lg:items-end">
+              <div className="flex h-full flex-col">
+                <CellTitle>{database.title}</CellTitle>
+                <CellBody>{database.body}</CellBody>
+                <ul className="mt-auto flex flex-wrap gap-2 pt-6">
+                  {databaseFacts.map((fact) => (
+                    <li
+                      key={fact}
+                      className="rounded-md border border-white/[0.08] bg-white/[0.03] px-2.5 py-1 text-[12.5px] text-zinc-300"
+                    >
+                      {fact}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <database.diagram />
+            </div>
+          </BentoCell>
+
+          <PrimitiveCell primitive={auth} />
+          <PrimitiveCell primitive={rest} />
+          <PrimitiveCell primitive={realtime} />
+          <PrimitiveCell primitive={storage} />
+          <PrimitiveCell primitive={functions} />
+
+          <BentoCell className="md:col-span-2">
+            <div className="flex items-baseline justify-between gap-6">
+              <CellTitle>Also built in</CellTitle>
+              <Link href={ROUTES.features} className={TEXT_LINK}>
+                Every feature
+                <ArrowRight aria-hidden className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
+              </Link>
+            </div>
+            <div className="mt-6 grid gap-x-8 gap-y-7 sm:grid-cols-3">
+              {alsoBuiltIn.map((item) => {
+                const ItemIcon = item.icon
+                return (
+                  <div key={item.title} className="border-t border-white/[0.08] pt-5">
+                    <ItemIcon aria-hidden className="h-[18px] w-[18px] text-violet-300" strokeWidth={1.75} />
+                    <h4 className={`mt-4 text-[15px] text-white ${HEADING}`}>{item.title}</h4>
+                    <p className="mt-2 text-[14px] leading-[1.65] text-zinc-400">{item.body}</p>
+                  </div>
+                )
+              })}
+            </div>
+          </BentoCell>
+        </Reveal>
+      </div>
+    </section>
+  )
+}
+
+function PrimitiveCell({ primitive }: { primitive: Primitive }) {
+  const Diagram = primitive.diagram
+  return (
+    <BentoCell>
+      <CellTitle>{primitive.title}</CellTitle>
+      {/* Three-line floor, so the drawings (bottom-aligned) sit on one line
+          across a row even when one paragraph wraps shorter. */}
+      <CellBody className="md:min-h-[81px]">{primitive.body}</CellBody>
       <div className="mt-auto">
         <Diagram />
       </div>
-    </motion.article>
+    </BentoCell>
   )
 }
 
 /**
- * The icon-and-paragraph row under both the capabilities grid and the autonomy
- * film. Capabilities used to carry a light-theme twin of this; once the section
- * went dark the two were the same component with different hex values.
+ * A bento cell with a cursor-following spotlight on its border and surface.
+ * The pointer position is written straight to CSS custom properties on the
+ * element, never to React state, so moving the mouse re-renders nothing.
  */
-function IconRow({ item }: { item: { icon: LucideIcon; title: string; body: string } }) {
-  const Icon = item.icon
+function BentoCell({ children, className = '' }: { children: ReactNode; className?: string }) {
+  const ref = useRef<HTMLElement>(null)
 
-  return (
-    <motion.div variants={cardVariants} className="group flex gap-4">
-      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-white/10 bg-white/[0.03] transition-colors duration-300 group-hover:border-white/25 group-hover:bg-white/[0.05]">
-        <Icon className="h-4 w-4 text-zinc-400 transition-colors duration-300 group-hover:text-zinc-100" />
-      </div>
-      <div className="min-w-0">
-        <h3 className="text-[17px] font-semibold leading-6 tracking-[-0.01em] text-white">
-          {item.title}
-        </h3>
-        <p className="mt-2 text-[15px] leading-7 text-zinc-400">{item.body}</p>
-      </div>
-    </motion.div>
-  )
-}
-
-/* ─────────────────────────────────────────────────────────────
-   Autonomy
-───────────────────────────────────────────────────────────── */
-
-function AutonomySection() {
-  return (
-    <section className="relative px-5 py-16 sm:px-6 sm:py-20 md:py-28">
-      <div className="mx-auto max-w-[100rem]">
-        <Reveal>
-          <SectionHeader
-            eyebrow="Autonomy"
-            title="It fixes problems while you sleep"
-            body="A resident loop watches every project: detect, fix safely, verify, document, keep it reversible. No prompt, no session, nobody at the keyboard."
-          />
-        </Reveal>
-
-        {/* One column for the film and the row beneath it. They used to sit at
-            different widths — the film at max-w-7xl inside a 100rem section —
-            so the rule above the three points ran wider than the frame it was
-            meant to close off. Keep both on this container. */}
-        <div className="mx-auto mt-12 w-full max-w-7xl">
-          <Reveal delay={0.06}>
-            {/* Drawn, not filmed. A screen recording of this exact claim shipped
-                and was pulled once already: the product moved and the footage
-                showed a dashboard that no longer existed. This renders the same
-                instrument the Overview does, so it cannot go stale behind us. */}
-            <AutonomyFilm />
-          </Reveal>
-
-          <Stagger className="mt-14 grid gap-8 border-t border-white/[0.06] pt-10 md:grid-cols-3 md:gap-8">
-            {autonomyItems.map((item) => (
-              <IconRow key={item.title} item={item} />
-            ))}
-          </Stagger>
-        </div>
-      </div>
-    </section>
-  )
-}
-
-/* ─────────────────────────────────────────────────────────────
-   Open source — REMOVED.
-
-   A two-column "You can take the whole thing" band (self-host vs Cloud) sat
-   here, and before that a "No lock-in" band sat above it. Both are gone. The
-   open-source claim still lives in the hero subline, the FAQ, and the footer;
-   it does not need a full section of its own. Do not reintroduce either band.
-───────────────────────────────────────────────────────────── */
-
-
-/* ─────────────────────────────────────────────────────────────
-   Demo clips — stays hidden until the recordings exist in
-   public/demos/. The section appears only once at least one
-   clip's metadata loads; a card whose video 404s stays hidden.
-───────────────────────────────────────────────────────────── */
-
-const demoClips = [
-  {
-    src: '/demos/build-verified-backend.mp4',
-    title: 'Your agent ships a feature',
-    body: 'One request over MCP becomes tables, REST APIs, and auth, then gets verified against the live runtime with real HTTP checks.',
-  },
-  {
-    src: '/demos/destructive-change-rollback.mp4',
-    title: 'Destructive changes wait for you',
-    body: 'The agent asks to drop a table with live rows; the change parks in the Review Queue until a human approves. Any saved version can be restored.',
-  },
-  {
-    src: '/demos/connect-frontend-mcp.mp4',
-    title: 'Connect in one command',
-    body: 'MCP for Claude Code and Cursor: your agent reads the live schema and builds against a real backend contract.',
-  },
-  {
-    src: '/demos/autonomy-self-heal.mp4',
-    title: 'It fixes problems before you wake up',
-    body: 'The autonomy loop detects real degradation, applies or proposes a fix, and writes up exactly what it did, reviewable and reversible.',
-  },
-]
-
-function DemoClipsSection() {
-  const [status, setStatus] = useState<Record<string, 'ok' | 'failed'>>({})
-  const anyReady = demoClips.some((clip) => status[clip.src] === 'ok')
-
-  return (
-    <section className={`px-5 pb-16 sm:px-6 sm:pb-20 md:pb-28 ${anyReady ? '' : 'hidden'}`}>
-      <div className="mx-auto max-w-[100rem]">
-        <Reveal>
-          <SectionHeader
-            eyebrow="See it work"
-            title="Real recordings, not mockups"
-            body="Short clips of the product doing its actual job: what it builds, what it refuses, what it connects to, and what it fixes on its own."
-          />
-        </Reveal>
-
-        <Stagger className="mt-12 grid gap-5 sm:grid-cols-2">
-          {demoClips.map((clip) => (
-            <DemoClipCard
-              key={clip.src}
-              clip={clip}
-              ready={status[clip.src] === 'ok'}
-              onReady={() =>
-                setStatus((prev) =>
-                  prev[clip.src] === 'ok' ? prev : { ...prev, [clip.src]: 'ok' }
-                )
-              }
-              onUnavailable={() =>
-                setStatus((prev) => ({ ...prev, [clip.src]: 'failed' }))
-              }
-            />
-          ))}
-        </Stagger>
-      </div>
-    </section>
-  )
-}
-
-function DemoClipCard({
-  clip,
-  ready,
-  onReady,
-  onUnavailable,
-}: {
-  clip: (typeof demoClips)[number]
-  ready: boolean
-  onReady: () => void
-  onUnavailable: () => void
-}) {
-  const videoRef = useRef<HTMLVideoElement>(null)
-  const [playing, setPlaying] = useState(false)
-
-  function toggleClip() {
-    const video = videoRef.current
-    if (!video) return
-
-    if (video.paused) {
-      void video.play()
-      setPlaying(true)
-      return
-    }
-
-    video.pause()
-    setPlaying(false)
+  function onMove(event: PointerEvent<HTMLElement>) {
+    const el = ref.current
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    el.style.setProperty('--x', `${event.clientX - rect.left}px`)
+    el.style.setProperty('--y', `${event.clientY - rect.top}px`)
   }
 
   return (
-    <motion.article
-      variants={cardVariants}
-      className={`overflow-hidden rounded-xl border border-white/[0.1] bg-[#0a0a0c] ${
-        ready ? '' : 'hidden'
-      }`}
+    <article
+      ref={ref}
+      onPointerMove={onMove}
+      className={`group relative flex min-w-0 flex-col overflow-hidden rounded-2xl border border-white/[0.07] bg-[linear-gradient(180deg,rgba(255,255,255,0.028),rgba(255,255,255,0.008))] p-6 transition-[border-color] duration-300 hover:border-white/[0.13] md:p-8 ${className}`}
     >
-      <button
-        type="button"
-        aria-label={playing ? `Pause demo: ${clip.title}` : `Play demo: ${clip.title}`}
-        onClick={toggleClip}
-        className="group relative block aspect-video w-full bg-black focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/40"
-      >
-        <video
-          ref={videoRef}
-          src={clip.src}
-          muted
-          loop
-          playsInline
-          preload="metadata"
-          onLoadedMetadata={onReady}
-          onError={onUnavailable}
-          onEnded={() => setPlaying(false)}
-          className="h-full w-full object-contain"
-        />
-        <div
-          className={`absolute inset-0 flex items-center justify-center bg-black/35 transition-opacity duration-300 ${
-            playing ? 'opacity-0 group-hover:opacity-100' : 'opacity-100'
-          }`}
-        >
-          <span className="flex h-12 w-12 items-center justify-center rounded-full border border-white/20 bg-black/70">
-            <Play className="h-5 w-5 text-white" />
-          </span>
-        </div>
-      </button>
-      <div className="border-t border-white/10 px-5 py-4">
-        <h3 className="text-[16px] font-semibold tracking-[-0.01em] text-white">{clip.title}</h3>
-        <p className="mt-1.5 text-[15px] leading-7 text-zinc-400">{clip.body}</p>
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0 opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+        style={{
+          background:
+            'radial-gradient(420px circle at var(--x, 50%) var(--y, 0%), rgba(167,139,250,0.08), transparent 60%)',
+        }}
+      />
+      <div className="relative flex h-full flex-col">{children}</div>
+    </article>
+  )
+}
+
+function CellTitle({ children }: { children: ReactNode }) {
+  return <h3 className={`text-[19px] text-white ${HEADING}`}>{children}</h3>
+}
+
+function CellBody({ children, className = '' }: { children: ReactNode; className?: string }) {
+  return (
+    <p className={`mt-3 max-w-[46ch] text-[15px] leading-[1.7] tracking-[-0.004em] text-zinc-400 ${className}`}>
+      {children}
+    </p>
+  )
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Connect
+───────────────────────────────────────────────────────────── */
+
+const channels = [
+  {
+    icon: Plug,
+    title: 'MCP server',
+    body: 'Typed tools for schema, data, auth, storage and functions. Driving the backend this way is never metered as AI.',
+  },
+  {
+    icon: Terminal,
+    title: 'CLI',
+    body: 'Schema, generated types, CI diffs, logs and read-only SQL: the part of the workflow that belongs in a pipeline.',
+  },
+  {
+    icon: BookOpen,
+    title: 'Agent skill',
+    body: 'A canonical skill at backenly.com/skill.md, so an agent learns the platform before it touches anything.',
+  },
+]
+
+function ConnectSection() {
+  return (
+    <section className={SECTION}>
+      <div className={`${CONTAINER} grid gap-12 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] lg:gap-16`}>
+        <Reveal className="flex flex-col">
+          <h2 className={`max-w-[16ch] text-[32px] text-white [text-wrap:balance] md:text-[46px] ${TITLE}`}>
+            One command, and your agent reads the real schema
+          </h2>
+          <p className={`mt-5 ${MEASURE} text-[17px] text-zinc-400 [text-wrap:pretty] ${LEDE}`}>
+            The key is scoped to one project and revocable from the dashboard. It can request a
+            destructive change, and it can never approve one.
+          </p>
+          <ul className="mt-10 grid gap-6">
+            {channels.map((channel) => {
+              const ChannelIcon = channel.icon
+              return (
+                <li key={channel.title} className="flex gap-4">
+                  <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/[0.09] bg-white/[0.03]">
+                    <ChannelIcon aria-hidden className="h-4 w-4 text-zinc-300" strokeWidth={1.75} />
+                  </span>
+                  <div className="min-w-0">
+                    <h3 className={`text-[16px] text-white ${HEADING}`}>{channel.title}</h3>
+                    <p className={`mt-1 max-w-[52ch] ${BODY} text-zinc-400`}>{channel.body}</p>
+                  </div>
+                </li>
+              )
+            })}
+          </ul>
+        </Reveal>
+        <Reveal delay={0.08} className="lg:pt-2">
+          <ConnectTabs />
+        </Reveal>
       </div>
-    </motion.article>
+    </section>
   )
 }
 
@@ -635,7 +599,7 @@ const faqs = [
   },
   {
     q: 'What does it cost?',
-    a: 'Self-hosting is free under Apache-2.0: you bring the servers, and an OpenAI key only if you want the natural-language build tools — the self-healing loop itself runs no model. On Backenly Cloud, the Free plan is genuinely free, with no credit card, and includes a real, permanent backend plus the self-healing loop every minute. Pro is $25/month and raises capacity and how much autonomy may fix per window, not the cadence; Enterprise is custom. Driving the backend from your own coding agent through the typed MCP tools is never metered as AI, and autonomy is included on every Cloud tier.',
+    a: 'Self-hosting is free under Apache-2.0: you bring the servers, and an OpenAI key only if you want the natural-language build tools. The self-healing loop itself runs no model. On Backenly Cloud, the Free plan is genuinely free, with no credit card, and includes a real, permanent backend plus the self-healing loop every minute. Pro is $25/month and raises capacity and how much autonomy may fix per window, not the cadence; Enterprise is custom. Driving the backend from your own coding agent through the typed MCP tools is never metered as AI, and autonomy is included on every Cloud tier.',
   },
   {
     q: 'If my agent does the building, what is the dashboard for?',
@@ -653,39 +617,33 @@ const faqSchema = {
   })),
 }
 
-/**
- * Two-column: title stays put on the left while the list scrolls on the
- * right; rows are open hairlines on the page ground, chevron leading the
- * question. The boxed accordion this replaces was one more rounded
- * container on a page that had already shed them.
- */
 function FaqSection() {
   const [openIndex, setOpenIndex] = useState<number | null>(0)
 
   return (
-    <section className="px-5 py-16 sm:px-6 sm:py-20 md:py-28">
-      <script
-        type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(faqSchema) }}
-      />
-      <div className="mx-auto grid max-w-[100rem] gap-10 lg:grid-cols-[minmax(0,4fr)_minmax(0,7fr)] lg:gap-16">
+    <section className={SECTION}>
+      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(faqSchema) }} />
+      <div className={`${CONTAINER} grid gap-10 lg:grid-cols-[minmax(0,4fr)_minmax(0,7fr)] lg:gap-16`}>
         <Reveal className="lg:sticky lg:top-28 lg:self-start">
-          <p className="font-mono text-[11px] font-medium uppercase tracking-[0.2em] text-zinc-500">
-            Common questions
-          </p>
-          <h2 className="mt-4 max-w-md bg-[linear-gradient(180deg,#fff_20%,rgba(255,255,255,0.66))] bg-clip-text text-3xl font-semibold leading-tight tracking-tight text-transparent [text-wrap:balance] md:text-5xl">
-            What people ask before trusting us with production
+          <h2 className={`max-w-[14ch] text-[32px] text-white [text-wrap:balance] md:text-[46px] ${TITLE}`}>
+            Questions before you trust us with production
           </h2>
-          <Link
-            href="/quickstart"
-            className="group mt-7 inline-flex items-center gap-1.5 text-[15px] font-medium text-zinc-400 transition-colors hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 focus-visible:ring-offset-2 focus-visible:ring-offset-black"
-          >
-            Read the quickstart
-            <ArrowRight className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
-          </Link>
+          <p className="mt-5 max-w-[36ch] text-[15px] leading-[1.7] text-zinc-400">
+            Anything else, ask the person who built it.
+          </p>
+          <div className="mt-7 flex flex-wrap gap-x-6 gap-y-3">
+            <Link href={ROUTES.resources} className={TEXT_LINK}>
+              Read the docs
+              <ArrowRight aria-hidden className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
+            </Link>
+            <a href={ROUTES.founder} target="_blank" rel="noopener noreferrer" className={TEXT_LINK}>
+              Book 30 minutes
+              <ArrowRight aria-hidden className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
+            </a>
+          </div>
         </Reveal>
 
-        <Reveal delay={0.08} className="divide-y divide-white/[0.07] border-y border-white/[0.07]">
+        <Reveal delay={0.08} className="border-t border-white/[0.08]">
           {faqs.map((faq, index) => (
             <FaqItem
               key={faq.q}
@@ -700,6 +658,9 @@ function FaqSection() {
   )
 }
 
+const TEXT_LINK =
+  'group inline-flex items-center gap-1.5 text-[15px] font-medium tracking-[-0.006em] text-zinc-300 transition-colors duration-200 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300 focus-visible:ring-offset-2 focus-visible:ring-offset-[#08090a]'
+
 function FaqItem({
   faq,
   open,
@@ -709,36 +670,49 @@ function FaqItem({
   open: boolean
   onToggle: () => void
 }) {
+  const panelId = useId()
+  const quiet = useSettledReducedMotion()
+
   return (
-    <div>
-      <button
-        type="button"
-        onClick={onToggle}
-        aria-expanded={open}
-        className="group flex w-full items-center gap-4 py-6 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-white/30 md:py-7"
-      >
-        <ChevronDown
-          className={`h-4 w-4 shrink-0 text-zinc-600 transition-all duration-300 group-hover:text-zinc-300 ${
-            open ? 'rotate-180 text-zinc-300' : ''
-          }`}
-        />
-        <span className="min-w-0 flex-1 text-[16px] font-semibold leading-6 tracking-[-0.01em] text-white md:text-[17px]">
-          {faq.q}
-        </span>
-      </button>
+    <div className="border-b border-white/[0.08]">
+      <h3>
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-expanded={open}
+          aria-controls={panelId}
+          className="group flex w-full items-center justify-between gap-6 py-6 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-white/30 md:py-7"
+        >
+          <span
+            className={`min-w-0 text-[16px] transition-colors duration-200 md:text-[18px] ${HEADING} ${
+              open ? 'text-white' : 'text-zinc-300 group-hover:text-white'
+            }`}
+          >
+            {faq.q}
+          </span>
+          <span
+            aria-hidden
+            className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full border transition-[transform,border-color,background-color] duration-300 ${
+              open
+                ? 'rotate-45 border-white/25 bg-white/[0.06]'
+                : 'border-white/[0.10] group-hover:border-white/25'
+            }`}
+          >
+            <Plus className="h-3.5 w-3.5 text-zinc-300" />
+          </span>
+        </button>
+      </h3>
       <AnimatePresence initial={false}>
         {open && (
           <motion.div
+            id={panelId}
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: 'auto', opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.3, ease: EASE_OUT }}
+            transition={{ duration: quiet ? 0 : 0.32, ease: EASE_OUT }}
             className="overflow-hidden"
           >
-            {/* pl-8 = chevron width + gap, so the answer sits under the question. */}
-            <p className="max-w-2xl pb-6 pl-8 text-sm leading-7 text-zinc-400 [text-wrap:pretty] md:pb-7">
-              {faq.a}
-            </p>
+            <p className={`${MEASURE} pb-7 pr-12 ${BODY} text-zinc-400 [text-wrap:pretty]`}>{faq.a}</p>
           </motion.div>
         )}
       </AnimatePresence>
@@ -747,50 +721,41 @@ function FaqItem({
 }
 
 /* ─────────────────────────────────────────────────────────────
-   Closing CTA
+   Closing
+
+   Centred, and the page's last light: a horizon arc rising behind the ask,
+   answering the lit edge the hero film sits on.
 ───────────────────────────────────────────────────────────── */
 
-/**
- * The finale in the page's own language: the crosshair ground, one static
- * hairline, monochrome type. It used to be the last colored, animated
- * element left — a pulsing emerald-to-violet edge with a violet glow —
- * which made the send-off the least disciplined moment on the page.
- */
-function ClosingCTA() {
+function ClosingSection() {
+  const { isLoggedIn } = useUserSession()
+
   return (
-    <section className="relative px-5 pb-20 pt-8 sm:px-6 sm:pb-28 sm:pt-12">
-      <Reveal className="relative mx-auto max-w-7xl overflow-hidden rounded-lg border border-white/10 bg-[#0a0a0d] px-5 py-12 text-center sm:px-6 sm:py-14 md:px-12 md:py-16">
-        <div
-          aria-hidden
-          className="pointer-events-none absolute inset-x-0 top-0 h-px bg-[linear-gradient(to_right,transparent,rgba(255,255,255,0.28),transparent)]"
-        />
-        <p className="font-mono text-[11px] font-medium uppercase tracking-[0.2em] text-zinc-500">
-          One command away
-        </p>
-        <h2 className="mx-auto mt-4 max-w-3xl bg-[linear-gradient(180deg,#fff_20%,rgba(255,255,255,0.66))] bg-clip-text text-3xl font-semibold leading-tight tracking-tight text-transparent [text-wrap:balance] sm:text-4xl md:text-5xl">
+    <section className="relative overflow-hidden pb-[220px] pt-[112px] md:pb-[280px] md:pt-[176px]">
+      {/* The arc's apex sits ~110px under the buttons at every width: the
+          container is anchored to the section's bottom edge, and the bottom
+          padding above is what keeps the copy clear of it. */}
+      <div aria-hidden className="pointer-events-none absolute inset-x-0 bottom-0 h-[420px] overflow-hidden">
+        <div className="absolute left-1/2 top-[140px] h-[1400px] w-[2400px] -translate-x-1/2 rounded-[50%] bg-[radial-gradient(closest-side,rgba(139,92,246,0.26),rgba(139,92,246,0.06)_55%,transparent)]" />
+        <div className="absolute left-1/2 top-[250px] h-[1400px] w-[1800px] -translate-x-1/2 rounded-[50%] border-t border-violet-200/50 bg-[#08090a] shadow-[0_-40px_140px_-30px_rgba(167,139,250,0.55),inset_0_1px_40px_-10px_rgba(196,181,253,0.25)] md:w-[2200px]" />
+      </div>
+
+      <Reveal className={`${CONTAINER} relative text-center`}>
+        <h2 className={`mx-auto max-w-[18ch] text-[36px] text-white [text-wrap:balance] md:text-[64px] ${DISPLAY}`}>
           Give your agent a backend it can’t break
         </h2>
-        <p className="mx-auto mt-5 max-w-2xl text-base leading-7 text-zinc-400 [text-wrap:pretty]">
-          Start free: connect Claude Code or Cursor in one command, ship real
-          infrastructure today, and let autonomy keep it healthy tonight.
-          Every change reviewable. Every change reversible. Every line open source.
+        <p className={`mx-auto mt-6 max-w-[52ch] text-[17px] text-zinc-400 [text-wrap:pretty] md:text-[18px] ${LEDE}`}>
+          Connect Claude Code or Cursor in one command, ship real infrastructure today, and let
+          autonomy keep it healthy tonight.
         </p>
-        <div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
-          <Link
-            href={ROUTES.signup}
-            className="group inline-flex h-12 w-full items-center justify-center gap-2 rounded-md bg-white px-5 text-sm font-semibold text-black transition duration-200 hover:bg-zinc-200 active:scale-[0.985] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60 focus-visible:ring-offset-2 focus-visible:ring-offset-black sm:w-auto whitespace-nowrap"
-          >
-            Start free
-            <ArrowRight className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
+        <div className="mt-10 flex flex-col items-center justify-center gap-3 sm:flex-row">
+          <Link href={isLoggedIn ? ROUTES.app : ROUTES.signup} className={PRIMARY_CTA}>
+            {isLoggedIn ? 'Go to console' : 'Start free'}
+            <ArrowRight aria-hidden className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
           </Link>
-          <a
-            href={ROUTES.founder}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-md border border-white/12 px-5 text-sm font-semibold text-white transition duration-200 hover:border-white/25 hover:bg-white/[0.04] active:scale-[0.985] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60 focus-visible:ring-offset-2 focus-visible:ring-offset-black sm:w-auto whitespace-nowrap"
-          >
-            <Calendar className="h-4 w-4" />
-            Talk to founder
+          <a href={ROUTES.founder} target="_blank" rel="noopener noreferrer" className={SECONDARY_CTA}>
+            <Calendar aria-hidden className="h-4 w-4" />
+            Talk to the founder
           </a>
         </div>
       </Reveal>
@@ -807,80 +772,32 @@ function Reveal({
   className = '',
   delay = 0,
 }: {
-  children: React.ReactNode
+  children: ReactNode
   className?: string
   delay?: number
 }) {
-  const reduceMotion = useReducedMotion()
-  const wrapperClassName = `min-w-0 ${className}`.trim()
-
-  if (reduceMotion) {
-    return <div className={wrapperClassName}>{children}</div>
-  }
+  const quiet = useSettledReducedMotion()
 
   return (
     <motion.div
       initial="hidden"
       whileInView="visible"
-      viewport={{ once: true, amount: 0.12, margin: '0px 0px -8% 0px' }}
-      variants={revealVariants}
-      transition={{ duration: 0.9, delay, ease: EASE_OUT }}
-      className={wrapperClassName}
+      viewport={{ once: true, amount: 0.15, margin: '0px 0px -8% 0px' }}
+      variants={rise}
+      transition={{ duration: quiet ? 0 : 0.9, delay: quiet ? 0 : delay, ease: EASE_OUT }}
+      className={`min-w-0 ${className}`.trim()}
     >
       {children}
     </motion.div>
   )
 }
 
-function Stagger({
-  children,
-  className = '',
-}: {
-  children: React.ReactNode
-  className?: string
-}) {
-  const reduceMotion = useReducedMotion()
-  const wrapperClassName = `min-w-0 ${className}`.trim()
-
-  if (reduceMotion) {
-    return <div className={wrapperClassName}>{children}</div>
-  }
-
+/** Left-aligned, stacked, no eyebrow. The headline names the section itself. */
+function SectionHead({ title, body }: { title: string; body: string }) {
   return (
-    <motion.div
-      initial="hidden"
-      whileInView="visible"
-      viewport={{ once: true, amount: 0.1, margin: '0px 0px -8% 0px' }}
-      variants={staggerVariants}
-      className={wrapperClassName}
-    >
-      {children}
-    </motion.div>
-  )
-}
-
-function SectionHeader({
-  eyebrow,
-  title,
-  body,
-  align = 'center',
-}: {
-  eyebrow: string
-  title: string
-  body: string
-  align?: 'left' | 'center'
-}) {
-  const alignment = align === 'center' ? 'mx-auto text-center' : 'text-left'
-
-  return (
-    <div className={`w-full max-w-full sm:max-w-3xl ${alignment}`}>
-      <p className="font-mono text-[11px] font-medium uppercase tracking-[0.2em] text-zinc-500">
-        {eyebrow}
-      </p>
-      <h2 className="mt-4 bg-[linear-gradient(180deg,#fff_20%,rgba(255,255,255,0.66))] bg-clip-text text-3xl font-semibold leading-tight tracking-tight text-transparent [text-wrap:balance] md:text-5xl">
-        {title}
-      </h2>
-      <p className="mt-5 text-base leading-7 text-zinc-400 [text-wrap:pretty]">{body}</p>
+    <div>
+      <h2 className={`max-w-[22ch] text-[32px] text-white [text-wrap:balance] md:text-[48px] ${TITLE}`}>{title}</h2>
+      <p className={`mt-5 ${MEASURE} text-[17px] text-zinc-400 [text-wrap:pretty] md:text-[18px] ${LEDE}`}>{body}</p>
     </div>
   )
 }

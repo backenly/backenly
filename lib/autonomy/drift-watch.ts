@@ -85,11 +85,39 @@ export async function detectPendingSchemaDrift(projectId: string): Promise<RawFi
 
 // ── Adopt ─────────────────────────────────────────────────────────────────────
 
+/**
+ * What adoption actually achieved.
+ *
+ * `adopted` used to be the only outcome, written unconditionally at the end
+ * regardless of what the steps above had managed. Partial execution reported
+ * as completion is the same defect as a verifier failure reported as success,
+ * and here it also retired the drift events - the only record that the change
+ * had been noticed at all.
+ */
+export type AdoptOutcome =
+  /** Every required step completed and the live set was established. */
+  | 'adopted'
+  /** The live set was established; some non-essential step did not complete. */
+  | 'partial'
+  /**
+   * The live schema could not be read, so nothing is known about what exists.
+   *
+   * Critically NOT the same as "the schema is empty". Pruning against an
+   * unestablished live set deletes metadata for tables that are merely
+   * invisible, and ApiDefinition cascades from Table.
+   */
+  | 'unverified'
+
 export interface AdoptExternalSchemaResult {
+  outcome: AdoptOutcome
+  /** Why, when the outcome is not `adopted`. */
+  reason: string | null
   adoptedEvents: number
   registeredTables: string[]
   refreshedTables: string[]
   prunedTables: string[]
+  /** Steps that did not complete, named. Empty on a clean adoption. */
+  incompleteSteps: string[]
 }
 
 /**
@@ -116,18 +144,57 @@ export async function adoptExternalSchema(
   //    catalog views filter by privilege. The sync chowns it to the project's
   //    owner role (backenly_user is a member), making it visible and operable
   //    for everything below.
+  const incompleteSteps: string[] = []
+  let grantsSynced = true
   try {
     const { syncDirectAccessGrants } = await import('@/lib/services/direct-access')
     await syncDirectAccessGrants(projectId)
-  } catch { /* non-fatal — registration below will then skip unseen tables */ }
+  } catch {
+    // NOT non-fatal, which is what the old comment claimed. This is the step
+    // that makes an externally-created table visible at all: information_schema
+    // filters by privilege, so without the chown `backenly_user` cannot see it.
+    // A silent failure here shrinks the live set that step 3 prunes against,
+    // and the prune then deletes metadata for tables that physically exist.
+    grantsSynced = false
+    incompleteSteps.push('grants-sync')
+  }
 
   // Live physical tables vs platform metadata — the honest diff, independent
   // of which events happened to be captured.
+  //
+  // `.catch(() => [])` used to sit here, which made a failed catalog read
+  // indistinguishable from an empty schema. Step 3 prunes against this set, so
+  // that difference is the difference between reconciling and deleting a
+  // project's entire metadata surface.
+  let liveEstablished = true
   const liveRows = await prisma.$queryRawUnsafe<Array<{ table_name: string }>>(
     `SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'BASE TABLE'`,
     schema,
-  ).catch(() => [] as Array<{ table_name: string }>)
+  ).catch(() => {
+    liveEstablished = false
+    return [] as Array<{ table_name: string }>
+  })
   const liveTables = new Set(liveRows.map(r => r.table_name).filter(t => !isReservedWorkspaceTable(t)))
+
+  // Could we look at all?
+  //
+  // This is the question the empty set cannot answer on its own. A schema
+  // that is genuinely empty and a schema that does not exist or is not
+  // visible both return zero rows, and only one of them means "everything
+  // this project had is gone". Asking for the schema separates them.
+  const schemaRows = await prisma.$queryRawUnsafe<Array<{ n: bigint }>>(
+    `SELECT count(*)::bigint AS n FROM information_schema.schemata WHERE schema_name = $1`,
+    schema,
+  ).catch(() => {
+    liveEstablished = false
+    return [] as Array<{ n: bigint }>
+  })
+  if (Number(schemaRows[0]?.n ?? 0) === 0) liveEstablished = false
+
+  // And a grants sync that failed leaves tables owned by the external role
+  // invisible to this connection, so the set is incomplete even when the read
+  // itself succeeded.
+  if (!grantsSynced) liveEstablished = false
 
   const metaRows = await prisma.table.findMany({
     where: { projectId },
@@ -166,13 +233,27 @@ export async function adoptExternalSchema(
 
   // 3. Prune metadata for tables that no longer physically exist (external
   //    DROP). ApiDefinition cascades from Table, so one delete per table.
+  //
+  // ONLY against an established live set. This is the destructive step, and
+  // absence of evidence is not evidence of absence: an unreadable schema, or
+  // one the grants sync never made visible, produces exactly the same empty
+  // set as a genuinely emptied database.
   const prunedTables: string[] = []
-  for (const m of metaRows) {
-    if (!liveTables.has(m.name) && !isReservedWorkspaceTable(m.name)) {
-      await prisma.table.delete({ where: { id: m.id } }).then(() => {
-        prunedTables.push(m.name)
-      }).catch(() => {})
+  if (liveEstablished) {
+    for (const m of metaRows) {
+      if (!liveTables.has(m.name) && !isReservedWorkspaceTable(m.name)) {
+        await prisma.table.delete({ where: { id: m.id } }).then(() => {
+          prunedTables.push(m.name)
+        }).catch(() => {
+          // A prune that failed is a divergence that survives, so it is named
+          // rather than dropped - otherwise adoption reports a reconciled
+          // state it did not reach.
+          incompleteSteps.push(`prune:${m.name}`)
+        })
+      }
     }
+  } else {
+    incompleteSteps.push('prune-skipped-live-set-unestablished')
   }
 
   // 4. New baseline so shadow-mutation/schema probes measure from adopted
@@ -186,12 +267,30 @@ export async function adoptExternalSchema(
     await syncDirectAccessGrants(projectId)
   } catch { /* non-fatal */ }
 
-  // 5. Mark the events adopted (also any that arrived while we worked — the
-  //    snapshot above already includes them).
-  const marked = await prisma.schemaDriftEvent.updateMany({
-    where: { projectId, status: 'pending' },
-    data: { status: 'adopted', resolvedAt: new Date() },
-  })
+  // 5. Mark the events adopted, but ONLY if adoption actually happened.
+  //
+  // This used to run unconditionally. Retiring a drift event is retiring the
+  // only record that the change was noticed, so doing it after a run that
+  // reconciled nothing loses the signal and the reason for it at once. A
+  // still-pending event is re-adopted on the next pass for free.
+  const outcome: AdoptOutcome = !liveEstablished
+    ? 'unverified'
+    : incompleteSteps.length > 0
+      ? 'partial'
+      : 'adopted'
+  const reason = !liveEstablished
+    ? 'could not establish which tables physically exist, so nothing was pruned and no drift was retired'
+    : incompleteSteps.length > 0
+      ? `some steps did not complete: ${incompleteSteps.join(', ')}`
+      : null
+
+  const marked =
+    outcome === 'unverified'
+      ? { count: 0 }
+      : await prisma.schemaDriftEvent.updateMany({
+          where: { projectId, status: 'pending' },
+          data: { status: 'adopted', resolvedAt: new Date() },
+        })
 
   await prisma.auditLog.create({
     data: {
@@ -199,16 +298,27 @@ export async function adoptExternalSchema(
       action: 'EXTERNAL_SCHEMA_ADOPTED',
       type: 'autonomy',
       details: JSON.stringify({
+        outcome,
+        reason,
         adoptedEvents: marked.count,
         registeredTables,
         refreshedTables,
         prunedTables,
+        incompleteSteps,
       }),
       timestamp: new Date(),
     },
   }).catch(() => {})
 
-  return { adoptedEvents: marked.count, registeredTables, refreshedTables, prunedTables }
+  return {
+    outcome,
+    reason,
+    adoptedEvents: marked.count,
+    registeredTables,
+    refreshedTables,
+    prunedTables,
+    incompleteSteps,
+  }
 }
 
 // ── Reaper ────────────────────────────────────────────────────────────────────

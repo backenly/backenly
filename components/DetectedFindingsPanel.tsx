@@ -277,7 +277,7 @@ export function DetectedFindingsPanel({
       <div className="flex items-center gap-2.5 border-b border-white/[0.06] px-5 py-3.5">
         <Radar className="size-3.5 text-violet-300" />
         <h3 className="text-[13px] font-semibold tracking-tight text-zinc-100">Detected</h3>
-        <span className="font-mono text-[11px] font-medium tabular-nums text-violet-300">
+        <span className="text-[12px] font-medium tabular-nums text-violet-300">
           {openTotal}
           {groups.length < openTotal && (
             <span className="ml-1.5 font-normal text-zinc-500">
@@ -296,7 +296,7 @@ export function DetectedFindingsPanel({
       </div>
 
       <div className="border-b border-white/[0.06] px-5 py-2.5">
-        <p className="text-[11.5px] leading-relaxed text-zinc-500">{dispositionCopy(level)}</p>
+        <p className="text-[12.5px] leading-relaxed text-zinc-500">{dispositionCopy(level)}</p>
       </div>
 
       <ul className="divide-y divide-white/[0.04]">
@@ -315,7 +315,7 @@ export function DetectedFindingsPanel({
       {/* The preview cap is stated rather than hidden: a project over 50
           actionable rows would otherwise look like it had exactly 50. */}
       {openTotal > openFindings.length && (
-        <p className="border-t border-white/[0.06] px-5 py-2.5 font-mono text-[10.5px] text-zinc-600">
+        <p className="border-t border-white/[0.06] px-5 py-2.5 font-mono text-[12px] text-zinc-600">
           showing {openFindings.length} of {openTotal} — the rest appear as these clear
         </p>
       )}
@@ -350,7 +350,7 @@ function DetectedRow({
         <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-emerald-400" />
         <div className="min-w-0 flex-1">
           <p className="text-[12.5px] font-medium text-zinc-200">{g.title}</p>
-          <p className="mt-1 font-mono text-[10.5px] text-zinc-500">
+          <p className="mt-1 font-mono text-[12px] text-zinc-500">
             fixed{many ? ` · ${g.members.length} tables` : ''} · rollback snapshot captured
           </p>
         </div>
@@ -378,7 +378,7 @@ function DetectedRow({
         />
         <div className="min-w-0 flex-1">
           <p className="text-[12.5px] leading-snug text-zinc-100">{g.title}</p>
-          <p className="mt-1.5 font-mono text-[10.5px] text-zinc-600">
+          <p className="mt-1.5 font-mono text-[12px] text-zinc-600">
             {head.type} · {g.severity}
             {!many && g.subjects[0] && <> · <span className="text-zinc-500">{g.subjects[0]}</span></>}
             {' · '}{timeAgo(head.detectedAt)}
@@ -389,7 +389,7 @@ function DetectedRow({
               <button
                 onClick={() => setExpanded(v => !v)}
                 aria-expanded={expanded}
-                className="inline-flex items-center gap-1 text-[11.5px] font-medium text-zinc-500 transition-colors hover:text-zinc-300"
+                className="inline-flex items-center gap-1 text-[12.5px] font-medium text-zinc-500 transition-colors hover:text-zinc-300"
               >
                 {g.members.length} findings, one cause
                 <ChevronDown className={`size-3 transition-transform ${expanded ? 'rotate-180' : ''}`} />
@@ -397,7 +397,7 @@ function DetectedRow({
               {expanded && (
                 <ul className="mt-2 space-y-1 border-l border-white/[0.08] pl-3">
                   {g.members.map((m, i) => (
-                    <li key={m.id} className="font-mono text-[10.5px] leading-relaxed text-zinc-500">
+                    <li key={m.id} className="font-mono text-[12px] leading-relaxed text-zinc-500">
                       {g.subjects[i] ?? m.type}
                     </li>
                   ))}
@@ -409,7 +409,7 @@ function DetectedRow({
           {state.phase === 'error' && (
             <div className="mt-2 flex items-start gap-2">
               <XCircle className="mt-px size-3.5 shrink-0 text-rose-400" />
-              <p className="text-[11.5px] leading-snug text-rose-300/90">{state.message}</p>
+              <p className="text-[12.5px] leading-snug text-rose-300/90">{state.message}</p>
             </div>
           )}
         </div>

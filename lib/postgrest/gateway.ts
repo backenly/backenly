@@ -115,6 +115,17 @@ export function profileForBranchSchema(
 }
 
 /**
+ * Never forwarded upstream: the RFC 7230 §6.1 hop-by-hop set, plus the headers
+ * that describe the incoming body's framing and encoding, which the gateway
+ * replaces by re-serializing the body itself.
+ */
+export const FRAMING_HEADERS: ReadonlySet<string> = new Set([
+  'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
+  'te', 'trailer', 'transfer-encoding', 'upgrade',
+  'host', 'content-length', 'content-encoding', 'expect',
+])
+
+/**
  * Build the header set forwarded to PostgREST.
  *
  * Every reserved header is dropped from the incoming request FIRST and then set
@@ -153,11 +164,27 @@ export function buildUpstreamHeaders(
   const reserved = new Set<string>(RESERVED_UPSTREAM_HEADERS)
   const out: Record<string, string> = {}
 
+  // Headers the incoming connection named as hop-by-hop, beyond the fixed set.
+  const connectionListed = new Set<string>()
+  for (const [rawKey, value] of entries) {
+    if (rawKey.toLowerCase() !== 'connection') continue
+    for (const token of String(value).split(',')) {
+      const t = token.trim().toLowerCase()
+      if (t) connectionListed.add(t)
+    }
+  }
+
   for (const [rawKey, value] of entries) {
     const key = rawKey.toLowerCase()
     if (reserved.has(key)) continue
-    // Hop-by-hop headers must not be proxied.
-    if (key === 'host' || key === 'connection' || key === 'content-length') continue
+    // The upstream request's framing and encoding are the gateway's own: both
+    // callers re-serialize the already-decoded body. So no header describing
+    // how the INCOMING request was framed may be forwarded (RFC 7230 §6.1).
+    // `transfer-encoding` is the one that bit: behind Next's streaming
+    // forwarder every write arrived chunked, undici refuses a request that sets
+    // it by hand ("invalid transfer-encoding header"), and every /db and /api/v2
+    // write on AWS answered 502 while reads worked.
+    if (FRAMING_HEADERS.has(key) || connectionListed.has(key)) continue
     // The caller's own credentials stop here — the gateway is the boundary.
     if (key === 'x-api-key' || key === 'x-user-token') continue
     out[key] = value

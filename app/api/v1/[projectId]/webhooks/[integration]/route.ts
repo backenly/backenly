@@ -22,6 +22,7 @@ import { prisma } from '@/lib/db/prisma'
 import { getIntegrationKey } from '@/lib/services/integrationKeyStore'
 import { executeAiFunction, FunctionEvent } from '@/lib/services/ai-functions/executor'
 import { ERROR_TAXONOMY } from '@/lib/errors/taxonomy'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 // ── Stripe signature validation ────────────────────────────────────────────────
 
@@ -108,10 +109,11 @@ async function validateHmacSignature(
   }
 }
 
-export async function POST(
+async function handlePOST(
   request: NextRequest,
-  { params }: { params: { projectId: string; integration: string } }
+  props: { params: Promise<{ projectId: string; integration: string }> }
 ) {
+  const params = await props.params;
   const { projectId, integration } = params
   const integrationLower = integration.toLowerCase()
 
@@ -562,3 +564,5 @@ async function handleStripeBusinessLogic(projectId: string, payload: Record<stri
       break
   }
 }
+
+export const POST = recordedV1(handlePOST)

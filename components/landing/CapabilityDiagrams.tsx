@@ -66,7 +66,8 @@
  */
 
 import { Fragment } from 'react'
-import { motion, useReducedMotion, type Variants } from 'framer-motion'
+import { MotionConfig, motion, type Variants } from 'framer-motion'
+import { useSettledReducedMotion } from '@/lib/hooks/useSettledReducedMotion'
 
 const MONO = 'font-mono text-[11px] leading-none tracking-tight'
 const TEXT = 'text-zinc-300'
@@ -126,20 +127,32 @@ const drawX: Variants = {
   visible: { scaleX: 1, transition: { duration: 0.55, ease: EASE_OUT } },
 }
 
+/**
+ * The server cannot know the reduced-motion preference, so the first render
+ * must be the same for everyone: `initial="hidden"` always. Letting framer's
+ * `useReducedMotion()` pick `initial={false}` during render made the server
+ * HTML (opacity 0) disagree with the client for every reduced-motion visitor,
+ * a hydration mismatch React does not patch up. `useSettledReducedMotion`
+ * reads the preference after hydration; those visitors then get the figure
+ * immediately, with transforms disabled, instead of on scroll.
+ */
 function Slot({ children, className = '' }: { children: React.ReactNode; className?: string }) {
-  const reduceMotion = useReducedMotion()
+  const reduceMotion = useSettledReducedMotion()
 
   return (
-    <motion.div
-      className={`relative mt-8 flex min-h-[200px] select-none flex-col justify-end ${className}`.trim()}
-      aria-hidden
-      initial={reduceMotion ? false : 'hidden'}
-      whileInView="visible"
-      viewport={{ once: true, amount: 0.4 }}
-      variants={sequence}
-    >
-      {children}
-    </motion.div>
+    <MotionConfig reducedMotion={reduceMotion ? 'always' : 'never'}>
+      <motion.div
+        className={`relative mt-8 flex min-h-[200px] select-none flex-col justify-end ${className}`.trim()}
+        aria-hidden
+        initial="hidden"
+        animate={reduceMotion ? 'visible' : undefined}
+        whileInView={reduceMotion ? undefined : 'visible'}
+        viewport={{ once: true, amount: 0.4 }}
+        variants={sequence}
+      >
+        {children}
+      </motion.div>
+    </MotionConfig>
   )
 }
 
@@ -487,7 +500,7 @@ export function StorageDiagram() {
  * object, same shape.
  */
 export function RealtimeDiagram() {
-  const reduceMotion = useReducedMotion()
+  const reduceMotion = useSettledReducedMotion()
   const ops = ['INSERT', 'UPDATE', 'DELETE']
   /** Column centres of a 3-column grid across the 360-unit figure. */
   const columns = [60.5, 180.5, 300.5]

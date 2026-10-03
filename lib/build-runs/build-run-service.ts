@@ -186,29 +186,40 @@ export async function recordBuildSnapshot(
 /**
  * Load the conversation thread + compute current build state.
  *
- * `messages` is ordered by (createdAt ASC, snapshotSeq ASC) so the thread
- * renders deterministically across refreshes — no async-flush flicker.
+ * `messages` is ordered by messageSeq ASC, the database sequence assigned at
+ * insert, so the thread renders deterministically across refreshes — no
+ * async-flush flicker, and no dependence on two rows landing in different
+ * milliseconds.
  *
  * `currentBuildState` is the AI snapshot with the highest `snapshotSeq` for
  * which `supersededAt` is unset. When no build snapshots exist or all are
  * superseded, this is `null` and the UI should not show an "active build" card.
  */
 export async function loadConversation(projectId: string): Promise<LoadedConversation> {
+  // Ordered by the database, in one clause.
+  //
+  // This used to read `orderBy: createdAt` and then re-sort in JavaScript,
+  // falling back through snapshotSeq to break ties. It could not work.
+  // createdAt has millisecond resolution, so two messages written in the same
+  // millisecond tie; snapshotSeq only exists on build-snapshot messages, so two
+  // PLAIN messages tie again; and `id` is a random v4 UUID with no causal
+  // content. The comparator then returned 0 and kept whatever order Postgres
+  // scanned, which put a follow-up question above the answer it followed and
+  // failed the ordering test in 2 of 6 runs.
+  //
+  // messageSeq is assigned by a database sequence at insert, so it is a total
+  // order over messages and needs no tie-break at all.
+  //
+  // It is deliberately NOT selected: it is a BigInt, JSON.stringify throws on
+  // those, and a conversation travels through route handlers that serialize it.
+  // Nothing outside this ordering needs the value.
   const rows = await prisma.conversationMessage.findMany({
     where: { projectId },
-    orderBy: { createdAt: 'asc' },
+    orderBy: { messageSeq: 'asc' },
     select: { id: true, projectId: true, role: true, content: true, metadata: true, createdAt: true },
   })
 
-  // Stable secondary sort by snapshotSeq (when defined) preserves intra-second order.
-  const messages = rows.map(toRecord).sort((a, b) => {
-    const ta = a.createdAt.getTime()
-    const tb = b.createdAt.getTime()
-    if (ta !== tb) return ta - tb
-    const sa = (asMetadata(a.metadata) as BuildSnapshotMetadata).snapshotSeq ?? 0
-    const sb = (asMetadata(b.metadata) as BuildSnapshotMetadata).snapshotSeq ?? 0
-    return sa - sb
-  })
+  const messages = rows.map(toRecord)
 
   // Pick the most recent non-superseded snapshot. Across different buildJobIds,
   // recency wins by createdAt; within the same job, supersededAt has already

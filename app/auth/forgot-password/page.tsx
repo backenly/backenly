@@ -1,217 +1,329 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState, Suspense } from 'react'
 import Link from 'next/link'
-import { motion } from 'framer-motion'
-import { Mail, AlertTriangle, CheckCircle, ArrowLeft } from 'lucide-react'
-import { Logo } from '@/components/Logo'
+import { useSearchParams } from 'next/navigation'
+import { Icon } from '@iconify/react'
+import { registerSiteIcons } from '@/lib/icons/registry'
+import { GlobalLoading } from '@/components/ui/GlobalLoading'
+import { PASSWORD_MIN_LENGTH, PASSWORD_POLICY_HINT, validatePasswordStrength } from '@/lib/auth/password-policy'
+import { AuthRequestError, requestPasswordResetCode, resetPasswordWithCode } from '@/lib/api/auth'
+import { CODE_LENGTH, CodeField, ResendCodeButton, useCooldown } from '@/components/site/EmailCodeFields'
+import {
+  AuthChrome,
+  AuthCard,
+  AuthFooterNote,
+  FieldLabel,
+  FieldInput,
+  PrimaryButton,
+} from '@/components/site/AuthShell'
 
-export default function ForgotPasswordPage() {
-  const [email, setEmail] = useState('')
-  const [error, setError] = useState<string | null>(null)
-  const [submitted, setSubmitted] = useState(false)
-  const [isSubmitting, setIsSubmitting] = useState(false)
+registerSiteIcons()
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setError(null)
+type Step = 'email' | 'code' | 'done'
 
-    if (!email) {
-      setError('Email is required')
-      return
-    }
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
-    setIsSubmitting(true)
-    try {
-      const res = await fetch('/api/auth/forgot-password', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email }),
+/**
+ * Account recovery in one page: the address, then the emailed code with the
+ * new password, then done.
+ *
+ * It says "sent" only when the server said so. When this deployment cannot
+ * send email at all, it says that instead, and tells the operator of a
+ * self-hosted install how to reset a password from the server.
+ */
+function ForgotPasswordForm() {
+  const searchParams = useSearchParams()
+  const [step, setStep] = useState<Step>('email')
+  const [email, setEmail] = useState(() => searchParams.get('email')?.trim() || '')
+  const [emailError, setEmailError] = useState<string | null>(null)
+  const [unavailable, setUnavailable] = useState<string | null>(null)
+  const [isSending, setIsSending] = useState(false)
+
+  const [code, setCode] = useState('')
+  const [password, setPassword] = useState('')
+  const [confirm, setConfirm] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
+  const [errors, setErrors] = useState<{ code?: string; password?: string; confirm?: string }>({})
+  const [notice, setNotice] = useState<string | null>(null)
+  const [isResetting, setIsResetting] = useState(false)
+  const [resendIn, setResendIn] = useCooldown(0)
+
+  // Asked up front so nobody types an address and waits for an email this
+  // server has no way to send. The request below is still authoritative.
+  useEffect(() => {
+    fetch('/api/auth/platform-providers')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data?.emailDelivery === false) {
+          setUnavailable(
+            "Email isn't set up on this server, so reset codes can't be sent. If you run this server, " +
+              'reset a password from it with: npm run auth:reset-password -- --email you@example.com. ' +
+              'Otherwise, contact the person who runs it.',
+          )
+        }
       })
-      const data = await res.json()
+      .catch(() => {})
+  }, [])
 
-      if (!res.ok) {
-        setError(data.error || 'Something went wrong')
-        return
+  const sendCode = async (): Promise<boolean> => {
+    const target = email.trim().toLowerCase()
+    try {
+      const r = await requestPasswordResetCode(target)
+      setEmail(target)
+      setResendIn(r.resendAfterSec)
+      return true
+    } catch (error) {
+      if (error instanceof AuthRequestError && error.code === 'EMAIL_DELIVERY_UNAVAILABLE') {
+        setUnavailable(error.message)
+      } else if (step === 'email') {
+        setEmailError(error instanceof Error ? error.message : 'Could not send a reset code')
+      } else {
+        setErrors({ code: error instanceof Error ? error.message : 'Could not send a new code' })
       }
-
-      setSubmitted(true)
-    } catch {
-      setError('Network error. Please try again.')
-    } finally {
-      setIsSubmitting(false)
+      return false
     }
   }
 
+  const handleEmailSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!email.trim()) return setEmailError('Email is required')
+    if (!EMAIL_RE.test(email.trim())) return setEmailError('Please enter a valid email address')
+    setEmailError(null)
+    setIsSending(true)
+    const ok = await sendCode()
+    setIsSending(false)
+    if (ok) {
+      setCode('')
+      setErrors({})
+      setNotice(null)
+      setStep('code')
+    }
+  }
+
+  const handleResend = async () => {
+    setIsSending(true)
+    setErrors({})
+    setNotice(null)
+    const ok = await sendCode()
+    setIsSending(false)
+    if (ok) {
+      setCode('')
+      setNotice(`A new code is on its way to ${email}.`)
+    }
+  }
+
+  const handleReset = async (e: React.FormEvent) => {
+    e.preventDefault()
+    const next: { code?: string; password?: string; confirm?: string } = {}
+    if (code.length !== CODE_LENGTH) next.code = `Enter the ${CODE_LENGTH}-digit code from the email.`
+    if (!password) {
+      next.password = 'Password is required'
+    } else {
+      const strength = validatePasswordStrength(password)
+      if (!strength.valid) next.password = strength.message || 'Choose a stronger password'
+    }
+    if (!confirm) next.confirm = 'Please confirm your password'
+    else if (password !== confirm) next.confirm = 'Passwords do not match'
+    if (Object.keys(next).length > 0) return setErrors(next)
+
+    setErrors({})
+    setNotice(null)
+    setIsResetting(true)
+    try {
+      await resetPasswordWithCode(email, code, password)
+      setStep('done')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not reset the password'
+      if (error instanceof AuthRequestError && error.code === 'CODE_REJECTED') setErrors({ code: message })
+      else setErrors({ password: message })
+    } finally {
+      setIsResetting(false)
+    }
+  }
+
+  const backToSignIn = (
+    <div className="mt-7 pt-6 border-t border-white/[0.06] text-center">
+      <Link
+        href="/auth/login"
+        className="text-xs text-zinc-400 hover:text-zinc-200 transition-colors font-medium inline-flex items-center gap-1"
+      >
+        <Icon icon="solar:alt-arrow-down-linear" width={12} className="rotate-90 text-zinc-500" />
+        Back to sign in
+      </Link>
+    </div>
+  )
+
+  if (unavailable) {
+    return (
+      <AuthChrome>
+        <AuthCard
+          eyebrow="Account recovery"
+          title="Email can't be sent"
+          subtitle="No reset code was sent, so there is nothing to wait for."
+        >
+          <div className="mb-6 flex items-start gap-3 rounded-lg border border-amber-500/20 bg-amber-500/[0.06] p-4 text-xs leading-relaxed text-amber-200">
+            <Icon icon="solar:danger-triangle-bold" width={20} className="mt-0.5 shrink-0 text-amber-400" />
+            <p className="break-words text-zinc-300">{unavailable}</p>
+          </div>
+          <PrimaryButton type="button" onClick={() => setUnavailable(null)}>
+            Try again
+          </PrimaryButton>
+          {backToSignIn}
+        </AuthCard>
+        <AuthFooterNote />
+      </AuthChrome>
+    )
+  }
+
+  if (step === 'done') {
+    return (
+      <AuthChrome>
+        <AuthCard
+          eyebrow="Success"
+          title="Password updated"
+          subtitle="Every device that was signed in has been signed out. Sign in with your new password."
+        >
+          <Link
+            href="/auth/login"
+            className="group inline-flex h-12 w-full items-center justify-center gap-2 rounded-lg bg-white px-5 text-[15px] font-semibold text-zinc-950 transition hover:bg-zinc-200"
+          >
+            Go to sign in
+            <Icon icon="solar:arrow-right-linear" width={16} className="transition-transform group-hover:translate-x-0.5" />
+          </Link>
+        </AuthCard>
+        <AuthFooterNote />
+      </AuthChrome>
+    )
+  }
+
+  if (step === 'code') {
+    return (
+      <AuthChrome>
+        <AuthCard
+          eyebrow="Check your email"
+          title="Set a new password"
+          subtitle={`If ${email} has a Backenly account, we sent it a ${CODE_LENGTH}-digit code. It expires in 10 minutes.`}
+        >
+          <form onSubmit={handleReset} className="flex flex-col gap-4 mb-5">
+            <CodeField value={code} onChange={setCode} disabled={isResetting} error={errors.code} />
+
+            <FieldLabel htmlFor="password">New password</FieldLabel>
+            <FieldInput
+              id="password"
+              type={showPassword ? 'text' : 'password'}
+              autoComplete="new-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder={`At least ${PASSWORD_MIN_LENGTH} characters`}
+              disabled={isResetting}
+              error={errors.password}
+              helper={errors.password ? undefined : PASSWORD_POLICY_HINT}
+              trailing={
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((s) => !s)}
+                  className="text-zinc-500 hover:text-zinc-300 transition-colors"
+                  aria-label={showPassword ? 'Hide password' : 'Show password'}
+                >
+                  <Icon icon={showPassword ? 'ri:eye-off-line' : 'ri:eye-line'} width={16} />
+                </button>
+              }
+            />
+
+            <FieldLabel htmlFor="confirm">Confirm new password</FieldLabel>
+            <FieldInput
+              id="confirm"
+              type={showPassword ? 'text' : 'password'}
+              autoComplete="new-password"
+              value={confirm}
+              onChange={(e) => setConfirm(e.target.value)}
+              placeholder="Repeat your new password"
+              disabled={isResetting}
+              error={errors.confirm}
+            />
+
+            {notice && !errors.code && <p className="text-[11px] text-emerald-300">{notice}</p>}
+
+            <PrimaryButton type="submit" disabled={isResetting} loading={isResetting}>
+              {isResetting ? 'Updating password…' : 'Reset password'}
+            </PrimaryButton>
+          </form>
+
+          <div className="flex items-center justify-between gap-3">
+            <ResendCodeButton secondsLeft={resendIn} sending={isSending} onResend={handleResend} />
+            <button
+              type="button"
+              onClick={() => setStep('email')}
+              className="text-xs text-zinc-400 hover:text-zinc-200 transition-colors"
+            >
+              Use a different email
+            </button>
+          </div>
+
+          <p className="mt-6 text-[11px] leading-relaxed text-zinc-500">
+            No email? Check your spam folder. Accounts created with Google or GitHub can set a password
+            here too.
+          </p>
+
+          {backToSignIn}
+        </AuthCard>
+        <AuthFooterNote />
+      </AuthChrome>
+    )
+  }
+
   return (
-    <main className="min-h-screen flex">
-      {/* Left branding panel */}
-      <div className="hidden lg:flex lg:w-1/3 relative overflow-hidden">
-        <div className="absolute inset-0 bg-gradient-to-br from-purple-600 via-purple-700 to-purple-800" />
-        <motion.div
-          className="absolute top-0 right-0 w-96 h-96 bg-purple-500/20 rounded-full blur-3xl"
-          animate={{ scale: [1, 1.2, 1], opacity: [0.3, 0.5, 0.3] }}
-          transition={{ duration: 8, repeat: Infinity, ease: 'easeInOut' }}
-        />
-        <motion.div
-          className="absolute bottom-0 left-0 w-96 h-96 bg-purple-400/20 rounded-full blur-3xl"
-          animate={{ scale: [1.2, 1, 1.2], opacity: [0.3, 0.5, 0.3] }}
-          transition={{ duration: 8, repeat: Infinity, ease: 'easeInOut', delay: 1 }}
-        />
-        <div className="relative z-10 flex flex-col items-center justify-center h-full w-full px-12">
-          <motion.div
-            className="text-center"
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.8, delay: 0.2 }}
-          >
-            <motion.div className="inline-flex items-center justify-center mb-16" whileHover={{ scale: 1.05 }}>
-              <div className="scale-[2] mb-6">
-                <Logo />
-              </div>
-            </motion.div>
-            <h2 className="text-4xl font-bold text-white mb-4">
-              Forgot your<br />password?
-            </h2>
-            <p className="text-white/80 text-lg">
-              No worries. We'll send you a secure reset link.
-            </p>
-          </motion.div>
+    <AuthChrome>
+      <AuthCard
+        eyebrow="Account recovery"
+        title="Reset your password"
+        subtitle="Enter your account's email and we'll send you a code to choose a new password."
+      >
+        <form onSubmit={handleEmailSubmit} className="flex flex-col gap-4 mb-5">
+          <FieldLabel htmlFor="email">Email address</FieldLabel>
+          <FieldInput
+            id="email"
+            type="email"
+            autoComplete="email"
+            value={email}
+            onChange={(e) => {
+              setEmail(e.target.value)
+              if (emailError) setEmailError(null)
+            }}
+            placeholder="you@example.com"
+            disabled={isSending}
+            error={emailError || undefined}
+          />
+
+          <PrimaryButton type="submit" disabled={isSending} loading={isSending}>
+            {isSending ? 'Sending code…' : 'Send reset code'}
+          </PrimaryButton>
+        </form>
+
+        <div className="mt-7 pt-6 border-t border-white/[0.06] text-center">
+          <p className="text-xs text-zinc-400">
+            Remember your password?{' '}
+            <Link
+              href="/auth/login"
+              className="text-violet-300 hover:text-violet-200 transition-colors font-medium inline-flex items-center gap-1"
+            >
+              Sign in
+              <Icon icon="solar:arrow-right-up-linear" width={11} />
+            </Link>
+          </p>
         </div>
-      </div>
+      </AuthCard>
 
-      {/* Right form panel */}
-      <div className="flex-1 bg-gradient-to-br from-[#0A0E1A] via-[#0F1419] to-[#0A0E1A] flex items-center justify-center p-8 relative overflow-hidden">
-        <div className="absolute inset-0">
-          <div className="absolute top-20 right-20 w-96 h-96 bg-purple-500/10 rounded-full blur-[120px] animate-pulse" />
-          <div className="absolute bottom-20 left-20 w-96 h-96 bg-blue-500/10 rounded-full blur-[120px] animate-pulse delay-700" />
-        </div>
+      <AuthFooterNote />
+    </AuthChrome>
+  )
+}
 
-        <div className="w-full max-w-md relative z-10">
-          <motion.div
-            initial={{ opacity: 0, scale: 0.95 }}
-            animate={{ opacity: 1, scale: 1 }}
-            className="bg-white/5 backdrop-blur-2xl border border-white/10 rounded-[2.5rem] p-9 shadow-2xl shadow-black/50"
-          >
-            {/* Logo on mobile */}
-            <div className="flex items-center justify-center mb-6 lg:hidden">
-              <Logo />
-            </div>
-
-            {submitted ? (
-              <motion.div
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="text-center"
-              >
-                <div className="w-16 h-16 rounded-full bg-green-500/20 border border-green-500/30 flex items-center justify-center mx-auto mb-6">
-                  <CheckCircle className="w-8 h-8 text-green-400" />
-                </div>
-                <h1 className="text-2xl font-black text-white mb-3">Check your email</h1>
-                <p className="text-gray-400 text-sm leading-relaxed mb-8">
-                  If <span className="text-white font-semibold">{email}</span> is registered, we sent a password reset link.
-                  It expires in <span className="text-white font-semibold">1 hour</span>.
-                </p>
-                <p className="text-gray-500 text-xs mb-8">
-                  Didn't receive it? Check your spam folder or{' '}
-                  <button
-                    onClick={() => setSubmitted(false)}
-                    className="text-purple-400 hover:text-purple-300 underline"
-                  >
-                    try again
-                  </button>.
-                </p>
-                <Link
-                  href="/auth/login"
-                  className="inline-flex items-center gap-2 text-white/60 hover:text-white transition-colors text-sm font-bold"
-                >
-                  <ArrowLeft className="w-4 h-4" />
-                  Back to sign in
-                </Link>
-              </motion.div>
-            ) : (
-              <>
-                <motion.div
-                  className="mb-8"
-                  initial={{ opacity: 0, y: -20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.6 }}
-                >
-                  <h1 className="text-3xl font-black text-white mb-2 tracking-tight">Reset password</h1>
-                  <p className="text-gray-400 text-base font-medium">
-                    Enter your email and we'll send you a reset link
-                  </p>
-                </motion.div>
-
-                <motion.form
-                  onSubmit={handleSubmit}
-                  className="space-y-5"
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.6, delay: 0.2 }}
-                >
-                  <div>
-                    <label htmlFor="email" className="block text-sm font-bold text-white/70 mb-2.5 ml-1">
-                      Email Address
-                    </label>
-                    <div className="relative">
-                      <Mail className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-white/30" />
-                      <input
-                        id="email"
-                        type="email"
-                        value={email}
-                        onChange={e => setEmail(e.target.value)}
-                        className="w-full pl-12 pr-5 py-3 bg-white/5 border border-white/10 rounded-2xl text-white placeholder-white/20 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent hover:bg-white/[0.08] transition-all duration-300"
-                        placeholder="you@example.com"
-                        disabled={isSubmitting}
-                        autoFocus
-                      />
-                    </div>
-                    {error && (
-                      <motion.p
-                        initial={{ opacity: 0, y: -10 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        className="mt-2.5 text-sm text-red-400 font-bold flex items-center gap-2 ml-1"
-                      >
-                        <AlertTriangle className="w-4 h-4" />
-                        {error}
-                      </motion.p>
-                    )}
-                  </div>
-
-                  <motion.button
-                    type="submit"
-                    disabled={isSubmitting}
-                    whileHover={{ scale: isSubmitting ? 1 : 1.02, y: isSubmitting ? 0 : -2 }}
-                    whileTap={{ scale: isSubmitting ? 1 : 0.98 }}
-                    className="w-full px-6 py-3 bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 text-white font-black rounded-2xl shadow-xl shadow-purple-500/20 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed relative overflow-hidden group"
-                  >
-                    <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000" />
-                    <span className="relative z-10">
-                      {isSubmitting ? 'Sending link...' : 'Send reset link'}
-                    </span>
-                  </motion.button>
-                </motion.form>
-
-                <motion.div
-                  className="mt-8 text-center"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  transition={{ duration: 0.6, delay: 0.4 }}
-                >
-                  <Link
-                    href="/auth/login"
-                    className="inline-flex items-center gap-2 text-white/60 hover:text-white transition-colors text-sm font-bold group"
-                  >
-                    <ArrowLeft className="w-4 h-4 group-hover:-translate-x-1 transition-transform" />
-                    Back to sign in
-                  </Link>
-                </motion.div>
-              </>
-            )}
-          </motion.div>
-        </div>
-      </div>
-    </main>
+export default function ForgotPasswordPage() {
+  return (
+    <Suspense fallback={<GlobalLoading />}>
+      <ForgotPasswordForm />
+    </Suspense>
   )
 }

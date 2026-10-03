@@ -13,18 +13,23 @@
  *   - the owner's autonomy dial (OFF → shadow only)
  *   - the circuit breaker + change-freeze during incidents
  *
- * So this route does no policy work — it just enumerates active projects and
- * fans out, with per-project failure isolation and a small concurrency cap.
+ * So this route does no policy work. It asks FleetScheduler which projects to
+ * visit and fans out, with per-project failure isolation and a small
+ * concurrency cap.
+ *
+ * WHICH projects is an edition question and is not answered here: single-tenant
+ * resolves THE project, Cloud enumerates its estate. WHAT happens to each one
+ * is runReconciler, which is public product and identical in both editions.
  */
 
 export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db/prisma'
 import { runReconciler } from '@/lib/autonomy/reconciler'
 import { diagnoseEscalatedFindings } from '@/lib/autonomy/escalation-diagnosis'
+import { sweepProjectMaintenance, type SweepDisposition } from '@/lib/autonomy/maintenance/sweep'
 import { FLAGS } from '@/lib/config/flags'
-import { activeProjectsWhere } from '@/lib/autonomy/activity-gate'
+import { getFleetScheduler } from '@/lib/edition'
 
 const CONCURRENCY = 5
 
@@ -47,14 +52,10 @@ export async function GET(request: NextRequest) {
 
   const startedAt = Date.now()
 
-  const activeProjects = await prisma.project
-    .findMany({
-      // Shared with the in-process node-cron tick so the two schedulers cannot
-      // disagree about which projects get healed. See lib/autonomy/activity-gate.ts.
-      where: activeProjectsWhere(),
-      select: { id: true },
-    })
-    .catch(() => [])
+  // Shared with the in-process node-cron tick so the two schedulers cannot
+  // disagree about which projects get healed. The eligibility rule itself is
+  // still lib/autonomy/activity-gate.ts; the edition decides only the SET.
+  const activeProjects = await getFleetScheduler().activeTargets()
 
   let attempted = 0
   let applied = 0
@@ -64,6 +65,7 @@ export async function GET(request: NextRequest) {
   const errors: string[] = []
 
   let diagnosed = 0
+  const maintenance: Partial<Record<SweepDisposition, number>> = {}
 
   for (let i = 0; i < activeProjects.length; i += CONCURRENCY) {
     const batch = activeProjects.slice(i, i + CONCURRENCY)
@@ -94,6 +96,27 @@ export async function GET(request: NextRequest) {
     for (const d of diag) {
       if (d.status === 'fulfilled') diagnosed += d.value
     }
+
+    // Tier C — the maintenance sweep, on the SAME estate this route already
+    // visits. Not a second scheduler and not a second queue: it answers the
+    // same Autonomy findings, through the executor an operator proved by hand.
+    //
+    // Almost every pass returns `no_finding` or `awaiting_approval` and touches
+    // nothing. It runs a ladder only when one is planable against the live
+    // catalog AND a human has approved that exact plan version, and it refuses
+    // to start a ladder it could not finish rather than leaving a schema
+    // half-expanded. Failure-isolated per project, like the passes above.
+    const sweeps = await Promise.allSettled(
+      batch.map(p => sweepProjectMaintenance({ projectId: p.id })),
+    )
+    for (let j = 0; j < sweeps.length; j++) {
+      const s = sweeps[j]
+      if (s.status === 'rejected') {
+        errors.push(`${batch[j].id} maintenance: ${String(s.reason?.message ?? s.reason)}`)
+        continue
+      }
+      maintenance[s.value.disposition] = (maintenance[s.value.disposition] ?? 0) + 1
+    }
   }
 
   return NextResponse.json({
@@ -106,6 +129,9 @@ export async function GET(request: NextRequest) {
     deferred,
     frozen,
     diagnosed,
+    // Counts per disposition, so a quiet estate reads as quiet rather than as
+    // nothing having run: mostly `no_finding`, some `awaiting_approval`.
+    maintenance,
     errors: errors.slice(0, 10),
   })
 }

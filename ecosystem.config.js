@@ -12,7 +12,16 @@ module.exports = {
   apps: [
     {
       name: 'backenly-nextjs',
-      script: '.next/standalone/server.js',
+      // Started through the wrapper, NOT directly, because the standalone
+      // server chdirs into .next/standalone/ and then cannot see the app root
+      // .env. Running node here directly is what took production down on
+      // 2026-09-06 with "JWT_SECRET environment variable is not set" on a
+      // release whose .env was correctly present at the app root.
+      //
+      // The wrapper loads the root .env into the process environment and execs
+      // node, so node replaces the shell and PM2 still supervises node itself.
+      script: 'scripts/start-next-standalone.sh',
+      interpreter: 'bash',
       cwd: './',
       instances: 1,
       exec_mode: 'fork',

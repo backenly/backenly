@@ -9,6 +9,7 @@ import { cookies, headers } from 'next/headers'
 import { verifyToken } from './jwt'
 import { prisma } from '@/lib/db/postgres'
 import { verifyProjectAccess } from './project-access'
+import { canAccessProject } from '@/lib/edition/guard'
 
 export class UnauthorizedError extends Error {
   constructor(message = 'Unauthorized') {
@@ -32,7 +33,15 @@ export class ForbiddenError extends Error {
  */
 export async function requireUser() {
   const cookieStore = await cookies()
-  const token = cookieStore.get('auth-token')?.value
+  let token = cookieStore.get('auth-token')?.value
+
+  if (!token) {
+    const headersList = await headers()
+    const authHeader = headersList.get('authorization')
+    if (authHeader?.startsWith('Bearer ')) {
+      token = authHeader.slice(7).trim()
+    }
+  }
 
   if (!token) {
     throw new UnauthorizedError('No authentication token')
@@ -104,17 +113,21 @@ export async function getUserFromHeaders() {
 export async function getProjectContext(projectId: string) {
   const user = await requireUser()
 
-  // Validate project exists and user has access
-  const project = await prisma.project.findFirst({
-    where: {
-      id: projectId,
-      // User must own the project
-      userId: user.userId,
-    },
-    include: {
-      workspaces: true,
-    },
-  })
+  // Audited before changing: app/api/projects/[id]/go-live is the only caller
+  // (lib/services/aiWorkspace exports a DIFFERENT function of the same name),
+  // so the decision belongs here and needs no trusted variant.
+  //
+  // Fetched by id alone afterwards: re-adding a userId predicate would restore
+  // owner-only access after the organization-aware check already granted it.
+  const allowed = await canAccessProject(user.userId, projectId)
+  const project = allowed
+    ? await prisma.project.findUnique({
+        where: { id: projectId },
+        include: {
+          workspaces: true,
+        },
+      })
+    : null
 
   if (!project) {
     throw new ForbiddenError(

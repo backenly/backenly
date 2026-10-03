@@ -18,8 +18,9 @@ import { detectSchemaDrift, applyReconciliationMigrations } from '@/lib/ai/schem
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { id: string } },
+  props: { params: Promise<{ id: string }> },
 ) {
+  const params = await props.params
   return withProjectValidation<any>(request, async (validated) => {
     const report = await detectSchemaDrift(validated.projectId)
 
@@ -39,8 +40,9 @@ export async function GET(
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: { id: string } },
+  props: { params: Promise<{ id: string }> },
 ) {
+  const params = await props.params
   return withProjectValidation<any>(request, async (validated) => {
     const body = await request.json().catch(() => ({}))
     const { apply = false, dryRun = false } = body as { apply?: boolean; dryRun?: boolean }

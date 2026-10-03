@@ -44,7 +44,7 @@ Domain trust is a supporting signal here, never the gate.
 
 Ordered by how much work each one actually does.
 
-### 1. Turnstile — `lib/auth/bot-defense.ts`
+### 1. Turnstile — `lib/trust/bot-defense.ts`
 
 Cloudflare Turnstile on the email signup form, verified server-side. Free, no
 request ceiling, invisible for most real users, no ad-graph coupling. This is
@@ -69,7 +69,7 @@ but **the register route never consumed it**, so a script could register
 unlimited accounts from one address at full speed. Now it does, and a trip
 records `signup_rate_limited`.
 
-### 3. Email trust — `lib/auth/email-trust.ts`
+### 3. Email trust — `lib/trust/email-trust.ts`
 
 Server-side scoring, 0–100, returning a verdict rather than a boolean:
 
@@ -122,7 +122,7 @@ Domain farms reuse mail infrastructure (`dysonc.com` routes through
 `mail.wabblywabble.com`), so blocking one entry retires the whole farm instead
 of playing whack-a-mole.
 
-### 4. Account standing — `lib/auth/account-standing.ts`
+### 4. Account standing — `lib/trust/account-standing.ts`
 
 This is the structural layer, and the one that does not depend on correctly
 identifying an abusive domain.

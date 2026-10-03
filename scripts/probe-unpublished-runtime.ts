@@ -135,7 +135,7 @@ async function main() {
     if (stillThere) {
       // A dangling registration wedges the schema cache for EVERY tenant, so
       // this is not a tidy-up nicety — say so loudly.
-      console.error('  ^ dangling registration left behind; run repair-postgrest-registrations.ts')
+      console.error('  ^ dangling registration left behind; unregisterSchema() clears it')
       process.exitCode = 1
     }
     await prisma.$disconnect()

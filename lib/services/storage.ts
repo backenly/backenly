@@ -3,7 +3,12 @@ import { promises as fs } from 'fs'
 import path from 'path'
 import crypto from 'crypto'
 import { S3StorageService } from './s3Storage'
+import { clampIsPublic } from '@/lib/storage/access-policy'
 import { requireStorageSecret } from '@/lib/auth/jwt-secret'
+import { StorageUnavailableError } from '@/lib/storage/errors'
+import { signExportToken } from '@/lib/storage/export-token'
+import { getProjectQuota } from '@/lib/services/storageQuota'
+import { UploadRejectedError, assertFileAllowed, assertFileSize } from '@/lib/storage/upload-policy'
 
 export interface StorageService {
   // Bucket operations
@@ -30,6 +35,12 @@ export interface StorageService {
   }>>
   getFile(fileId: string, projectId: string): Promise<{ path: string; buffer: Buffer; mimeType: string | null; name: string } | null>
   getFileUrl(fileId: string, projectId: string, expiresIn?: number): Promise<string>
+  /**
+   * A time-limited link an administrator can hand to a script to take this
+   * file out of the project, public or private, INCLUDING while the project is
+   * paused. Only the admin-only export route may call this.
+   */
+  getExportUrl(fileId: string, projectId: string, ttlSeconds: number): Promise<string>
   deleteFile(fileId: string, projectId: string): Promise<void>
   deleteFiles(fileIds: string[], projectId: string): Promise<void>
 
@@ -221,129 +232,40 @@ class LocalStorageService implements StorageService {
     })
 
     if (!bucket) {
-      throw new Error('Bucket not found')
+      throw new UploadRejectedError('BUCKET_NOT_FOUND', 'Bucket not found')
     }
 
     // Validate tenant ownership
     if (bucket.projectId !== options.projectId) {
-      throw new Error('Bucket does not belong to this project')
+      throw new UploadRejectedError('BUCKET_NOT_IN_PROJECT', 'Bucket does not belong to this project')
     }
 
-    // ============ P0: MIME TYPE & EXTENSION VALIDATION (SECURITY) ============
-    const fileExt = path.extname(file.name).toLowerCase()
-    const detectedMimeType = file.mimeType || 'application/octet-stream'
-
-    // Dangerous executable extensions
-    const DANGEROUS_EXTENSIONS = [
-      '.exe', '.bat', '.cmd', '.sh', '.bash', '.ps1', '.app', '.deb', '.rpm',
-      '.msi', '.dmg', '.pkg', '.run', '.bin', '.jar', '.dll', '.so', '.dylib',
-      '.scr', '.vbs', '.js', '.jse', '.wsf', '.wsh', '.com', '.pif', '.lnk'
-    ]
-
-    // Block executables if enabled
-    if (bucket.blockExecutables && DANGEROUS_EXTENSIONS.includes(fileExt)) {
-      throw new Error(
-        `Executable files are not allowed. File extension "${fileExt}" is blocked for security.`
-      )
-    }
-
-    // Validate file extension against whitelist
-    if (bucket.allowedExtensions.length > 0 && !bucket.allowedExtensions.includes(fileExt)) {
-      throw new Error(
-        `File extension "${fileExt}" is not allowed in this bucket. ` +
-        `Allowed extensions: ${bucket.allowedExtensions.join(', ')}`
-      )
-    }
-
-    // Validate MIME type against whitelist
-    if (bucket.allowedMimeTypes.length > 0 && !bucket.allowedMimeTypes.includes(detectedMimeType)) {
-      throw new Error(
-        `File type "${detectedMimeType}" is not allowed in this bucket. ` +
-        `Allowed types: ${bucket.allowedMimeTypes.join(', ')}`
-      )
-    }
-
-    // Cross-check: Ensure MIME type matches extension (prevent spoofing)
-    const extensionMimeMap: Record<string, string[]> = {
-      // Images
-      '.jpg': ['image/jpeg'],
-      '.jpeg': ['image/jpeg'],
-      '.png': ['image/png'],
-      '.gif': ['image/gif'],
-      '.webp': ['image/webp'],
-      '.svg': ['image/svg+xml'],
-      
-      // Documents
-      '.pdf': ['application/pdf'],
-      '.txt': ['text/plain'],
-      '.csv': ['text/csv', 'application/csv'],
-      
-      // Videos
-      '.mp4': ['video/mp4'],
-      '.webm': ['video/webm'],
-      '.ogv': ['video/ogg'],
-      '.mov': ['video/quicktime'],
-      '.avi': ['video/x-msvideo'],
-      
-      // Audio
-      '.mp3': ['audio/mpeg'],
-      '.wav': ['audio/wav', 'audio/x-wav'],
-      '.ogg': ['audio/ogg'],
-      '.m4a': ['audio/mp4'],
-    }
-
-    const expectedMimes = extensionMimeMap[fileExt]
-    if (expectedMimes && !expectedMimes.includes(detectedMimeType)) {
-      throw new Error(
-        `File extension "${fileExt}" does not match MIME type "${detectedMimeType}". ` +
-        `Possible file spoofing detected.`
-      )
-    }
-    // =========================================================================
+    // Type, extension and spoofing checks (lib/storage/upload-policy.ts, shared with the S3 driver)
+    assertFileAllowed(bucket, file)
 
     // ============ P0: STORAGE QUOTA VALIDATION ============
-    // Get project limits
     const project = await prisma.project.findUnique({
       where: { id: options.projectId },
       select: {
-        storageUsed: true,
-        storageLimit: true,
-        maxFileSize: true,
         maxFilesPerBucket: true,
       },
     })
 
     if (!project) {
-      throw new Error('Project not found')
+      throw new UploadRejectedError('PROJECT_NOT_FOUND', 'Project not found')
     }
 
     const fileSize = BigInt(file.buffer.length)
+    assertFileSize(fileSize, { bucketMaxBytes: bucket.maxFileSizeBytes })
 
-    // P1: Check bucket-level file size limit (overrides project default if smaller)
-    if (fileSize > bucket.maxFileSizeBytes) {
-      const maxSizeMB = Number(bucket.maxFileSizeBytes) / (1024 * 1024)
-      const fileSizeMB = Number(fileSize) / (1024 * 1024)
-      throw new Error(
-        `File size (${fileSizeMB.toFixed(2)}MB) exceeds bucket's maximum allowed size (${maxSizeMB}MB)`
-      )
-    }
-
-    // Check project-level file size limit
-    if (fileSize > project.maxFileSize) {
-      const maxSizeMB = Number(project.maxFileSize) / (1024 * 1024)
-      const fileSizeMB = Number(fileSize) / (1024 * 1024)
-      throw new Error(
-        `File size (${fileSizeMB.toFixed(2)}MB) exceeds maximum allowed size (${maxSizeMB}MB)`
-      )
-    }
-
-    // Check total storage quota
-    const newTotalSize = project.storageUsed + fileSize
-    if (newTotalSize > project.storageLimit) {
-      const limitGB = Number(project.storageLimit) / (1024 * 1024 * 1024)
-      const usedGB = Number(project.storageUsed) / (1024 * 1024 * 1024)
-      const availableGB = Number(project.storageLimit - project.storageUsed) / (1024 * 1024 * 1024)
-      throw new Error(
+    // Check the account's pooled storage against the owner's plan (storageQuota.ts owns it)
+    const quota = await getProjectQuota(options.projectId, BigInt(fileSize))
+    if (quota.used + fileSize > quota.limit) {
+      const limitGB = Number(quota.limit) / (1024 * 1024 * 1024)
+      const usedGB = Number(quota.used) / (1024 * 1024 * 1024)
+      const availableGB = Number(quota.available) / (1024 * 1024 * 1024)
+      throw new UploadRejectedError(
+        'STORAGE_QUOTA_EXCEEDED',
         `Storage quota exceeded. Used: ${usedGB.toFixed(2)}GB / ${limitGB.toFixed(2)}GB. ` +
         `Available: ${availableGB.toFixed(2)}GB. Please upgrade your plan or delete unused files.`
       )
@@ -384,7 +306,8 @@ class LocalStorageService implements StorageService {
 
       switch (strategy) {
         case 'deny':
-          throw new Error(
+          throw new UploadRejectedError(
+            'FILE_EXISTS',
             `File "${file.name}" already exists in this bucket. ` +
             `Overwriting is not allowed. Please rename your file or delete the existing one.`
           )
@@ -467,11 +390,17 @@ class LocalStorageService implements StorageService {
         })
       }
 
-      // Derive isPublic from bucket access policy (#74)
+      // Derive isPublic from the bucket's access policy, CLAMPED to it.
+      //
+      // This used to be `options?.isPublic ?? (policy is public-ish)`, which let
+      // a caller-supplied `true` override a `private` bucket. Combined with the
+      // serving path reading this column, that was a write-time policy bypass:
+      // an API-key holder could put a world-readable object into a private
+      // bucket. `clampIsPublic` makes the bucket the ceiling here as well as at
+      // read time, so the two layers agree rather than one quietly cleaning up
+      // after the other.
       const accessPolicy = (bucket as any).accessPolicy as string | undefined
-      const isPublicFile =
-        options?.isPublic ??
-        (accessPolicy === 'public_read' || accessPolicy === 'cdn_cacheable' || bucket.isPublic)
+      const isPublicFile = clampIsPublic(options?.isPublic, accessPolicy ?? (bucket.isPublic ? 'public_read' : 'private'))
 
       // Create file record
       const storageFile = await tx.storageFile.create({
@@ -607,8 +536,15 @@ class LocalStorageService implements StorageService {
         name: file.name,
       }
     } catch (error) {
+      // NOT `return null`. The metadata row exists, so this is a storage fault,
+      // and the caller renders null as `404 File not found` - a definite claim
+      // that the object does not exist, made while the only thing known is that
+      // its bytes could not be read. See lib/storage/errors.ts.
       console.error(`Failed to read file ${file.path}:`, error)
-      return null
+      throw new StorageUnavailableError(
+        `the bytes for file ${fileId} could not be read from local storage`,
+        error,
+      )
     }
   }
 
@@ -643,6 +579,23 @@ class LocalStorageService implements StorageService {
     // For private files, generate a signed URL
     const token = await this.generateAccessToken(fileId, expiresIn)
     return `${baseUrl}/${fileId}/download?token=${token}`
+  }
+
+  /**
+   * Always a signed export link, even for a public file: the bare public route
+   * is refused while the project is paused, and an export has to work then.
+   */
+  async getExportUrl(fileId: string, projectId: string, ttlSeconds: number): Promise<string> {
+    const file = await prisma.storageFile.findUnique({
+      where: { id: fileId },
+      select: { projectId: true, deletedAt: true },
+    })
+    if (!file || file.deletedAt) throw new Error('File not found')
+    if (file.projectId !== projectId) throw new Error('File does not belong to this project')
+
+    const baseUrl = process.env.STORAGE_BASE_URL || '/api/storage/files'
+    const token = signExportToken(fileId, ttlSeconds, requireStorageSecret('sign an export link'))
+    return `${baseUrl}/${fileId}/download?token=${encodeURIComponent(token)}`
   }
 
   async deleteFile(fileId: string, projectId: string, deletedBy?: string) {

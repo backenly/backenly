@@ -268,7 +268,13 @@ async function apply(projectId: string) {
     // pacing is real and correct in production, but it would strand a retake
     // mid-shoot. The FIX itself is untouched — same action, same snapshot,
     // same audit row. Only the wait is skipped.
-    const res = await runAutoFix(f.id, projectId, { skipCooldown: true })
+    // Operator-run demo against their own deployment. Labelled rather than left
+    // to the default, which is `autonomous` and would put this behind the
+    // Authority Decision along with everything else.
+    const res = await runAutoFix(f.id, projectId, {
+      skipCooldown: true,
+      actor: { kind: 'operator', via: 'cli' },
+    })
     const mark =
       res.outcome === 'auto_fixed' ? c.green('✓ auto_fixed')
       : res.outcome === 'deferred' ? c.yellow('· deferred')

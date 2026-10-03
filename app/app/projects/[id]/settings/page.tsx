@@ -3,31 +3,42 @@
 /**
  * Project Settings — first-class page (IA restructure §6.15).
  *
- * The Control Hub deleted the old project-settings page; in a single-sidebar
- * world it earns its slot back at the bottom of the sidebar. Three tabs:
+ * Three tabs:
  *
- *   • General  — name / description, environment info (API base URL, project
- *     id), and the danger zone (delete). Restores real, editable settings.
+ *   • General  — name / description, connection facts (project id, API base
+ *     URL, where it runs), and the danger zone (delete).
  *   • API Keys — THE one key-management surface (ClientKeysPanel). Connect →
  *     Direct links here instead of duplicating the manager.
  *   • Access   — who can open this project. Project access is org membership
  *     (lib/auth/project-access.ts), so this shows the live org roster and
  *     points to /app/members for management — read here, manage there.
  *
- * API Keys embeds a self-headed panel; General and Access render kit content
- * under the page's single header + tab strip. Deep-linkable via ?tab=keys|access.
+ * Deep-linkable via ?tab=keys|access. Settings are cards of one concern each:
+ * title, sentence, control, and a footer holding the hint and the action.
  */
 
 import { useCallback, useEffect, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
-import { Settings, SlidersHorizontal, KeyRound, Users, Copy, Check, Loader2, Trash2, AlertTriangle, Crown, UserPlus, FolderLock, Lock, Plus, X } from 'lucide-react'
+import { SlidersHorizontal, KeyRound, Users, Check, Trash2, Crown, UserPlus, FolderLock, Lock, Plus, X } from 'lucide-react'
 import { setCurrentProjectId } from '@/lib/api/client'
 import { getProject, updateProject, deleteProject, type Project } from '@/lib/api/projects'
-import { InspectorPageHeader } from '@/components/inspector/InspectorPageHeader'
 import {
-  KitTabs, KitTab, KitCard, KitCardHeader, KitCardBody, KitButton, KitField, KitInput, KitPage, KitBadge, KitNote,
+  CopyField,
+  DetailList,
+  DetailRow,
+  KitBadge,
+  KitButton,
+  KitInput,
+  KitNote,
+  KitTab,
+  KitTabs,
+  PageHeader,
+  SettingsCard,
+  Skeleton,
 } from '@/components/inspector/kit'
+import { PAGE_GUTTER, PAGE_WIDTH } from '@/components/console/tokens'
 import { ClientKeysPanel } from '@/components/hub/ClientKeysPanel'
+import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 
 type Tab = 'general' | 'keys' | 'access'
 
@@ -41,8 +52,18 @@ export default function ProjectSettingsPage() {
   // mount — useSearchParams would need a Suspense boundary at export time.
   useEffect(() => {
     const t = new URLSearchParams(window.location.search).get('tab')
-    if (t === 'keys' || t === 'access') setTab(t)
+    if (t === 'keys' || (t === 'access' && CLOUD_CONTROL_PLANE)) setTab(t)
   }, [])
+
+  // Keep the URL in step with the tab, so a refresh or a shared link lands on
+  // the same tab. replaceState: switching tabs is not navigation.
+  const selectTab = (next: Tab) => {
+    setTab(next)
+    const url = new URL(window.location.href)
+    if (next === 'general') url.searchParams.delete('tab')
+    else url.searchParams.set('tab', next)
+    window.history.replaceState(null, '', url.toString())
+  }
 
   if (projectId && typeof window !== 'undefined') setCurrentProjectId(projectId)
   useEffect(() => {
@@ -50,36 +71,45 @@ export default function ProjectSettingsPage() {
   }, [projectId])
 
   return (
-    <div className="min-h-screen bg-[#101116] flex flex-col text-white">
-      <InspectorPageHeader
-        icon={Settings}
+    <div className="pb-16">
+      <PageHeader
         title="Settings"
-        description="Project identity, API keys, and access. Every change here is scoped to this project only."
-        badge={{ label: 'Managed', variant: 'managed' }}
+        description="Project identity, API keys and access. Every change here is scoped to this project."
+        tabs={
+          <KitTabs>
+            <KitTab active={tab === 'general'} onClick={() => selectTab('general')}>
+              <SlidersHorizontal />
+              General
+            </KitTab>
+            <KitTab active={tab === 'keys'} onClick={() => selectTab('keys')}>
+              <KeyRound />
+              API keys
+            </KitTab>
+            {/* Access is team management, and a team is an organization. Both the
+                page and the API behind it are Cloud control plane, so a public
+                build has no roster to show and no route to ask. */}
+            {CLOUD_CONTROL_PLANE && (
+              <KitTab active={tab === 'access'} onClick={() => selectTab('access')}>
+                <Users />
+                Access
+              </KitTab>
+            )}
+          </KitTabs>
+        }
       />
 
-      <div className="px-8 pt-4">
-        <KitTabs>
-          <KitTab active={tab === 'general'} onClick={() => setTab('general')}>
-            <SlidersHorizontal className="w-3.5 h-3.5" />
-            General
-          </KitTab>
-          <KitTab active={tab === 'keys'} onClick={() => setTab('keys')}>
-            <KeyRound className="w-3.5 h-3.5" />
-            API Keys
-          </KitTab>
-          <KitTab active={tab === 'access'} onClick={() => setTab('access')}>
-            <Users className="w-3.5 h-3.5" />
-            Access
-          </KitTab>
-        </KitTabs>
-      </div>
+      {tab === 'general' && <GeneralTab projectId={projectId} onDeleted={() => router.push('/app')} />}
+      {tab === 'keys' && <ClientKeysPanel />}
+      {tab === 'access' && CLOUD_CONTROL_PLANE && <AccessTab projectId={projectId} />}
+    </div>
+  )
+}
 
-      <div className="flex-1">
-        {tab === 'general' && <GeneralTab projectId={projectId} onDeleted={() => router.push('/app')} />}
-        {tab === 'keys' && <ClientKeysPanel />}
-        {tab === 'access' && <AccessTab projectId={projectId} />}
-      </div>
+/** The settings column: one readable width, left-aligned under the header. */
+function SettingsColumn({ children }: { children: React.ReactNode }) {
+  return (
+    <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pt-6`}>
+      <div className="max-w-[760px] space-y-5">{children}</div>
     </div>
   )
 }
@@ -94,7 +124,6 @@ function GeneralTab({ projectId, onDeleted }: { projectId: string; onDeleted: ()
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
-  const [copied, setCopied] = useState<string | null>(null)
 
   const [deleteText, setDeleteText] = useState('')
   const [deleting, setDeleting] = useState(false)
@@ -134,15 +163,7 @@ function GeneralTab({ projectId, onDeleted }: { projectId: string; onDeleted: ()
     }
   }
 
-  const copy = async (value: string, key: string) => {
-    try {
-      await navigator.clipboard.writeText(value)
-      setCopied(key)
-      setTimeout(() => setCopied(null), 1500)
-    } catch { /* clipboard blocked — non-fatal */ }
-  }
-
-  const apiBaseUrl = project?.apiUrlProd || project?.apiUrlStaging || project?.apiUrlDev || '—'
+  const apiBaseUrl = project?.apiUrlProd || project?.apiUrlStaging || project?.apiUrlDev || null
 
   const confirmDelete = async () => {
     if (deleteText !== (project?.name ?? '')) return
@@ -159,83 +180,120 @@ function GeneralTab({ projectId, onDeleted }: { projectId: string; onDeleted: ()
 
   if (loading) {
     return (
-      <KitPage>
-        <div className="flex items-center justify-center gap-2 py-24 text-sm text-zinc-500">
-          <Loader2 className="h-4 w-4 animate-spin" /> Loading settings…
-        </div>
-      </KitPage>
+      <SettingsColumn>
+        <Skeleton className="h-[236px] w-full rounded-[10px]" />
+        <Skeleton className="h-[180px] w-full rounded-[10px]" />
+      </SettingsColumn>
     )
   }
 
   return (
-    <KitPage>
-      <div className="max-w-2xl space-y-4">
-        {/* Identity */}
-        <KitCard>
-          <KitCardHeader title="Project" description="How this project is named across the workspace and receipts." />
-          <KitCardBody className="space-y-4">
-            <KitField label="Name">
-              <KitInput value={name} onChange={(e) => setName(e.target.value)} placeholder="My backend" />
-            </KitField>
-            <KitField label="Description" hint="Optional. Shown on the project card.">
-              <KitInput value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What this backend powers" />
-            </KitField>
-            <div className="flex items-center gap-3 pt-1">
-              <KitButton variant="primary" onClick={save} disabled={!dirty || !name.trim() || saving} icon={saving ? Loader2 : undefined}>
-                {saving ? 'Saving…' : 'Save changes'}
-              </KitButton>
-              {saved && (
-                <span className="inline-flex items-center gap-1.5 text-[12px] text-emerald-300">
-                  <Check className="w-3.5 h-3.5" /> Saved
-                </span>
-              )}
-              {saveError && <span className="text-[12px] text-rose-300">{saveError}</span>}
-            </div>
-          </KitCardBody>
-        </KitCard>
-
-        {/* Environment / connection info */}
-        <KitCard>
-          <KitCardHeader title="Connection" description="Point your agent or app at this backend." />
-          <KitCardBody className="space-y-3">
-            <InfoRow label="Project ID" value={projectId} onCopy={() => copy(projectId, 'id')} copied={copied === 'id'} />
-            <InfoRow label="API base URL" value={apiBaseUrl} onCopy={() => copy(apiBaseUrl, 'url')} copied={copied === 'url'} disabled={apiBaseUrl === '—'} />
-            <InfoRow label="Region" value="EU · Hetzner" mono={false} />
-          </KitCardBody>
-        </KitCard>
-
-        {/* Danger zone */}
-        <div className="rounded-lg border border-rose-500/20 bg-rose-500/[0.03] overflow-hidden">
-          <div className="px-4 py-3 border-b border-rose-500/15 flex items-center gap-2">
-            <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
-            <span className="text-[12.5px] font-semibold text-rose-200">Danger zone</span>
-          </div>
-          <div className="px-4 py-4 space-y-3">
-            <p className="text-[12.5px] text-zinc-400 leading-5">
-              Deleting a project permanently removes its schema, tables, users, storage, and every receipt. This
-              cannot be undone. Type <span className="font-mono text-zinc-200">{project?.name}</span> to confirm.
-            </p>
-            <div className="flex items-center gap-2">
-              <KitInput
-                value={deleteText}
-                onChange={(e) => setDeleteText(e.target.value)}
-                placeholder={project?.name ?? 'project name'}
-                className="flex-1 focus:border-rose-400/40 focus:ring-rose-400/15"
-              />
-              <KitButton
-                variant="danger"
-                onClick={confirmDelete}
-                disabled={deleteText !== (project?.name ?? '') || deleting}
-              >
-                {deleting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
-                Delete project
-              </KitButton>
-            </div>
-            {deleteError && <p className="text-[12px] text-rose-300">{deleteError}</p>}
-          </div>
+    <SettingsColumn>
+      {/* Identity */}
+      <SettingsCard
+        title="Project"
+        description="How this project is named across the console, the project list and every receipt."
+        onSubmit={save}
+        footer={
+          saveError ? (
+            <span role="alert" className="text-rose-300">{saveError}</span>
+          ) : saved ? (
+            <span aria-live="polite" className="inline-flex items-center gap-1.5 text-emerald-300">
+              <Check className="h-3.5 w-3.5" /> Saved
+            </span>
+          ) : (
+            'The description is optional. It shows on the project card.'
+          )
+        }
+        actions={
+          <KitButton type="submit" variant="primary" loading={saving} disabled={!dirty || !name.trim()}>
+            {saving ? 'Saving…' : 'Save'}
+          </KitButton>
+        }
+      >
+        <div className="grid gap-4 sm:grid-cols-2">
+          <label className="block">
+            <span className="mb-1.5 block text-[12.5px] font-medium text-zinc-300">Name</span>
+            <KitInput
+              name="project-name"
+              autoComplete="off"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="orbit-commerce"
+            />
+          </label>
+          <label className="block">
+            <span className="mb-1.5 block text-[12.5px] font-medium text-zinc-300">Description</span>
+            <KitInput
+              name="project-description"
+              autoComplete="off"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="What this backend powers…"
+            />
+          </label>
         </div>
-      </div>
-    </KitPage>
+      </SettingsCard>
+
+      {/* Connection facts */}
+      <SettingsCard title="Connection" description="The coordinates your agent or app uses to reach this backend.">
+        <DetailList>
+          <DetailRow label="Project ID">
+            <CopyField value={projectId} />
+          </DetailRow>
+          <DetailRow label="API base URL">
+            {apiBaseUrl ? (
+              <CopyField value={apiBaseUrl} />
+            ) : (
+              <span className="text-zinc-500">Set when the project is first published</span>
+            )}
+          </DetailRow>
+          <DetailRow label="Runs on">
+            {/* Honest per edition: Cloud runs one AWS region today; a
+                self-hosted deployment runs wherever its operator put it. */}
+            {CLOUD_CONTROL_PLANE ? 'Backenly Cloud, AWS ap-south-1' : 'This self-hosted deployment'}
+          </DetailRow>
+        </DetailList>
+      </SettingsCard>
+
+      {/* Danger zone */}
+      <SettingsCard
+        danger
+        title="Delete project"
+        description={
+          <>
+            Permanently removes this project’s schema, tables, users, storage and every receipt. This cannot be
+            undone. Type <code className="font-mono text-zinc-200">{project?.name}</code> to confirm.
+          </>
+        }
+        onSubmit={confirmDelete}
+        footer={deleteError ? <span role="alert" className="text-rose-300">{deleteError}</span> : 'Deletion is immediate and final.'}
+        actions={
+          <KitButton
+            type="submit"
+            variant="danger"
+            icon={Trash2}
+            loading={deleting}
+            disabled={deleteText !== (project?.name ?? '')}
+          >
+            Delete project
+          </KitButton>
+        }
+      >
+        <label className="block max-w-[420px]">
+          <span className="sr-only">Project name to confirm deletion</span>
+          <KitInput
+            name="confirm-project-name"
+            autoComplete="off"
+            spellCheck={false}
+            value={deleteText}
+            onChange={(e) => setDeleteText(e.target.value)}
+            placeholder={project?.name ?? 'project name'}
+            className="focus:border-rose-400/50 focus:ring-rose-400/15"
+          />
+        </label>
+      </SettingsCard>
+    </SettingsColumn>
   )
 }
 
@@ -307,11 +365,9 @@ function AccessTab({ projectId }: { projectId: string }) {
 
   if (loading) {
     return (
-      <KitPage>
-        <div className="flex items-center justify-center gap-2 py-24 text-sm text-zinc-500">
-          <Loader2 className="h-4 w-4 animate-spin" /> Loading access…
-        </div>
-      </KitPage>
+      <SettingsColumn>
+        <Skeleton className="h-[260px] w-full rounded-[10px]" />
+      </SettingsColumn>
     )
   }
 
@@ -319,121 +375,95 @@ function AccessTab({ projectId }: { projectId: string }) {
   const scopedCount = data?.members.filter((m) => m.restricted).length ?? 0
 
   return (
-    <KitPage>
-      <div className="max-w-2xl space-y-4">
-        <KitCard>
-          <KitCardHeader
-            title="Who can open this project"
-            description={
-              scopedCount > 0
-                ? 'Org-wide members can open every project. Project-scoped members only see the projects granted to them. Grant or revoke this project below.'
-                : 'Everyone in your organization can open this project. To limit someone to specific projects, set them to project-scoped on the Members page (Pro).'
-            }
-            actions={
-              <KitButton variant="secondary" icon={UserPlus} onClick={() => router.push('/app/members')}>
-                Manage members
-              </KitButton>
-            }
-          />
-          <KitCardBody>
-            {!data || data.members.length === 0 ? (
-              <p className="text-[12.5px] text-zinc-500 py-2">
-                {data && !data.hasOrg
-                  ? 'This is a solo project; only you can open it. Invite teammates from the Members page to share access.'
-                  : "Couldn't load your organization roster. Manage people and roles on the Members page."}
-              </p>
-            ) : (
-              <div className="divide-y divide-white/[0.05]">
-                {data.members.map((m) => {
-                  const orgWide = !m.restricted || m.isOwner || m.role === 'ADMIN'
-                  return (
-                    <div key={m.userId} className="flex items-center justify-between gap-3 py-2.5 first:pt-0 last:pb-0">
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-[13px] text-zinc-100 truncate">{m.name || m.email}</span>
-                          {m.isOwner && <Crown className="w-3 h-3 text-amber-400/80 flex-shrink-0" />}
-                          {m.userId === data.me?.userId && <span className="text-[11px] text-zinc-500">(you)</span>}
-                        </div>
-                        {m.name && <p className="text-[11.5px] text-zinc-500 truncate">{m.email}</p>}
-                      </div>
-                      <div className="flex items-center gap-2.5 flex-shrink-0">
-                        {/* Access state */}
-                        {orgWide ? (
-                          <span className="inline-flex items-center gap-1 text-[11px] text-zinc-400">
-                            <Check className="w-3 h-3 text-emerald-400/80" /> Full access
-                          </span>
-                        ) : m.hasAccess ? (
-                          <span className="inline-flex items-center gap-1 text-[11px] text-violet-300">
-                            <FolderLock className="w-3 h-3" /> This project
-                          </span>
-                        ) : (
-                          <span className="text-[11px] text-zinc-600">No access</span>
-                        )}
-
-                        {/* Grant / revoke for scoped members (owners/admins only) */}
-                        {canManage && m.restricted && !m.isOwner && m.role !== 'ADMIN' && (
-                          m.hasAccess ? (
-                            <button
-                              onClick={() => setAccess(m.userId, false)}
-                              disabled={busy === m.userId}
-                              className="inline-flex h-6 items-center gap-1 rounded-md border border-white/10 px-2 text-[11px] text-zinc-400 hover:border-rose-400/30 hover:text-rose-300 disabled:opacity-50"
-                            >
-                              {busy === m.userId ? <Loader2 className="w-3 h-3 animate-spin" /> : <X className="w-3 h-3" />} Remove
-                            </button>
-                          ) : (
-                            <button
-                              onClick={() => data.isPaid ? setAccess(m.userId, true) : router.push('/app/billing')}
-                              disabled={busy === m.userId}
-                              className="inline-flex h-6 items-center gap-1 rounded-md border border-white/[0.14] bg-white/[0.06] px-2 text-[11px] text-violet-200 hover:border-white/25 disabled:opacity-50"
-                            >
-                              {busy === m.userId ? <Loader2 className="w-3 h-3 animate-spin" /> : data.isPaid ? <Plus className="w-3 h-3" /> : <Lock className="w-3 h-3" />} Add to project
-                            </button>
-                          )
-                        )}
-
-                        <KitBadge tone={ROLE_TONE[m.role]}>{ROLE_LABEL[m.role]}</KitBadge>
-                      </div>
+    <SettingsColumn>
+      <SettingsCard
+        title="Who can open this project"
+        description={
+          scopedCount > 0
+            ? 'Org-wide members can open every project. Project-scoped members only see the projects granted to them. Grant or revoke this project below.'
+            : 'Everyone in your organization can open this project. To limit someone to specific projects, set them to project-scoped on the Members page (Pro).'
+        }
+        footer={err ? <span role="alert" className="text-rose-300">{err}</span> : 'Roles and invitations are managed on the Members page.'}
+        actions={
+          <KitButton variant="secondary" icon={UserPlus} onClick={() => router.push('/app/members')}>
+            Manage members
+          </KitButton>
+        }
+      >
+        {!data || data.members.length === 0 ? (
+          <p className="text-[13px] text-zinc-500">
+            {data && !data.hasOrg
+              ? 'This is a solo project; only you can open it. Invite teammates from the Members page to share access.'
+              : "Couldn't load your organization roster. Manage people and roles on the Members page."}
+          </p>
+        ) : (
+          <ul className="-mx-5 divide-y divide-white/[0.06] border-y border-white/[0.06] sm:-mx-6">
+            {data.members.map((m) => {
+              const orgWide = !m.restricted || m.isOwner || m.role === 'ADMIN'
+              return (
+                <li key={m.userId} className="flex flex-col justify-between gap-2.5 px-5 py-3 sm:flex-row sm:items-center sm:px-6">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <span className="truncate text-[13px] font-medium text-zinc-100">{m.name || m.email}</span>
+                      {m.isOwner && <Crown className="h-3.5 w-3.5 flex-shrink-0 text-amber-300/80" aria-label="Owner" />}
+                      {m.userId === data.me?.userId && <span className="text-[12px] text-zinc-500">(you)</span>}
                     </div>
-                  )
-                })}
-              </div>
-            )}
-            {err && <p className="mt-3 text-[12px] text-rose-300">{err}</p>}
-          </KitCardBody>
-        </KitCard>
+                    {m.name && <p className="truncate text-[12px] text-zinc-500">{m.email}</p>}
+                  </div>
+                  <div className="flex flex-shrink-0 flex-wrap items-center gap-2.5">
+                    {orgWide ? (
+                      <span className="inline-flex items-center gap-1 text-[12px] text-zinc-400">
+                        <Check className="h-3.5 w-3.5 text-emerald-400/80" /> Full access
+                      </span>
+                    ) : m.hasAccess ? (
+                      <span className="inline-flex items-center gap-1 text-[12px] text-violet-200">
+                        <FolderLock className="h-3.5 w-3.5" /> This project
+                      </span>
+                    ) : (
+                      <span className="text-[12px] text-zinc-600">No access</span>
+                    )}
 
-        {data?.hasOrg && !data.isPaid && (
-          <KitNote icon={Lock}>
-            Project-scoped access, limiting a teammate to specific projects, is a Pro feature.{' '}
-            <button onClick={() => router.push('/app/billing')} className="text-violet-300 hover:text-violet-200 underline underline-offset-2">Upgrade</button> to enable it.
-          </KitNote>
+                    {/* Grant / revoke for scoped members (owners/admins only) */}
+                    {canManage && m.restricted && !m.isOwner && m.role !== 'ADMIN' && (
+                      m.hasAccess ? (
+                        <KitButton size="sm" variant="ghost" icon={X} loading={busy === m.userId} onClick={() => setAccess(m.userId, false)}>
+                          Remove
+                        </KitButton>
+                      ) : (
+                        <KitButton
+                          size="sm"
+                          variant="secondary"
+                          icon={data.isPaid ? Plus : Lock}
+                          loading={busy === m.userId}
+                          onClick={() => (data.isPaid ? setAccess(m.userId, true) : router.push('/app/billing'))}
+                        >
+                          Add to project
+                        </KitButton>
+                      )
+                    )}
+
+                    <KitBadge tone={ROLE_TONE[m.role]}>{ROLE_LABEL[m.role]}</KitBadge>
+                  </div>
+                </li>
+              )
+            })}
+          </ul>
         )}
-      </div>
-    </KitPage>
-  )
-}
+      </SettingsCard>
 
-function InfoRow({
-  label, value, onCopy, copied, mono = true, disabled = false,
-}: {
-  label: string; value: string; onCopy?: () => void; copied?: boolean; mono?: boolean; disabled?: boolean
-}) {
-  return (
-    <div className="flex items-center justify-between gap-3">
-      <span className="text-[12px] text-zinc-500 flex-shrink-0">{label}</span>
-      <div className="flex items-center gap-2 min-w-0">
-        <span className={`text-[12px] text-zinc-200 truncate ${mono ? 'font-mono' : ''}`}>{value}</span>
-        {onCopy && (
+      {data?.hasOrg && !data.isPaid && (
+        <KitNote icon={Lock}>
+          Project-scoped access, limiting a teammate to specific projects, is a Pro feature.{' '}
           <button
-            onClick={onCopy}
-            disabled={disabled}
-            className="p-1 rounded hover:bg-white/[0.06] text-zinc-500 hover:text-zinc-200 disabled:opacity-30 transition-colors"
-            aria-label={`Copy ${label}`}
+            type="button"
+            onClick={() => router.push('/app/billing')}
+            className="font-medium text-violet-300 underline underline-offset-2 hover:text-violet-200"
           >
-            {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-          </button>
-        )}
-      </div>
-    </div>
+            Upgrade
+          </button>{' '}
+          to enable it.
+        </KitNote>
+      )}
+    </SettingsColumn>
   )
 }

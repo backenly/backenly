@@ -24,11 +24,10 @@ import { prisma } from '@/lib/db'
 import jwt from 'jsonwebtoken'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { projectId: string } },
-) {
+async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   try {
     const projectId = params.projectId
 
@@ -196,3 +195,5 @@ export async function POST(
     )
   }
 }
+
+export const POST = recordedV1(handlePOST)

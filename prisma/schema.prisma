@@ -37,6 +37,10 @@ model User {
   // `plan.monthlyAiCredits + bonusCredits`; consumption is reconciled at month
   // rollover (see lib/billing/credit-ledger.ts). Never silently re-ratioed.
   bonusCredits            Int                      @default(0)
+  // Credits bought outright (one-time Stripe Checkout in Cloud). Unlike bonus
+  // credits they are paid for, so month rollover never expires them: they are
+  // spent only by usage beyond plan + bonus. Zero wherever nothing is sold.
+  purchasedCredits        Int                      @default(0)
   // Last YYYY-MM whose bonus consumption has been reconciled into bonusCredits.
   // Guards the idempotent month-rollover reconciliation (no cron dependency).
   bonusReconciledThrough  String?
@@ -44,7 +48,7 @@ model User {
   referredById            String?
   // ── Signup trust (anti-abuse) ────────────────────────────────────────────
   // How this account arrived. "trusted" is the normal path. "untrusted" is set
-  // when the signup email landed in the challenge band (see lib/auth/email-trust.ts)
+  // when the signup email landed in the challenge band (see lib/trust/email-trust.ts)
   // and must verify its mailbox before it can consume any resources. Existing
   // accounts default to trusted so this can never retroactively lock anyone out.
   trustLevel              String                   @default("trusted")
@@ -75,6 +79,7 @@ model User {
   referrals               User[]                   @relation("UserReferrals")
   referralCode            ReferralCode?
   creditLedger            CreditLedgerEntry[]
+  aiCreditPurchases       AiCreditPurchase[]
   referralGrantsMade      ReferralGrant[]          @relation("ReferralReferrer")
   referralGrantReceived   ReferralGrant?           @relation("ReferralReferee")
   // ── Organization relations (Phase 6) ──────────────────────────────────────
@@ -134,6 +139,14 @@ model Project {
   deletedAt               DateTime? // Soft delete — set instead of removing the row
   lockedDownAt            DateTime? // Founder-triggered emergency lockdown — blocks public API + freezes the project. See lib/platform/controls.ts.
   lockedDownReason        String? // Human-readable note for why the project was locked.
+  // Inactivity pause. Set only by Backenly Cloud's idle sweep through
+  // lib/projects/pause-lifecycle.ts; nothing public writes it, so a self-hosted
+  // project never pauses. While set, every runtime door answers PROJECT_PAUSED.
+  pausedAt                DateTime?
+  pauseReason             String? // 'inactivity' today. Text, so a new reason is a code change reviewed with its writer.
+  pauseWarnedAt           DateTime? // When the pause warning was DELIVERED. Cleared by real activity. No delivered warning, no pause.
+  lastActivityAt          DateTime? // Real use only (runtime traffic, MCP calls, dashboard writes). Never stamped by autonomy, cron or backups.
+  pausePolicySince        DateTime? // When the inactivity policy first applied to this project, so a paid-to-Free downgrade gets a full window.
   isDeployed              Boolean                @default(false)
   isBackendGenerated      Boolean                @default(false)
   isFrontendConnected     Boolean                @default(false)
@@ -209,17 +222,23 @@ model Project {
   changeReceipts         ChangeReceipt[]
   mauRecords             ProjectActiveUser[]
   authConfig             ProjectAuthConfig?
+  emailConfig            ProjectEmailConfig?
+  emailTemplates         ProjectEmailTemplate[]
   // Owning organization (Phase 6). Nullable + backfilled lazily; when null the
   // access check falls back to owner-only, so this is fully additive.
   organizationId         String?
   organization           Organization?             @relation(fields: [organizationId], references: [id], onDelete: SetNull)
   projectMembers         ProjectMember[]
+  maintenanceApprovals   MaintenanceApproval[]
+  ownershipIntents       OwnershipIntent[]
+  authorityGrants        AuthorityGrant[]
 
   @@index([userId])
   @@index([updatedAt])
   @@index([expiresAt])
   @@index([deletedAt])
   @@index([organizationId])
+  @@index([pausedAt])
   @@map("projects")
 }
 
@@ -424,6 +443,113 @@ model SchemaIntent {
   @@index([projectId])
   @@index([projectId, tableName])
   @@map("schema_intents")
+}
+
+/// A durable assertion that a table's rows are owned by the authenticated
+/// subject through a named column.
+///
+/// The first intent that is NOT a property of application code. Column shape
+/// (`SchemaIntent`) describes what a table looks like; this describes who its
+/// rows belong to, which no type system expresses and which drifts
+/// independently of the code.
+///
+/// Append-only. A change writes a new version and supersedes the old one,
+/// because "what did we believe when we acted" is the question an incident
+/// review asks, and an in-place update destroys the answer.
+model OwnershipIntent {
+  id        String @id @default(uuid())
+  projectId String @map("project_id")
+
+  /// What this asserts ownership over.
+  tableName   String @map("table_name")
+  /// The column naming the owner, e.g. "user_id".
+  ownerColumn String @map("owner_column")
+  /// What the column's value is compared against. Only "authenticated_user" today.
+  subject     String @default("authenticated_user")
+
+  /// WHO said so. Only declared_by_user and declared_by_authorized_agent may
+  /// authorize a mutation; observed and inferred may explain and recommend and
+  /// never widen authority on their own.
+  provenance String
+
+  /// Monotonic per (project, table). Approval binds to an exact version.
+  version        Int       @default(1)
+  /// Set when a newer version replaces this one.
+  supersededById String?   @map("superseded_by_id")
+  supersededAt   DateTime? @map("superseded_at")
+  /// Set when withdrawn. A revoked intent authorizes nothing, immediately.
+  revokedAt      DateTime? @map("revoked_at")
+  revokedBy      String?   @map("revoked_by")
+
+  /// The principal that declared it, as lib/principal serialises one.
+  declaredBy Json?    @map("declared_by")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, tableName, version])
+  @@index([projectId, tableName])
+  @@index([projectId, revokedAt])
+  @@map("ownership_intents")
+}
+
+/// A human's standing permission for a Backenly controller to perform one class
+/// of action unattended.
+///
+/// Distinct from OwnershipIntent, and the distinction is load-bearing: intent
+/// says what SHOULD be true of a resource, a grant says whether Backenly may
+/// CHANGE it without asking. Treating a declaration of fact as a grant of power
+/// is the shortcut this model exists to make impossible.
+///
+/// Distinct from MaintenanceApproval too: that is consent to ONE plan at one
+/// version, this is a standing permission for a class of action within bounds.
+/// Both are valid authority sources and neither replaces the other.
+///
+/// Default deny. Absence of a row is absence of authority.
+model AuthorityGrant {
+  id        String @id @default(uuid())
+  projectId String @map("project_id")
+
+  /// The human who created it. Only a person may delegate unattended authority;
+  /// an agent granting itself authority is the thing requestedBy/authorizedBy
+  /// exists to prevent.
+  grantedByUserId String @map("granted_by_user_id")
+
+  /// Which Backenly controller may act under it.
+  granteeKind String @default("backenly") @map("grantee_kind")
+  granteeLoop String @map("grantee_loop")
+
+  /// Exactly one action class. Never a tier band: permitting a class is narrow,
+  /// raising a ceiling is not.
+  actionClassId String @map("action_class_id")
+  /// Resource scope. '*' means every resource in the project.
+  resourceScope String @default("*") @map("resource_scope")
+  environment   String
+
+  maxTier        Int    @default(2) @map("max_tier")
+  maxBlastRadius String @default("table") @map("max_blast_radius")
+
+  validFrom       DateTime  @default(now()) @map("valid_from")
+  expiresAt       DateTime? @map("expires_at")
+  /// Remaining uses, when the grant is budgeted. Null means unbudgeted.
+  budgetRemaining Int?      @map("budget_remaining")
+
+  /// Set when withdrawn. Checked at the mutation boundary, so revocation stops
+  /// an execution that has already been decided.
+  revokedAt DateTime? @map("revoked_at")
+  revokedBy String?   @map("revoked_by")
+
+  /// Bumped on any change that alters what the grant permits. The decision
+  /// records the version it relied on so the mutation boundary can prove the
+  /// permission did not move underneath it.
+  version   Int      @default(1)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, actionClassId, environment])
+  @@index([projectId, revokedAt])
+  @@map("authority_grants")
 }
 
 model BackendEvent {
@@ -1204,20 +1330,23 @@ model CreditReservation {
   @@map("credit_reservations")
 }
 
-// ─── Credit ledger (bonus assistant credits) ────────────────────────────────
-// Append-only audit trail of every bonus-credit movement: grants (referral,
-// promo, signup bonus) as positive amounts, and month-rollover burns (bonus
-// consumed beyond the plan allowance) as negatives. The Billing "Credit
-// activity" tab reads from here; `User.bonusCredits` is the running balance.
+// ─── Credit ledger (bonus and purchased assistant credits) ──────────────────
+// Append-only audit trail of every movement of the two credit balances:
+// grants (referral, promo, signup bonus) and purchases as positive amounts, and
+// month-rollover burns (credits consumed beyond the plan allowance) as
+// negatives. The Billing "Credit activity" tab reads from here;
+// `User.bonusCredits` and `User.purchasedCredits` are the running balances.
 model CreditLedgerEntry {
   id           String   @id @default(uuid())
   userId       String
-  // Signed credits: +grant, -burn. Sum over a user == bonusCredits ever moved.
+  // Signed credits: +grant, -burn. Summed over one balance's reasons, equals
+  // that balance's net movement.
   amount       Int
-  // Running bonus balance immediately AFTER this entry (for a clean history UI).
+  // That balance immediately AFTER this entry (for a clean history UI).
   balanceAfter Int
-  // 'referral_signup' | 'referral_paid' | 'promo' | 'admin_grant' |
-  // 'monthly_bonus_burn' | 'signup_bonus'
+  // Bonus: 'referral_signup' | 'referral_paid' | 'promo' | 'admin_grant' |
+  //        'monthly_bonus_burn' | 'signup_bonus'
+  // Purchased: 'purchase' | 'monthly_purchased_burn'
   reason       String
   // Free-form human note shown in the history row.
   description  String?
@@ -1229,6 +1358,26 @@ model CreditLedgerEntry {
 
   @@index([userId, createdAt])
   @@map("credit_ledger_entries")
+}
+
+// ─── AI credit purchases ────────────────────────────────────────────────────
+// One row per paid Stripe Checkout Session that bought credits: the
+// fulfilment record. The unique session id is what makes the grant idempotent,
+// so a webhook delivered twice can never credit an account twice. Written only
+// by the Cloud overlay; Stripe stays the payment authority.
+model AiCreditPurchase {
+  id              String   @id @default(uuid())
+  userId          String
+  stripeSessionId String   @unique
+  credits         Int
+  amountCents     Int
+  currency        String
+  createdAt       DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("ai_credit_purchases")
 }
 
 // ─── Referral program ───────────────────────────────────────────────────────
@@ -1274,7 +1423,7 @@ model ReferralGrant {
 
 // ─── Organizations (Phase 6 — team accounts) ────────────────────────────────
 // A platform-level account that owns projects and (org-based) billing. Every
-// user gets one personal Organization lazily (lib/org). Teams are formed by
+// user gets one personal Organization lazily. Teams are formed by
 // inviting other users as members with a role. Access + billing resolve through
 // the org; the change is additive — a solo user's personal org behaves exactly
 // like today's owner-only model.
@@ -1700,6 +1849,7 @@ model AgentApprovalRequest {
   apiKeyId      String? // which scoped key asked — agent identity for receipts
   message       String // original natural-language request, replayed on approval
   tool          String // blocked destructive tool (e.g. drop_table)
+  toolArgs      Json? // exact arguments, run verbatim on approval (MCP domain tools); null replays `message` through the brain
   target        String // human description, e.g. "recipes table"
   rowCount      Int? // live rows affected when cheaply knowable
   reversible    Boolean   @default(false)
@@ -1845,6 +1995,8 @@ model Plan {
   autonomyMaxActionsPerWindow      Int? // Circuit-breaker ceiling: autonomous mutations/project/rolling-window (null = unlimited — healing is never a paywall)
   maxApiRequestsPerMonth           BigInt? // API request cap — monthly OR lifetime (see apiQuotaIsLifetime)
   apiQuotaIsLifetime               Boolean @default(false) // true = maxApiRequestsPerMonth is a lifetime total that never resets (Free)
+  inactivityPauseDays              Int? // Days without real use before a project on this plan is paused. null = never paused.
+  pausedFreeResumeDays             Int? // Days after pausing that resuming stays free on this plan. null = always free to resume.
   maxPostgresStorageMb             Int? // PostgreSQL storage in MB
   maxFileStorageMb                 Int? // File/object storage in MB
   maxRealtimeConnections           Int? // Concurrent SSE/realtime connections
@@ -1898,9 +2050,28 @@ model Subscription {
   userId               String
   planId               String
   paddleSubscriptionId String?            @unique
+  // Stripe, which replaces Paddle for Backenly Cloud. The ids are Stripe's; the
+  // price is what Stripe charges, which is what decides the plan, and the
+  // interval and period are mirrored from Stripe rather than computed here.
+  stripeSubscriptionId String?            @unique
+  stripeCustomerId     String?
+  stripePriceId        String?
+  billingInterval      String? // monthly | annual
+  currentPeriodStart   DateTime?
   status               SubscriptionStatus @default(FREE)
   currentPeriodEnd     DateTime?
+  // Failed-payment recovery only. Set when the provider reports past_due, and
+  // cleared the moment payment recovers. A voluntary cancellation never writes
+  // it — see cancelScheduledAt.
   graceUntil           DateTime?
+  // The provider-scheduled cancellation date, copied verbatim from the Paddle
+  // scheduledChange.effectiveAt. Never computed here: this is a mirror of
+  // provider state, not a second billing clock. Null means no cancellation is
+  // scheduled, which is also the state after the provider reverses one.
+  // The subscription stays ACTIVE and fully entitled until the provider sends
+  // its own terminal subscription.canceled event, so entitlement resolution is
+  // deliberately unaware of this field.
+  cancelScheduledAt    DateTime?
   createdAt            DateTime           @default(now())
   updatedAt            DateTime           @updatedAt
   // Owning organization (Phase 6 billing). Nullable + backfilled lazily to the
@@ -1915,6 +2086,7 @@ model Subscription {
   @@index([planId])
   @@index([status])
   @@index([paddleSubscriptionId])
+  @@index([stripeCustomerId])
   @@index([organizationId])
   @@map("subscriptions")
 }
@@ -1948,6 +2120,9 @@ enum WebhookDeliveryStatus {
   FAILED
   RETRYING
   DEAD_LETTER
+  // Terminal, and never retried: the delivery was withdrawn because its project
+  // was paused. Holding it instead would fire a weeks-old event on resume.
+  CANCELLED
 }
 
 model WebhookLog {
@@ -2063,11 +2238,27 @@ model ConversationMessage {
   metadata  Json? // Optional metadata like intent, executionId, etc.
   createdAt DateTime @default(now())
 
+  // WHEN a message happened is createdAt. In WHAT ORDER to render or replay the
+  // thread is this, and they are different questions.
+  //
+  // createdAt cannot answer the second one. It has millisecond resolution, so
+  // two messages written in the same millisecond tie, and `id` is a random v4
+  // UUID that carries no causality to break the tie with. Postgres then returns
+  // tied rows in whatever order it scans them, which made a follow-up question
+  // render above the answer it followed and failed the ordering test in 2 of 6
+  // runs.
+  //
+  // Assigned by the database, never by application code: a read-then-write of
+  // `max + 1` or `count + 1` has a race between the read and the insert, which
+  // is the same class of bug one level down.
+  messageSeq BigInt @unique @default(autoincrement())
+
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
   @@index([projectId])
   @@index([createdAt])
   @@index([projectId, createdAt])
+  @@index([projectId, messageSeq])
   @@map("conversation_messages")
 }
 
@@ -2241,8 +2432,8 @@ model WorkspaceBackup {
   id         String   @id @default(uuid())
   projectId  String
   filename   String // e.g. "2024-01-15-02-00.sql.gz"
-  filePath   String // absolute path on disk
-  sizeBytes  Int      @default(0)
+  filePath   String // where it is stored: an absolute path on disk, or s3://bucket/key (lib/services/snapshot-store.ts)
+  sizeBytes  BigInt   @default(0) // compressed bytes; BIGINT because a dump passes 2 GiB at about 8 GB of data
   schemaName String // workspace_{projectId}
   status     String // completed | failed
   error      String?
@@ -2257,30 +2448,40 @@ model WorkspaceBackup {
 }
 
 // ============================================================================
-// PROCESSED WEBHOOK EVENTS — DB-backed idempotency for Paddle webhooks
-// Prevents double-processing when Vercel spawns multiple function instances
+// PROCESSED WEBHOOK EVENTS — DB-backed idempotency for billing webhooks
+// Prevents double-processing when several instances receive the same event
 // ============================================================================
 
 model ProcessedWebhookEvent {
-  id          String   @id // Paddle eventId
+  id          String   @id // provider event id; Stripe's are stored as stripe:<evt id>
   processedAt DateTime @default(now())
 
   @@map("processed_webhook_events")
 }
 
-// Single-use password reset token tracking. We sign a short-lived JWT with a
-// jti and record it here on issue; the reset route deletes the row on success
-// to make the token un-replayable. Expired rows are GC'd by the cleanup-tokens
-// cron job.
-model PasswordResetToken {
-  jti       String   @id
-  userId    String
-  expiresAt DateTime
-  createdAt DateTime @default(now())
+// A six-digit code emailed to prove someone controls an address: before a
+// platform account is created (`signup`) and before a password is replaced
+// (`password_reset`). One live code per purpose and address; issuing again
+// replaces it. Only an HMAC of the code is stored, and it is deleted on use.
+//
+// `payload` holds what a pending signup needs to become an account once the
+// code is proven: the bcrypt hash of the chosen password and the admission
+// verdict. No user row exists until then.
+model AuthEmailCode {
+  id         String   @id @default(uuid())
+  purpose    String
+  email      String
+  codeHash   String
+  attempts   Int      @default(0)
+  sendCount  Int      @default(1)
+  lastSentAt DateTime @default(now())
+  expiresAt  DateTime
+  payload    Json?
+  createdAt  DateTime @default(now())
 
-  @@index([userId])
+  @@unique([purpose, email])
   @@index([expiresAt])
-  @@map("password_reset_tokens")
+  @@map("auth_email_codes")
 }
 
 // ============================================================================
@@ -2374,6 +2575,150 @@ model ProjectUsage {
   @@index([projectId])
   @@index([month])
   @@map("project_usage")
+}
+
+// ============================================================================
+// USAGE LEDGER — billing-grade metering (lib/usage/ledger.ts)
+// ============================================================================
+
+// One row per project, axis, UTC day and measurement source. Counter axes add
+// up over the day; gauge axes keep the day's maximum. There is deliberately no
+// foreign key to Project: usage outlives a deleted project, and the month it
+// was used in stays attributed to the account that owned it.
+//
+// `billingAccountId` is the owning user's id today. It is a plain string so an
+// organization id can replace it later without rewriting history.
+model UsageDaily {
+  id               String   @id @default(uuid())
+  billingAccountId String
+  projectId        String
+  axis             String // lib/usage/axes.ts
+  day              DateTime @db.Date
+  quantity         BigInt   @default(0)
+  source           String // lib/usage/axes.ts USAGE_SOURCES
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([projectId, axis, day, source])
+  @@index([billingAccountId, day])
+  @@index([day])
+  @@map("usage_daily")
+}
+
+// One row per billing account, UTC calendar month and axis, written once by the
+// monthly close (lib/usage/close.ts). Insert-only: the close uses ON CONFLICT
+// DO NOTHING, so running it twice cannot add a second total, and the migration
+// installs a trigger that refuses UPDATE.
+model UsagePeriodClose {
+  id               String   @id @default(uuid())
+  billingAccountId String
+  period           String // YYYY-MM
+  axis             String
+  quantity         BigInt
+  unit             String
+  detail           Json?
+  closedAt         DateTime @default(now())
+
+  @@unique([billingAccountId, period, axis])
+  @@index([period])
+  @@map("usage_period_closes")
+}
+
+// Exactly-once application of usage. A ledger flush batch, a replayed spool
+// file and an ingested access-log object each carry an id that is inserted in
+// the SAME transaction as their increments, so a retry after an ambiguous
+// failure, a replay after a restart, or a second pass over a log bucket can
+// never count twice.
+model UsageAppliedBatch {
+  id        String   @id
+  kind      String // flush | spool | log
+  entries   Int
+  appliedAt DateTime @default(now())
+
+  @@index([appliedAt])
+  @@map("usage_applied_batches")
+}
+
+// The most a billing account lets Backenly charge beyond its included usage in
+// one month, in cents. No row means 0: nothing beyond the plan, every quota a
+// hard cap. Only a signed-in owner raises it (never an API key, an agent or an
+// MCP tool), and every change writes an audit_logs row.
+model UsageSpendLimit {
+  billingAccountId String   @id
+  limitCents       Int      @default(0)
+  updatedByUserId  String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@map("usage_spend_limits")
+}
+
+// A usage threshold an account crossed, recorded once per account, month, axis
+// and level so each alert is sent exactly once however many processes see it.
+// `level` is the percent of included usage ("50", "80", "100"), the percent of
+// the spend limit on axis "spend", or "cap" when the effective limit (included
+// plus spend-limit headroom) was reached.
+model UsageAlert {
+  id               String   @id @default(uuid())
+  billingAccountId String
+  period           String // YYYY-MM
+  axis             String
+  level            String
+  observed         BigInt
+  limit            BigInt
+  createdAt        DateTime @default(now())
+
+  @@unique([billingAccountId, period, axis, level])
+  @@index([billingAccountId, period])
+  @@map("usage_alerts")
+}
+
+// Since when an account has been at or over its effective limit on an axis
+// whose limit behaviour starts with a grace period (database and egress). Set
+// when first observed over, cleared as soon as usage is back under, so the
+// grace clock measures one continuous stretch rather than restarting monthly.
+model UsageLimitState {
+  billingAccountId String
+  axis             String
+  overSince        DateTime?
+  updatedAt        DateTime  @updatedAt
+
+  @@id([billingAccountId, axis])
+  @@map("usage_limit_states")
+}
+
+// What usage past a plan's included quantity came to for one account, month
+// and axis, and what became of it. Computed from the closed month
+// (usage_period_closes), so it is one row per account, period and axis:
+// computing the same month again can never produce a second charge.
+//
+//   shadow    computed and shown, never charged (BACKENLY_OVERAGE_MODE=shadow)
+//   carried   under the minimum charge; rolled into a later month's invoice
+//   pending   an invoice is being created
+//   invoiced  on the Stripe invoice named by stripeInvoiceId
+//   charged   that invoice was paid
+//   failed    that invoice's payment failed (the payment grace flow applies)
+//   waived    not collected: carried when the subscription ended, or no
+//             payment method to charge
+model UsageCharge {
+  id               String   @id @default(uuid())
+  billingAccountId String
+  period           String // YYYY-MM
+  axis             String
+  // Units past the included quantity, in the closed unit of the axis
+  // (users, runs, bytes, or byte-months as bytes for storage).
+  overQuantity     BigInt
+  amountCents      Int
+  status           String
+  stripeInvoiceId  String?
+  detail           Json?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([billingAccountId, period, axis])
+  @@index([status])
+  @@index([stripeInvoiceId])
+  @@map("usage_charges")
 }
 
 // ============================================================================
@@ -2872,7 +3217,7 @@ model Blocklist {
   // "ip" | "email" | "domain" | "mx"
   // "mx" blocks every domain whose mail routes through that host, which is how
   // a throwaway-domain farm gets retired as a farm instead of one domain at a
-  // time (see lib/auth/email-trust.ts).
+  // time (see lib/trust/email-trust.ts).
   kind      String
   value     String // lowercased; ip in CIDR or plain
   reason    String?
@@ -2980,6 +3325,86 @@ model ProjectAuthConfig {
   project                  Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
   @@map("project_auth_configs")
+}
+
+/// Per-project SMTP, so mail settings stop being a deployment-wide env var.
+///
+/// The transport already existed and read SMTP_HOST/SMTP_USER/SMTP_PASS from the
+/// environment, which meant an operator could not change where auth mail comes
+/// from without editing .env and restarting, and a Cloud tenant could not send
+/// from their own domain at all. The register called that PARTIAL, correctly: a
+/// real transport with no way to configure it.
+///
+/// Deployment env remains the FALLBACK rather than being replaced. A self-host
+/// install that already works keeps working on upgrade, and an operator who
+/// prefers .env is not forced into the dashboard.
+///
+/// The password is AES-256-GCM, following DatabaseCredential rather than
+/// inventing a second scheme (lib/security/projectEnvCrypto). It is never
+/// returned by any route: the surface reports configured / not configured, and
+/// replacing it means sending a new one.
+model ProjectEmailConfig {
+  id        String  @id @default(uuid())
+  projectId String  @unique
+  /// False keeps the row but sends through the deployment fallback, so an
+  /// operator can stop using project SMTP without losing the settings.
+  enabled   Boolean @default(false)
+
+  host     String
+  port     Int
+  username String
+
+  passwordCipher String
+  passwordIv     String
+  passwordTag    String
+
+  /// Envelope sender. Separate from username because they routinely differ:
+  /// SES and SendGrid authenticate as an API identity and send as your domain.
+  fromAddress String
+  fromName    String?
+
+  /// Evidence, not intent. "Configured" and "works" are different claims, and
+  /// the dashboard must not imply the second from the first: these record the
+  /// last real send attempt so the operator sees which one they have.
+  lastTestAt    DateTime?
+  lastTestError String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@map("project_email_configs")
+}
+
+/// An operator-authored subject and body for one auth email.
+///
+/// The built-in templates are real and they send; they were simply hardcoded in
+/// TypeScript, so changing a word needed a code change and a deploy. A row here
+/// OVERRIDES the built-in for one kind; absence means the built-in is used, so
+/// this is additive and an install that customises nothing behaves exactly as
+/// before.
+///
+/// Placeholders are validated against an allowlist when the row is written, not
+/// when the email is sent. A template that cannot render is refused at the
+/// dashboard, because discovering it at send time means discovering it during
+/// somebody's password reset.
+model ProjectEmailTemplate {
+  id        String @id @default(uuid())
+  projectId String
+  /// 'verification' | 'password_reset' | 'magic_link'. Checked against
+  /// lib/email/template-kinds.ts rather than a database enum, so adding a kind
+  /// is a code change reviewed with the code that sends it.
+  kind      String
+
+  subject  String
+  bodyHtml String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, kind])
+  @@map("project_email_templates")
 }
 
 // ─── Direct Database Access (open-loop) ───────────────────────────────────────
@@ -3112,4 +3537,145 @@ model McpOAuthRefresh {
   @@index([apiKeyId])
   @@index([expiresAt])
   @@map("mcp_oauth_refresh_tokens")
+}
+
+// ─── Phase 6b: maintenance execution ledger ─────────────────────────────────
+//
+// What a structural maintenance run did, durably, so a restart can tell what
+// already happened and an operator can tell what it is doing.
+//
+// Retry lifecycle is NOT here. BackgroundJob owns attempts, maxAttempts, runAt,
+// timeoutAt and the queued/running/completed/failed/dead_letter states; a step
+// points at the job that owns its retries. Duplicating those semantics would
+// create a second retry queue with its own opinion about what "failed" means.
+
+model MaintenanceExecution {
+  id                 String    @id @default(uuid())
+  projectId          String
+  findingId          String // the HealthFinding this maintenance answers
+  planId             String
+  planVersion        Int // approval is bound to this exact version
+  catalogFingerprint String // re-checked immediately before every mutation
+  approvalId         String? // null until a human has approved
+  tier               String // the plan's tier, re-checked at execution
+  status             String    @default("planned") // planned | running | halted | ready_to_switch | failed | completed
+  haltReason         String? // why it stopped, when it stopped
+  startedAt          DateTime?
+  completedAt        DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  steps MaintenanceStepExecution[]
+
+  // One execution per plan version: re-planning produces a new version rather
+  // than mutating the record an approval was bound to.
+  @@unique([planId, planVersion])
+  @@index([projectId, status])
+  @@index([findingId])
+  @@map("maintenance_executions")
+}
+
+/// A human's consent to run ONE maintenance plan, at ONE version.
+///
+/// Approval was an environment variable, which works for an operator running a
+/// single plan by hand and cannot work for a scheduler: there is no per-project
+/// consent in a process-wide variable, and no way to withdraw one.
+///
+/// Bound to planVersion, never to planId. planVersion covers the ladder, the
+/// catalog fingerprint and the executor capability table, so approving version
+/// N is not consent for N+1 - the schema moved, the ladder changed, or the
+/// executor gained a capability. A re-plan produces a new version and needs a
+/// new approval, which is the property that makes unattended execution safe.
+model MaintenanceApproval {
+  id          String    @id @default(uuid())
+  projectId   String
+  findingId   String
+  planId      String
+  /// The exact version consented to. Nothing else may run under it.
+  planVersion String
+  /// Highest tier this consent covers. `contract` is Tier 3 and is never
+  /// approvable here: it is performed by a person, not authorised for a robot.
+  maxTier     Int       @default(2)
+  approvedBy  String
+  reason      String?
+  /// What the ladder operates on, in real identifiers, as the approver stated
+  /// it. Bindings travel WITH consent because they are part of what is being
+  /// consented to: approving "consolidate the lifecycle column" without saying
+  /// which column is not an approval anybody could give. A scheduler that
+  /// derived them instead would be guessing which column to migrate.
+  bindings    Json
+  /// Set when withdrawn. A revoked approval stops future runs immediately.
+  revokedAt   DateTime?
+  revokedBy   String?
+  createdAt   DateTime  @default(now())
+  project     Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([planId, planVersion])
+  @@index([projectId, revokedAt])
+  @@map("maintenance_approvals")
+}
+
+model MaintenanceStepExecution {
+  id          String               @id @default(uuid())
+  executionId String
+  execution   MaintenanceExecution @relation(fields: [executionId], references: [id], onDelete: Cascade)
+
+  stepId   String // the step's id within the plan
+  stepKind String // add_structure | dual_write | backfill | verify
+  ordinal  Int // position within the plan
+
+  // Replaying a completed step must be a no-op, so completion is keyed rather
+  // than inferred from status alone.
+  idempotencyKey  String  @unique
+  status          String  @default("pending") // pending | running | succeeded | failed | skipped
+  backgroundJobId String? // the BackgroundJob that owns this step's retries
+
+  // DECLARED, not observed. These hold the planner's sentences - "target
+  // column does not already exist" - and the step's classification. Useful as
+  // a record of what was required; useless as a stale guard, because a claim
+  // made before the work cannot say what the work left behind.
+  preconditionEvidence  Json? // what the step DECLARED it required
+  postconditionEvidence Json? // what the step DECLARED it would achieve
+  rollback              Json? // rollback spec, and whether it has been applied
+  result                Json? // failure or result evidence, including reconciliation
+
+  // ── Recovery authority: what rollback is allowed to undo ──────────────────
+  //
+  // The plan says what KIND of work should happen; only the execution record
+  // can say what actually happened, so rollback is reconstructed from here and
+  // never from the plan. The plan does not even name the column - that arrives
+  // in the approval's bindings - so "undo this ladder's drop_column" is not a
+  // resolvable instruction without these.
+
+  /// What this step operated on, in real identifiers.
+  resourceIdentity  Json?
+  /// The resource's SHAPE as observed immediately before and after mutating.
+  ///
+  /// Shape, not just name: `sessions.state` does not distinguish the column
+  /// this ladder added from one somebody recreated under the same name an hour
+  /// later, and dropping the second because the ledger remembers the first is
+  /// how automatic recovery destroys somebody's work.
+  observedPreState  Json?
+  observedPostState Json?
+
+  /// eligible | started | verified | failed | unverified | blocked_stale
+  ///
+  /// Null until a rollback is considered. `verified` is the ONLY value that
+  /// means the prior state was restored and independently confirmed; `failed`
+  /// and `unverified` must never be read as restored, for the same reason a
+  /// thrown forward verifier must never be read as success.
+  rollbackStatus String?
+  rollbackDetail String?
+  rollbackAt     DateTime?
+
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([executionId, ordinal])
+  @@index([status])
+  @@index([backgroundJobId])
+  @@index([rollbackStatus])
+  @@map("maintenance_step_executions")
 }

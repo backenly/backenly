@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getProjectAuthStatus } from '@/lib/services/auth-status'
+import { withAuth } from '@/lib/auth/route-protection'
+import { canAccessProject } from '@/lib/edition/guard'
 
 /**
  * GET /api/projects/[projectId]/auth-state
@@ -9,12 +11,26 @@ import { getProjectAuthStatus } from '@/lib/services/auth-status'
  * (/api/projects/[id]/state), and the proof system always agree on
  * which providers are connected.
  */
-export async function GET(
-  _request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+
+/**
+ * ── This route had NO authentication ────────────────────────────────────────
+ *
+ * It took a project id from the path and answered. Anyone able to reach the
+ * server and name a project could read which auth providers a project has connected - without a session, let alone
+ * ownership. Found by the route-authorization sweep; no UI called it, which is
+ * why nothing ever noticed.
+ *
+ * A read is not harmless here: it discloses how somebody else's backend is
+ * built. 404 rather than 403, so the endpoint is not an oracle for project ids.
+ */
+export const GET = withAuth(async (_request: NextRequest, { user, params: routeParams }) => {
+  const params = await routeParams
   try {
     const projectId = params.id
+
+    if (!(await canAccessProject(user.userId, projectId))) {
+      return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+    }
     const status = await getProjectAuthStatus(projectId)
 
     const ICON: Record<string, string> = {
@@ -47,4 +63,4 @@ export async function GET(
       { status: 500 }
     )
   }
-}
+})

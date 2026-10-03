@@ -28,12 +28,12 @@ export const POST = withAuth(async (request: NextRequest, { user }) => {
   // Two buckets. The IP limit stops a script cycling accounts; the per-user
   // limit stops one account being used to pump mail at a third party, which
   // would burn the platform's sender reputation rather than theirs.
-  const ipLimit = consume(
+  const ipLimit = await consume(
     `resend-verify:ip:${ip}`,
     AUTH_LIMITS.verifyEmail.ip.limit,
     AUTH_LIMITS.verifyEmail.ip.windowMs,
   )
-  const userLimit = consume(`resend-verify:user:${user.userId}`, 3, 15 * 60_000)
+  const userLimit = await consume(`resend-verify:user:${user.userId}`, 3, 15 * 60_000)
   if (!ipLimit.allowed || !userLimit.allowed) {
     const retryAfter = Math.max(ipLimit.retryAfter, userLimit.retryAfter)
     return NextResponse.json(

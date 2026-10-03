@@ -30,17 +30,35 @@
  * See: lib/config/SECTION_BOUNDARIES.ts
  */
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import {
-  Plus, Search, RefreshCw, Database as DatabaseIcon,
-  Filter, ArrowUpDown, ArrowUp, ArrowDown, X, ChevronDown, ChevronRight, ChevronLeft,
-  FileCode, Save, Edit2, Trash2, Copy, Download, Upload,
-  Table2, Columns, Settings, Eye, EyeOff, Key,
-  Info, MoreVertical, Play, Building2, Folder, Activity, Network, CheckCircle2, Loader2,
-  Maximize2, Minimize2, HelpCircle, AlertCircle
+  AlertCircle, ArrowDown, ArrowUp, ArrowUpDown, Cable, Camera, Check, ChevronLeft, ChevronRight, Columns,
+  Database as DatabaseIcon, Edit2, Filter, History, Key, Link2, Loader2, Maximize2, Minimize2, Network,
+  Plus, Puzzle, RefreshCw, Rows, Save, Search, Shapes, Table2, Terminal, Trash2, X,
+  type LucideIcon,
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { KIT, KitNote } from '@/components/inspector/kit'
+import {
+  AgentPrompt,
+  CommandBar,
+  EmptyState,
+  IconButton,
+  INPUT_BASE,
+  KIT,
+  KitButton,
+  KitConfirmDialog,
+  KitField,
+  KitInput,
+  KitModal,
+  KitNote,
+  KitTab,
+  KitTabs,
+  Segmented,
+  Skeleton,
+  Spinner,
+  Tag,
+} from '@/components/inspector/kit'
+import { EDGE, FOCUS, FOCUS_INSET, RULE, R_CONTROL, R_PANEL, R_TAG } from '@/components/console/tokens'
 import {
   getSchemas,
   getTables,
@@ -51,6 +69,7 @@ import {
   updateRow,
   deleteRow,
   addColumn,
+  addConstraint,
   renameColumn,
   dropColumn,
   validateProjectAccess,
@@ -59,6 +78,12 @@ import {
   type IndexInfo,
   type DatabaseType,
 } from '@/lib/api/database'
+import { isForeignKeyShaped, suggestForeignKeyColumn } from '@/lib/db/fk-shape'
+import { SqlWorkspace } from '@/components/database/SqlWorkspace'
+import { SchemaHistory } from '@/components/database/SchemaHistory'
+import { EnumsPanel } from '@/components/database/EnumsPanel'
+import { ExtensionsPanel } from '@/components/database/ExtensionsPanel'
+import { DatabaseSnapshots } from '@/components/database/DatabaseSnapshots'
 import { useParams, useRouter } from 'next/navigation'
 import { getCurrentProjectId } from '@/lib/api/client'
 import EnhancedSchemaVisualizer from '@/components/database/EnhancedSchemaVisualizer'
@@ -66,7 +91,7 @@ import EnhancedSchemaVisualizer from '@/components/database/EnhancedSchemaVisual
 
 type ViewMode = 'data' | 'structure'
 type TableView = 'data' | 'structure'
-type DatabaseView = 'tables' | 'visualization'
+type DatabaseView = 'tables' | 'visualization' | 'sql' | 'history' | 'snapshots' | 'types' | 'extensions'
 
 // Rows fetched per page in the data browser. Kept in one place so the
 // pagination footer, the "step back a page after delete" math, and the query
@@ -174,8 +199,6 @@ export default function ProjectDatabasePage() {
   const [showQueryBuilder, setShowQueryBuilder] = useState(false)
   const [expandedSchemas, setExpandedSchemas] = useState<Set<string>>(new Set())
   const [showVisualization, setShowVisualization] = useState<DatabaseView>('tables')
-  const [setupSuccess, setSetupSuccess] = useState(false)
-  const [setupMessage, setSetupMessage] = useState<string | null>(null)
   const [isVisualizationExpanded, setIsVisualizationExpanded] = useState(false)
   
   // New table creation state
@@ -197,6 +220,18 @@ export default function ProjectDatabasePage() {
   const [newColumnType, setNewColumnType] = useState('text')
   const [newColumnNullable, setNewColumnNullable] = useState(true)
   const [addingColumn, setAddingColumn] = useState(false)
+  // Constraints requested alongside a new column. Applied AFTER the column
+  // exists, because every one of them is an ALTER on a column that has to be
+  // there first. Each is a separate typed action through the same governed
+  // path, not a hand-assembled DDL string.
+  const [newColumnUnique, setNewColumnUnique] = useState(false)
+  const [newColumnReferences, setNewColumnReferences] = useState('')
+  const [newColumnCheck, setNewColumnCheck] = useState('')
+  // Reports which constraints applied and which did not. The column can succeed
+  // while a constraint fails — an FK against a table with incompatible rows,
+  // for instance — and saying "added" would be a lie in exactly the case the
+  // operator most needs to know about.
+  const [constraintOutcome, setConstraintOutcome] = useState<string[] | null>(null)
 
   const [renamingColumn, setRenamingColumn] = useState<string | null>(null)
   const [renameColumnNewName, setRenameColumnNewName] = useState('')
@@ -538,61 +573,6 @@ export default function ProjectDatabasePage() {
     } catch (err: any) {
       console.error('Error loading tables:', err)
       setError(err.message || 'Failed to load tables')
-    } finally {
-      setLoading(false)
-    }
-  }
-  
-  const checkAndSetupDatabase = async () => {
-    if (!resolvedProjectId) return
-    
-    try {
-      console.log('[Database] Checking if automatic setup is needed...')
-      setLoading(true)
-      setSetupSuccess(false)
-      setSetupMessage(null)
-      
-      // Call the setup API with explicit projectId
-      const response = await fetch(`/api/database/setup-workspace?projectId=${resolvedProjectId}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ projectId: resolvedProjectId })
-      })
-      
-      if (response.ok) {
-        const result = await response.json()
-        if (result.success && result.details?.totalTables > 0) {
-          console.log(`[Database] ✅ Auto-setup successful! Created ${result.details.totalTables} tables`)
-          setSetupSuccess(true)
-          setSetupMessage(`Successfully created ${result.details.totalTables} tables: ${result.details.tablesCreated.join(', ')}`)
-          // Reload tables to show the newly created ones (skip auto-setup to prevent loop)
-          setTimeout(() => {
-            loadTables(true) // Skip auto-setup on this reload
-            // Clear success message after 5 seconds
-            setTimeout(() => {
-              setSetupSuccess(false)
-              setSetupMessage(null)
-            }, 5000)
-          }, 1000)
-        } else if (result.success) {
-          // Project has no tables yet — this is a valid empty state, don't show any message
-          console.log('[Database] Project workspace ready — no tables created yet')
-          setSetupMessage(null)
-        } else {
-          console.log('[Database] No tables to create from schema')
-          setSetupMessage('No Prisma schema found or no tables to create')
-        }
-      } else {
-        const error = await response.json()
-        console.log('[Database] Auto-setup not needed or failed:', error.error)
-        setSetupMessage(error.error || 'Setup failed')
-      }
-    } catch (err: any) {
-      console.log('[Database] Auto-setup check failed:', err.message)
-      setSetupMessage('Failed to setup database. Please try again.')
-      // Silently fail - user can manually trigger if needed
     } finally {
       setLoading(false)
     }
@@ -1052,20 +1032,90 @@ export default function ProjectDatabasePage() {
   // /api/database/schema/columns route + lib/services/tableLifecycle). So a
   // manual rename triggers the same schema-version snapshot, typegen refresh,
   // and Zod validator cache eviction that an AI-driven rename does.
+  const resetAddColumnForm = () => {
+    setNewColumnName('')
+    setNewColumnType('text')
+    setNewColumnNullable(true)
+    setNewColumnUnique(false)
+    setNewColumnReferences('')
+    setNewColumnCheck('')
+  }
+
   const handleAddColumn = async () => {
     if (!selectedTable || !resolvedProjectId || !newColumnName.trim()) return
+    const columnName = newColumnName.trim()
     try {
       setAddingColumn(true)
       setError(null)
+      setConstraintOutcome(null)
+
       await addColumn(resolvedProjectId, selectedTable, {
-        name: newColumnName.trim(),
+        name: columnName,
         type: newColumnType,
         nullable: newColumnNullable,
       })
+
+      // The column now exists. Each constraint is applied separately, and one
+      // failing does not undo the column or stop the others: an FK can fail on
+      // rows that do not match while a UNIQUE on the same new column succeeds.
+      // Reporting each outcome is the point — a single "added" over a partial
+      // result is how a schema silently ends up weaker than the operator
+      // believes it is.
+      const requested: Array<{ label: string; run: () => Promise<void> }> = []
+      if (newColumnUnique) {
+        requested.push({
+          label: 'unique',
+          run: () => addConstraint(resolvedProjectId, selectedTable, columnName, 'unique'),
+        })
+      }
+      if (newColumnReferences) {
+        requested.push({
+          label: `foreign key to ${newColumnReferences}`,
+          run: () =>
+            // The table is passed as referencedTable, NOT as the expression.
+            // The executor infers a target when none is given, and an inferred
+            // target is not necessarily the one just chosen here.
+            addConstraint(
+              resolvedProjectId,
+              selectedTable,
+              columnName,
+              'foreign_key',
+              undefined,
+              newColumnReferences,
+            ),
+        })
+      }
+      if (newColumnCheck.trim()) {
+        requested.push({
+          label: 'check',
+          run: () =>
+            addConstraint(resolvedProjectId, selectedTable, columnName, 'check', newColumnCheck.trim()),
+        })
+      }
+
+      const failures: string[] = []
+      for (const c of requested) {
+        try {
+          await c.run()
+        } catch (err: any) {
+          failures.push(`${c.label}: ${err?.message || 'failed'}`)
+        }
+      }
+
+      if (failures.length > 0) {
+        // Deliberately NOT thrown. The column was created, so treating this as
+        // a failed operation would leave the operator thinking nothing
+        // happened and adding it a second time.
+        setConstraintOutcome([
+          `Column "${columnName}" was added, but ${failures.length} of ${requested.length} constraints did not apply.`,
+          ...failures,
+        ])
+        await loadTableData()
+        return
+      }
+
       setShowAddColumnModal(false)
-      setNewColumnName('')
-      setNewColumnType('text')
-      setNewColumnNullable(true)
+      resetAddColumnForm()
       await loadTableData()
     } catch (err: any) {
       console.error('Error adding column:', err)
@@ -1119,95 +1169,87 @@ export default function ProjectDatabasePage() {
   const RESERVED_COLUMNS = new Set(['id', 'createdat', 'updatedat', 'deleted_at', 'deletedat'])
   const isReservedColumn = (name: string) => RESERVED_COLUMNS.has(name.toLowerCase())
 
-  // Muted semantic tints for data cells — telemetry, not syntax highlighting.
-  const getDataTypeColor = (type: string): string => {
-    const lowerType = type.toLowerCase()
-    if (lowerType.includes('int') || lowerType.includes('number') || lowerType.includes('decimal') || lowerType.includes('numeric')) return 'text-sky-300/80'
-    if (lowerType.includes('varchar') || lowerType.includes('text') || lowerType.includes('string')) return 'text-zinc-300'
-    if (lowerType.includes('bool')) return 'text-emerald-300/80'
-    if (lowerType.includes('date') || lowerType.includes('time')) return 'text-amber-500/80'
-    if (lowerType.includes('json')) return 'text-rose-300/80'
-    return 'text-zinc-400'
-  }
+  // The grid reads best with the key first, the table's own columns next and
+  // the managed timestamps last; otherwise createdAt, updatedAt and an
+  // all-NULL deleted_at fill the first screen and push the data off it.
+  // Structure keeps the real ordinal order.
+  const gridColumns = [
+    ...columns.filter((c) => c.primary),
+    ...columns.filter((c) => !c.primary && !isReservedColumn(c.name)),
+    ...columns.filter((c) => !c.primary && isReservedColumn(c.name)),
+  ]
 
   const visibleTables = tableFilter.trim()
     ? tables.filter((t) => t.name.toLowerCase().includes(tableFilter.trim().toLowerCase()))
     : tables
 
-  return (
-    <div className={`flex h-[calc(100vh-48px)] flex-col overflow-hidden ${KIT.bg}`}>
+  // Columns a person fills in when inserting: auto-serials and auto-stamped
+  // timestamps are the database's job.
+  const insertableColumns = columns.filter((col) => {
+    const isAutoSerial = col.type.toLowerCase().includes('serial')
+    const isAutoTimestamp =
+      (col.name.toLowerCase() === 'createdat' || col.name.toLowerCase() === 'updatedat') &&
+      (col.default?.includes('now()') || col.default?.includes('CURRENT_TIMESTAMP'))
+    return !isAutoSerial && !isAutoTimestamp
+  })
 
+  const closeAddColumn = () => {
+    if (addingColumn) return
+    setShowAddColumnModal(false)
+    resetAddColumnForm()
+    setConstraintOutcome(null)
+    setError(null)
+  }
+
+  const openCreateTable = () => {
+    setError(null)
+    setShowCreateTableModal(true)
+  }
+
+  const fkBlocked = !!newColumnReferences && !isForeignKeyShaped(newColumnName)
+
+  return (
+    <div className={`console-fill flex flex-col overflow-hidden ${KIT.bg}`}>
       {/* ── Command bar ─────────────────────────────────────────
           A data grid needs vertical room far more than it needs a hero
-          header, so page identity collapses into this single row. */}
-      <div className="flex h-11 flex-shrink-0 items-center justify-between gap-4 border-b border-white/[0.06] px-4">
-        <div className="flex min-w-0 items-center gap-2.5">
-          <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-600">
-            <DatabaseIcon className="h-3 w-3" />
-            Inspector
-          </span>
-          <span className="h-3 w-px bg-white/10" />
-          <h1 className="text-[13px] font-semibold text-zinc-100">Tables</h1>
-          <span className="inline-flex items-center gap-1.5 font-mono text-[10.5px] font-medium text-zinc-400">
-            <span className="h-[5px] w-[5px] rounded-full bg-zinc-500" />
-            Managed
-          </span>
-          {tables.length > 0 && (
-            <span className="font-mono text-[10.5px] tabular-nums text-zinc-500">{tables.length}</span>
-          )}
-        </div>
+          header, so the page's identity is one 52px row. */}
+      <CommandBar
+        title="Database"
+        context={
+          tables.length > 0 ? (
+            <span className="tabular-nums">
+              {tables.length} {tables.length === 1 ? 'table' : 'tables'}
+            </span>
+          ) : undefined
+        }
+      >
+        <KitButton
+          variant="primary"
+          size="sm"
+          icon={Plus}
+          onClick={openCreateTable}
+          disabled={!selectedSchema}
+          title={selectedSchema ? 'Create a table in this project' : 'Waiting for the workspace schema'}
+        >
+          New table
+        </KitButton>
+      </CommandBar>
 
-        {/* View Switcher */}
-        {selectedSchema && (
-          <div className="flex flex-shrink-0 items-center gap-0.5 rounded-lg border border-white/[0.07] bg-white/[0.02] p-0.5">
-            <button
-              onClick={() => setShowVisualization('tables')}
-              className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11.5px] font-medium transition-colors focus:outline-none ${
-                showVisualization === 'tables'
-                  ? 'bg-white/[0.06] text-zinc-100'
-                  : 'text-zinc-500 hover:text-zinc-300'
-              }`}
-            >
-              <Table2 className="w-3 h-3" />
-              Tables
-            </button>
-            <button
-              onClick={() => setShowVisualization('visualization')}
-              className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11.5px] font-medium transition-colors focus:outline-none ${
-                showVisualization === 'visualization'
-                  ? 'bg-white/[0.06] text-zinc-100'
-                  : 'text-zinc-500 hover:text-zinc-300'
-              }`}
-            >
-              <Network className="w-3 h-3" />
-              Schema
-            </button>
-          </div>
-        )}
-      </div>
-
-      {/* Setup Success/Error Message - only show for actual success (tables created) or real errors */}
-      {setupMessage && setupSuccess && (
-        <div className="flex-shrink-0 border-b border-white/[0.06] px-4 py-2.5">
-          <KitNote
-            tone="success"
-            icon={CheckCircle2}
-            title="Data ready"
-            actions={
-              <button
-                onClick={() => {
-                  setSetupSuccess(false)
-                  setSetupMessage(null)
-                }}
-                className="text-zinc-500 hover:text-zinc-200 transition-colors focus:outline-none"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            }
-          >
-            {setupMessage}
-          </KitNote>
-        </div>
+      {/* ── Views ───────────────────────────────────────────────
+          Tables and Schema read the workspace schema; SQL, History, Types,
+          Extensions and Snapshots are project-wide and need no table. */}
+      {selectedSchema && (
+        <KitTabs className="flex-shrink-0 px-3 sm:px-4">
+          {DATABASE_VIEWS.map((view) => {
+            const Icon = view.icon
+            return (
+              <KitTab key={view.id} active={showVisualization === view.id} onClick={() => setShowVisualization(view.id)}>
+                <Icon strokeWidth={1.75} />
+                {view.label}
+              </KitTab>
+            )
+          })}
+        </KitTabs>
       )}
 
       {/* ── Workbench ─────────────────────────────────────────
@@ -1215,357 +1257,389 @@ export default function ProjectDatabasePage() {
           itself against this box instead of pushing the app shell's flex
           chain wider than the viewport. */}
       <div className="relative min-h-0 flex-1">
-      <div className="absolute inset-0 flex">
-
-        {/* Sidebar - Table List (Hidden in visualization mode) */}
-        {showVisualization !== 'visualization' && (
-          <div className={`flex w-[248px] flex-shrink-0 flex-col border-r border-white/[0.06] ${KIT.rail}`}>
-
-            {/* Workspace row */}
-            <div className="flex h-10 flex-shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] px-3">
-              <div className="flex min-w-0 items-center gap-2">
-                <div className="h-[5px] w-[5px] flex-shrink-0 rounded-full bg-violet-300" />
-                <span className="truncate text-[11.5px] font-medium text-zinc-300">{displayProjectName || 'workspace'}</span>
-              </div>
-              <div className="flex flex-shrink-0 items-center gap-0.5">
-                <button
-                  onClick={handleRefresh}
-                  className="p-1.5 text-zinc-600 hover:text-zinc-200 hover:bg-white/[0.04] rounded-md transition-colors"
-                  title="Refresh"
-                >
-                  <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
-                </button>
-                <button
-                  onClick={() => setShowCreateTableModal(true)}
-                  className="p-1.5 text-zinc-600 hover:text-violet-300 hover:bg-white/[0.06] rounded-md transition-colors"
-                  title="New table"
-                >
-                  <Plus className="w-3 h-3" />
-                </button>
-              </div>
-            </div>
-
-            {/* Table filter */}
-            {tables.length > 0 && (
-              <div className="flex-shrink-0 border-b border-white/[0.06] p-2">
-                <div className="relative">
-                  <Search className="absolute left-2.5 top-1/2 h-3 w-3 -translate-y-1/2 text-zinc-600" />
-                  <input
-                    type="text"
-                    placeholder="Search tables…"
-                    value={tableFilter}
-                    onChange={(e) => setTableFilter(e.target.value)}
-                    className="h-7 w-full rounded-lg border border-white/[0.07] bg-[#0f1015] pl-7 pr-3 text-[11.5px] text-zinc-300 transition-colors placeholder:text-zinc-600 focus:border-violet-400/40 focus:outline-none focus:ring-2 focus:ring-violet-400/15"
+        <div className="absolute inset-0 flex">
+          {/* Table rail: the Tables view only. On a phone it is the first
+              screen, and picking a table drills into it. */}
+          {showVisualization === 'tables' && (
+            <div
+              className={`w-full flex-shrink-0 flex-col border-r ${RULE} md:w-[248px] ${KIT.rail} ${
+                selectedTable ? 'hidden md:flex' : 'flex'
+              }`}
+            >
+              <div className={`flex h-[44px] flex-shrink-0 items-center justify-between gap-2 border-b ${RULE} pl-4 pr-2`}>
+                <span className="text-[13px] font-medium text-zinc-200">Tables</span>
+                <div className="flex flex-shrink-0 items-center gap-0.5">
+                  <IconButton
+                    icon={RefreshCw}
+                    label="Refresh tables"
+                    onClick={handleRefresh}
+                    className={loading ? '[&_svg]:animate-spin' : ''}
                   />
+                  <IconButton icon={Plus} label="New table" onClick={openCreateTable} disabled={!selectedSchema} />
                 </div>
               </div>
-            )}
 
-            {error && (
-              <div className="m-2 flex-shrink-0 rounded-md border border-rose-500/15 bg-rose-500/[0.06] p-2.5 text-[11px] leading-4 text-rose-300/90">
-                {error}
-              </div>
-            )}
-
-            {/* Table List */}
-            <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden py-1.5">
-              {loading && tables.length === 0 ? (
-                <div className="flex items-center justify-center py-8">
-                  <Loader2 className="w-4 h-4 text-white/30 animate-spin" />
-                </div>
-              ) : tables.length === 0 ? (
-                <div className="px-4 py-6 text-center space-y-3">
-                  <DatabaseIcon className="w-4 h-4 text-zinc-600 mx-auto" />
-                  <div>
-                    <p className="text-[12px] font-semibold text-zinc-200 mb-0.5">No tables yet</p>
-                    <p className="text-[11px] text-zinc-500 leading-relaxed">Connect your coding agent and it builds your schema here.</p>
+              {tables.length > 0 && (
+                <div className={`flex-shrink-0 border-b ${RULE} p-2`}>
+                  <div className="relative">
+                    <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-600" />
+                    <input
+                      type="search"
+                      aria-label="Search tables"
+                      placeholder="Search tables…"
+                      value={tableFilter}
+                      onChange={(e) => setTableFilter(e.target.value)}
+                      className={`${INPUT_BASE} h-[30px] pl-8 pr-2.5`}
+                    />
                   </div>
-                  <button
-                    onClick={checkAndSetupDatabase}
-                    disabled={loading || setupSuccess}
-                    className="w-full h-7 px-3 border border-white/10 bg-white/[0.04] text-zinc-300 hover:border-white/20 hover:bg-white/[0.08] rounded-lg text-[11.5px] font-medium flex items-center justify-center gap-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {loading ? (
-                      <><Loader2 className="w-3 h-3 animate-spin" /><span>Preparing…</span></>
-                    ) : setupSuccess ? (
-                      <><CheckCircle2 className="w-3 h-3" /><span>Done</span></>
-                    ) : (
-                      <span>Prepare workspace</span>
-                    )}
-                  </button>
                 </div>
-              ) : visibleTables.length === 0 ? (
-                <p className="px-4 py-6 text-center text-[11.5px] leading-relaxed text-zinc-600">
-                  No table matches “{tableFilter}”.
-                </p>
-              ) : (
-                <div className="px-2 space-y-px">
-                  {visibleTables.map((table) => (
-                    <div
-                      key={table.name}
-                      className={`group relative flex items-center gap-2 px-2.5 py-[7px] rounded-md cursor-pointer transition-colors ${
-                        selectedTable === table.name
-                          ? 'bg-white/[0.05] text-zinc-50'
-                          : 'text-zinc-400 hover:text-zinc-100 hover:bg-white/[0.03]'
-                      }`}
-                      onClick={() => setSelectedTable(table.name)}
-                    >
-                      {/* Active indicator */}
-                      <div className={`w-[5px] h-[5px] rounded-full flex-shrink-0 transition-colors ${
-                        selectedTable === table.name ? 'bg-violet-300' : 'bg-white/[0.12] group-hover:bg-white/25'
-                      }`} />
+              )}
 
-                      {/* Table name */}
-                      <span className={`flex-1 text-[12px] font-mono truncate transition-colors ${
-                        selectedTable === table.name ? 'text-zinc-50' : ''
-                      }`}>
-                        {table.name}
-                      </span>
+              {error && !showAddRowModal && !editingRow && !showAddColumnModal && !showCreateTableModal && !showDeleteModal && !showDeleteColumnModal && (
+                <div className="flex-shrink-0 p-2">
+                  <KitNote tone="danger" icon={AlertCircle}>
+                    {error}
+                  </KitNote>
+                </div>
+              )}
 
-                      {/* Row count — hidden on hover to show delete */}
-                      <span className={`font-mono text-[10.5px] tabular-nums flex-shrink-0 transition-all ${
-                        selectedTable === table.name ? 'text-zinc-400' : 'text-zinc-600'
-                      } group-hover:opacity-0`}>
-                        {table.rows ?? 0}
-                      </span>
+              <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden py-1.5">
+                {loading && tables.length === 0 ? (
+                  <div className="space-y-1.5 px-3 py-2" aria-hidden>
+                    {[0, 1, 2, 3].map((i) => (
+                      <Skeleton key={i} className="h-[24px] w-full" />
+                    ))}
+                  </div>
+                ) : tables.length === 0 ? (
+                  <div className="px-4 py-5">
+                    <p className="text-[13px] font-medium text-zinc-200">No tables yet</p>
+                    <p className="mt-1 text-[12.5px] leading-[19px] text-zinc-500">
+                      Your coding agent creates tables as it builds. You can also add one by hand.
+                    </p>
+                    <KitButton size="sm" icon={Plus} onClick={openCreateTable} disabled={!selectedSchema} className="mt-3">
+                      New table
+                    </KitButton>
+                  </div>
+                ) : visibleTables.length === 0 ? (
+                  <p className="px-4 py-6 text-center text-[12.5px] leading-relaxed text-zinc-600">
+                    No table matches “{tableFilter}”.
+                  </p>
+                ) : (
+                  <ul className="space-y-px px-2">
+                    {visibleTables.map((table) => {
+                      const active = selectedTable === table.name
+                      return (
+                        <li key={table.name}>
+                          <div
+                            role="button"
+                            tabIndex={0}
+                            aria-current={active ? 'true' : undefined}
+                            onClick={() => setSelectedTable(table.name)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault()
+                                setSelectedTable(table.name)
+                              }
+                            }}
+                            className={`group relative flex h-[32px] cursor-pointer items-center gap-2.5 rounded-[7px] px-2.5 transition-colors ${FOCUS_INSET} ${
+                              active ? 'bg-white/[0.07] text-zinc-50' : 'text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-100'
+                            }`}
+                          >
+                            <Table2
+                              className={`h-3.5 w-3.5 flex-shrink-0 ${active ? 'text-zinc-300' : 'text-zinc-600'}`}
+                              strokeWidth={1.75}
+                            />
+                            <span className="flex-1 truncate font-mono text-[12.5px]">{table.name}</span>
+                            <span
+                              className={`flex-shrink-0 text-[12px] tabular-nums group-hover:opacity-0 group-focus-within:opacity-0 ${
+                                active ? 'text-zinc-400' : 'text-zinc-600'
+                              }`}
+                              title={`${(table.rows ?? 0).toLocaleString()} rows`}
+                            >
+                              {(table.rows ?? 0).toLocaleString()}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                setError(null)
+                                setTableToDelete(table.name)
+                                setShowDeleteModal(true)
+                              }}
+                              aria-label={`Delete table ${table.name}`}
+                              title="Delete table"
+                              className={`absolute right-1.5 flex h-[22px] w-[22px] items-center justify-center rounded-[5px] text-zinc-500 opacity-0 transition-opacity hover:bg-rose-500/[0.12] hover:text-rose-300 focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 ${FOCUS_INSET}`}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" strokeWidth={1.75} />
+                            </button>
+                          </div>
+                        </li>
+                      )
+                    })}
+                  </ul>
+                )}
+              </div>
 
-                      {/* Delete — appears on hover */}
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          setTableToDelete(table.name)
-                          setShowDeleteModal(true)
-                        }}
-                        className="absolute right-2 opacity-0 group-hover:opacity-100 p-1 hover:bg-rose-500/15 rounded-md transition-all"
-                        title="Delete table"
-                      >
-                        <Trash2 className="w-3 h-3 text-rose-300/70" />
-                      </button>
-                    </div>
-                  ))}
+              {tables.length > 0 && (
+                <div className={`flex h-[32px] flex-shrink-0 items-center border-t ${RULE} px-4 text-[12px] tabular-nums text-zinc-500`}>
+                  {tableFilter.trim()
+                    ? `${visibleTables.length} of ${tables.length}`
+                    : `${tables.length} table${tables.length === 1 ? '' : 's'}`}
                 </div>
               )}
             </div>
+          )}
 
-            {tables.length > 0 && (
-              <div className="flex h-7 flex-shrink-0 items-center border-t border-white/[0.06] px-3 font-mono text-[10.5px] tabular-nums text-zinc-600">
-                {tableFilter.trim()
-                  ? `${visibleTables.length} of ${tables.length}`
-                  : `${tables.length} table${tables.length === 1 ? '' : 's'}`}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Main Panel - Table Data / Visualization */}
+          {/* ── Main pane ─────────────────────────────────────── */}
           <div className="flex min-w-0 flex-1 flex-col">
-              {showVisualization === 'visualization' && activeDb === 'postgresql' && selectedSchema ? (
-                <>
-                  {/* Visualization Header */}
-                  <div className="flex h-10 flex-shrink-0 items-center justify-between gap-3 border-b border-white/[0.06] px-4">
-                    <div className="flex items-baseline gap-2 min-w-0">
-                      <h2 className="text-[12.5px] font-semibold text-zinc-100">Schema graph</h2>
-                      <span className="truncate font-mono text-[11px] text-zinc-500">{selectedSchema}</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <button
-                        onClick={() => setIsVisualizationExpanded(true)}
-                        className="p-1.5 text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.04] rounded-md transition-colors"
-                        title="Fullscreen mode"
-                      >
-                        <Maximize2 className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        onClick={handleRefresh}
-                        className="p-1.5 text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.04] rounded-md transition-colors"
-                        title="Refresh"
-                      >
-                        <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-                      </button>
-                    </div>
+            {showVisualization === 'history' && resolvedProjectId ? (
+              <SchemaHistory projectId={resolvedProjectId} />
+            ) : showVisualization === 'types' && resolvedProjectId ? (
+              // Project-scoped: types live in the workspace schema and need no
+              // selected table.
+              <EnumsPanel projectId={resolvedProjectId} />
+            ) : showVisualization === 'extensions' && resolvedProjectId ? (
+              // Deployment-scoped, reached through a project: extensions are
+              // database-wide, which the panel says.
+              <ExtensionsPanel projectId={resolvedProjectId} />
+            ) : showVisualization === 'snapshots' && resolvedProjectId ? (
+              // Project-scoped like the schema graph: it needs no selected
+              // table, and a project whose tables have not loaded can still
+              // be snapshotted.
+              <DatabaseSnapshots projectId={resolvedProjectId} />
+            ) : showVisualization === 'sql' && resolvedProjectId ? (
+              // Project-scoped, like the schema graph: it needs no selected
+              // table, and a deployment whose tables have not loaded yet can
+              // still be queried.
+              <SqlWorkspace projectId={resolvedProjectId} />
+            ) : showVisualization === 'visualization' && activeDb === 'postgresql' && selectedSchema ? (
+              <>
+                <div className={`flex h-[44px] flex-shrink-0 items-center justify-between gap-3 border-b ${RULE} pl-4 pr-2 sm:pl-5`}>
+                  <div className="flex min-w-0 items-baseline gap-2.5">
+                    <h2 className="text-[13px] font-medium text-zinc-100">Schema graph</h2>
+                    <span className="hidden truncate text-[12px] text-zinc-500 sm:inline">
+                      Tables and the foreign keys between them
+                    </span>
                   </div>
-                  <div className="min-h-0 flex-1 overflow-hidden">
-                    <EnhancedSchemaVisualizer
-                      schema={selectedSchema}
-                      databaseType={activeDb}
-                      projectId={resolvedProjectId || undefined}
-                      view={databaseView}
+                  <div className="flex items-center gap-0.5">
+                    <IconButton icon={Maximize2} label="Full screen" onClick={() => setIsVisualizationExpanded(true)} />
+                    <IconButton
+                      icon={RefreshCw}
+                      label="Refresh"
+                      onClick={handleRefresh}
+                      className={loading ? '[&_svg]:animate-spin' : ''}
                     />
                   </div>
-                </>
-              ) : selectedTable && selectedSchema ? (
-                <>
-                  {/* Table Toolbar */}
-                  <div className="flex h-10 flex-shrink-0 items-center justify-between gap-3 border-b border-white/[0.06] px-4">
-                    <div className="flex items-baseline gap-2 min-w-0">
-                      <h2 className="truncate font-mono text-[13px] font-medium text-zinc-100">{selectedTable}</h2>
-                      <span className="whitespace-nowrap font-mono text-[11px] text-zinc-500 tabular-nums">
-                        {totalRows.toLocaleString()} row{totalRows === 1 ? '' : 's'}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {/* View Mode Toggle */}
-                      <div className="flex items-center gap-0.5 rounded-lg border border-white/[0.07] bg-white/[0.02] p-0.5">
-                        <button
-                          onClick={() => setViewMode('data')}
-                          className={`rounded-md px-2.5 py-1 text-[11.5px] font-medium transition-colors focus:outline-none ${
-                            viewMode === 'data'
-                              ? 'bg-white/[0.06] text-zinc-100'
-                              : 'text-zinc-500 hover:text-zinc-300'
-                          }`}
-                        >
-                          Data
-                        </button>
-                        <button
-                          onClick={() => setViewMode('structure')}
-                          className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11.5px] font-medium transition-colors focus:outline-none ${
-                            viewMode === 'structure'
-                              ? 'bg-white/[0.06] text-zinc-100'
-                              : 'text-zinc-500 hover:text-zinc-300'
-                          }`}
-                        >
-                          <Columns className="w-3 h-3" />
-                          Structure
-                        </button>
-                      </div>
-
-                      {viewMode === 'data' && (
-                        <button
-                          onClick={handleAddRow}
-                          className="inline-flex h-7 items-center gap-1.5 rounded-lg bg-white px-2.5 text-[11.5px] font-semibold text-black transition-colors hover:bg-zinc-200 focus:outline-none focus:ring-2 focus:ring-violet-400/50"
-                        >
-                          <Plus className="w-3 h-3" />
-                          Insert row
-                        </button>
+                </div>
+                <div className="min-h-0 flex-1 overflow-hidden">
+                  <EnhancedSchemaVisualizer
+                    schema={selectedSchema}
+                    databaseType={activeDb}
+                    projectId={resolvedProjectId || undefined}
+                    view={databaseView}
+                  />
+                </div>
+              </>
+            ) : selectedTable && selectedSchema ? (
+              <>
+                {/* Table toolbar */}
+                <div className={`flex h-[44px] flex-shrink-0 items-center justify-between gap-3 border-b ${RULE} pl-3 pr-2 sm:pl-5`}>
+                  <div className="flex min-w-0 items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedTable(null)}
+                      className={`-ml-1 mr-0.5 inline-flex h-[28px] items-center gap-1 rounded-[6px] px-1.5 text-[12.5px] text-zinc-400 transition-colors hover:bg-white/[0.05] hover:text-zinc-100 md:hidden ${FOCUS}`}
+                      aria-label="Back to tables"
+                    >
+                      <ChevronLeft className="h-3.5 w-3.5" />
+                      Tables
+                    </button>
+                    <h2 className="truncate font-mono text-[13px] font-medium text-zinc-100">{selectedTable}</h2>
+                    <span className="hidden whitespace-nowrap text-[12px] tabular-nums text-zinc-500 sm:inline">
+                      {totalRows.toLocaleString()} {totalRows === 1 ? 'row' : 'rows'}
+                      {columns.length > 0 && (
+                        <>
+                          <span className="px-1.5 text-zinc-700">·</span>
+                          {columns.length} {columns.length === 1 ? 'column' : 'columns'}
+                        </>
                       )}
-
-                      <button
-                        onClick={handleRefresh}
-                        className="p-1.5 text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.04] rounded-md transition-colors"
-                        title="Refresh"
-                      >
-                        <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-                      </button>
-                    </div>
+                    </span>
                   </div>
+                  <div className="flex flex-shrink-0 items-center gap-2">
+                    <Segmented
+                      size="sm"
+                      label="Table view"
+                      value={viewMode}
+                      onChange={(v) => setViewMode(v)}
+                      options={[
+                        { value: 'data', label: 'Data', icon: Rows },
+                        { value: 'structure', label: 'Structure', icon: Columns },
+                      ]}
+                    />
+                    {viewMode === 'data' && (
+                      <KitButton size="sm" icon={Plus} onClick={handleAddRow}>
+                        <span className="hidden sm:inline">Insert row</span>
+                        <span className="sm:hidden">Row</span>
+                      </KitButton>
+                    )}
+                    <IconButton
+                      icon={RefreshCw}
+                      label="Refresh"
+                      onClick={handleRefresh}
+                      className={loading ? '[&_svg]:animate-spin' : ''}
+                    />
+                  </div>
+                </div>
 
-                  {/* Filter bar — above the grid, always visible */}
-                  {viewMode === 'data' && (
-                    <div className="flex h-10 flex-shrink-0 items-center gap-2 px-4 border-b border-white/[0.05]">
-                      <div className="relative flex-1 max-w-xs">
-                        <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-zinc-600" />
-                        <input
-                          type="text"
-                          placeholder="Search rows…"
-                          value={searchTerm}
-                          onChange={e => setSearchTerm(e.target.value)}
-                          className="w-full h-7 pl-7 pr-3 bg-[#0f1015] border border-white/[0.07] rounded-lg text-[11.5px] text-zinc-300 placeholder:text-zinc-600 focus:outline-none focus:border-violet-400/40 focus:ring-2 focus:ring-violet-400/15 transition-colors"
-                        />
-                      </div>
-                      {sortColumn && (
-                        <div className="flex items-center gap-1.5 px-2 py-1 rounded-md border border-white/[0.07] bg-white/[0.02]">
-                          <ArrowUpDown className="w-3 h-3 text-zinc-500" />
-                          <span className="font-mono text-[10.5px] text-zinc-300">{sortColumn}</span>
-                          <span className="font-mono text-[10px] text-zinc-600">{sortDirection}</span>
-                          <button onClick={() => setSortColumn(null)} className="text-zinc-600 hover:text-zinc-300 ml-0.5">
-                            <X className="w-3 h-3" />
-                          </button>
-                        </div>
-                      )}
-                      {filterColumn && (
-                        <div className="flex items-center gap-1.5 px-2 py-1 rounded-md border border-white/[0.07] bg-white/[0.02]">
-                          <Filter className="w-3 h-3 text-zinc-500" />
-                          <span className="font-mono text-[10.5px] text-zinc-300">{filterColumn}</span>
-                          <button onClick={() => { setFilterColumn(null); setFilterValue('') }} className="text-zinc-600 hover:text-zinc-300 ml-0.5">
-                            <X className="w-3 h-3" />
-                          </button>
-                        </div>
-                      )}
+                {/* Filter bar: above the grid, always visible in Data */}
+                {viewMode === 'data' && (
+                  <div className={`flex min-h-[44px] flex-shrink-0 flex-wrap items-center gap-2 border-b ${RULE} px-3 py-1.5 sm:px-5`}>
+                    <div className="relative w-full max-w-[280px] flex-1">
+                      <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-600" />
+                      <input
+                        type="search"
+                        aria-label="Search rows"
+                        placeholder="Search rows…"
+                        value={searchTerm}
+                        onChange={(e) => setSearchTerm(e.target.value)}
+                        className={`${INPUT_BASE} h-[30px] pl-8 pr-2.5`}
+                      />
                     </div>
-                  )}
+                    {sortColumn && (
+                      <span className={`inline-flex h-[26px] items-center gap-1.5 ${R_TAG} border ${EDGE} bg-white/[0.03] pl-2 pr-1 text-[12px] text-zinc-400`}>
+                        <ArrowUpDown className="h-3 w-3 text-zinc-500" />
+                        Sorted by <span className="font-mono text-zinc-200">{sortColumn}</span>
+                        <span className="text-zinc-500">{sortDirection === 'asc' ? 'ascending' : 'descending'}</span>
+                        <button
+                          type="button"
+                          onClick={() => handleSort(sortColumn)}
+                          aria-label="Clear sort"
+                          className={`ml-0.5 flex h-[20px] w-[20px] items-center justify-center rounded-[4px] text-zinc-500 hover:bg-white/[0.06] hover:text-zinc-200 ${FOCUS_INSET}`}
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </span>
+                    )}
+                    {filterColumn && (
+                      <span className={`inline-flex h-[26px] items-center gap-1.5 ${R_TAG} border ${EDGE} bg-white/[0.03] pl-2 pr-1 text-[12px] text-zinc-400`}>
+                        <Filter className="h-3 w-3 text-zinc-500" />
+                        <span className="font-mono text-zinc-200">{filterColumn}</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setFilterColumn(null)
+                            setFilterValue('')
+                          }}
+                          aria-label="Clear filter"
+                          className={`ml-0.5 flex h-[20px] w-[20px] items-center justify-center rounded-[4px] text-zinc-500 hover:bg-white/[0.06] hover:text-zinc-200 ${FOCUS_INSET}`}
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </span>
+                    )}
+                  </div>
+                )}
 
-                  {/* Table Content */}
-                  {viewMode === 'data' ? (
-                    <>
+                {viewMode === 'data' ? (
+                  <>
                     <div className="min-h-0 flex-1 overflow-auto">
-                      {loading ? (
-                        <div className="flex h-full flex-col items-center justify-center">
-                          <Loader2 className="w-4 h-4 text-zinc-500 animate-spin mb-2" />
-                          <p className="text-[12px] text-zinc-500">Loading data…</p>
+                      {loading && rows.length === 0 ? (
+                        <div className="flex h-full flex-col items-center justify-center gap-2">
+                          <Spinner className="h-4 w-4 text-zinc-500" />
+                          <p className="text-[12.5px] text-zinc-500">Loading rows…</p>
                         </div>
                       ) : rows.length === 0 && committedSearch ? (
-                        <div className="flex h-full flex-col items-center justify-center px-8">
-                          <Search className="w-4 h-4 text-zinc-600 mb-3" />
-                          <p className="text-[13px] font-semibold text-zinc-200 mb-1">No matching rows</p>
-                          <p className="text-[12px] text-zinc-500 text-center max-w-xs mb-5 leading-relaxed">
-                            Nothing in <span className="font-mono text-zinc-300">{selectedTable}</span> matches “{committedSearch}”.
-                          </p>
-                          <button
-                            onClick={() => setSearchTerm('')}
-                            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-3 text-[12px] font-medium text-zinc-200 transition-colors hover:border-white/20 hover:bg-white/[0.08]"
-                          >
-                            <X className="w-3.5 h-3.5" />
-                            Clear search
-                          </button>
-                        </div>
+                        <EmptyState
+                          icon={Search}
+                          title="No matching rows"
+                          description={`Nothing in ${selectedTable} matches “${committedSearch}”.`}
+                          action={
+                            <KitButton size="sm" icon={X} onClick={() => setSearchTerm('')}>
+                              Clear search
+                            </KitButton>
+                          }
+                          className="h-full"
+                        />
                       ) : rows.length === 0 ? (
-                        <div className="flex h-full flex-col items-center justify-center px-8">
-                          <Table2 className="w-4 h-4 text-zinc-600 mb-3" />
-                          <p className="text-[13px] font-semibold text-zinc-200 mb-1">Table is empty</p>
-                          <p className="text-[12px] text-zinc-500 text-center max-w-xs mb-5 leading-relaxed">
-                            No rows yet. Data lands here the moment your app or agent writes to it.
-                          </p>
-                          <div className="flex items-center gap-2">
-                            <button
-                              onClick={handleAddRow}
-                              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-3 text-[12px] font-medium text-zinc-200 transition-colors hover:border-white/20 hover:bg-white/[0.08]"
-                            >
-                              <Plus className="w-3.5 h-3.5" />
-                              Insert row
-                            </button>
-                            <button
-                              onClick={() => router.push(`/app/projects/${resolvedProjectId}/connect`)}
-                              className="inline-flex h-8 items-center rounded-lg bg-white px-3.5 text-[12px] font-semibold text-black transition-colors hover:bg-zinc-200"
-                            >
-                              Connect your agent
-                            </button>
-                          </div>
-                        </div>
+                        <EmptyState
+                          icon={Table2}
+                          title="No rows yet"
+                          description="Rows appear here the moment your app, your agent or a function writes to this table."
+                          action={
+                            <>
+                              <KitButton size="sm" icon={Plus} onClick={handleAddRow}>
+                                Insert row
+                              </KitButton>
+                              <KitButton
+                                size="sm"
+                                variant="ghost"
+                                icon={Cable}
+                                onClick={() => router.push(`/app/projects/${resolvedProjectId}/connect`)}
+                              >
+                                Connect your agent
+                              </KitButton>
+                            </>
+                          }
+                          className="h-full"
+                        />
                       ) : (
-                        <table className="w-max min-w-full border-separate border-spacing-0">
+                        <table className={`w-max min-w-full border-separate border-spacing-0 transition-opacity ${loading ? 'opacity-60' : ''}`}>
                           <thead className="sticky top-0 z-20">
                             <tr>
-                              {/* Row-number gutter — pins left so the row you are
+                              {/* Row-number gutter: pinned left so the row you are
                                   reading stays identifiable when scrolled wide. */}
-                              <th className={`sticky left-0 z-30 w-[52px] border-b border-r border-white/[0.06] ${KIT.gridHead} px-3 py-2.5 text-right text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600`}>
-                                #
+                              <th
+                                scope="col"
+                                className={`sticky left-0 z-30 w-[56px] border-b border-r ${RULE} ${KIT.gridHead} px-3 py-2 text-right text-[12px] font-normal text-zinc-600`}
+                              >
+                                <span className="sr-only">Row</span>#
                               </th>
-                              {columns.map((col) => {
+                              {gridColumns.map((col) => {
                                 const isSorted = sortColumn === col.name
+                                const numeric = isNumericType(col.type)
                                 return (
                                   <th
                                     key={col.name}
-                                    onClick={() => handleSort(col.name)}
-                                    className={`min-w-[150px] max-w-[380px] cursor-pointer select-none border-b border-white/[0.06] ${KIT.gridHead} px-4 py-2.5 text-left transition-colors hover:bg-white/[0.03] group/th`}
-                                    title={isSorted ? (sortDirection === 'asc' ? 'Sorted ascending. Click for descending' : 'Sorted descending. Click to clear') : 'Click to sort'}
+                                    scope="col"
+                                    aria-sort={isSorted ? (sortDirection === 'asc' ? 'ascending' : 'descending') : undefined}
+                                    className={`group/th min-w-[150px] max-w-[380px] border-b ${RULE} ${KIT.gridHead} p-0 text-left font-normal`}
                                   >
-                                    <div className="flex items-center gap-1.5">
-                                      <span className={`text-[9.5px] font-semibold uppercase tracking-[0.1em] ${isSorted ? 'text-zinc-200' : 'text-zinc-500'}`}>{col.name}</span>
-                                      {col.primary && (
-                                        <span className="font-mono text-[9px] font-semibold uppercase text-amber-500/80">pk</span>
-                                      )}
-                                      {col.foreign && (
-                                        <span className="font-mono text-[9px] font-semibold uppercase text-violet-300/80">fk</span>
-                                      )}
-                                      {isSorted ? (
-                                        sortDirection === 'asc'
-                                          ? <ArrowUp className="w-3 h-3 text-violet-300" />
-                                          : <ArrowDown className="w-3 h-3 text-violet-300" />
-                                      ) : (
-                                        <ArrowUpDown className="w-3 h-3 text-zinc-700 opacity-0 group-hover/th:opacity-100 transition-opacity" />
-                                      )}
-                                    </div>
-                                    <div className="font-mono text-[9.5px] text-zinc-700 mt-0.5">{col.type}</div>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleSort(col.name)}
+                                      title={
+                                        isSorted
+                                          ? sortDirection === 'asc'
+                                            ? 'Sorted ascending. Click for descending'
+                                            : 'Sorted descending. Click to clear'
+                                          : 'Sort by this column'
+                                      }
+                                      className={`flex w-full flex-col gap-0.5 px-4 py-2 transition-colors hover:bg-white/[0.03] ${FOCUS_INSET} ${
+                                        numeric ? 'items-end text-right' : 'items-start text-left'
+                                      }`}
+                                    >
+                                      <span className="flex items-center gap-1.5">
+                                        {col.primary && (
+                                          <Key className="h-3 w-3 text-amber-300/70" strokeWidth={2} aria-label="Primary key" />
+                                        )}
+                                        {col.foreign && (
+                                          <Link2 className="h-3 w-3 text-violet-300/80" strokeWidth={2} aria-label="Foreign key" />
+                                        )}
+                                        <span className={`font-mono text-[12px] font-medium ${isSorted ? 'text-zinc-50' : 'text-zinc-300'}`}>
+                                          {col.name}
+                                        </span>
+                                        {isSorted ? (
+                                          sortDirection === 'asc' ? (
+                                            <ArrowUp className="h-3 w-3 text-zinc-200" />
+                                          ) : (
+                                            <ArrowDown className="h-3 w-3 text-zinc-200" />
+                                          )
+                                        ) : (
+                                          <ArrowUpDown className="h-3 w-3 text-zinc-600 opacity-0 transition-opacity group-hover/th:opacity-100" />
+                                        )}
+                                      </span>
+                                      <span className="font-mono text-[11px] text-zinc-600">{col.type}</span>
+                                    </button>
                                   </th>
                                 )
                               })}
@@ -1575,28 +1649,37 @@ export default function ProjectDatabasePage() {
                             {rows.map((row, idx) => (
                               <tr
                                 key={idx}
-                                className={`group/row cursor-pointer transition-colors ${KIT.rowHoverOn}`}
+                                tabIndex={0}
                                 onClick={() => openRowEditor(row)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') openRowEditor(row)
+                                }}
+                                aria-label={`Row ${(currentPage - 1) * PAGE_SIZE + idx + 1}. Open to edit`}
+                                className={`group/row cursor-pointer transition-colors ${KIT.rowHoverOn} ${FOCUS_INSET}`}
                               >
-                                <td className={`sticky left-0 z-10 border-b border-r border-white/[0.04] ${KIT.bg} px-3 py-[9px] text-right font-mono text-[11px] tabular-nums text-zinc-700 transition-colors ${KIT.rowHoverGroup} group-hover/row:text-zinc-500`}>
+                                <td
+                                  className={`sticky left-0 z-10 border-b border-r border-white/[0.04] ${KIT.bg} px-3 py-[9px] text-right text-[12px] tabular-nums text-zinc-600 transition-colors ${KIT.rowHoverGroup} group-hover/row:text-zinc-400`}
+                                >
                                   {(currentPage - 1) * PAGE_SIZE + idx + 1}
                                 </td>
-                                {columns.map((col) => {
+                                {gridColumns.map((col) => {
                                   const value = row[col.name]
-                                  const displayValue = value === null || value === undefined
+                                  const isNull = value === null || value === undefined
+                                  const displayValue = isNull
                                     ? 'NULL'
                                     : typeof value === 'object'
                                     ? JSON.stringify(value)
                                     : String(value)
-
+                                  const numeric = isNumericType(col.type)
                                   return (
-                                    <td key={col.name} className="max-w-[380px] border-b border-white/[0.04] px-4 py-[9px]">
+                                    <td
+                                      key={col.name}
+                                      className={`max-w-[380px] border-b border-white/[0.04] px-4 py-[9px] ${numeric ? 'text-right' : ''}`}
+                                    >
                                       <span
                                         title={displayValue}
                                         className={`block truncate font-mono text-[12px] ${
-                                          value === null || value === undefined
-                                            ? 'text-zinc-700 italic'
-                                            : getDataTypeColor(col.type)
+                                          isNull ? 'italic text-zinc-600' : numeric ? 'tabular-nums text-zinc-200' : 'text-zinc-300'
                                         }`}
                                       >
                                         {displayValue}
@@ -1611,761 +1694,755 @@ export default function ProjectDatabasePage() {
                       )}
                     </div>
 
-                    {/* Pagination footer — only when there is at least one row */}
+                    {/* Pagination footer: only when there is at least one row */}
                     {totalRows > 0 && (
-                      <div className="flex h-10 flex-shrink-0 items-center justify-between gap-3 border-t border-white/[0.06] px-4">
-                        <span className="font-mono text-[11px] text-zinc-500 tabular-nums">
-                          {`${((currentPage - 1) * PAGE_SIZE) + 1}–${Math.min(currentPage * PAGE_SIZE, totalRows)} of ${totalRows.toLocaleString()}`}
-                          {committedSearch && <span className="ml-1.5 text-zinc-600">· filtered by “{committedSearch}”</span>}
+                      <div className={`flex h-[40px] flex-shrink-0 items-center justify-between gap-3 border-t ${RULE} px-3 sm:px-5`}>
+                        <span className="truncate text-[12px] tabular-nums text-zinc-500">
+                          {`${(currentPage - 1) * PAGE_SIZE + 1}–${Math.min(currentPage * PAGE_SIZE, totalRows)} of ${totalRows.toLocaleString()}`}
+                          {committedSearch && <span className="ml-1.5 text-zinc-600">matching “{committedSearch}”</span>}
                         </span>
                         {totalPages > 1 && (
-                          <div className="flex items-center gap-1">
-                            <button
+                          <div className="flex flex-shrink-0 items-center gap-1">
+                            <KitButton
+                              size="sm"
+                              variant="ghost"
+                              icon={ChevronLeft}
                               onClick={() => goToPage(currentPage - 1)}
                               disabled={currentPage <= 1 || loading}
-                              className="inline-flex h-7 items-center gap-1 rounded-md border border-white/[0.07] bg-white/[0.02] pl-1.5 pr-2.5 text-[11.5px] text-zinc-300 hover:bg-white/[0.05] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                             >
-                              <ChevronLeft className="w-3.5 h-3.5" />
-                              Prev
-                            </button>
-                            <span className="px-2 font-mono text-[11px] text-zinc-500 tabular-nums">
-                              {currentPage} / {Math.max(1, totalPages)}
+                              Previous
+                            </KitButton>
+                            <span className="px-1.5 text-[12px] tabular-nums text-zinc-500">
+                              {currentPage} of {Math.max(1, totalPages)}
                             </span>
-                            <button
+                            <KitButton
+                              size="sm"
+                              variant="ghost"
+                              iconRight={ChevronRight}
                               onClick={() => goToPage(currentPage + 1)}
                               disabled={currentPage >= totalPages || loading}
-                              className="inline-flex h-7 items-center gap-1 rounded-md border border-white/[0.07] bg-white/[0.02] pl-2.5 pr-1.5 text-[11.5px] text-zinc-300 hover:bg-white/[0.05] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                             >
                               Next
-                              <ChevronRight className="w-3.5 h-3.5" />
-                            </button>
+                            </KitButton>
                           </div>
                         )}
                       </div>
                     )}
-                    </>
-                  ) : (
-                    <div className="min-h-0 flex-1 overflow-auto p-6">
-                      {/* Column Structure */}
-                      <div className="mb-6">
-                        <div className="flex items-center justify-between mb-3">
-                          <h3 className="flex items-baseline gap-2">
-                            <span className="text-[12.5px] font-semibold text-zinc-100">Columns</span>
-                            <span className="font-mono text-[11px] text-zinc-500 tabular-nums">{columns.length}</span>
-                          </h3>
-                          <button
-                            onClick={() => setShowAddColumnModal(true)}
-                            className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-2.5 text-[11.5px] font-medium text-zinc-200 transition-colors hover:border-white/20 hover:bg-white/[0.08]"
-                          >
-                            <Plus className="w-3 h-3" />
-                            Add column
-                          </button>
-                        </div>
-                        <div className="border border-white/[0.07] rounded-lg overflow-hidden">
-                          <table className="w-full">
+                  </>
+                ) : (
+                  <div className="min-h-0 flex-1 overflow-auto px-3 py-5 sm:px-5 sm:py-6">
+                    {/* Columns */}
+                    <section aria-labelledby="db-columns-title">
+                      <div className="mb-3 flex items-center justify-between gap-3">
+                        <h3 id="db-columns-title" className="flex items-baseline gap-2">
+                          <span className="text-[14px] font-semibold tracking-[-0.01em] text-zinc-100">Columns</span>
+                          <span className="text-[12.5px] tabular-nums text-zinc-500">{columns.length}</span>
+                        </h3>
+                        <KitButton
+                          size="sm"
+                          icon={Plus}
+                          onClick={() => {
+                            setError(null)
+                            setConstraintOutcome(null)
+                            setShowAddColumnModal(true)
+                          }}
+                        >
+                          Add column
+                        </KitButton>
+                      </div>
+                      <div className={`overflow-x-auto border ${EDGE} ${R_PANEL}`}>
+                        <table className="w-full min-w-[720px] border-separate border-spacing-0">
+                          <thead>
+                            <tr className={KIT.gridHead}>
+                              {['Column', 'Type', 'Nullable', 'Default', 'Constraints'].map((h) => (
+                                <th
+                                  key={h}
+                                  scope="col"
+                                  className={`border-b ${RULE} px-4 py-2 text-left text-[12px] font-normal text-zinc-500`}
+                                >
+                                  {h}
+                                </th>
+                              ))}
+                              <th scope="col" className={`w-[92px] border-b ${RULE} px-4 py-2 text-right text-[12px] font-normal text-zinc-500`}>
+                                <span className="sr-only">Actions</span>
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {columns.map((col) => (
+                              <tr key={col.name} className="group transition-colors hover:bg-white/[0.02]">
+                                <td className="border-b border-white/[0.04] px-4 py-2.5">
+                                  <div className="flex items-center gap-2">
+                                    {col.primary ? (
+                                      <Key className="h-3 w-3 flex-shrink-0 text-amber-300/70" strokeWidth={2} aria-label="Primary key" />
+                                    ) : col.foreign ? (
+                                      <Link2 className="h-3 w-3 flex-shrink-0 text-violet-300/80" strokeWidth={2} aria-label="Foreign key" />
+                                    ) : (
+                                      <span className="h-3 w-3 flex-shrink-0" />
+                                    )}
+                                    {renamingColumn === col.name ? (
+                                      <div className="flex items-center gap-1">
+                                        <input
+                                          autoFocus
+                                          aria-label={`New name for ${col.name}`}
+                                          value={renameColumnNewName}
+                                          onChange={(e) => setRenameColumnNewName(e.target.value)}
+                                          onKeyDown={(e) => {
+                                            if (e.key === 'Enter') handleRenameColumn()
+                                            if (e.key === 'Escape') {
+                                              setRenamingColumn(null)
+                                              setRenameColumnNewName('')
+                                            }
+                                          }}
+                                          disabled={savingRename}
+                                          className={`${INPUT_BASE} h-[28px] w-44 px-2 font-mono sm:text-[12.5px]`}
+                                        />
+                                        <IconButton
+                                          icon={savingRename ? Loader2 : Check}
+                                          label="Save the new name"
+                                          onClick={handleRenameColumn}
+                                          disabled={savingRename || !renameColumnNewName.trim()}
+                                          className={savingRename ? '[&_svg]:animate-spin' : ''}
+                                        />
+                                        <IconButton
+                                          icon={X}
+                                          label="Keep the old name"
+                                          onClick={() => {
+                                            setRenamingColumn(null)
+                                            setRenameColumnNewName('')
+                                          }}
+                                          disabled={savingRename}
+                                        />
+                                      </div>
+                                    ) : (
+                                      <span className="font-mono text-[12.5px] text-zinc-100">{col.name}</span>
+                                    )}
+                                  </div>
+                                </td>
+                                <td className="border-b border-white/[0.04] px-4 py-2.5">
+                                  <span className="font-mono text-[12px] text-zinc-400">{col.type}</span>
+                                </td>
+                                <td className="border-b border-white/[0.04] px-4 py-2.5">
+                                  <span className={`text-[12.5px] ${col.nullable ? 'text-zinc-500' : 'text-zinc-300'}`}>
+                                    {col.nullable ? 'Yes' : 'No'}
+                                  </span>
+                                </td>
+                                <td className="max-w-[240px] border-b border-white/[0.04] px-4 py-2.5">
+                                  {col.default ? (
+                                    <span className="block truncate font-mono text-[12px] text-zinc-500" title={col.default}>
+                                      {col.default}
+                                    </span>
+                                  ) : (
+                                    <span className="text-[12px] text-zinc-700">None</span>
+                                  )}
+                                </td>
+                                <td className="border-b border-white/[0.04] px-4 py-2.5">
+                                  <div className="flex flex-wrap items-center gap-1">
+                                    {col.primary && <Tag mono>primary key</Tag>}
+                                    {col.unique && !col.primary && <Tag mono>unique</Tag>}
+                                    {col.foreign && <Tag mono tone="violet">foreign key</Tag>}
+                                    {col.indexed && !col.primary && <Tag mono>indexed</Tag>}
+                                    {!col.primary && !col.unique && !col.foreign && !col.indexed && (
+                                      <span className="text-[12px] text-zinc-700">None</span>
+                                    )}
+                                  </div>
+                                </td>
+                                <td className="border-b border-white/[0.04] px-3 py-2 text-right">
+                                  {isReservedColumn(col.name) ? (
+                                    <span
+                                      className="text-[12px] text-zinc-600"
+                                      title="Managed by Backenly. It cannot be renamed or dropped."
+                                    >
+                                      Managed
+                                    </span>
+                                  ) : (
+                                    <div className="flex items-center justify-end gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+                                      <IconButton
+                                        icon={Edit2}
+                                        label={`Rename ${col.name}`}
+                                        onClick={() => {
+                                          setRenamingColumn(col.name)
+                                          setRenameColumnNewName(col.name)
+                                        }}
+                                        disabled={renamingColumn !== null}
+                                      />
+                                      <IconButton
+                                        icon={Trash2}
+                                        label={`Drop ${col.name}`}
+                                        onClick={() => {
+                                          setError(null)
+                                          setColumnToDelete(col.name)
+                                          setShowDeleteColumnModal(true)
+                                        }}
+                                        className="hover:!bg-rose-500/[0.12] hover:!text-rose-300"
+                                      />
+                                    </div>
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </section>
+
+                    {/* Indexes: what Postgres actually has, read from the catalog */}
+                    {indexes.length > 0 && (
+                      <section aria-labelledby="db-indexes-title" className="mt-8">
+                        <h3 id="db-indexes-title" className="mb-3 flex items-baseline gap-2">
+                          <span className="text-[14px] font-semibold tracking-[-0.01em] text-zinc-100">Indexes</span>
+                          <span className="text-[12.5px] tabular-nums text-zinc-500">{indexes.length}</span>
+                        </h3>
+                        <div className={`overflow-x-auto border ${EDGE} ${R_PANEL}`}>
+                          <table className="w-full min-w-[480px] border-separate border-spacing-0">
                             <thead>
-                              <tr className="border-b border-white/[0.06]">
-                                <th className="px-4 py-2 text-left text-[9.5px] font-semibold text-zinc-600 uppercase tracking-[0.1em]">Column</th>
-                                <th className="px-4 py-2 text-left text-[9.5px] font-semibold text-zinc-600 uppercase tracking-[0.1em]">Type</th>
-                                <th className="px-4 py-2 text-left text-[9.5px] font-semibold text-zinc-600 uppercase tracking-[0.1em]">Nullable</th>
-                                <th className="px-4 py-2 text-left text-[9.5px] font-semibold text-zinc-600 uppercase tracking-[0.1em]">Default</th>
-                                <th className="px-4 py-2 text-left text-[9.5px] font-semibold text-zinc-600 uppercase tracking-[0.1em]">Constraints</th>
-                                <th className="px-4 py-2 text-right text-[9.5px] font-semibold text-zinc-600 uppercase tracking-[0.1em] w-[88px]">Actions</th>
+                              <tr className={KIT.gridHead}>
+                                {['Name', 'Columns', 'Kind'].map((h) => (
+                                  <th
+                                    key={h}
+                                    scope="col"
+                                    className={`border-b ${RULE} px-4 py-2 text-left text-[12px] font-normal text-zinc-500`}
+                                  >
+                                    {h}
+                                  </th>
+                                ))}
                               </tr>
                             </thead>
-                            <tbody className="divide-y divide-white/[0.04]">
-                              {columns.map((col, idx) => (
-                                <tr key={col.name} className="group hover:bg-white/[0.025] transition-colors">
-                                  <td className="px-4 py-2.5">
-                                    <div className="flex items-center gap-2">
-                                      {col.primary ? (
-                                        <Key className="w-3 h-3 text-amber-500/70 flex-shrink-0" />
-                                      ) : (
-                                        <span className="w-3 h-3 flex-shrink-0" />
-                                      )}
-                                      {renamingColumn === col.name ? (
-                                        <div className="flex items-center gap-1.5">
-                                          <input
-                                            autoFocus
-                                            value={renameColumnNewName}
-                                            onChange={(e) => setRenameColumnNewName(e.target.value)}
-                                            onKeyDown={(e) => {
-                                              if (e.key === 'Enter') handleRenameColumn()
-                                              if (e.key === 'Escape') { setRenamingColumn(null); setRenameColumnNewName('') }
-                                            }}
-                                            disabled={savingRename}
-                                            className="h-7 px-2 bg-[#0f1015] border border-violet-400/30 focus:border-violet-400/60 rounded-md text-[12px] font-mono text-zinc-50 outline-none w-40"
-                                          />
-                                          <button
-                                            onClick={handleRenameColumn}
-                                            disabled={savingRename || !renameColumnNewName.trim()}
-                                            className="p-1 text-violet-300 hover:text-violet-200 hover:bg-white/[0.06] rounded-md transition-colors disabled:opacity-30"
-                                            title="Save rename"
-                                          >
-                                            {savingRename ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
-                                          </button>
-                                          <button
-                                            onClick={() => { setRenamingColumn(null); setRenameColumnNewName('') }}
-                                            disabled={savingRename}
-                                            className="p-1 text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.04] rounded-md transition-colors"
-                                            title="Cancel"
-                                          >
-                                            <X className="w-3.5 h-3.5" />
-                                          </button>
-                                        </div>
-                                      ) : (
-                                        <>
-                                          <span className="font-mono text-[12px] text-zinc-200">{col.name}</span>
-                                          {col.primary && (
-                                            <span className="font-mono text-[9px] font-semibold uppercase text-amber-500/80">pk</span>
-                                          )}
-                                        </>
-                                      )}
-                                    </div>
-                                  </td>
-                                  <td className="px-4 py-2.5">
-                                    <span className={`font-mono text-[11.5px] ${getDataTypeColor(col.type)}`}>
-                                      {col.type}
+                            <tbody>
+                              {indexes.map((ix) => (
+                                <tr key={ix.name}>
+                                  <td className="max-w-[320px] border-b border-white/[0.04] px-4 py-2.5">
+                                    <span className="block truncate font-mono text-[12px] text-zinc-200" title={ix.name}>
+                                      {ix.name}
                                     </span>
                                   </td>
-                                  <td className="px-4 py-2.5">
-                                    <span className={`font-mono text-[11px] ${col.nullable ? 'text-zinc-600' : 'text-zinc-400'}`}>
-                                      {col.nullable ? 'nullable' : 'not null'}
-                                    </span>
+                                  <td className="border-b border-white/[0.04] px-4 py-2.5 font-mono text-[12px] text-zinc-400">
+                                    {ix.columns.join(', ')}
                                   </td>
-                                  <td className="px-4 py-2.5">
-                                    <span className="font-mono text-[11px] text-zinc-600">
-                                      {col.default || <span className="text-zinc-700">—</span>}
-                                    </span>
-                                  </td>
-                                  <td className="px-4 py-2.5">
-                                    <div className="flex items-center gap-2 font-mono text-[10px] font-medium uppercase">
-                                      {col.unique && <span className="text-zinc-400">unique</span>}
-                                      {col.foreign && <span className="text-violet-300/80">fk</span>}
-                                      {col.indexed && <span className="text-sky-300/80">indexed</span>}
-                                      {!col.unique && !col.foreign && !col.indexed && (
-                                        <span className="text-zinc-700 normal-case">—</span>
-                                      )}
-                                    </div>
-                                  </td>
-                                  <td className="px-4 py-2.5 text-right">
-                                    {isReservedColumn(col.name) ? (
-                                      <span className="font-mono text-[10px] text-zinc-700" title="Reserved system column. Cannot be renamed or dropped">system</span>
-                                    ) : (
-                                      <div className="flex items-center justify-end gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                                        <button
-                                          onClick={() => { setRenamingColumn(col.name); setRenameColumnNewName(col.name) }}
-                                          disabled={renamingColumn !== null}
-                                          className="p-1.5 text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.04] rounded-md transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-                                          title="Rename column"
-                                        >
-                                          <Edit2 className="w-3 h-3" />
-                                        </button>
-                                        <button
-                                          onClick={() => { setColumnToDelete(col.name); setShowDeleteColumnModal(true) }}
-                                          className="p-1.5 text-zinc-500 hover:text-rose-300 hover:bg-rose-500/10 rounded-md transition-colors"
-                                          title="Drop column"
-                                        >
-                                          <Trash2 className="w-3 h-3" />
-                                        </button>
-                                      </div>
-                                    )}
+                                  <td className="border-b border-white/[0.04] px-4 py-2.5 text-[12.5px] text-zinc-400">
+                                    {ix.unique ? 'unique' : 'index'}
                                   </td>
                                 </tr>
                               ))}
                             </tbody>
                           </table>
                         </div>
+                      </section>
+                    )}
+                  </div>
+                )}
+              </>
+            ) : (
+              <EmptyState
+                icon={DatabaseIcon}
+                title={tables.length === 0 ? 'No tables yet' : 'Pick a table'}
+                description={
+                  tables.length === 0
+                    ? 'Ask your coding agent for the data your app needs. Each table it creates comes with REST endpoints, row-level security and a reversible change record.'
+                    : 'Choose a table on the left to browse its rows and structure.'
+                }
+                action={
+                  tables.length === 0 ? (
+                    <div className="flex w-full flex-col items-center gap-3">
+                      <AgentPrompt prompt="Add a products table with a name, a price in cents and a stock count. Anyone can read it; only admins can write." />
+                      <div className="flex flex-wrap items-center justify-center gap-2">
+                        <KitButton
+                          variant="primary"
+                          size="sm"
+                          icon={Cable}
+                          onClick={() => router.push(`/app/projects/${resolvedProjectId}/connect`)}
+                        >
+                          Connect your agent
+                        </KitButton>
+                        <KitButton size="sm" icon={Plus} onClick={openCreateTable} disabled={!selectedSchema}>
+                          New table
+                        </KitButton>
                       </div>
                     </div>
-                  )}
-                </>
-              ) : (
-                <div className="flex flex-1 flex-col items-center justify-center px-8">
-                  <DatabaseIcon className="w-4 h-4 text-zinc-600 mb-3" />
-                  <p className="text-[13px] font-semibold text-zinc-200 mb-1">No tables yet</p>
-                  <p className="text-[12px] text-zinc-500 text-center max-w-xs leading-relaxed">
-                    Describe what you want to build in chat and Backenly creates your tables automatically.
-                  </p>
-                </div>
-              )}
+                  ) : undefined
+                }
+                className="h-full"
+              />
+            )}
           </div>
-      </div>
+        </div>
       </div>
 
-      {/* Fullscreen Visualization Modal */}
+      {/* ── Full-screen schema graph ─────────────────────────── */}
       <AnimatePresence>
         {isVisualizationExpanded && selectedSchema && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 bg-black/95"
-            onClick={() => setIsVisualizationExpanded(false)}
+            transition={{ duration: 0.16 }}
+            className={`fixed inset-0 z-50 flex flex-col ${KIT.bg}`}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Schema graph, full screen"
           >
-            <div className="absolute inset-0 flex flex-col" onClick={(e) => e.stopPropagation()}>
-              {/* Header */}
-              <div className="flex items-center justify-between px-4 py-3 border-b border-white/[0.06] bg-[#16171d]">
-                <div className="flex items-baseline gap-2">
-                  <Network className="w-3.5 h-3.5 text-zinc-500 self-center" />
-                  <h2 className="text-[12.5px] font-semibold text-zinc-100">Schema graph</h2>
-                  <p className="font-mono text-[11px] text-zinc-500">{selectedSchema}</p>
-                </div>
-                <div className="flex items-center gap-1">
-                  <button
-                    onClick={() => setIsVisualizationExpanded(false)}
-                    className="p-1.5 text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.04] rounded-md transition-colors"
-                    title="Exit fullscreen"
-                  >
-                    <Minimize2 className="w-3.5 h-3.5" />
-                  </button>
-                  <button
-                    onClick={() => setIsVisualizationExpanded(false)}
-                    className="p-1.5 text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.04] rounded-md transition-colors"
-                    title="Close"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                </div>
+            <div className={`flex h-[52px] flex-shrink-0 items-center justify-between gap-3 border-b ${RULE} pl-5 pr-3`}>
+              <div className="flex min-w-0 items-baseline gap-2.5">
+                <h2 className="text-[15px] font-semibold tracking-[-0.014em] text-zinc-50">Schema graph</h2>
+                <span className="hidden truncate text-[12px] text-zinc-500 sm:inline">
+                  {tables.length} {tables.length === 1 ? 'table' : 'tables'}
+                </span>
               </div>
-              
-              {/* Fullscreen Visualization */}
-              <div className="flex-1 overflow-hidden">
-                <EnhancedSchemaVisualizer
-                  schema={selectedSchema}
-                  databaseType={activeDb}
-                  projectId={resolvedProjectId || undefined}
-                  view={databaseView}
-                />
-              </div>
+              <IconButton icon={Minimize2} label="Exit full screen" onClick={() => setIsVisualizationExpanded(false)} />
+            </div>
+            <div className="min-h-0 flex-1 overflow-hidden">
+              <EnhancedSchemaVisualizer
+                schema={selectedSchema}
+                databaseType={activeDb}
+                projectId={resolvedProjectId || undefined}
+                view={databaseView}
+              />
             </div>
           </motion.div>
         )}
       </AnimatePresence>
-      
-      {/* Insert Row Modal */}
-      <AnimatePresence>
-        {showAddRowModal && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
-            onClick={() => setShowAddRowModal(false)}
-          >
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 8 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 8 }}
-              transition={{ duration: 0.15 }}
-              className="bg-[#16171d] border border-white/[0.12] rounded-xl shadow-[0_12px_32px_-16px_rgba(0,0,0,0.85)] w-full max-w-lg max-h-[80vh] flex flex-col"
-              onClick={(e) => e.stopPropagation()}
+
+      {/* ── Insert row ─────────────────────────────────────── */}
+      <KitModal
+        open={showAddRowModal}
+        onClose={() => {
+          if (!loading) setShowAddRowModal(false)
+        }}
+        title="Insert row"
+        description={<span className="font-mono text-[12.5px] text-zinc-400">{selectedTable}</span>}
+        width="max-w-lg"
+        footer={
+          <>
+            <KitButton variant="ghost" onClick={() => setShowAddRowModal(false)} disabled={loading}>
+              Cancel
+            </KitButton>
+            <KitButton variant="primary" icon={Plus} onClick={saveNewRow} loading={loading}>
+              Insert
+            </KitButton>
+          </>
+        }
+      >
+        <div className="space-y-3.5">
+          {insertableColumns.map((col) => (
+            <RowField
+              key={col.name}
+              column={col}
+              required={!col.nullable && !col.default}
+              value={newRowData[col.name] ?? ''}
+              onChange={(v) => setNewRowData((prev) => ({ ...prev, [col.name]: v }))}
+              placeholder={col.default ? `default: ${col.default}` : col.nullable ? 'null' : ''}
+              dateAsPicker
+            />
+          ))}
+          {error && (
+            <KitNote tone="danger" icon={AlertCircle}>
+              {error}
+            </KitNote>
+          )}
+        </div>
+      </KitModal>
+
+      {/* ── Edit row ──────────────────────────────────────── */}
+      <KitModal
+        open={!!editingRow}
+        onClose={() => {
+          if (!savingRow && !deletingRow) closeRowEditor()
+        }}
+        title="Edit row"
+        description={
+          <span className="font-mono text-[12.5px] text-zinc-400">
+            {selectedTable}
+            {rowPkValue(editingRow) !== undefined && rowPkValue(editingRow) !== null && (
+              <span className="text-zinc-600"> · id {String(rowPkValue(editingRow))}</span>
+            )}
+          </span>
+        }
+        width="max-w-lg"
+        footer={
+          <>
+            <KitButton
+              variant="danger"
+              icon={Trash2}
+              onClick={deleteEditingRow}
+              loading={deletingRow}
+              disabled={savingRow}
+              className="sm:mr-auto"
             >
-              {/* Header */}
-              <div className="flex items-center justify-between px-5 py-4 border-b border-white/[0.06]">
-                <div className="flex items-baseline gap-2">
-                  <h2 className="text-[13px] font-semibold text-zinc-50">Insert row</h2>
-                  <p className="font-mono text-[11px] text-zinc-500">{selectedTable}</p>
-                </div>
-                <button
-                  onClick={() => setShowAddRowModal(false)}
-                  className="p-1.5 text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.04] rounded-md transition-colors"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
+              Delete row
+            </KitButton>
+            <KitButton variant="ghost" onClick={closeRowEditor} disabled={savingRow || deletingRow}>
+              Cancel
+            </KitButton>
+            <KitButton variant="primary" icon={Save} onClick={saveRowEdit} loading={savingRow} disabled={deletingRow}>
+              Save changes
+            </KitButton>
+          </>
+        }
+      >
+        <div className="space-y-3.5">
+          {columns.map((col) => {
+            const readOnly = !!col.primary || isReservedColumn(col.name)
+            return (
+              <RowField
+                key={col.name}
+                column={col}
+                readOnly={readOnly}
+                required={!col.nullable && !col.default && !readOnly}
+                value={editRowData[col.name] ?? ''}
+                onChange={(v) => setEditRowData((prev) => ({ ...prev, [col.name]: v }))}
+                placeholder={col.nullable ? 'null' : ''}
+                nullLabel="null"
+              />
+            )
+          })}
+          {error && (
+            <KitNote tone="danger" icon={AlertCircle}>
+              {error}
+            </KitNote>
+          )}
+        </div>
+      </KitModal>
 
-              {/* Fields */}
-              <div className="overflow-y-auto flex-1 p-5 space-y-3">
-                {columns
-                  .filter((col) => {
-                    const isAutoSerial = col.type.toLowerCase().includes('serial')
-                    const isAutoTimestamp =
-                      (col.name.toLowerCase() === 'createdat' || col.name.toLowerCase() === 'updatedat') &&
-                      (col.default?.includes('now()') || col.default?.includes('CURRENT_TIMESTAMP'))
-                    return !isAutoSerial && !isAutoTimestamp
-                  })
-                  .map((col) => (
-                    <div key={col.name}>
-                      <label className="block text-[11px] font-medium text-zinc-400 mb-1.5">
-                        <span className="font-mono text-zinc-300">{col.name}</span>
-                        <span className="ml-2 font-mono text-[10px] text-zinc-600">{col.type}</span>
-                        {!col.nullable && !col.default && (
-                          <span className="ml-1 text-rose-300/70">*</span>
-                        )}
-                      </label>
-                      {col.type.toLowerCase().includes('bool') ? (
-                        <select
-                          value={newRowData[col.name] ?? ''}
-                          onChange={(e) => setNewRowData((prev) => ({ ...prev, [col.name]: e.target.value }))}
-                          className="w-full h-8 px-3 bg-[#0f1015] border border-white/[0.07] rounded-lg text-zinc-200 text-[12px] focus:outline-none focus:border-violet-400/40 focus:ring-2 focus:ring-violet-400/15 transition-colors"
-                        >
-                          <option value="">-- select --</option>
-                          <option value="true">true</option>
-                          <option value="false">false</option>
-                        </select>
-                      ) : (
-                        <input
-                          type={
-                            col.type.toLowerCase().includes('int') || col.type.toLowerCase().includes('float') || col.type.toLowerCase().includes('numeric')
-                              ? 'number'
-                              : col.type.toLowerCase().includes('date') || col.type.toLowerCase().includes('timestamp')
-                              ? 'datetime-local'
-                              : 'text'
-                          }
-                          placeholder={col.default ? `default: ${col.default}` : col.nullable ? 'null' : ''}
-                          value={newRowData[col.name] ?? ''}
-                          onChange={(e) => setNewRowData((prev) => ({ ...prev, [col.name]: e.target.value }))}
-                          className="w-full h-8 px-3 bg-[#0f1015] border border-white/[0.07] rounded-lg text-zinc-200 text-[12px] placeholder:text-zinc-600 focus:outline-none focus:border-violet-400/40 focus:ring-2 focus:ring-violet-400/15 transition-colors"
-                        />
-                      )}
-                    </div>
-                  ))}
-              </div>
-
-              {/* Footer */}
-              <div className="px-5 py-4 border-t border-white/[0.06]">
-                {error && (
-                  <p className="mb-3 text-[11.5px] leading-5 text-rose-300">
-                    {error}
-                  </p>
-                )}
-                <div className="flex items-center justify-end gap-2">
-                  <button
-                    onClick={() => setShowAddRowModal(false)}
-                    className="h-8 px-3 text-[12px] font-medium text-zinc-400 hover:text-zinc-100 hover:bg-white/[0.04] rounded-lg transition-colors"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={saveNewRow}
-                    disabled={loading}
-                    className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-white px-3.5 text-[12px] font-semibold text-black transition-colors hover:bg-zinc-200 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
-                    Insert
-                  </button>
-                </div>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Row Editor Modal — view / edit / delete a single row */}
-      <AnimatePresence>
-        {editingRow && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
-            onClick={() => !savingRow && !deletingRow && closeRowEditor()}
-          >
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 8 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 8 }}
-              transition={{ duration: 0.15 }}
-              className="bg-[#16171d] border border-white/[0.12] rounded-xl shadow-[0_12px_32px_-16px_rgba(0,0,0,0.85)] w-full max-w-lg max-h-[82vh] flex flex-col"
-              onClick={(e) => e.stopPropagation()}
+      {/* ── Add column: funnels through the canonical tableLifecycle ── */}
+      <KitModal
+        open={showAddColumnModal}
+        onClose={closeAddColumn}
+        title="Add column"
+        description={<span className="font-mono text-[12.5px] text-zinc-400">{selectedTable}</span>}
+        footer={
+          <>
+            <KitButton variant="ghost" onClick={closeAddColumn} disabled={addingColumn}>
+              Cancel
+            </KitButton>
+            <KitButton
+              variant="primary"
+              icon={Plus}
+              onClick={handleAddColumn}
+              loading={addingColumn}
+              disabled={!newColumnName.trim() || fkBlocked}
             >
-              {/* Header */}
-              <div className="flex items-center justify-between px-5 py-4 border-b border-white/[0.06]">
-                <div className="flex items-baseline gap-2 min-w-0">
-                  <h2 className="text-[13px] font-semibold text-zinc-50">Edit row</h2>
-                  <p className="font-mono text-[11px] text-zinc-500 truncate">
-                    {selectedTable}
-                    {rowPkValue(editingRow) !== undefined && rowPkValue(editingRow) !== null && (
-                      <span className="text-zinc-600"> · id {String(rowPkValue(editingRow))}</span>
-                    )}
-                  </p>
-                </div>
-                <button
-                  onClick={() => !savingRow && !deletingRow && closeRowEditor()}
-                  className="p-1.5 text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.04] rounded-md transition-colors"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
+              Add column
+            </KitButton>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <KitField label="Name" hint="Letters, numbers and underscores. It must start with a letter or an underscore.">
+            <KitInput
+              value={newColumnName}
+              onChange={(e) => setNewColumnName(e.target.value)}
+              placeholder="e.g. email, price, is_active"
+              disabled={addingColumn}
+              className="font-mono"
+            />
+          </KitField>
 
-              {/* Fields */}
-              <div className="overflow-y-auto flex-1 p-5 space-y-3">
-                {columns.map((col) => {
-                  const readOnly = col.primary || isReservedColumn(col.name)
-                  const isBool = col.type.toLowerCase().includes('bool')
-                  return (
-                    <div key={col.name}>
-                      <label className="block text-[11px] font-medium text-zinc-400 mb-1.5">
-                        <span className="font-mono text-zinc-300">{col.name}</span>
-                        <span className="ml-2 font-mono text-[10px] text-zinc-600">{col.type}</span>
-                        {readOnly && <span className="ml-2 font-mono text-[10px] text-zinc-600">read-only</span>}
-                        {!col.nullable && !col.default && !readOnly && (
-                          <span className="ml-1 text-rose-300/70">*</span>
-                        )}
-                      </label>
-                      {readOnly ? (
-                        <div className="w-full min-h-8 px-3 py-1.5 bg-white/[0.02] border border-white/[0.05] rounded-lg text-zinc-500 text-[12px] font-mono break-all">
-                          {editRowData[col.name] === '' || editRowData[col.name] === undefined
-                            ? <span className="text-zinc-700 italic">null</span>
-                            : editRowData[col.name]}
-                        </div>
-                      ) : isBool ? (
-                        <select
-                          value={editRowData[col.name] ?? ''}
-                          onChange={(e) => setEditRowData((prev) => ({ ...prev, [col.name]: e.target.value }))}
-                          className="w-full h-8 px-3 bg-[#0f1015] border border-white/[0.07] rounded-lg text-zinc-200 text-[12px] focus:outline-none focus:border-violet-400/40 focus:ring-2 focus:ring-violet-400/15 transition-colors"
-                        >
-                          <option value="">-- null --</option>
-                          <option value="true">true</option>
-                          <option value="false">false</option>
-                        </select>
-                      ) : (
-                        <input
-                          type={
-                            col.type.toLowerCase().includes('int') || col.type.toLowerCase().includes('float') || col.type.toLowerCase().includes('numeric')
-                              ? 'number'
-                              : 'text'
-                          }
-                          placeholder={col.nullable ? 'null' : ''}
-                          value={editRowData[col.name] ?? ''}
-                          onChange={(e) => setEditRowData((prev) => ({ ...prev, [col.name]: e.target.value }))}
-                          className="w-full h-8 px-3 bg-[#0f1015] border border-white/[0.07] rounded-lg text-zinc-200 text-[12px] font-mono placeholder:text-zinc-600 focus:outline-none focus:border-violet-400/40 focus:ring-2 focus:ring-violet-400/15 transition-colors"
-                        />
-                      )}
-                    </div>
-                  )
-                })}
-
-                {error && (
-                  <div className="px-3 py-2 bg-rose-500/[0.06] border border-rose-500/15 rounded-lg text-[11px] text-rose-300/90">{error}</div>
-                )}
-              </div>
-
-              {/* Footer — Delete on the left, Cancel / Save on the right */}
-              <div className="flex items-center justify-between gap-2 px-5 py-4 border-t border-white/[0.06]">
-                <button
-                  onClick={deleteEditingRow}
-                  disabled={savingRow || deletingRow}
-                  className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-rose-500/25 bg-rose-500/[0.08] px-3 text-[12px] font-semibold text-rose-300 transition-colors hover:bg-rose-500/[0.16] disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {deletingRow ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
-                  Delete
-                </button>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={closeRowEditor}
-                    disabled={savingRow || deletingRow}
-                    className="h-8 px-3 text-[12px] font-medium text-zinc-400 hover:text-zinc-100 hover:bg-white/[0.04] rounded-lg transition-colors disabled:opacity-50"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={saveRowEdit}
-                    disabled={savingRow || deletingRow}
-                    className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-white px-3.5 text-[12px] font-semibold text-black transition-colors hover:bg-zinc-200 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {savingRow ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
-                    Save changes
-                  </button>
-                </div>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Add Column Modal — funnels through canonical tableLifecycle */}
-      <AnimatePresence>
-        {showAddColumnModal && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
-            onClick={() => !addingColumn && setShowAddColumnModal(false)}
-          >
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 8 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 8 }}
-              transition={{ duration: 0.15 }}
-              className="bg-[#16171d] border border-white/[0.12] rounded-xl shadow-[0_12px_32px_-16px_rgba(0,0,0,0.85)] w-full max-w-md"
-              onClick={(e) => e.stopPropagation()}
+          <KitField label="Type">
+            <select
+              value={newColumnType}
+              onChange={(e) => setNewColumnType(e.target.value)}
+              disabled={addingColumn}
+              className={`${INPUT_BASE} h-[36px] px-2.5 sm:h-[32px]`}
             >
-              <div className="flex items-center justify-between px-5 py-4 border-b border-white/[0.06]">
-                <div className="flex items-baseline gap-2">
-                  <h2 className="text-[13px] font-semibold text-zinc-50">Add column</h2>
-                  <p className="font-mono text-[11px] text-zinc-500">{selectedTable}</p>
-                </div>
-                <button
-                  onClick={() => !addingColumn && setShowAddColumnModal(false)}
-                  className="p-1.5 text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.04] rounded-md transition-colors"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
+              <option value="text">text (string)</option>
+              <option value="int">int (whole number)</option>
+              <option value="bigint">bigint (large number)</option>
+              <option value="numeric">numeric (decimal)</option>
+              <option value="boolean">boolean (true/false)</option>
+              <option value="timestamp">timestamp (date + time)</option>
+              <option value="uuid">uuid (unique identifier)</option>
+              <option value="jsonb">jsonb (structured JSON)</option>
+            </select>
+          </KitField>
 
-              <div className="p-5 space-y-4">
-                <div>
-                  <label className="block text-[10px] font-semibold text-zinc-600 uppercase tracking-[0.12em] mb-1.5">Name</label>
-                  <input
-                    autoFocus
-                    value={newColumnName}
-                    onChange={(e) => setNewColumnName(e.target.value)}
-                    placeholder="e.g. email, price, is_active"
-                    disabled={addingColumn}
-                    className="w-full h-8 px-3 bg-[#0f1015] border border-white/[0.07] rounded-lg text-zinc-50 text-[12.5px] font-mono placeholder:text-zinc-600 focus:outline-none focus:border-violet-400/40 focus:ring-2 focus:ring-violet-400/15 transition-colors"
-                  />
-                  <p className="text-[10.5px] text-zinc-600 mt-1.5">Letters, numbers, underscores. Must start with a letter or underscore.</p>
-                </div>
+          <label className="flex cursor-pointer items-center gap-2.5">
+            <input
+              type="checkbox"
+              checked={newColumnNullable}
+              onChange={(e) => setNewColumnNullable(e.target.checked)}
+              disabled={addingColumn}
+              className={CHECKBOX}
+            />
+            <span className="text-[13px] text-zinc-300">Allow empty values (nullable)</span>
+          </label>
 
-                <div>
-                  <label className="block text-[10px] font-semibold text-zinc-600 uppercase tracking-[0.12em] mb-1.5">Type</label>
-                  <select
-                    value={newColumnType}
-                    onChange={(e) => setNewColumnType(e.target.value)}
-                    disabled={addingColumn}
-                    className="w-full h-8 px-3 bg-[#0f1015] border border-white/[0.07] rounded-lg text-zinc-200 text-[12.5px] focus:outline-none focus:border-violet-400/40 transition-colors"
-                  >
-                    <option value="text">text (string)</option>
-                    <option value="int">int (whole number)</option>
-                    <option value="bigint">bigint (large number)</option>
-                    <option value="numeric">numeric (decimal)</option>
-                    <option value="boolean">boolean (true/false)</option>
-                    <option value="timestamp">timestamp (date + time)</option>
-                    <option value="uuid">uuid (unique identifier)</option>
-                    <option value="jsonb">jsonb (structured JSON)</option>
-                  </select>
-                </div>
+          <div className={`border-t ${RULE} pt-4`}>
+            <label className="mb-3 block text-[12.5px] font-medium leading-[18px] text-zinc-300">Constraints</label>
 
-                <label className="flex items-center gap-2.5 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={newColumnNullable}
-                    onChange={(e) => setNewColumnNullable(e.target.checked)}
-                    disabled={addingColumn}
-                    className="w-4 h-4 rounded border-white/20 bg-white/[0.04] text-violet-500 focus:ring-violet-400/30"
-                  />
-                  <span className="text-[12px] text-zinc-300">Allow empty values (nullable)</span>
-                </label>
+            <label className="mb-4 flex cursor-pointer items-center gap-2.5">
+              <input
+                type="checkbox"
+                checked={newColumnUnique}
+                onChange={(e) => setNewColumnUnique(e.target.checked)}
+                disabled={addingColumn}
+                className={CHECKBOX}
+              />
+              <span className="text-[13px] text-zinc-300">Unique</span>
+            </label>
 
-                {error && (
-                  <div className="px-3 py-2 bg-rose-500/[0.06] border border-rose-500/15 rounded-lg text-[11px] text-rose-300/90">{error}</div>
-                )}
-              </div>
-
-              <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-white/[0.06]">
-                <button
-                  onClick={() => setShowAddColumnModal(false)}
+            <div className="mb-4">
+              <KitField label="References" hint="Points this column at the target table's primary key.">
+                <select
+                  value={newColumnReferences}
+                  onChange={(e) => setNewColumnReferences(e.target.value)}
                   disabled={addingColumn}
-                  className="h-8 px-3 text-[12px] font-medium text-zinc-400 hover:text-zinc-100 hover:bg-white/[0.04] rounded-lg transition-colors disabled:opacity-50"
+                  className={`${INPUT_BASE} h-[36px] px-2.5 sm:h-[32px]`}
                 >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleAddColumn}
-                  disabled={addingColumn || !newColumnName.trim()}
-                  className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-white px-3.5 text-[12px] font-semibold text-black transition-colors hover:bg-zinc-200 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {addingColumn ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
-                  Add column
-                </button>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Drop Column Confirmation Modal */}
-      <AnimatePresence>
-        {showDeleteColumnModal && columnToDelete && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
-            onClick={() => !droppingColumn && setShowDeleteColumnModal(false)}
-          >
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 8 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 8 }}
-              transition={{ duration: 0.15 }}
-              className="bg-[#16171d] border border-rose-500/25 rounded-xl shadow-[0_12px_32px_-16px_rgba(0,0,0,0.85)] w-full max-w-md"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="px-5 py-4 border-b border-white/[0.06]">
-                <div className="flex items-start gap-3">
-                  <AlertCircle className="w-4 h-4 text-rose-300 flex-shrink-0 mt-0.5" />
-                  <div>
-                    <h2 className="text-[13px] font-semibold text-zinc-50">Drop column?</h2>
-                    <p className="text-[12px] text-zinc-400 mt-1 leading-5">
-                      Permanently delete <span className="font-mono text-rose-300">{columnToDelete}</span> and all of its data from <span className="font-mono text-zinc-200">{selectedTable}</span>. The REST API will be regenerated so the column disappears from CRUD payloads.
-                    </p>
-                  </div>
-                </div>
-              </div>
-              {error && (
-                <div className="mx-5 mt-4 px-3 py-2 bg-rose-500/[0.06] border border-rose-500/15 rounded-lg text-[11px] text-rose-300/90">{error}</div>
+                  <option value="">No foreign key</option>
+                  {tables
+                    .filter((t) => t.name !== selectedTable)
+                    .map((t) => (
+                      <option key={t.name} value={t.name}>
+                        {t.name}
+                      </option>
+                    ))}
+                </select>
+              </KitField>
+              {fkBlocked && (
+                <p className="mt-1.5 text-[12px] leading-[17px] text-amber-200/90">
+                  A foreign key needs a column named like{' '}
+                  <span className="font-mono">{suggestForeignKeyColumn(newColumnReferences)}</span>. Rename the column, or
+                  the key will be refused.
+                </p>
               )}
-              <div className="flex items-center justify-end gap-2 px-5 py-4">
-                <button
-                  onClick={() => setShowDeleteColumnModal(false)}
-                  disabled={droppingColumn}
-                  className="h-8 px-3 text-[12px] font-medium text-zinc-400 hover:text-zinc-100 hover:bg-white/[0.04] rounded-lg transition-colors disabled:opacity-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleDropColumn}
-                  disabled={droppingColumn}
-                  className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-rose-500/25 bg-rose-500/[0.10] px-3.5 text-[12px] font-semibold text-rose-300 transition-colors hover:bg-rose-500/[0.18] disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {droppingColumn ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
-                  Drop column
-                </button>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+            </div>
 
-      {/* Create Table Modal — funnels through /api/database/create-table (executeAction) */}
-      <AnimatePresence>
-        {showCreateTableModal && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
-            onClick={() => !creatingTable && setShowCreateTableModal(false)}
-          >
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 8 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 8 }}
-              transition={{ duration: 0.15 }}
-              className="bg-[#16171d] border border-white/[0.12] rounded-xl shadow-[0_12px_32px_-16px_rgba(0,0,0,0.85)] w-full max-w-md"
-              onClick={(e) => e.stopPropagation()}
+            <KitField label="Check" hint="A condition every row must satisfy. Validated by the server.">
+              <KitInput
+                value={newColumnCheck}
+                onChange={(e) => setNewColumnCheck(e.target.value)}
+                placeholder="e.g. price > 0"
+                disabled={addingColumn}
+                className="font-mono"
+              />
+            </KitField>
+          </div>
+
+          {constraintOutcome && (
+            <KitNote tone="warn" icon={AlertCircle} title={constraintOutcome[0]}>
+              <ul className="space-y-0.5">
+                {constraintOutcome.slice(1).map((line, i) => (
+                  <li key={i} className="font-mono text-[12px] text-amber-100/80">
+                    {line}
+                  </li>
+                ))}
+              </ul>
+            </KitNote>
+          )}
+
+          {error && (
+            <KitNote tone="danger" icon={AlertCircle}>
+              {error}
+            </KitNote>
+          )}
+        </div>
+      </KitModal>
+
+      {/* ── Drop column ───────────────────────────────────── */}
+      <KitConfirmDialog
+        open={showDeleteColumnModal && !!columnToDelete}
+        onCancel={() => {
+          if (!droppingColumn) setShowDeleteColumnModal(false)
+        }}
+        onConfirm={handleDropColumn}
+        title="Drop column?"
+        description={
+          <>
+            Permanently deletes <span className="font-mono text-zinc-200">{columnToDelete}</span> and all of its data
+            from <span className="font-mono text-zinc-200">{selectedTable}</span>. The REST API is regenerated so the
+            column disappears from its payloads.
+          </>
+        }
+        confirmLabel="Drop column"
+        danger
+        busy={droppingColumn}
+      >
+        {error && (
+          <KitNote tone="danger" icon={AlertCircle}>
+            {error}
+          </KitNote>
+        )}
+      </KitConfirmDialog>
+
+      {/* ── New table: funnels through /api/database/create-table ── */}
+      <KitModal
+        open={showCreateTableModal}
+        onClose={() => {
+          if (!creatingTable) setShowCreateTableModal(false)
+        }}
+        title="New table"
+        description="Backenly adds id, createdAt and updatedAt, then generates REST endpoints with auth and rate limits."
+        footer={
+          <>
+            <KitButton variant="ghost" onClick={() => setShowCreateTableModal(false)} disabled={creatingTable}>
+              Cancel
+            </KitButton>
+            <KitButton
+              variant="primary"
+              icon={Plus}
+              onClick={handleCreateTable}
+              loading={creatingTable}
+              disabled={!newTableName.trim()}
             >
-              <div className="flex items-center justify-between px-5 py-4 border-b border-white/[0.06]">
-                <h2 className="text-[13px] font-semibold text-zinc-50">New table</h2>
-                <button
-                  onClick={() => !creatingTable && setShowCreateTableModal(false)}
-                  className="p-1.5 text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.04] rounded-md transition-colors"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
+              Create table
+            </KitButton>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <KitField label="Name">
+            <KitInput
+              value={newTableName}
+              onChange={(e) => setNewTableName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleCreateTable()
+              }}
+              placeholder="e.g. posts, orders, comments"
+              disabled={creatingTable}
+              className="font-mono"
+            />
+          </KitField>
+          <KitField label={<>Description <span className="font-normal text-zinc-500">(optional)</span></>}>
+            <KitInput
+              value={newTableDescription}
+              onChange={(e) => setNewTableDescription(e.target.value)}
+              placeholder="What this table stores"
+              disabled={creatingTable}
+            />
+          </KitField>
+          {error && (
+            <KitNote tone="danger" icon={AlertCircle}>
+              {error}
+            </KitNote>
+          )}
+        </div>
+      </KitModal>
 
-              <div className="p-5 space-y-4">
-                <div>
-                  <label className="block text-[10px] font-semibold text-zinc-600 uppercase tracking-[0.12em] mb-1.5">Name</label>
-                  <input
-                    autoFocus
-                    value={newTableName}
-                    onChange={(e) => setNewTableName(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === 'Enter') handleCreateTable() }}
-                    placeholder="e.g. posts, orders, comments"
-                    disabled={creatingTable}
-                    className="w-full h-8 px-3 bg-[#0f1015] border border-white/[0.07] rounded-lg text-zinc-50 text-[12.5px] font-mono placeholder:text-zinc-600 focus:outline-none focus:border-violet-400/40 focus:ring-2 focus:ring-violet-400/15 transition-colors"
-                  />
-                  <p className="text-[10.5px] text-zinc-600 mt-1.5">Backenly adds id, createdAt and updatedAt automatically, plus REST endpoints with auth and rate limits.</p>
-                </div>
-
-                <div>
-                  <label className="block text-[10px] font-semibold text-zinc-600 uppercase tracking-[0.12em] mb-1.5">Description <span className="normal-case tracking-normal text-zinc-700">(optional)</span></label>
-                  <input
-                    value={newTableDescription}
-                    onChange={(e) => setNewTableDescription(e.target.value)}
-                    placeholder="What this table stores"
-                    disabled={creatingTable}
-                    className="w-full h-8 px-3 bg-[#0f1015] border border-white/[0.07] rounded-lg text-zinc-200 text-[12.5px] placeholder:text-zinc-600 focus:outline-none focus:border-violet-400/40 focus:ring-2 focus:ring-violet-400/15 transition-colors"
-                  />
-                </div>
-
-                {error && (
-                  <div className="px-3 py-2 bg-rose-500/[0.06] border border-rose-500/15 rounded-lg text-[11px] text-rose-300/90">{error}</div>
-                )}
-              </div>
-
-              <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-white/[0.06]">
-                <button
-                  onClick={() => setShowCreateTableModal(false)}
-                  disabled={creatingTable}
-                  className="h-8 px-3 text-[12px] font-medium text-zinc-400 hover:text-zinc-100 hover:bg-white/[0.04] rounded-lg transition-colors disabled:opacity-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleCreateTable}
-                  disabled={creatingTable || !newTableName.trim()}
-                  className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-white px-3.5 text-[12px] font-semibold text-black transition-colors hover:bg-zinc-200 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {creatingTable ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
-                  Create table
-                </button>
-              </div>
-            </motion.div>
-          </motion.div>
+      {/* ── Delete table ──────────────────────────────────── */}
+      <KitConfirmDialog
+        open={showDeleteModal && !!tableToDelete}
+        onCancel={() => {
+          if (!deletingTable) setShowDeleteModal(false)
+        }}
+        onConfirm={handleDeleteTable}
+        title="Delete table?"
+        description={
+          <>
+            Permanently deletes <span className="font-mono text-zinc-200">{tableToDelete}</span>, all of its rows and its
+            generated REST endpoints. This cannot be undone.
+          </>
+        }
+        confirmLabel="Delete table"
+        danger
+        busy={deletingTable}
+      >
+        {error && (
+          <KitNote tone="danger" icon={AlertCircle}>
+            {error}
+          </KitNote>
         )}
-      </AnimatePresence>
-
-      {/* Delete Table Confirmation Modal */}
-      <AnimatePresence>
-        {showDeleteModal && tableToDelete && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
-            onClick={() => !deletingTable && setShowDeleteModal(false)}
-          >
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 8 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 8 }}
-              transition={{ duration: 0.15 }}
-              className="bg-[#16171d] border border-rose-500/25 rounded-xl shadow-[0_12px_32px_-16px_rgba(0,0,0,0.85)] w-full max-w-md"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="px-5 py-4 border-b border-white/[0.06]">
-                <div className="flex items-start gap-3">
-                  <AlertCircle className="w-4 h-4 text-rose-300 flex-shrink-0 mt-0.5" />
-                  <div>
-                    <h2 className="text-[13px] font-semibold text-zinc-50">Delete table?</h2>
-                    <p className="text-[12px] text-zinc-400 mt-1 leading-5">
-                      Permanently delete <span className="font-mono text-rose-300">{tableToDelete}</span>, all of its rows, and its generated REST endpoints. This cannot be undone.
-                    </p>
-                  </div>
-                </div>
-              </div>
-              {error && (
-                <div className="mx-5 mt-4 px-3 py-2 bg-rose-500/[0.06] border border-rose-500/15 rounded-lg text-[11px] text-rose-300/90">{error}</div>
-              )}
-              <div className="flex items-center justify-end gap-2 px-5 py-4">
-                <button
-                  onClick={() => setShowDeleteModal(false)}
-                  disabled={deletingTable}
-                  className="h-8 px-3 text-[12px] font-medium text-zinc-400 hover:text-zinc-100 hover:bg-white/[0.04] rounded-lg transition-colors disabled:opacity-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleDeleteTable}
-                  disabled={deletingTable}
-                  className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-rose-500/25 bg-rose-500/[0.10] px-3.5 text-[12px] font-semibold text-rose-300 transition-colors hover:bg-rose-500/[0.18] disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {deletingTable ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
-                  Delete table
-                </button>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
+      </KitConfirmDialog>
     </div>
+  )
+}
+
+// ─── Parts ────────────────────────────────────────────────────────────────────
+
+const DATABASE_VIEWS: Array<{ id: DatabaseView; label: string; icon: LucideIcon }> = [
+  { id: 'tables', label: 'Tables', icon: Table2 },
+  { id: 'visualization', label: 'Schema', icon: Network },
+  { id: 'sql', label: 'SQL', icon: Terminal },
+  { id: 'history', label: 'History', icon: History },
+  { id: 'types', label: 'Types', icon: Shapes },
+  { id: 'extensions', label: 'Extensions', icon: Puzzle },
+  { id: 'snapshots', label: 'Snapshots', icon: Camera },
+]
+
+const CHECKBOX =
+  'h-4 w-4 flex-shrink-0 cursor-pointer rounded-[4px] border-white/20 bg-white/[0.04] text-violet-500 focus:ring-violet-400/30 focus:ring-offset-0'
+
+function isNumericType(type: string): boolean {
+  const t = type.toLowerCase()
+  return (
+    t.includes('int') ||
+    t.includes('numeric') ||
+    t.includes('decimal') ||
+    t.includes('float') ||
+    t.includes('double') ||
+    t.includes('real') ||
+    t.includes('serial')
+  )
+}
+
+/** One column's input in the insert and edit dialogs: typed to the column. */
+function RowField({
+  column,
+  value,
+  onChange,
+  placeholder,
+  required,
+  readOnly = false,
+  dateAsPicker = false,
+  nullLabel,
+}: {
+  column: { name: string; type: string }
+  value: string
+  onChange: (value: string) => void
+  placeholder?: string
+  required?: boolean
+  readOnly?: boolean
+  /** Insert uses the native date-time picker; edit keeps the stored ISO text. */
+  dateAsPicker?: boolean
+  nullLabel?: string
+}) {
+  const type = column.type.toLowerCase()
+  const isBool = type.includes('bool')
+  const isNumber = type.includes('int') || type.includes('float') || type.includes('numeric')
+  const isDate = type.includes('date') || type.includes('timestamp')
+  const label = (
+    <span className="flex items-baseline gap-2">
+      <span className="font-mono text-zinc-200">{column.name}</span>
+      <span className="font-mono text-[11.5px] font-normal text-zinc-600">{column.type}</span>
+      {readOnly && <span className="text-[11.5px] font-normal text-zinc-600">read-only</span>}
+      {required && (
+        <span className="text-[11.5px] font-normal text-zinc-500" aria-label="required">
+          required
+        </span>
+      )}
+    </span>
+  )
+
+  if (readOnly) {
+    return (
+      <KitField label={label}>
+        <div className={`min-h-[32px] break-all ${R_CONTROL} border border-white/[0.05] bg-white/[0.02] px-3 py-1.5 font-mono text-[12px] text-zinc-500`}>
+          {value === '' ? <span className="italic text-zinc-600">null</span> : value}
+        </div>
+      </KitField>
+    )
+  }
+
+  if (isBool) {
+    return (
+      <KitField label={label}>
+        <select value={value} onChange={(e) => onChange(e.target.value)} className={`${INPUT_BASE} h-[36px] px-2.5 sm:h-[32px]`}>
+          <option value="">{nullLabel ? `${nullLabel}` : 'Choose…'}</option>
+          <option value="true">true</option>
+          <option value="false">false</option>
+        </select>
+      </KitField>
+    )
+  }
+
+  return (
+    <KitField label={label}>
+      <KitInput
+        type={isNumber ? 'number' : isDate && dateAsPicker ? 'datetime-local' : 'text'}
+        placeholder={placeholder}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="font-mono"
+      />
+    </KitField>
   )
 }

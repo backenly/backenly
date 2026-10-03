@@ -1,0 +1,83 @@
+{
+  "id": "provisioning/prisma-migration-ledger",
+  "bucket": "known_provisioning_effect",
+  "source": "the Layer 3 migration runner (tools/managed-db/runner), which is prisma migrate itself",
+  "derivation": "replayed",
+  "replayStatus": "valid_postgres",
+  "confidence": "observed",
+  "notes": "Prisma's own migration history table. It is created by `migrate resolve` or `migrate deploy`, never by schema.prisma, so the projection can never contain it and it would otherwise read as unexplained divergence for the rest of this database's life. The DDL is fixed by the pinned Prisma CLI (5.22.0), not by this repository: these field values were replayed into a throwaway database by tools/managed-db/rehearse-baseline.ts, which reports the same eleven objects, and observed again in the post-baseline staging capture of 2026-09-16. A version bump of the CLI that changed this shape would surface here as a mismatch rather than be absorbed, which is the intended behaviour. Contents are deliberately not described: which migrations a database has applied is state, not lineage.",
+  "entries": [
+    {
+      "key": "table public._prisma_migrations",
+      "expect": { "kind": "r", "persistence": "p", "rls": false, "force_rls": false },
+      "subtype": "migration_ledger",
+      "ownership": "managed_database_migration_runner",
+      "required": true,
+      "evidence": [
+        "tools/managed-db/runner/Dockerfile.migrate",
+        "tools/managed-db/runner/entrypoint.sh",
+        "tools/managed-db/rehearse-baseline.ts",
+        "scripts/run-migration-job-fargate.ts"
+      ],
+      "validation": "prisma migrate status reports the database up to date",
+      "note": "RLS stays off: the ledger is platform state, reachable only by the migration role, and enabling RLS on it would break the runner rather than protect anything."
+    },
+    {
+      "key": "column public._prisma_migrations.id",
+      "expect": { "type": "character varying(36)", "not_null": true, "default_expr": null },
+      "subtype": "migration_ledger"
+    },
+    {
+      "key": "column public._prisma_migrations.checksum",
+      "expect": { "type": "character varying(64)", "not_null": true, "default_expr": null },
+      "subtype": "migration_ledger",
+      "note": "How the runner detects a migration file edited after it was applied."
+    },
+    {
+      "key": "column public._prisma_migrations.migration_name",
+      "expect": { "type": "character varying(255)", "not_null": true, "default_expr": null },
+      "subtype": "migration_ledger"
+    },
+    {
+      "key": "column public._prisma_migrations.logs",
+      "expect": { "type": "text", "not_null": false, "default_expr": null },
+      "subtype": "migration_ledger"
+    },
+    {
+      "key": "column public._prisma_migrations.started_at",
+      "expect": { "type": "timestamp with time zone", "not_null": true, "default_expr": "now()" },
+      "subtype": "migration_ledger"
+    },
+    {
+      "key": "column public._prisma_migrations.finished_at",
+      "expect": { "type": "timestamp with time zone", "not_null": false, "default_expr": null },
+      "subtype": "migration_ledger",
+      "note": "Null while a migration is in flight, which is how a half-applied migration is recognised."
+    },
+    {
+      "key": "column public._prisma_migrations.rolled_back_at",
+      "expect": { "type": "timestamp with time zone", "not_null": false, "default_expr": null },
+      "subtype": "migration_ledger"
+    },
+    {
+      "key": "column public._prisma_migrations.applied_steps_count",
+      "expect": { "type": "integer", "not_null": true, "default_expr": "0" },
+      "subtype": "migration_ledger"
+    },
+    {
+      "key": "constraint public._prisma_migrations._prisma_migrations_pkey",
+      "expect": { "type": "p", "definition": "PRIMARY KEY (id)", "validated": true },
+      "subtype": "migration_ledger"
+    },
+    {
+      "key": "index public._prisma_migrations._prisma_migrations_pkey",
+      "expect": {
+        "definition": "CREATE UNIQUE INDEX _prisma_migrations_pkey ON public._prisma_migrations USING btree (id)",
+        "unique": true,
+        "primary": true,
+        "method": "btree"
+      },
+      "subtype": "migration_ledger"
+    }
+  ]
+}

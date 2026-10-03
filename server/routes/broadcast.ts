@@ -11,13 +11,14 @@ import { Router, Request, Response } from 'express'
 import { prisma } from '@/lib/db'
 import { v1AuthMiddleware } from '../lib/auth'
 import { workspaceChannelName } from '@/lib/security/workspace-schema'
+import { asyncRoute } from '../lib/async-route'
 
 const router = Router()
 
 const MAX_PAYLOAD_BYTES = 6_000
 const CHANNEL_RE = /^[a-zA-Z0-9_-]{1,64}$/
 
-router.post('/:projectId/broadcast', v1AuthMiddleware, async (req: Request, res: Response) => {
+router.post('/:projectId/broadcast', asyncRoute(v1AuthMiddleware), asyncRoute(async (req: Request, res: Response) => {
   const { projectId } = req.params
   const { channel, payload = {} } = req.body
 
@@ -59,6 +60,6 @@ router.post('/:projectId/broadcast', v1AuthMiddleware, async (req: Request, res:
   } catch (err: any) {
     res.status(500).json({ error: 'Broadcast failed' })
   }
-})
+}))
 
 export default router

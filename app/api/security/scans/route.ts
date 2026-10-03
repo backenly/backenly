@@ -5,6 +5,7 @@ import { withAuth } from '@/lib/auth/route-protection'
 import { prisma } from '@/lib/db'
 import { z } from 'zod'
 import { runSecurityScan, createSecurityIssues } from '@/lib/services/securityScanner'
+import { canAccessProject, canWriteProject } from '@/lib/edition/guard'
 
 const querySchema = z.object({
   page: z.string().optional().transform((val) => (val ? parseInt(val, 10) : 1)),
@@ -36,14 +37,7 @@ export const GET = withAuth(async (request: NextRequest, { user }) => {
 
     // If projectId provided, verify ownership
     if (params.projectId) {
-      const project = await prisma.project.findFirst({
-        where: {
-          id: params.projectId,
-          userId: user.userId,
-        },
-      })
-      
-      if (!project) {
+      if (!(await canAccessProject(user.userId, params.projectId))) {
         return NextResponse.json(
           { error: 'Invalid project access' },
           { status: 403 }
@@ -116,14 +110,7 @@ export const POST = withAuth(async (request: NextRequest, { user }) => {
 
     // If projectId provided, verify ownership
     if (data.projectId) {
-      const project = await prisma.project.findFirst({
-        where: {
-          id: data.projectId,
-          userId: user.userId,
-        },
-      })
-      
-      if (!project) {
+      if (!(await canWriteProject(user.userId, data.projectId))) {
         return NextResponse.json(
           { error: 'Invalid project access' },
           { status: 403 }

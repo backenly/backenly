@@ -16,13 +16,14 @@ import { prisma } from '@/lib/db'
 import { verifyPassword } from '@/lib/auth/password'
 import { sendError, ErrorCodes } from './response'
 import { classifyKeyFailure, type ApiKeyFailureDiagnostic } from '@/lib/middleware/apiKeyFailureDiagnostic'
-import { recordSecurityEvent } from '@/lib/platform/controls'
+import { recordSecurityEvent } from '@/lib/platform-controls'
 import { isInternalOrigin } from '@/lib/security/internal-origin'
 import {
   detectBrowserOrigin,
   recordServiceRoleBrowserBlock,
   serviceRoleRefusalMessage,
 } from '@/lib/security/service-role-exposure'
+import { touchProjectActivity } from '@/lib/projects/activity'
 
 export interface V1ApiContext {
   projectId: string
@@ -382,6 +383,9 @@ export async function v1AuthMiddleware(req: Request, res: Response, next: NextFu
       serviceRole: apiKeyRecord.serviceRole,
     },
   }
+
+  // Authenticated, in quota, and past the serving gate: real use.
+  void touchProjectActivity(projectId)
 
   next()
 }

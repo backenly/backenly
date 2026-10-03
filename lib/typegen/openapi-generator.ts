@@ -395,7 +395,7 @@ export function generateOpenApiSpec(
           },
         },
         responses: {
-          '200': { description: 'User created + JWT token', content: { 'application/json': { schema: { type: 'object', properties: { token: { type: 'string' }, refreshToken: { type: 'string' }, user: { type: 'object' } } } } } },
+          '201': { description: 'User created + JWT token', content: { 'application/json': { schema: { type: 'object', properties: { token: { type: 'string' }, refreshToken: { type: 'string' }, user: { type: 'object' } } } } } },
           '409': { $ref: '#/components/responses/Conflict' },
         },
       },

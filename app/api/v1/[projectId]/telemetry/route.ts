@@ -24,13 +24,12 @@ import { NextRequest, NextResponse } from 'next/server'
 import crypto from 'crypto'
 import { prisma } from '@/lib/db/prisma'
 import { recordApiUsageEvent, type ApiUsageEvent } from '@/lib/ai/frontend-coevolution'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 const MAX_EVENTS_PER_REQUEST = 50
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { projectId: string } },
-) {
+async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   const { projectId } = params
 
   // ── 1. Validate projectId ─────────────────────────────────────────────────
@@ -143,3 +142,5 @@ export async function POST(
 
   return NextResponse.json({ ok: true, recorded }, { status: 200 })
 }
+
+export const POST = recordedV1(handlePOST)

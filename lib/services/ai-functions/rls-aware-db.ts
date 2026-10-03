@@ -47,10 +47,21 @@
  * Resolved by the runner from the real request (`x-user-token` verified against
  * the PROJECT's jwtSecret, or `x-admin-key`), never from anything the function
  * body passes in. A function cannot elevate itself by asking.
+ *
+ * ── Reach ───────────────────────────────────────────────────────────────────
+ *
+ * Claims decide which ROWS a policy admits; they never stopped a statement
+ * naming another schema. The transaction ran on the app's connection, whose
+ * role owns the platform tables and every workspace schema, so
+ * `SELECT ... FROM public.users` or `workspace_<another project>.orders` simply
+ * worked. It now runs on a client that logs in as the project's function role
+ * (function-db-role.ts), whose grants cover its own workspace schema and
+ * nothing else, with `search_path` pinned there so an unqualified name means
+ * the project's table.
  */
 
-import { prisma } from '@/lib/db'
 import { rlsSessionSql, rlsSessionParams, type RlsIdentity } from '@/lib/services/rls-session'
+import type { FunctionDbHandle } from './function-db-role'
 
 /**
  * The subset of the Prisma client a route module is allowed to reach, with
@@ -71,26 +82,56 @@ export interface RlsAwarePrisma {
   $transaction(fn: (tx: RlsAwarePrisma) => Promise<any>): Promise<any>
 }
 
+/** Supplies the project's function login; `refresh` re-derives it after a refused login. */
+export type FunctionDbConnector = (opts?: { refresh?: boolean }) => Promise<FunctionDbHandle>
+
+/** Prisma's code for a login the server refused. Nothing has run yet when it fires. */
+function isLoginRefused(err: unknown): boolean {
+  const e = err as { errorCode?: string; code?: string } | null
+  return e?.errorCode === 'P1000' || e?.code === 'P1000'
+}
+
 /**
  * Build the claims-scoped client for one invocation.
  *
  * `identity` is fixed for the life of the call. Rebuilding it per query would
  * open a window where a function could mutate its own identity mid-request.
+ *
+ * `connect` is asked on the first query, not when the module loads, so a
+ * handler that never touches the database never opens a connection.
  */
-export function makeRlsAwarePrisma(identity: RlsIdentity): RlsAwarePrisma {
+export function makeRlsAwarePrisma(identity: RlsIdentity, connect: FunctionDbConnector): RlsAwarePrisma {
+  let handle: Promise<FunctionDbHandle> | null = null
+
   /**
    * Run `body` on a connection that already carries the caller's identity.
    *
-   * `is_local = true` inside `rlsSessionSql` scopes the settings to this
-   * transaction, so they revert on commit and can never leak onto the next
-   * borrower of a pooled connection — the failure mode that would turn a
-   * silent-empty bug into a cross-user data leak.
+   * `is_local = true` scopes the settings to this transaction, so they revert
+   * on commit and can never leak onto the next borrower of a pooled
+   * connection — the failure mode that would turn a silent-empty bug into a
+   * cross-user data leak. `search_path` is pinned here rather than trusted from
+   * the role, because Prisma sets its own on every connection it opens.
    */
-  const withClaims = <T>(body: (tx: any) => Promise<T>): Promise<T> =>
-    prisma.$transaction(async tx => {
-      await tx.$executeRawUnsafe(rlsSessionSql(), ...rlsSessionParams(identity))
+  const run = <T>(h: FunctionDbHandle, body: (tx: any) => Promise<T>): Promise<T> =>
+    h.client.$transaction(async (tx: any) => {
+      await tx.$executeRawUnsafe(
+        `${rlsSessionSql(2)},\n       set_config('search_path', $1, true)`,
+        `"${h.schema}", public`,
+        ...rlsSessionParams(identity),
+      )
       return body(tx)
     })
+
+  const withClaims = async <T>(body: (tx: any) => Promise<T>): Promise<T> => {
+    handle ??= connect()
+    try {
+      return await run(await handle, body)
+    } catch (err) {
+      if (!isLoginRefused(err)) throw err
+      handle = connect({ refresh: true })
+      return run(await handle, body)
+    }
+  }
 
   const wrap = (tx: any): RlsAwarePrisma => ({
     $queryRaw: (...args: any[]) => (tx.$queryRaw as any)(...args),
@@ -112,5 +153,21 @@ export function makeRlsAwarePrisma(identity: RlsIdentity): RlsAwarePrisma {
     // A function that opens its own transaction gets the claims set once, at
     // the top, covering every statement inside it.
     $transaction: (fn: (tx: RlsAwarePrisma) => Promise<any>) => withClaims(tx => fn(wrap(tx))),
+  }
+}
+
+/**
+ * A client every query of which is refused. Validation evaluates a module
+ * without calling its handler, but a module's top level can still start a
+ * query, and nothing being validated has a project to scope it to.
+ */
+export function refusingPrisma(reason: string): RlsAwarePrisma {
+  const refuse = () => Promise.reject(new Error(reason))
+  return {
+    $queryRaw: refuse,
+    $queryRawUnsafe: refuse,
+    $executeRaw: refuse,
+    $executeRawUnsafe: refuse,
+    $transaction: refuse,
   }
 }

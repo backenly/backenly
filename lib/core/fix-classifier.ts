@@ -352,6 +352,47 @@ export function classifyFix(
   // invalid index re-runs the operation that already failed once, and it fails
   // again if the data that stopped it is still there. Validating a constraint
   // scans the whole table. Both are one click, and both are the owner's call.
+  // ── Repeated failure across one subsystem ───────────────────────────────────
+  //
+  // `notify_only` is not caution here, it is the honest classification. The
+  // claim this finding makes is "the individual repairs in this area are
+  // treating symptoms", and there is no executor verb for that — the remedy is
+  // a structural decision about how the subsystem is modelled, which belongs to
+  // the owner.
+  //
+  // Rating it `approval` would be worse than useless: the conformance guard
+  // requires anything rated auto or approval to carry a real executor action,
+  // and inventing one to satisfy that is precisely how `schema_not_registered`
+  // shipped pointing at REGISTER_POSTGREST_SCHEMA, a verb that never existed.
+  // ── Usage anomaly (the spend guard) ─────────────────────────────────────────
+  //
+  // `notify_only`, honestly: there is no executor verb for "your traffic spiked",
+  // and whether a spike is a launch or a runaway is the owner's judgement.
+  if (type === 'usage_anomaly') {
+    return {
+      decision: 'notify_only',
+      reason: 'Usage on this project jumped far past its own usual daily level.',
+      riskNote:
+        'No automatic action. Throttling or blocking traffic could break a launch; ' +
+        'the owner decides whether this is growth or a fault.',
+    }
+  }
+
+  if (type === 'subsystem_repeat_failure') {
+    const n = Number(details?.confirmedRepairCount ?? 0)
+    const area = String(details?.membership ?? '')
+    return {
+      decision: 'notify_only',
+      reason:
+        `Backenly has applied ${n || 'several'} verified repairs across this area and they are ` +
+        `not holding${area ? ` (${area})` : ''}. Individually each fix worked; together they ` +
+        'suggest the area itself needs a structural change rather than another repair.',
+      riskNote:
+        'No automatic action. Deciding whether to restructure a subsystem is a judgement about ' +
+        'your data model, not a repair Backenly can make on its own.',
+    }
+  }
+
   if (type === 'migration_residue') {
     const kind = details?.residueKind
     if (kind === 'invalid_index') {

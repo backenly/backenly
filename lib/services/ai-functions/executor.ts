@@ -29,8 +29,10 @@ import { buildIntegrationContext, IntegrationContext } from './integration-conte
 import { getProviderSpec } from './integration-registry'
 import { generateFixedFunctionCode } from './generator'
 import { isRouteModuleFunction, executeRouteModuleFunction, validateRouteModule } from './route-module-runner'
-import { enforceAiFunctionInvocation, trackAiFunctionInvocation } from '@/lib/billing'
+import { enforceAiFunctionInvocation, trackAiFunctionInvocation } from '@/lib/entitlements/policy'
+import { recordUsage } from '@/lib/usage/ledger'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
+import { safeFetch } from '@/lib/security/outbound-guard'
 import { isReservedTestEmail } from '@/lib/services/end-user-auth-table'
 // One cast table for the whole codebase. Duplicating it is how the MCP path and
 // this one would drift, and a drifted cast table is invisible until 42804.
@@ -82,6 +84,13 @@ export interface FunctionCallerContext {
    * endpoint's real logic can be exercised. Never set on public paths.
    */
   testRun?: boolean
+  /**
+   * Whether a failure hands the function to the model-backed auto-fixer, which
+   * rewrites its code. On by default. An agent invoking a function to test it
+   * turns it off: it needs the error, and code that changes under it without a
+   * word would make the next run test something it never wrote or saw.
+   */
+  selfHeal?: boolean
 }
 
 const EXECUTION_TIMEOUT_MS = 10_000
@@ -220,22 +229,32 @@ function buildDbProxy(projectId: string, caller: FunctionCallerContext = {}) {
       return null
     },
 
+    // ── ctx.http.* ───────────────────────────────────────────────────────────
+    //
+    // These two handlers run PARENT-side. Every other control in this module
+    // bounds the worker; none of them bounds the parent's network reach, so a
+    // bare fetch() here could read the cloud metadata service, anything on the
+    // VPC, or the loopback admin ports (PostgREST on 3002, the runtime on 3001)
+    // on behalf of customer-authored code. safeFetch is the boundary: scheme
+    // allowlist, connect-time address validation that closes the DNS-rebinding
+    // window, per-hop redirect re-validation, and a response cap.
+    // See lib/security/outbound-guard.ts.
     async 'http.get'([url, headers]: [string, Record<string, string> | undefined]) {
-      const res = await fetch(url, {
+      const res = await safeFetch(url, {
         method: 'GET',
         headers: { 'Content-Type': 'application/json', ...headers },
-        signal: AbortSignal.timeout(8000),
+        timeoutMs: 8000,
       })
       const text = await res.text()
       try { return JSON.parse(text) } catch { return text }
     },
 
     async 'http.post'([url, body, headers]: [string, any, Record<string, string> | undefined]) {
-      const res = await fetch(url, {
+      const res = await safeFetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...headers },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(8000),
+        timeoutMs: 8000,
       })
       const text = await res.text()
       try { return JSON.parse(text) } catch { return text }
@@ -303,6 +322,29 @@ function getConnectedFromContext(integrations: IntegrationContext): string[] {
 
 // ─── Worker-based execution ───────────────────────────────────────────────────
 
+/**
+ * A sandbox run that failed, carrying the lines the function logged first.
+ *
+ * The worker sends its log lines in the message that ends the run, `done` or
+ * `error`, and never one at a time. This used to reject with a bare Error and
+ * resolve with the parent's own list, which only ever filled from per-line
+ * messages that were never sent, so every sandbox run was recorded with no
+ * log lines at all: after a success, and after the failure an agent most
+ * needed them for.
+ */
+export class SandboxRunError extends Error {
+  constructor(message: string, readonly logs: string[]) {
+    super(message)
+    this.name = 'SandboxRunError'
+  }
+}
+
+/** The lines a finished run logged: the ones the worker sent, else any streamed. */
+function workerLines(streamed: string[], msg: { logs?: unknown }): string[] {
+  const sent = Array.isArray(msg.logs) ? msg.logs.map((l) => String(l)) : []
+  return sent.length ? sent : streamed
+}
+
 function runInWorker(
   code: string,
   event: FunctionEvent,
@@ -333,7 +375,7 @@ function runInWorker(
     // Hard timeout: kill the worker after EXECUTION_TIMEOUT_MS
     const hardKillTimer = setTimeout(() => {
       worker.terminate().catch(() => {})
-      reject(new Error('Function timed out after 10s'))
+      reject(new SandboxRunError('Function timed out after 10s', logs))
     }, EXECUTION_TIMEOUT_MS)
 
     worker.on('message', async (msg: any) => {
@@ -361,33 +403,64 @@ function runInWorker(
       if (msg.type === 'done') {
         clearTimeout(hardKillTimer)
         worker.terminate().catch(() => {})
-        resolve({ logs, returnValue: msg.result })
+        resolve({ logs: workerLines(logs, msg), returnValue: msg.result })
         return
       }
 
       if (msg.type === 'error') {
         clearTimeout(hardKillTimer)
         worker.terminate().catch(() => {})
-        reject(new Error(msg.error))
+        reject(new SandboxRunError(msg.error, workerLines(logs, msg)))
         return
       }
     })
 
     worker.on('error', (err) => {
       clearTimeout(hardKillTimer)
-      reject(err)
+      reject(new SandboxRunError(err.message, logs))
     })
 
     worker.on('exit', (code) => {
       clearTimeout(hardKillTimer)
       if (code !== 0) {
-        reject(new Error(`Sandbox worker exited with code ${code}`))
+        reject(new SandboxRunError(`Sandbox worker exited with code ${code}`, logs))
       }
     })
 
     // Start execution — pass connectedIntegrations so worker can build ctx.integrations,
     // and decrypted envVars so worker can expose ctx.env (frozen).
     worker.postMessage({ type: 'run', id: runId, code, event, connectedIntegrations, envVars, integrationManifest })
+  })
+}
+
+/**
+ * Whether the sandbox would accept `code`, asked of the sandbox worker itself:
+ * the import rewrite, the blocked-pattern check, the ctx.require() package list
+ * and a compile of the wrapper the worker runs. The function body is never run.
+ * Deploying agent-written code checks this before storing it, so what is stored
+ * is what the runtime can execute.
+ */
+export function validateSandboxFunction(code: string): Promise<{ valid: boolean; error?: string }> {
+  return new Promise((resolve) => {
+    let settled = false
+    const worker = new Worker(SANDBOX_WORKER_PATH, {
+      env: {},
+      resourceLimits: { maxOldGenerationSizeMb: 64, maxYoungGenerationSizeMb: 16, codeRangeSizeMb: 8 },
+    })
+    const finish = (result: { valid: boolean; error?: string }) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      worker.terminate().catch(() => {})
+      resolve(result)
+    }
+    const timer = setTimeout(() => finish({ valid: false, error: 'The sandbox did not answer within 5s.' }), 5_000)
+    worker.on('message', (msg: any) => {
+      if (msg?.type === 'validated') finish(msg.error ? { valid: false, error: String(msg.error) } : { valid: true })
+    })
+    worker.on('error', (err) => finish({ valid: false, error: `The sandbox could not start: ${err.message}` }))
+    worker.on('exit', (exitCode) => finish({ valid: false, error: `The sandbox exited with code ${exitCode} before answering.` }))
+    worker.postMessage({ type: 'validate', id: `v${Date.now()}`, code })
   })
 }
 
@@ -634,6 +707,10 @@ export async function executeAiFunction(
       }
     }
     trackAiFunctionInvocation(project.userId).catch(() => {})
+    // The billing record of the run (lib/usage/axes.ts `fn_runs`): counted
+    // here, after the plan check and before execution, so every invocation that
+    // actually runs the function counts once, whatever its outcome.
+    recordUsage({ projectId, axis: 'fn_runs', quantity: 1, source: 'executor', billingAccountId: project.userId })
   }
 
   // ─── Route-module path ──────────────────────────────────────────────────────
@@ -676,7 +753,7 @@ export async function executeAiFunction(
       // auto-fixer would rewrite the module into a ctx.* sandbox body and
       // corrupt it — never use it here). Guarded so a failed fix can't loop.
       const prevError = fn.lastError ?? ''
-      if (!prevError.startsWith('AUTO-FIX')) {
+      if (caller.selfHeal !== false && !prevError.startsWith('AUTO-FIX')) {
         autoFixRouteModuleFunction(
           functionId, projectId, errorMsg, fn.generatedCode, fn.description, fn.triggerTable
         ).catch(() => {})
@@ -737,7 +814,9 @@ export async function executeAiFunction(
 
   const durationMs = Date.now() - startMs
   const errorMsg = lastError?.message || 'Unknown error'
-  const logs: string[] = []
+  // What the function logged before it failed, which is what an agent reads
+  // to find out why.
+  const logs: string[] = lastError instanceof SandboxRunError ? lastError.logs : []
 
   // Persist error log
   await persistExecutionLog(functionId, projectId, false, logs, errorMsg, durationMs, event.type)
@@ -748,7 +827,7 @@ export async function executeAiFunction(
   }).catch(() => {})
 
   const previousError = fn.lastError ?? ''
-  if (!previousError.startsWith('AUTO-FIX')) {
+  if (caller.selfHeal !== false && !previousError.startsWith('AUTO-FIX')) {
     autoFixAiFunction(
       functionId, projectId, errorMsg, fn.generatedCode,
       fn.description, fn.triggerType, fn.triggerTable

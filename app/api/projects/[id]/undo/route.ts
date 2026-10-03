@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { verifyToken } from '@/lib/auth/jwt'
+import { canAdministerProject } from '@/lib/edition/guard'
 import { logErrorInternal } from '@/lib/errors/sanitize'
 import { getPreviousGraphId, undoToGraph } from '@/lib/orchestration/graph-pointer'
 import { generateTraceId } from '@/lib/utils'
@@ -16,12 +17,10 @@ import { generateTraceId } from '@/lib/utils'
  * 
  * GUARANTEE: "Undo any change. Nothing breaks. Ever."
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const traceId = generateTraceId()
-  
+
   try {
     // 1. Authenticate user
     const sessionToken = request.cookies.get('auth-token')?.value
@@ -39,6 +38,25 @@ export async function POST(
     const decoded = await verifyToken(sessionToken)
     const userId = decoded.userId
     const projectId = params.id
+
+
+    // Ownership, which this route verified a token but never checked.
+    //
+    // It confirmed the caller was SOME signed-in user, checked THEIR plan
+    // entitlement, then rolled back the project named in the path. So any
+    // authenticated account on a qualifying plan could roll back another
+    // tenant's deployment. Authentication is not authorization, and an
+    // entitlement check is about the caller's billing, not their access.
+    //
+    // canAdministerProject, not canAccessProject: a rollback rewrites live
+    // state and is not something a read-only collaborator should trigger.
+    // 404 rather than 403 so the endpoint is not an oracle for project ids.
+    if (!(await canAdministerProject(userId, projectId))) {
+      return NextResponse.json(
+        { success: false, error: 'Project not found' },
+        { status: 404 },
+      )
+    }
 
     console.log(`[Undo API] Starting undo operation for project ${projectId}, traceId: ${traceId}`)
 

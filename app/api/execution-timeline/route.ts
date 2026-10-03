@@ -16,6 +16,7 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { authenticateRequest } from '@/lib/auth/middleware'
+import { canAccessProject } from '@/lib/edition/guard'
 import { getTimeline, getExecutionSummary } from '@/lib/ai/execution-timeline'
 import { ERROR_TAXONOMY } from '@/lib/errors/taxonomy'
 
@@ -33,6 +34,15 @@ export async function GET(request: NextRequest) {
 
     if (!projectId) {
       return NextResponse.json({ error: 'projectId is required' }, { status: 400 })
+    }
+
+    // getTimeline scopes its query by projectId, but nothing checked that the
+    // CALLER may read that project. Execution history carries prompts, SQL and
+    // error detail, so a cross-tenant read here is a disclosure of how somebody
+    // else's backend is built and what it has been doing.
+    // 404, so the endpoint is not an oracle for project ids.
+    if (!authResult.userId || !(await canAccessProject(authResult.userId, projectId))) {
+      return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
 
     const [entries, summary] = await Promise.all([

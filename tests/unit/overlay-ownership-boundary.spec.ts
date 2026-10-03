@@ -1,0 +1,698 @@
+/**
+ * Phase 4 ownership boundaries, and the guard that protects them.
+ *
+ * Phase 4 moved four things so that entire DIRECTORIES can later become private
+ * overlay ownership units, instead of private and public files sharing one
+ * directory forever. The moves themselves are trivial to undo by accident: an
+ * editor auto-import, a merge, a "this file feels like it belongs in lib/auth"
+ * judgement call. Nothing about the code stops it. This does.
+ *
+ * The second half is the more important half. `scripts/verify-overlay-boundary.ts`
+ * is the guard that keeps the private overlay add-only, and a guard nobody has
+ * ever watched fail is not known to work -- Phase 1 learned that from suites
+ * that passed vacuously against a stub. So every rule it claims to enforce is
+ * mutation-tested here: the map is deliberately broken, and the guard must
+ * reject it.
+ */
+import { execFileSync } from 'child_process'
+import * as fs from 'fs'
+import * as os from 'os'
+import * as path from 'path'
+
+const ROOT = process.cwd()
+const VERIFIER = 'scripts/verify-overlay-boundary.ts'
+const ALLOWLIST_PATH = path.join(ROOT, 'overlay-allowlist.json')
+
+interface Allowlist {
+  version: number
+  private: string[]
+  transition?: { grandfathered: string[]; expiresAfterPhase?: number }
+}
+
+const allowlist: Allowlist = JSON.parse(fs.readFileSync(ALLOWLIST_PATH, 'utf8'))
+
+/** Files git actually tracks. The only honest answer to "is this public?". */
+const tracked = new Set(
+  execFileSync('git', ['ls-files'], { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+    .split('\n')
+    .filter(Boolean),
+)
+
+/**
+ * This spec names the old paths in its own assertions, so it matches every
+ * regex below. Exempting exactly this one file keeps the audit honest for
+ * everything else; a broader "skip tests" rule would let a real stale import
+ * hide in any suite.
+ */
+const SELF = 'tests/unit/overlay-ownership-boundary.spec.ts'
+
+/** Content of every tracked text file, for import audits that must not miss a form. */
+function trackedFilesMatching(re: RegExp): string[] {
+  const hits: string[] = []
+  for (const file of tracked) {
+    if (file === SELF) continue
+    if (!/\.(ts|tsx|js|jsx|mjs|cjs|json|md|prisma|ya?ml|sh|example)$/.test(file)) continue
+    let body: string
+    try {
+      body = fs.readFileSync(path.join(ROOT, file), 'utf8')
+    } catch {
+      continue
+    }
+    if (re.test(body)) hits.push(file)
+  }
+  return hits
+}
+
+interface Run {
+  status: number
+  stdout: string
+  stderr: string
+}
+
+function runVerifier(args: string[] = []): Run {
+  const res = require('child_process').spawnSync(
+    process.execPath,
+    ['node_modules/tsx/dist/cli.mjs', VERIFIER, ...args],
+    { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
+  )
+  return { status: res.status ?? -1, stdout: res.stdout ?? '', stderr: res.stderr ?? '' }
+}
+
+/** Run the guard against a deliberately broken ownership map. */
+function runWithAllowlist(mutate: (a: Allowlist) => void, args: string[] = []): Run {
+  const copy: Allowlist = JSON.parse(JSON.stringify(allowlist))
+  mutate(copy)
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'overlay-allowlist-'))
+  const file = path.join(tmp, 'mutated.json')
+  fs.writeFileSync(file, JSON.stringify(copy, null, 2))
+  try {
+    return runVerifier(['--allowlist', file, ...args])
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+}
+
+function withOverlay(files: Record<string, string>, fn: (dir: string) => Run): Run {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'overlay-tree-'))
+  try {
+    for (const [rel, body] of Object.entries(files)) {
+      const abs = path.join(dir, rel)
+      fs.mkdirSync(path.dirname(abs), { recursive: true })
+      fs.writeFileSync(abs, body)
+    }
+    return fn(dir)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+// ---------------------------------------------------------------------------
+// MOVE 1 -- quota kernel is public product, out of future-private lib/billing
+// ---------------------------------------------------------------------------
+
+describe('MOVE 1: quota kernel is public', () => {
+  it('lives at lib/quota/kernel.ts', () => {
+    expect(tracked.has('lib/quota/kernel.ts')).toBe(true)
+  })
+
+  it('no longer exists under lib/billing', () => {
+    expect(tracked.has('lib/billing/quota-kernel.ts')).toBe(false)
+  })
+
+  it('is not under any private-owned path', () => {
+    // Quota enforcement runs on the API, MCP, storage, realtime and end-user
+    // auth hot paths. If the overlay owned it, the public product could not
+    // enforce its own limits.
+    for (const entry of allowlist.private) {
+      const prefix = entry.endsWith('/**') ? entry.slice(0, -2) : entry
+      expect('lib/quota/kernel.ts'.startsWith(prefix)).toBe(false)
+    }
+  })
+
+  it('no tracked file references the old path in any form', () => {
+    // Static imports, dynamic imports and prose all at once: the dynamic
+    // `await import('./quota-kernel')` in lib/billing/index.ts was invisible to
+    // an alias-shaped search and would have failed only at runtime.
+    expect(trackedFilesMatching(/quota-kernel/)).toEqual([])
+  })
+
+  it('public runtime call sites import the public path', () => {
+    const callers = [
+      'lib/api/v1/middleware.ts',
+      'lib/mcp/guard.ts',
+      'lib/realtime/listener-hub.ts',
+      'lib/services/storageQuota.ts',
+      'lib/services/end-user-auth-flows.ts',
+      'lib/ai/build-runtime/mutate.ts',
+      'server/routes/oauth.ts',
+      'app/api/v1/[projectId]/auth/signin/route.ts',
+      'app/api/v1/[projectId]/auth/signup/route.ts',
+    ]
+    for (const caller of callers) {
+      expect(tracked.has(caller)).toBe(true)
+      const body = fs.readFileSync(path.join(ROOT, caller), 'utf8')
+      expect(body).toMatch(/@\/lib\/quota\/kernel/)
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// MOVE 2 -- back-office admin auth, and ONLY that, under lib/admin/auth
+// ---------------------------------------------------------------------------
+
+describe('MOVE 2: admin auth primitives', () => {
+  const ADMIN_AUTH = ['requireFounder.ts', 'adminStepUp.ts', 'adminSigning.ts']
+
+  it('left public tracking with the rest of the back office', () => {
+    // Phase 4 moved these under lib/admin/auth so the whole directory could go
+    // private in one piece. Phase 6 did that, so the assertion is now the
+    // opposite one: nothing admin remains publicly tracked. What Phase 4 was
+    // really guarding is the line below, that they never drifted back into
+    // lib/auth alongside the product's own authentication.
+    for (const f of ADMIN_AUTH) expect(tracked.has(`lib/admin/auth/${f}`)).toBe(false)
+    expect([...tracked].filter(p => p.startsWith('lib/admin/'))).toEqual([])
+  })
+
+  it('no longer sit in lib/auth', () => {
+    for (const f of ADMIN_AUTH) expect(tracked.has(`lib/auth/${f}`)).toBe(false)
+  })
+
+  it('left product and end-user auth in lib/auth', () => {
+    // The failure this guards against is over-reach: sweeping the whole of
+    // lib/auth private because three founder-console files lived there. These
+    // are the primitives every project, API key, MCP and end-user request
+    // depends on, and they are OSS.
+    for (const f of [
+      'middleware.ts',
+      'jwt.ts',
+      'jwt-secret.ts',
+      'apiKeyAuth.ts',
+      'session.ts',
+      'rbac.ts',
+      'project-access.ts',
+      'password.ts',
+      'oidc-delegation.ts',
+    ]) {
+      expect(tracked.has(`lib/auth/${f}`)).toBe(true)
+    }
+  })
+
+  it('are referenced by nothing at the old paths', () => {
+    expect(trackedFilesMatching(/lib\/auth\/(requireFounder|adminStepUp|adminSigning)/)).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// MOVE 3 -- trust / abuse intelligence under lib/trust
+// ---------------------------------------------------------------------------
+
+describe('MOVE 3: trust and admission intelligence', () => {
+  // Phase 4 put four files under lib/trust. Phase 6 then classified them by
+  // responsibility rather than by directory, and two legitimately left:
+  //
+  //   email-eligibility  -> lib/auth/signup-email-eligibility.ts
+  //        pure, deterministic, already in the browser bundle, and imported by
+  //        the public signup page. Client-safe validation, not intelligence.
+  //   account-standing   -> lib/platform-controls/account-standing.ts
+  //        suspension is an operator decision that public auth already enforces
+  //        in lib/auth/{middleware,server,session}; its untrusted branch is
+  //        inert in single-tenant because only Cloud scoring sets that level.
+  //
+  // What remains under lib/trust is the part that scores a stranger.
+  const TRUST = ['bot-defense.ts', 'email-trust.ts']
+  const LEFT_BY_CLASSIFICATION = {
+    'lib/auth/signup-email-eligibility.ts': 'lib/trust/email-eligibility.ts',
+    'lib/platform-controls/account-standing.ts': 'lib/trust/account-standing.ts',
+  } as const
+
+  it('left public tracking with the rest of the back office', () => {
+    // Same story as MOVE 2. Phase 4 gathered the scoring under lib/trust so it
+    // could leave in one piece; Phase 6 removed it. The two files Phase 6
+    // reclassified are asserted separately below, because those did NOT leave.
+    for (const f of TRUST) expect(tracked.has(`lib/trust/${f}`)).toBe(false)
+    expect([...tracked].filter(p => p.startsWith('lib/trust/'))).toEqual([])
+  })
+
+  it('no longer sits in lib/auth', () => {
+    for (const f of TRUST) expect(tracked.has(`lib/auth/${f}`)).toBe(false)
+  })
+
+  it('is referenced by nothing at the old paths', () => {
+    expect(trackedFilesMatching(/lib\/auth\/(bot-defense|email-trust)\./)).toEqual([])
+  })
+
+  it('the two reclassified files moved rather than being copied', () => {
+    // A copy would leave the public product depending on a module that is
+    // leaving, which is exactly what the reclassification was for.
+    for (const [now, before] of Object.entries(LEFT_BY_CLASSIFICATION)) {
+      expect(tracked.has(now)).toBe(true)
+      expect(tracked.has(before)).toBe(false)
+    }
+  })
+
+  it('keeps the single-tenant first-operator admission gate where it was', () => {
+    // Phase 3's clean-machine acceptance turns on this exception staying
+    // exactly as narrow as it was: single-tenant edition AND zero platform
+    // users. Phase 4 moved file paths; Phase 6 moved the gate into
+    // lib/platform-controls and handed only the SCORING to the private seam.
+    // The policy itself is unchanged and still public.
+    const admission = fs.readFileSync(path.join(ROOT, 'lib/platform-controls/signup-admission.ts'), 'utf8')
+    expect(admission).toMatch(/single-tenant|selfHostedRegistrationClosed/)
+    expect(admission).toMatch(/firstSelfHostedOperator/)
+    // The scoring is reached through the seam, never imported directly.
+    expect(admission).toMatch(/@\/lib\/platform-signals/)
+    expect(admission).not.toMatch(/@\/lib\/trust/)
+
+    const slot = fs.readFileSync(path.join(ROOT, 'lib/platform-controls/signup-slot.ts'), 'utf8')
+    expect(slot).toMatch(/BACKENLY_ALLOW_PUBLIC_SIGNUP/)
+    expect(slot).toMatch(/pg_advisory_xact_lock/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// MOVE 4 -- Cloud UI and fleet tooling in whole private-ready directories
+// ---------------------------------------------------------------------------
+
+describe('MOVE 4: Cloud UI and fleet scripts', () => {
+  it('OrgSwitcher has left the public repository entirely', () => {
+    // Phase 4 moved it from components/shell to components/cloud so that a
+    // whole directory could be claimed. Phase 7 claimed it: the component is
+    // in the overlay now, and neither the old home nor the new one is tracked.
+    expect(tracked.has('components/cloud/OrgSwitcher.tsx')).toBe(false)
+    expect(tracked.has('components/shell/OrgSwitcher.tsx')).toBe(false)
+    // No tracked PATH carries the component anywhere. References to the name in
+    // prose, in the seam fallback and in this suite are expected and are not
+    // the component.
+    expect([...tracked].filter(f => /OrgSwitcher/.test(f))).toEqual([])
+  })
+
+  it('the console bars reach it through the Cloud seam, not by path', () => {
+    // Phase 4 moved the file to components/cloud and had TopBar import it
+    // directly. Phase 7 moves the file itself into the private overlay, so a
+    // direct import would break the public build. The shell imports the
+    // specifier, which resolves to the overlay when composed and to the static
+    // chip in lib/edition/oss otherwise. Since the console rebuild both bars
+    // (TopBar and OrgShell) render it through AccountScope in ConsoleChrome,
+    // so that is where the import lives.
+    const chrome = fs.readFileSync(path.join(ROOT, 'components/shell/ConsoleChrome.tsx'), 'utf8')
+    expect(chrome).toMatch(/@cloud\/org-switcher/)
+    for (const rel of ['components/shell/ConsoleChrome.tsx', 'components/shell/TopBar.tsx', 'components/shell/OrgShell.tsx']) {
+      const src = fs.readFileSync(path.join(ROOT, rel), 'utf8')
+      expect(src).not.toMatch(/@\/components\/cloud\/OrgSwitcher/)
+    }
+  })
+
+  it('fleet-wide scripts are gone from the public repository', () => {
+    // Phase 4 gathered them under scripts/fleet so Phase 7 could take the
+    // directory whole. Asserting BOTH paths matters: a script that reappeared
+    // at its old scripts/ location would satisfy "not under scripts/fleet"
+    // while being just as public as before.
+    for (const s of [
+      'autonomy-fleet-check',
+      'purge-projects',
+      'purge-orphan-schemas',
+      'sandbox-cleanup',
+      'load-test',
+    ]) {
+      expect(tracked.has(`scripts/fleet/${s}.ts`)).toBe(false)
+      expect(tracked.has(`scripts/${s}.ts`)).toBe(false)
+    }
+    expect(trackedFilesMatching(/^scripts\/fleet\//)).toEqual([])
+  })
+
+  it('keeps self-host and project-local scripts public', () => {
+    // These are how someone stands up a single OSS deployment. Sweeping them
+    // into scripts/fleet would have handed the OSS operator's own setup
+    // tooling to the private overlay and left self-hosting unusable.
+    for (const s of [
+      'scripts/bootstrap.ts',
+      'scripts/bootstrap-prerequisites.ts',
+      'scripts/postgrest-install.sh',
+      'scripts/setup-postgrest-roles.ts',
+      'scripts/preflight-oss.ts',
+      'scripts/verify-project-authorization.ts',
+      'scripts/verify-suite-accounting.ts',
+      'scripts/run-stress-test-500.ts',
+      'scripts/real-db-concurrency-test.ts',
+    ]) {
+      expect(tracked.has(s)).toBe(true)
+      expect(s.startsWith('scripts/fleet/')).toBe(false)
+    }
+  })
+
+  it('no public module imports the organization layer', () => {
+    // The whole point of moving lib/org: public code must not depend on a
+    // module a public checkout does not ship. The Cloud membership question is
+    // asked through @cloud/project-access, which has an OSS fallback.
+    const offenders = [...tracked]
+      .filter(f => /\.tsx?$/.test(f))
+      .filter(f => /from '(@\/lib\/org|\.\.?\/org)'/.test(fs.readFileSync(path.join(ROOT, f), 'utf8')))
+    expect(offenders).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The ownership map
+// ---------------------------------------------------------------------------
+
+describe('overlay-allowlist.json', () => {
+  it('declares exactly the intended private destinations', () => {
+    expect([...allowlist.private].sort()).toEqual(
+      [
+        '__tests__/analytics/amplitude-config.test.tsx',
+        '__tests__/analytics/amplitude-resilience.test.tsx',
+        '__tests__/billing/cancellation-and-grace.test.ts',
+        '__tests__/billing/free-plan-resolution.test.ts',
+        '__tests__/cloud/**',
+        '__tests__/lib/agent-ops.test.ts',
+        '__tests__/security/admin-step-up.test.ts',
+        'app/admin/**',
+        'app/api/admin/**',
+        'app/api/billing/**',
+        'app/api/cron/grace-check/route.ts',
+        'app/api/cron/process-grace-periods/route.ts',
+        'app/api/org/**',
+        'app/api/projects/[id]/access/route.ts',
+        // Whether a paused project may resume, and resuming it: Cloud's
+        // inactivity-pause policy. The pause state itself is public.
+        'app/api/projects/[id]/availability/**',
+        'app/api/referral/**',
+        'app/api/users/route.ts',
+        'app/app/billing/**',
+        'app/app/invite/**',
+        'app/app/members/**',
+        'app/app/referral/**',
+        'components/app/AmplitudeAnalytics.tsx',
+        'components/cloud/**',
+        'config/cloud/**',
+        'lib/admin/**',
+        'lib/analytics/**',
+        'lib/billing/**',
+        'lib/cloud/**',
+        'lib/fleet/**',
+        'lib/org/**',
+        'lib/platform/**',
+        'lib/trust/**',
+        'prisma/seed-billing.ts',
+        'scripts/fleet/**',
+        'tests/auth/email-trust.test.ts',
+        'tests/core/autonomy-entitlements-are-seeded.test.ts',
+      ].sort(),
+    )
+  })
+
+  it('every ownership path is also ignored by git', () => {
+    // A composed Cloud checkout writes the whole overlay into the working
+    // tree. Anything not ignored shows up as untracked, which puts the private
+    // control plane one `git add -A` away from a PUBLIC repository.
+    //
+    // Bracketed Next.js segments must be ESCAPED: unescaped, [id] is a
+    // gitignore character class matching a single 'i' or 'd', so the pattern
+    // silently matches nothing and the file is not ignored at all.
+    const ignore = fs.readFileSync(path.join(ROOT, '.gitignore'), 'utf8')
+    const patterns = new Set(
+      ignore
+        .split(/\r?\n/)
+        .map(l => l.trim())
+        .filter(l => l && !l.startsWith('#')),
+    )
+
+    const escape = (p: string) => p.replace(/\[/g, '\\[').replace(/\]/g, '\\]')
+    const missing = allowlist.private.filter(entry => {
+      const expected = entry.endsWith('/**')
+        ? `/${escape(entry.slice(0, -3))}/`
+        : `/${escape(entry)}`
+      return !patterns.has(expected)
+    })
+    expect(missing).toEqual([])
+  })
+
+  it('uses a named file only where the directory is mixed', () => {
+    // Whole-directory ownership is the default because it means the overlay
+    // only ever ADDS files. Every exception below is a private file living in
+    // a directory that also holds public product, where claiming the directory
+    // would drag public code private with it:
+    //
+    //   app/api/users/         [userId] and stats are public product routes
+    //   app/api/cron/          ten of its routes are self-host jobs
+    //   components/app/        public product components
+    //   __tests__/billing/     model-backed-tools-are-charged tests a public contract
+    //   __tests__/lib/, __tests__/security/, tests/auth/, __tests__/analytics/
+    //                          public suites live alongside
+    //   prisma/                schema.prisma is public and single-copy
+    //   tests/core/            the rest of tests/core is public autonomy coverage
+    //   app/api/projects/[id]/ every other route under it is per-project
+    //                          product; only access/ is team management
+    const files = allowlist.private.filter(p => !p.endsWith('/**'))
+    expect(files.sort()).toEqual(
+      [
+        '__tests__/analytics/amplitude-config.test.tsx',
+        '__tests__/analytics/amplitude-resilience.test.tsx',
+        '__tests__/billing/cancellation-and-grace.test.ts',
+        '__tests__/billing/free-plan-resolution.test.ts',
+        '__tests__/lib/agent-ops.test.ts',
+        '__tests__/security/admin-step-up.test.ts',
+        'app/api/cron/grace-check/route.ts',
+        'app/api/cron/process-grace-periods/route.ts',
+        'app/api/projects/[id]/access/route.ts',
+        'app/api/users/route.ts',
+        'components/app/AmplitudeAnalytics.tsx',
+        'prisma/seed-billing.ts',
+        'tests/auth/email-trust.test.ts',
+        'tests/core/autonomy-entitlements-are-seeded.test.ts',
+      ].sort(),
+    )
+  })
+
+  it('owns no public product code', () => {
+    // Cloud value is managed infrastructure and governance. Withholding the
+    // brain, the data plane, the per-project reconciler, the runtime or the
+    // published packages would be weakening the product to manufacture it.
+    const forbidden = [
+      'lib/ai/brain/',
+      'lib/autonomy/',
+      'lib/postgrest/',
+      'lib/services/',
+      'lib/edition/',
+      'lib/quota/',
+      'server/',
+      'packages/',
+    ]
+    for (const entry of allowlist.private) {
+      for (const pub of forbidden) {
+        expect(entry.startsWith(pub)).toBe(false)
+      }
+    }
+  })
+
+  it('owns no shared infrastructure file', () => {
+    for (const shared of [
+      'package.json',
+      'package-lock.json',
+      'next.config.js',
+      'middleware.ts',
+      'ecosystem.config.js',
+      'prisma/schema.prisma',
+      'app/layout.tsx',
+    ]) {
+      expect(allowlist.private).not.toContain(shared)
+    }
+  })
+
+  it('carries no transition configuration at all', () => {
+    // Phase 4 to Phase 7 grandfathered public files that still sat under a
+    // future-private path: 73, then 14, then 0. Phase 8 removed the key.
+    //
+    // These two assertions replace the two that used to read
+    // `transition.grandfathered`. Left as they were, both would have gone on
+    // passing forever against `?? []` -- comparing an empty list to an empty
+    // list and reporting green while asserting nothing, which is exactly the
+    // shape Phase 1 was written to eliminate. The invariant they were really
+    // protecting is below, and it is now stated directly.
+    expect(allowlist.transition).toBeUndefined()
+  })
+
+  it('has no public file under any private-owned path', () => {
+    // What the grandfather list existed to bound, now that it bounds nothing.
+    // This is the same question --strict asks the verifier, asserted here
+    // against the tracked tree so a violation is named rather than merely
+    // exiting non-zero.
+    const prefixes = allowlist.private.filter(p => p.endsWith('/**')).map(p => p.slice(0, -2))
+    const exact = new Set(allowlist.private.filter(p => !p.endsWith('/**')))
+    const under = [...tracked]
+      .filter(f => exact.has(f) || prefixes.some(pre => f.startsWith(pre)))
+      .sort()
+    expect(under).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The guard itself, mutation-tested
+// ---------------------------------------------------------------------------
+
+describe('verify-overlay-boundary', () => {
+  it('passes on the committed map', () => {
+    const run = runVerifier()
+    expect(run.status).toBe(0)
+    expect(run.stdout).toMatch(/ok \(transition\)/)
+  })
+
+  it('is invoked by CI in --strict mode', () => {
+    // Phase 8 made strict the enforced policy. Asserting it here means removing
+    // the flag from the workflow fails a test rather than silently reverting
+    // the repository to a mode that tolerates exemptions -- and the workflow is
+    // exactly the kind of file whose edits no unit test usually sees.
+    const workflow = fs.readFileSync(path.join(ROOT, '.github/workflows/ci.yml'), 'utf8')
+    expect(workflow).toMatch(/verify-overlay-boundary\.ts --strict/)
+  })
+
+  it('passes in --strict mode, now that nothing is grandfathered', () => {
+    // Phase 7 emptied the transition list, so the repository is already in the
+    // state Phase 8 will enforce. CI stays in transition mode until Phase 8
+    // makes that switch deliberately; this proves the switch will be a no-op.
+    const run = runVerifier(['--strict'])
+    expect(run.status).toBe(0)
+  })
+
+  it('still REJECTS in --strict mode when a public file is under a private path', () => {
+    // The test above can only ever report "nothing to find", and a mode that
+    // has never been observed rejecting anything is a mode nobody could trust
+    // at the moment it starts mattering. So strict mode is pointed at an
+    // ownership map that claims a directory full of public product code, and
+    // must refuse. lib/usage is real, tracked, and not on the public-core
+    // deny-list, so the SHAPE check passes it and the COLLISION check is what
+    // rejects it. A deny-listed path would have failed one step earlier and
+    // proved nothing about strict mode.
+    const run = runWithAllowlist(a => a.private.push('lib/usage/**'), ['--strict'])
+    expect(run.status).toBe(1)
+    expect(run.stderr).toMatch(/public file still tracked under private-owned/)
+    expect(run.stderr).toMatch(/lib\/usage\/db-storage\.ts/)
+  })
+
+  it('rejects private ownership of shared infrastructure', () => {
+    const run = runWithAllowlist(a => a.private.push('package.json'))
+    expect(run.status).toBe(1)
+    expect(run.stderr).toMatch(/shared public infrastructure/)
+  })
+
+  it('rejects private ownership of a shared file via its parent directory', () => {
+    const run = runWithAllowlist(a => a.private.push('prisma/**'))
+    expect(run.status).toBe(1)
+    expect(run.stderr).toMatch(/shared public infrastructure "prisma\/schema\.prisma"/)
+  })
+
+  it('rejects private ownership of public product code', () => {
+    const run = runWithAllowlist(a => a.private.push('lib/ai/brain/**'))
+    expect(run.status).toBe(1)
+    expect(run.stderr).toMatch(/public product code/)
+  })
+
+  it('rejects private ownership of the relocated quota kernel', () => {
+    const run = runWithAllowlist(a => a.private.push('lib/quota/**'))
+    expect(run.status).toBe(1)
+    expect(run.stderr).toMatch(/public product code "lib\/quota\//)
+  })
+
+  it('rejects a directory entry that is not whole-directory', () => {
+    const run = runWithAllowlist(a => a.private.push('lib/billing'))
+    expect(run.status).toBe(1)
+    expect(run.stderr).toMatch(/missing the "\/\*\*" suffix/)
+  })
+
+  it('rejects a mid-path wildcard', () => {
+    const run = runWithAllowlist(a => a.private.push('app/*/admin/**'))
+    expect(run.status).toBe(1)
+    expect(run.stderr).toMatch(/may only wildcard a whole trailing directory/)
+  })
+
+  it('rejects an upward traversal', () => {
+    const run = runWithAllowlist(a => a.private.push('../secrets/**'))
+    expect(run.status).toBe(1)
+    expect(run.stderr).toMatch(/must not traverse upward/)
+  })
+
+  it('rejects a duplicated entry', () => {
+    const run = runWithAllowlist(a => a.private.push('lib/billing/**'))
+    expect(run.status).toBe(1)
+    expect(run.stderr).toMatch(/listed twice/)
+  })
+
+  it('rejects a NEW public file under a private-owned path', () => {
+    // The transition state must not be able to widen silently. Claiming a
+    // directory that still holds ungrandfathered public files is exactly how
+    // it would.
+    const run = runWithAllowlist(a => a.private.push('lib/notifications/**'))
+    expect(run.status).toBe(1)
+    expect(run.stderr).toMatch(/new public file under private-owned/)
+  })
+
+  it('rejects a grandfather entry for a file that no longer exists', () => {
+    // Phase 6/7 delete files and must prune the list in the same commit, so
+    // the exemption cannot outlive the thing it exempts.
+    //
+    // The transition object is CONSTRUCTED here rather than mutated in place.
+    // The previous form was `a.transition?.grandfathered.push(...)`, which read
+    // the shape off the committed allowlist -- so the moment Phase 8 deletes
+    // that key the optional chain short-circuits, the mutation becomes a no-op,
+    // the verifier correctly exits 0, and this test starts failing for a reason
+    // that has nothing to do with the guard it protects. Building the config
+    // makes the test independent of whether the real repository still uses
+    // transition mode, which is the whole point: the guard must outlive the
+    // configuration that motivated it.
+    //
+    // The synthetic object mirrors the real schema, `expiresAfterPhase`
+    // included, so the refusal below can only be about the STALE PATH. A
+    // malformed object could fail for its own reasons and prove nothing.
+    const run = runWithAllowlist(a => {
+      a.transition = { grandfathered: ['lib/billing/gone.ts'], expiresAfterPhase: 7 }
+    })
+    expect(run.status).toBe(1)
+    expect(run.stderr).toMatch(/stale grandfather entry/)
+    // The diagnosis must name the offending path. Asserting only the exit code
+    // would pass against a verifier that refused for any other reason at all.
+    expect(run.stderr).toContain('lib/billing/gone.ts')
+  })
+
+  it('accepts an overlay that only adds files in allowlisted paths', () => {
+    const run = withOverlay(
+      { 'lib/cloud/fleet.ts': 'export const x = 1\n', 'config/cloud/app.json': '{}\n' },
+      dir => runVerifier(['--overlay', dir]),
+    )
+    expect(run.status).toBe(0)
+    expect(run.stdout).toMatch(/ok \(overlay/)
+  })
+
+  it('fails when an overlay file would overwrite a tracked public file', () => {
+    // The whole point of the boundary: the public repository must stay a
+    // truthful description of what Cloud runs.
+    //
+    // A collision needs a path that is BOTH allowlisted and tracked publicly.
+    // That combination is what the split exists to eliminate, so this case has
+    // already lost its subject twice: it used lib/billing/index.ts until Phase 6
+    // moved billing, then lib/org/index.ts until Phase 7 moved organizations,
+    // and each time the overlay file became legal and the case silently stopped
+    // testing a collision while still reporting green.
+    //
+    // So the allowlist is mutated to claim a directory that is real, tracked and
+    // staying public. Nothing here depends on a future phase's ownership call.
+    const run = withOverlay({ 'lib/usage/db-storage.ts': '// clobbered\n' }, dir =>
+      runWithAllowlist(a => a.private.push('lib/usage/**'), ['--overlay', dir]),
+    )
+    expect(run.status).toBe(1)
+    expect(run.stderr).toMatch(/would overwrite a tracked public file/)
+  })
+
+  it('fails when an overlay file lands outside every allowlisted path', () => {
+    const run = withOverlay({ 'lib/ai/brain/secret-operator.ts': 'export const y = 2\n' }, dir =>
+      runVerifier(['--overlay', dir]),
+    )
+    expect(run.status).toBe(1)
+    expect(run.stderr).toMatch(/outside every allowlisted private path/)
+  })
+
+  it('fails closed when the ownership map is missing', () => {
+    const run = runVerifier(['--allowlist', 'does-not-exist.json'])
+    expect(run.status).toBe(1)
+    expect(run.stderr).toMatch(/ownership map not found/)
+  })
+})

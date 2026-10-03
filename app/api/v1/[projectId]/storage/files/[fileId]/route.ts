@@ -5,15 +5,18 @@ import { v1ApiMiddleware, requirePermission, requireCapability } from '@/lib/api
 import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
 import { storageService } from '@/lib/services/storage'
 import { prisma } from '@/lib/db'
+import { isStorageUnavailable } from '@/lib/storage/errors'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 /**
  * GET /v1/{projectId}/storage/files/{fileId}
  * Get file metadata
  */
-export async function GET(
+async function handleGET(
   request: NextRequest,
-  { params }: { params: { projectId: string; fileId: string } }
+  props: { params: Promise<{ projectId: string; fileId: string }> }
 ) {
+  const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, params)
     if (middleware.response) {
@@ -54,6 +57,16 @@ export async function GET(
       name: file.name,
     })
   } catch (error: any) {
+    if (isStorageUnavailable(error)) {
+      // The file record exists; its bytes are unreachable. Reporting 404 here
+      // would tell an API consumer the object had been deleted.
+      console.error('Storage get file: storage unavailable:', error.cause ?? error.message)
+      return createErrorResponse(
+        ErrorCodes.SERVICE_UNAVAILABLE,
+        'Storage is currently unavailable',
+        503
+      )
+    }
     console.error('Storage get file error:', error)
     return createErrorResponse(
       ErrorCodes.INTERNAL_ERROR,
@@ -67,10 +80,11 @@ export async function GET(
  * DELETE /v1/{projectId}/storage/files/{fileId}
  * Delete file
  */
-export async function DELETE(
+async function handleDELETE(
   request: NextRequest,
-  { params }: { params: { projectId: string; fileId: string } }
+  props: { params: Promise<{ projectId: string; fileId: string }> }
 ) {
+  const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, params)
     if (middleware.response) {
@@ -105,3 +119,5 @@ export async function DELETE(
   }
 }
 
+export const GET = recordedV1(handleGET)
+export const DELETE = recordedV1(handleDELETE)

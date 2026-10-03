@@ -157,17 +157,17 @@ export function AppliedChangesPanel({
           <h3 className="text-[13px] font-semibold tracking-tight text-zinc-100">
             Changes Backenly made
           </h3>
-          <span className="font-mono text-[11px] tabular-nums text-zinc-600">
+          <span className="text-[12px] tabular-nums text-zinc-600">
             {changes.length}
           </span>
         </div>
-        <span className="font-mono text-[10.5px] tabular-nums text-zinc-600">
+        <span className="text-[12px] tabular-nums text-zinc-600">
           {revertibleCount} undoable
         </span>
       </div>
 
       <div className="border-b border-white/[0.06] px-5 py-2.5">
-        <p className="text-[11.5px] leading-relaxed text-zinc-500">
+        <p className="text-[12.5px] leading-relaxed text-zinc-500">
           Applied without waiting for you, because each one was additive and snapshotted first.
           Undo restores the exact state captured before the fix ran.
         </p>
@@ -223,7 +223,7 @@ function ChangeRow({
         <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-emerald-400" />
         <div className="min-w-0 flex-1">
           <p className="text-[12.5px] font-medium text-zinc-200">{c.summary}</p>
-          <p className="mt-1 font-mono text-[10.5px] text-zinc-500">{state.message}</p>
+          <p className="mt-1 font-mono text-[12px] text-zinc-500">{state.message}</p>
         </div>
       </li>
     )
@@ -237,7 +237,7 @@ function ChangeRow({
         <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-zinc-600" />
         <div className="min-w-0 flex-1">
           <p className="text-[12.5px] leading-snug text-zinc-100">{c.summary}</p>
-          <p className="mt-1.5 font-mono text-[10.5px] text-zinc-600">
+          <p className="mt-1.5 font-mono text-[12px] text-zinc-600">
             {c.type}
             {c.resource && <> · <span className="text-zinc-500">{c.resource}</span></>}
             {' · '}{timeAgo(c.at)}
@@ -260,7 +260,7 @@ function ChangeRow({
               <button
                 onClick={() => setShowSql(v => !v)}
                 aria-expanded={showSql}
-                className="inline-flex items-center gap-1 text-[11.5px] font-medium text-zinc-500 transition-colors hover:text-zinc-300"
+                className="inline-flex items-center gap-1 text-[12.5px] font-medium text-zinc-500 transition-colors hover:text-zinc-300"
               >
                 {statements.length === 1 ? '1 statement' : `${statements.length} statements`}
                 <ChevronDown className={`size-3 transition-transform ${showSql ? 'rotate-180' : ''}`} />
@@ -268,9 +268,9 @@ function ChangeRow({
               {showSql && (
                 <div className="mt-2 space-y-2">
                   {statements.map((st, i) => (
-                    <div key={i} className="rounded-md border border-white/[0.07] bg-[#0f1015]">
+                    <div key={i} className="rounded-md border border-white/[0.07] bg-[#08090a]">
                       <div className="flex items-start gap-2 px-3 py-2">
-                        <pre className="min-w-0 flex-1 overflow-x-auto whitespace-pre-wrap break-words font-mono text-[10.5px] leading-relaxed text-zinc-300">
+                        <pre className="min-w-0 flex-1 overflow-x-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-relaxed text-zinc-300">
 {st.sql}
                         </pre>
                         <button
@@ -284,7 +284,7 @@ function ChangeRow({
                         </button>
                       </div>
                       {st.params && st.params.length > 0 && (
-                        <p className="border-t border-white/[0.05] px-3 py-1.5 font-mono text-[10px] text-zinc-600">
+                        <p className="border-t border-white/[0.05] px-3 py-1.5 font-mono text-[12px] text-zinc-600">
                           {st.params.map((p, j) => `$${j + 1} = ${p}`).join('  ·  ')}
                         </p>
                       )}
@@ -298,21 +298,21 @@ function ChangeRow({
           {state.phase === 'confirming' && (
             <div className="mt-2 flex items-start gap-2 rounded-md border border-rose-500/20 bg-rose-500/[0.05] px-3 py-2">
               <ShieldAlert className="mt-px size-3.5 shrink-0 text-rose-400" />
-              <p className="text-[11.5px] leading-snug text-rose-200/90">{state.message}</p>
+              <p className="text-[12.5px] leading-snug text-rose-200/90">{state.message}</p>
             </div>
           )}
 
           {state.phase === 'error' && (
             <div className="mt-2 flex items-start gap-2">
               <XCircle className="mt-px size-3.5 shrink-0 text-rose-400" />
-              <p className="text-[11.5px] leading-snug text-rose-300/90">{state.message}</p>
+              <p className="text-[12.5px] leading-snug text-rose-300/90">{state.message}</p>
             </div>
           )}
 
           {!c.revertible && c.revertBlockedReason && (
             <div className="mt-2 flex items-start gap-2">
               <Lock className="mt-px size-3 shrink-0 text-zinc-600" />
-              <p className="text-[11.5px] leading-snug text-zinc-500">{c.revertBlockedReason}</p>
+              <p className="text-[12.5px] leading-snug text-zinc-500">{c.revertBlockedReason}</p>
             </div>
           )}
         </div>

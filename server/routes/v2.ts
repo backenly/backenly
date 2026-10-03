@@ -50,6 +50,15 @@ import { stripUpstreamError } from '@/lib/postgrest/translate'
 import { ensureSchemaRegistered } from '@/lib/postgrest/registration'
 import { getProjectIdFromAuth } from './dynamic'
 import { enforceRateLimitByKeyId } from '../lib/auth'
+import { asyncRoute } from '../lib/async-route'
+import { touchProjectActivity } from '@/lib/projects/activity'
+import {
+  isGrowingWrite,
+  projectRestriction,
+  restrictionDetails,
+  restrictionMessage,
+  RESTRICTED_CODE,
+} from '@/lib/usage/restrictions'
 
 const router = Router()
 
@@ -65,7 +74,7 @@ function operationFor(method: string, hasId: boolean): Operation | null {
   }
 }
 
-router.all('/:projectId/*', async (req: Request, res: Response) => {
+router.all('/:projectId/*', asyncRoute(async (req: Request, res: Response) => {
   const projectId = req.params.projectId
   const rest = (req.params as Record<string, string>)[0] ?? ''
   const [table, maybeId] = rest.split('/').filter(Boolean)
@@ -131,6 +140,21 @@ router.all('/:projectId/*', async (req: Request, res: Response) => {
       return res.status(429).json({
         code: 'RATE_LIMIT_EXCEEDED',
         message: `Rate limit exceeded. Retry in ${rl.retryAfter ?? 60}s.`,
+      })
+    }
+  }
+
+  // Authenticated, in quota, and past the serving gate: real use.
+  void touchProjectActivity(projectId)
+
+  // Past the database grace period the data API is read-only, as on v1.
+  if (isGrowingWrite(req.method)) {
+    const restriction = await projectRestriction(projectId, 'db_bytes')
+    if (restriction.restricted) {
+      return res.status(403).json({
+        code: RESTRICTED_CODE,
+        message: restrictionMessage('db_bytes', restriction),
+        details: restrictionDetails('db_bytes', restriction),
       })
     }
   }
@@ -230,6 +254,6 @@ router.all('/:projectId/*', async (req: Request, res: Response) => {
       message: err instanceof Error ? err.message : 'PostgREST did not respond.',
     })
   }
-})
+}))
 
 export default router

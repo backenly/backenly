@@ -1,17 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db/postgres'
 import { verifySession } from '@/lib/auth/session'
 import { Pool } from 'pg'
+import { canWriteProject } from '@/lib/edition/guard'
 
 // POST /api/projects/[id]/table-op — Real workspace table operations
 //
 // Executes insert / select / delete against workspace_{projectId} schema.
 // All queries are parameterised — no string interpolation of user-supplied values.
 // Table name is validated against information_schema before any query.
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   let pool: Pool | undefined
 
   try {
@@ -35,10 +33,7 @@ export async function POST(
     }
 
     // Verify project ownership
-    const project = await prisma.project.findFirst({
-      where: { id: projectId, userId: session.userId },
-    })
-    if (!project) {
+    if (!(await canWriteProject(session.userId, projectId))) {
       return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
 

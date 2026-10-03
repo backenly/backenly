@@ -8,6 +8,7 @@
 import { AppInspectionResult } from './app-inspector'
 import OpenAI from 'openai'
 import { prisma } from '@/lib/db'
+import { createProvisionedProject } from '@/lib/projects/provision'
 
 export interface IntentReconstructionResult {
   success: boolean
@@ -69,7 +70,10 @@ export class IntentReconstructor {
   /**
    * Reconstruct backend intent from app inspection
    */
-  static async reconstruct(inspectionData: AppInspectionResult['data']): Promise<IntentReconstructionResult> {
+  static async reconstruct(
+    inspectionData: AppInspectionResult['data'],
+    userId: string,
+  ): Promise<IntentReconstructionResult> {
     try {
       if (!inspectionData) {
         return {
@@ -116,15 +120,14 @@ CRITICAL RULES:
 
       const reconstruction = JSON.parse(result)
 
-      // Create or update project with reconstructed intent
-      const userId = 'system' // TODO: Get from auth context
-      
-      const project = await prisma.project.create({
-        data: {
-          name: inspectionData.appName || 'Connected App',
-          description: `Backend reconstructed from ${inspectionData.appUrl}`,
-          userId, // Will be updated when user connects
-        },
+      // Fully provisioned, and owned by the caller rather than by the string
+      // 'system'. This used to create a bare row with a userId that is not a
+      // user id, so the project had no workspace schema, no PostgREST
+      // registration, and an owner that could never sign in.
+      const project = await createProvisionedProject({
+        name: inspectionData.appName || 'Connected App',
+        description: `Backend reconstructed from ${inspectionData.appUrl}`,
+        userId,
       })
 
       // Create metadata with reconstructed intent

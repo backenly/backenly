@@ -11,7 +11,8 @@
     "rootDir": ".",
     "baseUrl": ".",
     "paths": {
-      "@/*": ["./*"]
+      "@/*": ["./*"],
+      "@cloud/*": ["./lib/cloud/*", "./lib/edition/oss/*"]
     }
   },
   "include": ["server/**/*.ts", "lib/**/*.ts"],

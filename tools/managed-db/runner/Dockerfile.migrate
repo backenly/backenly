@@ -1,0 +1,42 @@
+# Layer 3 migration runner.
+#
+# Contains the Prisma CLI, the schema, and the canonical migration chain. It
+# does not contain the application, db push, Layer 2 provisioning, the Layer 4
+# installers, or any way to run arbitrary SQL. Deployment tooling stays out of
+# long-running application containers, and this stays out of everything else.
+#
+# The build context is assembled (see build-and-push.sh): it carries only the
+# runner's own package files, prisma/schema.prisma and
+# prisma/migrations-canonical. The repository's gitignored prisma/migrations
+# working directory, which still holds the legacy corpus on developer machines,
+# can never reach this image.
+
+FROM node:20.20.1-bookworm-slim
+
+# Prisma's query engine needs OpenSSL; ca-certificates for the TLS connection to
+# RDS. Pinned base image plus a lockfile install is what makes a rerun of this
+# build produce the same runner.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends openssl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund
+
+COPY schema.prisma ./prisma/schema.prisma
+# Renamed on the way in: the image's migrations directory IS the canonical chain.
+COPY migrations-canonical ./prisma/migrations
+
+# Fixed catalog checks the entrypoint runs by name: the ownership preflight and
+# the per-migration absence and presence proofs. Read-only SQL, never a query
+# surface: a command selects one of these files, it cannot supply its own.
+COPY checks ./checks
+
+COPY entrypoint.sh /usr/local/bin/migrate
+RUN chmod +x /usr/local/bin/migrate
+
+# No default command: a task definition states what it wants, and an
+# unrecognised verb is refused rather than defaulted.
+ENTRYPOINT ["/usr/local/bin/migrate"]

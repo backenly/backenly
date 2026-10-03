@@ -11,6 +11,7 @@ export const dynamic = 'force-dynamic'
  */
 
 import { NextRequest, NextResponse } from 'next/server'
+import { cdnServesPublicObjects } from '@/lib/storage/access-policy'
 import { withTenantIsolation, TenantIsolationError } from '@/lib/tenant/isolation'
 import { storageService } from '@/lib/services/storage'
 
@@ -27,10 +28,16 @@ export async function GET(request: NextRequest) {
         
         return NextResponse.json({
           success: true,
+          // Whether a policy can be revoked at all, answered by the server. The
+          // dashboard warns an operator before they rely on a control that a CDN
+          // will keep serving around.
+          cdnServesPublicObjects: cdnServesPublicObjects(),
           buckets: bucketsWithStatus.map(bucket => ({
             id: bucket.id,
             name: bucket.name,
             isPublic: bucket.isPublic,
+            // What actually governs who may read this bucket's objects.
+            accessPolicy: bucket.accessPolicy,
             fileCount: bucket.fileCount,
             totalSize: bucket.totalSize.toString(), // BigInt to string
             // PHASE 3: Include provisioning status

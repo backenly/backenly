@@ -8,14 +8,40 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/prisma'
 import { undoToGraph, getPreviousGraphId, isProjectLive } from '@/lib/orchestration/graph-pointer'
+import { withAuth } from '@/lib/auth/route-protection'
+import { canAdministerProject } from '@/lib/edition/guard'
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
-  const projectId = params.id
+/**
+ * Undo the last live mutation for a LIVE project.
+ *
+ * ── This route had NO authentication at all ─────────────────────────────────
+ *
+ * It took a project id from the path, confirmed the project was live, and
+ * rolled its deployment back to the previous graph. Anyone who could reach the
+ * server and knew or guessed a project id could roll back somebody else's live
+ * backend. There was no session check, no ownership check, and no UI calling
+ * it, which is why nothing ever noticed.
+ *
+ * Found by the route-authorization sweep. It is the third destructive route in
+ * this family with the same defect, and the most severe: the other two at least
+ * required a session.
+ *
+ * `canAdministerProject`, not `canAccessProject`: rolling back a live
+ * deployment is not something a read-only collaborator should be able to do.
+ */
+export const POST = withAuth(async (request: NextRequest, { user, params }) => {
+  const { id: projectId } = await params
 
   try {
+    // Ownership first, before anything reads or writes project state.
+    // 404 rather than 403 so the endpoint is not an oracle for project ids.
+    if (!(await canAdministerProject(user.userId, projectId))) {
+      return NextResponse.json(
+        { success: false, message: 'Project not found' },
+        { status: 404 },
+      )
+    }
+
     // 1. Verify project is LIVE
     const isLive = await isProjectLive(projectId)
 
@@ -77,4 +103,4 @@ export async function POST(
       { status: 500 }
     )
   }
-}
+})

@@ -212,6 +212,11 @@ export function FieldInput({
   error,
   trailing,
   helper,
+  inputMode,
+  autoComplete,
+  maxLength,
+  autoFocus,
+  className,
 }: {
   id: string
   type: string
@@ -222,6 +227,12 @@ export function FieldInput({
   error?: string
   trailing?: React.ReactNode
   helper?: string
+  inputMode?: React.HTMLAttributes<HTMLInputElement>['inputMode']
+  autoComplete?: string
+  maxLength?: number
+  autoFocus?: boolean
+  /** Extra classes for the input itself, e.g. the wide tracking of a code. */
+  className?: string
 }) {
   return (
     <div>
@@ -237,7 +248,11 @@ export function FieldInput({
           onChange={onChange}
           placeholder={placeholder}
           disabled={disabled}
-          className="flex-1 bg-transparent text-[15px] text-zinc-100 placeholder:text-zinc-600 focus:outline-none disabled:opacity-50"
+          inputMode={inputMode}
+          autoComplete={autoComplete}
+          maxLength={maxLength}
+          autoFocus={autoFocus}
+          className={`flex-1 bg-transparent text-[15px] text-zinc-100 placeholder:text-zinc-600 focus:outline-none disabled:opacity-50 ${className ?? ''}`}
         />
         {trailing}
       </div>

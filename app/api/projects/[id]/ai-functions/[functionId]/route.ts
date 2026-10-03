@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { authenticateRequest } from '@/lib/auth/middleware'
+import { canAdministerProject, canWriteProject } from '@/lib/edition/guard'
 
 /**
  * PUT /api/projects/[id]/ai-functions/[functionId]
@@ -9,16 +10,14 @@ import { authenticateRequest } from '@/lib/auth/middleware'
  */
 export async function PUT(
   request: NextRequest,
-  { params }: { params: { id: string; functionId: string } }
+  props: { params: Promise<{ id: string; functionId: string }> }
 ) {
+  const params = await props.params;
   try {
     const auth = await authenticateRequest(request)
     if (!auth.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-    const project = await prisma.project.findFirst({
-      where: { id: params.id, userId: auth.userId },
-    })
-    if (!project) return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+    if (!(await canWriteProject(auth.userId, params.id))) return NextResponse.json({ error: 'Project not found' }, { status: 404 })
 
     const body = await request.json()
     const { status } = body
@@ -47,16 +46,14 @@ export async function PUT(
  */
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: { id: string; functionId: string } }
+  props: { params: Promise<{ id: string; functionId: string }> }
 ) {
+  const params = await props.params;
   try {
     const auth = await authenticateRequest(request)
     if (!auth.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-    const project = await prisma.project.findFirst({
-      where: { id: params.id, userId: auth.userId },
-    })
-    if (!project) return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+    if (!(await canAdministerProject(auth.userId, params.id))) return NextResponse.json({ error: 'Project not found' }, { status: 404 })
 
     await prisma.aiFunction.deleteMany({
       where: { id: params.functionId, projectId: params.id },

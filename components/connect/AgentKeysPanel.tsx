@@ -16,19 +16,19 @@
  */
 
 import { useEffect, useState, useCallback } from 'react'
+import { AlertTriangle, Check, KeyRound, Plug2, ShieldCheck, Trash2, Zap } from 'lucide-react'
 import {
-  AlertTriangle, Check, Copy, KeyRound, Loader2,
-  Plug2, ShieldCheck, Trash2, Zap,
-} from 'lucide-react'
-import {
-  KIT,
-  KitCard,
-  KitButton,
-  KitInput,
-  KitConfirmDialog,
-  StatTile,
-  SectionLabel,
+  CopyField,
   EmptyState,
+  KitButton,
+  KitConfirmDialog,
+  KitInput,
+  KitNote,
+  SectionTitle,
+  Skeleton,
+  Stat,
+  StatStrip,
+  Tag,
 } from '@/components/inspector/kit'
 
 interface McpKey {
@@ -73,7 +73,6 @@ export function AgentKeysPanel({
   const [creating, setCreating] = useState(false)
   const [newKey, setNewKey] = useState<{ rawKey: string; label: string | null } | null>(null)
   const [newLabel, setNewLabel] = useState('')
-  const [copied, setCopied] = useState(false)
   const [revoking, setRevoking] = useState<string | null>(null)
   const [revokeTarget, setRevokeTarget] = useState<McpKey | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -165,208 +164,182 @@ export function AgentKeysPanel({
     }
   }
 
-  function copyRaw(text: string) {
-    navigator.clipboard.writeText(text)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 1800)
-  }
-
   const hasLiveActivity = !!usage && usage.calls7d > 0
 
   return (
-    <div className="min-w-0 space-y-8">
-      {error && (
-        <div className={`flex items-start gap-2 ${KIT.radiusSm} border border-rose-500/25 bg-rose-500/[0.06] px-4 py-3 text-[12.5px] text-rose-200`}>
-          <AlertTriangle className="size-4 flex-none mt-0.5" />
-          {error}
-        </div>
-      )}
+    <div className="min-w-0 space-y-10">
+      {error && <KitNote tone="danger" icon={AlertTriangle}>{error}</KitNote>}
 
-      {/* ── LIVE ACTIVITY ──────────────────────────────────────────────── */}
+      {/* ── Live activity ─────────────────────────────────────────────── */}
       {hasLiveActivity && (
-        <section>
-          <SectionLabel className="mb-4">Live activity · last 7 days</SectionLabel>
-
-          <div className="grid sm:grid-cols-3 gap-3 mb-4">
-            <StatTile label="Calls (24h)" value={usage!.calls24h.toLocaleString()} />
-            <StatTile label="Calls (7d)" value={usage!.calls7d.toLocaleString()} />
-            <StatTile
-              label="Error rate (24h)"
+        <section aria-labelledby="agent-activity-heading">
+          <SectionTitle title={<span id="agent-activity-heading">Agent activity</span>} description="Tool calls your agents made in the last 7 days." />
+          <StatStrip className="mb-3">
+            <Stat label="Calls, 24 hours" value={usage!.calls24h.toLocaleString()} />
+            <Stat label="Calls, 7 days" value={usage!.calls7d.toLocaleString()} />
+            <Stat
+              label="Error rate, 24 hours"
               value={`${(usage!.errorRate * 100).toFixed(1)}%`}
-              tone={usage!.errorRate > 0.1 ? 'amber' : 'neutral'}
+              tone={usage!.errorRate > 0.1 ? 'warn' : 'neutral'}
             />
-          </div>
+          </StatStrip>
 
           {usage!.recent.length > 0 && (
-            <KitCard className="overflow-hidden">
-              <div className={`px-4 py-2.5 border-b ${KIT.hairline} flex items-center justify-between`}>
-                <SectionLabel>Recent tool calls</SectionLabel>
-                <span className="text-[10px] text-zinc-600 tabular-nums font-mono">{usage!.recent.length} events</span>
+            <div className="overflow-hidden rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
+              <div className="flex items-center justify-between border-b border-white/[0.06] px-4 py-2.5">
+                <h3 className="text-[13px] font-medium text-zinc-100">Recent tool calls</h3>
+                <span className="text-[12px] tabular-nums text-zinc-500">{usage!.recent.length} events</span>
               </div>
-              <div className={`divide-y ${KIT.divide} max-h-[360px] overflow-y-auto`}>
+              <ul className="max-h-[380px] divide-y divide-white/[0.05] overflow-y-auto overscroll-contain">
                 {usage!.recent.map((r) => {
                   const ok = r.statusCode >= 200 && r.statusCode < 300
                   return (
-                    <div key={r.id} className="px-4 py-2.5 flex items-center gap-3 hover:bg-white/[0.01] transition-colors">
-                      <span className={`inline-flex items-center gap-1.5 flex-none w-14 ${ok ? 'text-emerald-300/90' : 'text-rose-300'}`}>
-                        <span className={`size-1.5 rounded-full ${ok ? 'bg-emerald-400' : 'bg-rose-400'}`} />
-                        <span className="text-[10px] font-mono tabular-nums">{r.statusCode}</span>
-                      </span>
-                      <div className="flex-1 min-w-0">
+                    <li key={r.id} className="flex items-center gap-3 px-4 py-2.5">
+                      <span
+                        className={`h-[7px] w-[7px] flex-shrink-0 rounded-full ${ok ? 'bg-emerald-400' : 'bg-rose-400'}`}
+                        aria-label={ok ? `Succeeded (${r.statusCode})` : `Failed (${r.statusCode})`}
+                      />
+                      <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
-                          <code className="text-[12.5px] font-mono text-zinc-200 truncate">{r.tool ?? r.endpoint}</code>
-                          {r.mutation && (
-                            <span className={`text-[9px] font-semibold uppercase tracking-wider ${KIT.accentText} ${KIT.accentBg} border ${KIT.accentBorder} rounded px-1.5 py-0.5`}>
-                              mut
-                            </span>
-                          )}
+                          <code className="truncate font-mono text-[12.5px] text-zinc-100">{r.tool ?? r.endpoint}</code>
+                          {r.mutation && <Tag tone="violet">Write</Tag>}
+                          {!ok && <span className="text-[12px] tabular-nums text-rose-300">{r.statusCode}</span>}
                         </div>
                         {(r.summary || r.error) && (
-                          <div className="text-[11px] text-zinc-500 truncate mt-0.5">
-                            {plainText(r.error ?? r.summary ?? '')}
-                          </div>
+                          <div className="mt-0.5 truncate text-[12px] text-zinc-500">{plainText(r.error ?? r.summary ?? '')}</div>
                         )}
                       </div>
-                      <div className="text-[11px] text-zinc-500 flex-none tabular-nums font-mono w-14 text-right">
-                        {r.ms ?? 0}ms
-                      </div>
-                      <div className="text-[10px] text-zinc-600 flex-none tabular-nums font-mono w-12 text-right">
-                        {timeAgo(r.timestamp)}
-                      </div>
-                    </div>
+                      <div className="w-16 flex-shrink-0 text-right text-[12px] tabular-nums text-zinc-500">{r.ms ?? 0} ms</div>
+                      <div className="w-10 flex-shrink-0 text-right text-[12px] tabular-nums text-zinc-600">{timeAgo(r.timestamp)}</div>
+                    </li>
                   )
                 })}
-              </div>
-            </KitCard>
+              </ul>
+            </div>
           )}
         </section>
       )}
 
-      {/* ── KEYS ───────────────────────────────────────────────────────── */}
-      <section>
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
-          <SectionLabel>Your agent keys</SectionLabel>
-          <div className="flex items-center gap-2">
+      {/* ── Keys ──────────────────────────────────────────────────────── */}
+      <section aria-labelledby="agent-keys-heading">
+        <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <h2 id="agent-keys-heading" className="text-[15px] font-semibold leading-[22px] tracking-[-0.012em] text-zinc-100">Agent keys</h2>
+            <p className="mt-1 text-[13px] text-zinc-400">Server-side only, rate limited per key, and every mutation is audited.</p>
+          </div>
+          <form
+            className="flex items-center gap-2"
+            onSubmit={(e) => { e.preventDefault(); createKey() }}
+          >
+            <label className="sr-only" htmlFor="agent-key-label">Label for a new key</label>
             <KitInput
+              id="agent-key-label"
+              name="agent-key-label"
+              autoComplete="off"
               type="text"
-              placeholder="Label, e.g. CI server"
+              placeholder="Label, e.g. CI server…"
               value={newLabel}
               onChange={(e) => setNewLabel(e.target.value)}
               disabled={creating}
-              className="w-44 disabled:opacity-50"
+              className="w-full sm:w-48"
             />
-            {/* whitespace-nowrap: the label wrapped to two lines at the panel's
-                narrow column width, which made the button taller than the input
-                beside it. */}
-            <KitButton onClick={createKey} disabled={creating} className="whitespace-nowrap">
-              {creating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plug2 className="w-3.5 h-3.5" />}
+            <KitButton type="submit" icon={Plug2} loading={creating}>
               New key
             </KitButton>
-          </div>
+          </form>
         </div>
 
         {newKey && (
-          <div className={`${KIT.radius} border border-violet-500/25 bg-white/[0.015] p-4 mb-4`}>
-            <div className="flex items-center gap-2 text-violet-300 text-[12.5px] font-semibold mb-2">
-              <Check className="size-4" />
-              Key generated{newKey.label ? ` · ${newKey.label}` : ''}
-            </div>
-            <p className="text-zinc-400 text-[12px] mb-3 leading-relaxed">
-              Copy this now. It will <strong className="text-zinc-100">not</strong> be shown again.
+          <div className="mb-4 rounded-[10px] border border-violet-300/25 bg-violet-400/[0.04] p-4">
+            <p className="flex items-center gap-2 text-[13px] font-medium text-zinc-100">
+              <Check className="h-4 w-4 text-emerald-300" />
+              Key created{newKey.label ? `: ${newKey.label}` : ''}
             </p>
-            <div className={`flex items-center gap-2 bg-[#0f1015] border ${KIT.border} ${KIT.radiusSm} px-3 py-2.5 font-mono text-[12.5px]`}>
-              <KeyRound className="size-3.5 text-violet-300/70 flex-none" />
-              <span className="flex-1 truncate text-zinc-50 select-all">{newKey.rawKey}</span>
-              <KitButton size="sm" icon={copied ? Check : Copy} onClick={() => copyRaw(newKey.rawKey)}>
-                {copied ? 'Copied' : 'Copy'}
-              </KitButton>
-            </div>
-            <div className="mt-3 flex items-center gap-3 flex-wrap">
-              <KitButton size="sm" onClick={testConnection} disabled={testing}>
-                {testing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Zap className="w-3.5 h-3.5" />}
+            <p className="mb-3 mt-1 text-[12.5px] text-zinc-400">Copy it now. It will not be shown again.</p>
+            <CopyField value={newKey.rawKey} />
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <KitButton size="sm" icon={Zap} loading={testing} onClick={testConnection}>
                 Test connection
               </KitButton>
               {testResult && (
-                <div className={`flex items-center gap-1.5 text-[11.5px] ${testResult.ok ? 'text-emerald-300/90' : 'text-rose-300'}`}>
-                  {testResult.ok ? <ShieldCheck className="size-3.5" /> : <AlertTriangle className="size-3.5" />}
+                <span
+                  role="status"
+                  className={`flex items-center gap-1.5 text-[12.5px] ${testResult.ok ? 'text-emerald-300' : 'text-rose-300'}`}
+                >
+                  {testResult.ok ? <ShieldCheck className="h-3.5 w-3.5" /> : <AlertTriangle className="h-3.5 w-3.5" />}
                   {testResult.message}
-                </div>
+                </span>
               )}
-              <button
-                onClick={() => { setNewKey(null); setTestResult(null) }}
-                className="text-[11px] text-zinc-500 hover:text-zinc-200 transition-colors focus:outline-none"
-              >
-                I&apos;ve saved it
-              </button>
+              <KitButton size="sm" variant="ghost" className="ml-auto" onClick={() => { setNewKey(null); setTestResult(null) }}>
+                I’ve saved it
+              </KitButton>
             </div>
           </div>
         )}
 
         {loading ? (
-          <div className="text-zinc-500 text-[12.5px] flex items-center gap-2">
-            <Loader2 className="size-4 animate-spin" />
-            Loading…
+          <div className="space-y-2">
+            <Skeleton className="h-[56px] w-full rounded-[10px]" />
           </div>
         ) : keys.length === 0 ? (
-          <KitCard>
+          <div className="rounded-[10px] border border-dashed border-white/[0.10]">
             <EmptyState
               icon={KeyRound}
-              title="No keys yet"
-              description="Generate one above to wire your first agent."
-              className="py-8"
+              title="No agent keys yet"
+              description="Generate one in step 1, or add a labelled key here, to wire your first agent."
+              className="py-10"
             />
-          </KitCard>
+          </div>
         ) : (
-          <KitCard className="overflow-hidden">
-            <div className={`hidden sm:grid grid-cols-[1fr_auto_auto_auto] gap-4 px-4 py-2.5 border-b ${KIT.hairline} text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600`}>
-              <span>Key</span>
-              <span>Created</span>
-              <span>Last used</span>
-              <span className="w-16 text-right">Actions</span>
-            </div>
-            <div className={`divide-y ${KIT.divide}`}>
-              {keys.map((k) => {
-                const stat = usage?.byKey.find((b) => b.keyId === k.id)
-                return (
-                  <div key={k.id} className="grid grid-cols-1 sm:grid-cols-[1fr_auto_auto_auto] gap-2 sm:gap-4 px-4 py-3.5 items-center hover:bg-white/[0.01] transition-colors">
-                    <div className="min-w-0">
-                      <div className="text-[12.5px] font-medium text-zinc-200 truncate">
-                        {k.label || k.name}
-                      </div>
-                      <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-                        <code className="text-[11px] font-mono text-zinc-500">{k.masked}</code>
-                        {stat && stat.calls7d > 0 && (
-                          <span className="text-[10.5px] font-mono tabular-nums text-zinc-500">
-                            {stat.calls7d.toLocaleString()} / 7d
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                    <div className="text-[11.5px] text-zinc-500 tabular-nums font-mono">
-                      {new Date(k.createdAt).toLocaleDateString()}
-                    </div>
-                    <div className="text-[11.5px] text-zinc-500 tabular-nums font-mono">
-                      {k.lastUsed ? timeAgo(k.lastUsed) : '—'}
-                    </div>
-                    <button
-                      onClick={() => setRevokeTarget(k)}
-                      disabled={revoking === k.id}
-                      className={`justify-self-end inline-flex items-center gap-1.5 text-[11px] px-2.5 py-1.5 ${KIT.radiusXs} text-rose-300/80 hover:text-rose-200 hover:bg-rose-500/[0.08] transition-colors disabled:opacity-50 focus:outline-none`}
-                    >
-                      {revoking === k.id ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
-                      Revoke
-                    </button>
-                  </div>
-                )
-              })}
-            </div>
-          </KitCard>
+          <div className="overflow-x-auto rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
+            <table className="w-full min-w-[520px] text-left">
+              <thead>
+                <tr className="border-b border-white/[0.06] text-[12px] text-zinc-500">
+                  <th scope="col" className="h-[36px] whitespace-nowrap px-4 font-medium">Key</th>
+                  <th scope="col" className="h-[36px] whitespace-nowrap px-4 font-medium">Created</th>
+                  <th scope="col" className="h-[36px] whitespace-nowrap px-4 font-medium">Last used</th>
+                  <th scope="col" className="h-[36px] whitespace-nowrap px-4 font-medium"><span className="sr-only">Actions</span></th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/[0.05]">
+                {keys.map((k) => {
+                  const stat = usage?.byKey.find((b) => b.keyId === k.id)
+                  return (
+                    <tr key={k.id} className="group transition-colors hover:bg-white/[0.02]">
+                      <td className="px-4 py-3">
+                        <div className="truncate text-[13px] font-medium text-zinc-100">{k.label || k.name}</div>
+                        <div className="mt-0.5 flex flex-wrap items-center gap-2">
+                          <code className="font-mono text-[12px] text-zinc-500">{k.masked}</code>
+                          {stat && stat.calls7d > 0 && (
+                            <span className="text-[12px] tabular-nums text-zinc-500">{stat.calls7d.toLocaleString()} calls this week</span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3 text-[13px] tabular-nums text-zinc-400">
+                        {new Date(k.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3 text-[13px] tabular-nums text-zinc-400">
+                        {k.lastUsed ? `${timeAgo(k.lastUsed)} ago` : <span className="text-zinc-600">Never</span>}
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        <KitButton
+                          size="sm"
+                          variant="ghost"
+                          icon={Trash2}
+                          loading={revoking === k.id}
+                          onClick={() => setRevokeTarget(k)}
+                          className="hover:!bg-rose-500/[0.10] hover:!text-rose-200"
+                        >
+                          Revoke
+                        </KitButton>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
         )}
-
-        <div className="flex items-center gap-2 text-[11px] text-zinc-500 mt-3">
-          <ShieldCheck className="size-3" />
-          Server-side use only · per-key rate limits · audit log on every mutation
-        </div>
       </section>
 
       <KitConfirmDialog

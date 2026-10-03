@@ -2,7 +2,16 @@ import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
 import { jwtVerify } from 'jose'
 import { domainRoutingMiddleware, shouldUseDomainRouting } from '@/lib/middleware/domainRouting'
-import { extractTokenFromHeader } from '@/lib/auth/jwt'
+import { exceededBodyLimit, isUploadRoute, MAX_BUFFERED_UPLOAD_FILE_BYTES } from '@/lib/storage/body-limits'
+import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
+
+// Inlined rather than imported from lib/auth/jwt, which pulls jsonwebtoken and
+// node:crypto into the Edge middleware bundle.
+function extractTokenFromHeader(authHeader: string | null): string | null {
+  if (!authHeader) return null
+  if (!authHeader.startsWith('Bearer ')) return null
+  return authHeader.substring(7)
+}
 
 // ── Per-project CORS cache ────────────────────────────────────────────────────
 const _corsCache = new Map<string, { origins: string[]; expiresAt: number }>()
@@ -66,14 +75,49 @@ const publicPathPrefixes = [
   '/use-cases',
   '/resources',
   '/docs',
-  '/mcp',           // merged into /quickstart; next.config redirects it, but the
+  '/mcp',           // the page is gone and next.config redirects it, but the
                     // prefix stays public so an auth wall can never win the race
-  '/quickstart',    // the "how do I start" page — the one route that must never
-                    // require a session, since its whole job is to convert people
-                    // who do not have one yet
+  '/quickstart',    // same: the page was deleted and 301s to /resources. The
+                    // prefix stays public so the redirect always resolves for
+                    // anonymous visitors following an indexed or npm link
   '/report/',       // shared change reports — access IS the revocable token, no session
   '/.well-known/',  // security.txt etc.
 ]
+
+// ✅ MARKETING SURFACES — the hosted service's shop window.
+//
+// A self-hosted deployment is somebody's own infrastructure. Serving Backenly's
+// landing page, pricing and competitor comparisons there is wrong twice over:
+// the operator has already installed the product so there is nothing to sell
+// them, and their internal host ends up publishing our marketing to whoever can
+// reach it. Supabase self-hosted puts the dashboard at `/` and ships no
+// marketing at all; this matches that.
+//
+// These redirect to /app rather than 404 so that an indexed or bookmarked link
+// lands the operator in the product instead of on an error page. `/login`,
+// `/signup` and `/auth/*` are NOT here — they are how you reach the product.
+const marketingRoutes = [
+  '/',
+  '/pricing',
+  '/contact',
+  '/privacy',
+  '/terms',
+  '/refund-policy',
+]
+const marketingPrefixes = [
+  '/alternatives',
+  '/comparisons',
+  '/features',
+  '/use-cases',
+  '/resources',
+  '/mcp',
+  '/quickstart',
+]
+
+function isMarketingPath(pathname: string): boolean {
+  if (marketingRoutes.includes(pathname)) return true
+  return marketingPrefixes.some(prefix => pathname === prefix || pathname.startsWith(prefix + '/'))
+}
 
 // ✅ PUBLIC API ROUTES (Auth endpoints + webhook receivers)
 const publicApiRoutes = [
@@ -94,6 +138,7 @@ const publicApiRoutes = [
   '/api/health',
   '/api/internal/',                 // Internal middleware-to-server endpoints
   '/api/v1/',                       // Project runtime API — API key auth
+  '/api/v2/',                       // PostgREST-grammar data API — API key auth, served by the runtime
   '/api/mcp',                       // MCP server — scope='mcp' API key auth at route level.
                                     // No trailing slash: also covers the bare /api/mcp remote
                                     // (Streamable-HTTP) endpoint, which authenticates itself.
@@ -153,13 +198,15 @@ async function handleCORS(request: NextRequest): Promise<NextResponse | null> {
     return null
   }
 
-  const isSdkRoute = pathname.startsWith(SDK_ROUTE_PREFIX)
+  // /api/v2 is the same audience as /api/v1: a customer's frontend calling its
+  // own project with an anon key, from its own origin.
+  const isSdkRoute = pathname.startsWith(SDK_ROUTE_PREFIX) || pathname.startsWith('/api/v2/')
   let allowedOrigin: string | null = null
 
   if (isSdkRoute) {
     // SDK routes: API-key authenticated. Per-project allowedOrigins, fall back
     // to allow-any if no restrictions configured.
-    const projectIdMatch = pathname.match(/^\/api\/v1\/([^/]+)/)
+    const projectIdMatch = pathname.match(/^\/api\/v[12]\/([^/]+)/)
     const projectId = projectIdMatch?.[1]
 
     if (projectId) {
@@ -177,9 +224,13 @@ async function handleCORS(request: NextRequest): Promise<NextResponse | null> {
       allowedOrigin = origin
     }
   } else {
-    // Platform routes: strict allow-list. Dev includes localhost; prod does not.
+    // Platform routes: strict allow-list. Dev includes localhost and local IPs; prod does not.
     const list = process.env.NODE_ENV === 'production' ? ALLOWED_ORIGINS_PROD : ALLOWED_ORIGINS_DEV
     allowedOrigin = list.includes(origin) ? origin : null
+    if (!allowedOrigin && process.env.NODE_ENV === 'development' &&
+        (origin.includes('localhost') || origin.includes('127.0.0.1') || origin.includes('192.168.') || origin.includes('10.') || origin.includes('.local') || origin.includes('trycloudflare.com') || origin.includes('ngrok') || origin.includes('loca.lt') || origin.includes('pinggy.link'))) {
+      allowedOrigin = origin
+    }
   }
 
   // `Prefer`, `Range` and `Range-Unit` are the PostgREST control headers. They
@@ -263,6 +314,25 @@ export async function middleware(request: NextRequest) {
     return response
   }
 
+  // A body larger than this route takes (lib/storage/body-limits.ts) is refused
+  // here, before any route runs: Next would otherwise hand the route the first
+  // N bytes of it, which the upload routes answered with 500. Upload routes get
+  // the upload ceiling, every other route the 10 MB it always had. Only a
+  // declared Content-Length can be judged before the body arrives.
+  const exceeded = exceededBodyLimit(pathname, request.headers.get('content-length'))
+  if (exceeded !== null) {
+    const upload = isUploadRoute(pathname)
+    const code = upload ? 'FILE_TOO_LARGE' : 'PAYLOAD_TOO_LARGE'
+    const message = upload
+      ? `An upload through the server carries at most ${MAX_BUFFERED_UPLOAD_FILE_BYTES / (1024 * 1024)} MB. Use a multipart upload for larger files.`
+      : `Request body is larger than the ${exceeded / (1024 * 1024)} MB this endpoint accepts.`
+    // Each surface's own error shape: v1 clients read { error: { code, message } }.
+    const body = pathname.startsWith('/api/v1/')
+      ? { error: { code, message } }
+      : { success: false, code, message }
+    return applyCorsHeaders(NextResponse.json(body, { status: 413 }))
+  }
+
   // ✅ Public API routes
   if (publicApiRoutes.some(route => pathname.startsWith(route))) {
     return applyCorsHeaders(NextResponse.next())
@@ -282,6 +352,11 @@ export async function middleware(request: NextRequest) {
   // ✅ Auth pages
   if (pathname.startsWith('/auth')) {
     return applyCorsHeaders(NextResponse.next())
+  }
+
+  // 🚫 Marketing belongs to Cloud. Off Cloud, send the operator to the product.
+  if (!CLOUD_CONTROL_PLANE && isMarketingPath(pathname)) {
+    return NextResponse.redirect(new URL('/app', request.url))
   }
 
   // ✅ Exact public routes
@@ -378,6 +453,14 @@ export async function middleware(request: NextRequest) {
     const response = NextResponse.next({
       request: { headers: requestHeaders },
     })
+    // A signed-in page must not outlive its session in the browser's caches.
+    // Next serves the console as static HTML (`s-maxage=31536000`), and Back
+    // reuses a stored page without asking the server, so after signing out
+    // Back repainted the console instead of reaching the login redirect above.
+    // Outside dev, Next only sets its own Cache-Control when none is present.
+    if (!pathname.startsWith('/api')) {
+      response.headers.set('Cache-Control', 'private, no-store')
+    }
     return applyCorsHeaders(response)
   } catch {
     // Invalid token — clear and redirect. Never log the token itself.

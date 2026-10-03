@@ -2,18 +2,16 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { verifyToken } from '@/lib/auth/jwt'
-import { prisma } from '@/lib/db'
 import { startSandbox } from '@/lib/sandbox-runtime'
+import { canWriteProject } from '@/lib/edition/guard'
 
 /**
  * POST /api/sandbox/[projectId]/start
  * 
  * Start sandbox runtime for project
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   try {
     // Authenticate user session
     const sessionToken = request.cookies.get('auth-token')?.value
@@ -29,14 +27,7 @@ export async function POST(
     const projectId = params.projectId
 
     // Verify project ownership
-    const project = await prisma.project.findFirst({
-      where: {
-        id: projectId,
-        userId: userId,
-      },
-    })
-
-    if (!project) {
+    if (!(await canWriteProject(userId, projectId))) {
       return NextResponse.json(
         { error: 'Project not found or access denied' },
         { status: 404 }

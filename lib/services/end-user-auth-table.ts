@@ -159,6 +159,17 @@ export async function purgeSyntheticAuthArtifacts(
   // it — three red blocks per probe run, per project, for a non-event. Real
   // failures were getting lost in that noise.
   const existing = new Set<string>()
+  // Whether the lookup ANSWERED, as distinct from what it answered.
+  //
+  // This was inferred from `existing.size > 0`, which conflates "introspection
+  // failed" with "this schema has no tables" — and the second is exactly what a
+  // freshly installed deployment looks like. So on the one deployment where the
+  // pre-check mattered most it was skipped, every DELETE was attempted, and a
+  // brand-new install's log filled with `relation ... does not exist` for
+  // users, _email_verifications, _magic_links and _password_resets on every
+  // probe run. The operator's first impression of their own install was a wall
+  // of Prisma errors describing a non-event.
+  let introspected = false
   try {
     const present = await executeWithUserContext<{ table_name: string }>(
       '', true,
@@ -166,6 +177,7 @@ export async function purgeSyntheticAuthArtifacts(
       [schemaName],
     )
     for (const r of present) existing.add(r.table_name)
+    introspected = true
   } catch {
     /* introspection failed — fall through and let each purge try as before */
   }
@@ -173,9 +185,9 @@ export async function purgeSyntheticAuthArtifacts(
   // Each executeWithUserContext runs in its own transaction, so a table that
   // does not exist in this project fails just its own DELETE, not the batch.
   const purge = async (table: string, where: string, params: unknown[]): Promise<void> => {
-    // Skip only when introspection succeeded and positively excluded the table
-    // — an empty set means the lookup failed, so fall back to attempting.
-    if (existing.size > 0 && !existing.has(table)) return
+    // Skip whenever introspection ANSWERED and did not list this table. An
+    // empty answer is a real answer: a fresh workspace has no tables yet.
+    if (introspected && !existing.has(table)) return
     try {
       const rows = await executeWithUserContext<{ x: number }>(
         '', true,
@@ -195,13 +207,20 @@ export async function purgeSyntheticAuthArtifacts(
 
   if (!opts?.email) {
     let noUsers = false
-    try {
-      const remaining = await executeWithUserContext<{ n: bigint }>(
-        '', true, `SELECT count(*)::bigint AS n FROM "${schemaName}"."users"`,
-      )
-      noUsers = remaining.length > 0 && Number(remaining[0].n) === 0
-    } catch {
-      /* users table absent — leave noUsers false, only prune expired below */
+    // Same pre-check as the purges above, for the same reason. The try/catch
+    // here was never enough: Prisma logs a failed query at `error` level BEFORE
+    // any caller's catch runs, so on a workspace with no `users` table this one
+    // line still printed a raw error block on every sweep. Fixing only the
+    // purges left exactly one of the original four behind.
+    if (!introspected || existing.has('users')) {
+      try {
+        const remaining = await executeWithUserContext<{ n: bigint }>(
+          '', true, `SELECT count(*)::bigint AS n FROM "${schemaName}"."users"`,
+        )
+        noUsers = remaining.length > 0 && Number(remaining[0].n) === 0
+      } catch {
+        /* users table absent — leave noUsers false, only prune expired below */
+      }
     }
     await purge('_token_blacklist', noUsers ? 'TRUE' : 'expires_at < NOW()', [])
   }
@@ -268,16 +287,44 @@ export async function introspectAuthUsersTable(
 }
 
 /**
+ * A verifier account asked for end-user auth to be provisioned. Refused: see
+ * ensureAuthUsersTable. Signup routes answer it with 503 AUTH_NOT_CONFIGURED,
+ * which every probe already reads as "auth is not set up here".
+ */
+export class AuthNotProvisionedError extends Error {
+  readonly code = 'AUTH_NOT_CONFIGURED'
+  constructor() {
+    super('Authentication is not set up for this project yet.')
+    this.name = 'AuthNotProvisionedError'
+  }
+}
+
+/**
  * Guarantee `workspace_{projectId}.users` satisfies the auth contract, then
  * return its descriptor.
  *
  * Safe to call on every signup / OAuth callback: it is idempotent and cheap
  * (introspection plus, at most, one ALTER on the very first call per project).
+ *
+ * `requestedBy` is required so every caller states whose request this is. A
+ * verifier account (`isReservedTestEmail`) may use an auth table that exists
+ * but may never create one, or the schema around it. Monitoring that
+ * provisions is how a named-only project would grow a `users` table nobody
+ * built, and it re-created a workspace schema an operator had just dropped in
+ * the middle of a restore: the contract probe's signup ran
+ * CREATE SCHEMA IF NOT EXISTS between the platform replay and the workspace
+ * replay, and the restore failed on "schema already exists".
  */
 export async function ensureAuthUsersTable(
   projectId: string,
+  requestedBy: { email: string | null | undefined },
 ): Promise<AuthUsersSchema> {
   const schemaName = `workspace_${projectId}`
+
+  if (isReservedTestEmail(requestedBy.email)) {
+    const existing = await introspectColumns(schemaName)
+    if (existing.length === 0) throw new AuthNotProvisionedError()
+  }
 
   // 1. Schema + canonical table. Both IF NOT EXISTS — no-ops when present.
   await prisma.$executeRawUnsafe(`CREATE SCHEMA IF NOT EXISTS "${schemaName}"`)
@@ -547,10 +594,27 @@ export async function stampLastLogin(
     true,
     `ALTER TABLE "${schemaName}"."users" ADD COLUMN IF NOT EXISTS "last_login" TIMESTAMP WITH TIME ZONE`,
   )
+  // Bind the id as the column's own type. A bare $1 arrives as text, and
+  // uuid = text has no operator, so on every workspace whose users.id is uuid
+  // this stamp failed (quietly: the callers catch it) and "active · 30d" never
+  // counted anyone. Casting by the id's shape instead, as buildUserInsert does
+  // for its VALUES, would break a text id that happens to hold a uuid. Matching
+  // the column's type also keeps its primary-key index usable.
+  const idType = await executeWithUserContext<{ data_type: string }>(
+    '',
+    true,
+    `SELECT data_type FROM information_schema.columns
+      WHERE table_schema = $1 AND table_name = 'users' AND column_name = 'id'`,
+    [schemaName],
+  )
+  const dataType = idType[0]?.data_type ?? ''
+  const cast = dataType === 'uuid'
+    ? '::uuid'
+    : ['smallint', 'integer', 'bigint'].includes(dataType) ? '::bigint' : ''
   await executeWithUserContext(
     '',
     true,
-    `UPDATE "${schemaName}"."users" SET "last_login" = NOW() WHERE id = $1`,
-    [userId],
+    `UPDATE "${schemaName}"."users" SET "last_login" = NOW() WHERE id = $1${cast}`,
+    [String(userId)],
   )
 }

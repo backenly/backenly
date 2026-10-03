@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { getAiUsageStats } from '@/lib/services/aiConfig'
 import { authenticateRequest } from '@/lib/auth/middleware'
+import { canAccessProject } from '@/lib/edition/guard'
 
 // GET /api/settings/ai/usage - Get AI usage statistics
 export async function GET(request: NextRequest) {
@@ -18,6 +19,15 @@ export async function GET(request: NextRequest) {
 
     if (!projectId) {
       return NextResponse.json({ error: 'projectId is required' }, { status: 400 })
+    }
+
+
+    // Ownership. authenticateRequest established WHO is asking; the projectId
+    // came from the query string and went straight to the service, so any
+    // signed-in account could read another tenant's AI usage and spend.
+    // 404, so the endpoint is not an oracle for project ids.
+    if (!auth.userId || !(await canAccessProject(auth.userId, projectId))) {
+      return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
 
     const stats = await getAiUsageStats(projectId, period)

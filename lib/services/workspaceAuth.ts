@@ -4,6 +4,7 @@
  * Automatically creates User model and runs migrations when Auth is enabled.
  */
 
+import { projectWorkspaceDir } from '@/lib/workspace/paths';
 import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
@@ -117,7 +118,7 @@ export async function enableAuth(projectId: string): Promise<{ success: boolean;
   // Create migration promise
   const migrationPromise = (async () => {
     try {
-      const workspacePath = path.join(process.cwd(), 'workspace', projectId);
+      const workspacePath = projectWorkspaceDir(projectId);
       const schemaPath = path.join(workspacePath, 'schema.prisma');
       
       // Check if schema exists
@@ -229,7 +230,7 @@ export async function registerUser(
       };
     }
     
-    const workspacePath = path.join(process.cwd(), 'workspace', projectId);
+    const workspacePath = projectWorkspaceDir(projectId);
     
     // Ensure User model exists
     if (!hasUserModel(workspacePath)) {
@@ -298,7 +299,7 @@ export async function loginUser(
   data: LoginData
 ): Promise<AuthResponse> {
   try {
-    const workspacePath = path.join(process.cwd(), 'workspace', projectId);
+    const workspacePath = projectWorkspaceDir(projectId);
     
     // Ensure User model exists
     if (!hasUserModel(workspacePath)) {
@@ -363,22 +364,46 @@ export async function loginUser(
 /**
  * Get all users for dashboard display
  */
+/**
+ * The END USERS of one project.
+ *
+ * ── This returned every PLATFORM account ────────────────────────────────────
+ *
+ * It took a projectId, ignored it, and ran
+ *
+ *     SELECT id, email, name, "createdAt" FROM users
+ *
+ * on the PLATFORM connection. `users` is unqualified, so it resolved through
+ * search_path to `public.users` - and the platform User model is
+ * `@@map("users")`. The function therefore returned every account on the
+ * deployment, with emails, to whoever asked, for any projectId at all.
+ *
+ * The projectId parameter made it look tenant-scoped. It was never used in the
+ * predicate, which is exactly the shape that route-level review cannot catch:
+ * the caller passes the right argument and the service throws it away.
+ *
+ * Now goes through queryWorkspace*, which pins search_path to this project's
+ * own schema, so the tenant boundary is in the connection rather than in a
+ * string. Owner context because this is the operator listing THEIR end users:
+ * workspace tables are FORCE RLS, and a plain read would return nothing.
+ */
 export async function getWorkspaceUsers(projectId: string): Promise<any[]> {
   try {
-    const workspacePath = path.join(process.cwd(), 'workspace', projectId);
-    
+    const workspacePath = projectWorkspaceDir(projectId);
+
     // Check if User model exists
     if (!hasUserModel(workspacePath)) {
       return [];
     }
-    
-    // Get users from database
-    const users: any[] = await prisma.$queryRawUnsafe(`
-      SELECT id, email, name, "createdAt"
-      FROM users
-      ORDER BY "createdAt" DESC
-    `);
-    
+
+    const { queryWorkspaceAsOwner } = await import('./workspace-pool');
+    const users = await queryWorkspaceAsOwner<any>(
+      projectId,
+      `SELECT id, email, name, "createdAt"
+         FROM users
+        ORDER BY "createdAt" DESC`,
+    );
+
     return users;
   } catch (error: any) {
     console.error('Get users error:', error);

@@ -29,6 +29,11 @@ import {
   LAYER_HEADER,
 } from '@/lib/observability/request-trace'
 import {
+  decodeTokenTiming,
+  isPgrst303,
+  logPgrstClockDiagnostic,
+} from '@/lib/observability/pgrst-clock-diagnostic'
+import {
   toApiError,
   toListEnvelope,
   toRecordEnvelope,
@@ -205,6 +210,10 @@ export async function handleViaPostgrest(
   let url = ''
   let body: string | undefined
   let headers: Record<string, string> = {}
+  // Only the token's timing integers are retained, decoded at mint time. The
+  // JWT itself stays scoped to the block that builds the request, so no
+  // credential is reachable from the error path below.
+  let mintedTiming: ReturnType<typeof decodeTokenTiming> | null = null
 
   try {
     const token = mintInternalToken(
@@ -215,6 +224,7 @@ export async function handleViaPostgrest(
       }),
       secret,
     )
+    mintedTiming = decodeTokenTiming(token)
 
     if (operation === 'list' || operation === 'get') {
       const hasSoftDelete = await tableHasSoftDelete(schema, table)
@@ -363,6 +373,26 @@ export async function handleViaPostgrest(
       parsed && typeof parsed === 'object' && typeof (parsed as any).code === 'string'
         ? (parsed as any).code
         : null
+    // PGRST303 means PostgREST rejected our token's issue time. Record the
+    // timing numbers from this request so a clock disagreement can be told
+    // apart from a token-construction fault; they are unrecoverable afterwards.
+    // Server-side log only — nothing here reaches the caller, and it cannot throw.
+    if (isPgrst303(upstreamCode)) {
+      // Guarded here as well as inside the helper. The helper's own catch is
+      // the first line of defence; this one makes "observability cannot alter
+      // the response" a property of the call site rather than a promise the
+      // helper has to keep forever.
+      try {
+        logPgrstClockDiagnostic({
+          requestId,
+          table,
+          timing: mintedTiming,
+          remoteAddress: req.socket?.remoteAddress ?? null,
+        })
+      } catch {
+        /* never let a diagnostic change what the caller receives */
+      }
+    }
     return answer(mapped.status, mapped.body as unknown as Record<string, unknown>, { upstreamCode })
   }
 

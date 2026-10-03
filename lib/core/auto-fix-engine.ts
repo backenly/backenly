@@ -34,10 +34,17 @@ import { evaluateFixOutcome, captureCheckBaseline } from '@/lib/autonomy/desired
 import { FLAGS } from '@/lib/config/flags'
 import { withBuildLock } from '@/lib/ai/build-runtime/build-lock'
 import { normalizeFindingType } from './types'
+import type { FixVerification } from './fix-verification'
 import { buildFixAction, getManualRemediationHint } from './fix-actions'
 import type { FindingType } from './types'
 import type { AIAction } from '@/lib/ai/minimal-executor'
 import type { FixPlan } from './fix-plan-generator'
+import {
+  capturePolicies,
+  recoveryRestorePolicies,
+  samePolicies,
+  type PolicyCapture,
+} from '@/lib/autonomy/maintenance/primitives/recovery-restore-policies'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -47,7 +54,18 @@ export interface AutoFixResult {
   // left OPEN and retried on the next loop tick — it is NOT a failure and is
   // NEVER escalated to a human. Escalating a timing condition to an approval
   // queue is what made the loop look non-autonomous.
-  outcome: 'auto_fixed' | 'pending_approval' | 'notify_only' | 'escalated' | 'deferred'
+  // 'applied_unverified' = the mutation ran and the acceptance probe could not
+  // produce evidence either way. NOT success and NOT failure: a verifier that
+  // throws proves nothing about the repair. It is its own outcome so callers
+  // cannot count it as a fix, and so the reconciler can stop making dependent
+  // repairs on state it has not confirmed.
+  outcome:
+    | 'auto_fixed'
+    | 'applied_unverified'
+    | 'pending_approval'
+    | 'notify_only'
+    | 'escalated'
+    | 'deferred'
   findingId: string
   message: string
   rollbackData?: Record<string, unknown>
@@ -164,14 +182,43 @@ async function capturePreFixState(
  * Process one HealthFinding end-to-end.
  * Safe to call on any finding regardless of current status — it re-reads from DB.
  */
+/**
+ * Who is asking for this fix, and therefore which rules apply.
+ *
+ * Required at every call site rather than defaulted, because the default would
+ * decide the safety posture of whichever caller forgot to think about it. The
+ * two are genuinely different acts: a person clicking "fix this" has already
+ * authorised it by clicking, and the autonomous loop has authorised nothing
+ * until the Authority Decision says so.
+ */
+export type FixActor =
+  /**
+   * The autonomous loop. MUST pass the Authority Decision, which is evaluated
+   * here rather than at the caller so no entry point can skip it by omission.
+   */
+  | { kind: 'autonomous'; loop: 'reconciler' | 'maintenance' }
+  /**
+   * A person, through an authenticated surface. Not autonomy: the click IS the
+   * authorisation, and gating it behind a standing grant would mean a user
+   * could not fix their own backend without first delegating to a robot.
+   */
+  | { kind: 'human'; userId: string }
+  /**
+   * An operator running a script or a test harness against their own
+   * deployment. Recorded as such rather than disguised as one of the others.
+   */
+  | { kind: 'operator'; via: 'cli' | 'test' }
+
 export async function runAutoFix(
   findingId: string,
   projectId: string,
   // Test/verification harness only: bypass the 2-min post-mutation cooldown so
-  // multiple deterministic fixes can be exercised in one run. The autonomous
-  // reconciler NEVER passes this — cooldown pacing stays enforced in production.
-  opts: { skipCooldown?: boolean } = {},
+  // multiple deterministic fixes can be exercised in one run.
+  opts: { skipCooldown?: boolean; actor?: FixActor } = {},
 ): Promise<AutoFixResult> {
+  // Default-deny on omission. A caller that does not say who it is gets the
+  // strictest posture, not the most permissive one.
+  const actor: FixActor = opts.actor ?? { kind: 'autonomous', loop: 'reconciler' }
   const finding = await prisma.healthFinding.findUnique({ where: { id: findingId } })
   if (!finding) {
     return { findingId, outcome: 'notify_only', message: 'Finding not found.' }
@@ -210,6 +257,118 @@ export async function runAutoFix(
   }
 
   // ── auto branch ─────────────────────────────────────────────────────────────
+  //
+  // THE GATE. Everything above is classification; below this line something
+  // mutates. An autonomous caller must hold an AUTO_EXECUTE decision, and the
+  // check lives here rather than at each call site so that no entry point can
+  // skip it by forgetting to call it.
+  if (actor.kind === 'autonomous') {
+    const { authorizeAutonomousFix, revalidateAtMutationBoundary, enforceLegacyCompatibility } =
+      await import('@/lib/authority/gate')
+    const { authorityPathFor } = await import('@/lib/authority/action-classes')
+
+    const path = authorityPathFor(finding.type)
+
+    // ── Neither declared nor enumerated ──────────────────────────────────
+    //
+    // Nothing is known about this type's sensors, verifier or recovery, and it
+    // is not on the compatibility list either. Default deny.
+    if (path === 'freeze') {
+      return {
+        findingId,
+        outcome: 'notify_only',
+        message:
+          `Frozen: "${finding.type}" has no declared action class and is not a listed ` +
+          'legacy type, so Backenly cannot establish whether repairing it is safe.',
+      }
+    }
+
+    // ── Enumerated legacy type: today's proven behaviour, recorded as debt ──
+    //
+    // Deliberately NOT more permissive than before. The flag and the dial are
+    // enforced here because `runAutoFix` never checked them — only
+    // `runReconciler` did — so a direct caller could previously execute with
+    // ENABLE_AUTONOMY_LIVE_EXECUTION=false. The breaker, verification and
+    // recovery semantics below are unchanged.
+    if (path === 'legacy_compatibility') {
+      const compat = await enforceLegacyCompatibility(projectId, finding.type)
+      if (!compat.allowed) {
+        return { findingId, outcome: 'deferred', message: compat.reason ?? 'not permitted' }
+      }
+      return _executeAutoFix(finding.id, projectId, type, details, opts)
+    }
+
+    const tableName =
+      typeof details.tableName === 'string'
+        ? details.tableName
+        : typeof details.table === 'string'
+          ? (details.table as string)
+          : null
+
+    const gate = await authorizeAutonomousFix({
+      projectId,
+      findingType: finding.type,
+      tableName,
+      loop: actor.loop,
+    })
+
+    if (!gate.mayExecute) {
+      const d = gate.decision
+      // FREEZE must not surface an executable-looking proposal: the evidence
+      // for NEEDING the repair is what could not be established, so offering it
+      // would invite a human to approve something nobody can justify.
+      if (d.decision === 'FREEZE') {
+        await prisma.healthFinding
+          .update({ where: { id: finding.id }, data: { status: 'open' } })
+          .catch(() => {})
+        return {
+          findingId,
+          outcome: 'notify_only',
+          message: `Frozen: ${d.reasons[0] ?? 'state could not be established'}${
+            d.blocker ? ` Restore: ${d.blocker}.` : ''
+          }`,
+        }
+      }
+
+      // PROPOSE_ONLY and DENY: the repair is meaningful, authority is not
+      // sufficient. Surface it for a human rather than mutating.
+      await prisma.healthFinding
+        .update({ where: { id: finding.id }, data: { status: 'pending_approval' } })
+        .catch(() => {})
+      return {
+        findingId,
+        outcome: 'pending_approval',
+        message: `Authority: ${d.decision}. ${d.reasons[0] ?? ''}`.trim(),
+      }
+    }
+
+    // The decision was a lease. Prove it still holds now, immediately before
+    // the executor runs: between deciding and here an owner may have revoked
+    // the grant through a surface that never takes the execution lock.
+    const still = await revalidateAtMutationBoundary(gate, projectId)
+    if (!still.stillValid) {
+      return {
+        findingId,
+        outcome: 'deferred',
+        message: `Authority lapsed before execution: ${still.reason}`,
+      }
+    }
+
+    // The repair applies what the declared intent says, not what the executor
+    // would infer. See applyIntentToFixDetails.
+    //
+    // It also carries the class's declared recovery, so the executor performs
+    // the recovery the decision was granted on rather than a different one.
+    const { applyIntentToFixDetails } = await import('@/lib/authority/gate')
+    return _executeAutoFix(
+      finding.id,
+      projectId,
+      type,
+      applyIntentToFixDetails(gate.decision, details),
+      { ...opts, recovery: gate.decision.capability.recovery },
+    )
+  }
+
   return _executeAutoFix(finding.id, projectId, type, details, opts)
 }
 
@@ -240,7 +399,7 @@ export async function executeApprovedFix(
   snapshotId?: string
   rollbackData?: Record<string, unknown>
   /** Whether the gap was re-probed after the fix and confirmed gone. */
-  verification?: 'confirmed' | 'unverified'
+  verification?: FixVerification
 }> {
   const finding = await prisma.healthFinding.findUnique({ where: { id: findingId } })
   if (!finding) return { success: false, message: 'Finding not found.' }
@@ -262,6 +421,88 @@ export async function executeApprovedFix(
       message: hint
         ?? `This issue needs your manual review — open the relevant section of your dashboard to resolve it.`,
     }
+  }
+
+  // ── An unverified mutation is not permission to mutate again ──────────────
+  //
+  // A finding carrying `appliedUnverified` has already had its repair run
+  // once; what failed was the check, not necessarily the fix. This path had no
+  // precondition at all — it went from `buildFixAction` straight to executing
+  // — so the sequence below was reachable in about ten seconds:
+  //
+  //   CREATE INDEX succeeds -> verification times out -> finding stays in the
+  //   queue -> owner opens Autonomy and clicks Approve & fix -> the same
+  //   mutation runs again
+  //
+  // For `CREATE INDEX IF NOT EXISTS` that is merely wasteful. The repair
+  // vocabulary is not all idempotent and will not stay this small, and
+  // "unknown" must never be usable as consent to repeat a change.
+  //
+  // So the rule is: after a verification error, no second mutation until a
+  // FRESH observation says whether the first one worked.
+  if (details.appliedUnverified) {
+    const { recheckGap } = await import('@/lib/autonomy/desired-state')
+    const fresh = await recheckGap(projectId, finding.type, details).catch(() => 'error' as const)
+
+    if (fresh === 'resolved') {
+      // The earlier mutation did work; only the check had failed. Close it
+      // without touching the database a second time.
+      //
+      // Recorded as the auto-fix it actually was, not as a repair performed
+      // now. The statements and pre-fix snapshot from that run are promoted
+      // into `rollbackData` so Undo keeps working, and `verification` is
+      // stamped 'confirmed' because a probe has now positively established the
+      // postcondition. Late evidence is still evidence.
+      const applied = details.appliedUnverified as Record<string, unknown>
+      await prisma.healthFinding.update({
+        where: { id: findingId },
+        data: {
+          status: 'auto_fixed',
+          autoFixed: true,
+          fixAppliedAt: new Date(),
+          details: {
+            ...details,
+            rollbackData: {
+              fixAction: applied.fixAction,
+              statements: applied.statements,
+              rollbackFormat: 2,
+              snapshotId: applied.snapshotId ?? null,
+              fixedAt: applied.at,
+              verification: 'confirmed' satisfies FixVerification,
+              confirmedLate: true,
+            },
+          } as any,
+        },
+      })
+      await _writeAuditLog(projectId, 'HEALTH_FIX_CONFIRMED_LATE', {
+        findingId,
+        findingType: finding.type,
+        note: 'An earlier fix could not be verified at the time. A fresh check found the issue gone; nothing was re-applied.',
+      })
+      return {
+        success: true,
+        message:
+          'This was already fixed. The earlier repair could not be confirmed at the time, ' +
+          'and a fresh check now finds the issue gone, so nothing was changed again.',
+        verification: 'confirmed',
+      }
+    }
+
+    if (fresh !== 'unresolved') {
+      // 'unknown' (no probe covers this type) or the re-probe itself failed.
+      // Either way there is still no observation, and repeating a mutation on
+      // no evidence is the thing this guard exists to prevent.
+      return {
+        success: false,
+        message:
+          'Backenly already applied a fix for this and could not confirm the result. ' +
+          'It cannot check whether that fix worked right now, so it will not run the same ' +
+          'change again. It will re-check on its next pass.',
+        verification: 'verification_error',
+      }
+    }
+    // 'unresolved' — a fresh observation says the problem is genuinely still
+    // there, so re-applying is a decision made on evidence. Fall through.
   }
 
   // PRE-FIX capture — the state one-click undo restores (see capturePreFixState).
@@ -359,10 +600,36 @@ export async function executeApprovedFix(
   // table-shaped location exempted exactly the finding types a human is most
   // likely to be approving by hand — the auth pair, whose fix rewires sign-in for
   // every end-user of the project.
-  let verification: 'confirmed' | 'unverified' = 'unverified'
+  let verification: FixVerification = 'unverified'
   {
-    const outcome = await evaluateFixOutcome(projectId, finding.type, details, baseline)
-      .catch(() => null)
+    // Same three-outcome rule as the autonomous path. The verifier throwing is
+    // not the fix failing and is not the fix working, and a human who clicked
+    // Approve is extending MORE trust than the loop takes on its own, so this
+    // is the last place that distinction should be collapsed.
+    let verifierError: string | null = null
+    const outcome = await evaluateFixOutcome(projectId, finding.type, details, baseline).catch(
+      (err: unknown) => {
+        verifierError = err instanceof Error ? err.message : String(err)
+        return null
+      },
+    )
+
+    if (verifierError !== null) {
+      // `success: false` is deliberate and it is NOT a claim that the fix
+      // failed - the message says so in as many words. It is the only value
+      // that stops the caller rendering "verified & snapshotted", which is the
+      // claim we cannot make. The finding stays in the queue and the next
+      // detection pass settles it.
+      return {
+        success: false,
+        message:
+          'The fix ran, but the check that would confirm it could not complete ' +
+          `(${verifierError}). It has not been recorded as verified. Backenly re-checks ` +
+          'on its next pass and will close this automatically if the problem is gone.',
+        verification: 'verification_error',
+      }
+    }
+
     if (outcome && outcome.recheck === 'unresolved') {
       return {
         success: false,
@@ -800,7 +1067,14 @@ export async function findResolvableFinding(
  * Process all open findings for a project, ordered critical-first.
  * Called by the workspace observer on each health-check cycle.
  */
-export async function processOpenFindings(projectId: string): Promise<AutoFixResult[]> {
+export async function processOpenFindings(
+  projectId: string,
+  /**
+   * Who is driving this batch. Defaults to autonomous, which is the strict
+   * posture: a caller that has not said who it is gets the gate, not a bypass.
+   */
+  actor: FixActor = { kind: 'autonomous', loop: 'reconciler' },
+): Promise<AutoFixResult[]> {
   const severityOrder = { critical: 0, warning: 1, info: 2 }
 
   const findings = await prisma.healthFinding.findMany({
@@ -818,7 +1092,8 @@ export async function processOpenFindings(projectId: string): Promise<AutoFixRes
   const results: AutoFixResult[] = []
   for (const f of findings) {
     // Run sequentially so each fix is verified before the next begins
-    results.push(await runAutoFix(f.id, projectId))
+    // Inherits the caller's posture rather than assuming one.
+    results.push(await runAutoFix(f.id, projectId, { actor }))
   }
   return results
 }
@@ -830,7 +1105,11 @@ async function _executeAutoFix(
   projectId: string,
   type: FindingType,
   details: Record<string, unknown>,
-  opts: { skipCooldown?: boolean } = {},
+  /**
+   * `recovery` is the declared recovery of the action class that authorized
+   * this repair. Set only on the authority path; the legacy path has none.
+   */
+  opts: { skipCooldown?: boolean; recovery?: string } = {},
 ): Promise<AutoFixResult> {
   const baseType = (normalizeFindingType(type, details)?.base ?? type) as FindingType
   const fixAction = buildFixAction(type, details)
@@ -853,6 +1132,32 @@ async function _executeAutoFix(
   // the mutation; the post-fix snapshot below is version history only.
   const pre = await capturePreFixState(projectId, baseType, fixAction)
 
+  // ── The declared recovery, prepared before anything changes ─────────────
+  //
+  // `tighten_policy` is authorized on the promise of `restore_policies`, and
+  // the decision reports that recovery as implemented. Until this block the
+  // reconciler never ran it: a policy repair that failed verification was
+  // escalated with the new policy left in place. A recovery the decision
+  // counts on and the executor never performs is a receipt that lies.
+  //
+  // If the pre-state cannot be read, the recovery cannot be performed, so the
+  // repair does not run. Deferred rather than escalated: nothing was tried.
+  let policyPre: PolicyCapture | null = null
+  let policyPost: PolicyCapture | null = null
+  if (opts.recovery === 'restore_policies') {
+    const table = typeof details.tableName === 'string' ? details.tableName : null
+    if (!table) {
+      return _deferred(findingId, projectId, type, details,
+        'Declared recovery restore_policies needs the table this repair changes, and the finding names none.')
+    }
+    try {
+      policyPre = await capturePolicies(projectId, table)
+    } catch (err: any) {
+      return _deferred(findingId, projectId, type, details,
+        `Declared recovery restore_policies could not capture the pre-repair policies: ${err?.message ?? err}`)
+    }
+  }
+
   // Baseline of which guarantees currently HOLD, so the acceptance gate below
   // can tell "this fix broke something" from "this was already broken". Without
   // a before-state there is nothing to compare against and a regression is
@@ -867,14 +1172,21 @@ async function _executeAutoFix(
     const captured = await withSqlCapture(() => withBuildLock(
       projectId,
       'modify',
-      async () => executeAction(
-        { action: fixAction.action as AIAction['action'], params: fixAction.params },
-        projectId,
-        undefined, // apiKey
-        0,         // retryCount
-        undefined, // executionId
-        false,     // allowReplan — deterministic autonomy fix, never LLM-replan
-      ),
+      async () => {
+        const r = await executeAction(
+          { action: fixAction.action as AIAction['action'], params: fixAction.params },
+          projectId,
+          undefined, // apiKey
+          0,         // retryCount
+          undefined, // executionId
+          false,     // allowReplan — deterministic autonomy fix, never LLM-replan
+        )
+        // Still inside the lock, so this is the state THIS execution left, not
+        // one a later writer produced. restore_policies' stale guard compares
+        // against it and refuses to overwrite anything that differs.
+        if (policyPre) policyPost = await capturePolicies(projectId, policyPre.table).catch(() => null)
+        return r
+      },
       { skipCooldown: opts.skipCooldown },
     ))
     const governed = captured.result
@@ -894,9 +1206,13 @@ async function _executeAutoFix(
 
   if (!result!.success) {
     const reason = result!.error ?? result!.message
+    const recovered = policyPre
+      ? await _recoverPolicies(findingId, projectId, type, policyPre, policyPost, reason)
+      : null
+    const full = recovered ? `${reason} ${recovered}` : reason
     return _isTransientGovernanceError(reason)
-      ? _deferred(findingId, projectId, type, details, reason)
-      : _escalate(findingId, projectId, type, details, reason)
+      ? _deferred(findingId, projectId, type, details, full)
+      : _escalate(findingId, projectId, type, details, full)
   }
 
   // ── TRUST GUARANTEE: a fix is only "fixed" if the gap actually closed ───────
@@ -929,18 +1245,67 @@ async function _executeAutoFix(
   // for any type no probe covers, which is precisely the case the location check
   // was reaching for. Deleting it costs nothing (the baseline diff above is
   // already computed unconditionally) and closes the hole.
-  let verification: 'confirmed' | 'unverified' = 'unverified'
+  // ── Three outcomes, not two ───────────────────────────────────────────────
+  //
+  // This block used to be `.catch(() => null)` followed by three guards all
+  // shaped `if (outcome && ...)`. When the verifier THREW, every one of them
+  // was skipped and the fix fell through to be recorded as applied:
+  //
+  //     detect -> mutate -> verifier throws -> record success
+  //
+  // A transient database error therefore certified a repair nobody had
+  // checked. That is the observation bug the probes had, moved one step later
+  // and made worse: this manufactures certainty about our own work, after
+  // already having changed the customer's backend.
+  //
+  // A timeout does not prove the fix failed. It also does not prove it worked.
+  // So the error case is its own state and is never success.
+  let verification: FixVerification = 'unverified'
   {
-    const outcome = await evaluateFixOutcome(projectId, type, details, baseline)
-      .catch(() => null)
-    if (outcome && !outcome.accepted && outcome.recheck !== 'unknown') {
-      return _escalate(findingId, projectId, type, details, outcome.reason)
+    let verifierError: string | null = null
+    const outcome = await evaluateFixOutcome(projectId, type, details, baseline).catch(
+      (err: unknown) => {
+        verifierError = err instanceof Error ? err.message : String(err)
+        return null
+      },
+    )
+
+    if (verifierError !== null) {
+      // Applied, unverifiable. NOT escalated as a failed fix — the repair may
+      // well have worked and calling it a failure is its own false claim — and
+      // NOT rolled back, because undoing a good index because the observer
+      // blinked is the same error in the other direction.
+      //
+      // The finding stays visible instead of disappearing as healed, and the
+      // next tick re-probes it for free: `reapInvariantFindings` closes a
+      // `pending_approval` finding whose gap is genuinely gone, so a fix that
+      // did work resolves itself on the following pass. That is the bounded
+      // verification retry, using the machinery that already exists rather
+      // than re-running a mutation that has already happened.
+      return _appliedUnverified(findingId, projectId, type, details, {
+        fixAction,
+        statements,
+        preSnapshotId: pre.preSnapshotId,
+        message: result.message,
+        verifierError,
+      })
     }
-    // A regression is disqualifying even when closure could not be confirmed:
-    // "I could not prove I helped, and something that used to hold now fails"
-    // is the worst outcome to record as a fix.
-    if (outcome && outcome.regressions.length > 0) {
-      return _escalate(findingId, projectId, type, details, outcome.reason)
+
+    // Both rejections below are verdicts the verifier DID reach, so they are
+    // the case the declared recovery exists for. A verifier that could not
+    // reach one returned above without rolling back, and stays that way.
+    const rejected =
+      (outcome && !outcome.accepted && outcome.recheck !== 'unknown') ||
+      // A regression is disqualifying even when closure could not be confirmed:
+      // "I could not prove I helped, and something that used to hold now fails"
+      // is the worst outcome to record as a fix.
+      (outcome && outcome.regressions.length > 0)
+    if (rejected) {
+      const recovered = policyPre
+        ? await _recoverPolicies(findingId, projectId, type, policyPre, policyPost, outcome.reason)
+        : null
+      return _escalate(findingId, projectId, type, details,
+        recovered ? `${outcome.reason} ${recovered}` : outcome.reason)
     }
     if (outcome?.recheck === 'resolved') verification = 'confirmed'
   }
@@ -1002,6 +1367,141 @@ async function _executeAutoFix(
   })
 
   return { findingId, outcome: 'auto_fixed', message: result.message, rollbackData }
+}
+
+/**
+ * The mutation happened and we could not confirm it. Say exactly that.
+ *
+ * Deliberately NOT `_escalate`. Escalation means "the loop tried, verified,
+ * and the fix did not hold" — a claim about the repair. This is a claim about
+ * the OBSERVING, and conflating them would tell a user their fix failed when
+ * what actually failed was the check.
+ *
+ * Deliberately not `auto_fixed` either. The whole point is that nothing may
+ * call this a verified repair, and a finding that leaves the queue as healed
+ * is the system asserting exactly that.
+ *
+ * ── Why the mutation is recorded even though the fix "did not complete" ───
+ *
+ * Because it DID run. `statements` and the pre-fix snapshot are written the
+ * same way a confirmed fix writes them, so Undo still works and "show me what
+ * it ran" still has an answer. Losing that because the verifier broke would
+ * turn an unverified change into an untraceable one.
+ */
+async function _appliedUnverified(
+  findingId: string,
+  projectId: string,
+  type: FindingType,
+  details: Record<string, unknown>,
+  applied: {
+    fixAction: unknown
+    statements: unknown
+    preSnapshotId: string | null
+    message: string
+    verifierError: string
+  },
+): Promise<AutoFixResult> {
+  const reason =
+    `The fix ran, but the check that would confirm it could not complete: ${applied.verifierError}. ` +
+    'It has not been recorded as verified. Backenly will re-check on its next pass and close this ' +
+    'automatically if the problem is genuinely gone.'
+
+  await prisma.healthFinding.update({
+    where: { id: findingId },
+    data: {
+      // Stays in the queue. `reapInvariantFindings` closes a pending_approval
+      // finding whose gap is actually gone, so a fix that worked resolves
+      // itself next tick and one that did not stays visible.
+      status: 'pending_approval',
+      details: {
+        ...details,
+        // The mutation is on the record even though the verdict is not, so a
+        // later reader can tell "we changed this and do not know the result"
+        // from "we never got that far".
+        appliedUnverified: {
+          at: new Date().toISOString(),
+          fixAction: applied.fixAction,
+          statements: applied.statements,
+          snapshotId: applied.preSnapshotId,
+          verifierError: applied.verifierError,
+        },
+        escalation: {
+          ...((details.escalation ?? {}) as Record<string, unknown>),
+          reason,
+          at: new Date().toISOString(),
+        },
+      } as any,
+    },
+  })
+
+  // Its own action, not HEALTH_FIX_ESCALATED. The activity feed, the trust
+  // scoreboard and the welcome-back banner all read these strings, and a
+  // verification outage read as a failed repair would be a second false claim
+  // laid on top of the first.
+  await _writeAuditLog(projectId, 'HEALTH_FIX_UNVERIFIED', {
+    findingId,
+    findingType: type,
+    tableName: (details.tableName ?? details.table ?? details.location ?? null) as string | null,
+    columnName: (details.columnName ?? details.column ?? null) as string | null,
+    fixAction: applied.fixAction,
+    message: applied.message,
+    snapshotId: applied.preSnapshotId,
+    statements: applied.statements,
+    verifierError: applied.verifierError,
+    // Never 'confirmed'. The scoreboard counts only that string, so this row
+    // cannot inflate the verified rate however it is later aggregated.
+    verification: 'verification_error' satisfies FixVerification,
+  })
+
+  return { findingId, outcome: 'applied_unverified', message: reason }
+}
+
+/**
+ * Run the declared `restore_policies` recovery after a rejected policy repair.
+ *
+ * Returns the sentence the escalation carries, so the finding says what state
+ * the table was left in rather than only why the repair was rejected. Every
+ * outcome is written to the ledger as `AUTHORITY_RECOVERY`, including the ones
+ * where nothing had to be restored, because "was it put back" is the first
+ * question anyone asks about a rejected authorization change.
+ */
+async function _recoverPolicies(
+  findingId: string,
+  projectId: string,
+  type: FindingType,
+  pre: PolicyCapture,
+  post: PolicyCapture | null,
+  rejectedBecause: string,
+): Promise<string> {
+  let status: string
+  let message: string
+  if (!post) {
+    // Without the state this execution left, the stale guard has nothing to
+    // compare against, and restoring anyway could overwrite a later change.
+    status = 'blocked_stale'
+    message = 'The policies this repair left behind could not be read, so they were not overwritten.'
+  } else if (samePolicies(pre, post)) {
+    status = 'not_needed'
+    message = 'The repair changed no policy, so there was nothing to restore.'
+  } else {
+    const r = await recoveryRestorePolicies(projectId, pre, post).catch((err: any) => ({
+      status: 'failed' as const,
+      message: `Restore threw: ${err?.message ?? err}`,
+    }))
+    status = r.status
+    message = r.message
+  }
+
+  await _writeAuditLog(projectId, 'AUTHORITY_RECOVERY', {
+    findingId,
+    findingType: type,
+    tableName: pre.table,
+    strategy: 'restore_policies',
+    status,
+    message,
+    rejectedBecause,
+  })
+  return `Recovery (restore_policies): ${status}. ${message}`
 }
 
 async function _escalate(

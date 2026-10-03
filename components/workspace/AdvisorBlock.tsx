@@ -128,7 +128,7 @@ export function AdvisorBlock({
   const foldedFindings = total - countFindings(shown)
 
   return (
-    <section className="relative overflow-hidden rounded-xl border border-white/[0.07] bg-[#16171d] shadow-[0_16px_44px_-28px_rgba(0,0,0,0.9)]">
+    <section className="relative overflow-hidden rounded-xl border border-white/[0.07] bg-[#0f1012] shadow-[0_16px_44px_-28px_rgba(0,0,0,0.9)]">
       {/* Header */}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-white/[0.06] px-4 py-3">
         <div className="flex items-center gap-2">
@@ -136,13 +136,13 @@ export function AdvisorBlock({
           <h2 className="text-[13px] font-semibold tracking-tight text-zinc-100">Backend health</h2>
         </div>
         <div className="ml-auto flex items-center gap-3">
-          <span className="font-mono text-[10.5px] tabular-nums text-zinc-600">
+          <span className="text-[12px] tabular-nums text-zinc-600">
             {lastScan ? `Last scan ${lastScan}` : 'First scan running…'}
           </span>
           <button
             onClick={rescan}
             disabled={scanning}
-            className="inline-flex h-7 items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.03] px-2.5 text-[11.5px] font-medium text-zinc-300 transition-colors hover:border-white/20 hover:text-zinc-100 disabled:cursor-wait disabled:opacity-60"
+            className="inline-flex h-7 items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.03] px-2.5 text-[12.5px] font-medium text-zinc-300 transition-colors hover:border-white/20 hover:text-zinc-100 disabled:cursor-wait disabled:opacity-60"
             title="Run the deterministic detectors now. Free, and never spends autonomy budget"
           >
             <RefreshCw className={`h-3 w-3 ${scanning ? 'animate-spin' : ''}`} />
@@ -187,7 +187,7 @@ export function AdvisorBlock({
                         initial={{ opacity: 0, x: 4 }}
                         animate={{ opacity: 1, x: 0 }}
                         transition={{ delay: 0.5, duration: 0.35 }}
-                        className="inline-flex items-center gap-1.5 text-[11.5px] font-semibold text-emerald-300"
+                        className="inline-flex items-center gap-1.5 text-[12.5px] font-semibold text-emerald-300"
                       >
                         <Check className="h-3.5 w-3.5" />
                         Backenly fixed this
@@ -210,7 +210,7 @@ export function AdvisorBlock({
                   <span className="min-w-0 flex-1 truncate text-[12.5px] text-zinc-200">{g.title}</span>
                   {g.members.length > 1 && (
                     <span
-                      className="shrink-0 font-mono text-[10.5px] tabular-nums text-zinc-500"
+                      className="shrink-0 text-[12px] tabular-nums text-zinc-500"
                       title={g.subjects.join(', ')}
                     >
                       {g.members.length} affected
@@ -221,7 +221,7 @@ export function AdvisorBlock({
             })}
 
             {(foldedGroups > 0 || truncated) && (
-              <div className="px-3 pt-0.5 text-[11.5px] text-zinc-600">
+              <div className="px-3 pt-0.5 text-[12.5px] text-zinc-600">
                 {foldedGroups > 0 && (
                   <>
                     +{foldedGroups} more {foldedGroups === 1 ? 'issue' : 'issues'}
@@ -243,10 +243,10 @@ export function AdvisorBlock({
       {/* Hand-off — Overview reports, Autonomy acts. */}
       {total > 0 && (
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-white/[0.06] px-4 py-2.5">
-          <span className="text-[11.5px] text-zinc-500">
-            <span className="font-mono tabular-nums text-zinc-300">{total}</span>{' '}
+          <span className="text-[12.5px] text-zinc-500">
+            <span className="tabular-nums text-zinc-300">{total}</span>{' '}
             {total === 1 ? 'finding' : 'findings'} across{' '}
-            <span className="font-mono tabular-nums text-zinc-300">{groups.length}</span>
+            <span className="tabular-nums text-zinc-300">{groups.length}</span>
             {truncated ? '+' : ''}{' '}
             {groups.length === 1 ? 'issue' : 'issues'}
             {held > 0 && (
@@ -255,7 +255,7 @@ export function AdvisorBlock({
           </span>
           <button
             onClick={onReview}
-            className="ml-auto inline-flex h-7 items-center gap-1 rounded-md px-2 text-[11.5px] font-semibold text-violet-300 transition-colors hover:text-violet-200"
+            className="ml-auto inline-flex h-7 items-center gap-1 rounded-md px-2 text-[12.5px] font-semibold text-violet-300 transition-colors hover:text-violet-200"
           >
             Review and fix in Autonomy
             <ArrowUpRight className="h-3 w-3" />
@@ -270,7 +270,7 @@ export function AdvisorBlock({
 
 function SeverityChip({ sev }: { sev: { label: string; dot: string; text: string } }) {
   return (
-    <span className={`inline-flex items-center gap-1.5 font-mono text-[10px] font-semibold tabular-nums ${sev.text}`}>
+    <span className={`inline-flex items-center gap-1.5 text-[12px] font-semibold tabular-nums ${sev.text}`}>
       <span className={`h-[6px] w-[6px] rounded-full ${sev.dot}`} />
       {sev.label}
     </span>
@@ -279,7 +279,7 @@ function SeverityChip({ sev }: { sev: { label: string; dot: string; text: string
 
 function CategoryChip({ label }: { label: string }) {
   return (
-    <span className="text-[10px] font-medium uppercase tracking-[0.1em] text-zinc-600">{label}</span>
+    <span className="text-[12px] font-medium text-zinc-600">{label}</span>
   )
 }
 

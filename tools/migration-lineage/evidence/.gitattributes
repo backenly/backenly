@@ -1,0 +1,3 @@
+# Exact bytes of recovered evidence. No line-ending normalisation, or
+# SHA256SUMS stops describing the files it lists.
+* -text

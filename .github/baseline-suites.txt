@@ -1,0 +1,49 @@
+# Suites that RUN on a blocking CI job but are checked against
+# tests/baseline-failures.json instead of being required green.
+#
+# All 15 fail today. Before the baseline existed they could not be on any job:
+# the rule in suites-not-in-ci.txt was "a suite joins CI when it passes, not
+# before", because a permanently red job trains everyone to ignore CI. Recording
+# known failures BY NAME removes that tradeoff. The `baseline` job runs these on
+# every push and goes red only on a failure that is NEW, so a regression inside
+# an already-failing suite is no longer invisible.
+#
+# What this list is NOT: an excuse. Every entry is a real defect in the test or
+# the code that someone still has to decide about. Moving a suite here parks the
+# question; it does not answer it. Two worth singling out:
+#
+#   concurrency-convergence  9 of 10 concurrent mutations succeed where the
+#                            suite demands 10. This suite exists to prove no
+#                            mutation is lost under contention, so if the
+#                            assertion is right this is a real lost-mutation bug
+#                            in the retry path, not a flaky test.
+#
+#   monitoring               expects 10, receives a different count from
+#                            ApiRequestLog aggregation.
+#
+# MEASURED INDIVIDUALLY on 2026-09-04, and the CI job runs them one at a time
+# for the same reason. In a combined run these suites report 115 failures
+# between them; run alone they have 55. Several create and drop schemas, seed
+# findings and VACUUM, so sharing a database with each other and with the
+# blocking suites manufactures failures that do not exist. Never capture or
+# check this baseline from a single monolithic `npx jest` run.
+#
+# To re-measure after a deliberate fix:
+#   npx jest --runTestsByPath <suite> --ci --runInBand --forceExit \
+#     --json --outputFile=.jest-baseline/N.json || true
+#   npx tsx scripts/test-baseline.ts capture .jest-baseline/*.json
+__tests__/concurrency-convergence.test.ts
+__tests__/deterministic-executor.test.ts
+__tests__/invariants/mutation-safety.test.ts
+__tests__/lib/services/databaseBrain.test.ts
+__tests__/lib/services/monitoring.test.ts
+__tests__/load/concurrency.test.ts
+__tests__/load/execution-engine-performance.test.ts
+__tests__/suite2.relationships.test.ts
+__tests__/suite3.conflicts.test.ts
+__tests__/suite4.safety.test.ts
+__tests__/suite5.advisory.test.ts
+tests/error-communication.test.ts
+tests/field-extraction.test.ts
+tests/storage-provisioning.test.ts
+tests/timeline-granularity.test.ts

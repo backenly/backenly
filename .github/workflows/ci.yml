@@ -57,6 +57,14 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit -p tsconfig.json
 
+      # CONTRIBUTING.md and README.md both tell contributors to run this before
+      # a PR, but nothing enforced it, so main drifted to 17 lint errors and the
+      # first command a new contributor ran failed on code they never touched
+      # (#8). `next build` cannot catch it either: next.config.js sets
+      # eslint.ignoreDuringBuilds. Only running it here keeps it green.
+      - name: Lint
+        run: npm run lint
+
       # Under PostgREST the API IS the schema, so an ApiDefinition row decides
       # nothing — it is a second, writable copy of a fact the PostgreSQL catalog
       # already owns, and the only thing a second copy can do is disagree. It
@@ -67,30 +75,204 @@ jobs:
       - name: No ApiDefinition write paths
         run: npx tsx scripts/assert-no-apidefinition-writes.ts
 
+      # The suite manifests below were written when the tree held 156 suites and
+      # nothing recomputed the arithmetic as it grew. By 2026-09-04 twelve suites
+      # belonged to NO category: not blocking, not baselined, not excluded with a
+      # reason. They guarded the billing grace lifecycle, project deletion, the
+      # purge outbox, privacy-page integrity and the API-key plaintext fix, and
+      # no job ran any of them.
+      #
+      # That is the same defect suites-not-in-ci.txt was created to fix, returning
+      # by decay: a hand-maintained list stops matching reality the moment someone
+      # adds a test without editing it. Naming them once was never going to hold.
+      # This makes the claim falsifiable on every push instead.
+      - name: Suite accounting balances
+        run: npx tsx scripts/verify-suite-accounting.ts
+
+      # A route that accepts a resource identifier and never authorizes the
+      # caller is the exact shape that let any authenticated account read
+      # another tenant's schema snapshots and roll back their schema. That
+      # route had no UI, which is why nothing noticed for as long as it
+      # existed.
+      #
+      # This is a ratchet over a reviewed baseline, not a clean-tree claim: the
+      # routes already carrying that shape are listed and being worked through,
+      # and a NEW one cannot be added without either fixing it or writing down
+      # why the shape is correct there. It also fails when a baseline entry
+      # stops being flagged, so the list cannot quietly go stale.
+      - name: No new unauthorized-by-shape routes
+        run: npx tsx scripts/audit-route-authorization.ts --check
+
+      # Express 4 does not await its handlers, so an async one that rejects
+      # never reaches the global error middleware: it becomes an unhandled
+      # rejection and the runtime process EXITS. A PostgreSQL restart did
+      # exactly that, and every /api/v1/* surface stayed down afterwards.
+      #
+      # Thirty-nine call sites were fixed mechanically. This is here so the
+      # fortieth cannot be added by someone who has never heard of the problem,
+      # which is the only way a mechanical fix survives a codebase.
+      - name: Every runtime route goes through asyncRoute
+        run: npx tsx scripts/audit-async-routes.ts
+
+      # The repository had accumulated ~70 independent answers to "may this
+      # caller reach this project", and the owner-only one won on volume, so an
+      # invited organization member was denied storage, logs, monitoring,
+      # security issues and env vars. A request naming no project resolved to
+      # the caller's OLDEST OWNED one and answered 200 with another project's
+      # data.
+      #
+      # That will not come back as a rewrite. It comes back one route at a
+      # time, each looking locally reasonable. This fails the build on the
+      # shape itself.
+      - name: One authority for project access
+        run: npx tsx scripts/verify-project-authorization.ts
+
+      # A Project row is not a project. Two live connect routes created bare
+      # rows with no workspace schema and no PostgREST registration, so a user
+      # connecting a frontend got a project whose data plane answered PGRST106
+      # forever. One owned it to `userId: 'system'`, which is not a user id.
+      - name: One creation path for projects
+        run: npx tsx scripts/verify-project-provisioning.ts
+
+      # Backenly ships as this public repository plus a private Cloud overlay
+      # that only ever ADDS files. The moment the overlay can overwrite a
+      # tracked public file, the public tree stops being a truthful description
+      # of what Cloud runs, and an OSS reader can no longer tell which behaviour
+      # is theirs. overlay-allowlist.json is the ownership map; this is what
+      # makes it falsifiable.
+      #
+      # STRICT since Phase 8. From Phase 4 to Phase 7 this ran in transition
+      # mode, grandfathering BY NAME the public files that still sat under paths
+      # the overlay would eventually own; that list went 73 -> 14 -> 0 as Phase 6
+      # moved the back office and Phase 7 the control plane, and the exemption
+      # mechanism went with it. Strict means what it says: ANY public file
+      # tracked under a private-owned path fails, and there is no way to spell
+      # an exception.
+      #
+      # The verifier is unchanged. --strict was already passing at the end of
+      # Phase 7, so this switched a policy rather than fixing a check, and its
+      # negative test (an allowlist claiming lib/usage/**) is what keeps strict
+      # mode from being vacuously green.
+      - name: Overlay ownership boundary
+        run: npx tsx scripts/verify-overlay-boundary.ts --strict
+
+      # The boundary verifier answers "may the overlay own this path". This
+      # answers the harder question: when it refuses, does the working tree come
+      # through untouched? A script that validated and copied file by file would
+      # pass every path check and still leave a half-composed checkout, which is
+      # neither the public product nor Cloud and which builds perfectly happily.
+      #
+      # REQUIRE=1 so the symlink-escape case FAILS here instead of skipping. It
+      # skips on Windows, where symlinks need a privilege, and a green tick that
+      # quietly checked nothing is the failure mode this repository keeps
+      # relearning.
+      - name: Overlay applies add-only, or not at all
+        env:
+          OVERLAY_APPLY_REQUIRE: '1'
+        run: bash scripts/test/overlay-apply.sh
+
+      # Cloud is the public repository plus the private overlay. Every way that
+      # can go wrong — the private repo unreachable, the two revisions written
+      # against each other, an overlay that would clobber public source — has to
+      # stop the deploy while the previous build is still serving, not halfway
+      # through a .next swap. Real git repositories over file:// remotes; no
+      # production host is contacted and deploy.sh is only read, never run.
+      - name: Cloud deploy composes before it builds
+        run: bash scripts/test/deploy-composition.sh
+
+      # An acceptance install on a clean Ubuntu 24.04 machine stopped here:
+      # `psql -f <path>` makes the postgres user open the file, and Ubuntu home
+      # directories are 0750, so a normal clone was unreadable. This builds that
+      # exact situation with two users and asserts the old form still fails.
+      # A jest test cannot do it — it needs POSIX permissions and a second user.
+      - name: SQL installs from a 0750 home directory
+        # REQUIRE=1 so a missing prerequisite fails here instead of skipping and
+        # leaving a green tick that checked nothing.
+        env:
+          SQL_FILE_ACCESS_REQUIRE: '1'
+        run: bash scripts/test/sql-file-access.sh
+
       # tests/unit is deliberately database-free so it runs on every push.
       # docs-install-command.spec.ts is the one that fails when public/llms.txt
       # and the MCP CLI parser drift apart — the defect that made the published
       # install command unusable. It only protects anything if it runs here.
-      - name: Unit tests
-        run: npx jest tests/unit --ci --verbose
+      # tests/unit/mcp-transport-parity.spec.ts drives the BUILT stdio package
+      # against the remote endpoint, so it is built here from its own lockfile,
+      # as npm ships it. The suite fails, rather than skips, when it is missing.
+      - name: Build the stdio MCP package for the transport parity suite
+        run: |
+          npm ci --prefix packages/mcp-server
+          npm run build --prefix packages/mcp-server
 
-      # The self-healing guards. These are database-free too and were simply
-      # never listed, so nothing ran them on push — and two had gone red in the
-      # tree without anyone finding out:
+      - name: Unit tests
+        run: npx jest tests/unit --ci --verbose --json --outputFile=jest-unit.json
+
+      # Read by the acceptance job, which judges each MCP acceptance case from
+      # the tests that ran here rather than running anything itself.
+      - name: Keep the unit results for the acceptance matrix
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jest-unit
+          path: jest-unit.json
+          if-no-files-found: ignore
+
+      # tests/unit was not the only database-free suite, it was just the only
+      # one anyone had pointed CI at. jest resolves 157 suites; the four paths
+      # this workflow names cover 92, and the remaining 65 were not excluded on
+      # purpose — no comment here mentions them either way (#7).
       #
-      #   • autonomy-is-model-free was reading auto-fix-engine.ts for a repair
-      #     map that had moved to fix-actions.ts. It failed its own
-      #     "did the regex match anything" guard, and while it failed it was also
-      #     no longer watching the file where a model call could actually enter
-      #     the repair path.
-      #   • tests/core holds the trust guarantees — post-fix verification
-      #     coverage, fix classification, repair conformance. All passing, all
-      #     unenforced.
+      # 31 of those need no database, including the tenant-isolation,
+      # admin-step-up, ai-data-access, rbac, middleware, webhook-security and
+      # security-isolation suites. Every one of them guards a boundary this
+      # repository treats as non-negotiable, and none of them ran on any push.
+      # They cost ~22s against the unroutable URL above.
       #
-      # Autonomy is the product's differentiator. Its guards belong on the
-      # blocking path, not in a directory someone remembers to run by hand.
-      - name: Autonomy guards
-        run: npx jest tests/core __tests__/autonomy --ci --verbose
+      # The list lives in a file, not inline here, because the set is not a
+      # directory: several directories hold both kinds, so a path pattern would
+      # drag database-backed suites onto this job and make it permanently red —
+      # the exact failure the tests/core note below describes.
+      #
+      # The rest were then measured against a real Postgres, individually. 10
+      # fail without a database and pass with one; they run in `integration`
+      # below. proposals.test.ts needed no database once its dead import was
+      # removed and joined this list. CI now runs 134 of 156 suites.
+      #
+      # The 22 still unrun are named, with the measured reason for each, in
+      # .github/suites-not-in-ci.txt. That file is the actual fix for #7: the
+      # defect was never that suites failed, it was that unrun suites were
+      # named nowhere, so nothing could report them missing.
+      - name: Database-free suites outside tests/unit
+        run: |
+          set -euo pipefail
+          # A renamed or deleted suite must fail loudly here. Passed to jest as
+          # a bare path, it would simply match nothing and this step would stay
+          # green while testing less than it claims to.
+          SUITES=()
+          while IFS= read -r f; do
+            [ -f "$f" ] || { echo "listed suite no longer exists: $f"; exit 1; }
+            SUITES+=("$f")
+          done < <(grep -vE '^[[:space:]]*(#|$)' .github/database-free-suites.txt)
+          echo "running ${#SUITES[@]} database-free suites"
+          npx jest --runTestsByPath "${SUITES[@]}" --ci --verbose \
+            --json --outputFile=jest-static.json
+          node scripts/assert-no-skipped-suites.js jest-static.json
+
+      # `tests/core` used to run HERE, and it could never have passed.
+      #
+      # The step was added on the belief that tests/core was database-free. It
+      # never was: auto-fix-integration and auto-fix-approve-coverage each carry
+      # a "Part 2 (real DB)" section that seeds HealthFinding rows and drives the
+      # executor, and AGENTS.md forbids mocking the database at all ("mocks have
+      # caused prod incidents"). Pointed at the deliberately unroutable URL above,
+      # those suites could only ever fail.
+      #
+      # So CI went red on every single push, for weeks, on a failure nobody had
+      # introduced — which is worse than not running the guards at all. A red
+      # that is always red carries no information, and the emails train everyone
+      # to ignore the one push where something genuinely broke.
+      #
+      # They now run in the `autonomy` job below, against a real Postgres.
 
   # ── MCP server package ──────────────────────────────────────────────────────
   secrets:
@@ -127,6 +309,12 @@ jobs:
         run: |
           npm install
           npm run build
+      # Drives the BUILT entrypoint over stdio with the official MCP client, in
+      # both protocol eras, and over raw JSON-RPC. It needs this package's own
+      # dependencies, which the root install in the static job does not have.
+      - name: The built server speaks both eras and recovers a catalog that failed at boot
+        working-directory: packages/mcp-server
+        run: npm test
       - name: Verify the published entrypoint parses its documented flags
         working-directory: packages/mcp-server
         run: |
@@ -143,6 +331,254 @@ jobs:
           "
 
   # ── Database-backed ─────────────────────────────────────────────────────────
+  # The second half of #7: suites that were never named in any job and need a
+  # real database to run at all.
+  #
+  # Entry requirement is a measurement, not a judgement. Each suite here was run
+  # twice — against the unroutable placeholder the `static` job uses, and against
+  # a real PostgreSQL 16 — and appears in this job only because it FAILS without
+  # a database and PASSES with one. A suite that passes both ways belongs in
+  # `static`; putting it here would spend a service container proving nothing.
+  #
+  # Two of these could not have passed in ANY environment before this job
+  # existed. concurrency-convergence and pointer-swap-concurrency hardcoded
+  # postgresql://postgres:pass@localhost:5432/nexa — the pre-rename database
+  # name — and overwrote DATABASE_URL with it at module load. They failed with
+  # PrismaClientInitializationError everywhere, which reads as "needs a
+  # database" and is why #7 first filed them that way. They needed one specific
+  # -- The product default, built -------------------------------------------
+  #
+  # Phase 8 made an unset BACKENLY_EDITION mean single-tenant. This job is the
+  # proof that a fresh public clone builds that way with NOTHING configured,
+  # which is the claim the whole OSS story rests on.
+  #
+  # The absence of the variable is DELIBERATE here, not incidental:
+  #
+  #   - the job never writes a .env, and .env is gitignored and untracked, so a
+  #     fresh checkout cannot be carrying one. That matters because
+  #     .env.example DOES set BACKENLY_EDITION=single-tenant for self-hosters,
+  #     and `cp .env.example .env` would quietly turn this into an explicit-
+  #     edition build that proves nothing about the default.
+  #   - the first step asserts the variable is genuinely unset and no .env
+  #     exists, so this cannot pass because a runner happened to export it.
+  #
+  # A separate explicit single-tenant build already runs in the self-host job.
+  # This one exists only to test the DEFAULT.
+  default-oss-build:
+    name: default OSS build (edition unset)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # JWT_SECRET only, and deliberately nothing else.
+    #
+    # It is a fundamental application security prerequisite: five modules read
+    # it at import time and every real deployment sets it, so supplying a
+    # throwaway value here does not weaken what this job proves. The value is
+    # not secret-shaped and grants nothing.
+    #
+    # OPENAI_API_KEY is deliberately ABSENT. It was the second blocker this job
+    # found, and injecting a fake key would have made the build pass while
+    # permanently encoding an implementation accident: an optional AI feature
+    # making itself a build-time requirement. lib/services/aiWorkspace.ts
+    # constructs its client lazily instead, so an OSS build needs no AI
+    # credential at all. Do not add one here to fix a future failure without
+    # first asking whether the module should have required it.
+    env:
+      JWT_SECRET: phase8-ci-placeholder-not-a-real-secret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+
+      - name: nothing is supplying an edition
+        run: |
+          set -euo pipefail
+          if [ -n "${BACKENLY_EDITION:-}" ]; then
+            echo "BACKENLY_EDITION is set to '${BACKENLY_EDITION}' - this job must run with it UNSET"
+            exit 1
+          fi
+          if [ -f .env ]; then
+            echo ".env exists in a fresh checkout; it could supply BACKENLY_EDITION and void this proof"
+            exit 1
+          fi
+          echo "no BACKENLY_EDITION in the environment, no .env in the tree"
+
+      - name: the default really is single-tenant
+        run: |
+          set -euo pipefail
+          npx tsx -e "
+            const { currentEdition } = require('./lib/edition');
+            const e = currentEdition();
+            if (e !== 'single-tenant') { console.error('unset edition resolved to ' + e); process.exit(1); }
+            console.log('unset edition resolves to single-tenant');
+          "
+
+      - name: a self-host install needs no private overlay
+        run: npx tsx scripts/verify-cloud-composition.ts --expect absent
+
+      - run: npx prisma generate
+
+      - name: Typecheck
+        run: npx tsc --noEmit -p tsconfig.json
+
+      # The flagship proof. No edition, no overlay, no private repository.
+      - name: Build
+        run: npm run build
+
+  # dead database. They now use TEST_DATABASE_URL like everything else.
+  integration:
+    name: integration suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: backenly_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      # The auth limiter's shared store.
+      #
+      # tests/integration/rate-limit-shared-store.spec.ts proves that two app
+      # instances spend ONE budget, which is a claim about Redis's own INCR and
+      # PEXPIRE semantics across two connections. A mock would be asserting the
+      # mock, so the suite FAILS rather than skips when REDIS_URL is unset -
+      # a skipped shared-store test is worse than none, because the tick beside
+      # it says the multi-instance claim was checked.
+      redis:
+        image: redis:7
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/backenly_test
+      DIRECT_URL: postgresql://postgres:postgres@localhost:5432/backenly_test
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/backenly_test
+      REDIS_URL: redis://localhost:6379
+      JWT_SECRET: ci-not-a-real-secret
+      # Keep the workspace pools inside a default Postgres.
+      #
+      # lib/services/workspace-pool.ts keeps one pool PER PROJECT, defaulting to
+      # 50 pools of 5 connections. That is 250 connections; postgres:16 ships
+      # max_connections=100. A suite that touches enough distinct projects
+      # therefore exhausts the server and fails with "sorry, too many clients
+      # already" from whichever query happens to run next - which is why the
+      # failures landed in computeSubsystems rather than anywhere near the
+      # cause.
+      #
+      # Product runtime is unaffected: a self-hosted deployment is one project
+      # and one pool. This is a test-environment budget, set where it applies.
+      WORKSPACE_POOL_MAX: '2'
+      WORKSPACE_POOL_MAX_POOLS: '8'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # selfhost-upgrade.spec.ts builds a genuine OLD install from an
+          # earlier release's own schema.prisma, so it needs that commit. The
+          # default shallow clone does not have it, and fetching a bare SHA
+          # afterwards depends on what the remote is willing to serve - it
+          # failed here with nothing but "Command failed: git fetch".
+          #
+          # Asking for the history up front removes the network step from the
+          # test entirely. The suite keeps its own fallback for a contributor
+          # working in a shallow clone, but CI no longer relies on it.
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Push schema to the test database
+        run: npx prisma db push --accept-data-loss --skip-generate
+      - run: npx prisma generate
+
+      # --runInBand: these share one database and several seed and delete the
+      # same User and Project rows. --forceExit for the same Prisma-singleton
+      # reason as the probe and autonomy suites.
+      - name: Database-backed suites
+        run: |
+          set -euo pipefail
+          # A renamed or deleted suite must fail loudly rather than silently
+          # matching nothing and leaving this job green while testing less than
+          # it claims to.
+          SUITES=()
+          while IFS= read -r f; do
+            [ -f "$f" ] || { echo "listed suite no longer exists: $f"; exit 1; }
+            SUITES+=("$f")
+          done < <(grep -vE '^[[:space:]]*(#|$)' .github/database-backed-suites.txt)
+          echo "running ${#SUITES[@]} database-backed suites"
+          npx jest --runTestsByPath "${SUITES[@]}" --ci --runInBand --verbose --forceExit \
+            --json --outputFile=jest-integration.json
+          node scripts/assert-no-skipped-suites.js jest-integration.json
+
+      - name: Keep the integration results for the acceptance matrix
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jest-integration
+          path: jest-integration.json
+          if-no-files-found: ignore
+
+  # The MCP acceptance matrix (scripts/mcp-acceptance). Runs no tests of its
+  # own: each case names the tests that prove it, and this reads the results the
+  # jobs above wrote. A case whose tests failed, were skipped, or did not run is
+  # FAIL, never PASS, and cases only the final AWS staging image can show are
+  # listed as DEFERRED_TO_FINAL_STAGING_RELEASE_GATE with the command to run.
+  # `if: always()` so a failed job still produces the matrix that says why.
+  acceptance:
+    name: MCP acceptance matrix
+    needs: [static, integration, mcp-server]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Fetch the unit results
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: jest-unit
+          path: acceptance-input
+      - name: Fetch the integration results
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: jest-integration
+          path: acceptance-input
+      - name: Build the matrix
+        run: |
+          npx tsx scripts/mcp-acceptance/matrix.ts \
+            --unit acceptance-input/jest-unit.json \
+            --integration acceptance-input/jest-integration.json \
+            --job mcp-server=${{ needs.mcp-server.result }} \
+            --require-all --out acceptance-matrix
+      - name: Show the matrix
+        if: always()
+        run: '[ -f acceptance-matrix/acceptance-matrix.md ] && cat acceptance-matrix/acceptance-matrix.md >> "$GITHUB_STEP_SUMMARY" || true'
+      - name: Keep the matrix
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-matrix
+          path: acceptance-matrix/
+          if-no-files-found: ignore
+
   # Probe fixtures construct a violating state directly and assert the probe
   # FIRES. A probe that has never been observed producing a finding is presumed
   # broken, not healthy — detectMissingRls sat dead in every environment and
@@ -172,6 +608,20 @@ jobs:
       # fixtures create and drop their own schema inside it.
       TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/backenly_test
       JWT_SECRET: ci-not-a-real-secret
+      # Keep the workspace pools inside a default Postgres.
+      #
+      # lib/services/workspace-pool.ts keeps one pool PER PROJECT, defaulting to
+      # 50 pools of 5 connections. That is 250 connections; postgres:16 ships
+      # max_connections=100. A suite that touches enough distinct projects
+      # therefore exhausts the server and fails with "sorry, too many clients
+      # already" from whichever query happens to run next - which is why the
+      # failures landed in computeSubsystems rather than anywhere near the
+      # cause.
+      #
+      # Product runtime is unaffected: a self-hosted deployment is one project
+      # and one pool. This is a test-environment budget, set where it applies.
+      WORKSPACE_POOL_MAX: '2'
+      WORKSPACE_POOL_MAX_POOLS: '8'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -187,3 +637,730 @@ jobs:
       # handles after a fully successful run.
       - name: Probe fixture suite
         run: npx jest tests/probes --ci --runInBand --verbose --forceExit
+
+  # ── Known-failure baseline ──────────────────────────────────────────────────
+  # These 15 suites fail today. Until now that meant they could not be on any
+  # job at all: this file already carries the lesson that "a red that is always
+  # red carries no information", and suites-not-in-ci.txt states the rule it
+  # produced, that a suite joins CI when it passes and not before.
+  #
+  # A name-level baseline changes that calculus. tests/baseline-failures.json
+  # records every currently failing test BY NAME, so this job goes red only on a
+  # failure that is NEW. The known ones stay known, the suites finally run on
+  # every push, and a regression inside an already-failing suite stops being
+  # invisible. Comparing counts could not do this: 259 before and 259 after is
+  # equally true of a change that broke nothing and one that fixed nine tests
+  # while breaking nine others.
+  #
+  # EACH SUITE RUNS ALONE, and that is not a performance choice. Measured on
+  # 2026-09-04: run together against one shared database, these suites and the
+  # blocking ones invent failures wholesale — tests/probes/rls-isolation.spec.ts
+  # reported 11 failures in a combined run and passes 11/11 by itself, and three
+  # further suites reported 61 failures between them while passing completely
+  # alone. Several here create and drop schemas, seed findings and VACUUM. A
+  # baseline captured from a combined run would have recorded the RLS isolation
+  # probes and the autonomy engine as known-broken, which is exactly the
+  # coverage the baseline exists to protect.
+  baseline:
+    name: known-failure baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: backenly_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/backenly_test
+      DIRECT_URL: postgresql://postgres:postgres@localhost:5432/backenly_test
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/backenly_test
+      JWT_SECRET: ci-not-a-real-secret
+      # Keep the workspace pools inside a default Postgres.
+      #
+      # lib/services/workspace-pool.ts keeps one pool PER PROJECT, defaulting to
+      # 50 pools of 5 connections. That is 250 connections; postgres:16 ships
+      # max_connections=100. A suite that touches enough distinct projects
+      # therefore exhausts the server and fails with "sorry, too many clients
+      # already" from whichever query happens to run next - which is why the
+      # failures landed in computeSubsystems rather than anywhere near the
+      # cause.
+      #
+      # Product runtime is unaffected: a self-hosted deployment is one project
+      # and one pool. This is a test-environment budget, set where it applies.
+      WORKSPACE_POOL_MAX: '2'
+      WORKSPACE_POOL_MAX_POOLS: '8'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Push schema to the test database
+        run: npx prisma db push --accept-data-loss --skip-generate
+      - run: npx prisma generate
+
+      - name: Baseline suites, one at a time
+        run: |
+          set -euo pipefail
+          mkdir -p .jest-baseline
+          i=0
+          while IFS= read -r f; do
+            [ -f "$f" ] || { echo "listed suite no longer exists: $f"; exit 1; }
+            i=$((i+1))
+            # `|| true`: jest exits non-zero on a failing suite, which is the
+            # NORMAL case here. The report is still written, and the baseline
+            # check below is what decides pass or fail.
+            npx jest --runTestsByPath "$f" --ci --runInBand --forceExit \
+              --json --outputFile=".jest-baseline/$i.json" || true
+          done < <(grep -vE '^[[:space:]]*(#|$)' .github/baseline-suites.txt)
+          echo "ran $i baseline suite(s) individually"
+          npx tsx scripts/test-baseline.ts check .jest-baseline/*.json
+
+  # ── The self-healing guards ─────────────────────────────────────────────────
+  # Autonomy is the product's differentiator, so its guards belong on the
+  # blocking path. They need a real database — see the note in `static`.
+  #
+  # Two PostgreSQL extensions are set up before the suite runs, and they are not
+  # optional decoration: several probes measure rather than infer, and their
+  # tests ASSERT the extension is present instead of skipping. That is
+  # deliberate. The hot-table suite first shipped green while every assertion in
+  # it was silently skipped for a missing extension — a test that cannot fail is
+  # worse than no test, because the suite spends its credibility vouching for it.
+  autonomy:
+    name: autonomy guards
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: backenly_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/backenly_test
+      DIRECT_URL: postgresql://postgres:postgres@localhost:5432/backenly_test
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/backenly_test
+      JWT_SECRET: ci-not-a-real-secret
+      # Keep the workspace pools inside a default Postgres.
+      #
+      # lib/services/workspace-pool.ts keeps one pool PER PROJECT, defaulting to
+      # 50 pools of 5 connections. That is 250 connections; postgres:16 ships
+      # max_connections=100. A suite that touches enough distinct projects
+      # therefore exhausts the server and fails with "sorry, too many clients
+      # already" from whichever query happens to run next - which is why the
+      # failures landed in computeSubsystems rather than anywhere near the
+      # cause.
+      #
+      # Product runtime is unaffected: a self-hosted deployment is one project
+      # and one pool. This is a test-environment budget, set where it applies.
+      WORKSPACE_POOL_MAX: '2'
+      WORKSPACE_POOL_MAX_POOLS: '8'
+      PGPASSWORD: postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+
+      # pg_stat_statements needs shared_preload_libraries, which needs a server
+      # RESTART — a service container cannot be given a `command`, so the setting
+      # is written with ALTER SYSTEM and the container is bounced. pgstattuple
+      # needs neither and is created alongside it.
+      - name: Enable the measurement extensions
+        run: |
+          set -euo pipefail
+          psql "$DATABASE_URL" -c "ALTER SYSTEM SET shared_preload_libraries = 'pg_stat_statements';"
+          docker restart "${{ job.services.postgres.id }}"
+          for _ in $(seq 1 30); do
+            pg_isready -h localhost -p 5432 -U postgres && break
+            sleep 2
+          done
+          psql "$DATABASE_URL" -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;"
+          psql "$DATABASE_URL" -c "CREATE EXTENSION IF NOT EXISTS pgstattuple;"
+          # Assert rather than hope. If either is missing the suites below fail
+          # with a confusing measurement error instead of naming the real cause.
+          psql "$DATABASE_URL" -tAc \
+            "SELECT count(*) FROM pg_extension WHERE extname IN ('pg_stat_statements','pgstattuple')" \
+            | grep -qx 2 || { echo "measurement extensions missing"; exit 1; }
+
+      - name: Push schema to the test database
+        run: npx prisma db push --accept-data-loss --skip-generate
+      - run: npx prisma generate
+
+      # --runInBand: these suites share one database and several of them VACUUM.
+      # Run in parallel, one suite's open snapshot pins the vacuum horizon and a
+      # neighbour's "delete rows, vacuum, expect sparse" fixture legitimately
+      # cannot become sparse. Serial is also simply correct on a 2-core runner.
+      # --forceExit for the same Prisma-singleton reason as the probe suite.
+      - name: Autonomy guards
+        run: npx jest tests/core __tests__/autonomy --ci --runInBand --verbose --forceExit
+
+  # ── The documented self-host path, executed ────────────────────────────────
+  # Reading the README is not evidence that it works. Every self-host defect
+  # found so far — a rotated credential, a hardcoded application role, a
+  # fresh-cluster role deadlock, a quickstart that never reached a data plane,
+  # and a psql that could not read its own SQL under a 0750 home — was invisible
+  # to review and obvious the moment someone ran it.
+  #
+  # So this runs the quickstart the way the README writes it, on the Compose
+  # stack, up to a PostgREST that answers. MCP, end-user auth, storage and
+  # autonomy still need a real machine; everything before them no longer does.
+  self-host:
+    name: self-host quickstart
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+
+      # README step 1. `.env.example` already points DATABASE_URL at the Compose
+      # stack, so only the lines the README says to add are added here.
+      - name: Configure .env as the README directs
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+          # BACKENLY_EDITION is NOT appended here. The template already carries
+          # single-tenant, and the README no longer tells anyone to add it, so
+          # appending would test a path the documentation does not describe.
+          {
+            echo "BACKENLY_PROJECT_ID=$(cat /proc/sys/kernel/random/uuid)"
+            echo "JWT_SECRET=$(openssl rand -hex 32)"
+            echo "POSTGREST_JWT_SECRET=$(openssl rand -hex 32)"
+          } >> .env
+
+      - name: docker compose up
+        run: |
+          set -euo pipefail
+          # postgrest is deliberately left down: it has no credential until the
+          # prerequisite step issues one, and starting it here would only prove
+          # that it restarts in a loop.
+          docker compose -f docker-compose.dev.yml up -d postgres redis
+          # Waits on a real query, not pg_isready. The entrypoint runs initdb
+          # against a TEMPORARY server on the unix socket, so a socket
+          # pg_isready reports ready seconds before the real server exists and
+          # the next step then fails with "rejecting connections".
+          for i in $(seq 1 90); do
+            if docker compose -f docker-compose.dev.yml exec -T postgres \
+                 psql -h 127.0.0.1 -U backenly_user -d backenly -tAc 'select 1' >/dev/null 2>&1; then
+              echo "postgres accepting queries after ${i}s"; break
+            fi
+            sleep 1
+          done
+          docker compose -f docker-compose.dev.yml exec -T postgres \
+            psql -h 127.0.0.1 -U backenly_user -d backenly -tAc 'select 1'
+
+      # README step 3.
+      - name: db:generate and db:push
+        run: npm run db:generate && npm run db:push
+
+      # A self-hosted install must work with NO private repository, on a machine
+      # that has never heard of backenly-cloud. This is that claim, asserted on
+      # the real clean-machine path rather than in a unit test with a temporary
+      # directory: the composition state must be `absent` and the process must
+      # still be willing to start. --expect makes it impossible to pass by
+      # reaching the right verdict for the wrong reason.
+      - name: a self-host install needs no private overlay
+        run: npx tsx scripts/verify-cloud-composition.ts --expect absent
+
+      # The same checkout, asked to be Cloud, must refuse. If this ever exits 0
+      # the fail-closed guarantee is gone and a Cloud process could serve
+      # multi-tenant traffic with single-tenant tenancy rules.
+      - name: the same checkout refuses to run as cloud
+        run: |
+          set -euo pipefail
+          if BACKENLY_EDITION=cloud npx tsx scripts/verify-cloud-composition.ts; then
+            echo "cloud started without its private overlay - fail-closed is broken"
+            exit 1
+          fi
+          echo "cloud correctly refused without the private overlay"
+
+      - name: bootstrap reports NOT ready, with exit 3
+        run: |
+          set -euo pipefail
+          set +e
+          npm run bootstrap > boot1.log 2>&1
+          code=$?
+          set -e
+          cat boot1.log
+          # 3 is the documented first-run outcome. 0 here would mean the
+          # prerequisites were somehow already met, which on a fresh stack would
+          # mean the check is not checking anything.
+          [ "$code" -eq 3 ] || { echo "expected exit 3, got $code"; exit 1; }
+
+      # README step 4, in order.
+      - name: install the support objects and the PostgREST roles
+        run: bash scripts/postgrest-install.sh
+
+      - name: issue the authenticator password and the per-schema grants
+        run: |
+          set -euo pipefail
+          PID=$(grep -E '^BACKENLY_PROJECT_ID=' .env | cut -d= -f2)
+          npx tsx scripts/setup-postgrest-roles.ts --project "$PID" --apply | tee roles.log
+          # The password is printed exactly once and is not recoverable, which is
+          # why it is captured here rather than regenerated.
+          PW=$(grep -oP 'postgres://backenly_authenticator:\K[^@]+' roles.log | head -1)
+          [ -n "$PW" ] || { echo "no authenticator password in the output"; exit 1; }
+          echo "POSTGREST_AUTHENTICATOR_PASSWORD=$PW" >> .env
+
+      - name: start the data plane
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose.dev.yml up -d postgrest
+          for i in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:3002/ 2>/dev/null; then
+              echo "postgrest answering after ${i}s"; break
+            fi
+            sleep 2
+          done
+
+      - name: bootstrap reports READY, with exit 0
+        run: |
+          set -euo pipefail
+          set +e
+          npm run bootstrap > boot2.log 2>&1
+          code=$?
+          set -e
+          cat boot2.log
+          [ "$code" -eq 0 ] || { echo "expected exit 0, got $code"; exit 1; }
+          grep -q "Backenly is ready" boot2.log || { echo "did not report ready"; exit 1; }
+          # Direct database access is deliberately NOT installed at this point.
+          # Proving that the step the README calls optional really is optional is
+          # the point: it used to be tracked as a hard prerequisite, so exit 0 was
+          # unreachable for anyone who skipped it. It must still be REPORTED,
+          # because "ready" must not mean "silent about what is missing".
+          grep -q "Optional, not installed" boot2.log || {
+            echo "the optional piece was not reported at all"; exit 1; }
+          grep -q "database access is unavailable" boot2.log || {
+            echo "direct access was not reported as the missing optional piece"; exit 1; }
+
+      - name: PostgREST is reachable and serving the workspace schema
+        run: |
+          set -euo pipefail
+          PID=$(grep -E '^BACKENLY_PROJECT_ID=' .env | cut -d= -f2)
+
+          # Ask PostgREST for the WORKSPACE schema, not just for a 200 on the
+          # default one. Accept-Profile is how a schema is selected, and one that
+          # is missing from the served list answers PGRST106 — the exact "data
+          # plane is up but serves nothing" state this job exists to catch. A
+          # healthy container proves only that a process is listening.
+          code=$(curl -s -o pgrst.json -w '%{http_code}' \
+            -H "Accept-Profile: workspace_${PID}" http://127.0.0.1:3002/)
+          echo "  postgrest workspace_${PID} -> ${code}"
+          if grep -q PGRST106 pgrst.json; then
+            echo "  PGRST106: the workspace schema is not exposed"; cat pgrst.json; exit 1
+          fi
+          [ "$code" = "200" ] || { cat pgrst.json; exit 1; }
+          # The registry writes the served-schema list onto the authenticator
+          # role. If registration silently did nothing, this is empty and every
+          # table would answer PGRST106.
+          SCHEMAS=$(docker compose -f docker-compose.dev.yml exec -T postgres \
+            psql -U backenly_user -d backenly -tAc \
+            'SELECT public.backenly_pgrst_current_schemas()' | tr -d '[:space:]')
+          echo "  served schemas: $SCHEMAS"
+          echo "$SCHEMAS" | grep -q "workspace_${PID}" || {
+            echo "workspace_${PID} is not registered"; exit 1; }
+
+      # Exercises install-sql.sh on the real path, in docker mode, and proves the
+      # advisory is a real signal rather than a permanent line of text.
+      - name: the optional piece installs, and its advisory clears
+        run: |
+          set -euo pipefail
+          bash scripts/install-sql.sh scripts/setup-direct-access.sql
+          npm run bootstrap > boot3.log 2>&1
+          cat boot3.log
+          grep -q "Backenly is ready" boot3.log
+          # Only the DIRECT ACCESS advisory must clear. The anon-key one stays,
+          # because no human has signed up on a CI runner and a script cannot
+          # create an account. Asserting the whole block disappears would be
+          # asserting something untrue.
+          if grep -q "database access is unavailable" boot3.log; then
+            echo "the direct access advisory did not clear after installing it"; exit 1
+          fi
+          grep -q "anon key" boot3.log || {
+            echo "the anon key advisory vanished; it should still be reported"; exit 1; }
+          grep -q "direct access role" boot3.log || {
+            echo "direct access roles were never provisioned"; exit 1; }
+          echo "  direct access provisioned, advisory cleared"
+
+      - name: a further bootstrap changes nothing
+        run: |
+          set -euo pipefail
+          npm run bootstrap > boot4.log 2>&1
+          cat boot4.log
+          grep -q "Backenly is ready" boot4.log
+          # The reconciler claim, asserted rather than described.
+          #
+          # `if grep; then fail; fi`, never `grep && fail`: under `set -e` a grep
+          # that finds nothing returns 1, the && chain yields 1, and the step
+          # dies on the SUCCESS path.
+          if grep -qE '^\s+\S.*\s+created$' boot4.log; then
+            echo "a rerun created something:"; grep -E 'created$' boot4.log; exit 1
+          fi
+          echo "  rerun created nothing"
+
+      - name: compose logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.dev.yml logs --tail=80
+
+  # The one-command install, on a machine that has never run Backenly.
+  #
+  # The sibling `self-host` job walks the README step by step and is the
+  # authority on the DOCUMENTED path. This one asserts the single command
+  # actually replaces it, because "one command" is a claim about what an
+  # operator types, and the only honest test of it is typing that and nothing
+  # else. No .env is written here, no secret is exported, no step is performed
+  # on the installer's behalf: a clean clone, `npm ci`, then the command.
+  self-host-one-command:
+    name: self-host one command
+    runs-on: ubuntu-latest
+    # Installs a deployment, reruns the installer, then builds the app and runs
+    # the browser suite against it. The Next build is the long pole.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+
+      # Deliberately NOT creating .env. Generating the secrets and the project
+      # id is the installer's job, and doing it here would test a path no
+      # operator follows.
+      - name: the machine is clean
+        run: |
+          set -euo pipefail
+          test ! -f .env || { echo ".env exists before the installer ran"; exit 1; }
+          echo "  no .env, no containers"
+
+      - name: npm run selfhost
+        run: npm run selfhost 2>&1 | tee install.log
+
+      - name: it reached the end, and said so
+        run: |
+          set -euo pipefail
+          grep -q "Backenly is installed." install.log || {
+            echo "the installer did not report a completed install"; exit 1; }
+          echo "  installer reported success"
+
+      # Exit 0 from bootstrap is the readiness contract, and the installer is
+      # not allowed to be the thing that decides it. Asked again here, directly.
+      - name: bootstrap independently agrees the deployment is ready
+        run: |
+          set -euo pipefail
+          npm run bootstrap > verify.log 2>&1
+          cat verify.log
+          grep -q "Backenly is ready" verify.log
+
+      - name: it generated every secret, and none is a template placeholder
+        run: |
+          set -euo pipefail
+          for key in BACKENLY_PROJECT_ID JWT_SECRET POSTGREST_JWT_SECRET STORAGE_SECRET MASTER_ENCRYPTION_KEY POSTGREST_AUTHENTICATOR_PASSWORD; do
+            value=$(grep -E "^${key}=" .env | head -1 | cut -d= -f2-)
+            if [ -z "$value" ]; then echo "$key is empty"; exit 1; fi
+            case "$value" in
+              *change-this*|your-*|"<"*) echo "$key is still the template placeholder: $value"; exit 1 ;;
+            esac
+            echo "  $key set"
+          done
+
+      # The defect this program started from. A fresh install must not open with
+      # stack-shaped text an operator reads as a crash.
+      - name: the install printed no raw Prisma error
+        run: |
+          set -euo pipefail
+          for marker in "prisma:error" "PrismaClientKnownRequestError" "Raw query failed"; do
+            if grep -qF "$marker" install.log; then
+              echo "installer output contained: $marker"
+              grep -nF -A4 "$marker" install.log | head -30
+              exit 1
+            fi
+          done
+          echo "  clean output"
+
+      # Idempotence, which is the property that makes rerunning safe. Asserted
+      # on the secrets specifically: regenerating JWT_SECRET would sign out
+      # every session and regenerating the authenticator password would break
+      # the PostgREST now running.
+      - name: rerunning it changes no secret
+        run: |
+          set -euo pipefail
+          cp .env .env.before
+          npm run selfhost 2>&1 | tee rerun.log
+          grep -q "Backenly is installed." rerun.log
+          if ! diff -q .env.before .env; then
+            echo "a rerun modified .env:"; diff .env.before .env || true; exit 1
+          fi
+          echo "  .env byte-identical after a rerun"
+
+      - name: the install is under migration control
+        run: |
+          set -euo pipefail
+          # The invariant that makes UPGRADES possible, asserted on the one
+          # machine where a real install exists.
+          #
+          # `prisma db push` created this schema and recorded no history, so a
+          # later release had nothing to deploy against: the installer saw
+          # `public.projects`, returned, and the deployment kept a frozen schema
+          # until the first query against a newer table failed with P2021. A
+          # fresh install must come out of the box with a COMPLETE
+          # `_prisma_migrations`, not merely with the right tables.
+          expected=$(ls -1d prisma/migrations-canonical/*/ | wc -l | tr -d ' ')
+
+          # The same defaults scripts/selfhost.ts uses. `|| true` because the
+          # installer does NOT write POSTGRES_USER into .env, and under
+          # `set -e` a grep that matches nothing would fail this step for a
+          # reason unrelated to what it is testing - which is what it did.
+          PGUSER=$(grep -E '^POSTGRES_USER=' .env | head -1 | cut -d= -f2- || true)
+          PGDB=$(grep -E '^POSTGRES_DB=' .env | head -1 | cut -d= -f2- || true)
+          PGUSER=${PGUSER:-backenly_user}
+          PGDB=${PGDB:-backenly}
+          echo "  querying as ${PGUSER} on ${PGDB}"
+
+          # The route the installer itself uses: the compose Postgres does not
+          # publish its port, so psql on the runner cannot reach it directly.
+          actual=$(docker compose -f docker-compose.dev.yml exec -T postgres \
+            psql -h 127.0.0.1 -U "$PGUSER" -d "$PGDB" -tAc \
+            "SELECT count(*) FROM _prisma_migrations WHERE finished_at IS NOT NULL" \
+            | tr -d ' \r' || true)
+
+          echo "  canonical migrations: $expected, recorded as applied: ${actual:-<query failed>}"
+          [ "$actual" = "$expected" ] || {
+            echo "the install did not record every canonical migration;"
+            echo "a deployment in this state cannot be upgraded by a later release."
+            exit 1
+          }
+
+      - name: the data plane is actually serving
+        run: |
+          set -euo pipefail
+          # Not "the container is up". PostgREST restarts in a loop without a
+          # valid credential, and `docker compose ps` calls that running. A
+          # response is the only evidence that the password the installer wrote
+          # is the one the role actually has.
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3002/ || true)
+            if [ "$code" != "000" ]; then echo "  postgrest answered $code after ${i}s"; break; fi
+            sleep 1
+          done
+          [ "$code" != "000" ] || { echo "postgrest never answered"; exit 1; }
+
+      # ── Browser coverage, on the deployment just installed ────────────────
+      #
+      # This job is the only place a REAL self-hosted deployment exists in CI,
+      # so it is where the browser suite belongs. `tests/e2e/` already held
+      # specs, but they assumed a session nothing created and were never wired
+      # in, so they were not evidence for anything. The `selfhost` project
+      # signs up through the real register route and asserts against the pages
+      # the install produced.
+      - name: the whole stack comes back from persisted state
+        run: |
+          set -euo pipefail
+          # A reboot, as an operator would experience it: every container goes
+          # away and comes back, and NOTHING ELSE is run.
+          #
+          # `npm run selfhost` is installation and upgrade reconciliation. An
+          # operator must not have to run it after every restart, and a
+          # deployment that only works because the installer was re-run is not a
+          # deployment that survives a reboot.
+          PGUSER=$(grep -E '^POSTGRES_USER=' .env | head -1 | cut -d= -f2- || true)
+          PGDB=$(grep -E '^POSTGRES_DB=' .env | head -1 | cut -d= -f2- || true)
+          PGUSER=${PGUSER:-backenly_user}
+          PGDB=${PGDB:-backenly}
+
+          # What must still be true afterwards, captured first so the comparison
+          # is against observed state rather than against an expectation.
+          before_schemas=$(docker compose -f docker-compose.dev.yml exec -T postgres \
+            psql -h 127.0.0.1 -U "$PGUSER" -d "$PGDB" -tAc \
+            "SELECT count(*) FROM backenly_pgrst_schema_registry" | tr -d ' \r')
+          before_migrations=$(docker compose -f docker-compose.dev.yml exec -T postgres \
+            psql -h 127.0.0.1 -U "$PGUSER" -d "$PGDB" -tAc \
+            "SELECT count(*) FROM _prisma_migrations WHERE finished_at IS NOT NULL" | tr -d ' \r')
+          echo "  before: $before_schemas registry row(s), $before_migrations migration(s)"
+
+          docker compose -f docker-compose.dev.yml restart
+          echo "  every container restarted; the installer was NOT run"
+
+          # Postgres answering again, from its own persisted volume.
+          for i in $(seq 1 60); do
+            if docker compose -f docker-compose.dev.yml exec -T postgres \
+                 psql -h 127.0.0.1 -U "$PGUSER" -d "$PGDB" -tAc 'select 1' >/dev/null 2>&1; then
+              echo "  postgres answered after ${i}s"; break
+            fi
+            sleep 1
+          done
+
+          after_schemas=$(docker compose -f docker-compose.dev.yml exec -T postgres \
+            psql -h 127.0.0.1 -U "$PGUSER" -d "$PGDB" -tAc \
+            "SELECT count(*) FROM backenly_pgrst_schema_registry" | tr -d ' \r')
+          after_migrations=$(docker compose -f docker-compose.dev.yml exec -T postgres \
+            psql -h 127.0.0.1 -U "$PGUSER" -d "$PGDB" -tAc \
+            "SELECT count(*) FROM _prisma_migrations WHERE finished_at IS NOT NULL" | tr -d ' \r')
+
+          [ "$after_schemas" = "$before_schemas" ] || {
+            echo "the PostgREST registry changed across a restart: $before_schemas -> $after_schemas"
+            exit 1
+          }
+          [ "$after_migrations" = "$before_migrations" ] || {
+            echo "migration history changed across a restart: $before_migrations -> $after_migrations"
+            exit 1
+          }
+          echo "  registry and migration history survived"
+
+          # The data plane SERVING, not the container being up. PostgREST
+          # restarts in a loop without a valid credential and `ps` calls that
+          # running, so a response is the only evidence the credential survived.
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3002/ || true)
+            if [ "$code" != "000" ]; then echo "  postgrest answered $code after ${i}s"; break; fi
+            sleep 1
+          done
+          [ "$code" != "000" ] || { echo "postgrest never answered after the restart"; exit 1; }
+
+      - name: a restart did not require the installer
+        run: |
+          set -euo pipefail
+          # The installer is idempotent, so running it would hide the property
+          # under test. What is asserted instead is that the deployment was
+          # already serving BEFORE any installer run, which the step above did.
+          #
+          # This step exists to state the invariant next to the evidence: .env is
+          # untouched, so nothing regenerated a secret to make the stack work.
+          cp .env .env.after-restart
+          diff -q .env.before .env.after-restart || {
+            echo "a restart changed .env, which means something reconciled state"
+            exit 1
+          }
+          echo "  .env byte-identical across the restart"
+
+
+      - name: install the browser
+        run: npx playwright install --with-deps chromium
+
+      - name: build and start the app
+        run: |
+          set -euo pipefail
+          npm run build
+          # Started detached and waited for. `npm run dev` would also work but
+          # rebuilds on demand, which makes the first navigation in every spec
+          # look like a slow page rather than a slow compile.
+          npm run start > app.log 2>&1 &
+          for i in $(seq 1 90); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/app || true)
+            if [ "$code" != "000" ]; then echo "  app answered $code after ${i}s"; break; fi
+            sleep 1
+          done
+          [ "$code" != "000" ] || { echo "the app never started"; tail -60 app.log; exit 1; }
+
+      - name: browser suite
+        env:
+          # The app is already running, started by the step above. Without this
+          # Playwright starts its own on the same port.
+          PLAYWRIGHT_SERVER_ALREADY_RUNNING: '1'
+        run: |
+          set -euo pipefail
+          # The id bootstrap pinned, which names the workspace schema. Reading
+          # it from the API listing instead produced undefined once, and every
+          # spec then navigated to a URL that redirects to the project list.
+          export BACKENLY_PROJECT_ID=$(grep -E '^BACKENLY_PROJECT_ID=' .env | head -1 | cut -d= -f2-)
+          export BACKENLY_SETUP_TOKEN=$(grep -E '^BACKENLY_SETUP_TOKEN=' .env | head -1 | cut -d= -f2-)
+          echo "project: $BACKENLY_PROJECT_ID"
+
+          # NO bootstrap rerun between signup and the specs.
+          #
+          # There used to be one, because the project was created owner-less and
+          # only a second bootstrap adopted the operator. Removing it is the
+          # point of the setup-token change: signing up with the token now binds
+          # the administrator to the project in one transaction. If that
+          # regressed, the setup project fails on its own ownership assertion.
+          npx playwright test --project=selfhost
+
+      # ── The runtime, and the surfaces that only exist on a deployment ────
+      #
+      # /db/* is served by the EXPRESS runtime against a real PostgREST, and
+      # realtime is a live SSE stream fed by LISTEN/NOTIFY. Neither exists in
+      # the jest integration job - there is no PostgREST there and no
+      # long-lived server - so the dependency-failure suites deliberately do
+      # not pretend to cover them. This is where they are covered.
+      #
+      # It runs AFTER the browser suite, on purpose: the app process started
+      # earlier is still running, which is what makes "the same application
+      # process recovered" a claim about anything.
+      - name: start the runtime
+        env:
+          NODE_ENV: production
+          # The runtime refuses to start in production without this rather
+          # than falling back to allow-all on a public surface.
+          CORS_ORIGIN: http://localhost:3000
+        run: |
+          set -euo pipefail
+          npm run start:runtime > runtime.log 2>&1 &
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3001/health || true)
+            if [ "$code" != "000" ]; then echo "  runtime answered $code after ${i}s"; break; fi
+            sleep 1
+          done
+          [ "$code" != "000" ] || { echo "the runtime never started"; tail -60 runtime.log; exit 1; }
+
+      - name: /db/*, end-user auth and realtime survive their dependencies
+        run: npx tsx scripts/qualify-selfhost-runtime.ts
+
+      # ── The last gate ────────────────────────────────────────────────────
+      #
+      # Everything above tests one subsystem at a time against a fixture built
+      # for that subsystem. This builds ONE deployment carrying as much of the
+      # product as a real one would, takes it through build -> use -> snapshot
+      # -> bundle -> DESTROY -> restore -> verify, and ends with a bounded soak
+      # that watches for leaks rather than measuring throughput.
+      #
+      # The destruction is real: the workspace schema is dropped and the stored
+      # object's bytes are deleted, and both are checked to be gone BEFORE the
+      # restore runs. A restore verified while the original state is still there
+      # proves nothing, because every assertion can be satisfied by the thing
+      # that was never removed.
+      - name: final synthetic-production qualification
+        run: npx tsx scripts/qualify-selfhost-final.ts
+
+      - name: runtime log on failure
+        if: failure()
+        run: tail -120 runtime.log || true
+
+      # The rendered page, not a guess at it. Without this, diagnosing a
+      # selector that does not match means another full CI cycle per attempt.
+      - name: keep the browser evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-results
+          path: test-results/
+          if-no-files-found: ignore
+
+      - name: app log on failure
+        if: failure()
+        run: tail -120 app.log || true
+
+      - name: compose logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.dev.yml logs --tail=120

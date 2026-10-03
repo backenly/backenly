@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/prisma'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 /**
  * Base project API info endpoint.
@@ -7,11 +8,11 @@ import { prisma } from '@/lib/db/prisma'
  *
  * Example: GET https://backenly.com/api/v1/{projectId}
  */
-export async function GET(
+async function handleGET(
   _request: NextRequest,
-  context: { params: { projectId: string } }
+  context: { params: Promise<{ projectId: string }> }
 ) {
-  const { projectId } = context.params
+  const { projectId } = (await context.params)
 
   if (!projectId) {
     return NextResponse.json(
@@ -137,3 +138,5 @@ export async function GET(
     )
   }
 }
+
+export const GET = recordedV1(handleGET)

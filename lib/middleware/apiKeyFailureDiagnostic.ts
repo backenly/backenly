@@ -14,6 +14,8 @@
  * valid credential for some other system.
  */
 
+import { looksLikeBackenlyKey } from '@/lib/auth/key-prefix'
+
 export type ApiKeyFailureKind =
   | 'missing'
   | 'placeholder'
@@ -77,9 +79,11 @@ export function classifyKeyFailure(
     }
   }
 
-  const isBackenlyShape =
-    /^proj_(live|test)_[a-f0-9]+$/i.test(trimmed) ||
-    /^sk_(live|test)_[a-f0-9]+$/i.test(trimmed)
+  // Every shape Backenly issues, current and legacy (lib/auth/key-prefix.ts).
+  // svc_live_ and mcp_live_ keys used to fall through to "does not match the
+  // Backenly key format", and the Stripe hint below is only reached by a value
+  // that is not a Backenly key: Backenly keys are hex after the prefix.
+  const isBackenlyShape = looksLikeBackenlyKey(trimmed)
 
   if (!isBackenlyShape) {
     const prefix = trimmed.substring(0, 8)

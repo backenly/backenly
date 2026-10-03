@@ -18,7 +18,8 @@ import { generateTypes } from '@/lib/typegen/type-generator'
 import { generateTypedClient } from '@/lib/typegen/client-generator'
 import { prisma } from '@/lib/db'
 
-export async function GET(request: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params
   return withProjectValidation<any>(request, async (validated) => {
     const { projectId } = validated
     const { searchParams } = request.nextUrl

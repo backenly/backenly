@@ -234,15 +234,17 @@ export class PostgresService {
         is_primary: boolean
         is_unique: boolean
         is_indexed: boolean
+        is_foreign: boolean
       }>>`
-        SELECT 
+        SELECT
           c.column_name,
           c.data_type,
           c.is_nullable,
           c.column_default,
           CASE WHEN pk.column_name IS NOT NULL THEN true ELSE false END as is_primary,
           CASE WHEN u.column_name IS NOT NULL THEN true ELSE false END as is_unique,
-          CASE WHEN idx.column_name IS NOT NULL THEN true ELSE false END as is_indexed
+          CASE WHEN idx.column_name IS NOT NULL THEN true ELSE false END as is_indexed,
+          CASE WHEN fk.column_name IS NOT NULL THEN true ELSE false END as is_foreign
         FROM information_schema.columns c
         LEFT JOIN (
           SELECT ku.column_name, ku.table_schema, ku.table_name
@@ -257,8 +259,11 @@ export class PostgresService {
         ) pk ON c.column_name = pk.column_name 
           AND LOWER(c.table_schema) = LOWER(pk.table_schema)
           AND LOWER(c.table_name) = LOWER(pk.table_name)
+        -- Every lookup below is DISTINCT. A column that sits in two indexes
+        -- (a UNIQUE constraint's index and a plain one, say) otherwise joined
+        -- twice and came back as two columns.
         LEFT JOIN (
-          SELECT ku.column_name, ku.table_schema, ku.table_name
+          SELECT DISTINCT ku.column_name, ku.table_schema, ku.table_name
           FROM information_schema.table_constraints tc
           JOIN information_schema.key_column_usage ku
             ON tc.constraint_name = ku.constraint_name
@@ -271,7 +276,20 @@ export class PostgresService {
           AND LOWER(c.table_schema) = LOWER(u.table_schema)
           AND LOWER(c.table_name) = LOWER(u.table_name)
         LEFT JOIN (
-          SELECT a.attname as column_name
+          SELECT DISTINCT ku.column_name, ku.table_schema, ku.table_name
+          FROM information_schema.table_constraints tc
+          JOIN information_schema.key_column_usage ku
+            ON tc.constraint_name = ku.constraint_name
+            AND tc.table_schema = ku.table_schema
+            AND tc.table_name = ku.table_name
+          WHERE LOWER(tc.table_schema) = LOWER(${schema})
+            AND LOWER(tc.table_name) = LOWER(${tableName})
+            AND tc.constraint_type = 'FOREIGN KEY'
+        ) fk ON c.column_name = fk.column_name
+          AND LOWER(c.table_schema) = LOWER(fk.table_schema)
+          AND LOWER(c.table_name) = LOWER(fk.table_name)
+        LEFT JOIN (
+          SELECT DISTINCT a.attname as column_name
           FROM pg_index i
           JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
           JOIN pg_class t ON t.oid = i.indrelid
@@ -283,11 +301,12 @@ export class PostgresService {
         ORDER BY c.ordinal_position
       `
       
-      let columns = result.map((r) => ({
+      let columns: ColumnInfo[] = result.map((r) => ({
         name: r.column_name,
         type: r.data_type,
         nullable: r.is_nullable === 'YES',
         primary: r.is_primary,
+        foreign: r.is_foreign,
         unique: r.is_unique,
         indexed: r.is_indexed,
         default: r.column_default || undefined,

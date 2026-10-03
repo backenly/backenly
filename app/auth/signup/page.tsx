@@ -7,8 +7,17 @@ import { useRouter, useSearchParams } from 'next/navigation'
 import {
   checkSignupEmailEligibility,
   SIGNUP_EMAIL_REJECTION_MESSAGE,
-} from '@/lib/auth/email-eligibility'
-import { register } from '@/lib/api/auth'
+} from '@/lib/auth/signup-email-eligibility'
+import {
+  AuthRequestError,
+  getRegistrationRequirements,
+  register,
+  resendSignupCode,
+  verifySignupCode,
+} from '@/lib/api/auth'
+import { CODE_LENGTH, CodeField, ResendCodeButton, useCooldown } from '@/components/site/EmailCodeFields'
+import { PASSWORD_MIN_LENGTH, PASSWORD_POLICY_HINT, validatePasswordStrength } from '@/lib/auth/password-policy'
+import { useUserSession } from '@/lib/hooks/useUserSession'
 import { registerSiteIcons } from '@/lib/icons/registry'
 import {
   AuthChrome,
@@ -50,18 +59,42 @@ function SignupForm() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
-  const [errors, setErrors] = useState<{ email?: string; password?: string }>({})
+  const [errors, setErrors] = useState<{ email?: string; password?: string; setupToken?: string; form?: string }>({})
+  // Set once the server has mailed a code. No account exists until it is
+  // entered, so this step is where signup actually finishes.
+  const [pendingEmail, setPendingEmail] = useState<string | null>(null)
+  const [code, setCode] = useState('')
+  const [codeError, setCodeError] = useState<string | null>(null)
+  const [codeNotice, setCodeNotice] = useState<string | null>(null)
+  const [isVerifying, setIsVerifying] = useState(false)
+  const [isResending, setIsResending] = useState(false)
+  const [resendIn, setResendIn] = useCooldown(0)
   const [isSubmitting, setIsSubmitting] = useState(false)
-  const [showEmailForm, setShowEmailForm] = useState(false)
+  // The installer prints a claim link carrying the token. Read once, at first
+  // render, so the form opens already filled in.
+  const [claimLinkToken] = useState(() => searchParams.get('setup_token')?.trim() || '')
+  const [showEmailForm, setShowEmailForm] = useState(!!claimLinkToken)
   const [oauthProviders, setOauthProviders] = useState<{ google: boolean; github: boolean } | null>(null)
   const [refCode, setRefCode] = useState<string | null>(null)
   const [turnstileToken, setTurnstileToken] = useState<string | null>(null)
+  // A self-hosted deployment is claimed by the first account that presents the
+  // token `npm run selfhost` printed. The register route refuses a first signup
+  // without it, so the form has to be able to send it.
+  const [setupTokenRequired, setSetupTokenRequired] = useState(!!claimLinkToken)
+  const [setupToken, setSetupToken] = useState(claimLinkToken)
 
   // Honor ?redirect= (e.g. an org-invite accept page) — sanitized the same way
   // as login so we never loop back into /auth/*.
   const rawRedirect = searchParams.get('redirect') || '/app'
   const isAuthPath = rawRedirect.startsWith('/auth') || rawRedirect === '/login' || rawRedirect === '/signup'
   const redirectUrl = isAuthPath ? '/app' : rawRedirect
+  const { isLoggedIn } = useUserSession({ confirmSignedIn: true })
+
+  useEffect(() => {
+    if (isLoggedIn) {
+      router.replace(redirectUrl)
+    }
+  }, [isLoggedIn, redirectUrl, router])
 
   useEffect(() => {
     fetch('/api/auth/platform-providers')
@@ -69,6 +102,23 @@ function SignupForm() {
       .then((data) => setOauthProviders(data))
       .catch(() => setOauthProviders({ google: false, github: false }))
   }, [])
+
+  useEffect(() => {
+    getRegistrationRequirements()
+      .then((r) => { if (r.setupTokenRequired) setSetupTokenRequired(true) })
+      // Unanswerable is not "not required": the first refusal reveals the field.
+      .catch(() => {})
+  }, [])
+
+  // Then drop the claim link's token from the address bar, so it does not sit
+  // in history or on a shared screen.
+  useEffect(() => {
+    if (!searchParams.get('setup_token')) return
+    const rest = new URLSearchParams(searchParams.toString())
+    rest.delete('setup_token')
+    const query = rest.toString()
+    router.replace(query ? `/auth/signup?${query}` : '/auth/signup', { scroll: false })
+  }, [searchParams, router])
 
   // Capture ?ref= once: remember it for the email form AND drop a cookie so it
   // survives the OAuth round-trip (the register route + OAuth callbacks read it).
@@ -92,19 +142,24 @@ function SignupForm() {
 
   const validatePassword = (val: string) => {
     if (!val) return 'Password is required'
-    if (val.length < 8) return 'Password must be at least 8 characters'
-    if (!/(?=.*[a-z])/.test(val)) return 'Password must contain at least one lowercase letter'
-    if (!/(?=.*[A-Z])/.test(val)) return 'Password must contain at least one uppercase letter'
-    if (!/(?=.*\d)/.test(val)) return 'Password must contain at least one number'
-    return null
+    const strength = validatePasswordStrength(val)
+    return strength.valid ? null : strength.message || 'Choose a stronger password'
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     const emailError = validateEmail(email)
     const passwordError = validatePassword(password)
-    if (emailError || passwordError) {
-      setErrors({ email: emailError || undefined, password: passwordError || undefined })
+    const setupTokenError =
+      setupTokenRequired && !setupToken.trim()
+        ? 'Paste the setup token printed by npm run selfhost.'
+        : null
+    if (emailError || passwordError || setupTokenError) {
+      setErrors({
+        email: emailError || undefined,
+        password: passwordError || undefined,
+        setupToken: setupTokenError || undefined,
+      })
       return
     }
     // Turnstile issues single-use tokens, so a failed submit must not be
@@ -116,19 +171,149 @@ function SignupForm() {
     setErrors({})
     setIsSubmitting(true)
     try {
-      await register({
+      const result = await register({
         email,
         password,
         ...(refCode ? { ref: refCode } : {}),
         ...(turnstileToken ? { turnstileToken } : {}),
+        ...(setupTokenRequired && setupToken.trim() ? { setupToken: setupToken.trim() } : {}),
       })
+      if (result.status === 'verification_required') {
+        setPendingEmail(result.email)
+        setCode('')
+        setCodeError(null)
+        setCodeNotice(null)
+        setResendIn(result.resendAfterSec)
+        setIsSubmitting(false)
+        return
+      }
       router.push(redirectUrl)
     } catch (error) {
-      setErrors({ password: error instanceof Error ? error.message : 'Registration failed' })
+      if (error instanceof AuthRequestError && error.code === 'SETUP_TOKEN_REJECTED') {
+        // Also the fallback when the requirements could not be read up front.
+        setSetupTokenRequired(true)
+        setErrors({ setupToken: error.message })
+      } else if (error instanceof AuthRequestError && error.code === 'EMAIL_DELIVERY_UNAVAILABLE') {
+        setErrors({ form: error.message })
+      } else {
+        setErrors({ password: error instanceof Error ? error.message : 'Registration failed' })
+      }
       setIsSubmitting(false)
       setTurnstileToken(null)
       resetTurnstile()
     }
+  }
+
+  const handleVerify = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!pendingEmail) return
+    if (code.length !== CODE_LENGTH) {
+      setCodeError(`Enter the ${CODE_LENGTH}-digit code from the email.`)
+      return
+    }
+    setCodeError(null)
+    setIsVerifying(true)
+    try {
+      await verifySignupCode(pendingEmail, code)
+      router.push(redirectUrl)
+    } catch (error) {
+      setCodeError(error instanceof Error ? error.message : 'Verification failed')
+      setIsVerifying(false)
+    }
+  }
+
+  const handleResend = async () => {
+    if (!pendingEmail) return
+    setIsResending(true)
+    setCodeError(null)
+    setCodeNotice(null)
+    try {
+      const r = await resendSignupCode(pendingEmail)
+      setResendIn(r.resendAfterSec)
+      setCode('')
+      setCodeNotice(`A new code is on its way to ${pendingEmail}.`)
+    } catch (error) {
+      setCodeError(error instanceof Error ? error.message : 'Could not send a new code')
+    } finally {
+      setIsResending(false)
+    }
+  }
+
+  // Back to the form, keeping what was typed. The pending signup is replaced
+  // by the next submit, so nothing about the abandoned one lingers.
+  const startOver = () => {
+    setPendingEmail(null)
+    setCode('')
+    setCodeError(null)
+    setCodeNotice(null)
+    setTurnstileToken(null)
+    resetTurnstile()
+  }
+
+  if (isLoggedIn) {
+    return (
+      <AuthChrome>
+        <AuthCard
+          eyebrow="Account"
+          title="Already signed in"
+          subtitle="Redirecting to your projects..."
+        >
+          <div className="flex h-24 items-center justify-center">
+            <div className="h-6 w-6 animate-spin rounded-full border-2 border-white/20 border-t-white" />
+          </div>
+        </AuthCard>
+      </AuthChrome>
+    )
+  }
+
+  if (pendingEmail) {
+    return (
+      <AuthChrome>
+        <AuthCard
+          eyebrow="Check your email"
+          title="Enter your code"
+          subtitle={`We sent a ${CODE_LENGTH}-digit code to ${pendingEmail}. It expires in 10 minutes.`}
+        >
+          <form onSubmit={handleVerify} className="flex flex-col gap-4 mb-5">
+            <CodeField value={code} onChange={setCode} disabled={isVerifying} error={codeError || undefined} />
+
+            {codeNotice && !codeError && (
+              <p className="text-[11px] text-emerald-300">{codeNotice}</p>
+            )}
+
+            <PrimaryButton type="submit" disabled={isVerifying} loading={isVerifying}>
+              {isVerifying ? 'Creating account…' : 'Verify and create account'}
+            </PrimaryButton>
+          </form>
+
+          <div className="flex items-center justify-between gap-3">
+            <ResendCodeButton secondsLeft={resendIn} sending={isResending} onResend={handleResend} />
+            <button
+              type="button"
+              onClick={startOver}
+              className="text-xs text-zinc-400 hover:text-zinc-200 transition-colors"
+            >
+              Use a different email
+            </button>
+          </div>
+
+          <p className="mt-6 text-[11px] leading-relaxed text-zinc-500">
+            No email? Check your spam folder. If this address already has an account, we sent a note
+            saying so instead, and you can{' '}
+            <Link href="/auth/login" className="text-zinc-300 hover:text-white">sign in</Link> or{' '}
+            <Link
+              href={`/auth/forgot-password?email=${encodeURIComponent(pendingEmail)}`}
+              className="text-zinc-300 hover:text-white"
+            >
+              reset your password
+            </Link>
+            .
+          </p>
+        </AuthCard>
+
+        <AuthFooterNote />
+      </AuthChrome>
+    )
   }
 
   return (
@@ -195,10 +380,10 @@ function SignupForm() {
                 type={showPassword ? 'text' : 'password'}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder="At least 8 characters"
+                placeholder={`At least ${PASSWORD_MIN_LENGTH} characters`}
                 disabled={isSubmitting}
                 error={errors.password}
-                helper={errors.password ? undefined : '8+ chars, mix of upper, lower, and a number.'}
+                helper={errors.password ? undefined : PASSWORD_POLICY_HINT}
                 trailing={
                   <button
                     type="button"
@@ -211,7 +396,34 @@ function SignupForm() {
                 }
               />
 
+              {setupTokenRequired && (
+                <>
+                  <FieldLabel htmlFor="setupToken">Setup token</FieldLabel>
+                  <FieldInput
+                    id="setupToken"
+                    type="text"
+                    value={setupToken}
+                    onChange={(e) => setSetupToken(e.target.value)}
+                    placeholder="Printed by npm run selfhost"
+                    disabled={isSubmitting}
+                    error={errors.setupToken}
+                    helper={
+                      errors.setupToken
+                        ? undefined
+                        : 'Claims this self-hosted deployment. Also in .env as BACKENLY_SETUP_TOKEN.'
+                    }
+                  />
+                </>
+              )}
+
               <TurnstileWidget onToken={setTurnstileToken} className="mt-1" />
+
+              {errors.form && (
+                <div className="flex items-start gap-2 rounded-lg border border-rose-500/30 bg-rose-500/[0.06] p-3 text-[12px] leading-relaxed text-rose-200">
+                  <Icon icon="solar:shield-warning-linear" width={14} className="mt-0.5 shrink-0" />
+                  <span>{errors.form}</span>
+                </div>
+              )}
 
               <PrimaryButton type="submit" disabled={isSubmitting} loading={isSubmitting}>
                 {isSubmitting ? 'Creating account…' : 'Create account'}

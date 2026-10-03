@@ -14,6 +14,10 @@ import bootstrapRoutes from './routes/bootstrap'
 import dynamicRoutes from './routes/dynamic'
 import v2Routes from './routes/v2'
 import { nextProxy } from './routes/next-proxy'
+import { asyncRoute } from './lib/async-route'
+import { projectServingGate } from './lib/serving-gate'
+import { recordRuntimeRequest, INTERNAL_TRAFFIC_HEADER, isInternalTraffic } from '@/lib/traffic/request-recorder'
+import { meterNodeResponse } from '@/lib/usage/egress'
 
 const app = express()
 
@@ -96,6 +100,42 @@ app.use(cors({
   maxAge: 86400,
 }))
 
+// ── Traffic ─────────────────────────────────────────────────────────────────────
+// Every request to a project's runtime API is recorded once it finishes, first
+// in the chain so a request the gate refuses is recorded too: a paused or
+// locked project answering 503 is exactly what the traffic signals should see.
+// See lib/traffic/request-recorder.ts for why this table was empty.
+app.use(['/api/v1/:projectId', '/api/v2/:projectId'], (req, res, next) => {
+  const startedAt = Date.now()
+  // From the URL rather than req.params: a mount-path parameter is not reliably
+  // populated on an app-level use() across Express versions.
+  const projectId = /^\/api\/v[12]\/([^/?#]+)/.exec(req.originalUrl)?.[1] ?? null
+  // Egress is counted here only when this process is the edge. Behind Next (AWS,
+  // compose) every request carries the internal marker the forwarder adds, and
+  // Next has already counted the bytes. lib/usage/egress.ts.
+  if (projectId && !isInternalTraffic(req.get(INTERNAL_TRAFFIC_HEADER))) {
+    meterNodeResponse(res, projectId)
+  }
+  res.on('finish', () => {
+    recordRuntimeRequest({
+      projectId,
+      method: req.method,
+      pathname: req.originalUrl,
+      statusCode: res.statusCode,
+      durationMs: Date.now() - startedAt,
+      internalHeader: req.get(INTERNAL_TRAFFIC_HEADER),
+    })
+  })
+  next()
+})
+
+// ── Project serving gate ───────────────────────────────────────────────────────
+// Before the Next proxy and before every router, because it is the one check
+// they all need and none of them used to make: founder lockdown was enforced by
+// the Next-owned surfaces only, so /db, /v2, end-user auth, functions and
+// realtime kept serving a sealed project. See lib/projects/serving-state.ts.
+app.use(['/api/v1/:projectId', '/api/v2/:projectId'], asyncRoute(projectServingGate))
+
 // ── Next.js-owned v1 surfaces (storage, orgs, stats, checkout, …) ──────────────
 // nginx sends ALL /api/v1/* here, but these routes only exist in the Next app.
 // Forward them BEFORE body parsing so multipart uploads stream untouched, and
@@ -153,8 +193,21 @@ app.use('/api/v2', v2Routes)
 app.use(BASE, dynamicRoutes)
 
 // ── Global error handler ───────────────────────────────────────────────────────
-app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+//
+// Reachable at last. Express 4 does not await its handlers, so until every
+// route was wrapped in `asyncRoute` an async rejection never arrived here - it
+// became an unhandled rejection and Node terminated the process. This is where
+// a dependency failure now becomes a 500 instead.
+app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
   console.error('[Runtime Server] Unhandled error:', err?.message ?? 'unknown')
+
+  // Once the headers are out there is no status left to set, and writing a JSON
+  // body into a half-sent response corrupts it. The realtime SSE route commits
+  // its headers with flushHeaders() and then streams for minutes, so a failure
+  // after that point lands here with nothing sendable. Express's default
+  // handler destroys the socket, which is the only correct answer.
+  if (res.headersSent) return next(err)
+
   res.status(500).json({ error: 'Internal server error', code: 'INTERNAL_ERROR' })
 })
 

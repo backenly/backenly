@@ -345,7 +345,7 @@ export default function EnhancedSchemaVisualizer({
   const visibleNames = new Set(visibleNodes.map(n => n.name))
 
   return (
-    <div className="h-full w-full relative bg-[#101116]">
+    <div className="h-full w-full relative bg-[#0c0d0f]">
       {/* Quiet engineering grid — neutral, near-invisible */}
       <div
         className="absolute inset-0"
@@ -369,7 +369,7 @@ export default function EnhancedSchemaVisualizer({
               placeholder="Search tables or fields…"
               value={searchTerm}
               onChange={e => setSearchTerm(e.target.value)}
-              className="h-8 pl-8 pr-8 bg-[#16171d] border border-white/[0.07] rounded-lg text-[12.5px] text-zinc-50 placeholder:text-zinc-600 focus:outline-none focus:border-violet-400/40 focus:ring-2 focus:ring-violet-400/15 w-64 transition-colors shadow-[0_16px_44px_-28px_rgba(0,0,0,0.9)]"
+              className="h-8 pl-8 pr-8 bg-[#0f1012] border border-white/[0.07] rounded-lg text-[12.5px] text-zinc-50 placeholder:text-zinc-600 focus:outline-none focus:border-violet-400/40 focus:ring-2 focus:ring-violet-400/15 w-64 transition-colors shadow-[0_16px_44px_-28px_rgba(0,0,0,0.9)]"
             />
             {searchTerm && (
               <button onClick={() => setSearchTerm('')} className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-md text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.06] transition-colors">
@@ -380,7 +380,7 @@ export default function EnhancedSchemaVisualizer({
 
           <button
             onClick={autoLayout}
-            className="inline-flex items-center gap-1.5 h-8 px-3 bg-[#16171d] border border-white/[0.07] rounded-lg text-[12px] font-medium text-zinc-200 hover:border-white/[0.14] hover:bg-white/[0.04] transition-colors shadow-[0_16px_44px_-28px_rgba(0,0,0,0.9)]"
+            className="inline-flex items-center gap-1.5 h-8 px-3 bg-[#0f1012] border border-white/[0.07] rounded-lg text-[12px] font-medium text-zinc-200 hover:border-white/[0.14] hover:bg-white/[0.04] transition-colors shadow-[0_16px_44px_-28px_rgba(0,0,0,0.9)]"
           >
             <Grid3X3 className="w-3.5 h-3.5 text-zinc-500" />
             Auto-layout
@@ -389,22 +389,22 @@ export default function EnhancedSchemaVisualizer({
 
         {/* Right: stats + zoom + minimap */}
         <div className="flex items-center gap-2 pointer-events-auto">
-          <div className="h-8 bg-[#16171d] border border-white/[0.07] rounded-lg px-3 flex items-center gap-3 shadow-[0_16px_44px_-28px_rgba(0,0,0,0.9)]">
+          <div className="h-8 bg-[#0f1012] border border-white/[0.07] rounded-lg px-3 flex items-center gap-3 shadow-[0_16px_44px_-28px_rgba(0,0,0,0.9)]">
             <span className="inline-flex items-baseline gap-1.5">
-              <span className="font-mono text-[12px] font-medium tabular-nums text-zinc-100">{tables.length}</span>
-              <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">tables</span>
+              <span className="text-[12px] font-medium tabular-nums text-zinc-100">{tables.length}</span>
+              <span className="text-[12px] font-medium text-zinc-500">tables</span>
             </span>
             <div className="w-px h-3.5 bg-white/[0.08]" />
             <span className="inline-flex items-baseline gap-1.5">
-              <span className="font-mono text-[12px] font-medium tabular-nums text-zinc-100">{relationships.length}</span>
-              <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">relations</span>
+              <span className="text-[12px] font-medium tabular-nums text-zinc-100">{relationships.length}</span>
+              <span className="text-[12px] font-medium text-zinc-500">relations</span>
             </span>
           </div>
 
-          <div className="h-8 bg-[#16171d] border border-white/[0.07] rounded-lg p-0.5 flex items-center shadow-[0_16px_44px_-28px_rgba(0,0,0,0.9)]">
+          <div className="h-8 bg-[#0f1012] border border-white/[0.07] rounded-lg p-0.5 flex items-center shadow-[0_16px_44px_-28px_rgba(0,0,0,0.9)]">
             <button onClick={zoomOut} aria-label="Zoom out" className="p-1.5 rounded-md text-zinc-400 hover:text-zinc-100 hover:bg-white/[0.06] transition-colors"><ZoomOut className="w-3.5 h-3.5" /></button>
             <button onClick={zoomReset} title="Reset view" className="px-2 py-1 rounded-md hover:bg-white/[0.06] transition-colors">
-              <span className="text-[11px] text-zinc-300 font-mono font-medium tabular-nums">{Math.round(zoom * 100)}%</span>
+              <span className="text-[12px] text-zinc-300 font-medium tabular-nums">{Math.round(zoom * 100)}%</span>
             </button>
             <button onClick={zoomIn} aria-label="Zoom in" className="p-1.5 rounded-md text-zinc-400 hover:text-zinc-100 hover:bg-white/[0.06] transition-colors"><ZoomIn className="w-3.5 h-3.5" /></button>
           </div>
@@ -412,7 +412,7 @@ export default function EnhancedSchemaVisualizer({
           <button
             onClick={() => setShowMinimap(v => !v)}
             title={showMinimap ? 'Hide minimap' : 'Show minimap'}
-            className="inline-flex items-center justify-center w-8 h-8 bg-[#16171d] border border-white/[0.07] rounded-lg text-zinc-400 hover:text-zinc-100 hover:border-white/[0.14] hover:bg-white/[0.04] transition-colors shadow-[0_16px_44px_-28px_rgba(0,0,0,0.9)]"
+            className="inline-flex items-center justify-center w-8 h-8 bg-[#0f1012] border border-white/[0.07] rounded-lg text-zinc-400 hover:text-zinc-100 hover:border-white/[0.14] hover:bg-white/[0.04] transition-colors shadow-[0_16px_44px_-28px_rgba(0,0,0,0.9)]"
           >
             {showMinimap ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
           </button>
@@ -564,7 +564,7 @@ export default function EnhancedSchemaVisualizer({
                       <DatabaseIcon className="w-3.5 h-3.5 flex-shrink-0" style={{ color: gc.border, opacity: 0.8 }} />
                       <h3 className="text-[12.5px] font-semibold text-zinc-100 font-mono truncate">{node.name}</h3>
                     </div>
-                    <span className="font-mono text-[10.5px] text-zinc-600 tabular-nums flex-shrink-0">
+                    <span className="text-[12px] text-zinc-600 tabular-nums flex-shrink-0">
                       {node.columns.length} fields
                     </span>
                   </div>
@@ -585,15 +585,15 @@ export default function EnhancedSchemaVisualizer({
                           <span className={isPk ? 'text-emerald-300/80' : isFk ? 'text-sky-300/80' : 'text-zinc-600'}>
                             {getTypeIcon(col.type)}
                           </span>
-                          <span className={`font-mono text-[11.5px] truncate ${isPk ? 'text-emerald-300 font-medium' : isFk ? 'text-sky-300 font-medium' : 'text-zinc-300'}`}>
+                          <span className={`font-mono text-[12.5px] truncate ${isPk ? 'text-emerald-300 font-medium' : isFk ? 'text-sky-300 font-medium' : 'text-zinc-300'}`}>
                             {col.name}
                           </span>
                           <div className="flex items-center gap-1.5 flex-shrink-0">
-                            {isPk && <span className="font-mono text-[9px] font-semibold text-emerald-300/70">PK</span>}
-                            {isFk && <span className="font-mono text-[9px] font-semibold text-sky-300/70">FK</span>}
+                            {isPk && <span className="font-mono text-[12px] font-semibold text-emerald-300/70">PK</span>}
+                            {isFk && <span className="font-mono text-[12px] font-semibold text-sky-300/70">FK</span>}
                           </div>
                         </div>
-                        <span className="text-[10px] text-zinc-600 ml-2 flex-shrink-0 font-mono">
+                        <span className="text-[12px] text-zinc-600 ml-2 flex-shrink-0 font-mono">
                           {col.type.length > 12 ? col.type.slice(0, 10) + '…' : col.type}
                         </span>
                       </div>
@@ -602,7 +602,7 @@ export default function EnhancedSchemaVisualizer({
                 </div>
 
                 {/* Footer */}
-                <div className="px-4 py-2 border-t border-white/[0.06] flex items-center justify-between font-mono text-[10px] text-zinc-600 tabular-nums">
+                <div className="px-4 py-2 border-t border-white/[0.06] flex items-center justify-between text-[12px] text-zinc-600 tabular-nums">
                   <span>{pkCols.length} PK · {fkCols.size} FK</span>
                   <span className="capitalize">{node.group || 'core'}</span>
                 </div>
@@ -619,10 +619,10 @@ export default function EnhancedSchemaVisualizer({
             initial={{ opacity: 0, scale: 0.9 }}
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0, scale: 0.9 }}
-            className="absolute bottom-6 right-6 w-52 h-36 bg-[#16171d] border border-white/[0.07] rounded-xl overflow-hidden z-20 shadow-[0_16px_44px_-28px_rgba(0,0,0,0.9)]"
+            className="absolute bottom-6 right-6 w-52 h-36 bg-[#0f1012] border border-white/[0.07] rounded-xl overflow-hidden z-20 shadow-[0_16px_44px_-28px_rgba(0,0,0,0.9)]"
           >
             <div className="p-3">
-              <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600 mb-2">Minimap</p>
+              <p className="text-[12px] font-medium text-zinc-500 mb-2">Minimap</p>
               <div className="relative w-full h-24 bg-white/[0.02] rounded-lg border border-white/[0.06]">
                 {tableNodes.map((node, i) => {
                   const scaleX = (52 * 4 - 24) / maxX
@@ -655,20 +655,20 @@ export default function EnhancedSchemaVisualizer({
       </AnimatePresence>
 
       {/* ── Legend ────────────────────────────────────────────────────────────── */}
-      <div className="absolute bottom-6 left-6 bg-[#16171d] border border-white/[0.07] rounded-xl px-3.5 py-3 z-20 shadow-[0_16px_44px_-28px_rgba(0,0,0,0.9)]">
-        <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600 mb-2">Groups</p>
+      <div className="absolute bottom-6 left-6 bg-[#0f1012] border border-white/[0.07] rounded-xl px-3.5 py-3 z-20 shadow-[0_16px_44px_-28px_rgba(0,0,0,0.9)]">
+        <p className="text-[12px] font-medium text-zinc-500 mb-2">Groups</p>
         <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
           {Object.entries(GROUP_COLORS).map(([key, c]) => (
             <div key={key} className="flex items-center gap-1.5">
               <span className="h-[5px] w-[5px] rounded-full" style={{ backgroundColor: c.border }} />
-              <span className="font-mono text-[10.5px] text-zinc-400 capitalize">{key}</span>
+              <span className="font-mono text-[12px] text-zinc-400 capitalize">{key}</span>
             </div>
           ))}
         </div>
         {relationships.length > 0 && (
           <div className="mt-2.5 pt-2 border-t border-white/[0.06] flex items-center gap-1.5">
             <div className="w-5 h-px bg-zinc-600" />
-            <span className="font-mono text-[10.5px] text-zinc-500">FK relation</span>
+            <span className="font-mono text-[12px] text-zinc-500">FK relation</span>
           </div>
         )}
       </div>

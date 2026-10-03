@@ -8,6 +8,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { Logo } from '@/components/Logo'
 import { getProjects, type Project } from '@/lib/api/projects'
 import { setCurrentProjectId as setProjectId, clearProjectCache } from '@/lib/api/client'
+import { signOut } from '@/lib/api/auth'
 
 export function AppHeader() {
   const router = useRouter()
@@ -66,28 +67,9 @@ export function AppHeader() {
   }, [params])
 
   // Handle logout
-  const handleLogout = async () => {
-    try {
-      setUserMenuOpen(false)
-      
-      // Call logout API
-      await fetch('/api/auth/logout', {
-        method: 'POST',
-        credentials: 'include'
-      })
-      
-      // Clear localStorage
-      localStorage.removeItem('auth-token')
-      localStorage.removeItem('current-project-id')
-      
-      // Redirect to login
-      router.push('/auth/login')
-    } catch (error) {
-      console.error('Logout failed:', error)
-      // Force redirect even if API fails
-      localStorage.clear()
-      router.push('/auth/login')
-    }
+  const handleLogout = () => {
+    setUserMenuOpen(false)
+    signOut().catch((error) => console.error('Logout failed:', error))
   }
 
   // Close menus when clicking outside

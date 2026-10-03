@@ -27,14 +27,22 @@ export async function executeFrontendIntegration(
   // Load project to get public key / info
   const project = await prisma.project.findUnique({
     where: { id: projectId },
-    select: { id: true, name: true, apiKeys: { take: 1, select: { key: true } } },
+    select: { id: true, name: true, anonKey: true },
   })
 
   if (!project) {
     return { success: false, message: 'Project not found.' }
   }
 
-  const publicKey = project.apiKeys[0]?.key || `pk_${projectId.slice(0, 8)}`
+  // Project.anonKey, not the first ApiKey's persisted plaintext.
+  //
+  // This snippet is pasted into a customer's frontend source, so the credential
+  // in it is published to every visitor of their app. It used to take
+  // `project.apiKeys[0]?.key`, which is whichever key happened to be created
+  // first — routinely an sk_live_ admin key. The anon key is the credential
+  // designed for this, and it is the only one still stored recoverably. See
+  // lib/auth/api-key-plaintext.ts.
+  const publicKey = project.anonKey || `pk_${projectId.slice(0, 8)}`
 
   // Detect the user's frontend framework (falls back to 'unknown' gracefully)
   const framework = detectFrontendFramework(userMessage || '', conversationHistory)

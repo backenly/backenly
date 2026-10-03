@@ -36,11 +36,12 @@ function Shell({ title, children }: { title: string; children: React.ReactNode }
   )
 }
 
-export default async function McpAuthorizePage({
-  searchParams,
-}: {
-  searchParams: { req?: string }
-}) {
+export default async function McpAuthorizePage(
+  props: {
+    searchParams: Promise<{ req?: string }>
+  }
+) {
+  const searchParams = await props.searchParams;
   const reqToken = searchParams.req
   if (!reqToken) {
     return (
@@ -63,7 +64,7 @@ export default async function McpAuthorizePage({
     )
   }
 
-  const token = cookies().get('auth-token')?.value
+  const token = (await cookies()).get('auth-token')?.value
   const uid = token ? verifyToken(token)?.userId : null
   if (!uid) {
     redirect(`/auth/login?redirect=${encodeURIComponent(`/mcp/authorize?req=${reqToken}`)}`)

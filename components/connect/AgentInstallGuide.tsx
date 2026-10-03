@@ -28,7 +28,8 @@
  */
 
 import { useState } from 'react'
-import { Terminal, ShieldCheck, Loader2, KeyRound, RefreshCw, ArrowUpRight } from 'lucide-react'
+import { Check, ShieldCheck, KeyRound, RefreshCw, ArrowUpRight } from 'lucide-react'
+import { KitButton, KitNote, Segmented } from '@/components/inspector/kit'
 import { AGENT_ICON, GenericAgentIcon } from './AgentBrandIcons'
 import { CodeSurface, CliText, JsonText, PromptText } from './CodeSurface'
 
@@ -36,12 +37,13 @@ import { CodeSurface, CliText, JsonText, PromptText } from './CodeSurface'
  * Two docs targets, and they are NOT interchangeable:
  *   MCP_DOCS  — llms.txt, written for a model. Only ever goes INSIDE the prompt
  *               the agent consumes.
- *   USER_DOCS — /quickstart, written for a person. Every link a human clicks in
+ *   USER_DOCS — /resources, written for a person. Every link a human clicks in
  *               this UI points here. Sending a developer to a plaintext dump
- *               addressed to their agent is a dead end.
+ *               addressed to their agent is a dead end. (Was /quickstart until
+ *               that page was removed; it now 301s here anyway.)
  */
 const MCP_DOCS = 'https://backenly.com/llms.txt'
-const USER_DOCS = '/quickstart'
+const USER_DOCS = '/resources'
 const KEY_PLACEHOLDER = '<SCOPED_KEY>'
 /** The remote (Streamable-HTTP) MCP endpoint — app/api/mcp/route.ts. No npx. */
 const REMOTE_URL = 'https://backenly.com/api/mcp'
@@ -176,18 +178,31 @@ const AGENTS: Agent[] = [
  * scroll past on what is supposed to be the first thirty seconds of the
  * product. Nothing is broken; the instructions asked for something impossible.
  *
- * So the prompt now states the lifecycle, tells the agent to STOP after the
- * install, and explicitly forecloses the improvisation. Naming the wrong path
- * matters as much as naming the right one: a capable agent will invent the
- * bridge unless told not to.
+ * The fix after that told the agent to STOP after the install and ask for a
+ * restart. Correct, and still a dead end: the user asked for a backend and got
+ * "reload VS Code" instead. So the prompt now splits the two jobs. The MCP
+ * server is registered for the NEXT conversation, and the work continues in
+ * THIS one through `@backenly/cli call`, which posts to the same /api/mcp/*
+ * handlers with the same key. The improvised paths (a stdio bridge, a raw curl)
+ * are still named as unsupported: a capable agent invents them unless told the
+ * supported one exists.
  */
 function quickStartPrompt(projectId: string, key: string): string {
-  return `I'm using Backenly as my backend. Install its MCP server:
+  return `I'm using Backenly as my backend (project ${projectId}).
+
+1. Register its MCP server for my future conversations:
 claude mcp add backenly -- npx -y @backenly/mcp-server --project ${projectId} --key ${key}
 
-MCP servers only connect when the host process starts, so Backenly's tools will NOT appear in this session. Once the command succeeds, stop and tell me to restart. Do not try to reach Backenly another way in the meantime — a stdio bridge or a raw HTTP call is not the supported path and will just fail on permissions.
+2. Do not stop and ask me to restart. MCP tools registered during a conversation only appear in the next one, but every Backenly tool is callable right now from the shell with the same key:
+npx -y @backenly/cli@latest link --project ${projectId} --key ${key}
+npx -y @backenly/cli@latest tools
+npx -y @backenly/cli@latest call read_backend_state
+npx -y @backenly/cli@latest call apply_migration sql="CREATE TABLE posts (title text NOT NULL)"
+npx -y @backenly/cli@latest chat "describe the change in plain English"
+(Arguments are key=value pairs; for nested JSON use --args-file args.json.)
+Use the CLI for this conversation and the MCP tools once they appear. Do not start the MCP server yourself or call Backenly's HTTP API with curl; the CLI is the supported path.
 
-After I restart, call \`read_backend_state\` to confirm the connection, then use Backenly's tools for all backend work. Docs: ${MCP_DOCS}`
+3. Start with read_backend_state and tell me what the backend has, then build what I ask for. Docs: ${MCP_DOCS}`
 }
 
 export function AgentInstallGuide({
@@ -250,33 +265,32 @@ export function AgentInstallGuide({
   }
 
   return (
-    <div className="min-w-0 space-y-6">
+    <ol className="min-w-0">
       {/* 1 — Key mint gate. Everything below is inert until this runs. */}
-      <Section step="1" icon={KeyRound} title="Generate a scoped key">
-        <div className="flex items-center justify-between gap-3 rounded-lg border border-white/[0.07] bg-[#16171d] px-4 py-3">
-          <p className="min-w-0 truncate text-[12px] text-zinc-500">
-            {key ? 'Baked into everything below. Revoke any time.' : 'Scoped and revocable — never a root key.'}
-          </p>
-          <button
+      <Step n={1} title="Generate a scoped key" done={keyReady}>
+        <div className="flex flex-col gap-3 rounded-[10px] border border-white/[0.08] bg-[#0f1012] px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0">
+            <p className="text-[13px] font-medium text-zinc-100">
+              {key ? 'Key ready' : 'One key for this project, scoped and revocable'}
+            </p>
+            <p className="mt-0.5 text-[12.5px] text-zinc-500">
+              {key ? 'It is baked into everything below. Revoke it any time from the list.' : 'Never a root key. It can request a destructive change, never approve one.'}
+            </p>
+          </div>
+          <KitButton
+            variant={key ? 'secondary' : 'primary'}
+            icon={key ? RefreshCw : KeyRound}
+            loading={minting}
             onClick={mintKey}
-            disabled={minting}
-            className="inline-flex h-8 flex-shrink-0 items-center gap-1.5 rounded-lg bg-white px-3 text-[12.5px] font-semibold text-black transition-colors hover:bg-zinc-200 disabled:opacity-50"
           >
-            {minting ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : key ? (
-              <RefreshCw className="h-3.5 w-3.5" />
-            ) : (
-              <KeyRound className="h-3.5 w-3.5" />
-            )}
-            {key ? 'New key' : 'Generate'}
-          </button>
+            {key ? 'New key' : 'Generate key'}
+          </KitButton>
         </div>
-      </Section>
-      {mintError && <p className="text-[12px] text-rose-300">{mintError}</p>}
+        {mintError && <p role="alert" className="mt-2 text-[12.5px] text-rose-300">{mintError}</p>}
+      </Step>
 
       {/* 2 — Paste into your agent. It installs and verifies itself. */}
-      <Section step="2" icon={Terminal} title="Paste into your agent">
+      <Step n={2} title="Paste into your agent" hint="It registers the server for your next conversation and keeps working in this one.">
         <CodeSurface
           label="prompt"
           onCopy={() => copy(quickStartPrompt(projectId, effectiveKey), 'quickstart')}
@@ -285,64 +299,57 @@ export function AgentInstallGuide({
         >
           <PromptText text={quickStartPrompt(projectId, effectiveKey)} />
         </CodeSurface>
-      </Section>
+      </Step>
 
       {/* 3 — Manual install: pick a transport, pick an agent, get its command. */}
-      <Section step="3" icon={CommandGlyph} title="Or install manually">
-        {/* Transport toggle: the npm package (works everywhere) vs the npx-free
-            remote URL (host must speak Streamable-HTTP). */}
+      <Step n={3} title="Or install manually" last>
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <div className="inline-flex items-center gap-0.5 rounded-lg border border-white/[0.07] bg-[#16171d] p-0.5">
-            {(['local', 'remote'] as Transport[]).map((t) => (
-              <button
-                key={t}
-                onClick={() => setTransport(t)}
-                aria-pressed={transport === t}
-                className={`rounded-md px-2.5 py-1 text-[11.5px] font-medium transition-colors ${
-                  transport === t ? 'bg-white/[0.08] text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'
-                }`}
-              >
-                {t === 'local' ? 'Local (npx)' : 'Remote URL'}
-              </button>
-            ))}
-          </div>
-          <p className="text-[11px] text-zinc-500">
+          <Segmented<Transport>
+            label="Transport"
+            value={transport}
+            onChange={setTransport}
+            options={[
+              { value: 'local', label: 'Local (npx)' },
+              { value: 'remote', label: 'Remote URL' },
+            ]}
+          />
+          <p className="text-[12.5px] text-zinc-500">
             {transport === 'local'
-              ? 'Runs the npm package on your machine — works in every host.'
-              : 'Agent connects straight to Backenly — nothing to install.'}
+              ? 'Runs the npm package on your machine. Works in every host.'
+              : 'Your agent connects straight to Backenly. Nothing to install.'}
           </p>
         </div>
 
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+        <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3" role="radiogroup" aria-label="Coding agent">
           {AGENTS.map((a) => {
             const Icon = AGENT_ICON[a.id] ?? GenericAgentIcon
             const active = agentId === a.id
             return (
               <button
                 key={a.id}
+                type="button"
+                role="radio"
+                aria-checked={active}
                 onClick={() => setAgentId(a.id)}
-                aria-pressed={active}
-                className={`flex items-center gap-2.5 rounded-lg border px-3 py-2.5 text-left transition-colors ${
+                className={`flex h-[42px] items-center gap-2.5 rounded-[8px] border px-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300/60 ${
                   active
-                    ? 'border-white/[0.16] bg-white/[0.06]'
-                    : 'border-white/[0.07] bg-[#16171d] hover:border-white/[0.12] hover:bg-white/[0.03]'
+                    ? 'border-white/[0.18] bg-white/[0.07]'
+                    : 'border-white/[0.08] bg-[#0f1012] hover:border-white/[0.14]'
                 }`}
               >
                 <Icon size={17} />
-                <span className={`truncate text-[12.5px] font-medium ${active ? 'text-zinc-100' : 'text-zinc-400'}`}>
-                  {a.name}
-                </span>
+                <span className={`truncate text-[13px] font-medium ${active ? 'text-zinc-50' : 'text-zinc-400'}`}>{a.name}</span>
               </button>
             )
           })}
         </div>
         {downgraded && agent && (
-          <p className="text-[11px] text-amber-300/80">
-            {agent.name} loads MCP servers over the local package only — showing that command.
+          <p className="mt-2 text-[12.5px] text-amber-200/90">
+            {agent.name} loads MCP servers over the local package only, so that command is shown.
           </p>
         )}
         {agent && variant && (
-          <>
+          <div className="mt-3 space-y-3">
             <CodeSurface
               label={variant.label}
               onCopy={() => copy(command, agent.id)}
@@ -351,81 +358,85 @@ export function AgentInstallGuide({
             >
               {variant.kind === 'json' ? <JsonText text={command} /> : <CliText text={command} />}
             </CodeSurface>
-            {variant.note && <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">{variant.note}</p>}
+            {variant.note && <p className="text-[12.5px] leading-[19px] text-zinc-500">{variant.note}</p>}
             <RestartNotice agentName={agent.name} hint={RESTART_HINT[agent.id]} />
-          </>
+          </div>
         )}
-      </Section>
-    </div>
+      </Step>
+    </ol>
   )
 }
 
 /**
- * Per-host restart instruction. Every MCP host reads its server manifest once,
- * at process start, so the install command above has NO effect on a session
- * that is already running. This is the single most common "Backenly doesn't
- * work" report and it is never a Backenly fault — which is exactly why it has
- * to be on screen next to the command rather than in docs somebody already
- * skipped.
+ * When the tools appear, per host. Every MCP host reads its server config when
+ * a session starts, so the command above has no effect on a conversation that
+ * is already open. That is the most common "Backenly doesn't work" report and
+ * it is never a Backenly fault, which is why it sits next to the command rather
+ * than in docs somebody already skipped.
  *
- * Each hint names the cheapest real action for that host, not a generic
- * "restart your editor": in VS Code-family hosts reloading the window is both
- * faster and more reliable than hunting for the right process to kill.
+ * Each hint names the cheapest real action for that host. For Claude Code that
+ * is a new conversation, not a window reload: its docs say an added server
+ * takes effect in conversations started afterwards, and `claude --continue`
+ * starts one that keeps the history. Running the command BEFORE opening the
+ * agent avoids the wait entirely, and the CLI covers the gap when it cannot be.
  */
 const RESTART_HINT: Record<string, string> = {
-  'claude-code': 'Reload Window (Ctrl/Cmd+Shift+P) in the VS Code extension, or start a new `claude` process in the terminal. Then run /mcp — backenly should be listed.',
+  'claude-code': 'Open a new Claude Code conversation (a new tab in VS Code), or in a terminal run /exit and then `claude --continue` to keep this conversation. /mcp lists backenly when it worked.',
   cursor: 'Reload Window (Ctrl/Cmd+Shift+P), then check Settings → MCP for a green backenly entry.',
   cline: 'Reload Window (Ctrl/Cmd+Shift+P), then reopen the Cline panel and check its MCP Servers list.',
   codex: 'Quit and relaunch the Codex CLI.',
-  other: 'Restart the host process — MCP manifests are read once at startup.',
+  other: 'Restart the host process. MCP config is read when a session starts.',
 }
 
 function RestartNotice({ agentName, hint }: { agentName: string; hint?: string }) {
   return (
-    <div className="mt-3 flex items-start gap-2.5 rounded-lg border border-amber-400/20 bg-amber-400/[0.04] px-3 py-2.5">
-      <RefreshCw className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-amber-300/80" />
-      <p className="text-[11.5px] leading-relaxed text-zinc-400">
-        <span className="font-semibold text-amber-200/90">Restart {agentName} after this.</span>{' '}
-        MCP servers connect when the host starts, so the tools stay invisible in any session that was
-        already open. {hint ?? RESTART_HINT.other}
-      </p>
-    </div>
+    <KitNote tone="warn" icon={RefreshCw} title={`Run this before you open ${agentName}`}>
+      Servers connect when a session starts, so a conversation that is already open will not see the tools.{' '}
+      {hint ?? RESTART_HINT.other} Until then, the same tools work from the shell:{' '}
+      <code>npx -y @backenly/cli@latest call &lt;tool&gt;</code>.
+    </KitNote>
   )
 }
 
-/* A numbered step header: index chip + titled icon. */
-function Section({
-  step,
-  icon: Icon,
+/**
+ * One step of the setup sequence: a numbered marker on a rail, a title, and the
+ * step's content. Numbered because this is genuinely a sequence.
+ */
+function Step({
+  n,
   title,
+  hint,
+  done = false,
+  last = false,
   children,
 }: {
-  step: string
-  icon: React.ComponentType<{ className?: string }>
+  n: number
   title: string
+  hint?: string
+  done?: boolean
+  last?: boolean
   children: React.ReactNode
 }) {
   return (
-    <div className="space-y-2.5">
-      <div className="flex items-center gap-2.5">
-        <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md border border-white/[0.08] bg-white/[0.03] font-mono text-[10px] text-zinc-500">
-          {step}
-        </span>
-        <Icon className="h-3.5 w-3.5 flex-shrink-0 text-zinc-400" />
-        <span className="text-[13px] font-semibold text-zinc-100">{title}</span>
+    <li className="relative flex gap-4 pb-8 last:pb-0">
+      {!last && <span aria-hidden className="absolute bottom-0 left-[11px] top-[28px] w-px bg-white/[0.08]" />}
+      <span
+        aria-hidden
+        className={`relative z-[1] mt-px flex h-[23px] w-[23px] flex-shrink-0 items-center justify-center rounded-full text-[12px] font-semibold tabular-nums ${
+          done ? 'bg-emerald-400/15 text-emerald-300' : 'border border-white/[0.14] bg-[#0c0d0f] text-zinc-300'
+        }`}
+      >
+        {done ? <Check className="h-3.5 w-3.5" strokeWidth={2.5} /> : n}
+      </span>
+      <div className="min-w-0 flex-1">
+        <h3 className="text-[14px] font-semibold leading-[22px] tracking-[-0.01em] text-zinc-100">
+          <span className="sr-only">Step {n}: </span>
+          {title}
+        </h3>
+        {hint && <p className="mb-3 mt-0.5 text-[13px] text-zinc-500">{hint}</p>}
+        <div className={hint ? '' : 'mt-3'}>{children}</div>
       </div>
-      {children}
-    </div>
-  )
-}
-
-/* Terminal-prompt glyph for the per-agent section header. */
-function CommandGlyph({ className }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
-      <path d="M5 8 L9 12 L5 16" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M12 16 H19" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
+    </li>
   )
 }
 
@@ -441,43 +452,43 @@ function CommandGlyph({ className }: { className?: string }) {
  * longer carries. And the audience is agent operators, for whom a tool name IS
  * the capability; a paragraph explaining it is the part they skip.
  *
- * The four listed are the load-bearing quarter of MCP_SURFACE (lib/mcp/
+ * The four listed are the load-bearing core of MCP_SURFACE (lib/mcp/
  * catalog.ts) — read, migrate, query, escape hatch. Keep this list in step with
- * that set; /quickstart covers the rest for the human reading this card.
+ * that set; packages/mcp-server/README.md covers the rest.
  */
 const HEADLINE_TOOLS: { name: string; gloss: string }[] = [
   { name: 'read_backend_state', gloss: 'Schema, RLS, metrics, incidents' },
   { name: 'apply_migration', gloss: 'DDL, governed and reversible' },
   { name: 'run_query', gloss: 'Read-only SQL, scoped role' },
-  { name: 'get_database_credentials', gloss: 'Real Postgres connection string' },
+  { name: 'deploy', gloss: 'Readiness, publish, rollback (approved)' },
 ]
 
 export function AgentCapabilitiesCard() {
   return (
-    <div className="overflow-hidden rounded-xl border border-white/[0.07] bg-[#16171d]">
+    <div className="overflow-hidden rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
       <div className="flex items-center justify-between gap-3 border-b border-white/[0.06] px-4 py-3">
-        <span className="text-[13px] font-semibold text-zinc-100">What your agent gets</span>
+        <h3 className="text-[13px] font-medium text-zinc-100">What your agent gets</h3>
         <a
           href={USER_DOCS}
           target="_blank"
           rel="noreferrer"
-          className="group inline-flex items-center gap-1 text-[11.5px] text-zinc-500 transition-colors hover:text-zinc-200"
+          className="group inline-flex items-center gap-1 rounded-[5px] text-[12.5px] text-zinc-400 transition-colors hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300/60"
         >
           Docs
-          <ArrowUpRight className="h-3 w-3 opacity-60 transition-opacity group-hover:opacity-100" />
+          <ArrowUpRight className="h-3.5 w-3.5 opacity-70 transition-opacity group-hover:opacity-100" />
         </a>
       </div>
-      <div className="space-y-2.5 px-4 py-3.5">
+      <dl className="divide-y divide-white/[0.05]">
         {HEADLINE_TOOLS.map((t) => (
-          <div key={t.name} className="flex items-baseline justify-between gap-3">
-            <code className="flex-shrink-0 font-mono text-[11.5px] text-zinc-200">{t.name}</code>
-            <span className="truncate text-[11.5px] text-zinc-500">{t.gloss}</span>
+          <div key={t.name} className="flex items-baseline justify-between gap-4 px-4 py-2.5">
+            <dt><code className="font-mono text-[12px] text-zinc-100">{t.name}</code></dt>
+            <dd className="truncate text-right text-[12.5px] text-zinc-500">{t.gloss}</dd>
           </div>
         ))}
-      </div>
+      </dl>
       <div className="flex items-center gap-2 border-t border-white/[0.06] px-4 py-2.5">
         <ShieldCheck className="h-3.5 w-3.5 flex-shrink-0 text-zinc-500" />
-        <span className="truncate text-[11.5px] text-zinc-500">Drops and truncates are never exposed over MCP.</span>
+        <span className="truncate text-[12.5px] text-zinc-500">Drops and truncates are never exposed over MCP.</span>
       </div>
     </div>
   )

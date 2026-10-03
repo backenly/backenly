@@ -3,10 +3,9 @@
  * Usage: npx ts-node scripts/create-demo-user.ts
  */
 
-import { PrismaClient } from '@prisma/client'
 import bcrypt from 'bcryptjs'
-
-const prisma = new PrismaClient()
+import { prisma } from '@/lib/db/prisma'
+import { initializeAccountEntitlements } from '@/lib/entitlements'
 
 async function createDemoUser() {
   try {
@@ -41,21 +40,11 @@ async function createDemoUser() {
         }
       })
 
-      // Create FREE subscription
-      const freePlan = await prisma.plan.findUnique({
-        where: { name: 'FREE' }
-      })
-
-      if (freePlan) {
-        await prisma.subscription.create({
-          data: {
-            userId: user.id,
-            planId: freePlan.id,
-            status: 'FREE'
-          }
-        })
-        console.log('✅ FREE subscription created')
-      }
+      // Entitle the account through the seam rather than resolving a Plan row
+      // here. A no-op in a public checkout, where there is nothing to bill;
+      // composed Cloud creates the free subscription it always did.
+      await initializeAccountEntitlements(user.id)
+      console.log('✅ Account entitlements initialised')
 
       console.log('✅ Demo user created successfully')
     }

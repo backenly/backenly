@@ -17,6 +17,21 @@ export interface RegisterRequest {
   ref?: string
   /** Cloudflare Turnstile solve. Required once the server has a secret key. */
   turnstileToken?: string
+  /** Claims a self-hosted deployment. Printed by `npm run selfhost`. */
+  setupToken?: string
+}
+
+/** What a signup made right now must carry beyond an email and a password. */
+export interface RegistrationRequirements {
+  setupTokenRequired: boolean
+}
+
+/** A refusal from an auth route, with the machine-readable code when it sent one. */
+export class AuthRequestError extends Error {
+  constructor(message: string, readonly code?: string) {
+    super(message)
+    this.name = 'AuthRequestError'
+  }
 }
 
 export interface AuthResponse {
@@ -54,47 +69,185 @@ export async function login(data: LoginRequest): Promise<AuthResponse> {
     localStorage.setItem('auth-token', result.token)
   }
   
+  try {
+    const { setSessionCache } = await import('@/lib/hooks/useUserSession')
+    setSessionCache(result.user || null, true)
+  } catch {
+    // Non-critical hook sync failure
+  }
+  
   return result
 }
 
-export async function register(data: RegisterRequest): Promise<AuthResponse> {
+export async function getRegistrationRequirements(): Promise<RegistrationRequirements> {
+  const response = await fetch(`${API_BASE}/auth/register`, { cache: 'no-store' })
+  if (!response.ok) throw new Error(`registration requirements: ${response.status}`)
+  return response.json()
+}
+
+/**
+ * What POST /api/auth/register answers when the address must be proven first.
+ * No account and no session exist yet; the code mailed to `email` creates them.
+ */
+export interface SignupVerificationRequired {
+  status: 'verification_required'
+  email: string
+  expiresInSec: number
+  resendAfterSec: number
+}
+
+export type RegisterResult =
+  | ({ status: 'created' } & AuthResponse)
+  | SignupVerificationRequired
+
+async function readAuthError(response: Response, fallback: string): Promise<AuthRequestError> {
+  const error = await response.json().catch(() => ({}))
+  return new AuthRequestError(error.error || fallback, error.code)
+}
+
+/** Remember the session a successful signup or verification issued. */
+async function adoptSession(result: AuthResponse): Promise<void> {
+  if (result.token) {
+    localStorage.setItem('auth-token', result.token)
+  }
+  try {
+    const { setSessionCache } = await import('@/lib/hooks/useUserSession')
+    setSessionCache(result.user || null, true)
+  } catch {
+    // Non-critical hook sync failure
+  }
+}
+
+export async function register(data: RegisterRequest): Promise<RegisterResult> {
   const response = await fetch(`${API_BASE}/auth/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
   })
-  
-  if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.error || 'Registration failed')
-  }
-  
+
+  if (!response.ok) throw await readAuthError(response, 'Registration failed')
+
   const result = await response.json()
-  // Store token in localStorage
-  if (result.token) {
-    localStorage.setItem('auth-token', result.token)
-  }
-  
+  if (result.status === 'verification_required') return result as SignupVerificationRequired
+
+  await adoptSession(result)
+  return { ...result, status: 'created' }
+}
+
+/** Prove the address with the mailed code; this is what creates the account. */
+export async function verifySignupCode(email: string, code: string): Promise<AuthResponse> {
+  const response = await fetch(`${API_BASE}/auth/register/verify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, code }),
+  })
+
+  if (!response.ok) throw await readAuthError(response, 'Verification failed')
+
+  const result = await response.json()
+  await adoptSession(result)
   return result
 }
 
-export async function logout(): Promise<void> {
+export async function resendSignupCode(email: string): Promise<{ resendAfterSec: number }> {
+  const response = await fetch(`${API_BASE}/auth/register/resend`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email }),
+  })
+  if (!response.ok) throw await readAuthError(response, 'Could not send a new code')
+  return response.json()
+}
+
+export async function requestPasswordResetCode(email: string): Promise<{ resendAfterSec: number }> {
+  const response = await fetch(`${API_BASE}/auth/forgot-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email }),
+  })
+  if (!response.ok) throw await readAuthError(response, 'Could not send a reset code')
+  return response.json()
+}
+
+export async function resetPasswordWithCode(email: string, code: string, password: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/auth/reset-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, code, password }),
+  })
+  if (!response.ok) throw await readAuthError(response, 'Could not reset the password')
+}
+
+/** Where signing out lands. Signing in again from there returns to the console. */
+export const SIGNED_OUT_URL = '/auth/login?redirect=%2Fapp'
+
+/** Where a deleted account lands. There is no console left to return to. */
+export const ACCOUNT_DELETED_URL = '/auth/login'
+
+/**
+ * Sign the platform user out of this browser and leave the console. Every
+ * sign-out control calls this. Rejects, leaving the user signed in and on the
+ * page, when the server did not confirm it cleared this browser's credentials.
+ *
+ * Four hand-written copies used to end only the server session. The
+ * localStorage token and the `useUserSession` cache still said "signed in",
+ * so the login page bounced to /app, the middleware bounced that back to
+ * /auth/login?redirect=%2Fapp, and the user saw a blank frame, an "Already
+ * signed in" card and a reload before the form settled.
+ */
+export async function signOut(): Promise<void> {
   const token = localStorage.getItem('auth-token')
-  
-  if (token) {
-    await fetch(`${API_BASE}/auth/logout`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`,
-      },
-    })
-  }
-  
-  // Clear all user-specific data
+
+  // Always ask the server, even without a localStorage token: the httpOnly
+  // cookies are the session, and only the server can clear them. It does so
+  // whether or not the access session is still live, so anything but success
+  // means they may still be there. (A 401 used to be read as "already signed
+  // out" while the refresh cookie survived to sign the browser back in.)
+  const response = await fetch(`${API_BASE}/auth/logout`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+  })
+  if (!response.ok) throw new Error(`Sign-out failed (${response.status})`)
+
+  await leaveSignedOut(SIGNED_OUT_URL)
+}
+
+/**
+ * Delete the signed-in platform account, then leave as a signed-out browser.
+ * Rejects, changing nothing in this browser, when the server refused.
+ */
+export async function deleteAccount(): Promise<void> {
+  const response = await fetch(`${API_BASE}/auth/delete-account`, {
+    method: 'DELETE',
+    credentials: 'include',
+  })
+  if (!response.ok) throw await readAuthError(response, 'Failed to delete account')
+
+  await leaveSignedOut(ACCOUNT_DELETED_URL)
+}
+
+/**
+ * Forget this browser's platform session and load `destination` as a new
+ * document. Call only once the server has cleared the session cookies.
+ *
+ * A full document replace, not a router push. The console keeps the user and
+ * their projects in module memory so tabs switch instantly, and only a new
+ * document drops it. Replacing the history entry keeps Back from reopening the
+ * page that was left.
+ */
+async function leaveSignedOut(destination: string): Promise<void> {
   localStorage.removeItem('auth-token')
   localStorage.removeItem('current-project-id')
   localStorage.removeItem('user-info')
+  try {
+    const { invalidateSessionCache } = await import('@/lib/hooks/useUserSession')
+    invalidateSessionCache()
+  } catch {
+    // Non-critical: the document is replaced next, which drops the cache anyway
+  }
+
+  window.location.replace(destination)
 }
 
 export async function verifyEmail(token?: string): Promise<{ message: string; emailVerified: boolean }> {

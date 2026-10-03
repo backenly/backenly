@@ -14,6 +14,7 @@
  *                         1. Retry failed outbound webhooks
  *                         2. Detect & fail stuck background jobs (timeout)
  *                         3. Process the background job queue
+ *                         3b. Finish external purges for deleted projects
  *                         4. Auto-provision system cleanup jobs (daily)
  *                       Called every minute by instrumentation.ts alongside
  *                       runDueCronJobs().
@@ -25,8 +26,9 @@
 import { prisma } from '@/lib/db/prisma'
 import { executeAiFunction, FunctionEvent } from '@/lib/services/ai-functions/executor'
 import { retryFailedWebhooks } from '@/lib/webhooks/index'
+import { drainWebhookOutbox } from '@/lib/webhooks/capture'
 import { detectAndTimeoutStuckJobs, enqueue } from '@/lib/queue/index'
-import { processBackgroundJobs } from '@/lib/queue/worker'
+import { processBackgroundJobs, processPurgeJobs } from '@/lib/queue/worker'
 
 // ─── Cron Expression Matching ─────────────────────────────────────────────────
 
@@ -76,7 +78,9 @@ export async function runDueCronJobs(now?: Date): Promise<CronRunResult> {
   const ts = now ?? new Date()
 
   const cronJobs = await prisma.aiFunction.findMany({
-    where: { status: 'active', triggerType: 'cron' },
+    // A paused or deleted project's schedule does not fire. The function stays
+    // `active`, so it resumes on its next tick after the project does.
+    where: { status: 'active', triggerType: 'cron', project: { pausedAt: null, deletedAt: null } },
     select: { id: true, name: true, projectId: true, triggerTable: true },
   })
 
@@ -142,7 +146,17 @@ async function ensureSystemCleanupJobs(): Promise<void> {
  * Each task is isolated — a failure in one never blocks the others.
  */
 export async function runSystemTasks(): Promise<void> {
-  // 1. Retry outbound webhooks whose nextRetryAt has passed
+  // 1a. Turn captured row changes into webhook deliveries.
+  //
+  //    BEFORE the retry pass, not after: draining first means an event
+  //    captured this minute gets its first attempt this minute. Reversed, every
+  //    delivery that failed on attempt one would wait an extra tick for a retry
+  //    pass that had already run before the log existed.
+  await drainWebhookOutbox().catch(err =>
+    console.error('[SystemTasks] webhook outbox drain failed:', err?.message)
+  )
+
+  // 1b. Retry outbound webhooks whose nextRetryAt has passed
   await retryFailedWebhooks().catch(err =>
     console.error('[SystemTasks] webhook retry failed:', err?.message)
   )
@@ -155,6 +169,14 @@ export async function runSystemTasks(): Promise<void> {
   // 3. Process the background job queue (up to 10 jobs per tick)
   await processBackgroundJobs().catch(err =>
     console.error('[SystemTasks] job processing failed:', err?.message)
+  )
+
+  // 3b. Finish deleting files for projects whose rows are already gone.
+  //     Separate from the queue above because purge jobs deliberately never
+  //     enter the 'queued' status a released worker would claim and complete
+  //     without a handler. See PURGE_STATUS in lib/queue/index.ts.
+  await processPurgeJobs().catch(err =>
+    console.error('[SystemTasks] purge processing failed:', err?.message)
   )
 
   // 4. Auto-provision daily cleanup jobs at 02:00 UTC

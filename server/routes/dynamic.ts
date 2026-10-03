@@ -26,6 +26,16 @@ import {
   recordServiceRoleBrowserBlock,
   serviceRoleRefusalMessage,
 } from '@/lib/security/service-role-exposure'
+import { asyncRoute } from '../lib/async-route'
+import { refuseUnlessServing } from '../lib/serving-gate'
+import { touchProjectActivity } from '@/lib/projects/activity'
+import {
+  isGrowingWrite,
+  projectRestriction,
+  restrictionDetails,
+  restrictionMessage,
+  RESTRICTED_CODE,
+} from '@/lib/usage/restrictions'
 
 const router = Router()
 
@@ -285,6 +295,12 @@ async function handleDynamicRequest(req: Request, res: Response) {
 
   const { projectId, keyId, userId, endUserId, isServiceRole, userRole, branchSchema } = authResult
 
+  // The project served here is the KEY's, which the URL-keyed serving gate
+  // never saw when the path is the legacy `/api/v1/{table}` form. Judge it now
+  // that it is known, or a paused or locked project's key walks straight past.
+  if (await refuseUnlessServing(res, projectId)) return
+  void touchProjectActivity(projectId)
+
   // Strip the URL prefix that the SDK and verifier always include:
   //   /api/v1/{projectId}/db/{tableName}[/{id}]   →  pathSegments = [tableName, …]
   // The executeServerlessApi() executor expects pathSegments[0] to be the API
@@ -481,6 +497,22 @@ async function handleDynamicRequest(req: Request, res: Response) {
   // half-migrated state that returned empty tables for two months without
   // anyone noticing. A data plane that fails loudly is worth more than one that
   // quietly answers differently.
+  // Past the database grace period the data API is read-only: writes that add
+  // or change rows are refused, reads and deletes are not (lib/usage/restrictions.ts).
+  if (isGrowingWrite(req.method)) {
+    const restriction = await projectRestriction(projectId!, 'db_bytes')
+    if (restriction.restricted) {
+      res.status(403).json({
+        error: {
+          code: RESTRICTED_CODE,
+          message: restrictionMessage('db_bytes', restriction),
+          details: restrictionDetails('db_bytes', restriction),
+        },
+      })
+      return
+    }
+  }
+
   const handled = await handleViaPostgrest(req, res, path, {
     projectId: projectId!,
     endUserId,
@@ -632,10 +664,10 @@ async function serveProjectDiscovery(projectId: string, req: Request, res: Respo
   }
 }
 
-router.get('/*', handleDynamicRequest)
-router.post('/*', handleDynamicRequest)
-router.put('/*', handleDynamicRequest)
-router.patch('/*', handleDynamicRequest)
-router.delete('/*', handleDynamicRequest)
+router.get('/*', asyncRoute(handleDynamicRequest))
+router.post('/*', asyncRoute(handleDynamicRequest))
+router.put('/*', asyncRoute(handleDynamicRequest))
+router.patch('/*', asyncRoute(handleDynamicRequest))
+router.delete('/*', asyncRoute(handleDynamicRequest))
 
 export default router

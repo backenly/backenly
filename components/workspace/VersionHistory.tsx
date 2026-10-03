@@ -110,7 +110,7 @@ function ReceiptCard({ receipt, onDismiss }: { receipt: RestoreReceipt; onDismis
           <p className="text-[12.5px] font-semibold text-zinc-100">
             Backend restored to version {receipt.version}
           </p>
-          <p className="mt-0.5 text-[11.5px] leading-5 text-zinc-400">
+          <p className="mt-0.5 text-[12.5px] leading-5 text-zinc-400">
             {created.length > 0
               ? <>Re-created {summaryParts.join(' · ')}. Nothing added since was deleted.</>
               : <>Everything from version {receipt.version} was already live — the version pointer moved, nothing needed re-creating.</>}
@@ -123,7 +123,7 @@ function ReceiptCard({ receipt, onDismiss }: { receipt: RestoreReceipt; onDismis
                 return (
                   <span
                     key={`${item.kind}:${item.target}`}
-                    className="inline-flex items-center gap-1 rounded-md border border-white/[0.07] bg-white/[0.03] px-1.5 py-0.5 font-mono text-[10.5px] text-zinc-300"
+                    className="inline-flex items-center gap-1 rounded-md border border-white/[0.07] bg-white/[0.03] px-1.5 py-0.5 font-mono text-[12px] text-zinc-300"
                   >
                     <Icon className="h-2.5 w-2.5 text-zinc-500" />
                     {item.target}
@@ -136,7 +136,7 @@ function ReceiptCard({ receipt, onDismiss }: { receipt: RestoreReceipt; onDismis
           {failed.length > 0 && (
             <div className="mt-2 space-y-1">
               {failed.map(item => (
-                <p key={`${item.kind}:${item.target}`} className="flex items-start gap-1.5 text-[11px] leading-4 text-rose-300/90">
+                <p key={`${item.kind}:${item.target}`} className="flex items-start gap-1.5 text-[12px] leading-4 text-rose-300/90">
                   <AlertTriangle className="mt-px h-3 w-3 flex-shrink-0" />
                   <span>
                     <span className="font-mono">{item.target}</span> could not be re-created
@@ -148,7 +148,7 @@ function ReceiptCard({ receipt, onDismiss }: { receipt: RestoreReceipt; onDismis
           )}
 
           {skipped.length > 0 && (
-            <p className="mt-2 text-[11px] leading-4 text-zinc-500">
+            <p className="mt-2 text-[12px] leading-4 text-zinc-500">
               Not restored automatically:{' '}
               {skipped.map(s => `${s.target} (${s.kind === 'oauth_provider' ? 'reconnect in Auth' : 'regenerate in Functions'})`).join(', ')}.
             </p>
@@ -250,7 +250,7 @@ export function VersionHistory({ projectId, onRollback }: VersionHistoryProps) {
       </AnimatePresence>
 
       {error && (
-        <p className="flex items-start gap-1.5 text-[11.5px] leading-4 text-rose-300/90">
+        <p className="flex items-start gap-1.5 text-[12.5px] leading-4 text-rose-300/90">
           <AlertTriangle className="mt-px h-3 w-3 flex-shrink-0" />
           {error}
         </p>
@@ -272,7 +272,7 @@ export function VersionHistory({ projectId, onRollback }: VersionHistoryProps) {
               <div className="flex items-center gap-2.5 px-3 py-2.5">
                 {/* Sequence marker — mono numeral, violet check when active */}
                 <span
-                  className={`flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full font-mono text-[10.5px] font-medium tabular-nums ${
+                  className={`flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full text-[12px] font-medium tabular-nums ${
                     version.isActive
                       ? 'bg-violet-500/15 text-violet-300'
                       : 'border border-white/[0.07] text-zinc-500'
@@ -289,13 +289,13 @@ export function VersionHistory({ projectId, onRollback }: VersionHistoryProps) {
                   <p className={`truncate text-[12.5px] ${version.isActive ? 'text-zinc-100' : 'text-zinc-300'}`}>
                     {version.message}
                   </p>
-                  <p className="mt-0.5 font-mono text-[10.5px] tabular-nums text-zinc-600">
+                  <p className="mt-0.5 text-[12px] tabular-nums text-zinc-600">
                     v{version.sequenceNumber} · {formatWhen(version.createdAt)} · {version.changeCount} change{version.changeCount === 1 ? '' : 's'}
                   </p>
                 </button>
 
                 {version.isActive && (
-                  <span className="inline-flex items-center gap-1.5 font-mono text-[10.5px] font-medium text-violet-300">
+                  <span className="inline-flex items-center gap-1.5 font-mono text-[12px] font-medium text-violet-300">
                     <span className="h-[5px] w-[5px] rounded-full bg-violet-300" />
                     current
                   </span>
@@ -308,7 +308,7 @@ export function VersionHistory({ projectId, onRollback }: VersionHistoryProps) {
                       <button
                         onClick={() => handleRestore(version)}
                         disabled={isRestoring}
-                        className="inline-flex h-7 items-center gap-1.5 rounded-lg bg-white px-2.5 text-[11.5px] font-semibold text-black transition-colors hover:bg-zinc-200 focus:outline-none focus:ring-2 focus:ring-violet-400/40 disabled:opacity-50"
+                        className="inline-flex h-7 items-center gap-1.5 rounded-lg bg-white px-2.5 text-[12.5px] font-semibold text-black transition-colors hover:bg-zinc-200 focus:outline-none focus:ring-2 focus:ring-violet-400/40 disabled:opacity-50"
                       >
                         {isRestoring ? (
                           <>
@@ -325,7 +325,7 @@ export function VersionHistory({ projectId, onRollback }: VersionHistoryProps) {
                       {!isRestoring && (
                         <button
                           onClick={() => setArmedVersion(null)}
-                          className="inline-flex h-7 items-center rounded-lg px-2 text-[11.5px] text-zinc-500 transition-colors hover:bg-white/[0.04] hover:text-zinc-200 focus:outline-none"
+                          className="inline-flex h-7 items-center rounded-lg px-2 text-[12.5px] text-zinc-500 transition-colors hover:bg-white/[0.04] hover:text-zinc-200 focus:outline-none"
                         >
                           Cancel
                         </button>
@@ -334,7 +334,7 @@ export function VersionHistory({ projectId, onRollback }: VersionHistoryProps) {
                   ) : (
                     <button
                       onClick={() => setArmedVersion(version.id)}
-                      className="inline-flex h-7 flex-shrink-0 items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.03] px-2.5 text-[11.5px] font-medium text-zinc-300 opacity-90 transition-colors hover:border-white/20 hover:bg-white/[0.07] hover:text-white focus:outline-none focus:ring-2 focus:ring-violet-400/35"
+                      className="inline-flex h-7 flex-shrink-0 items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.03] px-2.5 text-[12.5px] font-medium text-zinc-300 opacity-90 transition-colors hover:border-white/20 hover:bg-white/[0.07] hover:text-white focus:outline-none focus:ring-2 focus:ring-violet-400/35"
                     >
                       <RotateCcw className="h-3 w-3" />
                       Restore
@@ -360,7 +360,7 @@ export function VersionHistory({ projectId, onRollback }: VersionHistoryProps) {
                     initial={{ height: 0, opacity: 0 }}
                     animate={{ height: 'auto', opacity: 1 }}
                     exit={{ height: 0, opacity: 0 }}
-                    className="overflow-hidden px-3 pb-2 pl-[46px] text-[11px] leading-4 text-zinc-500"
+                    className="overflow-hidden px-3 pb-2 pl-[46px] text-[12px] leading-4 text-zinc-500"
                   >
                     Rebuilds anything from v{version.sequenceNumber} that&apos;s missing now. Additive only — nothing added since gets deleted, and the current state is saved as its own restore point first.
                   </motion.p>
@@ -378,7 +378,7 @@ export function VersionHistory({ projectId, onRollback }: VersionHistoryProps) {
                   >
                     <div className="space-y-1 px-3 py-2 pl-[46px]">
                       {version.details.map((detail, dIdx) => (
-                        <div key={dIdx} className="flex items-center gap-2 text-[11px] text-zinc-500">
+                        <div key={dIdx} className="flex items-center gap-2 text-[12px] text-zinc-500">
                           <span className="h-1 w-1 flex-shrink-0 rounded-full bg-zinc-700" />
                           <span>{detail}</span>
                         </div>
@@ -392,7 +392,7 @@ export function VersionHistory({ projectId, onRollback }: VersionHistoryProps) {
         })}
       </div>
 
-      <p className="font-mono text-[10px] text-zinc-700">
+      <p className="font-mono text-[12px] text-zinc-700">
         version control for your backend — every change is a restore point
       </p>
     </div>

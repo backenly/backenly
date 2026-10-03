@@ -1,24 +1,38 @@
 'use client'
 
 import { useState, useEffect } from 'react'
+import Link from 'next/link'
 import { useParams } from 'next/navigation'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-  CheckCircle2, Loader2, Rocket, Copy, Check, AlertCircle, RotateCcw,
-  Layers, ExternalLink, Database, Shield, HardDrive, Code2, ArrowRight,
-  Globe, ShieldCheck, Info,
+  AlertCircle, Cable, Check, CheckCircle2, Code2, Database, ExternalLink, Globe, HardDrive, Info, Layers, Loader2,
+  Lock, Rocket, RotateCcw, Shield, ShieldCheck,
 } from 'lucide-react'
-import { GlobalLoading } from '@/components/ui/GlobalLoading'
-import { InspectorPageHeader, InspectorGovernanceFooter } from '@/components/inspector/InspectorPageHeader'
 import { EnvVarsPanel } from '@/components/inspector/EnvVarsPanel'
 import { FrontendConnectionPill } from '@/components/inspector/FrontendConnectionPill'
 import {
-  KIT,
-  KitCard, KitCardHeader,
-  KitButton, KitBadge, KitNote,
+  AgentPrompt,
+  BUTTON_BASE,
+  BUTTON_SIZES,
+  BUTTON_VARIANTS,
+  CopyField,
   EmptyState,
-  SectionLabel,
+  KIT,
+  KitButton,
+  KitCard,
+  KitCardHeader,
+  KitColumns,
+  KitNote,
+  PageHeader,
+  SettingsCard,
+  Skeleton,
+  Spinner,
+  Stat,
+  StatStrip,
+  StatusDot,
+  type StatusTone,
 } from '@/components/inspector/kit'
+import { EDGE, FOCUS, PAGE_GUTTER, PAGE_WIDTH, RULE } from '@/components/console/tokens'
 
 type ProjectStatus = 'PRIVATE' | 'DEPLOYING' | 'LIVE' | 'FAILED'
 
@@ -195,7 +209,7 @@ export default function PublishPage() {
       const data = await response.json()
       if (!response.ok || !data.success) {
         if (data.code === 'PLAN_LIMIT_EXCEEDED') {
-          throw new Error('Rollback is available on the Pro plan and higher. Upgrade in Settings → Billing to unlock it.')
+          throw new Error('Rollback is included in Pro and higher. Compare plans on the Billing page.')
         }
         throw new Error(data.error || 'Rollback failed')
       }
@@ -230,12 +244,25 @@ export default function PublishPage() {
     return `${Math.floor(hrs / 24)}d ago`
   }
 
-  if (loading) return <GlobalLoading message="Loading..." />
+  if (loading) {
+    return (
+      <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pb-16`}>
+        <PageHeader className="!px-0" title="Deploy" description="Production changes only when you publish." />
+        <div className="space-y-4" aria-hidden>
+          <Skeleton className="h-[76px] w-full rounded-[10px]" />
+          <Skeleton className="h-[200px] w-full rounded-[10px]" />
+        </div>
+      </div>
+    )
+  }
 
   if (!project) {
     return (
-      <div className="min-h-screen bg-[#101116] flex items-center justify-center">
-        <p className="text-zinc-500 text-[13px]">Project not found</p>
+      <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pb-16`}>
+        <PageHeader className="!px-0" title="Deploy" />
+        <KitCard>
+          <EmptyState icon={AlertCircle} title="Project not found" description="This project does not exist, or you no longer have access to it." />
+        </KitCard>
       </div>
     )
   }
@@ -257,7 +284,10 @@ export default function PublishPage() {
   /**
    * What the readiness card actually draws: anything that FAILED, then the
    * passes, capped. Sorting before the cap is what guarantees a blocker can
-   * never be the item that falls off the end — see the note at the render site.
+   * never be the item that falls off the end. This list used to render the
+   * server's own order sliced to eight while the "N to clear" counter counted
+   * every check, so a blocker at index 8 was cropped and the panel showed
+   * eight green ticks under "1 to clear" with nothing naming the blocker.
    */
   const VISIBLE_CHECK_LIMIT = 8
   const orderedChecks = [
@@ -268,518 +298,371 @@ export default function PublishPage() {
   const visibleChecks = orderedChecks.slice(0, VISIBLE_CHECK_LIMIT)
   const hiddenCheckCount = Math.max(0, orderedChecks.length - visibleChecks.length)
 
-  const runtimeStatus: { label: string; tone: 'operational' | 'attention' | 'paused' | 'managed' | 'beta' } = (() => {
+  const runtimeStatus: { label: string; tone: StatusTone; pulse?: boolean } = (() => {
     if (status === 'LIVE' && hasRealBackend) return { label: 'Live', tone: 'operational' }
-    if (status === 'DEPLOYING')               return { label: 'Deploying', tone: 'attention' }
-    if (status === 'FAILED')                  return { label: 'Failed', tone: 'attention' }
-    if (hasRealBackend)                       return { label: 'Ready', tone: 'managed' }
-    return { label: 'Idle', tone: 'paused' }
+    if (status === 'DEPLOYING') return { label: 'Publishing', tone: 'attention', pulse: true }
+    if (status === 'FAILED') return { label: 'Publish failed', tone: 'failed' }
+    if (hasRealBackend) return { label: 'Ready to publish', tone: 'managed' }
+    return { label: 'Nothing to publish', tone: 'paused' }
   })()
 
   const runtimeTagline = (() => {
-    if (status === 'LIVE' && hasRealBackend) return 'Production endpoint is serving traffic: every mutation governed, snapshotted, and reversible.'
-    if (status === 'DEPLOYING')               return 'Creating a stable production snapshot. Runtime stays locked until activation completes.'
-    if (status === 'FAILED')                  return 'Publish failed. Production endpoint is unchanged; your previous version is still serving.'
-    if (hasRealBackend)                       return 'Backend built. Publish to create a stable, versioned endpoint your app can rely on.'
-    return 'No backend artifacts yet. Wire your coding agent on the Connect page to start building.'
+    if (status === 'LIVE' && hasRealBackend) return 'Your production endpoint is serving. Every change is governed, snapshotted and reversible.'
+    if (status === 'DEPLOYING') return 'Creating a stable production snapshot. The runtime stays locked until activation completes.'
+    if (status === 'FAILED') return 'The last publish failed. Production is unchanged, and the previous version is still serving.'
+    if (hasRealBackend) return 'Your backend is built. Publish it to get a stable, versioned endpoint your app can rely on.'
+    return 'Production changes only when you publish. Connect your coding agent to start building.'
   })()
 
-  return (
-    <div className="min-h-screen bg-[#101116] flex flex-col">
-      <InspectorPageHeader
-        icon={Rocket}
-        title="Publish"
-        description="Production updates only when you publish · runtime stays locked until then"
-        badge={
-          status === 'LIVE' && hasRealBackend
-            ? { label: 'Live', variant: 'live' }
-            : status === 'DEPLOYING'
-            ? { label: 'Deploying', variant: 'beta' }
-            : undefined
-        }
-        actions={
-          hasRealBackend && !isLive ? (
-            <KitButton
-              variant="primary"
-              icon={publishing ? Loader2 : Rocket}
-              onClick={handlePublish}
-              disabled={publishing}
-              className={publishing ? '[&_svg]:animate-spin' : ''}
+  const publishButton = (label: string) => (
+    <KitButton variant="primary" icon={Rocket} onClick={handlePublish} loading={publishing}>
+      {publishing ? 'Publishing…' : label}
+    </KitButton>
+  )
+
+  const readinessPanel = (title: string) =>
+    readinessChecks.length > 0 ? (
+      <KitCard className="overflow-hidden">
+        <KitCardHeader
+          title={
+            <span className="flex items-center gap-2">
+              <ShieldCheck className="h-4 w-4 text-zinc-500" strokeWidth={1.75} />
+              {title}
+            </span>
+          }
+          actions={
+            blockingChecks.length === 0 ? (
+              <StatusDot tone="operational" label={`${passingChecks} of ${readinessChecks.length} passing`} />
+            ) : (
+              <StatusDot tone="attention" label={`${blockingChecks.length} to clear`} />
+            )
+          }
+        />
+        <ul className="space-y-2.5 px-4 py-3.5">
+          {visibleChecks.map(check => (
+            <li key={check.id} className="flex items-start gap-2.5">
+              {check.status === 'pass' ? (
+                <Check className="mt-[3px] h-3.5 w-3.5 flex-shrink-0 text-emerald-400/80" strokeWidth={2} />
+              ) : (
+                <AlertCircle
+                  className={`mt-[3px] h-3.5 w-3.5 flex-shrink-0 ${check.severity === 'blocking' ? 'text-rose-300' : 'text-amber-300'}`}
+                  strokeWidth={2}
+                />
+              )}
+              <div className="min-w-0">
+                <p className={`text-[13px] leading-[19px] ${check.status === 'pass' ? 'text-zinc-400' : 'text-zinc-100'}`}>{check.name}</p>
+                {/* A failing check states WHY inline, not in a title attribute nobody hovers. */}
+                {check.status !== 'pass' && check.message && (
+                  <p className="mt-0.5 text-[12.5px] leading-[18px] text-zinc-500">{check.message}</p>
+                )}
+              </div>
+            </li>
+          ))}
+          {hiddenCheckCount > 0 && (
+            <li className="pl-6 text-[12.5px] text-zinc-500">
+              +{hiddenCheckCount} more passing {hiddenCheckCount === 1 ? 'check' : 'checks'}
+            </li>
+          )}
+        </ul>
+        {blockingChecks.length > 0 && (
+          <div className={`border-t ${RULE} px-4 py-2.5`}>
+            <Link
+              href={`/app/projects/${projectId}`}
+              className="text-[12.5px] font-medium text-zinc-300 hover:text-zinc-50 hover:underline"
             >
-              {publishing ? 'Publishing…' : 'Publish now'}
-            </KitButton>
-          ) : undefined
+              See what needs attention on Overview
+            </Link>
+          </div>
+        )}
+      </KitCard>
+    ) : null
+
+  return (
+    <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pb-16`}>
+      <PageHeader
+        className="!px-0"
+        title="Deploy"
+        meta={<StatusDot tone={runtimeStatus.tone} label={runtimeStatus.label} pulse={runtimeStatus.pulse} />}
+        description={runtimeTagline}
+        actions={
+          hasRealBackend && status !== 'DEPLOYING' ? publishButton(isLive ? 'Publish update' : 'Publish now') : undefined
         }
       />
 
-      <div className="flex-1 px-8 py-6">
-        {/* Compact status + version row — replaces "Production Runtime"
-            duplicate hero. Pill + tagline + version + deployed-ago all on one
-            line; FrontendConnectionPill stays on the right where it's useful. */}
-        <div className="mb-5 flex items-center justify-between gap-4 flex-wrap">
-          <div className="flex items-center gap-3 flex-wrap min-w-0">
-            <KitBadge tone={runtimeStatus.tone ?? 'operational'}>{runtimeStatus.label}</KitBadge>
-            <span className="text-[12.5px] text-zinc-400 leading-snug truncate max-w-md">{runtimeTagline}</span>
-            {isLive && latestPublishedVersion && (
-              <>
-                <span className="w-px h-3 bg-white/[0.08]" />
-                <span className="font-mono text-[12px] font-semibold text-zinc-300 tabular-nums">v{latestPublishedVersion.version}</span>
-                {project.deployedAt && (
-                  <span className="text-[12px] text-zinc-500">deployed {formatTimeAgo(project.deployedAt)}</span>
-                )}
-              </>
-            )}
-          </div>
-          {isLive && (
-            <div className="hidden md:flex items-center gap-3 flex-shrink-0">
-              <FrontendConnectionPill projectId={projectId} variant="badge" />
-            </div>
-          )}
-        </div>
-
-        {/* Banners */}
+      <div className="space-y-4">
         <AnimatePresence>
           {error && (
-            <motion.div initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="mb-4">
-              <KitNote tone="warn" icon={AlertCircle} title="Publish error">
+            <motion.div key="err" initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
+              <KitNote tone="warn" icon={AlertCircle} title="The publish did not complete">
                 <span className="whitespace-pre-line">{error}</span>
               </KitNote>
             </motion.div>
           )}
           {successMsg && (
-            <motion.div initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="mb-4">
-              <KitNote tone="success" icon={CheckCircle2}>{successMsg}</KitNote>
+            <motion.div key="ok" initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
+              <KitNote tone="success" icon={CheckCircle2}>
+                {successMsg}
+              </KitNote>
             </motion.div>
           )}
         </AnimatePresence>
 
-        {/* LIVE state */}
+        {/* ── LIVE ─────────────────────────────────────────────── */}
         {isLive && hasRealBackend && (
           <>
-            {/* Inline production counts — one dense mono rail. */}
-            <div className="mb-4 rounded-xl border border-white/[0.07] bg-[#16171d] shadow-[0_16px_44px_-28px_rgba(0,0,0,0.9)]">
-              <div className="grid grid-cols-2 sm:grid-cols-4 divide-x divide-white/[0.06]">
-                {[
-                  { value: tableCount, label: 'tables live' },
-                  { value: endpointCount, label: 'HTTP endpoints' },
-                  { value: apiResourceCount, label: 'API resources' },
-                  { value: publishedVersions.length, label: 'versions' },
-                ].map(({ value, label }) => (
-                  <div key={label} className="flex items-baseline gap-2 px-4 py-3">
-                    <span className="font-mono text-[16px] font-medium tabular-nums leading-none text-white">{value}</span>
-                    <span className="text-[11px] text-zinc-500 leading-none">{label}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
+            <StatStrip>
+              <Stat label="Tables live" value={tableCount.toLocaleString()} />
+              <Stat label="HTTP endpoints" value={endpointCount.toLocaleString()} />
+              <Stat label="API resources" value={apiResourceCount.toLocaleString()} />
+              <Stat
+                label="Published versions"
+                value={publishedVersions.length.toLocaleString()}
+                hint={
+                  latestPublishedVersion && project.deployedAt
+                    ? `v${latestPublishedVersion.version} · ${formatTimeAgo(project.deployedAt)}`
+                    : undefined
+                }
+              />
+            </StatStrip>
 
-            <div className="flex gap-4 items-start">
-              <div className="flex-1 min-w-0 flex flex-col gap-4">
-                {/* Public URL */}
-                {project.publicUrl && (
-                  <KitCard>
-                    <div className="px-4 py-3 border-b border-white/[0.06] flex items-center gap-2.5">
-                      <Globe className="w-3 h-3 text-zinc-500" />
-                      <SectionLabel>Production endpoint</SectionLabel>
-                      <KitBadge tone="operational" className="ml-auto">active</KitBadge>
-                    </div>
-                    <div className="px-4 py-3.5 flex items-center gap-3">
-                      <code className="flex-1 text-[12.5px] text-zinc-100 font-mono truncate min-w-0">
-                        {project.publicUrl}
-                      </code>
-                      <div className="flex items-center gap-1 flex-shrink-0">
-                        <button onClick={handleCopyURL} className="p-2 rounded-md hover:bg-white/[0.06] transition-colors" title="Copy URL">
-                          {copied
-                            ? <Check className="w-3.5 h-3.5 text-violet-400" />
-                            : <Copy className="w-3.5 h-3.5 text-zinc-500 hover:text-zinc-100 transition-colors" />}
-                        </button>
-                        <a href={project.publicUrl} target="_blank" rel="noopener noreferrer" className="p-2 rounded-md hover:bg-white/[0.06] transition-colors" title="Open in new tab">
-                          <ExternalLink className="w-3.5 h-3.5 text-zinc-500 hover:text-zinc-100 transition-colors" />
-                        </a>
-                      </div>
-                    </div>
-                  </KitCard>
-                )}
-
-                {/* Action grid */}
-                <div className="grid grid-cols-2 gap-4">
-                  <a
-                    href={`/app/projects/${projectId}/connect`}
-                    className="flex items-center gap-3 px-4 py-3.5 bg-[#16171d] border border-white/[0.07] hover:border-white/[0.14] rounded-xl transition-colors group shadow-[0_16px_44px_-28px_rgba(0,0,0,0.9)]"
-                  >
-                    <Code2 className="w-3.5 h-3.5 text-zinc-500 flex-shrink-0" />
-                    <div className="min-w-0">
-                      <p className="text-[12.5px] font-medium text-zinc-100">Connect your agent</p>
-                      <p className="text-[11px] text-zinc-500 mt-0.5">MCP, keys, and direct database access</p>
-                    </div>
-                    <ArrowRight className="w-3.5 h-3.5 text-zinc-600 group-hover:text-zinc-300 ml-auto flex-shrink-0 transition-all group-hover:translate-x-0.5" />
-                  </a>
-                  <button
-                    onClick={handlePublish}
-                    disabled={publishing}
-                    className="flex items-center gap-3 px-4 py-3.5 bg-[#16171d] border border-white/[0.07] hover:border-white/[0.14] rounded-xl transition-colors group disabled:opacity-40 disabled:cursor-not-allowed text-left shadow-[0_16px_44px_-28px_rgba(0,0,0,0.9)]"
-                  >
-                    {publishing
-                      ? <Loader2 className="w-3.5 h-3.5 text-violet-300 animate-spin flex-shrink-0" />
-                      : <Rocket className="w-3.5 h-3.5 text-violet-300 flex-shrink-0" />}
-                    <div className="min-w-0">
-                      <p className="text-[12.5px] font-medium text-zinc-100">{publishing ? 'Publishing…' : 'Publish update'}</p>
-                      <p className="text-[11px] text-zinc-500 mt-0.5">Push latest changes to production</p>
-                    </div>
-                  </button>
-                </div>
-
-                {/* Version history */}
-                {publishedVersions.length > 0 && (
-                  <KitCard>
-                    <KitCardHeader
-                      title="Version history"
-                      actions={<span className="font-mono text-[11px] text-zinc-500 tabular-nums">{publishedVersions.length}</span>}
-                    />
-                    {/* A version is "active" only while its snapshot still equals
-                        the live graph (see app/api/projects/[id]/rollback). Every
-                        agent edit and every autonomous fix moves the live graph,
-                        so a published project drifts off its last version and no
-                        row is marked active. Say that, rather than showing a
-                        table where nothing is live under a header that says
-                        something is. */}
-                    {!publishedVersions.some((v) => v.isActive) && (
-                      <div className="px-5 pt-3">
-                        <KitNote tone="info" icon={Info}>
-                          The live backend has changed since v{publishedVersions[0]?.version} was
-                          published. Publish an update to snapshot the current state as a version you
-                          can roll back to.
-                        </KitNote>
-                      </div>
-                    )}
-                    {/* A deployment list, not a timeline. The dotted rail read
-                        fine at one version and turns into a wall at twenty;
-                        columns stay scannable however long the history gets. */}
-                    <table className="w-full border-collapse">
-                      <thead>
-                        <tr className={KIT.gridHead}>
-                          <th className="w-16 border-b border-white/[0.06] px-4 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
-                            Ver
-                          </th>
-                          <th className="border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
-                            Change
-                          </th>
-                          {/* Both columns are sized for their widest real
-                              content and set nowrap: at w-40/w-28 the date and
-                              the Roll back label each broke onto two lines and
-                              made the row twice as tall as it needed to be. */}
-                          <th className="w-44 whitespace-nowrap border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
-                            Published
-                          </th>
-                          <th className="w-36 whitespace-nowrap border-b border-white/[0.06] px-4 py-2 text-right text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
-                            State
-                          </th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {publishedVersions.map((version) => {
-                          const isRollingBack = rollingBackId === version.id
-                          return (
-                            <tr key={version.id} className={`group/row transition-colors ${KIT.rowHoverOn}`}>
-                              <td className="border-b border-white/[0.04] px-4 py-2.5">
-                                <span
-                                  className={`font-mono text-[11.5px] font-medium tabular-nums ${
-                                    version.isActive ? 'text-violet-300' : 'text-zinc-500'
-                                  }`}
-                                >
-                                  v{version.version}
-                                </span>
-                              </td>
-                              <td className="border-b border-white/[0.04] px-3 py-2.5">
-                                <span className="text-[12.5px] text-zinc-200">{version.changeSummary}</span>
-                              </td>
-                              <td className="whitespace-nowrap border-b border-white/[0.04] px-3 py-2.5 font-mono text-[10.5px] tabular-nums text-zinc-600">
-                                {formatDate(version.publishedAt)}
-                                <span className="text-zinc-700"> · {formatTimeAgo(version.publishedAt)}</span>
-                              </td>
-                              <td className="whitespace-nowrap border-b border-white/[0.04] px-4 py-2.5 text-right">
-                                {version.isActive ? (
-                                  <KitBadge tone="operational">active</KitBadge>
-                                ) : version.canRollback ? (
-                                  <KitButton
-                                    variant="ghost"
-                                    size="sm"
-                                    icon={isRollingBack ? Loader2 : RotateCcw}
-                                    onClick={() => handleRollback(version.id, version.version)}
-                                    disabled={!!rollingBackId}
-                                    className={`whitespace-nowrap ${isRollingBack ? '[&_svg]:animate-spin' : ''}`}
-                                  >
-                                    {isRollingBack ? 'Rolling back…' : 'Roll back'}
-                                  </KitButton>
-                                ) : (
-                                  <span className="font-mono text-[10.5px] text-zinc-700">archived</span>
-                                )}
-                              </td>
-                            </tr>
-                          )
-                        })}
-                      </tbody>
-                    </table>
-                  </KitCard>
-                )}
-
-                <EnvVarsPanel projectId={projectId} />
-              </div>
-
-              {/* Sidebar */}
-              <div className="w-80 flex-shrink-0 flex flex-col gap-4">
-                <KitCard className="p-4">
-                  <div className="mb-3.5">
-                    <SectionLabel>Capabilities in production</SectionLabel>
-                  </div>
-                  <div className="space-y-2.5">
-                    {[
-                      { icon: Database, label: 'Database',      active: tableCount > 0,   sub: `${tableCount} tables` },
-                      { icon: Code2,    label: 'REST APIs',     active: endpointCount > 0, sub: `${endpointCount} endpoints` },
-                      { icon: Shield,   label: 'Authentication',active: hasAuth,           sub: hasAuth ? 'JWT sessions' : 'not configured' },
-                      { icon: HardDrive,label: 'File storage',  active: hasStorage,        sub: hasStorage ? 'buckets provisioned' : 'not configured' },
-                    ].map(({ icon: Icon, label, active, sub }) => (
-                      <div key={label} className="flex items-center gap-2.5">
-                        <Icon className={`w-3.5 h-3.5 flex-shrink-0 ${active ? 'text-zinc-400' : 'text-zinc-700'}`} />
-                        <div className="flex-1 min-w-0">
-                          <p className={`text-[12px] font-medium ${active ? 'text-zinc-200' : 'text-zinc-500'}`}>{label}</p>
-                          <p className="font-mono text-[10.5px] text-zinc-600 tabular-nums">{sub}</p>
-                        </div>
-                        {active && <Check className="w-3 h-3 text-emerald-400/70 flex-shrink-0" />}
-                      </div>
-                    ))}
-                  </div>
-                </KitCard>
-
-                {readinessChecks.length > 0 && (
-                  <KitCard className="p-4">
-                    <div className="flex items-center justify-between mb-3.5">
-                      <div className="flex items-center gap-2">
-                        <ShieldCheck className="w-3 h-3 text-zinc-500" />
-                        <SectionLabel>Runtime readiness</SectionLabel>
-                      </div>
-                      {blockingChecks.length === 0 ? (
-                        <span className="inline-flex items-center gap-1.5 font-mono text-[10.5px] font-medium text-emerald-300/90">
-                          <span className="h-[5px] w-[5px] rounded-full bg-emerald-400" />
-                          ready
-                        </span>
-                      ) : (
+            <KitColumns
+              main={
+                <>
+                  {project.publicUrl && (
+                    <KitCard className="overflow-hidden">
+                      <KitCardHeader
+                        title={
+                          <span className="flex items-center gap-2">
+                            <Globe className="h-4 w-4 text-zinc-500" strokeWidth={1.75} />
+                            Production endpoint
+                          </span>
+                        }
+                        actions={<StatusDot tone="operational" label="Serving" />}
+                      />
+                      <div className="flex items-center gap-2 px-4 py-3.5">
+                        <CopyField value={project.publicUrl} className="flex-1" />
                         <a
-                          href="/app"
-                          className="inline-flex items-center gap-1.5 font-mono text-[10.5px] font-medium text-amber-500 hover:text-amber-400"
-                          title="A few things to clear. Open the dashboard"
+                          href={project.publicUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          aria-label="Open the endpoint in a new tab"
+                          className={`inline-flex h-[34px] w-[34px] flex-shrink-0 items-center justify-center rounded-[7px] border ${EDGE} text-zinc-400 transition-colors hover:bg-white/[0.05] hover:text-zinc-100 ${FOCUS}`}
                         >
-                          <span className="h-[5px] w-[5px] rounded-full bg-amber-400" />
-                          {blockingChecks.length} to clear
+                          <ExternalLink className="h-3.5 w-3.5" />
                         </a>
+                      </div>
+                    </KitCard>
+                  )}
+
+                  {publishedVersions.length > 0 && (
+                    <KitCard className="overflow-hidden">
+                      <KitCardHeader
+                        title="Versions"
+                        actions={<span className="text-[12px] tabular-nums text-zinc-500">{publishedVersions.length}</span>}
+                      />
+                      {/* A version is "active" only while its snapshot still equals
+                          the live graph (see app/api/projects/[id]/rollback). Every
+                          agent edit and every autonomous fix moves the live graph,
+                          so a published project drifts off its last version. Say
+                          that, rather than a table where nothing is live under a
+                          header that says something is. */}
+                      {!publishedVersions.some(v => v.isActive) && (
+                        <div className="px-4 pt-3">
+                          <KitNote tone="info" icon={Info}>
+                            The live backend has changed since v{publishedVersions[0]?.version} was published. Publish an
+                            update to save the current state as a version you can roll back to.
+                          </KitNote>
+                        </div>
                       )}
-                    </div>
-                    <p className="text-[12px] text-zinc-500 leading-5">
-                      {blockingChecks.length === 0
-                        ? `${passingChecks} of ${readinessChecks.length} checks passing. Autonomy is watching error rate, latency, and anomalies in the background.`
-                        : 'Open the dashboard to see what needs attention. Autonomy is handling routine issues automatically.'}
-                    </p>
+                      <div className="overflow-x-auto">
+                        <table className="w-full min-w-[560px] border-separate border-spacing-0">
+                          <thead>
+                            <tr className={KIT.gridHead}>
+                              <th scope="col" className={`w-16 border-b ${RULE} px-4 py-2 text-left text-[12px] font-normal text-zinc-500`}>Version</th>
+                              <th scope="col" className={`border-b ${RULE} px-3 py-2 text-left text-[12px] font-normal text-zinc-500`}>Change</th>
+                              <th scope="col" className={`w-44 whitespace-nowrap border-b ${RULE} px-3 py-2 text-left text-[12px] font-normal text-zinc-500`}>Published</th>
+                              <th scope="col" className={`w-36 whitespace-nowrap border-b ${RULE} px-4 py-2 text-right text-[12px] font-normal text-zinc-500`}>
+                                <span className="sr-only">State</span>
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {publishedVersions.map(version => {
+                              const isRollingBack = rollingBackId === version.id
+                              return (
+                                <tr key={version.id} className={`transition-colors ${KIT.rowHoverOn}`}>
+                                  <td className="border-b border-white/[0.04] px-4 py-2.5">
+                                    <span className={`text-[13px] font-medium tabular-nums ${version.isActive ? 'text-zinc-50' : 'text-zinc-400'}`}>
+                                      v{version.version}
+                                    </span>
+                                  </td>
+                                  <td className="border-b border-white/[0.04] px-3 py-2.5 text-[13px] text-zinc-300">{version.changeSummary}</td>
+                                  <td className="whitespace-nowrap border-b border-white/[0.04] px-3 py-2.5 text-[12.5px] tabular-nums text-zinc-500">
+                                    {formatDate(version.publishedAt)}
+                                    <span className="text-zinc-600"> · {formatTimeAgo(version.publishedAt)}</span>
+                                  </td>
+                                  <td className="whitespace-nowrap border-b border-white/[0.04] px-4 py-2 text-right">
+                                    {version.isActive ? (
+                                      <StatusDot tone="operational" label="Live" />
+                                    ) : version.canRollback ? (
+                                      <KitButton
+                                        variant="ghost"
+                                        size="sm"
+                                        icon={RotateCcw}
+                                        loading={isRollingBack}
+                                        onClick={() => handleRollback(version.id, version.version)}
+                                        disabled={!!rollingBackId && !isRollingBack}
+                                      >
+                                        {isRollingBack ? 'Rolling back…' : 'Roll back'}
+                                      </KitButton>
+                                    ) : (
+                                      <span className="text-[12px] text-zinc-600">Archived</span>
+                                    )}
+                                  </td>
+                                </tr>
+                              )
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </KitCard>
+                  )}
+
+                  <EnvVarsPanel projectId={projectId} />
+                </>
+              }
+              side={
+                <>
+                  <KitCard className="overflow-hidden">
+                    <KitCardHeader title="In production" />
+                    <ul className="divide-y divide-white/[0.06]">
+                      {[
+                        { icon: Database, label: 'Database', active: tableCount > 0, sub: `${tableCount} ${tableCount === 1 ? 'table' : 'tables'}` },
+                        { icon: Code2, label: 'REST API', active: endpointCount > 0, sub: `${endpointCount} endpoints` },
+                        { icon: Shield, label: 'Authentication', active: hasAuth, sub: hasAuth ? 'JWT sessions' : 'Not configured' },
+                        { icon: HardDrive, label: 'File storage', active: hasStorage, sub: hasStorage ? 'Buckets provisioned' : 'Not configured' },
+                      ].map(({ icon: Icon, label, active, sub }) => (
+                        <li key={label} className="flex items-center gap-3 px-4 py-2.5">
+                          <Icon className={`h-4 w-4 flex-shrink-0 ${active ? 'text-zinc-400' : 'text-zinc-700'}`} strokeWidth={1.75} />
+                          <div className="min-w-0 flex-1">
+                            <p className={`text-[13px] ${active ? 'text-zinc-100' : 'text-zinc-500'}`}>{label}</p>
+                            <p className="text-[12px] tabular-nums text-zinc-500">{sub}</p>
+                          </div>
+                          {active && <Check className="h-3.5 w-3.5 flex-shrink-0 text-emerald-400/80" strokeWidth={2} />}
+                        </li>
+                      ))}
+                    </ul>
                   </KitCard>
-                )}
-              </div>
-            </div>
+                  {readinessPanel('Runtime readiness')}
+                  <div className="hidden md:block">
+                    <FrontendConnectionPill projectId={projectId} variant="badge" />
+                  </div>
+                </>
+              }
+            />
           </>
         )}
 
-        {/* PRIVATE — no backend */}
+        {/* ── PRIVATE, nothing built ───────────────────────────── */}
         {status === 'PRIVATE' && !hasRealBackend && (
           <KitCard>
             <EmptyState
               icon={Layers}
-              title="Empty backend"
-              description="Describe your app to your coding agent and Backenly lays the foundation: tables, APIs, auth, all of it."
+              title="Nothing to publish yet"
+              description="Describe your app to your coding agent. Once it has built tables, auth or storage, publishing gives the backend a stable, versioned endpoint."
               action={
-                <KitButton variant="primary" icon={Database} onClick={() => location.assign(`/app/projects/${projectId}/database`)}>
-                  Build your backend
-                </KitButton>
+                <div className="flex w-full flex-col items-center gap-3">
+                  <AgentPrompt prompt="Build the backend for a task tracker: projects, tasks with a status and a due date, and email sign-in. Only a task's owner can edit it." />
+                  <Link href={`/app/projects/${projectId}/connect`} className={`${BUTTON_BASE} ${BUTTON_SIZES.md} ${BUTTON_VARIANTS.primary}`}>
+                    <Cable className="h-[15px] w-[15px]" strokeWidth={2} />
+                    Connect your agent
+                  </Link>
+                </div>
               }
             />
           </KitCard>
         )}
 
-        {/* PRIVATE — ready to publish */}
+        {/* ── PRIVATE, ready to publish ────────────────────────── */}
         {status === 'PRIVATE' && hasRealBackend && (
-          <div className="flex gap-4 items-start">
-            <KitCard className="flex-1 min-w-0">
-              <div className="px-5 py-6">
-                <div className="flex items-center gap-2 mb-1.5">
-                  <Rocket className="w-4 h-4 text-violet-300" />
-                  <h2 className="text-[15px] font-semibold text-zinc-50 tracking-[-0.01em]">Ready to go live</h2>
-                </div>
-                <p className="text-[12.5px] text-zinc-500 mb-4 max-w-[420px] leading-5">
-                  Publish to create a stable, versioned endpoint your app can rely on.
-                </p>
-                <KitButton
-                  variant="primary"
-                  icon={publishing ? Loader2 : Rocket}
-                  onClick={handlePublish}
-                  disabled={publishing}
-                  className={publishing ? '[&_svg]:animate-spin' : ''}
-                >
-                  {publishing ? 'Publishing…' : 'Publish backend'}
-                </KitButton>
-              </div>
-              <div className="border-t border-white/[0.06] px-5 py-2.5 flex items-center gap-5 flex-wrap">
-                {tableCount > 0 && (
-                  <div className="flex items-center gap-1.5">
-                    <Database className="w-3 h-3 text-zinc-600" />
-                    <span className="font-mono text-[11px] text-zinc-400 tabular-nums">{tableCount} tables</span>
-                  </div>
-                )}
-                {endpointCount > 0 && (
-                  <div className="flex items-center gap-1.5">
-                    <Code2 className="w-3 h-3 text-zinc-600" />
-                    <span className="font-mono text-[11px] text-zinc-400 tabular-nums">{endpointCount} endpoints</span>
-                  </div>
-                )}
-                {hasAuth && (
-                  <div className="flex items-center gap-1.5">
-                    <Shield className="w-3 h-3 text-zinc-600" />
-                    <span className="font-mono text-[11px] text-zinc-400">auth</span>
-                  </div>
-                )}
-                {hasStorage && (
-                  <div className="flex items-center gap-1.5">
-                    <HardDrive className="w-3 h-3 text-zinc-600" />
-                    <span className="font-mono text-[11px] text-zinc-400">storage</span>
-                  </div>
-                )}
-              </div>
-            </KitCard>
-
-            {readinessChecks.length > 0 && (
-              <KitCard className="w-80 flex-shrink-0 p-4">
-                <div className="flex items-center justify-between mb-3.5">
-                  <div className="flex items-center gap-2">
-                    <ShieldCheck className="w-3 h-3 text-zinc-500" />
-                    <SectionLabel>Pre-publish readiness</SectionLabel>
-                  </div>
-                  {blockingChecks.length === 0 ? (
-                    <span className="inline-flex items-center gap-1.5 font-mono text-[10.5px] font-medium text-emerald-300/90">
-                      <span className="h-[5px] w-[5px] rounded-full bg-emerald-400" />
-                      cleared
-                    </span>
-                  ) : (
-                    <span className="inline-flex items-center gap-1.5 font-mono text-[10.5px] font-medium text-amber-500">
-                      <span className="h-[5px] w-[5px] rounded-full bg-amber-400" />
-                      {blockingChecks.length} to clear
-                    </span>
-                  )}
-                </div>
-                <div className="space-y-2">
-                  {/*
-                    Failures first, blocking before warning, and only THEN the
-                    passes.
-
-                    This list used to render `readinessChecks.slice(0, 8)` in
-                    the server's own order while the "N to clear" counter above
-                    it was computed across every check. So when the one blocking
-                    failure sat at index 8 or beyond it was silently cropped,
-                    and the panel showed eight green ticks under a header
-                    reading "1 to clear" — with nothing anywhere naming the
-                    blocker. Publishing then refused with "1 readiness issue
-                    must be cleared first. Details are in the readiness panel",
-                    pointing at a panel that did not contain them.
-
-                    Ordering by severity makes the crop harmless: whatever is
-                    blocking publish is now always in the visible set, because
-                    it sorts above everything that passed.
-                  */}
-                  {visibleChecks.map(check => (
-                    <div key={check.id} title={check.message} className="flex items-start gap-2">
-                      {check.status === 'pass' ? (
-                        <Check className="w-3 h-3 text-emerald-400/70 flex-shrink-0 mt-0.5" />
-                      ) : (
-                        <AlertCircle className={`w-3 h-3 flex-shrink-0 mt-0.5 ${
-                          check.severity === 'blocking' ? 'text-rose-300' : 'text-amber-500/80'
-                        }`} />
-                      )}
-                      <div className="min-w-0">
-                        <p className={`text-[12px] leading-snug ${
-                          check.status === 'pass' ? 'text-zinc-500' : 'text-zinc-300'
-                        }`}>{check.name}</p>
-                        {/*
-                          A failing check states WHY inline. "Details are in the
-                          readiness panel" was only true if the panel showed the
-                          reason, and it showed the name alone — the message was
-                          buried in a title attribute nobody hovers.
-                        */}
-                        {check.status !== 'pass' && check.message && (
-                          <p className="mt-0.5 text-[11.5px] leading-snug text-zinc-500">{check.message}</p>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                  {hiddenCheckCount > 0 && (
-                    <p className="pt-0.5 text-[11.5px] text-zinc-600">
-                      +{hiddenCheckCount} more passing {hiddenCheckCount === 1 ? 'check' : 'checks'}
-                    </p>
-                  )}
-                </div>
-              </KitCard>
-            )}
-          </div>
+          <KitColumns
+            main={
+              <SettingsCard
+                title="Ready to go live"
+                description="Publishing snapshots the backend as version one and gives your app a stable endpoint. Later changes stay in development until you publish again."
+                footer={
+                  <span className="flex flex-wrap items-center gap-x-4 gap-y-1 tabular-nums">
+                    {tableCount > 0 && <span>{tableCount} {tableCount === 1 ? 'table' : 'tables'}</span>}
+                    {endpointCount > 0 && <span>{endpointCount} endpoints</span>}
+                    {hasAuth && <span>Auth</span>}
+                    {hasStorage && <span>Storage</span>}
+                  </span>
+                }
+                actions={publishButton('Publish backend')}
+              />
+            }
+            side={readinessPanel('Before you publish')}
+          />
         )}
 
-        {/* DEPLOYING */}
+        {/* ── DEPLOYING ─────────────────────────────────────────── */}
         {status === 'DEPLOYING' && (
-          <KitCard className="px-5 py-6">
-            <div className="flex items-center gap-2.5 mb-1.5">
-              <div className="w-4 h-4 rounded-full border-2 border-violet-500/15 border-t-violet-300 animate-spin" />
-              <h2 className="text-[15px] font-semibold text-zinc-50 tracking-[-0.01em]">Publishing…</h2>
-            </div>
-            <p className="text-[12.5px] text-zinc-500 mb-4">Creating a stable production snapshot.</p>
-            <div className="space-y-2.5">
-              {['Snapshotting backend', 'Provisioning endpoint', 'Activating production'].map((step, i) => (
-                <motion.div key={step} initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }}
+          <KitCard className="px-5 py-5 sm:px-6">
+            <h2 className="flex items-center gap-2.5 text-[15px] font-semibold tracking-[-0.012em] text-zinc-50">
+              <Spinner className="h-4 w-4 text-zinc-300" />
+              Publishing
+            </h2>
+            <p className="mt-1 text-[13px] text-zinc-400">Creating a stable production snapshot.</p>
+            <ol className="mt-4 space-y-2.5">
+              {['Snapshotting the backend', 'Provisioning the endpoint', 'Activating production'].map((step, i) => (
+                <motion.li
+                  key={step}
+                  initial={{ opacity: 0, x: -6 }}
+                  animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: i * 0.3 }}
-                  className="flex items-center gap-2.5">
-                  <Loader2 className="w-3 h-3 text-violet-300 animate-spin flex-shrink-0" />
-                  <span className="text-[12.5px] text-zinc-300">{step}</span>
-                </motion.div>
+                  className="flex items-center gap-2.5"
+                >
+                  <Loader2 className="h-3.5 w-3.5 flex-shrink-0 animate-spin text-zinc-500" />
+                  <span className="text-[13px] text-zinc-300">{step}</span>
+                </motion.li>
               ))}
-            </div>
+            </ol>
           </KitCard>
         )}
 
-        {/* FAILED */}
+        {/* ── FAILED ────────────────────────────────────────────── */}
         {status === 'FAILED' && (
           <KitCard>
             <EmptyState
               icon={AlertCircle}
-              title="Couldn't publish"
-              description={project.deploymentError || "Something went wrong on the way out. Try again, or ask me to look at it."}
-              action={
-                <KitButton variant="primary" icon={publishing ? Loader2 : Rocket} onClick={handlePublish} disabled={publishing} className={publishing ? '[&_svg]:animate-spin' : ''}>
-                  {publishing ? 'Retrying…' : 'Try again'}
-                </KitButton>
-              }
+              title="The publish did not complete"
+              description={project.deploymentError || 'Production is unchanged and the previous version is still serving. Try again, or ask your agent to look at the error.'}
+              action={publishButton('Try again')}
             />
           </KitCard>
         )}
 
-        {/* Edge case: marked live but no backend */}
+        {/* Edge case: marked live but nothing to serve */}
         {isLive && !hasRealBackend && (
           <KitCard>
             <EmptyState
               icon={AlertCircle}
               title="Live, but empty"
-              description="Your project is published but there's nothing to serve yet. Build the backend first."
+              description="This project is published, but there is nothing to serve yet. Connect your coding agent and build the backend first."
               action={
-                <KitButton variant="secondary" icon={Database} onClick={() => location.assign(`/app/projects/${projectId}/database`)}>
-                  Build your backend
-                </KitButton>
+                <Link href={`/app/projects/${projectId}/connect`} className={`${BUTTON_BASE} ${BUTTON_SIZES.md} ${BUTTON_VARIANTS.secondary}`}>
+                  <Cable className="h-[15px] w-[15px]" strokeWidth={2} />
+                  Connect your agent
+                </Link>
               }
             />
           </KitCard>
         )}
 
-        <InspectorGovernanceFooter />
+        <p className="flex items-center gap-2 pt-2 text-[12.5px] text-zinc-500">
+          <Lock className="h-3.5 w-3.5 text-zinc-600" />
+          Every change is planned, snapshotted and written to the audit log before it reaches production.
+        </p>
       </div>
     </div>
   )

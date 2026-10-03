@@ -2,6 +2,7 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { logoutEndUser } from '@/lib/services/end-user-auth-flows'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 /**
  * POST /v1/{projectId}/auth/logout
@@ -12,10 +13,8 @@ import { logoutEndUser } from '@/lib/services/end-user-auth-flows'
  * Blacklists the token's jti server-side so revoked tokens are rejected
  * before their natural expiry. Idempotent — always 200.
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   let rawToken: string | null = null
   const authHeader = request.headers.get('authorization')
   if (authHeader?.startsWith('Bearer ')) {
@@ -32,3 +31,5 @@ export async function POST(
   const result = await logoutEndUser(params.projectId, rawToken)
   return NextResponse.json(result.body, { status: result.status })
 }
+
+export const POST = recordedV1(handlePOST)

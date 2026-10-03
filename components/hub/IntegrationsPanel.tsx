@@ -12,8 +12,9 @@
  * Nothing is hardcoded to a specific use-case (e.g. "blog posts").
  * The user defines exactly what they want before anything is provisioned.
  *
- * Presentation composes components/inspector/kit.tsx — the page H1 lives in
- * the route wrapper's InspectorPageHeader; this panel renders content only.
+ * Presentation composes components/inspector/kit.tsx. The panel renders the
+ * whole page, header included, because the header's action and count belong
+ * to the directory and the detail view replaces it.
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react'
@@ -27,31 +28,33 @@ import {
   Check,
   ChevronRight,
   Zap,
-  Loader2,
   ArrowLeft,
   ExternalLink,
   BarChart2,
   Search,
   Plus,
   Info,
-  Copy,
+  KeyRound,
+  Lock,
 } from 'lucide-react'
 import {
-  KIT,
-  KitCard,
-  KitBadge,
+  BUTTON_BASE,
+  BUTTON_VARIANTS,
+  CopyButton,
+  EmptyState,
   KitButton,
-  KitTabs,
-  KitTab,
-  KitModal,
+  KitChecklist,
   KitField,
   KitInput,
-  KitTextarea,
+  KitModal,
   KitNote,
-  KitChecklist,
+  KitTextarea,
+  PageHeader,
   SectionTitle,
-  EmptyState,
+  Skeleton,
+  StatusDot,
 } from '@/components/inspector/kit'
+import { FOCUS, PAGE_GUTTER, PAGE_WIDTH } from '@/components/console/tokens'
 
 // ─── Brand logos ────────────────────────────────────────────────────────────────
 // Official marks (simple-icons, CC0), pasted verbatim from the package so a mark
@@ -63,7 +66,7 @@ import {
 // Rendered with currentColor; the brand hex is applied to the glyph only, never
 // to surfaces or chrome. The hex is NOT always the one simple-icons publishes:
 // those are chosen for light backgrounds, and OpenAI, Resend and PostHog are all
-// black there, which is invisible on our #16171d tile. A black-on-light mark
+// black there, which is invisible on our dark tile. A black-on-light mark
 // renders white here; PostHog and Anthropic use their own brand colour, which
 // carries on dark.
 
@@ -183,7 +186,7 @@ const INTEGRATION_CATALOG: IntegrationCategory[] = [
         name: 'Stripe',
         tagline: 'Payment processing',
         description:
-          'Subscriptions, one-time checkout, and usage billing. Backenly provisions the webhook endpoint, the plan schema, and a payment event log.',
+          'Subscriptions, one-time checkout, and usage billing, built by your agent in Backenly: checkout, plan schema, and a payment event log behind a signed webhook receiver.',
         logo: StripeLogo,
         brandColor: '#635BFF',
         enabled: false,
@@ -346,7 +349,7 @@ const INTEGRATION_CATALOG: IntegrationCategory[] = [
 ]
 
 // ─── Provider logomark ────────────────────────────────────────────────────────
-// Neutral chip; the brand hex lives on the glyph only.
+// A neutral tile; the brand hex lives on the glyph only.
 
 function ProviderMark({
   provider,
@@ -358,10 +361,12 @@ function ProviderMark({
   size?: 'md' | 'lg'
 }) {
   const Logo = provider.logo ?? category.icon
-  const box = size === 'lg' ? 'w-10 h-10' : 'w-8 h-8'
-  const glyph = size === 'lg' ? 'w-5 h-5' : 'w-4 h-4'
+  const box = size === 'lg' ? 'h-[44px] w-[44px] rounded-[10px]' : 'h-[36px] w-[36px] rounded-[8px]'
+  const glyph = size === 'lg' ? 'h-[22px] w-[22px]' : 'h-[18px] w-[18px]'
   return (
-    <div className={`${box} ${KIT.radiusSm} flex items-center justify-center border ${KIT.border} ${KIT.surfaceAlt} flex-shrink-0`}>
+    <div
+      className={`${box} flex flex-shrink-0 items-center justify-center border border-white/[0.09] bg-[linear-gradient(180deg,rgba(255,255,255,0.06),rgba(255,255,255,0.02))] shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]`}
+    >
       <Logo
         className={`${glyph} ${provider.brandColor ? '' : 'text-zinc-300'}`}
         style={provider.brandColor ? { color: provider.brandColor } : undefined}
@@ -396,18 +401,18 @@ function ActivationModal({
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState('')
   const [done, setDone] = useState(false)
-  const [copied, setCopied] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
   // Focus the key input when the modal opens
   useEffect(() => {
-    setTimeout(() => inputRef.current?.focus(), 80)
+    const t = setTimeout(() => inputRef.current?.focus(), 80)
+    return () => clearTimeout(t)
   }, [])
 
   function validateKey() {
     const trimmed = apiKey.trim()
     if (!trimmed) { setKeyError('Paste your API key to continue.'); return false }
-    if (trimmed.length < 10) { setKeyError('This doesn\'t look like a valid API key.'); return false }
+    if (trimmed.length < 10) { setKeyError('This doesn’t look like a valid API key. Check that you copied all of it.'); return false }
     setKeyError('')
     return true
   }
@@ -422,12 +427,30 @@ function ActivationModal({
     )
   }
 
+  /**
+   * The prompt handed to the user's coding agent once the key is stored.
+   *
+   * It used to be the bare intent ("Add subscription billing…"). An agent
+   * sitting in the user's app repo reads that as a request to write Stripe code
+   * in the repo, asks for the key again, and builds nothing in Backenly. So the
+   * prompt says where the work belongs, which door to use (with the CLI for a
+   * conversation whose MCP tools have not loaded yet), and that the key is
+   * already stored and must stay out of code.
+   */
   function buildFinalIntent(): string {
     const parts: string[] = [...selectedOptions]
     if (customIntent.trim()) parts.push(customIntent.trim())
-    if (parts.length === 0) return `Add ${provider.name} integration to this project`
-    if (parts.length === 1) return parts[0]
-    return parts.join('. ') + '.'
+    const intent =
+      parts.length === 0 ? `Add the ${provider.name} integration`
+      : parts.length === 1 ? parts[0]
+      : parts.join('. ')
+    return (
+      `In my Backenly backend (project ${projectId}): ${intent.replace(/\.$/, '')}. ` +
+      `Build it in Backenly with its tools: backend_chat over MCP, or ` +
+      `npx -y @backenly/cli@latest chat "…" if the MCP tools are not loaded in this conversation. ` +
+      `My ${provider.name} key is already stored in Backenly and Backenly functions reach it as ` +
+      `ctx.integrations.${provider.id}. Do not ask me for the key and do not put it in code.`
+    )
   }
 
   async function handleActivate() {
@@ -450,7 +473,7 @@ function ActivationModal({
       })
       const credData = await credRes.json()
       if (!credRes.ok || !credData.success) {
-        setSubmitError(credData.error || 'Failed to save your API key. Please try again.')
+        setSubmitError(credData.error || 'Your API key could not be saved. Try again.')
         setSubmitting(false)
         return
       }
@@ -470,41 +493,26 @@ function ActivationModal({
 
   const canActivate = selectedOptions.length > 0 || customIntent.trim().length > 0
 
-  const description = done
-    ? 'Key stored. Hand the prompt to your agent'
-    : step === 1
-      ? 'Step 1 of 2: paste your API key'
-      : 'Step 2 of 2: describe what to provision'
-
   return (
     <KitModal
       open
       onClose={onClose}
-      title={done ? `${provider.name} connected` : `Activate ${provider.name}`}
-      description={description}
+      width="max-w-[520px]"
+      title={
+        <span className="flex items-center gap-3">
+          <ProviderMark provider={provider} category={category} />
+          {done ? `${provider.name} connected` : `Connect ${provider.name}`}
+        </span>
+      }
+      description={done ? undefined : <StepIndicator step={step} />}
       footer={
         done ? (
           <>
-            <KitButton
-              variant="secondary"
-              icon={copied ? Check : Copy}
-              onClick={() => {
-                navigator.clipboard?.writeText(buildFinalIntent()).catch(() => {})
-                setCopied(true)
-                setTimeout(() => setCopied(false), 1600)
-              }}
-            >
-              {copied ? 'Copied' : 'Copy prompt'}
-            </KitButton>
+            <CopyButton value={buildFinalIntent()} label="Copy prompt" showLabel className="h-[32px] border border-white/[0.10] px-3" />
             <KitButton variant="primary" onClick={onClose}>Done</KitButton>
           </>
         ) : step === 1 ? (
-          <KitButton
-            variant="primary"
-            iconRight={ChevronRight}
-            onClick={handleStep1Continue}
-            disabled={!apiKey.trim()}
-          >
+          <KitButton variant="primary" iconRight={ChevronRight} onClick={handleStep1Continue} disabled={!apiKey.trim()}>
             Continue
           </KitButton>
         ) : (
@@ -512,165 +520,200 @@ function ActivationModal({
             <KitButton variant="ghost" icon={ArrowLeft} onClick={() => { setStep(1); setSubmitError('') }}>
               Back
             </KitButton>
-            <KitButton
-              variant="primary"
-              onClick={handleActivate}
-              disabled={submitting || !canActivate}
-            >
-              {submitting
-                ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Activating…</>
-                : <><Zap className="w-3.5 h-3.5" /> Activate {provider.name}</>}
+            <KitButton variant="primary" icon={Zap} loading={submitting} onClick={handleActivate} disabled={!canActivate}>
+              {submitting ? 'Connecting…' : `Connect ${provider.name}`}
             </KitButton>
           </>
         )
       }
     >
       {step === 1 && !done && (
-        <div className="space-y-4">
-          <p className="text-[11.5px] text-zinc-500 leading-snug">
-            Your key is encrypted with AES-256-GCM and never exposed to the client again after this step.
-          </p>
-
-          <KitField label={<span className="font-mono">{provider.envVar}</span>}>
+        <form
+          className="space-y-4"
+          onSubmit={e => { e.preventDefault(); handleStep1Continue() }}
+        >
+          <label className="block">
+            <span className="mb-1.5 block font-mono text-[12px] text-zinc-300">{provider.envVar}</span>
             <div className="relative">
               <KitInput
                 ref={inputRef}
+                name={provider.envVar}
+                autoComplete="off"
+                spellCheck={false}
                 type={showKey ? 'text' : 'password'}
                 value={apiKey}
                 onChange={e => { setApiKey(e.target.value); setKeyError('') }}
-                onKeyDown={e => { if (e.key === 'Enter') handleStep1Continue() }}
                 placeholder={provider.keyPlaceholder}
-                className={`pr-9 font-mono ${keyError ? 'border-rose-500/40' : ''}`}
+                aria-invalid={!!keyError}
+                className={`pr-10 font-mono ${keyError ? '!border-rose-400/50' : ''}`}
               />
               <button
                 type="button"
                 onClick={() => setShowKey(v => !v)}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-600 hover:text-zinc-300 transition-colors"
+                aria-label={showKey ? 'Hide key' : 'Show key'}
+                className="absolute right-1.5 top-1/2 flex h-[26px] w-[26px] -translate-y-1/2 items-center justify-center rounded-[6px] text-zinc-500 transition-colors hover:bg-white/[0.06] hover:text-zinc-200"
               >
-                {showKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                {showKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
               </button>
             </div>
-            {keyError && <p className="text-[11.5px] text-rose-300 mt-1.5">{keyError}</p>}
-          </KitField>
+            {keyError && <p role="alert" className="mt-1.5 text-[12px] text-rose-300">{keyError}</p>}
+          </label>
 
           <a
             href={provider.keyDocsUrl}
             target="_blank"
             rel="noopener noreferrer"
-            className="flex items-center gap-1.5 text-[11.5px] text-zinc-500 hover:text-zinc-200 transition-colors w-fit"
+            className="flex w-fit items-center gap-1.5 text-[12.5px] text-zinc-400 transition-colors hover:text-zinc-100"
           >
-            <ExternalLink className="w-3 h-3" />
+            <ExternalLink className="h-3.5 w-3.5" />
             {provider.keyHelperText}
           </a>
 
           {provider.webhookKey && (
-            <div className={`pt-3 border-t ${KIT.hairline}`}>
-              <KitField
-                label={
-                  <span className="font-mono">
-                    {provider.webhookKey.envVar}
-                    <span className="ml-2 font-sans text-zinc-600 font-normal">optional · add after deploying</span>
-                  </span>
-                }
-              >
+            <div className="border-t border-white/[0.06] pt-4">
+              <label className="block">
+                <span className="mb-1.5 flex items-baseline gap-2">
+                  <span className="font-mono text-[12px] text-zinc-300">{provider.webhookKey.envVar}</span>
+                  <span className="text-[12px] text-zinc-600">Optional, add after deploying</span>
+                </span>
                 <div className="relative">
                   <KitInput
+                    name={provider.webhookKey.envVar}
+                    autoComplete="off"
+                    spellCheck={false}
                     type={showWebhookKey ? 'text' : 'password'}
                     value={webhookKey}
                     onChange={e => setWebhookKey(e.target.value)}
                     placeholder={provider.webhookKey.placeholder}
-                    className="pr-9 font-mono"
+                    className="pr-10 font-mono"
                   />
                   <button
                     type="button"
                     onClick={() => setShowWebhookKey(v => !v)}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-600 hover:text-zinc-300 transition-colors"
+                    aria-label={showWebhookKey ? 'Hide secret' : 'Show secret'}
+                    className="absolute right-1.5 top-1/2 flex h-[26px] w-[26px] -translate-y-1/2 items-center justify-center rounded-[6px] text-zinc-500 transition-colors hover:bg-white/[0.06] hover:text-zinc-200"
                   >
-                    {showWebhookKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                    {showWebhookKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
                   </button>
                 </div>
-              </KitField>
+              </label>
               <a
                 href={provider.webhookKey.docsUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="flex items-center gap-1.5 text-[11.5px] text-zinc-500 hover:text-zinc-200 transition-colors w-fit mt-1.5"
+                className="mt-2 flex w-fit items-center gap-1.5 text-[12.5px] text-zinc-400 transition-colors hover:text-zinc-100"
               >
-                <ExternalLink className="w-3 h-3" />
+                <ExternalLink className="h-3.5 w-3.5" />
                 {provider.webhookKey.helperText}
               </a>
             </div>
           )}
-        </div>
+
+          <p className="flex items-start gap-2 text-[12px] leading-[18px] text-zinc-500">
+            <Lock className="mt-[2px] h-3.5 w-3.5 flex-shrink-0" />
+            Encrypted with AES-256-GCM, and never sent back to the browser after this step.
+          </p>
+        </form>
       )}
 
       {step === 2 && !done && (
         <div className="space-y-4">
-          <div>
-            <p className="text-[12.5px] font-semibold text-zinc-100 mb-1">
-              What do you want to use {provider.name} for?
+          <fieldset>
+            <legend className="text-[13px] font-medium text-zinc-100">What should {provider.name} do in this backend?</legend>
+            <p className="mb-3 mt-0.5 text-[12.5px] text-zinc-500">
+              Pick one or more, or describe it yourself. Your agent builds exactly this in Backenly.
             </p>
-            <p className="text-[11.5px] text-zinc-500 mb-3">
-              Select one or more, or describe it yourself. Backenly will provision exactly what you need.
-            </p>
-
             <div className="space-y-1.5">
               {provider.quickOptions.map(opt => {
                 const selected = selectedOptions.includes(opt.intent)
                 return (
-                  <button
+                  <label
                     key={opt.intent}
-                    onClick={() => toggleOption(opt.intent)}
-                    className={`w-full flex items-center gap-2.5 px-3 py-2 ${KIT.radiusSm} border text-left text-[12px] font-medium transition-colors ${
+                    className={`flex cursor-pointer items-center gap-2.5 rounded-[8px] border px-3 py-2.5 text-[13px] transition-colors focus-within:ring-2 focus-within:ring-violet-300/60 ${
                       selected
-                        ? `${KIT.accentBg} ${KIT.accentBorder} ${KIT.accentText}`
-                        : 'bg-white/[0.02] border-white/[0.07] text-zinc-400 hover:border-white/[0.14] hover:text-zinc-200'
+                        ? 'border-violet-300/40 bg-violet-400/[0.06] text-zinc-100'
+                        : 'border-white/[0.08] text-zinc-300 hover:border-white/[0.14]'
                     }`}
                   >
-                    <span className={`w-3.5 h-3.5 ${KIT.radiusXs} flex-shrink-0 border flex items-center justify-center transition-colors ${
-                      selected ? `${KIT.accentBg} ${KIT.accentBorder}` : 'border-white/[0.14] bg-white/[0.03]'
-                    }`}>
-                      {selected && <Check className={`w-2.5 h-2.5 ${KIT.accentText}`} />}
+                    <input
+                      type="checkbox"
+                      checked={selected}
+                      onChange={() => toggleOption(opt.intent)}
+                      className="sr-only"
+                    />
+                    <span
+                      aria-hidden
+                      className={`flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-[4px] border transition-colors ${
+                        selected ? 'border-violet-300/60 bg-violet-400/80' : 'border-white/[0.18] bg-white/[0.03]'
+                      }`}
+                    >
+                      {selected && <Check className="h-3 w-3 text-zinc-950" strokeWidth={3} />}
                     </span>
                     {opt.label}
-                  </button>
+                  </label>
                 )
               })}
             </div>
-          </div>
+          </fieldset>
 
           <KitField label="Or describe your own use case">
             <KitTextarea
               value={customIntent}
               onChange={e => setCustomIntent(e.target.value)}
-              placeholder={`e.g. "Generate personalised size recommendations using AI…"`}
+              placeholder="Generate size recommendations from order history…"
               rows={2}
             />
           </KitField>
 
-          {submitError && <p className="text-[11.5px] text-rose-300">{submitError}</p>}
-          {!canActivate && (
-            <p className="text-[11px] text-zinc-600">
-              Select at least one option or describe your use case.
-            </p>
-          )}
+          {submitError && <p role="alert" className="text-[12.5px] text-rose-300">{submitError}</p>}
         </div>
       )}
 
       {done && (
         <div className="space-y-3">
-          <p className="text-[11.5px] text-zinc-500 leading-snug">
-            Your key is stored securely. To wire up the features, hand this prompt to
-            your coding agent (Claude Code, Cursor; set up in Connect):
+          <p className="text-[13px] leading-[20px] text-zinc-400">
+            Your key is stored. To build the features, send this to your coding agent (Claude Code, Cursor, any MCP
+            client set up in Connect):
           </p>
-          <div className={`${KIT.radiusSm} bg-[#0f1015] border ${KIT.border} px-3 py-2.5`}>
-            <p className="text-[11.5px] text-zinc-300 font-mono leading-relaxed break-words">
-              {buildFinalIntent()}
-            </p>
+          <div className="rounded-[8px] border border-white/[0.08] bg-[#08090a] px-3.5 py-3">
+            <p className="break-words font-mono text-[12px] leading-[20px] text-zinc-300">{buildFinalIntent()}</p>
           </div>
         </div>
       )}
     </KitModal>
+  )
+}
+
+/** The activation's two steps. Numbered because they are a sequence. */
+function StepIndicator({ step }: { step: 1 | 2 }) {
+  const steps = ['Add your key', 'Choose what to build']
+  return (
+    <ol className="mt-1 flex items-center gap-2 text-[12.5px]">
+      {steps.map((label, i) => {
+        const n = i + 1
+        const state = n < step ? 'done' : n === step ? 'current' : 'next'
+        return (
+          <li key={label} className="flex items-center gap-2">
+            {i > 0 && <span aria-hidden className="h-px w-5 bg-white/[0.12]" />}
+            <span
+              aria-hidden
+              className={`flex h-[18px] w-[18px] items-center justify-center rounded-full text-[11px] font-semibold tabular-nums ${
+                state === 'done'
+                  ? 'bg-emerald-400/15 text-emerald-300'
+                  : state === 'current'
+                    ? 'bg-zinc-100 text-zinc-950'
+                    : 'border border-white/[0.14] text-zinc-500'
+              }`}
+            >
+              {state === 'done' ? <Check className="h-3 w-3" strokeWidth={3} /> : n}
+            </span>
+            <span className={state === 'next' ? 'text-zinc-500' : 'text-zinc-200'} aria-current={state === 'current' ? 'step' : undefined}>
+              {label}
+            </span>
+          </li>
+        )
+      })}
+    </ol>
   )
 }
 
@@ -693,30 +736,30 @@ function ConnectorCard({
     <button
       type="button"
       onClick={onOpen}
-      className={`group flex h-full flex-col overflow-hidden text-left ${KIT.surface} border ${KIT.border} ${KIT.radius} ${KIT.inset} transition-colors ${KIT.borderHover} focus:outline-none focus:ring-2 focus:ring-violet-400/35`}
+      className={`group flex h-full flex-col overflow-hidden rounded-[10px] border border-white/[0.08] bg-[#0f1012] text-left transition-[border-color,background-color] duration-150 hover:border-white/[0.15] hover:bg-[#111215] ${FOCUS}`}
     >
-      <div className="flex flex-1 flex-col p-4">
-        <div className="mb-3 flex items-start justify-between gap-3">
+      <div className="flex flex-1 flex-col p-5">
+        <div className="mb-4 flex items-start justify-between gap-3">
           <ProviderMark provider={provider} category={category} size="lg" />
-          {provider.enabled && <KitBadge tone="operational">connected</KitBadge>}
+          {provider.enabled && <StatusDot tone="operational" label="Connected" />}
         </div>
 
-        <h3 className="text-[13px] font-semibold leading-tight text-zinc-50">{provider.name}</h3>
-        <p className="mt-1.5 text-[12px] leading-5 text-zinc-500">{provider.description}</p>
+        <h3 className="text-[14px] font-semibold leading-[20px] tracking-[-0.01em] text-zinc-50">{provider.name}</h3>
+        <p className="mt-1.5 line-clamp-3 text-[13px] leading-[20px] text-zinc-400">{provider.description}</p>
       </div>
 
-      <div className={`flex items-center justify-between gap-3 border-t ${KIT.hairline} px-4 py-2.5`}>
-        <span className="truncate font-mono text-[10.5px] text-zinc-600">{category.title}</span>
-        <span className="flex flex-shrink-0 items-center gap-1 text-[11px] font-medium text-zinc-600 transition-colors group-hover:text-zinc-200">
+      <div className="flex items-center justify-between gap-3 border-t border-white/[0.06] px-5 py-3">
+        <span className="truncate text-[12px] text-zinc-500">{category.title}</span>
+        <span className="flex flex-shrink-0 items-center gap-1 text-[12.5px] font-medium text-zinc-400 transition-colors group-hover:text-zinc-100">
           {provider.enabled ? 'Manage' : 'Connect'}
-          <ChevronRight className="h-3 w-3 transition-transform group-hover:translate-x-0.5" />
+          <ChevronRight className="h-3.5 w-3.5 transition-transform duration-150 group-hover:translate-x-0.5" />
         </span>
       </div>
     </button>
   )
 }
 
-// ─── Connector detail (Overview / Connections / Features) ───────────────────────
+// ─── Connector detail ─────────────────────────────────────────────────────────
 
 function ConnectorDetail({
   entry,
@@ -729,77 +772,70 @@ function ConnectorDetail({
 }) {
   const { provider, category } = entry
   return (
-    <div className="max-w-3xl">
-      <div className="flex items-center gap-1.5 text-[12.5px] mb-4">
+    <div className="max-w-[840px] pb-16">
+      <nav aria-label="Breadcrumb" className="mb-6 flex items-center gap-1.5 text-[13px]">
         <button
+          type="button"
           onClick={onBack}
-          className="flex items-center gap-1.5 text-zinc-500 hover:text-zinc-200 transition-colors focus:outline-none"
+          className={`flex items-center gap-1.5 rounded-[5px] text-zinc-400 transition-colors hover:text-zinc-100 ${FOCUS}`}
         >
-          <ArrowLeft className="w-3.5 h-3.5" /> Integrations
+          <ArrowLeft className="h-3.5 w-3.5" /> Integrations
         </button>
-        <ChevronRight className="w-3.5 h-3.5 text-zinc-700" />
-        <span className="text-zinc-100 font-medium">{provider.name}</span>
+        <ChevronRight className="h-3.5 w-3.5 text-zinc-700" />
+        <span className="font-medium text-zinc-100" aria-current="page">{provider.name}</span>
+      </nav>
+
+      <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center gap-4">
+          <ProviderMark provider={provider} category={category} size="lg" />
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <h1 className="text-[22px] font-semibold leading-[28px] tracking-[-0.022em] text-zinc-50">{provider.name}</h1>
+              <StatusDot tone={provider.enabled ? 'operational' : 'neutral'} label={provider.enabled ? 'Connected' : 'Not connected'} />
+            </div>
+            <p className="mt-0.5 text-[14px] text-zinc-400">{provider.tagline}</p>
+          </div>
+        </div>
+        <KitButton variant="primary" icon={provider.enabled ? KeyRound : Plus} onClick={onAddConnection}>
+          {provider.enabled ? 'Replace key' : 'Connect'}
+        </KitButton>
       </div>
 
-      <KitCard className="mb-6">
-        <div className="flex items-center gap-3.5 px-4 py-4">
-          <ProviderMark provider={provider} category={category} size="lg" />
-          <div className="flex-1 min-w-0">
-            <h2 className="text-[15px] font-semibold text-zinc-50 leading-tight tracking-[-0.01em]">
-              {provider.name}
-            </h2>
-            <p className="text-[12px] text-zinc-500 mt-0.5">{provider.tagline}</p>
-          </div>
-          <KitBadge tone={provider.enabled ? 'operational' : 'neutral'}>
-            {provider.enabled ? 'connected' : 'not connected'}
-          </KitBadge>
-        </div>
-      </KitCard>
-
-      <section className="mb-6">
-        <SectionTitle title="Overview" />
-        <p className="text-[12.5px] text-zinc-400 leading-relaxed -mt-2">{category.description}</p>
-      </section>
-
-      <section className="mb-6">
-        <SectionTitle
-          title="Connections"
-          description={`Create and manage connections for ${provider.name}.`}
-          actions={
-            <KitButton variant="primary" size="sm" icon={Plus} onClick={onAddConnection}>
-              Add connection
-            </KitButton>
-          }
-        />
-        {provider.enabled && provider.keyStatus ? (
-          <KitCard>
-            <div className="flex items-center justify-between px-4 py-3">
+      <div className="mt-8 space-y-8">
+        <section>
+          <SectionTitle title="Connection" description={`The ${provider.name} credential your backend's functions reach as ctx.integrations.${provider.id}.`} />
+          {provider.enabled && provider.keyStatus ? (
+            <div className="flex items-center justify-between gap-3 rounded-[10px] border border-white/[0.08] bg-[#0f1012] px-4 py-3.5">
               <div className="min-w-0">
-                <p className="text-[12.5px] font-medium text-zinc-200 font-mono">{provider.envVar}</p>
-                <p className="text-[11.5px] text-zinc-500 font-mono mt-0.5">{provider.keyStatus.maskedKey}</p>
+                <p className="font-mono text-[12.5px] text-zinc-100">{provider.envVar}</p>
+                <p className="mt-0.5 font-mono text-[12px] text-zinc-500">{provider.keyStatus.maskedKey}</p>
               </div>
-              <KitBadge tone="operational">connected</KitBadge>
+              <StatusDot tone="operational" label="Stored" />
             </div>
-          </KitCard>
-        ) : (
-          <KitCard>
-            <EmptyState
-              icon={Info}
-              title="No connections"
-              description={`Add a connection to store your ${provider.name} key and unlock provisioning.`}
-              className="py-8"
-            />
-          </KitCard>
-        )}
-      </section>
+          ) : (
+            <div className="rounded-[10px] border border-dashed border-white/[0.10]">
+              <EmptyState
+                icon={KeyRound}
+                title="No key stored"
+                description={`Connect ${provider.name} to store its key, encrypted, so your agent can build with it.`}
+                className="py-10"
+                action={
+                  <KitButton variant="secondary" icon={Plus} onClick={onAddConnection}>
+                    Connect {provider.name}
+                  </KitButton>
+                }
+              />
+            </div>
+          )}
+        </section>
 
-      <section>
-        <SectionTitle
-          title="Features"
-          description={`What ${provider.name} provisions when connected.`}
-        />
-        <KitChecklist items={provider.provisions} />
-      </section>
+        <section>
+          <SectionTitle title="What your agent can build" description={category.description} />
+          <div className="rounded-[10px] border border-white/[0.08] bg-[#0f1012] px-4 py-4">
+            <KitChecklist items={provider.provisions} />
+          </div>
+        </section>
+      </div>
     </div>
   )
 }
@@ -885,97 +921,120 @@ export function IntegrationsPanel() {
     return true
   })
 
+  const filters: Array<{ id: string; label: string; count: number }> = [
+    { id: 'all', label: 'All', count: allProviders.length },
+    { id: 'enabled', label: 'Connected', count: totalEnabled },
+    ...categories.map((cat) => ({ id: cat.id, label: cat.title, count: cat.providers.length })),
+  ]
+
   return (
-    <div className="px-8 py-6">
+    <div className={`${PAGE_WIDTH} ${PAGE_GUTTER}`}>
       {detail ? (
-        <ConnectorDetail
-          entry={detail}
-          onBack={() => setDetail(null)}
-          onAddConnection={() => setModalOpen(true)}
-        />
+        <div className="pt-7 sm:pt-9">
+          <ConnectorDetail
+            entry={detail}
+            onBack={() => setDetail(null)}
+            onAddConnection={() => setModalOpen(true)}
+          />
+        </div>
       ) : (
-        // Wider than a reading column: a browseable grid wants three cards
-        // across on a laptop, and max-w-4xl only ever fit two.
-        <div className="max-w-6xl">
+        <div className="pb-16">
+          <PageHeader
+            className="!px-0"
+            title="Integrations"
+            description="Connect a provider’s key once. It becomes callable from functions, triggers and your agent through ctx.integrations, and never appears in code."
+            meta={
+              !loading ? (
+                <span className="text-[13px] tabular-nums text-zinc-500">
+                  {totalEnabled} of {allProviders.length} connected
+                </span>
+              ) : undefined
+            }
+            actions={
+              <a
+                href="mailto:hello@backenly.com?subject=Connector%20request"
+                className={`${BUTTON_BASE} ${BUTTON_VARIANTS.secondary} h-[32px] px-3 text-[13px]`}
+              >
+                Request a connector
+              </a>
+            }
+          />
+
           {fetchError && (
-            <div className="mb-4">
+            <div className="mb-5">
               <KitNote
                 tone="danger"
                 icon={Info}
                 actions={<KitButton size="sm" variant="secondary" onClick={() => fetchIntegrations()}>Retry</KitButton>}
               >
-                Couldn&apos;t load connection status. Showing the catalog without live state.
+                Connection status couldn’t be loaded. The catalog is shown without live state.
               </KitNote>
             </div>
           )}
 
-          <div className="flex items-center justify-between gap-4 mb-3">
-            <div className="relative w-72">
-              <Search className="w-3.5 h-3.5 text-zinc-600 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+          <div className="mb-5 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="scrollbar-hide -mx-1 flex items-center gap-1 overflow-x-auto px-1" role="radiogroup" aria-label="Filter connectors">
+              {filters.map((f) => {
+                const on = filter === f.id
+                return (
+                  <button
+                    key={f.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={on}
+                    onClick={() => setFilter(f.id)}
+                    className={`inline-flex h-[30px] flex-shrink-0 items-center gap-1.5 whitespace-nowrap rounded-[7px] border px-2.5 text-[12.5px] font-medium transition-colors ${FOCUS} ${
+                      on
+                        ? 'border-white/[0.14] bg-white/[0.08] text-zinc-50'
+                        : 'border-transparent text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-100'
+                    }`}
+                  >
+                    {f.label}
+                    <span className={`tabular-nums ${on ? 'text-zinc-400' : 'text-zinc-600'}`}>{f.count}</span>
+                  </button>
+                )
+              })}
+            </div>
+            <div className="relative w-full lg:w-[280px]">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500" />
               <KitInput
+                type="search"
+                name="connector-search"
+                autoComplete="off"
+                aria-label="Search connectors"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search connectors"
+                placeholder="Search connectors…"
                 className="pl-9"
               />
             </div>
-            <div className="flex items-center gap-4">
-              <span className="font-mono text-[10.5px] font-medium tabular-nums text-zinc-500">
-                {totalEnabled} connected · {allProviders.length} available
-              </span>
-              <a
-                href="mailto:hello@backenly.com?subject=Connector%20request"
-                className="text-[11.5px] font-medium text-zinc-500 hover:text-zinc-200 transition-colors"
-              >
-                Request a connector
-              </a>
-            </div>
           </div>
-
-          <KitTabs className="mb-4">
-            <KitTab active={filter === 'all'} onClick={() => setFilter('all')} count={allProviders.length}>
-              All
-            </KitTab>
-            <KitTab active={filter === 'enabled'} onClick={() => setFilter('enabled')} count={totalEnabled}>
-              Connected
-            </KitTab>
-            {categories.map((cat) => (
-              <KitTab
-                key={cat.id}
-                active={filter === cat.id}
-                onClick={() => setFilter(cat.id)}
-                count={cat.providers.length}
-              >
-                {cat.title}
-              </KitTab>
-            ))}
-          </KitTabs>
 
           {loading ? (
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
               {Array.from({ length: 6 }).map((_, i) => (
-                <div key={i} className={`${KIT.surface} border ${KIT.border} ${KIT.radius} p-4`}>
-                  <div className={`h-10 w-10 ${KIT.radiusSm} animate-pulse bg-white/[0.03]`} />
-                  <div className="mt-3 h-3 w-24 animate-pulse rounded bg-white/[0.04]" />
-                  <div className="mt-2 h-2.5 w-full animate-pulse rounded bg-white/[0.03]" />
-                  <div className="mt-1.5 h-2.5 w-3/4 animate-pulse rounded bg-white/[0.03]" />
+                <div key={i} className="rounded-[10px] border border-white/[0.08] bg-[#0f1012] p-5">
+                  <Skeleton className="h-[44px] w-[44px] rounded-[10px]" />
+                  <Skeleton className="mt-4 h-[14px] w-24" />
+                  <Skeleton className="mt-3 h-[12px] w-full" />
+                  <Skeleton className="mt-2 h-[12px] w-3/4" />
                 </div>
               ))}
             </div>
           ) : visible.length === 0 ? (
-            <KitCard>
+            <div className="rounded-[10px] border border-dashed border-white/[0.10]">
               <EmptyState
                 icon={Search}
                 title="No connectors match"
                 description={
                   q
-                    ? `Nothing matches “${query}”. Try a different search or request the connector you need.`
+                    ? `Nothing matches “${query}”. Try a different search, or request the connector you need.`
                     : filter === 'enabled'
-                      ? 'Nothing is connected yet. Pick a connector from the catalog to get started.'
+                      ? 'Nothing is connected yet. Pick a connector from the catalog to start.'
                       : 'No connectors in this category yet.'
                 }
               />
-            </KitCard>
+            </div>
           ) : (
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
               {visible.map(({ provider, category }) => (
@@ -991,14 +1050,14 @@ export function IntegrationsPanel() {
         </div>
       )}
 
-      {/* Activation modal (opened from a connector's "Add connection") */}
+      {/* Activation modal (opened from a connector's Connect action) */}
       {modalOpen && detail && (
         <ActivationModal
           provider={detail.provider}
           category={detail.category}
           projectId={projectId}
           onClose={() => setModalOpen(false)}
-          onActivated={(id) => { handleProviderActivated(id); setModalOpen(false) }}
+          onActivated={(id) => { handleProviderActivated(id) }}
         />
       )}
     </div>

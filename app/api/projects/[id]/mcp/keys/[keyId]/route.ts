@@ -13,8 +13,9 @@ import { prisma } from '@/lib/db/prisma'
 
 export async function DELETE(
   req: NextRequest,
-  { params }: { params: { id: string; keyId: string } },
+  props: { params: Promise<{ id: string; keyId: string }> }
 ) {
+  const params = await props.params;
   return withProjectValidation<any>(req, async ({ projectId, userId }) => {
     const keyId = params.keyId
     if (!keyId) {

@@ -4,8 +4,11 @@ import { NextRequest, NextResponse } from 'next/server'
 import { verify } from 'jsonwebtoken'
 import { createSession } from '@/lib/auth/session'
 import { prisma } from '@/lib/db'
-import { assertSignupAllowed, isBlocked } from '@/lib/platform/controls'
+import { onSignupCompleted } from '@/lib/platform-signals'
+import { assertSignupAllowed, isBlocked } from '@/lib/platform-controls'
 import { consume, AUTH_LIMITS, clientIp } from '@/lib/security/auth-rate-limit'
+import { githubVerifiedEmail } from '@/lib/auth/oauth/verified-email'
+import { oauthMayCreateAccount } from '@/lib/auth/setup-token'
 
 function isSafeRedirect(target: unknown): target is string {
   if (typeof target !== 'string') return false
@@ -23,7 +26,7 @@ export async function GET(request: NextRequest) {
   try {
     // IP rate limit — unauthenticated surface.
     const ip = clientIp(request)
-    const rl = consume(`oauth-cb:platform-github:${ip}`, AUTH_LIMITS.oauthCallback.ip.limit, AUTH_LIMITS.oauthCallback.ip.windowMs)
+    const rl = await consume(`oauth-cb:platform-github:${ip}`, AUTH_LIMITS.oauthCallback.ip.limit, AUTH_LIMITS.oauthCallback.ip.windowMs)
     if (!rl.allowed) {
       return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/auth/login?error=rate_limited`)
     }
@@ -119,18 +122,17 @@ export async function GET(request: NextRequest) {
       },
     })
 
-    let email = githubUser.email
-    if (!email && emailsResponse.ok) {
-      const emails = await emailsResponse.json()
-      const primaryEmail = emails.find((e: any) => e.primary && e.verified)
-      email = primaryEmail?.email || emails[0]?.email
-    }
+    // Only an address GitHub itself has verified. The account below is created,
+    // or LINKED to an existing one by address, as email-verified, so taking the
+    // public profile email or `emails[0]` unchecked let an unverified address
+    // skip the proof email signup requires, and attach to whichever Backenly
+    // account already owned that address.
+    const email = emailsResponse.ok ? githubVerifiedEmail(await emailsResponse.json()) : null
 
     if (!email) {
-      console.error('[Platform GitHub OAuth] No email found')
-      return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/auth/login?error=no_email`)
+      console.error('[Platform GitHub OAuth] No verified email found')
+      return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/auth/login?error=email_not_verified`)
     }
-    email = String(email).trim().toLowerCase()
 
     // Founder blocklist — gates both new signups and existing logins.
     const oauthIp =
@@ -152,6 +154,13 @@ export async function GET(request: NextRequest) {
     })
 
     if (!user) {
+      // An OAuth round trip carries no setup token, so it cannot claim a
+      // self-hosted deployment that is waiting for one.
+      if (!(await oauthMayCreateAccount())) {
+        return NextResponse.redirect(
+          `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/auth/login?error=claim_requires_setup_token`,
+        )
+      }
       // Founder kill switches gate NEW signups via OAuth too.
       const guard = await assertSignupAllowed(email, oauthIp)
       if (!guard.ok) {
@@ -172,20 +181,18 @@ export async function GET(request: NextRequest) {
           // GitHub already proved control of the mailbox, so an OAuth signup is
           // never held as untrusted. The score is still recorded — a challenge
           // verdict here is worth being able to see later.
-          signupScore: guard.trust?.score ?? null,
-          signupSignals: guard.trust?.signals ?? [],
+          signupScore: guard.score ?? null,
+          signupSignals: guard.signals ?? [],
           signupIp: oauthIp,
         },
         include: { role: true },
       })
 
-      // Referral: a brand-new OAuth account carries its ?ref= via the
-      // backenly_ref cookie set on the signup page. Non-fatal.
+      // A brand-new OAuth account carries its ?ref= via the backenly_ref cookie
+      // set on the signup page. Reporting the signup is a no-op in single-tenant
+      // and never throws, so it cannot block sign-in.
       const refCode = request.cookies.get('backenly_ref')?.value || null
-      if (refCode) {
-        const { applyReferralOnSignup } = await import('@/lib/billing/referral')
-        await applyReferralOnSignup(user.id, user.email, refCode).catch(() => {})
-      }
+      await onSignupCompleted({ userId: user.id, email: user.email, provider: 'github', referralCode: refCode })
     } else {
       // Always stamp lastLogin + lastActiveAt on a successful OAuth sign-in;
       // link the provider on the first OAuth sign-in for an email-only account.

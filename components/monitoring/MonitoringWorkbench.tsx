@@ -14,17 +14,20 @@
  * events move to a right rail so they are visible without displacing the log.
  */
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useId } from 'react'
 import { useRouter } from 'next/navigation'
 import {
-  Activity, TrendingUp, Globe, CheckCircle2, RefreshCw, BarChart3,
-  Shield, Rocket, Upload, Database, Code,
+  Activity, TrendingUp, Globe, RefreshCw, BarChart3,
+  Shield, Rocket, Upload, Database, Code, AlertTriangle,
 } from 'lucide-react'
 import {
   getMetrics, getStats, getAnomalies, getActiveIncidents, getPerformanceBreakdown,
   type DataPoint, type MetricStats, type Anomaly, type Incident, type PerformanceBreakdown,
 } from '@/lib/api/monitoring'
-import { KitButton, EmptyState, KIT } from '@/components/inspector/kit'
+import {
+  CommandBar, EmptyState, IconButton, KIT, KitButton, KitTab, KitTabs, NoticeStrip, Segmented, Spinner, StatusDot,
+} from '@/components/inspector/kit'
+import { LogsExplorer } from './LogsExplorer'
 
 type TimeRange = '1h' | '24h' | '7d' | '30d'
 
@@ -41,7 +44,7 @@ export function MonitoringWorkbench({ projectId }: { projectId: string }) {
   const [timeRange, setTimeRange] = useState<TimeRange>('24h')
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
-  const [activeView, setActiveView] = useState<'overview' | 'performance'>('overview')
+  const [activeView, setActiveView] = useState<'overview' | 'performance' | 'logs'>('overview')
 
   const [metrics, setMetrics] = useState<MetricStats | null>(null)
   const [responseTimeData, setResponseTimeData] = useState<DataPoint[]>([])
@@ -145,92 +148,91 @@ export function MonitoringWorkbench({ projectId }: { projectId: string }) {
     return () => clearInterval(interval)
   }, [fetchData])
 
-  const stabilityValue =
-    metrics && metrics.requests.value > 0
-      ? `${(100 - (metrics.errors.value / metrics.requests.value) * 100).toFixed(1)}%`
-      : '100%'
+  // Rates only mean something once there is traffic to divide by. With none,
+  // the strip says so instead of printing a reassuring 100%.
+  const requestCount = metrics?.requests.value ?? 0
+  const hasTraffic = requestCount > 0
+  const successRate = hasTraffic && metrics ? 100 - (metrics.errors.value / requestCount) * 100 : null
+  const rangeLabel = { '1h': 'hour', '24h': '24 hours', '7d': '7 days', '30d': '30 days' }[timeRange]
+
+  const deltaHint = (change: number | undefined, invert = false) => {
+    if (!hasTraffic || !change || !Number.isFinite(change)) return undefined
+    const up = change > 0
+    const bad = invert ? up : !up
+    return (
+      <span className={bad ? 'text-amber-200/80' : 'text-zinc-500'}>
+        {up ? '+' : '−'}
+        {Math.abs(change).toFixed(0)}% vs previous {rangeLabel}
+      </span>
+    )
+  }
 
   const shell = (body: React.ReactNode) => (
-    <div className={`flex h-[calc(100vh-48px)] flex-col overflow-hidden ${KIT.bg}`}>
+    <div className={`console-fill flex flex-col overflow-hidden ${KIT.bg}`}>
       {/* ── Command bar ───────────────────────────────────── */}
-      <div className="flex h-11 flex-shrink-0 items-center justify-between gap-4 border-b border-white/[0.06] px-4">
-        <div className="flex min-w-0 items-center gap-2.5">
-          <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-600">
-            <Activity className="h-3 w-3" />
-            Inspector
-          </span>
-          <span className="h-3 w-px bg-white/10" />
-          <h1 className="text-[13px] font-semibold text-zinc-100">Monitoring</h1>
-          <span className="inline-flex items-center gap-1.5 font-mono text-[10.5px] font-medium text-emerald-300/90">
-            <span className="h-[5px] w-[5px] rounded-full bg-emerald-400" />
-            Live
-          </span>
-        </div>
-
-        <div className="flex flex-shrink-0 items-center gap-1">
-          <div className="flex items-center gap-0.5 rounded-lg border border-white/[0.07] bg-white/[0.02] p-0.5">
-            {(['1h', '24h', '7d', '30d'] as TimeRange[]).map((range) => (
-              <button
-                key={range}
-                onClick={() => setTimeRange(range)}
-                className={`rounded-md px-2.5 py-1 font-mono text-[10.5px] font-medium tabular-nums transition-colors focus:outline-none ${
-                  timeRange === range ? 'bg-white/[0.06] text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'
-                }`}
-              >
-                {range}
-              </button>
-            ))}
-          </div>
-          <button
-            onClick={() => fetchData()}
-            disabled={refreshing}
-            className="ml-1 rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-white/[0.04] hover:text-zinc-200"
-            title="Refresh"
-          >
-            <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} />
-          </button>
-        </div>
-      </div>
+      <CommandBar
+        title="Monitoring"
+        context={
+          isBackendLive == null ? undefined : (
+            <StatusDot
+              tone={isBackendLive ? 'operational' : 'neutral'}
+              label={isBackendLive ? 'Published' : 'Not published'}
+            />
+          )
+        }
+      >
+        <span className="hidden text-[12px] text-zinc-600 md:inline">Refreshes every 30s</span>
+        <Segmented<TimeRange>
+          label="Time range"
+          size="sm"
+          value={timeRange}
+          onChange={setTimeRange}
+          options={(['1h', '24h', '7d', '30d'] as TimeRange[]).map((r) => ({ value: r, label: r }))}
+        />
+        <IconButton
+          icon={RefreshCw}
+          label="Refresh now"
+          onClick={() => fetchData()}
+          disabled={refreshing}
+          className={refreshing ? '[&_svg]:animate-spin' : ''}
+        />
+      </CommandBar>
 
       {/* ── Metric strip ──────────────────────────────────── */}
-      <div className="grid flex-shrink-0 grid-cols-2 border-b border-white/[0.06] lg:grid-cols-4">
-        {[
-          { label: 'Latency', value: metrics ? `${metrics.responseTime.value}ms` : '—' },
-          { label: 'Traffic', value: metrics ? metrics.requests.value.toLocaleString() : '—' },
-          { label: 'Stability', value: metrics ? stabilityValue : '—' },
-          { label: 'Reliability', value: metrics ? `${metrics.uptime.value}%` : '—' },
-        ].map((m, i) => (
-          <div
-            key={m.label}
-            className={`px-4 py-2.5 ${i < 3 ? 'lg:border-r' : ''} ${i % 2 === 0 ? 'border-r' : ''} ${
-              i < 2 ? 'border-b lg:border-b-0' : ''
-            } border-white/[0.06]`}
-          >
-            <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">{m.label}</p>
-            <p className="mt-1.5 font-mono text-[17px] font-medium leading-none tabular-nums text-white">{m.value}</p>
-          </div>
-        ))}
+      <div className="grid flex-shrink-0 grid-cols-2 gap-px border-b border-white/[0.06] bg-white/[0.06] lg:grid-cols-4">
+        <Metric
+          label="Avg latency"
+          value={metrics == null ? null : hasTraffic ? `${metrics.responseTime.value} ms` : 'No data'}
+          hint={deltaHint(metrics?.responseTime.change, true)}
+          tone={metrics?.responseTime.status}
+        />
+        <Metric
+          label="Requests"
+          value={metrics == null ? null : requestCount.toLocaleString()}
+          hint={deltaHint(metrics?.requests.change) ?? (metrics ? `Last ${rangeLabel}` : undefined)}
+        />
+        <Metric
+          label="Success rate"
+          title="Requests answered without a 4xx or 5xx"
+          value={metrics == null ? null : successRate == null ? 'No data' : `${successRate.toFixed(1)}%`}
+          hint={hasTraffic && metrics ? `${metrics.errors.value.toLocaleString()} errored` : undefined}
+          tone={metrics?.errors.status}
+        />
+        <Metric
+          label="Reliability"
+          title="Requests answered without a server error (5xx)"
+          value={metrics == null ? null : hasTraffic ? `${metrics.uptime.value}%` : 'No data'}
+          hint={hasTraffic ? 'Without a server error' : undefined}
+          tone={metrics?.uptime.status}
+        />
       </div>
 
       {/* ── Tabs ──────────────────────────────────────────── */}
-      <div className="flex h-9 flex-shrink-0 items-center gap-0.5 border-b border-white/[0.06] px-3">
-        {([
-          ['overview', 'Overview'],
-          ['performance', 'Performance'],
-        ] as const).map(([key, label]) => (
-          <button
-            key={key}
-            onClick={() => setActiveView(key)}
-            className={`-mb-px border-b-2 px-3 py-2 text-[12px] font-medium transition-colors focus:outline-none ${
-              activeView === key
-                ? 'border-violet-400 text-zinc-50'
-                : 'border-transparent text-zinc-500 hover:text-zinc-200'
-            }`}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
+      <KitTabs className="flex-shrink-0 px-3 sm:px-4">
+        <KitTab active={activeView === 'overview'} onClick={() => setActiveView('overview')}>Overview</KitTab>
+        <KitTab active={activeView === 'performance'} onClick={() => setActiveView('performance')}>Endpoints</KitTab>
+        <KitTab active={activeView === 'logs'} onClick={() => setActiveView('logs')}>Logs</KitTab>
+      </KitTabs>
 
       <div className="relative min-h-0 flex-1">
         <div className="absolute inset-0 flex">{body}</div>
@@ -238,17 +240,40 @@ export function MonitoringWorkbench({ projectId }: { projectId: string }) {
     </div>
   )
 
-  // Backend not live — keep the chrome so the section still reads as itself.
-  if (isBackendLive === false && !loading) {
+  // Ahead of BOTH gates below, deliberately.
+  //
+  // Logs read a different endpoint and own their loading, empty and error
+  // states, so the workbench's shared spinner would block a panel that is
+  // already capable of showing its own. More importantly the "backend not
+  // live" gate would swallow this tab entirely: a deployment with no traffic
+  // still records system and auth logs, and sending that case to "nothing to
+  // watch yet" hides the very entries an operator opens this tab to read.
+  if (activeView === 'logs') {
+    return shell(<LogsExplorer projectId={projectId} />)
+  }
+
+  if (loading) {
     return shell(
-      <div className="flex h-full w-full flex-col items-center justify-center px-8">
+      <div className="flex h-full w-full items-center justify-center text-zinc-500">
+        <Spinner className="h-4 w-4" />
+      </div>
+    )
+  }
+
+  // Not published AND nothing recorded: there is genuinely nothing to show.
+  // Traffic that arrives before publishing (tests, a local frontend, an agent
+  // exercising endpoints) is real, so it is shown rather than hidden behind
+  // this state while the strip above reports it.
+  if (isBackendLive === false && !hasTraffic && requestLog.length === 0) {
+    return shell(
+      <div className="flex h-full w-full flex-col items-center justify-center overflow-y-auto px-6">
         <EmptyState
           icon={BarChart3}
           title="Nothing to watch yet"
-          description="Once your app goes live, I'll start tracking traffic, errors, and slow queries here."
+          description="Traffic, errors and slow endpoints appear here as soon as something calls this backend. Publishing gives your app a stable URL to call."
           action={
             <KitButton variant="primary" icon={Rocket} onClick={() => router.push(`/app/projects/${projectId}/deploy`)}>
-              Publish now
+              Publish
             </KitButton>
           }
         />
@@ -256,79 +281,56 @@ export function MonitoringWorkbench({ projectId }: { projectId: string }) {
     )
   }
 
-  if (loading) {
-    return shell(
-      <div className="flex h-full w-full items-center justify-center">
-        <RefreshCw className="h-4 w-4 animate-spin text-white/30" />
-      </div>
-    )
-  }
-
   if (activeView === 'performance') {
     return shell(
       <div className="flex min-w-0 flex-1 flex-col">
-        <div className="flex h-10 flex-shrink-0 items-center justify-between gap-3 border-b border-white/[0.06] px-4">
-          <div className="flex items-baseline gap-2">
-            <h2 className="text-[13px] font-medium text-zinc-100">API performance</h2>
-            <span className="font-mono text-[11px] tabular-nums text-zinc-500">
-              {performanceBreakdowns.length} route{performanceBreakdowns.length === 1 ? '' : 's'}
-            </span>
-          </div>
-          <span className="font-mono text-[10.5px] tabular-nums text-zinc-700">per-endpoint · {timeRange}</span>
-        </div>
+        <PaneHeader
+          title="Endpoints"
+          count={`${performanceBreakdowns.length} ${performanceBreakdowns.length === 1 ? 'route' : 'routes'}`}
+          aside={`Last ${rangeLabel}`}
+        />
         <div className="min-h-0 flex-1 overflow-auto">
           {performanceBreakdowns.length === 0 ? (
-            <div className="flex h-full flex-col items-center justify-center px-8">
+            <div className="flex min-h-full flex-col items-center justify-center px-6">
               <EmptyState
                 icon={BarChart3}
                 title="Nothing to measure yet"
-                description="When your app starts handling real requests, I'll break down speed and reliability per endpoint."
+                description="Once requests arrive, each endpoint gets its own traffic, speed and error rate here."
               />
             </div>
           ) : (
-            <table className="w-full border-collapse">
-              <thead className="sticky top-0 z-10">
-                <tr className={KIT.gridHead}>
-                  {['API route', 'Traffic', 'Speed', 'Slowest', 'Health'].map((h, i) => (
-                    <th
-                      key={h}
-                      className={`border-b border-white/[0.06] px-3 py-2 text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600 ${
-                        i === 0 ? 'text-left' : 'text-right'
-                      }`}
-                    >
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {performanceBreakdowns.map((b, idx) => (
-                  <tr key={idx} className={`transition-colors ${KIT.rowHoverOn}`}>
-                    <td className="border-b border-white/[0.04] px-3 py-[9px] font-mono text-[12px] text-zinc-300">
-                      {b.endpoint || b.function || b.database}
-                    </td>
-                    <td className="border-b border-white/[0.04] px-3 py-[9px] text-right font-mono text-[11px] tabular-nums text-zinc-500">
-                      {b.requests.toLocaleString()}
-                    </td>
-                    <td className="border-b border-white/[0.04] px-3 py-[9px] text-right font-mono text-[11px] tabular-nums text-zinc-500">
-                      {b.avgResponseTime}ms
-                    </td>
-                    <td className="border-b border-white/[0.04] px-3 py-[9px] text-right font-mono text-[11px] tabular-nums text-zinc-500">
-                      {b.p95}ms
-                    </td>
-                    <td className="border-b border-white/[0.04] px-3 py-[9px] text-right">
-                      <span
-                        className={`font-mono text-[11px] font-medium tabular-nums ${
-                          b.errorRate > 1 ? 'text-rose-300' : b.errorRate > 0.2 ? 'text-amber-500' : 'text-emerald-300/90'
-                        }`}
-                      >
-                        {b.errorRate}%
-                      </span>
-                    </td>
+            <div className="min-w-full overflow-x-auto">
+              <table className="w-full min-w-[560px] border-collapse">
+                <thead className="sticky top-0 z-10">
+                  <tr className={KIT.gridHead}>
+                    <th className={`${TH} text-left`}>Route</th>
+                    <th className={`${TH} text-right`}>Requests</th>
+                    <th className={`${TH} text-right`}>Avg</th>
+                    <th className={`${TH} text-right`}>p95</th>
+                    <th className={`${TH} text-right`}>Error rate</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {performanceBreakdowns.map((b, idx) => (
+                    <tr key={idx} className={`transition-colors ${KIT.rowHoverOn}`}>
+                      <td className={`${TD} font-mono text-[12.5px] text-zinc-200`}>{b.endpoint || b.function || b.database}</td>
+                      <td className={`${TD} text-right text-[12.5px] tabular-nums text-zinc-300`}>{b.requests.toLocaleString()}</td>
+                      <td className={`${TD} text-right text-[12.5px] tabular-nums text-zinc-300`}>{b.avgResponseTime} ms</td>
+                      <td className={`${TD} text-right text-[12.5px] tabular-nums text-zinc-400`}>{b.p95} ms</td>
+                      <td className={`${TD} text-right`}>
+                        <span
+                          className={`text-[12.5px] tabular-nums ${
+                            b.errorRate > 1 ? 'text-rose-300' : b.errorRate > 0.2 ? 'text-amber-200' : 'text-zinc-400'
+                          }`}
+                        >
+                          {b.errorRate}%
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
       </div>
@@ -342,174 +344,165 @@ export function MonitoringWorkbench({ projectId }: { projectId: string }) {
     <>
       {/* Main column — charts band on top, request log takes the rest */}
       <div className="flex min-w-0 flex-1 flex-col">
+        {isBackendLive === false && (
+          <NoticeStrip
+            icon={Rocket}
+            action={
+              <KitButton size="sm" onClick={() => router.push(`/app/projects/${projectId}/deploy`)}>
+                Publish
+              </KitButton>
+            }
+          >
+            <strong>Not published yet.</strong> These requests reached the backend before it had a public release.
+          </NoticeStrip>
+        )}
+
         {hasCharts ? (
           <div className="grid flex-shrink-0 grid-cols-1 border-b border-white/[0.06] lg:grid-cols-2">
             <Chart
               title="Response time"
-              subtitle="Average latency"
+              subtitle="Average, ms"
               data={responseTimeData}
-              unit="ms"
+              unit=" ms"
               threshold={200}
-              thresholdLabel="Healthy threshold"
-              className="lg:border-r border-white/[0.06]"
+              thresholdLabel="Target"
+              className="border-white/[0.06] lg:border-r"
             />
-            <Chart title="Request volume" subtitle="Requests per minute" data={requestVolumeData} unit="req/m" />
+            <Chart title="Request volume" subtitle="Requests per minute" data={requestVolumeData} unit="/min" />
           </div>
         ) : (
-          <div className="flex-shrink-0 border-b border-white/[0.06] py-8">
+          <div className="flex-shrink-0 border-b border-white/[0.06] py-6">
             <EmptyState
               icon={Activity}
               title="Quiet so far"
-              description="The moment your app starts talking to its backend, I'll show you what's happening here."
+              description="Charts draw once there is enough traffic in this window to plot."
             />
           </div>
         )}
 
-        <div className="flex h-10 flex-shrink-0 items-center justify-between gap-3 border-b border-white/[0.06] px-4">
-          <div className="flex items-baseline gap-2">
-            <h2 className="text-[13px] font-medium text-zinc-100">API request log</h2>
-            <span className="font-mono text-[11px] tabular-nums text-zinc-500">
-              {requestLog.length} request{requestLog.length === 1 ? '' : 's'}
-            </span>
-          </div>
-          <span className="font-mono text-[10.5px] tabular-nums text-zinc-700">{timeRange}</span>
-        </div>
+        <PaneHeader
+          title="Requests"
+          count={`${requestLog.length} ${requestLog.length === 1 ? 'request' : 'requests'}`}
+          aside="Newest first"
+        />
 
         <div className="min-h-0 flex-1 overflow-auto">
           {requestLog.length === 0 ? (
-            <div className="flex h-full flex-col items-center justify-center px-8">
+            <div className="flex min-h-full flex-col items-center justify-center px-6">
               <EmptyState
                 icon={Globe}
-                title="No traffic yet"
-                description="Live API calls will stream in here as soon as your app is talking to its backend."
+                title="No requests yet"
+                description="Every call to this backend's API lands here with its status and latency."
               />
             </div>
           ) : (
-            <table className="w-full border-collapse">
-              <thead className="sticky top-0 z-10">
-                <tr className={KIT.gridHead}>
-                  {['Method', 'Endpoint', 'Status', 'Latency', 'When'].map((h) => (
-                    <th
-                      key={h}
-                      className="border-b border-white/[0.06] px-3 py-2 text-left text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600"
-                    >
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {requestLog.map((req) => {
-                  const methodColor =
-                    req.method === 'POST'
-                      ? 'text-emerald-300/90'
-                      : req.method === 'PUT' || req.method === 'PATCH'
-                      ? 'text-violet-300/90'
-                      : req.method === 'DELETE'
-                      ? 'text-rose-300/90'
-                      : 'text-zinc-400'
-                  const statusColor =
-                    req.status >= 500
-                      ? 'text-rose-300'
-                      : req.status >= 400
-                      ? 'text-amber-500'
-                      : req.status >= 300
-                      ? 'text-sky-300/90'
-                      : 'text-emerald-300/90'
-                  return (
-                    <tr key={req.id} className={`transition-colors ${KIT.rowHoverOn}`}>
-                      <td className="w-20 border-b border-white/[0.04] px-3 py-[7px]">
-                        <span className={`font-mono text-[11px] font-semibold tracking-wide ${methodColor}`}>
-                          {req.method}
-                        </span>
-                      </td>
-                      <td className="border-b border-white/[0.04] px-3 py-[7px] font-mono text-[12px] text-zinc-300">
-                        {req.path}
-                      </td>
-                      <td className={`w-16 border-b border-white/[0.04] px-3 py-[7px] font-mono text-[11px] tabular-nums ${statusColor}`}>
-                        {req.status}
-                      </td>
-                      <td className="w-20 border-b border-white/[0.04] px-3 py-[7px] font-mono text-[11px] tabular-nums text-zinc-500">
-                        {req.latency}ms
-                      </td>
-                      <td className="w-36 border-b border-white/[0.04] px-3 py-[7px] font-mono text-[10.5px] tabular-nums text-zinc-600">
-                        {new Date(req.timestamp).toLocaleString('en-US', {
-                          month: 'short',
-                          day: 'numeric',
-                          hour: '2-digit',
-                          minute: '2-digit',
-                        })}
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
+            <div className="min-w-full overflow-x-auto">
+              <table className="w-full min-w-[560px] border-collapse">
+                <thead className="sticky top-0 z-10">
+                  <tr className={KIT.gridHead}>
+                    <th className={`${TH} w-20 text-left`}>Method</th>
+                    <th className={`${TH} text-left`}>Path</th>
+                    <th className={`${TH} w-20 text-left`}>Status</th>
+                    <th className={`${TH} w-24 text-right`}>Latency</th>
+                    <th className={`${TH} w-36 text-right`}>When</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {requestLog.map((req) => {
+                    const statusTone =
+                      req.status >= 500 ? 'failed' : req.status >= 400 ? 'attention' : req.status >= 300 ? 'neutral' : 'operational'
+                    return (
+                      <tr key={req.id} className={`transition-colors ${KIT.rowHoverOn}`}>
+                        <td className={TD}>
+                          <span className={`font-mono text-[11.5px] font-medium tracking-[0.02em] ${METHOD_TONE[req.method] ?? 'text-zinc-400'}`}>
+                            {req.method}
+                          </span>
+                        </td>
+                        <td className={`${TD} max-w-0 w-full truncate font-mono text-[12.5px] text-zinc-200`} title={req.path}>
+                          {req.path}
+                        </td>
+                        <td className={TD}>
+                          <StatusDot tone={statusTone} label={<span className="tabular-nums">{req.status}</span>} />
+                        </td>
+                        <td className={`${TD} text-right text-[12.5px] tabular-nums ${req.latency > 1000 ? 'text-amber-200' : 'text-zinc-300'}`}>
+                          {req.latency} ms
+                        </td>
+                        <td className={`${TD} text-right text-[12.5px] tabular-nums text-zinc-500`}>
+                          <time dateTime={new Date(req.timestamp).toISOString()} title={new Date(req.timestamp).toLocaleString()}>
+                            {new Date(req.timestamp).toLocaleString(undefined, {
+                              month: 'short',
+                              day: 'numeric',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })}
+                          </time>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
       </div>
 
       {/* Right rail — anomalies and system events stay visible beside the log */}
       <div className={`hidden w-[300px] flex-shrink-0 flex-col border-l border-white/[0.06] xl:flex ${KIT.rail}`}>
-        <div className="flex h-10 flex-shrink-0 items-center justify-between border-b border-white/[0.06] px-3">
-          <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">Signals</span>
+        <div className="flex h-[44px] flex-shrink-0 items-center justify-between border-b border-white/[0.06] px-4">
+          <span className="text-[13px] font-medium text-zinc-200">Signals</span>
           {anomalies.length > 0 && (
-            <span className="inline-flex items-center gap-1.5 font-mono text-[10.5px] font-medium text-amber-500">
-              <span className="h-[5px] w-[5px] rounded-full bg-amber-400" />
-              {anomalies.length}
-            </span>
+            <StatusDot tone="attention" label={`${anomalies.length} ${anomalies.length === 1 ? 'anomaly' : 'anomalies'}`} />
           )}
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto">
           {anomalies.length > 0 && (
-            <div className="border-b border-white/[0.06]">
-              <p className="px-3 pb-1.5 pt-3 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">
-                Active anomalies
-              </p>
-              <div className={`divide-y ${KIT.divide}`}>
+            <section className="border-b border-white/[0.06]">
+              <h3 className="px-4 pb-1 pt-4 text-[12px] font-medium text-zinc-500">Anomalies</h3>
+              <ul className="divide-y divide-white/[0.05]">
                 {anomalies.map((anomaly) => (
-                  <div key={anomaly.id} className="px-3 py-2.5">
-                    <div className="mb-1 flex items-center gap-2">
-                      <span className="truncate text-[12px] font-medium text-zinc-100">{anomaly.metric}</span>
-                      <span className="flex-shrink-0 font-mono text-[10.5px] font-medium tabular-nums text-amber-500">
-                        {anomaly.type === 'spike' ? '↑' : '↓'} {Math.abs(anomaly.deviation).toFixed(0)}%
+                  <li key={anomaly.id} className="px-4 py-3">
+                    <div className="mb-1 flex items-center justify-between gap-2">
+                      <span className="flex min-w-0 items-center gap-2">
+                        <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0 text-amber-300" strokeWidth={1.75} />
+                        <span className="truncate text-[13px] font-medium text-zinc-100">{anomaly.metric}</span>
+                      </span>
+                      <span className="flex-shrink-0 text-[12.5px] tabular-nums text-amber-200">
+                        {anomaly.type === 'spike' ? '+' : '−'}
+                        {Math.abs(anomaly.deviation).toFixed(0)}%
                       </span>
                     </div>
-                    <p className="mb-1.5 text-[11.5px] leading-5 text-zinc-500">{anomaly.explanation}</p>
-                    <div className="flex items-center gap-3 font-mono text-[10px] tabular-nums text-zinc-600">
-                      <span>
-                        exp <span className="text-zinc-400">{anomaly.expectedValue}</span>
-                      </span>
-                      <span>
-                        act <span className="text-zinc-300">{anomaly.value}</span>
-                      </span>
-                      <span>{new Date(anomaly.timestamp).toLocaleTimeString()}</span>
-                    </div>
-                  </div>
+                    <p className="text-[12.5px] leading-[19px] text-zinc-400">{anomaly.explanation}</p>
+                    <p className="mt-1.5 text-[12px] tabular-nums text-zinc-500">
+                      Expected {anomaly.expectedValue}, saw <span className="text-zinc-300">{anomaly.value}</span>
+                      <span className="text-zinc-700"> · </span>
+                      {new Date(anomaly.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </p>
+                  </li>
                 ))}
-              </div>
-            </div>
+              </ul>
+            </section>
           )}
 
-          <p className="px-3 pb-1.5 pt-3 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">
-            System events
-          </p>
-          {systemEvents.length === 0 ? (
-            <p className="px-3 pb-4 text-[11.5px] leading-relaxed text-zinc-600">
-              Deploys, incidents, and significant changes land here as they happen.
-            </p>
-          ) : (
-            <div className={`divide-y ${KIT.divide}`}>
-              {systemEvents.map((event) => {
-                const Icon = event.icon
-                return (
-                  <div key={event.id} className="flex items-start gap-2.5 px-3 py-2.5">
-                    <Icon className="mt-0.5 h-3 w-3 flex-shrink-0 text-zinc-600" />
+          <section>
+            <h3 className="px-4 pb-1 pt-4 text-[12px] font-medium text-zinc-500">System events</h3>
+            {systemEvents.length === 0 ? (
+              <p className="px-4 pb-4 pt-1 text-[12.5px] leading-[19px] text-zinc-500">
+                Deploys, incidents and significant changes land here as they happen.
+              </p>
+            ) : (
+              <ul className="divide-y divide-white/[0.05]">
+                {collapseEvents(systemEvents).map(({ event, repeats }) => (
+                  <li key={event.id} className="flex items-start gap-3 px-4 py-2.5">
+                    <SystemEventIcon type={event.type} />
                     <div className="min-w-0 flex-1">
-                      <p className="truncate text-[11.5px] font-medium text-zinc-300">{event.message}</p>
-                      <p className="mt-0.5 font-mono text-[10px] tabular-nums text-zinc-600">
-                        {new Date(event.timestamp).toLocaleString('en-US', {
+                      <p className="text-[13px] leading-[19px] text-zinc-200 [overflow-wrap:break-word]">
+                        {humanizeEvent(event.message)}
+                        {repeats > 1 && <span className="ml-1.5 text-[12px] tabular-nums text-zinc-500">×{repeats}</span>}
+                      </p>
+                      <p className="mt-0.5 text-[12px] tabular-nums text-zinc-500">
+                        {new Date(event.timestamp).toLocaleString(undefined, {
                           month: 'short',
                           day: 'numeric',
                           hour: '2-digit',
@@ -517,15 +510,99 @@ export function MonitoringWorkbench({ projectId }: { projectId: string }) {
                         })}
                       </p>
                     </div>
-                    <span className="flex-shrink-0 font-mono text-[10px] text-emerald-300/80">ok</span>
-                  </div>
-                )
-              })}
-            </div>
-          )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
         </div>
       </div>
     </>
+  )
+}
+
+/** Event codes such as DATA_PLANE_RESTART_UNCONFIGURED read as a sentence. */
+function humanizeEvent(message: string): string {
+  if (typeof message !== 'string') return String(message ?? '')
+  if (!/^[A-Z0-9_]+$/.test(message)) return message
+  const words = message.toLowerCase().split('_').filter(Boolean).join(' ')
+  return words.charAt(0).toUpperCase() + words.slice(1)
+}
+
+/** Consecutive identical events (a check that fires every minute) become one row with a count. */
+function collapseEvents(events: any[]): Array<{ event: any; repeats: number }> {
+  const out: Array<{ event: any; repeats: number }> = []
+  for (const event of events) {
+    const last = out[out.length - 1]
+    if (last && last.event.message === event.message && last.event.type === event.type) last.repeats++
+    else out.push({ event, repeats: 1 })
+  }
+  return out
+}
+
+const TH = 'h-[36px] whitespace-nowrap border-b border-white/[0.06] px-3 text-[12px] font-medium text-zinc-500'
+const TD = 'h-[36px] whitespace-nowrap border-b border-white/[0.04] px-3'
+
+const METHOD_TONE: Record<string, string> = {
+  GET: 'text-zinc-400',
+  POST: 'text-emerald-300',
+  PUT: 'text-violet-300',
+  PATCH: 'text-violet-300',
+  DELETE: 'text-rose-300',
+}
+
+function SystemEventIcon({ type }: { type: string }) {
+  const cls = 'mt-[3px] h-3.5 w-3.5 flex-shrink-0 text-zinc-500'
+  switch ((type || '').toLowerCase()) {
+    case 'deploy': case 'deployment': return <Rocket className={cls} strokeWidth={1.75} />
+    case 'scale': case 'scaling': return <TrendingUp className={cls} strokeWidth={1.75} />
+    case 'traffic': return <Globe className={cls} strokeWidth={1.75} />
+    case 'auth': return <Shield className={cls} strokeWidth={1.75} />
+    case 'storage': return <Upload className={cls} strokeWidth={1.75} />
+    case 'database': return <Database className={cls} strokeWidth={1.75} />
+    case 'api': return <Code className={cls} strokeWidth={1.75} />
+    default: return <Activity className={cls} strokeWidth={1.75} />
+  }
+}
+
+function PaneHeader({ title, count, aside }: { title: string; count?: string; aside?: string }) {
+  return (
+    <div className="flex h-[44px] flex-shrink-0 items-center justify-between gap-3 border-b border-white/[0.06] px-4">
+      <div className="flex min-w-0 items-center gap-3">
+        <h2 className="text-[13px] font-medium text-zinc-100">{title}</h2>
+        {count && <span className="whitespace-nowrap text-[12px] tabular-nums text-zinc-500">{count}</span>}
+      </div>
+      {aside && <span className="flex-shrink-0 text-[12px] text-zinc-600">{aside}</span>}
+    </div>
+  )
+}
+
+function Metric({
+  label,
+  value,
+  hint,
+  tone,
+  title,
+}: {
+  label: string
+  value: string | null
+  hint?: React.ReactNode
+  tone?: 'healthy' | 'warning' | 'critical'
+  title?: string
+}) {
+  const valueTone = value === 'No data'
+    ? 'text-zinc-600'
+    : tone === 'critical' ? 'text-rose-300' : tone === 'warning' ? 'text-amber-200' : 'text-zinc-50'
+  return (
+    <div className="min-w-0 bg-[#0c0d0f] px-4 py-3 sm:px-5" title={title}>
+      <p className="truncate text-[12px] text-zinc-500">{label}</p>
+      {value == null ? (
+        <span className="mt-2 block h-[22px] w-16 animate-pulse rounded-[5px] bg-white/[0.06]" />
+      ) : (
+        <p className={`mt-1 truncate text-[20px] font-semibold leading-[28px] tracking-[-0.02em] tabular-nums ${valueTone}`}>{value}</p>
+      )}
+      <p className="mt-0.5 h-[16px] truncate text-[12px] leading-[16px] text-zinc-500">{hint}</p>
+    </div>
   )
 }
 
@@ -548,7 +625,8 @@ function Chart({
   thresholdLabel?: string
   className?: string
 }) {
-  const color = '#a78bfa'
+  const color = '#c4b5fd'
+  const gradientId = `mon-${useId().replace(/:/g, '')}`
   const maxValue = Math.max(...data.map((d) => d.value), threshold || 0, 1)
   const minValue = Math.min(...data.map((d) => d.value), 0)
   const range = maxValue - minValue || 1
@@ -563,29 +641,29 @@ function Chart({
   const thresholdY = threshold ? 100 - ((threshold - minValue) / range) * 100 : null
   const exceedsThreshold = threshold && data.some((d) => d.value > threshold)
 
+  const latest = data.length ? data[data.length - 1].value : null
+
   return (
-    <div className={`px-4 py-3 ${className}`}>
-      <div className="mb-2 flex items-start justify-between gap-3">
+    <div className={`px-4 py-4 sm:px-5 ${className}`}>
+      <div className="mb-3 flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <h3 className="text-[12px] font-semibold text-zinc-100">{title}</h3>
-          <p className="mt-0.5 text-[11px] text-zinc-500">{subtitle}</p>
+          <h3 className="text-[13px] font-medium text-zinc-100">{title}</h3>
+          <p className="mt-0.5 text-[12px] text-zinc-500">{subtitle}</p>
         </div>
-        {threshold ? (
-          <div className="flex-shrink-0 text-right">
-            <p className="text-[9.5px] font-semibold uppercase tracking-[0.1em] text-zinc-600">{thresholdLabel}</p>
-            <p className="mt-0.5 font-mono text-[11px] tabular-nums text-zinc-400">
-              {threshold}
+        <div className="flex-shrink-0 text-right">
+          {latest != null && (
+            <p className="text-[13px] font-medium tabular-nums text-zinc-100">
+              {Math.round(latest).toLocaleString()}
+              <span className="text-zinc-500">{unit}</span>
+            </p>
+          )}
+          {threshold ? (
+            <p className={`mt-0.5 text-[12px] tabular-nums ${exceedsThreshold ? 'text-amber-200' : 'text-zinc-500'}`}>
+              {thresholdLabel} {threshold}
               {unit}
             </p>
-          </div>
-        ) : (
-          !exceedsThreshold && (
-            <p className="flex flex-shrink-0 items-center gap-1.5 font-mono text-[10px] text-emerald-300/70">
-              <CheckCircle2 className="h-3 w-3" />
-              stable
-            </p>
-          )
-        )}
+          ) : null}
+        </div>
       </div>
       <div className="relative h-[128px]">
         <svg width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none" className="absolute inset-0">
@@ -604,7 +682,13 @@ function Chart({
               vectorEffect="non-scaling-stroke"
             />
           )}
-          <polygon points={areaPoints} fill={color} fillOpacity="0.07" />
+          <defs>
+            <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={color} stopOpacity="0.16" />
+              <stop offset="100%" stopColor={color} stopOpacity="0" />
+            </linearGradient>
+          </defs>
+          <polygon points={areaPoints} fill={`url(#${gradientId})`} />
           <polyline
             points={points}
             fill="none"
@@ -613,7 +697,7 @@ function Chart({
             vectorEffect="non-scaling-stroke"
           />
         </svg>
-        <div className="absolute bottom-0 left-0 top-0 -ml-1 flex flex-col justify-between font-mono text-[10px] text-zinc-600">
+        <div className="pointer-events-none absolute bottom-0 left-0 top-0 flex flex-col justify-between text-[11px] tabular-nums text-zinc-600">
           <span>{maxValue.toFixed(0)}</span>
           <span>{minValue.toFixed(0)}</span>
         </div>

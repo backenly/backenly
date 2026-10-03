@@ -22,7 +22,7 @@ change planned, verified, and reversible.
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-Backenly-0A66C2?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/company/117034579)
 [![Star on GitHub](https://img.shields.io/badge/Star-on%20GitHub-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/backenly/backenly)
 
-**[backenly.com](https://backenly.com)** &nbsp;·&nbsp; [Quickstart](https://backenly.com/quickstart) &nbsp;·&nbsp; [Resources](https://backenly.com/resources) &nbsp;·&nbsp; [Pricing](https://backenly.com/pricing) &nbsp;·&nbsp; [Client libraries](https://github.com/backenly/backenly-js)
+**[backenly.com](https://backenly.com)** &nbsp;·&nbsp; [Resources](https://backenly.com/resources) &nbsp;·&nbsp; [Pricing](https://backenly.com/pricing) &nbsp;·&nbsp; [Client libraries](https://github.com/backenly/backenly-js)
 
 https://github.com/user-attachments/assets/2b215d72-4b1b-4a4c-8290-a94553be192d
 
@@ -113,25 +113,407 @@ at it. Nothing to install or operate.
 
 ### Self-hosted
 
-Requires Node 20+, and Docker (or your own PostgreSQL 14+ instance).
+One deployment is one project.
 
 ```bash
 git clone https://github.com/backenly/backenly.git
 cd backenly
 npm install
+npm run selfhost
+```
 
-cp .env.example .env          # then set OPENAI_API_KEY and JWT_SECRET
+That is the whole install. It generates the secrets, starts the Compose stack,
+creates the tables, runs the superuser steps, issues the PostgREST credential
+and reconciles until the deployment reports ready. Then:
 
-# PostgreSQL + Redis, matching the defaults already in .env.example
-docker compose -f docker-compose.dev.yml up -d
-
-npm run db:generate && npm run db:push
+```bash
 npm run dev                   # dashboard :3000 · runtime :3001
 ```
 
-`npm run dev` starts both processes together. If you already have PostgreSQL
-running, skip the Docker step and point `DATABASE_URL` at it instead — in which
-case enable `pg_stat_statements` yourself:
+Then **claim the deployment**. The installer prints a claim link carrying a
+setup token. Open it and create your account: the first account to present the
+token becomes the administrator and takes ownership of this deployment's single
+project in the same step. There is no second command to run. The signup page
+also has a **Setup token** field while the deployment is unclaimed, if you
+would rather paste the token than follow the link.
+
+The token is in `.env` as `BACKENLY_SETUP_TOKEN`. It gates the claim because a
+deployment is often reachable before its operator gets to it — an open port on
+a VPS, a preview environment, a colleague pointed at the wrong host — and
+without it the single administrator slot would go to whoever loaded the page
+first. Once the deployment is claimed the token stops working, whatever it is
+set to.
+
+#### Email
+
+Claiming the deployment needs no email. Two things do: **password-reset
+codes**, and the code a new account must enter before it exists if you open
+registration with `BACKENLY_ALLOW_PUBLIC_SIGNUP=true`. Set any SMTP provider in
+`.env`:
+
+```bash
+SMTP_HOST=smtp.resend.com     # or SES, Mailgun, SendGrid, Gmail
+SMTP_PORT=587                 # STARTTLS; 465 is rewritten to 587
+SMTP_USER=resend
+SMTP_PASS=...
+SMTP_FROM=Backenly <noreply@yourdomain.com>   # a domain your provider has verified
+```
+
+Without it, the reset page says email is unavailable rather than pretending a
+code was sent, and later signups are refused rather than created unverified.
+To reset a password without email, run this on the server:
+
+```bash
+npm run auth:reset-password -- --email you@example.com              # prompts
+npm run auth:reset-password -- --email you@example.com --generate   # prints one
+```
+
+It ends every session for that account. Access to the machine is the
+authority, as it is for the setup token.
+
+#### The four credentials
+
+The install creates a separate PostgreSQL role for each job, rather than one
+that does everything:
+
+| Role | Used by | Properties |
+| --- | --- | --- |
+| `backenly_user` | the install scripts only | `SUPERUSER`. Creates roles, installs event triggers. Never in `DATABASE_URL`. |
+| `backenly_app` | web and runtime | **`NOSUPERUSER NOBYPASSRLS`**. Owns the platform tables and workspace schemas, so governed typed actions keep their DDL rights. |
+| `backenly_authenticator` | PostgREST | `NOINHERIT`; can only switch into `anon` / `authenticated` / `service_role`. |
+| `backenly_backup` | `pg_dump` only | `NOSUPERUSER BYPASSRLS`, with `CONNECT`, `USAGE`, `SELECT` and nothing else. |
+
+`backenly_app` not being a superuser is the one that matters most. A superuser
+bypasses row-level security — including `FORCE ROW LEVEL SECURITY` — so an
+application running as one has its own policies applied only by convention.
+Ownership plus `FORCE` is what keeps DDL working while leaving RLS in force.
+
+Restore runs over the application connection, not the backup one, so the
+application keeps ownership of the schema it restored.
+
+`npm run selfhost` is **safe to rerun**. It fills in what is missing and never
+rotates a secret that already exists, so a rerun cannot sign out your sessions
+or break a running PostgREST.
+
+It does not hide the steps or replace them: it runs the same sequence
+[documented below](#doing-it-by-hand), driven by the same module that
+`npm run bootstrap` prints its guidance from. Read that section if you are
+bringing your own database, if a step failed and you want to run it yourself,
+or if you would simply rather see what is being done to your machine.
+
+The installer needs one thing the README cannot give you: an `OPENAI_API_KEY`
+in `.env` for planning and the autonomy loop. Everything else it generates.
+
+<a name="doing-it-by-hand"></a>
+
+## Doing it by hand
+
+The same install, one step at a time. `npm run bootstrap` is the centre of it:
+it provisions the project, and it is a reconciler rather than an installer, so
+rerunning it repairs whatever is missing and changes nothing else. You will run
+it at least twice, and that is the intended path, not a failure.
+
+**You install on the host:**
+
+- **Node.js 20+** — the app, the scripts and the CLI all run here, not in a
+  container
+- **Docker**, with Compose
+
+**The Compose stack provides:**
+
+- **PostgreSQL 15**, with `pg_stat_statements` preloaded
+- **Redis**
+- **PostgREST**, pinned — this is the `/db/*` data plane
+
+Docker does not provide Node. If you would rather run your own PostgreSQL or
+PostgREST, read [Bringing your own database](#bringing-your-own-database) first;
+the steps below describe the Compose path.
+
+> **Use a PostgreSQL cluster dedicated to this deployment.**
+>
+> PostgREST authenticates through cluster-global roles, and the list of schemas
+> it serves is stored as a role setting with no `IN DATABASE` scope. Two
+> Backenly databases on one cluster therefore overwrite each other's
+> served-schema registry, and the loser's data plane answers `PGRST106` on every
+> table. This is a known limitation being redesigned, not something you can
+> configure around. The Compose stack gives you a dedicated one.
+
+#### 1. Install
+
+```bash
+git clone https://github.com/backenly/backenly.git
+cd backenly
+npm install
+cp .env.example .env
+
+docker compose -f docker-compose.dev.yml up -d
+```
+
+`postgrest` will restart in a loop until step 4 issues its password. That is
+expected, and it is deliberate that it serves nothing until then.
+
+Then set these in `.env`, adding any line the template does not already carry —
+today that is `BACKENLY_PROJECT_ID`:
+
+```bash
+BACKENLY_PROJECT_ID=<uuid>       # any UUID, e.g. `uuidgen`
+JWT_SECRET=<openssl rand -hex 32>
+POSTGREST_JWT_SECRET=<openssl rand -hex 32>
+STORAGE_SECRET=<openssl rand -hex 32>
+OPENAI_API_KEY=<your key>
+```
+
+`BACKENLY_EDITION` is already `single-tenant` in the template and you can leave
+it there. Backenly resolves an unset edition to `single-tenant` too, so the line
+is not what makes this a self-host install — it is there because
+`scripts/deploy.sh` composes through `scripts/compose-cloud.sh`, which refuses to
+guess an edition rather than risk cloning a private repository you cannot read.
+
+`DATABASE_URL` already matches the Compose stack, so leave it alone unless you
+changed `POSTGRES_USER` or `POSTGRES_PASSWORD`.
+
+`BACKENLY_PROJECT_ID` is the identity of this deployment and must never change
+afterwards: it names the `workspace_<uuid>` schema your tables live in. Bootstrap
+refuses to run against a database that already holds a different one. You may
+leave it unset and pin the id bootstrap generates instead, but then step 4's
+command has to be copied from bootstrap's output rather than from here.
+
+`JWT_SECRET` signs every platform session. `POSTGREST_JWT_SECRET` is separate and
+must match the value Compose passes to PostgREST, because the gateway mints
+short-lived internal tokens with it. `STORAGE_SECRET` signs the access tokens for
+stored files — without it every upload fails with a 500 whose only explanation is
+in the server log. None of the three has a default, deliberately: a fallback
+baked into a public repository is a key everybody already knows.
+`OPENAI_API_KEY` powers planning and the autonomy loop. See
+[`.env.example`](.env.example) for the rest.
+
+#### 2. Tell the database which role Backenly connects as
+
+**Skip this on the Compose path.** The stack already uses `backenly_user`, which
+is what the SQL defaults to.
+
+It applies only if you brought your own database and the role in your
+`DATABASE_URL` is something else, in which case run, as a superuser:
+
+```bash
+psql -c "ALTER DATABASE <db> SET backenly.app_role = '<your role>'"
+```
+
+Skipping it there makes the next section fail with
+`role "backenly_user" does not exist`.
+
+#### 3. Create the tables and bootstrap
+
+```bash
+npm run db:generate && npm run db:push
+npm run bootstrap
+```
+
+> **`db:push` belongs to this step only — do not rerun it later.**
+>
+> The PostgREST support objects are created by SQL in step 4, not by Prisma: a
+> registry table and two event triggers that fire on schema DDL. `prisma db
+> push` does not know about them, so on an installed deployment it treats them
+> as objects to drop, which is exactly what `--accept-data-loss` authorises.
+> The registry is what the data plane reads to decide which schemas PostgREST
+> serves, so losing it takes `/db/*` down.
+>
+> `npm run bootstrap` is the command that is safe to rerun. It is a reconciler
+> and repairs whatever is missing.
+
+**This first run is expected to exit 3.** Bootstrap creates the project row, its
+workspace schema and its signing secret, then reports what it cannot install
+itself. Its exit code is the state, and deployment automation should read it:
+
+| exit | meaning |
+| --- | --- |
+| `0` | ready |
+| `2` | refused. The database is in a state bootstrap will not touch, either more than one project or a `BACKENLY_PROJECT_ID` that does not match what is already there. Nothing was written. |
+| `3` | core bootstrapped, prerequisites still unmet. **Not** ready: the `/db/*` data plane will answer `PGRST106` until step 4 is done. |
+
+#### 4. Install the prerequisites bootstrap cannot install itself
+
+These reach the database as a superuser. Bootstrap prints this same list, with
+your real project id filled in; run what it prints.
+
+```bash
+# 1. support objects: registry functions, DDL event triggers, and the
+#    anon / authenticated / service_role / backenly_authenticator roles.
+bash scripts/postgrest-install.sh
+
+# 2. passwords, role membership and the per-schema grants.
+#    Prints the connection string PostgREST authenticates with. Store it: it is
+#    not recoverable, and this command will not print it again.
+npx tsx scripts/setup-postgrest-roles.ts --project <PROJECT_ID> --apply
+
+# 3. put that password in .env as POSTGREST_AUTHENTICATOR_PASSWORD, then start
+#    the data plane. It has been restarting in a loop until now.
+docker compose -f docker-compose.dev.yml up -d postgrest
+
+# 4. optional. Only needed to hand out direct psql credentials to a project.
+#    Backenly is fully operational without it.
+bash scripts/install-sql.sh scripts/setup-direct-access.sql
+```
+
+Those scripts talk to PostgreSQL through one explicit mechanism, chosen by
+`BACKENLY_DB_ADMIN`, so the same command works wherever the database lives:
+
+| `BACKENLY_DB_ADMIN` | how it connects |
+| --- | --- |
+| `docker` (default) | `psql` inside the Compose `postgres` service |
+| `url` | `psql "$BACKENLY_ADMIN_DATABASE_URL"` — any reachable database |
+| `local` | `sudo -u postgres psql` — a cluster installed on this host |
+
+That order is not arbitrary and cannot be collapsed into one command. The first
+has to create the roles, because the event triggers it installs grant to them,
+and a `CREATE SCHEMA` that grants to a role nobody created aborts. The second
+grants per workspace schema, so it needs the schema `npm run bootstrap` already
+created above. This is why bootstrap runs, reports NOT ready, and is rerun: it is
+a reconciler, and rerunning is the mechanism.
+
+Then rerun:
+
+```bash
+npm run bootstrap
+```
+
+**Exit 0 means ready.** Anything else, read what it printed and fix that; it is
+safe to rerun as many times as you need.
+
+#### 5. Run it
+
+```bash
+npm run dev                   # dashboard :3000 · runtime :3001
+```
+
+`npm run dev` starts both processes together. There is no account yet, so sign up
+in the dashboard, then run `npm run bootstrap` once more to issue the anon key
+your frontend embeds.
+
+#### Autonomy
+
+The self-healing loop runs by itself. There is nothing to schedule.
+
+`instrumentation.ts` starts an in-process scheduler when the app boots, and it
+is active whenever `VERCEL` is unset — which is every self-hosted deployment. The
+reconciler ticks **every minute**. `.env.example` already sets the two flags it
+needs, so a `.env` copied from it has autonomy on:
+
+```bash
+ENABLE_AUTONOMY_RECONCILER=true      # the loop runs at all
+ENABLE_AUTONOMY_LIVE_EXECUTION=true  # it may apply fixes, not just observe
+```
+
+Confirm it is ticking by watching the process output:
+
+```
+[AutonomyReconciler] Cron run complete — 1 projects, 0 fixes applied, 0 frozen
+```
+
+**`0 projects` is normal on a new install, and does not mean it is broken.** A
+project is only reconciled once something has been built in it (a table other
+than the built-in `users` table, a function, a bucket, a trigger, a webhook or
+enabled auth) *and* it shows recent activity. A project that has only been named
+has nothing to be right or wrong about, so the loop skips it and files nothing
+against it. Create a table through your agent and the count becomes 1 on the
+next tick.
+
+`CRON_SECRET` is **not** required for any of the above. It guards one ad-hoc
+endpoint, for forcing a tick without waiting for the minute:
+
+```bash
+CRON_SECRET=<openssl rand -hex 32>   # add to .env, then restart
+curl -H "x-cron-secret: $CRON_SECRET" http://127.0.0.1:3000/api/cron/autonomy
+```
+
+Nothing calls that URL on its own. The in-process scheduler is the mechanism;
+the endpoint is for operators.
+
+#### Backups
+
+Backups are a Backenly Cloud capability and the routes answer 404 on a
+self-hosted deployment. Nothing below is needed to run Backenly; it is here
+because the same code runs in both editions and the failure it describes is
+silent.
+
+A backup is `pg_dump` of one project's `workspace_<id>` schema, gzipped under
+`BACKUP_DIR`. It carries tables, rows, indexes, constraints, RLS policies,
+`FORCE ROW LEVEL SECURITY` and the end-user `users` table. It is **not** PITR
+and not deployment-level disaster recovery: project secrets, API keys, storage
+objects and function definitions all live outside that schema.
+
+**`npm run selfhost` creates the backup credential for you.** It converges a
+dedicated `backenly_backup` role and records `BACKUP_DATABASE_URL` in `.env`,
+as the last step of the install — last because the objects it must be able to
+read are created at different times: the platform tables by the migration
+chain, the PostgREST registry and event triggers by the elevated SQL after it,
+and the workspace schema by bootstrap after that.
+
+This used to be a manual step, and the instructions here were incomplete: they
+granted the workspace schema and not `public`, so an operator who followed them
+exactly still could not produce a Deployment Recovery bundle. `pg_dump --schema
+public` takes a `LOCK TABLE` on every table in the schema and stopped at the
+registry:
+
+```
+pg_dump: error: query failed:
+ERROR: permission denied for table backenly_pgrst_schema_registry
+```
+
+The credential is needed because workspace tables are `FORCE ROW LEVEL
+SECURITY`, and under FORCE even the owner is subject to its policies, so
+`pg_dump` over the application role aborts on the first protected table:
+
+```
+pg_dump: error: query failed: ERROR: query would be affected by
+         row-level security policy for table "users"
+```
+
+On production that meant every nightly backup failed for four days while the
+pruner deleted the last good ones, ending at zero on disk. The Compose stack
+hides it, because `POSTGRES_USER` there is the bootstrap superuser and
+superusers bypass RLS. Managed Postgres does not hide it.
+
+Do **not** fix this by granting `BYPASSRLS` to the application role — that
+disables every RLS policy on every tenant at once. The installer creates a role
+with exactly this much and no more:
+
+```
+LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE BYPASSRLS NOINHERIT
+CONNECT on the database
+USAGE + SELECT on public and on every workspace schema
+no CREATE, no INSERT/UPDATE/DELETE/TRUNCATE, member of nothing, owns nothing
+```
+
+To converge it by hand on an existing deployment, or after adding a schema:
+
+```bash
+npx tsx scripts/setup-backup-role.ts --apply
+```
+
+Restore deliberately writes back over `DATABASE_URL` instead, so the
+application keeps ownership of its own schema — restoring over the backup role
+would re-own every table to it, and `FORCE ROW LEVEL SECURITY` keys on the
+owner. `tests/integration/backup-role-contract.spec.ts` builds both roles for
+real and proves the whole contract, including that the application role is
+refused where the backup role succeeds.
+
+#### Bringing your own database
+
+The Compose stack is the supported path. If you already operate PostgreSQL, or
+run PostgREST under your own service manager, the differences are:
+
+- Point `DATABASE_URL` and `DIRECT_URL` at your database, and do step 2 above.
+- Run the step 4 scripts with `BACKENLY_DB_ADMIN=url` and
+  `BACKENLY_ADMIN_DATABASE_URL` set to a superuser connection string, or with
+  `BACKENLY_DB_ADMIN=local` if PostgreSQL is on this machine.
+- Start your own PostgREST against the connection string step 4.2 prints, with
+  `POSTGREST_URL` in `.env` pointing at it and its JWT secret set to
+  `POSTGREST_JWT_SECRET`. Use the version pinned in
+  [`docker-compose.dev.yml`](docker-compose.dev.yml): PostgREST reads its
+  configuration out of the database, so a version difference changes what the
+  data plane serves.
+- Enable `pg_stat_statements` yourself:
 
 ```conf
 # postgresql.conf, then restart the server
@@ -144,16 +526,8 @@ CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
 It is how Backenly finds indexes that are missing by *measurement* — the columns
 Postgres is actually spending milliseconds filtering on — rather than only by
 schema shape. Without it that check reports itself as unchecked rather than
-passing, so nothing claims a guarantee it never evaluated. The Docker stack
-above already sets both.
-
-Two variables are not optional:
-
-- `JWT_SECRET` signs every platform session. Generate one per deployment with
-  `openssl rand -hex 32`.
-- `OPENAI_API_KEY` powers planning and the autonomy loop.
-
-See [`.env.example`](.env.example) for the rest.
+passing, so nothing claims a guarantee it never evaluated. The Compose stack sets
+it already.
 
 ## Connecting a coding agent
 

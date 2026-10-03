@@ -24,9 +24,11 @@ import {
 } from './autonomy-level'
 import { explainAutonomyEvent } from './because-copy'
 import { summariseFinding } from '@/lib/core/finding-summaries'
+import { isVerifiedFix, isVerificationError } from '@/lib/core/fix-verification'
 import { classifyFix } from '@/lib/core/fix-classifier'
 import { revertEligibility } from '@/lib/core/auto-fix-engine'
 import { INVARIANTS } from './desired-state'
+import { resolveExecutionMode, type ExecutionModeState } from './execution-mode'
 
 export interface TrustScoreboard {
   windowDays: number
@@ -52,6 +54,14 @@ export interface ActivityItem {
   kind:
     | 'auto_fix'
     | 'applied'
+    /**
+     * The loop changed the backend and could not confirm the result.
+     *
+     * Its own kind rather than 'auto_fix' (which would claim a success nobody
+     * established) or 'failed' (which would claim a failure nobody
+     * established either).
+     */
+    | 'applied_unverified'
     | 'escalation'
     | 'breaker'
     | 'rollback'
@@ -178,7 +188,23 @@ export interface TrustReport {
    * (the K of MAPE-K). Surfaced under the Observe node of the dashboard's
    * self-healing loop so the number can never drift from the real catalogue.
    */
+  /**
+   * Guarantees a probe actively establishes for this project.
+   *
+   * Was `INVARIANTS.length`, which counted three members that could not fire:
+   * one held by PostgREST rather than watched, one inert with no observer at
+   * all, and one behind a deployment flag that is off by default. "29
+   * guarantees" meant 26 watched, one structural and two names.
+   */
   invariantCount: number
+  /** Held by the engine rather than watched. Real promises, not observations. */
+  guaranteedByConstruction: number
+  /**
+   * Declared but not establishable in THIS deployment - a missing server
+   * capability or a switched-off flag. Reported so the difference between
+   * "clean" and "not looked at" stays visible.
+   */
+  uncheckedHere: number
   scoreboard: TrustScoreboard
   recentActivity: ActivityItem[]
   pendingApprovals: PendingApproval[]
@@ -186,6 +212,19 @@ export interface TrustReport {
   appliedChanges: AppliedChange[]
   /** What the closed loop would do right now (present only in shadow mode). */
   shadowPreview: ShadowPreview | null
+  /**
+   * Whether the loop is actually applying repairs to this project.
+   *
+   * Authoritative: read from the flags and the dial, not inferred from audit
+   * rows. `shadowPreview` above is evidence the loop LEFT and says nothing on
+   * a project that has never ticked; this is a fact about the running process
+   * and is correct before the first tick.
+   *
+   * The surfaces render the dial, so a project showed "Autopilot" while the
+   * deployment was structurally incapable of applying a fix. This is the field
+   * that has to be believed over the dial.
+   */
+  executionMode: ExecutionModeState
 }
 
 const ROLLBACK_PREFIX = 'ROLLBACK_'
@@ -217,6 +256,10 @@ const INTERNAL_ONLY_ACTIONS = [
 ]
 
 function classify(action: string): ActivityItem['kind'] {
+  // Before the AUTONOMOUS_AUDIT_ACTIONS test, not after. This action is in
+  // BUDGET_CONSUMING_ACTIONS (it spent a mutation) but must never be rendered
+  // as a completed fix.
+  if (action === 'HEALTH_FIX_UNVERIFIED') return 'applied_unverified'
   if ((AUTONOMOUS_AUDIT_ACTIONS as readonly string[]).includes(action)) return 'auto_fix'
   if (action === 'HEALTH_FIX_ESCALATED') return 'escalation'
   if (action === 'AUTONOMY_CIRCUIT_OPEN') return 'breaker'
@@ -236,6 +279,8 @@ function prettyAction(action: string): string {
     case 'HEALTH_FIX_APPROVED':       return 'You approved a fix — applying it now'
     case 'AUTONOMY_LEVEL_CHANGED':    return 'You changed the autonomy level'
     case 'HEALTH_FINDING_DISMISSED':  return 'You dismissed a finding'
+    case 'HEALTH_FIX_UNVERIFIED':
+      return 'Applied a fix but could not confirm it worked — re-checking next pass'
     default:                          return action.replace(/_/g, ' ').toLowerCase()
   }
 }
@@ -266,9 +311,10 @@ function humanize(action: string, details: string | null): string {
       // it. This row asserted "verified & snapshotted" on every applied fix,
       // including the ones whose type no probe can re-check — the ledger was
       // vouching for work nothing had looked at.
-      const suffix =
-        d.verification === 'confirmed'
-          ? ' — re-checked and confirmed, snapshot captured'
+      const suffix = isVerifiedFix(d.verification)
+        ? ' — re-checked and confirmed, snapshot captured'
+        : isVerificationError(d.verification)
+          ? ' — applied, but the check that would confirm it could not run'
           : ' — applied and snapshotted (not independently re-checked)'
       return what
         ? `Applied your approved fix: ${what}${suffix}`
@@ -514,7 +560,9 @@ export async function buildTrustReport(
       resource: det.location ?? det.tableName ?? undefined,
       // Only the kernel's positive re-probe counts. `rollbackData.verification`
       // is stamped by evaluateFixOutcome; anything else means nothing looked.
-      verified: (det.rollbackData as Record<string, unknown> | undefined)?.verification === 'confirmed',
+      verified: isVerifiedFix(
+        (det.rollbackData as Record<string, unknown> | undefined)?.verification,
+      ),
       revertible: eligibility.revertible,
       requiresConfirmation: eligibility.requiresConfirmation,
       revertBlockedReason: eligibility.reason,
@@ -539,11 +587,14 @@ export async function buildTrustReport(
   }
 
   return {
+    executionMode: resolveExecutionMode(level),
     projectId,
     level,
     cap,
     plan: planDisplayName(planName),
-    invariantCount: INVARIANTS.length,
+    invariantCount: INVARIANTS.filter(i => i.assurance !== 'by_construction' && !(i.enabled && !i.enabled())).length,
+    guaranteedByConstruction: INVARIANTS.filter(i => i.assurance === 'by_construction').length,
+    uncheckedHere: INVARIANTS.filter(i => i.enabled && !i.enabled()).length,
     scoreboard: {
       windowDays,
       autonomousFixes,

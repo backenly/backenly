@@ -555,10 +555,9 @@ export async function runAndStoreFrontendCoevolution(
       const { reapCoevolutionFindings } = await import('@/lib/core/finding-reaper')
       const detected = new Set<string>([
         ...(sdkGaps?.gaps ?? [])
-          .filter((g) => g.proposal && !g.proposal.autoApprove)
+          .filter((g) => g.proposal)
           .map((g) => `coevo_${g.gapType}_${g.tableName}_${g.fieldName ?? ''}`),
         ...signals
-          .filter((s) => s.requiresApproval)
           .map((s) => `coevo_${s.type}_${s.tableName}`),
       ])
       const cleanScan =
@@ -571,17 +570,28 @@ export async function runAndStoreFrontendCoevolution(
     const hasWork = (sdkGaps && sdkGaps.gaps.length > 0) || signals.length > 0
     if (!hasWork) return
 
-    // Layer 2: Auto-apply SDK proposals (additive column adds)
-    let appliedDescriptions: string[] = []
-    if (sdkGaps && sdkGaps.autoApprovedCount > 0) {
-      appliedDescriptions = await applyAutoApprovedProposals(projectId, sdkGaps)
-    }
+    // Layer 2: SDK column proposals are NEVER applied from here. Adding a column
+    // because a frontend asked for a field is a change to the shape of the
+    // owner's schema inferred from telemetry, which is approval-tier: a typo in
+    // a client becomes a permanent column. It also ran as raw SQL outside the
+    // executor, so it left no receipt, no rollback and a catalog the platform
+    // did not know about. Every proposal is persisted below for the owner or
+    // their agent; applyAutoApprovedProposals stays for the owner-triggered
+    // /coevolution?apply=true route, where a person is the one asking.
+    const appliedDescriptions: string[] = []
 
-    // Layer 3: Auto-apply safe AuditLog signals (index additions)
-    const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
+    // Layer 3: index additions from AuditLog signals, tier 0, under the same
+    // flag-and-dial check as every other repair. Refused, they are persisted
+    // for the owner like any approval-tier signal.
+    const indexPermit = signals.some(s => !s.requiresApproval && s.sqlFix)
+      ? await (await import('@/lib/authority/gate')).permitInlineRepair(projectId, 'coevo_missing_index', 0)
+      : null
+    const heldSignals = new Set(
+      signals.filter(s => s.requiresApproval || !indexPermit?.allowed),
+    )
     const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 3 })
     try {
-      for (const sig of signals.filter(s => !s.requiresApproval && s.sqlFix)) {
+      for (const sig of signals.filter(s => !s.requiresApproval && s.sqlFix && indexPermit?.allowed)) {
         try {
           await pool.query(sig.sqlFix!)
           appliedDescriptions.push(`Index added: ${sig.tableName} (${sig.type})`)
@@ -602,7 +612,7 @@ export async function runAndStoreFrontendCoevolution(
 
     // SDK pending proposals
     if (sdkGaps) {
-      for (const gap of sdkGaps.gaps.filter(g => g.proposal && !g.proposal.autoApprove)) {
+      for (const gap of sdkGaps.gaps.filter(g => g.proposal)) {
         const type = `coevo_${gap.gapType}_${gap.tableName}_${gap.fieldName ?? ''}`
         if (!existingTypes.has(type)) {
           toCreate.push({
@@ -625,7 +635,7 @@ export async function runAndStoreFrontendCoevolution(
     }
 
     // AuditLog signals requiring approval
-    for (const sig of signals.filter(s => s.requiresApproval)) {
+    for (const sig of signals.filter(s => heldSignals.has(s))) {
       const type = `coevo_${sig.type}_${sig.tableName}`
       if (!existingTypes.has(type)) {
         toCreate.push({

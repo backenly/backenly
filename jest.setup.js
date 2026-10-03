@@ -3,12 +3,20 @@ import '@testing-library/jest-dom'
 import 'openai/shims/node'
 import { PrismaClient } from '@prisma/client'
 
-// Global Prisma instance for tests
-const prisma = new PrismaClient()
+// Global Prisma instance for tests.
+//
+// Skipped under jsdom. `@prisma/client` resolves to its browser build when the
+// test environment defines `window`, and that build throws on every property
+// access — including the `$disconnect()` in the afterAll below, which failed
+// the whole suite before any assertion ran. That made component tests
+// impossible to write in this repo: any file with `@jest-environment jsdom`
+// died in setup. Component suites never touch the database, so the client is
+// created only for the node-environment suites that do.
+const prisma = typeof window === 'undefined' ? new PrismaClient() : null
 
 // Cleanup after all tests
 afterAll(async () => {
-  await prisma.$disconnect()
+  if (prisma) await prisma.$disconnect()
 })
 
 // CRITICAL: Force test database - NEVER use production database
@@ -29,6 +37,53 @@ process.env.NODE_ENV = 'test'
 process.env.ENGINE_MODE = 'integration' // Integration tests should not execute real DDL
 
 console.log('✅ Test database configured:', process.env.TEST_DATABASE_URL.replace(/:[^:]*@/, ':***@'))
+
+// Record every database handle this test file opens, so the test environment
+// (tests/helpers/db-release-environment.js) can close them when the file ends.
+// Without it each file's Prisma clients and pg pools stayed open for the life
+// of the process, and a --runInBand job ran Postgres out of connections.
+//
+// The constructors are wrapped, not replaced: a Proxy's construct trap builds
+// the real object and only notes it, so `instanceof`, statics and subclasses
+// behave exactly as before. Modules read `pg.Pool` / `PrismaClient` when they
+// construct, and they load after this file in the same registry, so they get
+// the wrapped constructor. A file that mocks either module is unaffected.
+;(() => {
+  const handles = { pools: new Set(), clients: new Set() }
+  globalThis.__backenlyDbHandles = handles
+  const track = (Ctor, into) =>
+    new Proxy(Ctor, {
+      construct(target, args, newTarget) {
+        const made = Reflect.construct(target, args, newTarget)
+        into.add(made)
+        return made
+      },
+    })
+  try {
+    const pg = require('pg')
+    pg.Pool = track(pg.Pool, handles.pools)
+  } catch {
+    /* pg not installed in this context */
+  }
+  try {
+    const client = require('@prisma/client')
+    client.PrismaClient = track(client.PrismaClient, handles.clients)
+  } catch {
+    /* no generated client in this context */
+  }
+})()
+
+// The runtime's real web-standard classes, kept before the mocks below replace
+// them. Code built on the real ones (the MCP SDK, which clones requests and
+// streams responses) restores them per file with
+// tests/helpers/real-web-standard.ts, so it is tested against what production
+// runs rather than against these stand-ins.
+global.__realWebStandard = {
+  Request: global.Request,
+  Response: global.Response,
+  Headers: global.Headers,
+  fetch: global.fetch,
+}
 
 // Mock Next.js Request/Response
 global.Request = class Request {
@@ -94,7 +149,30 @@ global.Headers = class Headers {
   has(name) {
     return name.toLowerCase() in this._headers
   }
-  
+
+  // NextResponse's cookie jar clears and re-appends Set-Cookie on every
+  // `response.cookies.set(...)`. Without these, any route that sets a cookie
+  // (register, login, signup verification) died with "headers.delete is not a
+  // function" and answered 500 in tests, which reads like a bug in the route.
+  delete(name) {
+    delete this._headers[name.toLowerCase()]
+    if (name.toLowerCase() === 'set-cookie') this._setCookies = []
+  }
+
+  append(name, value) {
+    const key = name.toLowerCase()
+    if (key === 'set-cookie') {
+      this._setCookies = [...(this._setCookies || []), value]
+      this._headers[key] = this._setCookies.join(', ')
+      return
+    }
+    this._headers[key] = key in this._headers ? `${this._headers[key]}, ${value}` : value
+  }
+
+  getSetCookie() {
+    return [...(this._setCookies || [])]
+  }
+
   forEach(callback) {
     Object.entries(this._headers).forEach(([key, value]) => {
       callback(value, key, this)

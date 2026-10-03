@@ -1,7 +1,7 @@
 /**
  * MCP reliability harness — runner.
  *
- *   npx tsx scripts/mcp-harness/run.ts --key mcp_live_… [--endpoint https://backenly.com]
+ *   npx tsx scripts/mcp-harness/run.ts --key mcp_live_… [--endpoint https://backenly.com] [--json results.json]
  *
  * Env fallbacks: BACKENLY_MCP_KEY, BACKENLY_API_URL.
  *
@@ -175,6 +175,18 @@ async function main() {
   }
 
   const failed = blockingFailures.length > 0 || (strict && targetFailures.length > 0)
+
+  // Machine-readable, for scripts/mcp-acceptance/matrix.ts --live.
+  if (typeof args.json === 'string') {
+    const { writeFileSync } = await import('fs')
+    writeFileSync(args.json, JSON.stringify({
+      endpoint,
+      runId: `hx_${runId}`,
+      at: new Date().toISOString(),
+      cases: outcomes.map((o) => ({ id: o.case.id, kind: o.case.kind, status: o.status, detail: o.detail ?? null })),
+    }, null, 2))
+    console.log(`  results  ${args.json}`)
+  }
   console.log(`\n  ${failed ? 'FAILED' : 'OK'}\n`)
   process.exit(failed ? 1 : 0)
 }

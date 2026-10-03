@@ -1,0 +1,51 @@
+{
+  "id": "provisioning/postgrest-ddl-sync.sql",
+  "bucket": "known_provisioning_effect",
+  "source": "scripts/sql/postgrest-ddl-sync.sql",
+  "derivation": "replayed",
+  "confidence": "derived",
+  "notes": "Observed by replaying scripts/sql/postgrest-ddl-sync.sql into a throwaway cluster (PostgreSQL 16.4, compiled by Visual C++ build 1940, 64-bit) on top of the schema.prisma projection, in the order scripts/postgrest-install.sh applies. Roles, grants and default privileges are cluster or database state rather than schema objects, and are reported in the provisioning inventory instead of here.",
+  "entries": [
+    {
+      "key": "event_trigger backenly_pgrst_ddl_sync",
+      "expect": {
+        "event": "ddl_command_end",
+        "enabled": "O",
+        "function": "public.backenly_pgrst_on_ddl",
+        "tags": null
+      }
+    },
+    {
+      "key": "routine public.backenly_pgrst_on_ddl()",
+      "expect": {
+        "result": "event_trigger",
+        "kind": "f",
+        "language": "plpgsql",
+        "security_definer": true,
+        "volatility": "v",
+        "strict": false,
+        "leakproof": false,
+        "config": [
+          "search_path=pg_catalog, public"
+        ],
+        "body_sha256": "jCpb2eoVrjlR6A6gaZYJMM8D1jLA8n0F9NjWs/nKgUw="
+      }
+    },
+    {
+      "key": "routine public.backenly_pgrst_prepare_schema(target_schema text)",
+      "expect": {
+        "result": "void",
+        "kind": "f",
+        "language": "plpgsql",
+        "security_definer": true,
+        "volatility": "v",
+        "strict": false,
+        "leakproof": false,
+        "config": [
+          "search_path=pg_catalog, public"
+        ],
+        "body_sha256": "p6NabgVsSxqXEXWShX1j0bPWNm9DtxeFNVLQFF24LMQ="
+      }
+    }
+  ]
+}

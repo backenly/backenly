@@ -6,14 +6,23 @@
  * name and links back to the app's URL — never to backenly.com. Branding comes
  * from ProjectAuthConfig (appName/appUrl), falling back to the project name.
  *
- * Delivery uses the platform SMTP transport (buildEnvSmtpTransport). When SMTP
- * is unconfigured (local dev) the email is logged to console instead — tokens
- * are NEVER returned to API callers (see forgotEndUserPassword).
+ * Delivery resolves SMTP per project, falling back to the deployment
+ * environment (lib/email/project-smtp.ts). When neither is configured the email
+ * is logged to console instead — tokens are NEVER returned to API callers (see
+ * forgotEndUserPassword).
+ *
+ * Subjects and bodies below are the BUILT-INS. An operator override replaces
+ * one per kind; absence means the built-in is used, so an install that
+ * customises nothing behaves exactly as it did. A stored template that cannot
+ * render falls back to the built-in and says so in the log, because an auth
+ * flow must not be the thing that surfaces a template bug.
  */
 
 import nodemailer from 'nodemailer'
 import { prisma } from '@/lib/db'
-import { buildEnvSmtpTransport } from '@/lib/email/smtp-transport'
+import { buildProjectSmtpTransport } from '@/lib/email/project-smtp'
+import { resolveAuthEmail } from '@/lib/email/auth-template-resolver'
+import type { TemplateKind, TemplateVariable } from '@/lib/email/template-kinds'
 
 export interface AuthEmailContext {
   appName: string
@@ -71,18 +80,56 @@ function shell(appName: string, heading: string, body: string, ctaText: string, 
   `
 }
 
-async function deliver(to: string, subject: string, html: string, label: string): Promise<boolean> {
-  const transporter = buildEnvSmtpTransport(nodemailer)
-  if (transporter) {
-    const from = process.env.SMTP_FROM || 'Backenly <noreply@backenly.com>'
-    await transporter.sendMail({ from, to, subject, html })
+async function deliver(
+  projectId: string,
+  to: string,
+  subject: string,
+  html: string,
+  label: string,
+): Promise<boolean> {
+  const resolved = await buildProjectSmtpTransport(nodemailer, projectId)
+  if (resolved) {
+    await resolved.transport.sendMail({ from: resolved.from, to, subject, html })
     return true
   }
+  // Neither project settings nor deployment env. The email is logged WITHOUT
+  // its body, because the body carries the reset link and console output ends
+  // up in log aggregators.
   console.log(`\n========== ${label} (SMTP unconfigured) ==========`)
   console.log(`To: ${to}`)
   console.log(`Subject: ${subject}`)
   console.log('===================================================\n')
   return false
+}
+
+/**
+ * Send one auth email, using the operator's template when there is a usable one.
+ *
+ * Every caller routes through here so the override, the fallback and the
+ * logging cannot be applied to two of the three emails and forgotten on the
+ * third.
+ */
+async function sendAuthEmail(
+  projectId: string,
+  kind: TemplateKind,
+  to: string,
+  label: string,
+  values: Partial<Record<TemplateVariable, string>>,
+  builtIn: { subject: string; bodyHtml: string },
+): Promise<boolean> {
+  const email = await resolveAuthEmail(projectId, kind, values, builtIn)
+
+  if (email.fallbackReason) {
+    // Loud on purpose. A quiet fallback is how a project sends Backenly's
+    // default wording for months while the dashboard shows a template nobody
+    // is using.
+    console.warn(
+      `[AuthEmail] project ${projectId} has a ${kind} template that could not be ` +
+        `used (${email.fallbackReason}); sent the built-in instead.`,
+    )
+  }
+
+  return deliver(projectId, to, email.subject, email.bodyHtml, label)
 }
 
 export async function sendEndUserVerificationEmail(
@@ -100,7 +147,14 @@ export async function sendEndUserVerificationEmail(
     verifyUrl,
     `If you didn't create a ${esc(ctx.appName)} account, you can safely ignore this email.`,
   )
-  return deliver(email, `Verify your ${ctx.appName} email`, html, 'END-USER VERIFICATION EMAIL')
+  return sendAuthEmail(
+    projectId,
+    'verification',
+    email,
+    'END-USER VERIFICATION EMAIL',
+    { appName: ctx.appName, email, ctaUrl: verifyUrl, expiry: '24 hours' },
+    { subject: `Verify your ${ctx.appName} email`, bodyHtml: html },
+  )
 }
 
 export async function sendEndUserMagicLinkEmail(
@@ -118,7 +172,14 @@ export async function sendEndUserMagicLinkEmail(
     magicUrl,
     `If you didn't request this link, you can safely ignore this email — no one can sign in without it.`,
   )
-  return deliver(email, `Sign in to ${ctx.appName}`, html, 'END-USER MAGIC LINK EMAIL')
+  return sendAuthEmail(
+    projectId,
+    'magic_link',
+    email,
+    'END-USER MAGIC LINK EMAIL',
+    { appName: ctx.appName, email, ctaUrl: magicUrl, expiry: '15 minutes' },
+    { subject: `Sign in to ${ctx.appName}`, bodyHtml: html },
+  )
 }
 
 export async function sendEndUserPasswordResetEmail(
@@ -141,5 +202,12 @@ export async function sendEndUserPasswordResetEmail(
     resetUrl,
     `If you didn't request a password reset, you can safely ignore this email — your password won't change.`,
   )
-  return deliver(email, `Reset your ${ctx.appName} password`, html, 'END-USER PASSWORD RESET EMAIL')
+  return sendAuthEmail(
+    projectId,
+    'password_reset',
+    email,
+    'END-USER PASSWORD RESET EMAIL',
+    { appName: ctx.appName, email, ctaUrl: resetUrl, expiry: '1 hour' },
+    { subject: `Reset your ${ctx.appName} password`, bodyHtml: html },
+  )
 }

@@ -29,7 +29,7 @@ function tokenize(command: string): string[] {
 
 /** Every documented invocation of the MCP server across the published docs. */
 function documentedInvocations(): Array<{ source: string; line: string }> {
-  const sources = ['public/llms.txt', 'packages/mcp-server/README.md']
+  const sources = ['public/llms.txt', 'public/docs/agents/client-setup.md', 'public/skill.md', 'packages/mcp-server/README.md']
   const found: Array<{ source: string; line: string }> = []
 
   for (const source of sources) {

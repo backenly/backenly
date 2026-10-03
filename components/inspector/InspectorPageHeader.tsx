@@ -67,10 +67,10 @@ export function InspectorPageHeader({
   stat,
 }: InspectorPageHeaderProps) {
   return (
-    <div className="bg-[#101116] px-8 pb-1 pt-5">
-      <div className="flex items-end justify-between gap-5 border-b border-white/[0.06] pb-4">
+    <div className="bg-[#101116] px-4 sm:px-8 pb-1 pt-3 sm:pt-5">
+      <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-3 sm:gap-5 border-b border-white/[0.06] pb-4">
         <div className="min-w-0">
-          <div className="flex items-center gap-2.5 text-[11px]">
+          <div className="flex items-center gap-2.5 text-[11px] flex-wrap">
             <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-600">
               <Icon className="h-3 w-3" />
               Inspector
@@ -86,16 +86,16 @@ export function InspectorPageHeader({
               <span className="font-mono text-[10.5px] text-zinc-500 tabular-nums">{stat}</span>
             )}
           </div>
-          <h1 className="mt-1.5 truncate text-[22px] font-semibold leading-tight tracking-[-0.01em] text-white">
+          <h1 className="mt-1.5 truncate text-lg sm:text-[22px] font-semibold leading-tight tracking-[-0.01em] text-white">
             {title}
           </h1>
-          <p className="mt-1 max-w-3xl text-[12.5px] leading-5 text-zinc-500">
+          <p className="mt-1 max-w-3xl text-xs sm:text-[12.5px] leading-5 text-zinc-500">
             {description}
           </p>
         </div>
 
         {actions && (
-          <div className="flex flex-shrink-0 items-center gap-2 pb-0.5">
+          <div className="flex flex-shrink-0 items-center gap-2 pb-0.5 w-full sm:w-auto justify-start sm:justify-end">
             {actions}
           </div>
         )}

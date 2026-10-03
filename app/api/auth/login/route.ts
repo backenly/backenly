@@ -6,7 +6,7 @@ import { verifyPassword } from '@/lib/auth/password'
 import { createSession } from '@/lib/auth/session'
 import { logAuthEvent } from '@/lib/services/logging'
 import { sendAccountLockedEmail } from '@/lib/auth/email'
-import { isBlocked, recordSecurityEvent } from '@/lib/platform/controls'
+import { isBlocked, recordSecurityEvent } from '@/lib/platform-controls'
 import { z } from 'zod'
 import crypto from 'crypto'
 

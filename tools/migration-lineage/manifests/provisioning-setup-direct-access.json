@@ -1,0 +1,124 @@
+{
+  "id": "provisioning/setup-direct-access.sql",
+  "bucket": "known_provisioning_effect",
+  "source": "scripts/setup-direct-access.sql",
+  "derivation": "replayed",
+  "confidence": "derived",
+  "notes": "Observed by replaying scripts/setup-direct-access.sql into a throwaway cluster (PostgreSQL 16.4, compiled by Visual C++ build 1940, 64-bit) on top of the schema.prisma projection, in the order scripts/postgrest-install.sh applies. Roles, grants and default privileges are cluster or database state rather than schema objects, and are reported in the provisioning inventory instead of here.",
+  "entries": [
+    {
+      "key": "event_trigger backenly_ddl_watch",
+      "expect": {
+        "event": "ddl_command_end",
+        "enabled": "O",
+        "function": "public.backenly_capture_ddl",
+        "tags": null
+      }
+    },
+    {
+      "key": "event_trigger backenly_drop_watch",
+      "expect": {
+        "event": "sql_drop",
+        "enabled": "O",
+        "function": "public.backenly_capture_drop",
+        "tags": null
+      }
+    },
+    {
+      "key": "routine public.backenly_capture_ddl()",
+      "expect": {
+        "result": "event_trigger",
+        "kind": "f",
+        "language": "plpgsql",
+        "security_definer": true,
+        "volatility": "v",
+        "strict": false,
+        "leakproof": false,
+        "config": [
+          "search_path=pg_catalog, public"
+        ],
+        "body_sha256": "TlCzb3loW9rb9b31PrFlDz0m/Bza44tqni+uomBpGUI="
+      }
+    },
+    {
+      "key": "routine public.backenly_capture_drop()",
+      "expect": {
+        "result": "event_trigger",
+        "kind": "f",
+        "language": "plpgsql",
+        "security_definer": true,
+        "volatility": "v",
+        "strict": false,
+        "leakproof": false,
+        "config": [
+          "search_path=pg_catalog, public"
+        ],
+        "body_sha256": "wTupoI2MerIvDQHipNGqijCwF9ckTdwe/Nk5cofaU2M="
+      }
+    },
+    {
+      "key": "routine public.backenly_direct_create_role(p_role text, p_password text, p_schema text, p_mode text)",
+      "expect": {
+        "result": "boolean",
+        "kind": "f",
+        "language": "plpgsql",
+        "security_definer": true,
+        "volatility": "v",
+        "strict": false,
+        "leakproof": false,
+        "config": [
+          "search_path=pg_catalog, public"
+        ],
+        "body_sha256": "vDtLHvbqFhL8EneFnK33xh5XTfJo3YYerxMA3Bh1mgQ="
+      }
+    },
+    {
+      "key": "routine public.backenly_direct_drop_role(p_role text)",
+      "expect": {
+        "result": "boolean",
+        "kind": "f",
+        "language": "plpgsql",
+        "security_definer": true,
+        "volatility": "v",
+        "strict": false,
+        "leakproof": false,
+        "config": [
+          "search_path=pg_catalog, public"
+        ],
+        "body_sha256": "GGDRe0gEL6qY1ILZSlZrFo7J12nkKjArdSimMd5jOl8="
+      }
+    },
+    {
+      "key": "routine public.backenly_direct_set_password(p_role text, p_password text)",
+      "expect": {
+        "result": "boolean",
+        "kind": "f",
+        "language": "plpgsql",
+        "security_definer": true,
+        "volatility": "v",
+        "strict": false,
+        "leakproof": false,
+        "config": [
+          "search_path=pg_catalog, public"
+        ],
+        "body_sha256": "48yNFaV07GGwpUMTXUI+2F8bBXb+yiSBRqoEPyOHQ8Y="
+      }
+    },
+    {
+      "key": "routine public.backenly_direct_sync_schema(p_schema text, p_ro text, p_rw text, p_owner text)",
+      "expect": {
+        "result": "boolean",
+        "kind": "f",
+        "language": "plpgsql",
+        "security_definer": true,
+        "volatility": "v",
+        "strict": false,
+        "leakproof": false,
+        "config": [
+          "search_path=pg_catalog, public"
+        ],
+        "body_sha256": "yBIsSAOPjf6xUQogEJAmMtHsyGcNPN7p5RF0OgnkKcM="
+      }
+    }
+  ]
+}

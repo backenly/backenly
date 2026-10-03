@@ -416,6 +416,46 @@ export function getManualRemediationHint(
       return `"${t}" is taking heavy sequential scans and Backenly could not find a column it is safe to index automatically.${measured} Add an index on whichever column your queries filter or sort by — in the AI chat, say "add an index on <table>.<column>".`
     }
 
+    // No executable repair exists and none is coming: the finding's whole claim
+    // is that repairing individual gaps here has stopped working. So the hint
+    // hands over the evidence rather than a command, because the next step is a
+    // decision about the data model and Backenly cannot make it.
+    // No repair exists for a spike: it may be a launch as easily as a runaway.
+    // The hint hands over where the traffic went and what to check.
+    case 'usage_anomaly': {
+      const axis = String(details?.axis ?? '')
+      const paths = Array.isArray(details?.topPaths)
+        ? (details!.topPaths as Array<{ path?: string }>).map((p) => p?.path).filter(Boolean).slice(0, 3)
+        : []
+      const where = paths.length
+        ? `Start with ${paths.join(', ')}, which carried most of the day's requests.`
+        : axis === 'egress_bytes'
+          ? 'It did not go through the API, so look at file downloads: a public file shared widely, or a client re-downloading one in a loop.'
+          : 'Look at what changed that day: a deploy, a new client, or a job running more often than intended.'
+      return (
+        `This project's ${axis === 'egress_bytes' ? 'egress' : axis === 'fn_runs' ? 'function runs' : 'new end users'} ` +
+        `jumped far past its usual daily level. ${where} If it is expected growth, dismiss this; if it is not, ` +
+        'fix the cause before it reaches your plan limit or spend limit (the Usage page shows both).'
+      )
+    }
+
+    case 'subsystem_repeat_failure': {
+      const area = Array.isArray(details?.membership)
+        ? (details!.membership as string[]).join(', ')
+        : String(details?.membership ?? 'this area')
+      const n = Number(details?.confirmedRepairCount ?? 0)
+      const gaps = Array.isArray(details?.distinctGapIdentities)
+        ? (details!.distinctGapIdentities as string[]).length
+        : 0
+      return (
+        `Backenly applied ${n || 'several'} verified repairs across ${area}` +
+        `${gaps ? `, spanning ${gaps} different problems` : ''}, and this area is still failing. ` +
+        'Each repair worked on its own, so the pattern points at how the area is modelled rather ' +
+        'than at any one gap. Review the evidence on this finding and decide whether to restructure ' +
+        'it. Dismiss this if the repeated repairs are expected here — Backenly will stop raising it.'
+      )
+    }
+
     // Only the prepared-transaction kind reaches here — the other two have real
     // repairs. It hands over the exact commands and refuses to pick between
     // them, because the choice discards or applies work Backenly cannot see.

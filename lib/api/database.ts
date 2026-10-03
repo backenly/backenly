@@ -534,12 +534,24 @@ export async function addConstraint(
   columnName: string,
   constraintType: 'not_null' | 'unique' | 'check' | 'foreign_key',
   expression?: string,
+  /**
+   * The table a foreign key points at.
+   *
+   * Separate from `expression` because the executor treats them differently:
+   * with no referencedTable it INFERS the target from the column name, and an
+   * inferred target is not necessarily the one the operator chose. Passing the
+   * table through `expression` only works if it is spelled `table(column)`,
+   * which is the migration parser's shape, not a picker's. So a UI that lets
+   * someone choose the table has to say which one explicitly, or the choice is
+   * silently discarded and a plausible-looking wrong FK is created.
+   */
+  referencedTable?: string,
 ): Promise<void> {
   const response = await fetch(`/api/database/schema/constraints?projectId=${encodeURIComponent(projectId)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     credentials: 'include',
-    body: JSON.stringify({ tableName, columnName, constraintType, expression }),
+    body: JSON.stringify({ tableName, columnName, constraintType, expression, referencedTable }),
   })
   const data = await response.json().catch(() => ({}))
   if (!response.ok || !data.success) throw new Error(data.error || 'Failed to add constraint')

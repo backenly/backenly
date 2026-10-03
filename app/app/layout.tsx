@@ -7,7 +7,7 @@ import { AppSidebar } from '@/components/app/AppSidebar'
 import { Logo } from '@/components/Logo'
 import { GlobalLoading } from '@/components/ui/GlobalLoading'
 import { getProjects } from '@/lib/api/projects'
-import { isAuthenticated, logout } from '@/lib/api/auth'
+import { isAuthenticated, signOut } from '@/lib/api/auth'
 import { VerifyEmailWall } from '@/components/app/VerifyEmailWall'
 
 // Inner component for layout
@@ -48,6 +48,13 @@ function AppLayoutContent({ children }: { children: React.ReactNode }) {
   )
 }
 
+function isSelfGuarded(pathname: string | null): boolean {
+  if (!pathname) return false
+  if (pathname === '/app' || pathname === '/app/' || pathname === '/app/settings' || pathname === '/app/connect') return true
+  const selfGuardedPrefixes = ['/app/projects/', '/app/api-builder', '/app/usage', '/app/billing', '/app/members', '/app/referral']
+  return selfGuardedPrefixes.some((p) => pathname.startsWith(p))
+}
+
 function AppLayoutInternal({
   children,
 }: {
@@ -57,7 +64,7 @@ function AppLayoutInternal({
   const pathname = usePathname()
   const searchParams = useSearchParams()
   const [sidebarWidth, setSidebarWidth] = useState(256) // 64 * 4 = 256px (w-64)
-  const [isCheckingProject, setIsCheckingProject] = useState(true)
+  const [isCheckingProject, setIsCheckingProject] = useState(() => !isSelfGuarded(pathname))
   // Signup-trust standing. `null` until /api/auth/me answers; the wall must
   // never flash before we know, and must never block if the check itself fails.
   const [standing, setStanding] = useState<{ walled: boolean; email: string } | null>(null)
@@ -84,11 +91,7 @@ function AppLayoutInternal({
       // Project pages handle their own auth and data fetching
       // Org-shell + project pages handle their own auth/data — never bounce
       // them through the "no projects → /app" redirect.
-      const selfGuardedPrefixes = ['/app/projects/', '/app/api-builder', '/app/deploy', '/app/usage', '/app/billing', '/app/members', '/app/referral']
-      if (
-        pathname === '/app' || pathname === '/app/' || pathname === '/app/settings' || pathname === '/app/connect' ||
-        selfGuardedPrefixes.some((p) => pathname?.startsWith(p))
-      ) {
+      if (isSelfGuarded(pathname)) {
         setIsCheckingProject(false)
         return
       }
@@ -132,7 +135,7 @@ function AppLayoutInternal({
   //
   // Fails OPEN on any error: a flaky /me must never wall a paying customer out
   // of their own dashboard. The real boundary is the server gate in
-  // lib/auth/account-standing.ts, which this only mirrors for UX.
+  // lib/platform-controls/account-standing.ts, which this only mirrors for UX.
   useEffect(() => {
     let cancelled = false
     const checkStanding = async () => {
@@ -151,12 +154,14 @@ function AppLayoutInternal({
           email: me?.email ?? '',
         })
       } catch {
-        // Leave `standing` null — renders the app, never the wall.
+        // network/server error: fail OPEN
       }
     }
     checkStanding()
-    return () => { cancelled = true }
-  }, [pathname])
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   // Sync with sidebar state from localStorage
   useEffect(() => {
@@ -208,12 +213,8 @@ function AppLayoutInternal({
     return (
       <VerifyEmailWall
         email={standing.email}
-        onLogout={async () => {
-          try {
-            await logout()
-          } finally {
-            router.push('/auth/login')
-          }
+        onLogout={() => {
+          signOut().catch((error) => console.error('Sign-out failed:', error))
         }}
       />
     )
@@ -230,7 +231,7 @@ export default function AppLayout({
   children: React.ReactNode
 }) {
   return (
-    <Suspense fallback={<GlobalLoading />}>
+    <Suspense fallback={null}>
       <AppLayoutInternal>{children}</AppLayoutInternal>
     </Suspense>
   )

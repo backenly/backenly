@@ -237,6 +237,8 @@ export async function addWorkspaceConstraint(
     columnName: string
     constraintType: ConstraintType
     expression?: string
+    /** Explicit foreign-key target. Omitted, the executor infers one. */
+    referencedTable?: string
   },
 ): Promise<ExecutionResult> {
   assertValidProjectId(projectId)
@@ -255,7 +257,13 @@ export async function addWorkspaceConstraint(
   return executeAction(
     {
       action: 'ADD_CONSTRAINT',
-      params: { tableName, columnName, constraintType: opts.constraintType, expression: opts.expression },
+      params: {
+        tableName,
+        columnName,
+        constraintType: opts.constraintType,
+        expression: opts.expression,
+        referencedTable: opts.referencedTable,
+      },
     },
     projectId,
   )

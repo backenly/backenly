@@ -1,0 +1,347 @@
+[
+  {
+    "route": "/api/auth/forgot-password",
+    "status": "ACCEPTED",
+    "reason": "ACCEPTED: unauthenticated by design - a user who can log in does not need it. Rate-limited via AUTH_LIMITS."
+  },
+  {
+    "route": "/api/auth/github",
+    "status": "ACCEPTED",
+    "reason": "ACCEPTED: unauthenticated by design - starts the github OAuth redirect before a session exists."
+  },
+  {
+    "route": "/api/auth/github/callback",
+    "status": "ACCEPTED",
+    "reason": "ACCEPTED: unauthenticated by design - the provider calls it. CSRF is handled by OAuth state validation, which this route performs before creating a session."
+  },
+  {
+    "route": "/api/auth/google",
+    "status": "ACCEPTED",
+    "reason": "ACCEPTED: unauthenticated by design - starts the google OAuth redirect before a session exists."
+  },
+  {
+    "route": "/api/auth/google/callback",
+    "status": "ACCEPTED",
+    "reason": "ACCEPTED: unauthenticated by design - the provider calls it. CSRF is handled by OAuth state validation, which this route performs before creating a session."
+  },
+  {
+    "route": "/api/auth/login",
+    "status": "ACCEPTED",
+    "reason": "ACCEPTED: unauthenticated by design - this is where a session is obtained. Protected by IP brute-force limiting (5 attempts / 15 min), account-level lockout, and a founder blocklist checked at the login surface."
+  },
+  {
+    "route": "/api/auth/platform-github",
+    "status": "ACCEPTED",
+    "reason": "ACCEPTED: unauthenticated by design - starts the platform-github OAuth redirect before a session exists."
+  },
+  {
+    "route": "/api/auth/platform-github/callback",
+    "status": "ACCEPTED",
+    "reason": "ACCEPTED: unauthenticated by design - the provider calls it. CSRF is handled by OAuth state validation, which this route performs before creating a session."
+  },
+  {
+    "route": "/api/auth/platform-google",
+    "status": "ACCEPTED",
+    "reason": "ACCEPTED: unauthenticated by design - starts the platform-google OAuth redirect before a session exists."
+  },
+  {
+    "route": "/api/auth/platform-google/callback",
+    "status": "ACCEPTED",
+    "reason": "ACCEPTED: unauthenticated by design - the provider calls it. CSRF is handled by OAuth state validation, which this route performs before creating a session."
+  },
+  {
+    "route": "/api/auth/platform-providers",
+    "status": "ACCEPTED",
+    "reason": "ACCEPTED: unauthenticated read of WHICH providers are configured, needed to render the sign-in page before anybody has a session. Returns no secrets."
+  },
+  {
+    "route": "/api/auth/refresh-token",
+    "status": "ACCEPTED",
+    "reason": "ACCEPTED: unauthenticated by design; authority comes from the refresh cookie, which is what it exists to exchange."
+  },
+  {
+    "route": "/api/auth/register",
+    "status": "ACCEPTED",
+    "reason": "ACCEPTED: unauthenticated by design. Rate-limited per IP via AUTH_LIMITS, bot-checked through verifySignupChallenge, and on self-host the single account slot is claimed inside the inserting transaction behind an advisory lock."
+  },
+  {
+    "route": "/api/auth/register/resend",
+    "status": "ACCEPTED",
+    "reason": "ACCEPTED: unauthenticated by design - it re-sends the code for a signup that has no account and no session yet. It carries only an address and re-issues the pending signup's stored code, so it cannot change what is created. Rate-limited per IP via AUTH_LIMITS and per address by throttleEmailCodeSend, and it answers identically whether or not a signup is pending."
+  },
+  {
+    "route": "/api/auth/register/verify",
+    "status": "ACCEPTED",
+    "reason": "ACCEPTED: unauthenticated by design - this is what creates the account, so no session can exist yet. Authority is the six-digit code mailed to the address, stored as an HMAC, dead after five wrong guesses and single-use. Rate-limited per IP via AUTH_LIMITS, and assertSignupAllowed is re-checked before the account is created."
+  },
+  {
+    "route": "/api/auth/replit",
+    "status": "ACCEPTED",
+    "reason": "ACCEPTED: unauthenticated by design - starts the replit OAuth redirect before a session exists."
+  },
+  {
+    "route": "/api/auth/replit/callback",
+    "status": "ACCEPTED",
+    "reason": "ACCEPTED: unauthenticated by design - the provider calls it. CSRF is handled by OAuth state validation, which this route performs before creating a session."
+  },
+  {
+    "route": "/api/auth/reset-password",
+    "status": "ACCEPTED",
+    "reason": "ACCEPTED: unauthenticated by design; authority comes from the six-digit code mailed to the address, not a session. The code is stored as an HMAC, dies after five wrong guesses and is single-use. Rate-limited via AUTH_LIMITS."
+  },
+  {
+    "route": "/api/auth/verify-email",
+    "status": "ACCEPTED",
+    "reason": "ACCEPTED: unauthenticated by design; authority comes from the signed token in the link."
+  },
+  {
+    "route": "/api/cron/health",
+    "status": "ACCEPTED",
+    "reason": "Scheduler liveness. Proves itself with a shared secret rather than a session, which is the only credential a scheduler can hold."
+  },
+  {
+    "route": "/api/database-brain/issues/[issueId]",
+    "status": "SAFE",
+    "reason": "SAFE: getCurrentProjectId resolves the project FOR THE CALLER (resolveForUser, which records a security event on a cross-tenant attempt), and the query is findFirst({ id, projectId }) - tenant-scoped in the predicate."
+  },
+  {
+    "route": "/api/database-brain/issues/[issueId]/apply-fix",
+    "status": "SAFE",
+    "reason": "SAFE: requireAuth + getCurrentProjectId, then an explicit issue.projectId !== projectId cross-check before executing anything."
+  },
+  {
+    "route": "/api/execution-timeline",
+    "status": "SAFE",
+    "reason": "SAFE (fixed here): now requires canAccessProject. getTimeline was already scoped by projectId in its predicate, but nothing checked the caller could read that project."
+  },
+  {
+    "route": "/api/health",
+    "status": "ACCEPTED",
+    "reason": "Liveness probe. Reports reachability and no configuration."
+  },
+  {
+    "route": "/api/learning/patterns/[id]/review",
+    "status": "SAFE",
+    "reason": "SAFE (fixed here): now requires platform admin. CorrectionPattern has no projectId - it is deployment-wide learning state consumed by the autonomy loop, so reviewing one changes behaviour for every project."
+  },
+  {
+    "route": "/api/mcp",
+    "status": "ACCEPTED",
+    "reason": "MCP transport endpoint. Per-request authority is the bearer token the MCP OAuth flow issued; an unauthenticated request gets nothing."
+  },
+  {
+    "route": "/api/mcp/health",
+    "status": "ACCEPTED",
+    "reason": "Liveness probe for the MCP surface. Reports reachability only."
+  },
+  {
+    "route": "/api/mcp/oauth/register",
+    "status": "ACCEPTED",
+    "reason": "RFC 7591 dynamic client registration. Unauthenticated by protocol - a client has no credential until it registers. Issues only a client_id/secret pair, which grants nothing until an authorization code flow with PKCE completes."
+  },
+  {
+    "route": "/api/mcp/oauth/revoke",
+    "status": "ACCEPTED",
+    "reason": "RFC 7009 revocation. Unauthenticated by protocol, and revoking a token you already hold grants nothing."
+  },
+  {
+    "route": "/api/mcp/oauth/token",
+    "status": "ACCEPTED",
+    "reason": "RFC 6749 token endpoint. Unauthenticated by protocol; authority is the authorization code plus the PKCE code_verifier, which binds the exchange to the client that began the flow."
+  },
+  {
+    "route": "/api/metrics",
+    "status": "ACCEPTED",
+    "reason": "Operational counters only; no secrets and no per-tenant data."
+  },
+  {
+    "route": "/api/notifications/[id]",
+    "status": "ACCEPTED",
+    "reason": "ACCEPTED: loads the notification and refuses unless existing.userId === auth.userId. A load-then-compare against the CALLER rather than a project, which the detector does not model."
+  },
+  {
+    "route": "/api/oidc/revoke",
+    "status": "ACCEPTED",
+    "reason": "OIDC revocation. Unauthenticated by protocol; revoking a held token grants nothing."
+  },
+  {
+    "route": "/api/oidc/token",
+    "status": "ACCEPTED",
+    "reason": "OIDC token endpoint, same protocol reasoning as the MCP one: authority is the code plus PKCE verifier."
+  },
+  {
+    "route": "/api/policies/[policyId]",
+    "status": "SAFE",
+    "reason": "SAFE (fixed in #58): every verb requires platform admin, including the read, which previously disclosed how access is decided."
+  },
+  {
+    "route": "/api/project/deploy",
+    "status": "SAFE",
+    "reason": "SAFE: calls canWriteProject BEFORE the findUnique. The lookup is not the boundary; the check preceding it is."
+  },
+  {
+    "route": "/api/projects/[id]/anon-key",
+    "reason": "SAFE: withProjectValidation, and the findUnique uses the authorized projectId from the callback, not params.id.",
+    "status": "SAFE"
+  },
+  {
+    "route": "/api/projects/[id]/connection-health",
+    "reason": "SAFE: withProjectValidation; the route header states owner-only access and the handler uses the authorized id.",
+    "status": "SAFE"
+  },
+  {
+    "route": "/api/projects/[id]/credentials",
+    "reason": "SAFE: runs under withProjectValidation and uses validated.projectId throughout, never params.id, so the authorized project is the one acted on.",
+    "status": "SAFE"
+  },
+  {
+    "route": "/api/projects/[id]/export/database",
+    "reason": "SAFE: same shape as credentials - withProjectValidation, and every use is validated.projectId. Reviewed specifically as a data-exfiltration path.",
+    "status": "SAFE"
+  },
+  {
+    "route": "/api/projects/[id]/go-live",
+    "reason": "SAFE: getProjectContext calls canAccessProject before returning the project.",
+    "status": "SAFE"
+  },
+  {
+    "route": "/api/projects/[id]/health",
+    "reason": "SAFE: withProjectValidation; queries scope on the authorized projectId.",
+    "status": "SAFE"
+  },
+  {
+    "route": "/api/projects/[id]/integrations",
+    "reason": "SAFE: withProjectValidation on both verbs; every query and service call uses validated.projectId.",
+    "status": "SAFE"
+  },
+  {
+    "route": "/api/providers/[providerId]",
+    "status": "SAFE",
+    "reason": "SAFE (fixed in #58): every verb requires platform admin, and clientSecret is never returned - the response reports clientSecretSet instead."
+  },
+  {
+    "route": "/api/roles/[roleId]",
+    "status": "SAFE",
+    "reason": "SAFE (fixed in #58): every verb requires platform admin. Role definitions are not project-scoped and editing permissions changes privilege for every holder."
+  },
+  {
+    "route": "/api/settings/ai/usage",
+    "status": "SAFE",
+    "reason": "SAFE (fixed here): now requires canAccessProject before the projectId from the query reaches getAiUsageStats."
+  },
+  {
+    "route": "/api/settings/billing",
+    "status": "SAFE",
+    "reason": "SAFE (fixed here): now requires canAccessProject before the projectId reaches getBillingUsage."
+  },
+  {
+    "route": "/api/storage/buckets/[bucketId]",
+    "reason": "SAFE: storageService.getBucket(bucketId, projectId) is tenant-scoped in its signature, AND the route cross-checks bucketRecord.projectId via validateProjectOwnership on GET, PATCH and DELETE.",
+    "status": "SAFE"
+  },
+  {
+    "route": "/api/system/health",
+    "status": "ACCEPTED",
+    "reason": "Liveness probe. Reports reachability and no configuration."
+  },
+  {
+    "route": "/api/testing/lineage-proof",
+    "status": "SAFE",
+    "reason": "SAFE: createOrchestrationContext(projectId, userId) calls validateProjectAccess before returning. Authorization is one call deeper than the route file."
+  },
+  {
+    "route": "/api/testing/time-travel",
+    "status": "SAFE",
+    "reason": "SAFE: same as lineage-proof - authorized inside createOrchestrationContext."
+  },
+  {
+    "route": "/api/usage",
+    "status": "ACCEPTED",
+    "reason": "ACCEPTED: withAuth, and every query filters on { userId } taken from the session - the detector cannot see it because the filter is built into a variable first. Scoped by caller identity in the predicate."
+  },
+  {
+    "route": "/api/v1/[projectId]",
+    "status": "ACCEPTED",
+    "reason": "Public discovery root for the project runtime. Returns no secret; the anon key it references is public by design."
+  },
+  {
+    "route": "/api/v1/[projectId]/[...unmatched]",
+    "status": "ACCEPTED",
+    "reason": "Catch-all for v1 paths Next does not serve. Forwards the request unchanged to the Express runtime when RUNTIME_API_URL is set (lib/runtime/forward-to-runtime.ts), otherwise answers the JSON 404. It authorizes nothing itself and needs nothing: the runtime authenticates the API key on every forwarded request and serves the key's own project (server/routes/dynamic.ts, server/routes/v2.ts), behind the serving gate (server/lib/serving-gate.ts). The only header it adds, x-backenly-internal, is read solely to skip traffic recording and to stop a forward loop; it grants no access."
+  },
+  {
+    "route": "/api/v1/[projectId]/auth/forgot-password",
+    "status": "ACCEPTED",
+    "reason": "Public by design. Throttled per IP+project AND per target address, so it cannot be used as an email bomb. Always answers 200 for unknown addresses, and the target-limit path returns the same 200 so a 429 cannot confirm an account exists."
+  },
+  {
+    "route": "/api/v1/[projectId]/auth/logout",
+    "status": "ACCEPTED",
+    "reason": "Public by design and idempotent. Invalidates the caller\u2019s own token; holding a token is the authority, and revoking one you already hold grants nothing."
+  },
+  {
+    "route": "/api/v1/[projectId]/auth/refresh-token",
+    "status": "ACCEPTED",
+    "reason": "Public by design; authority is the refresh token presented, which is what the endpoint exists to exchange."
+  },
+  {
+    "route": "/api/v1/[projectId]/auth/reset-password",
+    "status": "ACCEPTED",
+    "reason": "Public by design; authority is the emailed token, not a session. Throttled per IP+project so reset tokens cannot be brute-forced at speed."
+  },
+  {
+    "route": "/api/v1/[projectId]/auth/signin",
+    "status": "ACCEPTED",
+    "reason": "Public by design - this is how a customer\u2019s own users sign in. Abuse resistance added here: per IP+project AND per project+normalised-email budgets, so distributed credential stuffing trips the identity limit even when no single address trips the IP one. 429 is indistinguishable from a wrong password."
+  },
+  {
+    "route": "/api/v1/[projectId]/auth/signup",
+    "status": "ACCEPTED",
+    "reason": "Public by design. Throttled per IP+project, with a looser budget than signin so a shared NAT cannot block a customer\u2019s legitimate new users."
+  },
+  {
+    "route": "/api/v1/[projectId]/bootstrap",
+    "status": "ACCEPTED",
+    "reason": "Public by design: it returns the project ANON key, which the SDK embeds in client bundles and which anyone who loaded the customer\u2019s app already holds. Documented as such in the route header."
+  },
+  {
+    "route": "/api/v1/[projectId]/healthz",
+    "status": "ACCEPTED",
+    "reason": "Liveness probe. Reports reachability only."
+  },
+  {
+    "route": "/api/v1/[projectId]/orgs/accept-invite",
+    "status": "ACCEPTED",
+    "reason": "Authority is the invitation token, matched in the workspace schema and then verified against the end-user\u2019s email, so a token issued to someone else cannot be redeemed. Expired and already-accepted invites are rejected."
+  },
+  {
+    "route": "/api/v1/[projectId]/realtime/ticket",
+    "reason": "SAFE: v1ApiMiddleware refuses an API key whose projectId does not match the path and records a security event, so params.projectId IS the authorized id here.",
+    "status": "SAFE"
+  },
+  {
+    "route": "/api/v1/[projectId]/storage/upload-multipart",
+    "reason": "SAFE: v1ApiMiddleware plus requirePermission; same key-to-path binding as the rest of the v1 runtime.",
+    "status": "SAFE"
+  },
+  {
+    "route": "/api/v1/[projectId]/telemetry",
+    "status": "ACCEPTED",
+    "reason": "Public write-only ingest from a customer\u2019s client app, which by definition has no privileged credential. Accepts telemetry, returns nothing readable."
+  },
+  {
+    "route": "/api/v1/[projectId]/webhooks/[integration]",
+    "status": "ACCEPTED",
+    "reason": "Inbound provider callback. The caller is a third party that cannot hold a Backenly session; authenticity comes from the provider\u2019s signature rather than a guard."
+  },
+  {
+    "route": "/api/v2/[projectId]/[[...path]]",
+    "status": "ACCEPTED",
+    "reason": "The PostgREST-grammar data API, served by the runtime. Forwards the request unchanged to the Express runtime when RUNTIME_API_URL is set (lib/runtime/forward-to-runtime.ts), otherwise answers the JSON 404. It authorizes nothing itself and needs nothing: the runtime authenticates the API key on every forwarded request and serves the key's own project (server/routes/dynamic.ts, server/routes/v2.ts), behind the serving gate (server/lib/serving-gate.ts). The only header it adds, x-backenly-internal, is read solely to skip traffic recording and to stop a forward loop; it grants no access."
+  },
+  {
+    "route": "/api/workspace-oauth/[provider]",
+    "status": "ACCEPTED",
+    "reason": "requireAuth, and the handler scopes its work to the authenticated caller rather than to a path-supplied identity."
+  }
+]

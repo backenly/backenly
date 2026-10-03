@@ -420,7 +420,7 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
       />
 
       <div className="border-b border-white/[0.06] px-5 py-2.5">
-        <p className="text-[11.5px] leading-relaxed text-zinc-500">
+        <p className="text-[12.5px] leading-relaxed text-zinc-500">
           Backenly deliberately did not act on these. They need your call; everything else it handles itself.
           {' '}Once you decide, each change settles into the agent journal on{' '}
           <button
@@ -438,7 +438,7 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
           <p className="min-w-0 text-[12px] font-medium text-zinc-200">
             {banner.title}
             {banner.detail && (
-              <span className="ml-2 font-mono text-[11px] font-normal text-zinc-500">{banner.detail}</span>
+              <span className="ml-2 font-mono text-[12px] font-normal text-zinc-500">{banner.detail}</span>
             )}
           </p>
         </div>
@@ -502,7 +502,7 @@ function PanelHeader({
       <AlertTriangle className="size-3.5 text-amber-400" />
       <h3 className="text-[13px] font-semibold tracking-tight text-zinc-100">Waiting on you</h3>
       {typeof count === 'number' && count > 0 && (
-        <span className="font-mono text-[11px] font-medium tabular-nums text-amber-300">
+        <span className="text-[12px] font-medium tabular-nums text-amber-300">
           {count}
           {typeof groupCount === 'number' && groupCount < count && (
             <span className="ml-1.5 font-normal text-zinc-500">
@@ -589,7 +589,7 @@ function AgentRequestRow({
           <p className="mt-1 break-words text-[12px] leading-relaxed text-zinc-500">
             “{a.message.length > 180 ? a.message.slice(0, 180) + '…' : a.message}”
           </p>
-          <p className="mt-1.5 font-mono text-[10.5px] text-zinc-600">
+          <p className="mt-1.5 font-mono text-[12px] text-zinc-600">
             {a.rowCount !== null && a.rowCount > 0 && (
               <span className="text-amber-400/90">{a.rowCount} live row{a.rowCount === 1 ? '' : 's'} · </span>
             )}
@@ -605,7 +605,7 @@ function AgentRequestRow({
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {state.phase === 'verified' ? (
-            <span className="inline-flex items-center gap-1.5 font-mono text-[11.5px] text-emerald-300">
+            <span className="inline-flex items-center gap-1.5 font-mono text-[12.5px] text-emerald-300">
               <CheckCircle2 className="size-3.5" /> Done
             </span>
           ) : (
@@ -670,7 +670,7 @@ function ApprovalRow({
         <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-emerald-400" />
         <div className="min-w-0 flex-1">
           <p className="text-[12.5px] font-medium text-zinc-200">{g.title}</p>
-          <p className="mt-1 font-mono text-[10.5px] text-zinc-500">
+          <p className="mt-1 font-mono text-[12px] text-zinc-500">
             fixed{many ? ` · ${g.members.length} tables` : ''} · schema verified · rollback snapshot captured
           </p>
         </div>
@@ -699,28 +699,28 @@ function ApprovalRow({
         <div className="min-w-0 flex-1">
           <p className="text-[12.5px] leading-snug text-zinc-100">{g.title}</p>
           {heldKindLabel(head) && (
-            <p className="mt-1 text-[10.5px] font-medium uppercase tracking-wide text-amber-400/80">
+            <p className="mt-1 text-[12px] font-medium text-amber-400/80">
               {heldKindLabel(head)}
             </p>
           )}
-          <p className="mt-1 text-[11.5px] leading-snug text-zinc-500">{reasonForApproval(head)}</p>
+          <p className="mt-1 text-[12.5px] leading-snug text-zinc-500">{reasonForApproval(head)}</p>
           {(() => {
             const diag = diagnosisOf(head)
             if (!diag) return null
             return (
               <div className="mt-1.5 border-l border-white/[0.08] pl-3">
                 {diag.rootCause && (
-                  <p className="text-[11.5px] leading-snug text-zinc-400">{diag.rootCause}</p>
+                  <p className="text-[12.5px] leading-snug text-zinc-400">{diag.rootCause}</p>
                 )}
                 {diag.recommendation && (
-                  <p className="mt-0.5 text-[11.5px] leading-snug text-zinc-500">
+                  <p className="mt-0.5 text-[12.5px] leading-snug text-zinc-500">
                     <span className="text-zinc-400">Recommended:</span> {diag.recommendation}
                   </p>
                 )}
               </div>
             )
           })()}
-          <p className="mt-1.5 font-mono text-[10.5px] text-zinc-600">
+          <p className="mt-1.5 font-mono text-[12px] text-zinc-600">
             {head.type} · {g.severity}
             {!many && head.resource && <> · <span className="text-zinc-500">{head.resource}</span></>}
             {head.source && head.source !== 'autonomy' && (
@@ -736,7 +736,7 @@ function ApprovalRow({
               <button
                 onClick={() => setExpanded(v => !v)}
                 aria-expanded={expanded}
-                className="inline-flex items-center gap-1 text-[11.5px] font-medium text-zinc-500 transition-colors hover:text-zinc-300"
+                className="inline-flex items-center gap-1 text-[12.5px] font-medium text-zinc-500 transition-colors hover:text-zinc-300"
               >
                 {g.members.length} findings, one cause
                 <ChevronDown className={`size-3 transition-transform ${expanded ? 'rotate-180' : ''}`} />
@@ -744,7 +744,7 @@ function ApprovalRow({
               {expanded && (
                 <ul className="mt-2 space-y-1 border-l border-white/[0.08] pl-3">
                   {g.members.map((m, i) => (
-                    <li key={m.id} className="font-mono text-[10.5px] leading-relaxed text-zinc-500">
+                    <li key={m.id} className="font-mono text-[12px] leading-relaxed text-zinc-500">
                       {g.subjects[i] ?? m.resource ?? m.reason}
                     </li>
                   ))}
@@ -758,7 +758,7 @@ function ApprovalRow({
               hint is the same sentence the approve route would have returned,
               read from the one fix mapping (lib/core/fix-actions.ts). */}
           {!g.actionable && state.phase !== 'error' && g.manualHint && (
-            <p className="mt-2 border-l border-white/[0.08] pl-3 text-[11.5px] leading-snug text-zinc-400">
+            <p className="mt-2 border-l border-white/[0.08] pl-3 text-[12.5px] leading-snug text-zinc-400">
               {g.manualHint}
             </p>
           )}
@@ -766,7 +766,7 @@ function ApprovalRow({
           {state.phase === 'error' && (
             <div className="mt-2 flex items-start gap-2">
               <XCircle className="mt-px size-3.5 shrink-0 text-rose-400" />
-              <p className="text-[11.5px] leading-snug text-rose-300/90">{state.message}</p>
+              <p className="text-[12.5px] leading-snug text-rose-300/90">{state.message}</p>
             </div>
           )}
         </div>

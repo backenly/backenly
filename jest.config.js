@@ -8,7 +8,9 @@ const createJestConfig = nextJest({
 // Add any custom config to be passed to Jest
 const customJestConfig = {
   setupFilesAfterEnv: ['<rootDir>/jest.setup.js'],
-  testEnvironment: 'node', // Use node environment for API tests
+  // Node, plus closing every DB handle a test file opened when it ends
+  // (tests/helpers/db-release-environment.js).
+  testEnvironment: '<rootDir>/tests/helpers/db-release-environment.js',
   testTimeout: 20000, // 20 second timeout for integration tests
   moduleNameMapper: {
     // The SDK subpath exports resolve through `exports` in its package.json,
@@ -23,6 +25,10 @@ const customJestConfig = {
     // Jest runs plain Node, so map it to a no-op — the modules that import it
     // are still server modules, we just want to be able to unit test them.
     '^server-only$': '<rootDir>/tests/__mocks__/server-only.js',
+    // Overlay-first, OSS fallback. Jest tries each entry in order, so the
+    // private Cloud implementation wins when the overlay has been applied and
+    // the public single-tenant one is used when it has not.
+    '^@cloud/(.*)$': ['<rootDir>/lib/cloud/$1', '<rootDir>/lib/edition/oss/$1'],
     '^@/(.*)$': '<rootDir>/$1',
   },
   collectCoverageFrom: [

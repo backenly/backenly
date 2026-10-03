@@ -426,7 +426,123 @@ const ALL_TENANTS_FAILING: SymptomDefinition = {
   ],
 }
 
+
+// ── Symptom: repairs across one area have stopped holding ───────────────────
+//
+// Raised by `subsystem_repeat_failure`, which says THAT an area's repairs are
+// not holding and deliberately says nothing about why. These are the candidate
+// explanations.
+//
+// Admissibility for every test below was settled in advance and written down in
+// `docs/structural-probe-inventory.md`. Two tests decide from direct catalog
+// facts, one decides only above a sample threshold, and one can RAISE its
+// hypothesis and never confirm it — the probe that would confirm it needs AST
+// analysis of customer function source, which this repository has no tooling
+// for. That asymmetry is recorded in the predictions rather than smoothed over.
+const SUBSYSTEM_REPEAT_FAILURE: SymptomDefinition = {
+  id: 'subsystem_repeat_failure',
+  description: 'Several different repairs in one area of the schema are not holding',
+  tests: [
+    {
+      id: 'policy_overlap',
+      description: 'Do several RLS policies cover the same command on one table?',
+      cost: 'trivial',
+    },
+    {
+      id: 'constraint_coverage',
+      description: 'Are the state-carrying columns in this area constrained at all?',
+      cost: 'trivial',
+    },
+    {
+      id: 'column_covariation',
+      description: 'Do two state columns on one table encode the same state?',
+      cost: 'expensive',
+    },
+    {
+      id: 'write_statement_shapes',
+      description: 'How many distinct write shapes target these tables?',
+      cost: 'cheap',
+    },
+  ],
+  hypotheses: [
+    {
+      id: 'policy_fragmentation',
+      statement:
+        'Access to these tables is decided by several overlapping policies, so the effective rule is not what any single policy reads as — and a repair to one policy does not change the outcome.',
+      prior: 0.2,
+      predicts: { policy_overlap: 'overlapping' },
+      remedy: {
+        summary: 'Consolidate the overlapping policies into one rule per command.',
+        autoApplicable: false,
+      },
+    },
+    {
+      id: 'missing_constraint_permits_invalid_state',
+      statement:
+        'The schema permits states the application assumes cannot exist, so invalid rows keep arriving and each repair cleans up after them instead of stopping them.',
+      prior: 0.25,
+      predicts: { constraint_coverage: 'state_columns_unconstrained' },
+      remedy: {
+        summary: 'Constrain the state columns so the invalid rows cannot be written.',
+        autoApplicable: false,
+      },
+    },
+    {
+      id: 'duplicated_lifecycle_state',
+      statement:
+        'The same state is recorded in more than one column, so writers disagree and each repair fixes one representation while the other keeps drifting.',
+      prior: 0.25,
+      predicts: { column_covariation: 'co_varying' },
+      remedy: {
+        summary: 'Consolidate the duplicated state into one representation.',
+        autoApplicable: false,
+      },
+    },
+    {
+      // Raised, never confirmed. `multiple_writers` is equally consistent with
+      // one application having several code paths, and nothing available
+      // separates those — so this hypothesis is deliberately given a LOW prior
+      // and its remedy says the next step is a human reading the code.
+      id: 'split_brain_writers',
+      statement:
+        'More than one writer maintains this data and they disagree. Suspected only — the evidence that would confirm it needs analysis of function source this platform cannot perform.',
+      prior: 0.1,
+      // Nothing this platform can measure settles it. See `Hypothesis.confirmable`.
+      confirmable: false,
+      predicts: { write_statement_shapes: 'multiple_writers' },
+      remedy: {
+        summary:
+          'Identify which code paths write these tables and make one of them authoritative. Backenly cannot determine this from the database alone.',
+        autoApplicable: false,
+      },
+    },
+    {
+      // A real hypothesis with a real prior, and deliberately NOT a fallback:
+      // it commits to a negative prediction on EVERY test, so any positive
+      // observation refutes it outright. That is what stops it becoming the
+      // bucket everything falls into when the instruments were simply blind —
+      // a run whose deciding probes did not execute returns `inconclusive`,
+      // never this.
+      id: 'no_structural_cause',
+      statement:
+        'The repairs are unrelated. This area is busy rather than structurally wrong.',
+      prior: 0.2,
+      predicts: {
+        policy_overlap: 'single_per_command',
+        constraint_coverage: 'constrained',
+        column_covariation: 'independent',
+        write_statement_shapes: 'single_writer',
+      },
+      remedy: {
+        summary: 'No structural change indicated. Keep repairing individually.',
+        autoApplicable: false,
+      },
+    },
+  ],
+}
+
 export const SYMPTOM_CATALOG: readonly SymptomDefinition[] = [
+  SUBSYSTEM_REPEAT_FAILURE,
   EMPTY_READS,
   ENDPOINT_404,
   ENDPOINT_403,

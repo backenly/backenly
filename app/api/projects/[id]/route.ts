@@ -4,7 +4,14 @@ import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { z } from 'zod'
 import { withAuth } from '@/lib/auth/route-protection'
+import { deleteProjectCompletely } from '@/lib/projects/delete'
+import { canAccessProject, canAdministerProject, canWriteProject } from '@/lib/edition/guard'
+import { getProjectQuota } from '@/lib/services/storageQuota'
 
+// Usage figures (storageUsed, apiRequests, activeUsers, ...) are measured by the
+// server and are deliberately NOT accepted here. They used to be, which let any
+// project writer set storageUsed to 0 and upload past the plan's quota. Zod
+// strips unknown keys, so a client that still sends them is ignored, not refused.
 const updateProjectSchema = z.object({
   name: z.string().min(1).max(100).optional(),
   description: z.string().optional().nullable(),
@@ -12,12 +19,6 @@ const updateProjectSchema = z.object({
   apiUrlDev: z.string().url().optional().nullable(),
   apiUrlStaging: z.string().url().optional().nullable(),
   apiUrlProd: z.string().url().optional().nullable(),
-  // Metrics update
-  apiRequests: z.number().int().min(0).optional(),
-  avgLatency: z.number().int().min(0).optional(),
-  errorCount: z.number().int().min(0).optional(),
-  storageUsed: z.number().int().min(0).optional(),
-  activeUsers: z.number().int().min(0).optional(),
 })
 
 // GET /api/projects/[id] - Get a single project
@@ -30,11 +31,22 @@ export const GET = withAuth(async (
   const projectId = pathParts[pathParts.length - 1]
 
   try {
-    const project = await prisma.project.findFirst({
-      where: { 
-        id: projectId,
-        userId: user.userId 
-      },
+    // Authorize first, then fetch. The fetch below deliberately carries no
+    // userId predicate: re-adding one would restore owner-only access after the
+    // organization-aware check has already granted it, which is the exact
+    // defect this migration exists to remove.
+    if (!(await canAccessProject(user.userId, projectId))) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Project not found or access denied',
+        },
+        { status: 404 }
+      )
+    }
+
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
       include: {
         // functions: true, // Commented out - functions feature removed
         tables: true,
@@ -63,7 +75,8 @@ export const GET = withAuth(async (
     const serializedProject = {
       ...project,
       storageUsed: Number(project.storageUsed),
-      storageLimit: Number(project.storageLimit),
+      // The plan's effective cap, not the unused Project.storageLimit column.
+      storageLimit: Number((await getProjectQuota(project.id)).limit),
       maxFileSize: Number(project.maxFileSize),
       maxFilesPerBucket: project.maxFilesPerBucket, // Already Int, not BigInt
       metrics: {
@@ -110,14 +123,7 @@ export const PUT = withAuth(async (
     const validatedData = updateProjectSchema.parse(body)
 
     // Check if project exists and user owns it
-    const existing = await prisma.project.findFirst({
-      where: { 
-        id: projectId,
-        userId: user.userId 
-      },
-    })
-
-    if (!existing) {
+    if (!(await canWriteProject(user.userId, projectId))) {
       return NextResponse.json(
         {
           success: false,
@@ -135,18 +141,6 @@ export const PUT = withAuth(async (
     if (validatedData.apiUrlDev !== undefined) updateData.apiUrlDev = validatedData.apiUrlDev
     if (validatedData.apiUrlStaging !== undefined) updateData.apiUrlStaging = validatedData.apiUrlStaging
     if (validatedData.apiUrlProd !== undefined) updateData.apiUrlProd = validatedData.apiUrlProd
-    
-    // Update metrics if provided
-    if (validatedData.apiRequests !== undefined) updateData.apiRequests = validatedData.apiRequests
-    if (validatedData.avgLatency !== undefined) updateData.avgLatency = validatedData.avgLatency
-    if (validatedData.errorCount !== undefined) updateData.errorCount = validatedData.errorCount
-    if (validatedData.storageUsed !== undefined) updateData.storageUsed = BigInt(validatedData.storageUsed)
-    if (validatedData.activeUsers !== undefined) updateData.activeUsers = validatedData.activeUsers
-    
-    // Update lastMetricsUpdate if any metric was updated
-    if (Object.keys(validatedData).some(key => ['apiRequests', 'avgLatency', 'errorCount', 'storageUsed', 'activeUsers'].includes(key))) {
-      updateData.lastMetricsUpdate = new Date()
-    }
 
     const project = await prisma.project.update({
       where: { id: projectId },
@@ -169,7 +163,7 @@ export const PUT = withAuth(async (
     const serializedProject = {
       ...project,
       storageUsed: Number(project.storageUsed),
-      storageLimit: Number(project.storageLimit),
+      storageLimit: Number((await getProjectQuota(project.id)).limit),
       maxFileSize: Number(project.maxFileSize),
       maxFilesPerBucket: project.maxFilesPerBucket, // Already Int, not BigInt
       metrics: {
@@ -223,11 +217,27 @@ export const DELETE = withAuth(async (
   const projectId = pathParts[pathParts.length - 1]
 
   try {
-    const project = await prisma.project.findFirst({
-      where: { 
-        id: projectId,
-        userId: user.userId 
-      },
+    // ADMIN, and the single most consequential widening in this migration:
+    // deleting a project was owner-only and is now reachable by an organization
+    // ADMIN or OWNER. It is irreversible and takes the workspace schemas,
+    // backups and storage objects with it, so it is held a full rank above an
+    // ordinary write and a DEVELOPER cannot reach it. Covered by a dedicated
+    // role matrix in __tests__/auth/project-delete-authorization.test.ts.
+    //
+    // The 404 is kept for a denial as well as a miss, so refusing to delete
+    // does not confirm to a stranger that the project exists.
+    if (!(await canAdministerProject(user.userId, projectId))) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Project not found or access denied',
+        },
+        { status: 404 }
+      )
+    }
+
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
     })
 
     if (!project) {
@@ -240,9 +250,11 @@ export const DELETE = withAuth(async (
       )
     }
 
-    await prisma.project.delete({
-      where: { id: projectId },
-    })
+    // Drops every schema this project owns and deletes its rows in one
+    // transaction, then removes its backups and storage objects. Previously
+    // this was a bare `prisma.project.delete`, which left workspace_<id> and
+    // every branch schema resident with nothing pointing at them.
+    await deleteProjectCompletely(projectId)
 
     return NextResponse.json({
       success: true,

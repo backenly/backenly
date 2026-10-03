@@ -1,5 +1,6 @@
 import { Metadata } from 'next'
 import Link from 'next/link'
+import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 
 export const metadata: Metadata = {
   title: 'Page Not Found',
@@ -9,84 +10,86 @@ export const metadata: Metadata = {
 
 export default function NotFound() {
   return (
-    <html lang="en">
-      <body
+    <main
+      style={{
+        minHeight: '100vh',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: '#0f0f14',
+        color: '#eeeef5',
+        fontFamily: 'var(--font-geist-sans), -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif',
+      }}
+    >
+      <div
         style={{
-          margin: 0,
-          padding: 0,
-          background: '#0f0f14',
-          color: '#eeeef5',
-          fontFamily: 'var(--font-geist-sans), -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif',
-          minHeight: '100vh',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
+          textAlign: 'center',
+          padding: '2rem',
+          maxWidth: '480px',
         }}
       >
-        <main
+        <p
           style={{
-            textAlign: 'center',
-            padding: '2rem',
-            maxWidth: '480px',
+            fontSize: '0.8rem',
+            letterSpacing: '0.15em',
+            textTransform: 'uppercase',
+            color: '#8b5cf6',
+            fontWeight: 600,
+            marginBottom: '1.5rem',
           }}
         >
-          <p
+          404
+        </p>
+
+        <h1
+          style={{
+            fontSize: 'clamp(2rem, 5vw, 3.5rem)',
+            fontWeight: 700,
+            letterSpacing: '-0.04em',
+            lineHeight: 1.1,
+            marginBottom: '1rem',
+          }}
+        >
+          Page not found
+        </h1>
+
+        <p
+          style={{
+            fontSize: '1.05rem',
+            color: '#6b6b88',
+            lineHeight: 1.65,
+            marginBottom: '2.5rem',
+          }}
+        >
+          The page you are looking for does not exist or has been moved.
+          Let&apos;s get you back on track.
+        </p>
+
+        <nav
+          aria-label="Recovery navigation"
+          style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', alignItems: 'center' }}
+        >
+          <Link
+            href={CLOUD_CONTROL_PLANE ? '/' : '/app'}
             style={{
-              fontSize: '0.8rem',
-              letterSpacing: '0.15em',
-              textTransform: 'uppercase',
-              color: '#8b5cf6',
+              display: 'inline-block',
+              background: '#7c3aed',
+              color: '#fff',
+              padding: '0.75rem 2rem',
+              borderRadius: '8px',
               fontWeight: 600,
-              marginBottom: '1.5rem',
+              fontSize: '0.95rem',
+              textDecoration: 'none',
             }}
           >
-            404
-          </p>
+            {CLOUD_CONTROL_PLANE ? 'Back to Backenly' : 'Back to your dashboard'}
+          </Link>
 
-          <h1
-            style={{
-              fontSize: 'clamp(2rem, 5vw, 3.5rem)',
-              fontWeight: 700,
-              letterSpacing: '-0.04em',
-              lineHeight: 1.1,
-              marginBottom: '1rem',
-            }}
-          >
-            Page not found
-          </h1>
-
-          <p
-            style={{
-              fontSize: '1.05rem',
-              color: '#6b6b88',
-              lineHeight: 1.65,
-              marginBottom: '2.5rem',
-            }}
-          >
-            The page you are looking for does not exist or has been moved.
-            Let&apos;s get you back on track.
-          </p>
-
-          <nav
-            aria-label="Recovery navigation"
-            style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', alignItems: 'center' }}
-          >
-            <Link
-              href="/"
-              style={{
-                display: 'inline-block',
-                background: '#7c3aed',
-                color: '#fff',
-                padding: '0.75rem 2rem',
-                borderRadius: '8px',
-                fontWeight: 600,
-                fontSize: '0.95rem',
-                textDecoration: 'none',
-              }}
-            >
-              Back to Backenly
-            </Link>
-
+          {/* Pricing, use cases and a signup CTA are the hosted service
+              selling itself. On a self-hosted deployment the operator has
+              already installed the product and these routes redirect to /app,
+              so the links would be both irrelevant and circular. */}
+          {CLOUD_CONTROL_PLANE && (
             <div style={{ display: 'flex', gap: '1.5rem', marginTop: '0.25rem' }}>
               <Link
                 href="/pricing"
@@ -107,9 +110,9 @@ export default function NotFound() {
                 Get started free
               </Link>
             </div>
-          </nav>
-        </main>
-      </body>
-    </html>
+          )}
+        </nav>
+      </div>
+    </main>
   )
 }

@@ -1,4 +1,5 @@
 import { MetadataRoute } from 'next'
+import { COMPARISON_SLUGS } from './comparisons/data'
 
 const APP_URL = 'https://backenly.com'
 
@@ -8,7 +9,6 @@ export default function sitemap(): MetadataRoute.Sitemap {
   // ── Core marketing pages ───────────────────────────────────────────────────
   const core: MetadataRoute.Sitemap = [
     { url: APP_URL,                          lastModified: now, changeFrequency: 'weekly',  priority: 1.0 },
-    { url: `${APP_URL}/quickstart`,          lastModified: now, changeFrequency: 'monthly', priority: 0.95 },
     { url: `${APP_URL}/pricing`,             lastModified: now, changeFrequency: 'monthly', priority: 0.9 },
     { url: `${APP_URL}/alternatives`,        lastModified: now, changeFrequency: 'monthly', priority: 0.8 },
     { url: `${APP_URL}/contact`,             lastModified: now, changeFrequency: 'monthly', priority: 0.6 },
@@ -40,9 +40,9 @@ export default function sitemap(): MetadataRoute.Sitemap {
   const useCaseSlugs = [
     'ai-assisted-developers',
     'founders',
-    'startup-mvps',
-    'ai-app-builders',
-    'side-projects',
+    'migrate-from-supabase',
+    'ai-product-backends',
+    'multi-tenant-saas',
   ]
 
   const useCases: MetadataRoute.Sitemap = [
@@ -56,12 +56,13 @@ export default function sitemap(): MetadataRoute.Sitemap {
   ]
 
   // ── Comparisons ───────────────────────────────────────────────────────────
-  const comparisonSlugs = [
-    'backenly-vs-supabase',
-    'backenly-vs-firebase',
-    'backenly-vs-no-code-builders',
-    'backenly-vs-traditional-backend-development',
-  ]
+  //
+  // Derived from the comparison data rather than hand-listed. The two used to be
+  // separate lists of the same four slugs with nothing tying them together,
+  // which is how a live page goes missing from the sitemap, or a retired one
+  // stays in it. verify-content-integrity.ts asserts the parity that this
+  // derivation makes true by construction.
+  const comparisonSlugs = COMPARISON_SLUGS
 
   const comparisons: MetadataRoute.Sitemap = [
     { url: `${APP_URL}/comparisons`,         lastModified: now, changeFrequency: 'monthly', priority: 0.85 },
@@ -75,11 +76,13 @@ export default function sitemap(): MetadataRoute.Sitemap {
 
   // ── Resources ─────────────────────────────────────────────────────────────
   const resourceSlugs = [
-    'what-is-ai-backend-generation',
-    'how-to-build-a-backend-without-coding',
-    'best-backend-tools-for-non-technical-founders',
-    'full-stack-development-with-ai-coding-agents',
-    'backend-development-for-ai-app-builders',
+    'connect-your-coding-agent',
+    'your-first-backend',
+    'the-data-api',
+    'how-backenly-works',
+    'access-control-and-rls',
+    'after-you-launch',
+    'self-hosting',
   ]
 
   const resources: MetadataRoute.Sitemap = [

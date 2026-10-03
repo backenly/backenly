@@ -27,7 +27,7 @@
  *                    numeral, size right-aligned. Every card opens its section,
  *                    and this is the page's ENTIRE inventory surface.
  *
- * The lower two blocks carry SectionLabels. Four panels at one uniform gap
+ * The lower two blocks carry headings. Four panels at one uniform gap
  * with no headings made everything read equally important, which on a
  * dashboard means nothing does.
  *
@@ -46,11 +46,14 @@
  * and if it needs a list it belongs in its own section. Do not re-add a panel
  * here.
  *
- * Design rules that keep this from reading "generated":
- *   – One type scale: 22 / 15 / 13 / 12 / 11 / 10. Tabular numerals everywhere.
- *   – Violet is reserved for: the primary action, the active loop phase, and
- *     attention states. Never decorative.
- *   – Hairline borders only. One entrance animation. No hover-lift on cards.
+ * Design rules that keep this from reading "generated" (console redesign,
+ * 2026-09-30):
+ *   – Sentence-case headings; no uppercase micro-labels. Numbers are tabular
+ *     Geist, not mono.
+ *   – Violet is reserved for the active loop phase and attention states.
+ *     Status is a dot beside neutral text.
+ *   – Hairline borders only, no drop shadows. The page's one entrance is the
+ *     shell's; nothing here animates in on its own.
  *
  * Data sources:
  *   • /api/projects/[id]/build-status        verdict / blocked / failed
@@ -68,8 +71,11 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { useRouter } from 'next/navigation'
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import {
-  ArrowUpRight, Braces, ChevronRight, Database, HardDrive, ShieldCheck, User,
+  ArrowRight, ArrowUpRight, Braces, ChevronRight, Database, HardDrive, ShieldCheck, User,
+  type LucideIcon,
 } from 'lucide-react'
+import { BUTTON_BASE, BUTTON_VARIANTS, StatusDot } from '@/components/inspector/kit'
+import { FOCUS, FOCUS_INSET } from '@/components/console/tokens'
 import {
   levelLabel, useAutonomyStatus, type AutonomyLastAction,
 } from '@/lib/hooks/useAutonomyStatus'
@@ -132,10 +138,13 @@ interface WorkspaceHomeProps {
 }
 
 // ── Design tokens ────────────────────────────────────────────────────────────
-// Single source of truth for surfaces so panels can't drift apart.
-const PANEL = 'rounded-xl border border-white/[0.07] bg-[#16171d]'
-const PANEL_SHADOW = 'shadow-[0_16px_44px_-28px_rgba(0,0,0,0.9)]'
+// Single source of truth for surfaces so panels can't drift apart. The values
+// are the console ladder (components/console/tokens.ts): a plate on the lit
+// canvas, a hairline edge, no drop shadow.
+const PANEL = 'rounded-[10px] border border-white/[0.08] bg-[#0f1012]'
 const HAIRLINE = 'border-white/[0.06]'
+/** The panel ground, repeated where a shape must mask the rail behind it. */
+const NODE_GROUND = 'bg-[#0f1012]'
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -342,7 +351,7 @@ export function WorkspaceHome({
     : hasOpenWork ? {
       headline: 'A few things to clear before launch',
       body: 'Backenly flagged some issues while checking the runtime. Auto-fix them here, or hand them to your coding agent.',
-      cta: { label: 'Open inspector', onClick: () => router.push(`/app/projects/${projectId}/autonomy`) },
+      cta: { label: 'Review in Autonomy', onClick: () => router.push(`/app/projects/${projectId}/autonomy`) },
     }
     : verdict === 'structure_ready' ? {
       headline: 'Built and standing by',
@@ -424,19 +433,14 @@ export function WorkspaceHome({
   ]
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 6 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.32, ease: [0.25, 0.46, 0.45, 0.94] }}
-      className="relative space-y-7"
-    >
+    <div className="relative space-y-10">
       {/* ── The agent and its loop — one block, tight internal rhythm ─────
-          Header carries the name only. Status lives in the agent panel below;
-          the header chip duplicated it. Global actions (Assistant, inbox,
+          The header carries the name only. Status lives in the agent panel
+          below; a header chip duplicated it. Global actions (Assistant, inbox,
           Connect agent) live in the top bar. ──────────────────────────── */}
-      <div className="space-y-3.5">
-        <header className="min-w-0 px-1 pt-1">
-          <h1 className="truncate text-[22px] font-semibold leading-tight tracking-[-0.01em] text-white">
+      <div className="space-y-3">
+        <header className="min-w-0 pb-3">
+          <h1 className="truncate text-[26px] font-semibold leading-[32px] tracking-[-0.028em] text-zinc-50">
             {projectName ?? 'Untitled project'}
           </h1>
         </header>
@@ -448,11 +452,9 @@ export function WorkspaceHome({
           onOpenAutonomy={() => router.push(`/app/projects/${projectId}/autonomy`)}
         />
 
-        {/* The loop used to be a 3px rail crammed into the agent panel's
-            footer: the one thing that makes this platform different was the
-            least legible element on the page. It is now the page's centerpiece
-            — a closed circuit whose readings are the same numbers the Autonomy
-            page computes, and whose return path is why the phases never end. */}
+        {/* The loop is the page's centrepiece: a closed circuit whose readings
+            are the same numbers the Autonomy page computes, and whose return
+            path is why the phases never end. */}
         <LoopPanel
           autonomy={autonomy}
           autonomyOff={!!autonomyOff}
@@ -474,51 +476,45 @@ export function WorkspaceHome({
           surface here. ──────────────────────────────────────────────────── */}
 
       {/* ── Honest observability — 24h runtime traffic only (§6.2). The window
-             is stated once here, so the tiles no longer each repeat "· 24h". */}
-      <section className="space-y-3">
-        <SectionLabel>Runtime · last 24 hours</SectionLabel>
+             is stated once in the heading, so the readings do not repeat it. */}
+      <section aria-labelledby="runtime-heading" className="space-y-3">
+        <BlockHeading id="runtime-heading" hint="Requests your frontend and agents made against this backend">
+          Last 24 hours
+        </BlockHeading>
         <ObservabilityStrip projectId={projectId} />
       </section>
 
       {/* ── Resource cards — the four things a backend HAS. This is the whole
-          inventory surface now. The Database / Storage / Realtime / Agent
-          journal panels that used to sit below were removed (2026-07-21): each
-          restated a number the card above it already carries, and on a project
-          with one table they rendered ~600px of void to say "1 table, empty".
-          The lists they held are one click away in their own sections, which is
-          where "View all" was already sending everyone. ─────────────────── */}
-      <section className="space-y-3">
-        <SectionLabel>Resources</SectionLabel>
+          inventory surface. The Database / Storage / Realtime / Agent journal
+          panels that used to sit below were removed (2026-07-21): each
+          restated a number a card already carries. The lists live one click
+          away in their own sections. ─────────────────────────────────────── */}
+      <section aria-labelledby="resources-heading" className="space-y-3">
+        <BlockHeading id="resources-heading">Resources</BlockHeading>
         <ResourceCards items={resources} />
       </section>
-    </motion.div>
+    </div>
   )
 }
 
 // ── Shared primitives ───────────────────────────────────────────────────────
 
 function Panel({ children, className = '' }: { children: React.ReactNode; className?: string }) {
-  return (
-    <section className={`relative overflow-hidden ${PANEL} ${PANEL_SHADOW} ${className}`}>
-      {children}
-    </section>
-  )
+  return <section className={`relative overflow-hidden ${PANEL} ${className}`}>{children}</section>
 }
 
 /**
- * Section heading for the page's lower half. The page used to be four panels
- * at one uniform gap with no hierarchy — everything looked equally important,
- * which on a dashboard means nothing does. These name the two inventory
- * blocks and carry their shared time window so the tiles inside don't each
- * have to repeat it.
+ * A block heading for the page's lower half, in sentence case. The page used
+ * to be four panels at one uniform gap with no hierarchy; these name the two
+ * inventory blocks and carry their shared time window.
  */
-function SectionLabel({ children }: { children: React.ReactNode }) {
+function BlockHeading({ children, id, hint }: { children: React.ReactNode; id: string; hint?: string }) {
   return (
-    <div className="flex items-center gap-3 px-1">
-      <h2 className="text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
+    <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+      <h2 id={id} className="text-[15px] font-semibold leading-[22px] tracking-[-0.012em] text-zinc-100">
         {children}
       </h2>
-      <span className="h-px flex-1 bg-gradient-to-r from-white/[0.07] to-transparent" />
+      {hint && <p className="text-[13px] leading-[20px] text-zinc-500">{hint}</p>}
     </div>
   )
 }
@@ -527,12 +523,6 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
 // What the agent has to say right now, in its own voice, with the single next
 // action — and beside it the one control that governs it (the mode dial) plus
 // the promise that survives every mode.
-//
-// The loop moved OUT of this panel on 2026-07-21. Bolted to the footer here it
-// rendered as five 6px dots on a hairline: the product's signature reduced to
-// the least legible element on the page. It now owns LoopPanel below, and this
-// panel is a short, dense report instead of a tall one with a void under the
-// CTA.
 
 type LoopPhase = 'observe' | 'detect' | 'propose' | 'apply' | 'verify'
 
@@ -597,67 +587,49 @@ function AgentPanel({
   const mode = autonomy ? levelLabel(autonomy.level) : null
   return (
     <Panel>
-      {/* single restrained accent: hairline glow along the top edge */}
-      <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-violet-300/40 to-transparent" />
-
-      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_300px]">
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_320px]">
         {/* ── Left: the agent's report ──────────────────────────────────── */}
-        <div className="flex flex-col justify-center px-5 py-5 sm:px-6">
-          <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
-            <span className="relative flex h-[6px] w-[6px]">
-              {!autonomyOff && (
-                <motion.span
-                  animate={{ opacity: [0.25, 0.8, 0.25] }}
-                  transition={{ duration: 3, repeat: Infinity, ease: 'easeInOut' }}
-                  className="absolute inset-[-3px] rounded-full bg-violet-400/30"
-                />
-              )}
-              <span className={`relative h-[6px] w-[6px] rounded-full ${autonomyOff ? 'bg-zinc-600' : 'bg-violet-300'}`} />
-            </span>
-            Backend agent
-          </div>
-
-          <div className="mt-3 min-h-[26px]">
+        <div className="flex flex-col justify-center px-5 py-6 sm:px-7 sm:py-7">
+          <div className="min-h-[30px]">
             <AnimatePresence mode="wait" initial={false}>
               <motion.h2
                 key={agent.headline}
                 initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -4 }}
-                transition={{ duration: 0.3, ease: [0.25, 0.46, 0.45, 0.94] }}
-                className="text-[19px] font-semibold leading-snug tracking-[-0.01em] text-white"
+                transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
+                className="text-[21px] font-semibold leading-[30px] tracking-[-0.022em] text-zinc-50 [text-wrap:balance]"
               >
                 {agent.headline}
               </motion.h2>
             </AnimatePresence>
           </div>
-          <p className="mt-1.5 max-w-xl text-[13px] leading-6 text-zinc-400">
-            {agent.body}
-          </p>
+          <p className="mt-2 max-w-[60ch] text-[14px] leading-[22px] text-zinc-400 [text-wrap:pretty]">{agent.body}</p>
 
           {(agent.cta || agent.quiet) && (
-            <div className="mt-4 flex items-center gap-3">
+            <div className="mt-5 flex flex-wrap items-center gap-3">
               {agent.cta && (
                 <button
+                  type="button"
                   onClick={agent.cta.onClick}
-                  className="group inline-flex h-8 items-center gap-1.5 rounded-lg bg-white px-3.5 text-[12px] font-semibold text-black transition-colors hover:bg-zinc-200 focus:outline-none focus:ring-2 focus:ring-violet-400/50"
+                  className={`group ${BUTTON_BASE} ${BUTTON_VARIANTS.primary} h-[34px] px-3.5 text-[13px]`}
                 >
                   {agent.cta.label}
-                  <ArrowUpRight className="h-3 w-3 opacity-90 transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5" />
+                  <ArrowRight className="h-3.5 w-3.5 transition-transform duration-150 group-hover:translate-x-0.5" strokeWidth={2} />
                 </button>
               )}
               {agent.quiet && (
                 <button
+                  type="button"
                   onClick={agent.quiet.onClick}
-                  className="group inline-flex items-center gap-0.5 text-[12px] font-medium text-zinc-500 transition-colors hover:text-zinc-200 focus:outline-none"
+                  className={`group inline-flex items-center gap-0.5 rounded-[5px] text-[13px] font-medium text-zinc-400 transition-colors hover:text-zinc-100 ${FOCUS}`}
                 >
                   {agent.quiet.label}
-                  <ChevronRight className="h-3 w-3 transition-transform group-hover:translate-x-0.5" />
+                  <ChevronRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
                 </button>
               )}
             </div>
           )}
-
         </div>
 
         {/* ── Right: the one control that governs the agent ─────────────
@@ -666,33 +638,29 @@ function AgentPanel({
                already prints. What it holds instead is the dial, what the dial
                currently permits in plain English, and the promise that no dial
                setting can override. ─────────────────────────────────────── */}
-        <div className={`border-t lg:border-l lg:border-t-0 ${HAIRLINE} flex flex-col`}>
+        <div className={`flex flex-col border-t lg:border-l lg:border-t-0 ${HAIRLINE} bg-white/[0.012]`}>
           <button
             type="button"
             onClick={onOpenAutonomy}
-            className="group/mode flex-1 px-5 py-4 text-left transition-colors hover:bg-white/[0.02] focus:outline-none focus:ring-2 focus:ring-inset focus:ring-violet-400/30"
+            className={`group/mode flex-1 px-5 py-5 text-left transition-colors hover:bg-white/[0.02] sm:px-6 ${FOCUS_INSET}`}
           >
             <span className="flex items-center justify-between">
-              <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">Mode</span>
-              <ChevronRight className="h-3.5 w-3.5 text-zinc-700 transition-all group-hover/mode:translate-x-0.5 group-hover/mode:text-zinc-400" />
+              <span className="text-[12px] font-medium text-zinc-500">Autonomy mode</span>
+              <ChevronRight className="h-4 w-4 text-zinc-600 transition-all group-hover/mode:translate-x-0.5 group-hover/mode:text-zinc-300" />
             </span>
-            <span className="mt-1.5 flex items-baseline gap-2">
-              <span className={`text-[15px] font-semibold tracking-[-0.01em] ${autonomyOff ? 'text-zinc-400' : 'text-white'}`}>
+            <span className="mt-2 flex items-center gap-2.5">
+              <span className={`text-[16px] font-semibold tracking-[-0.014em] ${autonomyOff ? 'text-zinc-400' : 'text-zinc-50'}`}>
                 {mode ?? '—'}
               </span>
-              {!autonomyOff && mode && (
-                <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-violet-300/80">live</span>
-              )}
+              {!autonomyOff && mode && <StatusDot tone="operational" label="Live" />}
             </span>
             {mode && MODE_MEANING[mode] && (
-              <span className="mt-1.5 block text-[11.5px] leading-[1.45] text-zinc-500">
-                {MODE_MEANING[mode]}
-              </span>
+              <span className="mt-1.5 block text-[13px] leading-[20px] text-zinc-400">{MODE_MEANING[mode]}</span>
             )}
           </button>
-          <div className={`border-t ${HAIRLINE} flex items-start gap-2 px-5 py-3`}>
-            <ShieldCheck className="mt-px h-3.5 w-3.5 flex-shrink-0 text-zinc-600" />
-            <p className="text-[11px] leading-4 text-zinc-500">
+          <div className={`flex items-start gap-2.5 border-t ${HAIRLINE} px-5 py-3.5 sm:px-6`}>
+            <ShieldCheck className="mt-[2px] h-4 w-4 flex-shrink-0 text-zinc-500" strokeWidth={1.75} />
+            <p className="text-[12.5px] leading-[19px] text-zinc-500">
               Auth, destructive and irreversible changes always need your approval, in every mode.
             </p>
           </div>
@@ -743,20 +711,24 @@ function LoopPanel({
   return (
     <Panel>
       {/* ── Header ─────────────────────────────────────────────────────── */}
-      <div className={`flex flex-wrap items-center justify-between gap-x-6 gap-y-2 border-b ${HAIRLINE} px-5 py-3.5 sm:px-6`}>
-        <div className="flex items-center gap-2.5">
-          <h2 className="text-[13px] font-semibold tracking-tight text-zinc-100">Self-healing loop</h2>
-          <LiveBadge off={autonomyOff} />
+      <div className={`flex flex-wrap items-center justify-between gap-x-6 gap-y-2 border-b ${HAIRLINE} px-5 py-3.5 sm:px-7`}>
+        <div className="flex items-center gap-3">
+          <h2 className="text-[14px] font-semibold tracking-[-0.01em] text-zinc-100">Self-healing loop</h2>
+          <StatusDot
+            tone={autonomyOff ? 'paused' : 'operational'}
+            label={autonomyOff ? 'Paused' : 'Running'}
+            pulse={!autonomyOff}
+          />
         </div>
-        <span className="font-mono text-[10.5px] text-zinc-600 tabular-nums">
+        <span className="text-[12px] tabular-nums text-zinc-500">
           {autonomyOff
-            ? 'records & suggests only'
-            : lastReconciledIso ? `checked ${formatRelative(lastReconciledIso)}` : 'first check running…'}
+            ? 'Records and suggests only'
+            : lastReconciledIso ? `Checked ${formatRelative(lastReconciledIso)}` : 'First check running…'}
         </span>
       </div>
 
       {/* ── The circuit ────────────────────────────────────────────────── */}
-      <div className="px-5 pb-5 pt-6 sm:px-8">
+      <div className="px-5 pb-8 pt-7 sm:px-8">
         <SelfHealingLoop
           phase={loopPhase}
           off={autonomyOff}
@@ -768,13 +740,10 @@ function LoopPanel({
 
       {/* ── Receipts — proof the circuit above actually ran ─────────────
           Not a second findings queue (Autonomy owns the one queue): this is
-          the guardrail action log, already folded by repeat server-side. The
-          trust ledger used to show exactly one of these rows, clamped to two
-          lines in a 300px column. Three rows with their own tone marker say
-          far more and cost less height. ────────────────────────────────── */}
+          the guardrail action log, already folded by repeat server-side. */}
       {receipts.length > 0 && (
         <div className={`border-t ${HAIRLINE}`}>
-          <ul className="divide-y divide-white/[0.04]">
+          <ul className="divide-y divide-white/[0.05]">
             {receipts.map((a, i) => (
               <ReceiptRow key={`${a.at}-${i}`} item={a} />
             ))}
@@ -782,12 +751,12 @@ function LoopPanel({
           <button
             type="button"
             onClick={onReview}
-            className={`group/all flex w-full items-center justify-between border-t ${HAIRLINE} px-5 py-2.5 text-left transition-colors hover:bg-white/[0.02] focus:outline-none sm:px-6`}
+            className={`group/all flex w-full items-center justify-between border-t ${HAIRLINE} px-5 py-3 text-left transition-colors hover:bg-white/[0.02] sm:px-7 ${FOCUS_INSET}`}
           >
-            <span className="text-[11.5px] font-medium text-zinc-500 transition-colors group-hover/all:text-zinc-300">
+            <span className="text-[12.5px] font-medium text-zinc-400 transition-colors group-hover/all:text-zinc-100">
               Full guardrail log, restore points and approvals
             </span>
-            <ChevronRight className="h-3.5 w-3.5 text-zinc-700 transition-all group-hover/all:translate-x-0.5 group-hover/all:text-zinc-400" />
+            <ChevronRight className="h-4 w-4 text-zinc-600 transition-all group-hover/all:translate-x-0.5 group-hover/all:text-zinc-300" />
           </button>
         </div>
       )}
@@ -795,59 +764,30 @@ function LoopPanel({
   )
 }
 
-/** Live / paused state of the loop, as a single quiet chip. */
-function LiveBadge({ off }: { off: boolean }) {
-  const reduced = useReducedMotion()
-  return (
-    <span
-      className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-[3px] text-[9.5px] font-semibold uppercase tracking-[0.12em] ${
-        off
-          ? 'border-white/[0.06] text-zinc-600'
-          : 'border-violet-400/20 bg-violet-400/[0.07] text-violet-200/90'
-      }`}
-    >
-      <span className="relative flex h-[5px] w-[5px]">
-        {!off && !reduced && (
-          <motion.span
-            animate={{ opacity: [0.2, 0.85, 0.2], scale: [1, 1.9, 1] }}
-            transition={{ duration: 2.4, repeat: Infinity, ease: 'easeInOut' }}
-            className="absolute inset-0 rounded-full bg-violet-300/50"
-          />
-        )}
-        <span className={`relative h-[5px] w-[5px] rounded-full ${off ? 'bg-zinc-600' : 'bg-violet-300'}`} />
-      </span>
-      {off ? 'Paused' : 'Running'}
-    </span>
-  )
-}
-
 // Receipt tone: the row's marker colour states what KIND of act it was, so a
-// rollback or a failed apply can never read as routine. Amber/rose match the
-// status vocabulary the observability strip already uses.
+// rollback or a failed apply can never read as routine.
 const RECEIPT_TONE: Record<string, string> = {
-  auto_fix:   'bg-violet-400/70',
-  applied:    'bg-violet-400/70',
-  escalation: 'bg-amber-400/70',
-  rollback:   'bg-amber-400/70',
-  failed:     'bg-rose-400/70',
-  breaker:    'bg-rose-400/70',
+  auto_fix:   'bg-emerald-400',
+  applied:    'bg-emerald-400',
+  escalation: 'bg-amber-400',
+  rollback:   'bg-amber-400',
+  failed:     'bg-rose-400',
+  breaker:    'bg-rose-400',
   shadow:     'bg-zinc-600',
   other:      'bg-zinc-600',
 }
 
 function ReceiptRow({ item }: { item: AutonomyLastAction }) {
   return (
-    <li className="flex items-start gap-3 px-5 py-2.5 sm:px-6">
-      <span className={`mt-[6px] h-1.5 w-1.5 flex-shrink-0 rounded-full ${RECEIPT_TONE[item.kind] ?? RECEIPT_TONE.other}`} />
-      <span className="min-w-0 flex-1 text-[12px] leading-[1.5] text-zinc-400">
-        <span className="line-clamp-2">{item.summary}</span>
+    <li className="flex items-start gap-3 px-5 py-3 sm:px-7">
+      <span className={`mt-[7px] h-[6px] w-[6px] flex-shrink-0 rounded-full ${RECEIPT_TONE[item.kind] ?? RECEIPT_TONE.other}`} aria-hidden />
+      <span className="line-clamp-2 min-w-0 flex-1 text-[13px] leading-[20px] text-zinc-300">
+        {item.summary}
         {(item.repeat ?? 1) > 1 && (
-          <span className="ml-1.5 font-mono text-[10.5px] tabular-nums text-zinc-600">×{item.repeat}</span>
+          <span className="ml-1.5 text-[12px] tabular-nums text-zinc-500">×{item.repeat}</span>
         )}
       </span>
-      <span className="flex-shrink-0 pt-px font-mono text-[10.5px] text-zinc-600 tabular-nums">
-        {formatRelative(item.at)}
-      </span>
+      <span className="flex-shrink-0 pt-px text-[12px] tabular-nums text-zinc-500">{formatRelative(item.at)}</span>
     </li>
   )
 }
@@ -868,16 +808,11 @@ function ReceiptRow({ item }: { item: AutonomyLastAction }) {
  * snapshot, Apply/Verify a 30-day track record. Without that split "15 broken"
  * beside "100% proven fixed" reads as the loop contradicting itself.
  *
- * Each node also carries a one-sentence LOOP_EXPLAIN on hover. The stage names
- * are this product's own vocabulary — no other backend has a loop to name —
- * so the readings answer "how much" for a reader who has not yet been told
- * "of what", and the zero columns in particular are unreadable without it.
+ * Each node also carries a one-sentence LOOP_EXPLAIN on hover and focus.
  *
  * Motion is telemetry, never theater: the lit node is the real derived phase,
  * the heal sweep fires only when a finding genuinely closed, OFF freezes the
- * whole circuit, and prefers-reduced-motion renders it static. Numbers come
- * from the same trust report the Autonomy page renders, so the two surfaces
- * cannot disagree.
+ * whole circuit, and prefers-reduced-motion renders it static.
  */
 // Heal choreography: stage 1..5 maps to the node index the fix is passing
 // through (Detect → Propose → Apply → Verify, Observe is home). Driven by a
@@ -908,271 +843,240 @@ function SelfHealingLoop({
   const readings: Record<LoopPhase, { value: string; unit: string; accent?: boolean }> = {
     observe: {
       value: stats.invariants == null ? '—' : String(stats.invariants),
-      // The cadence belongs ON the reading, not only in the header's "checked
-      // just now". It is the whole claim — a linter runs when you invoke it,
-      // this runs whether or not anyone is looking — and it holds for every
-      // plan including Free, which is why the unit can state it flatly.
-      unit: 'guarantees · every minute',
+      // The cadence belongs ON the reading. It is the whole claim — a linter
+      // runs when you invoke it, this runs whether or not anyone is looking —
+      // and it holds for every plan including Free.
+      unit: 'guarantees, every minute',
     },
     detect: {
-      // open + pending_approval. Autonomy renders exactly this set across its
-      // two cards — Detected (open) + Waiting on you (held) — so this number is
-      // the sum of what that page shows, never larger than it. The Backend
-      // health list this used to point at was deleted on 2026-07-21.
+      // open + pending_approval: the sum of what the Autonomy page shows
+      // across Detected + Waiting on you, never larger than it.
       value: stats.actionableFindings == null ? '—' : String(stats.actionableFindings),
-      // Was 'need attention', which named the wrong subject: the loop attends
-      // to these, not the reader — and Propose is the column that actually
-      // needs them. Naming the same population Observe counts ("guarantees")
-      // is what makes the first two columns read as one measurement.
       unit: 'broken guarantees',
     },
     propose: {
       value: stats.pending == null ? '—' : String(stats.pending),
-      // Still a SUBSET of `detect`, but no longer said as a back-reference:
-      // "of those, held for you" only parses if you read left-to-right and are
-      // still holding the previous column in your head. The subset relationship
-      // moved into LOOP_EXPLAIN, where there is room to state it.
+      // A SUBSET of `detect`; the relationship is stated in LOOP_EXPLAIN.
       unit: 'waiting on you',
       accent: (stats.pending ?? 0) > 0,
     },
     apply: {
       value: stats.fixes30d == null ? '—' : String(stats.fixes30d),
-      // 'fixed' alone is what every monitoring tool claims; 'on its own' is the
-      // word that separates this product from all of them.
-      unit: 'fixed on its own · 30d',
+      // 'on its own' is the phrase that separates this product from every
+      // monitoring tool that also claims 'fixed'.
+      unit: 'fixed on its own',
     },
     verify: {
       value: stats.verifiedRate == null ? '—' : `${Math.round(stats.verifiedRate * 100)}%`,
-      // Matches Apply's '· 30d' on purpose: this is the hold-up rate of THOSE
-      // 30-day fixes, not a live score against what Detect shows right now.
-      // Without the matching window label, "15 broken" next to "100% verified"
-      // reads as a straight contradiction instead of two different clocks —
-      // the single biggest source of "this makes no sense" reports.
-      //
-      // 'proven' rather than 'verified' because the scoreboard means something
-      // stricter than the everyday word: re-probed and confirmed gone, never
-      // "nobody rolled it back" (see trust-report's verifiedRate).
-      unit: 'proven fixed · 30d',
+      // 'proven' rather than 'verified': re-probed and confirmed gone, never
+      // "nobody rolled it back" (see trust-report's verifiedRate). The 30-day
+      // window is stated once, on the axis under Apply and Verify.
+      unit: 'proven fixed',
     },
   }
 
   return (
     <div
-      className="relative"
+      className="scrollbar-hide relative -mx-5 overflow-x-auto px-5 sm:mx-0 sm:overflow-visible sm:px-0"
       aria-label={off ? 'Autonomy loop off' : `Autonomy loop phase: ${phase}`}
     >
-      {/* ── Rail + phase nodes ───────────────────────────────────────────
+      <div className="min-w-[520px] sm:min-w-0">
+        {/* ── Rail + phase nodes ───────────────────────────────────────────
           A five-column grid, not justify-between: the node centers then sit at
           exactly 10/30/50/70/90% of the width, which is what lets the rail and
           the return arc below anchor to them at any viewport size. ──────── */}
-      <div className="relative">
-        {/* Rail — one hairline through the node centers (top = NODE/2). */}
-        <div className={`absolute left-[10%] right-[10%] top-[13px] h-px ${off ? 'bg-white/[0.05]' : 'bg-white/[0.08]'}`} />
+        <div className="relative">
+          {/* Rail — one hairline through the node centers (top = NODE/2). */}
+          <div className={`absolute left-[10%] right-[10%] top-[15px] h-px ${off ? 'bg-white/[0.05]' : 'bg-white/[0.10]'}`} />
 
-        {/* The signal: two comets travelling the rail, clipped to a 3px strip
-            so they enter and leave cleanly at the first and last node. */}
-        {live && (
-          <div className="pointer-events-none absolute left-[10%] right-[10%] top-[12px] h-[3px] overflow-hidden">
-            <motion.span
-              className="absolute top-[1px] h-px w-28 bg-[linear-gradient(to_right,transparent,rgba(196,181,253,0.85),transparent)]"
-              animate={{ left: ['-18%', '104%'] }}
-              transition={{ duration: 5.6, repeat: Infinity, ease: 'linear' }}
-            />
-            <motion.span
-              className="absolute top-[1px] h-px w-16 bg-[linear-gradient(to_right,transparent,rgba(196,181,253,0.4),transparent)]"
-              animate={{ left: ['-18%', '104%'] }}
-              transition={{ duration: 5.6, repeat: Infinity, ease: 'linear', delay: 2.8 }}
-            />
-          </div>
-        )}
+          {/* The signal: one comet travelling the rail, clipped to a strip so
+              it enters and leaves cleanly at the first and last node. */}
+          {live && (
+            <div className="pointer-events-none absolute left-[10%] right-[10%] top-[14px] h-[3px] overflow-hidden">
+              <motion.span
+                className="absolute top-[1px] h-px w-32 bg-[linear-gradient(to_right,transparent,rgba(196,181,253,0.9),transparent)]"
+                animate={{ left: ['-20%', '104%'] }}
+                transition={{ duration: 6.4, repeat: Infinity, ease: 'linear' }}
+              />
+            </div>
+          )}
 
-        {/* The heal signal: one bright pulse driving the fix down the rail from
-            Detect to Verify. Fires once per real self-heal, keyed so re-heals
-            replay it cleanly. */}
-        {heal && !reduced && (
-          <div className="pointer-events-none absolute left-[10%] right-[10%] top-[12px] h-[3px] overflow-hidden">
-            <motion.span
-              key={heal.id}
-              className="absolute top-[1px] h-[1.5px] w-24 rounded-full bg-[linear-gradient(to_right,transparent,rgba(196,181,253,1),transparent)]"
-              initial={{ left: '4%', opacity: 0 }}
-              animate={{ left: '96%', opacity: [0, 1, 1, 0.6] }}
-              transition={{ duration: 2.0, ease: 'easeInOut' }}
-            />
-          </div>
-        )}
+          {/* The heal signal: one bright pulse driving the fix down the rail
+              from Detect to Verify. Fires once per real self-heal. */}
+          {heal && !reduced && (
+            <div className="pointer-events-none absolute left-[10%] right-[10%] top-[14px] h-[3px] overflow-hidden">
+              <motion.span
+                key={heal.id}
+                className="absolute top-[1px] h-[1.5px] w-24 rounded-full bg-[linear-gradient(to_right,transparent,rgba(196,181,253,1),transparent)]"
+                initial={{ left: '4%', opacity: 0 }}
+                animate={{ left: '96%', opacity: [0, 1, 1, 0.6] }}
+                transition={{ duration: 2.0, ease: 'easeInOut' }}
+              />
+            </div>
+          )}
 
-        {/* Phase nodes — circles mask the rail with the panel background. Each
-            node shows its live reading; Propose navigates to the queue when
-            something is actually waiting. */}
-        <div className="relative grid grid-cols-5">
-          {LOOP_STAGES.map((s, idx) => {
-            const healingHere = healingIndex === idx
-            const active = !off && (healingIndex != null ? healingHere : s.key === phase)
-            const r = readings[s.key]
-            const clickable = s.key === 'propose' && (stats.pending ?? 0) > 0
-            const valueClass = `font-mono text-[21px] font-medium tabular-nums leading-none tracking-[-0.01em] ${
-              r.accent ? 'text-violet-300' : off ? 'text-zinc-600' : active ? 'text-white' : 'text-zinc-300'
-            }`
-            const node = (
-              <>
-                <span
-                  className={`relative flex h-[26px] w-[26px] items-center justify-center rounded-full border bg-[#16171d] transition-colors ${
-                    active ? 'border-violet-400/45' : off ? 'border-white/[0.05]' : 'border-white/[0.09]'
-                  }`}
-                >
-                  {active && !reduced && !healingHere && (
-                    <motion.span
-                      animate={{ opacity: [0.15, 0.5, 0.15], scale: [1, 1.5, 1] }}
-                      transition={{ duration: 2.2, repeat: Infinity, ease: 'easeInOut' }}
-                      className="absolute inset-0 rounded-full bg-violet-400/25"
-                    />
-                  )}
-                  {/* One-shot ripple as the heal pulse reaches this node. */}
-                  {healingHere && !reduced && (
-                    <motion.span
-                      key={`ripple-${heal!.id}-${idx}`}
-                      initial={{ opacity: 0.65, scale: 1 }}
-                      animate={{ opacity: 0, scale: 2.3 }}
-                      transition={{ duration: 0.7, ease: 'easeOut' }}
-                      className="absolute inset-0 rounded-full bg-violet-400/45"
-                    />
-                  )}
+          {/* Phase nodes — circles mask the rail with the panel ground. Propose
+              opens the queue when something is actually waiting. */}
+          <div className="relative grid grid-cols-5">
+            {LOOP_STAGES.map((s, idx) => {
+              const healingHere = healingIndex === idx
+              const active = !off && (healingIndex != null ? healingHere : s.key === phase)
+              const r = readings[s.key]
+              const clickable = s.key === 'propose' && (stats.pending ?? 0) > 0
+              const valueClass = `text-[28px] font-semibold leading-none tabular-nums tracking-[-0.03em] ${
+                r.accent ? 'text-violet-200' : off ? 'text-zinc-600' : active ? 'text-zinc-50' : 'text-zinc-300'
+              }`
+              const node = (
+                <>
                   <span
-                    className={`relative h-[6px] w-[6px] rounded-full transition-colors ${
-                      active ? 'bg-violet-300' : off ? 'bg-zinc-700' : 'bg-zinc-600'
+                    className={`relative flex h-[30px] w-[30px] items-center justify-center rounded-full border ${NODE_GROUND} transition-colors duration-300 ${
+                      active
+                        ? 'border-violet-300/50 shadow-[0_0_0_4px_rgba(167,139,250,0.08),0_0_24px_-4px_rgba(167,139,250,0.45)]'
+                        : off ? 'border-white/[0.06]' : 'border-white/[0.12]'
                     }`}
-                  />
-                </span>
+                  >
+                    {active && !reduced && !healingHere && (
+                      <motion.span
+                        animate={{ opacity: [0.1, 0.4, 0.1], scale: [1, 1.45, 1] }}
+                        transition={{ duration: 2.6, repeat: Infinity, ease: 'easeInOut' }}
+                        className="absolute inset-0 rounded-full bg-violet-400/25"
+                      />
+                    )}
+                    {/* One-shot ripple as the heal pulse reaches this node. */}
+                    {healingHere && !reduced && (
+                      <motion.span
+                        key={`ripple-${heal!.id}-${idx}`}
+                        initial={{ opacity: 0.65, scale: 1 }}
+                        animate={{ opacity: 0, scale: 2.3 }}
+                        transition={{ duration: 0.7, ease: 'easeOut' }}
+                        className="absolute inset-0 rounded-full bg-violet-400/45"
+                      />
+                    )}
+                    <span
+                      className={`relative h-[8px] w-[8px] rounded-full transition-colors duration-300 ${
+                        active ? 'bg-violet-200' : off ? 'bg-zinc-700' : 'bg-zinc-500'
+                      }`}
+                    />
+                  </span>
 
-                <span
-                  className={`mt-2.5 text-[9.5px] font-semibold uppercase tracking-[0.14em] transition-colors ${
-                    active ? 'text-violet-200' : 'text-zinc-500'
-                  }`}
-                >
-                  {s.label}
-                </span>
+                  <span
+                    className={`mt-3 text-[12.5px] font-medium transition-colors ${
+                      active ? 'text-zinc-50' : 'text-zinc-400'
+                    }`}
+                  >
+                    {s.label}
+                  </span>
 
-                {/* The reading, stacked under its phase: numeral then unit, so
-                    the numbers form one scannable row across the instrument
-                    instead of five inline value+unit clumps of varying width. */}
-                <span className="mt-2 flex h-[21px] items-center">
-                  {reduced ? (
-                    <span className={valueClass}>{r.value}</span>
-                  ) : (
-                    <span className="relative inline-flex leading-none">
-                      <AnimatePresence initial={false} mode="popLayout">
-                        <motion.span
-                          key={r.value}
-                          initial={{ y: 6, opacity: 0 }}
-                          animate={{ y: 0, opacity: 1 }}
-                          exit={{ y: -6, opacity: 0, position: 'absolute' }}
-                          transition={{ duration: 0.26, ease: 'easeOut' }}
-                          className={valueClass}
-                        >
-                          {r.value}
-                        </motion.span>
-                      </AnimatePresence>
-                    </span>
-                  )}
-                </span>
+                  {/* The reading, stacked under its phase: numeral then unit,
+                      so the numbers form one scannable row across the
+                      instrument. */}
+                  <span className="mt-3 flex h-[28px] items-center">
+                    {reduced ? (
+                      <span className={valueClass}>{r.value}</span>
+                    ) : (
+                      <span className="relative inline-flex leading-none">
+                        <AnimatePresence initial={false} mode="popLayout">
+                          <motion.span
+                            key={r.value}
+                            initial={{ y: 6, opacity: 0 }}
+                            animate={{ y: 0, opacity: 1 }}
+                            exit={{ y: -6, opacity: 0, position: 'absolute' }}
+                            transition={{ duration: 0.26, ease: 'easeOut' }}
+                            className={valueClass}
+                          >
+                            {r.value}
+                          </motion.span>
+                        </AnimatePresence>
+                      </span>
+                    )}
+                  </span>
 
-                <span className="mt-1.5 max-w-[132px] px-1 text-center text-[10px] leading-[1.35] text-zinc-600">
-                  {r.unit}
-                </span>
+                  <span className="mt-2 max-w-[140px] px-1 text-center text-[12px] leading-[16px] text-zinc-500">
+                    {r.unit}
+                  </span>
 
-                {/* What the phase MEANS, on hover. Opens DOWNWARD: the panel
-                    clips (overflow-hidden) and the nodes sit 24px under the
-                    header, so there is no room above. Edge columns anchor to
-                    their own edge instead of centring, which keeps the widest
-                    popover inside the panel at every viewport. Always in the
-                    accessibility tree, so it is never a mouse-only
-                    explanation. */}
-                <span className="sr-only">{LOOP_EXPLAIN[s.key]}</span>
-                <span
-                  aria-hidden="true"
-                  // 240px, not narrower: the space below the readings is the
-                  // axis + the return arc + the panel's own padding, ~107px
-                  // before `overflow-hidden` clips. At 220px the longest of
-                  // these sentences wraps to five lines and lands ~1px inside
-                  // that. One more line of width buys a whole line of height.
-                  className={`pointer-events-none absolute top-full z-20 mt-2 w-[min(240px,calc(100vw-3rem))] rounded-lg border ${HAIRLINE} bg-[#1c1d23] ${PANEL_SHADOW} px-3 py-2 text-left text-[11px] leading-[1.5] text-zinc-400 opacity-0 transition-opacity duration-150 group-hover/node:opacity-100 group-focus-visible/node:opacity-100 ${
-                    idx === 0
-                      ? 'left-0'
-                      : idx === LOOP_STAGES.length - 1
-                        ? 'right-0'
-                        : 'left-1/2 -translate-x-1/2'
-                  }`}
-                >
-                  {LOOP_EXPLAIN[s.key]}
-                </span>
-              </>
-            )
-            if (clickable) {
-              return (
-                <button
-                  key={s.key}
-                  type="button"
-                  onClick={onReview}
-                  title={`${stats.pending} change${stats.pending === 1 ? '' : 's'} waiting on your approval`}
-                  className="group/node group/loop relative flex flex-col items-center rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-400/30"
-                >
-                  {node}
-                </button>
+                  {/* What the phase MEANS, on hover and keyboard focus. Edge
+                      columns anchor to their own edge instead of centring, so
+                      the widest popover stays inside the panel at every
+                      viewport. Always in the accessibility tree, so it is never
+                      a mouse-only explanation. */}
+                  <span className="sr-only">{LOOP_EXPLAIN[s.key]}</span>
+                  <span
+                    aria-hidden="true"
+                    className={`pointer-events-none absolute top-full z-20 mt-2 w-[min(260px,calc(100vw-3rem))] rounded-[10px] bg-[#141518] px-3.5 py-2.5 text-left text-[12.5px] leading-[19px] text-zinc-300 opacity-0 shadow-[0_0_0_1px_rgba(255,255,255,0.08),0_16px_40px_-12px_rgba(0,0,0,0.8)] transition-opacity duration-150 group-hover/node:opacity-100 group-focus-visible/node:opacity-100 ${
+                      idx === 0
+                        ? 'left-0'
+                        : idx === LOOP_STAGES.length - 1
+                          ? 'right-0'
+                          : 'left-1/2 -translate-x-1/2'
+                    }`}
+                  >
+                    {LOOP_EXPLAIN[s.key]}
+                  </span>
+                </>
               )
-            }
-            return (
-              <div key={s.key} className="group/node relative flex flex-col items-center">
-                {node}
-              </div>
-            )
-          })}
+              if (clickable) {
+                return (
+                  <button
+                    key={s.key}
+                    type="button"
+                    onClick={onReview}
+                    title={`${stats.pending} change${stats.pending === 1 ? '' : 's'} waiting on your approval`}
+                    className={`group/node relative flex flex-col items-center rounded-[10px] pb-1 ${FOCUS}`}
+                  >
+                    {node}
+                  </button>
+                )
+              }
+              return (
+                <div key={s.key} className="group/node relative flex flex-col items-center pb-1">
+                  {node}
+                </div>
+              )
+            })}
+          </div>
         </div>
-      </div>
 
-      {/* ── Clock axis ───────────────────────────────────────────────────
+        {/* ── Clock axis ───────────────────────────────────────────────────
           Observe/Detect/Propose read the backend right now; Apply/Verify are a
           30-day track record, not the next two steps those same items take.
           Without this split, "15 broken" beside "100% proven fixed" reads
-          as the loop contradicting itself instead of two different clocks —
-          one instant snapshot, one rolling window. It used to be two 9px words
-          in zinc-700 that nobody saw; it is now a ruled axis under the
-          readings it governs. ─────────────────────────────────────────── */}
-      <div className="mt-5 grid grid-cols-5">
-        <AxisSpan className="col-span-3 pr-3" label="right now" />
-        <AxisSpan className="col-span-2 pl-3" label="last 30 days" />
-      </div>
+          as the loop contradicting itself instead of two different clocks. */}
+        <div className="mt-6 grid grid-cols-5">
+          <AxisSpan className="col-span-3 pr-3" label="Right now" />
+          <AxisSpan className="col-span-2 pl-3" label="Last 30 days" />
+        </div>
 
-      {/* ── Return path — the reason it is a loop and not a pipeline ───── */}
-      <ReturnCircuit
-        off={off}
-        live={live}
-        label={
-          off ? (
-            <>
-              Loop paused
-              <span className="hidden lg:inline"> — findings are still recorded</span>
-            </>
-          ) : (
-            <>
-              Verify feeds the next Observe
-              <span className="hidden lg:inline">. No human at the top of the loop</span>
-            </>
-          )
-        }
-      />
+        {/* ── Return path — the reason it is a loop and not a pipeline ───── */}
+        <ReturnCircuit
+          off={off}
+          live={live}
+          label={
+            off ? (
+              <>
+                Loop paused
+                <span className="hidden lg:inline">. Findings are still recorded</span>
+              </>
+            ) : (
+              <>
+                Verify feeds the next Observe
+                <span className="hidden lg:inline">. No human at the top of the loop</span>
+              </>
+            )
+          }
+        />
+      </div>
     </div>
   )
 }
 
-/** One labelled span of the clock axis: hairline — label — hairline. */
+/** One labelled span of the clock axis: hairline, label, hairline. */
 function AxisSpan({ label, className = '' }: { label: string; className?: string }) {
   return (
     <div className={`flex items-center gap-2.5 ${className}`}>
-      <span className="h-px flex-1 bg-gradient-to-r from-white/[0.02] to-white/[0.08]" />
-      <span className="whitespace-nowrap text-[9px] font-semibold uppercase tracking-[0.16em] text-zinc-600">
-        {label}
-      </span>
-      <span className="h-px flex-1 bg-gradient-to-l from-white/[0.02] to-white/[0.08]" />
+      <span className="h-px flex-1 bg-gradient-to-r from-white/[0.02] to-white/[0.09]" />
+      <span className="whitespace-nowrap text-[12px] text-zinc-500">{label}</span>
+      <span className="h-px flex-1 bg-gradient-to-l from-white/[0.02] to-white/[0.09]" />
     </div>
   )
 }
@@ -1186,19 +1090,14 @@ function AxisSpan({ label, className = '' }: { label: string; className?: string
  * which stretches the corner radii into ellipses at wide viewports. Measuring
  * the container and drawing 1:1 keeps the corners circular at every width.
  *
- * Coordinates are snapped to the half-pixel grid. A 1px stroke at a fractional
- * x (and x = width * 0.1 is fractional at almost every viewport) antialiases
- * across two pixel columns at half opacity each, which at these stroke alphas
- * made the path disappear entirely — leaving only the travelling signal
- * visible, so the circuit read as two disconnected brackets.
+ * Coordinates are snapped to the half-pixel grid, so a 1px stroke lands on one
+ * crisp column instead of antialiasing away across two.
  *
- * That signal is a dash pattern on the path itself (pathLength=100 normalises
- * the dash units, so no length maths), which is why it follows the corners
- * exactly — an absolutely-positioned dot animating left/top would cut across
- * them.
+ * The travelling signal is a dash pattern on the path itself (pathLength=100
+ * normalises the dash units), which is why it follows the corners exactly.
  */
-const CIRCUIT_H = 42
-const CIRCUIT_R = 10
+const CIRCUIT_H = 44
+const CIRCUIT_R = 12
 
 /** Snap to the half-pixel grid so a 1px stroke lands on one crisp column. */
 const crisp = (n: number) => Math.round(n) + 0.5
@@ -1231,25 +1130,14 @@ function ReturnCircuit({ off, live, label }: { off: boolean; live: boolean; labe
     : ''
 
   return (
-    <div ref={ref} className="relative mt-3.5" style={{ height: h }}>
+    <div ref={ref} className="relative mt-4" style={{ height: h }}>
       {w > 0 && (
-        <svg
-          width={w}
-          height={h}
-          viewBox={`0 0 ${w} ${h}`}
-          fill="none"
-          className="absolute inset-0"
-          aria-hidden="true"
-        >
-          <path
-            d={d}
-            stroke={off ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.13)'}
-            strokeWidth={1}
-          />
+        <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} fill="none" className="absolute inset-0" aria-hidden="true">
+          <path d={d} stroke={off ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.14)'} strokeWidth={1} />
           {/* Arrowhead at the Observe end — the loop has a direction. */}
           <path
             d={`M ${x1 - 3.5} 7 L ${x1} 1.5 L ${x1 + 3.5} 7`}
-            stroke={off ? 'rgba(255,255,255,0.09)' : 'rgba(196,181,253,0.55)'}
+            stroke={off ? 'rgba(255,255,255,0.09)' : 'rgba(196,181,253,0.65)'}
             strokeWidth={1.25}
             strokeLinecap="round"
             strokeLinejoin="round"
@@ -1258,21 +1146,20 @@ function ReturnCircuit({ off, live, label }: { off: boolean; live: boolean; labe
             <motion.path
               d={d}
               pathLength={100}
-              strokeDasharray="16 84"
-              stroke="rgba(196,181,253,0.8)"
+              strokeDasharray="14 86"
+              stroke="rgba(196,181,253,0.85)"
               strokeWidth={1.25}
               strokeLinecap="round"
               animate={{ strokeDashoffset: [0, -100] }}
-              transition={{ duration: 5.6, repeat: Infinity, ease: 'linear' }}
+              transition={{ duration: 6.4, repeat: Infinity, ease: 'linear' }}
             />
           )}
         </svg>
       )}
 
       {/* Why the arc exists, said once — set ON the return run like a callout
-          on a circuit diagram. Floating it in the middle of the enclosed space
-          read as a caption stranded in a large empty box. */}
-      <span className="pointer-events-none absolute bottom-0 left-1/2 -translate-x-1/2 translate-y-1/2 whitespace-nowrap bg-[#16171d] px-3 text-[10px] leading-none text-zinc-600">
+          on a circuit diagram. */}
+      <span className={`pointer-events-none absolute bottom-0 left-1/2 -translate-x-1/2 translate-y-1/2 whitespace-nowrap ${NODE_GROUND} px-3 text-[12px] leading-[16px] text-zinc-500`}>
         {label}
       </span>
     </div>
@@ -1281,15 +1168,12 @@ function ReturnCircuit({ off, live, label }: { off: boolean; live: boolean; labe
 
 // ── Resource cards ──────────────────────────────────────────────────────────
 // The four things a backend HAS: identities, data, files, code. One card each,
-// each an open-in link to that section. Icon + label on the top line, the
-// reading on the bottom line — big numeral, its unit beside it, the size
-// measurement right-aligned. Still the flat kit: hairline borders, mono
-// numerals, no gradient chrome, violet only on focus.
+// each a link into that section.
 
 interface ResourceCard {
   key: string
   label: string
-  icon: React.ComponentType<{ className?: string }>
+  icon: LucideIcon
   value: string
   /** Noun beside the numeral ("Tables", "Buckets"). Omitted for a bare count. */
   unit?: string
@@ -1308,23 +1192,23 @@ function ResourceCards({ items }: { items: ResourceCard[] }) {
           key={m.key}
           type="button"
           onClick={m.onClick}
-          className={`group ${PANEL} ${PANEL_SHADOW} flex flex-col justify-between gap-6 px-4 py-3.5 text-left transition-colors hover:border-white/[0.12] hover:bg-white/[0.02] focus:outline-none focus:ring-2 focus:ring-inset focus:ring-violet-400/30`}
+          className={`group ${PANEL} flex min-h-[124px] flex-col justify-between gap-6 p-4 text-left transition-[border-color,background-color] duration-150 hover:border-white/[0.14] hover:bg-[#111215] ${FOCUS}`}
         >
-          <span className="flex items-center gap-2">
-            <m.icon className="h-3.5 w-3.5 flex-shrink-0 text-zinc-500" />
-            <span className="truncate text-[12.5px] font-medium text-zinc-300">{m.label}</span>
-            <ArrowUpRight className="ml-auto h-3.5 w-3.5 flex-shrink-0 text-zinc-700 transition-colors group-hover:text-zinc-400" />
+          <span className="flex items-center gap-2.5">
+            <span className="flex h-[28px] w-[28px] flex-shrink-0 items-center justify-center rounded-[7px] border border-white/[0.08] bg-white/[0.03] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+              <m.icon className="h-[15px] w-[15px] text-zinc-400" strokeWidth={1.75} />
+            </span>
+            <span className="truncate text-[13px] font-medium text-zinc-200">{m.label}</span>
+            <ArrowUpRight className="ml-auto h-4 w-4 flex-shrink-0 text-zinc-600 transition-[color,transform] duration-150 group-hover:-translate-y-px group-hover:translate-x-px group-hover:text-zinc-300" strokeWidth={1.75} />
           </span>
 
-          <span className="flex items-baseline gap-1.5">
-            <span className={`font-mono text-[22px] font-medium leading-none tabular-nums ${m.muted ? 'text-zinc-500' : 'text-white'}`}>
+          <span className="flex items-baseline gap-2">
+            <span className={`text-[28px] font-semibold leading-none tracking-[-0.03em] tabular-nums ${m.muted ? 'text-zinc-500' : 'text-zinc-50'}`}>
               {m.value}
             </span>
-            {m.unit && <span className="text-[11.5px] leading-none text-zinc-500">{m.unit}</span>}
+            {m.unit && <span className="text-[13px] leading-none text-zinc-500">{m.unit}</span>}
             {m.meta && (
-              <span className="ml-auto whitespace-nowrap font-mono text-[11.5px] leading-none text-zinc-500 tabular-nums">
-                {m.meta}
-              </span>
+              <span className="ml-auto whitespace-nowrap text-[12.5px] leading-none text-zinc-500 tabular-nums">{m.meta}</span>
             )}
           </span>
         </button>

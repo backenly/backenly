@@ -1,11 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/prisma'
 import { verifySession } from '@/lib/auth/session'
+import { canAccessProject } from '@/lib/edition/guard'
 
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } },
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const token = request.cookies.get('auth-token')?.value
     if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
@@ -18,8 +17,12 @@ export async function GET(
     const functionId = searchParams.get('functionId')
     const format = searchParams.get('format') ?? 'json'
 
-    const project = await prisma.project.findFirst({
-      where: { id: projectId, userId: session.userId },
+    if (!(await canAccessProject(session.userId, projectId))) {
+      return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+    }
+
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
       select: { id: true, name: true },
     })
     if (!project) return NextResponse.json({ error: 'Project not found' }, { status: 404 })

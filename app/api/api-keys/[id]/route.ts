@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/postgres'
 import { requireAuth } from '@/lib/auth/middleware'
+import { apiKeyRateCeilingViolation } from '@/lib/quota/kernel'
 import { z } from 'zod'
 
 const updateApiKeySchema = z.object({
@@ -16,10 +17,8 @@ const updateApiKeySchema = z.object({
   rateLimitWindow: z.number().int().positive().optional(),
 })
 
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const auth = await requireAuth(request)
 
@@ -66,10 +65,8 @@ export async function GET(
   }
 }
 
-export async function PUT(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function PUT(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const auth = await requireAuth(request)
     const body = await request.json()
@@ -91,6 +88,25 @@ export async function PUT(
       const now = new Date()
       updateData.resetAt = new Date(now.getTime() + data.rateLimitWindow * 1000)
       updateData.requestCount = 0
+    }
+
+    // The plan's fair-use ceiling applies to the rate the key ends up with.
+    if (data.rateLimit !== undefined || data.rateLimitWindow !== undefined) {
+      const current = await prisma.apiKey.findFirst({
+        where: { id: params.id, userId: auth.userId },
+        select: { rateLimit: true, rateLimitWindow: true, projectId: true },
+      })
+      if (current) {
+        const ceiling = await apiKeyRateCeilingViolation(
+          current.projectId,
+          auth.userId,
+          data.rateLimit ?? current.rateLimit,
+          data.rateLimitWindow ?? current.rateLimitWindow,
+        )
+        if (ceiling) {
+          return NextResponse.json({ error: ceiling, code: 'PLAN_LIMIT_EXCEEDED' }, { status: 400 })
+        }
+      }
     }
 
     const apiKey = await prisma.apiKey.updateMany({
@@ -148,10 +164,8 @@ export async function PUT(
   }
 }
 
-export async function DELETE(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function DELETE(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const auth = await requireAuth(request)
 

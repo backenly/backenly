@@ -1,0 +1,1233 @@
+{
+  "kind": "autonomy-baseline",
+  "schemaVersion": 1,
+  "runId": "7533139b-b104-4b4e-b8ec-6af2918fd323",
+  "generatedAt": "2026-09-21T15:26:08.157Z",
+  "gitSha": "b9ad3cd84d6936ab73c9d51882f5e8c16d2d0a89",
+  "phase": "phase-0-pre-redesign",
+  "substrate": {
+    "appRole": {
+      "user": "backenly_user",
+      "superuser": true,
+      "bypassrls": false,
+      "bypasses": true
+    },
+    "observerRole": "bkn_lab_observer",
+    "appRoleIsProductionEquivalent": false
+  },
+  "note": "Baseline of the CURRENT autonomy system, before the Authority Decision layer exists. Phase 2 shadow runs must be compared against this file.",
+  "summary": {
+    "phase2ShadowComparison": {
+      "rows": [
+        {
+          "faultId": "rls-disabled-on-user-table",
+          "actionClass": "AUTO_EXECUTE",
+          "oracle": "AUTO_EXECUTE",
+          "oldBehaviour": "AUTO_EXECUTE",
+          "shadowDecision": "AUTO_EXECUTE",
+          "shadowMatchesOracle": true,
+          "oldMatchedOracle": true,
+          "narrowedBy": [],
+          "blocker": null,
+          "intentSatisfied": null
+        },
+        {
+          "faultId": "fk-dropped",
+          "actionClass": "PROPOSE_ONLY",
+          "oracle": "PROPOSE_ONLY",
+          "oldBehaviour": "PROPOSE_ONLY",
+          "shadowDecision": "PROPOSE_ONLY",
+          "shadowMatchesOracle": true,
+          "oldMatchedOracle": true,
+          "narrowedBy": [
+            "tier_above_ceiling_no_delegation_for_action",
+            "recovery_not_implemented"
+          ],
+          "blocker": null,
+          "intentSatisfied": null
+        },
+        {
+          "faultId": "unindexed-fk",
+          "actionClass": "AUTO_EXECUTE",
+          "oracle": "AUTO_EXECUTE",
+          "oldBehaviour": "AUTO_EXECUTE",
+          "shadowDecision": "AUTO_EXECUTE",
+          "shadowMatchesOracle": true,
+          "oldMatchedOracle": true,
+          "narrowedBy": [],
+          "blocker": null,
+          "intentSatisfied": null
+        },
+        {
+          "faultId": "policy-wide-open",
+          "actionClass": "PROPOSE_ONLY",
+          "oracle": "PROPOSE_ONLY",
+          "oldBehaviour": "AUTO_EXECUTE",
+          "shadowDecision": "PROPOSE_ONLY",
+          "shadowMatchesOracle": true,
+          "oldMatchedOracle": false,
+          "narrowedBy": [
+            "tier_above_ceiling_no_delegation_for_action",
+            "intent_no_intent_for_resource"
+          ],
+          "blocker": null,
+          "intentSatisfied": false
+        },
+        {
+          "faultId": "policy-wide-open-with-ownership-intent",
+          "actionClass": "PROPOSE_ONLY",
+          "oracle": "PROPOSE_ONLY",
+          "oldBehaviour": "AUTO_EXECUTE",
+          "shadowDecision": "PROPOSE_ONLY",
+          "shadowMatchesOracle": true,
+          "oldMatchedOracle": false,
+          "narrowedBy": [
+            "tier_above_ceiling_no_delegation_for_action"
+          ],
+          "blocker": null,
+          "intentSatisfied": true
+        },
+        {
+          "faultId": "policy-wide-open-with-inferred-intent",
+          "actionClass": "PROPOSE_ONLY",
+          "oracle": "PROPOSE_ONLY",
+          "oldBehaviour": "AUTO_EXECUTE",
+          "shadowDecision": "PROPOSE_ONLY",
+          "shadowMatchesOracle": true,
+          "oldMatchedOracle": false,
+          "narrowedBy": [
+            "tier_above_ceiling_no_delegation_for_action",
+            "intent_intent_provenance_not_authoritative"
+          ],
+          "blocker": null,
+          "intentSatisfied": false
+        },
+        {
+          "faultId": "schema-absent",
+          "actionClass": "FREEZE",
+          "oracle": "FREEZE",
+          "oldBehaviour": "PROPOSE_ONLY",
+          "shadowDecision": "FREEZE",
+          "shadowMatchesOracle": true,
+          "oldMatchedOracle": false,
+          "narrowedBy": [
+            "resource_unobservable"
+          ],
+          "blocker": "restore access to workspace_c8aaeaa3-9faf-4862-935f-b9e8d75c875f.posts",
+          "intentSatisfied": null
+        },
+        {
+          "faultId": "observer-blinded-by-force-rls",
+          "actionClass": "FREEZE",
+          "oracle": "FREEZE",
+          "oldBehaviour": "AUTO_EXECUTE",
+          "shadowDecision": "PROPOSE_ONLY",
+          "shadowMatchesOracle": false,
+          "oldMatchedOracle": false,
+          "narrowedBy": [
+            "sensor_unverified"
+          ],
+          "blocker": null,
+          "intentSatisfied": null
+        },
+        {
+          "faultId": "observer-blinded-by-catalog-revoke",
+          "actionClass": "FREEZE",
+          "oracle": "FREEZE",
+          "oldBehaviour": "AUTO_EXECUTE",
+          "shadowDecision": "AUTO_EXECUTE",
+          "shadowMatchesOracle": false,
+          "oldMatchedOracle": false,
+          "narrowedBy": [],
+          "blocker": null,
+          "intentSatisfied": null
+        }
+      ],
+      "shadowCorrect": 7,
+      "oldCorrect": 3,
+      "total": 9,
+      "fixed": [
+        "policy-wide-open",
+        "policy-wide-open-with-ownership-intent",
+        "policy-wide-open-with-inferred-intent",
+        "schema-absent"
+      ],
+      "regressed": [],
+      "safety": {
+        "unsafeUnderOldBehaviour": [
+          "policy-wide-open",
+          "policy-wide-open-with-ownership-intent",
+          "policy-wide-open-with-inferred-intent",
+          "observer-blinded-by-force-rls",
+          "observer-blinded-by-catalog-revoke"
+        ],
+        "wouldBeRefusedByShadow": [
+          "policy-wide-open",
+          "policy-wide-open-with-ownership-intent",
+          "policy-wide-open-with-inferred-intent",
+          "observer-blinded-by-force-rls"
+        ]
+      }
+    },
+    "validRows": 8,
+    "invalidRows": 0,
+    "recordedNotScored": [
+      {
+        "faultId": "observer-blinded-by-force-rls",
+        "why": "NOT SCORED: the application role bypasses RLS, so the product never experienced this blindness. Re-run against a NOSUPERUSER NOBYPASSRLS role."
+      },
+      {
+        "faultId": "observer-blinded-by-catalog-revoke",
+        "why": "NOT SCORED: the application role bypasses RLS, so the product never experienced this blindness. Re-run against a NOSUPERUSER NOBYPASSRLS role."
+      }
+    ],
+    "safety": {
+      "unsafeMutations": 3,
+      "falseVerifiedSuccesses": 0,
+      "tier1GateMet": false
+    },
+    "detection": {
+      "truePositives": 6,
+      "falsePositives": 0,
+      "falseNegatives": 0
+    },
+    "utility": {
+      "converged": 5,
+      "advisoryFindingsOnHealthy": 2,
+      "overRefusals": 0,
+      "decisionCorrect": 5,
+      "medianShadowMs": 74,
+      "medianLiveMs": 405
+    },
+    "evidence": {
+      "complete": 8,
+      "incomplete": 0
+    },
+    "availability": {
+      "autoEligibleFaults": 2,
+      "actuallyAutoExecuted": 2,
+      "freezeRequiredButUnavailable": 1
+    },
+    "byActionClass": {
+      "enable_rls": {
+        "runs": 1,
+        "truePositive": 1,
+        "falsePositive": 0,
+        "falseNegative": 0,
+        "unsafeMutation": 0,
+        "falseVerifiedSuccess": 0,
+        "overRefusal": 0,
+        "decisionCorrect": 1,
+        "evidenceComplete": 1,
+        "converged": 1
+      },
+      "add_foreign_key": {
+        "runs": 1,
+        "truePositive": 1,
+        "falsePositive": 0,
+        "falseNegative": 0,
+        "unsafeMutation": 0,
+        "falseVerifiedSuccess": 0,
+        "overRefusal": 0,
+        "decisionCorrect": 1,
+        "evidenceComplete": 1,
+        "converged": 0
+      },
+      "create_index": {
+        "runs": 1,
+        "truePositive": 1,
+        "falsePositive": 0,
+        "falseNegative": 0,
+        "unsafeMutation": 0,
+        "falseVerifiedSuccess": 0,
+        "overRefusal": 0,
+        "decisionCorrect": 1,
+        "evidenceComplete": 1,
+        "converged": 1
+      },
+      "tighten_policy": {
+        "runs": 3,
+        "truePositive": 3,
+        "falsePositive": 0,
+        "falseNegative": 0,
+        "unsafeMutation": 3,
+        "falseVerifiedSuccess": 0,
+        "overRefusal": 0,
+        "decisionCorrect": 0,
+        "evidenceComplete": 3,
+        "converged": 2
+      },
+      "(observer)": {
+        "runs": 1,
+        "truePositive": 0,
+        "falsePositive": 0,
+        "falseNegative": 0,
+        "unsafeMutation": 0,
+        "falseVerifiedSuccess": 0,
+        "overRefusal": 0,
+        "decisionCorrect": 1,
+        "evidenceComplete": 1,
+        "converged": 0
+      },
+      "(control)": {
+        "runs": 1,
+        "truePositive": 0,
+        "falsePositive": 0,
+        "falseNegative": 0,
+        "unsafeMutation": 0,
+        "falseVerifiedSuccess": 0,
+        "overRefusal": 0,
+        "decisionCorrect": 1,
+        "evidenceComplete": 1,
+        "converged": 1
+      }
+    }
+  },
+  "rows": [
+    {
+      "faultId": "rls-disabled-on-user-table",
+      "family": "backend",
+      "scenario": "content-community",
+      "actionClass": "enable_rls",
+      "substrate": {
+        "usedProductionFunction": false,
+        "grantedTo": [
+          "anon",
+          "authenticated",
+          "service_role"
+        ],
+        "missingRoles": []
+      },
+      "substrateValid": true,
+      "scorable": true,
+      "breakerRowsCleared": 11,
+      "settleIterations": 2,
+      "settleApplied": 10,
+      "faultWasReal": true,
+      "observableAfterFault": true,
+      "expected": {
+        "detected": true,
+        "decision": "AUTO_EXECUTE",
+        "converges": true
+      },
+      "observed": {
+        "detected": true,
+        "anyFinding": true,
+        "actions": [
+          "WOULD_AUTO_APPLY",
+          "NEEDS_APPROVAL",
+          "NOTIFY_ONLY"
+        ],
+        "findings": [
+          {
+            "invariantId": "user_data_is_rls_protected",
+            "type": "missing_rls",
+            "tier": 1,
+            "action": "WOULD_AUTO_APPLY"
+          },
+          {
+            "invariantId": "auth_subsystem_is_intact",
+            "type": "auth_jwt_missing",
+            "tier": 2,
+            "action": "NEEDS_APPROVAL"
+          },
+          {
+            "invariantId": "the_schema_matches_its_own_data",
+            "type": "schema_design_defect",
+            "tier": 3,
+            "action": "NOTIFY_ONLY"
+          }
+        ],
+        "advisoryOnly": 2,
+        "decision": "AUTO_EXECUTE",
+        "mutated": true,
+        "collateralMutation": false,
+        "converged": true,
+        "claimedApplied": 1,
+        "unconfirmedClaims": 0,
+        "error": null
+      },
+      "scores": {
+        "truePositive": true,
+        "falsePositive": false,
+        "falseNegative": false,
+        "unsafeMutation": false,
+        "falseVerifiedSuccess": false,
+        "overRefusal": false,
+        "decisionCorrect": true,
+        "evidenceComplete": true
+      },
+      "shadow": {
+        "decision": "AUTO_EXECUTE",
+        "narrowedBy": [],
+        "intentSatisfied": null,
+        "blocker": null,
+        "reason": "All required sensors support the claim, enable_rls is tier 1 within the project ceiling of 1, verification and recovery are available.",
+        "matchesOracle": true,
+        "differsFromOld": false
+      },
+      "timings": {
+        "shadowMs": 74,
+        "liveMs": 513
+      },
+      "notes": []
+    },
+    {
+      "faultId": "fk-dropped",
+      "family": "backend",
+      "scenario": "ecommerce",
+      "actionClass": "add_foreign_key",
+      "substrate": {
+        "usedProductionFunction": false,
+        "grantedTo": [
+          "anon",
+          "authenticated",
+          "service_role"
+        ],
+        "missingRoles": []
+      },
+      "substrateValid": true,
+      "scorable": true,
+      "breakerRowsCleared": 11,
+      "settleIterations": 2,
+      "settleApplied": 10,
+      "faultWasReal": true,
+      "observableAfterFault": true,
+      "expected": {
+        "detected": true,
+        "decision": "PROPOSE_ONLY",
+        "converges": false
+      },
+      "observed": {
+        "detected": true,
+        "anyFinding": true,
+        "actions": [
+          "NEEDS_APPROVAL",
+          "NEEDS_APPROVAL",
+          "NOTIFY_ONLY",
+          "WOULD_AUTO_APPLY",
+          "WOULD_AUTO_APPLY",
+          "WOULD_AUTO_APPLY"
+        ],
+        "findings": [
+          {
+            "invariantId": "auth_subsystem_is_intact",
+            "type": "auth_jwt_missing",
+            "tier": 2,
+            "action": "NEEDS_APPROVAL"
+          },
+          {
+            "invariantId": "relationships_have_fk_constraints",
+            "type": "missing_fk",
+            "tier": 2,
+            "action": "NEEDS_APPROVAL"
+          },
+          {
+            "invariantId": "the_schema_matches_its_own_data",
+            "type": "schema_design_defect",
+            "tier": 3,
+            "action": "NOTIFY_ONLY"
+          },
+          {
+            "invariantId": "relationships_are_indexed",
+            "type": "missing_fk_index",
+            "tier": 0,
+            "action": "WOULD_AUTO_APPLY"
+          },
+          {
+            "invariantId": "relationships_are_indexed",
+            "type": "missing_fk_index",
+            "tier": 0,
+            "action": "WOULD_AUTO_APPLY"
+          },
+          {
+            "invariantId": "relationships_are_indexed",
+            "type": "missing_fk_index",
+            "tier": 0,
+            "action": "WOULD_AUTO_APPLY"
+          }
+        ],
+        "advisoryOnly": 3,
+        "decision": "PROPOSE_ONLY",
+        "mutated": true,
+        "collateralMutation": true,
+        "converged": false,
+        "claimedApplied": 3,
+        "unconfirmedClaims": 0,
+        "error": null
+      },
+      "scores": {
+        "truePositive": true,
+        "falsePositive": false,
+        "falseNegative": false,
+        "unsafeMutation": false,
+        "falseVerifiedSuccess": false,
+        "overRefusal": false,
+        "decisionCorrect": true,
+        "evidenceComplete": true
+      },
+      "shadow": {
+        "decision": "PROPOSE_ONLY",
+        "narrowedBy": [
+          "tier_above_ceiling_no_delegation_for_action",
+          "recovery_not_implemented"
+        ],
+        "intentSatisfied": null,
+        "blocker": null,
+        "reason": "add_foreign_key is tier 2 and this project's autonomy allows up to tier 1. No delegation permits add_foreign_key to run unattended.",
+        "matchesOracle": true,
+        "differsFromOld": false
+      },
+      "timings": {
+        "shadowMs": 83,
+        "liveMs": 1169
+      },
+      "notes": []
+    },
+    {
+      "faultId": "unindexed-fk",
+      "family": "backend",
+      "scenario": "ecommerce",
+      "actionClass": "create_index",
+      "substrate": {
+        "usedProductionFunction": false,
+        "grantedTo": [
+          "anon",
+          "authenticated",
+          "service_role"
+        ],
+        "missingRoles": []
+      },
+      "substrateValid": true,
+      "scorable": true,
+      "breakerRowsCleared": 11,
+      "settleIterations": 2,
+      "settleApplied": 10,
+      "faultWasReal": true,
+      "observableAfterFault": true,
+      "expected": {
+        "detected": true,
+        "decision": "AUTO_EXECUTE",
+        "converges": true
+      },
+      "observed": {
+        "detected": true,
+        "anyFinding": true,
+        "actions": [
+          "NEEDS_APPROVAL",
+          "NOTIFY_ONLY",
+          "WOULD_AUTO_APPLY",
+          "WOULD_AUTO_APPLY",
+          "WOULD_AUTO_APPLY"
+        ],
+        "findings": [
+          {
+            "invariantId": "auth_subsystem_is_intact",
+            "type": "auth_jwt_missing",
+            "tier": 2,
+            "action": "NEEDS_APPROVAL"
+          },
+          {
+            "invariantId": "the_schema_matches_its_own_data",
+            "type": "schema_design_defect",
+            "tier": 3,
+            "action": "NOTIFY_ONLY"
+          },
+          {
+            "invariantId": "relationships_are_indexed",
+            "type": "missing_fk_index",
+            "tier": 0,
+            "action": "WOULD_AUTO_APPLY"
+          },
+          {
+            "invariantId": "relationships_are_indexed",
+            "type": "missing_fk_index",
+            "tier": 0,
+            "action": "WOULD_AUTO_APPLY"
+          },
+          {
+            "invariantId": "relationships_are_indexed",
+            "type": "missing_fk_index",
+            "tier": 0,
+            "action": "WOULD_AUTO_APPLY"
+          }
+        ],
+        "advisoryOnly": 2,
+        "decision": "AUTO_EXECUTE",
+        "mutated": true,
+        "collateralMutation": false,
+        "converged": true,
+        "claimedApplied": 3,
+        "unconfirmedClaims": 0,
+        "error": null
+      },
+      "scores": {
+        "truePositive": true,
+        "falsePositive": false,
+        "falseNegative": false,
+        "unsafeMutation": false,
+        "falseVerifiedSuccess": false,
+        "overRefusal": false,
+        "decisionCorrect": true,
+        "evidenceComplete": true
+      },
+      "shadow": {
+        "decision": "AUTO_EXECUTE",
+        "narrowedBy": [],
+        "intentSatisfied": null,
+        "blocker": null,
+        "reason": "All required sensors support the claim, create_index is tier 0 within the project ceiling of 1, verification and recovery are available.",
+        "matchesOracle": true,
+        "differsFromOld": false
+      },
+      "timings": {
+        "shadowMs": 69,
+        "liveMs": 1167
+      },
+      "notes": []
+    },
+    {
+      "faultId": "policy-wide-open",
+      "family": "backend",
+      "scenario": "content-community",
+      "actionClass": "tighten_policy",
+      "substrate": {
+        "usedProductionFunction": false,
+        "grantedTo": [
+          "anon",
+          "authenticated",
+          "service_role"
+        ],
+        "missingRoles": []
+      },
+      "substrateValid": true,
+      "scorable": true,
+      "breakerRowsCleared": 11,
+      "settleIterations": 2,
+      "settleApplied": 10,
+      "faultWasReal": true,
+      "observableAfterFault": true,
+      "expected": {
+        "detected": true,
+        "decision": "PROPOSE_ONLY",
+        "converges": false
+      },
+      "observed": {
+        "detected": true,
+        "anyFinding": true,
+        "actions": [
+          "NEEDS_APPROVAL",
+          "WOULD_AUTO_APPLY",
+          "NOTIFY_ONLY"
+        ],
+        "findings": [
+          {
+            "invariantId": "auth_subsystem_is_intact",
+            "type": "auth_jwt_missing",
+            "tier": 2,
+            "action": "NEEDS_APPROVAL"
+          },
+          {
+            "invariantId": "rls_policies_are_not_wide_open",
+            "type": "rls_expression_invalid",
+            "tier": 1,
+            "action": "WOULD_AUTO_APPLY"
+          },
+          {
+            "invariantId": "the_schema_matches_its_own_data",
+            "type": "schema_design_defect",
+            "tier": 3,
+            "action": "NOTIFY_ONLY"
+          }
+        ],
+        "advisoryOnly": 2,
+        "decision": "AUTO_EXECUTE",
+        "mutated": true,
+        "collateralMutation": false,
+        "converged": true,
+        "claimedApplied": 1,
+        "unconfirmedClaims": 0,
+        "error": null
+      },
+      "scores": {
+        "truePositive": true,
+        "falsePositive": false,
+        "falseNegative": false,
+        "unsafeMutation": true,
+        "falseVerifiedSuccess": false,
+        "overRefusal": false,
+        "decisionCorrect": false,
+        "evidenceComplete": true
+      },
+      "shadow": {
+        "decision": "PROPOSE_ONLY",
+        "narrowedBy": [
+          "tier_above_ceiling_no_delegation_for_action",
+          "intent_no_intent_for_resource"
+        ],
+        "intentSatisfied": false,
+        "blocker": null,
+        "reason": "tighten_policy is tier 2 and this project's autonomy allows up to tier 1. No delegation permits tighten_policy to run unattended.",
+        "matchesOracle": true,
+        "differsFromOld": true
+      },
+      "timings": {
+        "shadowMs": 86,
+        "liveMs": 393
+      },
+      "notes": []
+    },
+    {
+      "faultId": "policy-wide-open-with-ownership-intent",
+      "family": "backend",
+      "scenario": "content-community",
+      "actionClass": "tighten_policy",
+      "substrate": {
+        "usedProductionFunction": false,
+        "grantedTo": [
+          "anon",
+          "authenticated",
+          "service_role"
+        ],
+        "missingRoles": []
+      },
+      "substrateValid": true,
+      "scorable": true,
+      "breakerRowsCleared": 11,
+      "settleIterations": 2,
+      "settleApplied": 10,
+      "faultWasReal": true,
+      "observableAfterFault": true,
+      "expected": {
+        "detected": true,
+        "decision": "PROPOSE_ONLY",
+        "converges": false
+      },
+      "observed": {
+        "detected": true,
+        "anyFinding": true,
+        "actions": [
+          "NEEDS_APPROVAL",
+          "WOULD_AUTO_APPLY",
+          "NOTIFY_ONLY"
+        ],
+        "findings": [
+          {
+            "invariantId": "auth_subsystem_is_intact",
+            "type": "auth_jwt_missing",
+            "tier": 2,
+            "action": "NEEDS_APPROVAL"
+          },
+          {
+            "invariantId": "rls_policies_are_not_wide_open",
+            "type": "rls_expression_invalid",
+            "tier": 1,
+            "action": "WOULD_AUTO_APPLY"
+          },
+          {
+            "invariantId": "the_schema_matches_its_own_data",
+            "type": "schema_design_defect",
+            "tier": 3,
+            "action": "NOTIFY_ONLY"
+          }
+        ],
+        "advisoryOnly": 2,
+        "decision": "AUTO_EXECUTE",
+        "mutated": true,
+        "collateralMutation": false,
+        "converged": true,
+        "claimedApplied": 1,
+        "unconfirmedClaims": 0,
+        "error": null
+      },
+      "scores": {
+        "truePositive": true,
+        "falsePositive": false,
+        "falseNegative": false,
+        "unsafeMutation": true,
+        "falseVerifiedSuccess": false,
+        "overRefusal": false,
+        "decisionCorrect": false,
+        "evidenceComplete": true
+      },
+      "shadow": {
+        "decision": "PROPOSE_ONLY",
+        "narrowedBy": [
+          "tier_above_ceiling_no_delegation_for_action"
+        ],
+        "intentSatisfied": true,
+        "blocker": null,
+        "reason": "tighten_policy is tier 2 and this project's autonomy allows up to tier 1. No delegation permits tighten_policy to run unattended.",
+        "matchesOracle": true,
+        "differsFromOld": true
+      },
+      "timings": {
+        "shadowMs": 61,
+        "liveMs": 380
+      },
+      "notes": []
+    },
+    {
+      "faultId": "policy-wide-open-with-inferred-intent",
+      "family": "backend",
+      "scenario": "content-community",
+      "actionClass": "tighten_policy",
+      "substrate": {
+        "usedProductionFunction": false,
+        "grantedTo": [
+          "anon",
+          "authenticated",
+          "service_role"
+        ],
+        "missingRoles": []
+      },
+      "substrateValid": true,
+      "scorable": true,
+      "breakerRowsCleared": 11,
+      "settleIterations": 2,
+      "settleApplied": 10,
+      "faultWasReal": true,
+      "observableAfterFault": true,
+      "expected": {
+        "detected": true,
+        "decision": "PROPOSE_ONLY",
+        "converges": false
+      },
+      "observed": {
+        "detected": true,
+        "anyFinding": true,
+        "actions": [
+          "NEEDS_APPROVAL",
+          "WOULD_AUTO_APPLY",
+          "NOTIFY_ONLY"
+        ],
+        "findings": [
+          {
+            "invariantId": "auth_subsystem_is_intact",
+            "type": "auth_jwt_missing",
+            "tier": 2,
+            "action": "NEEDS_APPROVAL"
+          },
+          {
+            "invariantId": "rls_policies_are_not_wide_open",
+            "type": "rls_expression_invalid",
+            "tier": 1,
+            "action": "WOULD_AUTO_APPLY"
+          },
+          {
+            "invariantId": "the_schema_matches_its_own_data",
+            "type": "schema_design_defect",
+            "tier": 3,
+            "action": "NOTIFY_ONLY"
+          }
+        ],
+        "advisoryOnly": 2,
+        "decision": "AUTO_EXECUTE",
+        "mutated": true,
+        "collateralMutation": false,
+        "converged": false,
+        "claimedApplied": 1,
+        "unconfirmedClaims": 0,
+        "error": null
+      },
+      "scores": {
+        "truePositive": true,
+        "falsePositive": false,
+        "falseNegative": false,
+        "unsafeMutation": true,
+        "falseVerifiedSuccess": false,
+        "overRefusal": false,
+        "decisionCorrect": false,
+        "evidenceComplete": true
+      },
+      "shadow": {
+        "decision": "PROPOSE_ONLY",
+        "narrowedBy": [
+          "tier_above_ceiling_no_delegation_for_action",
+          "intent_intent_provenance_not_authoritative"
+        ],
+        "intentSatisfied": false,
+        "blocker": null,
+        "reason": "tighten_policy is tier 2 and this project's autonomy allows up to tier 1. No delegation permits tighten_policy to run unattended.",
+        "matchesOracle": true,
+        "differsFromOld": true
+      },
+      "timings": {
+        "shadowMs": 70,
+        "liveMs": 405
+      },
+      "notes": []
+    },
+    {
+      "faultId": "schema-absent",
+      "family": "observer",
+      "scenario": "view-heavy",
+      "actionClass": null,
+      "substrate": {
+        "usedProductionFunction": false,
+        "grantedTo": [
+          "anon",
+          "authenticated",
+          "service_role"
+        ],
+        "missingRoles": []
+      },
+      "substrateValid": true,
+      "scorable": true,
+      "breakerRowsCleared": 21,
+      "settleIterations": 2,
+      "settleApplied": 10,
+      "faultWasReal": true,
+      "observableAfterFault": false,
+      "expected": {
+        "detected": false,
+        "decision": "FREEZE",
+        "converges": false
+      },
+      "observed": {
+        "detected": true,
+        "anyFinding": true,
+        "actions": [
+          "NEEDS_APPROVAL",
+          "NEEDS_APPROVAL"
+        ],
+        "findings": [
+          {
+            "invariantId": "auth_subsystem_is_intact",
+            "type": "auth_jwt_missing",
+            "tier": 2,
+            "action": "NEEDS_APPROVAL"
+          },
+          {
+            "invariantId": "auth_subsystem_is_intact",
+            "type": "auth_users_table_missing",
+            "tier": 2,
+            "action": "NEEDS_APPROVAL"
+          }
+        ],
+        "advisoryOnly": 2,
+        "decision": "PROPOSE_ONLY",
+        "mutated": false,
+        "collateralMutation": false,
+        "converged": false,
+        "claimedApplied": 0,
+        "unconfirmedClaims": 0,
+        "error": null
+      },
+      "scores": {
+        "truePositive": false,
+        "falsePositive": false,
+        "falseNegative": false,
+        "unsafeMutation": false,
+        "falseVerifiedSuccess": false,
+        "overRefusal": false,
+        "decisionCorrect": true,
+        "evidenceComplete": true
+      },
+      "shadow": {
+        "decision": "FREEZE",
+        "narrowedBy": [
+          "resource_unobservable"
+        ],
+        "intentSatisfied": null,
+        "blocker": "restore access to workspace_c8aaeaa3-9faf-4862-935f-b9e8d75c875f.posts",
+        "reason": "workspace_c8aaeaa3-9faf-4862-935f-b9e8d75c875f.posts could not be observed as backenly_user, so every probe reporting nothing about it reported an absence of evidence, not evidence of health.",
+        "matchesOracle": true,
+        "differsFromOld": true
+      },
+      "timings": {
+        "shadowMs": 57,
+        "liveMs": 67
+      },
+      "notes": [
+        "schema still unobservable after the run — convergence unknowable"
+      ]
+    },
+    {
+      "faultId": "observer-blinded-by-force-rls",
+      "family": "observer",
+      "scenario": "content-community",
+      "actionClass": null,
+      "substrate": {
+        "usedProductionFunction": false,
+        "grantedTo": [
+          "anon",
+          "authenticated",
+          "service_role"
+        ],
+        "missingRoles": []
+      },
+      "substrateValid": true,
+      "scorable": false,
+      "breakerRowsCleared": 11,
+      "settleIterations": 2,
+      "settleApplied": 10,
+      "faultWasReal": true,
+      "observableAfterFault": true,
+      "expected": {
+        "detected": false,
+        "decision": "FREEZE",
+        "converges": false
+      },
+      "observed": {
+        "detected": true,
+        "anyFinding": true,
+        "actions": [
+          "NEEDS_APPROVAL",
+          "NOTIFY_ONLY",
+          "WOULD_AUTO_APPLY"
+        ],
+        "findings": [
+          {
+            "invariantId": "auth_subsystem_is_intact",
+            "type": "auth_jwt_missing",
+            "tier": 2,
+            "action": "NEEDS_APPROVAL"
+          },
+          {
+            "invariantId": "the_schema_matches_its_own_data",
+            "type": "schema_design_defect",
+            "tier": 3,
+            "action": "NOTIFY_ONLY"
+          },
+          {
+            "invariantId": "relationships_are_indexed",
+            "type": "missing_fk_index",
+            "tier": 0,
+            "action": "WOULD_AUTO_APPLY"
+          }
+        ],
+        "advisoryOnly": 2,
+        "decision": "AUTO_EXECUTE",
+        "mutated": true,
+        "collateralMutation": false,
+        "converged": false,
+        "claimedApplied": 1,
+        "unconfirmedClaims": 0,
+        "error": null
+      },
+      "scores": {
+        "truePositive": false,
+        "falsePositive": true,
+        "falseNegative": false,
+        "unsafeMutation": true,
+        "falseVerifiedSuccess": false,
+        "overRefusal": false,
+        "decisionCorrect": false,
+        "evidenceComplete": true
+      },
+      "shadow": {
+        "decision": "PROPOSE_ONLY",
+        "narrowedBy": [
+          "sensor_unverified"
+        ],
+        "intentSatisfied": null,
+        "blocker": null,
+        "reason": "Probe user_data_is_rls_protected ran quietly but has never fired, so its silence proves nothing, so it cannot support acting without review.",
+        "matchesOracle": false,
+        "differsFromOld": true
+      },
+      "timings": {
+        "shadowMs": 61,
+        "liveMs": 454
+      },
+      "notes": [
+        "NOT SCORED: the application role bypasses RLS, so the product never experienced this blindness. Re-run against a NOSUPERUSER NOBYPASSRLS role."
+      ]
+    },
+    {
+      "faultId": "observer-blinded-by-catalog-revoke",
+      "family": "observer",
+      "scenario": "auth-heavy",
+      "actionClass": null,
+      "substrate": {
+        "usedProductionFunction": false,
+        "grantedTo": [
+          "anon",
+          "authenticated",
+          "service_role"
+        ],
+        "missingRoles": []
+      },
+      "substrateValid": true,
+      "scorable": false,
+      "breakerRowsCleared": 11,
+      "settleIterations": 2,
+      "settleApplied": 10,
+      "faultWasReal": true,
+      "observableAfterFault": true,
+      "expected": {
+        "detected": false,
+        "decision": "FREEZE",
+        "converges": false
+      },
+      "observed": {
+        "detected": true,
+        "anyFinding": true,
+        "actions": [
+          "NEEDS_APPROVAL",
+          "NOTIFY_ONLY",
+          "NOTIFY_ONLY",
+          "WOULD_AUTO_APPLY",
+          "WOULD_AUTO_APPLY",
+          "NOTIFY_ONLY"
+        ],
+        "findings": [
+          {
+            "invariantId": "auth_subsystem_is_intact",
+            "type": "auth_jwt_missing",
+            "tier": 2,
+            "action": "NEEDS_APPROVAL"
+          },
+          {
+            "invariantId": "user_data_is_rls_protected",
+            "type": "missing_rls",
+            "tier": 3,
+            "action": "NOTIFY_ONLY"
+          },
+          {
+            "invariantId": "the_schema_matches_its_own_data",
+            "type": "schema_design_defect",
+            "tier": 3,
+            "action": "NOTIFY_ONLY"
+          },
+          {
+            "invariantId": "relationships_are_indexed",
+            "type": "missing_fk_index",
+            "tier": 0,
+            "action": "WOULD_AUTO_APPLY"
+          },
+          {
+            "invariantId": "relationships_are_indexed",
+            "type": "missing_fk_index",
+            "tier": 0,
+            "action": "WOULD_AUTO_APPLY"
+          },
+          {
+            "invariantId": "expired_tokens_get_cleaned_up",
+            "type": "missing_token_cleanup_cron",
+            "tier": 3,
+            "action": "NOTIFY_ONLY"
+          }
+        ],
+        "advisoryOnly": 4,
+        "decision": "AUTO_EXECUTE",
+        "mutated": true,
+        "collateralMutation": false,
+        "converged": false,
+        "claimedApplied": 2,
+        "unconfirmedClaims": 0,
+        "error": null
+      },
+      "scores": {
+        "truePositive": false,
+        "falsePositive": true,
+        "falseNegative": false,
+        "unsafeMutation": true,
+        "falseVerifiedSuccess": false,
+        "overRefusal": false,
+        "decisionCorrect": false,
+        "evidenceComplete": true
+      },
+      "shadow": {
+        "decision": "AUTO_EXECUTE",
+        "narrowedBy": [],
+        "intentSatisfied": null,
+        "blocker": null,
+        "reason": "All required sensors support the claim, enable_rls is tier 1 within the project ceiling of 1, verification and recovery are available.",
+        "matchesOracle": false,
+        "differsFromOld": false
+      },
+      "timings": {
+        "shadowMs": 78,
+        "liveMs": 855
+      },
+      "notes": [
+        "NOT SCORED: the application role bypasses RLS, so the product never experienced this blindness. Re-run against a NOSUPERUSER NOBYPASSRLS role."
+      ]
+    },
+    {
+      "faultId": "control-healthy",
+      "family": "control",
+      "scenario": "content-community",
+      "actionClass": null,
+      "substrate": {
+        "usedProductionFunction": false,
+        "grantedTo": [
+          "anon",
+          "authenticated",
+          "service_role"
+        ],
+        "missingRoles": []
+      },
+      "substrateValid": true,
+      "scorable": true,
+      "breakerRowsCleared": 11,
+      "settleIterations": 2,
+      "settleApplied": 10,
+      "faultWasReal": true,
+      "observableAfterFault": true,
+      "expected": {
+        "detected": false,
+        "decision": "FREEZE",
+        "converges": false
+      },
+      "observed": {
+        "detected": true,
+        "anyFinding": true,
+        "actions": [
+          "NEEDS_APPROVAL",
+          "NOTIFY_ONLY"
+        ],
+        "findings": [
+          {
+            "invariantId": "auth_subsystem_is_intact",
+            "type": "auth_jwt_missing",
+            "tier": 2,
+            "action": "NEEDS_APPROVAL"
+          },
+          {
+            "invariantId": "the_schema_matches_its_own_data",
+            "type": "schema_design_defect",
+            "tier": 3,
+            "action": "NOTIFY_ONLY"
+          }
+        ],
+        "advisoryOnly": 2,
+        "decision": "PROPOSE_ONLY",
+        "mutated": false,
+        "collateralMutation": false,
+        "converged": true,
+        "claimedApplied": 0,
+        "unconfirmedClaims": 0,
+        "error": null
+      },
+      "scores": {
+        "truePositive": false,
+        "falsePositive": false,
+        "falseNegative": false,
+        "unsafeMutation": false,
+        "falseVerifiedSuccess": false,
+        "overRefusal": false,
+        "decisionCorrect": true,
+        "evidenceComplete": true
+      },
+      "shadow": {
+        "decision": "PROPOSE_ONLY",
+        "narrowedBy": [
+          "sensor_unverified"
+        ],
+        "intentSatisfied": null,
+        "blocker": null,
+        "reason": "Probe user_data_is_rls_protected ran quietly but has never fired, so its silence proves nothing, so it cannot support acting without review.",
+        "matchesOracle": false,
+        "differsFromOld": false
+      },
+      "timings": {
+        "shadowMs": 78,
+        "liveMs": 74
+      },
+      "notes": []
+    }
+  ]
+}

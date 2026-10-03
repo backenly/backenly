@@ -4,6 +4,7 @@ import { verifyToken } from '@/lib/auth/jwt'
 import crypto from 'crypto'
 import { z } from 'zod'
 import { logAuditEvent } from '@/lib/middleware/delegation'
+import { canAccessProject, canAdministerProject, canWriteProject } from '@/lib/edition/guard'
 
 const createConnectionSchema = z.object({
   provider: z.enum(['cursor', 'replit', 'web']),
@@ -13,10 +14,8 @@ const createConnectionSchema = z.object({
  * POST /api/projects/:projectId/connections
  * Create a delegated connection token for one-click frontend integration
  */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     // Verify authentication
     const authHeader = request.headers.get('authorization')
@@ -36,14 +35,7 @@ export async function POST(
     const { provider } = createConnectionSchema.parse(body)
 
     // Verify project ownership
-    const project = await prisma.project.findFirst({
-      where: {
-        id: projectId,
-        userId: payload.userId,
-      },
-    })
-
-    if (!project) {
+    if (!(await canWriteProject(payload.userId, projectId))) {
       return NextResponse.json({ error: 'Project not found or access denied' }, { status: 404 })
     }
 
@@ -129,10 +121,8 @@ export async function POST(
  * GET /api/projects/:projectId/connections
  * List active delegated connections for a project
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     // Try cookie-based auth first, then Bearer token
     const cookieToken = request.cookies.get('auth-token')?.value
@@ -154,14 +144,7 @@ export async function GET(
     const projectId = params.id
 
     // Verify project ownership
-    const project = await prisma.project.findFirst({
-      where: {
-        id: projectId,
-        userId: payload.userId,
-      },
-    })
-
-    if (!project) {
+    if (!(await canAccessProject(payload.userId, projectId))) {
       return NextResponse.json({ error: 'Project not found or access denied' }, { status: 404 })
     }
 
@@ -196,10 +179,8 @@ export async function GET(
  * DELETE /api/projects/:projectId/connections
  * Revoke a delegated connection
  */
-export async function DELETE(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function DELETE(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     // Try cookie-based auth first, then Bearer token
     const cookieToken = request.cookies.get('auth-token')?.value
@@ -227,14 +208,7 @@ export async function DELETE(
     }
 
     // Verify project ownership
-    const project = await prisma.project.findFirst({
-      where: {
-        id: projectId,
-        userId: payload.userId,
-      },
-    })
-
-    if (!project) {
+    if (!(await canAdministerProject(payload.userId, projectId))) {
       return NextResponse.json({ error: 'Project not found or access denied' }, { status: 404 })
     }
 

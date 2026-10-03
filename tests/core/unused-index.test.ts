@@ -27,6 +27,14 @@ import { executeAction } from '@/lib/ai/minimal-executor'
 import { classifyFix } from '@/lib/core/fix-classifier'
 import { buildFixAction } from '@/lib/core/fix-actions'
 
+// The autonomous path now enforces the deployment's live-execution flag at the
+// mutation boundary. `runAutoFix` never checked it before — only `runReconciler`
+// did — so a test calling `runReconcilerLive` directly could execute while the
+// operator's emergency lever was off. Setting it here keeps these suites testing
+// what they are for (executor and verification semantics) rather than the flag.
+process.env.ENABLE_AUTONOMY_RECONCILER = 'true'
+process.env.ENABLE_AUTONOMY_LIVE_EXECUTION = 'true'
+
 const LEDGER_TYPE = 'index_usage'
 
 let userId: string

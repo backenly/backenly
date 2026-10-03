@@ -120,24 +120,24 @@ function ActivityCard({ health, refreshing, onRefresh, onCopyFix, copiedIdx, for
 
       <div className="px-4 py-3 space-y-2.5">
         {!hasErrors && !hasTraffic && (
-          <p className="text-[11.5px] text-zinc-500 leading-relaxed">
+          <p className="text-[12.5px] text-zinc-500 leading-relaxed">
             No SDK requests yet. Traffic and failures appear here once your app calls Backenly.
           </p>
         )}
 
         {!hasErrors && hasTraffic && (
           <>
-            <div className="flex items-center gap-2 text-[11.5px]">
+            <div className="flex items-center gap-2 text-[12.5px]">
               <KitBadge tone="operational">All clear</KitBadge>
-              <span className="text-zinc-500 tabular-nums font-mono text-[10.5px]">· {totals!.bootstraps24h.toLocaleString()} req</span>
+              <span className="text-zinc-500 tabular-nums text-[12px]">· {totals!.bootstraps24h.toLocaleString()} req</span>
               {totals!.distinctOriginsConnected > 0 && (
-                <span className="text-zinc-600 font-mono text-[10.5px]">· {totals!.distinctOriginsConnected} {totals!.distinctOriginsConnected === 1 ? 'origin' : 'origins'}</span>
+                <span className="text-zinc-600 font-mono text-[12px]">· {totals!.distinctOriginsConnected} {totals!.distinctOriginsConnected === 1 ? 'origin' : 'origins'}</span>
               )}
             </div>
             {health!.successes.slice(0, 2).map(s => (
-              <div key={s.origin} className="flex items-center justify-between text-[11px]">
+              <div key={s.origin} className="flex items-center justify-between text-[12px]">
                 <code className="font-mono text-zinc-400 truncate">{s.origin}</code>
-                <div className="flex items-center gap-2 flex-shrink-0 font-mono tabular-nums">
+                <div className="flex items-center gap-2 flex-shrink-0 tabular-nums">
                   <span className="text-emerald-300/90">{s.count}</span>
                   <span className="text-zinc-600">{formatTimeAgo(s.lastSeen)}</span>
                 </div>
@@ -148,19 +148,19 @@ function ActivityCard({ health, refreshing, onRefresh, onCopyFix, copiedIdx, for
 
         {hasErrors && (
           <>
-            <div className="flex items-center gap-3 text-[11.5px] flex-wrap">
+            <div className="flex items-center gap-3 text-[12.5px] flex-wrap">
               <span className="flex items-center gap-1.5">
                 <span className={`h-[5px] w-[5px] rounded-full ${accent === 'red' ? 'bg-rose-400' : 'bg-amber-400'}`} />
-                <span className="text-zinc-200 tabular-nums font-mono font-semibold">{totals!.failures24h}</span>
+                <span className="text-zinc-200 tabular-nums font-semibold">{totals!.failures24h}</span>
                 <span className="text-zinc-500">failed</span>
                 {totals!.failures1h > 0 && (
-                  <span className="text-rose-300 font-mono text-[10.5px]">({totals!.failures1h} in last hour)</span>
+                  <span className="text-rose-300 font-mono text-[12px]">({totals!.failures1h} in last hour)</span>
                 )}
               </span>
               {hasTraffic && (
                 <span className="flex items-center gap-1.5">
                   <span className="h-[5px] w-[5px] rounded-full bg-emerald-400" />
-                  <span className="text-zinc-400 tabular-nums font-mono">{totals!.bootstraps24h}</span>
+                  <span className="text-zinc-400 tabular-nums">{totals!.bootstraps24h}</span>
                   <span className="text-zinc-600">ok</span>
                 </span>
               )}
@@ -168,17 +168,17 @@ function ActivityCard({ health, refreshing, onRefresh, onCopyFix, copiedIdx, for
             {health!.failures.slice(0, 1).map((f, idx) => (
               <div
                 key={`${f.origin}-${idx}`}
-                className={`${KIT.radiusSm} border ${KIT.border} bg-[#0f1015] px-3 py-2.5`}
+                className={`${KIT.radiusSm} border ${KIT.border} bg-[#08090a] px-3 py-2.5`}
               >
                 <div className="flex items-center gap-2 mb-1.5">
                   <AlertCircle className="w-3 h-3 text-rose-300 flex-shrink-0" />
-                  <code className="text-[11px] font-mono text-zinc-200 truncate flex-1">{f.origin}</code>
-                  <span className="text-[10px] text-zinc-600 font-mono flex-shrink-0">{formatTimeAgo(f.lastSeen)}</span>
+                  <code className="text-[12px] font-mono text-zinc-200 truncate flex-1">{f.origin}</code>
+                  <span className="text-[12px] text-zinc-600 font-mono flex-shrink-0">{formatTimeAgo(f.lastSeen)}</span>
                 </div>
-                <p className="text-[10.5px] text-zinc-400 leading-relaxed mb-2 line-clamp-2">{f.hint}</p>
+                <p className="text-[12px] text-zinc-400 leading-relaxed mb-2 line-clamp-2">{f.hint}</p>
                 <button
                   onClick={() => onCopyFix(f.fixPrompt, idx)}
-                  className={`flex items-center gap-1 px-2 py-1 ${KIT.radiusXs} ${KIT.accentBg} hover:bg-white/[0.10] border ${KIT.accentBorder} ${KIT.accentText} text-[10px] font-semibold transition-colors focus:outline-none`}
+                  className={`flex items-center gap-1 px-2 py-1 ${KIT.radiusXs} ${KIT.accentBg} hover:bg-white/[0.10] border ${KIT.accentBorder} ${KIT.accentText} text-[12px] font-semibold transition-colors focus:outline-none`}
                 >
                   {copiedIdx === idx ? (
                     <><Check className="w-2.5 h-2.5" /> Copied. Paste into your agent</>
@@ -189,7 +189,7 @@ function ActivityCard({ health, refreshing, onRefresh, onCopyFix, copiedIdx, for
               </div>
             ))}
             {health!.failures.length > 1 && (
-              <p className="text-[10px] text-zinc-600">+{health!.failures.length - 1} more origin{health!.failures.length - 1 === 1 ? '' : 's'} failing</p>
+              <p className="text-[12px] text-zinc-600">+{health!.failures.length - 1} more origin{health!.failures.length - 1 === 1 ? '' : 's'} failing</p>
             )}
           </>
         )}
@@ -198,7 +198,7 @@ function ActivityCard({ health, refreshing, onRefresh, onCopyFix, copiedIdx, for
             public endpoint. Informational: real browser frontends always send
             an Origin header, so these never flip the card red. */}
         {(health?.probes?.count ?? 0) > 0 && (
-          <p className={`text-[10px] text-zinc-600 leading-relaxed border-t ${KIT.hairline} pt-2`}>
+          <p className={`text-[12px] text-zinc-600 leading-relaxed border-t ${KIT.hairline} pt-2`}>
             {health!.probes!.count} unattributed request{health!.probes!.count === 1 ? '' : 's'} rejected
             {health!.probes!.lastSeen ? ` · ${formatTimeAgo(health!.probes!.lastSeen)}` : ''} · no Origin header;
             usually bots, curl, or a server script missing its API key.
@@ -241,7 +241,7 @@ function RegisteredCard({
       <div className={`px-4 py-2.5 border-b ${KIT.hairline} flex items-center justify-between`}>
         <SectionLabel>Registered frontends</SectionLabel>
         {active.length > 0 && (
-          <span className="text-[10px] text-zinc-600 tabular-nums font-mono">{active.length} active</span>
+          <span className="text-[12px] text-zinc-600 tabular-nums">{active.length} active</span>
         )}
       </div>
 
@@ -258,7 +258,7 @@ function RegisteredCard({
           <button
             onClick={() => onConnect(false)}
             disabled={!urlInput.trim() || busy || !!pendingConnect}
-            className={`flex items-center gap-1 px-2.5 h-8 ${KIT.accentBg} hover:bg-white/[0.10] border ${KIT.accentBorder} disabled:opacity-40 ${KIT.accentText} text-[11px] font-semibold ${KIT.radiusSm} transition-colors flex-shrink-0 focus:outline-none`}
+            className={`flex items-center gap-1 px-2.5 h-8 ${KIT.accentBg} hover:bg-white/[0.10] border ${KIT.accentBorder} disabled:opacity-40 ${KIT.accentText} text-[12px] font-semibold ${KIT.radiusSm} transition-colors flex-shrink-0 focus:outline-none`}
           >
             {busy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Link2 className="w-3 h-3" />}
             Bind
@@ -266,7 +266,7 @@ function RegisteredCard({
         </div>
 
         {!error && !pendingConnect && active.length === 0 && (
-          <p className="text-[10.5px] text-zinc-500 leading-snug">
+          <p className="text-[12px] text-zinc-500 leading-snug">
             Optional. Without a URL bound, any origin can call your SDK.
           </p>
         )}
@@ -274,13 +274,13 @@ function RegisteredCard({
         {error && (
           <div className={`flex items-start gap-1.5 px-2.5 py-1.5 bg-rose-500/[0.06] border border-rose-500/20 ${KIT.radiusSm}`}>
             <AlertCircle className="w-3 h-3 text-rose-300 flex-shrink-0 mt-0.5" />
-            <p className="text-[10.5px] text-rose-300/90 leading-snug whitespace-pre-line">{error}</p>
+            <p className="text-[12px] text-rose-300/90 leading-snug whitespace-pre-line">{error}</p>
           </div>
         )}
 
         {pendingConnect && (
           <div className={`bg-amber-500/[0.05] border border-amber-500/20 ${KIT.radiusSm} p-2.5 space-y-1.5`}>
-            <p className="text-[10.5px] text-amber-500/90 leading-snug whitespace-pre-line">{pendingConnect.message}</p>
+            <p className="text-[12px] text-amber-500/90 leading-snug whitespace-pre-line">{pendingConnect.message}</p>
             <div className="flex gap-1.5">
               <KitInput
                 type="text"
@@ -292,7 +292,7 @@ function RegisteredCard({
               <button
                 onClick={() => onConnect(true)}
                 disabled={confirmText !== 'CONNECT' || busy}
-                className={`px-2.5 h-8 bg-amber-500/[0.15] border border-amber-500/25 disabled:opacity-40 text-amber-500 text-[11px] font-semibold ${KIT.radiusSm} focus:outline-none`}
+                className={`px-2.5 h-8 bg-amber-500/[0.15] border border-amber-500/25 disabled:opacity-40 text-amber-500 text-[12px] font-semibold ${KIT.radiusSm} focus:outline-none`}
               >
                 Confirm
               </button>
@@ -304,10 +304,10 @@ function RegisteredCard({
         )}
 
         {active.length > 0 && (
-          <ul className={`${KIT.radiusSm} border ${KIT.hairline} bg-[#0f1015] divide-y ${KIT.divide}`}>
+          <ul className={`${KIT.radiusSm} border ${KIT.hairline} bg-[#08090a] divide-y ${KIT.divide}`}>
             {active.slice(0, 3).map(app => (
               <li key={app.id} className="flex items-center justify-between px-2.5 py-2 gap-2">
-                <code className="text-[11px] font-mono text-zinc-200 truncate flex-1">{app.origin}</code>
+                <code className="text-[12px] font-mono text-zinc-200 truncate flex-1">{app.origin}</code>
                 <button
                   onClick={() => onDisconnect(app.origin, false)}
                   disabled={busy}
@@ -319,14 +319,14 @@ function RegisteredCard({
               </li>
             ))}
             {active.length > 3 && (
-              <li className="px-2.5 py-1.5 text-[10px] text-zinc-600">+{active.length - 3} more</li>
+              <li className="px-2.5 py-1.5 text-[12px] text-zinc-600">+{active.length - 3} more</li>
             )}
           </ul>
         )}
 
         {pendingDisconnect && (
           <div className={`bg-rose-500/[0.05] border border-rose-500/20 ${KIT.radiusSm} p-2.5 space-y-1.5`}>
-            <p className="text-[10.5px] text-rose-300/90 leading-snug whitespace-pre-line">{pendingDisconnect.message}</p>
+            <p className="text-[12px] text-rose-300/90 leading-snug whitespace-pre-line">{pendingDisconnect.message}</p>
             <div className="flex gap-1.5">
               <KitInput
                 type="text"
@@ -338,7 +338,7 @@ function RegisteredCard({
               <button
                 onClick={() => onDisconnect(pendingDisconnect.origin, true)}
                 disabled={confirmText !== 'DISCONNECT' || busy}
-                className={`px-2.5 h-8 bg-rose-500/[0.15] border border-rose-500/25 disabled:opacity-40 text-rose-300 text-[11px] font-semibold ${KIT.radiusSm} focus:outline-none`}
+                className={`px-2.5 h-8 bg-rose-500/[0.15] border border-rose-500/25 disabled:opacity-40 text-rose-300 text-[12px] font-semibold ${KIT.radiusSm} focus:outline-none`}
               >
                 Confirm
               </button>
@@ -485,11 +485,11 @@ export function FrontendRuntimeCards({ projectId }: { projectId: string }) {
     <div className="mt-6">
       <SectionLabel>Frontend clients</SectionLabel>
       {/* Pointed a human at llms.txt, which is written for their agent. A
-          person reading this panel needs /quickstart. */}
+          person reading this panel needs the docs hub. */}
       <p className="mt-1.5 text-[12.5px] leading-relaxed text-zinc-500 max-w-2xl">
         Live SDK traffic and the optional origin allowlist. Your agent wires the SDK — see{' '}
-        <a href="/quickstart" target="_blank" rel="noreferrer" className="text-zinc-300 underline decoration-white/20 underline-offset-2 hover:text-zinc-100">
-          Quickstart
+        <a href="/resources" target="_blank" rel="noreferrer" className="text-zinc-300 underline decoration-white/20 underline-offset-2 hover:text-zinc-100">
+          Documentation
         </a>
         .
       </p>

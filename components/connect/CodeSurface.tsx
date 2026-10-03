@@ -93,7 +93,7 @@ function renderPromptLine(line: string): ReactNode {
   return parts.map((p, i) => {
     if (p.startsWith('`') && p.endsWith('`'))
       return (
-        <span key={i} className="rounded bg-white/[0.06] px-1 py-px text-zinc-200">
+        <span key={i} className="rounded-[4px] bg-white/[0.06] px-1 py-px text-zinc-200">
           {p.slice(1, -1)}
         </span>
       )
@@ -139,14 +139,16 @@ export function CopyButton({
 }) {
   return (
     <button
+      type="button"
       onClick={onClick}
       disabled={disabled}
-      className={`inline-flex items-center gap-1.5 rounded-md text-[11.5px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
-        compact ? 'h-7 w-7 justify-center' : 'h-7 px-2.5'
+      aria-label={copied ? 'Copied' : 'Copy'}
+      className={`inline-flex items-center gap-1.5 rounded-[6px] text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300/60 disabled:cursor-not-allowed disabled:opacity-40 ${
+        compact ? 'h-[26px] w-[26px] justify-center' : 'h-[26px] px-2'
       } ${
         copied
-          ? 'bg-emerald-500/[0.10] text-emerald-300'
-          : 'bg-white/[0.05] text-zinc-400 hover:bg-white/[0.09] hover:text-zinc-100'
+          ? 'text-emerald-300'
+          : 'text-zinc-400 hover:bg-white/[0.07] hover:text-zinc-100'
       }`}
       title={copied ? 'Copied' : 'Copy'}
     >
@@ -157,9 +159,10 @@ export function CopyButton({
 }
 
 /**
- * The framed code block: a slim terminal bar (window dots + a mono label) over a
- * highlighted body. `label` names the surface — a shell (`bash`) or a config
- * path (`.cursor/mcp.json`).
+ * The framed code block: a slim bar (the surface's name and a copy button) over
+ * a highlighted body. `label` names the surface — a shell (`bash`) or a config
+ * path (`.cursor/mcp.json`). No window dots: this is a code block, not a
+ * picture of a terminal.
  */
 export function CodeSurface({
   label,
@@ -175,21 +178,12 @@ export function CodeSurface({
   children: ReactNode
 }) {
   return (
-    <div className="overflow-hidden rounded-lg border border-white/[0.07] bg-[#0f1015]">
-      <div className="flex h-9 items-center justify-between gap-3 border-b border-white/[0.06] px-3">
-        <div className="flex min-w-0 items-center gap-2.5">
-          <span className="flex items-center gap-[5px]">
-            <span className="h-[7px] w-[7px] rounded-full bg-white/[0.11]" />
-            <span className="h-[7px] w-[7px] rounded-full bg-white/[0.11]" />
-            <span className="h-[7px] w-[7px] rounded-full bg-white/[0.11]" />
-          </span>
-          {label && (
-            <span className="truncate font-mono text-[11px] tracking-tight text-zinc-500">{label}</span>
-          )}
-        </div>
+    <div className="overflow-hidden rounded-[10px] border border-white/[0.08] bg-[#08090a]">
+      <div className="flex h-[38px] items-center justify-between gap-3 border-b border-white/[0.06] pl-4 pr-1.5">
+        <span className="min-w-0 truncate font-mono text-[12px] text-zinc-500">{label}</span>
         <CopyButton onClick={onCopy} copied={copied} disabled={disabled} />
       </div>
-      <pre className="overflow-x-auto whitespace-pre-wrap break-words px-4 py-3.5 font-mono text-[12px] leading-[1.7] tracking-[-0.01em] text-zinc-400 [font-variant-ligatures:none]">
+      <pre className="overflow-x-auto whitespace-pre-wrap break-words px-4 py-3.5 font-mono text-[12px] leading-[20px] text-zinc-400 [font-variant-ligatures:none]">
         {children}
       </pre>
     </div>

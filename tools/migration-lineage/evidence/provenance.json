@@ -1,0 +1,253 @@
+{
+  "schema": "migration-lineage-evidence/v1",
+  "status": "evidence_only",
+  "executable": false,
+  "statement": "Forensic evidence recovered from an ignored local directory. This is not Backenly migration history, is not applied by any tooling, and must never be executed as deployment history.",
+  "recovered_at": "2026-09-15",
+  "recovered_from": {
+    "path": "prisma/migrations/",
+    "tracked": false,
+    "ignored_by": ".gitignore: /prisma/migrations",
+    "location": "a local working tree only; absent from the public repository and the private overlay repository"
+  },
+  "git_history": "none reachable. Public history begins at the OSS import commit 11a806ad (2026-07-23) and no commit in any inspected repository contains these files.",
+  "byte_preservation": "exact bytes including CRLF line endings; .gitattributes in this directory disables line-ending normalisation. Every copy was compared byte-for-byte with its original before hashing.",
+  "hash_authority": "SHA256SUMS in this directory is the only record of file hashes. Per-file entries below are matched to it by path.",
+  "local_mtime_caveat": "local_mtime is the modification time observed on a cloud-synced working tree. It is weak evidence at best and must not be treated as application order or history.",
+  "prisma_order": {
+    "rule": "Prisma applies migration directories in lexicographic name order.",
+    "order": [
+      "20251201130457_add_monitoring_models",
+      "20251202054453_add_logs_model",
+      "20251202060648_nexa",
+      "20251202082046_storage",
+      "20251206190540_add_deployment_tables",
+      "20251209101930_add_workspace_database_fields",
+      "20260106085821_add_session_project_id",
+      "20260107182752_add_api_definitions",
+      "20260108161024_add_project_metadata",
+      "20260112061951_add_api_key_hash",
+      "20260112064201_remove_plaintext_key",
+      "20260112163141_add_isolated_runtime",
+      "20260113043053_add_key_field_for_development",
+      "20260224052239_add_tier_to_user",
+      "20260225000000_add_billing_schema",
+      "20260702000000_add_backend_patterns",
+      "20260901000000_add_subscription_cancel_scheduled_at",
+      "add_auth_security"
+    ],
+    "note": "add_auth_security has no timestamp and therefore sorts after every dated migration."
+  },
+  "secret_review": {
+    "date": "2026-09-15",
+    "methods": [
+      "manual read of all 25 files",
+      "fixed-string search for every literal value, URL password, username and host in the local .env files (203 values, 0 matches)",
+      "pattern search for data statements, URLs, IPv4 literals, email addresses and credential shapes"
+    ],
+    "findings": "DDL only, plus one UPDATE on plans in uncap_autonomy_healing.sql. No row data, credentials, hostnames, addresses or personal data.",
+    "withheld": []
+  },
+  "files": [
+    {
+      "path": "legacy-prisma-chain/20251201130457_add_monitoring_models/migration.sql",
+      "original_path": "prisma/migrations/20251201130457_add_monitoring_models/migration.sql",
+      "kind": "legacy_prisma_migration",
+      "bytes": 12131,
+      "line_endings": "lf",
+      "local_mtime": "2025-12-01T13:04:57.170Z"
+    },
+    {
+      "path": "legacy-prisma-chain/20251202054453_add_logs_model/migration.sql",
+      "original_path": "prisma/migrations/20251202054453_add_logs_model/migration.sql",
+      "kind": "legacy_prisma_migration",
+      "bytes": 1181,
+      "line_endings": "lf",
+      "local_mtime": "2025-12-02T05:44:53.382Z"
+    },
+    {
+      "path": "legacy-prisma-chain/20251202060648_nexa/migration.sql",
+      "original_path": "prisma/migrations/20251202060648_nexa/migration.sql",
+      "kind": "legacy_prisma_migration",
+      "bytes": 3478,
+      "line_endings": "lf",
+      "local_mtime": "2025-12-02T06:06:48.972Z"
+    },
+    {
+      "path": "legacy-prisma-chain/20251202082046_storage/migration.sql",
+      "original_path": "prisma/migrations/20251202082046_storage/migration.sql",
+      "kind": "legacy_prisma_migration",
+      "bytes": 1947,
+      "line_endings": "lf",
+      "local_mtime": "2025-12-02T08:20:46.885Z"
+    },
+    {
+      "path": "legacy-prisma-chain/20251206190540_add_deployment_tables/migration.sql",
+      "original_path": "prisma/migrations/20251206190540_add_deployment_tables/migration.sql",
+      "kind": "legacy_prisma_migration",
+      "bytes": 8475,
+      "line_endings": "lf",
+      "local_mtime": "2025-12-06T19:05:40.988Z"
+    },
+    {
+      "path": "legacy-prisma-chain/20251209101930_add_workspace_database_fields/migration.sql",
+      "original_path": "prisma/migrations/20251209101930_add_workspace_database_fields/migration.sql",
+      "kind": "legacy_prisma_migration",
+      "bytes": 238,
+      "line_endings": "lf",
+      "local_mtime": "2025-12-09T10:19:30.684Z"
+    },
+    {
+      "path": "legacy-prisma-chain/20260106085821_add_session_project_id/migration.sql",
+      "original_path": "prisma/migrations/20260106085821_add_session_project_id/migration.sql",
+      "kind": "legacy_prisma_migration",
+      "bytes": 8015,
+      "line_endings": "lf",
+      "local_mtime": "2026-01-06T08:58:21.967Z"
+    },
+    {
+      "path": "legacy-prisma-chain/20260107182752_add_api_definitions/migration.sql",
+      "original_path": "prisma/migrations/20260107182752_add_api_definitions/migration.sql",
+      "kind": "legacy_prisma_migration",
+      "bytes": 2426,
+      "line_endings": "lf",
+      "local_mtime": "2026-01-07T18:27:52.859Z"
+    },
+    {
+      "path": "legacy-prisma-chain/20260108161024_add_project_metadata/migration.sql",
+      "original_path": "prisma/migrations/20260108161024_add_project_metadata/migration.sql",
+      "kind": "legacy_prisma_migration",
+      "bytes": 994,
+      "line_endings": "lf",
+      "local_mtime": "2026-01-08T16:10:24.193Z"
+    },
+    {
+      "path": "legacy-prisma-chain/20260112061951_add_api_key_hash/migration.sql",
+      "original_path": "prisma/migrations/20260112061951_add_api_key_hash/migration.sql",
+      "kind": "legacy_prisma_migration",
+      "bytes": 403,
+      "line_endings": "lf",
+      "local_mtime": "2026-01-12T06:19:51.877Z"
+    },
+    {
+      "path": "legacy-prisma-chain/20260112064201_remove_plaintext_key/migration.sql",
+      "original_path": "prisma/migrations/20260112064201_remove_plaintext_key/migration.sql",
+      "kind": "legacy_prisma_migration",
+      "bytes": 397,
+      "line_endings": "lf",
+      "local_mtime": "2026-01-12T06:42:01.408Z"
+    },
+    {
+      "path": "legacy-prisma-chain/20260112163141_add_isolated_runtime/migration.sql",
+      "original_path": "prisma/migrations/20260112163141_add_isolated_runtime/migration.sql",
+      "kind": "legacy_prisma_migration",
+      "bytes": 810,
+      "line_endings": "lf",
+      "local_mtime": "2026-01-12T16:31:41.803Z"
+    },
+    {
+      "path": "legacy-prisma-chain/20260113043053_add_key_field_for_development/migration.sql",
+      "original_path": "prisma/migrations/20260113043053_add_key_field_for_development/migration.sql",
+      "kind": "legacy_prisma_migration",
+      "bytes": 64,
+      "line_endings": "lf",
+      "local_mtime": "2026-01-13T04:30:53.088Z"
+    },
+    {
+      "path": "legacy-prisma-chain/20260224052239_add_tier_to_user/migration.sql",
+      "original_path": "prisma/migrations/20260224052239_add_tier_to_user/migration.sql",
+      "kind": "legacy_prisma_migration",
+      "bytes": 18701,
+      "line_endings": "lf",
+      "local_mtime": "2026-02-24T05:22:39.800Z"
+    },
+    {
+      "path": "legacy-prisma-chain/20260225000000_add_billing_schema/migration.sql",
+      "original_path": "prisma/migrations/20260225000000_add_billing_schema/migration.sql",
+      "kind": "legacy_prisma_migration",
+      "bytes": 2429,
+      "line_endings": "crlf",
+      "local_mtime": "2026-02-26T15:37:50.735Z"
+    },
+    {
+      "path": "legacy-prisma-chain/20260702000000_add_backend_patterns/migration.sql",
+      "original_path": "prisma/migrations/20260702000000_add_backend_patterns/migration.sql",
+      "kind": "legacy_prisma_migration",
+      "bytes": 1102,
+      "line_endings": "lf",
+      "local_mtime": "2026-07-01T20:46:27.939Z"
+    },
+    {
+      "path": "legacy-prisma-chain/20260901000000_add_subscription_cancel_scheduled_at/migration.sql",
+      "original_path": "prisma/migrations/20260901000000_add_subscription_cancel_scheduled_at/migration.sql",
+      "kind": "legacy_prisma_migration",
+      "bytes": 820,
+      "line_endings": "lf",
+      "local_mtime": "2026-08-31T21:31:00.021Z"
+    },
+    {
+      "path": "legacy-prisma-chain/add_auth_security/migration.sql",
+      "original_path": "prisma/migrations/add_auth_security/migration.sql",
+      "kind": "legacy_prisma_migration",
+      "bytes": 719,
+      "line_endings": "crlf",
+      "local_mtime": "2025-12-26T14:03:47.570Z"
+    },
+    {
+      "path": "legacy-prisma-chain/migration_lock.toml",
+      "original_path": "prisma/migrations/migration_lock.toml",
+      "kind": "prisma_migration_lock",
+      "bytes": 126,
+      "line_endings": "lf",
+      "local_mtime": "2026-02-24T05:22:39.800Z"
+    },
+    {
+      "path": "legacy-loose-sql/add_api_versioning.sql",
+      "original_path": "prisma/migrations/add_api_versioning.sql",
+      "kind": "legacy_loose_sql",
+      "bytes": 2520,
+      "line_endings": "crlf",
+      "local_mtime": "2026-01-30T17:04:31.926Z"
+    },
+    {
+      "path": "legacy-loose-sql/add_mcp_read_only_keys.sql",
+      "original_path": "prisma/migrations/add_mcp_read_only_keys.sql",
+      "kind": "legacy_loose_sql",
+      "bytes": 961,
+      "line_endings": "lf",
+      "local_mtime": "2026-08-07T20:43:22.458Z"
+    },
+    {
+      "path": "legacy-loose-sql/add_oidc_delegation.sql",
+      "original_path": "prisma/migrations/add_oidc_delegation.sql",
+      "kind": "legacy_loose_sql",
+      "bytes": 3213,
+      "line_endings": "crlf",
+      "local_mtime": "2026-01-30T18:08:09.673Z"
+    },
+    {
+      "path": "legacy-loose-sql/add_rls_policies.sql",
+      "original_path": "prisma/migrations/add_rls_policies.sql",
+      "kind": "legacy_loose_sql",
+      "bytes": 3043,
+      "line_endings": "crlf",
+      "local_mtime": "2026-01-25T06:28:47.999Z"
+    },
+    {
+      "path": "legacy-loose-sql/add_signup_trust.sql",
+      "original_path": "prisma/migrations/add_signup_trust.sql",
+      "kind": "legacy_loose_sql",
+      "bytes": 988,
+      "line_endings": "lf",
+      "local_mtime": "2026-07-30T16:35:00.639Z"
+    },
+    {
+      "path": "legacy-loose-sql/uncap_autonomy_healing.sql",
+      "original_path": "prisma/migrations/uncap_autonomy_healing.sql",
+      "kind": "legacy_loose_sql",
+      "bytes": 1468,
+      "line_endings": "lf",
+      "local_mtime": "2026-07-31T01:26:54.403Z"
+    }
+  ]
+}

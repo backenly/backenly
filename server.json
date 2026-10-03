@@ -3,7 +3,7 @@
   "name": "io.github.backenly/backenly",
   "title": "Backenly",
   "description": "Autonomous backend platform. Built by your coding agent over MCP, every change reversible.",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "websiteUrl": "https://backenly.com",
   "repository": {
     "url": "https://github.com/backenly/backenly",
@@ -15,7 +15,7 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@backenly/mcp-server",
-      "version": "0.3.2",
+      "version": "0.4.0",
       "transport": {
         "type": "stdio"
       },

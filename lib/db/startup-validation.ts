@@ -13,6 +13,7 @@
  */
 
 import { prisma } from './prisma'
+import { rateLimitHealth } from '@/lib/security/rate-limit-backend'
 import { execSync } from 'child_process'
 
 interface ValidationResult {
@@ -262,6 +263,12 @@ export async function runStartupValidation(): Promise<void> {
 export async function runHealthCheck(): Promise<{
   healthy: boolean
   checks: Record<string, boolean>
+  rateLimiter: {
+    store: 'memory' | 'redis'
+    ready: boolean
+    lastError: string | null
+    lastErrorAt: string | null
+  }
   timestamp: string
 }> {
   const checks: Record<string, boolean> = {
@@ -281,9 +288,40 @@ export async function runHealthCheck(): Promise<{
     // Check failed
   }
 
+  // The auth limiter's store.
+  //
+  // Reported here because an operator needs to tell two failures apart that
+  // look identical from outside: end users being throttled, and the limiter
+  // being unable to count at all. The second denies every protected sign-in
+  // and is an outage; without a health signal its only symptom is a rise in
+  // refusals, which reads exactly like ordinary abuse.
+  //
+  // Message only, never the connection string: this response is served to
+  // whoever can reach /api/health, and REDIS_URL carries a password.
+  //
+  // Reported ALONGSIDE `checks`, deliberately not inside it.
+  //
+  // `checks` drives the 200/503 that a load balancer acts on. A limiter whose
+  // store is unreachable is a real and serious fault, but it is not a reason to
+  // pull this instance out of rotation: the data plane, functions, storage and
+  // dashboard are all still serving. Folding it in would take every instance
+  // out at once when Redis went away, converting an auth outage into a total
+  // outage — the opposite of what a health check is for.
+  //
+  // So alert on `rateLimiter.ready` rather than on the status code. That is the
+  // field that says protected sign-in is being denied for an infrastructural
+  // reason rather than because callers are actually abusing it.
+  const limiter = rateLimitHealth()
+
   return {
     healthy: Object.values(checks).every(v => v),
     checks,
+    rateLimiter: {
+      store: limiter.kind,
+      ready: limiter.ready,
+      lastError: limiter.lastError,
+      lastErrorAt: limiter.lastErrorAt ? new Date(limiter.lastErrorAt).toISOString() : null,
+    },
     timestamp: new Date().toISOString(),
   }
 }

@@ -110,6 +110,39 @@ export const FLAGS = {
   get ENABLE_AUTO_FIX_PLANNER(): boolean { return readBool('ENABLE_AUTO_FIX_PLANNER') },
 
   /**
+   * Phase 6b — structural maintenance MUTATIONS.
+   *
+   * Off by default, and the default is the point: merging this code and
+   * activating it in production are separate decisions, so the ladder can ship,
+   * be deployed, and be exercised in production without writing anything.
+   *
+   * With it off, `executeMaintenancePlan` still classifies every step, applies
+   * every gate and writes the full ledger — it refuses at the write. That makes
+   * "would this ladder have been allowed to run here?" answerable against real
+   * production schemas before anything is permitted to run.
+   *
+   * With it on, nothing else widens: Tier 2 still needs an approval bound to the
+   * plan version, Tier 3 is still never executed, and a blocked ladder is still
+   * refused including its runnable prefix. This flag removes exactly one
+   * refusal, not the floor beneath it.
+   */
+  get ENABLE_PHASE_6B_MAINTENANCE_MUTATIONS(): boolean {
+    return readBool('ENABLE_PHASE_6B_MAINTENANCE_MUTATIONS')
+  },
+
+  /**
+   * Run maintenance ladders without anybody typing the command.
+   *
+   * Separate from the mutations flag, and useless without it. Two switches
+   * because they answer different questions: whether this deployment may write
+   * at all, and whether it may decide for itself when to. Turning the first on
+   * for a hand-run plan must not also start a sweep.
+   */
+  get ENABLE_MAINTENANCE_SCHEDULER(): boolean {
+    return readBool('ENABLE_MAINTENANCE_SCHEDULER')
+  },
+
+  /**
    * Phase 12 — Auto-Fix Execution.
    *
    * When on (requires ENABLE_AUTO_FIX_PLANNER also on), safe auto-fixable
@@ -208,6 +241,44 @@ export const FLAGS = {
    * Off by default. Safe to enable in production — it only observes.
    */
   get ENABLE_AUTONOMY_RECONCILER(): boolean { return readBool('ENABLE_AUTONOMY_RECONCILER') },
+
+  /**
+   * Subsystem-recurrence shadow evaluation.
+   *
+   * Asks, once per tick, whether several DIFFERENT gaps have been repaired in
+   * one foreign-key-connected area and whether that area shows harm the loop
+   * did not cause itself. Writes ONE AuditLog row and nothing else: no finding,
+   * no queue entry, no mutation, nothing an owner sees.
+   *
+   * It is a measurement, not a feature. The question it answers is whether
+   * subsystem-level repeated failure happens often enough to justify building
+   * structural diagnosis and maintenance on top of it. Enabling this before
+   * building those phases is the cheap way to find out; building them first and
+   * discovering the input does not exist is the expensive way.
+   *
+   * Its numbers are only admissible once the detectMissingRls fix is deployed —
+   * before that the confirmed-repair count is measuring a partly blind detector.
+   *
+   * Off by default. Safe to enable in production: read-only.
+   */
+  get ENABLE_SUBSYSTEM_RECURRENCE_SHADOW(): boolean { return readBool('ENABLE_SUBSYSTEM_RECURRENCE_SHADOW') },
+
+  /**
+   * Subsystem recurrence as a REAL finding in the review queue.
+   *
+   * Deliberately separate from the shadow flag above. Shadow writes one audit
+   * row nobody sees; this puts a row in front of the owner. Those are different
+   * decisions and collapsing them into one switch would mean the first time
+   * anyone enabled measurement, they also shipped a user-visible surface.
+   *
+   * The finding carries NO executable repair — it is classified `notify_only`,
+   * which is Tier 3, so no autonomy level can act on it. It reports that
+   * repairing individual gaps in one area has stopped working; the remedy is a
+   * structural decision that belongs to the owner.
+   *
+   * Off by default.
+   */
+  get ENABLE_SUBSYSTEM_RECURRENCE_FINDING(): boolean { return readBool('ENABLE_SUBSYSTEM_RECURRENCE_FINDING') },
 
   /**
    * Autonomy live execution.

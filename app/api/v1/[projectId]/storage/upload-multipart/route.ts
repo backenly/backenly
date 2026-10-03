@@ -10,6 +10,7 @@ import crypto from 'crypto'
 import path from 'path'
 import fs from 'fs/promises'
 import os from 'os'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 const CHUNK_UPLOAD_DIR = process.env.CHUNK_TEMP_DIR || path.join(os.tmpdir(), 'backenly-chunks')
 // Maximum total assembled file size (2 GB)
@@ -35,7 +36,8 @@ function isValidUploadId(id: string): boolean {
  */
 function safeChunkPath(uploadId: string, partFile?: string): string | null {
   if (!isValidUploadId(uploadId)) return null
-  const root = path.resolve(CHUNK_UPLOAD_DIR)
+  // turbopackIgnore: runtime chunk-upload directory, absent at build time.
+  const root = path.resolve(/*turbopackIgnore: true*/ CHUNK_UPLOAD_DIR)
   const target = partFile
     ? path.resolve(root, uploadId, partFile)
     : path.resolve(root, uploadId)
@@ -351,10 +353,8 @@ async function handleComplete(request: NextRequest, uploadId: string, totalParts
 
 // ── Route dispatcher ───────────────────────────────────────────────────────────
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   const middleware = await v1ApiMiddleware(request, params)
   if (middleware.response) return middleware.response
   const { context } = middleware
@@ -376,10 +376,8 @@ export async function POST(
   return createErrorResponse(ErrorCodes.BAD_REQUEST, 'Use ?action=initiate or ?action=complete', 400)
 }
 
-export async function PUT(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+async function handlePUT(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   const middleware = await v1ApiMiddleware(request, params)
   if (middleware.response) return middleware.response
   const { context } = middleware
@@ -393,10 +391,8 @@ export async function PUT(
   return handleUploadChunk(request, uploadId, partNumber, totalParts, context.projectId)
 }
 
-export async function DELETE(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+async function handleDELETE(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   const middleware = await v1ApiMiddleware(request, params)
   if (middleware.response) return middleware.response
   const { context } = middleware
@@ -436,3 +432,7 @@ export async function DELETE(
 
   return createSuccessResponse({ aborted: true, uploadId })
 }
+
+export const POST = recordedV1(handlePOST)
+export const PUT = recordedV1(handlePUT)
+export const DELETE = recordedV1(handleDELETE)

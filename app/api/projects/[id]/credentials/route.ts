@@ -34,10 +34,8 @@ const ENV_TO_INTEGRATION: Record<string, string> = {
   GITHUB_CLIENT_SECRET:   'github',
 }
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   return withProjectValidation<any>(request, async (validated) => {
     const { projectId, userId } = validated
 

@@ -17,6 +17,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
+import { isCloudEdition } from '@/lib/edition/cloud-only'
 import type { AutonomyTier } from './desired-state'
 
 export type AutonomyLevel = 'OFF' | 'CONSERVATIVE' | 'BALANCED' | 'AGGRESSIVE'
@@ -172,13 +173,19 @@ export function coerceAutonomyLevel(input: unknown): AutonomyLevel | null {
  * label shown everywhere in the product (Free / Pro / Enterprise). Kept in
  * sync with app/app/billing/billing-panel.tsx. Unknown names pass through so a
  * future plan doesn't render as a blank.
+ *
+ * The empty case is edition-dependent. A self-hosted deployment never writes
+ * Subscription — the table is not even in its schema — so the resolver above
+ * always returns null there, and the old `|| 'Free'` fallback reported a Cloud
+ * plan name to an operator whose entitlements are unlimited. Off Cloud the
+ * honest answer is what the deployment is, not the cheapest tier.
  */
 export function planDisplayName(internalName: string | null | undefined): string {
   switch (internalName) {
     case 'SANDBOX': return 'Free'
     case 'BUILDER': return 'Pro'
     case 'SCALE':   return 'Enterprise'
-    default:        return internalName || 'Free'
+    default:        return internalName || (isCloudEdition() ? 'Free' : 'Self-hosted')
   }
 }
 

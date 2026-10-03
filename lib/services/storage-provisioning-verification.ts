@@ -7,6 +7,7 @@
  */
 
 import { storageService } from './storage'
+import { FALLBACK_POLICY, normalisePolicy } from '@/lib/storage/access-policy'
 import { prisma } from '@/lib/db'
 
 export interface ProvisioningResult {
@@ -364,6 +365,13 @@ export async function listBucketsWithStatus(projectId: string): Promise<Array<{
   id: string
   name: string
   isPublic: boolean
+  /**
+   * The bucket's access policy, which is what actually decides who may read its
+   * objects. Carried here because the dashboard could not previously SEE it: the
+   * list returned `isPublic` only, so the surface could not show, let alone
+   * change, the control that governs access.
+   */
+  accessPolicy: string
   status: 'ready' | 'pending' | 'error'
   canUpload: boolean
   fileCount: number
@@ -371,10 +379,24 @@ export async function listBucketsWithStatus(projectId: string): Promise<Array<{
 }>> {
   const buckets = await storageService.listBuckets(projectId)
 
+  // The driver's listBuckets does not carry the policy column, so it is read
+  // here in ONE query rather than per bucket. Normalised, so an unrecognised
+  // value shows as the `private` it is treated as at serve time instead of
+  // rendering something the enforcement path does not honour.
+  const policies = new Map(
+    (
+      await prisma.storageBucket.findMany({
+        where: { projectId },
+        select: { id: true, accessPolicy: true },
+      })
+    ).map(b => [b.id, normalisePolicy(b.accessPolicy)]),
+  )
+
   return buckets.map((bucket) => ({
     id: bucket.id,
     name: bucket.name,
     isPublic: bucket.isPublic,
+    accessPolicy: policies.get(bucket.id) ?? FALLBACK_POLICY,
     status: 'ready' as const,
     canUpload: true,
     fileCount: bucket.fileCount,

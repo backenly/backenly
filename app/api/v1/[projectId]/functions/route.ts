@@ -13,11 +13,10 @@ import { NextRequest } from 'next/server'
 import { v1ApiMiddleware } from '@/lib/api/v1/middleware'
 import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
 import { prisma } from '@/lib/db'
+import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
+  const params = await props.params;
   try {
     const middleware = await v1ApiMiddleware(request, params)
     if (middleware.response) return middleware.response
@@ -89,3 +88,5 @@ export async function POST(
     return createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Failed to invoke function', 500)
   }
 }
+
+export const POST = recordedV1(handlePOST)

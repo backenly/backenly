@@ -3,9 +3,12 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { verify } from 'jsonwebtoken'
 import { prisma } from '@/lib/db'
+import { onSignupCompleted } from '@/lib/platform-signals'
 import { createSession } from '@/lib/auth/session'
-import { assertSignupAllowed, isBlocked } from '@/lib/platform/controls'
+import { assertSignupAllowed, isBlocked } from '@/lib/platform-controls'
 import { consume, AUTH_LIMITS, clientIp } from '@/lib/security/auth-rate-limit'
+import { googleVerifiedEmail } from '@/lib/auth/oauth/verified-email'
+import { oauthMayCreateAccount } from '@/lib/auth/setup-token'
 
 /**
  * Platform-level Google OAuth callback.
@@ -23,7 +26,7 @@ import { consume, AUTH_LIMITS, clientIp } from '@/lib/security/auth-rate-limit'
 export async function GET(request: NextRequest) {
   // 1. IP rate limit — OAuth callbacks are unauthenticated.
   const ip = clientIp(request)
-  const rl = consume(`oauth-cb:platform-google:${ip}`, AUTH_LIMITS.oauthCallback.ip.limit, AUTH_LIMITS.oauthCallback.ip.windowMs)
+  const rl = await consume(`oauth-cb:platform-google:${ip}`, AUTH_LIMITS.oauthCallback.ip.limit, AUTH_LIMITS.oauthCallback.ip.windowMs)
   if (!rl.allowed) {
     return NextResponse.redirect(`${appUrl()}/auth/login?error=rate_limited`)
   }
@@ -95,10 +98,14 @@ export async function GET(request: NextRequest) {
     return NextResponse.redirect(`${appUrl()}/auth/login?error=userinfo_failed`)
   }
   const googleUser = await userInfoResponse.json()
-  if (!googleUser?.email) {
-    return NextResponse.redirect(`${appUrl()}/auth/login?error=userinfo_failed`)
+  // Only an address Google says it verified. The account below is created, or
+  // LINKED to an existing one by address, as email-verified, so accepting
+  // `email` without `verified_email` let an unverified address claim whichever
+  // Backenly account already held it.
+  const email = googleVerifiedEmail(googleUser)
+  if (!email) {
+    return NextResponse.redirect(`${appUrl()}/auth/login?error=email_not_verified`)
   }
-  const email = String(googleUser.email).trim().toLowerCase()
 
   // Founder block/abuse controls.
   const ipForBlock = ip === 'unknown' ? null : ip
@@ -114,6 +121,11 @@ export async function GET(request: NextRequest) {
     include: { role: true },
   })
   if (!user) {
+    // An OAuth round trip carries no setup token, so it cannot claim a
+    // self-hosted deployment that is waiting for one.
+    if (!(await oauthMayCreateAccount())) {
+      return NextResponse.redirect(`${appUrl()}/auth/login?error=claim_requires_setup_token`)
+    }
     const guard = await assertSignupAllowed(email, ipForBlock)
     if (!guard.ok) {
       return NextResponse.redirect(`${appUrl()}/auth/login?error=signup_not_allowed`)
@@ -130,20 +142,18 @@ export async function GET(request: NextRequest) {
         // Google already proved control of the mailbox, so an OAuth signup is
         // never held as untrusted. The score is still recorded — a challenge
         // verdict here is worth being able to see later.
-        signupScore: guard.trust?.score ?? null,
-        signupSignals: guard.trust?.signals ?? [],
+        signupScore: guard.score ?? null,
+        signupSignals: guard.signals ?? [],
         signupIp: ipForBlock,
       },
       include: { role: true },
     })
 
-    // Referral: a brand-new OAuth account carries its ?ref= via the backenly_ref
-    // cookie set on the signup page. Non-fatal — never blocks sign-in.
+    // A brand-new OAuth account carries its ?ref= via the backenly_ref cookie
+    // set on the signup page. Reporting the signup is a no-op in single-tenant
+    // and never throws, so it cannot block sign-in.
     const refCode = request.cookies.get('backenly_ref')?.value || null
-    if (refCode) {
-      const { applyReferralOnSignup } = await import('@/lib/billing/referral')
-      await applyReferralOnSignup(user.id, user.email, refCode).catch(() => {})
-    }
+    await onSignupCompleted({ userId: user.id, email: user.email, provider: 'google', referralCode: refCode })
   } else {
     // Always stamp lastLogin + lastActiveAt on a successful OAuth sign-in;
     // link the provider on the first OAuth sign-in for an email-only account.

@@ -1,0 +1,632 @@
+# Test suites that CI runs in the `integration` job, against a real Postgres.
+#
+# These are the second half of #7. Every suite below was measured twice, once
+# against the unroutable placeholder the `static` job uses and once against a
+# real PostgreSQL 16: each one FAILS without a database and PASSES with one.
+# That is the whole entry requirement, and it is why they cannot live in
+# `static` and could never have passed there.
+#
+# To re-verify this list, or to check a suite before adding one:
+#
+#   # must FAIL
+#   DATABASE_URL=postgresql://ci:ci@127.0.0.1:1/unused \
+#   TEST_DATABASE_URL=$DATABASE_URL DIRECT_URL=$DATABASE_URL \
+#   JWT_SECRET=ci-not-a-real-secret npx jest --runTestsByPath <path> --ci
+#
+#   # must PASS
+#   DATABASE_URL=postgresql://postgres:postgres@localhost:5432/backenly_test \
+#   TEST_DATABASE_URL=$DATABASE_URL DIRECT_URL=$DATABASE_URL \
+#   JWT_SECRET=ci-not-a-real-secret npx jest --runTestsByPath <path> --ci
+#
+# A suite that passes BOTH ways belongs in database-free-suites.txt instead —
+# putting it here would burn a Postgres service container to prove nothing.
+#
+# Suites that fail even WITH a database are deliberately not here. They are
+# listed, with the measured reason, in suites-not-in-ci.txt. Adding a known-red
+# suite to a blocking job is how CI became permanently red before (see the note
+# on `tests/core` in ci.yml); a red that is always red carries no information.
+
+__tests__/architecture-hardening.test.ts
+__tests__/billing/purchased-credits-extend-the-cap.test.ts
+__tests__/pointer-swap-concurrency.test.ts
+__tests__/retry-logic.test.ts
+tests/bench/ai-function-db-casts.spec.ts
+tests/bench/build-lock-advisory.spec.ts
+tests/bench/infra-intelligence-catalog.spec.ts
+tests/bench/prisma-uuid-binding.spec.ts
+tests/build-runs/build-run-service.test.ts
+tests/build-runs/hydration.test.ts
+tests/integration/mcp-oauth-flow.spec.ts
+tests/integration/webhook-delivery.spec.ts
+tests/integration/end-user-email-verification-opt-in.spec.ts
+tests/integration/signin-enumeration.spec.ts
+tests/integration/project-smtp-and-templates.spec.ts
+tests/integration/storage-bucket-policy.spec.ts
+tests/integration/postgres-admin.spec.ts
+
+# Needs a real Postgres AND a git worktree of an older release.
+#
+# It builds a genuine old install from that release's own schema.prisma rather
+# than downgrading the current one, because a hand-made artefact would prove
+# nothing about what operators actually have on disk. It also creates and drops
+# throwaway databases, so it needs CREATEDB.
+tests/integration/selfhost-upgrade.spec.ts
+
+# Needs a real Postgres, and a real Redis for the limiter half.
+#
+# It severs the database at the TRANSPORT through a proxy rather than stopping
+# the server, because the only Postgres on a developer's machine is the one
+# their work depends on - and what the pool experiences is identical either way.
+# A genuine server restart is the self-host CI job's business, where a real
+# deployment exists.
+tests/integration/restart-recovery.spec.ts
+
+# Needs REDIS, not Postgres.
+#
+# The `integration` job is where CI runs suites that require a real backing
+# service, and this one requires a different service from the rest. It holds to
+# the same rule they do: it FAILS without its dependency rather than skipping,
+# so it can never sit green having tested nothing. Verify it the same way,
+# with and without REDIS_URL rather than with and without a database.
+tests/integration/rate-limit-shared-store.spec.ts
+
+__tests__/projects/deletion-transaction.test.ts
+__tests__/projects/purge-outbox.test.ts
+
+# The ProjectResolver regression matrix (commit 2). Pins the behaviour the ~70
+# authorization call sites are being migrated TO, before they are migrated, so
+# the migration cannot quietly redefine it. Measured the same way as everything
+# above: fails against the unroutable placeholder, passes against a real
+# PostgreSQL. Every assertion lives in a `where` clause, which is exactly what a
+# mocked client cannot model.
+__tests__/auth/project-resolver.test.ts
+
+# The tenant-isolation adapter (commit 2b). withTenantIsolation -> requireProjectId
+# -> getCurrentProjectId is now the single decision point for 36 route files, so
+# its contract is pinned directly and then again through a real route. Needs a
+# database and real signed sessions: the defect lived in a `where` clause and an
+# auth branch, neither of which a mocked client models.
+__tests__/auth/tenant-isolation-adapter.test.ts
+
+# Representative authorization matrix for app/api/projects/[id]/** (commit 2c).
+# One route per authentication pattern rather than 35 near-identical tests,
+# because the authorization decision is now identical across the family and only
+# the plumbing differs. Asserts the 404-for-both behaviour is preserved, so
+# migrating authorization did not start leaking project existence.
+__tests__/auth/project-routes-authorization.test.ts
+
+# Project deletion (commit 2c-2b). The only destructive operation the
+# authorization migration WIDENS: DELETE /api/projects/[id] was owner-only and
+# is now reachable by an organization ADMIN. It drops every workspace schema the
+# project owns and there is no undo, so the VIEWER/DEVELOPER/ADMIN/OWNER matrix
+# gets its own suite rather than being folded into the general route tests.
+__tests__/auth/project-delete-authorization.test.ts
+
+# Single-tenant bootstrap (commit 3). Runs the real script against a database it
+# creates and drops, because everything worth asserting is a side effect on
+# Postgres: a schema that exists, a row that was not duplicated, a refusal that
+# happened before anything was written. It cannot share this job's database:
+# bootstrap counts projects globally and the shared one holds many, which is
+# itself asserted as the incompatible-database case.
+__tests__/bootstrap/single-tenant-bootstrap.test.ts
+
+# The self-hosted single-account claim (commit 3 follow-up). The pre-flight
+# check in assertSignupAllowed runs ~50 lines before the insert, so it cannot be
+# the enforcement: two concurrent first signups would both read zero accounts.
+# The claim is made inside the inserting transaction behind an advisory lock,
+# and this asserts it under genuine concurrency rather than in sequence.
+__tests__/auth/first-account-claim.test.ts
+
+# setup-postgrest-roles idempotency (commit 3 follow-up). --apply used to run
+# ALTER ROLE ... PASSWORD unconditionally with a fresh random password, so
+# re-running a command documented as repeatable rotated the credential a live
+# PostgREST authenticates with. Roles are CLUSTER-WIDE, so this suite uses a
+# throwaway authenticator and its own database.
+__tests__/bootstrap/postgrest-roles-idempotency.test.ts
+
+# Single-tenant ownership: THE project is created before anyone signs up, so it
+# starts owner-less and must adopt the first operator. Runs the real script
+# against its own database, because the failure was a state the database was
+# allowed to sit in.
+__tests__/bootstrap/single-tenant-ownership.test.ts
+
+# What a new self-hoster READS on the documented first run. That run exits 3 by
+# design, but it used to open with raw Prisma error blocks, because bootstrap
+# discovered its optional superuser helpers were missing by calling them and
+# catching the failure - and Prisma logs a failed query at `error` level before
+# any catch runs. Asserts the OUTPUT, since the exit code was always correct.
+# Needs its own database: the text depends on the helpers being genuinely
+# absent, which is not true of the shared one.
+__tests__/bootstrap/install-path-output.test.ts
+
+# First self-hosted operator admission. Needs a user table with ZERO rows, which
+# a shared database cannot guarantee, so it runs against its own.
+__tests__/auth/first-operator-admission.test.ts
+
+# ProjectLifecycle, the Phase 7 edition seam for "which projects exist, and may
+# another be created". Every assertion is a property of rows: that single-tenant
+# resolves THE pinned project while a second row sits in the same table, that
+# its refusal happens BEFORE the insert, and that Cloud creation provisions a
+# graph, a workspace, a schema and a signing secret rather than one row.
+__tests__/edition/project-lifecycle.test.ts
+
+# FleetScheduler, the Phase 7 edition seam for "which projects does a scheduled
+# pass run against". The property under test is a `where` clause: single-tenant
+# must return THE project while a second, equally eligible row sits in the same
+# table. A mock cannot show that, and "returns one project" would pass against
+# an enumeration that happened to find one.
+__tests__/edition/fleet-scheduler.test.ts
+
+# The migration-lineage probe, against a real engine. Four properties have no
+# meaning without one: that a whole migration file survives as a single
+# submission (Prisma's raw API cannot send one at all), that the capture reads
+# the semantics the comparison depends on rather than object names, that the RLS
+# reads see a policy that exists, and that a scratch database is always dropped.
+tests/integration/migration-lineage-probe-db.spec.ts
+
+# The canonical migration chain against a real engine. Once a forward migration
+# exists, "the baseline equals schema.prisma" is no longer the invariant and is
+# no longer checkable statically: the live property is that baseline plus every
+# migration after it equals the model, and only Prisma can answer it, by
+# replaying the chain into a shadow database. This is the gate that catches a
+# schema.prisma edit shipped without a migration.
+tests/integration/managed-db-canonical-history.spec.ts
+
+# The Phase 6b primitives against a real engine. The executor's governance is
+# decided in TypeScript and is unit tested; these three primitives generate SQL,
+# and nothing about whether that SQL is correct can be learned without
+# PostgreSQL running it. It earned the slot immediately: the first run found
+# that the backfill cursor used max(k), and PostgreSQL has no max() aggregate
+# for uuid — the most common primary key on this platform.
+tests/integration/maintenance-phase6b.spec.ts
+
+# Resolving a plan that was never stored. Every step is a database read: the
+# finding, the subsystem clustering, the structural diagnosis and the catalog
+# fingerprint. It also documents what a project must actually look like before
+# a dry run can return anything but WOULD_REFUSE — 50+ analysed rows, and
+# exactly one live hypothesis rather than a tie the diagnosis will not break.
+tests/integration/maintenance-resolve-db.spec.ts
+
+# The maintenance primitives against a table the PRODUCT built, which means one
+# with row-level security on it. Every other fixture here uses raw DDL and so
+# has no RLS, which is exactly why reconcile.ts could read zero rows from a
+# table holding eighty and call it "no rows" — for months, with every suite
+# green. It also creates a throwaway NOSUPERUSER role, because the local
+# development role is a superuser and superusers bypass RLS entirely, so a
+# superuser-only test would prove nothing about production.
+tests/integration/maintenance-rls-aware.spec.ts
+
+# Restore must never destroy a project and report success. It did: DROP plus
+# CREATE, then a dump whose own first statement is CREATE SCHEMA, an aborted
+# --single-transaction restore, and psql exiting 0 because ON_ERROR_STOP was
+# unset. Observed as 3 tables and 5 rows before, 0 tables after, success:true.
+# Needs a real database, a real pg_dump and a real psql: the defect lived in
+# the interaction between the dump's contents and psql's exit code, so any
+# mock would have tested the mock.
+__tests__/services/backup-restore-integrity.test.ts
+
+# Backup and restore under a PRODUCTION-style role rather than a superuser.
+# Every other test of this path runs as the local development role, which is a
+# superuser, and superusers bypass RLS — so a superuser-only test proves
+# nothing about the deployment that matters. That gap hid a four-day production
+# backup outage. This builds a NOSUPERUSER NOBYPASSRLS application role owning
+# FORCE ROW LEVEL SECURITY tables, plus a dedicated BYPASSRLS backup role with
+# CONNECT, USAGE and SELECT and nothing else, and asserts the minimal privilege
+# contract the README documents. Needs CREATE ROLE, so it is database-backed.
+__tests__/services/backup-restore-privileges.test.ts
+
+# The table editor's constraint picker. The foreign-key executor INFERS a target
+# when none is given, which is right for the AI path and wrong for a picker: an
+# operator's explicit choice was being discarded in favour of a guess. The
+# fixture makes inference and the choice DISAGREE, and asserts on the catalog
+# rather than on what the executor reported.
+__tests__/database/constraint-picker.test.ts
+
+# The logs explorer's query. /api/logs answered "how many, and how many of each
+# severity" by loading every matching row into memory for a .length and four
+# .filter().length calls, then discarding them - a full table read per request
+# on a page whose search box fires on every change. Nothing caught it because
+# the ANSWERS were right, so this pins the answers AND the tenant scoping, with
+# a second project holding more rows of every severity.
+__tests__/database/logs-explorer-query.test.ts
+
+# The credential split. The application used to connect as POSTGRES_USER, which
+# initdb creates as a SUPERUSER - and superusers bypass RLS, including FORCE
+# ROW LEVEL SECURITY, so every policy the platform wrote was advisory for the
+# application itself. Runs the real script, then reconnects as the role it made
+# and watches the database refuse. A contrast test shows the superuser still
+# sees every row, so the isolation assertion cannot pass vacuously.
+__tests__/database/app-role-separation.test.ts
+
+# Claiming a self-hosted deployment. The installer said "ready" while the
+# project had no owner, so the first account could not use the dashboard until
+# somebody ran bootstrap a second time. Signup now binds the administrator to
+# the project in one transaction, gated on a token the installer prints -
+# possession of the machine grants the claim rather than whoever loads the page
+# first. Covers the race, the replay, and adoption itself.
+__tests__/auth/deployment-claim.test.ts
+
+# Emailed six-digit codes for platform signup and password reset. The code is
+# only safe short because it can be guessed a few times, online, and used once:
+# the attempt budget is one conditional UPDATE and single use is one conditional
+# DELETE, so both are asserted under real concurrency against Postgres.
+#
+# The routes suite drives signup and reset end to end against a real STARTTLS
+# SMTP sink, reading each code out of the mail that actually arrived, and
+# includes the production failure where the provider rejected the sending
+# domain while every page still said "sent".
+__tests__/auth/email-code.test.ts
+__tests__/auth/email-code-routes.test.ts
+
+# Signing out ends this browser's sessions from any state: live, access expired
+# with a live refresh cookie, cookie-only, Bearer and cookie drifted apart, or
+# already signed out. It ends only what the request presents, refuses
+# cross-site browser requests, and logout-all still needs a live session. The
+# refresh route is driven afterwards to prove the token cannot be replayed.
+# Fails 12/12 without a database, passes 12/12 with one.
+__tests__/auth/session-lifecycle-routes.test.ts
+
+# An OAuth sign-in carries no setup token, so it must not be able to claim a
+# self-hosted deployment - and the Google and GitHub callbacks used to create
+# the first account without asking. Needs a users table with ZERO rows, which a
+# shared database cannot guarantee, so it runs against a database of its own.
+__tests__/auth/oauth-claim-gate.test.ts
+
+# The read-only SQL workspace. /api/database/query used to run queryRaw on the
+# APPLICATION connection with a deny-list regex as its only tenant boundary -
+# and before the credential split that connection was a superuser. Its sibling
+# /api/cli/query was moved onto the governed bkn_ro_ engine in July for exactly
+# that reason; this route was left behind, with no callers and no tests. The
+# suite bypasses the parser deliberately and asserts POSTGRES refuses, with
+# positive reads present so the refusals cannot pass because nothing works.
+__tests__/database/sql-workspace-isolation.test.ts
+
+# Function SQL ran on the app's own connection, whose role owns every platform
+# table and workspace schema, so generated function code could read public.users
+# or another tenant's tables; claims filter rows, not schemas. It now logs in as
+# the project's own role. The suite runs the real runner and asserts POSTGRES
+# refuses, including after RESET ROLE, with positive reads and writes present
+# so the refusals cannot pass because nothing works.
+__tests__/database/function-sql-isolation.test.ts
+
+# Cross-tenant schema history. The route called verifyToken and stopped, so any
+# authenticated account could read another tenant's schema snapshots and roll
+# back their schema. Underneath, getSchemaVersion looked up by version id alone
+# and stripped projectId from its result, so no caller could have checked even
+# if it tried - and rollbackToVersion used it. Tested at the library boundary,
+# because scoping the query is what makes the bug unrepresentable.
+__tests__/auth/schema-version-isolation.test.ts
+
+# The ai-workspace routes took projectId from the request body and used it
+# unchecked, so any signed-in account could name another tenant's project and
+# apply schema changes to it. Two-sided: every denial is paired with the
+# corresponding permission, because a refusal-only suite is green when nothing
+# works. Runs as CLOUD, since single-tenant treats any authenticated account as
+# the deployment's operator and the question does not arise there.
+__tests__/auth/ai-workspace-tenant-isolation.test.ts
+
+# PUT /api/users/[userId] discarded requireAuth's result and applied the body to
+# where: { id: params.userId }. The body accepts password, roleId, emailVerified
+# and twoFactorEnabled, so one authenticated request was account takeover,
+# privilege escalation and 2FA bypass. Separates WHO may touch a record from
+# WHICH fields they may set: self-service must not become self-promotion.
+__tests__/auth/user-record-authorization.test.ts
+# A fresh install must not fill its log with errors about a non-event. The
+# autonomy sweep purges end-user auth tables that do not exist until a project
+# enables auth; its information_schema pre-check treated an EMPTY answer as a
+# failed lookup, which is exactly what a brand-new workspace returns. Observes
+# the output from a SUBPROCESS: an in-process capture saw nothing and passed
+# identically against the bug.
+__tests__/services/fresh-install-auth-purge.test.ts
+
+# Five destructive routes that did not check who was asking. Three had NO
+# authentication at all - anyone reaching the server could roll back a live
+# deployment or rebuild a workspace database. Two verified a token and then
+# checked the caller's PLAN ENTITLEMENT, which reads like a permission check
+# and is not one. Two-sided, and asserts the victim's state is unchanged after
+# a denial, because "denied" and "denied and did nothing" are different claims.
+__tests__/auth/destructive-route-authorization.test.ts
+
+# Passing a tenant id into a service is not evidence the service uses it.
+# getWorkspaceUsers took a projectId, ignored it, and ran an unqualified
+# SELECT ... FROM users on the PLATFORM connection - returning every account
+# email on the deployment for any projectId. generate-fix had no auth and could
+# regenerate a victim's stored sqlFix, the field apply-fix runs through
+# $executeRawUnsafe: cross-tenant fix poisoning, not SQL injection. Asserts the
+# victim's fix is byte-for-byte unchanged after a denied write.
+__tests__/auth/tenant-scoped-service-queries.test.ts
+
+# The deployment recovery bundle, written from a real database. The two things
+# most likely to be wrong cannot be seen from the pg_dump arguments alone: that
+# the encryption protects anything, and that the dropped tables are actually
+# empty in the dump. A known secret is planted and must appear nowhere in the
+# bundle bytes AND must appear once opened with the credential - the second half
+# is what proves the first half's search would have noticed. A live session is
+# planted for the same reason, so "no session rows" cannot pass against a
+# database that simply had none.
+__tests__/recovery/export-bundle.test.ts
+
+# Recovery onto a machine that has never seen the deployment. The target is a
+# database created empty seconds earlier, so nothing can be silently borrowed
+# from the environment - which is what makes a restore test run on the source
+# machine worthless. Asserts both locked semantics: the project signing secret
+# comes back byte-for-byte, the revoked JTI is still revoked, and the planted
+# session and magic link are gone while their tables exist and are empty. Each
+# has a paired assertion that the source really held the row, so none can pass
+# vacuously.
+__tests__/recovery/clean-machine-restore.test.ts
+
+# Restoring over a deployment that is already running. The clean-machine case is
+# what the product is for; this is the one that can do damage. A marker row is
+# written into a live target, a deliberately corrupted bundle and then a wrong
+# credential are offered, and the marker must still be there afterwards -
+# workspace-backup restored by dropping the schema first and reading the dump
+# second, so an unreadable dump destroyed a working schema. Then the good bundle
+# must REPLACE rather than merge, because a restore that leaves newer rows
+# produces a deployment matching no point in time at all. Run twice, since an
+# interrupted restore gets re-run.
+__tests__/recovery/destructive-restore.test.ts
+
+# ── Dependency failure ──────────────────────────────────────────────────────
+#
+# Restart qualification asks whether a deployment comes back. These ask what it
+# SAYS while a dependency is actually gone, which is a different question and is
+# where the dishonest answers live. Each one found a real defect:
+#
+#   postgres  every authorization wrapper reported a database outage as 401,
+#             so a signed-in operator was told their credentials were rejected -
+#             and the obvious response, signing out and back in, destroys the
+#             session and cannot succeed while the same database is down
+#   storage   both drivers collapsed "cannot read the bytes" into null, which
+#             both callers render as 404, so an unmounted volume told every
+#             caller their objects had ceased to exist
+#
+# The postgres suite cuts the transport with a proxy rather than stopping the
+# server, for the reason tests/helpers/severable-proxy.ts states, and repoints
+# DATABASE_URL BEFORE importing the routes so the product's own singleton is
+# what loses its database.
+tests/integration/dependency-failure-postgres.spec.ts
+tests/integration/dependency-failure-storage.spec.ts
+
+# Needs REDIS, not Postgres — same rule as rate-limit-shared-store.spec.ts, so
+# verify it with and without REDIS_URL rather than with and without a database.
+#
+# It does not repeat what that suite already proves about the limiter. It asks
+# how far a Redis outage spreads: a feature that has nothing to do with rate
+# limiting must stay completely available, or a defence-in-depth component has
+# become a single point of failure. It stops and starts redis-server for real,
+# so the shared-counter claim after recovery is made against a store that
+# genuinely restarted.
+tests/integration/dependency-failure-redis.spec.ts
+
+# The dependency that fails here is somebody ELSE'S server: the customer's HTTP
+# endpoint, which can be down for a week without this deployment being able to
+# do anything about it. The contract is therefore the opposite of the others -
+# keep the event, retry on a schedule, deliver exactly once on return - and the
+# three ways that goes wrong (lost, duplicated, never) are each asserted.
+#
+# It also pins the distinction that makes the ladder work: the egress guard's
+# refusal is TERMINAL, a connection refusal is not. Collapsing the two would
+# either spam a forbidden URL or drop every event from a restarting receiver.
+tests/integration/dependency-failure-webhook-receiver.spec.ts
+
+# What happens when a migration FAILS halfway - the case an operator meets at
+# 3am and the one where a wrong answer is unrecoverable.
+#
+# The rehearsal migration exists only in the assembled workspace, never in the
+# repository, so a deliberately broken migration can never ship. It does real
+# work and then fails inside one transaction, which is the RECOVERABLE shape
+# and therefore the one worth proving first.
+#
+# It found that the failure was honest but ILLEGIBLE: execFileSync puts the
+# reason on stderr and none of it in `message`, so an operator got
+# "Command failed: <node> <cli> migrate deploy" while Prisma's P3018, the
+# migration name, the SQL error and the recovery link were all discarded.
+#
+# The fixture installs the PostgREST support objects the way the installer
+# does, from both SQL files in the installer's order. Without them case D is
+# vacuous: "nothing was lost" is trivially true when there was nothing to lose.
+tests/integration/selfhost-failed-migration.spec.ts
+
+# ── Managed migration runner: ownership and failed-migration recovery ─────────
+#
+# The 2026-09-24 staging incident, rebuilt: a non-superuser admin builds the
+# chain, the tables move to the app role, the enums stay behind, and the pause
+# migration fails with 42501. Proves the ownership preflight refuses before
+# Prisma writes history, rollback resolves only a genuinely absent failed
+# attempt, and the enum repair converges and is idempotent. Real runner
+# entrypoint, real Prisma CLI, real PostgreSQL. Needs CREATE DATABASE/ROLE.
+tests/integration/migration-ownership-recovery.spec.ts
+
+# ── Credential rotation ─────────────────────────────────────────────────────
+#
+# A rotation proven only by "the new password works" is not proven: the point of
+# rotating is that the OLD credential STOPS working. Every case is control ->
+# rotate -> old refused (28P01, not a timeout) -> new works -> security
+# properties survived. The last step is the expensive one to skip: a rotation
+# that recreated backenly_app as a superuser would pass the first four while
+# turning every FORCE RLS policy into a suggestion.
+#
+# Roles are CLUSTER-WIDE, so this uses throwaway role names throughout - a
+# separate database does not isolate them.
+#
+# It measures whether the cluster authenticates at all, with a password that is
+# certainly wrong, and REFUSES to assert revocation on a `trust` cluster rather
+# than reporting a false verdict. A developer's local PostgreSQL is usually
+# trust; CI's postgres:16 is initialised with a password and scram-sha-256.
+tests/integration/credential-rotation-database.spec.ts
+
+# Rotating the secrets an operator types into the dashboard rather than into a
+# connection string. It found that GET /api/workspace-oauth decrypted every
+# provider's client secret and returned it to the browser, while the POST on the
+# same endpoint redacted its own response - so the intent was never in doubt and
+# the GET simply contradicted it.
+tests/integration/credential-rotation-provider-secrets.spec.ts
+
+# ── Scheduled snapshots ─────────────────────────────────────────────────────
+#
+# Default OFF, and it stays off: an upgrade must not start writing a dump of
+# every project to disk nightly on somebody's behalf while they are not looking.
+#
+# Nothing here calls backupWorkspace directly - that is the point. The
+# SCHEDULER'S own entry point is driven, including its auth gate, and the
+# artifact it produces is opened and read for the marker row. Calling the backup
+# function by hand proves the function works and says nothing about whether
+# anything ever calls it.
+#
+# The failure case encodes a real production incident: nightly backups failed
+# for four days while the pruner deleted the last good ones, ending at zero
+# backups on disk with one info-level line as the only trace. So a failed run
+# must leave a FAILED record and no artifact, never a completed record pointing
+# at a file that is not there, and retention must protect a project whose latest
+# run failed.
+tests/integration/scheduled-snapshots.spec.ts
+
+# HIGH, found by the final qualification on a real deployment: a PostgreSQL
+# restart made the next /api/v1/* request reject with P1017 and the RUNTIME
+# PROCESS EXITED. Express 4 does not await its handlers, so an async rejection
+# never reaches the global error middleware - it becomes an unhandled rejection
+# and Node 15+ terminates on those. Every v1 surface stayed down afterwards.
+#
+# The demonstration runs in a SUBPROCESS, because jest installs its own
+# unhandledRejection handler and the thing under test - Node terminating - can
+# never happen inside it. Wrapped: 500 and exit 0. Unwrapped: no response and a
+# non-zero exit, which is the CI log exactly.
+tests/integration/runtime-async-crash.spec.ts
+
+# The fourth role. setup-app-role.ts and README.md have documented a four-role
+# architecture since the credential split; three were created by code, and
+# `backenly_backup` existed in prose plus a README section telling operators to
+# run the CREATE ROLE by hand - with a grant list covering the workspace schema
+# and NOT public, so even following it left recovery broken.
+#
+# Deployment Recovery therefore failed on every correctly split install with
+# "permission denied for table backenly_pgrst_schema_registry". Every existing
+# recovery test passed because they run where the role is a superuser.
+#
+# Granting the registry to the app role would have cleared that error and
+# stopped at the next: workspace tables are FORCE RLS and backenly_app is
+# NOBYPASSRLS. That is asserted here rather than argued - the app role is made
+# to try both dumps, and fails both.
+tests/integration/backup-role-contract.spec.ts
+
+# Founder lockdown was enforced by the Next-owned v1 surfaces and bootstrap
+# only, so /db, /database, /v2, end-user sign-in, OAuth and realtime kept
+# serving a locked project. The runtime serving gate now sits in front of all
+# of them. This drives the REAL server/app.ts over a socket, because mount
+# order is the property under test. Mutation-checked: unmounting the gate
+# fails 7 of the 8 locked-door assertions (bootstrap has its own check).
+tests/integration/runtime-serving-gate.spec.ts
+
+# The public half of the inactivity pause, against real Postgres: the
+# fail-closed lifecycle lock, the conditional pause write that loses to real
+# use arriving mid-snapshot, CANCELLED webhook deliveries and a discarded
+# outbox, idempotent resume, paused-project jobs left queued with attempts
+# unspent, and the mutation kernel refusing a paused project. Mutation-checked:
+# dropping the activity guard or the job filter fails the matching tests.
+tests/integration/project-pause-lifecycle.spec.ts
+
+# The inactivity clock (Project.lastActivityAt), which decides who Backenly
+# Cloud pauses: first use, the hourly write ceiling, a paused project's clock
+# never moving, a stamp making a stale pause decision lose, the real runtime
+# stamping served traffic and NOT refused or unauthenticated traffic, and the
+# snapshot download refusing a row that points outside its project's backup
+# directory. Mutation-checked: dropping the runtime stamp or the containment
+# check fails the matching tests.
+tests/integration/project-activity-clock.spec.ts
+
+# PR 2b of the MCP program: the section tools' new actions, end to end through
+# the real MCP route with real keys. Webhooks run against a loopback receiver
+# that verifies the signature; the delete is parked and runs only when a human
+# approves it. Runs as the cloud edition with only the plan lookup supplied,
+# because the single-tenant resolver rightly refuses a database of many projects.
+tests/integration/mcp-domain-operations.spec.ts
+
+# Sandbox function runs lost every ctx.log line, after a success and after a
+# failure: the worker sends them in the message that ends the run, and the
+# parent used a list only per-line messages (never sent) would fill. Runs the
+# real executor and worker, and checks the persisted run record.
+tests/integration/sandbox-function-logs.spec.ts
+tests/integration/apply-migration-existing-table.spec.ts
+# MCP acceptance (scripts/mcp-acceptance/cases.ts): two agent workflows, twice
+# each, and the acceptance cases no other suite covered. Real MCP route, real
+# keys, provisioned projects, runtime engine mode.
+tests/integration/mcp-golden-workflows.spec.ts
+tests/integration/mcp-acceptance-cases.spec.ts
+
+# File storage is bounded by the owner's plan and measured by the server: not
+# the unused Project.storageLimit column (1 GiB on every project), not a
+# hardcoded 10 GB on the S3 path, and never a client-supplied storageUsed.
+__tests__/storage/storage-quota-follows-plan.test.ts
+
+# The usage ledger counts every metered quantity exactly once: batches applied
+# with an exactly-once id, a failed or ambiguous flush retried without double
+# counting, a SIGTERM spool replayed once, and an insert-only monthly close.
+__tests__/usage/usage-ledger.test.ts
+
+# Every meter measures what lib/usage/axes.ts says: streamed egress bytes once and
+# never for internal traffic, MAU once per user per month, database size including
+# branch schemas, file size from metadata, and function runs that executed.
+__tests__/usage/usage-meters.test.ts
+
+# Access-log egress (load balancer, S3 presigned downloads, CloudFront) is
+# attributed by path or key and each log object is ingested exactly once.
+__tests__/usage/usage-log-ingest.test.ts
+
+# Quotas are the account's, pooled across its projects (6 GB + 5 GB is over a
+# 10 GB plan), raised past the plan only by an enforce policy with a spend limit
+# and only by what the remaining limit buys; usage alerts are sent once each.
+__tests__/usage/pooled-quotas.test.ts
+
+# Past the grace period the data API is read-only (POST/PUT/PATCH refused, reads
+# and deletes kept) and files stop being served except to members; the plan's
+# fair-use ceiling bounds any one API key's configured rate.
+__tests__/usage/usage-restrictions.test.ts
+
+# A person and an agent read the same account usage: pooled usage against the
+# cap, the month-end forecast from the ledger, the estimated cost past the plan,
+# the spend limit and grace; and no MCP or brain tool can change the limit.
+__tests__/usage/usage-visibility.test.ts
+
+# The spend guard: a project whose daily egress, function runs or new MAU
+# jumps far past its own median becomes one Autonomy finding with ledger and
+# request-path evidence, refreshed while it lasts and resolved when it ends.
+__tests__/usage/usage-anomaly.test.ts
+
+# Behind a signed CDN every file leaves from the edge, and only after the
+# bucket policy, pause and usage restriction have allowed it: a CloudFront
+# canned-policy signature over exactly that object, verified with the key.
+__tests__/storage/signed-cdn.test.ts
+
+# One scheduler per database: every web process schedules, and a job runs only
+# where the scheduler's session advisory lock is held. Two instances elect one
+# leader, a stopping leader hands over (a deploy), a killed session stops
+# leading and another takes over, and nothing leads without a database. Session
+# lock semantics are the property under test, so it needs a real Postgres.
+tests/integration/scheduler-leader-lock.spec.ts
+
+# A table a developer creates over a READ_WRITE direct connection belongs to a
+# role the backup role's default privileges never named, so pg_dump failed for
+# that project on every run. backenly_direct_sync_schema now grants the backup
+# role (or backenly.backup_role) read on the schema it syncs, and never write.
+# Mutation-checked: the previous function fails the two grant tests.
+tests/integration/direct-access-backup-grants.spec.ts
+
+# Both storage drivers apply one per-file rule: the bucket's own limit under the
+# shared ceiling for uploads through the server. The local driver also applied
+# Project.maxFileSize, which nothing can set (10 MB everywhere), so a raised
+# bucket and every local multipart upload over 10 MB were refused on self-host.
+# Mutation-checked: the previous driver refuses the 12 MB file.
+tests/integration/local-upload-file-size.spec.ts
+
+# Sign-in stamps last_login whatever type users.id is. The id was bound as text
+# and uuid = text has no operator, so every uuid-keyed workspace failed the stamp
+# silently (callers catch it) and "active · 30d" never moved. Server-side type
+# resolution is the property, so it needs a real Postgres.
+tests/integration/last-login-id-type.spec.ts
+
+# The contract probe is exempt from the end-user auth limits only with the
+# internal-traffic token AND a reserved address; every other combination,
+# and every customer, keeps the 10-per-window budgets. The routes' own check
+# order against a real workspace is the property, so it needs a real Postgres.
+tests/integration/probe-auth-rate-limit.spec.ts

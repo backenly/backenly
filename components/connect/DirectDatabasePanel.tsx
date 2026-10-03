@@ -159,7 +159,7 @@ export function DirectDatabasePanel({ projectId }: { projectId: string }) {
         <SectionLabel>Your database, direct</SectionLabel>
         <p className="mt-1.5 text-[12.5px] leading-relaxed text-zinc-500 max-w-2xl">
           Standard PostgreSQL, and it&apos;s yours: real connection strings for psql, TablePlus, or any BI tool,
-          plus full <span className="font-mono text-[11.5px]">pg_dump</span> exports. No lock-in.
+          plus full <span className="font-mono text-[12.5px]">pg_dump</span> exports. No lock-in.
         </p>
       </div>
 
@@ -174,7 +174,7 @@ export function DirectDatabasePanel({ projectId }: { projectId: string }) {
           <KitCardBody className="space-y-3">
             <p className="text-[12px] leading-relaxed text-zinc-500">
               SELECT-only role scoped to this project&apos;s schema: inspect, run{' '}
-              <span className="font-mono text-[11px]">EXPLAIN</span>, take backups. It structurally cannot write.
+              <span className="font-mono text-[12px]">EXPLAIN</span>, take backups. It structurally cannot write.
             </p>
             {has('READ_ONLY') ? (
               <CredentialDetails
@@ -210,7 +210,7 @@ export function DirectDatabasePanel({ projectId }: { projectId: string }) {
             {has('READ_WRITE') ? (
               <>
                 {status!.pendingDriftEvents > 0 && (
-                  <div className="flex items-center gap-2 text-[11.5px] text-amber-400/90">
+                  <div className="flex items-center gap-2 text-[12.5px] text-amber-400/90">
                     <GitBranch className="w-3.5 h-3.5" />
                     {status!.pendingDriftEvents} external schema change{status!.pendingDriftEvents === 1 ? '' : 's'} awaiting adoption · see Autonomy
                   </div>
@@ -259,7 +259,7 @@ export function DirectDatabasePanel({ projectId }: { projectId: string }) {
       {/* ── Honest notes ─────────────────────────────────────────────────────── */}
       <div className="space-y-2">
         <KitNote>
-          TLS required (<span className="font-mono text-[10.5px]">sslmode=require</span>), scoped to this project&apos;s
+          TLS required (<span className="font-mono text-[12px]">sslmode=require</span>), scoped to this project&apos;s
           schema. Shared tier: catalogs can list other projects&apos; schema <em>names</em>, never their data.
         </KitNote>
         <KitNote>
@@ -307,7 +307,7 @@ function CredentialDetails({
   return (
     <div className="space-y-2.5">
       <div className={`flex items-center gap-1.5 rounded-md border ${KIT.hairline} ${KIT.surfaceSoft} pl-3 pr-1.5 py-1.5`}>
-        <code className="flex-1 truncate font-mono text-[11px] text-zinc-300">{shown}</code>
+        <code className="flex-1 truncate font-mono text-[12px] text-zinc-300">{shown}</code>
         <button
           onClick={() => {
             const next = new Set(revealed)
@@ -328,7 +328,7 @@ function CredentialDetails({
         </button>
       </div>
 
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] font-mono text-zinc-600">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] font-mono text-zinc-600">
         <span>{c.roleName}</span>
         <span>{c.host}:{c.port}/{c.database}</span>
         {c.rotatedAt && <span>rotated {new Date(c.rotatedAt).toLocaleDateString()}</span>}
