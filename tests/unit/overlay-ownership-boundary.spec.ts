@@ -377,11 +377,15 @@ describe('overlay-allowlist.json', () => {
         // inactivity-pause policy. The pause state itself is public.
         'app/api/projects/[id]/availability/**',
         'app/api/referral/**',
+        // Backenly for Startups: the application page, its API, and the pass
+        // it grants are a Cloud program. The table they use is public schema.
+        'app/api/startups/**',
         'app/api/users/route.ts',
         'app/app/billing/**',
         'app/app/invite/**',
         'app/app/members/**',
         'app/app/referral/**',
+        'app/startups/**',
         'components/app/AmplitudeAnalytics.tsx',
         'components/cloud/**',
         'config/cloud/**',

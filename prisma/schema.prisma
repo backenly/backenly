@@ -82,6 +82,7 @@ model User {
   aiCreditPurchases       AiCreditPurchase[]
   referralGrantsMade      ReferralGrant[]          @relation("ReferralReferrer")
   referralGrantReceived   ReferralGrant?           @relation("ReferralReferee")
+  startupApplication      StartupApplication?
   // ── Organization relations (Phase 6) ──────────────────────────────────────
   ownedOrganizations      Organization[]           @relation("OrgOwner")
   orgMemberships          OrganizationMember[]
@@ -1419,6 +1420,65 @@ model ReferralGrant {
   @@index([referrerId])
   @@index([code])
   @@map("referral_grants")
+}
+
+// ─── Backenly for Startups ──────────────────────────────────────────────────
+// An application for the startup pass: Pro at no cost for a fixed period.
+// Backenly Cloud only. The table is here because the schema is one schema,
+// whole and public; everything that reads or writes it is the Cloud overlay
+// (lib/billing/startup-program.ts), so a self-hosted install has no rows.
+//
+// The applicant proves they work at the startup by entering a code sent to an
+// address at the startup's own domain. An application verified before the
+// applicant has an account is held as `unclaimed` under a hashed claim token
+// their browser keeps, and joins the review queue once they sign in.
+model StartupApplication {
+  id                  String    @id @default(uuid())
+  // Null while unclaimed. One application per account.
+  userId              String?   @unique
+  // unclaimed | in_review | approved | declined | ended | converted
+  status              String    @default("unclaimed")
+  companyName         String
+  website             String
+  // The website's host without "www.", lower-case. The work email must be at
+  // this domain or under it, and it is what "one pass per company" counts.
+  domain              String
+  stage               String
+  teamSize            String
+  currentBackend      String
+  building            String
+  applicantName       String
+  applicantRole       String
+  profileUrl          String?
+  workEmail           String
+  workEmailVerifiedAt DateTime
+  // Hints for the reviewer recorded at verification, such as another
+  // application from the same domain. Never a decision on their own.
+  signals             String[]  @default([])
+  claimTokenHash      String?   @unique
+  submittedIp         String?
+  // When the application joined the review queue (claimed by an account).
+  submittedAt         DateTime?
+  reviewedAt          DateTime?
+  reviewedById        String?
+  // Shown to the applicant when an application is declined.
+  reviewNote          String?
+  passStartsAt        DateTime?
+  passEndsAt          DateTime?
+  // The subscription row the pass was written to, so ending the pass can only
+  // ever touch that row and never a subscription the account paid for later.
+  subscriptionId      String?
+  reminderSentAt      DateTime?
+  endedAt             DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([domain])
+  @@index([passEndsAt])
+  @@map("startup_applications")
 }
 
 // ─── Organizations (Phase 6 — team accounts) ────────────────────────────────

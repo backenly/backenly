@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, type ReactNode } from 'react'
+import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import {
   ArrowRight,
@@ -262,26 +263,17 @@ function comparisonGroups(published: boolean): MatrixGroup[] {
 /**
  * Backenly for Startups: two months of Pro at no cost for early-stage teams.
  *
- * DESIGN ONLY FOR NOW. There is no program logic behind this yet: applying is
- * an email to support with a prefilled template, and the team switches Pro on
- * by hand. When the program gets real enforcement, keep the numbers here equal
- * to what it grants.
+ * Applying happens at /startups/apply, which Backenly Cloud provides: the
+ * applicant describes the startup, confirms a code sent to an address at its
+ * domain, then signs in or creates an account as usual. The founding team
+ * reviews it, and approval switches Pro on for the pass. The months here must
+ * stay equal to what the program grants (STARTUP_PASS_MONTHS in the Cloud
+ * overlay's lib/billing/startup-program.ts).
  */
 const STARTUP_MONTHS = 2
 const PRO_MONTHLY_USD = 25
 
-const startupApplyHref = `mailto:${ROUTES.supportEmail}?subject=${encodeURIComponent(
-  'Backenly for Startups application',
-)}&body=${encodeURIComponent(
-  [
-    'Startup name:',
-    'Website:',
-    'Stage (bootstrapped, pre-seed, seed, Series A):',
-    'Current backend (Supabase, Appwrite, Firebase, self-hosted, other):',
-    'What you are building:',
-    'Email on your Backenly account:',
-  ].join('\n\n'),
-)}`
+const STARTUP_APPLY_PATH = '/startups/apply'
 
 const startupSources = ['Supabase', 'Appwrite', 'Firebase', 'Self-hosted', 'Starting fresh']
 
@@ -294,7 +286,7 @@ const startupPass = [
 ]
 
 const startupSteps = [
-  { title: 'Apply in two minutes', body: 'Tell us about your startup, your stage, and the backend you run today.' },
+  { title: 'Apply in two minutes', body: 'Tell us about your startup and confirm an email at its domain, then sign in as usual.' },
   { title: 'Get Pro switched on', body: `Once approved, Pro runs on your account for ${STARTUP_MONTHS} months. No card needed.` },
   { title: 'Move over and ship', body: 'Run production on Backenly. Your data stays standard Postgres, exportable anytime.' },
 ]
@@ -631,10 +623,10 @@ function StartupProgram() {
           </ul>
 
           <div className="mt-9">
-            <a href={startupApplyHref} className={PRIMARY_CTA}>
+            <Link href={STARTUP_APPLY_PATH} className={PRIMARY_CTA}>
               Apply for startup access
               <ArrowRight aria-hidden className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
-            </a>
+            </Link>
           </div>
           <p className="mt-4 max-w-[58ch] text-[13px] leading-[1.6] text-zinc-500">
             For early-stage teams, bootstrapped through Series A. One pass per company, and every

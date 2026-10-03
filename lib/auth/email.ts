@@ -250,6 +250,41 @@ export async function sendSpendLimitCodeEmail(email: string, code: string, newLi
   await sendRequiredEmail('spend_limit_code', email, subject, html, text, { Code: code, 'New limit': newLimitLabel })
 }
 
+/** Text someone typed, made safe to place inside an email's HTML. */
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+/**
+ * The code that confirms an application to Backenly Cloud's startup program.
+ *
+ * It goes to an address at the startup's own domain, so entering it shows the
+ * applicant reads that company's mail. That is the identity check the founding
+ * team relies on when they review the application.
+ */
+export async function sendStartupApplicationCodeEmail(email: string, code: string, companyName: string): Promise<void> {
+  const subject = `${code} confirms your Backenly for Startups application`
+  const html = codeEmailHtml({
+    heading: 'Confirm your work email',
+    intro:
+      `Enter this code to confirm the Backenly for Startups application for ` +
+      `<strong style="color: #e5e7eb;">${escapeHtml(companyName)}</strong>. ` +
+      `It expires in <strong style="color: #e5e7eb;">${CODE_MINUTES} minutes</strong>.`,
+    code,
+    footer: "If you didn't apply, you can ignore this email. Nothing is submitted without this code.",
+  })
+  const text =
+    `Your Backenly for Startups confirmation code is ${code}\n\n` +
+    `Enter it to confirm the application for ${companyName}. It expires in ${CODE_MINUTES} minutes.\n\n` +
+    "If you didn't apply, you can ignore this email. Nothing is submitted without this code."
+  await sendRequiredEmail('startup_application_code', email, subject, html, text, { Code: code, Company: companyName })
+}
+
 /**
  * Sent instead of a signup code when the address already has an account.
  *

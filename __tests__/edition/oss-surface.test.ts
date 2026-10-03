@@ -60,6 +60,8 @@ describeOss('the back office is absent', () => {
     ['app/app/billing/', 'billing pages'],
     ['app/api/referral/', 'referral API'],
     ['app/app/referral/', 'referral page'],
+    ['app/startups/', 'startup program application'],
+    ['app/api/startups/', 'startup program API'],
     ['lib/trust/', 'Cloud admission scoring'],
     ['lib/analytics/', 'founder funnel telemetry'],
     ['lib/platform/', 'founder kill-switch writer'],
