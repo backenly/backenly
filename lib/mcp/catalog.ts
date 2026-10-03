@@ -160,7 +160,7 @@ const MCP_EXCLUDE = new Set<string>([
 
 /** Build tools (non-destructive mutations) — assigned to tier 'build'. */
 const BUILD_TOOLS = new Set<string>([
-  'create_branch', 'merge_branch',
+  'create_branch', 'connect_branch', 'merge_branch',
   'create_table', 'add_column', 'create_index', 'rename_column', 'add_constraint',
   // (list_branches / diff_branch are read tools; all four are reachable through
   // the single advertised `branch` tool — see BRANCH_ACTIONS.)
@@ -694,8 +694,9 @@ export function buildDispatchable(): McpToolDescriptor[] {
     },
   )
 
-  // ── branch — the staging door, one tool with four verbs ────────────────────
-  // Routes to create_branch / list_branches / diff_branch / merge_branch via
+  // ── branch — the staging door, one tool with five verbs ────────────────────
+  // Routes to create_branch / connect_branch / list_branches / diff_branch /
+  // merge_branch via
   // BRANCH_ACTIONS, which the dispatcher reads from the same table this schema
   // advertises — so an action the manifest offers can never be one dispatch
   // cannot serve.
@@ -708,13 +709,16 @@ export function buildDispatchable(): McpToolDescriptor[] {
       'keeps serving. apply_migration and the other build tools still change MAIN, not a branch.\n' +
       'A branch starts EMPTY. It does not copy production rows unless you pass includeData:true, which protects your ' +
       'real data from whatever the experiment does to it. Seed what you need instead.\n' +
-      'To run an app against a branch, issue a key bound to it: create_api_key with that branchId. The environment is ' +
-      'a property of the KEY — no header switches it. That key reads and writes the branch through the data API ' +
-      '(/api/v1/{projectId}/db and /api/v2), and every response says which environment answered in the ' +
-      'X-Backenly-Environment header. Any other endpoint (auth, functions, storage, realtime) refuses the key with ' +
-      'BRANCH_SURFACE_UNAVAILABLE, and a key on a merged or discarded branch is refused, rather than either falling ' +
-      'back to production.\n' +
+      'Its PREVIEW ENDPOINT is the project\'s usual base URL with a key bound to the branch: the environment is a ' +
+      'property of the KEY, and no header or URL switches it. "create" returns that endpoint with a client key ' +
+      '(shown once) and instructions for a test; "connect" issues more keys. A branch key reads and writes the branch ' +
+      'through the data API (/api/v1/{projectId}/db and /api/v2), and every response says which environment answered ' +
+      'in the X-Backenly-Environment header (branch:<name>): assert it in tests. Any other endpoint (auth, functions, ' +
+      'storage, realtime) refuses the key with BRANCH_SURFACE_UNAVAILABLE, and a key on a merged or discarded branch ' +
+      'is refused, rather than either falling back to production. Read a branch\'s traffic with monitoring ' +
+      'action:"request_logs" and its branchId.\n' +
       'Actions: "list" (existing branches + their ids) · "create" (needs `name`, lowercase kebab-case, max 5 active) · ' +
+      '"connect" (needs `branchId`; serviceRole:true for a server-side key) · ' +
       '"diff" (needs `branchId` — exactly what would land) · "merge" (needs `branchId` — new tables apply through the ' +
       'governed kernel; added columns, type changes and drops come back as review items rather than reshaping a live ' +
       'column silently). Discarding a branch is destructive — ask via backend_chat and it goes to the Review Queue.',
@@ -727,12 +731,18 @@ export function buildDispatchable(): McpToolDescriptor[] {
           description: 'What to do. Start with "list" if you do not have a branchId.',
         },
         name: { type: 'string', description: 'For action:"create" — the branch name, e.g. "add-payments".' },
-        branchId: { type: 'string', description: 'For action:"diff" / "merge" — the id from action:"list".' },
+        branchId: { type: 'string', description: 'For action:"connect" / "diff" / "merge" — the id from action:"list".' },
         includeData: {
           type: 'boolean',
           description:
             'For action:"create". Default false — the branch is schema-only. True copies every production row into ' +
             'it, which is occasionally useful for reproducing a data-shaped bug and is otherwise a liability.',
+        },
+        serviceRole: {
+          type: 'boolean',
+          description:
+            'For action:"connect". Default false (a client key bound by row-level security). True issues a ' +
+            'server-side key that bypasses RLS on the branch only.',
         },
       },
       required: ['action'],
@@ -848,6 +858,7 @@ export function buildDispatchable(): McpToolDescriptor[] {
 export const BRANCH_ACTIONS: Record<string, string> = {
   list: 'list_branches',
   create: 'create_branch',
+  connect: 'connect_branch',
   diff: 'diff_branch',
   merge: 'merge_branch',
 }

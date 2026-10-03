@@ -38,6 +38,8 @@ interface ApiKey {
   permissions: string[]
   capabilities?: string[]
   serviceRole?: boolean
+  /** Set for a preview key: it reaches that branch and nothing else. */
+  branch?: { id: string; name: string; status: string } | null
   projectId?: string | null
   lastUsed?: string | null
   createdAt: string
@@ -247,6 +249,15 @@ export function ClientKeysPanel() {
                       <div className="flex items-center gap-2">
                         <span className="max-w-[220px] truncate text-[13px] font-medium text-zinc-100">{key.name}</span>
                         <Tag tone={ROLE_TAG[key.role] ?? 'neutral'}>{ROLE_LABEL[key.role] ?? key.role}</Tag>
+                        {key.branch && (
+                          // A preview key answers only on its branch, and not at
+                          // all once that branch is merged or discarded.
+                          <Tag tone={key.branch.status === 'active' ? 'warn' : 'neutral'} mono>
+                            {key.branch.status === 'active'
+                              ? `Preview: ${key.branch.name}`
+                              : `Preview: ${key.branch.name} (${key.branch.status})`}
+                          </Tag>
+                        )}
                       </div>
                       <p className="mt-0.5 max-w-[260px] truncate text-[12px] text-zinc-500">
                         {key.capabilities && key.capabilities.length > 0 ? key.capabilities.join(', ') : 'Full access'}

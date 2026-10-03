@@ -636,3 +636,9 @@ tests/integration/probe-auth-rate-limit.spec.ts
 # data plane says which environment answered. Mount order against real key and
 # branch rows is the property, so it needs a real Postgres.
 tests/integration/branch-key-surfaces.spec.ts
+
+# A preview branch has a working endpoint: the agent tool issues a branch key,
+# the runtime serves the branch and tags its request log rows, every production
+# health reader ignores those rows, and the branch's OpenAPI spec reads the
+# branch's schema. Real schemas, keys and log rows are the property.
+tests/integration/branch-preview-endpoint.spec.ts

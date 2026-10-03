@@ -10,6 +10,7 @@
  *   GET    /branches/[id]       schema diff vs main
  *   POST   /branches/[id]       merge (additive auto, rest → review items)
  *   DELETE /branches/[id]       discard (drops the clone)
+ *   POST   /branches/[id]/keys  issue a key bound to the branch (BranchPreviewCard)
  *
  * Built from the console kit like every other section. Discarding drops the
  * clone, so it asks first.
@@ -17,6 +18,7 @@
 
 import { useEffect, useState, useCallback } from 'react'
 import { AlertTriangle, ArrowRight, Check, GitBranch, Plus, RefreshCw, Trash2, X } from 'lucide-react'
+import { BranchPreviewCard, type BranchPreview } from './BranchPreviewCard'
 import {
   EmptyState,
   IconButton,
@@ -39,8 +41,11 @@ interface Branch {
   id: string
   name: string
   status: 'active' | 'merged' | 'discarded'
+  schemaName?: string
   createdAt: string
   mergedAt: string | null
+  /** Present for an active branch: where to point an app at it. */
+  preview?: BranchPreview
 }
 
 interface ColumnDiff { name: string; dataType: string }
@@ -82,6 +87,7 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
   const [openDiff, setOpenDiff] = useState<{ id: string; name: string; diff: SchemaDiff } | null>(null)
   const [mergeOutcome, setMergeOutcome] = useState<{ name: string; result: MergeResult } | null>(null)
   const [confirmDiscard, setConfirmDiscard] = useState<Branch | null>(null)
+  const [openPreview, setOpenPreview] = useState<string | null>(null)
 
   const base = `/api/projects/${projectId}/branches`
 
@@ -154,6 +160,7 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
       const j = await res.json()
       if (!res.ok || !j.success) { setError(j.error || 'Could not discard branch.'); return }
       if (openDiff?.id === b.id) setOpenDiff(null)
+      if (openPreview === b.id) setOpenPreview(null)
       await load()
     } finally {
       setBusy(null)
@@ -161,7 +168,9 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
   }
 
   const active = branches.filter((b) => b.status === 'active')
+  const merged = branches.filter((b) => b.status === 'merged')
   const atLimit = active.length >= 5
+  const previewing = active.find((b) => b.id === openPreview && b.preview)
 
   return (
     <div className="space-y-4">
@@ -238,6 +247,16 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
             ))}
           </ul>
         </KitNote>
+      )}
+
+      {/* Preview endpoint */}
+      {previewing && previewing.preview && (
+        <BranchPreviewCard
+          key={previewing.id}
+          projectId={projectId}
+          branch={{ id: previewing.id, name: previewing.name, schemaName: previewing.schemaName, preview: previewing.preview }}
+          onClose={() => setOpenPreview(null)}
+        />
       )}
 
       {/* Diff detail */}
@@ -346,6 +365,15 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
                   <p className="text-[12px] text-zinc-500">Created {timeAgo(b.createdAt)}</p>
                 </div>
                 <div className="flex flex-shrink-0 items-center gap-1.5">
+                  {b.preview && (
+                    <KitButton
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setOpenPreview(openPreview === b.id ? null : b.id)}
+                    >
+                      Preview
+                    </KitButton>
+                  )}
                   <KitButton size="sm" variant="ghost" onClick={() => viewDiff(b)} loading={busy === b.id && !confirmDiscard}>
                     Compare
                   </KitButton>
@@ -362,6 +390,31 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
           </ul>
         )}
       </KitCard>
+
+      {/* History: a merged branch no longer answers its keys, but it happened. */}
+      {merged.length > 0 && (
+        <KitCard className="overflow-hidden">
+          <KitCardHeader
+            title={
+              <span className="flex items-baseline gap-2">
+                Merged
+                <span className="text-[12px] font-normal tabular-nums text-zinc-500">{merged.length}</span>
+              </span>
+            }
+          />
+          <ul className="divide-y divide-white/[0.06]">
+            {merged.map((b) => (
+              <li key={b.id} className="flex items-center gap-3 px-4 py-2.5">
+                <GitBranch className="h-4 w-4 flex-shrink-0 text-zinc-600" strokeWidth={1.75} />
+                <p className="min-w-0 flex-1 truncate font-mono text-[13px] text-zinc-400">{b.name}</p>
+                <span className="text-[12px] text-zinc-500">
+                  Merged {b.mergedAt ? timeAgo(b.mergedAt) : ''}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </KitCard>
+      )}
 
       <KitConfirmDialog
         open={!!confirmDiscard}

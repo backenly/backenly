@@ -27,14 +27,29 @@ export const ISSUED_PREFIX = {
   mcp: 'mcp_live_',
   /** A platform key for the dashboard API. */
   dashboard: 'dk_admin_',
+  /** Bound by row-level security and to a preview branch; never reaches production. */
+  projectPreview: 'proj_preview_',
+  /** Bypasses row-level security on a preview branch only; server-side only. */
+  servicePreview: 'svc_preview_',
 } as const
 
 /** Prefixes keys were minted with before this taxonomy. Still valid; never issued again. */
 export const LEGACY_PREFIXES = ['sk_live_', 'sk_test_', 'sk_read_', 'sk_ai_', 'sk_client_', 'sk_service_'] as const
 
-export function issuedKeyPrefix(kind: { keyType?: string | null; scope?: string | null; serviceRole?: boolean | null }): string {
+export function issuedKeyPrefix(kind: {
+  keyType?: string | null
+  scope?: string | null
+  serviceRole?: boolean | null
+  /**
+   * A key bound to a preview branch says so in its prefix, the way a Stripe
+   * test key does: the URL is the same as production's, so the key is the only
+   * thing in an app's environment that shows which one it talks to.
+   */
+  branchId?: string | null
+}): string {
   if (kind.keyType === 'dashboard') return ISSUED_PREFIX.dashboard
   if (kind.scope === 'mcp') return ISSUED_PREFIX.mcp
+  if (kind.branchId) return kind.serviceRole ? ISSUED_PREFIX.servicePreview : ISSUED_PREFIX.projectPreview
   if (kind.serviceRole) return ISSUED_PREFIX.service
   return ISSUED_PREFIX.project
 }
