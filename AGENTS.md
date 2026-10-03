@@ -271,7 +271,7 @@ Architecture: `Client → EventSource → PostgreSQL LISTEN → NOTIFY → SSE s
 
 - Plans (internal code → display): SANDBOX → Free $0 · BUILDER → Pro $25/mo ($20 annual) · SCALE → Enterprise (custom, sales-led, no self-serve checkout) — seeded via the Cloud overlay's `prisma/seed-billing.ts`. Internal codes are stable; only display names/prices/quotas change.
 - Payments are Stripe, in the Cloud overlay (`lib/billing/`, `app/api/billing/`): Checkout Sessions, the customer portal, and `app/api/billing/webhook/route.ts` (Stripe events). Paddle is retired.
-- Usage pricing: quotas pool per billing account (`lib/usage/pool.ts`); past a quota only an `enforce` overage policy with an owner-set spend limit raises a cap (`lib/usage/overage.ts`); the month is billed from the usage ledger's close (`lib/usage/`, Cloud `lib/billing/usage-charges.ts`). Rates live in `lib/pricing/catalog.ts`. `BACKENLY_OVERAGE_MODE` is `off|shadow|enforce`.
+- Usage pricing: quotas pool per billing account (`lib/usage/pool.ts`); past a quota only an `enforce` overage policy with an owner-set spend limit raises a cap (`lib/usage/overage.ts`). The limit is prepaid: it counts only up to what the owner paid in advance through Stripe Checkout (Cloud `lib/billing/prepay.ts`, `usage_prepayments`), Free has no limit at all, and each month's usage past the plan is drawn from that balance at the usage ledger's close (`lib/usage/`, Cloud `lib/billing/usage-charges.ts`). Rates live in `lib/pricing/catalog.ts`. `BACKENLY_OVERAGE_MODE` is `off|shadow|enforce`.
 - AI usage tracked per user/month: `UserAiUsage` model
 - Grace periods for overdue subscriptions: `lib/billing/grace.ts`
 
