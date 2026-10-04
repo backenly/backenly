@@ -31,6 +31,21 @@ import { prisma } from '@/lib/db/prisma'
 
 export const BRANCH_SURFACE_UNAVAILABLE = 'BRANCH_SURFACE_UNAVAILABLE'
 
+/**
+ * Which environment answered, on every data-plane response.
+ *
+ * A preview key and a main key hit the same URL, so nothing in a response said
+ * which schema served it. A test an agent runs "against the preview" could not
+ * tell that it was in fact reading production, which is the one mistake a
+ * preview environment exists to prevent. Exposed to browsers in server/app.ts
+ * and middleware.ts, so a frontend's test can assert it too.
+ */
+export const ENVIRONMENT_HEADER = 'X-Backenly-Environment'
+
+export function environmentHeaderValue(branchName?: string | null): string {
+  return branchName ? `branch:${branchName}` : 'main'
+}
+
 /** What a branch-bound key can reach, as a caller should read it. */
 export const BRANCH_SCOPED_SURFACES = ['/api/v1/{projectId}/db/*', '/api/v2/{projectId}/*'] as const
 
@@ -159,6 +174,23 @@ export function branchSurfaceRefusal(branch: BoundBranch): BranchSurfaceRefusal 
       branchScoped: BRANCH_SCOPED_SURFACES,
       hint: 'Use a main key for this endpoint, or test this part of the backend against production deliberately.',
     },
+  }
+}
+
+/**
+ * The branch a request's key is bound to, for the request log.
+ *
+ * Null for a keyless request, a main key, or a lookup that fails: the log is
+ * evidence, and recording must never slow or fail the request it describes.
+ * Shares the cache above, so the data plane's own lookups make this free.
+ */
+export async function branchIdForRequest(headers: HeaderSource, url?: URL | null): Promise<string | null> {
+  const key = presentedApiKey(headers, url)
+  if (!key) return null
+  try {
+    return (await branchBoundToKey(key))?.id ?? null
+  } catch {
+    return null
   }
 }
 

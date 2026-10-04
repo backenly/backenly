@@ -47,7 +47,7 @@ Exactly **23** tools are advertised; `tools/list` is the authority. Every tool e
 | `db_insert` / `db_update` / `db_delete` | Row writes as the owner, for seeding and repair. Update and delete need a non-empty filter. |
 | `set_rls` | Row-level security as exact SQL predicates, installed verbatim and read back. |
 | `generate_types` | TypeScript types, a typed client or OpenAPI from the live catalog. |
-| `branch` | Preview branches: `list`, `create`, `diff`, `merge`. |
+| `branch` | Preview branches: `list`, `create`, `connect`, `diff`, `merge`. `create` and `connect` return the branch's preview endpoint and a key bound to it. |
 | `check_approval` | Poll an action waiting for a human. |
 | `backend_chat` | Plain-English requests to Backenly's own engine. Draws AI credits. |
 | `fetch_docs` | These docs, one topic at a time. |

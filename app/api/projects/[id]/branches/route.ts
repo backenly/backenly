@@ -15,6 +15,13 @@ import { NextRequest, NextResponse } from 'next/server'
 import { withProjectAccess } from '@/lib/auth/route-protection'
 import { isCloudEdition } from '@/lib/edition/cloud-only'
 import { createBranch, listBranches } from '@/lib/branches/engine'
+import {
+  previewAgentInstructions,
+  previewCurl,
+  previewEndpoint,
+  previewSdkSnippet,
+} from '@/lib/branches/preview'
+import { resolvePublicBaseUrl } from '@/lib/services/public-url'
 
 // Preview branches are a Backenly Cloud capability. On a self-hosted
 // deployment the surface does not exist, so this answers 404 rather than 403:
@@ -23,10 +30,31 @@ const cloudOnly404 = () =>
   NextResponse.json({ error: 'Not found', code: 'CLOUD_ONLY_FEATURE' }, { status: 404 })
 
 
-export const GET = withProjectAccess(async (_req: NextRequest, { projectId }) => {
+export const GET = withProjectAccess(async (req: NextRequest, { projectId }) => {
   if (!isCloudEdition()) return cloudOnly404()
   const branches = await listBranches(projectId)
-  return NextResponse.json({ success: true, branches })
+  const origin = resolvePublicBaseUrl(req)
+  // Every active branch comes with its preview endpoint, so the panel can show
+  // where to point an app without a second round trip. The snippets name the
+  // key's slot rather than carrying a key: a key is shown once, when issued.
+  return NextResponse.json({
+    success: true,
+    branches: branches.map(b => {
+      if (b.status !== 'active') return b
+      const endpoint = previewEndpoint(projectId, b, origin)
+      return {
+        ...b,
+        preview: {
+          ...endpoint,
+          // The dashboard reads the spec with its own session, not an MCP key.
+          openapiUrl: `/api/projects/${projectId}/openapi?branchId=${b.id}`,
+          curl: previewCurl(endpoint),
+          sdk: previewSdkSnippet(projectId),
+          instructions: previewAgentInstructions(endpoint),
+        },
+      }
+    }),
+  })
 })
 
 export const POST = withProjectAccess(async (req: NextRequest, { user, projectId }) => {

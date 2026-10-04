@@ -6716,7 +6716,7 @@ async function executeCreateKey(params: any, projectId: string): Promise<Executi
     // Backenly's own generator is used now, and the prefix distinguishes the two
     // real kinds: `proj_live_…` is publishable, `svc_live_…` bypasses RLS.
     const { mintKey } = await import('@/lib/auth/key-prefix')
-    const { key: keyValue } = mintKey({ serviceRole: Boolean(serviceRole) })
+    const { key: keyValue } = mintKey({ serviceRole: Boolean(serviceRole), branchId })
     const keyPrefix = keyValue.substring(0, 12)
     const keyHash = crypto.createHash('sha256').update(keyValue).digest('hex')
         

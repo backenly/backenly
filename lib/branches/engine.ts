@@ -346,7 +346,7 @@ export async function listBranches(projectId: string) {
   return prisma.workspaceBranch.findMany({
     where: { projectId, status: { not: 'discarded' } },
     orderBy: { createdAt: 'desc' },
-    select: { id: true, name: true, status: true, createdAt: true, mergedAt: true },
+    select: { id: true, name: true, status: true, schemaName: true, createdAt: true, mergedAt: true },
   })
 }
 

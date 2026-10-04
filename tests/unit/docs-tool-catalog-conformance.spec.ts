@@ -112,6 +112,8 @@ describe('the agent docs describe the real MCP surface', () => {
       'anon_key', 'project_id', 'pg_dump', 'pg_policies',
       'on_signup', 'on_insert', 'on_update', 'on_delete_row',
       'backenly_types', 'service_key', 'x_backenly_key', 'redirect_to',
+      // Key prefixes: what a preview branch's keys start with.
+      'proj_preview_', 'svc_preview_',
     ])
     // The RLS template names come from the add_rls enum itself, so documenting
     // a new template never needs this list edited, and a template that is

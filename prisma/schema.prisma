@@ -1938,12 +1938,20 @@ model ApiRequestLog {
   statusCode Int
   duration   Int
   timestamp  DateTime @default(now())
+  // The preview branch whose key made the request; null for main. Production
+  // health signals (monitoring, the autonomy freeze and detectors) read null
+  // only, so a test run against a branch never reads as a production incident.
+  // No foreign key: this is the hottest insert path in the platform, and a
+  // branch row outlives its traffic anyway (branches are marked merged or
+  // discarded, never deleted).
+  branchId   String?
   project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
   user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([projectId, timestamp])
   @@index([userId, timestamp])
   @@index([timestamp])
+  @@index([branchId, timestamp])
   @@map("api_request_logs")
 }
 

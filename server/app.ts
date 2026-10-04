@@ -18,7 +18,7 @@ import { asyncRoute } from './lib/async-route'
 import { projectServingGate } from './lib/serving-gate'
 import { recordRuntimeRequest, INTERNAL_TRAFFIC_HEADER, isInternalTraffic } from '@/lib/traffic/request-recorder'
 import { meterNodeResponse } from '@/lib/usage/egress'
-import { refuseBranchKeyOffDataPlane } from '@/lib/branches/key-scope'
+import { branchIdForRequest, refuseBranchKeyOffDataPlane } from '@/lib/branches/key-scope'
 
 const app = express()
 
@@ -118,14 +118,23 @@ app.use(['/api/v1/:projectId', '/api/v2/:projectId'], (req, res, next) => {
     meterNodeResponse(res, projectId)
   }
   res.on('finish', () => {
-    recordRuntimeRequest({
+    const served = {
       projectId,
       method: req.method,
       pathname: req.originalUrl,
       statusCode: res.statusCode,
       durationMs: Date.now() - startedAt,
       internalHeader: req.get(INTERNAL_TRAFFIC_HEADER),
-    })
+    }
+    // A forwarded request is not recorded here at all (Next already did), so
+    // it needs no branch lookup either.
+    if (isInternalTraffic(served.internalHeader)) return recordRuntimeRequest(served)
+    // The key's branch, so preview traffic stays out of production's health
+    // signals. Cached alongside the branch-key check below.
+    void branchIdForRequest(
+      { get: (name: string) => req.get(name) },
+      new URL(req.originalUrl, 'http://runtime.internal'),
+    ).then(branchId => recordRuntimeRequest({ ...served, branchId }))
   })
   next()
 })

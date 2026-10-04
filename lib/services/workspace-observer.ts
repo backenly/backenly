@@ -1321,6 +1321,8 @@ async function detectAuthSpike(projectId: string): Promise<RawFinding[]> {
       path: { contains: '/auth/' },
       statusCode: { gte: 400, lte: 499 },
       timestamp: { gte: windowStart },
+      // Production only: refused branch keys and preview auth tests are not an attack.
+      branchId: null,
     },
   }).catch(() => 0)
 
