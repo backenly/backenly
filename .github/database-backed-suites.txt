@@ -630,3 +630,9 @@ tests/integration/last-login-id-type.spec.ts
 # and every customer, keeps the 10-per-window budgets. The routes' own check
 # order against a real workspace is the property, so it needs a real Postgres.
 tests/integration/probe-auth-rate-limit.spec.ts
+
+# A new end user's session works from sign-up: the Next sign-up route signs with
+# the resolved (decrypted) project secret every verifier uses, and refresh binds
+# the id as the column's type, so it works on the canonical uuid users table.
+# Real provisioned projects (encrypted secrets) and real users are the property.
+tests/integration/end-user-session-tokens.spec.ts
