@@ -428,7 +428,7 @@ const STEPS = [
   {
     icon: Cable,
     title: 'Connect your coding agent',
-    body: 'One scoped key and one pasted prompt for Claude Code, Cursor, Codex or any MCP client.',
+    body: 'One scoped key and one command for Claude Code, Cursor, Codex or any MCP client.',
   },
   {
     icon: MessageSquare,

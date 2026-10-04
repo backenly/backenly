@@ -7,8 +7,8 @@
  *
  * Two tabs, each a self-contained surface:
  *   • Agents — the ONE agent-wiring surface: the setup sequence (scoped key →
- *              one-paste prompt → per-agent command, §9.1) and what the agent
- *              gets, beside key management and live MCP usage.
+ *              one install command per agent, §9.1) and what the agent gets,
+ *              beside key management and live MCP usage.
  *   • Direct — everything that calls the data plane without MCP: REST
  *              coordinates + TypeScript types / OpenAPI spec, frontend runtime
  *              telemetry + the origin allowlist (FrontendRuntimeCards), and
@@ -54,7 +54,7 @@ type Tab = 'agents' | 'direct'
 const HEADERS: Record<Tab, { title: string; description: string }> = {
   agents: {
     title: 'Connect your coding agent',
-    description: 'One scoped key and one pasted prompt. Your agent reads the real schema and builds through governed, reversible changes.',
+    description: 'One scoped key, one command. Your agent reads the real schema and builds through governed, reversible changes.',
   },
   direct: {
     title: 'Direct access',

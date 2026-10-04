@@ -4,45 +4,55 @@
  * AgentInstallGuide — the Connect page's Agents experience (PLATFORM_RESTRUCTURE
  * _REPORT §9.1 items 1–2), and since 2026-08-06 the product's ONLY agent-setup
  * surface: it mints a REAL scoped, revocable MCP key at generate time (never a
- * root key in a clipboard) and bakes it into a one-paste setup prompt + a
- * per-agent install command. The placeholder-key card that used to sit on the
- * Projects page (AgentSetupCard) is deleted — setup belongs where a project,
- * and therefore a real key, exists.
+ * root key in a clipboard) and bakes it into one install command per agent.
+ * The placeholder-key card that used to sit on the Projects page
+ * (AgentSetupCard) is deleted — setup belongs where a project, and therefore a
+ * real key, exists.
  *
  * Key minting:
  *   POST /api/projects/[id]/mcp/keys  →  { rawKey }
  * Keys created here appear (and are revocable) in AgentKeysPanel in the right
  * column of the same tab — `onKeyMinted` tells it to refresh.
  *
- * Two steps, not four (2026-07-22). The surface previously ran key gate →
- * prompt → a five-row accordion → a separate "verify the connection" prompt.
- * Two of those earned nothing: the setup prompt ALREADY instructs the agent to
- * verify, so the third code block restated it, and the accordion let several
- * command blocks stack at once for a reader who only ever uses one agent. The
- * accordion is now a picker over ONE code panel, and the verify step is gone.
+ * One command, not a prompt (2026-10-04). Step 2 used to be a twenty-line
+ * "paste into your agent" prompt: register the server, keep working in the
+ * same conversation through `@backenly/cli call`, then read the backend. On
+ * screen it was a wall of text where every MCP vendor shows one line, and
+ * each of its jobs already has a home:
+ *   • registering the server IS the install command, so the command is the
+ *     whole step;
+ *   • "start with read_backend_state and say what the backend has" is what
+ *     the server's own connect instructions tell the agent
+ *     (buildMcpInstructions, lib/mcp/protocol/shared.ts);
+ *   • hosts load MCP servers when a session starts, so the line under the
+ *     command says to run it first and then open a session, as llms.txt does.
+ *     An agent that installed the server mid-conversation is told by its own
+ *     docs to keep going through `npx @backenly/cli call` (public/llms.txt,
+ *     public/docs/agents/client-setup.md), not by text the human has to read.
  *
- * Presentation: agent tiles carry the real brand logomark (AgentBrandIcons) and
- * every command/config/prompt renders through CodeSurface — terminal chrome +
- * monochrome, brightness-tiered highlighting. Violet is spent only on the scoped
- * key, keeping the surface inside the flat inspector language.
+ * The key is masked on screen to the prefix AgentKeysPanel lists; the copy
+ * button and a copy made by selecting the text both carry the real key, and
+ * the eye toggle shows it. That keeps the command to two lines, and a
+ * screenshot of this page no longer carries a live key.
+ *
+ * Presentation: agent tabs carry the real brand logomark (AgentBrandIcons) and
+ * the command renders through CodeSurface — monochrome, brightness-tiered
+ * highlighting. Violet is spent only on the scoped key, keeping the surface
+ * inside the flat inspector language.
  */
 
-import { useState } from 'react'
-import { Check, ShieldCheck, KeyRound, RefreshCw, ArrowUpRight } from 'lucide-react'
-import { KitButton, KitNote, Segmented } from '@/components/inspector/kit'
+import { useState, type ClipboardEvent, type ReactNode } from 'react'
+import { Check, Eye, EyeOff, ShieldCheck, KeyRound, RefreshCw, ArrowUpRight } from 'lucide-react'
+import { KitButton, Segmented } from '@/components/inspector/kit'
 import { AGENT_ICON, GenericAgentIcon } from './AgentBrandIcons'
-import { CodeSurface, CliText, JsonText, PromptText } from './CodeSurface'
+import { CodeSurface, CliText, JsonText } from './CodeSurface'
 
 /**
- * Two docs targets, and they are NOT interchangeable:
- *   MCP_DOCS  — llms.txt, written for a model. Only ever goes INSIDE the prompt
- *               the agent consumes.
- *   USER_DOCS — /resources, written for a person. Every link a human clicks in
- *               this UI points here. Sending a developer to a plaintext dump
- *               addressed to their agent is a dead end. (Was /quickstart until
- *               that page was removed; it now 301s here anyway.)
+ * /resources is written for a person, so every link a human clicks in this UI
+ * points there. llms.txt is written for a model and is never linked from here:
+ * sending a developer to a plaintext dump addressed to their agent is a dead
+ * end. (Was /quickstart until that page was removed; it now 301s here anyway.)
  */
-const MCP_DOCS = 'https://backenly.com/llms.txt'
 const USER_DOCS = '/resources'
 const KEY_PLACEHOLDER = '<SCOPED_KEY>'
 /** The remote (Streamable-HTTP) MCP endpoint — app/api/mcp/route.ts. No npx. */
@@ -55,44 +65,46 @@ type Transport = 'local' | 'remote'
  * remote configs differ in shape AND in how the key is carried, so each is
  * spelled out rather than templated — the differences below are load-bearing,
  * verified against each host's own docs (2026-07):
- *   • kind   — which renderer + how the reader consumes it (a shell command vs
- *              a file they paste into).
- *   • label  — the terminal-bar caption: a shell, or the exact config path.
- *   • note   — an optional caveat shown under the block.
+ *   • kind — which renderer: a shell command, or a file the reader pastes into.
+ *   • next — the one line under it: where it goes, and how the host picks it
+ *            up. Every host reads its MCP config when a session starts, so a
+ *            conversation that is already open never sees the tools — the most
+ *            common "Backenly doesn't work" report, and never a Backenly fault.
  */
 interface Variant {
   kind: 'cli' | 'json'
-  label: string
   build: (projectId: string, key: string) => string
-  note?: string
+  next: ReactNode
 }
 
 interface Agent {
   id: string
   name: string
   local: Variant
-  /** Absent when the host has no clean remote path — the toggle falls back to local. */
-  remote?: Variant
+  remote: Variant
 }
 
 const NPX_ARGS = (p: string, k: string) => ['-y', '@backenly/mcp-server', '--project', p, '--key', k]
 
+/**
+ * JSON the way people write mcp.json by hand: two-space indent, with an array
+ * of plain values on one line, so a config reads in eight lines, not fourteen.
+ */
+function configJson(value: unknown): string {
+  return JSON.stringify(value, null, 2).replace(
+    /\[\n\s+([^[\]{}]*?)\n\s*\]/g,
+    (_, items: string) => `[${items.split(/,\n\s+/).join(', ')}]`,
+  )
+}
+
 /** Cursor + Cline local: stdio via command/args. No `type` field for stdio. */
 function stdioJson(projectId: string, key: string): string {
-  return JSON.stringify(
-    { mcpServers: { backenly: { command: 'npx', args: NPX_ARGS(projectId, key) } } },
-    null,
-    2,
-  )
+  return configJson({ mcpServers: { backenly: { command: 'npx', args: NPX_ARGS(projectId, key) } } })
 }
 
 /** Cursor remote: url + headers; Cursor infers the transport from the url. */
 function cursorRemoteJson(_projectId: string, key: string): string {
-  return JSON.stringify(
-    { mcpServers: { backenly: { url: REMOTE_URL, headers: { 'x-api-key': key } } } },
-    null,
-    2,
-  )
+  return configJson({ mcpServers: { backenly: { url: REMOTE_URL, headers: { 'x-api-key': key } } } })
 }
 
 /**
@@ -101,21 +113,17 @@ function cursorRemoteJson(_projectId: string, key: string): string {
  * Streamable-HTTP endpoint — the single most common Cline-remote failure.
  */
 function clineRemoteJson(_projectId: string, key: string): string {
-  return JSON.stringify(
-    {
-      mcpServers: {
-        backenly: {
-          url: REMOTE_URL,
-          type: 'streamableHttp',
-          headers: { 'x-api-key': key },
-          disabled: false,
-          autoApprove: [],
-        },
+  return configJson({
+    mcpServers: {
+      backenly: {
+        url: REMOTE_URL,
+        type: 'streamableHttp',
+        headers: { 'x-api-key': key },
+        disabled: false,
+        autoApprove: [],
       },
     },
-    null,
-    2,
-  )
+  })
 }
 
 /**
@@ -127,83 +135,39 @@ function codexRemoteToml(_projectId: string, key: string): string {
   return `[mcp_servers.backenly]\nurl = "${REMOTE_URL}"\nhttp_headers = { "x-api-key" = "${key}" }`
 }
 
+const RUN_THEN_NEW_SESSION = 'Run it in a terminal, then start a new Claude Code session.'
+
 const AGENTS: Agent[] = [
   {
     id: 'claude-code', name: 'Claude Code',
-    local: { kind: 'cli', label: 'bash', build: (p, k) => `claude mcp add backenly -- npx -y @backenly/mcp-server --project ${p} --key ${k}` },
-    remote: { kind: 'cli', label: 'bash', build: (_p, k) => `claude mcp add --transport http backenly ${REMOTE_URL} --header "x-api-key: ${k}"` },
+    local: { kind: 'cli', next: RUN_THEN_NEW_SESSION, build: (p, k) => `claude mcp add backenly -- npx -y @backenly/mcp-server --project ${p} --key ${k}` },
+    remote: { kind: 'cli', next: RUN_THEN_NEW_SESSION, build: (_p, k) => `claude mcp add --transport http backenly ${REMOTE_URL} --header "x-api-key: ${k}"` },
   },
   {
     id: 'cursor', name: 'Cursor',
-    local: { kind: 'json', label: '.cursor/mcp.json', build: stdioJson },
-    remote: { kind: 'json', label: '.cursor/mcp.json', build: cursorRemoteJson },
+    local: { kind: 'json', next: <>Paste into <code>.cursor/mcp.json</code>, then reload the window.</>, build: stdioJson },
+    remote: { kind: 'json', next: <>Paste into <code>.cursor/mcp.json</code>, then reload the window.</>, build: cursorRemoteJson },
   },
   {
     id: 'codex', name: 'Codex',
-    local: { kind: 'cli', label: 'bash', build: (p, k) => `codex mcp add backenly -- npx -y @backenly/mcp-server --project ${p} --key ${k}` },
+    local: { kind: 'cli', next: 'Run it in a terminal, then relaunch Codex.', build: (p, k) => `codex mcp add backenly -- npx -y @backenly/mcp-server --project ${p} --key ${k}` },
     remote: {
-      kind: 'json', label: '~/.codex/config.toml', build: codexRemoteToml,
-      note: 'Codex has no header flag on the CLI — paste this into ~/.codex/config.toml. If it isn’t picked up, add [beta] rmcp = true.',
+      kind: 'json', build: codexRemoteToml,
+      // Codex has no header flag on the CLI, so the remote form is a file edit.
+      next: <>Paste into <code>~/.codex/config.toml</code>, then relaunch Codex. If it isn’t picked up, add <code>[beta] rmcp = true</code>.</>,
     },
   },
   {
     id: 'cline', name: 'Cline',
-    local: { kind: 'json', label: 'cline_mcp_settings.json', build: stdioJson },
-    remote: { kind: 'json', label: 'cline_mcp_settings.json', build: clineRemoteJson },
+    local: { kind: 'json', next: <>Paste into <code>cline_mcp_settings.json</code>, then reload the window.</>, build: stdioJson },
+    remote: { kind: 'json', next: <>Paste into <code>cline_mcp_settings.json</code>, then reload the window.</>, build: clineRemoteJson },
   },
   {
     id: 'other', name: 'Other',
-    local: { kind: 'cli', label: 'bash', build: (p, k) => `npx -y @backenly/mcp-server --project ${p} --key ${k}` },
-    remote: {
-      kind: 'cli', label: 'endpoint',
-      build: (_p, k) => `# Add as a remote (Streamable-HTTP) MCP server:\n#   URL:    ${REMOTE_URL}\n#   Header: x-api-key: ${k}`,
-    },
+    local: { kind: 'cli', next: 'Use it as the server command in any MCP host, then restart the host.', build: (p, k) => `npx -y @backenly/mcp-server --project ${p} --key ${k}` },
+    remote: { kind: 'cli', next: 'Add it as a Streamable HTTP server in any MCP host, then restart the host.', build: (_p, k) => `URL     ${REMOTE_URL}\nHeader  x-api-key: ${k}` },
   },
 ]
-
-/**
- * The one-paste prompt. Names `read_backend_state` — NOT `get_project_overview`,
- * which the catalog rewrite left dispatchable but un-advertised (lib/mcp/
- * catalog.ts MCP_SURFACE). Telling an agent to call a tool absent from its own
- * manifest is a failed first impression on the one step that has to work.
- *
- * ── Why the restart paragraph is load-bearing ───────────────────────────────
- *
- * This prompt used to say "install it, then call read_backend_state" in one
- * breath. Every MCP host connects its servers at PROCESS START and reads the
- * manifest once, so a server added by the running agent is registered in config
- * and absent from that session's tool list. The agent then does the reasonable
- * thing and improvises a way to reach us anyway — a stdio bridge, a raw curl —
- * which the permission classifier blocks, and the user watches three failures
- * scroll past on what is supposed to be the first thirty seconds of the
- * product. Nothing is broken; the instructions asked for something impossible.
- *
- * The fix after that told the agent to STOP after the install and ask for a
- * restart. Correct, and still a dead end: the user asked for a backend and got
- * "reload VS Code" instead. So the prompt now splits the two jobs. The MCP
- * server is registered for the NEXT conversation, and the work continues in
- * THIS one through `@backenly/cli call`, which posts to the same /api/mcp/*
- * handlers with the same key. The improvised paths (a stdio bridge, a raw curl)
- * are still named as unsupported: a capable agent invents them unless told the
- * supported one exists.
- */
-function quickStartPrompt(projectId: string, key: string): string {
-  return `I'm using Backenly as my backend (project ${projectId}).
-
-1. Register its MCP server for my future conversations:
-claude mcp add backenly -- npx -y @backenly/mcp-server --project ${projectId} --key ${key}
-
-2. Do not stop and ask me to restart. MCP tools registered during a conversation only appear in the next one, but every Backenly tool is callable right now from the shell with the same key:
-npx -y @backenly/cli@latest link --project ${projectId} --key ${key}
-npx -y @backenly/cli@latest tools
-npx -y @backenly/cli@latest call read_backend_state
-npx -y @backenly/cli@latest call apply_migration sql="CREATE TABLE posts (title text NOT NULL)"
-npx -y @backenly/cli@latest chat "describe the change in plain English"
-(Arguments are key=value pairs; for nested JSON use --args-file args.json.)
-Use the CLI for this conversation and the MCP tools once they appear. Do not start the MCP server yourself or call Backenly's HTTP API with curl; the CLI is the supported path.
-
-3. Start with read_backend_state and tell me what the backend has, then build what I ask for. Docs: ${MCP_DOCS}`
-}
 
 export function AgentInstallGuide({
   projectId,
@@ -216,22 +180,19 @@ export function AgentInstallGuide({
   const [key, setKey] = useState<string | null>(null)
   const [minting, setMinting] = useState(false)
   const [mintError, setMintError] = useState<string | null>(null)
-  // Exactly one agent's command is on screen at a time — nobody installs into
-  // five editors, and stacked blocks are what made this surface read as a wall.
-  // Starts unpicked on purpose: the prompt in step 2 already carries the Claude
-  // Code line, so defaulting to Claude Code would print the same command twice.
-  const [agentId, setAgentId] = useState<string>('')
+  // Claude Code first: it is the host most people arrive with, and one tab is
+  // always open, so step 2 is a command from the moment the page loads.
+  const [agentId, setAgentId] = useState<string>(AGENTS[0].id)
   const [transport, setTransport] = useState<Transport>('local')
-  const [copied, setCopied] = useState<string | null>(null)
+  const [revealed, setRevealed] = useState(false)
+  const [copied, setCopied] = useState(false)
 
-  const effectiveKey = key ?? KEY_PLACEHOLDER
-  const keyReady = !!key
-  const agent = AGENTS.find((a) => a.id === agentId) ?? null
-  // Pick the variant for the chosen transport, falling back to local when a host
-  // has no clean remote path — never hand someone a config their agent can't load.
-  const variant = agent ? (transport === 'remote' ? agent.remote ?? agent.local : agent.local) : null
-  const downgraded = !!agent && transport === 'remote' && !agent.remote
-  const command = variant ? variant.build(projectId, effectiveKey) : ''
+  const agent = AGENTS.find((a) => a.id === agentId) ?? AGENTS[0]
+  const variant = agent[transport]
+  // The same prefix AgentKeysPanel lists, so the command and its row match.
+  const masked = key ? `${key.slice(0, 16)}…` : KEY_PLACEHOLDER
+  const command = variant.build(projectId, key ?? KEY_PLACEHOLDER)
+  const shown = revealed ? command : variant.build(projectId, masked)
 
   async function mintKey() {
     if (!projectId) return
@@ -246,6 +207,7 @@ export function AgentInstallGuide({
       const data = await res.json().catch(() => ({}))
       if (!res.ok || !data?.rawKey) throw new Error(data?.error || `Could not mint key (HTTP ${res.status})`)
       setKey(data.rawKey)
+      setRevealed(false)
       onKeyMinted?.()
     } catch (err) {
       setMintError(err instanceof Error ? err.message : 'Could not mint a key. Try again.')
@@ -254,27 +216,42 @@ export function AgentInstallGuide({
     }
   }
 
-  async function copy(text: string, id: string) {
+  function pickAgent(id: string) {
+    setAgentId(id)
+    setCopied(false)
+  }
+
+  async function copy() {
     try {
-      await navigator.clipboard.writeText(text)
-      setCopied(id)
-      setTimeout(() => setCopied(null), 1600)
+      await navigator.clipboard.writeText(command)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1600)
     } catch {
       /* clipboard blocked — non-fatal */
     }
   }
 
+  // A copy made by selecting the masked command by hand gets the real key, so
+  // a hand-copied command works exactly like the button's.
+  function copySelection(event: ClipboardEvent<HTMLPreElement>) {
+    if (!key || revealed) return
+    const selected = window.getSelection()?.toString() ?? ''
+    if (!selected.includes(masked)) return
+    event.preventDefault()
+    event.clipboardData.setData('text/plain', selected.split(masked).join(key))
+  }
+
   return (
     <ol className="min-w-0">
-      {/* 1 — Key mint gate. Everything below is inert until this runs. */}
-      <Step n={1} title="Generate a scoped key" done={keyReady}>
+      {/* 1 — Key mint gate. The command below stays inert until this runs. */}
+      <Step n={1} title="Generate a scoped key" done={!!key}>
         <div className="flex flex-col gap-3 rounded-[10px] border border-white/[0.08] bg-[#0f1012] px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0">
             <p className="text-[13px] font-medium text-zinc-100">
               {key ? 'Key ready' : 'One key for this project, scoped and revocable'}
             </p>
             <p className="mt-0.5 text-[12.5px] text-zinc-500">
-              {key ? 'It is baked into everything below. Revoke it any time from the list.' : 'Never a root key. It can request a destructive change, never approve one.'}
+              {key ? 'It is in the command below. Revoke it any time from the list.' : 'Never a root key. It can request a destructive change, never approve one.'}
             </p>
           </div>
           <KitButton
@@ -289,112 +266,84 @@ export function AgentInstallGuide({
         {mintError && <p role="alert" className="mt-2 text-[12.5px] text-rose-300">{mintError}</p>}
       </Step>
 
-      {/* 2 — Paste into your agent. It installs and verifies itself. */}
-      <Step n={2} title="Paste into your agent" hint="It registers the server for your next conversation and keeps working in this one.">
+      {/* 2 — One command for the chosen agent, and the one line after it. */}
+      <Step n={2} title="Add Backenly to your agent" last>
         <CodeSurface
-          label="prompt"
-          onCopy={() => copy(quickStartPrompt(projectId, effectiveKey), 'quickstart')}
-          copied={copied === 'quickstart'}
-          disabled={!keyReady}
-        >
-          <PromptText text={quickStartPrompt(projectId, effectiveKey)} />
-        </CodeSurface>
-      </Step>
-
-      {/* 3 — Manual install: pick a transport, pick an agent, get its command. */}
-      <Step n={3} title="Or install manually" last>
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <Segmented<Transport>
-            label="Transport"
-            value={transport}
-            onChange={setTransport}
-            options={[
-              { value: 'local', label: 'Local (npx)' },
-              { value: 'remote', label: 'Remote URL' },
-            ]}
-          />
-          <p className="text-[12.5px] text-zinc-500">
-            {transport === 'local'
-              ? 'Runs the npm package on your machine. Works in every host.'
-              : 'Your agent connects straight to Backenly. Nothing to install.'}
-          </p>
-        </div>
-
-        <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3" role="radiogroup" aria-label="Coding agent">
-          {AGENTS.map((a) => {
-            const Icon = AGENT_ICON[a.id] ?? GenericAgentIcon
-            const active = agentId === a.id
-            return (
-              <button
-                key={a.id}
-                type="button"
-                role="radio"
-                aria-checked={active}
-                onClick={() => setAgentId(a.id)}
-                className={`flex h-[42px] items-center gap-2.5 rounded-[8px] border px-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300/60 ${
-                  active
-                    ? 'border-white/[0.18] bg-white/[0.07]'
-                    : 'border-white/[0.08] bg-[#0f1012] hover:border-white/[0.14]'
-                }`}
-              >
-                <Icon size={17} />
-                <span className={`truncate text-[13px] font-medium ${active ? 'text-zinc-50' : 'text-zinc-400'}`}>{a.name}</span>
-              </button>
-            )
-          })}
-        </div>
-        {downgraded && agent && (
-          <p className="mt-2 text-[12.5px] text-amber-200/90">
-            {agent.name} loads MCP servers over the local package only, so that command is shown.
-          </p>
-        )}
-        {agent && variant && (
-          <div className="mt-3 space-y-3">
-            <CodeSurface
-              label={variant.label}
-              onCopy={() => copy(command, agent.id)}
-              copied={copied === agent.id}
-              disabled={!keyReady}
+          bar={<AgentTabs value={agent.id} onChange={pickAgent} />}
+          actions={
+            <button
+              type="button"
+              onClick={() => setRevealed((r) => !r)}
+              disabled={!key}
+              aria-label={revealed ? 'Hide key' : 'Show key'}
+              title={revealed ? 'Hide key' : 'Show key'}
+              className="inline-flex h-[26px] w-[26px] items-center justify-center rounded-[6px] text-zinc-400 transition-colors hover:bg-white/[0.07] hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300/60 disabled:cursor-not-allowed disabled:opacity-40"
             >
-              {variant.kind === 'json' ? <JsonText text={command} /> : <CliText text={command} />}
-            </CodeSurface>
-            {variant.note && <p className="text-[12.5px] leading-[19px] text-zinc-500">{variant.note}</p>}
-            <RestartNotice agentName={agent.name} hint={RESTART_HINT[agent.id]} />
-          </div>
-        )}
+              {revealed ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+            </button>
+          }
+          onCopy={copy}
+          copied={copied}
+          disabled={!key}
+          onSelectionCopy={copySelection}
+          footer={
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+              <p className="min-w-0 text-[12.5px] leading-[18px] text-zinc-500 [&_code]:font-mono [&_code]:text-[12px] [&_code]:text-zinc-300">
+                {variant.next}
+              </p>
+              <Segmented<Transport>
+                size="sm"
+                label="Transport"
+                className="self-start sm:self-auto"
+                value={transport}
+                onChange={setTransport}
+                options={[
+                  { value: 'local', label: 'Local', title: 'Runs the npm package on your machine. Works in every host.' },
+                  { value: 'remote', label: 'Remote', title: 'Your agent connects straight to Backenly. Nothing to install.' },
+                ]}
+              />
+            </div>
+          }
+        >
+          {variant.kind === 'json' ? <JsonText text={shown} /> : <CliText text={shown} />}
+        </CodeSurface>
       </Step>
     </ol>
   )
 }
 
 /**
- * When the tools appear, per host. Every MCP host reads its server config when
- * a session starts, so the command above has no effect on a conversation that
- * is already open. That is the most common "Backenly doesn't work" report and
- * it is never a Backenly fault, which is why it sits next to the command rather
- * than in docs somebody already skipped.
- *
- * Each hint names the cheapest real action for that host. For Claude Code that
- * is a new conversation, not a window reload: its docs say an added server
- * takes effect in conversations started afterwards, and `claude --continue`
- * starts one that keeps the history. Running the command BEFORE opening the
- * agent avoids the wait entirely, and the CLI covers the gap when it cannot be.
+ * The agent picker that heads the command card: one option per host, brand
+ * mark and name. Exactly one host's command is on screen at a time — nobody
+ * installs into five editors at once.
  */
-const RESTART_HINT: Record<string, string> = {
-  'claude-code': 'Open a new Claude Code conversation (a new tab in VS Code), or in a terminal run /exit and then `claude --continue` to keep this conversation. /mcp lists backenly when it worked.',
-  cursor: 'Reload Window (Ctrl/Cmd+Shift+P), then check Settings → MCP for a green backenly entry.',
-  cline: 'Reload Window (Ctrl/Cmd+Shift+P), then reopen the Cline panel and check its MCP Servers list.',
-  codex: 'Quit and relaunch the Codex CLI.',
-  other: 'Restart the host process. MCP config is read when a session starts.',
-}
-
-function RestartNotice({ agentName, hint }: { agentName: string; hint?: string }) {
+function AgentTabs({ value, onChange }: { value: string; onChange: (id: string) => void }) {
   return (
-    <KitNote tone="warn" icon={RefreshCw} title={`Run this before you open ${agentName}`}>
-      Servers connect when a session starts, so a conversation that is already open will not see the tools.{' '}
-      {hint ?? RESTART_HINT.other} Until then, the same tools work from the shell:{' '}
-      <code>npx -y @backenly/cli@latest call &lt;tool&gt;</code>.
-    </KitNote>
+    <div role="radiogroup" aria-label="Coding agent" className="scrollbar-hide flex overflow-x-auto">
+      {AGENTS.map((a) => {
+        const Icon = AGENT_ICON[a.id] ?? GenericAgentIcon
+        const active = a.id === value
+        return (
+          <button
+            key={a.id}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            onClick={() => onChange(a.id)}
+            className={`group relative flex h-[40px] flex-shrink-0 items-center gap-1.5 px-2.5 text-[13px] font-medium transition-colors first:pl-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-300/60 ${
+              active ? 'text-zinc-50' : 'text-zinc-500 hover:text-zinc-200'
+            }`}
+          >
+            <Icon size={14} className={active ? '' : 'opacity-60 transition-opacity group-hover:opacity-100'} />
+            {a.name}
+            <span
+              aria-hidden
+              className={`absolute inset-x-2.5 bottom-0 h-[1.5px] rounded-full group-first:left-4 ${active ? 'bg-zinc-100' : 'bg-transparent'}`}
+            />
+          </button>
+        )
+      })}
+    </div>
   )
 }
 
@@ -405,14 +354,12 @@ function RestartNotice({ agentName, hint }: { agentName: string; hint?: string }
 function Step({
   n,
   title,
-  hint,
   done = false,
   last = false,
   children,
 }: {
   n: number
   title: string
-  hint?: string
   done?: boolean
   last?: boolean
   children: React.ReactNode
@@ -433,8 +380,7 @@ function Step({
           <span className="sr-only">Step {n}: </span>
           {title}
         </h3>
-        {hint && <p className="mb-3 mt-0.5 text-[13px] text-zinc-500">{hint}</p>}
-        <div className={hint ? '' : 'mt-3'}>{children}</div>
+        <div className="mt-3">{children}</div>
       </div>
     </li>
   )
