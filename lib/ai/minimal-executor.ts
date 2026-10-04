@@ -3842,14 +3842,33 @@ async function addColumnWithConstraints(
 }
 
 /**
+ * Where a schema handler writes.
+ *
+ * Omitted: the project's main schema, with every side effect the handler has
+ * always had. `targetSchema` set: a preview branch's schema. The handler then
+ * issues the SAME DDL into that schema, so a branch's tables come out exactly
+ * the shape main's will when the change is merged, and does nothing keyed by
+ * the project: no metadata rows, intent ledger, realtime, buckets, generated
+ * endpoints, or main-schema FK repair and RLS. Those belong to main and happen
+ * when the merge replays the change there. Only executeBranchSchemaAction
+ * passes a target, after checking the schema is an active branch of this
+ * project.
+ */
+interface SchemaTarget {
+  targetSchema?: string
+}
+
+/**
  * REAL BACKEND CALL: Create Table
  * DIRECT DATABASE ACCESS (bypasses HTTP layer for server-to-server calls)
  */
 async function executeCreateTable(
   params: any,
   projectId: string,
-  apiKey?: string
+  apiKey?: string,
+  target: SchemaTarget = {},
 ): Promise<ExecutionResult> {
+  const branchMode = !!target.targetSchema
   console.log('[AI Executor] Creating table:', params.tableName)
   console.log('[AI Executor] Params:', JSON.stringify(params, null, 2))
   
@@ -3941,21 +3960,24 @@ async function executeCreateTable(
   // sat in the database as INTEGER from May to July with every probe green.
   // Recorded from the request and never reconciled from the catalog: a ledger
   // that self-heals to match reality can never detect drift.
-  try {
-    const { recordSchemaIntent } = await import('@/lib/autonomy/intent-conformance')
-    await recordSchemaIntent(projectId, tableName, columns ?? [], 'create_table')
-  } catch (intentErr: any) {
-    console.error('[IntentLedger] record failed (non-fatal):', intentErr?.message)
+  // The ledger describes MAIN; a branch's request is recorded when it is merged.
+  if (!branchMode) {
+    try {
+      const { recordSchemaIntent } = await import('@/lib/autonomy/intent-conformance')
+      await recordSchemaIntent(projectId, tableName, columns ?? [], 'create_table')
+    } catch (intentErr: any) {
+      console.error('[IntentLedger] record failed (non-fatal):', intentErr?.message)
+    }
   }
-  
+
   try {
     // Import Prisma and database utility functions
     const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
-    
-    // Get workspace schema
-    const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
-    
+
+    // Get workspace schema (or the preview branch's; see SchemaTarget)
+    const postgresSchema = target.targetSchema ?? getWorkspaceDatabaseNames(projectId).postgresSchema
+
     console.log(`🔌 [AI Executor] Creating table in schema: ${postgresSchema}...`)
 
     // ── Build full CREATE TABLE with ALL columns upfront ─────────────────────
@@ -4237,6 +4259,21 @@ async function executeCreateTable(
         console.log(`📑 [AI Executor] Index created: ${indexName}`)
       } catch (idxErr: any) {
         console.warn(`[AI Executor] Index create failed for ${col} (non-fatal):`, idxErr?.message)
+      }
+    }
+
+    // ── A preview branch stops here ────────────────────────────────────────────
+    // The table, its CHECK and UNIQUE constraints, the updatedAt trigger and the
+    // indexes above are the DDL main will get, issued into the branch schema.
+    // Everything below is keyed by the project (metadata, realtime, buckets,
+    // foreign keys across main, auto-RLS, generated endpoints) and happens on
+    // main when the merge replays this statement. Foreign keys are not enforced
+    // on a branch, matching how a branch is cloned (lib/branches/engine.ts).
+    if (branchMode) {
+      return {
+        success: true,
+        message: `✅ Created table "${tableName}" on the branch (${columnDefs.length} columns)`,
+        data: { tableName, schema: postgresSchema, columns: columnDefs.length },
       }
     }
 
@@ -5508,8 +5545,10 @@ export async function GET(req: NextRequest, { params }: { params: { projectId: s
 async function executeAddColumn(
   params: any,
   projectId: string,
-  apiKey?: string
+  apiKey?: string,
+  target: SchemaTarget = {},
 ): Promise<ExecutionResult> {
+  const branchMode = !!target.targetSchema
   console.log('[AI Executor] Adding column:', params)
 
   // Support both single column (columnName/columnType) and multi-column (columns array)
@@ -5531,7 +5570,7 @@ async function executeAddColumn(
   try {
     const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
-    const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
+    const postgresSchema = target.targetSchema ?? getWorkspaceDatabaseNames(projectId).postgresSchema
 
     // ── REAL DB CHECK: does the table actually exist in PostgreSQL? ──────────
     const tableCheck = await prisma.$queryRawUnsafe<{ exists: boolean }[]>(
@@ -5543,6 +5582,12 @@ async function executeAddColumn(
       tableName,
     )
     const tableExistsInDB = tableCheck[0]?.exists === true
+
+    // On a branch a missing table is an error, not something to create: the
+    // auto-create below writes main's metadata, and a typo must not become a table.
+    if (!tableExistsInDB && branchMode) {
+      return { success: false, message: `There is no table "${tableName}" on this branch.`, code: 'TABLE_NOT_FOUND' } as ExecutionResult
+    }
 
     if (!tableExistsInDB) {
       // Auto-create the table with just an id column so we can add columns to it
@@ -5624,7 +5669,7 @@ async function executeAddColumn(
 
     const addedCols: string[] = []
     for (const col of colsToAdd) {
-      await addColumnToTable(tableName, { name: col.name, type: col.type }, projectId, apiKey)
+      await addColumnToTable(tableName, { name: col.name, type: col.type }, projectId, apiKey, target)
       addedCols.push(col.name)
     }
 
@@ -5866,13 +5911,14 @@ async function addColumnToTable(
   tableName: string,
   column: { name: string; type: string },
   projectId: string,
-  apiKey?: string
+  apiKey?: string,
+  target: SchemaTarget = {},
 ): Promise<void> {
   try {
     const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
-    
-    const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
+
+    const postgresSchema = target.targetSchema ?? getWorkspaceDatabaseNames(projectId).postgresSchema
     
     // Check if column already exists
     const columnsQuery = `
@@ -8326,7 +8372,7 @@ async function executeValidateConstraint(params: any, projectId: string): Promis
   }
 }
 
-async function executeCreateIndex(params: any, projectId: string): Promise<ExecutionResult> {
+async function executeCreateIndex(params: any, projectId: string, target: SchemaTarget = {}): Promise<ExecutionResult> {
   const { tableName } = params
   // Accept { columnName } (autonomy buildFixAction) or { columns: [...] } (chat,
   // MCP, migration parser). A param-name drift here must never silently no-op.
@@ -8389,7 +8435,7 @@ async function executeCreateIndex(params: any, projectId: string): Promise<Execu
   try {
     const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
-    const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
+    const postgresSchema = target.targetSchema ?? getWorkspaceDatabaseNames(projectId).postgresSchema
 
     const idxName = params.indexName || defaultIndexName(tableName, columns, unique)
     const colList = columns.map((c) => `"${c}"`).join(', ')
@@ -8617,7 +8663,7 @@ export function indexDefColumns(indexdef: string): string[] {
 /**
  * DATABASE: Rename Column
  */
-async function executeRenameColumn(params: any, projectId: string): Promise<ExecutionResult> {
+async function executeRenameColumn(params: any, projectId: string, target: SchemaTarget = {}): Promise<ExecutionResult> {
   const { tableName, oldName, newName } = params
   if (!tableName || !oldName || !newName) {
     return { success: false, message: 'tableName, oldName and newName are required', error: 'Missing parameters' }
@@ -8625,7 +8671,7 @@ async function executeRenameColumn(params: any, projectId: string): Promise<Exec
   try {
     const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
-    const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
+    const postgresSchema = target.targetSchema ?? getWorkspaceDatabaseNames(projectId).postgresSchema
     const safe = (s: string) => s.replace(/[^a-z0-9_]/gi, '')
     await prisma.$executeRawUnsafe(
       `ALTER TABLE "${postgresSchema}"."${safe(tableName)}" RENAME COLUMN "${safe(oldName)}" TO "${safe(newName)}"`
@@ -8678,7 +8724,48 @@ async function executeRenameColumn(params: any, projectId: string): Promise<Exec
  * reporting success. `NOT NULL` is also a real `ALTER COLUMN SET NOT NULL` now,
  * not a CHECK impersonating one.
  */
-async function executeAddConstraint(params: any, projectId: string): Promise<ExecutionResult> {
+/**
+ * Apply one schema action to a PREVIEW BRANCH of this project.
+ *
+ * The branch migration path (lib/branches/migrate.ts) calls this for each
+ * action apply_migration's parser produced. It runs the same handler main
+ * would, so the branch's schema comes out exactly as main's will after the
+ * merge replays the statement, but with the handler in branch mode (see
+ * SchemaTarget): DDL into the branch schema, nothing keyed by the project.
+ *
+ * Only the five actions the parser emits are accepted. Anything else is
+ * refused rather than run against main by the default path.
+ */
+export async function executeBranchSchemaAction(
+  action: { action: string; params: any },
+  projectId: string,
+  branchSchema: string,
+): Promise<ExecutionResult> {
+  const { profileForBranchSchema } = await import('@/lib/postgrest/gateway')
+  // Throws unless the schema is `workspace_<projectId>_br_<name>`: a branch of
+  // THIS project, never main and never another tenant's.
+  const targetSchema = profileForBranchSchema(projectId, branchSchema)
+  if (!targetSchema.includes('_br_')) {
+    return { success: false, message: 'Refusing to apply a branch change outside a branch schema.', code: 'NOT_A_BRANCH' } as ExecutionResult
+  }
+  const target: SchemaTarget = { targetSchema }
+  switch (action.action) {
+    case 'CREATE_TABLE':   return executeCreateTable(action.params, projectId, undefined, target)
+    case 'ADD_COLUMN':     return executeAddColumn(action.params, projectId, undefined, target)
+    case 'CREATE_INDEX':   return executeCreateIndex(action.params, projectId, target)
+    case 'RENAME_COLUMN':  return executeRenameColumn(action.params, projectId, target)
+    case 'ADD_CONSTRAINT': return executeAddConstraint(action.params, projectId, target)
+    default:
+      return {
+        success: false,
+        message: `${action.action} cannot be applied to a branch.`,
+        code: 'UNSUPPORTED_ON_BRANCH',
+      } as ExecutionResult
+  }
+}
+
+async function executeAddConstraint(params: any, projectId: string, schemaTarget: SchemaTarget = {}): Promise<ExecutionResult> {
+  const branchMode = !!schemaTarget.targetSchema
   const { tableName, constraintName, constraintDefinition, referencedTable } = params
   const columnName = params.columnName ? String(params.columnName).trim() : ''
   // `expression` is the declared contract; `constraintDefinition` is the older
@@ -8700,6 +8787,18 @@ async function executeAddConstraint(params: any, projectId: string): Promise<Exe
     // explicit referencedTable, then the expression, then inference.
     const fromExpr = /^([A-Za-z_][A-Za-z0-9_$]*)\s*\(/.exec(expression)?.[1]
     const target = referencedTable || fromExpr
+    // fk-repair works on main's catalog. A branch does not enforce foreign keys
+    // (it is cloned without them), so the statement is recorded and the key is
+    // added when the merge replays it on main. Said, not silently skipped.
+    if (branchMode) {
+      return {
+        success: true,
+        message:
+          `Recorded foreign key ${tableName}.${columnName}${target ? ` → ${target}` : ''}; it is not enforced on a ` +
+          `branch and is added to production when the branch is merged.`,
+        data: { tableName, columnName, referencedTable: target ?? null, enforcedOnBranch: false },
+      }
+    }
     const { repairForeignKeyColumn } = await import('./fk-repair')
     const r = await repairForeignKeyColumn(projectId, tableName, columnName, target)
     return r.success
@@ -8770,7 +8869,7 @@ async function executeAddConstraint(params: any, projectId: string): Promise<Exe
   try {
     const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
-    const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
+    const postgresSchema = schemaTarget.targetSchema ?? getWorkspaceDatabaseNames(projectId).postgresSchema
     const qualified = `"${postgresSchema}"."${tableName}"`
 
     // ── ALTER COLUMN forms: not constraints in the pg_constraint sense ───────
@@ -8904,6 +9003,7 @@ async function executeAddConstraint(params: any, projectId: string): Promise<Exe
         const idxResult = await executeCreateIndex(
           { tableName, columns, unique: true, ...(constraintName ? { indexName: constraintName } : {}) },
           projectId,
+          schemaTarget,
         )
         if (!idxResult.success) return idxResult
         return {

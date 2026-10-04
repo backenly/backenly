@@ -222,6 +222,9 @@ const DESTRUCTIVE_TOOLS = new Set<ToolName>([
   'delete_webhook',
   // DROP SCHEMA CASCADE on the branch — every experiment in it is gone.
   'discard_branch',
+  // Replays the branch's migrations onto PRODUCTION. Reviewing a change before
+  // it reaches production is what a branch is for, so a human approves it.
+  'merge_branch',
   // Affects end-users / data exposure
   'block_end_user',
   'remove_permission',
@@ -318,6 +321,13 @@ export interface ToolDispatchContext {
    * keeps parking destructive ops in the human Review Queue.
    */
   mcpOwnerConfirmed?: boolean
+  /**
+   * True when a coding agent is the caller: the MCP tool route, apply_migration
+   * on main, and brain runs on the MCP surface (backend_chat). The
+   * protected-production gate keys on it (lib/branches/protection.ts). A merge
+   * replay and any call a human approved run without it.
+   */
+  agentSurface?: boolean
   /**
    * In-turn ledger of tables this turn has CREATED. Used to block the LLM
    * from calling fix_backend(target='table', tableName=X) immediately after
@@ -1032,11 +1042,11 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     'List this project\'s preview branches with their status, schema name and creation time. Side-effect free.',
     {}),
   fn('diff_branch',
-    'Compare a preview branch against main: tables added/removed, columns added/removed, and type changes. Read this before merging so you know exactly what would land. Side-effect free.',
+    'What a preview branch would bring to production: the migrations applied on it, in order (exactly what a merge replays), the tables and columns they changed, and any table main has changed since the branch was cut (a conflict blocks the merge). Side-effect free.',
     { branchId: { type: 'string', description: 'The branch id from list_branches.' } },
     ['branchId']),
   fn('merge_branch',
-    'Merge a preview branch back into main through the governed path. NEW TABLES are applied via the same kernel a direct create uses (metadata, REST exposure, auto-RLS, reconciler all fire). Added columns, type changes and drops are NOT auto-applied — they come back as review items, because silently reshaping a live column is exactly what a branch exists to prevent. Call diff_branch first.',
+    'Merge a preview branch into PRODUCTION: its migrations are replayed onto main, in order, through the same governed path a direct apply_migration takes. Requires a human\'s approval, because it changes production. Refused while main has changed a table the migrations touch. On success the branch is closed and its schema dropped; its keys stop working. Call diff_branch first.',
     { branchId: { type: 'string', description: 'The branch id from list_branches.' } },
     ['branchId']),
   fn('discard_branch',
@@ -1867,6 +1877,15 @@ export async function dispatchTool(
   const preflight = preflightValidate(name, args, ctx)
   if (preflight) return preflight
 
+  // ── Protected production: an agent changes the schema on a branch ─────────
+  if (ctx.agentSurface) {
+    const { GATED_SCHEMA_TOOLS, isProductionProtected, branchRequired } = await import('@/lib/branches/protection')
+    if (GATED_SCHEMA_TOOLS.has(name) && (await isProductionProtected(ctx.projectId))) {
+      const refusal = branchRequired(`${name}${args.tableName ? ` on "${String(args.tableName)}"` : ''}`)
+      return { ok: false, summary: `${refusal.error} ${refusal.hint}`, code: refusal.code }
+    }
+  }
+
   ctx.onToolEvent?.({ phase: 'start', tool: name as ToolName, title })
 
   const finalize = (r: ToolResult): ToolResult => {
@@ -2237,7 +2256,8 @@ export async function dispatchTool(
         // mergeBranch re-shapes its early return).
         const res = await engine.diffBranch(ctx.projectId, branchId)
         if (!res.ok) return finalize({ ok: false, summary: (res as { ok: false; error: string }).error })
-        const d: any = (res as Extract<typeof res, { ok: true }>).diff
+        const full = res as Extract<typeof res, { ok: true }>
+        const d: any = full.diff
         const parts: string[] = []
         if (d.addedTables?.length) parts.push(`Tables added: ${d.addedTables.map((t: any) => t.tableName).join(', ')}`)
         if (d.droppedTables?.length) parts.push(`Tables dropped: ${d.droppedTables.join(', ')}`)
@@ -2246,16 +2266,24 @@ export async function dispatchTool(
           if (a.droppedColumns?.length) parts.push(`${a.table}: -${a.droppedColumns.join(', -')}`)
           for (const tc of a.typeChanged ?? []) parts.push(`${a.table}.${tc.column}: ${tc.from} → ${tc.to}`)
         }
+        const migrations = full.migrations.length
+          ? `\n**A merge replays ${full.migrations.length} statement(s) onto production:**\n  ${full.migrations.map((s, i) => `${i + 1}. ${s}`).join('\n  ')}`
+          : full.recorded ? '\nNo migrations were applied on this branch, so a merge changes nothing.' : ''
+        const conflicts = full.conflicts.length
+          ? `\n⚠️ Main has changed ${full.conflicts.join(', ')} since this branch was cut, and the migrations touch ${full.conflicts.length === 1 ? 'it' : 'them'}: the merge will be refused. Create a fresh branch and reapply.`
+          : ''
         return finalize({
           ok: true,
-          summary: parts.length ? `**${res.branch} vs main:**\n  • ${parts.join('\n  • ')}` : `"${res.branch}" is identical to main.`,
-          data: res.diff,
+          summary:
+            (parts.length ? `**${full.branch}, what changed:**\n  • ${parts.join('\n  • ')}` : `"${full.branch}" has no schema changes.`) +
+            migrations + conflicts,
+          data: { diff: full.diff, migrations: full.migrations, conflicts: full.conflicts, mainChanged: full.mainChanged },
         })
       }
 
       if (name === 'merge_branch') {
         const res = await engine.mergeBranch(ctx.projectId, ctx.userId ?? '', branchId)
-        if (!res.ok) return finalize({ ok: false, summary: (res as any).error })
+        if (!res.ok) return finalize({ ok: false, summary: (res as any).error, code: (res as any).code })
         const r: any = res
         const applied = r.applied?.length ? `Applied: ${r.applied.join('; ')}.` : 'Nothing was applied automatically.'
         const review = r.review?.length

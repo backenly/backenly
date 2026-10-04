@@ -532,9 +532,13 @@ export interface BackendMetadata {
   functions: { count: number; names: string[] }
 }
 
-/** One-call structured view of the entire backend. */
-export async function getBackendMetadata(projectId: string): Promise<BackendMetadata> {
-  const schema = schemaFor(projectId)
+/**
+ * One-call structured view of the entire backend. With a branch scope, the
+ * tables and relationships are the branch's; auth, storage, realtime and
+ * functions stay the project's, since none of them is branch-scoped.
+ */
+export async function getBackendMetadata(projectId: string, scope: IntrospectionScope = {}): Promise<BackendMetadata> {
+  const schema = schemaFor(projectId, scope)
 
   const [tableRows, colCounts, policyCounts, rlsRows, fkRows] = await Promise.all([
     prisma.$queryRawUnsafe<Array<{ table_name: string }>>(

@@ -81,6 +81,9 @@ beforeAll(async () => {
   })).id
   const project = await createProvisionedProject({ name: 'mcp-acceptance-cases', userId: ownerId })
   projectId = project.id
+  // New Cloud projects start protected; these cases exercise the main path, as
+  // an owner who turned protection off does. See branch-migrations.spec.ts.
+  await prisma.project.update({ where: { id: projectId }, data: { protectedProduction: false } })
   schema = project.postgresSchema
   RW = (await mint(false)).raw
   RO = (await mint(true)).raw

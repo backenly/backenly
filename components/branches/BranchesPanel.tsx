@@ -84,12 +84,42 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
   const [includeData, setIncludeData] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [openDiff, setOpenDiff] = useState<{ id: string; name: string; diff: SchemaDiff } | null>(null)
+  const [openDiff, setOpenDiff] = useState<{ id: string; name: string; diff: SchemaDiff; migrations: string[]; conflicts: string[] } | null>(null)
   const [mergeOutcome, setMergeOutcome] = useState<{ name: string; result: MergeResult } | null>(null)
   const [confirmDiscard, setConfirmDiscard] = useState<Branch | null>(null)
+  const [confirmMerge, setConfirmMerge] = useState<{ branch: Branch; migrations: string[]; conflicts: string[] } | null>(null)
   const [openPreview, setOpenPreview] = useState<string | null>(null)
+  const [protectedProduction, setProtectedProduction] = useState<boolean | null>(null)
+  const [savingProtection, setSavingProtection] = useState(false)
 
   const base = `/api/projects/${projectId}/branches`
+
+  useEffect(() => {
+    let cancelled = false
+    fetch(`/api/projects/${projectId}/protection`, { credentials: 'include' })
+      .then((r) => r.json())
+      .then((j) => { if (!cancelled && j.success) setProtectedProduction(!!j.protectedProduction) })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [projectId])
+
+  const saveProtection = async (next: boolean) => {
+    setSavingProtection(true); setError(null)
+    try {
+      const res = await fetch(`/api/projects/${projectId}/protection`, {
+        method: 'PUT', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ protectedProduction: next }),
+      })
+      const j = await res.json()
+      if (!res.ok || !j.success) { setError(j.error || 'Could not change production protection.'); return }
+      setProtectedProduction(!!j.protectedProduction)
+    } catch {
+      setError('Network error changing production protection.')
+    } finally {
+      setSavingProtection(false)
+    }
+  }
 
   const load = useCallback(async () => {
     try {
@@ -133,7 +163,21 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
       const res = await fetch(`${base}/${b.id}`, { credentials: 'include' })
       const j = await res.json()
       if (!res.ok || !j.success) { setError(j.error || 'Could not diff branch.'); return }
-      setOpenDiff({ id: b.id, name: b.name, diff: j.diff })
+      setOpenDiff({ id: b.id, name: b.name, diff: j.diff, migrations: j.migrations ?? [], conflicts: j.conflicts ?? [] })
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  // Merging changes production, so the human sees exactly which statements
+  // will be applied before confirming.
+  const askMerge = async (b: Branch) => {
+    setBusy(b.id); setError(null)
+    try {
+      const res = await fetch(`${base}/${b.id}`, { credentials: 'include' })
+      const j = await res.json()
+      if (!res.ok || !j.success) { setError(j.error || 'Could not read the branch.'); return }
+      setConfirmMerge({ branch: b, migrations: j.migrations ?? [], conflicts: j.conflicts ?? [] })
     } finally {
       setBusy(null)
     }
@@ -147,6 +191,7 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
       if (!res.ok || !j.success) { setError(j.error || 'Merge failed.'); return }
       setMergeOutcome({ name: b.name, result: j })
       setOpenDiff(null)
+      if (openPreview === b.id) setOpenPreview(null)
       await load()
     } finally {
       setBusy(null)
@@ -174,9 +219,29 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
 
   return (
     <div className="space-y-4">
+      {protectedProduction !== null && (
+        <label className="flex cursor-pointer items-start gap-3 rounded-[10px] border border-white/[0.07] bg-white/[0.02] px-4 py-3.5">
+          <input
+            type="checkbox"
+            checked={protectedProduction}
+            onChange={(e) => saveProtection(e.target.checked)}
+            disabled={savingProtection}
+            className="mt-[3px] h-4 w-4 flex-shrink-0 accent-violet-400"
+          />
+          <span className="min-w-0">
+            <span className="block text-[13px] font-medium text-zinc-100">Protected production</span>
+            <span className="mt-0.5 block text-[12.5px] leading-[18px] text-zinc-500">
+              {protectedProduction
+                ? 'Coding agents change the schema on a preview branch, and production gets it only through a merge you approve. Your own changes in the dashboard are not affected.'
+                : 'Off: coding agents can change production\'s schema directly. Turn on to require a branch and your approval for every agent schema change.'}
+            </span>
+          </span>
+        </label>
+      )}
+
       <SettingsCard
         title="New preview branch"
-        description="A copy of this project's schema in its own isolated space, with the same row security and its own id sequences. It starts empty. An API key bound to the branch reads and writes it through the data API, while production keeps serving."
+        description="A copy of this project's schema in its own isolated space, with the same row security and its own id sequences. It starts empty. Your agent changes its schema with apply_migration and its branchId, and tests against its preview endpoint while production keeps serving. Merging replays those changes onto production."
         onSubmit={create}
         footer={<span className="tabular-nums">{active.length} of 5 branches active</span>}
         actions={
@@ -265,14 +330,14 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
           <KitCardHeader
             title={
               <span>
-                <span className="font-mono">{openDiff.name}</span> compared with production
+                What changed on <span className="font-mono">{openDiff.name}</span>
               </span>
             }
             actions={<IconButton icon={X} label="Close the comparison" onClick={() => setOpenDiff(null)} />}
           />
           <KitCardBody>
             {openDiff.diff.identical ? (
-              <p className="text-[13px] text-zinc-500">No differences. This branch matches production.</p>
+              <p className="text-[13px] text-zinc-500">No schema changes on this branch.</p>
             ) : (
               <div className="space-y-4">
                 {openDiff.diff.addedTables.length > 0 && (
@@ -323,11 +388,25 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
                     </div>
                   </div>
                 )}
-                <p className="max-w-[72ch] text-[12.5px] leading-[19px] text-zinc-500">
-                  New tables merge automatically through the governed kernel. Column and type changes come back as
-                  review items in the approval path, never as silent DDL.
-                </p>
               </div>
+            )}
+            {openDiff.migrations.length > 0 && (
+              <div className="mt-4">
+                <SectionLabel>A merge applies these to production, in order</SectionLabel>
+                <ol className="mt-1.5 space-y-1">
+                  {openDiff.migrations.map((m, i) => (
+                    <li key={i} className="font-mono text-[12px] leading-[18px] text-zinc-300">
+                      {i + 1}. {m}
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            )}
+            {openDiff.conflicts.length > 0 && (
+              <KitNote tone="warn" icon={AlertTriangle} title="Main changed since this branch was cut">
+                Production has changed {openDiff.conflicts.join(', ')}, which this branch&apos;s migrations also touch, so
+                the merge will be refused. Create a fresh branch from production and apply the change there.
+              </KitNote>
             )}
           </KitCardBody>
         </KitCard>
@@ -377,7 +456,7 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
                   <KitButton size="sm" variant="ghost" onClick={() => viewDiff(b)} loading={busy === b.id && !confirmDiscard}>
                     Compare
                   </KitButton>
-                  <KitButton size="sm" onClick={() => merge(b)} disabled={busy === b.id}>
+                  <KitButton size="sm" onClick={() => askMerge(b)} disabled={busy === b.id}>
                     Merge
                   </KitButton>
                   <OverflowMenu
@@ -432,6 +511,39 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
           setConfirmDiscard(null)
         }}
       />
+
+      <KitConfirmDialog
+        open={!!confirmMerge}
+        busy={!!confirmMerge && busy === confirmMerge.branch.id}
+        title={confirmMerge ? `Merge ${confirmMerge.branch.name} into production?` : 'Merge branch'}
+        description={
+          confirmMerge && confirmMerge.conflicts.length > 0
+            ? `Production has changed ${confirmMerge.conflicts.join(', ')} since this branch was cut, so the merge will be refused. Create a fresh branch instead.`
+            : confirmMerge && confirmMerge.migrations.length === 0
+              ? 'This branch has no schema changes. Merging closes it and drops its schema; production is not changed.'
+              : 'These statements are applied to production, in order, through the governed path. The branch is then closed, its schema dropped and its keys stop working.'
+        }
+        confirmLabel={confirmMerge && confirmMerge.conflicts.length > 0 ? 'Close' : 'Merge into production'}
+        onCancel={() => {
+          if (!busy) setConfirmMerge(null)
+        }}
+        onConfirm={async () => {
+          if (!confirmMerge) return
+          // A conflicting merge is refused by the server; there is nothing to send.
+          if (confirmMerge.conflicts.length === 0) await merge(confirmMerge.branch)
+          setConfirmMerge(null)
+        }}
+      >
+        {confirmMerge && confirmMerge.migrations.length > 0 && (
+          <ol className="max-h-[240px] space-y-1 overflow-auto rounded-[8px] border border-white/[0.07] bg-black/30 px-3.5 py-3">
+            {confirmMerge.migrations.map((m, i) => (
+              <li key={i} className="font-mono text-[12px] leading-[18px] text-zinc-300">
+                {i + 1}. {m}
+              </li>
+            ))}
+          </ol>
+        )}
+      </KitConfirmDialog>
     </div>
   )
 }

@@ -2,17 +2,27 @@
 
 Index: https://backenly.com/llms.txt
 
-Preview branches, on Backenly Cloud: a copy of the project's schema in an isolated PostgreSQL schema, for testing an app against it while production keeps serving. Schema changes made with `apply_migration` and the other build tools still apply to the main schema, not to a branch.
+Preview branches, on Backenly Cloud: a copy of the project's schema in an isolated PostgreSQL schema where you build and test a change while production keeps serving. A merge, approved by a human, replays the change onto production.
 
 `branch { action }`:
 
 - `list`: every branch and its state.
 - `create`: a new branch, returned with its preview endpoint and a client key. It starts **empty**: the schema is copied with its row-level security and its own sequences, the rows are not, unless you pass `includeData: true`.
 - `connect`: another key for an active branch, with its preview endpoint. `serviceRole: true` issues a server-side key that bypasses row-level security on the branch only.
-- `diff`: what differs between the branch and the main schema.
-- `merge`: create the branch's new tables on the main schema. Added columns, type changes and drops come back as review items.
+- `diff`: the migrations applied on the branch, in order (exactly what a merge replays), what they changed, and any conflict with production.
+- `merge`: replay the branch's migrations onto production. **Waits for a human**: you get an approval id to poll with `check_approval`. Refused with `MERGE_CONFLICT` while production has changed a table the migrations touch. When it runs, the branch is closed and its schema dropped.
 
 Discarding a branch goes through `backend_chat` and waits for a human's approval.
+
+## Building on a branch
+
+1. `branch` `create` with a name. Keep the `branchId` and the preview key it returns.
+2. `apply_migration { sql, branchId }`. Same grammar and checks as on production, applied to the branch only; production is untouched. Each statement that applies is logged for the merge. Foreign keys are recorded but not enforced on a branch.
+3. Seed rows with `db_insert { table, row, branchId }`, or with the preview key over the data API.
+4. Test against the preview endpoint (below). Read the branch's schema with `read_backend_state { section: "schema", branchId }` and its rows with `db_query { table, branchId }`. `run_query` reads production only.
+5. `branch` `diff`, then `branch` `merge`, and tell your human it is waiting for their approval.
+
+On a project whose production is protected (the default for new Backenly Cloud projects), `apply_migration` without a `branchId`, and the schema tools inside `backend_chat`, are refused with `BRANCH_REQUIRED`: use the steps above.
 
 ## The preview endpoint
 

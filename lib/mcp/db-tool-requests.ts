@@ -24,6 +24,9 @@ import { z } from 'zod'
 
 const table = z.string().trim().min(1).max(63)
 const nonEmpty = (message: string) => z.record(z.unknown()).refine((r) => Object.keys(r).length > 0, message)
+// A preview branch to read or seed instead of main. Resolved on the caller's
+// project and only while active (lib/mcp/runtime-db.ts).
+const branchId = z.string().trim().min(1).max(64).optional()
 
 export const DB_TOOL_REQUESTS = {
   db_query: z.object({
@@ -32,19 +35,23 @@ export const DB_TOOL_REQUESTS = {
     limit: z.number().int().min(1).max(200).optional(),
     offset: z.number().int().min(0).optional(),
     orderBy: z.record(z.unknown()).optional(),
+    branchId,
   }),
   db_insert: z.object({
     table,
     row: nonEmpty('row must include at least one column'),
+    branchId,
   }),
   db_update: z.object({
     table,
     filter: nonEmpty('filter must be non-empty (refusing table-wide UPDATE)'),
     patch: nonEmpty('patch must include at least one column'),
+    branchId,
   }),
   db_delete: z.object({
     table,
     filter: nonEmpty('filter must be non-empty (refusing table-wide DELETE)'),
+    branchId,
   }),
 }
 

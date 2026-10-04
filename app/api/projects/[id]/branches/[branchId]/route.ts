@@ -3,9 +3,11 @@ export const dynamic = 'force-dynamic'
 /**
  * Preview branch operations.
  *
- * GET    /api/projects/[id]/branches/[branchId]        → schema diff vs main
- * POST   /api/projects/[id]/branches/[branchId]        → merge (additive auto,
- *                                                        the rest as review items)
+ * GET    /api/projects/[id]/branches/[branchId]        → what changed, the
+ *                                                        migrations a merge
+ *                                                        replays, conflicts
+ * POST   /api/projects/[id]/branches/[branchId]        → merge (replays the
+ *                                                        migrations onto main)
  * DELETE /api/projects/[id]/branches/[branchId]        → discard (drops the clone)
  *
  * Explicit Extract<> casts throughout — this tsconfig doesn't narrow boolean
@@ -37,15 +39,29 @@ export const GET = withProjectAccess(async (req: NextRequest, { projectId }) => 
     return NextResponse.json({ success: false, error: fail.error }, { status: 404 })
   }
   const ok = result as Extract<typeof result, { ok: true }>
-  return NextResponse.json({ success: true, branch: ok.branch, diff: ok.diff })
+  return NextResponse.json({
+    success: true,
+    branch: ok.branch,
+    diff: ok.diff,
+    migrations: ok.migrations,
+    conflicts: ok.conflicts,
+    mainChanged: ok.mainChanged,
+    recorded: ok.recorded,
+  })
 })
 
+// A human in the dashboard is the reviewer, so a merge here runs directly; an
+// agent's merge request over MCP waits in the Review Queue instead.
 export const POST = withProjectAccess(async (req: NextRequest, { user, projectId }) => {
   if (!isCloudEdition()) return cloudOnly404()
   const result = await mergeBranch(projectId, user.userId, branchIdFrom(req))
   if (!result.ok) {
-    const fail = result as Extract<typeof result, { ok: false }>
-    return NextResponse.json({ success: false, error: fail.error }, { status: 404 })
+    const fail = result as { ok: false; error: string; code?: string; applied?: string[]; remaining?: string[] }
+    const status = fail.code === 'MERGE_CONFLICT' ? 409 : fail.code === 'MERGE_FAILED' ? 400 : 404
+    return NextResponse.json(
+      { success: false, error: fail.error, code: fail.code, applied: fail.applied ?? [], remaining: fail.remaining ?? [] },
+      { status },
+    )
   }
   const ok = result as Extract<typeof result, { ok: true }>
   return NextResponse.json({

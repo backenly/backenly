@@ -108,6 +108,11 @@ export async function createProvisionedProject(input: ProvisionInput): Promise<P
         apiUrlDev: input.apiUrlDev ?? null,
         apiUrlStaging: input.apiUrlStaging ?? null,
         apiUrlProd: input.apiUrlProd ?? null,
+        // New Cloud projects start protected: a coding agent changes the schema
+        // on a preview branch and production gets it through a reviewed merge.
+        // Never on a self-hosted install, which has no branches to use instead.
+        // The owner can turn it off in Settings. lib/branches/protection.ts.
+        protectedProduction: currentEdition() === 'cloud',
       },
     })
     const graph = await tx.backendGraph.create({
