@@ -97,7 +97,7 @@ function configJson(value: unknown): string {
   )
 }
 
-/** Cursor + Cline local: stdio via command/args. No `type` field for stdio. */
+/** Cursor + Antigravity local: stdio via command/args. No `type` field for stdio. */
 function stdioJson(projectId: string, key: string): string {
   return configJson({ mcpServers: { backenly: { command: 'npx', args: NPX_ARGS(projectId, key) } } })
 }
@@ -108,22 +108,14 @@ function cursorRemoteJson(_projectId: string, key: string): string {
 }
 
 /**
- * Cline remote: MUST set `"type": "streamableHttp"` (camelCase, no hyphen).
- * Omit it and Cline falls back to the legacy SSE transport and 405s against our
- * Streamable-HTTP endpoint — the single most common Cline-remote failure.
+ * Antigravity remote: MUST be `serverUrl`, not `url`. Antigravity's schema has
+ * no `url` or `httpUrl`, so a Cursor-style block pasted here never connects
+ * (verified 2026-10 against GitHub's Antigravity install guide). The config
+ * lives in mcp_config.json, which Antigravity opens itself from Manage MCP
+ * Servers → View raw config; its path on disk has moved between releases.
  */
-function clineRemoteJson(_projectId: string, key: string): string {
-  return configJson({
-    mcpServers: {
-      backenly: {
-        url: REMOTE_URL,
-        type: 'streamableHttp',
-        headers: { 'x-api-key': key },
-        disabled: false,
-        autoApprove: [],
-      },
-    },
-  })
+function antigravityRemoteJson(_projectId: string, key: string): string {
+  return configJson({ mcpServers: { backenly: { serverUrl: REMOTE_URL, headers: { 'x-api-key': key } } } })
 }
 
 /**
@@ -136,6 +128,9 @@ function codexRemoteToml(_projectId: string, key: string): string {
 }
 
 const RUN_THEN_NEW_SESSION = 'Run it in a terminal, then start a new Claude Code session.'
+const ANTIGRAVITY_NEXT = (
+  <>Paste into <code>mcp_config.json</code> (Manage MCP Servers → View raw config), then restart Antigravity.</>
+)
 
 const AGENTS: Agent[] = [
   {
@@ -158,9 +153,9 @@ const AGENTS: Agent[] = [
     },
   },
   {
-    id: 'cline', name: 'Cline',
-    local: { kind: 'json', next: <>Paste into <code>cline_mcp_settings.json</code>, then reload the window.</>, build: stdioJson },
-    remote: { kind: 'json', next: <>Paste into <code>cline_mcp_settings.json</code>, then reload the window.</>, build: clineRemoteJson },
+    id: 'antigravity', name: 'Antigravity',
+    local: { kind: 'json', next: ANTIGRAVITY_NEXT, build: stdioJson },
+    remote: { kind: 'json', next: ANTIGRAVITY_NEXT, build: antigravityRemoteJson },
   },
   {
     id: 'other', name: 'Other',
@@ -316,6 +311,11 @@ export function AgentInstallGuide({
  * The agent picker that heads the command card: one option per host, brand
  * mark and name. Exactly one host's command is on screen at a time — nobody
  * installs into five editors at once.
+ *
+ * Five fit beside the copy button at the narrowest two-column width, and no
+ * more. Cline gave its place to Antigravity (2026-10); its config, including
+ * the `"type": "streamableHttp"` its remote entry needs, is in
+ * public/docs/agents/client-setup.md, and Other's command works there too.
  */
 function AgentTabs({ value, onChange }: { value: string; onChange: (id: string) => void }) {
   return (
@@ -330,7 +330,7 @@ function AgentTabs({ value, onChange }: { value: string; onChange: (id: string) 
             role="radio"
             aria-checked={active}
             onClick={() => onChange(a.id)}
-            className={`group relative flex h-[40px] flex-shrink-0 items-center gap-1.5 px-2.5 text-[13px] font-medium transition-colors first:pl-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-300/60 ${
+            className={`group relative flex h-[40px] flex-shrink-0 items-center gap-1 px-[6px] text-[13px] font-medium transition-colors first:pl-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-300/60 ${
               active ? 'text-zinc-50' : 'text-zinc-500 hover:text-zinc-200'
             }`}
           >
@@ -338,7 +338,7 @@ function AgentTabs({ value, onChange }: { value: string; onChange: (id: string) 
             {a.name}
             <span
               aria-hidden
-              className={`absolute inset-x-2.5 bottom-0 h-[1.5px] rounded-full group-first:left-4 ${active ? 'bg-zinc-100' : 'bg-transparent'}`}
+              className={`absolute inset-x-[6px] bottom-0 h-[1.5px] rounded-full group-first:left-4 ${active ? 'bg-zinc-100' : 'bg-transparent'}`}
             />
           </button>
         )

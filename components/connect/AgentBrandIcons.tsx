@@ -50,21 +50,17 @@ export const CodexIcon: FC<BrandIconProps> = ({ size = 18, className }) => (
   </svg>
 )
 
-/* Cline — the robot head. */
-export const ClineIcon: FC<BrandIconProps> = ({ size = 18, className }) => {
-  const c = '#C3C9D4'
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
-      <path d="M12 3.6 V5.6" stroke={c} strokeWidth="1.5" strokeLinecap="round" />
-      <circle cx="12" cy="3" r="1.05" fill={c} />
-      <rect x="4.3" y="6" width="15.4" height="12.3" rx="3.6" fill={c} fillOpacity="0.13" stroke={c} strokeWidth="1.5" />
-      <rect x="8.2" y="10.3" width="2.3" height="3.5" rx="1.15" fill={c} />
-      <rect x="13.5" y="10.3" width="2.3" height="3.5" rx="1.15" fill={c} />
-      <path d="M4.3 10.6 H2.9 V13.7 H4.3" stroke={c} strokeWidth="1.5" fill="none" strokeLinejoin="round" />
-      <path d="M19.7 10.6 H21.1 V13.7 H19.7" stroke={c} strokeWidth="1.5" fill="none" strokeLinejoin="round" />
-    </svg>
-  )
-}
+/*
+ * Google Antigravity — the arch. Path data from LobeHub Icons (MIT,
+ * github.com/lobehub/lobe-icons), the same mark components/landing/AgentMarks
+ * uses. The brand's own fill is a multi-colour gradient; one neutral tone
+ * keeps it beside Cursor and Codex rather than outshouting them.
+ */
+export const AntigravityIcon: FC<BrandIconProps> = ({ size = 18, className }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="#E7E7EA" fillRule="evenodd" className={className} aria-hidden>
+    <path d="M21.751 22.607c1.34 1.005 3.35.335 1.508-1.508C17.73 15.74 18.904 1 12.037 1 5.17 1 6.342 15.74.815 21.1c-2.01 2.009.167 2.511 1.507 1.506 5.192-3.517 4.857-9.714 9.715-9.714 4.857 0 4.522 6.197 9.714 9.715z" />
+  </svg>
+)
 
 /* Generic / any MCP-capable CLI — a terminal prompt. */
 export const GenericAgentIcon: FC<BrandIconProps> = ({ size = 18, className }) => {
@@ -83,6 +79,6 @@ export const AGENT_ICON: Record<string, FC<BrandIconProps>> = {
   'claude-code': ClaudeIcon,
   cursor: CursorIcon,
   codex: CodexIcon,
-  cline: ClineIcon,
+  antigravity: AntigravityIcon,
   other: GenericAgentIcon,
 }

@@ -13,7 +13,7 @@ claude mcp add backenly -- npx -y @backenly/mcp-server --project <id> --key <sco
 claude mcp add --transport http backenly https://backenly.com/api/mcp --header "x-api-key: <scoped-key>"
 ```
 
-The remote endpoint also accepts a browser sign-in instead of a key. Other hosts (Codex, Cursor, Cline) are in `client-setup`.
+The remote endpoint also accepts a browser sign-in instead of a key. Other hosts (Codex, Cursor, Antigravity, Cline) are in `client-setup`.
 
 **If the Backenly tools are not in this conversation** (you registered the server during it), do not ask your human to restart. The CLI calls the same tools with the same key and the same governance:
 
