@@ -19,15 +19,14 @@ export interface UserEntitlements {
   maxProjects: number | null
   maxAiBuildActionsPerMonth: number | null
   monthlyAiCredits: number | null
-  maxApiRequestsPerMonth: bigint | null
   /**
-   * true = `maxApiRequestsPerMonth` is a lifetime total that never resets.
-   *
-   * Free is metered this way in Cloud, which is why the quota kernel keys its
-   * counter on 'LIFETIME' rather than the month. Carried here because the
-   * kernel used to read it off `Plan` directly and must not any more.
+   * @deprecated Nothing reads it. API requests are unlimited on every plan and
+   * the quota kernel no longer caps them. Optional only so a provider that
+   * still copies it off a Plan row keeps compiling; drop it once none does.
    */
-  apiQuotaIsLifetime: boolean
+  maxApiRequestsPerMonth?: bigint | null
+  /** @deprecated Read by nothing, for the same reason as `maxApiRequestsPerMonth`. */
+  apiQuotaIsLifetime?: boolean
   maxMonthlyActiveUsers: number | null
   maxPostgresStorageMb: number | null
   maxFileStorageMb: number | null

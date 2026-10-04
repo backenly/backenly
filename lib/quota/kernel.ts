@@ -26,8 +26,9 @@
  *   • At the quota the gate blocks, unless the owner's spend limit allows
  *     overage (lib/usage/overage.ts effectiveCap). Alerts at 50/80/100% are
  *     sent once each by lib/usage/alerts.ts.
- *   • API requests: Free = lifetime TOTAL (never resets, `apiQuotaIsLifetime`);
- *     paid = per calendar month; `null` cap = unlimited.
+ *   • API requests are unlimited on every plan, Free included. They are
+ *     counted per calendar month as a record of use and never refused here;
+ *     the only bound on request volume is the per-key fair-use rate limit.
  *   • MAU: distinct end-users who authenticated this calendar month. At the
  *     cap, NEW end-user signups are blocked; existing users keep working.
  *
@@ -71,18 +72,18 @@ function thisMonth(): string {
   return new Date().toISOString().slice(0, 7) // YYYY-MM
 }
 
-// ─── 80% warning on the quotas the usage sweep does not cover ────────────────
+// ─── 80% warning on the quota the usage sweep does not cover ─────────────────
 //
-// API requests and realtime connections are never billed, so the usage-alert
-// sweep (lib/usage/alerts.ts) does not evaluate them; their gates warn here.
-// The warning is recorded durably and sent once per account and period; this
-// set only spares the database a repeated no-op insert on a hot path.
+// Realtime connections are never billed, so the usage-alert sweep
+// (lib/usage/alerts.ts) does not evaluate them; their gate warns here. The
+// warning is recorded durably and sent once per account and period; this set
+// only spares the database a repeated no-op insert on a hot path.
 
 const warnedKeys = new Set<string>()
 
 function fireThresholdWarning(
   userId: string,
-  axis: 'api_requests' | 'realtime_connections',
+  axis: 'realtime_connections',
   used: number,
   max: number,
   period: string,
@@ -99,59 +100,30 @@ function blocked(plan: string, message: string, used?: number, max?: number | nu
   return { allowed: false, code: 'PLAN_LIMIT_EXCEEDED', message, plan, used, max }
 }
 
-// ─── API requests (lifetime for Free, monthly for paid) ──────────────────────
+// ─── API requests (unlimited, counted) ───────────────────────────────────────
 
 /**
- * Enforce + track ONE API request against the project owner's plan.
- * Called from the v1 API middleware — the single choke point for every
- * `/api/v1/[projectId]/**` request.
+ * Count ONE API request against the project owner's account for this month.
+ * Called from the v1 API middleware and the MCP guard, the choke points for
+ * `/api/v1/[projectId]/**` and `/api/mcp/**`.
  *
- * - `null` cap            → unlimited: track for display, always allow.
- * - `apiQuotaIsLifetime`  → count against a never-resetting LIFETIME row.
- * - otherwise             → count against the current YYYY-MM.
- *
- * The counter is incremented atomically (row-level upsert) and the post-
- * increment value is compared to the cap, so the request that trips the
- * limit is the one that's refused. Concurrency overshoot is at most a few
- * requests — acceptable for API volume, unlike AI build actions.
+ * API requests are unlimited on every plan, so this never refuses anything
+ * and never reads entitlements. A Free account used to be refused with a 429
+ * once it had made 100,000 requests in its lifetime. Volume is bounded per key
+ * by the key's own rate limit, which the plan's `apiRateLimitPerMin` caps, not
+ * by a running total. Fire-and-forget: the request never waits on the counter,
+ * and a failed write is dropped.
  */
-export async function enforceAndTrackApiRequest(userId: string): Promise<QuotaDecision> {
-  try {
-    const ent = await getUserEntitlements(userId)
-    if (!ent) return ALLOW // no entitlements on a hot path → fail open
-
-    const max = ent.maxApiRequestsPerMonth // BigInt | null
-    const isLifetime = ent.apiQuotaIsLifetime
-    const periodKey = isLifetime ? 'LIFETIME' : thisMonth()
-
-    const record = await prisma.userAiUsage.upsert({
-      where: { userId_date: { userId, date: periodKey } },
+export function trackApiRequest(userId: string): void {
+  const date = thisMonth()
+  prisma.userAiUsage
+    .upsert({
+      where: { userId_date: { userId, date } },
       update: { apiRequestCount: { increment: 1 } },
-      create: { userId, date: periodKey, apiRequestCount: BigInt(1) },
-      select: { apiRequestCount: true },
+      create: { userId, date, apiRequestCount: BigInt(1) },
+      select: { userId: true },
     })
-
-    if (max === null) return ALLOW // unlimited — tracked for display only
-
-    const used = Number(record.apiRequestCount)
-    const limit = Number(max)
-
-    fireThresholdWarning(userId, 'api_requests', used, limit, periodKey)
-
-    if (used > limit) {
-      return blocked(
-        ent.planName,
-        isLifetime
-          ? `You've used all ${limit.toLocaleString()} API requests included with the Free plan. Upgrade to Pro ($25/mo) for unlimited API requests.`
-          : `You've hit your ${limit.toLocaleString()} API requests for this month on the ${ent.planName} plan. Resets on the 1st, or upgrade for more.`,
-        used,
-        limit,
-      )
-    }
-    return ALLOW
-  } catch {
-    return ALLOW // never break the API because billing had a hiccup
-  }
+    .catch(() => {})
 }
 
 // ─── MAU (monthly active end-users) ──────────────────────────────────────────

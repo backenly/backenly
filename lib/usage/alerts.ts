@@ -237,14 +237,13 @@ export async function evaluateUsageAlerts(now: Date = new Date()): Promise<Alert
 }
 
 const WARNING_RESOURCE = {
-  api_requests: 'API requests',
   realtime_connections: 'concurrent realtime connections',
 } as const
 
 /**
- * The 80% warning for quotas that are never billed (API requests on Free,
- * realtime connections), recorded once per account and period and sent once.
- * `period` is YYYY-MM, or LIFETIME for Free's lifetime API allowance.
+ * The 80% warning for quotas that are never billed (realtime connections),
+ * recorded once per account and period and sent once. `period` is YYYY-MM.
+ * API requests are unlimited on every plan, so they have no warning.
  */
 export async function recordQuotaWarning(
   billingAccountId: string,
@@ -258,12 +257,11 @@ export async function recordQuotaWarning(
   if (!inserted.length) return false
   const resource = WARNING_RESOURCE[axis]
   const pct = Math.min(100, Math.round((used / max) * 100))
-  const scope = period === 'LIFETIME' ? 'included with your plan' : `this month (${period})`
   await createPlatformNotification({
     userId: billingAccountId,
     type: 'usage_limit',
     title: `You're at ${pct}% of your ${resource}`,
-    body: `You've used ${Math.round(used).toLocaleString('en-US')} of the ${max.toLocaleString('en-US')} ${resource} ${scope}, across all of your projects.`,
+    body: `You've used ${Math.round(used).toLocaleString('en-US')} of the ${max.toLocaleString('en-US')} ${resource} this month (${period}), across all of your projects.`,
     metadata: {
       axis,
       level: '80',

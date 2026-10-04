@@ -79,7 +79,7 @@ const plans: Plan[] = [
     ],
     features: [
       'Self-healing every minute, repairing everything it safely can, never capped and never metered',
-      'PostgreSQL, auth, storage, realtime and REST APIs: the full runtime, not a trial',
+      'PostgreSQL, auth, storage, realtime and REST APIs with unlimited API requests: the full runtime, not a trial',
       'Build over MCP with your own coding agent; the typed tools are never metered as AI',
     ],
   },
@@ -177,7 +177,7 @@ function comparisonGroups(published: boolean): MatrixGroup[] {
       title: 'Database',
       rows: [
         { label: 'Postgres database', hint: 'Shared by every project on your account', cells: ['512 MB', metered('db_bytes'), 'Custom'] },
-        { label: 'API requests', hint: 'No per-request fee on any plan', cells: ['100,000 total', 'Unlimited', 'Unlimited'] },
+        { label: 'API requests', hint: 'No per-request fee or cap on any plan', cells: ['Unlimited', 'Unlimited', 'Unlimited'] },
         { label: 'Daily backups', cells: ['7 days kept', '7 days kept', '7 days kept'] },
         { label: 'Direct Postgres access and pg_dump export', cells: [true, true, true] },
         { label: 'Deployment history and rollback', cells: [false, 'Full history', 'Full history'] },

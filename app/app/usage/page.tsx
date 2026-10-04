@@ -6,8 +6,9 @@
  * Account-wide usage for the current billing cycle. The quota meters read
  * /api/usage/account (lib/usage/describe.ts): usage pooled across every project
  * of the account, the most each may reach, and the month-end projection; the
- * same description an agent gets from the MCP usage read. AI credits and API
- * requests still come from /api/billing/usage. Flat kit — solid violet meters,
+ * same description an agent gets from the MCP usage read. AI credits still
+ * come from /api/billing/usage. API requests have no meter: they are unlimited
+ * on every plan, so there is no quota to show. Flat kit — solid violet meters,
  * mono numerals, no gradients/glows.
  *
  * Honesty: we render only metrics the endpoint actually returns. "Autonomy runs
@@ -21,7 +22,7 @@ import Link from 'next/link'
 import { notFound, useRouter } from 'next/navigation'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import { planAllowsOverage } from '@/lib/pricing/catalog'
-import { Database, HardDrive, Bot, Activity, Users, ArrowUpRight, AlertTriangle, ShieldCheck, Sparkles, Globe, Wallet, Info, RefreshCw } from 'lucide-react'
+import { Database, HardDrive, Bot, Users, ArrowUpRight, AlertTriangle, ShieldCheck, Sparkles, Globe, Wallet, Info, RefreshCw } from 'lucide-react'
 import { OrgShell } from '@/components/shell/OrgShell'
 import { EmptyState, INPUT_BASE, KitButton, KitNote, KitCard, KitCardHeader, KitCardBody, PageHeader, Skeleton } from '@/components/inspector/kit'
 import { EDGE, PAGE_GUTTER, PAGE_WIDTH, PLATE, R_PANEL } from '@/components/console/tokens'
@@ -32,9 +33,6 @@ interface UsageData {
   monthlyAiCredits: number | null
   aiFunctionInvocationsUsed: number
   maxAiFunctionInvocationsPerMonth: number | null
-  apiRequestsUsed: string
-  maxApiRequestsPerMonth: string | null
-  apiQuotaIsLifetime: boolean
   monthlyActiveUsersUsed: number
   maxMonthlyActiveUsers: number | null
   maxPostgresStorageMb: number | null
@@ -508,8 +506,6 @@ export default function UsagePage() {
     ? new Date(usage.resetAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
     : ''
   const resetNote = usage ? `Resets ${resetDate}` : undefined
-  const apiReqUsed = usage ? parseInt(usage.apiRequestsUsed, 10) || 0 : 0
-  const apiReqMax = usage?.maxApiRequestsPerMonth ? parseInt(usage.maxApiRequestsPerMonth, 10) : null
 
   return (
     <OrgShell>
@@ -555,14 +551,6 @@ export default function UsagePage() {
                 signal a user got was their agent being refused.
               */}
               <Meter icon={Sparkles} label="AI credits" used={usage.aiCreditsUsed} max={usage.monthlyAiCredits} format={fmtNum} resetNote={resetNote} />
-              <Meter
-                icon={Activity}
-                label="API requests"
-                used={apiReqUsed}
-                max={apiReqMax}
-                format={fmtNum}
-                resetNote={usage.apiQuotaIsLifetime ? 'Total · no reset' : resetNote}
-              />
               {account ? (
                 account.axes.map((a) => (
                   <AxisMeter key={a.axis} a={a} resetNote={resetNote} planBillsOverage={account.axes.some((x) => x.billable)} />

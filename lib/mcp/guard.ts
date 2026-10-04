@@ -9,10 +9,10 @@
  * Responsibilities:
  *
  *   1. Authenticate (delegates to `authenticateMcp`).
- *   1b. Refuse a paused project, before any quota is spent.
+ *   1b. Refuse a paused project, before the call is counted or rate limited.
  *   1c. Stamp the project's activity clock (only once past 1b).
- *   2. Plan-level quota — `enforceAndTrackApiRequest`. A Free user who has
- *      blown their lifetime cap cannot grind through their quota over MCP.
+ *   2. Count the request — `trackApiRequest`. API requests are unlimited on
+ *      every plan, so the count is a record of use and never refuses.
  *   3. Per-key rate limit — ApiKey.rateLimit / rateLimitWindow. Sliding
  *      window using the existing `requestCount` + `resetAt` columns. Prevents
  *      a runaway host-LLM loop from DOSing the brain.
@@ -30,7 +30,7 @@ import {
   mcpAuthFailureResponse,
   type McpAuthResult,
 } from './auth'
-import { enforceAndTrackApiRequest } from '@/lib/quota/kernel'
+import { trackApiRequest } from '@/lib/quota/kernel'
 import {
   getProjectServingState,
   PAUSED_CODE,
@@ -50,7 +50,7 @@ export interface McpGuardAuth {
 
 /**
  * Guard result: when `response` is set, the route MUST return it (auth failed
- * / quota exceeded / rate limited). Otherwise `auth` is populated and the
+ * / project paused / rate limited). Otherwise `auth` is populated and the
  * route may proceed.
  *
  * We use plain optional fields rather than a discriminated union so the
@@ -61,14 +61,14 @@ export interface McpGuardResult {
   auth: McpGuardAuth | null
 }
 
-/** Pre-flight: auth + quota + rate limit. Returns either a green-light or an HTTP response. */
+/** Pre-flight: auth + pause check + rate limit. Returns either a green-light or an HTTP response. */
 export async function mcpGuard(request: NextRequest): Promise<McpGuardResult> {
   const auth = await authenticateMcp(request)
   const failure = mcpAuthFailureResponse(auth)
   if (failure) return { response: failure, auth: null }
 
-  // A paused project, refused BEFORE quota and rate limiting so a call that
-  // cannot run does not spend either. The agent gets a stable code and the
+  // A paused project, refused BEFORE counting and rate limiting so a call
+  // that cannot run does not spend either. The agent gets a stable code and the
   // place to resume, rather than a tool failure that reads like a bug in its
   // own request.
   const serving = await getProjectServingState(auth.projectId!)
@@ -88,29 +88,12 @@ export async function mcpGuard(request: NextRequest): Promise<McpGuardResult> {
   }
 
   // The owner's agent operating the backend is real use. Stamped after the
-  // pause check, so a refused call never moves the clock, and before quota,
-  // because an over-quota agent is still someone using this project.
+  // pause check, so a refused call never moves the clock, and before the rate
+  // limit, because a throttled agent is still someone using this project.
   void touchProjectActivity(auth.projectId!)
 
-  // Plan-level lifetime / monthly quota (fail-open on infra error inside the
-  // kernel itself — that lib already swallows DB failures to ALLOW).
-  const quota = await enforceAndTrackApiRequest(auth.userId!)
-  if (!quota.allowed) {
-    return {
-      auth: null,
-      response: NextResponse.json(
-        {
-          ok: false,
-          error: quota.message ?? 'API quota exceeded for your plan.',
-          code: quota.code ?? 'PLAN_LIMIT_EXCEEDED',
-          plan: quota.plan,
-          used: quota.used,
-          max: quota.max,
-        },
-        { status: 429 },
-      ),
-    }
-  }
+  // Counted, never refused: API requests are unlimited on every plan.
+  trackApiRequest(auth.userId!)
 
   // Per-key sliding-window rate limit. Uses the existing requestCount +
   // resetAt columns on ApiKey. We do NOT block on a transactional contention

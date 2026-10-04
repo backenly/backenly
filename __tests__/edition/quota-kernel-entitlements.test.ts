@@ -2,16 +2,17 @@
  * The quota kernel reads entitlements, and the numbers it enforces are the
  * numbers it was given.
  *
- * The kernel is the enforcement surface for API requests, MAU, realtime
- * connections and storage, and until Phase 6 it read Plan rows through
+ * The kernel is the enforcement surface for MAU, realtime connections and
+ * storage, and the counter for API requests. Until Phase 6 it read Plan rows through
  * getUserSubscription from @/lib/billing. Rerouting it through the Entitlements
  * seam touched every call site in the file, and the file had no direct
  * coverage, so "behaviour preserving" was a claim with nothing behind it.
  *
  * These tests pin the decisions rather than the plumbing: a given set of limits
- * must produce the same allow/block outcome it produced before, and the two
- * fields the kernel used to read straight off `Plan` (apiQuotaIsLifetime and
- * maxMonthlyActiveUsers) must still drive the behaviour that depends on them.
+ * must produce the same allow/block outcome it produced before, and
+ * maxMonthlyActiveUsers, which the kernel used to read straight off `Plan`,
+ * must still drive the behaviour that depends on it. API requests are the
+ * exception: they are unlimited on every plan, so no entitlement may cap them.
  */
 import { selfHostedEntitlements } from '@/lib/entitlements/self-hosted'
 import type { UserEntitlements } from '@/lib/entitlements/types'
@@ -39,7 +40,7 @@ jest.mock('@/lib/entitlements', () => ({
 jest.mock('@/lib/notifications/platform', () => ({ createPlatformNotification: jest.fn() }))
 
 import {
-  enforceAndTrackApiRequest,
+  trackApiRequest,
   canAcceptNewEndUser,
   getRealtimeConnectionLimit,
 } from '@/lib/quota/kernel'
@@ -54,57 +55,35 @@ beforeEach(() => {
   mockPrisma.project.findUnique.mockResolvedValue({ userId: 'owner-1' })
 })
 
-describe('API request quota', () => {
-  it('blocks past the cap and names the plan from entitlements', async () => {
-    mockGetUserEntitlements.mockResolvedValue(entitlements({ maxApiRequestsPerMonth: BigInt(10) }))
-    mockPrisma.userAiUsage.upsert.mockResolvedValue({ apiRequestCount: BigInt(11) })
-
-    const decision = await enforceAndTrackApiRequest('user-1')
-
-    expect(decision.allowed).toBe(false)
-    expect(decision.code).toBe('PLAN_LIMIT_EXCEEDED')
-    expect(decision.plan).toBe('PRO')
-    expect(decision.max).toBe(10)
-  })
-
-  it('allows at the cap, because the block is strictly past it', async () => {
-    mockGetUserEntitlements.mockResolvedValue(entitlements({ maxApiRequestsPerMonth: BigInt(10) }))
-    mockPrisma.userAiUsage.upsert.mockResolvedValue({ apiRequestCount: BigInt(10) })
-
-    await expect(enforceAndTrackApiRequest('user-1')).resolves.toMatchObject({ allowed: true })
-  })
-
-  it('treats a null cap as unlimited and still records usage', async () => {
-    mockGetUserEntitlements.mockResolvedValue(entitlements({ maxApiRequestsPerMonth: null }))
-    mockPrisma.userAiUsage.upsert.mockResolvedValue({ apiRequestCount: BigInt(999999) })
-
-    await expect(enforceAndTrackApiRequest('user-1')).resolves.toMatchObject({ allowed: true })
-    expect(mockPrisma.userAiUsage.upsert).toHaveBeenCalled()
-  })
-
-  it('keys the counter on LIFETIME when the quota never resets', async () => {
-    // Free is metered as a lifetime total in Cloud. The kernel used to read
-    // this flag off the Plan row; it now comes through the seam, and keying the
-    // counter on the month instead would silently reset a Free account's
-    // lifetime allowance every 1st.
+describe('API requests', () => {
+  it('counts against the current month and never consults entitlements', async () => {
+    // Free used to be metered against a lifetime total of 100,000 and refused
+    // with a 429 past it. API requests are now unlimited on every plan, so a
+    // cap on the Plan row, lifetime or monthly, must not reach this path.
     mockGetUserEntitlements.mockResolvedValue(
-      entitlements({ maxApiRequestsPerMonth: BigInt(10), apiQuotaIsLifetime: true }),
+      entitlements({ planName: 'SANDBOX', maxApiRequestsPerMonth: BigInt(10), apiQuotaIsLifetime: true }),
     )
-    mockPrisma.userAiUsage.upsert.mockResolvedValue({ apiRequestCount: BigInt(1) })
+    mockPrisma.userAiUsage.upsert.mockResolvedValue({ userId: 'user-1' })
 
-    await enforceAndTrackApiRequest('user-1')
+    expect(trackApiRequest('user-1')).toBeUndefined()
 
+    const month = new Date().toISOString().slice(0, 7)
     expect(mockPrisma.userAiUsage.upsert).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { userId_date: { userId: 'user-1', date: 'LIFETIME' } } }),
+      expect.objectContaining({
+        where: { userId_date: { userId: 'user-1', date: month } },
+        update: { apiRequestCount: { increment: 1 } },
+      }),
     )
+    expect(mockGetUserEntitlements).not.toHaveBeenCalled()
   })
 
-  it('fails open when there are no entitlements', async () => {
-    // A billing hiccup must never take down a customer's API.
-    mockGetUserEntitlements.mockResolvedValue(null)
+  it('swallows a failed counter write', async () => {
+    // The request has already been let through; a lost count must not
+    // surface as an unhandled rejection.
+    mockPrisma.userAiUsage.upsert.mockRejectedValue(new Error('database unavailable'))
 
-    await expect(enforceAndTrackApiRequest('user-1')).resolves.toMatchObject({ allowed: true })
-    expect(mockPrisma.userAiUsage.upsert).not.toHaveBeenCalled()
+    expect(() => trackApiRequest('user-1')).not.toThrow()
+    await new Promise((resolve) => setImmediate(resolve))
   })
 })
 
@@ -153,9 +132,7 @@ describe('single-tenant', () => {
     // real entitlements whose caps are null, which reaches the same decision
     // for a stated reason rather than by accident.
     mockGetUserEntitlements.mockResolvedValue(selfHostedEntitlements())
-    mockPrisma.userAiUsage.upsert.mockResolvedValue({ apiRequestCount: BigInt(10_000_000) })
 
-    await expect(enforceAndTrackApiRequest('operator')).resolves.toMatchObject({ allowed: true })
     await expect(canAcceptNewEndUser('project-1')).resolves.toMatchObject({ allowed: true })
   })
 })

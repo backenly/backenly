@@ -3,14 +3,15 @@
  *
  * Two rules from the pause design that no end-to-end test can pin cheaply:
  *
- *   MCP     authenticate -> paused check -> stamp -> quota. A call refused
- *           because the project is paused must not move its clock, and must
- *           not spend quota either.
+ *   MCP     authenticate -> paused check -> stamp -> count -> rate limit. A
+ *           call refused because the project is paused must not move its
+ *           clock, and must not be counted or spend its key's rate limit.
  *   UI      a dashboard WRITE counts as use; a dashboard READ does not, or an
  *           open tab polling health would keep an abandoned backend awake.
  *
  * The collaborators are replaced with recorders (auth, the serving state, the
- * clock, quota). No database is mocked: nothing here reaches one. The real
+ * clock, the request counter, the rate limit's key read). No database is
+ * reached: the one read the guard makes is the recorder. The real
  * clock and the real serving state are covered against Postgres in
  * tests/integration/project-activity-clock.spec.ts.
  */
@@ -46,11 +47,22 @@ jest.mock('@/lib/projects/activity', () => ({
 }))
 
 jest.mock('@/lib/quota/kernel', () => ({
-  // Refuses, so mcpGuard stops before its rate-limit step (which is a DB read).
-  enforceAndTrackApiRequest: jest.fn(async () => {
-    calls.push('quota')
-    return { allowed: false, message: 'over quota', code: 'PLAN_LIMIT_EXCEEDED' }
+  // Never refuses: API requests are unlimited on every plan.
+  trackApiRequest: jest.fn(() => {
+    calls.push('count')
   }),
+}))
+
+jest.mock('@/lib/db/prisma', () => ({
+  prisma: {
+    apiKey: {
+      // The rate limit's key read. No key row means no limit to apply.
+      findUnique: jest.fn(async () => {
+        calls.push('rate')
+        return null
+      }),
+    },
+  },
 }))
 
 jest.mock('@/lib/auth/middleware', () => ({
@@ -74,12 +86,13 @@ beforeEach(() => {
 })
 
 describe('MCP', () => {
-  it('stamps after the pause check and before quota', async () => {
-    await mcpGuard({} as any)
-    expect(calls).toEqual(['auth', 'serving', 'touch:p1', 'quota'])
+  it('stamps after the pause check, then counts and rate limits without refusing', async () => {
+    const result = await mcpGuard({} as any)
+    expect(calls).toEqual(['auth', 'serving', 'touch:p1', 'count', 'rate'])
+    expect(result.response).toBeNull()
   })
 
-  it('neither stamps nor spends quota for a paused project', async () => {
+  it('neither stamps nor counts a paused project', async () => {
     servingKind = 'paused'
     const result = await mcpGuard({} as any)
 
