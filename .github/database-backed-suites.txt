@@ -631,3 +631,7 @@ tests/integration/last-login-id-type.spec.ts
 # order against a real workspace is the property, so it needs a real Postgres.
 tests/integration/probe-auth-rate-limit.spec.ts
 tests/integration/go-live-empty-guard.spec.ts
+
+# One-time tours remain caller-scoped, idempotent and unavailable until their
+# migration is applied, so a missing table never repeats the tour.
+tests/integration/tours-seen.spec.ts

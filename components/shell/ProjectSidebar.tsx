@@ -173,6 +173,7 @@ export function ProjectSidebar() {
             return (
               <NavItem
                 key={item.id}
+                tourTarget={`nav-${item.id}`}
                 href={`${basePath}${item.href}`}
                 icon={item.icon}
                 label={item.title}

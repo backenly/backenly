@@ -227,7 +227,14 @@ describe('disclosures that must be present while the behaviour is live', () => {
   it('states the hosting location without an absolute geographic negative', () => {
     const intl = JSON.stringify(PRIVACY_SECTIONS.find((s) => s.id === 'international'))
     expect(intl).toMatch(/Mumbai/)
+    expect(intl).toMatch(/Amazon Web Services/)
+    expect(intl).toMatch(/India/)
     expect(intl).toMatch(/may process information in other countries/i)
+  })
+
+  it('does not name hosting providers Backenly Cloud has retired', () => {
+    const all = JSON.stringify(PRIVACY_SECTIONS) + JSON.stringify(PRIVACY_SUMMARY) + JSON.stringify(PROVIDERS)
+    expect(all).not.toMatch(/Hetzner|Backblaze|Singapore/i)
   })
 
   it('names the operating entity', () => {

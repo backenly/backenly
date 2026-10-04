@@ -429,17 +429,20 @@ export function NavItem({
   label,
   active,
   trailing,
+  tourTarget,
 }: {
   href: string
   icon: LucideIcon
   label: string
   active: boolean
   trailing?: ReactNode
+  tourTarget?: string
 }) {
   return (
     <li>
       <Link
         href={href}
+        data-tour={tourTarget}
         aria-current={active ? 'page' : undefined}
         className={`group flex h-[36px] items-center gap-2.5 rounded-[7px] px-2.5 text-[13px] font-medium transition-[background-color,color] duration-150 md:h-[30px] ${FOCUS} ${
           active
