@@ -12,7 +12,7 @@
  *  1. An empty project is refused deployment.
  *  2. A project with only auth enabled passes the empty check and the
  *     confirmation message accurately reflects it.
- *  3. A project with tables and custom APIs passes the check and accurately
+ *  3. A project with catalog-backed REST APIs passes the check and accurately
  *     reports feature counts in the confirmation message.
  *  4. A project with only tables passes the check.
  */
@@ -38,7 +38,9 @@ beforeAll(async () => {
 }, 60_000)
 
 afterAll(async () => {
-  await prisma.apiDefinition.deleteMany({ where: { projectId: { in: projects } } }).catch(() => {})
+  for (const projectId of projects) {
+    await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "workspace_${projectId}" CASCADE`)
+  }
   await prisma.table.deleteMany({ where: { projectId: { in: projects } } }).catch(() => {})
   await prisma.backendGraph.deleteMany({ where: { projectId: { in: projects } } }).catch(() => {})
   await prisma.project.deleteMany({ where: { userId: ownerId } }).catch(() => {})
@@ -52,38 +54,36 @@ async function setupProject(features: { auth: boolean; tables: number; apis: num
     data: {
       name: `guard-test-${crypto.randomBytes(4).toString('hex')}`,
       userId: ownerId,
-      activeGraphId: `graph-${crypto.randomBytes(8).toString('hex')}`,
       authManifest: features.auth ? { enabled: true } : {},
       jwtSecret: features.auth ? crypto.randomBytes(32).toString('hex') : null,
     },
-    select: { id: true, activeGraphId: true },
+    select: { id: true },
   })
   projects.push(project.id)
 
-  await prisma.backendGraph.create({
+  const graph = await prisma.backendGraph.create({
     data: {
-      id: project.activeGraphId!,
       projectId: project.id,
       graphData: {},
     },
+    select: { id: true },
+  })
+  await prisma.project.update({
+    where: { id: project.id },
+    data: { activeGraphId: graph.id },
   })
 
   for (let i = 0; i < features.tables; i++) {
-    const table = await prisma.table.create({
+    await prisma.table.create({
       data: { projectId: project.id, name: `table_${i}` },
-      select: { id: true },
     })
-    if (i < features.apis) {
-      await prisma.apiDefinition.create({
-        data: { 
-          projectId: project.id, 
-          tableId: table.id,
-          name: `api_${i}`,
-          basePath: `/api_${i}`,
-          operations: {},
-          endpoints: {}
-        },
-      })
+  }
+  if (features.apis > 0) {
+    await prisma.$executeRawUnsafe(`CREATE SCHEMA "workspace_${project.id}"`)
+    for (let i = 0; i < features.apis; i++) {
+      await prisma.$executeRawUnsafe(
+        `CREATE TABLE "workspace_${project.id}"."api_${i}" (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), body text)`,
+      )
     }
   }
 
@@ -127,8 +127,8 @@ describe('the empty-backend guard', () => {
     }
   }, 30_000)
 
-  it('counts and reports custom APIs accurately', async () => {
-    const projectId = await setupProject({ tables: 1, apis: 1, auth: false })
+  it('admits catalog-backed REST APIs without legacy table metadata', async () => {
+    const projectId = await setupProject({ tables: 0, apis: 1, auth: false })
     const result = await goLive(projectId, ownerId, { force: false })
     
     if (result.kind === 'error') {
@@ -136,7 +136,7 @@ describe('the empty-backend guard', () => {
     } else {
       const confirm = result as GoLiveConfirmation
       expect(confirm.kind).toBe('confirmation')
-      expect(confirm.message).toMatch(/1 table/)
+      expect(confirm.message).not.toMatch(/0 tables/)
       expect(confirm.message).toMatch(/1 API/)
     }
   }, 30_000)

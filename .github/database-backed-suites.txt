@@ -630,3 +630,4 @@ tests/integration/last-login-id-type.spec.ts
 # and every customer, keeps the 10-per-window budgets. The routes' own check
 # order against a real workspace is the property, so it needs a real Postgres.
 tests/integration/probe-auth-rate-limit.spec.ts
+tests/integration/go-live-empty-guard.spec.ts

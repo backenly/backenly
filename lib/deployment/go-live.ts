@@ -16,6 +16,7 @@ import { prisma } from '@/lib/db/prisma'
 import { scoreReadiness, formatReadinessReport } from '@/lib/deployment/readiness-scorer'
 import type { ReadinessReport } from '@/lib/deployment/readiness-scorer'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
+import { isCrudExposable, listExposedTables } from '@/lib/mcp/schema-introspection'
 
 export interface GoLiveResult {
   kind: 'deployed'
@@ -90,7 +91,7 @@ export async function goLive(
   // This prevents the "Backend is live" card from appearing when the AI
   // accidentally triggers deploy (e.g. a build prompt containing "deploy-ready").
   const tableCount = await prisma.table.count({ where: { projectId } })
-  const apiCount = await prisma.apiDefinition.count({ where: { projectId } })
+  const apiCount = (await listExposedTables(projectId)).filter((table) => isCrudExposable(table.name)).length
   const hasAuth = (project.authManifest as any)?.enabled === true
 
   if (tableCount === 0 && apiCount === 0 && !hasAuth) {
