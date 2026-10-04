@@ -150,6 +150,12 @@ model Project {
   pauseWarnedAt           DateTime? // When the pause warning was DELIVERED. Cleared by real activity. No delivered warning, no pause.
   lastActivityAt          DateTime? // Real use only (runtime traffic, MCP calls, dashboard writes). Never stamped by autonomy, cron or backups.
   pausePolicySince        DateTime? // When the inactivity policy first applied to this project, so a paid-to-Free downgrade gets a full window.
+  // Protected production: a coding agent may change this project's schema only
+  // on a preview branch, and production only through a branch merge a human
+  // approved. Dashboard changes, autonomy fixes and row writes are not gated.
+  // On for new Backenly Cloud projects (provisioning sets it); self-hosted
+  // installs have no branches, so it is never set there. See lib/branches/protection.ts.
+  protectedProduction     Boolean                @default(false)
   isDeployed              Boolean                @default(false)
   isBackendGenerated      Boolean                @default(false)
   isFrontendConnected     Boolean                @default(false)
@@ -1859,26 +1865,53 @@ model PaddleSubscription {
   @@map("paddle_subscriptions")
 }
 
-// Preview branch — a full structural+data clone of the workspace schema where
-// an agent or owner can experiment; merge brings additive changes back through
-// the governed kernel, destructive diffs go to the approval path. Foundation
-// for "PRs for your backend" (agent-era pillar 2).
+// Preview branch — a structural clone of the workspace schema (rows only when
+// asked) where an agent builds and tests a change while production keeps
+// serving. Schema changes made on it are logged (WorkspaceBranchMigration) and
+// a merge replays that log onto main through the governed kernel.
+//
+// Names are unique among ACTIVE branches only, which lib/branches/engine.ts
+// enforces: a merged or discarded branch keeps its row as history, and its
+// schema is dropped, so the same name must be reusable. A database-wide unique
+// on name or schemaName made re-creating "staging" after a merge fail after the
+// new schema had already been created and registered.
 model WorkspaceBranch {
-  id          String    @id @default(uuid())
-  projectId   String
-  name        String // slug, e.g. "add-payments"
-  schemaName  String    @unique // workspace_{projectId}_br_{name}
-  status      String    @default("active") // active | merged | discarded
-  createdBy   String
-  createdAt   DateTime  @default(now())
-  mergedAt    DateTime?
-  discardedAt DateTime?
-  project     Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  apiKeys     ApiKey[]
+  id           String                      @id @default(uuid())
+  projectId    String
+  name         String // slug, e.g. "add-payments"
+  schemaName   String // workspace_{projectId}_br_{name}
+  status       String                      @default("active") // active | merged | discarded
+  createdBy    String
+  createdAt    DateTime                    @default(now())
+  mergedAt     DateTime?
+  discardedAt  DateTime?
+  // Main's schema when the branch was cut: what a merge compares against to
+  // tell a change made on the branch from one made on main since.
+  baseSnapshot Json?
+  project      Project                     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  apiKeys      ApiKey[]
+  migrations   WorkspaceBranchMigration[]
 
-  @@unique([projectId, name])
+  @@index([projectId, name])
+  @@index([schemaName])
   @@index([projectId, status])
   @@map("workspace_branches")
+}
+
+// One schema change applied to a preview branch, in order. A merge replays
+// these statements onto main through apply_migration's governed path, so
+// production receives exactly what was built and tested on the branch.
+model WorkspaceBranchMigration {
+  id         String          @id @default(uuid())
+  branchId   String
+  seq        Int
+  statements Json // string[]: each statement exactly as applied
+  appliedBy  String
+  appliedAt  DateTime        @default(now())
+  branch     WorkspaceBranch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@unique([branchId, seq])
+  @@map("workspace_branch_migrations")
 }
 
 // Revocable public-share token for read-only report pages (/report/[token]).

@@ -74,6 +74,11 @@ async function newEnv(label: string): Promise<Env> {
     data: { email: `golden-${label}-${crypto.randomBytes(6).toString('hex')}@example.test`, password: 'not-a-real-hash', name: 'golden' },
   })).id
   const project = await createProvisionedProject({ name: `golden-${label}`, userId: ownerId })
+  // A new Cloud project starts with production protected, which sends an
+  // agent's schema changes through a branch. These workflows build on main,
+  // as an owner who turned protection off does; protection is covered by
+  // tests/integration/branch-migrations.spec.ts.
+  await prisma.project.update({ where: { id: project.id }, data: { protectedProduction: false } })
   const mint = async (readOnly: boolean) => {
     const raw = `mcp_live_${crypto.randomBytes(20).toString('hex')}`
     await prisma.apiKey.create({

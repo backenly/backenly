@@ -220,8 +220,12 @@ export interface OwnershipCatalog {
  * autonomy tick, and per-table introspection would multiply that by the table
  * count for information that is identical across the loop.
  */
-export async function loadOwnershipCatalog(projectId: string): Promise<OwnershipCatalog> {
-  const schemaName = `workspace_${projectId}`
+export async function loadOwnershipCatalog(
+  projectId: string,
+  // A preview branch's schema, when its new tables need the RLS main would
+  // give them. Defaults to the project's main schema.
+  schemaName = `workspace_${projectId}`,
+): Promise<OwnershipCatalog> {
 
   const columnRows = await prisma.$queryRawUnsafe<Array<{ table_name: string; column_name: string }>>(
     `SELECT table_name, column_name
@@ -594,8 +598,8 @@ export function inferRlsPlanFromCatalog(
 }
 
 /** Convenience wrapper for single-table callers. */
-export async function inferRlsPlan(projectId: string, tableName: string): Promise<RlsPlan> {
-  const catalog = await loadOwnershipCatalog(projectId)
+export async function inferRlsPlan(projectId: string, tableName: string, schemaName?: string): Promise<RlsPlan> {
+  const catalog = await loadOwnershipCatalog(projectId, schemaName)
   return inferRlsPlanFromCatalog(catalog, tableName)
 }
 

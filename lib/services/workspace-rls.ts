@@ -485,14 +485,26 @@ function pickRule(
 }
 
 /**
+ * Where a policy is installed. Omitted: the project's main schema. A preview
+ * branch's schema when a table created on the branch needs the RLS main would
+ * give it; the policy is then installed there and no PermissionPolicy row is
+ * written, since that metadata describes main.
+ */
+export interface RlsTarget {
+  schemaName?: string
+}
+
+/**
  * Enable RLS on a workspace table and install the policy.
  */
 export async function applyPermissionPolicy(
   projectId: string,
-  config: PolicyConfig
+  config: PolicyConfig,
+  target: RlsTarget = {},
 ): Promise<{ success: boolean; message: string }> {
   const { tableName, roleColumn, role = 'authenticated' } = config
-  const schemaName = `workspace_${projectId}`
+  const branchMode = !!target.schemaName
+  const schemaName = target.schemaName ?? `workspace_${projectId}`
 
   // ── Resolve `template: 'auto'` against the live schema ────────────────────
   // The inference reads foreign keys, not just column names, so a table owned
@@ -503,7 +515,7 @@ export async function applyPermissionPolicy(
   let via = config.via
   let partyColumns = config.partyColumns
   if (config.template === 'auto') {
-    const plan = await inferRlsPlan(projectId, tableName)
+    const plan = await inferRlsPlan(projectId, tableName, schemaName)
     if (plan.kind === 'undecidable') {
       // Refuse rather than guess. Enabling RLS with no derivable policy makes
       // the table read empty — an outage in place of an exposure.
@@ -570,7 +582,7 @@ export async function applyPermissionPolicy(
   // There is one detector now. `resolveOwnership` consults the FK catalog first
   // and falls back to names, which is what lib/services/rls-ownership.ts has
   // always done for the `auto` path.
-  const ownership = await resolveOwnership(projectId, tableName)
+  const ownership = await resolveOwnership(projectId, tableName, schemaName)
   const detectedOwner = userIdColumn || ownership.ownerColumn
   const uidColumn = detectedOwner || 'user_id'
   const roleCol   = roleColumn || 'role'
@@ -609,7 +621,7 @@ export async function applyPermissionPolicy(
   // caller names the template explicitly without one, derive it here so the
   // template is usable from the brain/MCP surface too.
   if (template === 'related_rows' && !via) {
-    const plan = await inferRlsPlan(projectId, tableName)
+    const plan = await inferRlsPlan(projectId, tableName, schemaName)
     if (plan.kind !== 'related_rows') {
       return {
         success: false,
@@ -785,8 +797,9 @@ export async function applyPermissionPolicy(
       }
     }
 
-    // Step 4: Save policy metadata
-    await prisma.permissionPolicy.upsert({
+    // Step 4: Save policy metadata (main's; a branch's policies live only in
+    // its catalog and arrive on main through the merge).
+    if (!branchMode) await prisma.permissionPolicy.upsert({
       where: {
         projectId_tableName_policyName: {
           projectId,
@@ -859,7 +872,7 @@ async function loadExistsContext(
   schemaName: string,
   selfTable: string,
 ): Promise<ExistsContext> {
-  const catalog = await loadOwnershipCatalog(projectId)
+  const catalog = await loadOwnershipCatalog(projectId, schemaName)
   const tables = new Map<string, Set<string>>()
   for (const [table, cols] of catalog.columns) tables.set(table, new Set(cols))
   return { schemaName, selfTable, tables }
@@ -2129,9 +2142,10 @@ export async function executeWithUserContext<T = any>(
 export async function autoApplyRlsIfNeeded(
   projectId: string,
   tableName: string,
-  _columns: Array<{ name: string }> = []
+  _columns: Array<{ name: string }> = [],
+  target: RlsTarget = {},
 ): Promise<void> {
-  const plan = await inferRlsPlan(projectId, tableName)
+  const plan = await inferRlsPlan(projectId, tableName, target.schemaName)
 
   if (plan.kind === 'undecidable') {
     console.log(`[AutoRLS] Ownership undecidable for "${tableName}" — leaving RLS off. ${plan.reason}`)
@@ -2145,7 +2159,7 @@ export async function autoApplyRlsIfNeeded(
     ...(plan.kind === 'own_rows' ? { userIdColumn: plan.userIdColumn } : {}),
     ...(plan.kind === 'party_rows' ? { partyColumns: plan.partyColumns } : {}),
     ...(plan.kind === 'related_rows' ? { via: plan.via } : {}),
-  })
+  }, target)
 
   if (result.success) {
     console.log(`[AutoRLS] ✅ ${plan.template} policy applied to "${tableName}"`)
@@ -2237,9 +2251,10 @@ const OWNER_NAME_CANDIDATES = OWNERSHIP_COLUMN_CANDIDATES
 async function resolveOwnership(
   projectId: string,
   tableName: string,
+  schemaName?: string,
 ): Promise<{ ownerColumn: string | null; partyColumns: string[] }> {
   try {
-    const plan = await inferRlsPlan(projectId, tableName)
+    const plan = await inferRlsPlan(projectId, tableName, schemaName)
     if (plan.kind === 'own_rows') return { ownerColumn: plan.userIdColumn, partyColumns: [plan.userIdColumn] }
     if (plan.kind === 'party_rows') return { ownerColumn: plan.partyColumns[0], partyColumns: plan.partyColumns }
     // `related_rows` and `public_read` have no LOCAL owner column, and reporting

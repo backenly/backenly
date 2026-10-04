@@ -28,7 +28,12 @@ import { dbQuery, dbInsert, dbUpdate, dbDelete } from '@/lib/mcp/runtime-db'
 import { dbErrorBody } from '@/lib/db/query-errors'
 import { parseMcpBody } from '@/lib/mcp/request-body'
 import { DB_TOOL_FAILURE_CODE, DB_TOOL_REQUESTS, isDbTool, type DbToolName } from '@/lib/mcp/db-tool-requests'
-import { parseMigration, MigrationParseError } from '@/lib/mcp/migration-parser'
+import {
+  applyMigrationToMain,
+  type MigrationFailure,
+  type MigrationRefusal,
+  type MigrationSuccess,
+} from '@/lib/mcp/apply-migration'
 import { prisma } from '@/lib/db/prisma'
 import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 import { createTokenScope, runInTokenScope } from '@/lib/ai/token-meter'
@@ -418,149 +423,66 @@ export async function POST(request: NextRequest) {
   // gates, the intent ledger and rollback all behave identically.
   if (tool === 'apply_migration') {
     const sql = typeof args.sql === 'string' ? args.sql : ''
-    if (!sql.trim()) {
-      recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 400, tool, error: 'EMPTY_MIGRATION' })
-      return withCors(NextResponse.json(
+    const branchId = typeof args.branchId === 'string' ? args.branchId.trim() : ''
+
+    // On a preview branch: the same parse, check and handlers, applied to the
+    // branch's schema only and logged for the merge (lib/branches/migrate.ts).
+    // Without a branch: main, unless production is protected, in which case the
+    // agent is told exactly how to make the change on a branch instead.
+    let outcome: Awaited<ReturnType<typeof applyMigrationToMain>> & { branch?: string; recorded?: string[] }
+    if (branchId) {
+      const { applyBranchMigration } = await import('@/lib/branches/migrate')
+      outcome = await applyBranchMigration(auth.projectId, branchId, sql, auth.userId)
+    } else {
+      const { isProductionProtected, branchRequired } = await import('@/lib/branches/protection')
+      if (await isProductionProtected(auth.projectId)) {
+        const refusal = branchRequired('This migration')
+        recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 403, tool, error: refusal.code })
+        return withCors(NextResponse.json({ ok: false, ...refusal, applied: [] }, { status: 403 }))
+      }
+      outcome = await applyMigrationToMain(auth.projectId, auth.userId, sql, {
+        agentSurface: true,
+        workspaceSchema: workspaceSchemaName(auth.projectId),
+      })
+    }
+
+    if (!outcome.ok) {
+      // Report exactly how far the migration got (see lib/mcp/apply-migration).
+      const fail = outcome as MigrationRefusal | MigrationFailure
+      recordMcpCall(
+        { ...auth, endpoint: ENDPOINT, startedAt },
         {
-          ok: false,
-          error: 'apply_migration requires { sql }.',
-          code: 'EMPTY_MIGRATION',
-          hint: 'e.g. { "sql": "ALTER TABLE posts ADD COLUMN likes integer DEFAULT 0" }',
+          statusCode: 400,
+          tool,
+          mutation: fail.code === 'MIGRATION_FAILED',
+          error: fail.code,
+          ...('detail' in fail ? { summary: fail.detail } : {}),
         },
-        { status: 400 },
-      ))
+      )
+      return withCors(NextResponse.json(jsonSafe({
+        ...fail,
+        ...(outcome.branch ? { branch: outcome.branch, recorded: outcome.recorded ?? [] } : {}),
+      }), { status: 400 }))
     }
 
-    let planned
-    try {
-      planned = parseMigration(sql)
-    } catch (err) {
-      if (!(err instanceof MigrationParseError)) throw err
-      recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 400, tool, error: err.code })
-      return withCors(NextResponse.json(
-        {
-          ok: false,
-          error: err.message,
-          code: err.code,
-          ...(err.hint ? { hint: err.hint } : {}),
-          ...(err.statement ? { statement: err.statement } : {}),
-          applied: [],
-        },
-        { status: 400 },
-      ))
-    }
-
-    // ── Every statement against the tables that actually exist ──────────────
-    //
-    // The executors were never asked. create_table answered "Created table …"
-    // for a table that was already there and changed nothing, so columns a
-    // migration declared that way were reported created and never existed. And
-    // add_column on a table that did not exist CREATED it, so a typo in
-    // `ALTER TABLE <name>` made a new table instead of failing.
-    //
-    // So each statement is checked, in order, against the tables that exist
-    // plus those the migration creates before it, and before anything runs,
-    // like every other refusal. CREATE TABLE of an existing table is refused
-    // and names ALTER TABLE; CREATE TABLE IF NOT EXISTS leaves it as it is and
-    // says so; a statement on a table that does not exist is refused.
-    const existingNotes: string[] = []
-    const tableOf = (p: { args: Record<string, unknown> }) => String(p.args.tableName ?? '')
-    const named = [...new Set(planned.map(tableOf).filter(Boolean))]
-    if (named.length) {
-      const found = await prisma.$queryRaw<Array<{ table_name: string }>>`
-        SELECT table_name FROM information_schema.tables
-        WHERE table_schema = ${workspaceSchemaName(auth.projectId)} AND table_name = ANY(${named})`
-      const willExist = new Set(found.map((r) => r.table_name))
-      const skipped = new Set<string>()
-      const refuse = (code: string, error: string, statement: string, hint: string) => {
-        recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 400, tool, error: code })
-        return withCors(NextResponse.json({ ok: false, error, code, statement, hint, applied: [] }, { status: 400 }))
-      }
-      for (const step of planned) {
-        const table = tableOf(step)
-        if (!table || skipped.has(step.source)) continue
-        if (step.tool === 'create_table') {
-          if (!willExist.has(table)) { willExist.add(table); continue }
-          if (!/^\s*create\s+table\s+if\s+not\s+exists\b/i.test(step.source)) {
-            return refuse(
-              'TABLE_EXISTS',
-              `Table ${table} already exists, so CREATE TABLE would change nothing. Nothing was applied.`,
-              step.source,
-              `To add columns use ALTER TABLE ${table} ADD COLUMN …; get_table_schema shows what ${table} has now.`,
-            )
-          }
-          // IF NOT EXISTS: skip the statement and everything it expanded into.
-          skipped.add(step.source)
-          existingNotes.push(`${table} already existed; CREATE TABLE IF NOT EXISTS left it unchanged.`)
-          continue
-        }
-        if (!willExist.has(table)) {
-          return refuse(
-            'TABLE_NOT_FOUND',
-            `There is no table ${table} in this project, so "${step.source}" cannot run. Nothing was applied.`,
-            step.source,
-            `Check the name with read_backend_state { section: "tables" }, or create it first with CREATE TABLE ${table} (…).`,
-          )
-        }
-      }
-      planned = planned.filter((p) => ![...skipped].some((s) => p.source === s || p.source.startsWith(`${s} → `)))
-    }
-
-    const applied: { statement: string; tool: string; summary: string }[] = []
-    const notes = [...existingNotes, ...planned.flatMap((p) => p.notes ?? [])]
-
-    for (let i = 0; i < planned.length; i++) {
-      const step = planned[i]
-      let result: { ok: boolean; summary: string }
-      try {
-        result = await dispatchTool(step.tool, step.args, {
-          projectId: auth.projectId,
-          userId: auth.userId,
-          sessionToken: undefined,
-          destructiveConfirmed: false,
-          mcpOwnerConfirmed: true,
-          createdThisTurn: new Set<string>(),
-        })
-      } catch (err) {
-        result = { ok: false, summary: err instanceof Error ? err.message : 'Dispatch failed' }
-      }
-
-      if (!result.ok) {
-        // Report exactly how far the migration got. An agent that knows three of
-        // five statements applied can finish the job; one told only "failed"
-        // will usually replay the whole thing and double-apply.
-        recordMcpCall(
-          { ...auth, endpoint: ENDPOINT, startedAt },
-          { statusCode: 400, tool, mutation: true, error: 'MIGRATION_FAILED', summary: result.summary },
-        )
-        return withCors(NextResponse.json(jsonSafe({
-          ok: false,
-          error: `Migration stopped at: ${step.source}`,
-          code: 'MIGRATION_FAILED',
-          detail: result.summary,
-          applied,
-          remaining: planned.slice(i + 1).map((p) => p.source),
-          hint: applied.length
-            ? 'The statements in `applied` DID take effect — do not replay them. Fix the failing statement and re-send only what remains.'
-            : 'Nothing was applied.',
-        }), { status: 400 }))
-      }
-      applied.push({ statement: step.source, tool: step.tool, summary: result.summary })
-    }
-
-    const summary =
-      `Applied ${applied.length} statement(s): ` +
-      applied.map((a) => a.summary).join(' · ') +
-      (notes.length ? ` (${notes.join(' ')})` : '')
-
+    const success = outcome as MigrationSuccess & { branch?: string; recorded?: string[] }
     recordMcpCall(
       { ...auth, endpoint: ENDPOINT, startedAt },
-      { statusCode: 200, tool, mutation: true, summary: `migration: ${applied.length} statement(s)` },
+      {
+        statusCode: 200,
+        tool,
+        mutation: true,
+        summary: `migration${success.branch ? ` on branch ${success.branch}` : ''}: ${success.applied.length} statement(s)`,
+      },
     )
     return withCors(NextResponse.json(jsonSafe({
       ok: true,
-      summary,
-      data: { applied, ...(notes.length ? { notes } : {}) },
+      summary: success.summary,
+      data: {
+        applied: success.applied,
+        ...(success.notes.length ? { notes: success.notes } : {}),
+        ...(success.branch ? { branch: success.branch, recorded: success.recorded ?? [] } : {}),
+      },
       needsUser: false,
       timing: { ms: Date.now() - startedAt, heavy: true },
     })))
@@ -587,8 +509,50 @@ export async function POST(request: NextRequest) {
         { status: 400 },
       ))
     }
+    // A merge replays the branch's migrations onto PRODUCTION, so it waits for
+    // a human: the exact call is parked and runs verbatim once approved.
+    if (target === 'merge_branch') {
+      return withCors(await parkBranchMerge(auth, String(args.branchId ?? '').trim(), startedAt))
+    }
     dispatchName = target
     delete dispatchArgs.action
+  }
+
+  // ── read_backend_state on a preview branch: the branch's schema ───────────
+  // Only "schema" is branch-scoped. Any other section with a branchId is
+  // refused rather than answered for production, which is what an agent asking
+  // about its branch would otherwise silently get.
+  if (tool === 'read_backend_state' && typeof args.branchId === 'string' && args.branchId.trim()) {
+    const section = typeof args.section === 'string' ? args.section.trim().toLowerCase() : ''
+    if (section !== 'schema') {
+      recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 400, tool, error: 'BRANCH_SECTION_UNSUPPORTED' })
+      return withCors(NextResponse.json({
+        ok: false,
+        code: 'BRANCH_SECTION_UNSUPPORTED',
+        error: 'With branchId, read_backend_state answers section "schema" only.',
+        hint: 'Use { "section": "schema", "branchId": "…" }, branch { "action": "diff" } for what changed, or db_query { branchId } for rows.',
+      }, { status: 400 }))
+    }
+    const branch = await prisma.workspaceBranch.findFirst({
+      where: { id: args.branchId.trim(), projectId: auth.projectId, status: 'active' },
+      select: { name: true, schemaName: true },
+    })
+    if (!branch) {
+      recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 404, tool, error: 'BRANCH_NOT_FOUND' })
+      return withCors(NextResponse.json({
+        ok: false, code: 'BRANCH_NOT_FOUND', error: 'No active preview branch with that id on this project.',
+      }, { status: 404 }))
+    }
+    const { getBackendMetadata } = await import('@/lib/mcp/schema-introspection')
+    const meta = await getBackendMetadata(auth.projectId, { branchSchema: branch.schemaName })
+    recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 200, tool, mutation: false, summary: `schema of branch ${branch.name}` })
+    return withCors(NextResponse.json(jsonSafe({
+      ok: true,
+      summary: `Schema of preview branch "${branch.name}": ${meta.tables.length} table(s). Auth, storage and functions shown are production's; they are not branch-scoped.`,
+      data: { branch: branch.name, ...meta },
+      needsUser: false,
+      timing: { ms: Date.now() - startedAt, heavy: false },
+    })))
   }
 
   // ── read_backend_state — route `section` to the tool that answers it ───────
@@ -755,6 +719,8 @@ export async function POST(request: NextRequest) {
       // medium-risk build actions (set_env_var, connect_frontend) instead of
       // dead-ending them on an opaque APPROVAL_REQUIRED.
       mcpOwnerConfirmed: true,
+      // A coding agent: the protected-production gate applies to schema tools.
+      agentSurface: true,
       createdThisTurn: new Set<string>(),
     }))
 
@@ -985,5 +951,74 @@ async function parkForApproval(
       { ok: false, error: message, code: 'APPROVAL_FAILED', retryable: true, hint: 'Nothing was changed. Retry the call.' },
       { status: 500 },
     )
+  }
+}
+
+/**
+ * branch { action: "merge" }: park the merge for a human.
+ *
+ * The approval card names the statements that will reach production, read from
+ * the branch's log now, so the human approves what they can see. A branch
+ * whose migrations conflict with main is refused here rather than parked: the
+ * merge would be refused anyway, and a human should not be asked to approve
+ * something that cannot run.
+ */
+async function parkBranchMerge(auth: McpGuardAuth, branchId: string, startedAt: number): Promise<NextResponse> {
+  const callLabel = 'branch.merge'
+  const refuse = (status: number, body: Record<string, unknown>) => {
+    recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: status, tool: callLabel, error: String(body.code) })
+    return NextResponse.json({ ok: false, ...body }, { status })
+  }
+  if (!branchId) {
+    return refuse(400, { code: 'BAD_BODY', error: 'branch { action: "merge" } needs a branchId.', hint: 'branch { "action": "list" } shows the ids.' })
+  }
+  const { diffBranch } = await import('@/lib/branches/engine')
+  const diff = await diffBranch(auth.projectId, branchId).catch((e: unknown) => ({ ok: false as const, error: e instanceof Error ? e.message : String(e) }))
+  if (!diff.ok) return refuse(404, { code: 'BRANCH_NOT_FOUND', error: (diff as { error: string }).error })
+  const d = diff as Extract<typeof diff, { ok: true }>
+  if (d.conflicts.length > 0) {
+    return refuse(409, {
+      code: 'MERGE_CONFLICT',
+      error:
+        `Main has changed ${d.conflicts.join(', ')} since branch "${d.branch}" was cut, and its migrations touch ` +
+        `${d.conflicts.length === 1 ? 'it' : 'them'}. Nothing was requested.`,
+      hint: 'Create a new branch from main as it is now and apply the change there.',
+    })
+  }
+
+  const statements = d.migrations.length ? d.migrations.map((s) => `  ${s}`).join('\n') : '  (no schema changes: the merge only closes the branch)'
+  const target = `Merge preview branch "${d.branch}" into production`
+  try {
+    const { createApprovalRequest } = await import('@/lib/mcp/approvals')
+    const row = await createApprovalRequest({
+      projectId: auth.projectId,
+      userId: auth.userId,
+      apiKeyId: auth.keyId,
+      message: `Requested by an agent over MCP: ${target}. These statements will be applied to production, in order:\n${statements}`,
+      danger: { tool: 'merge_branch', target, rowCount: null, reversible: false },
+      toolArgs: { branchId },
+    })
+    recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 200, tool: callLabel, mutation: false, summary: `awaiting approval ${row.id}` })
+    return NextResponse.json({
+      ok: true,
+      status: 'awaiting_approval',
+      summary:
+        `${target} needs a human's approval and is waiting on the project's Autonomy page. ` +
+        `${d.migrations.length} statement(s) will reach production when it is approved. Nothing has changed yet.`,
+      data: { branch: d.branch, migrations: d.migrations },
+      approval: {
+        id: row.id,
+        status: 'pending',
+        poll: `check_approval with { "id": "${row.id}" }`,
+        note:
+          'The merge runs exactly as requested once a human approves it. Tell your human it is waiting, ' +
+          'then poll check_approval every 15-30s until it is executed, rejected, failed or expired (24h).',
+      },
+      needsUser: true,
+      timing: { ms: Date.now() - startedAt, heavy: false },
+    })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Could not create the approval request.'
+    return refuse(500, { code: 'APPROVAL_FAILED', error: message, retryable: true, hint: 'Nothing was changed. Retry the call.' })
   }
 }

@@ -55,6 +55,9 @@ beforeAll(async () => {
   })).id
   const project = await createProvisionedProject({ name: 'apply-migration-existing', userId: ownerId })
   projectId = project.id
+  // New Cloud projects start protected; this suite exercises apply_migration on
+  // main, as an owner who turned protection off does. See branch-migrations.spec.ts.
+  await prisma.project.update({ where: { id: projectId }, data: { protectedProduction: false } })
   schema = project.postgresSchema
   await prisma.apiKey.create({
     data: {

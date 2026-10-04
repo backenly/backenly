@@ -532,6 +532,9 @@ export async function runBrain(
     userMessage: input.message,
     understandingBlock,
     destructiveConfirmed: input.destructiveConfirmed,
+    // A coding agent over MCP: the protected-production gate applies. An
+    // approved replay (decideApproval) runs without surface:'mcp', so it is not.
+    agentSurface: input.surface === 'mcp',
     createdThisTurn: new Set<string>(),
     onToolEvent: (e) => {
       if (e.phase === 'start') emit({ type: 'tool_start', tool: e.tool, title: e.title })

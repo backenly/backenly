@@ -653,3 +653,9 @@ tests/integration/branch-key-surfaces.spec.ts
 # health reader ignores those rows, and the branch's OpenAPI spec reads the
 # branch's schema. Real schemas, keys and log rows are the property.
 tests/integration/branch-preview-endpoint.spec.ts
+
+# Build on a branch, merge to production after a human approves: protection
+# refuses an agent's migration on main, apply_migration { branchId } changes the
+# branch only (with production's RLS, no main metadata), the MCP merge parks for
+# approval and approving replays the log onto main; a conflict refuses the merge.
+tests/integration/branch-migrations.spec.ts
