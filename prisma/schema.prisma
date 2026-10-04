@@ -2665,7 +2665,9 @@ model UsageAppliedBatch {
 // The most a billing account lets Backenly charge beyond its included usage in
 // one month, in cents. No row means 0: nothing beyond the plan, every quota a
 // hard cap. Only a signed-in owner raises it (never an API key, an agent or an
-// MCP tool), and every change writes an audit_logs row.
+// MCP tool), and every change writes an audit_logs row. In Cloud the limit is
+// paid for in advance: it allows usage only up to the prepaid balance
+// (usage_prepayments less what was drawn from them).
 model UsageSpendLimit {
   billingAccountId String   @id
   limitCents       Int      @default(0)
@@ -2715,7 +2717,12 @@ model UsageLimitState {
 // (usage_period_closes), so it is one row per account, period and axis:
 // computing the same month again can never produce a second charge.
 //
-//   shadow    computed and shown, never charged (BACKENLY_OVERAGE_MODE=shadow)
+//   drawn     paid from the account's prepaid balance (usage_prepayments)
+//   shadow    computed and shown, never drawn (BACKENLY_OVERAGE_MODE=shadow)
+//
+// Months charged before prepaid billing were invoiced to the card afterwards,
+// and their rows keep that flow's statuses:
+//
 //   carried   under the minimum charge; rolled into a later month's invoice
 //   pending   an invoice is being created
 //   invoiced  on the Stripe invoice named by stripeInvoiceId
@@ -2742,6 +2749,27 @@ model UsageCharge {
   @@index([status])
   @@index([stripeInvoiceId])
   @@map("usage_charges")
+}
+
+// Money an account paid in advance for usage beyond its plan: one row per
+// Stripe Checkout Session, written once Stripe reports it paid. The webhook and
+// the owner's return from Checkout can both report the same payment; the
+// unique session id credits it once. The prepaid balance is these payments
+// less the usage drawn from them (usage_charges with status `drawn`).
+//
+//   paid      credited to the balance
+//   refunded  returned to the owner, so no longer part of the balance
+model UsagePrepayment {
+  id                    String   @id @default(uuid())
+  billingAccountId      String
+  stripeSessionId       String   @unique
+  stripePaymentIntentId String?
+  amountCents           Int
+  status                String   @default("paid")
+  createdAt             DateTime @default(now())
+
+  @@index([billingAccountId, status])
+  @@map("usage_prepayments")
 }
 
 // ============================================================================

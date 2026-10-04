@@ -20,6 +20,7 @@ import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { notFound, useRouter } from 'next/navigation'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
+import { planAllowsOverage } from '@/lib/pricing/catalog'
 import { Database, HardDrive, Bot, Activity, Users, ArrowUpRight, AlertTriangle, ShieldCheck, Sparkles, Globe, Wallet, Info, RefreshCw } from 'lucide-react'
 import { OrgShell } from '@/components/shell/OrgShell'
 import { EmptyState, INPUT_BASE, KitButton, KitNote, KitCard, KitCardHeader, KitCardBody, PageHeader, Skeleton } from '@/components/inspector/kit'
@@ -219,34 +220,77 @@ function GraceNotices({ axes, graceDays }: { axes: AxisDescription[]; graceDays:
   )
 }
 
+/** The spend limit as the Cloud route reports it: the owner's limit and what pays for it. */
+interface SpendLimitState {
+  limitCents: number
+  /** Paid in advance and not yet drawn. The limit allows usage only up to it. */
+  balanceCents: number
+}
+
+/** Where Stripe Checkout sent the owner back to: ?prepay=success&session_id=… or ?prepay=canceled. */
+interface CheckoutReturn {
+  outcome: 'success' | 'canceled'
+  sessionId: string | null
+}
+
+function readCheckoutReturn(): CheckoutReturn | null {
+  if (typeof window === 'undefined') return null
+  const params = new URLSearchParams(window.location.search)
+  const outcome = params.get('prepay')
+  if (outcome !== 'success' && outcome !== 'canceled') return null
+  return { outcome, sessionId: outcome === 'success' ? params.get('session_id') : null }
+}
+
+const CHECKOUT_CANCELED = 'Payment canceled. Your spend limit and prepaid balance did not change.'
+
 /**
  * Usage past the plan this month and the spend limit that bounds it. Shown only
- * where it can apply (Cloud, with overage not off). Lowering the limit applies
- * at once; raising it sends a code to the owner's email, and only that code
- * raises it.
+ * where it can apply: Cloud, a plan that allows overage (never Free), and
+ * overage not off.
+ *
+ * The limit is paid for in advance and allows usage only up to the prepaid
+ * balance. Lowering it applies at once. Raising it, or saving it again to top
+ * the balance back up, sends a code to the owner's email; when the balance does
+ * not cover the limit, confirming the code opens Stripe Checkout for the
+ * difference, and the limit applies once Stripe reports the payment.
  */
-function OverageCard({ usage, onChanged }: { usage: AccountUsage; onChanged: () => void }) {
+function OverageCard({ usage, notice, onChanged }: { usage: AccountUsage; notice: string | null; onChanged: () => void }) {
+  const [limit, setLimit] = useState<SpendLimitState | null>(null)
   const [presets, setPresets] = useState<number[]>([0, 5_000, 10_000, 25_000])
-  const [choice, setChoice] = useState<string>(String(usage.overage.spendLimitCents))
+  const [choice, setChoice] = useState<string | null>(null)
   const [custom, setCustom] = useState('')
-  const [pending, setPending] = useState<{ requestedCents: number; sentTo: string } | null>(null)
+  const [pending, setPending] = useState<{ requestedCents: number; paymentCents: number; sentTo: string } | null>(null)
   const [code, setCode] = useState('')
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
 
+  // Read again whenever the account description reloads, so the balance moves
+  // with the meters after a change or a payment.
   useEffect(() => {
+    let cancelled = false
     fetch('/api/billing/spend-limit', { credentials: 'include' })
       .then((r) => (r.ok ? r.json() : null))
-      .then((d) => { if (d?.presetsCents) setPresets(d.presetsCents) })
+      .then((d) => {
+        if (cancelled || !d) return
+        setLimit({ limitCents: d.limitCents, balanceCents: d.balanceCents ?? 0 })
+        if (d.presetsCents) setPresets(d.presetsCents)
+      })
       .catch(() => {})
-  }, [])
+    return () => { cancelled = true }
+  }, [usage])
 
   const mode = usage.overage.mode
   if (mode === null || mode === 'off') return null
 
+  const currentCents = limit?.limitCents ?? usage.overage.spendLimitCents
+  const selected = choice ?? String(currentCents)
+  // A custom limit set earlier is listed as itself rather than shown as the first preset.
+  const options = presets.includes(currentCents) ? presets : [...presets, currentCents].sort((a, b) => a - b)
+  const shortCents = limit ? Math.max(0, limit.limitCents - limit.balanceCents) : 0
+
   const save = async () => {
-    const cents = choice === 'custom' ? Math.round(Number(custom) * 100) : Number(choice)
-    if (!Number.isFinite(cents) || cents < 0) { setMessage('Enter a whole-dollar amount.'); return }
+    const cents = selected === 'custom' ? Math.round(Number(custom) * 100) : Number(selected)
+    if (!Number.isFinite(cents) || cents < 0 || (selected === 'custom' && !custom)) { setMessage('Enter a whole-dollar amount.'); return }
     setBusy(true); setMessage(null)
     try {
       const res = await fetch('/api/billing/spend-limit', {
@@ -256,7 +300,7 @@ function OverageCard({ usage, onChanged }: { usage: AccountUsage; onChanged: () 
         body: JSON.stringify({ limitCents: cents }),
       })
       const data = await res.json()
-      if (res.status === 202) setPending({ requestedCents: data.requestedCents, sentTo: data.sentTo })
+      if (res.status === 202) setPending({ requestedCents: data.requestedCents, paymentCents: data.paymentCents ?? 0, sentTo: data.sentTo })
       else if (!res.ok) setMessage(data.error || 'Could not change the limit.')
       else { setMessage('Spend limit updated.'); onChanged() }
     } finally { setBusy(false) }
@@ -273,9 +317,17 @@ function OverageCard({ usage, onChanged }: { usage: AccountUsage; onChanged: () 
       })
       const data = await res.json()
       if (!res.ok) { setMessage(data.error || 'That code did not work.'); return }
-      setPending(null); setCode(''); setMessage('Spend limit raised.'); onChanged()
+      if (data.checkoutUrl) {
+        // The limit changes once Stripe reports the payment, not before.
+        setMessage('Opening Stripe to take the payment…')
+        window.location.assign(data.checkoutUrl)
+        return
+      }
+      setPending(null); setCode(''); setMessage('Spend limit changed.'); onChanged()
     } finally { setBusy(false) }
   }
+
+  const shown = message ?? notice
 
   return (
     <KitCard className="mt-4">
@@ -283,8 +335,8 @@ function OverageCard({ usage, onChanged }: { usage: AccountUsage; onChanged: () 
         title="Usage beyond your plan"
         description={
           mode === 'shadow'
-            ? 'Estimated only. Usage past the plan is not billed yet.'
-            : 'Billed at the end of the month, never past your spend limit.'
+            ? 'Estimated only. Nothing is drawn from your balance yet.'
+            : 'Paid in advance from your prepaid balance, never past your spend limit.'
         }
         actions={
           <span className="inline-flex items-baseline gap-1.5">
@@ -300,16 +352,16 @@ function OverageCard({ usage, onChanged }: { usage: AccountUsage; onChanged: () 
           <select
             className={`${INPUT_BASE} h-[32px] w-auto px-2.5 tabular-nums`}
             aria-label="Spend limit"
-            value={choice}
+            value={selected}
             onChange={(e) => setChoice(e.target.value)}
             disabled={busy || !!pending}
           >
-            {presets.map((c) => (
+            {options.map((c) => (
               <option key={c} value={String(c)}>{c === 0 ? 'Off ($0)' : fmtCents(c)}</option>
             ))}
             <option value="custom">Custom…</option>
           </select>
-          {choice === 'custom' && (
+          {selected === 'custom' && (
             <input
               className={`${INPUT_BASE} h-[32px] w-24 px-2.5 tabular-nums`}
               aria-label="Custom spend limit in US dollars"
@@ -323,12 +375,20 @@ function OverageCard({ usage, onChanged }: { usage: AccountUsage; onChanged: () 
           <KitButton variant="secondary" size="sm" onClick={save} disabled={!!pending} loading={busy && !pending}>
 Save
           </KitButton>
-          <span className="text-[12.5px] text-zinc-500">Current: {usage.overage.spendLimitCents === 0 ? 'Off' : fmtCents(usage.overage.spendLimitCents)}</span>
+          <span className="text-[12.5px] text-zinc-500">Current: {currentCents === 0 ? 'Off' : fmtCents(currentCents)}</span>
         </div>
+        {limit && (
+          <p className="mt-2 text-[12.5px] tabular-nums text-zinc-400">
+            Prepaid balance {fmtCents(limit.balanceCents)}
+            {shortCents > 0 &&
+              `, ${fmtCents(shortCents)} short of your ${fmtCents(limit.limitCents)} limit: usage past the plan stops at ${fmtCents(limit.balanceCents)}. Save the limit to top it up.`}
+          </p>
+        )}
         {pending && (
           <div className="mt-3 flex flex-wrap items-center gap-2">
             <span className="text-[12px] text-zinc-400">
-              We sent a code to {pending.sentTo} to confirm raising the limit to {fmtCents(pending.requestedCents)}.
+              We sent a code to {pending.sentTo} to set the limit to {fmtCents(pending.requestedCents)}.
+              {pending.paymentCents > 0 && ` Next, Stripe takes ${fmtCents(pending.paymentCents)} for your prepaid balance.`}
             </span>
             <input
               className={`${INPUT_BASE} h-[32px] w-28 px-2.5 font-mono tracking-[0.2em]`}
@@ -340,14 +400,16 @@ Save
               onChange={(e) => setCode(e.target.value)}
             />
             <KitButton variant="primary" size="sm" onClick={confirm} disabled={busy || code.replace(/\D/g, '').length !== 6}>
-              Confirm
+              {pending.paymentCents > 0 ? 'Confirm and pay' : 'Confirm'}
             </KitButton>
           </div>
         )}
-        {message && <p className="mt-2 text-[12.5px] text-zinc-400">{message}</p>}
+        {shown && <p className="mt-2 text-[12.5px] text-zinc-400">{shown}</p>}
         <p className="mt-3 max-w-[72ch] text-[12.5px] leading-[19px] text-zinc-500">
-          With the limit off, every quota is a hard cap. Limits are checked every few minutes, so usage can run a little past one.
-          Only you can raise it, from this page and your email; agents and API keys can read it but never change it.
+          Usage past your plan is paid for in advance. Raising the limit takes a code from your email and, when your balance does
+          not cover it, a card payment through Stripe for the difference. Each month&apos;s usage past the plan is drawn from the
+          balance, never past your limit, and the rest carries over. With the limit off, every quota is a hard cap. Limits are
+          checked every few minutes, so usage can run a little past one. Agents and API keys can read the limit but never change it.
         </p>
       </KitCardBody>
     </KitCard>
@@ -367,6 +429,42 @@ export default function UsagePage() {
   const [activity, setActivity] = useState<AutonomyActivity | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  // Back from Stripe Checkout. Read once in the browser; nothing it decides is
+  // rendered before the account loads, so the server render never differs.
+  const [checkout] = useState(readCheckoutReturn)
+  const [checkoutNotice, setCheckoutNotice] = useState<string | null>(
+    checkout?.outcome === 'canceled' ? CHECKOUT_CANCELED : null,
+  )
+
+  // Report a paid Checkout Session so the balance and limit update now rather
+  // than whenever Stripe's webhook arrives. Crediting is keyed on the session,
+  // so this and the webhook together still credit the payment once.
+  useEffect(() => {
+    if (!checkout) return
+    window.history.replaceState(null, '', window.location.pathname)
+    if (!checkout.sessionId) return
+    let cancelled = false
+    fetch('/api/billing/spend-limit/prepay', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: checkout.sessionId }),
+    })
+      .then(async (res) => {
+        const data = await res.json().catch(() => ({}))
+        if (cancelled) return
+        if (!res.ok) setCheckoutNotice(data.error || 'Stripe has not confirmed the payment yet. Your balance updates when it does.')
+        else if (data.outcome === 'unpaid') setCheckoutNotice('Stripe is still processing the payment. Your balance updates when it clears.')
+        else setCheckoutNotice(`Payment received. Your prepaid balance is ${fmtCents(data.balanceCents ?? 0)}.`)
+      })
+      .catch(() => {
+        if (!cancelled) setCheckoutNotice('Stripe has not confirmed the payment yet. Your balance updates when it does.')
+      })
+      .finally(() => {
+        if (!cancelled) setAccountVersion((v) => v + 1)
+      })
+    return () => { cancelled = true }
+  }, [checkout])
 
   useEffect(() => {
     let cancelled = false
@@ -480,7 +578,10 @@ export default function UsagePage() {
             </div>
 
             {account && <GraceNotices axes={account.axes} graceDays={account.graceDays} />}
-            {account && <OverageCard usage={account} onChanged={() => setAccountVersion((v) => v + 1)} />}
+            {/* Free has no usage past the plan, only hard caps, so there is nothing to set or pay for. */}
+            {account && planAllowsOverage(account.planName) && (
+              <OverageCard usage={account} notice={checkoutNotice} onChanged={() => setAccountVersion((v) => v + 1)} />
+            )}
 
             {activity && (
               <KitCard className="mt-4">

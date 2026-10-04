@@ -95,8 +95,9 @@ export interface UserEntitlements {
  *                             recorded, never charged
  *                    enforce  usage may pass the quota until the estimated
  *                             overage reaches the spend limit, and is charged
- *   spendLimitCents  the most the owner allows beyond the plan in one month.
- *                    0 (the default) keeps every quota a hard cap.
+ *   spendLimitCents  the most usage beyond the plan may cost this month. Cloud
+ *                    answers the owner's limit, up to what they have paid in
+ *                    advance. 0 (the default) keeps every quota a hard cap.
  */
 export interface OveragePolicy {
   mode: 'off' | 'shadow' | 'enforce'
