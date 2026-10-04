@@ -996,11 +996,13 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   // and every migration landed on live customer data — reported as the single
   // riskiest gap in the surface. lib/branches/engine.ts is the implementation.
   fn('create_branch',
-    'Create a preview branch: a structural clone of this project\'s schema in an isolated PostgreSQL schema, carrying ' +
-    'its own row-security policies and its own sequences. Use it before any migration you are not certain about — ' +
-    'experiment there, diff it against main, then merge. Max 5 active branches. Names are lowercase kebab-case.\n' +
-    'The branch starts EMPTY: production rows are not copied unless you ask for them, so an experiment cannot damage ' +
-    'real data. To point an app at the branch, issue a key bound to it with create_api_key(branchId).',
+    'Create a preview branch: a copy of this project\'s schema in an isolated PostgreSQL schema, carrying ' +
+    'its own row-security policies and its own sequences. Max 5 active branches. Names are lowercase kebab-case.\n' +
+    'The branch starts EMPTY: production rows are not copied unless you ask for them, so a test cannot damage ' +
+    'real data. To point an app or a test at the branch, issue a key bound to it with create_api_key(branchId). That ' +
+    'key reads and writes the branch through the data API (/db and /api/v2) and is REFUSED by every other endpoint ' +
+    '(auth, functions, storage, realtime) rather than served from production.\n' +
+    'Schema changes made with apply_migration, create_table or any other build tool still apply to main, not to a branch.',
     {
       name: { type: 'string', description: 'Branch name, e.g. "add-payments". Lowercase kebab-case.' },
       includeData: {
@@ -2121,7 +2123,7 @@ export async function dispatchTool(
         if (!branches.length) {
           return finalize({
             ok: true,
-            summary: 'No preview branches. Create one with create_branch before a migration you are unsure about — it is a full clone and costs nothing to throw away.',
+            summary: 'No preview branches. Create one with create_branch to test against an isolated copy of the schema; it starts empty and costs nothing to throw away.',
             data: { branches: [] },
           })
         }

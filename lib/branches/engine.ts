@@ -7,9 +7,10 @@
  * environment.
  *
  * v1 contract (foundation):
- *   • create   — full structural clone (LIKE … INCLUDING ALL: types, defaults,
- *                NOT NULL, indexes) + data copy. FK constraints intentionally
- *                not cloned — the branch is a sandbox, not a runtime.
+ *   • create   — structural clone (LIKE … INCLUDING ALL: types, defaults,
+ *                NOT NULL, indexes), with row security and sequences
+ *                replicated; rows are copied only with includeData. FK
+ *                constraints intentionally not cloned.
  *   • diff     — pure comparison (lib/branches/diff.ts) of branch vs main.
  *   • merge    — NEW TABLES apply to main through executeAction (the governed
  *                kernel: metadata, generated APIs, auto-RLS, reconciler all

@@ -56,8 +56,25 @@ interface AuthResolution {
    * request, because a client-settable value here selects a PostgreSQL schema.
    */
   branchSchema?: string
+  /** The bound branch's name, for the X-Backenly-Environment response header. */
+  branchName?: string
   error?: string
   code?: string
+}
+
+/**
+ * Which environment answered, on every data-plane response.
+ *
+ * A preview key and a main key hit the same URL, so nothing in a response said
+ * which schema served it. A test an agent runs "against the preview" could not
+ * tell that it was in fact reading production, which is the one mistake a
+ * preview environment exists to prevent. Exposed to browsers in server/app.ts
+ * and middleware.ts, so a frontend's test can assert it too.
+ */
+export const ENVIRONMENT_HEADER = 'X-Backenly-Environment'
+
+export function environmentHeaderValue(branchName?: string | null): string {
+  return branchName ? `branch:${branchName}` : 'main'
 }
 
 /**
@@ -74,7 +91,7 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
       select: {
         id: true, name: true, keyPrefix: true, projectId: true, userId: true,
         permissions: true, rateLimit: true, expiresAt: true, serviceRole: true,
-        branch: { select: { schemaName: true, status: true } },
+        branch: { select: { schemaName: true, status: true, name: true } },
       },
     })
     if (!key) return { success: false, error: 'Invalid API key', code: 'INVALID_API_KEY' }
@@ -172,6 +189,7 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
       isServiceRole: !!key.serviceRole,
       userRole,
       branchSchema: key.branch?.schemaName,
+      branchName: key.branch?.name,
     }
   }
 
@@ -293,7 +311,7 @@ async function handleDynamicRequest(req: Request, res: Response) {
     return
   }
 
-  const { projectId, keyId, userId, endUserId, isServiceRole, userRole, branchSchema } = authResult
+  const { projectId, keyId, userId, endUserId, isServiceRole, userRole, branchSchema, branchName } = authResult
 
   // The project served here is the KEY's, which the URL-keyed serving gate
   // never saw when the path is the legacy `/api/v1/{table}` form. Judge it now
@@ -513,6 +531,7 @@ async function handleDynamicRequest(req: Request, res: Response) {
     }
   }
 
+  res.setHeader(ENVIRONMENT_HEADER, environmentHeaderValue(branchSchema ? branchName : null))
   const handled = await handleViaPostgrest(req, res, path, {
     projectId: projectId!,
     endUserId,

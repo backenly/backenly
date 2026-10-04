@@ -48,7 +48,7 @@ import {
 import { checkExposure, type Operation } from '@/lib/postgrest/exposure'
 import { stripUpstreamError } from '@/lib/postgrest/translate'
 import { ensureSchemaRegistered } from '@/lib/postgrest/registration'
-import { getProjectIdFromAuth } from './dynamic'
+import { getProjectIdFromAuth, ENVIRONMENT_HEADER, environmentHeaderValue } from './dynamic'
 import { enforceRateLimitByKeyId } from '../lib/auth'
 import { asyncRoute } from '../lib/async-route'
 import { touchProjectActivity } from '@/lib/projects/activity'
@@ -146,6 +146,7 @@ router.all('/:projectId/*', asyncRoute(async (req: Request, res: Response) => {
 
   // Authenticated, in quota, and past the serving gate: real use.
   void touchProjectActivity(projectId)
+  res.setHeader(ENVIRONMENT_HEADER, environmentHeaderValue(auth.branchSchema ? auth.branchName : null))
 
   // Past the database grace period the data API is read-only, as on v1.
   if (isGrowingWrite(req.method)) {

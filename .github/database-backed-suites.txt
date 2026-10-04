@@ -641,3 +641,9 @@ tests/integration/tours-seen.spec.ts
 # the id as the column's type, so it works on the canonical uuid users table.
 # Real provisioned projects (encrypted secrets) and real users are the property.
 tests/integration/end-user-session-tokens.spec.ts
+
+# A key bound to a preview branch is refused by every runtime surface that is
+# not branch-scoped, at both doors (the Express app and recordedV1), and the
+# data plane says which environment answered. Mount order against real key and
+# branch rows is the property, so it needs a real Postgres.
+tests/integration/branch-key-surfaces.spec.ts

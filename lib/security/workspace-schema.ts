@@ -65,9 +65,9 @@ export function quoteIdent(name: string): string {
  * The prefix every schema belonging to a project shares: `workspace_<uuid>_`.
  *
  * A project owns more than its canonical schema. Branches live at
- * `workspace_<id>_br_<name>` (lib/branches/diff.ts) and a staging copy at
- * `workspace_<id>_staging` (executeCreateStaging in lib/ai/minimal-executor.ts),
- * and both hold real customer rows. Deletion has to find all of them.
+ * `workspace_<id>_br_<name>` (lib/branches/diff.ts), and projects from before
+ * the retired staging action may still hold a `workspace_<id>_staging` copy.
+ * Both can hold real customer rows. Deletion has to find all of them.
  *
  * Safe as a namespace boundary because a UUID is fixed-length: for two distinct
  * ids A and B, `workspace_<A>_` can never prefix `workspace_<B>`, since the

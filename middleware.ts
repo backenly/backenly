@@ -248,7 +248,7 @@ async function handleCORS(request: NextRequest): Promise<NextResponse | null> {
     ? 'Content-Type, Authorization, X-Requested-With, X-User-Id, X-Project-Id, X-User-Token, x-api-key, Prefer, Range, Range-Unit, Accept-Profile, Content-Profile'
     : 'Content-Type, Authorization, X-Requested-With'
   /** Response headers cross-origin JavaScript is permitted to read. */
-  const exposedHeaders = 'Content-Range, Content-Location, Location, Range-Unit, Preference-Applied'
+  const exposedHeaders = 'Content-Range, Content-Location, Location, Range-Unit, Preference-Applied, X-Backenly-Environment'
 
   // SDK (/api/v1/*) auth is via x-api-key in headers, NOT cookies. Don't
   // advertise credentials — that prevents browsers from sending cookies and

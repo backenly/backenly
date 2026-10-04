@@ -22,5 +22,6 @@ Every tool and route answers failures as JSON: `{ ok: false, error, code }`, oft
 | `FUNCTION_INACTIVE` | The function is switched off | Turn it on with `functions` `set_active` first |
 | `INVALID_CODE` / `SECRET_IN_CODE` / `CODE_TOO_LARGE` | `functions` `deploy_code` refused the source | Fix what the summary names; nothing was stored |
 | `BRANCH_INACTIVE` | The key is bound to a branch that was merged or discarded | Use a key for an active branch or the main schema |
+| `BRANCH_SURFACE_UNAVAILABLE` | A branch-bound key called an endpoint that is not branch-scoped (auth, functions, storage, realtime), which would have served production | Use the branch key only on `/db` and `/api/v2`; use a main key for the rest |
 
 Database errors name the column, the expected type and the value received. A result with `partial` means some changes landed before the run stopped: read state before replaying anything.
