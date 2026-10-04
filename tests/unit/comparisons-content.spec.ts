@@ -26,16 +26,6 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createElement } from 'react'
 
-/**
- * SiteShell pulls in the smooth-scroll wrapper, which imports Lenis as ESM.
- * Jest does not transform it, so requiring a page module for its metadata
- * exports would fail on a dependency none of these assertions care about.
- * Stubbing the shell keeps the failure surface on the pages themselves rather
- * than widening jest.config for every other suite.
- */
-jest.mock('@/components/site/SiteShell', () => ({
-  SiteShell: ({ children }: { children: unknown }) => children,
-}))
 import { COMPARISONS, COMPARISON_LIST, COMPARISON_SLUGS } from '@/app/comparisons/data'
 import {
   CRITERIA,

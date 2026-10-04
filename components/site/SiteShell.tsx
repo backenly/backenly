@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useLayoutEffect, useState } from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { useSettledReducedMotion } from '@/lib/hooks/useSettledReducedMotion'
@@ -10,7 +10,6 @@ import { Menu, X } from 'lucide-react'
 import { registerSiteIcons } from '@/lib/icons/registry'
 import { BrandMark } from '@/components/site/BrandMark'
 import { LaunchBar } from '@/components/site/LaunchBar'
-import { SmoothScroll } from '@/components/site/SmoothScroll'
 import { useUserSession } from '@/lib/hooks/useUserSession'
 
 // Synchronously load all marketing-site icons into the Iconify cache so
@@ -116,10 +115,37 @@ function skipToContent(event: React.MouseEvent<HTMLAnchorElement>) {
   main.focus({ preventScroll: true })
 }
 
+/**
+ * Scrolling on the public site is the browser's own, like Supabase, Vercel and
+ * Linear: no smooth-scroll library. Lenis used to drive it, gliding every wheel
+ * tick for 1.5s from requestAnimationFrame on the main thread, which is the
+ * thread a low-memory laptop has least of; native scrolling runs on the
+ * compositor and keeps up while the page's JavaScript is busy.
+ *
+ * What stays smooth is the jump to an in-page anchor: html carries
+ * `scroll-behavior: smooth` (app/globals.css), and the browser animates that
+ * natively. The same rule would also animate every page change back to the
+ * top, because Next 16 resets scroll-behavior during a route change only when
+ * <html> has data-scroll-behavior="smooth". This sets it while a public page is
+ * mounted, so page changes here land instantly and the console keeps its own
+ * behaviour. A layout effect, not a passive one: on a client navigation into
+ * the site it must be in place before the router's scroll, which runs in the
+ * layout phase, in an ancestor of this component.
+ */
+function useInstantPageChanges() {
+  useLayoutEffect(() => {
+    const html = document.documentElement
+    html.dataset.scrollBehavior = 'smooth'
+    return () => {
+      delete html.dataset.scrollBehavior
+    }
+  }, [])
+}
+
 export function SiteShell({ children }: { children: React.ReactNode }) {
+  useInstantPageChanges()
   return (
     <div>
-      <SmoothScroll />
       <div
         // overflow-x-CLIP, not hidden. `hidden` makes this wrapper a scroll
         // container (overflow-y computes to auto), and a sticky descendant

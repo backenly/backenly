@@ -88,30 +88,6 @@
   }
 }
 
-/* Lenis smooth scroll (buttery momentum on marketing pages).
-   Only active once <SmoothScroll> attaches the .lenis class to <html>;
-   with reduced-motion or JS off, none of this applies and scroll is native. */
-html.lenis,
-html.lenis body {
-  height: auto;
-}
-
-.lenis.lenis-smooth {
-  scroll-behavior: auto !important;
-}
-
-.lenis.lenis-smooth [data-lenis-prevent] {
-  overscroll-behavior: contain;
-}
-
-.lenis.lenis-stopped {
-  overflow: hidden;
-}
-
-.lenis.lenis-smooth iframe {
-  pointer-events: none;
-}
-
 /* ─── Design System Foundation ─── Premium Dark Theme ─── */
 /* Palette: Black + White + Emerald (success only) */
 :root {
@@ -664,9 +640,19 @@ body {
   margin: 0 auto;
 }
 
-/* Scroll Behavior */
+/* Scroll Behavior
+   Smooth applies to in-page anchor jumps only; wheel and trackpad scrolling is
+   always the browser's own. The public site sets data-scroll-behavior on
+   <html> (SiteShell) so Next resets this during page changes there, and that
+   attribute is what scopes the reduced-motion opt-out to the public site. */
 html {
   scroll-behavior: smooth;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-scroll-behavior='smooth'] {
+    scroll-behavior: auto;
+  }
 }
 
 /* Focus States */

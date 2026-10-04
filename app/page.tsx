@@ -294,7 +294,7 @@ function AgentStrip() {
 
 function ChangeSection() {
   return (
-    <section id="how-it-works" className={`${SECTION} scroll-mt-20`}>
+    <section id="how-it-works" className={`${SECTION} scroll-mt-[92px]`}>
       <div className={CONTAINER}>
         <Reveal>
           <SectionHead
@@ -383,7 +383,7 @@ function PrimitivesSection() {
   const [database, auth, rest, realtime, storage, functions] = primitives
 
   return (
-    <section id="capabilities" className={`${SECTION} scroll-mt-20`}>
+    <section id="capabilities" className={`${SECTION} scroll-mt-[92px]`}>
       <div className={CONTAINER}>
         <Reveal>
           <SectionHead
