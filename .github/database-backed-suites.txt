@@ -635,3 +635,9 @@ tests/integration/go-live-empty-guard.spec.ts
 # One-time tours remain caller-scoped, idempotent and unavailable until their
 # migration is applied, so a missing table never repeats the tour.
 tests/integration/tours-seen.spec.ts
+
+# A new end user's session works from sign-up: the Next sign-up route signs with
+# the resolved (decrypted) project secret every verifier uses, and refresh binds
+# the id as the column's type, so it works on the canonical uuid users table.
+# Real provisioned projects (encrypted secrets) and real users are the property.
+tests/integration/end-user-session-tokens.spec.ts

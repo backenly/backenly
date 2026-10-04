@@ -19,6 +19,7 @@ import { recordedV1 } from '@/lib/traffic/recorded-v1'
 import { emitEndUserCreated } from '@/lib/services/end-user-auth-events'
 import { getAuthEmailContext } from '@/lib/services/end-user-auth-email'
 import { ensureEmailVerifiedColumn, requestEmailVerification } from '@/lib/services/end-user-auth-flows'
+import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 
 /**
  * POST /v1/{projectId}/auth/signup
@@ -167,9 +168,14 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     // accounts are excluded inside trackEndUserActive itself.
     trackEndUserActive(projectId, String(user.id), email).catch(() => {})
 
+    // Signed with the RESOLVED secret, as every verifier reads it. Provisioning
+    // stores the secret encrypted (JWTSecretManager.getOrCreateSecret), and this
+    // route signed with the stored ciphertext, so a sign-up token verified
+    // nowhere: the data plane served its holder as anonymous and refresh
+    // refused it, until the user signed in again.
     const token = jwt.sign(
       { userId: user.id, email: user.email, projectId, role: user.role ?? 'user', jti: crypto.randomUUID() },
-      jwtSecret,
+      resolveJwtSecret(jwtSecret),
       { expiresIn: '7d' },
     )
 
