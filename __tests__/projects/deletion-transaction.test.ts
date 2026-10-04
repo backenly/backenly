@@ -238,9 +238,10 @@ describe('B. project deletion — multiple branches', () => {
   })
 
   it('also drops a staging schema that no registry row names', async () => {
-    // executeCreateStaging copies production tables WITH DATA into
-    // workspace_<id>_staging and records nothing in Prisma. Resolving schemas
-    // from pg_namespace rather than from registry rows is what catches it.
+    // The retired staging action copied production tables WITH DATA into
+    // workspace_<id>_staging and recorded nothing in Prisma; projects from
+    // before its removal may still hold one. Resolving schemas from
+    // pg_namespace rather than from registry rows is what catches it.
     const userId = await makeUser()
     const projectId = await makeProject(userId)
     const staging = `workspace_${projectId}_staging`

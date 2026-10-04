@@ -8,6 +8,9 @@ import { canAccessProject } from '@/lib/edition/guard'
 
 const querySchema = z.object({
   projectId: z.string().uuid(),
+  // A preview branch's traffic instead of production's. Scoped by projectId in
+  // the query too, so another project's branch id reads nothing.
+  branchId: z.string().uuid().optional(),
   limit: z.string().optional().transform((val) => {
     if (!val || val === 'null' || val === 'undefined') return 10
     const num = parseInt(val, 10)
@@ -20,6 +23,7 @@ export const GET = withAuth(async (request: NextRequest, { user }) => {
     const searchParams = request.nextUrl.searchParams
     const parsed = querySchema.parse({
       projectId: searchParams.get('projectId') ?? undefined,
+      branchId: searchParams.get('branchId') ?? undefined,
       limit: searchParams.get('limit') ?? undefined,
     })
 
@@ -37,6 +41,8 @@ export const GET = withAuth(async (request: NextRequest, { user }) => {
       where: {
         projectId: parsed.projectId,
         NOT: { path: { startsWith: '/api/' } },
+        // Production unless a branch is asked for; the two never mix.
+        branchId: parsed.branchId ?? null,
       },
       orderBy: { timestamp: 'desc' },
       take: parsed.limit,

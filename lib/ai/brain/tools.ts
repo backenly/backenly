@@ -56,6 +56,7 @@ export type ToolName =
   | 'list_branches'
   | 'diff_branch'
   | 'create_branch'
+  | 'connect_branch'
   | 'merge_branch'
   | 'discard_branch'
   | 'list_integration_keys'
@@ -221,6 +222,9 @@ const DESTRUCTIVE_TOOLS = new Set<ToolName>([
   'delete_webhook',
   // DROP SCHEMA CASCADE on the branch — every experiment in it is gone.
   'discard_branch',
+  // Replays the branch's migrations onto PRODUCTION. Reviewing a change before
+  // it reaches production is what a branch is for, so a human approves it.
+  'merge_branch',
   // Affects end-users / data exposure
   'block_end_user',
   'remove_permission',
@@ -317,6 +321,13 @@ export interface ToolDispatchContext {
    * keeps parking destructive ops in the human Review Queue.
    */
   mcpOwnerConfirmed?: boolean
+  /**
+   * True when a coding agent is the caller: the MCP tool route, apply_migration
+   * on main, and brain runs on the MCP surface (backend_chat). The
+   * protected-production gate keys on it (lib/branches/protection.ts). A merge
+   * replay and any call a human approved run without it.
+   */
+  agentSurface?: boolean
   /**
    * In-turn ledger of tables this turn has CREATED. Used to block the LLM
    * from calling fix_backend(target='table', tableName=X) immediately after
@@ -842,13 +853,14 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     ['name', 'code', 'trigger']),
   // ── Monitoring: request log ───────────────────────────────────────────────
   fn('list_request_logs',
-    'The requests this project\'s runtime API served, newest first: method, path (no query string), status, latency, time. Filter to failures with minStatus 400, or to one route with pathPrefix.',
+    'The requests this project\'s runtime API served, newest first: method, path (no query string), status, latency, time. Filter to failures with minStatus 400, or to one route with pathPrefix. Production traffic only, unless branchId names a preview branch, which returns that branch\'s traffic instead.',
     {
       method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] },
       minStatus: { type: 'integer', minimum: 100, maximum: 599, description: 'e.g. 400 for failures, 500 for server errors.' },
       pathPrefix: { type: 'string', description: 'e.g. "/db/orders" or "/fn/".' },
       sinceMinutes: { type: 'integer', minimum: 1, maximum: 43200 },
       limit: { type: 'integer', minimum: 1, maximum: 200 },
+      branchId: { type: 'string', description: 'A preview branch id from branch(action:"list"): read the requests made with that branch\'s keys.' },
     },
     []),
   // ── Deploy: version history ───────────────────────────────────────────────
@@ -996,11 +1008,16 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   // and every migration landed on live customer data — reported as the single
   // riskiest gap in the surface. lib/branches/engine.ts is the implementation.
   fn('create_branch',
-    'Create a preview branch: a structural clone of this project\'s schema in an isolated PostgreSQL schema, carrying ' +
-    'its own row-security policies and its own sequences. Use it before any migration you are not certain about — ' +
-    'experiment there, diff it against main, then merge. Max 5 active branches. Names are lowercase kebab-case.\n' +
-    'The branch starts EMPTY: production rows are not copied unless you ask for them, so an experiment cannot damage ' +
-    'real data. To point an app at the branch, issue a key bound to it with create_api_key(branchId).',
+    'Create a preview branch: a copy of this project\'s schema in an isolated PostgreSQL schema, carrying ' +
+    'its own row-security policies and its own sequences. Max 5 active branches. Names are lowercase kebab-case.\n' +
+    'The branch starts EMPTY: production rows are not copied unless you ask for them, so a test cannot damage ' +
+    'real data.\n' +
+    'Returns the branch\'s PREVIEW ENDPOINT, ready to test: the base URL (the same as production), a client key ' +
+    'bound to the branch (shown once), the X-Backenly-Environment value every data response will carry, an OpenAPI ' +
+    'URL, and instructions to hand to a test. That key reads and writes the branch through the data API (/db and ' +
+    '/api/v2) and is REFUSED by every other endpoint (auth, functions, storage, realtime) rather than served from ' +
+    'production. connect_branch issues more keys.\n' +
+    'Schema changes made with apply_migration, create_table or any other build tool still apply to main, not to a branch.',
     {
       name: { type: 'string', description: 'Branch name, e.g. "add-payments". Lowercase kebab-case.' },
       includeData: {
@@ -1011,15 +1028,26 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
       },
     },
     ['name']),
+  fn('connect_branch',
+    'Issue another key for an active preview branch, with its preview endpoint: base URL (the same as production), ' +
+    'the key (shown once), the X-Backenly-Environment value to assert, an OpenAPI URL and test instructions. A client ' +
+    'key by default, safe in a browser and bound by row-level security; serviceRole:true issues a server-side key ' +
+    'that bypasses RLS on the branch only. Either key reaches the data API and end-user sign-up, sign-in, refresh and ' +
+    'logout on the branch, and is refused by every endpoint that is not branch-scoped.',
+    {
+      branchId: { type: 'string', description: 'The branch id from list_branches.' },
+      serviceRole: { type: 'boolean', description: 'Default false. True issues a server-side key for the branch only.' },
+    },
+    ['branchId']),
   fn('list_branches',
     'List this project\'s preview branches with their status, schema name and creation time. Side-effect free.',
     {}),
   fn('diff_branch',
-    'Compare a preview branch against main: tables added/removed, columns added/removed, and type changes. Read this before merging so you know exactly what would land. Side-effect free.',
+    'What a preview branch would bring to production: the migrations applied on it, in order (exactly what a merge replays), the tables and columns they changed, and any table main has changed since the branch was cut (a conflict blocks the merge). Side-effect free.',
     { branchId: { type: 'string', description: 'The branch id from list_branches.' } },
     ['branchId']),
   fn('merge_branch',
-    'Merge a preview branch back into main through the governed path. NEW TABLES are applied via the same kernel a direct create uses (metadata, REST exposure, auto-RLS, reconciler all fire). Added columns, type changes and drops are NOT auto-applied — they come back as review items, because silently reshaping a live column is exactly what a branch exists to prevent. Call diff_branch first.',
+    'Merge a preview branch into PRODUCTION: its migrations are replayed onto main, in order, through the same governed path a direct apply_migration takes. Requires a human\'s approval, because it changes production. Refused while main has changed a table the migrations touch. On success the branch is closed and its schema dropped; its keys stop working. Call diff_branch first.',
     { branchId: { type: 'string', description: 'The branch id from list_branches.' } },
     ['branchId']),
   fn('discard_branch',
@@ -1850,6 +1878,15 @@ export async function dispatchTool(
   const preflight = preflightValidate(name, args, ctx)
   if (preflight) return preflight
 
+  // ── Protected production: an agent changes the schema on a branch ─────────
+  if (ctx.agentSurface) {
+    const { GATED_SCHEMA_TOOLS, isProductionProtected, branchRequired } = await import('@/lib/branches/protection')
+    if (GATED_SCHEMA_TOOLS.has(name) && (await isProductionProtected(ctx.projectId))) {
+      const refusal = branchRequired(`${name}${args.tableName ? ` on "${String(args.tableName)}"` : ''}`)
+      return { ok: false, summary: `${refusal.error} ${refusal.hint}`, code: refusal.code }
+    }
+  }
+
   ctx.onToolEvent?.({ phase: 'start', tool: name as ToolName, title })
 
   const finalize = (r: ToolResult): ToolResult => {
@@ -2112,16 +2149,61 @@ export async function dispatchTool(
     // ── Preview branches ───────────────────────────────────────────────────
     // Direct calls into lib/branches/engine.ts — there is no executor action
     // for these, so they do not go through TOOL_TO_ACTION.
-    if (name === 'create_branch' || name === 'list_branches' || name === 'diff_branch' ||
-        name === 'merge_branch' || name === 'discard_branch') {
+    if (name === 'create_branch' || name === 'connect_branch' || name === 'list_branches' ||
+        name === 'diff_branch' || name === 'merge_branch' || name === 'discard_branch') {
       const engine = await import('@/lib/branches/engine')
+      const preview = await import('@/lib/branches/preview')
+
+      // The preview endpoint, as one block an agent can act on. The key is in
+      // the summary because the caller has to use it, exactly as create_api_key
+      // returns its key; it is shown once and never stored.
+      const describePreview = (
+        branch: { id: string; name: string },
+        minted: { key: string; serviceRole: boolean } | null,
+      ) => {
+        const endpoint = preview.previewEndpoint(ctx.projectId, branch)
+        const keyText = minted?.key ?? '$BACKENLY_PREVIEW_KEY'
+        const lines = [
+          `**Preview endpoint for "${branch.name}"**`,
+          `  • Base URL: ${endpoint.baseUrl} (same as production; the key selects the branch)`,
+          minted
+            ? `  • ${minted.serviceRole ? 'Service-role key (server-side only, bypasses RLS on the branch)' : 'Client key'}, shown once: ${minted.key}`
+            : '  • No key was issued: call connect_branch for one.',
+          `  • Every data response carries ${endpoint.environmentHeader.name}: ${endpoint.environmentHeader.value}`,
+          `  • Smoke test: ${preview.previewCurl(endpoint, 'your_table', keyText)}`,
+          `  • Only /db and /api/v2 are branch-scoped; auth, functions, storage and realtime refuse this key.`,
+        ]
+        return {
+          summary: lines.join('\n'),
+          data: {
+            preview: {
+              ...endpoint,
+              ...(minted ? { key: minted.key, keyServiceRole: minted.serviceRole } : {}),
+              instructions: preview.previewAgentInstructions(endpoint, keyText),
+            },
+          },
+        }
+      }
+
+      if (name === 'connect_branch') {
+        const branchId = String(args.branchId ?? '').trim()
+        if (!branchId) return finalize({ ok: false, summary: 'connect_branch needs a `branchId` — get it from list_branches.' })
+        const res = await preview.mintPreviewKey(ctx.projectId, branchId, { serviceRole: args.serviceRole === true })
+        if (!res.ok) {
+          const fail = res as Extract<typeof res, { ok: false }>
+          return finalize({ ok: false, summary: `${fail.error} Call list_branches for valid ids.`, code: fail.code })
+        }
+        const ok = res as Extract<typeof res, { ok: true }>
+        const d = describePreview(ok.branch, ok.minted)
+        return finalize({ ok: true, summary: d.summary, data: { branch: ok.branch, ...d.data } })
+      }
 
       if (name === 'list_branches') {
         const branches = await engine.listBranches(ctx.projectId)
         if (!branches.length) {
           return finalize({
             ok: true,
-            summary: 'No preview branches. Create one with create_branch before a migration you are unsure about — it is a full clone and costs nothing to throw away.',
+            summary: 'No preview branches. Create one with create_branch to test against an isolated copy of the schema; it starts empty and costs nothing to throw away.',
             data: { branches: [] },
           })
         }
@@ -2139,17 +2221,21 @@ export async function dispatchTool(
         // The summary states what the branch actually CONTAINS and how to reach
         // it. An agent told only "created" has no way to know the branch is
         // empty, and no way to point a client at it — which is how a correct
-        // feature still ends up unusable from the agent lane.
+        // feature still ends up unusable from the agent lane. So the branch
+        // comes back with a working preview endpoint and a client key for it.
+        const minted = await preview.mintPreviewKey(ctx.projectId, res.branch.id).catch(() => null)
+        const key = minted && minted.ok ? (minted as Extract<typeof minted, { ok: true }>).minted : null
+        const d = describePreview({ id: res.branch.id, name: res.branch.name }, key)
         return finalize({
           ok: true,
           summary:
-            `Created preview branch "${branchName}" — ${res.tablesCloned} table(s) cloned, ` +
+            `Created preview branch "${res.branch.name}" — ${res.tablesCloned} table(s) cloned, ` +
             `${res.policiesReplicated} row-security policy/policies replicated, ` +
             `${res.sequencesIsolated} sequence(s) isolated from main. ` +
             (res.dataCopied
               ? 'Production rows WERE copied into it.'
               : 'It is EMPTY — production rows were not copied. Seed what you need.') +
-            ` Point an app at it with create_api_key { branchId: "${res.branch.id}" }. ` +
+            `\n\n${d.summary}\n\n` +
             `Diff with diff_branch { branchId: "${res.branch.id}" } and merge when you are happy.`,
           data: {
             branch: res.branch,
@@ -2157,6 +2243,7 @@ export async function dispatchTool(
             dataCopied: res.dataCopied,
             policiesReplicated: res.policiesReplicated,
             sequencesIsolated: res.sequencesIsolated,
+            ...d.data,
           },
         })
       }
@@ -2170,7 +2257,8 @@ export async function dispatchTool(
         // mergeBranch re-shapes its early return).
         const res = await engine.diffBranch(ctx.projectId, branchId)
         if (!res.ok) return finalize({ ok: false, summary: (res as { ok: false; error: string }).error })
-        const d: any = (res as Extract<typeof res, { ok: true }>).diff
+        const full = res as Extract<typeof res, { ok: true }>
+        const d: any = full.diff
         const parts: string[] = []
         if (d.addedTables?.length) parts.push(`Tables added: ${d.addedTables.map((t: any) => t.tableName).join(', ')}`)
         if (d.droppedTables?.length) parts.push(`Tables dropped: ${d.droppedTables.join(', ')}`)
@@ -2179,16 +2267,24 @@ export async function dispatchTool(
           if (a.droppedColumns?.length) parts.push(`${a.table}: -${a.droppedColumns.join(', -')}`)
           for (const tc of a.typeChanged ?? []) parts.push(`${a.table}.${tc.column}: ${tc.from} → ${tc.to}`)
         }
+        const migrations = full.migrations.length
+          ? `\n**A merge replays ${full.migrations.length} statement(s) onto production:**\n  ${full.migrations.map((s, i) => `${i + 1}. ${s}`).join('\n  ')}`
+          : full.recorded ? '\nNo migrations were applied on this branch, so a merge changes nothing.' : ''
+        const conflicts = full.conflicts.length
+          ? `\n⚠️ Main has changed ${full.conflicts.join(', ')} since this branch was cut, and the migrations touch ${full.conflicts.length === 1 ? 'it' : 'them'}: the merge will be refused. Create a fresh branch and reapply.`
+          : ''
         return finalize({
           ok: true,
-          summary: parts.length ? `**${res.branch} vs main:**\n  • ${parts.join('\n  • ')}` : `"${res.branch}" is identical to main.`,
-          data: res.diff,
+          summary:
+            (parts.length ? `**${full.branch}, what changed:**\n  • ${parts.join('\n  • ')}` : `"${full.branch}" has no schema changes.`) +
+            migrations + conflicts,
+          data: { diff: full.diff, migrations: full.migrations, conflicts: full.conflicts, mainChanged: full.mainChanged },
         })
       }
 
       if (name === 'merge_branch') {
         const res = await engine.mergeBranch(ctx.projectId, ctx.userId ?? '', branchId)
-        if (!res.ok) return finalize({ ok: false, summary: (res as any).error })
+        if (!res.ok) return finalize({ ok: false, summary: (res as any).error, code: (res as any).code })
         const r: any = res
         const applied = r.applied?.length ? `Applied: ${r.applied.join('; ')}.` : 'Nothing was applied automatically.'
         const review = r.review?.length
@@ -2586,6 +2682,8 @@ export async function dispatchTool(
         pathPrefix: typeof args.pathPrefix === 'string' ? args.pathPrefix : undefined,
         sinceMinutes: typeof args.sinceMinutes === 'number' ? args.sinceMinutes : undefined,
         limit: typeof args.limit === 'number' ? args.limit : undefined,
+        // Scoped by projectId as well, so another project's branch id reads nothing.
+        branchId: typeof args.branchId === 'string' && args.branchId.trim() ? args.branchId.trim() : null,
       })
       const lines = rows.slice(0, 15).map((r) => `• ${r.timestamp} ${r.method} ${r.path} → ${r.status} (${r.latencyMs}ms)`)
       return finalize({

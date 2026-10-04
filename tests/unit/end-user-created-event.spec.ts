@@ -74,9 +74,12 @@ describe('both signup servers', () => {
   })
 
   it('answer a successful sign-up with 201', () => {
+    // A preview branch's sign-up adds `skippedOnBranch` after user and token.
     expect(readFileSync(join(ROOT, NEXT_ROUTE), 'utf8')).toMatch(
-      /createSuccessResponse\(\{ user, token \}, undefined, 201\)/,
+      /createSuccessResponse\(\s*\{ user, token\b[^\n]*\},\s*undefined,\s*201,?\s*\)/,
     )
-    expect(readFileSync(join(ROOT, RUNTIME_ROUTE), 'utf8')).toMatch(/res\.status\(201\)\.json\(\{ data: \{ user, token \} \}\)/)
+    expect(readFileSync(join(ROOT, RUNTIME_ROUTE), 'utf8')).toMatch(
+      /res\.status\(201\)\.json\(\{\s*data: \{ user, token\b/,
+    )
   })
 })

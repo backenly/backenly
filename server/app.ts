@@ -18,6 +18,7 @@ import { asyncRoute } from './lib/async-route'
 import { projectServingGate } from './lib/serving-gate'
 import { recordRuntimeRequest, INTERNAL_TRAFFIC_HEADER, isInternalTraffic } from '@/lib/traffic/request-recorder'
 import { meterNodeResponse } from '@/lib/usage/egress'
+import { branchIdForRequest, refuseBranchKeyOffDataPlane } from '@/lib/branches/key-scope'
 
 const app = express()
 
@@ -96,7 +97,7 @@ app.use(cors({
   // JavaScript cannot see a response header unless it is named here. The client
   // would send a correct request and get a body with no way to read the total.
   // `Location` is the same story for a created row's URI.
-  exposedHeaders: ['Content-Range', 'Content-Location', 'Location', 'Range-Unit', 'Preference-Applied'],
+  exposedHeaders: ['Content-Range', 'Content-Location', 'Location', 'Range-Unit', 'Preference-Applied', 'X-Backenly-Environment'],
   maxAge: 86400,
 }))
 
@@ -117,14 +118,23 @@ app.use(['/api/v1/:projectId', '/api/v2/:projectId'], (req, res, next) => {
     meterNodeResponse(res, projectId)
   }
   res.on('finish', () => {
-    recordRuntimeRequest({
+    const served = {
       projectId,
       method: req.method,
       pathname: req.originalUrl,
       statusCode: res.statusCode,
       durationMs: Date.now() - startedAt,
       internalHeader: req.get(INTERNAL_TRAFFIC_HEADER),
-    })
+    }
+    // A forwarded request is not recorded here at all (Next already did), so
+    // it needs no branch lookup either.
+    if (isInternalTraffic(served.internalHeader)) return recordRuntimeRequest(served)
+    // The key's branch, so preview traffic stays out of production's health
+    // signals. Cached alongside the branch-key check below.
+    void branchIdForRequest(
+      { get: (name: string) => req.get(name) },
+      new URL(req.originalUrl, 'http://runtime.internal'),
+    ).then(branchId => recordRuntimeRequest({ ...served, branchId }))
   })
   next()
 })
@@ -135,6 +145,25 @@ app.use(['/api/v1/:projectId', '/api/v2/:projectId'], (req, res, next) => {
 // the Next-owned surfaces only, so /db, /v2, end-user auth, functions and
 // realtime kept serving a sealed project. See lib/projects/serving-state.ts.
 app.use(['/api/v1/:projectId', '/api/v2/:projectId'], asyncRoute(projectServingGate))
+
+// ── A branch-bound key stays on the data plane ─────────────────────────────────
+// Only /db/*, /api/v2 and end-user sign-up, sign-in, refresh and logout are
+// served from a preview branch. Every other v1 surface (the emailed auth flows,
+// functions, storage, realtime, logs, the Next-owned sections) resolves to main,
+// so a branch key reaching one would read or write production. Refused here, before the Next proxy and every router, so a router
+// added later is covered without knowing about branches. lib/branches/key-scope.ts.
+app.use('/api/v1', asyncRoute(async (req, res, next) => {
+  const refusal = await refuseBranchKeyOffDataPlane(
+    req.originalUrl,
+    { get: (name: string) => req.get(name) },
+    new URL(req.originalUrl, 'http://runtime.internal'),
+  )
+  if (refusal) {
+    res.status(refusal.status).json(refusal.body)
+    return
+  }
+  next()
+}))
 
 // ── Next.js-owned v1 surfaces (storage, orgs, stats, checkout, …) ──────────────
 // nginx sends ALL /api/v1/* here, but these routes only exist in the Next app.

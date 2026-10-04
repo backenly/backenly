@@ -2,7 +2,7 @@
 
 /**
  * CodeSurface — the terminal/config chrome + monochrome syntax highlighting for
- * every code block on the Connect › Agents tab (commands, JSON config, prompts).
+ * every code block on the Connect › Agents tab (commands and JSON config).
  *
  * Highlighting is deliberately restrained to fit the flat inspector language:
  * meaning is carried by BRIGHTNESS TIERS (bright anchor → muted flags), not a
@@ -12,7 +12,7 @@
  * terminal at a funded-platform level of finish.
  */
 
-import type { ReactNode } from 'react'
+import type { ClipboardEvent, ReactNode } from 'react'
 import { Copy, Check } from 'lucide-react'
 
 /* A scoped key or its placeholder — the one token worth accenting. */
@@ -25,22 +25,19 @@ function isUuid(t: string): boolean {
 
 const EXECS = new Set(['claude', 'codex', 'cursor', 'npx'])
 
-/** A single shell command line, tokenized and brightness-tiered. */
-export function CliText({ text }: { text: string }) {
-  const tokens = text.split(/(\s+)/)
+/**
+ * One block per line, with a hanging indent: a line too long for the panel
+ * wraps two columns in from where it starts, so a wrapped command or config
+ * line reads as one line continuing, not a new line at the margin.
+ */
+function Lines({ text, render }: { text: string; render: (line: string) => ReactNode }) {
   return (
     <>
-      {tokens.map((t, i) => {
-        if (t === '' || /^\s+$/.test(t)) return <span key={i}>{t}</span>
-        let cls = 'text-zinc-400'
-        if (EXECS.has(t)) cls = 'text-zinc-100 font-medium'
-        else if (t === 'mcp' || t === 'add' || t === 'backenly' || t.startsWith('@backenly')) cls = 'text-zinc-300'
-        else if (t === '--' || t === '-y' || t.startsWith('--')) cls = 'text-zinc-600'
-        else if (isSecret(t)) cls = 'text-violet-300'
-        else if (isUuid(t)) cls = 'text-zinc-400'
+      {text.split('\n').map((line, i) => {
+        const hang = `${line.length - line.trimStart().length + 2}ch`
         return (
-          <span key={i} className={cls}>
-            {t}
+          <span key={i} className="block" style={{ paddingLeft: hang, textIndent: `-${hang}` }}>
+            {render(line)}
           </span>
         )
       })}
@@ -48,15 +45,41 @@ export function CliText({ text }: { text: string }) {
   )
 }
 
+/** A shell command line, tokenized and brightness-tiered. */
+export function CliText({ text }: { text: string }) {
+  return <Lines text={text} render={cliLine} />
+}
+
+function cliLine(line: string): ReactNode {
+  return line.split(/(\s+)/).map((t, i) => {
+    if (t === '' || /^\s+$/.test(t)) return <span key={i}>{t}</span>
+    let cls = 'text-zinc-400'
+    if (EXECS.has(t)) cls = 'text-zinc-100 font-medium'
+    else if (t === 'mcp' || t === 'add' || t === 'backenly' || t.startsWith('@backenly')) cls = 'text-zinc-300'
+    else if (t === '--' || t === '-y' || t.startsWith('--')) cls = 'text-zinc-600'
+    else if (isSecret(t)) cls = 'text-violet-300'
+    else if (isUuid(t)) cls = 'text-zinc-400'
+    return (
+      <span key={i} className={cls}>
+        {t}
+      </span>
+    )
+  })
+}
+
 /** Pretty-printed JSON config, tokenized. Keys bright, secret values violet. */
 export function JsonText({ text }: { text: string }) {
+  return <Lines text={text} render={jsonLine} />
+}
+
+function jsonLine(line: string): ReactNode {
   const nodes: ReactNode[] = []
   const re = /("(?:\\.|[^"\\])*")(\s*:)?|([{}[\],])/g
   let last = 0
   let m: RegExpExecArray | null
   let k = 0
-  while ((m = re.exec(text)) !== null) {
-    if (m.index > last) nodes.push(<span key={k++}>{text.slice(last, m.index)}</span>)
+  while ((m = re.exec(line)) !== null) {
+    if (m.index > last) nodes.push(<span key={k++}>{line.slice(last, m.index)}</span>)
     if (m[1] !== undefined) {
       const isKey = m[2] !== undefined
       const raw = m[1].slice(1, -1)
@@ -81,49 +104,8 @@ export function JsonText({ text }: { text: string }) {
     }
     last = re.lastIndex
   }
-  if (last < text.length) nodes.push(<span key={k++}>{text.slice(last)}</span>)
-  return <>{nodes}</>
-}
-
-function renderPromptLine(line: string): ReactNode {
-  // A bare command line inside the prompt gets full shell highlighting.
-  if (line.trimStart().startsWith('claude ')) return <CliText text={line} />
-  // Otherwise: plain prose, with `inline code` and URLs lifted out.
-  const parts = line.split(/(`[^`]+`|https?:\/\/\S+)/g)
-  return parts.map((p, i) => {
-    if (p.startsWith('`') && p.endsWith('`'))
-      return (
-        <span key={i} className="rounded-[4px] bg-white/[0.06] px-1 py-px text-zinc-200">
-          {p.slice(1, -1)}
-        </span>
-      )
-    if (/^https?:\/\//.test(p))
-      return (
-        <span key={i} className="text-zinc-500 underline decoration-white/20 underline-offset-2">
-          {p}
-        </span>
-      )
-    return (
-      <span key={i} className="text-zinc-400">
-        {p}
-      </span>
-    )
-  })
-}
-
-/** A multi-line agent prompt: prose + an embedded command + backticked tools. */
-export function PromptText({ text }: { text: string }) {
-  const lines = text.split('\n')
-  return (
-    <>
-      {lines.map((line, i) => (
-        <span key={i}>
-          {renderPromptLine(line)}
-          {i < lines.length - 1 ? '\n' : ''}
-        </span>
-      ))}
-    </>
-  )
+  if (last < line.length) nodes.push(<span key={k++}>{line.slice(last)}</span>)
+  return nodes
 }
 
 export function CopyButton({
@@ -159,33 +141,50 @@ export function CopyButton({
 }
 
 /**
- * The framed code block: a slim bar (the surface's name and a copy button) over
- * a highlighted body. `label` names the surface — a shell (`bash`) or a config
- * path (`.cursor/mcp.json`). No window dots: this is a code block, not a
- * picture of a terminal.
+ * The framed code block: a slim bar over a highlighted body, with an optional
+ * footer line. `bar` fills the left of the top bar (on the Agents tab, the
+ * agent picker); `actions` sit just before the copy button at its right. The
+ * copy button is icon-only so the picker keeps the width. No window dots: this
+ * is a code block, not a picture of a terminal.
+ *
+ * `onSelectionCopy` sees a copy made by selecting the body by hand, so a body
+ * that shows a stand-in (a masked key) can put the real text on the clipboard.
  */
 export function CodeSurface({
-  label,
+  bar,
+  actions,
+  footer,
   onCopy,
   copied,
   disabled = false,
+  onSelectionCopy,
   children,
 }: {
-  label?: string
+  bar?: ReactNode
+  actions?: ReactNode
+  footer?: ReactNode
   onCopy: () => void
   copied: boolean
   disabled?: boolean
+  onSelectionCopy?: (event: ClipboardEvent<HTMLPreElement>) => void
   children: ReactNode
 }) {
   return (
     <div className="overflow-hidden rounded-[10px] border border-white/[0.08] bg-[#08090a]">
-      <div className="flex h-[38px] items-center justify-between gap-3 border-b border-white/[0.06] pl-4 pr-1.5">
-        <span className="min-w-0 truncate font-mono text-[12px] text-zinc-500">{label}</span>
-        <CopyButton onClick={onCopy} copied={copied} disabled={disabled} />
+      <div className="flex min-h-[40px] items-center justify-between gap-2 border-b border-white/[0.06] pr-1.5">
+        <div className="min-w-0 flex-1">{bar}</div>
+        <div className="flex flex-shrink-0 items-center gap-0.5">
+          {actions}
+          <CopyButton onClick={onCopy} copied={copied} disabled={disabled} compact />
+        </div>
       </div>
-      <pre className="overflow-x-auto whitespace-pre-wrap break-words px-4 py-3.5 font-mono text-[12px] leading-[20px] text-zinc-400 [font-variant-ligatures:none]">
+      <pre
+        onCopy={onSelectionCopy}
+        className="overflow-x-auto whitespace-pre-wrap break-words px-4 py-3.5 font-mono text-[12px] leading-[20px] text-zinc-400 [font-variant-ligatures:none]"
+      >
         {children}
       </pre>
+      {footer && <div className="border-t border-white/[0.06] px-4 py-2.5">{footer}</div>}
     </div>
   )
 }

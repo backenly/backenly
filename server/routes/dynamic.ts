@@ -18,7 +18,7 @@ import { prisma } from '@/lib/db'
 import { verify } from 'jsonwebtoken'
 import { enforceRateLimitByKeyId } from '../lib/auth'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
-import { hashApiKey, resolveEndUserFromToken } from '../lib/end-user-identity'
+import { hashApiKey, resolveEndUserFromToken, crossEnvironmentUserToken } from '../lib/end-user-identity'
 import { handleViaPostgrest } from './postgrest-handler'
 import { v1NotFoundBody } from '@/lib/api/v1/route-not-found'
 import {
@@ -29,6 +29,7 @@ import {
 import { asyncRoute } from '../lib/async-route'
 import { refuseUnlessServing } from '../lib/serving-gate'
 import { touchProjectActivity } from '@/lib/projects/activity'
+import { ENVIRONMENT_HEADER, environmentHeaderValue } from '@/lib/branches/key-scope'
 import {
   isGrowingWrite,
   projectRestriction,
@@ -56,8 +57,12 @@ interface AuthResolution {
    * request, because a client-settable value here selects a PostgreSQL schema.
    */
   branchSchema?: string
+  /** The bound branch's name, for the X-Backenly-Environment response header. */
+  branchName?: string
   error?: string
   code?: string
+  /** Replaces the generic "include a credential" hint when the credential was present but wrong. */
+  hint?: string
 }
 
 /**
@@ -74,7 +79,7 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
       select: {
         id: true, name: true, keyPrefix: true, projectId: true, userId: true,
         permissions: true, rateLimit: true, expiresAt: true, serviceRole: true,
-        branch: { select: { schemaName: true, status: true } },
+        branch: { select: { id: true, schemaName: true, status: true, name: true } },
       },
     })
     if (!key) return { success: false, error: 'Invalid API key', code: 'INVALID_API_KEY' }
@@ -110,23 +115,6 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
     }
     prisma.apiKey.update({ where: { id: key.id }, data: { lastUsed: new Date() } }).catch(console.error)
 
-    // RLS identity:
-    //   - service-role key → bypass RLS (backends, cron, internal tools)
-    //   - non-service key + X-User-Token → act as that end-user (own_rows)
-    //   - non-service key, no user token → no user context (own_rows → empty)
-    let endUserId: string | undefined
-    let userRole: string | undefined
-    if (!key.serviceRole) {
-      const endUser = await resolveEndUserFromToken(
-        key.projectId,
-        (req.headers['x-user-token'] as string | undefined),
-      )
-      if (endUser) {
-        endUserId = endUser.userId
-        userRole = endUser.role
-      }
-    }
-
     // A key bound to a branch that was merged or discarded must NOT silently
     // fall back to main. That is the one failure mode branch routing can have
     // that is worse than an error: a staging credential quietly starts reading
@@ -138,6 +126,39 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
           'This key is bound to a branch that is no longer active. Issue a key for another ' +
           'branch, or a main key, rather than letting it fall back to production data.',
         code: 'BRANCH_INACTIVE',
+      }
+    }
+
+    // RLS identity:
+    //   - service-role key → bypass RLS (backends, cron, internal tools)
+    //   - non-service key + X-User-Token → act as that end-user (own_rows)
+    //   - non-service key, no user token → no user context (own_rows → empty)
+    //
+    // On a branch key the user token must have been issued on that branch.
+    // A production token used to be accepted here, so a preview test read the
+    // branch as a production user id; it is now refused by name, as is a
+    // branch token sent with a main key.
+    let endUserId: string | undefined
+    let userRole: string | undefined
+    if (!key.serviceRole) {
+      const userToken = req.headers['x-user-token'] as string | undefined
+      const branch = key.branch
+        ? { id: key.branch.id, name: key.branch.name, schemaName: key.branch.schemaName }
+        : null
+      const endUser = await resolveEndUserFromToken(key.projectId, userToken, branch)
+      if (endUser) {
+        endUserId = endUser.userId
+        userRole = endUser.role
+      } else if (userToken) {
+        const other = await crossEnvironmentUserToken(key.projectId, userToken, branch)
+        if (other) {
+          return {
+            success: false,
+            error: other.error,
+            code: other.code,
+            hint: 'Sign the user in with the same key you use for data requests.',
+          }
+        }
       }
     }
 
@@ -172,6 +193,7 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
       isServiceRole: !!key.serviceRole,
       userRole,
       branchSchema: key.branch?.schemaName,
+      branchName: key.branch?.name,
     }
   }
 
@@ -185,6 +207,19 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
       const unverified: any = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString())
 
       if (unverified?.projectId) {
+        // A token issued on a preview branch only means something with that
+        // branch's key. Alone, it would resolve to production, where its
+        // signature does not verify anyway; say why rather than "invalid".
+        if (typeof unverified.br === 'string') {
+          return {
+            success: false,
+            error:
+              'This end-user token was issued on a preview branch, so it is not valid on production. ' +
+              "Send it as X-User-Token together with that branch's preview key in x-api-key.",
+            code: 'BRANCH_TOKEN_ON_MAIN',
+            hint: 'Sign the user in with the same key you use for data requests.',
+          }
+        }
         // End-user token — verify with project.jwtSecret
         const project = await prisma.project.findUnique({
           where: { id: unverified.projectId },
@@ -288,12 +323,12 @@ async function handleDynamicRequest(req: Request, res: Response) {
     res.status(401).json({
       error: authResult.error || 'Authentication required',
       code: authResult.code || 'AUTHENTICATION_REQUIRED',
-      hint: 'Include x-api-key header or Authorization: Bearer token',
+      hint: authResult.hint ?? 'Include x-api-key header or Authorization: Bearer token',
     })
     return
   }
 
-  const { projectId, keyId, userId, endUserId, isServiceRole, userRole, branchSchema } = authResult
+  const { projectId, keyId, userId, endUserId, isServiceRole, userRole, branchSchema, branchName } = authResult
 
   // The project served here is the KEY's, which the URL-keyed serving gate
   // never saw when the path is the legacy `/api/v1/{table}` form. Judge it now
@@ -513,6 +548,7 @@ async function handleDynamicRequest(req: Request, res: Response) {
     }
   }
 
+  res.setHeader(ENVIRONMENT_HEADER, environmentHeaderValue(branchSchema ? branchName : null))
   const handled = await handleViaPostgrest(req, res, path, {
     projectId: projectId!,
     endUserId,

@@ -160,7 +160,7 @@ const MCP_EXCLUDE = new Set<string>([
 
 /** Build tools (non-destructive mutations) — assigned to tier 'build'. */
 const BUILD_TOOLS = new Set<string>([
-  'create_branch', 'merge_branch',
+  'create_branch', 'connect_branch', 'merge_branch',
   'create_table', 'add_column', 'create_index', 'rename_column', 'add_constraint',
   // (list_branches / diff_branch are read tools; all four are reachable through
   // the single advertised `branch` tool — see BRANCH_ACTIONS.)
@@ -638,6 +638,7 @@ export function buildDispatchable(): McpToolDescriptor[] {
           limit: { type: 'integer', minimum: 1, maximum: 200, description: 'Row cap. Default 50.' },
           offset: { type: 'integer', minimum: 0, description: 'Offset for pagination.' },
           orderBy: { type: 'object', description: 'e.g. {"created_at":"desc"}.' },
+          branchId: { type: 'string', description: 'A preview branch id (branch action:"list") to read or seed that branch instead of production.' },
         },
         required: ['table'],
         additionalProperties: false,
@@ -654,6 +655,7 @@ export function buildDispatchable(): McpToolDescriptor[] {
         properties: {
           table: { type: 'string' },
           row: { type: 'object', description: 'Column → value pairs for the new row. Omit id/timestamps — they are auto-generated.' },
+          branchId: { type: 'string', description: 'A preview branch id (branch action:"list") to read or seed that branch instead of production.' },
         },
         required: ['table', 'row'],
         additionalProperties: false,
@@ -671,6 +673,7 @@ export function buildDispatchable(): McpToolDescriptor[] {
           table: { type: 'string' },
           filter: { type: 'object', description: 'WHERE clause as column=value pairs (must not be empty — global updates are refused).' },
           patch: { type: 'object', description: 'Columns to set on the matched rows.' },
+          branchId: { type: 'string', description: 'A preview branch id (branch action:"list") to read or seed that branch instead of production.' },
         },
         required: ['table', 'filter', 'patch'],
         additionalProperties: false,
@@ -687,6 +690,7 @@ export function buildDispatchable(): McpToolDescriptor[] {
         properties: {
           table: { type: 'string' },
           filter: { type: 'object', description: 'WHERE clause as column=value pairs. Must not be empty.' },
+          branchId: { type: 'string', description: 'A preview branch id (branch action:"list") to read or seed that branch instead of production.' },
         },
         required: ['table', 'filter'],
         additionalProperties: false,
@@ -694,8 +698,9 @@ export function buildDispatchable(): McpToolDescriptor[] {
     },
   )
 
-  // ── branch — the staging door, one tool with four verbs ────────────────────
-  // Routes to create_branch / list_branches / diff_branch / merge_branch via
+  // ── branch — the staging door, one tool with five verbs ────────────────────
+  // Routes to create_branch / connect_branch / list_branches / diff_branch /
+  // merge_branch via
   // BRANCH_ACTIONS, which the dispatcher reads from the same table this schema
   // advertises — so an action the manifest offers can never be one dispatch
   // cannot serve.
@@ -704,17 +709,28 @@ export function buildDispatchable(): McpToolDescriptor[] {
     tier: 'build',
     description:
       'Work with preview branches: a clone of this project\'s SCHEMA in an isolated PostgreSQL schema, with its own ' +
-      'row-security policies and its own sequences. Use one before any migration you are not certain about — build ' +
-      'against the clone, diff it, then merge.\n' +
+      'row-security policies and its own sequences, where you build and test a change while production keeps ' +
+      'serving. Change the branch\'s schema with apply_migration { sql, branchId }; it is logged, and "merge" replays ' +
+      'that log onto production. Without a branchId, apply_migration changes MAIN (and on a project whose production ' +
+      'is protected, it is refused with BRANCH_REQUIRED).\n' +
       'A branch starts EMPTY. It does not copy production rows unless you pass includeData:true, which protects your ' +
       'real data from whatever the experiment does to it. Seed what you need instead.\n' +
-      'To run an app against a branch, issue a key bound to it: create_api_key with that branchId. The environment is ' +
-      'a property of the KEY — no header switches it, and a key on a merged or discarded branch is refused rather ' +
-      'than falling back to production.\n' +
+      'Its PREVIEW ENDPOINT is the project\'s usual base URL with a key bound to the branch: the environment is a ' +
+      'property of the KEY, and no header or URL switches it. "create" returns that endpoint with a client key ' +
+      '(shown once) and instructions for a test; "connect" issues more keys. A branch key reads and writes the branch ' +
+      'through the data API (/api/v1/{projectId}/db and /api/v2), and every response says which environment answered ' +
+      'in the X-Backenly-Environment header (branch:<name>): assert it in tests. End-user sign-up, sign-in, refresh and ' +
+      'logout with the key run on the branch\'s own users table, and their tokens work only with that branch\'s key. ' +
+      'Any other endpoint (functions, storage, realtime, the emailed auth flows) refuses the key with ' +
+      'BRANCH_SURFACE_UNAVAILABLE, and a key on a merged or discarded branch is refused, rather than either falling ' +
+      'back to production. Read a branch\'s traffic with monitoring ' +
+      'action:"request_logs" and its branchId.\n' +
       'Actions: "list" (existing branches + their ids) · "create" (needs `name`, lowercase kebab-case, max 5 active) · ' +
-      '"diff" (needs `branchId` — exactly what would land) · "merge" (needs `branchId` — new tables apply through the ' +
-      'governed kernel; added columns, type changes and drops come back as review items rather than reshaping a live ' +
-      'column silently). Discarding a branch is destructive — ask via backend_chat and it goes to the Review Queue.',
+      '"connect" (needs `branchId`; serviceRole:true for a server-side key) · ' +
+      '"diff" (needs `branchId` — the migrations a merge would replay, and any conflict with main) · "merge" (needs ' +
+      '`branchId` — replays the branch\'s migrations onto production; it WAITS FOR A HUMAN: you get an approval id to ' +
+      'poll with check_approval, and it is refused while main has changed a table the migrations touch). Discarding a ' +
+      'branch is destructive — ask via backend_chat and it goes to the Review Queue.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -724,12 +740,18 @@ export function buildDispatchable(): McpToolDescriptor[] {
           description: 'What to do. Start with "list" if you do not have a branchId.',
         },
         name: { type: 'string', description: 'For action:"create" — the branch name, e.g. "add-payments".' },
-        branchId: { type: 'string', description: 'For action:"diff" / "merge" — the id from action:"list".' },
+        branchId: { type: 'string', description: 'For action:"connect" / "diff" / "merge" — the id from action:"list".' },
         includeData: {
           type: 'boolean',
           description:
             'For action:"create". Default false — the branch is schema-only. True copies every production row into ' +
             'it, which is occasionally useful for reproducing a data-shaped bug and is otherwise a liability.',
+        },
+        serviceRole: {
+          type: 'boolean',
+          description:
+            'For action:"connect". Default false (a client key bound by row-level security). True issues a ' +
+            'server-side key that bypasses RLS on the branch only.',
         },
       },
       required: ['action'],
@@ -757,7 +779,9 @@ export function buildDispatchable(): McpToolDescriptor[] {
       'planned, verified and reversible — this is NOT raw SQL execution. Anything it cannot govern is refused ' +
       'with the exact tool to use instead, and a migration is all-or-nothing: if one statement is unsupported, ' +
       'none are applied. For row changes use db_insert/db_update/db_delete; for reads use run_query; for drops ' +
-      'and anything else use backend_chat.',
+      'and anything else use backend_chat.\n' +
+      'With `branchId` the migration applies to that preview branch ONLY, production is untouched, and the ' +
+      'statements are logged for the branch\'s merge. Foreign keys are recorded but not enforced on a branch.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -766,6 +790,10 @@ export function buildDispatchable(): McpToolDescriptor[] {
           description:
             'One or more DDL statements, semicolon-separated. e.g. ' +
             '"CREATE TABLE posts (title text NOT NULL, author_id uuid REFERENCES users(id)); CREATE INDEX ON posts (author_id);"',
+        },
+        branchId: {
+          type: 'string',
+          description: 'A preview branch id (branch action:"list"): apply to that branch instead of production.',
         },
       },
       required: ['sql'],
@@ -807,7 +835,9 @@ export function buildDispatchable(): McpToolDescriptor[] {
       'Read what is currently true about this backend. Call with no arguments for the grounding overview ' +
       '(tables, APIs, auth, storage, RLS) — do this FIRST on any non-trivial task. Pass `section` to drill into ' +
       'one area. This is the single read-state tool: there is no list_tables/list_apis/etc. to choose between. ' +
-      'For anything expressible as a query over your own data, use run_query instead. Side-effect free.',
+      'For anything expressible as a query over your own data, use run_query instead. Side-effect free.\n' +
+      'With `branchId` and section "schema", reads that preview branch\'s tables, columns and policies instead of ' +
+      'production\'s. run_query reads production only; read a branch\'s rows with db_query { branchId }.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -817,6 +847,10 @@ export function buildDispatchable(): McpToolDescriptor[] {
           description:
             'Which slice of state to read. Omit for the overview. ' +
             '"schema" is the full table/column/FK map; "instructions" is the recommended agent workflow.',
+        },
+        branchId: {
+          type: 'string',
+          description: 'With section "schema": a preview branch id, to read that branch\'s schema instead of production\'s.',
         },
       },
       additionalProperties: false,
@@ -845,6 +879,7 @@ export function buildDispatchable(): McpToolDescriptor[] {
 export const BRANCH_ACTIONS: Record<string, string> = {
   list: 'list_branches',
   create: 'create_branch',
+  connect: 'connect_branch',
   diff: 'diff_branch',
   merge: 'merge_branch',
 }

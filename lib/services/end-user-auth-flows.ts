@@ -24,9 +24,16 @@
 import { prisma } from '@/lib/db'
 import { hashPassword } from '@/lib/auth/password'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
-import { ensureAuthUsersTable, introspectAuthUsersTable, stampLastLogin, isReservedTestEmail } from '@/lib/services/end-user-auth-table'
+import { ensureAuthUsersTable, introspectAuthUsersTable, stampLastLogin, isReservedTestEmail, userIdCast } from '@/lib/services/end-user-auth-table'
 import { trackEndUserActive } from '@/lib/quota/kernel'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
+import {
+  mainAuthEnvironment,
+  endUserTokenSecret,
+  endUserTokenClaims,
+  crossEnvironmentToken,
+  type AuthEnvironment,
+} from '@/lib/branches/auth-environment'
 import jwt from 'jsonwebtoken'
 import crypto from 'crypto'
 
@@ -47,8 +54,17 @@ function err(code: string, message: string, status: number, details?: Record<str
  * POST /auth/refresh-token
  * Issues a new access token from a still-valid token (sliding window) or an
  * expired one within a 7-day grace window.
+ *
+ * `env` is the environment the request's key chose (lib/branches/auth-environment.ts).
+ * On a preview branch the token is verified and re-issued with that branch's
+ * secret against its own `users` table, so a branch session never becomes a
+ * production one by being refreshed.
  */
-export async function refreshEndUserToken(projectId: string, rawToken: string | null): Promise<AuthFlowResult> {
+export async function refreshEndUserToken(
+  projectId: string,
+  rawToken: string | null,
+  env: AuthEnvironment = mainAuthEnvironment(projectId),
+): Promise<AuthFlowResult> {
   try {
     const project = await prisma.project.findUnique({ where: { id: projectId } })
     if (!project) return err('NOT_FOUND', 'Project not found', 404)
@@ -65,15 +81,24 @@ export async function refreshEndUserToken(projectId: string, rawToken: string | 
       return err('NOT_FOUND', 'Authentication is not configured for this project.', 503)
     }
 
-    // Verify token with the project's own jwtSecret
+    // Verify token with the environment's secret: the project's own jwtSecret on
+    // production, the branch's derived one on a preview branch.
+    const projectSecret = resolveJwtSecret(project.jwtSecret)
+    const secret = endUserTokenSecret(projectSecret, env.branch)
+    const invalid = (): AuthFlowResult => {
+      const other = crossEnvironmentToken(rawToken, projectSecret, env.branch)
+      return other
+        ? err(other.code, other.error, 401)
+        : err('UNAUTHORIZED', 'Invalid token. Please sign in again.', 401)
+    }
     let payload: any = null
     try {
-      payload = jwt.verify(rawToken, resolveJwtSecret(project.jwtSecret), { algorithms: ['HS256'] }) as any
+      payload = jwt.verify(rawToken, secret, { algorithms: ['HS256'] }) as any
     } catch (e: any) {
       // If expired, retry with ignoreExpiration to enforce the 7-day grace window
       if (e?.name === 'TokenExpiredError') {
         try {
-          payload = jwt.verify(rawToken, resolveJwtSecret(project.jwtSecret), {
+          payload = jwt.verify(rawToken, secret, {
             algorithms: ['HS256'],
             ignoreExpiration: true,
           }) as any
@@ -84,35 +109,38 @@ export async function refreshEndUserToken(projectId: string, rawToken: string | 
             return err('UNAUTHORIZED', 'Token has expired beyond the refresh grace period. Please sign in again.', 401)
           }
         } catch {
-          return err('UNAUTHORIZED', 'Invalid token. Please sign in again.', 401)
+          return invalid()
         }
       } else {
-        return err('UNAUTHORIZED', 'Invalid token. Please sign in again.', 401)
+        return invalid()
       }
     }
 
-    // Token must be scoped to THIS project
+    // Token must be scoped to THIS project, and to this environment
     if (!payload || payload.projectId !== projectId) {
       return err('UNAUTHORIZED', 'Token is not valid for this project.', 401)
     }
+    if ((payload.br ?? null) !== (env.branch?.id ?? null)) return invalid()
 
-    const schemaName = `workspace_${projectId}`
+    const schemaName = env.schemaName
 
     // Read only columns that actually exist — an AI-generated users table may
     // lack `role` / `is_blocked` / `name`. A hardcoded list would 42703 → 500.
-    const schema = await introspectAuthUsersTable(projectId)
+    const schema = await introspectAuthUsersTable(projectId, schemaName)
     const selectCols = ['id', 'email']
     if (schema.hasName) selectCols.push('name')
     if (schema.hasRole) selectCols.push('role')
     if (schema.hasIsBlocked) selectCols.push('is_blocked')
 
     // Service-role read: the users table is FORCE RLS (service-role-only
-    // policy), so a plain query would see zero rows and 401 every refresh.
+    // policy), so a plain query would see zero rows and 401 every refresh. The
+    // id is bound as the column's own type: a bare $1 arrives as text, and on a
+    // uuid `id` (the canonical shape) every refresh failed with 42883.
     const users = await executeWithUserContext<any>(
       '',
       true,
-      `SELECT ${selectCols.map(c => `"${c}"`).join(', ')} FROM "${schemaName}"."users" WHERE id = $1 LIMIT 1`,
-      [payload.userId],
+      `SELECT ${selectCols.map(c => `"${c}"`).join(', ')} FROM "${schemaName}"."users" WHERE id = $1${userIdCast(schema)} LIMIT 1`,
+      [String(payload.userId)],
     )
 
     const user = users[0]
@@ -120,15 +148,19 @@ export async function refreshEndUserToken(projectId: string, rawToken: string | 
     if (user.is_blocked) return err('FORBIDDEN', 'This account has been suspended.', 403)
 
     const newToken = jwt.sign(
-      { userId: user.id, email: user.email, projectId, role: user.role ?? 'user', jti: crypto.randomUUID() },
-      resolveJwtSecret(project.jwtSecret!),
+      {
+        userId: user.id, email: user.email, projectId, role: user.role ?? 'user', jti: crypto.randomUUID(),
+        ...endUserTokenClaims(env.branch),
+      },
+      secret,
       { expiresIn: '7d' },
     )
 
-    // A token refresh means the end-user is still active this month.
-    trackEndUserActive(projectId, String(user.id), user.email).catch(() => {})
+    // A token refresh means the end-user is still active this month. A preview
+    // branch's test users are not the month's active users.
+    if (!env.branch) trackEndUserActive(projectId, String(user.id), user.email).catch(() => {})
     // Stamp last_login so the Auth dashboard's "active · 30d" metric is real.
-    stampLastLogin(projectId, user.id).catch(() => {})
+    stampLastLogin(projectId, user.id, schemaName).catch(() => {})
 
     return ok({ token: newToken, user: { id: user.id, email: user.email, name: user.name } })
   } catch (error: any) {
@@ -141,8 +173,16 @@ export async function refreshEndUserToken(projectId: string, rawToken: string | 
  * POST /auth/logout
  * Server-side token invalidation: stores the JWT ID (jti) in a per-workspace
  * blacklist table (lazily created). Always returns 200 — logout is idempotent.
+ *
+ * On a preview branch the token is checked against the branch's secret and
+ * revoked in the branch's own blacklist, which is the one the data plane reads
+ * for that branch's requests.
  */
-export async function logoutEndUser(projectId: string, rawToken: string | null): Promise<AuthFlowResult> {
+export async function logoutEndUser(
+  projectId: string,
+  rawToken: string | null,
+  env: AuthEnvironment = mainAuthEnvironment(projectId),
+): Promise<AuthFlowResult> {
   try {
     const project = await prisma.project.findUnique({ where: { id: projectId } })
     if (!project) return err('NOT_FOUND', 'Project not found', 404)
@@ -152,7 +192,7 @@ export async function logoutEndUser(projectId: string, rawToken: string | null):
       let payload: any = null
       try {
         if (project.jwtSecret) {
-          payload = jwt.verify(rawToken, resolveJwtSecret(project.jwtSecret), {
+          payload = jwt.verify(rawToken, endUserTokenSecret(resolveJwtSecret(project.jwtSecret), env.branch), {
             algorithms: ['HS256'],
             ignoreExpiration: true,
           }) as any
@@ -165,7 +205,7 @@ export async function logoutEndUser(projectId: string, rawToken: string | null):
       // is throwaway and the user row is deleted immediately after, so a
       // blacklist entry would just orphan in the developer's `_token_blacklist`.
       if (payload?.jti && payload?.projectId === projectId && !isReservedTestEmail(payload.email)) {
-        const schemaName = `workspace_${projectId}`
+        const schemaName = env.schemaName
         const expiresAt = payload.exp
           ? new Date(payload.exp * 1000)
           : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)

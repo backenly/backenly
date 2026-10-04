@@ -10,6 +10,19 @@ export class AuthModule {
   }
 
   /**
+   * The key this client was configured with, for sign-up and sign-in.
+   *
+   * Those two send no end-user token and never fetch an anon key, but they do
+   * send a key that is already set: a preview branch's key is what tells the
+   * server to create and check the user on that branch. Without it, an app
+   * pointed at a preview signed its test users up in production.
+   */
+  private keyHeaders(): Record<string, string> {
+    const key = this.client.getApiKey()
+    return key ? { 'x-api-key': key } : {}
+  }
+
+  /**
    * Register a new end-user.
    *
    * @example
@@ -31,6 +44,7 @@ export class AuthModule {
         method: 'POST',
         body: JSON.stringify(body),
         skipAuth: true,
+        headers: this.keyHeaders(),
       })
 
       if (response?.data?.token) {
@@ -67,6 +81,7 @@ export class AuthModule {
         method: 'POST',
         body: JSON.stringify(body),
         skipAuth: true,
+        headers: this.keyHeaders(),
       })
 
       if (response?.data?.token) {

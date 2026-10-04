@@ -283,7 +283,8 @@ export async function evaluateSubsystemRecurrence(
       take: 200,
     }),
     prisma.apiRequestLog.findMany({
-      where: { projectId, timestamp: { gte: since }, statusCode: { gte: 500 } },
+      // Production only: a preview branch's 5xx is not a recurring production fault.
+      where: { projectId, timestamp: { gte: since }, statusCode: { gte: 500 }, branchId: null },
       select: { path: true, statusCode: true, timestamp: true },
       take: 500,
     }),

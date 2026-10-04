@@ -199,7 +199,7 @@ function Hero() {
           // One vertical falloff across the whole headline, white to a cool
           // grey, the way a lit object reads. Not a second colour on one
           // phrase: that is the most common tell of a generated hero.
-          className={`bg-gradient-to-b from-white from-40% to-zinc-400 bg-clip-text pb-2 text-[38px] text-transparent [text-wrap:balance] sm:text-[60px] md:text-[76px] xl:text-[88px] ${DISPLAY}`}
+          className={`bg-gradient-to-b from-white from-40% to-zinc-400 bg-clip-text pb-2 text-[38px] text-transparent [text-wrap:balance] sm:text-[60px] md:text-[76px] xl:text-[80px] ${DISPLAY}`}
         >
           The autonomous backend
           <span className="block">built for coding agents</span>
@@ -294,7 +294,7 @@ function AgentStrip() {
 
 function ChangeSection() {
   return (
-    <section id="how-it-works" className={`${SECTION} scroll-mt-20`}>
+    <section id="how-it-works" className={`${SECTION} scroll-mt-[92px]`}>
       <div className={CONTAINER}>
         <Reveal>
           <SectionHead
@@ -383,7 +383,7 @@ function PrimitivesSection() {
   const [database, auth, rest, realtime, storage, functions] = primitives
 
   return (
-    <section id="capabilities" className={`${SECTION} scroll-mt-20`}>
+    <section id="capabilities" className={`${SECTION} scroll-mt-[92px]`}>
       <div className={CONTAINER}>
         <Reveal>
           <SectionHead
@@ -575,7 +575,7 @@ function ConnectSection() {
 const faqs = [
   {
     q: 'How does my coding agent connect?',
-    a: 'One command installs the Backenly MCP server for Claude Code, Cursor, Codex, Cline, or any MCP host, or paste the setup prompt and your agent installs it itself. The key is scoped and revocable from your project dashboard. There is also a CLI (npx @backenly/cli) for schema, generated types, CI diffs, logs, and read-only SQL, and a canonical agent skill at backenly.com/skill.md.',
+    a: 'One command installs the Backenly MCP server for Claude Code, Cursor, Codex, Cline, or any MCP host. The key is scoped and revocable from your project dashboard. There is also a CLI (npx @backenly/cli) for schema, generated types, CI diffs, logs, and read-only SQL, and a canonical agent skill at backenly.com/skill.md.',
   },
   {
     q: 'What happens when the agent tries something destructive?',

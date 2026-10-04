@@ -22,11 +22,21 @@
 
 import { prisma } from '@/lib/db/prisma'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
+import { profileForBranchSchema } from '@/lib/postgrest/gateway'
 
 const IDENT = /^[a-z_][a-z0-9_]{0,62}$/i
 
-function schemaFor(projectId: string): string {
-  return `workspace_${projectId}`
+/** Read a preview branch's schema instead of the project's main one. */
+export interface IntrospectionScope {
+  /** `workspace_<projectId>_br_<name>`, from the WorkspaceBranch row. */
+  branchSchema?: string | null
+}
+
+function schemaFor(projectId: string, scope: IntrospectionScope = {}): string {
+  if (!scope.branchSchema) return `workspace_${projectId}`
+  // The gateway's own check: a branch schema is read only when it belongs to
+  // this project, so a mis-scoped id can never point a read at another tenant.
+  return profileForBranchSchema(projectId, scope.branchSchema)
 }
 
 /**
@@ -325,10 +335,14 @@ function splitFirstTopLevelOr(s: string): [string, string] | null {
 }
 
 /** Full, RLS-aware schema for a single workspace table. */
-export async function getTableSchema(projectId: string, tableNameRaw: string): Promise<TableSchema> {
+export async function getTableSchema(
+  projectId: string,
+  tableNameRaw: string,
+  scope: IntrospectionScope = {},
+): Promise<TableSchema> {
   const table = String(tableNameRaw || '').toLowerCase()
   if (!IDENT.test(table)) throw new Error(`Invalid table name "${tableNameRaw}".`)
-  const schema = schemaFor(projectId)
+  const schema = schemaFor(projectId, scope)
   if (!(await tableExists(schema, table))) {
     throw new Error(`Table "${table}" does not exist in this project.`)
   }
@@ -474,8 +488,9 @@ export async function getTableSchema(projectId: string, tableNameRaw: string): P
  */
 export async function listExposedTables(
   projectId: string,
+  scope: IntrospectionScope = {},
 ): Promise<Array<{ name: string; columns: number; recordCount: number; rlsEnabled: boolean }>> {
-  const schema = schemaFor(projectId)
+  const schema = schemaFor(projectId, scope)
   const [tableRows, colCounts, rlsRows] = await Promise.all([
     prisma.$queryRawUnsafe<Array<{ table_name: string }>>(
       `SELECT table_name FROM information_schema.tables
@@ -517,9 +532,13 @@ export interface BackendMetadata {
   functions: { count: number; names: string[] }
 }
 
-/** One-call structured view of the entire backend. */
-export async function getBackendMetadata(projectId: string): Promise<BackendMetadata> {
-  const schema = schemaFor(projectId)
+/**
+ * One-call structured view of the entire backend. With a branch scope, the
+ * tables and relationships are the branch's; auth, storage, realtime and
+ * functions stay the project's, since none of them is branch-scoped.
+ */
+export async function getBackendMetadata(projectId: string, scope: IntrospectionScope = {}): Promise<BackendMetadata> {
+  const schema = schemaFor(projectId, scope)
 
   const [tableRows, colCounts, policyCounts, rlsRows, fkRows] = await Promise.all([
     prisma.$queryRawUnsafe<Array<{ table_name: string }>>(

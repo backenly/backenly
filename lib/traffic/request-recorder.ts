@@ -85,6 +85,7 @@ interface Pending {
   statusCode: number
   duration: number
   timestamp: Date
+  branchId: string | null
 }
 
 const buffer: Pending[] = []
@@ -100,6 +101,12 @@ export interface ServedRequest {
   durationMs: number
   /** Value of INTERNAL_TRAFFIC_HEADER, if the request carried one. */
   internalHeader?: string | null
+  /**
+   * The preview branch the request's key is bound to, or null for main. Every
+   * production health reader filters on null, so branch traffic (an agent's
+   * failure tests included) never reads as a production incident.
+   */
+  branchId?: string | null
 }
 
 /** Queue one served request. Never throws, never awaits the database. */
@@ -118,6 +125,7 @@ export function recordRuntimeRequest(req: ServedRequest): void {
       statusCode: Math.trunc(req.statusCode) || 0,
       duration: Math.max(0, Math.round(req.durationMs)),
       timestamp: new Date(),
+      branchId: req.branchId ?? null,
     })
 
     if (buffer.length >= FLUSH_AT) void flushRecordedRequests()

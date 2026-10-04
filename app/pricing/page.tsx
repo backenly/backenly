@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, type ReactNode } from 'react'
+import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import {
   ArrowRight,
@@ -237,11 +238,11 @@ function comparisonGroups(published: boolean): MatrixGroup[] {
       rows: [
         {
           label: 'Usage past the included amounts',
-          cells: ['Hard caps, never billed', { value: 'Only up to your spend limit', then: 'Off by default: every quota is a hard cap' }, 'Per contract'],
+          cells: ['Hard caps, never billed', { value: 'Prepaid, only up to your spend limit', then: 'Off by default: every quota is a hard cap' }, 'Per contract'],
         },
         {
           label: 'Spend limit',
-          hint: 'Only an owner can raise it; agents and API keys can only read it',
+          hint: 'Paid in advance. Only an owner can raise it; agents and API keys can only read it',
           cells: [false, { value: '$50, $100, $250 or your own', then: 'Emails at 50%, 80% and 100%' }, 'Per contract'],
         },
       ],
@@ -262,26 +263,17 @@ function comparisonGroups(published: boolean): MatrixGroup[] {
 /**
  * Backenly for Startups: two months of Pro at no cost for early-stage teams.
  *
- * DESIGN ONLY FOR NOW. There is no program logic behind this yet: applying is
- * an email to support with a prefilled template, and the team switches Pro on
- * by hand. When the program gets real enforcement, keep the numbers here equal
- * to what it grants.
+ * Applying happens at /startups/apply, which Backenly Cloud provides: the
+ * applicant describes the startup, confirms a code sent to an address at its
+ * domain, then signs in or creates an account as usual. The founding team
+ * reviews it, and approval switches Pro on for the pass. The months here must
+ * stay equal to what the program grants (STARTUP_PASS_MONTHS in the Cloud
+ * overlay's lib/billing/startup-program.ts).
  */
 const STARTUP_MONTHS = 2
 const PRO_MONTHLY_USD = 25
 
-const startupApplyHref = `mailto:${ROUTES.supportEmail}?subject=${encodeURIComponent(
-  'Backenly for Startups application',
-)}&body=${encodeURIComponent(
-  [
-    'Startup name:',
-    'Website:',
-    'Stage (bootstrapped, pre-seed, seed, Series A):',
-    'Current backend (Supabase, Appwrite, Firebase, self-hosted, other):',
-    'What you are building:',
-    'Email on your Backenly account:',
-  ].join('\n\n'),
-)}`
+const STARTUP_APPLY_PATH = '/startups/apply'
 
 const startupSources = ['Supabase', 'Appwrite', 'Firebase', 'Self-hosted', 'Starting fresh']
 
@@ -294,7 +286,7 @@ const startupPass = [
 ]
 
 const startupSteps = [
-  { title: 'Apply in two minutes', body: 'Tell us about your startup, your stage, and the backend you run today.' },
+  { title: 'Apply in two minutes', body: 'Tell us about your startup and confirm an email at its domain, then sign in as usual.' },
   { title: 'Get Pro switched on', body: `Once approved, Pro runs on your account for ${STARTUP_MONTHS} months. No card needed.` },
   { title: 'Move over and ship', body: 'Run production on Backenly. Your data stays standard Postgres, exportable anytime.' },
 ]
@@ -337,7 +329,7 @@ const faqs = [
 /** Shown only in a build that publishes usage pricing. */
 const usageFaq = {
   q: 'What happens when I go past what Pro includes?',
-  a: 'Nothing is billed unless you choose it. Pro’s quotas are shared by every project on your account, and your spend limit is off by default, so each quota is a hard cap. Set a limit ($50, $100, $250 or your own) and usage continues at the rates in the table, never past that limit, with emails at 50%, 80% and 100%. Usage is billed monthly, amounts under $5 roll into the next month, and projects, API requests, autonomy, the typed MCP tools, deploys and rollbacks are never billed at all.',
+  a: 'Nothing is billed unless you choose it. Pro’s quotas are shared by every project on your account, and your spend limit is off by default, so each quota is a hard cap. Set a limit ($50, $100, $250 or your own) and pay it in advance; usage then continues at the rates in the table, never past that limit, with emails at 50%, 80% and 100%. Each month’s usage is drawn from what you paid and the rest carries over, and projects, API requests, autonomy, the typed MCP tools, deploys and rollbacks are never billed at all.',
 }
 
 export default function PricingPage() {
@@ -631,10 +623,10 @@ function StartupProgram() {
           </ul>
 
           <div className="mt-9">
-            <a href={startupApplyHref} className={PRIMARY_CTA}>
+            <Link href={STARTUP_APPLY_PATH} className={PRIMARY_CTA}>
               Apply for startup access
               <ArrowRight aria-hidden className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
-            </a>
+            </Link>
           </div>
           <p className="mt-4 max-w-[58ch] text-[13px] leading-[1.6] text-zinc-500">
             For early-stage teams, bootstrapped through Series A. One pass per company, and every
@@ -740,7 +732,7 @@ function ComparisonSection({ published, onCta }: { published: boolean; onCta: ()
           title="Capacity changes. The core runtime stays."
           lede={
             published
-              ? 'Pro’s quotas are shared by every project on your account. Past them, nothing is billed unless you set a spend limit; with one, usage continues at the rates shown, never past it.'
+              ? 'Pro’s quotas are shared by every project on your account. Past them, nothing is billed unless you set a spend limit and pay it in advance; with one, usage continues at the rates shown, never past it.'
               : 'Running at company scale? Enterprise adds custom limits, SSO, onboarding and migration help, and a 12-hour SLA.'
           }
         />

@@ -159,6 +159,52 @@ setup('sign up the first operator', async ({ page, request, baseURL }) => {
     'the account that just signed up owns no project - adoption did not happen at signup'
   ).toBe(true)
 
+  // Complete first-run onboarding before exercising the console. Otherwise
+  // its delayed spotlight can cover an action in an unrelated browser spec.
+  // Walk the real targets and persist through the real API, rather than
+  // suppressing the tour with a fabricated localStorage value.
+  const tours = await request.get('/api/tours')
+  expect(tours.ok(), `could not read tours: ${tours.status()}`).toBe(true)
+  const seen = await tours.json()
+  expect(seen.available, 'the installed tour migration is unavailable').toBe(true)
+  if (!seen.seen.includes('console')) {
+    await page.goto(`/app/projects/${id}`)
+    await expect(page.locator('[data-tour="connect-agent"]')).toBeVisible({ timeout: 15_000 })
+    for (const title of [
+      'Connect your coding agent',
+      'Everything your agent builds lands here',
+      'Publish when it’s ready',
+      'Backenly keeps it healthy',
+    ]) {
+      const step = page.getByRole('dialog', { name: title, exact: true })
+      await expect(step).toBeVisible({ timeout: 15_000 })
+      await step.getByRole('button', { name: 'Next', exact: true }).click()
+    }
+    const last = page.getByRole('dialog', { name: 'Changes waiting on you', exact: true })
+    await expect(last).toBeVisible()
+    const [saved] = await Promise.all([
+      page.waitForResponse(r => new URL(r.url()).pathname === '/api/tours' && r.request().method() === 'POST'),
+      last.getByRole('button', { name: 'Connect your agent', exact: true }).click(),
+    ])
+    expect(saved.ok(), `could not save tour completion: ${saved.status()}`).toBe(true)
+    // The UI sends completion as a keepalive request while navigating. Check
+    // its durable effect through a fresh read instead of reading that body's
+    // browser response after navigation.
+    const persisted = await request.get('/api/tours')
+    expect(persisted.ok(), `could not read completed tours: ${persisted.status()}`).toBe(true)
+    expect(await persisted.json()).toMatchObject({ available: true, seen: ['console'] })
+    await expect(page).toHaveURL(new RegExp(`/app/projects/${id}/connect$`))
+    await page.evaluate(() => localStorage.removeItem('backenly_tour_console'))
+    const [remembered] = await Promise.all([
+      page.waitForResponse(r => new URL(r.url()).pathname === '/api/tours' && r.request().method() === 'GET'),
+      page.reload(),
+    ])
+    expect(remembered.ok(), `could not reload completed tours: ${remembered.status()}`).toBe(true)
+    await expect.poll(() => page.evaluate(() => localStorage.getItem('backenly_tour_console'))).toBe('seen')
+    await expect(page.getByRole('dialog', { name: 'Connect your coding agent', exact: true })).toHaveCount(0)
+  }
+  await page.context().storageState({ path: STORAGE_STATE })
+
   // The password is stored so a rerun of this setup can log in rather than
   // register. The file is gitignored and lives only for the life of the job.
   writeFileSync(PROJECT_HANDOFF, JSON.stringify({ id, email, password }, null, 2), 'utf8')

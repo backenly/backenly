@@ -20,6 +20,12 @@ export interface RequestLogFilter {
   /** Only the last N minutes. */
   sinceMinutes?: number
   limit?: number
+  /**
+   * Omitted: production traffic only. A preview branch's id: that branch's
+   * traffic only. The two never mix, so a branch's failure tests never read as
+   * production errors and production noise never hides a branch's result.
+   */
+  branchId?: string | null
 }
 
 export interface RequestLogRow {
@@ -43,6 +49,7 @@ export async function queryRequestLogs(projectId: string, filter: RequestLogFilt
     where: {
       projectId,
       NOT: { path: { startsWith: '/api/' } },
+      branchId: filter.branchId ?? null,
       ...(filter.method ? { method: filter.method.toUpperCase() } : {}),
       ...(Number.isFinite(filter.minStatus) ? { statusCode: { gte: filter.minStatus } } : {}),
       ...(filter.pathPrefix ? { path: { startsWith: filter.pathPrefix } } : {}),

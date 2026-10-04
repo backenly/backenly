@@ -52,7 +52,7 @@ const sections: LegalSection[] = [
       'Free: one permanent live project with limited monthly capacity',
       'Pro: additional capacity, custom domain, triggers, webhooks, rollback, team seats, and email support',
       'Enterprise: custom limits, SSO, priority support with an SLA, under an individual agreement',
-      'Usage beyond a plan: on Pro, usage past the included quotas is billed monthly in arrears at the rates published on the pricing page, and only after you set a monthly spend limit above zero. Each month’s usage charge will not exceed the spending limit in effect when that month closes. Amounts under $5 are carried to a later month’s invoice and are not collected if your subscription ends. You can lower or remove the limit at any time; raising it requires confirmation from your account email.',
+      'Usage beyond a plan: on Pro, usage past the included quotas is paid for in advance, and only after you set a monthly spend limit above zero. Setting or raising the limit requires confirmation from your account email and a payment of whatever your prepaid usage balance does not already cover. Usage past the quotas is charged at the rates published on the pricing page and drawn from that balance when each month closes; a month’s draw will not exceed the spending limit in effect when that month closes, or the balance. Unused balance carries over to later months. You can lower or remove the limit at any time.',
     ],
     extra:
       'By subscribing to a paid plan, you authorize recurring billing. Fees are non-refundable except as stated in our Refund Policy. We may change pricing with reasonable notice.',
@@ -143,7 +143,7 @@ export default function TermsPage() {
           lede="Please read these terms carefully before using Backenly. By using the service, you agree to be bound by them."
         >
           <p className="mt-7 text-[14px] text-zinc-500">
-            Last updated <span className="text-zinc-300">September 28, 2026</span>
+            Last updated <span className="text-zinc-300">October 3, 2026</span>
           </p>
         </PageHero>
 

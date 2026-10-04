@@ -98,12 +98,17 @@ const FORWARD_MIGRATIONS = [
   '20260922120000_auth_email_codes',
   '20260924120000_project_pause',
   '20260925120000_approval_exact_call',
+  '20260926120000_user_tours_seen',
   '20260927180000_usage_ledger',
   '20260928100000_usage_limits',
   '20260928140000_stripe_subscription_fields',
   '20260928160000_usage_charges',
   '20260930120000_snapshot_size_bigint',
   '20261003120000_purchased_ai_credits',
+  '20261003120000_usage_prepayments',
+  '20261003180000_startup_applications',
+  '20261004120000_request_log_branch',
+  '20261004130000_branch_migrations',
 ]
 
 describe('the assembled migration workspace', () => {

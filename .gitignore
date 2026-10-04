@@ -188,11 +188,13 @@ jest-integration.json
 /app/api/projects/\[id\]/access/route.ts
 /app/api/projects/\[id\]/availability/
 /app/api/referral/
+/app/api/startups/
 /app/api/users/route.ts
 /app/app/billing/
 /app/app/invite/
 /app/app/members/
 /app/app/referral/
+/app/startups/
 /components/app/AmplitudeAnalytics.tsx
 /components/cloud/
 /config/cloud/

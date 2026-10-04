@@ -17,6 +17,7 @@
  * still fail if the behaviour regresses.
  */
 
+import fs from 'fs'
 import {
   inferRlsPlanFromCatalog,
   severityForPlan,
@@ -204,13 +205,22 @@ describe('preview branches are reachable from an agent (#30)', () => {
     expect(advertised.has('branch')).toBe(true)
   })
 
-  it('every advertised branch action dispatches to a real tool', async () => {
+  it('every advertised branch action dispatches to a real tool, except merge, which waits for a human', async () => {
     const { BRANCH_ACTIONS } = await import('@/lib/mcp/catalog')
+    const { isDestructiveTool } = await import('@/lib/ai/brain/tools')
     const schema: any = buildCatalog().find((t) => t.name === 'branch')!.inputSchema
     expect(schema.properties.action.enum).toEqual(Object.keys(BRANCH_ACTIONS))
-    for (const target of Object.values(BRANCH_ACTIONS)) {
-      expect(dispatchable.has(target as string)).toBe(true)
+    for (const [action, target] of Object.entries(BRANCH_ACTIONS)) {
+      if (action === 'merge') continue
+      expect({ action, dispatchable: dispatchable.has(target as string) }).toEqual({ action, dispatchable: true })
     }
+    // A merge replays migrations onto production. It resolves to a real tool,
+    // one the brain gates as destructive and the route parks for approval with
+    // the exact call, rather than one that runs on the agent's word.
+    expect(BRANCH_ACTIONS.merge).toBe('merge_branch')
+    expect(isDestructiveTool('merge_branch')).toBe(true)
+    const route = fs.readFileSync('app/api/mcp/tool/route.ts', 'utf8')
+    expect(route).toMatch(/if \(target === 'merge_branch'\) \{\s*return withCors\(await parkBranchMerge\(/)
   })
 
   it('offers no discard action, and does not dispatch discard_branch', () => {

@@ -82,10 +82,13 @@ model User {
   aiCreditPurchases       AiCreditPurchase[]
   referralGrantsMade      ReferralGrant[]          @relation("ReferralReferrer")
   referralGrantReceived   ReferralGrant?           @relation("ReferralReferee")
+  startupApplication      StartupApplication?
   // ── Organization relations (Phase 6) ──────────────────────────────────────
   ownedOrganizations      Organization[]           @relation("OrgOwner")
   orgMemberships          OrganizationMember[]
   projectMemberships      ProjectMember[]
+  // Product tours this user has finished or skipped (lib/tours).
+  toursSeen               UserTourSeen[]
 
   @@index([email])
   @@index([provider, providerId])
@@ -147,6 +150,12 @@ model Project {
   pauseWarnedAt           DateTime? // When the pause warning was DELIVERED. Cleared by real activity. No delivered warning, no pause.
   lastActivityAt          DateTime? // Real use only (runtime traffic, MCP calls, dashboard writes). Never stamped by autonomy, cron or backups.
   pausePolicySince        DateTime? // When the inactivity policy first applied to this project, so a paid-to-Free downgrade gets a full window.
+  // Protected production: a coding agent may change this project's schema only
+  // on a preview branch, and production only through a branch merge a human
+  // approved. Dashboard changes, autonomy fixes and row writes are not gated.
+  // On for new Backenly Cloud projects (provisioning sets it); self-hosted
+  // installs have no branches, so it is never set there. See lib/branches/protection.ts.
+  protectedProduction     Boolean                @default(false)
   isDeployed              Boolean                @default(false)
   isBackendGenerated      Boolean                @default(false)
   isFrontendConnected     Boolean                @default(false)
@@ -1421,6 +1430,65 @@ model ReferralGrant {
   @@map("referral_grants")
 }
 
+// ─── Backenly for Startups ──────────────────────────────────────────────────
+// An application for the startup pass: Pro at no cost for a fixed period.
+// Backenly Cloud only. The table is here because the schema is one schema,
+// whole and public; everything that reads or writes it is the Cloud overlay
+// (lib/billing/startup-program.ts), so a self-hosted install has no rows.
+//
+// The applicant proves they work at the startup by entering a code sent to an
+// address at the startup's own domain. An application verified before the
+// applicant has an account is held as `unclaimed` under a hashed claim token
+// their browser keeps, and joins the review queue once they sign in.
+model StartupApplication {
+  id                  String    @id @default(uuid())
+  // Null while unclaimed. One application per account.
+  userId              String?   @unique
+  // unclaimed | in_review | approved | declined | ended | converted
+  status              String    @default("unclaimed")
+  companyName         String
+  website             String
+  // The website's host without "www.", lower-case. The work email must be at
+  // this domain or under it, and it is what "one pass per company" counts.
+  domain              String
+  stage               String
+  teamSize            String
+  currentBackend      String
+  building            String
+  applicantName       String
+  applicantRole       String
+  profileUrl          String?
+  workEmail           String
+  workEmailVerifiedAt DateTime
+  // Hints for the reviewer recorded at verification, such as another
+  // application from the same domain. Never a decision on their own.
+  signals             String[]  @default([])
+  claimTokenHash      String?   @unique
+  submittedIp         String?
+  // When the application joined the review queue (claimed by an account).
+  submittedAt         DateTime?
+  reviewedAt          DateTime?
+  reviewedById        String?
+  // Shown to the applicant when an application is declined.
+  reviewNote          String?
+  passStartsAt        DateTime?
+  passEndsAt          DateTime?
+  // The subscription row the pass was written to, so ending the pass can only
+  // ever touch that row and never a subscription the account paid for later.
+  subscriptionId      String?
+  reminderSentAt      DateTime?
+  endedAt             DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([domain])
+  @@index([passEndsAt])
+  @@map("startup_applications")
+}
+
 // ─── Organizations (Phase 6 — team accounts) ────────────────────────────────
 // A platform-level account that owns projects and (org-based) billing. Every
 // user gets one personal Organization lazily. Teams are formed by
@@ -1797,26 +1865,53 @@ model PaddleSubscription {
   @@map("paddle_subscriptions")
 }
 
-// Preview branch — a full structural+data clone of the workspace schema where
-// an agent or owner can experiment; merge brings additive changes back through
-// the governed kernel, destructive diffs go to the approval path. Foundation
-// for "PRs for your backend" (agent-era pillar 2).
+// Preview branch — a structural clone of the workspace schema (rows only when
+// asked) where an agent builds and tests a change while production keeps
+// serving. Schema changes made on it are logged (WorkspaceBranchMigration) and
+// a merge replays that log onto main through the governed kernel.
+//
+// Names are unique among ACTIVE branches only, which lib/branches/engine.ts
+// enforces: a merged or discarded branch keeps its row as history, and its
+// schema is dropped, so the same name must be reusable. A database-wide unique
+// on name or schemaName made re-creating "staging" after a merge fail after the
+// new schema had already been created and registered.
 model WorkspaceBranch {
-  id          String    @id @default(uuid())
-  projectId   String
-  name        String // slug, e.g. "add-payments"
-  schemaName  String    @unique // workspace_{projectId}_br_{name}
-  status      String    @default("active") // active | merged | discarded
-  createdBy   String
-  createdAt   DateTime  @default(now())
-  mergedAt    DateTime?
-  discardedAt DateTime?
-  project     Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  apiKeys     ApiKey[]
+  id           String                      @id @default(uuid())
+  projectId    String
+  name         String // slug, e.g. "add-payments"
+  schemaName   String // workspace_{projectId}_br_{name}
+  status       String                      @default("active") // active | merged | discarded
+  createdBy    String
+  createdAt    DateTime                    @default(now())
+  mergedAt     DateTime?
+  discardedAt  DateTime?
+  // Main's schema when the branch was cut: what a merge compares against to
+  // tell a change made on the branch from one made on main since.
+  baseSnapshot Json?
+  project      Project                     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  apiKeys      ApiKey[]
+  migrations   WorkspaceBranchMigration[]
 
-  @@unique([projectId, name])
+  @@index([projectId, name])
+  @@index([schemaName])
   @@index([projectId, status])
   @@map("workspace_branches")
+}
+
+// One schema change applied to a preview branch, in order. A merge replays
+// these statements onto main through apply_migration's governed path, so
+// production receives exactly what was built and tested on the branch.
+model WorkspaceBranchMigration {
+  id         String          @id @default(uuid())
+  branchId   String
+  seq        Int
+  statements Json // string[]: each statement exactly as applied
+  appliedBy  String
+  appliedAt  DateTime        @default(now())
+  branch     WorkspaceBranch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@unique([branchId, seq])
+  @@map("workspace_branch_migrations")
 }
 
 // Revocable public-share token for read-only report pages (/report/[token]).
@@ -1876,12 +1971,20 @@ model ApiRequestLog {
   statusCode Int
   duration   Int
   timestamp  DateTime @default(now())
+  // The preview branch whose key made the request; null for main. Production
+  // health signals (monitoring, the autonomy freeze and detectors) read null
+  // only, so a test run against a branch never reads as a production incident.
+  // No foreign key: this is the hottest insert path in the platform, and a
+  // branch row outlives its traffic anyway (branches are marked merged or
+  // discarded, never deleted).
+  branchId   String?
   project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
   user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([projectId, timestamp])
   @@index([userId, timestamp])
   @@index([timestamp])
+  @@index([branchId, timestamp])
   @@map("api_request_logs")
 }
 
@@ -2485,6 +2588,27 @@ model AuthEmailCode {
 }
 
 // ============================================================================
+// PRODUCT TOURS — which one-time console tours a user has already seen
+//
+// A row means "never show this tour to this user again", written when the tour
+// is finished or skipped. Keyed by tour id so a later tour needs no migration.
+// Its own table rather than a column on `users`, because the session lookup
+// loads the whole user row: a column there would break sign-in for as long as
+// a release ran ahead of its migration. Without this table the tour simply
+// does not run (lib/tours/seen.ts fails closed).
+// ============================================================================
+
+model UserTourSeen {
+  userId String
+  tourId String
+  seenAt DateTime @default(now())
+  user   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, tourId])
+  @@map("user_tours_seen")
+}
+
+// ============================================================================
 // PLATFORM NOTIFICATIONS — In-app notifications for developers using the platform
 // Created automatically by system events (payment, job status, low credits, etc.)
 // ============================================================================
@@ -2642,7 +2766,9 @@ model UsageAppliedBatch {
 // The most a billing account lets Backenly charge beyond its included usage in
 // one month, in cents. No row means 0: nothing beyond the plan, every quota a
 // hard cap. Only a signed-in owner raises it (never an API key, an agent or an
-// MCP tool), and every change writes an audit_logs row.
+// MCP tool), and every change writes an audit_logs row. In Cloud the limit is
+// paid for in advance: it allows usage only up to the prepaid balance
+// (usage_prepayments less what was drawn from them).
 model UsageSpendLimit {
   billingAccountId String   @id
   limitCents       Int      @default(0)
@@ -2692,7 +2818,12 @@ model UsageLimitState {
 // (usage_period_closes), so it is one row per account, period and axis:
 // computing the same month again can never produce a second charge.
 //
-//   shadow    computed and shown, never charged (BACKENLY_OVERAGE_MODE=shadow)
+//   drawn     paid from the account's prepaid balance (usage_prepayments)
+//   shadow    computed and shown, never drawn (BACKENLY_OVERAGE_MODE=shadow)
+//
+// Months charged before prepaid billing were invoiced to the card afterwards,
+// and their rows keep that flow's statuses:
+//
 //   carried   under the minimum charge; rolled into a later month's invoice
 //   pending   an invoice is being created
 //   invoiced  on the Stripe invoice named by stripeInvoiceId
@@ -2719,6 +2850,27 @@ model UsageCharge {
   @@index([status])
   @@index([stripeInvoiceId])
   @@map("usage_charges")
+}
+
+// Money an account paid in advance for usage beyond its plan: one row per
+// Stripe Checkout Session, written once Stripe reports it paid. The webhook and
+// the owner's return from Checkout can both report the same payment; the
+// unique session id credits it once. The prepaid balance is these payments
+// less the usage drawn from them (usage_charges with status `drawn`).
+//
+//   paid      credited to the balance
+//   refunded  returned to the owner, so no longer part of the balance
+model UsagePrepayment {
+  id                    String   @id @default(uuid())
+  billingAccountId      String
+  stripeSessionId       String   @unique
+  stripePaymentIntentId String?
+  amountCents           Int
+  status                String   @default("paid")
+  createdAt             DateTime @default(now())
+
+  @@index([billingAccountId, status])
+  @@map("usage_prepayments")
 }
 
 // ============================================================================

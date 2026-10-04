@@ -30,6 +30,21 @@ describe('what a new key is called', () => {
     expect(issuedKeyPrefix({ keyType: 'dashboard', serviceRole: true })).toBe('dk_admin_')
   })
 
+  it('says in the prefix that a key is bound to a preview branch', () => {
+    // Same URL as production, so the key is the one place an app's environment
+    // shows which one it talks to, as with a Stripe test key.
+    expect(issuedKeyPrefix({ serviceRole: false, branchId: 'b1' })).toBe('proj_preview_')
+    expect(issuedKeyPrefix({ serviceRole: true, branchId: 'b1' })).toBe('svc_preview_')
+    expect(issuedKeyPrefix({ serviceRole: false, branchId: null })).toBe('proj_live_')
+    // An MCP connection or a dashboard key is never a preview key.
+    expect(issuedKeyPrefix({ scope: 'mcp', branchId: 'b1' })).toBe('mcp_live_')
+    expect(issuedKeyPrefix({ keyType: 'dashboard', branchId: 'b1' })).toBe('dk_admin_')
+    const { key } = mintKey({ serviceRole: false, branchId: 'b1' })
+    expect(key).toMatch(/^proj_preview_[0-9a-f]{64}$/)
+    expect(looksLikeBackenlyKey(key)).toBe(true)
+    expect(classifyKeyFailure(key, 'unknown_key').kind).not.toBe('malformed')
+  })
+
   it('never issues a Stripe-shaped prefix', () => {
     expect(Object.values(ISSUED_PREFIX).filter((p) => STRIPE_LIKE.test(p))).toEqual([])
   })

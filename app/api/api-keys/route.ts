@@ -79,11 +79,12 @@ export async function GET(request: NextRequest) {
     }
     
     const apiKeys = await prisma.apiKey.findMany({
-      where: { 
+      where: {
         userId: auth.userId,
         projectId, // Tenant isolation
       },
       orderBy: { createdAt: 'desc' },
+      include: { branch: { select: { id: true, name: true, status: true } } },
     })
     
     return NextResponse.json({
@@ -103,6 +104,10 @@ export async function GET(request: NextRequest) {
         permissions: key.permissions,
         capabilities: key.capabilities,
         serviceRole: key.serviceRole,
+        // A preview key looks like any other in a list; this is what says it
+        // reaches a branch, and whether that branch still answers it.
+        branchId: key.branchId,
+        branch: key.branch,
         projectId: key.projectId,
         lastUsed: key.lastUsed,
         createdAt: key.createdAt,
@@ -186,7 +191,7 @@ export async function POST(request: NextRequest) {
     }
 
     // The prefix says what the key is (lib/auth/key-prefix.ts); its role is in the row.
-    const { key: fullKey, prefix: keyPrefix } = mintKey({ keyType: data.keyType, serviceRole: data.serviceRole })
+    const { key: fullKey, prefix: keyPrefix } = mintKey({ keyType: data.keyType, serviceRole: data.serviceRole, branchId: data.branchId })
     const keyHash = crypto.createHash('sha256').update(fullKey).digest('hex') // Hash for secure storage
     const permissions = data.permissions.length > 0 
       ? data.permissions 

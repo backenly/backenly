@@ -12,6 +12,7 @@ export const dynamic = 'force-dynamic'
  *   format=dts     → backenly.types.ts source (text/plain)
  *   format=client  → backenly.client.ts typed client (text/plain)
  *   format=openapi → OpenAPI 3.0 spec (application/json)
+ *   format=openapi&branch=<id> → that preview branch's data API instead
  *
  * Every response carries X-Backenly-Schema-Hash — a stable content hash of the
  * generated dts. `backenly diff` compares it against the local artifact to
@@ -41,6 +42,31 @@ export async function GET(request: NextRequest) {
       { ok: false, error: `Unknown format '${format}' — use dts, client, or openapi`, code: 'VALIDATION_ERROR' },
       { status: 400 },
     )
+  }
+
+  // A preview branch's spec: what a key bound to it may call (the data API),
+  // read from the branch's own schema. Resolved on this key's project and only
+  // while active, so another project's branch id describes nothing.
+  const branchId = request.nextUrl.searchParams.get('branch')
+  if (format === 'openapi' && branchId) {
+    const branch = await prisma.workspaceBranch.findFirst({
+      where: { id: branchId, projectId: auth.projectId, status: 'active' },
+      select: { name: true, schemaName: true },
+    })
+    if (!branch) {
+      return NextResponse.json(
+        { ok: false, error: 'No active preview branch with that id on this project.', code: 'BRANCH_NOT_FOUND' },
+        { status: 404 },
+      )
+    }
+    const { generateOpenApiSpec: generateCatalogSpec } = await import('@/lib/services/openapi-generator')
+    const { resolvePublicBaseUrl } = await import('@/lib/services/public-url')
+    const spec = await generateCatalogSpec(auth.projectId, resolvePublicBaseUrl(request), branch)
+    recordMcpCall(
+      { keyId: auth.keyId, projectId: auth.projectId, userId: auth.userId, endpoint: ENDPOINT, startedAt },
+      { statusCode: 200, mutation: false, summary: `format=openapi branch=${branch.name}` },
+    )
+    return NextResponse.json(spec, { status: 200 })
   }
 
   try {

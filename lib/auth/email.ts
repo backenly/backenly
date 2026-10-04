@@ -224,30 +224,85 @@ export async function sendPasswordResetCodeEmail(email: string, code: string): P
 }
 
 /**
- * The code that must be entered before a usage spend limit is raised.
+ * The code that must be entered before a usage spend limit is raised, or
+ * before paying to fund one.
  *
  * Raising the limit lets Backenly charge the account more, so it is confirmed
  * from the owner's mailbox rather than by any session or token alone: an agent
- * holding a platform token can read the meter, never raise the limit.
+ * holding a platform token can read the meter, never raise the limit. When the
+ * prepaid balance does not cover the new limit, `paymentLabel` is the amount the
+ * owner pays next, on Stripe's checkout page.
  */
-export async function sendSpendLimitCodeEmail(email: string, code: string, newLimitLabel: string): Promise<void> {
+export async function sendSpendLimitCodeEmail(
+  email: string,
+  code: string,
+  newLimitLabel: string,
+  paymentLabel?: string,
+): Promise<void> {
   const subject = `${code} confirms your new Backenly spend limit`
   const html = codeEmailHtml({
     heading: 'Confirm your new spend limit',
     intro:
-      `Enter this code to raise the monthly spend limit on your Backenly account to ` +
+      `Enter this code to set the monthly spend limit on your Backenly account to ` +
       `<strong style="color: #e5e7eb;">${newLimitLabel}</strong>. It expires in ` +
-      `<strong style="color: #e5e7eb;">${CODE_MINUTES} minutes</strong>.`,
+      `<strong style="color: #e5e7eb;">${CODE_MINUTES} minutes</strong>.` +
+      (paymentLabel
+        ? ` You then pay <strong style="color: #e5e7eb;">${paymentLabel}</strong> by card on Stripe's checkout page. ` +
+          'It is added to your prepaid usage balance, and the new limit applies once the payment goes through.'
+        : ''),
     code,
     footer:
-      "If you didn't ask to raise your spend limit, ignore this email and your limit stays as it is. " +
+      "If you didn't ask to change your spend limit, ignore this email and your limit stays as it is. " +
       'Consider changing your password if you did not start this.',
   })
   const text =
     `Your Backenly spend limit confirmation code is ${code}\n\n` +
-    `Enter it to raise your monthly spend limit to ${newLimitLabel}. It expires in ${CODE_MINUTES} minutes.\n\n` +
-    "If you didn't ask to raise your spend limit, ignore this email and your limit stays as it is."
-  await sendRequiredEmail('spend_limit_code', email, subject, html, text, { Code: code, 'New limit': newLimitLabel })
+    `Enter it to set your monthly spend limit to ${newLimitLabel}. It expires in ${CODE_MINUTES} minutes.\n\n` +
+    (paymentLabel
+      ? `You then pay ${paymentLabel} by card on Stripe's checkout page. It is added to your prepaid usage balance, ` +
+        'and the new limit applies once the payment goes through.\n\n'
+      : '') +
+    "If you didn't ask to change your spend limit, ignore this email and your limit stays as it is."
+  await sendRequiredEmail('spend_limit_code', email, subject, html, text, {
+    Code: code,
+    'New limit': newLimitLabel,
+    ...(paymentLabel ? { Payment: paymentLabel } : {}),
+  })
+}
+
+/** Text someone typed, made safe to place inside an email's HTML. */
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+/**
+ * The code that confirms an application to Backenly Cloud's startup program.
+ *
+ * It goes to an address at the startup's own domain, so entering it shows the
+ * applicant reads that company's mail. That is the identity check the founding
+ * team relies on when they review the application.
+ */
+export async function sendStartupApplicationCodeEmail(email: string, code: string, companyName: string): Promise<void> {
+  const subject = `${code} confirms your Backenly for Startups application`
+  const html = codeEmailHtml({
+    heading: 'Confirm your work email',
+    intro:
+      `Enter this code to confirm the Backenly for Startups application for ` +
+      `<strong style="color: #e5e7eb;">${escapeHtml(companyName)}</strong>. ` +
+      `It expires in <strong style="color: #e5e7eb;">${CODE_MINUTES} minutes</strong>.`,
+    code,
+    footer: "If you didn't apply, you can ignore this email. Nothing is submitted without this code.",
+  })
+  const text =
+    `Your Backenly for Startups confirmation code is ${code}\n\n` +
+    `Enter it to confirm the application for ${companyName}. It expires in ${CODE_MINUTES} minutes.\n\n` +
+    "If you didn't apply, you can ignore this email. Nothing is submitted without this code."
+  await sendRequiredEmail('startup_application_code', email, subject, html, text, { Code: code, Company: companyName })
 }
 
 /**

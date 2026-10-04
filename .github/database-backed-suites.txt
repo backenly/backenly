@@ -631,3 +631,42 @@ tests/integration/last-login-id-type.spec.ts
 # order against a real workspace is the property, so it needs a real Postgres.
 tests/integration/probe-auth-rate-limit.spec.ts
 tests/integration/go-live-empty-guard.spec.ts
+
+# One-time tours remain caller-scoped, idempotent and unavailable until their
+# migration is applied, so a missing table never repeats the tour.
+tests/integration/tours-seen.spec.ts
+
+# A new end user's session works from sign-up: the Next sign-up route signs with
+# the resolved (decrypted) project secret every verifier uses, and refresh binds
+# the id as the column's type, so it works on the canonical uuid users table.
+# Real provisioned projects (encrypted secrets) and real users are the property.
+tests/integration/end-user-session-tokens.spec.ts
+
+# A key bound to a preview branch is refused by every runtime surface that is
+# not branch-scoped, at both doors (the Express app and recordedV1), and the
+# data plane says which environment answered. Mount order against real key and
+# branch rows is the property, so it needs a real Postgres.
+tests/integration/branch-key-surfaces.spec.ts
+
+# A preview branch has a working endpoint: the agent tool issues a branch key,
+# the runtime serves the branch and tags its request log rows, every production
+# health reader ignores those rows, and the branch's OpenAPI spec reads the
+# branch's schema. Real schemas, keys and log rows are the property.
+tests/integration/branch-preview-endpoint.spec.ts
+
+# Build on a branch, merge to production after a human approves: protection
+# refuses an agent's migration on main, apply_migration { branchId } changes the
+# branch only (with production's RLS, no main metadata), the MCP merge parks for
+# approval and approving replays the log onto main; a conflict refuses the merge.
+tests/integration/branch-migrations.spec.ts
+
+# End-user auth on a preview branch: sign-up, sign-in, refresh and logout with a
+# preview key use the branch's own users table, issue tokens production cannot
+# verify, skip production's side effects, and a key for an inactive branch or
+# another project is refused. Real branch schemas, users and keys are the property.
+tests/integration/branch-auth.spec.ts
+
+# A new end user's session works from sign-up: the Next sign-up route signs with
+# the resolved (decrypted) project secret every verifier uses, and refresh binds
+# the id as the column's type, so it works on the canonical uuid users table.
+# Real provisioned projects (encrypted secrets) and real users are the property.

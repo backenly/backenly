@@ -209,6 +209,7 @@ export function TopBar() {
             queue itself and on the Overview loop. */}
         <Link
           href={`${basePath}/autonomy`}
+          data-tour="review-inbox"
           title={
             pendingReview > 0
               ? `${pendingReview} change${pendingReview === 1 ? '' : 's'} waiting on your approval`
@@ -244,7 +245,7 @@ export function TopBar() {
         </button>
 
         {/* Connect agent — the one build door, the primary action. */}
-        <Link href={`${basePath}/connect`} className={`${BUTTON_BASE} ${BUTTON_VARIANTS.primary} h-[32px] px-3 text-[13px]`}>
+        <Link data-tour="connect-agent" href={`${basePath}/connect`} className={`${BUTTON_BASE} ${BUTTON_VARIANTS.primary} h-[32px] px-3 text-[13px]`}>
           <Cable className="h-[15px] w-[15px]" strokeWidth={2} />
           <span className="hidden sm:inline">Connect agent</span>
         </Link>

@@ -11,6 +11,7 @@ export const dynamic = 'force-dynamic'
  *   status=4xx|5xx|<code>  filter by status class or exact code
  *   path=<substring>  filter by request path substring
  *   since=<ISO date>  only entries after this timestamp (powers --follow)
+ *   branch=<id>       a preview branch's traffic instead of production's
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -31,7 +32,9 @@ export async function GET(request: NextRequest) {
   const pathFilter = params.get('path')
   const since = params.get('since')
 
-  const where: any = { projectId: auth.projectId }
+  // Production unless a branch is asked for; scoped by projectId as well, so
+  // another project's branch id reads nothing.
+  const where: any = { projectId: auth.projectId, branchId: params.get('branch')?.trim() || null }
   if (status === '4xx') where.statusCode = { gte: 400, lt: 500 }
   else if (status === '5xx') where.statusCode = { gte: 500 }
   else if (status && /^\d{3}$/.test(status)) where.statusCode = parseInt(status, 10)

@@ -57,9 +57,46 @@ function schemaFor(projectId: string): string {
   return `workspace_${projectId}`
 }
 
-async function assertTable(projectId: string, tableName: string): Promise<void> {
+/** Where a row tool reads or writes: main, or one preview branch of this project. */
+interface Target {
+  schema: string
+  /** The branch's name, or null for main. */
+  branch: string | null
+}
+
+/**
+ * Resolve an optional branch id to the schema it names.
+ *
+ * Looked up on THIS project and only while active, then passed through the
+ * gateway's own check, so an id from another project, or a merged branch whose
+ * schema is gone, can never point a write anywhere but where it was meant.
+ */
+async function resolveTarget(projectId: string, branchId?: string | null): Promise<Target> {
+  if (!branchId) return { schema: schemaFor(projectId), branch: null }
+  const branch = await prisma.workspaceBranch.findFirst({
+    where: { id: branchId, projectId, status: 'active' },
+    select: { name: true, schemaName: true },
+  })
+  if (!branch) throw new Error('No active preview branch with that id on this project. branch { action: "list" } shows the ids.')
+  const { profileForBranchSchema } = await import('@/lib/postgrest/gateway')
+  return { schema: profileForBranchSchema(projectId, branch.schemaName), branch: branch.name }
+}
+
+async function assertTable(projectId: string, tableName: string, target: Target): Promise<void> {
   if (!IDENT.test(tableName)) {
     throw new Error(`Invalid table name "${tableName}".`)
+  }
+  // A branch's tables are in its catalog only; main's metadata does not list
+  // a table created on the branch, and must not.
+  if (target.branch) {
+    const found = await prisma.$queryRawUnsafe<Array<{ exists: boolean }>>(
+      `SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2) AS exists`,
+      target.schema, tableName.toLowerCase(),
+    )
+    if (found[0]?.exists !== true || tableName.startsWith('_')) {
+      throw new Error(`Table "${tableName}" not found on branch "${target.branch}".`)
+    }
+    return
   }
   const rec = await prisma.table.findFirst({
     where: { projectId, name: tableName.toLowerCase() },
@@ -224,6 +261,8 @@ function buildWhere(
 
 export interface DbQueryInput {
   table: string
+  /** A preview branch of this project instead of main. */
+  branchId?: string | null
   filter?: Record<string, unknown>
   limit?: number
   offset?: number
@@ -232,8 +271,9 @@ export interface DbQueryInput {
 
 export async function dbQuery(projectId: string, input: DbQueryInput) {
   const table = String(input.table || '').toLowerCase()
-  await assertTable(projectId, table)
-  const schema = schemaFor(projectId)
+  const target = await resolveTarget(projectId, input.branchId)
+  await assertTable(projectId, table, target)
+  const schema = target.schema
   const limit = Math.min(Math.max(1, Number(input.limit ?? 50)), 200)
   const offset = Math.max(0, Number(input.offset ?? 0))
 
@@ -257,13 +297,16 @@ export async function dbQuery(projectId: string, input: DbQueryInput) {
 
 export interface DbInsertInput {
   table: string
+  /** A preview branch of this project instead of main. */
+  branchId?: string | null
   row: Record<string, unknown>
 }
 
 export async function dbInsert(projectId: string, input: DbInsertInput) {
   const table = String(input.table || '').toLowerCase()
-  await assertTable(projectId, table)
-  const schema = schemaFor(projectId)
+  const target = await resolveTarget(projectId, input.branchId)
+  await assertTable(projectId, table, target)
+  const schema = target.schema
   const row = input.row ?? {}
   const cols = Object.keys(row).filter((c) => IDENT.test(c))
   if (cols.length === 0) throw new Error('`row` must include at least one valid column.')
@@ -279,14 +322,17 @@ export async function dbInsert(projectId: string, input: DbInsertInput) {
 
 export interface DbUpdateInput {
   table: string
+  /** A preview branch of this project instead of main. */
+  branchId?: string | null
   filter: Record<string, unknown>
   patch: Record<string, unknown>
 }
 
 export async function dbUpdate(projectId: string, input: DbUpdateInput) {
   const table = String(input.table || '').toLowerCase()
-  await assertTable(projectId, table)
-  const schema = schemaFor(projectId)
+  const target = await resolveTarget(projectId, input.branchId)
+  await assertTable(projectId, table, target)
+  const schema = target.schema
 
   const patch = input.patch ?? {}
   const setCols = Object.keys(patch).filter((c) => IDENT.test(c))
@@ -324,13 +370,16 @@ export async function dbUpdate(projectId: string, input: DbUpdateInput) {
 
 export interface DbDeleteInput {
   table: string
+  /** A preview branch of this project instead of main. */
+  branchId?: string | null
   filter: Record<string, unknown>
 }
 
 export async function dbDelete(projectId: string, input: DbDeleteInput) {
   const table = String(input.table || '').toLowerCase()
-  await assertTable(projectId, table)
-  const schema = schemaFor(projectId)
+  const target = await resolveTarget(projectId, input.branchId)
+  await assertTable(projectId, table, target)
+  const schema = target.schema
 
   // Same guardrail as update: no filter, no go.
   if (!input.filter || Object.keys(input.filter).length === 0) {
