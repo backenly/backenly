@@ -182,15 +182,19 @@ async function signUp(request: NextRequest, projectId: string, env: AuthEnvironm
 
     const user = created[0]
 
-    // A branch session is signed with the branch's own secret, so it cannot be
-    // presented to production (lib/branches/auth-environment.ts). Production
-    // tokens keep the secret exactly as this route always signed with it.
+    // Signed with the RESOLVED secret, as every verifier reads it. Provisioning
+    // stores the secret encrypted (JWTSecretManager.getOrCreateSecret), and this
+    // route signed with the stored ciphertext, so a sign-up token verified
+    // nowhere: the data plane served its holder as anonymous and refresh
+    // refused it, until the user signed in again. A branch session is signed
+    // with the branch's own secret, derived from that one, so it cannot be
+    // presented to production (lib/branches/auth-environment.ts).
     const token = jwt.sign(
       {
         userId: user.id, email: user.email, projectId, role: user.role ?? 'user', jti: crypto.randomUUID(),
         ...endUserTokenClaims(env.branch),
       },
-      env.branch ? endUserTokenSecret(resolveJwtSecret(jwtSecret), env.branch) : jwtSecret,
+      endUserTokenSecret(resolveJwtSecret(jwtSecret), env.branch),
       { expiresIn: '7d' },
     )
 

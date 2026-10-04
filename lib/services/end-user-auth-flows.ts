@@ -24,7 +24,7 @@
 import { prisma } from '@/lib/db'
 import { hashPassword } from '@/lib/auth/password'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
-import { ensureAuthUsersTable, introspectAuthUsersTable, stampLastLogin, isReservedTestEmail } from '@/lib/services/end-user-auth-table'
+import { ensureAuthUsersTable, introspectAuthUsersTable, stampLastLogin, isReservedTestEmail, userIdCast } from '@/lib/services/end-user-auth-table'
 import { trackEndUserActive } from '@/lib/quota/kernel'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import {
@@ -133,12 +133,14 @@ export async function refreshEndUserToken(
     if (schema.hasIsBlocked) selectCols.push('is_blocked')
 
     // Service-role read: the users table is FORCE RLS (service-role-only
-    // policy), so a plain query would see zero rows and 401 every refresh.
+    // policy), so a plain query would see zero rows and 401 every refresh. The
+    // id is bound as the column's own type: a bare $1 arrives as text, and on a
+    // uuid `id` (the canonical shape) every refresh failed with 42883.
     const users = await executeWithUserContext<any>(
       '',
       true,
-      `SELECT ${selectCols.map(c => `"${c}"`).join(', ')} FROM "${schemaName}"."users" WHERE id = $1 LIMIT 1`,
-      [payload.userId],
+      `SELECT ${selectCols.map(c => `"${c}"`).join(', ')} FROM "${schemaName}"."users" WHERE id = $1${userIdCast(schema)} LIMIT 1`,
+      [String(payload.userId)],
     )
 
     const user = users[0]

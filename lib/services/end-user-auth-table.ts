@@ -291,6 +291,18 @@ export async function introspectAuthUsersTable(
 }
 
 /**
+ * The cast that binds a user id as the `id` column's own type, for a lookup by
+ * id. A bare `$1` arrives as text and `uuid = text` has no operator (42883);
+ * matching the column's type also keeps its primary-key index usable. The same
+ * rule as stampLastLogin, below.
+ */
+export function userIdCast(schema: AuthUsersSchema): string {
+  const type = schema.columnMeta.find((c) => c.column_name === 'id')?.data_type ?? ''
+  if (type === 'uuid') return '::uuid'
+  return ['smallint', 'integer', 'bigint'].includes(type) ? '::bigint' : ''
+}
+
+/**
  * A verifier account asked for end-user auth to be provisioned. Refused: see
  * ensureAuthUsersTable. Signup routes answer it with 503 AUTH_NOT_CONFIGURED,
  * which every probe already reads as "auth is not set up here".
