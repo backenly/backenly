@@ -648,3 +648,9 @@ tests/integration/branch-preview-endpoint.spec.ts
 # branch only (with production's RLS, no main metadata), the MCP merge parks for
 # approval and approving replays the log onto main; a conflict refuses the merge.
 tests/integration/branch-migrations.spec.ts
+
+# End-user auth on a preview branch: sign-up, sign-in, refresh and logout with a
+# preview key use the branch's own users table, issue tokens production cannot
+# verify, skip production's side effects, and a key for an inactive branch or
+# another project is refused. Real branch schemas, users and keys are the property.
+tests/integration/branch-auth.spec.ts

@@ -100,7 +100,7 @@ Each is `https://backenly.com/docs/agents/<topic>.md`, or `fetch_docs { topic }`
 - [posthog](https://backenly.com/docs/agents/posthog.md): analytics events and feature flags from functions
 - [autonomy](https://backenly.com/docs/agents/autonomy.md): the maintenance loop, findings, and how a parked action is approved and polled
 - [monitoring](https://backenly.com/docs/agents/monitoring.md): metrics, errors, request logs, usage
-- [branches](https://backenly.com/docs/agents/branches.md): preview branches: create, diff, merge (Backenly Cloud)
+- [branches](https://backenly.com/docs/agents/branches.md): preview branches: create, build, test (data API and end-user auth), diff, merge (Backenly Cloud)
 - [deploy](https://backenly.com/docs/agents/deploy.md): readiness, publishing, history and rollback
 - [webhooks](https://backenly.com/docs/agents/webhooks.md): signed outbound endpoints, test deliveries, replays, trigger webhooks
 - [connect](https://backenly.com/docs/agents/connect.md): which project a connection acts on, API keys, env variables, database credentials, connected apps

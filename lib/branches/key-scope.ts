@@ -5,10 +5,12 @@
  * A key bound to a preview branch (`ApiKey.branchId`) is routed to that
  * branch's schema by the data plane: `/api/v1/{projectId}/db/*` and `/api/v2/*`
  * authenticate through getProjectIdFromAuth (server/routes/dynamic.ts), which
- * hands the branch schema to the PostgREST gateway. Nothing else is
- * branch-aware. End-user auth, functions, storage, realtime, presence,
- * broadcast, logs, the legacy `/database/*` routes and every Next-owned section
- * resolve to the project's main schema.
+ * hands the branch schema to the PostgREST gateway. End-user sign-up, sign-in,
+ * refresh and logout resolve the branch the same way
+ * (lib/branches/auth-environment.ts). Nothing else is branch-aware. The emailed
+ * auth flows, functions, storage, realtime, presence, broadcast, logs, the
+ * legacy `/database/*` routes and every Next-owned section resolve to the
+ * project's main schema.
  *
  * Those surfaces used to accept the key anyway and serve PRODUCTION. A signup
  * made "on the preview" created a real end user, fired the production signup
@@ -47,7 +49,22 @@ export function environmentHeaderValue(branchName?: string | null): string {
 }
 
 /** What a branch-bound key can reach, as a caller should read it. */
-export const BRANCH_SCOPED_SURFACES = ['/api/v1/{projectId}/db/*', '/api/v2/{projectId}/*'] as const
+export const BRANCH_SCOPED_SURFACES = [
+  '/api/v1/{projectId}/db/*',
+  '/api/v2/{projectId}/*',
+  '/api/v1/{projectId}/auth/{signup,signin,refresh-token,logout}',
+] as const
+
+/**
+ * The end-user auth endpoints that run on the branch, aliases included.
+ *
+ * The emailed flows (forgot and reset password, email verification, magic
+ * links) are not among them: their link is opened from an inbox with no key,
+ * so nothing could say which branch the token in it belongs to.
+ */
+export const BRANCH_SCOPED_AUTH_ACTIONS: ReadonlySet<string> = new Set([
+  'signup', 'register', 'signin', 'login', 'refresh-token', 'refresh', 'logout',
+])
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -76,6 +93,7 @@ export function isBranchScopedRuntimePath(pathname: string): boolean {
     // /db/{table}/vector-search is served by Next against main, not by the
     // data plane, even though it hangs off the CRUD prefix.
     if (section === 'db') return rest.length >= 3 && rest[3]?.toLowerCase() !== 'vector-search'
+    if (section === 'auth') return rest.length === 3 && BRANCH_SCOPED_AUTH_ACTIONS.has(rest[2].toLowerCase())
     return false
   }
 
@@ -168,7 +186,8 @@ export function branchSurfaceRefusal(branch: BoundBranch): BranchSurfaceRefusal 
     body: {
       error:
         `This key is bound to the preview branch "${branch.name}", and this endpoint is not branch-scoped: ` +
-        'it would read or write production. Only the data API is served from a branch.',
+        'it would read or write production. Only the data API and end-user sign-up, sign-in, refresh ' +
+        'and logout are served from a branch.',
       code: BRANCH_SURFACE_UNAVAILABLE,
       branch: branch.name,
       branchScoped: BRANCH_SCOPED_SURFACES,

@@ -10,7 +10,8 @@
  * environment answered. This module hands out all three in one shape, so the
  * dashboard and the agent tools describe a branch identically.
  *
- * Only the data API is branch-scoped. Every other endpoint refuses a branch key
+ * The data API and end-user sign-up, sign-in, refresh and logout are
+ * branch-scoped. Every other endpoint refuses a branch key
  * (lib/branches/key-scope.ts), and the instructions below say so rather than
  * letting a test discover it as a 403.
  */
@@ -80,6 +81,8 @@ export function previewSdkSnippet(projectId: string, key = 'process.env.BACKENLY
     `import { BackenlyClient } from '@backenly/sdk'`,
     ``,
     `// Same project, same URL as production. The preview key is what selects the branch.`,
+    `// @backenly/sdk 0.3.1 and earlier send no key on auth.signUp / auth.signIn, so those`,
+    `// two reach production; later releases send it. Check your version before testing auth.`,
     `// Without an apiKey the SDK falls back to the production anon key, so refuse to start.`,
     `const apiKey = ${key}`,
     `if (!apiKey) throw new Error('BACKENLY_PREVIEW_KEY is not set')`,
@@ -100,10 +103,18 @@ export function previewAgentInstructions(endpoint: PreviewEndpoint, key = '$BACK
     `- Send the preview key as the x-api-key header: ${key}. Never use a production key for these tests.`,
     `- With the SDK, always pass apiKey explicitly: without one it fetches the production anon key.`,
     `- Data API: ${endpoint.dataUrl} and ${endpoint.v2Url}.`,
-    `- Every data response must carry ${endpoint.environmentHeader.name}: ${endpoint.environmentHeader.value}. ` +
-      `Fail the test if it says "main".`,
-    `- End-user auth, functions, storage and realtime are not branch-scoped: they answer 403 ` +
-      `BRANCH_SURFACE_UNAVAILABLE to this key. Do not work around that with a production key.`,
+    `- Every data and auth response must carry ${endpoint.environmentHeader.name}: ` +
+      `${endpoint.environmentHeader.value}. Fail the test if it says "main".`,
+    `- End-user auth runs on the branch: POST ${endpoint.baseUrl}/auth/signup, /auth/signin, ` +
+      `/auth/refresh-token and /auth/logout WITH the preview key create and check users in the branch only. ` +
+      `Send the token they return as X-User-Token alongside the preview key. A production token is refused here ` +
+      `(PRODUCTION_TOKEN_ON_BRANCH), and a branch token is refused on production. @backenly/sdk 0.3.1 and ` +
+      `earlier send no key on auth.signUp / auth.signIn, so with those versions call the auth endpoints over HTTP.`,
+    `- A branch sign-up skips production's side effects (on_signup functions, webhooks, the active-user ` +
+      `count, email verification) and lists them in skippedOnBranch.`,
+    `- Functions, storage, realtime and the emailed auth flows (password reset, email verification, magic ` +
+      `links) are not branch-scoped: they answer 403 BRANCH_SURFACE_UNAVAILABLE to this key. Do not work ` +
+      `around that with a production key.`,
     `- The branch starts empty unless production rows were copied; seed the rows each test needs.`,
     `- OpenAPI for the branch: GET ${endpoint.openapiUrl} with your Backenly MCP key as x-api-key.`,
   ].join('\n')

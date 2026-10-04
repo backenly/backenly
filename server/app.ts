@@ -147,10 +147,10 @@ app.use(['/api/v1/:projectId', '/api/v2/:projectId'], (req, res, next) => {
 app.use(['/api/v1/:projectId', '/api/v2/:projectId'], asyncRoute(projectServingGate))
 
 // ── A branch-bound key stays on the data plane ─────────────────────────────────
-// Only /db/* and /api/v2 are served from a preview branch. Every other v1
-// surface (end-user auth, functions, storage, realtime, logs, the Next-owned
-// sections) resolves to main, so a branch key reaching one would read or write
-// production. Refused here, before the Next proxy and every router, so a router
+// Only /db/*, /api/v2 and end-user sign-up, sign-in, refresh and logout are
+// served from a preview branch. Every other v1 surface (the emailed auth flows,
+// functions, storage, realtime, logs, the Next-owned sections) resolves to main,
+// so a branch key reaching one would read or write production. Refused here, before the Next proxy and every router, so a router
 // added later is covered without knowing about branches. lib/branches/key-scope.ts.
 app.use('/api/v1', asyncRoute(async (req, res, next) => {
   const refusal = await refuseBranchKeyOffDataPlane(

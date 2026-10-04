@@ -719,9 +719,11 @@ export function buildDispatchable(): McpToolDescriptor[] {
       'property of the KEY, and no header or URL switches it. "create" returns that endpoint with a client key ' +
       '(shown once) and instructions for a test; "connect" issues more keys. A branch key reads and writes the branch ' +
       'through the data API (/api/v1/{projectId}/db and /api/v2), and every response says which environment answered ' +
-      'in the X-Backenly-Environment header (branch:<name>): assert it in tests. Any other endpoint (auth, functions, ' +
-      'storage, realtime) refuses the key with BRANCH_SURFACE_UNAVAILABLE, and a key on a merged or discarded branch ' +
-      'is refused, rather than either falling back to production. Read a branch\'s traffic with monitoring ' +
+      'in the X-Backenly-Environment header (branch:<name>): assert it in tests. End-user sign-up, sign-in, refresh and ' +
+      'logout with the key run on the branch\'s own users table, and their tokens work only with that branch\'s key. ' +
+      'Any other endpoint (functions, storage, realtime, the emailed auth flows) refuses the key with ' +
+      'BRANCH_SURFACE_UNAVAILABLE, and a key on a merged or discarded branch is refused, rather than either falling ' +
+      'back to production. Read a branch\'s traffic with monitoring ' +
       'action:"request_logs" and its branchId.\n' +
       'Actions: "list" (existing branches + their ids) · "create" (needs `name`, lowercase kebab-case, max 5 active) · ' +
       '"connect" (needs `branchId`; serviceRole:true for a server-side key) · ' +

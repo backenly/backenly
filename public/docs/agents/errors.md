@@ -22,7 +22,10 @@ Every tool and route answers failures as JSON: `{ ok: false, error, code }`, oft
 | `FUNCTION_INACTIVE` | The function is switched off | Turn it on with `functions` `set_active` first |
 | `INVALID_CODE` / `SECRET_IN_CODE` / `CODE_TOO_LARGE` | `functions` `deploy_code` refused the source | Fix what the summary names; nothing was stored |
 | `BRANCH_INACTIVE` | The key is bound to a branch that was merged or discarded | Use a key for an active branch or the main schema |
-| `BRANCH_SURFACE_UNAVAILABLE` | A branch-bound key called an endpoint that is not branch-scoped (auth, functions, storage, realtime), which would have served production | Use the branch key only on `/db` and `/api/v2`; use a main key for the rest |
+| `BRANCH_SURFACE_UNAVAILABLE` | A branch-bound key called an endpoint that is not branch-scoped (functions, storage, realtime, the emailed auth flows), which would have served production | Use the branch key only on `/db`, `/api/v2` and auth sign-up, sign-in, refresh and logout; use a main key for the rest |
+| `PRODUCTION_TOKEN_ON_BRANCH` | A production end-user token was sent with a preview key | Sign the user up or in with the preview key and use the token that returns |
+| `BRANCH_TOKEN_ON_MAIN` / `BRANCH_TOKEN_MISMATCH` | An end-user token issued on a branch was sent to production, or to another branch | Send it with the key of the branch that issued it |
+| `API_KEY_PROJECT_MISMATCH` | A preview key of one project was sent to another project's auth endpoint | Use a key of the project in the URL |
 | `BRANCH_REQUIRED` | Production is protected, so a schema change was refused on main | `branch` `create`, then `apply_migration { sql, branchId }`, then `branch` `merge` |
 | `MERGE_CONFLICT` | Production changed a table the branch's migrations touch since the branch was cut | Create a fresh branch and apply the change there |
 

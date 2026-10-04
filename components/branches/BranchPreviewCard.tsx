@@ -143,8 +143,9 @@ export function BranchPreviewCard({
         <div className="space-y-5">
           <p className="max-w-[72ch] text-[12.5px] leading-[19px] text-zinc-500">
             Same URL as production. A key bound to this branch is what makes a request reach it, and every data
-            response says which environment answered. Only the data API is branch-scoped: auth, functions, storage
-            and realtime refuse a branch key rather than answer from production.
+            and auth response says which environment answered. The data API and end-user sign-up, sign-in, refresh
+            and logout are branch-scoped; users signed up here exist only on the branch. Functions, storage, realtime
+            and emailed auth links refuse a branch key rather than answer from production.
           </p>
 
           <div className="space-y-2.5">

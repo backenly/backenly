@@ -14,9 +14,10 @@
  * check sees exactly what it saw before.
  *
  * Being the one wrapper every route passes through also makes it the place a
- * key bound to a preview branch is refused off the data plane: none of these
- * routes is branch-aware, so serving one would read or write production. The
- * refusal is recorded like any other response. lib/branches/key-scope.ts.
+ * key bound to a preview branch is refused off the data plane: apart from
+ * end-user sign-up, sign-in, refresh and logout, none of these routes is
+ * branch-aware, so serving one would read or write production. The refusal is
+ * recorded like any other response. lib/branches/key-scope.ts.
  */
 
 import { NextResponse } from 'next/server'

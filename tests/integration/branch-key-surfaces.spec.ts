@@ -3,10 +3,11 @@
  * ==========================================
  *
  * A key bound to a preview branch is routed to the branch by the data plane
- * (`/db/*`, `/api/v2`). Every other runtime surface resolves to the project's
- * main schema, and used to accept the key anyway: a signup "on the preview"
- * created a real end user and ran the production signup functions, and
- * `/fn/{name}` ran the production function.
+ * (`/db/*`, `/api/v2`) and by end-user sign-up, sign-in, refresh and logout
+ * (tests/integration/branch-auth.spec.ts). Every other runtime surface resolves
+ * to the project's main schema, and used to accept the key anyway: a signup
+ * "on the preview" created a real end user and ran the production signup
+ * functions, and `/fn/{name}` ran the production function.
  *
  * This drives the REAL `server/app.ts` over a real socket against a real
  * database, because the property is mount order: the refusal has to sit in
@@ -134,8 +135,9 @@ interface Door {
 /** Every door that resolves to main, one representative each. */
 function mainOnlyDoors(id: string): Door[] {
   return [
-    { name: 'end-user sign-up (no key needed)', method: 'POST', path: `/api/v1/${id}/auth/signup`, body: { email: 'preview@example.test', password: 'Correct-Horse-9' } },
-    { name: 'end-user sign-in', method: 'POST', path: `/api/v1/${id}/auth/signin`, body: { email: 'preview@example.test', password: 'x' } },
+    // Sign-up and sign-in are branch-scoped now; the emailed flows are not.
+    { name: 'emailed password reset (no key needed)', method: 'POST', path: `/api/v1/${id}/auth/forgot-password`, body: { email: 'preview@example.test' } },
+    { name: 'magic-link sign-in', method: 'POST', path: `/api/v1/${id}/auth/magic-link`, body: { email: 'preview@example.test' } },
     { name: 'function invocation', method: 'POST', path: `/api/v1/${id}/fn/send-welcome`, body: {} },
     { name: 'legacy database route', method: 'POST', path: `/api/v1/${id}/database/query`, body: { table: 'things' } },
     { name: 'realtime, key in the query string', method: 'GET', path: `/api/v1/${id}/realtime`, carrier: 'query', openEnded: true },
@@ -162,9 +164,9 @@ describe('a branch-bound key on a surface that is not branch-scoped', () => {
   }, 60_000)
 
   it('is refused the same way when its branch has been merged', async () => {
-    const res = await call('POST', `/api/v1/${projectId}/auth/signup`, {
+    const res = await call('POST', `/api/v1/${projectId}/auth/forgot-password`, {
       headers: { 'x-api-key': mergedBranchKey },
-      body: { email: 'merged@example.test', password: 'Correct-Horse-9' },
+      body: { email: 'merged@example.test' },
     })
     expect(res.status).toBe(403)
     expect(res.json?.code).toBe(BRANCH_SURFACE_UNAVAILABLE)

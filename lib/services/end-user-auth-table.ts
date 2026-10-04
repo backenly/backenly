@@ -278,11 +278,15 @@ function describe(schemaName: string, cols: AuthUsersColumn[]): AuthUsersSchema 
  * Use for read / update-only auth paths (reset-password, refresh-token) where
  * the table is already guaranteed to exist and the caller only needs to know
  * which physical column names to reference.
+ *
+ * `schemaName` is the environment's schema: a preview branch's when the request
+ * presented a branch key (lib/branches/auth-environment.ts), production's
+ * otherwise.
  */
 export async function introspectAuthUsersTable(
   projectId: string,
+  schemaName: string = `workspace_${projectId}`,
 ): Promise<AuthUsersSchema> {
-  const schemaName = `workspace_${projectId}`
   return describe(schemaName, await introspectColumns(schemaName))
 }
 
@@ -314,12 +318,19 @@ export class AuthNotProvisionedError extends Error {
  * the middle of a restore: the contract probe's signup ran
  * CREATE SCHEMA IF NOT EXISTS between the platform replay and the workspace
  * replay, and the restore failed on "schema already exists".
+ *
+ * `schemaName` is a preview branch's schema when the request presented a branch
+ * key. A branch gets its `users` table the same way production does, in its own
+ * schema, and never creates the schema itself: a branch schema exists exactly as
+ * long as the branch does, and recreating one that a merge or discard had just
+ * dropped would leave a schema nothing serves or cleans up.
  */
 export async function ensureAuthUsersTable(
   projectId: string,
   requestedBy: { email: string | null | undefined },
+  schemaName: string = `workspace_${projectId}`,
 ): Promise<AuthUsersSchema> {
-  const schemaName = `workspace_${projectId}`
+  const onBranch = schemaName !== `workspace_${projectId}`
 
   if (isReservedTestEmail(requestedBy.email)) {
     const existing = await introspectColumns(schemaName)
@@ -327,7 +338,7 @@ export async function ensureAuthUsersTable(
   }
 
   // 1. Schema + canonical table. Both IF NOT EXISTS — no-ops when present.
-  await prisma.$executeRawUnsafe(`CREATE SCHEMA IF NOT EXISTS "${schemaName}"`)
+  if (!onBranch) await prisma.$executeRawUnsafe(`CREATE SCHEMA IF NOT EXISTS "${schemaName}"`)
   await prisma.$executeRawUnsafe(`
     CREATE TABLE IF NOT EXISTS "${schemaName}"."users" (
       "id"           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -381,7 +392,7 @@ export async function ensureAuthUsersTable(
   //    table. Idempotent + guarded (one indexed lookup once a policy exists).
   //    Auth routes (signup/signin/reset) read users under SERVICE-ROLE, which
   //    bypasses this policy, so credential flows are unaffected. Non-fatal.
-  await ensureUsersRlsPolicy(projectId).catch((e) => {
+  await ensureUsersRlsPolicy(projectId, onBranch ? schemaName : null).catch((e) => {
     console.warn(`[AuthUsersTable] users RLS ensure failed (non-fatal): ${e?.message}`)
   })
 
@@ -393,20 +404,32 @@ export async function ensureAuthUsersTable(
  * `id` (the users table's own primary key is the ownership column). Runs the DDL
  * at most once per project — after a PermissionPolicy row exists it is a single
  * indexed lookup that returns early.
+ *
+ * A branch keeps no PermissionPolicy rows (they describe production), so on a
+ * branch the catalog is the record: a `users` table cloned with its policies, or
+ * given them by an earlier sign-up, is left alone.
  */
-async function ensureUsersRlsPolicy(projectId: string): Promise<void> {
-  const existing = await prisma.permissionPolicy.findFirst({
-    where: { projectId, tableName: 'users' },
-    select: { id: true },
-  })
-  if (existing) return
+async function ensureUsersRlsPolicy(projectId: string, branchSchema: string | null): Promise<void> {
+  if (branchSchema) {
+    const policies = await prisma.$queryRawUnsafe<unknown[]>(
+      `SELECT 1 FROM pg_policies WHERE schemaname = $1 AND tablename = 'users' LIMIT 1`,
+      branchSchema,
+    )
+    if (policies.length > 0) return
+  } else {
+    const existing = await prisma.permissionPolicy.findFirst({
+      where: { projectId, tableName: 'users' },
+      select: { id: true },
+    })
+    if (existing) return
+  }
 
   const { applyPermissionPolicy } = await import('./workspace-rls')
   const result = await applyPermissionPolicy(projectId, {
     tableName: 'users',
     template: 'own_rows',
     userIdColumn: 'id',
-  })
+  }, branchSchema ? { schemaName: branchSchema } : {})
   if (result.success) {
     console.log(`[AuthUsersTable] ✅ own_rows RLS applied to users (id-scoped) for ${projectId}`)
   } else {
@@ -584,8 +607,8 @@ export async function buildUserInsert(
 export async function stampLastLogin(
   projectId: string,
   userId: string | number,
+  schemaName: string = `workspace_${projectId}`,
 ): Promise<void> {
-  const schemaName = `workspace_${projectId}`
   const { executeWithUserContext } = await import('./workspace-rls')
   // Add the column if a legacy table predates the contract. IF NOT EXISTS keeps
   // this idempotent and cheap; it is a no-op once the column is present.

@@ -1032,7 +1032,8 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     'Issue another key for an active preview branch, with its preview endpoint: base URL (the same as production), ' +
     'the key (shown once), the X-Backenly-Environment value to assert, an OpenAPI URL and test instructions. A client ' +
     'key by default, safe in a browser and bound by row-level security; serviceRole:true issues a server-side key ' +
-    'that bypasses RLS on the branch only. Either key is refused on main and by every endpoint that is not branch-scoped.',
+    'that bypasses RLS on the branch only. Either key reaches the data API and end-user sign-up, sign-in, refresh and ' +
+    'logout on the branch, and is refused by every endpoint that is not branch-scoped.',
     {
       branchId: { type: 'string', description: 'The branch id from list_branches.' },
       serviceRole: { type: 'boolean', description: 'Default false. True issues a server-side key for the branch only.' },

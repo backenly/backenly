@@ -150,10 +150,12 @@ describe('the preview key on the runtime', () => {
   }, 60_000)
 
   it('is refused off the data plane', async () => {
-    const res = await fetch(`${base}/api/v1/${projectId}/auth/signup`, {
+    // Sign-up is branch-scoped (tests/integration/branch-auth.spec.ts); a
+    // function is not.
+    const res = await fetch(`${base}/api/v1/${projectId}/fn/send-welcome`, {
       method: 'POST',
       headers: { 'x-api-key': key, 'content-type': 'application/json' },
-      body: JSON.stringify({ email: 'p@example.test', password: 'Correct-Horse-9' }),
+      body: JSON.stringify({}),
     })
     expect(res.status).toBe(403)
     expect((await res.json()).code).toBe(BRANCH_SURFACE_UNAVAILABLE)
@@ -218,10 +220,12 @@ describe('production health readers ignore branch traffic', () => {
 })
 
 describe('the branch OpenAPI spec', () => {
-  it('describes the branch schema, labels the server as the preview, and lists only the data API', async () => {
+  it('describes the branch schema, labels the server as the preview, and lists only the data API and auth', async () => {
     const spec = await generateOpenApiSpec(projectId, 'https://backenly.test', { name: 'preview', schemaName: branchSchema })
-    expect(Object.keys(spec.paths)).toEqual(expect.arrayContaining(['/db/things', '/db/invoices']))
-    expect(Object.keys(spec.paths).some(p => p.startsWith('/auth') || p.startsWith('/fn'))).toBe(false)
+    expect(Object.keys(spec.paths)).toEqual(expect.arrayContaining(['/db/things', '/db/invoices', '/auth/signup', '/auth/signin']))
+    expect(Object.keys(spec.paths).some(p => p.startsWith('/fn'))).toBe(false)
+    // On a branch the key is what puts the user there, so sign-up declares it.
+    expect(spec.paths['/auth/signup'].post.security).toEqual([{ ApiKeyAuth: [] }])
     expect(spec.servers[0].url).toBe(`https://backenly.test/api/v1/${projectId}`)
     expect(spec.servers[0].description).toMatch(/Preview branch "preview"/)
   })
@@ -231,6 +235,7 @@ describe('the branch OpenAPI spec', () => {
     expect(Object.keys(spec.paths)).toContain('/db/things')
     expect(Object.keys(spec.paths)).not.toContain('/db/invoices')
     expect(spec.servers[0].description).toBe('Production')
+    expect(spec.paths['/auth/signup'].post.security).toEqual([])
   })
 
   it('refuses to read a schema that belongs to another project', async () => {
