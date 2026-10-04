@@ -54,7 +54,7 @@ export const CONSOLE_TOUR: Step[] = [
     side: 'bottom',
     eyebrow: 'Start here',
     title: 'Connect your coding agent',
-    body: 'Backenly is built through your coding agent over MCP. Generate a scoped key here and paste one prompt into Claude Code, Cursor, Codex or Cline.',
+    body: 'Backenly is built through your coding agent over MCP. Generate a scoped key here and copy the install command for Claude Code, Cursor, Codex or Antigravity.',
   },
   {
     target: 'nav-database',
