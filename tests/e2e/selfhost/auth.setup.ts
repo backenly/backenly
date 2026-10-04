@@ -187,14 +187,20 @@ setup('sign up the first operator', async ({ page, request, baseURL }) => {
       last.getByRole('button', { name: 'Connect your agent', exact: true }).click(),
     ])
     expect(saved.ok(), `could not save tour completion: ${saved.status()}`).toBe(true)
-    expect(await saved.json()).toEqual({ saved: true })
+    // The UI sends completion as a keepalive request while navigating. Check
+    // its durable effect through a fresh read instead of reading that body's
+    // browser response after navigation.
+    const persisted = await request.get('/api/tours')
+    expect(persisted.ok(), `could not read completed tours: ${persisted.status()}`).toBe(true)
+    expect(await persisted.json()).toMatchObject({ available: true, seen: ['console'] })
     await expect(page).toHaveURL(new RegExp(`/app/projects/${id}/connect$`))
     await page.evaluate(() => localStorage.removeItem('backenly_tour_console'))
     const [remembered] = await Promise.all([
       page.waitForResponse(r => new URL(r.url()).pathname === '/api/tours' && r.request().method() === 'GET'),
       page.reload(),
     ])
-    expect(await remembered.json()).toMatchObject({ available: true, seen: ['console'] })
+    expect(remembered.ok(), `could not reload completed tours: ${remembered.status()}`).toBe(true)
+    await expect.poll(() => page.evaluate(() => localStorage.getItem('backenly_tour_console'))).toBe('seen')
     await expect(page.getByRole('dialog', { name: 'Connect your coding agent', exact: true })).toHaveCount(0)
   }
   await page.context().storageState({ path: STORAGE_STATE })
