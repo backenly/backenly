@@ -34,7 +34,9 @@ codex mcp add backenly -- npx -y @backenly/mcp-server --project <id> --key <scop
 
 Codex remote takes the key only through `~/.codex/config.toml`: a `[mcp_servers.backenly]` table with `url = "https://backenly.com/api/mcp"` and `http_headers = { "x-api-key" = "<scoped-key>" }`.
 
-Cursor and Cline take JSON (`.cursor/mcp.json`, `cline_mcp_settings.json`). The Connect page prints the exact block for each host with the key filled in. Cline's remote entry must set `"type": "streamableHttp"`, or it falls back to SSE and the endpoint answers 405.
+Cursor and Antigravity take JSON, and the Connect page prints the exact block for each with the key filled in: `.cursor/mcp.json` for Cursor; for Antigravity, the `mcp_config.json` that Agent panel ⋯ → MCP Servers → Manage MCP Servers → View raw config opens. Antigravity's remote entry names the endpoint `serverUrl`, not `url`; restart Antigravity after editing the file.
+
+Cline takes the same `mcpServers` block as Cursor, in `cline_mcp_settings.json`. Its remote entry must set `"type": "streamableHttp"`, or it falls back to SSE and the endpoint answers 405.
 
 The remote endpoint and the stdio package serve the same tools, instructions and results.
 

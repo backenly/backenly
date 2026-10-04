@@ -575,7 +575,7 @@ function ConnectSection() {
 const faqs = [
   {
     q: 'How does my coding agent connect?',
-    a: 'One command installs the Backenly MCP server for Claude Code, Cursor, Codex, Cline, or any MCP host, or paste the setup prompt and your agent installs it itself. The key is scoped and revocable from your project dashboard. There is also a CLI (npx @backenly/cli) for schema, generated types, CI diffs, logs, and read-only SQL, and a canonical agent skill at backenly.com/skill.md.',
+    a: 'One command installs the Backenly MCP server for Claude Code, Cursor, Codex, Cline, or any MCP host. The key is scoped and revocable from your project dashboard. There is also a CLI (npx @backenly/cli) for schema, generated types, CI diffs, logs, and read-only SQL, and a canonical agent skill at backenly.com/skill.md.',
   },
   {
     q: 'What happens when the agent tries something destructive?',
