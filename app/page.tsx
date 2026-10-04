@@ -199,7 +199,7 @@ function Hero() {
           // One vertical falloff across the whole headline, white to a cool
           // grey, the way a lit object reads. Not a second colour on one
           // phrase: that is the most common tell of a generated hero.
-          className={`bg-gradient-to-b from-white from-40% to-zinc-400 bg-clip-text pb-2 text-[38px] text-transparent [text-wrap:balance] sm:text-[60px] md:text-[76px] xl:text-[88px] ${DISPLAY}`}
+          className={`bg-gradient-to-b from-white from-40% to-zinc-400 bg-clip-text pb-2 text-[38px] text-transparent [text-wrap:balance] sm:text-[60px] md:text-[76px] xl:text-[80px] ${DISPLAY}`}
         >
           The autonomous backend
           <span className="block">built for coding agents</span>
