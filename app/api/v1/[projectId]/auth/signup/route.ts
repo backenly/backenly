@@ -20,6 +20,13 @@ import { emitEndUserCreated } from '@/lib/services/end-user-auth-events'
 import { getAuthEmailContext } from '@/lib/services/end-user-auth-email'
 import { ensureEmailVerifiedColumn, requestEmailVerification } from '@/lib/services/end-user-auth-flows'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
+import {
+  endUserTokenSecret,
+  endUserTokenClaims,
+  SKIPPED_ON_BRANCH_SIGNUP,
+  type AuthEnvironment,
+} from '@/lib/branches/auth-environment'
+import { inAuthEnvironment } from '@/lib/branches/next-auth-environment'
 
 /**
  * POST /v1/{projectId}/auth/signup
@@ -32,12 +39,18 @@ import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
  * before any column is referenced — both the INSERT column list and the
  * RETURNING clause are built from the live schema, so an AI-generated table
  * with a missing column (e.g. no `role`) can no longer 500 signup.
+ *
+ * A request that presents a preview branch's key signs the user up on that
+ * branch instead: its own `users` table, a token only that branch accepts, and
+ * none of production's side effects (lib/branches/auth-environment.ts).
  */
 async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
-  const params = await props.params;
-  try {
-    const projectId = params.projectId
+  const { projectId } = await props.params
+  return inAuthEnvironment(request, projectId, (env) => signUp(request, projectId, env))
+}
 
+async function signUp(request: NextRequest, projectId: string, env: AuthEnvironment): Promise<Response> {
+  try {
     // Throttled per IP AND per project. This surface had no rate limiting of
     // any kind: it is unauthenticated by design, because it is how a
     // customer's own users sign in, but the platform's own /api/auth/login has
@@ -102,8 +115,9 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     // Guarantee the users table satisfies the auth contract — creates it when
     // missing, self-heals a drifted one (adds `role` / `is_blocked` / a
     // password column / timestamps as needed). All additions are
-    // non-destructive metadata-only operations on PG 11+.
-    const schema = await ensureAuthUsersTable(projectId, { email })
+    // non-destructive metadata-only operations on PG 11+. On a preview branch
+    // it is the branch's own `users` table.
+    const schema = await ensureAuthUsersTable(projectId, { email }, env.schemaName)
     const schemaName = schema.schemaName
 
     // Check if user already exists in workspace schema.
@@ -123,8 +137,10 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
 
     // MAU cap (Plan-driven): once this project hits its monthly-active-user
     // limit, NEW sign-ups are blocked — existing users keep working. The
-    // owner is prompted (in-app) to upgrade. Fail-open inside the kernel.
-    if (!isInternalTest) {
+    // owner is prompted (in-app) to upgrade. Fail-open inside the kernel. A
+    // preview branch's test users are not the month's active users, so they
+    // neither count nor get capped.
+    if (!isInternalTest && !env.branch) {
       const mau = await canAcceptNewEndUser(projectId)
       if (!mau.allowed) {
         return createErrorResponse(ErrorCodes.FORBIDDEN, mau.message ?? 'Sign-ups are temporarily unavailable for this app.', 403)
@@ -136,8 +152,10 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     // column added, no email sent. One that did gets the column BEFORE this
     // insert, because ensureEmailVerifiedColumn grandfathers rows that exist
     // when it first adds the column, and this new account must not be one.
+    // Never on a preview branch: the emailed link carries no key, so it could
+    // not say which branch it belongs to (SKIPPED_ON_BRANCH_SIGNUP).
     const requireVerification =
-      !isInternalTest && (await getAuthEmailContext(projectId)).requireEmailVerification
+      !isInternalTest && !env.branch && (await getAuthEmailContext(projectId)).requireEmailVerification
     if (requireVerification) await ensureEmailVerifiedColumn(schemaName)
 
     const hashedPassword = await hashPassword(password)
@@ -164,34 +182,44 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
 
     const user = created[0]
 
-    // Count this new end-user toward the project's MAU for the month. Verifier
-    // accounts are excluded inside trackEndUserActive itself.
-    trackEndUserActive(projectId, String(user.id), email).catch(() => {})
-
     // Signed with the RESOLVED secret, as every verifier reads it. Provisioning
     // stores the secret encrypted (JWTSecretManager.getOrCreateSecret), and this
     // route signed with the stored ciphertext, so a sign-up token verified
     // nowhere: the data plane served its holder as anonymous and refresh
-    // refused it, until the user signed in again.
+    // refused it, until the user signed in again. A branch session is signed
+    // with the branch's own secret, derived from that one, so it cannot be
+    // presented to production (lib/branches/auth-environment.ts).
     const token = jwt.sign(
-      { userId: user.id, email: user.email, projectId, role: user.role ?? 'user', jti: crypto.randomUUID() },
-      resolveJwtSecret(jwtSecret),
+      {
+        userId: user.id, email: user.email, projectId, role: user.role ?? 'user', jti: crypto.randomUUID(),
+        ...endUserTokenClaims(env.branch),
+      },
+      endUserTokenSecret(resolveJwtSecret(jwtSecret), env.branch),
       { expiresIn: '7d' },
     )
 
-    // Notify webhook subscribers that an end user signed up. Emitted here, not
-    // by a database trigger: the `users` table deliberately carries none, since
-    // it holds the bcrypt hash (Realtime once leaked it by broadcasting
-    // row_to_json(NEW) from this table). The shared emitter builds the payload
-    // from a fixed field list and skips reserved test accounts.
-    void emitEndUserCreated(projectId, user)
+    // Production side effects. None of them runs for a preview branch, whose
+    // response lists what it skipped: functions and webhooks are production
+    // code and endpoints, and the active-user count is the bill.
+    if (!env.branch) {
+      // Count this new end-user toward the project's MAU for the month. Verifier
+      // accounts are excluded inside trackEndUserActive itself.
+      trackEndUserActive(projectId, String(user.id), email).catch(() => {})
 
-    // Fire on_signup AI functions (non-blocking — never fails the signup)
-    import('@/lib/services/ai-functions/executor').then(({ fireAiFunctionsOnSignup }) => {
-      fireAiFunctionsOnSignup(projectId, { id: user.id, email: user.email, name: user.name }).catch(
-        (err: any) => console.warn('[AiFunctions] on_signup failed (non-fatal):', err?.message)
-      )
-    }).catch(() => {})
+      // Notify webhook subscribers that an end user signed up. Emitted here, not
+      // by a database trigger: the `users` table deliberately carries none, since
+      // it holds the bcrypt hash (Realtime once leaked it by broadcasting
+      // row_to_json(NEW) from this table). The shared emitter builds the payload
+      // from a fixed field list and skips reserved test accounts.
+      void emitEndUserCreated(projectId, user)
+
+      // Fire on_signup AI functions (non-blocking — never fails the signup)
+      import('@/lib/services/ai-functions/executor').then(({ fireAiFunctionsOnSignup }) => {
+        fireAiFunctionsOnSignup(projectId, { id: user.id, email: user.email, name: user.name }).catch(
+          (err: any) => console.warn('[AiFunctions] on_signup failed (non-fatal):', err?.message)
+        )
+      }).catch(() => {})
+    }
 
     // Non-blocking: the branded verification email (24h token), only where the
     // project requires verification. Sign-in enforces it; signup never waits on
@@ -205,7 +233,11 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
 
     // 201, as the runtime's signup answers and the contract probe expects: the
     // two implementations of one endpoint must not disagree on success (#147).
-    return createSuccessResponse({ user, token }, undefined, 201)
+    return createSuccessResponse(
+      { user, token, ...(env.branch ? { skippedOnBranch: SKIPPED_ON_BRANCH_SIGNUP } : {}) },
+      undefined,
+      201,
+    )
   } catch (error: any) {
     if (error instanceof AuthNotProvisionedError) {
       return createErrorResponse(error.code, error.message, 503)

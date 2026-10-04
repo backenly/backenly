@@ -1,11 +1,12 @@
 /**
  * Which runtime paths a branch-bound key may reach.
  *
- * Only the data plane is served from a branch. The classifier is the line
- * between "routed to the branch" and "would have been served from production",
- * so these pin both sides of it, including the shapes that sit next to the data
- * plane without being part of it (vector search under /db, /fn under the
- * legacy no-project form).
+ * The data plane and end-user sign-up, sign-in, refresh and logout are served
+ * from a branch. The classifier is the line between "routed to the branch" and
+ * "would have been served from production", so these pin both sides of it,
+ * including the shapes that sit next to a branch-scoped surface without being
+ * part of it (vector search under /db, /fn under the legacy no-project form,
+ * the emailed auth flows and OAuth under /auth).
  */
 
 import {
@@ -32,14 +33,31 @@ describe('isBranchScopedRuntimePath', () => {
     '/api/v1/todos',
     '/api/v1/todos/42',
     `/api/v1/${ID}`,
+    // End-user auth's core, aliases included (lib/branches/auth-environment.ts).
+    `/api/v1/${ID}/auth/signup`,
+    `/api/v1/${ID}/auth/register`,
+    `/api/v1/${ID}/auth/signin`,
+    `/api/v1/${ID}/auth/login`,
+    `/api/v1/${ID}/auth/refresh-token`,
+    `/api/v1/${ID}/auth/refresh`,
+    `/api/v1/${ID}/auth/logout`,
   ])('serves %s from the branch', (path) => {
     expect(isBranchScopedRuntimePath(path)).toBe(true)
   })
 
   it.each([
-    `/api/v1/${ID}/auth/signup`,
-    `/api/v1/${ID}/auth/signin`,
+    // The emailed flows: their link is opened with no key, so it could not say
+    // which branch it belongs to. OAuth returns through a provider the same way.
+    `/api/v1/${ID}/auth/forgot-password`,
+    `/api/v1/${ID}/auth/reset-password`,
+    `/api/v1/${ID}/auth/verify-email`,
+    `/api/v1/${ID}/auth/resend-verification`,
+    `/api/v1/${ID}/auth/magic-link`,
+    `/api/v1/${ID}/auth/magic-link/verify`,
+    `/api/v1/${ID}/auth/magic`,
     `/api/v1/${ID}/auth/google`,
+    `/api/v1/${ID}/auth/signup/extra`,
+    `/api/v1/${ID}/auth`,
     `/api/v1/${ID}/fn/send-welcome`,
     `/api/v1/${ID}/functions/invoke`,
     `/api/v1/${ID}/storage/upload`,
@@ -111,6 +129,10 @@ describe('branchSurfaceRefusal', () => {
     expect(r.body.branch).toBe('add-payments')
     expect(r.body.error).toContain('add-payments')
     expect(r.body.error).toMatch(/production/)
-    expect(r.body.branchScoped).toEqual(['/api/v1/{projectId}/db/*', '/api/v2/{projectId}/*'])
+    expect(r.body.branchScoped).toEqual([
+      '/api/v1/{projectId}/db/*',
+      '/api/v2/{projectId}/*',
+      '/api/v1/{projectId}/auth/{signup,signin,refresh-token,logout}',
+    ])
   })
 })

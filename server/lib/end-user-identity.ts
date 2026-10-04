@@ -13,23 +13,41 @@ import { verify } from 'jsonwebtoken'
 import { prisma } from '@/lib/db'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { noteEndUserActivity } from '@/lib/quota/kernel'
+import { crossEnvironmentToken, endUserTokenSecret } from '@/lib/branches/auth-environment'
 
 export interface EndUserIdentity {
   userId: string
   role: string
 }
 
+/** The preview branch a request's key is bound to, for end-user tokens. */
+export interface EndUserBranch {
+  id: string
+  name: string
+  schemaName: string
+}
+
+function bareToken(rawTokenInput: string): string {
+  return rawTokenInput.startsWith('Bearer ') ? rawTokenInput.substring(7) : rawTokenInput
+}
+
 /**
  * Verify an end-user's X-User-Token / Authorization JWT for a given project and
  * return their id + role — or null if the token is missing, invalid, for a
  * different project, or has been revoked via /auth/logout.
+ *
+ * With `branch`, the token must have been issued on that branch: it is verified
+ * with the branch's derived secret and checked against the branch's own
+ * blacklist (lib/branches/auth-environment.ts). Without it, only a production
+ * token verifies.
  */
 export async function resolveEndUserFromToken(
   projectId: string,
   rawTokenInput: string | undefined,
+  branch: EndUserBranch | null = null,
 ): Promise<EndUserIdentity | null> {
   if (!rawTokenInput) return null
-  const rawToken = rawTokenInput.startsWith('Bearer ') ? rawTokenInput.substring(7) : rawTokenInput
+  const rawToken = bareToken(rawTokenInput)
   const project = await prisma.project.findUnique({
     where: { id: projectId },
     select: { jwtSecret: true },
@@ -37,15 +55,16 @@ export async function resolveEndUserFromToken(
   if (!project?.jwtSecret) return null
   let payload: any
   try {
-    payload = verify(rawToken, resolveJwtSecret(project.jwtSecret), { algorithms: ['HS256'] })
+    payload = verify(rawToken, endUserTokenSecret(resolveJwtSecret(project.jwtSecret), branch), { algorithms: ['HS256'] })
   } catch {
     return null
   }
   if (payload?.projectId !== projectId || !payload.userId) return null
+  if ((payload.br ?? null) !== (branch?.id ?? null)) return null
   // Honour /auth/logout revocations.
   if (payload.jti) {
     try {
-      const schemaName = `workspace_${projectId}`
+      const schemaName = branch?.schemaName ?? `workspace_${projectId}`
       const rows = await prisma.$queryRawUnsafe<{ jti: string }[]>(
         `SELECT jti FROM "${schemaName}"."_token_blacklist" WHERE jti = $1 LIMIT 1`,
         payload.jti,
@@ -78,9 +97,30 @@ export async function resolveEndUserFromToken(
     }
   }
   // An authenticated data request is use: count the end user active this month
-  // (throttled to one write a day, never blocks).
-  noteEndUserActivity(projectId, String(payload.userId), typeof payload.email === 'string' ? payload.email : null)
+  // (throttled to one write a day, never blocks). A preview branch's test users
+  // are not the month's active users.
+  if (!branch) {
+    noteEndUserActivity(projectId, String(payload.userId), typeof payload.email === 'string' ? payload.email : null)
+  }
   return { userId: String(payload.userId), role: payload.role ?? 'user' }
+}
+
+/**
+ * The refusal for a user token that did not verify because it belongs to the
+ * other environment, or null when it is simply not valid (which the data plane
+ * answers as it always has, by serving the request with no user).
+ */
+export async function crossEnvironmentUserToken(
+  projectId: string,
+  rawTokenInput: string,
+  branch: EndUserBranch | null,
+): Promise<{ code: string; error: string } | null> {
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
+    select: { jwtSecret: true },
+  })
+  if (!project?.jwtSecret) return null
+  return crossEnvironmentToken(bareToken(rawTokenInput), resolveJwtSecret(project.jwtSecret), branch)
 }
 
 /** SHA-256 hash used to look up API keys — shared so every route hashes identically. */

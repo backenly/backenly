@@ -27,7 +27,10 @@ name: MCP reliability harness
 #   1. Create a project that exists ONLY for this. The harness creates tables
 #      and cannot drop them — destructive operations route to the human Review
 #      Queue by design — so every run leaves `hx_*` artefacts. Never point this
-#      at a project with real data.
+#      at a project with real data. Turn its production protection off on the
+#      Branches page: new Cloud projects start protected, which refuses an
+#      agent's schema change on main with BRANCH_REQUIRED, and the harness
+#      builds its tables on main.
 #   2. Mint an MCP key against it, NOT read-only; the harness writes.
 #   3. Add it as the repository secret BACKENLY_MCP_KEY.
 #   4. Run it once by hand, so the first real result is seen deliberately.

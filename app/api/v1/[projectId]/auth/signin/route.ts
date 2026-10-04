@@ -16,17 +16,24 @@ import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import jwt from 'jsonwebtoken'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
+import { endUserTokenSecret, endUserTokenClaims, type AuthEnvironment } from '@/lib/branches/auth-environment'
+import { inAuthEnvironment } from '@/lib/branches/next-auth-environment'
 
 /**
  * POST /v1/{projectId}/auth/signin
  *
  * Authenticates an END USER of the project — NOT a Backenly platform developer.
  * Reads from workspace_{projectId}.users — isolated from the platform User table.
+ * With a preview branch's key it reads the branch's `users` and issues a token
+ * only that branch accepts (lib/branches/auth-environment.ts).
  */
 async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
-  const params = await props.params;
+  const { projectId } = await props.params
+  return inAuthEnvironment(request, projectId, (env) => signIn(request, projectId, env))
+}
+
+async function signIn(request: NextRequest, projectId: string, env: AuthEnvironment): Promise<Response> {
   try {
-    const projectId = params.projectId
 
     // Throttled per IP AND per project. This surface had no rate limiting of
     // any kind: it is unauthenticated by design, because it is how a
@@ -104,7 +111,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       // exists and is being defended.
       if (!identityLimit.allowed) return throttledV1Response(identityLimit)
     }
-    const schemaName = `workspace_${projectId}`
+    const schemaName = env.schemaName
 
     // Check if users table exists
     const tableCheck = await prisma.$queryRawUnsafe<{ exists: boolean }[]>(
@@ -193,8 +200,9 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
 
     // Email-verification gate — opt-in via ProjectAuthConfig. Only blocks when
     // the column exists AND is explicitly false, so legacy users tables
-    // without the column are unaffected.
-    if (user.email_verified === false) {
+    // without the column are unaffected. Not on a preview branch, which cannot
+    // send the verification email whose link would lift it.
+    if (user.email_verified === false && !env.branch) {
       const { getAuthEmailContext } = await import('@/lib/services/end-user-auth-email')
       const emailCtx = await getAuthEmailContext(projectId)
       if (emailCtx.requireEmailVerification) {
@@ -208,15 +216,19 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     }
 
     const token = jwt.sign(
-      { userId: user.id, email: user.email, projectId, role: user.role ?? 'user', jti: crypto.randomUUID() },
-      resolveJwtSecret(project.jwtSecret),
+      {
+        userId: user.id, email: user.email, projectId, role: user.role ?? 'user', jti: crypto.randomUUID(),
+        ...endUserTokenClaims(env.branch),
+      },
+      endUserTokenSecret(resolveJwtSecret(project.jwtSecret), env.branch),
       { expiresIn: '7d' },
     )
 
     // Count this end-user as active for the month (MAU tracking — never blocks).
-    trackEndUserActive(projectId, String(user.id), user.email).catch(() => {})
+    // A preview branch's test users are not the month's active users.
+    if (!env.branch) trackEndUserActive(projectId, String(user.id), user.email).catch(() => {})
     // Stamp last_login so the Auth dashboard's "active · 30d" metric is real.
-    stampLastLogin(projectId, user.id).catch(() => {})
+    stampLastLogin(projectId, user.id, schemaName).catch(() => {})
 
     return createSuccessResponse({
       user: { id: user.id, email: user.email, name: user.name, role: user.role ?? 'user' },

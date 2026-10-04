@@ -24,8 +24,35 @@ import { asyncRoute } from '../lib/async-route'
 import { touchProjectActivity } from '@/lib/projects/activity'
 import { emitEndUserCreated } from '@/lib/services/end-user-auth-events'
 import { canAcceptNewEndUser, trackEndUserActive } from '@/lib/quota/kernel'
+import {
+  resolveAuthEnvironment,
+  endUserTokenSecret,
+  endUserTokenClaims,
+  SKIPPED_ON_BRANCH_SIGNUP,
+  type AuthEnvironment,
+} from '@/lib/branches/auth-environment'
+import { ENVIRONMENT_HEADER, environmentHeaderValue } from '@/lib/branches/key-scope'
 
 const router = Router()
+
+/**
+ * The environment this request's key chose, production or its preview branch,
+ * with the response header saying which; or null once the refusal is sent.
+ * See lib/branches/auth-environment.ts.
+ */
+async function authEnvironment(req: Request, res: Response): Promise<AuthEnvironment | null> {
+  const result = await resolveAuthEnvironment(
+    req.params.projectId,
+    { get: (name: string) => req.get(name) },
+    new URL(req.originalUrl, 'http://runtime.internal'),
+  )
+  if (!result.env) {
+    res.status(result.refusal!.status).json(result.refusal!.body)
+    return null
+  }
+  res.setHeader(ENVIRONMENT_HEADER, environmentHeaderValue(result.env.branch?.name))
+  return result.env
+}
 
 // End-user passwords must be at least 8 chars. Project owners can opt into
 // stricter rules via their auth config; this is the floor that the runtime
@@ -87,7 +114,8 @@ if (typeof setInterval !== 'undefined') {
 
 /**
  * POST /api/v1/:projectId/auth/signup  (also /auth/register)
- * Register an end user in workspace_{projectId}.users
+ * Register an end user in workspace_{projectId}.users, or in the preview
+ * branch's `users` when the request presents that branch's key.
  */
 async function handleSignUp(req: Request, res: Response) {
   const { projectId } = req.params
@@ -127,6 +155,8 @@ async function handleSignUp(req: Request, res: Response) {
       sendError(res, ErrorCodes.NOT_FOUND, 'Project not found', 404)
       return
     }
+    const env = await authEnvironment(req, res)
+    if (!env) return
 
     const parsed = signUpSchema.safeParse(req.body)
     if (!parsed.success) {
@@ -159,7 +189,8 @@ async function handleSignUp(req: Request, res: Response) {
     // it — creates it when missing, self-heals a drifted one (e.g. an
     // AI-generated `users` table with no `role` column). This is what
     // previously failed signup with `column "role" does not exist`.
-    const schema = await ensureAuthUsersTable(projectId, { email })
+    // On a preview branch it is the branch's own `users` table.
+    const schema = await ensureAuthUsersTable(projectId, { email }, env.schemaName)
     const schemaName = schema.schemaName
 
     // Service-role: workspace users tables may have FORCE ROW LEVEL SECURITY.
@@ -179,8 +210,9 @@ async function handleSignUp(req: Request, res: Response) {
     // The account's MAU cap, as on the Next signup route: only a NEW end user
     // is refused, existing users keep working. This route serves signups on
     // the single-box layout, and skipping the check here made the cap depend
-    // on which process happened to answer.
-    if (!isInternalTest) {
+    // on which process happened to answer. A preview branch's test users are
+    // not the month's active users, so they neither count nor get capped.
+    if (!isInternalTest && !env.branch) {
       const mau = await canAcceptNewEndUser(projectId)
       if (!mau.allowed) {
         sendError(res, ErrorCodes.FORBIDDEN, mau.message ?? 'Sign-ups are temporarily unavailable for this app.', 403)
@@ -190,9 +222,11 @@ async function handleSignUp(req: Request, res: Response) {
 
     // Email verification is the project's choice, exactly as on the Next
     // signup route: off by default, and the column goes in BEFORE the insert
-    // when it is on (see ensureEmailVerifiedColumn on grandfathering).
+    // when it is on (see ensureEmailVerifiedColumn on grandfathering). Never on
+    // a preview branch: the emailed link carries no key, so it could not say
+    // which branch it belongs to (SKIPPED_ON_BRANCH_SIGNUP).
     const requireVerification =
-      !isInternalTest && (await getAuthEmailContext(projectId)).requireEmailVerification
+      !isInternalTest && !env.branch && (await getAuthEmailContext(projectId)).requireEmailVerification
     if (requireVerification) await ensureEmailVerifiedColumn(schemaName)
 
     const hashedPassword = await hashPassword(password)
@@ -213,30 +247,40 @@ async function handleSignUp(req: Request, res: Response) {
     const created = await executeWithUserContext<any>('', true, plan.sql, plan.values)
     const user = created[0]
 
+    // A branch session is signed with the branch's own secret, so it cannot be
+    // presented to production (lib/branches/auth-environment.ts).
     const token = jwt.sign(
-      { userId: user.id, email: user.email, projectId, role: user.role ?? 'user', jti: crypto.randomUUID() },
-      signingSecret,
+      {
+        userId: user.id, email: user.email, projectId, role: user.role ?? 'user', jti: crypto.randomUUID(),
+        ...endUserTokenClaims(env.branch),
+      },
+      endUserTokenSecret(signingSecret, env.branch),
       { expiresIn: '7d', algorithm: 'HS256' }
     )
 
-    // A new end user is active this month (MAU; never blocks). The Next.js
-    // signup route always did this; this one, which serves single-box
-    // installs, did not.
-    trackEndUserActive(projectId, String(user.id), user.email).catch(() => {})
+    // Production side effects. None of them runs for a preview branch, whose
+    // response lists what it skipped: functions and webhooks are production
+    // code and endpoints, and the active-user count is the bill.
+    if (!env.branch) {
+      // A new end user is active this month (MAU; never blocks). The Next.js
+      // signup route always did this; this one, which serves single-box
+      // installs, did not.
+      trackEndUserActive(projectId, String(user.id), user.email).catch(() => {})
 
-    // auth.user.created, through the emitter the Next route also uses. This
-    // server never emitted it, so a single-box install's subscribers never heard
-    // of a sign-up. Reserved test accounts are skipped inside.
-    void emitEndUserCreated(projectId, user)
+      // auth.user.created, through the emitter the Next route also uses. This
+      // server never emitted it, so a single-box install's subscribers never heard
+      // of a sign-up. Reserved test accounts are skipped inside.
+      void emitEndUserCreated(projectId, user)
 
-    // Non-blocking: fire on_signup AI functions. Synthetic verifier accounts are
-    // filtered inside fireAiFunctionsOnSignup, not here — two signup routes call
-    // it and a guard at the call site only ever covers one of them.
-    import('@/lib/services/ai-functions/executor').then(({ fireAiFunctionsOnSignup }) => {
-      fireAiFunctionsOnSignup(projectId, { id: user.id, email: user.email, name: user.name }).catch(
-        (err: any) => console.warn('[AiFunctions] on_signup failed (non-fatal):', err?.message)
-      )
-    }).catch(() => {})
+      // Non-blocking: fire on_signup AI functions. Synthetic verifier accounts are
+      // filtered inside fireAiFunctionsOnSignup, not here — two signup routes call
+      // it and a guard at the call site only ever covers one of them.
+      import('@/lib/services/ai-functions/executor').then(({ fireAiFunctionsOnSignup }) => {
+        fireAiFunctionsOnSignup(projectId, { id: user.id, email: user.email, name: user.name }).catch(
+          (err: any) => console.warn('[AiFunctions] on_signup failed (non-fatal):', err?.message)
+        )
+      }).catch(() => {})
+    }
 
     // Non-blocking: the branded verification email (24h token), only where the
     // project requires verification. This used to go to every new user of every
@@ -251,7 +295,9 @@ async function handleSignUp(req: Request, res: Response) {
 
     // An end user signing up is the backend being used.
     void touchProjectActivity(projectId)
-    res.status(201).json({ data: { user, token } })
+    res.status(201).json({
+      data: { user, token, ...(env.branch ? { skippedOnBranch: SKIPPED_ON_BRANCH_SIGNUP } : {}) },
+    })
   } catch (error: any) {
     if (error instanceof AuthNotProvisionedError) {
       sendError(res, error.code, error.message, 503)
@@ -271,7 +317,8 @@ async function handleSignUp(req: Request, res: Response) {
 
 /**
  * POST /api/v1/:projectId/auth/signin  (also /auth/login)
- * Authenticate an end user from workspace_{projectId}.users
+ * Authenticate an end user from workspace_{projectId}.users, or from the
+ * preview branch's `users` when the request presents that branch's key.
  */
 async function handleSignIn(req: Request, res: Response) {
   const { projectId } = req.params
@@ -298,6 +345,9 @@ async function handleSignIn(req: Request, res: Response) {
       return
     }
 
+    const env = await authEnvironment(req, res)
+    if (!env) return
+
     const parsed = signInSchema.safeParse(req.body)
     if (!parsed.success) {
       sendError(res, ErrorCodes.VALIDATION_ERROR, 'Request validation failed', 400, {
@@ -307,7 +357,7 @@ async function handleSignIn(req: Request, res: Response) {
     }
 
     const { email, password } = parsed.data
-    const schemaName = `workspace_${projectId}`
+    const schemaName = env.schemaName
 
     const tableCheck = await prisma.$queryRawUnsafe<{ exists: boolean }[]>(
       `SELECT EXISTS (
@@ -359,8 +409,9 @@ async function handleSignIn(req: Request, res: Response) {
 
     // Email-verification gate — opt-in via ProjectAuthConfig. Only blocks when
     // the column exists AND is explicitly false, so legacy users tables
-    // without the column are unaffected.
-    if (user.email_verified === false) {
+    // without the column are unaffected. Not on a preview branch, which cannot
+    // send the verification email whose link would lift it.
+    if (user.email_verified === false && !env.branch) {
       const emailCtx = await getAuthEmailContext(projectId)
       if (emailCtx.requireEmailVerification) {
         sendError(
@@ -379,14 +430,17 @@ async function handleSignIn(req: Request, res: Response) {
       return
     }
     const token = jwt.sign(
-      { userId: user.id, email: user.email, projectId, role: user.role ?? 'user', jti: crypto.randomUUID() },
-      resolveJwtSecret(project.jwtSecret),
+      {
+        userId: user.id, email: user.email, projectId, role: user.role ?? 'user', jti: crypto.randomUUID(),
+        ...endUserTokenClaims(env.branch),
+      },
+      endUserTokenSecret(resolveJwtSecret(project.jwtSecret), env.branch),
       { expiresIn: '7d', algorithm: 'HS256' }
     )
     // Only a SUCCESSFUL sign-in counts: failed attempts are not use, and
     // counting them would let a credential-stuffing bot keep a project awake.
     void touchProjectActivity(projectId)
-    trackEndUserActive(projectId, String(user.id), user.email).catch(() => {})
+    if (!env.branch) trackEndUserActive(projectId, String(user.id), user.email).catch(() => {})
     sendSuccess(res, { user: { id: user.id, email: user.email, name: user.name }, token })
   } catch (error: any) {
     console.error('Signin error:', error?.message ?? 'unknown')
@@ -416,15 +470,20 @@ function tokenFrom(req: Request, bodyKeys: string[] = ['token']): string | null 
 const FORGOT_LIMITS = { limit: 10, windowMs: 60 * 60 * 1000 }
 
 async function handleRefreshToken(req: Request, res: Response) {
+  const env = await authEnvironment(req, res)
+  if (!env) return
   const result = await refreshEndUserToken(
     req.params.projectId,
     tokenFrom(req, ['token', 'refreshToken']),
+    env,
   )
   res.status(result.status).json(result.body)
 }
 
 async function handleLogout(req: Request, res: Response) {
-  const result = await logoutEndUser(req.params.projectId, tokenFrom(req))
+  const env = await authEnvironment(req, res)
+  if (!env) return
+  const result = await logoutEndUser(req.params.projectId, tokenFrom(req), env)
   res.status(result.status).json(result.body)
 }
 

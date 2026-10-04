@@ -24,7 +24,14 @@ const skip = (reason: string): Evidence => ({ kind: 'skip', reason })
 /** The live harness on the final staging image; see the deferral records below. */
 const HARNESS = 'npx tsx scripts/mcp-harness/run.ts --endpoint "$BACKENLY_API_URL" --key "$BACKENLY_MCP_KEY" --strict --json acceptance-live.json'
 const HARNESS_ENV = ['BACKENLY_API_URL', 'BACKENLY_MCP_KEY']
-const THROWAWAY = 'A dedicated throwaway project on final staging, and a read-write MCP key for it (never a project with real data).'
+/**
+ * New Cloud projects start with production protected (lib/branches/protection.ts),
+ * which refuses an agent's schema change on main with BRANCH_REQUIRED. The
+ * harness builds tables on main, so its project has protection turned off.
+ */
+const THROWAWAY =
+  'A dedicated throwaway project on final staging, and a read-write MCP key for it (never a project with real data). ' +
+  'Turn its production protection off on the Branches page first: new Cloud projects start protected, and the harness changes the schema of main.'
 /**
  * `call` takes its endpoint from BACKENLY_API_URL, but `link` reads only --url
  * and otherwise validates the key against https://backenly.com (CLI 0.2.0). A
@@ -214,16 +221,49 @@ export const ACCEPTANCE_CASES: AcceptanceCase[] = [
   { id: 'AUTO-APPROVAL', area: 'Autonomy', title: 'destructive and high-risk actions park for a human', evidence: unit('mcp-domain-tools.spec.ts', 'sends every destructive target to approval', 'sends every target the executor rates high risk to approval', 'parks a high-risk action the brain does not call destructive') },
 
   // ── Branches ───────────────────────────────────────────────────────────────
-  { id: 'BRANCH-LIFECYCLE', area: 'Branches', title: 'create, diff, merge, and discard through approval', evidence: staging({
+  { id: 'BRANCH-LIFECYCLE', area: 'Branches', title: 'create, build on, diff, merge through approval, and discard', evidence: staging({
     command:
       'npx -y @backenly/cli@0.2.0 call branch action=create name=gate && npx -y @backenly/cli@0.2.0 call branch action=list && ' +
-      'npx -y @backenly/cli@0.2.0 call branch action=diff branchId=<id from list> && npx -y @backenly/cli@0.2.0 call branch action=merge branchId=<id>',
+      'npx -y @backenly/cli@0.2.0 call apply_migration sql="CREATE TABLE gate_items (label text)" branchId=<id from list> && ' +
+      'npx -y @backenly/cli@0.2.0 call branch action=diff branchId=<id> && npx -y @backenly/cli@0.2.0 call branch action=merge branchId=<id>',
     env: ['BACKENLY_API_URL', 'BACKENLY_PROJECT_ID', 'BACKENLY_MCP_KEY'],
     preconditions: `${THROWAWAY} ${CLI_READY} The Cloud edition (branches are Backenly Cloud).`,
-    expected: 'create answers a branch that starts empty; diff lists what differs; merge applies it; a key bound to the merged branch is then refused with BRANCH_INACTIVE.',
-    cleanup: 'backend_chat "discard branch gate" parks for approval; approve it, or delete the throwaway project.',
-    why: 'Branch provisioning is part of the Cloud composition; the public CI builds the unset edition.',
+    expected:
+      'create answers a branch that starts empty, with a preview endpoint and a proj_preview_ key; apply_migration changes the branch only; ' +
+      'diff lists that migration and no conflict; merge answers awaiting_approval with an approval id and changes nothing; approving it on the ' +
+      'Autonomy page creates gate_items on production; the preview key is then refused with BRANCH_INACTIVE.',
+    cleanup: 'Merging closes the branch. Delete the throwaway project, or drop gate_items through backend_chat (parks for approval).',
+    why: 'Branch provisioning and PostgREST registration are part of the Cloud composition; the public CI builds the unset edition.',
   }) },
+  { id: 'BRANCH-PREVIEW', area: 'Branches', title: 'a preview endpoint: a key that reaches the branch, says so, and is refused off it', evidence: db(
+    'tests/integration/branch-preview-endpoint.spec.ts',
+    'connect_branch returns a branch key and how to use it', 'reaches the branch on the data API and says so', 'is refused off the data plane',
+  ) },
+  { id: 'BRANCH-TRAFFIC', area: 'Branches', title: 'branch traffic stays out of production monitoring and autonomy', evidence: db(
+    'tests/integration/branch-preview-endpoint.spec.ts',
+    'keeps branch 5xx out of the window stats Monitoring and anomaly detection read', 'keeps branch traffic out of the autonomy health signal',
+    'shows production by default and the branch only when asked',
+  ) },
+  { id: 'BRANCH-FAIL-CLOSED', area: 'Branches', title: 'a key on a closed branch is refused, never served from production', evidence: db(
+    'tests/integration/branch-key-surfaces.spec.ts',
+    'is refused the same way when its branch has been merged', 'is still refused as inactive on /db once its branch is merged, never served from main',
+  ) },
+  { id: 'BRANCH-BUILD-MERGE', area: 'Branches', title: 'build on a branch; the merge waits for a human and refuses a stale base', evidence: db(
+    'tests/integration/branch-migrations.spec.ts',
+    'applies a migration to the branch and leaves production untouched', 'parks an agent merge for a human, changing nothing yet',
+    'is refused when main changed a table the branch touched',
+  ) },
+  { id: 'BRANCH-PROTECTED', area: 'Branches', title: 'protected production refuses an agent\'s schema change on main, through every door', evidence: db(
+    'tests/integration/branch-migrations.spec.ts',
+    'refuses an agent migration on main, and names the way through', 'refuses the schema tools an agent reaches through backend_chat',
+    'lets an agent migrate main directly',
+  ) },
+  { id: 'BRANCH-AUTH', area: 'Branches', title: 'end-user auth on a branch: its own users, tokens production refuses, no production side effects', evidence: db(
+    'tests/integration/branch-auth.spec.ts',
+    'creates the user on the branch and leaves production untouched', 'runs none of production\'s side effects, and says which',
+    'issues a token only the branch accepts', 'names a production token sent with the preview key, instead of serving it',
+    'names a branch token sent to production, with a main key or alone',
+  ) },
 
   // ── Deploy ─────────────────────────────────────────────────────────────────
   { id: 'DEPLOY-READINESS', area: 'Deploy', title: 'readiness is a read, even when asked to fix', evidence: unit('mcp-readiness-is-a-read.spec.ts', 'fixes nothing when read through read_backend_state', 'fixes nothing from a read-only key, even when asked to') },

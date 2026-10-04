@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { logoutEndUser } from '@/lib/services/end-user-auth-flows'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
+import { inAuthEnvironment } from '@/lib/branches/next-auth-environment'
 
 /**
  * POST /v1/{projectId}/auth/logout
@@ -28,8 +29,12 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     }
   }
 
-  const result = await logoutEndUser(params.projectId, rawToken)
-  return NextResponse.json(result.body, { status: result.status })
+  // A preview branch's key revokes in that branch's blacklist, the one its
+  // data plane reads.
+  return inAuthEnvironment(request, params.projectId, async (env) => {
+    const result = await logoutEndUser(params.projectId, rawToken, env)
+    return NextResponse.json(result.body, { status: result.status })
+  })
 }
 
 export const POST = recordedV1(handlePOST)
