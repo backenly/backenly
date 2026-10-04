@@ -82,6 +82,8 @@ const publicPathPrefixes = [
                     // anonymous visitors following an indexed or npm link
   '/report/',       // shared change reports — access IS the revocable token, no session
   '/.well-known/',  // security.txt etc.
+  '/startups',      // Backenly for Startups application (Cloud overlay). Anyone
+                    // can apply; signing in is a step inside the page
 ]
 
 // ✅ MARKETING SURFACES — the hosted service's shop window.
@@ -112,6 +114,7 @@ const marketingPrefixes = [
   '/resources',
   '/mcp',
   '/quickstart',
+  '/startups',
 ]
 
 function isMarketingPath(pathname: string): boolean {
@@ -147,6 +150,9 @@ const publicApiRoutes = [
   '/api/billing/webhook',           // Paddle webhook — signature-verified
   '/api/feedback/feature-request',  // Public form (rate limited at route)
   '/api/feedback/support',          // Public form (rate limited at route)
+  '/api/startups/',                 // Startup program (Cloud overlay): applying is anonymous, gated by
+                                    // Turnstile, rate limits and an emailed code; the status and claim
+                                    // routes authenticate the session themselves
   '/api/connect/',                  // Legacy provider handshake flow (routes self-authenticate; flagged for removal)
 ]
 
