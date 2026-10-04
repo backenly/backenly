@@ -168,7 +168,8 @@ setup('sign up the first operator', async ({ page, request, baseURL }) => {
   const seen = await tours.json()
   expect(seen.available, 'the installed tour migration is unavailable').toBe(true)
   if (!seen.seen.includes('console')) {
-    await page.goto(`/app/projects/${id}/overview`)
+    await page.goto(`/app/projects/${id}`)
+    await expect(page.locator('[data-tour="connect-agent"]')).toBeVisible({ timeout: 15_000 })
     for (const title of [
       'Connect your coding agent',
       'Everything your agent builds lands here',
