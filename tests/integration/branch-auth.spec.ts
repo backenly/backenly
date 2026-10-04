@@ -71,6 +71,7 @@ import { dispatchTool } from '@/lib/ai/brain/tools'
 import { createBranch } from '@/lib/branches/engine'
 import { mintPreviewKey } from '@/lib/branches/preview'
 import { clearBranchKeyCache } from '@/lib/branches/key-scope'
+import { flushRecordedRequests } from '@/lib/traffic/request-recorder'
 import { SKIPPED_ON_BRANCH_SIGNUP } from '@/lib/branches/auth-environment'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
@@ -206,6 +207,8 @@ beforeAll(async () => {
 }, 240_000)
 
 afterAll(async () => {
+  // The routes record each request; write those rows before their project goes.
+  await flushRecordedRequests()
   const branches = await prisma.workspaceBranch.findMany({ where: { projectId }, select: { schemaName: true } }).catch(() => [])
   for (const b of branches) await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${b.schemaName}" CASCADE`).catch(() => {})
   if (mainSchema) await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${mainSchema}" CASCADE`).catch(() => {})
