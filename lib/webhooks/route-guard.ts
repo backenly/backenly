@@ -30,6 +30,7 @@
 import { NextResponse } from 'next/server'
 import { canAccessProject, canWriteProject, canAdministerProject } from '@/lib/edition/guard'
 import { enforceWebhook } from '@/lib/entitlements/policy'
+import { billingAccountOf } from '@/lib/usage/account'
 
 /**
  * VIEWER reads. DEVELOPER creates and edits. ADMIN deletes.
@@ -62,7 +63,8 @@ export async function guardWebhookRoute(
     return NextResponse.json({ error: 'Project not found' }, { status: 404 })
   }
 
-  const entitlement = await enforceWebhook(userId)
+  // The plan of the account the project bills to, not the caller's own.
+  const entitlement = await enforceWebhook((await billingAccountOf(projectId)) ?? userId)
   if (entitlement !== true) {
     return NextResponse.json(
       {

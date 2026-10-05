@@ -7,7 +7,8 @@ import { undoToGraph } from '@/lib/orchestration/graph-pointer'
 import { reconcileWorkspaceToGraph } from '@/lib/orchestration/graph-reconciler'
 import { recordRollbackMemory } from '@/lib/operational-memory/ledger'
 import { prisma } from '@/lib/db'
-import { getUserEntitlements } from '@/lib/entitlements'
+import { getAccountEntitlements } from '@/lib/entitlements'
+import { billingAccountOf } from '@/lib/usage/account'
 import type { BackendStateGraph } from '@/lib/orchestration/backend-state-graph'
 
 const QUOTA_DISABLED = process.env.DISABLE_QUOTA_ENFORCEMENT === 'true'
@@ -61,7 +62,7 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
     // entitlement, then rolled back the project named in the path. So any
     // authenticated account on a qualifying plan could roll back another
     // tenant's deployment. Authentication is not authorization, and an
-    // entitlement check is about the caller's billing, not their access.
+    // entitlement check is about the project's billing, not the caller's access.
     //
     // canAdministerProject, not canAccessProject: a rollback rewrites live
     // state and is not something a read-only collaborator should trigger.
@@ -73,9 +74,10 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
       )
     }
 
-    // 2. Check plan entitlement (allowDeploymentRollback — Growth+)
+    // 2. Check plan entitlement (allowDeploymentRollback — Growth+), on the plan
+    //    of the account the project bills to
     if (!QUOTA_DISABLED) {
-      const entitlements = await getUserEntitlements(userId)
+      const entitlements = await getAccountEntitlements((await billingAccountOf(projectId)) ?? userId)
       if (!entitlements?.allowDeploymentRollback) {
         return NextResponse.json(
           {

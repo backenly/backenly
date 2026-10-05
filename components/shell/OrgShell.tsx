@@ -35,15 +35,17 @@ import {
  * constant that is true exactly when those files are present. It gates
  * PRESENTATION only; every access decision stays server-side.
  *
- * Backenly Cloud scopes Projects and Members to an organization
- * (/app/org/[orgId]...), so their hrefs come from `useOrgHrefs` and their
- * active row matches both shapes.
+ * Backenly Cloud scopes Projects, Usage, Members and Billing to an
+ * organization (/app/org/[orgId]...), so their hrefs come from `useOrgHrefs`
+ * and their active row matches both shapes.
  */
 const ORG_ROOT = /^\/app\/org\/[^/]+\/?$/
 const ORG_MEMBERS = /^\/app\/org\/[^/]+\/members/
+const ORG_USAGE = /^\/app\/org\/[^/]+\/usage/
+const ORG_BILLING = /^\/app\/org\/[^/]+\/billing/
 
 const NAV = [
-  { id: 'projects', title: 'Projects',          icon: FolderKanban, href: '/app',          match: (p: string) => p === '/app' || p === '/app/' || ORG_ROOT.test(p) },
+  { id: 'projects', title: 'Projects',          icon: FolderKanban, match: (p: string) => p === '/app' || p === '/app/' || ORG_ROOT.test(p) },
   // Usage is a billing-cycle surface: it reads /api/billing/usage (overlay-only)
   // and renders consumption against plan ceilings. A self-hosted deployment has
   // no billing cycle and no ceilings — every self-host entitlement is null —
@@ -51,9 +53,9 @@ const NAV = [
   // build it showed "Could not load usage data" because its endpoint is absent.
   ...(CLOUD_CONTROL_PLANE
     ? ([
-        { id: 'usage',    title: 'Usage',             icon: Gauge,        href: '/app/usage',    match: (p: string) => p.startsWith('/app/usage') },
-        { id: 'members',  title: 'Members',           icon: Users,        href: '/app/members',  match: (p: string) => p.startsWith('/app/members') || ORG_MEMBERS.test(p) },
-        { id: 'billing',  title: 'Billing', icon: CreditCard,   href: '/app/billing',  match: (p: string) => p.startsWith('/app/billing') },
+        { id: 'usage',    title: 'Usage',             icon: Gauge,        match: (p: string) => p.startsWith('/app/usage') || ORG_USAGE.test(p) },
+        { id: 'members',  title: 'Members',           icon: Users,        match: (p: string) => p.startsWith('/app/members') || ORG_MEMBERS.test(p) },
+        { id: 'billing',  title: 'Billing', icon: CreditCard,   match: (p: string) => p.startsWith('/app/billing') || ORG_BILLING.test(p) },
       ] as const)
     : ([] as const)),
   // HIDDEN 2026-07-19 — referral program parked for now. Backend (signup ?ref=,
@@ -65,8 +67,7 @@ export function OrgShell({ children }: { children: ReactNode }) {
   const pathname = usePathname() ?? ''
   const settingsActive = pathname.startsWith('/app/settings')
   const orgHrefs = useOrgHrefs()
-  const hrefOf = (item: (typeof NAV)[number]) =>
-    item.id === 'projects' ? orgHrefs.projects : item.id === 'members' ? orgHrefs.members : item.href
+  const hrefOf = (item: (typeof NAV)[number]) => orgHrefs[item.id]
 
   const bar = (
     <ConsoleBar>

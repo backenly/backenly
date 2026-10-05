@@ -23,7 +23,7 @@
  * Whether overage exists at all is commercial (getOveragePolicy); everything
  * here is public policy and runs identically whoever answers it.
  */
-import { getOveragePolicy, getUserEntitlements, type OveragePolicy, type UserEntitlements } from '@/lib/entitlements'
+import { getAccountEntitlements, getOveragePolicy, type OveragePolicy, type UserEntitlements } from '@/lib/entitlements'
 import {
   OVERAGE_AXES,
   axisBillable,
@@ -171,7 +171,7 @@ export async function accountLimits(
   const hit = cache.get(billingAccountId)
   if (!opts.fresh && hit && Date.now() - hit.at < CACHE_MS) return hit.limits
 
-  const ent = opts.ent === undefined ? await getUserEntitlements(billingAccountId) : opts.ent
+  const ent = opts.ent === undefined ? await getAccountEntitlements(billingAccountId) : opts.ent
   let limits: AccountLimits | null = null
   if (ent) {
     // A plan with no finite quota (self-host, a contract plan) has nothing to

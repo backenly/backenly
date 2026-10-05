@@ -1,5 +1,6 @@
 /**
- * A short-lived per-user cache for usage summaries.
+ * A short-lived per-billing-account cache for usage summaries (keyed by the
+ * account, lib/usage/account.ts: an organization on Cloud).
  *
  * It lives here rather than in lib/billing because both halves of the split
  * touch it: the public policy layer invalidates it whenever it records usage,
@@ -13,21 +14,21 @@
  */
 const cache = new Map<string, { data: unknown; expiresAt: number }>()
 
-function key(userId: string): string {
-  return `usage_${userId}`
+function key(billingAccountId: string): string {
+  return `usage_${billingAccountId}`
 }
 
-export function readUsageCache<T>(userId: string): T | null {
-  const hit = cache.get(key(userId))
+export function readUsageCache<T>(billingAccountId: string): T | null {
+  const hit = cache.get(key(billingAccountId))
   if (!hit || hit.expiresAt <= Date.now()) return null
   return hit.data as T
 }
 
-export function writeUsageCache<T>(userId: string, data: T, ttlMs = 30_000): void {
-  cache.set(key(userId), { data, expiresAt: Date.now() + ttlMs })
+export function writeUsageCache<T>(billingAccountId: string, data: T, ttlMs = 30_000): void {
+  cache.set(key(billingAccountId), { data, expiresAt: Date.now() + ttlMs })
 }
 
 /** Call after any write that changes what a usage summary would report. */
-export function invalidateUsageCache(userId: string): void {
-  cache.delete(key(userId))
+export function invalidateUsageCache(billingAccountId: string): void {
+  cache.delete(key(billingAccountId))
 }

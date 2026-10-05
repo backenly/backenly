@@ -21,12 +21,17 @@
  * Cloud behaviour is unchanged. Entitlements resolve from the same Plan row, a
  * missing subscription still produces the same violation, and every message is
  * the one that shipped.
+ *
+ * Every function here takes a BILLING ACCOUNT (lib/usage/account.ts), not a
+ * person: on Backenly Cloud an organization, whose plan and counters apply to
+ * everyone working in it. Pass the account the work belongs to, which for
+ * anything done in a project is the project's.
  */
 import crypto from 'crypto'
 
 import { bonusCredits, purchasedCredits, recordAiConsumption } from '@cloud/entitlements'
 import { prisma } from '@/lib/db/prisma'
-import { getUserEntitlements } from './index'
+import { accountOwner, getAccountEntitlements } from './index'
 import type { UserEntitlements } from './types'
 import { invalidateUsageCache } from './usage-cache'
 
@@ -107,12 +112,12 @@ export function nextMonthStart(): Date {
 }
 
 /**
- * Derive a stable 32-bit advisory lock key from a (userId, month) tuple.
+ * Derive a stable 32-bit advisory lock key from a (billingAccountId, month) tuple.
  * pg_advisory_xact_lock takes a bigint but we use two int4s via the overload
  * pg_advisory_xact_lock(key1 int4, key2 int4) to stay within safe integer range.
  */
-function advisoryLockKeys(userId: string, month: string): [number, number] {
-  const hash = crypto.createHash('sha256').update(`${userId}:${month}`).digest()
+function advisoryLockKeys(billingAccountId: string, month: string): [number, number] {
+  const hash = crypto.createHash('sha256').update(`${billingAccountId}:${month}`).digest()
   const k1 = hash.readInt32BE(0)
   const k2 = hash.readInt32BE(4)
   return [k1, k2]
@@ -128,10 +133,10 @@ export interface MonthlyUsage {
   aiFunctionInvocations: number
 }
 
-export async function getMonthlyUsage(userId: string): Promise<MonthlyUsage> {
+export async function getMonthlyUsage(billingAccountId: string): Promise<MonthlyUsage> {
   const month = thisMonth()
-  const record = await prisma.userAiUsage.findUnique({
-    where: { userId_date: { userId, date: month } },
+  const record = await prisma.accountAiUsage.findUnique({
+    where: { billingAccountId_date: { billingAccountId, date: month } },
   })
   return {
     aiBuildActions: record?.intentCount ?? 0,
@@ -193,11 +198,11 @@ const ENFORCEMENT_EPOCH_MONTH = '2026-07'
  * FAIL-OPEN: a billing infra hiccup must never block a paying customer's
  * build. Only a real, measured budget breach blocks.
  */
-export async function enforceAiCredits(userId: string): Promise<true | LimitViolation> {
+export async function enforceAiCredits(billingAccountId: string): Promise<true | LimitViolation> {
   try {
     if (thisMonth() === ENFORCEMENT_EPOCH_MONTH) return true
 
-    const ent = await getUserEntitlements(userId)
+    const ent = await getAccountEntitlements(billingAccountId)
     if (!ent) return noEntitlements()
 
     const maxCredits = ent.monthlyAiCredits
@@ -206,11 +211,11 @@ export async function enforceAiCredits(userId: string): Promise<true | LimitViol
     // Bonus credits (referral / promo grants) and purchased credits genuinely
     // extend the monthly cap. Both are balances the ledger brings up to date at
     // month rollover, so this month's usage is measured against all three.
-    const bonus = await bonusCredits(userId)
-    const purchased = await purchasedCredits(userId)
+    const bonus = await bonusCredits(billingAccountId)
+    const purchased = await purchasedCredits(billingAccountId)
     const effectiveMax = maxCredits + bonus + purchased
 
-    const usage = await getMonthlyUsage(userId)
+    const usage = await getMonthlyUsage(billingAccountId)
     const creditsUsed = creditsFromTokens(usage.aiTokensUsed)
     if (creditsUsed >= effectiveMax) {
       const parts = [`${maxCredits.toLocaleString()} plan`]
@@ -239,37 +244,46 @@ export async function enforceAiCredits(userId: string): Promise<true | LimitViol
  * Call AFTER the turn, only when it produced a real backend change (questions
  * and clarifications are free). Fire-and-forget; never blocks.
  */
-export async function chargeAiCredits(userId: string, tokensUsed: number): Promise<void> {
+export async function chargeAiCredits(billingAccountId: string, tokensUsed: number): Promise<void> {
   if (!Number.isFinite(tokensUsed) || tokensUsed <= 0) return
-  await recordAiConsumption(userId, tokensUsed)
-  invalidateUsageCache(userId)
+  await recordAiConsumption(billingAccountId, tokensUsed)
+  invalidateUsageCache(billingAccountId)
 }
 
 // ─── Usage tracking ──────────────────────────────────────────────────────────
 
-export async function trackAiBuildAction(userId: string, tokenCount = 0): Promise<void> {
+export async function trackAiBuildAction(billingAccountId: string, tokenCount = 0): Promise<void> {
   const month = thisMonth()
-  await prisma.userAiUsage.upsert({
-    where: { userId_date: { userId, date: month } },
+  await prisma.accountAiUsage.upsert({
+    where: { billingAccountId_date: { billingAccountId, date: month } },
     update: {
       intentCount: { increment: 1 },
       tokenCount: { increment: tokenCount },
     },
-    create: { userId, date: month, intentCount: 1, tokenCount },
+    create: { billingAccountId, date: month, intentCount: 1, tokenCount },
   })
-  invalidateUsageCache(userId)
+  invalidateUsageCache(billingAccountId)
 
   // Fire credits-low notification when usage crosses the 80% threshold.
   // Run asynchronously, and never block the main execution path.
   try {
-    const ent = await getUserEntitlements(userId)
+    const ent = await getAccountEntitlements(billingAccountId)
     const max = ent?.maxAiBuildActionsPerMonth
     if (max) {
-      const usage = await getMonthlyUsage(userId)
-      const { checkAndNotifyCreditsLow } = await import('@/lib/notifications/platform')
-      checkAndNotifyCreditsLow(userId, month, usage.aiBuildActions, max).catch(() => {})
+      const usage = await getMonthlyUsage(billingAccountId)
+      notifyCreditsLow(billingAccountId, month, usage.aiBuildActions, max)
     }
   } catch { /* non-fatal */ }
+}
+
+/**
+ * Tell the account's owner its credits are running low. Notices go to a
+ * person, so an organization's go to its owner. Fire-and-forget.
+ */
+function notifyCreditsLow(billingAccountId: string, month: string, used: number, max: number): void {
+  Promise.all([accountOwner(billingAccountId), import('@/lib/notifications/platform')])
+    .then(([owner, { checkAndNotifyCreditsLow }]) => (owner ? checkAndNotifyCreditsLow(owner, month, used, max) : undefined))
+    .catch(() => {})
 }
 
 /**
@@ -279,43 +293,43 @@ export async function trackAiBuildAction(userId: string, tokenCount = 0): Promis
  * Why: a naive read-check-then-increment approach has a race condition. Two
  * concurrent requests both read count=N, both pass the limit check, and both
  * increment, overshooting the limit by one or more. The advisory lock on
- * (userId, month) serialises concurrent enforce+track calls for the same user
- * without blocking unrelated users.
+ * (billingAccountId, month) serialises concurrent enforce+track calls for the same
+ * account without blocking unrelated accounts.
  *
  * Returns true when the action is allowed and the counter has been incremented.
  * Returns a LimitViolation when the limit is already reached (counter NOT
  * incremented).
  */
 export async function enforceAndTrackAiBuildAction(
-  userId: string,
+  billingAccountId: string,
   tokenCount = 0
 ): Promise<true | LimitViolation> {
-  const ent = await getUserEntitlements(userId)
+  const ent = await getAccountEntitlements(billingAccountId)
   if (!ent) return noEntitlements()
 
   const max = ent.maxAiBuildActionsPerMonth
   if (max === null) {
     // Unlimited plan. Track asynchronously and immediately allow.
-    trackAiBuildAction(userId, tokenCount).catch(() => {})
+    trackAiBuildAction(billingAccountId, tokenCount).catch(() => {})
     return true
   }
 
   const month = thisMonth()
-  const [k1, k2] = advisoryLockKeys(userId, month)
+  const [k1, k2] = advisoryLockKeys(billingAccountId, month)
 
   const result = await prisma.$transaction(async (tx) => {
-    // Acquire a transaction-scoped advisory lock keyed to (userId, month).
+    // Acquire a transaction-scoped advisory lock keyed to (billingAccountId, month).
     // This blocks any other transaction attempting to take the same lock
     // until this transaction commits or rolls back. No deadlock risk, because
-    // each user+month pair maps to a unique key and we only ever lock one.
+    // each account+month pair maps to a unique key and we only ever lock one.
     await tx.$executeRawUnsafe(
       `SELECT pg_advisory_xact_lock($1::int4, $2::int4)`,
       k1, k2
     )
 
     // Read the current count inside the lock so the read is serialised.
-    const record = await tx.userAiUsage.findUnique({
-      where: { userId_date: { userId, date: month } },
+    const record = await tx.accountAiUsage.findUnique({
+      where: { billingAccountId_date: { billingAccountId, date: month } },
       select: { intentCount: true },
     })
     const currentCount = record?.intentCount ?? 0
@@ -325,13 +339,13 @@ export async function enforceAndTrackAiBuildAction(
     }
 
     // Increment inside the lock, guaranteed to be the only writer right now.
-    await tx.userAiUsage.upsert({
-      where: { userId_date: { userId, date: month } },
+    await tx.accountAiUsage.upsert({
+      where: { billingAccountId_date: { billingAccountId, date: month } },
       update: {
         intentCount: { increment: 1 },
         tokenCount: { increment: tokenCount },
       },
-      create: { userId, date: month, intentCount: 1, tokenCount },
+      create: { billingAccountId, date: month, intentCount: 1, tokenCount },
     })
 
     return { allowed: true as const, count: currentCount + 1 }
@@ -344,15 +358,10 @@ export async function enforceAndTrackAiBuildAction(
     )
   }
 
-  invalidateUsageCache(userId)
+  invalidateUsageCache(billingAccountId)
 
   // Fire the low-credit notification asynchronously, never blocking the response.
-  try {
-    if (max) {
-      const { checkAndNotifyCreditsLow } = await import('@/lib/notifications/platform')
-      checkAndNotifyCreditsLow(userId, month, result.count, max).catch(() => {})
-    }
-  } catch { /* non-fatal */ }
+  if (max) notifyCreditsLow(billingAccountId, month, result.count, max)
 
   return true
 }
@@ -360,23 +369,23 @@ export async function enforceAndTrackAiBuildAction(
 /** Track AI intent. Alias for backward compatibility. */
 export const trackAiIntent = trackAiBuildAction
 
-export async function trackAiFunctionInvocation(userId: string, count = 1): Promise<void> {
+export async function trackAiFunctionInvocation(billingAccountId: string, count = 1): Promise<void> {
   const month = thisMonth()
-  await prisma.userAiUsage.upsert({
-    where: { userId_date: { userId, date: month } },
+  await prisma.accountAiUsage.upsert({
+    where: { billingAccountId_date: { billingAccountId, date: month } },
     update: { aiFunctionInvocations: { increment: count } },
-    create: { userId, date: month, aiFunctionInvocations: count },
+    create: { billingAccountId, date: month, aiFunctionInvocations: count },
   })
-  invalidateUsageCache(userId)
+  invalidateUsageCache(billingAccountId)
 }
 
 // ─── Enforcement helpers ─────────────────────────────────────────────────────
 
 export async function enforceProjectCreation(
-  userId: string,
+  billingAccountId: string,
   currentProjectCount: number
 ): Promise<true | LimitViolation> {
-  const ent = await getUserEntitlements(userId)
+  const ent = await getAccountEntitlements(billingAccountId)
   if (!ent) return noEntitlements()
 
   const max = ent.maxProjects
@@ -389,14 +398,14 @@ export async function enforceProjectCreation(
   return true
 }
 
-export async function enforceAiBuildAction(userId: string): Promise<true | LimitViolation> {
-  const ent = await getUserEntitlements(userId)
+export async function enforceAiBuildAction(billingAccountId: string): Promise<true | LimitViolation> {
+  const ent = await getAccountEntitlements(billingAccountId)
   if (!ent) return noEntitlements()
 
   const max = ent.maxAiBuildActionsPerMonth
   if (max === null) return true
 
-  const usage = await getMonthlyUsage(userId)
+  const usage = await getMonthlyUsage(billingAccountId)
   if (usage.aiBuildActions >= max) {
     return violation(
       ent.planName,
@@ -407,14 +416,14 @@ export async function enforceAiBuildAction(userId: string): Promise<true | Limit
 }
 
 /** Alias for backward compatibility. */
-export const checkAiIntentLimit = async (userId: string) => {
-  const ent = await getUserEntitlements(userId)
+export const checkAiIntentLimit = async (billingAccountId: string) => {
+  const ent = await getAccountEntitlements(billingAccountId)
   if (!ent) return { allowed: false, code: 'AI_LIMIT_EXCEEDED' as const, remaining: 0, limit: 0, resetAt: nextMonthStart(), usedToday: 0 }
 
   const max = ent.maxAiBuildActionsPerMonth
   if (max === null) return { allowed: true, remaining: 999_999, limit: null, resetAt: nextMonthStart(), usedToday: 0 }
 
-  const usage = await getMonthlyUsage(userId)
+  const usage = await getMonthlyUsage(billingAccountId)
   const remaining = Math.max(0, max - usage.aiBuildActions)
   if (usage.aiBuildActions >= max) {
     return { allowed: false, code: 'AI_LIMIT_EXCEEDED' as const, remaining: 0, limit: max, resetAt: nextMonthStart(), usedToday: usage.aiBuildActions }
@@ -422,18 +431,18 @@ export const checkAiIntentLimit = async (userId: string) => {
   return { allowed: true, remaining, limit: max, resetAt: nextMonthStart(), usedToday: usage.aiBuildActions }
 }
 
-export async function enforceAiFunctionInvocation(userId: string): Promise<true | LimitViolation> {
-  const ent = await getUserEntitlements(userId)
+export async function enforceAiFunctionInvocation(billingAccountId: string): Promise<true | LimitViolation> {
+  const ent = await getAccountEntitlements(billingAccountId)
   if (!ent) return noEntitlements()
 
   const max = ent.maxAiFunctionInvocationsPerMonth
   if (max === null) return true
 
-  const usage = await getMonthlyUsage(userId)
+  const usage = await getMonthlyUsage(billingAccountId)
   if (usage.aiFunctionInvocations < max) return true
   // Past the included runs, the owner's spend limit decides (lib/usage/overage.ts).
   const { effectiveCap } = await import('@/lib/usage/overage')
-  const cap = await effectiveCap(userId, 'fn_runs', max, ent)
+  const cap = await effectiveCap(billingAccountId, 'fn_runs', max, ent)
   if (usage.aiFunctionInvocations >= cap) {
     return violation(
       ent.planName,
@@ -460,11 +469,11 @@ export async function enforceRealtimeConnection(
 }
 
 export async function enforceTriggerCreation(
-  userId: string,
+  billingAccountId: string,
   projectId: string,
   currentTriggerCount: number
 ): Promise<true | LimitViolation> {
-  const ent = await getUserEntitlements(userId)
+  const ent = await getAccountEntitlements(billingAccountId)
   if (!ent) return noEntitlements()
 
   const max = ent.maxTriggersPerProject
@@ -481,10 +490,10 @@ export async function enforceTriggerCreation(
 }
 
 export async function enforceTeamSeat(
-  userId: string,
+  billingAccountId: string,
   currentSeatCount: number
 ): Promise<true | LimitViolation> {
-  const ent = await getUserEntitlements(userId)
+  const ent = await getAccountEntitlements(billingAccountId)
   if (!ent) return noEntitlements()
 
   const max = ent.maxTeamSeats
@@ -497,8 +506,8 @@ export async function enforceTeamSeat(
   return true
 }
 
-export async function enforceCustomDomain(userId: string): Promise<true | LimitViolation> {
-  const ent = await getUserEntitlements(userId)
+export async function enforceCustomDomain(billingAccountId: string): Promise<true | LimitViolation> {
+  const ent = await getAccountEntitlements(billingAccountId)
   if (!ent) return noEntitlements()
 
   if (!ent.allowCustomDomain) {
@@ -507,8 +516,8 @@ export async function enforceCustomDomain(userId: string): Promise<true | LimitV
   return true
 }
 
-export async function enforceWebhook(userId: string): Promise<true | LimitViolation> {
-  const ent = await getUserEntitlements(userId)
+export async function enforceWebhook(billingAccountId: string): Promise<true | LimitViolation> {
+  const ent = await getAccountEntitlements(billingAccountId)
   if (!ent) return noEntitlements()
 
   if (!ent.allowWebhooks) {
@@ -517,8 +526,8 @@ export async function enforceWebhook(userId: string): Promise<true | LimitViolat
   return true
 }
 
-export async function enforceRbac(userId: string): Promise<true | LimitViolation> {
-  const ent = await getUserEntitlements(userId)
+export async function enforceRbac(billingAccountId: string): Promise<true | LimitViolation> {
+  const ent = await getAccountEntitlements(billingAccountId)
   if (!ent) return noEntitlements()
 
   if (!ent.allowRbac) {
@@ -527,8 +536,8 @@ export async function enforceRbac(userId: string): Promise<true | LimitViolation
   return true
 }
 
-export async function enforceDeployment(userId: string): Promise<true | LimitViolation> {
-  const ent = await getUserEntitlements(userId)
+export async function enforceDeployment(billingAccountId: string): Promise<true | LimitViolation> {
+  const ent = await getAccountEntitlements(billingAccountId)
   if (!ent) return noEntitlements()
 
   if (!ent.allowDeployment) {
@@ -543,8 +552,8 @@ export async function enforceDeployment(userId: string): Promise<true | LimitVio
   return true
 }
 
-export async function enforceAuthProvider(userId: string, provider: string): Promise<true | LimitViolation> {
-  const ent = await getUserEntitlements(userId)
+export async function enforceAuthProvider(billingAccountId: string, provider: string): Promise<true | LimitViolation> {
+  const ent = await getAccountEntitlements(billingAccountId)
   if (!ent) return noEntitlements()
 
   if (!ent.allowedAuthProviders.includes(provider)) {

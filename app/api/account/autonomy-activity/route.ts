@@ -3,26 +3,33 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { withAuth } from '@/lib/auth/route-protection'
 import { prisma } from '@/lib/db/prisma'
+import { accountForCaller } from '@/lib/entitlements'
+import { accountProjectsWhere } from '@/lib/usage/account'
 
 /**
- * GET /api/account/autonomy-activity
+ * GET /api/account/autonomy-activity?orgId=
  *
  * Account-wide autonomy activity for the current billing cycle (calendar month),
  * powering the Usage page "Autonomy runs" card + per-day chart (§5.2).
  *
  * Source of truth: AuditLog rows tagged `type: 'autonomy'` — the reconciler
  * writes one per tick (AUTONOMY_LIVE_RUN / AUTONOMY_SHADOW_DECISION / freeze /
- * escalation). We count real ticks across every project the user owns. No new
- * table, no synthetic data — if the loop hasn't run, the count is honestly 0.
+ * escalation). We count real ticks across every project of the billing
+ * account: the caller's own, or (on Cloud) the organization named by ?orgId=,
+ * which must be one the caller belongs to. No new table, no synthetic data — if
+ * the loop hasn't run, the count is honestly 0.
  */
-export const GET = withAuth(async (_request: NextRequest, { user }) => {
+export const GET = withAuth(async (request: NextRequest, { user }) => {
   try {
+    const account = await accountForCaller(user.userId, request.nextUrl?.searchParams.get('orgId'))
+    if (!account) return NextResponse.json({ error: 'Not found' }, { status: 404 })
+
     const now = new Date()
     const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
 
-    // Projects owned by this account.
+    // The account's projects.
     const projects = await prisma.project.findMany({
-      where: { userId: user.userId },
+      where: accountProjectsWhere(account),
       select: { id: true },
     })
     const projectIds = projects.map((p) => p.id)

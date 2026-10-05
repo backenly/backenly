@@ -54,6 +54,7 @@ import {
 } from '@/lib/security/workspace-schema'
 import { purgeProjectExternals } from '@/lib/projects/purge'
 import { PURGE_JOB_TYPE, PURGE_STATUS } from '@/lib/queue'
+import { purgeAccountState } from '@/lib/usage/account'
 
 export { PURGE_JOB_TYPE, PURGE_STATUS }
 
@@ -332,6 +333,9 @@ export async function deleteAccountCompletely(userId: string): Promise<DeletionR
         allSchemas.push(...result.schemas)
         allJobIds.push(result.jobId)
       }
+
+      // The account's own AI usage and credit balances, which do not cascade.
+      await purgeAccountState(tx, userId)
 
       // Cascades the projects and everything under them.
       await tx.user.delete({ where: { id: userId } })

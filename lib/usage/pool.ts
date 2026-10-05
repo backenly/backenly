@@ -1,8 +1,9 @@
 /**
  * An account's usage this month, pooled across all of its projects.
  *
- * Plan quotas belong to the billing account, not to a project: a Pro owner's
- * 8 GB of database is shared by every project they own, however many that is.
+ * Plan quotas belong to the billing account (lib/usage/account.ts: the
+ * organization on Cloud, the owner elsewhere), not to a project: a Pro org's
+ * 8 GB of database is shared by every project in it, however many that is.
  * Enforcing per project made the real cap N x 8 GB. Every quota check and
  * every usage alert reads the account's total from here.
  *
@@ -11,7 +12,7 @@
  *
  *   mau          project_active_users for the month, over the account's
  *                current projects
- *   fnRuns       UserAiUsage.aiFunctionInvocations for the month (already
+ *   fnRuns       AccountAiUsage.aiFunctionInvocations for the month (already
  *                per account)
  *   dbBytes      each current project's latest measured size (project_usage)
  *   fileBytes    each current project's stored-bytes counter, which counts an
@@ -51,9 +52,9 @@ export async function accountUsage(billingAccountId: string, at: Date = new Date
       SELECT count(*)::int AS n
       FROM "project_active_users" a
       JOIN "projects" p ON p."id" = a."projectId"
-      WHERE p."userId" = ${billingAccountId} AND a."month" = ${period}`
-  const aiUsage = await prisma.userAiUsage.findUnique({
-    where: { userId_date: { userId: billingAccountId, date: period } },
+      WHERE COALESCE(p."organizationId", p."userId") = ${billingAccountId} AND a."month" = ${period}`
+  const aiUsage = await prisma.accountAiUsage.findUnique({
+    where: { billingAccountId_date: { billingAccountId, date: period } },
     select: { aiFunctionInvocations: true },
   })
   const egressRows = await prisma.$queryRaw<Array<{ bytes: bigint | null }>>`
@@ -69,13 +70,13 @@ export async function accountUsage(billingAccountId: string, at: Date = new Date
         SELECT DISTINCT ON (u."projectId") u."dbStorageUsedMb"
         FROM "project_usage" u
         JOIN "projects" p ON p."id" = u."projectId"
-        WHERE p."userId" = ${billingAccountId}
+        WHERE COALESCE(p."organizationId", p."userId") = ${billingAccountId}
         ORDER BY u."projectId", u."month" DESC
       ) latest`
   const fileRows = await prisma.$queryRaw<Array<{ bytes: bigint | null }>>`
       SELECT COALESCE(SUM(GREATEST("storageUsed", 0)), 0)::bigint AS bytes
       FROM "projects"
-      WHERE "userId" = ${billingAccountId}`
+      WHERE COALESCE("organizationId", "userId") = ${billingAccountId}`
 
   return {
     billingAccountId,
@@ -88,8 +89,5 @@ export async function accountUsage(billingAccountId: string, at: Date = new Date
   }
 }
 
-/** The project's owning billing account (its owner's user id today), or null. */
-export async function billingAccountOf(projectId: string): Promise<string | null> {
-  const project = await prisma.project.findUnique({ where: { id: projectId }, select: { userId: true } })
-  return project?.userId ?? null
-}
+/** The project's billing account (see lib/usage/account.ts). Kept here for existing importers. */
+export { billingAccountOf } from './account'

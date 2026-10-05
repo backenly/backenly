@@ -31,6 +31,7 @@ import { generateFixedFunctionCode } from './generator'
 import { isRouteModuleFunction, executeRouteModuleFunction, validateRouteModule } from './route-module-runner'
 import { enforceAiFunctionInvocation, trackAiFunctionInvocation } from '@/lib/entitlements/policy'
 import { recordUsage } from '@/lib/usage/ledger'
+import { accountOf } from '@/lib/usage/account'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { safeFetch } from '@/lib/security/outbound-guard'
 import { isReservedTestEmail } from '@/lib/services/end-user-auth-table'
@@ -682,14 +683,16 @@ export async function executeAiFunction(
 
   // ── Plan-driven quota ────────────────────────────────────────────────────
   // Every invocation — manual, trigger-fired, or signup — counts against the
-  // project owner's monthly AI Function quota. Enforced once here so route,
+  // monthly AI Function quota of the account the project bills to (its
+  // organization on Cloud, its owner elsewhere). Enforced once here so route,
   // trigger, and SDK paths all share the same accounting.
   const project = await prisma.project.findUnique({
     where: { id: projectId },
-    select: { userId: true },
+    select: { userId: true, organizationId: true },
   })
-  if (project?.userId) {
-    const decision = await enforceAiFunctionInvocation(project.userId)
+  const account = project ? accountOf(project) : null
+  if (account) {
+    const decision = await enforceAiFunctionInvocation(account)
     if (decision !== true) {
       // A quota block must still leave a trace: trigger-fired functions
       // (on_signup/on_insert/...) swallow errors, so without a log row the
@@ -706,11 +709,11 @@ export async function executeAiFunction(
         durationMs: 0,
       }
     }
-    trackAiFunctionInvocation(project.userId).catch(() => {})
+    trackAiFunctionInvocation(account).catch(() => {})
     // The billing record of the run (lib/usage/axes.ts `fn_runs`): counted
     // here, after the plan check and before execution, so every invocation that
     // actually runs the function counts once, whatever its outcome.
-    recordUsage({ projectId, axis: 'fn_runs', quantity: 1, source: 'executor', billingAccountId: project.userId })
+    recordUsage({ projectId, axis: 'fn_runs', quantity: 1, source: 'executor', billingAccountId: account })
   }
 
   // ─── Route-module path ──────────────────────────────────────────────────────

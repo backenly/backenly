@@ -29,6 +29,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/prisma'
 import { recordSecurityEvent } from '@/lib/platform-controls'
+import { purgeAccountState } from '@/lib/usage/account'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 120
@@ -117,7 +118,10 @@ export async function POST(request: NextRequest) {
         // Relations that matter cascade on delete (see the Prisma schema);
         // anything that does not cascade would throw here and be reported
         // rather than silently leaving a half-deleted account behind.
-        await prisma.user.delete({ where: { id: user.id } })
+        await prisma.$transaction(async (tx) => {
+          await purgeAccountState(tx, user.id)
+          await tx.user.delete({ where: { id: user.id } })
+        })
         deleted++
       } catch (err) {
         failures.push({ email: user.email, error: (err as Error)?.message ?? 'unknown' })
