@@ -187,10 +187,10 @@ describe.each(Object.keys(runtimes) as Array<keyof typeof runtimes>)('%s runtime
     const real = freshIp()
     const statuses: number[] = []
     for (let i = 0; i < SIGNIN.ipFailures.limit; i++) {
-      statuses.push((await signin(`spoof-${i}@example.test`, WRONG, `100.${i}.7.7, ${real}`)).status)
+      statuses.push((await signin(`spoof-${i}@example.test`, WRONG, `192.0.2.${i}, ${real}`)).status)
     }
     expect(statuses).toEqual(Array(SIGNIN.ipFailures.limit).fill(401))
-    expect((await signin('spoof-next@example.test', WRONG, `100.250.7.7, ${real}`)).status).toBe(429)
+    expect((await signin('spoof-next@example.test', WRONG, `192.0.2.250, ${real}`)).status).toBe(429)
   }, 180_000)
 })
 

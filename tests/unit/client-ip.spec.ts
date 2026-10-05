@@ -35,7 +35,7 @@ describe('AWS: client, load balancer, web task (a Next route handler, no socket)
   })
 
   it('ignores what the client wrote in front of it', () => {
-    for (const spoofed of ['1.2.3.4', '10.0.0.5', '1.2.3.4, 5.6.7.8', 'garbage', '::1']) {
+    for (const spoofed of ['192.0.2.1', '10.0.0.5', '192.0.2.1, 192.0.2.2', 'garbage', '::1']) {
       expect(clientIpFromHeaders(fetchRequest({ 'x-forwarded-for': `${spoofed}, ${REAL}` }))).toBe(REAL)
     }
   })
@@ -53,7 +53,7 @@ describe('AWS: client, load balancer, web task (a Next route handler, no socket)
 describe('AWS: the web task forwards to the runtime inside the VPC', () => {
   it('skips the web task, a private address, to reach the client', () => {
     expect(clientIpFromNodeRequest({
-      headers: { 'x-forwarded-for': `1.2.3.4, ${REAL}` },
+      headers: { 'x-forwarded-for': `192.0.2.1, ${REAL}` },
       socket: { remoteAddress: '10.20.3.4' },
     })).toBe(REAL)
   })
@@ -63,7 +63,7 @@ describe('single box: client, nginx, runtime (and runtime to Next)', () => {
   it('skips nginx on loopback, including the IPv4-mapped form Node reports', () => {
     for (const loopback of ['127.0.0.1', '::ffff:127.0.0.1', '::1']) {
       expect(clientIpFromNodeRequest({
-        headers: { 'x-forwarded-for': `1.2.3.4, ${REAL}` },
+        headers: { 'x-forwarded-for': `192.0.2.1, ${REAL}` },
         socket: { remoteAddress: loopback },
       })).toBe(REAL)
     }
@@ -71,14 +71,14 @@ describe('single box: client, nginx, runtime (and runtime to Next)', () => {
 
   it('skips the loopback hop the runtime appends when it forwards to Next', () => {
     // server/routes/next-proxy.ts appends its own peer before handing over.
-    expect(clientIpFromHeaders(fetchRequest({ 'x-forwarded-for': `1.2.3.4, ${REAL}, 127.0.0.1` }))).toBe(REAL)
+    expect(clientIpFromHeaders(fetchRequest({ 'x-forwarded-for': `192.0.2.1, ${REAL}, 127.0.0.1` }))).toBe(REAL)
   })
 })
 
 describe('a runtime reached directly, with nothing in front', () => {
   it('believes the socket over any header the client sends', () => {
     expect(clientIpFromNodeRequest({
-      headers: { 'x-forwarded-for': '1.2.3.4', 'x-real-ip': '5.6.7.8' },
+      headers: { 'x-forwarded-for': '192.0.2.1', 'x-real-ip': '192.0.2.66' },
       socket: { remoteAddress: REAL },
     })).toBe(REAL)
   })
@@ -107,7 +107,7 @@ describe('a public proxy in front (a CDN), declared in BACKENLY_TRUSTED_PROXIES'
   })
 
   it('refuses an entry it cannot parse, loudly, at startup', () => {
-    for (const bad of ['not-an-address', '10.0.0.0/33', '2001:db8::/129', '1.2.3.4/x']) {
+    for (const bad of ['not-an-address', '10.0.0.0/33', '2001:db8::/129', '192.0.2.1/x']) {
       expect(() => assertTrustedProxiesParse(env(bad))).toThrow(TrustedProxiesMisconfigured)
     }
     expect(() => assertTrustedProxiesParse(env('10.0.0.0/8, 2001:db8::/32, 198.51.100.20'))).not.toThrow()
@@ -117,12 +117,12 @@ describe('a public proxy in front (a CDN), declared in BACKENLY_TRUSTED_PROXIES'
 describe('X-Real-IP', () => {
   it('is used only when there is no X-Forwarded-For', () => {
     expect(clientIpFromHeaders(fetchRequest({ 'x-real-ip': REAL }))).toBe(REAL)
-    expect(clientIpFromHeaders(fetchRequest({ 'x-real-ip': '5.6.7.8', 'x-forwarded-for': REAL }))).toBe(REAL)
+    expect(clientIpFromHeaders(fetchRequest({ 'x-real-ip': '192.0.2.66', 'x-forwarded-for': REAL }))).toBe(REAL)
   })
 
   it('is believed from a trusted proxy and not from a direct client', () => {
     expect(clientIpFromNodeRequest({ headers: { 'x-real-ip': REAL }, socket: { remoteAddress: '127.0.0.1' } })).toBe(REAL)
-    expect(clientIpFromNodeRequest({ headers: { 'x-real-ip': '5.6.7.8' }, socket: { remoteAddress: REAL } })).toBe(REAL)
+    expect(clientIpFromNodeRequest({ headers: { 'x-real-ip': '192.0.2.66' }, socket: { remoteAddress: REAL } })).toBe(REAL)
   })
 })
 
@@ -143,7 +143,7 @@ describe('the forms an address arrives in', () => {
   })
 
   it('reads every value of a repeated header', () => {
-    expect(resolveClientIp({ forwardedFor: ['1.2.3.4', REAL] })).toBe(REAL)
+    expect(resolveClientIp({ forwardedFor: ['192.0.2.1', REAL] })).toBe(REAL)
   })
 
   it('has no answer when nothing names an address', () => {
