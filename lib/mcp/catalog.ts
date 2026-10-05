@@ -912,6 +912,9 @@ export const STATE_SECTIONS: Record<string, string> = {
   // Read-only. Granting consent for a schema-rewriting ladder stays with a
   // person: an agent that could approve its own work defeats the tier system.
   maintenance: 'get_maintenance_ladder',
+  // Read-only, for the maintenance ladder's reason: an extraction restructures
+  // a production table, and its consent belongs to a person.
+  evolution: 'get_evolution_proposals',
   realtime: 'get_realtime_status',
 }
 

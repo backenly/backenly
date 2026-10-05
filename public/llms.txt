@@ -40,7 +40,7 @@ Exactly **23** tools are advertised; `tools/list` is the authority. Every tool e
 
 | Tool | What it is for |
 | --- | --- |
-| `read_backend_state` | The read door for state. No arguments: the overview. `section` drills in: `schema`, `instructions`, `tables`, `apis`, `buckets`, `files`, `keys`, `users`, `rls`, `triggers`, `functions`, `cron`, `integrations`, `apps`, `env`, `webhooks`, `findings`, `incidents`, `metrics`, `errors`, `usage`, `deploy`, `readiness`, `autonomy`, `maintenance`, `realtime`. |
+| `read_backend_state` | The read door for state. No arguments: the overview. `section` drills in: `schema`, `instructions`, `tables`, `apis`, `buckets`, `files`, `keys`, `users`, `rls`, `triggers`, `functions`, `cron`, `integrations`, `apps`, `env`, `webhooks`, `findings`, `incidents`, `metrics`, `errors`, `usage`, `deploy`, `readiness`, `autonomy`, `maintenance`, `evolution`, `realtime`. |
 | `get_table_schema` | One table in full: columns, keys, indexes, CHECK constraints with their permitted values, triggers, RLS policies. |
 | `run_query` | Read-only SQL over the project's schema, as a SELECT-only role. |
 | `apply_migration` | Schema changes as SQL. Every statement is checked before any runs, and anything it cannot map is refused with the tool to use instead; a statement that fails while running stops the migration, and the response lists what was applied and what remains. With `branchId`, it changes that preview branch only. |
@@ -63,7 +63,7 @@ One tool per dashboard section, each with an `action`:
 | `realtime` | `enable`, `status`; `disable` waits for approval | https://backenly.com/docs/agents/realtime.md |
 | `integrations` | `list`, `capabilities`, `verify`, `connect`, `send_push`; `disconnect` waits for approval | https://backenly.com/docs/agents/integrations.md |
 | `monitoring` | `metrics`, `errors`, `usage`, `incidents`, `request_logs` | https://backenly.com/docs/agents/monitoring.md |
-| `autonomy` | `status`, `findings`, `maintenance`, `set_level` | https://backenly.com/docs/agents/autonomy.md |
+| `autonomy` | `status`, `findings`, `maintenance`, `evolution`, `set_level` | https://backenly.com/docs/agents/autonomy.md |
 | `webhooks` | `list`, `create`, `update`, `test`, `logs`, `replay`, `rotate_secret`, `triggers`, `trigger_deliveries`, `replay_trigger_delivery`, `rotate_trigger_secret`; `delete` waits for approval | https://backenly.com/docs/agents/webhooks.md |
 | `deploy` | `status`, `history`, `readiness`; `deploy`, `rollback` wait for approval | https://backenly.com/docs/agents/deploy.md |
 | `connect` | `whoami`, `create_api_key`, `list_api_keys`, `set_key_permissions`, `set_env`, `list_env`, `database_credentials`, `connect_frontend`, `list_apps`; `revoke_api_key`, `delete_env`, `disconnect_frontend` wait for approval | https://backenly.com/docs/agents/connect.md |

@@ -66,6 +66,7 @@ export async function GET(request: NextRequest) {
 
   let diagnosed = 0
   const maintenance: Partial<Record<SweepDisposition, number>> = {}
+  const evolution: Record<string, number> = {}
 
   for (let i = 0; i < activeProjects.length; i += CONCURRENCY) {
     const batch = activeProjects.slice(i, i + CONCURRENCY)
@@ -117,6 +118,23 @@ export async function GET(request: NextRequest) {
       }
       maintenance[s.value.disposition] = (maintenance[s.value.disposition] ?? 0) + 1
     }
+
+    // Tier D — structural evolution, resume-only. It never proposes, approves
+    // or starts anything a person did not approve; it advances an approved
+    // extraction past its backfill so a long one finishes without somebody
+    // pressing the button again. Behind its own switch, loaded only when on.
+    if (FLAGS.ENABLE_EVOLUTION_SCHEDULER) {
+      const { sweepProjectEvolution } = await import('@/lib/structural-evolution')
+      const evo = await Promise.allSettled(batch.map(p => sweepProjectEvolution({ projectId: p.id })))
+      for (let j = 0; j < evo.length; j++) {
+        const e = evo[j]
+        if (e.status === 'rejected') {
+          errors.push(`${batch[j].id} evolution: ${String(e.reason?.message ?? e.reason)}`)
+          continue
+        }
+        evolution[e.value.disposition] = (evolution[e.value.disposition] ?? 0) + 1
+      }
+    }
   }
 
   return NextResponse.json({
@@ -132,6 +150,7 @@ export async function GET(request: NextRequest) {
     // Counts per disposition, so a quiet estate reads as quiet rather than as
     // nothing having run: mostly `no_finding`, some `awaiting_approval`.
     maintenance,
+    evolution,
     errors: errors.slice(0, 10),
   })
 }

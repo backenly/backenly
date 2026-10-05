@@ -267,6 +267,19 @@ Architecture: `Client → EventSource → PostgreSQL LISTEN → NOTIFY → SSE s
 
 ---
 
+## Structural Evolution (`lib/structural-evolution/`)
+
+Self-healing keeps a backend working; structural evolution keeps it well-shaped. It finds a concern that has grown inside a table (`refund_*` on `orders`), proves it with measured evidence, and moves it into its own table through a behaviour-preserving ladder: rehearse on a rolled-back copy → create the satellite closed → forward sync → batched backfill → reconcile → expose reads → open writes (reverse sync, so old and new clients coexist) → reconcile → `contract` (dropping the old columns: planned, shown, **never run** by software).
+
+- **Evidence rule:** a proposal needs two cohesion families (one measured: co-presence, cohort, lifecycle or reference — names alone never qualify) plus a measured cost. Churn only ranks; `firesConcernExtraction` cannot see it.
+- **Consent binds to SQL:** `planVersion` hashes the exact statements; the plan is rebuilt from the approved spec and the live catalog before every attempt. Consent, ledger and lock are the maintenance ladder's own tables (`maintenance_approvals`, `maintenance_executions`, `maintenance_step_executions`, rows keyed `evolution:*`) and its advisory lock.
+- **Access never widens:** satellite rows are visible iff the parent row is (the parent's own policies decide), and writes go back through the parent's UPDATE policy as the caller.
+- **Flags:** `ENABLE_EVOLUTION_MUTATIONS` (off by default; rehearsal and verification still run), `ENABLE_EVOLUTION_SCHEDULER` (resume-only).
+- **Surfaces:** Database → Evolution tab, `/api/projects/[id]/structural-evolution`, read-only MCP `autonomy { action: "evolution" }`. Agents can read proposals, never approve them. Deterministic: no model calls.
+- Not the same thing as `/api/projects/[id]/evolution` (the long-horizon orchestrator's model-written roadmap) or `lib/ai/architecture-evolution.ts` (life-stage heuristics).
+
+---
+
 ## Billing (Stripe, Cloud only)
 
 - Plans (internal code → display): SANDBOX → Free $0 · BUILDER → Pro $25/mo ($20 annual) · SCALE → Enterprise (custom, sales-led, no self-serve checkout) — seeded via the Cloud overlay's `prisma/seed-billing.ts`. Internal codes are stable; only display names/prices/quotas change.

@@ -16,6 +16,7 @@ Call as `autonomy { action: "<action>", … }`.
 | `status` | mode, recent repairs and what is waiting | nothing | yes | no |
 | `findings` | open health findings with evidence | nothing | yes | no |
 | `maintenance` | the schema-maintenance ladder and its consent state | nothing | yes | no |
+| `evolution` | concerns that should move into their own table, with evidence and the exact ladder | nothing | yes | no |
 | `set_level` | OFF, CONSERVATIVE, BALANCED or AGGRESSIVE | `level` | no | no |
 <!-- end generated -->
 
