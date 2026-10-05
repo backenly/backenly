@@ -48,6 +48,12 @@ export type JobType =
    * attempts, backoff and dead-lettering have exactly one implementation.
    */
   | 'maintenance_backfill'
+  /**
+   * One batch of a structural-evolution backfill (lib/structural-evolution/backfill-job.ts),
+   * re-queued with a cursor until the host table ends. Here for the same reason
+   * as `maintenance_backfill`: one retry lifecycle, not two.
+   */
+  | 'evolution_backfill'
 
 export const PURGE_JOB_TYPE = 'purge_project' as const
 

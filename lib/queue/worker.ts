@@ -206,6 +206,11 @@ export async function processBackgroundJobs(): Promise<{
             result = await handleBackfillJob(job.payload as any)
             break
           }
+          case 'evolution_backfill': {
+            const { handleEvolutionBackfillJob } = await import('@/lib/structural-evolution/backfill-job')
+            result = await handleEvolutionBackfillJob(job.payload as any)
+            break
+          }
           case 'purge_project':
             // Unreachable by design: purge rows never sit in 'queued', so
             // claimNextJobs cannot return one. If that ever changes, throwing

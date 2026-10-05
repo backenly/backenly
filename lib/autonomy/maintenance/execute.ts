@@ -748,8 +748,13 @@ async function nextAttempt(planId: string): Promise<number> {
  * production did on 2026-09-16 when it ran an image without the
  * `maintenance_backfill` handler. A skipped job that reads as success would let
  * `verify` run against rows nothing had backfilled.
+ *
+ * Exported because structural evolution (lib/structural-evolution/execute.ts)
+ * dispatches its backfill the same way and must read a job with exactly these
+ * rules — a second reader would be a second definition of "the backfill
+ * finished".
  */
-async function inspectBackgroundJob(
+export async function inspectBackgroundJob(
   jobId: string,
 ): Promise<{ state: 'pending' | 'done' | 'failed'; detail: string }> {
   const job = await prisma.backgroundJob
