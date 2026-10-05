@@ -22,7 +22,7 @@
 import { randomUUID } from 'crypto'
 import { prisma } from '@/lib/db/prisma'
 import { createPlatformNotification } from '@/lib/notifications/platform'
-import { OVERAGE_AXES, overagePrice, type OverageAxis } from '@/lib/pricing/catalog'
+import { OVERAGE_AXES, formatUnitPrice, overagePrice, type OverageAxis } from '@/lib/pricing/catalog'
 import { accountLimits, type AccountLimits } from './overage'
 import { GRACE_DAYS } from './restrictions'
 
@@ -111,10 +111,10 @@ async function notify(
     title = `Your ${resource} reached what your spend limit allows`
     body = `You've used ${usedLabel} of ${resource} this month, the most your spend limit allows. ${atQuotaBehaviour(axis)} Raise the spend limit to continue.`
   } else if (level === '100') {
-    const price = overagePrice(axis, limits.terms)
+    const price = formatUnitPrice(overagePrice(axis, limits.terms))
     title = `You've used all of your included ${resource}`
     body = limits.overageActive && limits.axes[axis].billable
-      ? `You've used ${usedLabel} of the ${limitLabel} included this month. Usage past it is billed at $${(price.cents / 100).toFixed(price.cents < 1 ? 4 : 2)} ${price.label}, within your $${(limits.spendLimitCents / 100).toFixed(0)} spend limit.`
+      ? `You've used ${usedLabel} of the ${limitLabel} included this month. Usage past it is billed at ${price}, within your $${(limits.spendLimitCents / 100).toFixed(0)} spend limit.`
       : `You've used ${usedLabel} of the ${limitLabel} included this month. ${atQuotaBehaviour(axis)}`
   } else {
     title = `You've used ${level}% of your included ${resource}`
