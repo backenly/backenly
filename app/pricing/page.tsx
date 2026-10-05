@@ -102,7 +102,7 @@ const plans: Plan[] = [
     features: [
       'The same uncapped self-healing loop as Free: you pay for capacity, never for uptime',
       'Unlimited projects, 2M function runs, triggers, webhooks, custom domains',
-      '5 team seats with org roles, full deployment history and rollback, 30-day logs',
+      '5 team seats with project-level access, full deployment history and rollback, 30-day logs',
     ],
   },
   {
@@ -172,7 +172,7 @@ function comparisonGroups(published: boolean): MatrixGroup[] {
       rows: [
         { label: 'Price', cells: ['$0 forever', { value: '$25 per month', then: 'or $240 per year' }, 'Annual agreement'] },
         { label: 'Projects', cells: ['1', 'Unlimited', 'Unlimited'] },
-        { label: 'Team seats', cells: ['1', '5, with org roles', 'Custom'] },
+        { label: 'Team seats', cells: ['2', '5, with project-level access', 'Custom'] },
       ],
     },
     {
