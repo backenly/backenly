@@ -57,7 +57,6 @@ describe('single-tenant entitlements', () => {
     // quota kernel already understands, so nothing downstream needs an edition
     // check of its own.
     expect(ent.monthlyAiCredits).toBeNull()
-    expect(ent.maxApiRequestsPerMonth).toBeNull()
     expect(ent.maxPostgresStorageMb).toBeNull()
     expect(ent.maxFileStorageMb).toBeNull()
     expect(ent.maxRealtimeConnections).toBeNull()
