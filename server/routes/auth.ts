@@ -34,6 +34,8 @@ import {
 } from '@/lib/branches/auth-environment'
 import { ENVIRONMENT_HEADER, environmentHeaderValue } from '@/lib/branches/key-scope'
 import { admitSigninAttempt, admitSigninRequest } from '@/lib/security/end-user-signin-limit'
+import { admitExistenceCheck, admitSignupRequest } from '@/lib/security/end-user-signup-limit'
+import { isPlatformProbe } from '@/lib/security/platform-probe'
 import { throttleDecision } from '@/lib/security/rate-limit-decision'
 import type { RateLimitResult } from '@/lib/security/auth-rate-limit'
 
@@ -82,23 +84,15 @@ const signInSchema = z.object({
   password: z.string(),
 })
 
-// In-memory IP throttle for the public end-user auth surface. The address is
-// the one lib/security/client-ip.ts resolves. Each project also has API-key
-// rate limiting on /api/v1/* but auth signup/signin run BEFORE the project's
-// API-key gate, so they need their own brake.
-const SIGNUP_LIMITS = { limit: 10, windowMs: 60 * 60 * 1000 }
-// Reserved test accounts (…@*.internal) get their own generous bucket. The
-// behavioral verifier signs one up on every build / scan / deploy-readiness run,
-// all from the server's single egress IP — sharing the 10/hr real-user bucket,
-// those self-tests exhaust it and the verifier then gets 429, which fails the
-// "Live HTTP endpoints" check and blocks the deploy for a perfectly healthy
-// backend. A separate bucket means real users and the verifier can never starve
-// each other; still bounded (these accounts are auto-purged + excluded from
-// quotas, so the cap is pure anti-abuse, not a product limit).
-const SIGNUP_INTERNAL_LIMITS = { limit: 100, windowMs: 60 * 60 * 1000 }
-// Sign-in is not throttled here: it uses the same failure-counting policy and
-// store as the Next route (lib/security/end-user-signin-limit.ts), so the two
-// implementations of one endpoint cannot hold two different limits again.
+// In-memory IP throttle for the emailed end-user flows below (recovery,
+// verification, magic links). The address is the one lib/security/client-ip.ts
+// resolves. Each project also has API-key rate limiting on /api/v1/* but these
+// run BEFORE the project's API-key gate, so they need their own brake.
+//
+// Sign-up and sign-in are not throttled here: they use the same policies and
+// store as the Next routes (lib/security/end-user-signup-limit.ts and
+// end-user-signin-limit.ts), so the two implementations of one endpoint cannot
+// hold two different limits again.
 const ipBuckets = new Map<string, { count: number; resetAt: number }>()
 function ipFrom(req: Request): string {
   return clientIpFromNodeRequest(req) ?? 'unknown'
@@ -134,33 +128,21 @@ if (typeof setInterval !== 'undefined') {
 async function handleSignUp(req: Request, res: Response) {
   const { projectId } = req.params
 
-  // IP rate limit — applies BEFORE any DB lookup so we can't be used as a
-  // free email-existence oracle. Peeking at the already-parsed body email to
-  // pick the bucket is a pure string check (no DB), so the oracle protection is
-  // preserved. Reserved test emails route to their own bucket (see above).
+  // Every attempt counts against the address's cap, before any DB lookup.
+  // Backenly's own contract probe is not counted, exactly as on the Next route:
+  // it needs the signed internal-traffic token AND a reserved address
+  // (lib/security/platform-probe.ts). A reserved address alone is counted like
+  // any customer's; it used to get a bucket of its own here, and nowhere else.
   const ip = ipFrom(req)
-  const isInternalTest = isReservedTestEmail((req.body as { email?: unknown })?.email as string | undefined)
-  const rl = isInternalTest
-    ? throttle(`v1-signup-internal:${projectId}:${ip}`, SIGNUP_INTERNAL_LIMITS)
-    : throttle(`v1-signup:${projectId}:${ip}`, SIGNUP_LIMITS)
-  if (!rl.allowed) {
-    res.setHeader('Retry-After', String(rl.retryAfter))
-    // ── State the limit and the wait, not "try again later" ──────────────────
-    //
-    // "Try again later" is unactionable: it names no threshold, so the caller
-    // cannot tell whether they tripped a burst guard or an hourly cap, and no
-    // wait, so their only option is to poll. A developer doing ordinary testing
-    // hit this, had no idea what the limit was, and had to guess how long to
-    // pause. The numbers are not a secret — they are configuration, and stating
-    // them turns a dead end into a decision.
-    sendError(
-      res,
-      ErrorCodes.RATE_LIMIT_EXCEEDED,
-      `Too many signup attempts — the limit is ${SIGNUP_LIMITS.limit} per hour per IP, per project. ` +
-      `Retry in ${rl.retryAfter}s (see the Retry-After header).`,
-      429,
-    )
-    return
+  const bodyEmail = (req.body as { email?: unknown })?.email
+  const isInternalTest = isReservedTestEmail(bodyEmail as string | undefined)
+  const probe = isPlatformProbe({ headers: { get: (name: string) => req.get(name) ?? null } }, bodyEmail)
+  if (!probe) {
+    const limit = await admitSignupRequest(projectId, ip)
+    if (!limit.allowed) {
+      sendThrottled(res, limit)
+      return
+    }
   }
 
   try {
@@ -210,6 +192,14 @@ async function handleSignUp(req: Request, res: Response) {
     // Service-role: workspace users tables may have FORCE ROW LEVEL SECURITY.
     // Anonymous signups need the service-role bypass; without it, both the
     // SELECT-existing and the INSERT below hit PG 42501.
+    //
+    // The answer is the existence oracle, so it is budgeted before it is looked
+    // up, and given back when the address turns out to be free.
+    const check = probe ? null : await admitExistenceCheck(projectId, ip)
+    if (check?.denied) {
+      sendThrottled(res, check.denied)
+      return
+    }
     const existing = await executeWithUserContext<any>(
       '',
       true,
@@ -220,6 +210,7 @@ async function handleSignUp(req: Request, res: Response) {
       sendError(res, ErrorCodes.CONFLICT, 'An account with this email already exists', 409)
       return
     }
+    await check?.addressFree()
 
     // The account's MAU cap, as on the Next signup route: only a NEW end user
     // is refused, existing users keep working. This route serves signups on

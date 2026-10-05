@@ -143,7 +143,19 @@ export const AUTH_LIMITS = {
     // person's password. Ten, Auth0's default brute-force threshold.
     accountFailures: { limit: 10,  windowMs: 15 * 60_000 },
   },
-  endUserSignup:  { ip: { limit: 10, windowMs: 60 * 60_000 } },
+  // Sign-up was 10 per hour per address, every attempt. A shop's launch from one
+  // campus or office address, or a frontend signing users up from its own
+  // server, was refused on the eleventh customer. But that limit was also the
+  // only brake on sign-up's one oracle, "An account with this email already
+  // exists", so it is split rather than simply raised
+  // (lib/security/end-user-signup-limit.ts):
+  endUserSignup: {
+    // Every attempt from one address: accounts created, MAU and rows.
+    ip:          { limit: 60, windowMs: 60 * 60_000 },
+    // Answers that the address is already registered, from one address: the
+    // existence oracle stays exactly as tight as it was.
+    ipConflicts: { limit: 10, windowMs: 60 * 60_000 },
+  },
   endUserRecover: { ip: { limit: 5,  windowMs: 15 * 60_000 } },
 } as const
 

@@ -76,7 +76,7 @@ async function signins(n: number, email: string, internal?: string, password = W
   return out
 }
 
-/** Statuses of `n` sign-ups (one new address each) from one fresh address. */
+/** Statuses of `n` sign-ups of `email(i)` from one fresh address. */
 async function signups(n: number, email: (i: number) => string, internal?: string): Promise<number[]> {
   const ip = freshIp()
   const out: number[] = []
@@ -136,7 +136,10 @@ describe('the customer limits', () => {
       ipFailures: { limit: 30, windowMs: 15 * 60_000 },
       accountFailures: { limit: 10, windowMs: 15 * 60_000 },
     })
-    expect(AUTH_LIMITS.endUserSignup.ip).toEqual({ limit: 10, windowMs: 60 * 60_000 })
+    expect(AUTH_LIMITS.endUserSignup).toEqual({
+      ip: { limit: 60, windowMs: 60 * 60_000 },
+      ipConflicts: { limit: 10, windowMs: 60 * 60_000 },
+    })
   })
 
   it('refuses the 11th wrong password to a customer account from one address', async () => {
@@ -169,17 +172,21 @@ describe('sign-in', () => {
 })
 
 describe('sign-up', () => {
+  // Sign-up's tight budget is on "already registered" answers (10 an hour), so
+  // these sign one address up and then repeat it: one 201, then 409s, then the
+  // 11th 409 is refused for everyone the exemption does not cover.
   const tag = crypto.randomBytes(3).toString('hex')
+  const ONE_THEN_TEN_CONFLICTS_THEN_429 = [201, ...Array(10).fill(409), 429]
 
   it('does not throttle the probe', async () => {
-    expect(await signups(12, (i) => `__cv_${tag}p${i}@backenly.internal`, token())).toEqual(Array(12).fill(201))
+    expect(await signups(12, () => `__cv_${tag}p@backenly.internal`, token())).toEqual([201, ...Array(11).fill(409)])
   }, 180_000)
 
-  it('throttles reserved addresses without the token on the 11th', async () => {
-    expect(await signups(11, (i) => `__cv_${tag}n${i}@backenly.internal`)).toEqual(TEN_OK_THEN_429(201))
+  it('throttles a reserved address without the token', async () => {
+    expect(await signups(12, () => `__cv_${tag}n@backenly.internal`)).toEqual(ONE_THEN_TEN_CONFLICTS_THEN_429)
   }, 180_000)
 
-  it('throttles the token on customer addresses on the 11th', async () => {
-    expect(await signups(11, (i) => `real-${tag}${i}@example.test`, token())).toEqual(TEN_OK_THEN_429(201))
+  it('throttles the token on a customer address', async () => {
+    expect(await signups(12, () => `real-${tag}@example.test`, token())).toEqual(ONE_THEN_TEN_CONFLICTS_THEN_429)
   }, 180_000)
 })
