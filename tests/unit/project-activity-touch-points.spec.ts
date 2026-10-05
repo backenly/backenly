@@ -3,16 +3,18 @@
  *
  * Two rules from the pause design that no end-to-end test can pin cheaply:
  *
- *   MCP     authenticate -> paused check -> stamp -> quota. A call refused
- *           because the project is paused must not move its clock, and must
- *           not spend quota either.
+ *   MCP     authenticate -> paused check -> stamp -> rate limit. A call
+ *           refused because the project is paused must not move its clock,
+ *           and must not spend the key's rate-limit window either. An MCP call
+ *           is never counted as an API request.
  *   UI      a dashboard WRITE counts as use; a dashboard READ does not, or an
  *           open tab polling health would keep an abandoned backend awake.
  *
  * The collaborators are replaced with recorders (auth, the serving state, the
- * clock, quota). No database is mocked: nothing here reaches one. The real
- * clock and the real serving state are covered against Postgres in
- * tests/integration/project-activity-clock.spec.ts.
+ * clock, the key's rate-limit read, and the two ways a request gets counted as
+ * an API request). The rate-limit read is the guard's only database access, so
+ * nothing here reaches one. The real clock and the real serving state are
+ * covered against Postgres in tests/integration/project-activity-clock.spec.ts.
  */
 
 const calls: string[] = []
@@ -45,11 +47,31 @@ jest.mock('@/lib/projects/activity', () => ({
   }),
 }))
 
-jest.mock('@/lib/quota/kernel', () => ({
-  // Refuses, so mcpGuard stops before its rate-limit step (which is a DB read).
-  enforceAndTrackApiRequest: jest.fn(async () => {
-    calls.push('quota')
-    return { allowed: false, message: 'over quota', code: 'PLAN_LIMIT_EXCEEDED' }
+jest.mock('@/lib/db/prisma', () => ({
+  prisma: {
+    apiKey: {
+      // The per-key rate limit, mcpGuard's last step. A key with no row has
+      // no window to spend, so the call passes and the guard runs to the end.
+      findUnique: jest.fn(async () => {
+        calls.push('rate')
+        return null
+      }),
+    },
+    // An MCP call is not an API request. Were the guard to count one, or to
+    // record it as served API traffic (which is what gets counted), 'count'
+    // would show up in the call order below.
+    userAiUsage: {
+      upsert: jest.fn(async () => {
+        calls.push('count')
+      }),
+    },
+  },
+}))
+
+jest.mock('@/lib/traffic/request-recorder', () => ({
+  ...jest.requireActual('@/lib/traffic/request-recorder'),
+  recordRuntimeRequest: jest.fn(() => {
+    calls.push('count')
   }),
 }))
 
@@ -74,12 +96,12 @@ beforeEach(() => {
 })
 
 describe('MCP', () => {
-  it('stamps after the pause check and before quota', async () => {
+  it('stamps after the pause check and before the rate limit, and counts no API request', async () => {
     await mcpGuard({} as any)
-    expect(calls).toEqual(['auth', 'serving', 'touch:p1', 'quota'])
+    expect(calls).toEqual(['auth', 'serving', 'touch:p1', 'rate'])
   })
 
-  it('neither stamps nor spends quota for a paused project', async () => {
+  it('neither stamps nor spends the rate limit for a paused project', async () => {
     servingKind = 'paused'
     const result = await mcpGuard({} as any)
 

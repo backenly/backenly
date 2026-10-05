@@ -351,13 +351,13 @@ describe('usage alerts', () => {
     expect(levels.map((l) => l.level).sort()).toEqual(['50', '80'])
   })
 
-  it('warns once on quotas that are never billed', async () => {
+  it('warns once on a quota that is never billed', async () => {
     const { userId } = await account()
-    await expect(recordQuotaWarning(userId, 'api_requests', 85, 100, 'LIFETIME')).resolves.toBe(true)
-    await expect(recordQuotaWarning(userId, 'api_requests', 95, 100, 'LIFETIME')).resolves.toBe(false)
     await expect(recordQuotaWarning(userId, 'realtime_connections', 10, 100, utcPeriod())).resolves.toBe(false)
+    await expect(recordQuotaWarning(userId, 'realtime_connections', 85, 100, utcPeriod())).resolves.toBe(true)
+    await expect(recordQuotaWarning(userId, 'realtime_connections', 95, 100, utcPeriod())).resolves.toBe(false)
     const sent = await usageNotifications(userId)
     expect(sent).toHaveLength(1)
-    expect(sent[0].title).toBe("You're at 85% of your API requests")
+    expect(sent[0].title).toBe("You're at 85% of your concurrent realtime connections")
   })
 })
