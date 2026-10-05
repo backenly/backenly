@@ -60,6 +60,12 @@ const mockUpdateExecution = jest.fn(async ({ where, data }: any) => {
 })
 const mockFindFirstExecution = jest.fn(async () => null)
 const mockJobFindUnique = jest.fn(async () => null as any)
+/**
+ * The newest job of a backfill chain, found by the rung's idempotency key.
+ * Null by default, which resolves to the recorded first job — the single-batch
+ * case every pre-existing test describes.
+ */
+const mockJobFindFirst = jest.fn(async (_args?: any) => null as any)
 const mockFindUniqueStep = jest.fn(async ({ where }: any) => stepRows.get(where.idempotencyKey) ?? null)
 const mockUpsertStep = jest.fn(async ({ where, create, update }: any) => {
   const existing = stepRows.get(where.idempotencyKey)
@@ -86,7 +92,10 @@ jest.mock('@/lib/db', () => ({
       update: (...a: any[]) => mockUpdateExecution(...(a as [any])),
       findFirst: (...a: any[]) => mockFindFirstExecution(...(a as [])),
     },
-    backgroundJob: { findUnique: (...a: any[]) => mockJobFindUnique(...(a as [any])) },
+    backgroundJob: {
+      findUnique: (...a: any[]) => mockJobFindUnique(...(a as [any])),
+      findFirst: (...a: any[]) => mockJobFindFirst(...(a as [any])),
+    },
     maintenanceStepExecution: {
       findUnique: (...a: any[]) => mockFindUniqueStep(...(a as [any])),
       upsert: (...a: any[]) => mockUpsertStep(...(a as [any])),
@@ -766,6 +775,77 @@ describe('a dispatched backfill stops the ladder', () => {
     expect(mockRunVerify).toHaveBeenCalledTimes(1)
     expect(r.steps.find(s => s.kind === 'backfill')).toMatchObject({ status: 'completed' })
     expect(r.status).toBe('completed')
+  })
+
+  // ── A chain longer than one batch ─────────────────────────────────────────
+  //
+  // Each batch queues the next as a NEW job, so the job the rung recorded is
+  // only the chain's first link and completes with done:false as soon as a
+  // second batch exists. Reading it alone kept every ladder on a table longer
+  // than one batch "awaiting background work" forever.
+
+  const chain = (jobs: Record<string, { status: string; result: unknown }>, newest: string) => {
+    mockJobFindFirst.mockResolvedValueOnce({ id: newest })
+    mockJobFindUnique.mockImplementation(async ({ where }: any) =>
+      jobs[where.id] ? { ...jobs[where.id], error: null, attempts: 0 } : null,
+    )
+  }
+
+  it('resumes once the LAST batch of a multi-batch chain finished, not the first', async () => {
+    const { plan, over } = withBackfill()
+    completed(plan, ...plan.steps.slice(0, at(plan, 'backfill')).map(x => x.ordinal))
+    dispatched(plan, at(plan, 'backfill'))
+    chain(
+      {
+        'job-1': { status: 'completed', result: { done: false, batches: 1 } },
+        'job-2': { status: 'completed', result: { done: false, batches: 2 } },
+        'job-3': { status: 'completed', result: { done: true, batches: 3, updated: 4_500 } },
+      },
+      'job-3',
+    )
+
+    const r = await run(over)
+    expect(r.steps.find(s => s.kind === 'backfill')).toMatchObject({ status: 'completed' })
+    expect(mockRunVerify).toHaveBeenCalledTimes(1)
+    expect(r.status).toBe('completed')
+  })
+
+  it('follows the chain by this rung\'s own idempotency key', async () => {
+    const { plan, over } = withBackfill()
+    completed(plan, ...plan.steps.slice(0, at(plan, 'backfill')).map(x => x.ordinal))
+    dispatched(plan, at(plan, 'backfill'))
+    chain({ 'job-1': { status: 'completed', result: { done: false } }, 'job-2': { status: 'queued', result: null } }, 'job-2')
+
+    const r = await run(over)
+    expect(r.status).toBe('awaiting_background_work')
+    expect(r.haltReason).toMatch(/waiting on job job-2/)
+    expect(mockJobFindFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          type: 'maintenance_backfill',
+          payload: { path: ['idempotencyKey'], equals: plan.steps[at(plan, 'backfill')].idempotencyKey },
+        }),
+        orderBy: { createdAt: 'desc' },
+      }),
+    )
+    expect(mockRunVerify).not.toHaveBeenCalled()
+  })
+
+  it('halts when a later link of the chain dead-lettered', async () => {
+    const { plan, over } = withBackfill()
+    completed(plan, ...plan.steps.slice(0, at(plan, 'backfill')).map(x => x.ordinal))
+    dispatched(plan, at(plan, 'backfill'))
+    chain(
+      {
+        'job-1': { status: 'completed', result: { done: false } },
+        'job-2': { status: 'dead_letter', result: null },
+      },
+      'job-2',
+    )
+
+    const r = await run(over)
+    expect(r.status).toBe('halted')
+    expect(r.haltReason).toMatch(/job-2 is dead_letter/)
   })
 
   it('halts when the job dead-lettered', async () => {

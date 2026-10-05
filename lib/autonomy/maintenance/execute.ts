@@ -438,16 +438,20 @@ async function runLadder(
     // A rung that already dispatched work resumes from the job, never by
     // dispatching a second one.
     if (existing?.status === 'dispatched' && existing.backgroundJobId) {
-      const progress = await inspectBackgroundJob(existing.backgroundJobId)
+      const { jobId, progress } = await inspectBackfillChain(
+        projectId,
+        step.idempotencyKey,
+        existing.backgroundJobId,
+      )
       if (progress.state === 'pending') {
         steps.push({
           ordinal: step.ordinal,
           kind: step.kind,
           status: 'dispatched',
-          detail: `background job ${existing.backgroundJobId} is ${progress.detail}`,
+          detail: `background job ${jobId} is ${progress.detail}`,
           backgroundJobId: existing.backgroundJobId,
         })
-        return awaiting(executionId, steps, `step ${step.ordinal} (${step.kind}) is waiting on job ${existing.backgroundJobId}`)
+        return awaiting(executionId, steps, `step ${step.ordinal} (${step.kind}) is waiting on job ${jobId}`)
       }
       if (progress.state === 'failed') {
         await prisma.maintenanceStepExecution.update({
@@ -790,6 +794,45 @@ export async function inspectBackgroundJob(
     state: 'done',
     detail: `backfill complete: ${String(result.updated ?? 0)} row(s) updated over ${String(result.batches ?? 0)} batch(es)`,
   }
+}
+
+/**
+ * The state of a backfill CHAIN, read from its newest job.
+ *
+ * `handleBackfillJob` runs one batch per job and queues the next batch as a NEW
+ * job, so the id the step row recorded at dispatch is only the chain's first
+ * link. That job completes with `done: false` the moment a second batch exists,
+ * and reading it alone reported "more remain" forever: any table longer than one
+ * batch (2,000 rows by default) left its ladder `awaiting_background_work` on
+ * every pass, with the backfill long finished.
+ *
+ * Every batch carries the step's idempotency key in its payload, which is unique
+ * to one rung of one plan, so the chain is followed by that key to its newest
+ * job — whose state IS the chain's state: queued or running means pending, a
+ * failure means the chain stopped there, `done: true` means it reached the end.
+ * A single-batch chain resolves to its own first job, so nothing changes for it.
+ *
+ * Falls back to the recorded job when the lookup fails, which is the previous
+ * behaviour: never better than before, never worse.
+ */
+export async function inspectBackfillChain(
+  projectId: string,
+  idempotencyKey: string,
+  firstJobId: string,
+): Promise<{ jobId: string; progress: { state: 'pending' | 'done' | 'failed'; detail: string } }> {
+  const newest = await prisma.backgroundJob
+    .findFirst({
+      where: {
+        projectId,
+        type: 'maintenance_backfill',
+        payload: { path: ['idempotencyKey'], equals: idempotencyKey },
+      },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true },
+    })
+    .catch(() => null)
+  const jobId = newest?.id ?? firstJobId
+  return { jobId, progress: await inspectBackgroundJob(jobId) }
 }
 
 async function awaiting(
