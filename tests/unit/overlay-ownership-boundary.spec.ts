@@ -384,6 +384,11 @@ describe('overlay-allowlist.json', () => {
         'app/app/billing/**',
         'app/app/invite/**',
         'app/app/members/**',
+        // Organizations: their projects, members and settings pages, the list,
+        // and creating one. The projects page they render is public.
+        'app/app/new-organization/**',
+        'app/app/org/**',
+        'app/app/organizations/**',
         'app/app/referral/**',
         'app/startups/**',
         'components/app/AmplitudeAnalytics.tsx',
