@@ -157,7 +157,7 @@ type MatrixGroup = { icon: LucideIcon; title: string; rows: MatrixRow[] }
  * their rates come from lib/pricing/catalog.ts, the catalog that also prices the
  * usage, so the page cannot state a rate the product does not charge. A rate
  * appears only in a build that publishes usage pricing, and only once the
- * catalog publishes that axis's rate (database waits on its measured cost).
+ * catalog publishes that axis's rate.
  */
 function comparisonGroups(published: boolean): MatrixGroup[] {
   const pro = new Map(proUsagePriceRows().map((r) => [r.axis, r]))
