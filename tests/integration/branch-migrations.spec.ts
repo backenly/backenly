@@ -45,7 +45,9 @@ import { hashApiKey } from '@/lib/auth/apiKeyAuth'
 import { createProvisionedProject } from '@/lib/projects/provision'
 import { POST } from '@/app/api/mcp/tool/route'
 import { dispatchTool } from '@/lib/ai/brain/tools'
-import { createBranch, mergeBranch, diffBranch } from '@/lib/branches/engine'
+import { createBranch, mergeBranch, diffBranch, discardBranch } from '@/lib/branches/engine'
+import { branchSchemaName } from '@/lib/branches/diff'
+import { profileForBranchSchema } from '@/lib/postgrest/gateway'
 import { decideApproval } from '@/lib/mcp/approvals'
 import { forgetProtection } from '@/lib/branches/protection'
 
@@ -124,6 +126,48 @@ afterAll(async () => {
   if (originalEngineMode === undefined) delete process.env.ENGINE_MODE
   else process.env.ENGINE_MODE = originalEngineMode
 }, 180_000)
+
+describe('branch schema identifiers', () => {
+  it.each(['release-preview', 'a'.repeat(31)])('creates and discards a branch named %s without identifier truncation', async (name) => {
+    const result = await createBranch(projectId, ownerId, name)
+    if (!result.ok) throw new Error((result as any).error)
+    const branch = (result as any).branch
+    try {
+      expect(Buffer.byteLength(branch.schemaName, 'utf8')).toBeLessThanOrEqual(63)
+      expect(await schemaExists(branch.schemaName)).toBe(true)
+      expect(await columns(branch.schemaName, 'orders')).toContain('total')
+      expect(profileForBranchSchema(projectId, branch.schemaName)).toBe(branch.schemaName)
+      const stored = await prisma.workspaceBranch.findUnique({ where: { id: branch.id } })
+      expect(stored?.schemaName).toBe(branch.schemaName)
+    } finally {
+      const discarded = await discardBranch(projectId, ownerId, branch.id)
+      expect(discarded.ok).toBe(true)
+    }
+    expect(await schemaExists(branch.schemaName)).toBe(false)
+  }, 120_000)
+
+  it('refuses a collision without deleting a preexisting schema or its data', async () => {
+    const name = 'release-preview'
+    const schemaName = branchSchemaName(projectId, name)
+    // A valid short name can occupy the same finite namespace as a long-name
+    // hash. This also covers legacy hyphen/underscore aliases: collision must
+    // fail safely even when there is no WorkspaceBranch row naming the schema.
+    await prisma.$executeRawUnsafe(`CREATE SCHEMA "${schemaName}"`)
+    try {
+      await prisma.$executeRawUnsafe(`CREATE TABLE "${schemaName}".sentinel (body text NOT NULL)`)
+      await prisma.$executeRawUnsafe(`INSERT INTO "${schemaName}".sentinel VALUES ('keep this branch data')`)
+      const result = await createBranch(projectId, ownerId, name)
+      expect(result.ok).toBe(false)
+      expect((result as any).error).toMatch(/already exists/)
+      expect(await schemaExists(schemaName)).toBe(true)
+      const rows = await prisma.$queryRawUnsafe<Array<{ body: string }>>(`SELECT body FROM "${schemaName}".sentinel`)
+      expect(rows).toEqual([{ body: 'keep this branch data' }])
+      expect(await prisma.workspaceBranch.count({ where: { projectId, name, status: 'active' } })).toBe(0)
+    } finally {
+      await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`)
+    }
+  }, 120_000)
+})
 
 describe('protected production', () => {
   it('is on for a new Cloud project', async () => {

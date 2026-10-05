@@ -181,7 +181,9 @@ export async function createBranch(
     await client.query('COMMIT')
   } catch (e: any) {
     await client.query('ROLLBACK').catch(() => {})
-    await pool.query(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`).catch(() => {})
+    // CREATE SCHEMA and every clone are transactional: rollback removes what
+    // this attempt created. Dropping here could destroy an existing branch
+    // when CREATE SCHEMA itself failed because its identifier already exists.
     return { ok: false as const, error: `Branch clone failed: ${e?.message ?? 'unknown error'}` }
   } finally {
     client.release()

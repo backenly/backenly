@@ -13,6 +13,7 @@
  * Pure function — unit-tested in scripts/verify-branch-diff.ts.
  */
 
+import { createHash } from 'crypto'
 import type { WorkspaceSchema, TableSchema } from '@/lib/typegen/schema-reader'
 
 export interface ColumnDiff {
@@ -95,5 +96,18 @@ export function validateBranchName(name: string): string | null {
 }
 
 export function branchSchemaName(projectId: string, name: string): string {
-  return `workspace_${projectId}_br_${name.replace(/-/g, '_')}`
+  const slug = name.trim().toLowerCase()
+  const prefix = `workspace_${projectId}_br_`
+  const legacy = `${prefix}${slug.replace(/-/g, '_')}`
+  // PostgreSQL truncates identifiers above 63 bytes. A canonical UUID leaves
+  // only 13 ASCII characters for the branch suffix, although the display name
+  // may contain 31. Keep every existing name that fits; stored schemaName is
+  // still authoritative for branches that already exist.
+  if (legacy.length <= 63) return legacy
+
+  // Hash the original slug so long names differing after the first 13 chars,
+  // or by '-' versus '_', do not collapse to the same truncated identifier.
+  // CREATE SCHEMA refuses any collision, including with a legacy short name.
+  const hash = createHash('sha256').update('backenly-preview-branch:').update(slug).digest('hex').slice(0, 12)
+  return `${prefix}b${hash}`
 }

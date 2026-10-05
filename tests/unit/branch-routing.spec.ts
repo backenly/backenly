@@ -18,10 +18,40 @@ import {
   profileForBranchSchema,
   profileForProject,
 } from '@/lib/postgrest/gateway'
+import { branchSchemaName, validateBranchName } from '@/lib/branches/diff'
 
 const PROJECT = 'abc123'
 const MAIN = 'workspace_abc123'
 const BRANCH = 'workspace_abc123_br_add_payments'
+
+describe('branch schema names fit PostgreSQL', () => {
+  const projectId = '11111111-2222-4333-8444-555555555555'
+  const prefix = `workspace_${projectId}_br_`
+
+  it('preserves existing names through the 13-character boundary', () => {
+    expect(branchSchemaName(projectId, 'abcdefghijklm')).toBe(`${prefix}abcdefghijklm`)
+    expect(branchSchemaName(projectId, 'add-payments')).toBe(`${prefix}add_payments`)
+  })
+
+  it.each(Array.from({ length: 30 }, (_, i) => i + 2))('bounds every accepted name length, including %i characters', (length) => {
+    const name = 'a'.repeat(length)
+    expect(validateBranchName(name)).toBeNull()
+    const schema = branchSchemaName(projectId, name)
+    expect(Buffer.byteLength(schema, 'utf8')).toBeLessThanOrEqual(63)
+    expect(profileForBranchSchema(projectId, schema)).toBe(schema)
+  })
+
+  it('bounds release-preview and is deterministic after normalization', () => {
+    const schema = branchSchemaName(projectId, 'release-preview')
+    expect(Buffer.byteLength(schema, 'utf8')).toBe(63)
+    expect(branchSchemaName(projectId, '  RELEASE-PREVIEW  ')).toBe(schema)
+  })
+
+  it('keeps long names distinct after the old truncation boundary and across separator variants', () => {
+    expect(branchSchemaName(projectId, 'abcdefghijklmno')).not.toBe(branchSchemaName(projectId, 'abcdefghijklmnp'))
+    expect(branchSchemaName(projectId, 'release-preview')).not.toBe(branchSchemaName(projectId, 'release_preview'))
+  })
+})
 
 describe('profileForBranchSchema', () => {
   it('falls back to main when no branch is bound', () => {
