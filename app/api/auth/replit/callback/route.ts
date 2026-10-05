@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { clientIpFromHeaders } from '@/lib/security/client-ip'
 import { cookies } from 'next/headers'
 import { prisma } from '@/lib/db'
 import { verifyToken } from '@/lib/auth/jwt'
@@ -175,7 +176,7 @@ export async function GET(request: NextRequest) {
           accessToken, // TODO: Encrypt this in production
           refreshToken, // TODO: Encrypt this in production
         },
-        ipAddress: request.headers.get('x-forwarded-for') || 'unknown',
+        ipAddress: clientIpFromHeaders(request) ?? 'unknown',
         userAgent: request.headers.get('user-agent') || 'unknown',
       },
     })

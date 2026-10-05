@@ -1,6 +1,7 @@
 export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
+import { clientIpFromHeaders } from '@/lib/security/client-ip'
 import { verify } from 'jsonwebtoken'
 import { createSession } from '@/lib/auth/session'
 import { prisma } from '@/lib/db'
@@ -135,10 +136,7 @@ export async function GET(request: NextRequest) {
     }
 
     // Founder blocklist — gates both new signups and existing logins.
-    const oauthIp =
-      request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
-      request.headers.get('x-real-ip') ||
-      null
+    const oauthIp = clientIpFromHeaders(request)
     const blockHit = await isBlocked({ email, ip: oauthIp })
     if (blockHit) {
       return NextResponse.redirect(

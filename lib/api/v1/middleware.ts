@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { clientIpFromHeaders } from '@/lib/security/client-ip'
 import { authenticateApiKey } from '@/lib/middleware/apiKeyAuth'
 import { prisma } from '@/lib/db'
 import { createErrorResponse, ErrorCodes } from './errors'
@@ -117,7 +118,7 @@ export async function v1ApiMiddleware(
         kind: 'auth_failure',
         severity: 'info',
         projectId: params.projectId,
-        ip: request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null,
+        ip: clientIpFromHeaders(request),
         summary: `Auth failed (${fr?.kind ?? 'unknown'}) from ${origin ?? 'unknown origin'}`,
         detail: {
           kind: fr?.kind ?? 'unknown',
@@ -174,7 +175,7 @@ export async function v1ApiMiddleware(
       severity: 'warn',
       userId: apiKeyRecord.userId,
       projectId: params.projectId,
-      ip: request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null,
+      ip: clientIpFromHeaders(request),
       summary: `Rate limit hit on project ${params.projectId} (key ${apiKeyRecord.keyPrefix})`,
       detail: { apiKeyId: apiKeyRecord.id, path: request.nextUrl.pathname, limit: apiKeyRecord.rateLimit },
     }).catch(() => {})
@@ -238,7 +239,7 @@ export async function v1ApiMiddleware(
       kind: 'lockdown',
       severity: 'high',
       projectId,
-      ip: request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null,
+      ip: clientIpFromHeaders(request),
       summary: `Public request blocked — project "${project.name}" is locked down`,
       detail: { path: request.nextUrl.pathname, method: request.method },
     }).catch(() => {})
@@ -370,7 +371,7 @@ export async function v1ApiMiddleware(
       severity: 'high',
       userId: apiKeyRecord.userId,
       projectId,
-      ip: request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null,
+      ip: clientIpFromHeaders(request),
       summary: `API key scoped to ${apiKeyRecord.projectId} used against project ${projectId}`,
       detail: { apiKeyId: apiKeyRecord.id, keyProjectId: apiKeyRecord.projectId, requestedProjectId: projectId, path: request.nextUrl.pathname },
     }).catch(() => {})

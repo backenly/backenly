@@ -7,6 +7,7 @@
  */
 
 import { NextRequest } from 'next/server'
+import { clientIpFromHeaders } from '@/lib/security/client-ip'
 import { prisma } from '@/lib/db/postgres'
 import crypto from 'crypto'
 
@@ -151,9 +152,7 @@ export async function logAuditEvent(
   metadata?: any
 ): Promise<void> {
   try {
-    const ipAddress = request.headers.get('x-forwarded-for') || 
-                      request.headers.get('x-real-ip') || 
-                      'unknown'
+    const ipAddress = clientIpFromHeaders(request) ?? 'unknown'
     const userAgent = request.headers.get('user-agent') || 'unknown'
     
     await prisma.delegationAuditLog.create({

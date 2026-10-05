@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { clientIpFromHeaders } from '@/lib/security/client-ip'
 import { prisma } from '@/lib/db'
 import { verifyToken } from '@/lib/auth/jwt'
 import crypto from 'crypto'
@@ -57,9 +58,7 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
     const tokenHash = crypto.createHash('sha256').update(delegationToken).digest('hex')
 
     // Capture IP address and user agent
-    const ipAddress = request.headers.get('x-forwarded-for') || 
-                      request.headers.get('x-real-ip') || 
-                      'unknown'
+    const ipAddress = clientIpFromHeaders(request) ?? 'unknown'
     const userAgent = request.headers.get('user-agent') || 'unknown'
 
     // Create delegation connection (24 hour expiry)

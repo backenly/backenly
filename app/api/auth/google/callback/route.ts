@@ -1,6 +1,7 @@
 export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
+import { clientIpFromHeaders } from '@/lib/security/client-ip'
 import { sign } from 'jsonwebtoken'
 import { prisma } from '@/lib/db'
 import { logger } from '@/lib/logger'
@@ -112,10 +113,7 @@ export async function GET(request: NextRequest) {
       if (!(await oauthMayCreateAccount())) {
         return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/auth/login?error=claim_requires_setup_token`)
       }
-      const signupIp =
-        request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
-        request.headers.get('x-real-ip') ||
-        null
+      const signupIp = clientIpFromHeaders(request)
       const guard = await assertSignupAllowed(email, signupIp)
       if (!guard.ok) {
         return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/auth/login?error=signup_not_allowed`)

@@ -14,6 +14,7 @@
  */
 
 import { Router, Request, Response } from 'express'
+import { clientIpFromNodeRequest } from '@/lib/security/client-ip'
 import { createHash } from 'crypto'
 import { prisma } from '@/lib/db'
 import { generateApiKey } from '@/lib/auth/apiKeyAuth'
@@ -72,10 +73,7 @@ const handleBootstrap = async (req: Request, res: Response) => {
     return sendError(res, ErrorCodes.BAD_REQUEST, 'Invalid project ID', 400)
   }
 
-  const ip = (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim()
-    ?? (req.headers['x-real-ip'] as string | undefined)
-    ?? req.socket?.remoteAddress
-    ?? 'unknown'
+  const ip = clientIpFromNodeRequest(req) ?? 'unknown'
 
   const rl = checkRateLimit(`${projectId}:${ip}`)
   if (rl.allowed === false) {

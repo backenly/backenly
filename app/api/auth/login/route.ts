@@ -1,6 +1,7 @@
 export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
+import { clientIpFromHeaders } from '@/lib/security/client-ip'
 import { prisma } from '@/lib/db/postgres'
 import { verifyPassword } from '@/lib/auth/password'
 import { createSession } from '@/lib/auth/session'
@@ -44,10 +45,7 @@ const MAX_ACCOUNT_ATTEMPTS = 5
 const ACCOUNT_LOCK_DURATION_MS = 30 * 60 * 1000 // 30 minutes
 
 export async function POST(request: NextRequest) {
-  const ip =
-    request.headers.get('x-forwarded-for')?.split(',')[0].trim() ||
-    request.headers.get('x-real-ip') ||
-    'unknown'
+  const ip = clientIpFromHeaders(request) ?? 'unknown'
 
   // 1. IP-level rate limit
   const rateCheck = checkIpBruteForce(ip)
