@@ -112,6 +112,26 @@ function isInvalidSchemaError(parsed: unknown): boolean {
   return b.code === 'PGRST106'
 }
 
+function isMissingTableError(parsed: unknown): boolean {
+  const b = (parsed ?? {}) as Record<string, unknown>
+  return b.code === 'PGRST205'
+}
+
+const SCHEMA_CACHE_RETRY_DELAY_MS = 1_000
+
+async function tableExists(schema: string, table: string): Promise<boolean> {
+  const { prisma } = await import('@/lib/db')
+  const rows = await prisma.$queryRawUnsafe<Array<{ present: boolean }>>(
+    `SELECT EXISTS (
+       SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+     ) AS present`,
+    schema,
+    table,
+  )
+  return rows[0]?.present === true
+}
+
 /**
  * Upstream timeout. Without one, a stalled PostgREST holds Express sockets open
  * until the client gives up, and a single slow query turns into exhaustion of
@@ -309,6 +329,37 @@ export async function handleViaPostgrest(
     }
   }
 
+  // PGRST205 also means a genuinely missing table. Check the catalog before
+  // waiting for the DDL-triggered cache reload; the first request was not run.
+  let staleCache = false
+  let catalogUnavailable = false
+  if (!upstream.ok && isMissingTableError(parsed)) {
+    try {
+      staleCache = await tableExists(schema, table)
+    } catch (err) {
+      catalogUnavailable = true
+      console.error('[postgrest] Could not check table after PGRST205:', err)
+    }
+    if (staleCache) {
+      await new Promise(resolve => setTimeout(resolve, SCHEMA_CACHE_RETRY_DELAY_MS))
+      try {
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS)
+        try {
+          const replayed = await fetch(url, { method: req.method, headers, body, signal: controller.signal })
+          const replayedText = await replayed.text()
+          upstream = replayed
+          text = replayedText
+          try { parsed = JSON.parse(text) } catch { parsed = null }
+        } finally {
+          clearTimeout(timer)
+        }
+      } catch (err) {
+        console.error('[postgrest] Replay after PGRST205 failed:', err)
+      }
+    }
+  }
+
   // ── PGRST106 self-heal ──────────────────────────────────────────────────────
   //
   // "Invalid schema: workspace_<id>" means PostgREST was never told this
@@ -362,13 +413,25 @@ export async function handleViaPostgrest(
   }
 
   if (!upstream.ok) {
+    if (catalogUnavailable) {
+      return answer(503, {
+        error: 'The data plane could not confirm this table. Retry shortly.',
+        code: 'DATA_PLANE_UNAVAILABLE',
+      })
+    }
+    if (staleCache && isMissingTableError(parsed)) {
+      return answer(503, {
+        error: 'The table exists, but the data plane has not loaded it yet. Retry shortly.',
+        code: 'DATA_PLANE_UNAVAILABLE',
+      }, { upstreamCode: 'PGRST205' })
+    }
     // PostgREST's own message can name roles, policies and constraint bodies.
     // The full text goes to the log; the caller gets the sanitised mapping.
     console.error(`[postgrest] upstream ${upstream.status} for ${table}:`, text.slice(0, 500))
     const mapped = toApiError(upstream.status, parsed)
     // The upstream CODE is passed through to the classifier (not to the caller):
-    // PGRST106 and PGRST205 are platform faults that look like the developer's
-    // missing table, and telling them apart is the entire point of this header.
+    // PGRST106 is a platform fault. PGRST205 is only one when the catalog
+    // confirms the table exists; genuine misses must keep their 404 diagnosis.
     const upstreamCode =
       parsed && typeof parsed === 'object' && typeof (parsed as any).code === 'string'
         ? (parsed as any).code
@@ -393,7 +456,9 @@ export async function handleViaPostgrest(
         /* never let a diagnostic change what the caller receives */
       }
     }
-    return answer(mapped.status, mapped.body as unknown as Record<string, unknown>, { upstreamCode })
+    return answer(mapped.status, mapped.body as unknown as Record<string, unknown>, {
+      upstreamCode: upstreamCode === 'PGRST205' ? null : upstreamCode,
+    })
   }
 
   const rows = Array.isArray(parsed) ? parsed : parsed == null ? [] : [parsed]

@@ -80,7 +80,7 @@ Users can only see their own projects and tasks.`,
         },
         {
           kind: 'note',
-          text: 'There is no API generation step to wait for. `/db/<table>` is live the moment the table exists, resolved from the PostgreSQL catalog per request. The one exception is `users`, which is managed through `/auth/*` and never exposed as `/db/users`, because it holds password hashes.',
+          text: 'There is no API generation step. `/db/<table>` is served through PostgREST, which reloads its schema cache after a table is created; the runtime retries a request that arrives before that reload finishes. The one exception is `users`, which is managed through `/auth/*` and never exposed as `/db/users`, because it holds password hashes.',
         },
       ],
     },
