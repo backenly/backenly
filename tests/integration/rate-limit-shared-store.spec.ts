@@ -110,6 +110,37 @@ describe('the memory backend, which is what self-host runs', () => {
     await new Promise(r => setTimeout(r, 200))
     expect((await backend.consume(k, 1, 120)).allowed).toBe(true)
   })
+
+  it('refunds one unit, so a counted attempt that succeeded is given back', async () => {
+    const k = key('memory-refund')
+    for (let i = 0; i < 3; i++) expect((await backend.consume(k, 3, 60_000)).allowed).toBe(true)
+    expect((await backend.consume(k, 3, 60_000)).allowed).toBe(false)
+
+    await backend.refund(k)
+
+    // Exactly one unit back: one more is admitted, the next is not.
+    expect((await backend.consume(k, 3, 60_000)).allowed).toBe(true)
+    expect((await backend.consume(k, 3, 60_000)).allowed).toBe(false)
+  })
+
+  it('never refunds below zero, which would be budget nobody spent', async () => {
+    const k = key('memory-refund-floor')
+    await backend.consume(k, 2, 60_000)
+    for (let i = 0; i < 5; i++) await backend.refund(k)
+
+    // A floor of zero means the full budget of two, not seven.
+    expect((await backend.consume(k, 2, 60_000)).allowed).toBe(true)
+    expect((await backend.consume(k, 2, 60_000)).allowed).toBe(true)
+    expect((await backend.consume(k, 2, 60_000)).allowed).toBe(false)
+  })
+
+  it('does nothing to a key it never counted', async () => {
+    const k = key('memory-refund-absent')
+    await backend.refund(k)
+    const first = await backend.consume(k, 2, 60_000)
+    expect(first.allowed).toBe(true)
+    expect(first.remaining).toBe(1)
+  })
 })
 
 describe('the shared store, across independent instances', () => {
@@ -228,6 +259,39 @@ describe('the shared store, across independent instances', () => {
     // The second instance sees the SAME window, not a new 30s one of its own.
     const second = await b.consume(k, 5, 30_000)
     expect(Math.abs(second.resetAt - first.resetAt)).toBeLessThan(1_000)
+  }, 30_000)
+
+  it('refunds one unit of the shared count from either instance, keeping the window', async () => {
+    const k = shared('shared-refund')
+    const other = shared('shared-refund-other')
+    const first = await a.consume(k, 2, 30_000)
+    expect((await b.consume(k, 2, 30_000)).allowed).toBe(true)
+    expect((await a.consume(k, 2, 30_000)).allowed).toBe(false)
+
+    // The counter is now 3 (Redis counts denied attempts too). One refund
+    // brings it to 2, still at the limit, and a second to 1.
+    await b.refund(k)
+    await a.refund(k)
+
+    const after = await b.consume(k, 2, 30_000)
+    expect(after.allowed).toBe(true)
+    expect(after.remaining).toBe(0)
+    // DECR keeps the TTL: the refund did not open a fresh window.
+    expect(Math.abs(after.resetAt - first.resetAt)).toBeLessThan(1_000)
+
+    // CONTROL: a refund lands on its own key only.
+    expect((await a.consume(other, 1, 30_000)).remaining).toBe(0)
+  }, 30_000)
+
+  it('never creates a counter by refunding one that does not exist', async () => {
+    // A bare DECR would create the key at -1 with no expiry: a permanent extra
+    // allowance. The guarded script leaves nothing behind.
+    const k = shared('shared-refund-absent')
+    await a.refund(k)
+    expect(await clientA.exists(k)).toBe(0)
+
+    const first = await b.consume(k, 2, 30_000)
+    expect(first.remaining).toBe(1)
   }, 30_000)
 
   it('FAILS CLOSED when the store cannot be reached, rather than falling back', async () => {

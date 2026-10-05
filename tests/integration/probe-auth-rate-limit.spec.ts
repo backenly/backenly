@@ -9,7 +9,11 @@
  *
  * The exemption needs BOTH the internal-traffic token (an HMAC of the platform
  * secret) and a reserved synthetic address. These tests hold every other
- * combination to the customer limits, which are asserted unchanged first.
+ * combination to the customer limits, which are asserted first.
+ *
+ * Sign-in's budgets count FAILED attempts (lib/security/end-user-signin-limit.ts),
+ * so the sign-in cases send a wrong password: that is what a budget refuses,
+ * and a right one never runs one out.
  *
  * Every case has its own address AND its own account: sign-in is also limited
  * per account, so a shared account would make a later case fail for an earlier
@@ -30,8 +34,10 @@ import { INTERNAL_TRAFFIC_HEADER, internalTrafficToken } from '@/lib/traffic/req
 
 const prisma = new PrismaClient()
 const PASSWORD = 'Probe-Horse-Battery-9!'
+const WRONG = 'not-the-password'
 const ACCOUNTS = {
   customer: 'customer@example.test',
+  returning: 'returning@example.test',
   tokenOnCustomer: 'token-on-customer@example.test',
   probe: '__cv_ratelimit@backenly.internal',
   reservedNoToken: '__cv_notoken@backenly.internal',
@@ -59,12 +65,12 @@ const params = () => ({ params: Promise.resolve({ projectId }) })
 const freshIp = () => `198.51.100.${++ipCounter}`
 const token = () => internalTrafficToken()!
 
-/** Statuses of `n` sign-ins to one account from one fresh address. */
-async function signins(n: number, email: string, internal?: string): Promise<number[]> {
+/** Statuses of `n` sign-ins to one account from one fresh address, by default with a wrong password. */
+async function signins(n: number, email: string, internal?: string, password = WRONG): Promise<number[]> {
   const ip = freshIp()
   const out: number[] = []
   for (let i = 0; i < n; i++) {
-    const res = await signin(request({ email, password: PASSWORD }, ip, internal), params())
+    const res = await signin(request({ email, password }, ip, internal), params())
     out.push(res.status)
   }
   return out
@@ -123,33 +129,42 @@ afterAll(async () => {
   await prisma.$disconnect()
 }, 120_000)
 
-describe('the customer limits are unchanged', () => {
+describe('the customer limits', () => {
   it('keeps the published budgets', () => {
-    expect(AUTH_LIMITS.endUserSignin.ip).toEqual({ limit: 10, windowMs: 15 * 60_000 })
+    expect(AUTH_LIMITS.endUserSignin).toEqual({
+      ip: { limit: 300, windowMs: 15 * 60_000 },
+      ipFailures: { limit: 30, windowMs: 15 * 60_000 },
+      accountFailures: { limit: 10, windowMs: 15 * 60_000 },
+    })
     expect(AUTH_LIMITS.endUserSignup.ip).toEqual({ limit: 10, windowMs: 60 * 60_000 })
   })
 
-  it('allows 10 sign-ins to a customer account from one address and refuses the 11th', async () => {
-    expect(await signins(11, ACCOUNTS.customer)).toEqual(TEN_OK_THEN_429(200))
+  it('refuses the 11th wrong password to a customer account from one address', async () => {
+    expect(await signins(11, ACCOUNTS.customer)).toEqual(TEN_OK_THEN_429(401))
+  }, 120_000)
+
+  it('never refuses a customer who has the password', async () => {
+    // This was TEN_OK_THEN_429(200): the eleventh correct sign-in was refused.
+    expect(await signins(15, ACCOUNTS.returning, undefined, PASSWORD)).toEqual(Array(15).fill(200))
   }, 120_000)
 })
 
 describe('sign-in', () => {
   it('does not throttle the probe: valid token AND a reserved address', async () => {
-    expect(await signins(15, ACCOUNTS.probe, token())).toEqual(Array(15).fill(200))
+    expect(await signins(15, ACCOUNTS.probe, token())).toEqual(Array(15).fill(401))
   }, 120_000)
 
   it('throttles the token on a customer account like any customer', async () => {
-    expect(await signins(11, ACCOUNTS.tokenOnCustomer, token())).toEqual(TEN_OK_THEN_429(200))
+    expect(await signins(11, ACCOUNTS.tokenOnCustomer, token())).toEqual(TEN_OK_THEN_429(401))
   }, 120_000)
 
   it('throttles a reserved address that has no token', async () => {
-    expect(await signins(11, ACCOUNTS.reservedNoToken)).toEqual(TEN_OK_THEN_429(200))
+    expect(await signins(11, ACCOUNTS.reservedNoToken)).toEqual(TEN_OK_THEN_429(401))
   }, 120_000)
 
   it('throttles a reserved address with a forged token', async () => {
     const forged = 'f'.repeat(token().length)
-    expect(await signins(11, ACCOUNTS.reservedForged, forged)).toEqual(TEN_OK_THEN_429(200))
+    expect(await signins(11, ACCOUNTS.reservedForged, forged)).toEqual(TEN_OK_THEN_429(401))
   }, 120_000)
 })
 

@@ -32,8 +32,21 @@ import {
   type AuthEnvironment,
 } from '@/lib/branches/auth-environment'
 import { ENVIRONMENT_HEADER, environmentHeaderValue } from '@/lib/branches/key-scope'
+import { admitSigninAttempt, admitSigninRequest } from '@/lib/security/end-user-signin-limit'
+import { throttleDecision } from '@/lib/security/rate-limit-decision'
+import type { RateLimitResult } from '@/lib/security/auth-rate-limit'
 
 const router = Router()
+
+/**
+ * A throttled sign-in, answered exactly as the Next route answers it: 429 for
+ * a budget that ran out, 503 when the limiter's store cannot be reached.
+ */
+function sendThrottled(res: Response, result: RateLimitResult) {
+  const d = throttleDecision(result)
+  res.set(d.headers)
+  sendError(res, d.code, d.message, d.status)
+}
 
 /**
  * The environment this request's key chose, production or its preview branch,
@@ -82,7 +95,9 @@ const SIGNUP_LIMITS = { limit: 10, windowMs: 60 * 60 * 1000 }
 // each other; still bounded (these accounts are auto-purged + excluded from
 // quotas, so the cap is pure anti-abuse, not a product limit).
 const SIGNUP_INTERNAL_LIMITS = { limit: 100, windowMs: 60 * 60 * 1000 }
-const SIGNIN_LIMITS = { limit: 30, windowMs: 15 * 60 * 1000 }
+// Sign-in is not throttled here: it uses the same failure-counting policy and
+// store as the Next route (lib/security/end-user-signin-limit.ts), so the two
+// implementations of one endpoint cannot hold two different limits again.
 const ipBuckets = new Map<string, { count: number; resetAt: number }>()
 function ipFrom(req: Request): string {
   const xff = req.headers['x-forwarded-for']
@@ -323,18 +338,12 @@ async function handleSignUp(req: Request, res: Response) {
 async function handleSignIn(req: Request, res: Response) {
   const { projectId } = req.params
 
-  // IP rate limit for brute-force protection.
+  // The all-attempts ceiling, before any lookup. The failure budgets follow
+  // once the body names the account.
   const ip = ipFrom(req)
-  const rl = throttle(`v1-signin:${projectId}:${ip}`, SIGNIN_LIMITS)
-  if (!rl.allowed) {
-    res.setHeader('Retry-After', String(rl.retryAfter))
-    sendError(
-      res,
-      ErrorCodes.RATE_LIMIT_EXCEEDED,
-      `Too many sign-in attempts — the limit is ${SIGNIN_LIMITS.limit} per 15 minutes per IP, per project. ` +
-      `Retry in ${rl.retryAfter}s (see the Retry-After header).`,
-      429,
-    )
+  const source = await admitSigninRequest(projectId, ip)
+  if (!source.allowed) {
+    sendThrottled(res, source)
     return
   }
 
@@ -358,6 +367,14 @@ async function handleSignIn(req: Request, res: Response) {
 
     const { email, password } = parsed.data
     const schemaName = env.schemaName
+
+    // Failed attempts per address and per account, spent now and refunded
+    // once the password proves correct.
+    const attempt = await admitSigninAttempt(projectId, ip, email)
+    if (attempt.denied) {
+      sendThrottled(res, attempt.denied)
+      return
+    }
 
     const tableCheck = await prisma.$queryRawUnsafe<{ exists: boolean }[]>(
       `SELECT EXISTS (
@@ -406,6 +423,9 @@ async function handleSignIn(req: Request, res: Response) {
       sendError(res, ErrorCodes.UNAUTHORIZED, 'Invalid email or password', 401)
       return
     }
+
+    // The password is right, so this attempt was not a guess.
+    await attempt.credentialsVerified()
 
     // Email-verification gate — opt-in via ProjectAuthConfig. Only blocks when
     // the column exists AND is explicitly false, so legacy users tables

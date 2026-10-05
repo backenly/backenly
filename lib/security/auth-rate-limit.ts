@@ -71,6 +71,14 @@ export async function reset(key: string): Promise<void> {
 }
 
 /**
+ * Give back the one unit this caller's `consume` took, once the attempt turned
+ * out not to be the thing the budget counts. See RateLimitBackend.refund.
+ */
+export async function refund(key: string): Promise<void> {
+  await getRateLimitBackend().refund(key)
+}
+
+/**
  * Best-effort client IP. Trusts X-Forwarded-For only when behind a known proxy.
  * Falls back to 'unknown' which still works as a coarse bucket.
  */
@@ -117,7 +125,28 @@ export const AUTH_LIMITS = {
   // Keyed per project as well as per IP, so one project under attack cannot
   // lock out sign-in for a different project sharing an egress address, and a
   // single IP cannot spend one global budget across every tenant.
-  endUserSignin:  { ip: { limit: 10, windowMs: 15 * 60_000 } },
+  //
+  // Sign-in counts FAILED attempts, not attempts. It used to spend 10 per 15
+  // minutes on every request, successful ones included, per address and per
+  // account. That is not a brute-force control, it is a cap on sign-ins: a
+  // shop's shoppers behind one office, campus or mobile-carrier NAT shared ten
+  // sign-ins between them, a frontend that signs in from its own server shared
+  // ten across its whole user base, and a developer testing their own login
+  // locked themselves out on the eleventh go. Guessing is made of failures, so
+  // failures are what is budgeted (lib/security/end-user-signin-limit.ts).
+  endUserSignin: {
+    // Every attempt from one address, successful or not. Not the guessing
+    // control (the two below are): a ceiling on how much password hashing one
+    // address can buy. Supabase allows 150 password sign-ins per 5 minutes
+    // per IP; this is lower and has no burst allowance on top.
+    ip:              { limit: 300, windowMs: 15 * 60_000 },
+    // Failed attempts from one address against any account in the project:
+    // credential stuffing from a single source.
+    ipFailures:      { limit: 30,  windowMs: 15 * 60_000 },
+    // Failed attempts against one account from any address: guessing one
+    // person's password. Ten, Auth0's default brute-force threshold.
+    accountFailures: { limit: 10,  windowMs: 15 * 60_000 },
+  },
   endUserSignup:  { ip: { limit: 10, windowMs: 60 * 60_000 } },
   endUserRecover: { ip: { limit: 5,  windowMs: 15 * 60_000 } },
 } as const
