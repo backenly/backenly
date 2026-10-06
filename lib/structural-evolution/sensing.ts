@@ -228,15 +228,22 @@ export function findingLocation(details: unknown): { table: string; column: stri
   return null
 }
 
-export async function readRepairs(projectId: string, since: Date): Promise<Array<RepairRecord & { table: string }>> {
+/**
+ * Repairs located on a column since `since`, newest first, or null when the
+ * findings could not be read: "unreadable" must never look like "none".
+ */
+export async function readRepairs(projectId: string, since: Date): Promise<Array<RepairRecord & { table: string }> | null> {
   const rows = await prisma.healthFinding
     .findMany({
       // Backenly's own approval requests are not repairs; see EVOLUTION_FINDING_TYPE.
       where: { projectId, detectedAt: { gte: since }, type: { not: 'architecture_evolution' } },
       select: { id: true, type: true, details: true, detectedAt: true },
+      // The cap keeps the newest, so a busy history never drops recent repairs at random.
+      orderBy: { detectedAt: 'desc' },
       take: 2_000,
     })
-    .catch(() => [] as Array<{ id: string; type: string; details: unknown; detectedAt: Date }>)
+    .catch(() => null)
+  if (!rows) return null
   const out: Array<RepairRecord & { table: string }> = []
   for (const r of rows) {
     const at = findingLocation(r.details)

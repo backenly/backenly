@@ -206,7 +206,8 @@ export async function analyzeStructuralEvolution(
         history: columnHistory(snapshots, table),
         pressure: {
           windowDays: WINDOW_DAYS,
-          repairs: repairs.filter(r => r.table === table),
+          // Unreadable repairs only withhold evidence; they never add any.
+          repairs: (repairs ?? []).filter(r => r.table === table),
           hostRequests: requests ? requests.get(table) ?? 0 : null,
           consumers: consumersOf(consumers, table, facts.columns.map(c => c.name)),
           now,

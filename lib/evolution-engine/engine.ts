@@ -956,7 +956,9 @@ export async function observe(input: { projectId: string; decisionId: string; no
   if (verdict.status === 'continue') return { state: 'observing', verdict: 'continue', reason: verdict.reason }
 
   if (verdict.status === 'regressed') {
-    await stopForRegression(projectId, d, summary.subject, verdict.reason, policy, input)
+    // The signals' own details, not their internal names, are what a person reads.
+    const problem = verdict.signals.map(sg => sg.detail).join('; ')
+    await stopForRegression(projectId, d, summary.subject, problem, policy, input)
     return { state: 'blocked', verdict: 'regressed', reason: verdict.reason }
   }
 
@@ -966,7 +968,7 @@ export async function observe(input: { projectId: string; decisionId: string; no
   await snapshot(projectId, d, primitive, resolved.plan, 'S2', now)
   const benefit = await judge(projectId, primitive, resolved.plan, decisionId, now)
   if (benefit.verdict === 'regressed') {
-    await stopForRegression(projectId, d, summary.subject, benefit.summary, policy, input)
+    await stopForRegression(projectId, d, summary.subject, asClause(benefit.summary), policy, input)
     return { state: 'blocked', verdict: 'regressed', reason: benefit.summary, benefit }
   }
   const s = summaryOf(trail)
@@ -974,8 +976,11 @@ export async function observe(input: { projectId: string; decisionId: string; no
     benefit.verdict === 'beneficial'
       ? `Backenly improved your ${s?.subjectTitle ?? summary.subject} architecture: it ${s?.did ?? 'restructured it'}.`
       : `Backenly ${s?.did ?? `restructured ${summary.subject}`}.`
+  // The milestone already says it works; the benefit summary's own lead would repeat it.
+  const outcome = benefit.summary.replace(/^It works correctly\.\s*/, '')
+  const later = benefit.verdict === 'beneficial' ? '' : ' Backenly will look again a month after the change.'
   await enter(projectId, d, 'stable', {
-    sentence: `${lead} Existing apps kept working, the data matches, and it can be undone. ${benefit.summary}`,
+    sentence: `${lead} Existing apps kept working, the data matches, and it can be undone.${outcome ? ` ${outcome}` : ''}${later}`,
     milestone: true,
   })
   await remember({ projectId, record: { ...base(d), event: 'outcome', payload: { benefit, phase: 'S2' } }, milestone: false, sentence: benefit.summary })
@@ -984,6 +989,10 @@ export async function observe(input: { projectId: string; decisionId: string; no
   return { state: 'stable', verdict: 'stable', reason: verdict.reason, benefit }
 }
 
+/** "It made things worse: x rose from a to b." → "x rose from a to b", to sit inside a sentence. */
+const asClause = (summary: string) => summary.replace(/^It made things worse:\s*/, '').replace(/[.\s]+$/, '')
+
+/** `reason` is a clause: no lead-in, no closing stop. */
 async function stopForRegression(
   projectId: string,
   d: DecisionRef,

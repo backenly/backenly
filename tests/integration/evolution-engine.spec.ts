@@ -325,6 +325,9 @@ describe('one architecture change, from proposal to undo', () => {
     expect(s.state).toBe('stable')
     expect(s.headline).toMatch(/Existing apps kept working, the data matches, and it can be undone/)
     expect(s.headline).not.toMatch(/improved/)
+    // Said once, and with when it will be judged again.
+    expect(s.headline).not.toMatch(/It works correctly/)
+    expect(s.headline).toMatch(/Backenly will look again a month after the change\.$/)
     expect((await requestsOf(f.projectId))[0].status).toBe('resolved')
 
     const [view] = await listChanges(f.projectId)

@@ -160,6 +160,7 @@ export type UnavailableReason =
   | 'statements_evicted'
   | 'relation_recreated'
   | 'request_log_unreadable'
+  | 'history_unreadable'
   | 'no_traffic_recorded'
   | 'table_not_served_over_api'
   | 'insufficient_sample'
