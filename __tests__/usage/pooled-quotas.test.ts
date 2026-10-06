@@ -232,9 +232,9 @@ describe('only an enforce policy with a spend limit raises a cap', () => {
 
   it('files: overage already used is paid from the same limit', async () => {
     const { a } = await account([11 * GiB, 0])
-    // 1 GB past the plan is an estimated $0.03 of a $0.30 limit; the $0.27
-    // left buys 9 GB more at $0.03 per GB, so the cap is 20 GB.
-    policy = { mode: 'enforce', spendLimitCents: 30 }
+    // 1 GB past the plan is an estimated $0.0213 of a $0.22 limit; the $0.1987
+    // left buys about 9.3 GB more at $0.0213 per GB, so the cap is about 20.3 GB.
+    policy = { mode: 'enforce', spendLimitCents: 22 }
 
     await expect(assertQuotaAvailable(a, 8 * GiB)).resolves.toBeUndefined()
     invalidateAccountLimits()
@@ -292,12 +292,14 @@ describe('only an enforce policy with a spend limit raises a cap', () => {
     expect(off.axes.egress_bytes.headroom).toBe(0)
     expect(off.axes.egress_bytes.cap).toBe(3 * 1024 * 1024 * 1024)
 
-    // Even with the egress billing switch on, egress stays non-billable while
-    // its rate is unpublished (OVERAGE_RATE_PUBLISHED.egress_bytes = false).
+    // With the switch on, egress is priced at its published rate like any
+    // other axis: 2 GB past the plan at $0.09 is 18 cents, and the $99.82 left
+    // of the limit buys more.
     const on = computeAccountLimits(pro(), over, enforce, 'cdn', true)
-    expect(on.axes.egress_bytes.billable).toBe(false)
-    expect(on.axes.egress_bytes.estimatedCents).toBe(0)
-    expect(on.axes.egress_bytes.headroom).toBe(0)
+    expect(on.axes.egress_bytes.billable).toBe(true)
+    expect(on.axes.egress_bytes.estimatedCents).toBeCloseTo(18, 9)
+    expect(on.axes.egress_bytes.headroom).toBe(Math.floor(((10_000 - 18) / 9) * GiB))
+    expect(on.axes.egress_bytes.cap).toBe(3 * GiB + on.axes.egress_bytes.headroom)
   })
 })
 
