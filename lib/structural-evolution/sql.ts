@@ -31,12 +31,16 @@
  *
  * ── Access: the satellite can never be more open than its parent ────────────
  *
- * Created with row-level security forced, one service-role policy, and every
- * grant revoked — including any a schema's default privileges handed out at
- * CREATE. Reads open later with a policy that says "you may see this row iff
- * you may see its parent", which is evaluated by running the parent's OWN
- * policy, so whatever rule protects `orders` protects `order_refunds` without
- * being restated. Writes are granted only to roles that may UPDATE the parent,
+ * Created with row-level security forced, one policy for the role that
+ * creates it — the platform, which the forward sync and Backenly's own
+ * backfill and reconciliation run as — and every grant revoked, including any
+ * a schema's default privileges handed out at CREATE. Reads open later with a
+ * policy that says "you may see this row iff you may see its parent", which is
+ * evaluated by running the parent's OWN policy, so whatever rule protects
+ * `orders` protects `order_refunds` without being restated. Nothing else is
+ * honoured: not even the service-role claim, which is only a session setting
+ * — a parent whose policies honour it extends that to the satellite through
+ * its own policy, and a parent whose policies do not, does not. Writes are granted only to roles that may UPDATE the parent,
  * and the reverse sync performs that UPDATE as the caller, so the parent's
  * update policy is enforced on every satellite write. Writing a refund needs
  * exactly the permission it needed when the refund was a column.
@@ -101,14 +105,20 @@
  *                            after; inside a savepoint that is rolled back,
  *                            PostgreSQL restores the setting with it
  *   parent key changes       ON UPDATE CASCADE rewrites the satellite's
- *                            reference; the reverse sync recognises the cascade
- *                            (old key gone, new key present, members equal)
- *                            and lets it through. A client moving a satellite
- *                            row to another parent is still refused (0A000).
+ *                            reference. A BEFORE row trigger on the host counts
+ *                            each re-keyed parent carrying the concern, and the
+ *                            reverse sync accepts a reference change only by
+ *                            consuming that count with nothing else moved. A
+ *                            client moving a row to another parent is refused
+ *                            (0A000).
  *   deletes                  deleting a parent cascades to its satellite row;
- *                            the reverse sync finds no parent and writes
- *                            nothing. Deleting a satellite row clears the
- *                            parent's members, as the caller.
+ *                            the same trigger counts it, and only a counted
+ *                            delete may leave the host untouched. Deleting a
+ *                            satellite row otherwise clears the parent's
+ *                            members, as the caller, or is refused (42501).
+ *                            Never decided by whether the caller can SEE the
+ *                            parent: through row-level security a hidden parent
+ *                            and a deleted one look alike.
  *   TRUNCATE                 refused on the satellite (row triggers do not
  *                            fire for it, so it would silently diverge);
  *                            TRUNCATE of the host needs CASCADE because of the
@@ -129,7 +139,6 @@
  */
 
 import { createHash } from 'node:crypto'
-import { jwtClaimFunctionSql, serviceRoleClause, SERVICE_ROLE } from '@/lib/postgrest/rls-translation'
 import { IDENT, LADDER_OBJECT_PREFIX, type TableFacts } from './facts'
 import { singular } from './lexicon'
 
@@ -164,7 +173,16 @@ export interface LadderNames {
   reverse: string
   /** Statement trigger + function refusing TRUNCATE on the satellite. */
   truncateGuard: string
-  policies: { service: string; select: string; insert: string; update: string; delete: string }
+  /**
+   * Row trigger + function on the host counting parents that carry the
+   * concern and are being deleted, or re-keyed, in this transaction: the only
+   * satellite changes the reverse sync accepts without changing the host.
+   */
+  cascadeMark: string
+  /** Transaction-local counters the cascade mark keeps. */
+  gone: string
+  moved: string
+  policies: { owner: string; select: string; insert: string; update: string; delete: string }
   /** Custom GUC suppressing each direction's echo. */
   guc: string
   carriedConstraint: (i: number) => string
@@ -192,7 +210,10 @@ export function ladderNames(spec: ExtractionSpec): LadderNames {
     forward: p('fwd'),
     reverse: p('rev'),
     truncateGuard: p('trunc'),
-    policies: { service: p('svc'), select: p('sel'), insert: p('ins'), update: p('upd'), delete: p('del') },
+    cascadeMark: p('mark'),
+    gone: `bkn_evo.gone_${hash}`,
+    moved: `bkn_evo.moved_${hash}`,
+    policies: { owner: p('own'), select: p('sel'), insert: p('ins'), update: p('upd'), delete: p('del') },
     guc: `bkn_evo.sync_${hash}`,
     carriedConstraint: i => `${p('ck')}_${i}`,
     carriedIndex: i => `${p('ix')}_${i}`,
@@ -285,17 +306,33 @@ function parts(facts: TableFacts, spec: ExtractionSpec, target: RenderTarget) {
     fk: qi(names.fkColumn),
     members,
     m: spec.members.map(qi),
-    svc: serviceRoleClause(target.schema),
   }
 }
+
+/**
+ * A counter that lives for ONE client statement, kept in a transaction-local
+ * setting as `<statement_timestamp>|<n>`: restored on savepoint rollback with
+ * everything else, and never inherited by the next statement. A parent's
+ * delete and the foreign key's cascade into the satellite are one statement;
+ * an unrelated satellite delete later in the same transaction is another, and
+ * reads zero whatever an earlier statement left behind.
+ */
+const counter = (guc: string) =>
+  `(CASE WHEN split_part(COALESCE(current_setting('${guc}', true), ''), '|', 1) = statement_timestamp()::text ` +
+  `THEN COALESCE(NULLIF(split_part(current_setting('${guc}', true), '|', 2), ''), '0')::int ELSE 0 END)`
+const bump = (guc: string, by: 1 | -1) =>
+  `PERFORM set_config('${guc}', statement_timestamp()::text || '|' || (${counter(guc)} ${by > 0 ? '+' : '-'} 1)::text, true);`
 
 const rowOf = (alias: string, cols: string[]) => `ROW(${cols.map(c => `${alias}.${c}`).join(', ')})::text`
 const allNull = (alias: string, cols: string[]) => cols.map(c => `${alias}.${c} IS NULL`).join(' AND ')
 const anySet = (alias: string, cols: string[]) => `(${cols.map(c => `${alias}.${c} IS NOT NULL`).join(' OR ')})`
 
-/** The parent-visibility predicate every satellite policy shares. */
+/**
+ * The parent-visibility predicate every client-facing satellite policy shares:
+ * the parent's own policies, run as the caller, and nothing else.
+ */
 function followsParent(x: ReturnType<typeof parts>): string {
-  return `(${x.svc} OR EXISTS (SELECT 1 FROM ${x.host} h WHERE h.${x.pk} = ${x.satName}.${x.fk}))`
+  return `(EXISTS (SELECT 1 FROM ${x.host} h WHERE h.${x.pk} = ${x.satName}.${x.fk}))`
 }
 
 function grantList(roles: string[]): string {
@@ -315,7 +352,6 @@ export function createSatelliteSql(
   const n = x.names
   const satRegclass = lit(`${qi(target.schema)}.${qi(spec.satellite)}`)
   return [
-    jwtClaimFunctionSql(target.schema),
     [
       `CREATE TABLE ${x.sat} (`,
       `  "id" uuid NOT NULL DEFAULT gen_random_uuid(),`,
@@ -331,7 +367,9 @@ export function createSatelliteSql(
     ...carried.indexes.map(i => i.definition),
     `ALTER TABLE ${x.sat} ENABLE ROW LEVEL SECURITY`,
     `ALTER TABLE ${x.sat} FORCE ROW LEVEL SECURITY`,
-    `CREATE POLICY ${qi(n.policies.service)} ON ${x.sat} FOR ALL USING (${x.svc}) WITH CHECK (${x.svc})`,
+    // The creating role: the platform. It is who the forward sync runs as
+    // (SECURITY DEFINER) and who backfills and reconciles; no client is.
+    `CREATE POLICY ${qi(n.policies.owner)} ON ${x.sat} FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true)`,
     // Row triggers do not fire for TRUNCATE, so emptying the satellite would
     // leave the host carrying values the satellite silently lost.
     [
@@ -381,8 +419,6 @@ export function forwardSyncSql(facts: TableFacts, spec: ExtractionSpec, target: 
     `SECURITY DEFINER`,
     `SET search_path = ${S}, pg_temp`,
     `AS $bkn$`,
-    `DECLARE`,
-    `  prev_claims text := current_setting('request.jwt.claims', true);`,
     `BEGIN`,
     `  -- The reverse direction is writing ${spec.host}; this is its echo.`,
     `  IF current_setting('${n.guc}', true) = '1' THEN`,
@@ -401,8 +437,8 @@ export function forwardSyncSql(facts: TableFacts, spec: ExtractionSpec, target: 
     `  END IF;`,
     `  -- No exception handler, on purpose: if the mirror cannot be written, the`,
     `  -- write to ${spec.host} does not commit either.`,
+    `  -- Runs as the satellite's owner (SECURITY DEFINER), whose policy admits it.`,
     `  PERFORM set_config('${n.guc}', '1', true);`,
-    `  PERFORM set_config('request.jwt.claims', '{"role":"${SERVICE_ROLE}"}', true);`,
     `  IF ${allNull('NEW', x.m)} THEN`,
     `    DELETE FROM ${x.sat} WHERE ${x.fk} = NEW.${x.pk};`,
     `  ELSE`,
@@ -410,9 +446,32 @@ export function forwardSyncSql(facts: TableFacts, spec: ExtractionSpec, target: 
     `    VALUES (NEW.${x.pk}, ${x.m.map(c => `NEW.${c}`).join(', ')})`,
     `    ON CONFLICT (${x.fk}) DO UPDATE SET ${x.m.map(c => `${c} = EXCLUDED.${c}`).join(', ')};`,
     `  END IF;`,
-    `  PERFORM set_config('request.jwt.claims', COALESCE(prev_claims, ''), true);`,
     `  PERFORM set_config('${n.guc}', '', true);`,
     `  RETURN NULL;`,
+    `END;`,
+    `$bkn$`,
+  ].join('\n')
+  // The foreign key cascades a parent's DELETE and key change into the
+  // satellite; the reverse sync must accept exactly those, and nothing that
+  // only looks like them. Counting them here, as the parent row goes, is the
+  // one way to know without asking whether the caller can SEE the parent — a
+  // hidden parent and a deleted one look the same through row-level security.
+  const mark = fq(target.schema, n.cascadeMark)
+  const markBody = [
+    `CREATE OR REPLACE FUNCTION ${mark}()`,
+    `RETURNS trigger`,
+    `LANGUAGE plpgsql`,
+    `SET search_path = ${S}, pg_temp`,
+    `AS $bkn$`,
+    `BEGIN`,
+    `  IF TG_OP = 'DELETE' THEN`,
+    `    ${bump(n.gone, 1)}`,
+    `    RETURN OLD;`,
+    `  END IF;`,
+    `  IF NEW.${x.pk} IS DISTINCT FROM OLD.${x.pk} THEN`,
+    `    ${bump(n.moved, 1)}`,
+    `  END IF;`,
+    `  RETURN NEW;`,
     `END;`,
     `$bkn$`,
   ].join('\n')
@@ -421,6 +480,10 @@ export function forwardSyncSql(facts: TableFacts, spec: ExtractionSpec, target: 
     `DROP TRIGGER IF EXISTS ${qi(n.forward)} ON ${x.host}`,
     `CREATE TRIGGER ${qi(n.forward)} AFTER INSERT OR UPDATE OF ${x.m.join(', ')} ON ${x.host} ` +
       `FOR EACH ROW EXECUTE FUNCTION ${fn}()`,
+    markBody,
+    `DROP TRIGGER IF EXISTS ${qi(n.cascadeMark)} ON ${x.host}`,
+    `CREATE TRIGGER ${qi(n.cascadeMark)} BEFORE DELETE OR UPDATE OF ${x.pk} ON ${x.host} ` +
+      `FOR EACH ROW WHEN (${x.m.map(c => `OLD.${c} IS NOT NULL`).join(' OR ')}) EXECUTE FUNCTION ${mark}()`,
   ]
 }
 
@@ -543,10 +606,11 @@ export function openWritesSql(
     `  END IF;`,
     `  IF TG_OP = 'UPDATE' AND NEW.${x.fk} IS DISTINCT FROM OLD.${x.fk} THEN`,
     `    -- ${spec.host}'s own key changed and ON UPDATE CASCADE carried it here:`,
-    `    -- the old key is gone, the new one exists, nothing else moved.`,
-    `    IF ${rowOf('OLD', x.m)} IS NOT DISTINCT FROM ${rowOf('NEW', x.m)}`,
-    `       AND NOT EXISTS (SELECT 1 FROM ${x.host} WHERE ${x.pk} = OLD.${x.fk})`,
-    `       AND EXISTS (SELECT 1 FROM ${x.host} WHERE ${x.pk} = NEW.${x.fk}) THEN`,
+    `    -- counted as the parent row was re-keyed (see the cascade mark), and`,
+    `    -- nothing but the reference moved. Anything else is a client moving a`,
+    `    -- row to another parent, which is refused.`,
+    `    IF ${rowOf('OLD', x.m)} IS NOT DISTINCT FROM ${rowOf('NEW', x.m)} AND ${counter(n.moved)} > 0 THEN`,
+    `      ${bump(n.moved, -1)}`,
     `      RETURN NULL;`,
     `    END IF;`,
     `    RAISE EXCEPTION '${spec.satellite}.${n.fkColumn} cannot change while ${spec.host} still carries these columns; delete and insert instead'`,
@@ -579,12 +643,19 @@ export function openWritesSql(
     `    END IF;`,
     `  END IF;`,
     `  PERFORM set_config('${n.guc}', '', true);`,
-    `  -- Run as the caller, so ${spec.host}'s own update policy decided. Zero rows`,
-    `  -- on a parent the caller can see means that policy said no. A DELETE whose`,
-    `  -- parent is gone is the cascade from deleting the parent, and is fine.`,
-    `  IF n = 0 AND (TG_OP <> 'DELETE' OR EXISTS (SELECT 1 FROM ${x.host} WHERE ${x.pk} = k)) THEN`,
-    `    RAISE EXCEPTION 'permission denied: this change to ${spec.satellite} changes ${spec.host} row %, which the caller may not update', k`,
-    `      USING ERRCODE = '42501';`,
+    `  -- Run as the caller, so ${spec.host}'s own update policy decided: zero rows`,
+    `  -- means it said no. The one exception is the cascade from deleting a`,
+    `  -- parent that carried the concern, counted as that parent row went (see`,
+    `  -- the cascade mark). It is never inferred from the caller not seeing the`,
+    `  -- parent: through row-level security a hidden parent and a deleted one`,
+    `  -- look the same, and only one of them may skip the host.`,
+    `  IF n = 0 THEN`,
+    `    IF TG_OP = 'DELETE' AND ${counter(n.gone)} > 0 THEN`,
+    `      ${bump(n.gone, -1)}`,
+    `    ELSE`,
+    `      RAISE EXCEPTION 'permission denied: this change to ${spec.satellite} changes ${spec.host} row %, which the caller may not update', k`,
+    `        USING ERRCODE = '42501';`,
+    `    END IF;`,
     `  END IF;`,
     `  RETURN NULL;`,
     `END;`,
@@ -614,6 +685,8 @@ export function contractSql(facts: TableFacts, spec: ExtractionSpec, target: Ren
     `DROP FUNCTION IF EXISTS ${fq(target.schema, n.reverse)}()`,
     `DROP TRIGGER IF EXISTS ${qi(n.forward)} ON ${x.host}`,
     `DROP FUNCTION IF EXISTS ${fq(target.schema, n.forward)}()`,
+    `DROP TRIGGER IF EXISTS ${qi(n.cascadeMark)} ON ${x.host}`,
+    `DROP FUNCTION IF EXISTS ${fq(target.schema, n.cascadeMark)}()`,
     `DROP TRIGGER IF EXISTS ${qi(n.truncateGuard)} ON ${x.sat}`,
     `DROP FUNCTION IF EXISTS ${fq(target.schema, n.truncateGuard)}()`,
     `ALTER TABLE ${x.host} ${x.m.map(c => `DROP COLUMN ${c}`).join(', ')}`,
@@ -636,6 +709,8 @@ export function dropForwardSyncSql(spec: ExtractionSpec, target: RenderTarget): 
   return [
     `DROP TRIGGER IF EXISTS ${qi(n.forward)} ON ${fq(target.schema, spec.host)}`,
     `DROP FUNCTION IF EXISTS ${fq(target.schema, n.forward)}()`,
+    `DROP TRIGGER IF EXISTS ${qi(n.cascadeMark)} ON ${fq(target.schema, spec.host)}`,
+    `DROP FUNCTION IF EXISTS ${fq(target.schema, n.cascadeMark)}()`,
   ]
 }
 

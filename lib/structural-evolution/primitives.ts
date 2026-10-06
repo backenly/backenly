@@ -208,6 +208,9 @@ export async function runStep(projectId: string, plan: ExtractionPlan, step: Ext
       if (!trig) {
         return { status: 'failed', detail: `CREATE TRIGGER reported no error but ${n.forward} is not on ${spec.host}` }
       }
+      if (!after?.triggers.some(t => t.name === n.cascadeMark)) {
+        return { status: 'failed', detail: `CREATE TRIGGER reported no error but ${n.cascadeMark} is not on ${spec.host}` }
+      }
       return {
         status: 'completed',
         detail: `${n.forward} mirrors writes on ${spec.host} into ${spec.satellite}`,

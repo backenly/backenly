@@ -57,10 +57,13 @@ describe('the extraction ladder', () => {
     }
   })
 
-  it('creates the satellite closed: forced row security, a service-only policy, every grant revoked', () => {
+  it('creates the satellite closed: forced row security, a policy for its creator only, every grant revoked', () => {
     const sql = plan().steps.find(s => s.kind === 'create_satellite')!.sql.join('\n')
     expect(sql).toMatch(/FORCE ROW LEVEL SECURITY/)
-    expect(sql).toMatch(/FOR ALL USING \("workspace_test"\."backenly_jwt_claim"\('role'\) = 'service_role'\)/)
+    // The creating role (the platform, which the forward sync runs as) and
+    // nobody else. Not the service-role claim: any role can set a claim.
+    expect(sql).toMatch(/FOR ALL TO CURRENT_USER USING \(true\) WITH CHECK \(true\)/)
+    expect(sql).not.toMatch(/service_role/)
     expect(sql).toMatch(/REVOKE ALL ON %s FROM %s/)
     expect(sql).not.toMatch(/GRANT /)
     // Members keep their names and types and carry no defaults.

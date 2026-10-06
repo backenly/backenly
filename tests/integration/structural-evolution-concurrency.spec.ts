@@ -509,6 +509,63 @@ describe('edges of the sync', () => {
     expect(agree(v)).toBe(true)
   })
 
+  describe('a satellite delete the host does not take', () => {
+    // A host trigger that skips the reverse sync's UPDATE when asked to: the
+    // same "zero rows changed" a caller gets from a parent its update policy
+    // refuses, or a parent hidden from it.
+    beforeAll(async () => {
+      await q(`CREATE FUNCTION ${t('bkn_test_skip')}() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF current_setting('bkn_test.skip', true) = '1' THEN RETURN NULL; END IF; RETURN NEW; END $$`)
+      await q(`CREATE TRIGGER bkn_test_skip BEFORE UPDATE ON ${t('orders')} FOR EACH ROW EXECUTE FUNCTION ${t('bkn_test_skip')}()`)
+    })
+    afterAll(async () => {
+      await q(`DROP TRIGGER IF EXISTS bkn_test_skip ON ${t('orders')}`)
+      await q(`DROP FUNCTION IF EXISTS ${t('bkn_test_skip')}()`)
+    })
+
+    it('is refused whole, never committed past the parent', async () => {
+      const k = refundKey()
+      const before = await valuesOf(k)
+      const c = await connect()
+      await c.query('BEGIN')
+      await c.query(`SET LOCAL bkn_test.skip = '1'`)
+      const err = (await settle(c.query(`DELETE FROM ${t('order_refunds')} WHERE order_id = $1`, [k]))) as { code?: string } | null
+      await c.query(err ? 'ROLLBACK' : 'COMMIT')
+      const after = await valuesOf(k)
+      expect(agree(after)).toBe(true)
+      expect(after).toEqual(before)
+      expect(err?.code).toBe('42501')
+    })
+
+    it('is not excused by a parent delete an earlier statement counted', async () => {
+      // A parent carrying the concern whose satellite row is already gone (a
+      // write that bypassed the triggers): deleting it is counted and no
+      // cascade consumes the count. A later statement in the same transaction
+      // must not be able to spend it.
+      const orphanParent = refundKey()
+      const victim = refundKey()
+      const before = await valuesOf(victim)
+      const c = await connect()
+      await c.query('BEGIN')
+      await c.query(`SET LOCAL session_replication_role = replica`)
+      await c.query(`DELETE FROM ${t('order_refunds')} WHERE order_id = $1`, [orphanParent])
+      await c.query(`SET LOCAL session_replication_role = origin`)
+      await c.query(`DELETE FROM ${t('orders')} WHERE id = $1`, [orphanParent])
+      await c.query(`SET LOCAL bkn_test.skip = '1'`)
+      const err = (await settle(c.query(`DELETE FROM ${t('order_refunds')} WHERE order_id = $1`, [victim]))) as { code?: string } | null
+      await c.query('ROLLBACK')
+      expect(err?.code).toBe('42501')
+      expect(await valuesOf(victim)).toEqual(before)
+    })
+
+    it('still lets a parent\'s own delete cascade, in the same statement', async () => {
+      const k = refundKey()
+      await expect(q(`DELETE FROM ${t('orders')} WHERE id = $1`, k)).resolves.toBe(1)
+      expect(await valuesOf(k)).toEqual({ host: '(missing)', sat: null })
+      await consistent()
+    })
+  })
+
   it('refuses TRUNCATE of the satellite, which row triggers would never see', async () => {
     const err = await settle(q(`TRUNCATE ${t('order_refunds')}`))
     expect(String((err as Error)?.message)).toMatch(/cannot be truncated/)

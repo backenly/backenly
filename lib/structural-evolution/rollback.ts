@@ -91,7 +91,7 @@ async function undo(input: { projectId: string; planId: string; requestedBy: str
   if (!host) return { status: 'refused', reason: `${spec.host} no longer exists`, actions }
   const sat = await readTableFacts(schema, spec.satellite)
   const ours = isOurSatellite(sat, spec)
-  const forwardLive = host.triggers.some(t => t.name === n.forward)
+  const forwardLive = host.triggers.some(t => t.name === n.forward || t.name === n.cascadeMark)
 
   if (sat && !ours) {
     return { status: 'refused', reason: `${spec.satellite} exists but was not created by this extraction`, actions }
@@ -200,7 +200,8 @@ async function undo(input: { projectId: string; planId: string; requestedBy: str
       'drop_forward_sync',
       forwardLive,
       dropForwardSyncSql(spec, target),
-      async () => !((await readTableFacts(schema, spec.host))?.triggers.some(t => t.name === n.forward) ?? false),
+      async () =>
+        !((await readTableFacts(schema, spec.host))?.triggers.some(t => t.name === n.forward || t.name === n.cascadeMark) ?? false),
       `${spec.host} no longer mirrors into ${spec.satellite}`,
     )) &&
     (await step(
