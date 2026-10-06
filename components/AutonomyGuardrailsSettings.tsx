@@ -39,6 +39,8 @@ import { ReviewQueuePanel } from '@/components/ReviewQueuePanel'
 import { DetectedFindingsPanel } from '@/components/DetectedFindingsPanel'
 import { AppliedChangesPanel, type AppliedChange } from '@/components/AppliedChangesPanel'
 import { MaintenanceLadderPanel } from '@/components/MaintenanceLadderPanel'
+import { ArchitectureChangesPanel } from '@/components/autonomy/ArchitectureChangesPanel'
+import type { ArchitectureChangeView } from '@/lib/evolution-engine/views'
 
 type Level = 'OFF' | 'CONSERVATIVE' | 'BALANCED' | 'AGGRESSIVE'
 
@@ -58,6 +60,9 @@ interface TrustReport {
   /** Optional on the wire so a response predating the field renders no panel
    *  rather than crashing the page. */
   appliedChanges?: AppliedChange[]
+  /** Approved architecture changes and what became of them. Optional for the
+   *  same reason: an older server sends none and the card does not render. */
+  architectureChanges?: ArchitectureChangeView[]
   /**
    * Whether the loop is really applying repairs.
    *
@@ -392,6 +397,13 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
 
         {/* ── Changes Backenly made, each with its way back ─────────── */}
         <AppliedChangesPanel projectId={projectId} changes={data.appliedChanges ?? []} onReverted={fetchReport} />
+
+        {/* Renders nothing until a person has approved an architecture change. */}
+        <ArchitectureChangesPanel
+          projectId={projectId}
+          changes={data.architectureChanges ?? []}
+          onChanged={fetchReport}
+        />
 
         {/* ── Recent guardrail actions: an audit log, read as a table ── */}
         <KitCard className="overflow-hidden">

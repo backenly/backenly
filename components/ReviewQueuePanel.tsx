@@ -32,6 +32,15 @@
  * needing nine identical approvals. A group is one row, one decision, and one
  * "Approve & fix all" that walks every member — the storage unit stays per
  * table, the decision unit becomes per cause.
+ *
+ * ARCHITECTURE CHANGES are the one exception to grouping. A prepared change
+ * (type `architecture_evolution`, lib/evolution-engine/request.ts) arrives in
+ * the same pendingApprovals, but each one is its own decision bound to its own
+ * plan version, so they are taken out BEFORE grouping: folded together they
+ * would share one title and one dismiss, and an approval could not say which
+ * version it consents to. Each renders as an EvolutionRequestRow, which
+ * approves through POST /api/projects/[id]/architecture only. They still count
+ * in the header, because they are still waiting on you.
  */
 
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
@@ -43,6 +52,8 @@ import {
 } from 'lucide-react'
 import { groupFindings, CATEGORY_LABEL, type FindingGroup } from '@/lib/core/finding-groups'
 import { hasExecutableFix } from '@/lib/core/fix-actions'
+import { isEvolutionApprovalFinding } from '@/lib/core/types'
+import { EvolutionRequestRow } from '@/components/autonomy/EvolutionRequestRow'
 
 interface PendingApproval {
   id: string
@@ -208,12 +219,15 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
 
   useEffect(() => { fetchReport() }, [fetchReport])
 
-  const groups = useMemo(
-    () => groupFindings(
-      (data?.pendingApprovals ?? []).map(p => ({ ...p, details: p.details ?? null })),
-    ),
-    [data],
-  )
+  // Architecture changes leave before grouping: each is its own decision on its
+  // own plan version, and the grouper would fold several into one row.
+  const { groups, evolutionRequests } = useMemo(() => {
+    const all = (data?.pendingApprovals ?? []).map(p => ({ ...p, details: p.details ?? null }))
+    return {
+      groups: groupFindings(all.filter(p => !isEvolutionApprovalFinding(p.type))),
+      evolutionRequests: all.filter(p => isEvolutionApprovalFinding(p.type)),
+    }
+  }, [data])
 
   const flashBanner = (title: string, detail?: string) => {
     setBanner({ title, detail })
@@ -408,13 +422,15 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
   // The header counts FINDINGS (what the user must clear), the list renders
   // GROUPS (what they must decide). Both numbers are shown, so folding nine
   // rows into one never looks like eight findings quietly disappearing.
+  // Architecture changes are in pendingApprovals, so they are in `total`; each
+  // is one row of its own.
   const total = data.pendingApprovals.length + pendingAgents.length
 
   return (
     <section className={CARD}>
       <PanelHeader
         count={total}
-        groupCount={groups.length + pendingAgents.length}
+        groupCount={groups.length + evolutionRequests.length + pendingAgents.length}
         refreshing={refreshing}
         onRefresh={() => fetchReport(true)}
       />
@@ -470,6 +486,15 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
               onApprove={() => decideAgentRequest(a.id, 'approve')}
               onReject={() => decideAgentRequest(a.id, 'reject')}
               onResetError={() => setRow(a.id, { phase: 'idle' })}
+            />
+          ))}
+          {evolutionRequests.map(r => (
+            <EvolutionRequestRow
+              key={r.id}
+              projectId={projectId}
+              request={r}
+              onRefresh={() => fetchReport(true)}
+              onDecided={message => flashBanner(message)}
             />
           ))}
         </ul>
