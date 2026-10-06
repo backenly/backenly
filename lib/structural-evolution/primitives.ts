@@ -31,7 +31,7 @@ import { prisma } from '@/lib/db'
 import { enqueue } from '@/lib/queue'
 import { createHash } from 'node:crypto'
 import { readTableFacts, relationExists, type TableFacts } from './facts'
-import { ladderNames, type ExtractionSpec } from './sql'
+import { ladderNames, policiesWiderThanParent, type ExtractionSpec } from './sql'
 import { reconcileExtraction } from './reconcile'
 import { rehearseExtraction } from './rehearse'
 import { inFlightChain } from './backfill-job'
@@ -64,6 +64,16 @@ export async function runStatements(statements: string[]): Promise<void> {
     },
     { timeout: STATEMENT_TIMEOUT_MS + 10_000, maxWait: 10_000 },
   )
+}
+
+/**
+ * Why the satellite's policies could admit a row its parent would not, or null.
+ * Checked before an access rung opens anything and again after it ran: a
+ * policy nobody rendered must never be opened along with Backenly's own.
+ */
+function widerThanParent(sat: TableFacts, spec: ExtractionSpec): string | null {
+  const { wider } = policiesWiderThanParent(sat.policies, ladderNames(spec))
+  return wider.length ? `${wider.join(', ')} on ${sat.table} admit${wider.length === 1 ? 's' : ''} rows by another test than the parent's visibility` : null
 }
 
 /** Is this relation the satellite THIS spec creates, and not a namesake? */
@@ -250,6 +260,9 @@ export async function runStep(projectId: string, plan: ExtractionPlan, step: Ext
     case 'expose_reads': {
       const sat = await readTableFacts(schema, spec.satellite)
       if (!isOurSatellite(sat, spec)) return { status: 'failed', detail: `${spec.satellite} is not this ladder's table` }
+      // Granting reads would also open whatever policy someone else put here.
+      const foreign = widerThanParent(sat!, spec)
+      if (foreign) return { status: 'failed', detail: `not opened: ${foreign}` }
       await runStatements(step.sql)
       const after = (await readTableFacts(schema, spec.satellite))!
       const missing = plan.access.readers.filter(
@@ -261,6 +274,8 @@ export async function runStep(projectId: string, plan: ExtractionPlan, step: Ext
           detail: `read access is not as planned: ${missing.length ? `SELECT missing for ${missing.join(', ')}` : 'the read policy is absent'}`,
         }
       }
+      const wider = widerThanParent(after, spec)
+      if (wider) return { status: 'failed', detail: `read access is not as planned: ${wider}` }
       await registerTable(
         projectId,
         schema,
@@ -279,8 +294,12 @@ export async function runStep(projectId: string, plan: ExtractionPlan, step: Ext
     case 'open_writes': {
       const sat = await readTableFacts(schema, spec.satellite)
       if (!isOurSatellite(sat, spec)) return { status: 'failed', detail: `${spec.satellite} is not this ladder's table` }
+      const foreign = widerThanParent(sat!, spec)
+      if (foreign) return { status: 'failed', detail: `not opened: ${foreign}` }
       await runStatements(step.sql)
       const after = (await readTableFacts(schema, spec.satellite))!
+      const wider = widerThanParent(after, spec)
+      if (wider) return { status: 'failed', detail: `write access is not as planned: ${wider}` }
       const policies = [n.policies.insert, n.policies.update, n.policies.delete]
       const missingPolicies = policies.filter(p => !after.policies.some(x => x.name === p))
       const missingGrants = plan.access.writers.filter(

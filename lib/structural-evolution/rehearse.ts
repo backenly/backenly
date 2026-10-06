@@ -97,6 +97,7 @@ import {
   fq,
   ladderNames,
   openWritesSql,
+  policiesWiderThanParent,
   qi,
   type ExtractionSpec,
   type RenderTarget,
@@ -918,6 +919,30 @@ async function rehearseAccess(scope: AccessScope): Promise<AuthorizationRehearsa
     return out
   }
 
+  async function policiesFollowParent(): Promise<AuthorizationCheck> {
+    const identity = 'every role'
+    const check = 'policies_follow_parent'
+    const policies = await rows<{ name: string; permissive: boolean; roles: string[]; using: string | null; withCheck: string | null }>(
+      `SELECT p.polname::text AS name, p.polpermissive AS permissive,
+              ARRAY(SELECT CASE WHEN r = 0 THEN 'public' ELSE pg_get_userbyid(r)::text END FROM unnest(p.polroles) r) AS roles,
+              pg_get_expr(p.polqual, p.polrelid) AS using, pg_get_expr(p.polwithcheck, p.polrelid) AS "withCheck"
+         FROM pg_policy p WHERE p.polrelid = $1::regclass ORDER BY p.polname`,
+      sat,
+    )
+    const { reference, wider } = policiesWiderThanParent(policies, names)
+    if (reference === null) {
+      return { identity, check, outcome: 'failed', detail: `${spec.satellite} has no read policy that follows ${spec.host}` }
+    }
+    return wider.length === 0
+      ? { identity, check, outcome: 'passed', detail: `every policy on ${spec.satellite} admits a row only while its ${spec.host} row is visible` }
+      : {
+          identity,
+          check,
+          outcome: 'failed',
+          detail: `${wider.join(', ')} admit${wider.length === 1 ? 's' : ''} rows of ${spec.satellite} by another test than whether their ${spec.host} row is visible`,
+        }
+  }
+
   // ── Every identity, each in a savepoint that is rolled back ─────────────
   const result: AuthorizationRehearsal = { status: 'unavailable', detail: '', identities: 0, checks: [] }
   for (const role of assumable) {
@@ -939,8 +964,22 @@ async function rehearseAccess(scope: AccessScope): Promise<AuthorizationRehearsa
     }
   }
 
+  // ── The catalog, for what no probe can see ───────────────────────────────
+  // A write probe names its row, and naming a column makes PostgreSQL apply
+  // the SELECT policies to an UPDATE or DELETE as well. So a write policy that
+  // is wider only on rows the caller cannot see never shows in a probe, yet an
+  // unqualified `DELETE FROM <satellite>` reads no column and would use it.
+  // The catalog shows it: every permissive policy on the satellite, but the
+  // owner's own, must admit a row by exactly the test its read policy uses,
+  // so no role can write a row it could not read.
+  const catalog = await policiesFollowParent()
+  result.checks.push(catalog)
+
   const failedChecks = result.checks.filter(c => c.outcome === 'failed')
-  const passedChecks = result.checks.filter(c => c.outcome === 'passed')
+  // The catalog check can fail a rehearsal, never pass one on its own: a pass
+  // needs an identity that was actually exercised.
+  const exercised = result.checks.filter(c => c !== catalog)
+  const passedChecks = exercised.filter(c => c.outcome === 'passed')
   const skipped = refusedRoles.length + untried.length > 0 ? ` Not rehearsed as: ${[...refusedRoles, ...untried].join(', ')}.` : ''
   const who =
     `${result.identities} identit${result.identities === 1 ? 'y' : 'ies'} (${assumable.join(', ')}; anonymous, ` +
@@ -956,7 +995,7 @@ async function rehearseAccess(scope: AccessScope): Promise<AuthorizationRehearsa
     result.status = 'passed'
     result.detail =
       `${spec.satellite} gave the same answer as ${spec.host} in all ${passedChecks.length} check(s) across ${who}; ` +
-      `${result.checks.length - passedChecks.length} not applicable.${skipped}`
+      `${exercised.length - passedChecks.length} not applicable; and every policy on it follows ${spec.host}.${skipped}`
   } else {
     result.detail = `no access check could be exercised across ${who}.${skipped}`
   }

@@ -335,6 +335,34 @@ function followsParent(x: ReturnType<typeof parts>): string {
   return `(EXISTS (SELECT 1 FROM ${x.host} h WHERE h.${x.pk} = ${x.satName}.${x.fk}))`
 }
 
+/**
+ * Policies on a satellite that could admit a row its parent would not: for a
+ * satellite as Backenly renders it, none.
+ *
+ * Every client-facing policy tests exactly `followsParent`, so each deparses to
+ * the same text as the read policy. The one exception is the owner's own,
+ * `TO CURRENT_USER` (a single named role, never PUBLIC). A permissive policy
+ * that tests anything else, under any name, can widen access, and no probe that
+ * names its row can see a write policy wider only on rows the caller cannot
+ * read. A restrictive policy only narrows and is left to the probes.
+ *
+ * `reference` is the read policy's deparsed test, or null before reads are
+ * exposed: then any client-facing policy at all is unexpected.
+ */
+export function policiesWiderThanParent(
+  policies: Array<{ name: string; permissive: boolean; roles: string[]; using: string | null; withCheck: string | null }>,
+  names: LadderNames,
+): { reference: string | null; wider: string[] } {
+  const reference = policies.find(p => p.name === names.policies.select)?.using ?? null
+  const owners = (p: (typeof policies)[number]) =>
+    p.name === names.policies.owner && p.roles.length === 1 && p.roles[0].toLowerCase() !== 'public'
+  const wider = policies
+    .filter(p => p.permissive && !owners(p))
+    .filter(p => reference === null || [p.using, p.withCheck].some(e => e !== null && e !== reference))
+    .map(p => p.name)
+  return { reference, wider }
+}
+
 function grantList(roles: string[]): string {
   return roles.map(r => (r === 'PUBLIC' ? 'PUBLIC' : qi(r))).join(', ')
 }

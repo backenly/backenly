@@ -42,7 +42,8 @@ import { handleEvolutionBackfillJob } from '@/lib/structural-evolution/backfill-
 import { reconcileExtraction } from '@/lib/structural-evolution/reconcile'
 import { rollbackExtraction } from '@/lib/structural-evolution/rollback'
 import { readTableFacts } from '@/lib/structural-evolution/facts'
-import { ladderNames, type ExtractionSpec } from '@/lib/structural-evolution/sql'
+import { runStep } from '@/lib/structural-evolution/primitives'
+import { fq, ladderNames, type ExtractionSpec } from '@/lib/structural-evolution/sql'
 
 jest.setTimeout(600_000)
 
@@ -374,6 +375,27 @@ describe('the governed executor', () => {
     // The host's CHECK and its index on a member came along.
     expect(sat.constraints.some(c => c.kind === 'c' && /refund_amount >= /.test(c.definition))).toBe(true)
     expect(sat.indexes.some(i => /\(refunded_at\)/.test(i.definition))).toBe(true)
+  })
+
+  it('will not open the new table while it carries a policy nobody rendered', async () => {
+    // A policy someone else put on the closed table would open with Backenly's
+    // own: refused before any grant, for reads and for writes alike.
+    const resolved = await resolveExtractionPlan(projectId, SPEC)
+    if (isResolveRefusal(resolved)) throw new Error(resolved.refusal)
+    const step = (kind: string) => resolved.plan.steps.find(s => s.kind === kind)!
+    await prisma.$executeRawUnsafe(`CREATE POLICY foreign_sweep ON ${fq(schema, 'order_refunds')} FOR DELETE USING (true)`)
+    try {
+      for (const kind of ['expose_reads', 'open_writes']) {
+        const out = await runStep(projectId, resolved.plan, step(kind))
+        expect(out.status).toBe('failed')
+        expect(out.detail).toBe("not opened: foreign_sweep on order_refunds admits rows by another test than the parent's visibility")
+      }
+      const sat = (await readTableFacts(schema, 'order_refunds'))!
+      expect(sat.grants.filter(g => g.grantee !== sat.owner)).toEqual([])
+      expect(sat.policies.map(p => p.name).sort()).toEqual([ladderNames(SPEC).policies.owner, 'foreign_sweep'].sort())
+    } finally {
+      await prisma.$executeRawUnsafe(`DROP POLICY IF EXISTS foreign_sweep ON ${fq(schema, 'order_refunds')}`)
+    }
   })
 
   it('resumes after the backfill and finishes everything software may do', async () => {

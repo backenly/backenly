@@ -36,15 +36,16 @@
  *                 a write to its refund, because the parent's update policy
  *                 still decides
  *   too wide      a planted SELECT policy is caught by the read and
- *                 hidden-parent checks
+ *                 hidden-parent checks, and by the catalog
  *   too narrow    a planted RESTRICTIVE update policy is caught too: narrower
  *                 than the parent breaks old-versus-new equivalence as surely
  *                 as wider does
  *   unsynced      with the reverse sync dropped, writes the new table accepts
  *                 never reach the parent and skip its update policy: caught
- *   known gap     a DELETE policy wider only on rows the caller cannot see is
- *                 NOT caught, because every probe names its row; pinned with
- *                 `it.failing`
+ *   unseen        a DELETE policy wider only on rows the caller cannot see is
+ *                 invisible to probes (each names its row), so the catalog
+ *                 check catches it: every permissive policy on the new table
+ *                 must test exactly what its read policy tests
  *   other hosts   access by grant alone passes, and roles past the limit are
  *                 named as not rehearsed; a host whose policies ignore the
  *                 service-role claim passes too: the satellite gives a caller
@@ -334,10 +335,13 @@ describe('the access rungs as rendered', () => {
     // Each role, times anonymous, three subjects and the service-role claim.
     expect(r.authorization.identities).toBeGreaterThanOrEqual(3)
     expect(r.authorization.identities).toBe(10)
+    // Then the catalog, once, for every role.
     expect(distinct(r.authorization.checks.map(c => c.identity))).toEqual([
       W.anonymous, ...W.subjects, W.service,
       R.anonymous, ...R.subjects, R.service,
+      'every role',
     ])
+    expect(checksOf(r, 'every role').policies_follow_parent.outcome).toBe('passed')
     expect(r.authorization.detail).toMatch(/^order_refunds gave the same answer as orders in all \d+ check\(s\) across 10 identities/)
     expect(r.authorization.detail).toMatch(/3 signed-in subject\(s\) drawn from user_id/)
 
@@ -463,10 +467,14 @@ describe('a satellite whose access differs from its parent', () => {
     expect(r.exercises.filter(e => e.outcome === 'failed')).toEqual([])
 
     const failed = failures(r)
-    expect(distinct(failed.map(c => c.check)).sort()).toEqual(['hidden_parent', 'read'])
-    // Everyone but the service-role claim, which may see every row anyway.
+    expect(distinct(failed.map(c => c.check)).sort()).toEqual(['hidden_parent', 'policies_follow_parent', 'read'])
+    // Everyone but the service-role claim, which may see every row anyway;
+    // and the catalog, which names the policy.
     const exposed = [W.anonymous, ...W.subjects, R.anonymous, ...R.subjects]
-    expect(distinct(failed.map(c => c.identity))).toEqual(exposed)
+    expect(distinct(failed.map(c => c.identity))).toEqual([...exposed, 'every role'])
+    expect(checksOf(r, 'every role').policies_follow_parent.detail).toBe(
+      'leak admits rows of order_refunds by another test than whether their orders row is visible',
+    )
     for (const identity of exposed) {
       const c = checksOf(r, identity)
       expect(c.read.detail).toMatch(/^order_refunds shows \d+ row\(s\) this identity cannot see in orders/)
@@ -543,35 +551,40 @@ describe('a satellite whose access differs from its parent', () => {
   })
 
   /*
-   * A gap in the rehearsal's probes, not in the SQL it rehearses.
+   * What no probe can see, and the catalog can.
    *
    * Every write probe names its row (`… WHERE order_id = $1`). Naming a column
    * makes PostgreSQL apply the table's SELECT policies to an UPDATE or DELETE
    * as well as its write policies, so a probe can only ever reach rows the
    * identity can see. A write policy that is wider only on HIDDEN rows is
-   * therefore invisible to it — yet `DELETE FROM order_refunds` with no WHERE
-   * reads no column, is filtered by the DELETE policies alone, and removes
-   * refunds of orders the caller cannot see. The reverse sync then finds the
-   * parent "gone" (it checks as the caller) and lets the delete commit without
-   * touching orders. (An unqualified UPDATE is safe: the reverse sync refuses
-   * it on a hidden parent.) The rendered DELETE policy is the parent's
-   * visibility, so this needs a policy nobody renders; the rehearsal should
-   * still refuse it, since planted flaws are what its seam exists to catch.
-   *
-   * Possible fix, in rehearse.ts: for each identity with hidden parents, run
-   * `DELETE FROM <satellite>` unqualified in a rolled-back savepoint and check,
-   * as the platform, that no row with a hidden parent is gone. When the
-   * identity also sees a row it may not change, the reverse sync aborts that
-   * whole statement first and hides the answer, so the probe has to run where
-   * no such row is visible, or the satellite's DELETE policies have to be
-   * compared with its SELECT policies in the catalog instead.
+   * therefore invisible to probes — yet `DELETE FROM order_refunds` with no
+   * WHERE reads no column, is filtered by the DELETE policies alone, and would
+   * remove refunds of orders the caller cannot see. The rehearsal's catalog
+   * check refuses any permissive policy whose test is not the read policy's.
    */
-  it.failing('KNOWN GAP in the rehearsal: a delete policy wider only on hidden rows should be caught', async () => {
+  it('is caught when a delete policy is wider only on rows the caller cannot see', async () => {
     const r = await rehearse(SPEC, {
       extraSatelliteSqlForTest: scratch => [`CREATE POLICY sweep ON ${fq(scratch.schema, 'order_refunds')} FOR DELETE USING (true)`],
     })
     expect(r.error).toBeNull()
     expect(r.authorization.status).toBe('failed')
+    expect(r.passed).toBe(false)
+    // Only the catalog sees it; every probe still agrees.
+    expect(failures(r).map(c => [c.identity, c.check])).toEqual([['every role', 'policies_follow_parent']])
+    expect(r.authorization.detail).toContain(
+      'First: every role, policies_follow_parent: sweep admits rows of order_refunds by another test than whether their orders row is visible.',
+    )
+  })
+
+  it('leaves a restrictive policy to the probes: it can only narrow', async () => {
+    const r = await rehearse(SPEC, {
+      extraSatelliteSqlForTest: scratch => [
+        `CREATE POLICY narrow_delete ON ${fq(scratch.schema, 'order_refunds')} AS RESTRICTIVE FOR DELETE USING (true)`,
+      ],
+    })
+    expect(r.error).toBeNull()
+    expect(checksOf(r, 'every role').policies_follow_parent.outcome).toBe('passed')
+    expect(r.authorization.status).toBe('passed')
   })
 })
 
@@ -591,9 +604,10 @@ describe('a host whose access is by grant alone', () => {
     const acted = [ROLE, ...EXTRA.slice(0, REHEARSAL_MAX_ROLES - 1)]
     const skipped = EXTRA.slice(REHEARSAL_MAX_ROLES - 1)
     expect(r.authorization.identities).toBe(acted.length * 2)
-    expect(distinct(r.authorization.checks.map(c => c.identity))).toEqual(
-      acted.flatMap(role => [`${role} as anonymous`, `${role} claiming the service role`]),
-    )
+    expect(distinct(r.authorization.checks.map(c => c.identity))).toEqual([
+      ...acted.flatMap(role => [`${role} as anonymous`, `${role} claiming the service role`]),
+      'every role',
+    ])
     expect(r.authorization.detail).toMatch(/0 signed-in subject\(s\), and the service-role claim/)
     expect(r.authorization.detail).toMatch(new RegExp(`Not rehearsed as: ${skipped.join(', ')}\\.$`))
     expect(r.notRehearsed).toContain(`access as ${skipped.join(', ')} — only the first ${REHEARSAL_MAX_ROLES} roles are rehearsed as`)
