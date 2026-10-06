@@ -16,6 +16,7 @@
  * "You approved it. Here is exactly what changed. One click to undo."
  */
 
+import { isEvolutionApprovalFinding } from '@/lib/core/types'
 import { prisma } from '@/lib/db/prisma'
 import { Pool } from 'pg'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
@@ -132,6 +133,12 @@ export async function applyApproval(
 
   if (!finding) {
     return { success: false, findingId, message: 'Finding not found or already resolved.' }
+  }
+
+  // An architecture-change request is never approved here: this path cannot
+  // bind consent to a plan version, and it runs `details.fix.sql` as written.
+  if (isEvolutionApprovalFinding(finding.type)) {
+    return { success: false, findingId, message: 'This is an architecture change awaiting approval. Approve it from the approval queue on the Autonomy page, which binds your consent to the exact version Backenly rehearsed.' }
   }
 
   const details = finding.details as any

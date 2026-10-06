@@ -17,6 +17,7 @@ export const dynamic = 'force-dynamic'
  *   requiresConfirmation until called with confirm=true.
  */
 
+import { isEvolutionApprovalFinding } from '@/lib/core/types'
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectAccess } from '@/lib/auth/route-protection'
 import { prisma } from '@/lib/db/prisma'
@@ -51,6 +52,10 @@ export const POST = withProjectAccess(async (req: NextRequest, { user, project, 
       { success: false, error: 'Finding not found' },
       { status: 404 },
     )
+  }
+
+  if (isEvolutionApprovalFinding(finding.type)) {
+    return NextResponse.json({ success: false, error: 'This is an architecture change awaiting approval. Approve it from the approval queue on the Autonomy page, which binds your consent to the exact version Backenly rehearsed.' }, { status: 409 })
   }
 
   if (finding.status === 'auto_fixed') {

@@ -17,6 +17,7 @@
 
 import { prisma } from '@/lib/db/prisma'
 import { explainAutonomyEvent } from '@/lib/autonomy/because-copy'
+import { ARCHITECTURE_LOG_TYPE, TRACE_ACTION } from '@/lib/evolution-engine/memory'
 
 export type ActivityKind =
   | 'api_key' | 'user' | 'file' | 'table' | 'auth' | 'deploy'
@@ -73,7 +74,8 @@ export async function buildActivityFeed(
   // when one source dominates the other.
   const [audits, fixes] = await Promise.all([
     prisma.auditLog.findMany({
-      where: { projectId, timestamp: timeFilter },
+      // Architecture-memory traces are the engine's notebook, not activity.
+      where: { projectId, timestamp: timeFilter, action: { not: TRACE_ACTION } },
       orderBy: { timestamp: 'desc' },
       take: limit,
       select: { id: true, action: true, type: true, timestamp: true, details: true, metadata: true },
@@ -140,6 +142,11 @@ function labelForAudit(
   const a = action.toLowerCase()
   const t = type.toLowerCase()
   const d = detail ?? {}
+
+  // An architecture change milestone carries the sentence written for it.
+  if (t === ARCHITECTURE_LOG_TYPE) {
+    return { kind: 'autonomy', label: typeof d.sentence === 'string' && d.sentence ? d.sentence : 'Backenly recorded an architecture change' }
+  }
 
   // ── Autonomous fix events FIRST ──────────────────────────────────────────
   // These rows are written with type='autonomy' AND action='AGENT_AUTO_FIXED'

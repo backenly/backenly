@@ -280,7 +280,11 @@ export async function evaluateSubsystemRecurrence(
       take: 500,
     }),
     prisma.healthFinding.findMany({
-      where: { projectId, status: 'pending_approval', detectedAt: { gte: since } },
+      // An architecture-change approval request waits on a person because
+      // policy says every restructuring does, not because anything escalated.
+      // Counting it would make Backenly's own proposal evidence of harm to the
+      // table it proposes to improve.
+      where: { projectId, status: 'pending_approval', detectedAt: { gte: since }, type: { not: 'architecture_evolution' } },
       select: { id: true, type: true, details: true, detectedAt: true },
       take: 200,
     }),

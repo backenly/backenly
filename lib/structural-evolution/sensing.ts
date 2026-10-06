@@ -231,7 +231,8 @@ export function findingLocation(details: unknown): { table: string; column: stri
 export async function readRepairs(projectId: string, since: Date): Promise<Array<RepairRecord & { table: string }>> {
   const rows = await prisma.healthFinding
     .findMany({
-      where: { projectId, detectedAt: { gte: since } },
+      // Backenly's own approval requests are not repairs; see EVOLUTION_FINDING_TYPE.
+      where: { projectId, detectedAt: { gte: since }, type: { not: 'architecture_evolution' } },
       select: { id: true, type: true, details: true, detectedAt: true },
       take: 2_000,
     })

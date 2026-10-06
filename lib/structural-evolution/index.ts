@@ -33,13 +33,12 @@
  * Restructure without consent. Every ladder needs a person to approve its exact
  * version; the scheduler only RESUMES what was approved.
  *
- * Read-only from here, except `sweepProjectEvolution`, which only runs ladders
- * a person already approved.
+ * Read-only. Running an approved change, observing it and remembering it are
+ * the Architecture Evolution Engine's (lib/evolution-engine/engine.ts), which
+ * drives this primitive through ./primitive.ts.
  */
 
-import { FLAGS } from '@/lib/config/flags'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
-import { getProjectAutonomyLevel } from '@/lib/autonomy/autonomy-level'
 import type { PriorOutcome } from '@/lib/evolution-engine/levels'
 import { listBaseTables, readTableFacts, relationExists } from './facts'
 import {
@@ -60,8 +59,7 @@ import {
 } from './sensing'
 import { buildExtractionPlan, extractionPlanId, requiredTier, type ExtractionPlan } from './plan'
 import { isOurSatellite } from './primitives'
-import { latestRun, listLiveEvolutionApprovals, readLatestEvolutionApproval, type LedgerRun } from './consent'
-import { executeExtraction, type ExtractionRunOutcome } from './execute'
+import { latestRun, readLatestEvolutionApproval, type LedgerRun } from './consent'
 import type { ExtractionSpec } from './sql'
 import { ladderNames } from './sql'
 
@@ -309,50 +307,4 @@ export async function analyzeStructuralEvolution(
       ...(!Array.isArray(snapshots) ? [snapshots.unavailable] : []),
     ],
   }
-}
-
-// ── The sweep ────────────────────────────────────────────────────────────────
-
-export type EvolutionSweepDisposition =
-  | 'disabled'
-  | 'nothing_approved'
-  | 'advanced'
-  | 'in_flight_elsewhere'
-
-export interface EvolutionSweepResult {
-  projectId: string
-  disposition: EvolutionSweepDisposition
-  planId?: string
-  outcome?: ExtractionRunOutcome
-  reason?: string
-}
-
-/**
- * Advance one approved extraction for this project, if any is unfinished.
- *
- * Never starts anything a person did not approve, and never approves anything.
- * One ladder per pass, for the maintenance sweep's reason: a ladder changes the
- * catalog, and a second plan in the same pass would act on a stale one.
- */
-export async function sweepProjectEvolution(input: { projectId: string }): Promise<EvolutionSweepResult> {
-  const { projectId } = input
-  if (!FLAGS.ENABLE_EVOLUTION_SCHEDULER || !FLAGS.ENABLE_EVOLUTION_MUTATIONS) {
-    return { projectId, disposition: 'disabled', reason: 'the evolution scheduler or its mutations are off in this deployment' }
-  }
-  if ((await getProjectAutonomyLevel(projectId)) === 'OFF') {
-    return { projectId, disposition: 'disabled', reason: 'autonomy is OFF for this project' }
-  }
-
-  for (const approval of await listLiveEvolutionApprovals(projectId)) {
-    const run = await latestRun(projectId, approval.planId)
-    if (run && ['completed', 'rolled_back', 'halted', 'refused'].includes(run.status)) continue
-    const outcome = await executeExtraction({ projectId, planId: approval.planId })
-    return {
-      projectId,
-      disposition: outcome.status === 'in_flight_elsewhere' ? 'in_flight_elsewhere' : 'advanced',
-      planId: approval.planId,
-      outcome,
-    }
-  }
-  return { projectId, disposition: 'nothing_approved' }
 }

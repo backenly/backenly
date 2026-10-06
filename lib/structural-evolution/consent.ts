@@ -46,6 +46,8 @@ export interface EvolutionApproval {
   planVersion: string
   maxTier: number
   spec: ExtractionSpec
+  /** The architecture decision this consent belongs to (lib/evolution-engine/memory.ts). */
+  decisionId: string | null
   approvedBy: string
   reason: string | null
   createdAt: Date
@@ -63,7 +65,7 @@ function coerce(row: {
   createdAt: Date
   revokedAt: Date | null
 }): EvolutionApproval | null {
-  const b = (row.bindings ?? {}) as { kind?: string; spec?: ExtractionSpec }
+  const b = (row.bindings ?? {}) as { kind?: string; spec?: ExtractionSpec; decisionId?: string }
   if (b.kind !== EVOLUTION_BINDING_KIND || !b.spec) return null
   return {
     id: row.id,
@@ -71,6 +73,7 @@ function coerce(row: {
     planVersion: row.planVersion,
     maxTier: row.maxTier,
     spec: b.spec,
+    decisionId: b.decisionId ?? null,
     approvedBy: row.approvedBy,
     reason: row.reason,
     createdAt: row.createdAt,
@@ -137,6 +140,8 @@ export async function grantEvolutionApproval(input: {
   planVersion: string
   approvedBy: string
   reason?: string | null
+  /** The architecture decision this consent belongs to, when the engine grants it. */
+  decisionId?: string | null
   resolve: (projectId: string, spec: ExtractionSpec) => Promise<{ plan: ExtractionPlan } | { refusal: string }>
 }): Promise<GrantResult> {
   const { projectId, approvedBy } = input
@@ -173,12 +178,12 @@ export async function grantEvolutionApproval(input: {
       maxTier: MAX_APPROVABLE_TIER,
       approvedBy,
       reason: input.reason ?? null,
-      bindings: { kind: EVOLUTION_BINDING_KIND, spec: plan.spec } as object,
+      bindings: { kind: EVOLUTION_BINDING_KIND, spec: plan.spec, decisionId: input.decisionId ?? null } as object,
     },
     update: {
       approvedBy,
       reason: input.reason ?? null,
-      bindings: { kind: EVOLUTION_BINDING_KIND, spec: plan.spec } as object,
+      bindings: { kind: EVOLUTION_BINDING_KIND, spec: plan.spec, decisionId: input.decisionId ?? null } as object,
       revokedAt: null,
       revokedBy: null,
     },

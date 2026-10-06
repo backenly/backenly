@@ -439,6 +439,15 @@ export function getManualRemediationHint(
       )
     }
 
+    case 'architecture_evolution': {
+      const ev = (details?.evolution ?? {}) as { summary?: { change?: string; reason?: string } }
+      return (
+        `${ev.summary?.change ?? 'Backenly prepared a change to how part of your data is stored.'} ` +
+        `${ev.summary?.reason ?? ''} Review it in the approval queue on the Autonomy page: approve it there, ` +
+        'or dismiss it and Backenly will not raise it again without new evidence.'
+      ).replace(/\s+/g, ' ').trim()
+    }
+
     case 'subsystem_repeat_failure': {
       const area = Array.isArray(details?.membership)
         ? (details!.membership as string[]).join(', ')

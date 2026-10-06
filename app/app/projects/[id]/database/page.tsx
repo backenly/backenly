@@ -34,7 +34,7 @@ import { useState, useEffect, useRef } from 'react'
 import {
   AlertCircle, ArrowDown, ArrowUp, ArrowUpDown, Cable, Camera, Check, ChevronLeft, ChevronRight, Columns,
   Database as DatabaseIcon, Edit2, Filter, History, Key, Link2, Loader2, Maximize2, Minimize2, Network,
-  Plus, Puzzle, RefreshCw, Rows, Save, Search, Shapes, Split, Table2, Terminal, Trash2, X,
+  Plus, Puzzle, RefreshCw, Rows, Save, Search, Shapes, Table2, Terminal, Trash2, X,
   type LucideIcon,
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -83,7 +83,6 @@ import { SqlWorkspace } from '@/components/database/SqlWorkspace'
 import { SchemaHistory } from '@/components/database/SchemaHistory'
 import { EnumsPanel } from '@/components/database/EnumsPanel'
 import { ExtensionsPanel } from '@/components/database/ExtensionsPanel'
-import { StructuralEvolutionPanel } from '@/components/database/StructuralEvolutionPanel'
 import { DatabaseSnapshots } from '@/components/database/DatabaseSnapshots'
 import { useParams, useRouter } from 'next/navigation'
 import { getCurrentProjectId } from '@/lib/api/client'
@@ -92,7 +91,7 @@ import EnhancedSchemaVisualizer from '@/components/database/EnhancedSchemaVisual
 
 type ViewMode = 'data' | 'structure'
 type TableView = 'data' | 'structure'
-type DatabaseView = 'tables' | 'visualization' | 'sql' | 'history' | 'snapshots' | 'types' | 'extensions' | 'evolution'
+type DatabaseView = 'tables' | 'visualization' | 'sql' | 'history' | 'snapshots' | 'types' | 'extensions'
 
 // Rows fetched per page in the data browser. Kept in one place so the
 // pagination footer, the "step back a page after delete" math, and the query
@@ -1403,11 +1402,6 @@ export default function ProjectDatabasePage() {
               // Deployment-scoped, reached through a project: extensions are
               // database-wide, which the panel says.
               <ExtensionsPanel projectId={resolvedProjectId} />
-            ) : showVisualization === 'evolution' && resolvedProjectId ? (
-              // Project-scoped. Here and not on the Autonomy page because an
-              // extraction creates a table, and only this section creates
-              // backend reality.
-              <StructuralEvolutionPanel projectId={resolvedProjectId} />
             ) : showVisualization === 'snapshots' && resolvedProjectId ? (
               // Project-scoped like the schema graph: it needs no selected
               // table, and a project whose tables have not loaded can still
@@ -2362,7 +2356,6 @@ const DATABASE_VIEWS: Array<{ id: DatabaseView; label: string; icon: LucideIcon 
   { id: 'types', label: 'Types', icon: Shapes },
   { id: 'extensions', label: 'Extensions', icon: Puzzle },
   { id: 'snapshots', label: 'Snapshots', icon: Camera },
-  { id: 'evolution', label: 'Evolution', icon: Split },
 ]
 
 const CHECKBOX =

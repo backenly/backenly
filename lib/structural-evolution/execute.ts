@@ -38,6 +38,7 @@ import { readLiveEvolutionApproval } from './consent'
 import { requiredTier, type ExtractionPlan, type ExtractionStep } from './plan'
 import { runStep, rungAlreadyApplied } from './primitives'
 import { inspectEvolutionChain } from './backfill-job'
+import type { StopReason } from '@/lib/evolution-engine/primitive'
 import { resolveExtractionPlan, isResolveRefusal } from './resolve'
 
 export type ExtractionRunStatus =
@@ -59,6 +60,8 @@ export interface ExtractionRunOutcome {
   executionId: string | null
   planVersion: string | null
   haltReason: string | null
+  /** Why it stopped short, when it did: decides "paused, needs you" from "a step failed". */
+  stoppedBecause: StopReason | null
   steps: ExtractionStepOutcome[]
 }
 
@@ -77,6 +80,7 @@ export async function executeExtraction(input: {
       executionId: null,
       planVersion: null,
       haltReason: 'another process is already running a ladder on this project',
+      stoppedBecause: null,
       steps: [],
     }
   }
@@ -91,31 +95,32 @@ async function runLadder(input: {
   const { projectId, planId } = input
   const mutationsEnabled = (input.mutationsEnabled ?? true) && FLAGS.ENABLE_EVOLUTION_MUTATIONS
 
-  const refuse = async (reason: string, plan?: ExtractionPlan): Promise<ExtractionRunOutcome> => {
+  const refuse = async (reason: string, because: StopReason, plan?: ExtractionPlan): Promise<ExtractionRunOutcome> => {
     const executionId = plan ? await openExecution(projectId, plan, 'refused', reason) : null
-    return { status: 'refused', executionId, planVersion: plan?.planVersion ?? null, haltReason: reason, steps: [] }
+    return { status: 'refused', executionId, planVersion: plan?.planVersion ?? null, haltReason: reason, stoppedBecause: because, steps: [] }
   }
 
   const approval = await readLiveEvolutionApproval(projectId, planId)
-  if (!approval) return refuse('nobody has consented to this extraction, or the consent was withdrawn')
+  if (!approval) return refuse('nobody has consented to this extraction, or the consent was withdrawn', 'consent')
 
   const resolved = await resolveExtractionPlan(projectId, approval.spec)
-  if (isResolveRefusal(resolved)) return refuse(resolved.refusal)
+  if (isResolveRefusal(resolved)) return refuse(resolved.refusal, 'drift')
   const { plan } = resolved
 
-  if (plan.planId !== planId) return refuse('the approved spec does not describe this plan')
+  if (plan.planId !== planId) return refuse('the approved spec does not describe this plan', 'drift')
   if (plan.planVersion !== approval.planVersion) {
     return refuse(
       `the plan rebuilt from the live catalog is version ${plan.planVersion}, and consent is for ${approval.planVersion}. ` +
         `${plan.spec.host} or its access changed since it was approved; it has to be re-read and re-approved.`,
+      'drift',
       plan,
     )
   }
   if (plan.validity !== 'executable') {
-    return refuse(`the plan is ${plan.validity}: ${plan.blockedReasons.join('; ')}`, plan)
+    return refuse(`the plan is ${plan.validity}: ${plan.blockedReasons.join('; ')}`, 'capability', plan)
   }
   const tier = requiredTier(plan)
-  if (tier > approval.maxTier) return refuse(`the ladder needs tier ${tier} and consent covers ${approval.maxTier}`, plan)
+  if (tier > approval.maxTier) return refuse(`the ladder needs tier ${tier} and consent covers ${approval.maxTier}`, 'consent', plan)
 
   const executionId = await openExecution(projectId, plan, 'running', null, approval.id)
   const steps: ExtractionStepOutcome[] = []
@@ -126,13 +131,13 @@ async function runLadder(input: {
       continue
     }
     if (step.capability !== 'implemented') {
-      return halt(executionId, plan, steps, `step ${step.ordinal} (${step.kind}) is ${step.capability}`)
+      return halt(executionId, plan, steps, `step ${step.ordinal} (${step.kind}) is ${step.capability}`, 'capability')
     }
 
     // Consent is re-read here, not remembered from the top of the ladder.
     const live = await readLiveEvolutionApproval(projectId, planId)
     if (!live || live.planVersion !== plan.planVersion) {
-      return halt(executionId, plan, steps, `consent for version ${plan.planVersion} was withdrawn before step ${step.ordinal} (${step.kind})`)
+      return halt(executionId, plan, steps, `consent for version ${plan.planVersion} was withdrawn before step ${step.ordinal} (${step.kind})`, 'consent')
     }
 
     const existing = await prisma.maintenanceStepExecution.findUnique({ where: { idempotencyKey: step.idempotencyKey } })
@@ -146,7 +151,7 @@ async function runLadder(input: {
         // Paused by a withdrawn consent that is live again (re-read above):
         // the stopped batch is queued again exactly as it was, cursor and all.
         if (!mutationsEnabled) {
-          return halt(executionId, plan, steps, `step ${step.ordinal} (${step.kind}) is paused and mutations are disabled for this run`)
+          return halt(executionId, plan, steps, `step ${step.ordinal} (${step.kind}) is paused and mutations are disabled for this run`, 'mutations_disabled')
         }
         const resumed = await enqueue('evolution_backfill', job.resumeFrom as unknown as Record<string, unknown>, { projectId })
         await prisma.maintenanceStepExecution.update({ where: { id: existing.id }, data: { backgroundJobId: resumed.id } })
@@ -163,7 +168,8 @@ async function runLadder(input: {
           data: { status: 'failed', completedAt: new Date(), result: { error: job.detail } },
         })
         steps.push({ ordinal: step.ordinal, kind: step.kind, status: 'failed', detail: job.detail })
-        return halt(executionId, plan, steps, `step ${step.ordinal} (${step.kind}) failed: ${job.detail}`)
+        // A backfill that stopped because the table changed shape is drift, not a broken step.
+        return halt(executionId, plan, steps, `step ${step.ordinal} (${step.kind}) failed: ${job.detail}`, /changed shape|no longer exists/.test(job.detail) ? 'drift' : 'rung_failed')
       }
       await prisma.maintenanceStepExecution.update({
         where: { id: existing.id },
@@ -199,6 +205,7 @@ async function runLadder(input: {
         plan,
         steps,
         `step ${step.ordinal} (${step.kind}) would change the live schema and mutations are disabled for this run`,
+        'mutations_disabled',
       )
     }
 
@@ -229,7 +236,7 @@ async function runLadder(input: {
         data: { status: 'failed', completedAt: new Date(), result: { error: message } },
       })
       steps.push({ ordinal: step.ordinal, kind: step.kind, status: 'failed', detail: message })
-      return halt(executionId, plan, steps, `step ${step.ordinal} (${step.kind}) threw: ${message}`)
+      return halt(executionId, plan, steps, `step ${step.ordinal} (${step.kind}) threw: ${message}`, 'rung_failed')
     }
 
     await prisma.maintenanceStepExecution.update({
@@ -249,7 +256,7 @@ async function runLadder(input: {
       return awaiting(executionId, plan, steps, `step ${step.ordinal} (${step.kind}) dispatched job ${outcome.backgroundJobId}; run again once it completes`)
     }
     if (outcome.status === 'failed') {
-      return halt(executionId, plan, steps, `step ${step.ordinal} (${step.kind}) failed: ${outcome.detail}`)
+      return halt(executionId, plan, steps, `step ${step.ordinal} (${step.kind}) failed: ${outcome.detail}`, step.kind === 'verify' ? 'verification' : 'rung_failed')
     }
   }
 
@@ -257,7 +264,7 @@ async function runLadder(input: {
     where: { id: executionId },
     data: { status: 'completed', completedAt: new Date(), haltReason: null },
   })
-  return { status: 'completed', executionId, planVersion: plan.planVersion, haltReason: null, steps }
+  return { status: 'completed', executionId, planVersion: plan.planVersion, haltReason: null, stoppedBecause: null, steps }
 }
 
 async function openExecution(
@@ -297,12 +304,13 @@ async function halt(
   plan: ExtractionPlan,
   steps: ExtractionStepOutcome[],
   reason: string,
+  because: StopReason,
 ): Promise<ExtractionRunOutcome> {
   await prisma.maintenanceExecution.update({
     where: { id: executionId },
     data: { status: 'halted', haltReason: reason, completedAt: new Date() },
   })
-  return { status: 'halted', executionId, planVersion: plan.planVersion, haltReason: reason, steps }
+  return { status: 'halted', executionId, planVersion: plan.planVersion, haltReason: reason, stoppedBecause: because, steps }
 }
 
 async function awaiting(
@@ -315,5 +323,5 @@ async function awaiting(
     where: { id: executionId },
     data: { status: 'awaiting_background_work', haltReason: reason },
   })
-  return { status: 'awaiting_background_work', executionId, planVersion: plan.planVersion, haltReason: reason, steps }
+  return { status: 'awaiting_background_work', executionId, planVersion: plan.planVersion, haltReason: reason, stoppedBecause: null, steps }
 }

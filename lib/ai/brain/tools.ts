@@ -1083,8 +1083,8 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     'Read the structural maintenance ladder awaiting a decision on this project: the diagnosis that produced it, every rung with its tier and whether it can be undone, and whether anybody has consented yet. A ladder rewrites schema, so consent belongs to a person and this tool is READ-ONLY: report what is waiting and why, then point the user at the Autonomy page to approve it. Consent binds to one exact planVersion, so a version read earlier may already be stale.',
     {}),
   fn('get_evolution_proposals',
-    'Read Backenly\'s structural-evolution proposals: groups of columns that have become a separate concern inside a table (refunds living on orders, say), the measured evidence for each, the exact behaviour-preserving ladder that would move them into their own table while every existing client keeps working, its consent state, and concerns only being watched. READ-ONLY: restructuring a table needs a person\'s consent to one exact planVersion, given in the Database section, so report what is proposed and why, show the client migration, and point the user there. Optional `table` narrows the analysis to one table.',
-    { table: { type: 'string' } }),
+    'Read Backenly\'s architecture evolution for this project, concisely: recent architecture changes in plain sentences (what changed, whether it worked and helped, whether it can be undone), how many changes wait for the owner\'s approval, recommendations not proposed to run, and tables deliberately left alone with the reason. Pass detail: true for a fresh analysis with every concern\'s evidence and the exact plans (optionally narrowed by `table`), or `decision` for one change\'s full history. READ-ONLY: approving, pausing, resuming or undoing a change belongs to a person on the Autonomy page; report what is waiting and why, and point the user there.',
+    { detail: { type: 'boolean' }, table: { type: 'string' }, decision: { type: 'string' } }),
   fn('get_realtime_status',
     'Read realtime streaming state from the live database: which tables push live INSERT/UPDATE/DELETE events to subscribed clients over SSE, which tables are idle (realtime not enabled), how many end-users are online right now, and the Postgres NOTIFY channel. Side-effect free. Call this to answer "is realtime working?" / "what is streaming?" / "how many users are online?", and ALWAYS before enable_realtime / disable_realtime / fix_backend(target="realtime") so you act on real state instead of guessing.',
     {}),
@@ -2498,47 +2498,51 @@ export async function dispatchTool(
       return finalize({ ok: true, summary, data: { pending: true, ladder } })
     }
 
-    // ── Structural evolution: what should change shape ───────────────────
+    // ── Architecture evolution: what changed, what waits, what was left ────
     //
-    // READ-ONLY for the same reason as the maintenance ladder: an extraction
-    // restructures a production table, and the property that makes running it
-    // safe is a person's consent to one exact planVersion. An agent that could
-    // grant it would be approving its own proposal.
+    // READ-ONLY for the same reason as the maintenance ladder: a change of
+    // architecture restructures production tables, and the property that makes
+    // running it safe is a person's consent to one exact plan version. An agent
+    // that could grant it would be approving its own proposal; the decision
+    // routes need a platform session, which an MCP key is not.
     if (name === 'get_evolution_proposals') {
-      const { analyzeStructuralEvolution } = await import('@/lib/structural-evolution')
-      const table = typeof args.table === 'string' && args.table.trim() ? args.table.trim() : null
-      const report = await analyzeStructuralEvolution(ctx.projectId, table ? { tables: [table] } : {}).catch(() => null)
-      if (!report) {
-        return finalize({ ok: false, summary: 'Could not analyse the schema right now. Try again in a moment.' })
+      const engine = await import('@/lib/evolution-engine/engine')
+      const decisionId = typeof args.decision === 'string' && args.decision.trim() ? args.decision.trim() : null
+      if (decisionId) {
+        const detail = await engine.decisionDetail(ctx.projectId, decisionId).catch(() => null)
+        return detail
+          ? finalize({ ok: true, summary: `History of one architecture change (${detail.status?.label ?? 'unknown'}): ${detail.trail.filter(t => t.milestone).map(t => t.sentence).join(' ')}`, data: detail })
+          : finalize({ ok: false, summary: 'No architecture change with that id in this project.' })
       }
-      if (report.proposals.length === 0) {
-        // Not a failure. "The shape is right" is the usual answer.
-        const watching = report.watching.map(w => `${w.host}.{${w.members.join(', ')}}`).join('; ')
-        return finalize({
-          ok: true,
-          summary:
-            'No structural change is proposed: no table carries a separate concern whose cost was measured.' +
-            (watching ? ` Watching, with no measured cost yet: ${watching}.` : ''),
-          data: report,
-        })
+      const summary = await engine.architectureSummary(ctx.projectId).catch(() => null)
+      if (!summary) return finalize({ ok: false, summary: 'Could not read architecture evolution right now. Try again in a moment.' })
+      const lines: string[] = []
+      for (const c of summary.changes) lines.push(`- ${c.headline} (${c.status.label}${c.outcome ? `; ${c.outcome.summary}` : ''})`)
+      if (summary.waitingOnYou > 0) {
+        lines.push(`${summary.waitingOnYou} architecture change(s) wait for the owner's approval on the Autonomy page. Approval is theirs to give; an agent cannot give it.`)
       }
-      const lines = report.proposals.map(p => {
-        const supports = p.families.filter(f => f.verdict === 'supports').map(f => f.family).join(', ')
-        return [
-          `- **${p.host}.{${p.members.join(', ')}}** → \`${p.spec.satellite}\` (${p.state}, priority ${p.priority.label})`,
-          `  evidence: ${supports}; cost: ${p.pressure.map(x => x.detail).join('; ') || 'none'}`,
-          `  plan ${p.planId}@${p.plan.planVersion} (${p.plan.validity}), ${p.plan.steps.length} rungs, highest tier ${p.plan.requiredTier}`,
-          `  clients: ${p.clientMigration[0].before}  →  ${p.clientMigration[0].after}`,
-        ].join('\n')
-      })
+      for (const r of summary.recommendations.slice(0, 3)) lines.push(`- Recommended, not proposed to run: ${r.sentence}`)
+      for (const n of summary.noChange.slice(0, 3)) lines.push(`- ${n.subject}: ${n.reason}`)
+      if (!summary.execution.enabled) lines.push(summary.execution.reason ?? '')
+      let data: Record<string, unknown> = { ...summary }
+      if (args.detail === true) {
+        const { allPrimitives } = await import('@/lib/evolution-engine/primitive')
+        const { readMemory, priorsFor, summarizeDecisions } = await import('@/lib/evolution-engine/memory')
+        const table = typeof args.table === 'string' && args.table.trim() ? args.table.trim() : null
+        const priors = priorsFor(summarizeDecisions(await readMemory(ctx.projectId)))
+        const analyses = []
+        for (const p of allPrimitives()) {
+          const assessment = await p.assess(ctx.projectId, { priors, ...(table ? { subjects: [table] } : {}) }).catch(() => null)
+          if (assessment) analyses.push({ primitive: p.id, title: p.title, assessment })
+        }
+        data = { ...data, analyses }
+      }
       return finalize({
         ok: true,
-        summary: [
-          `${report.proposals.length} structural change(s) proposed:`,
-          ...lines,
-          'Each needs a person to approve its exact version in the Database section (Evolution tab). Retiring the old columns is always theirs to do.',
-        ].join('\n'),
-        data: report,
+        summary: lines.length
+          ? ['Architecture evolution:', ...lines.filter(Boolean)].join('\n')
+          : 'No architecture changes, requests or recommendations: the shape of this backend is right as it stands.',
+        data,
       })
     }
 
@@ -3344,7 +3348,7 @@ export function humanTitle(name: string, args: Record<string, unknown>): string 
     case 'get_usage': return 'Reading usage + quota'
     case 'get_autonomy_status': return 'Reading autonomy + trust report'
     case 'get_maintenance_ladder': return 'Reading the maintenance ladder'
-    case 'get_evolution_proposals': return 'Reading structural evolution proposals'
+    case 'get_evolution_proposals': return 'Reading architecture evolution'
     case 'set_bucket_public': return `Making ${args.bucketName ?? 'bucket'} ${args.isPublic ? 'public' : 'private'}`
     case 'delete_bucket': return `Deleting bucket ${args.bucketName ?? ''}`.trim()
     case 'delete_file': return `Deleting file ${args.path ?? ''}`.trim()

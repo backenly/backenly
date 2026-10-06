@@ -7,6 +7,7 @@
 
 export const dynamic = 'force-dynamic'
 
+import { isEvolutionApprovalFinding } from '@/lib/core/types'
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
 import { prisma } from '@/lib/db/prisma'
@@ -277,6 +278,12 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
       return NextResponse.json({ error: 'Finding not found' }, { status: 404 })
     }
 
+    if (action === 'approve' && isEvolutionApprovalFinding(finding.type)) {
+      // Marking it auto_fixed would report a restructuring as done that never
+      // ran. Consent for it is given only through the evolution route.
+      return NextResponse.json({ error: 'This is an architecture change awaiting approval. Approve it from the approval queue on the Autonomy page, which binds your consent to the exact version Backenly rehearsed.' }, { status: 409 })
+    }
+
     if (action === 'approve') {
       // Human approved the suggested fix — mark as resolved and log it
       await prisma.$transaction([
@@ -304,6 +311,12 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
         where: { id: findingId },
         data: { status: 'dismissed' },
       })
+      // "Not now" on an architecture change is a decision Backenly remembers:
+      // it is not raised again unless something new is measured.
+      if (isEvolutionApprovalFinding(finding.type)) {
+        const { recordDecline } = await import('@/lib/evolution-engine/engine')
+        await recordDecline(projectId, findingId, validated.userId ?? null).catch(() => {})
+      }
     }
 
     // Keep the Memory timeline in step with the Review-Queue decision so a

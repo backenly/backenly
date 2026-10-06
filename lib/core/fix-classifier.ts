@@ -378,6 +378,21 @@ export function classifyFix(
     }
   }
 
+  // An approval request for a prepared architecture change. notify_only
+  // because no generic fix path may act on it: consent is bound to one exact
+  // plan version and given through the evolution route, never "Approve & fix".
+  if (type === 'architecture_evolution') {
+    return {
+      decision: 'notify_only',
+      reason:
+        'Backenly prepared and rehearsed this change and is asking before it runs. Restructuring a table ' +
+        'always waits for you.',
+      riskNote:
+        'Existing clients keep working throughout and every step can be undone; dropping the old columns is ' +
+        'never done for you.',
+    }
+  }
+
   if (type === 'subsystem_repeat_failure') {
     const n = Number(details?.confirmedRepairCount ?? 0)
     const area = String(details?.membership ?? '')

@@ -773,6 +773,7 @@ const RECEIPT_TONE: Record<string, string> = {
   rollback:   'bg-amber-400',
   failed:     'bg-rose-400',
   breaker:    'bg-rose-400',
+  architecture: 'bg-sky-400',
   shadow:     'bg-zinc-600',
   other:      'bg-zinc-600',
 }

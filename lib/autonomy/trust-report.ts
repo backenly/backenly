@@ -29,6 +29,8 @@ import { classifyFix } from '@/lib/core/fix-classifier'
 import { revertEligibility } from '@/lib/core/auto-fix-engine'
 import { INVARIANTS } from './desired-state'
 import { resolveExecutionMode, type ExecutionModeState } from './execution-mode'
+import { ARCHITECTURE_LOG_TYPE, MILESTONE_ACTION } from '@/lib/evolution-engine/memory'
+import type { ArchitectureChangeView } from '@/lib/evolution-engine/views'
 
 export interface TrustScoreboard {
   windowDays: number
@@ -67,6 +69,8 @@ export interface ActivityItem {
     | 'rollback'
     | 'shadow'
     | 'failed'
+    /** A milestone in an architecture change (Architecture Evolution Engine). */
+    | 'architecture'
     | 'other'
   summary: string
   /**
@@ -210,6 +214,12 @@ export interface TrustReport {
   pendingApprovals: PendingApproval[]
   /** Changes the loop applied on its own, newest first, each with its undo state. */
   appliedChanges: AppliedChange[]
+  /**
+   * Architecture changes a person approved (lib/evolution-engine), newest
+   * first: what changed, whether it worked and helped, and what can be done
+   * about it now. Empty unless the project has any.
+   */
+  architectureChanges: ArchitectureChangeView[]
   /** What the closed loop would do right now (present only in shadow mode). */
   shadowPreview: ShadowPreview | null
   /**
@@ -346,6 +356,25 @@ function humanize(action: string, details: string | null): string {
 }
 
 /**
+ * An architecture milestone row, rendered from what the engine wrote.
+ *
+ * The sentence is composed when the milestone is recorded (lib/evolution-engine),
+ * so the feed never has to understand the engine's states; the kind comes from
+ * the state so a paused or undone change can never read as routine.
+ */
+function architectureItem(details: string | null): { kind: ActivityItem['kind']; summary: string } {
+  let d: { sentence?: string; state?: string | null } = {}
+  try { d = details ? JSON.parse(details) : {} } catch { /* written by us; tolerate anyway */ }
+  const kind: ActivityItem['kind'] =
+    d.state === 'failed' || d.state === 'blocked'
+      ? 'failed'
+      : d.state === 'rolled_back' || d.state === 'rolling_back'
+        ? 'rollback'
+        : 'architecture'
+  return { kind, summary: d.sentence || 'Backenly recorded an architecture change' }
+}
+
+/**
  * Build the full trust report for one project over the trailing `windowDays`
  * (default 30). Every number traces to a durable audit/finding row.
  */
@@ -380,6 +409,15 @@ function heldBecauseFor(
       text:
         rec.note ??
         `Autopilot fixed this ${n} time${n === 1 ? '' : 's'} in the last ${rec.windowHours ?? 24}h and it kept returning — the fix is not holding, so it stopped retrying.`,
+    }
+  }
+
+  // A prepared architecture change. Held by policy, always: restructuring a
+  // table needs a person's consent to the exact version that was rehearsed.
+  if (type === 'architecture_evolution') {
+    return {
+      kind: 'guardrail',
+      text: 'Restructuring a table always waits for you. Backenly rehearsed it on a copy of your data first.',
     }
   }
 
@@ -418,6 +456,7 @@ export async function buildTrustReport(
     rollbacks,
     confirmedFixes,
     activityRows,
+    architectureRows,
     pending,
     applied,
     lastShadow,
@@ -462,6 +501,16 @@ export async function buildTrustReport(
       orderBy: { timestamp: 'desc' },
       take: 25,
       select: { action: true, details: true, timestamp: true },
+    }),
+    // Architecture milestones, read separately: they are rare and each one
+    // matters, so they must not be pushed out of the feed by a busy loop's
+    // twenty-five routine rows. Traces (ARCHITECTURE_EVOLUTION_TRACE) are memory
+    // for the engine, never news.
+    prisma.auditLog.findMany({
+      where: { projectId, timestamp: { gte: since }, type: ARCHITECTURE_LOG_TYPE, action: MILESTONE_ACTION },
+      orderBy: { timestamp: 'desc' },
+      take: 10,
+      select: { action: true, details: true, timestamp: true, type: true },
     }),
     prisma.healthFinding.findMany({
       where: { projectId, status: 'pending_approval' },
@@ -509,9 +558,15 @@ export async function buildTrustReport(
   // Rows are newest-first, so folding CONSECUTIVE identical summaries keeps
   // `at` on the most recent occurrence and never merges two runs separated by
   // something that actually happened in between.
+  const merged = [
+    ...activityRows.map(r => ({ ...r, architecture: false })),
+    ...architectureRows.map(r => ({ ...r, architecture: true })),
+  ].sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
   const recentActivity: ActivityItem[] = []
-  for (const r of activityRows) {
-    const summary = humanize(r.action, r.details ?? null)
+  for (const r of merged) {
+    const { kind, summary } = r.architecture
+      ? architectureItem(r.details ?? null)
+      : { kind: classify(r.action), summary: humanize(r.action, r.details ?? null) }
     const prev = recentActivity[recentActivity.length - 1]
     if (prev && prev.action === r.action && prev.summary === summary) {
       prev.repeat += 1
@@ -520,7 +575,7 @@ export async function buildTrustReport(
     recentActivity.push({
       at: r.timestamp.toISOString(),
       action: r.action,
-      kind: classify(r.action),
+      kind,
       summary,
       repeat: 1,
     })
@@ -545,6 +600,12 @@ export async function buildTrustReport(
       details: det,
     }
   })
+
+  // Read separately and never allowed to fail the report: the trust report is
+  // the Autonomy page's spine, and architecture changes are one card on it.
+  const architectureChanges: ArchitectureChangeView[] = await import('@/lib/evolution-engine/engine')
+    .then(m => m.listChanges(projectId, { limit: 5 }))
+    .catch(() => [])
 
   const appliedChanges: AppliedChange[] = applied.map(f => {
     const det = (f.details ?? {}) as Record<string, any>
@@ -606,6 +667,7 @@ export async function buildTrustReport(
     recentActivity,
     pendingApprovals,
     appliedChanges,
+    architectureChanges,
     shadowPreview,
   }
 }

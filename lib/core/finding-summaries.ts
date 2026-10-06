@@ -48,6 +48,13 @@ export function summariseFinding(type: string, details: Details): string {
   const table =
     norm?.tableName ?? str(d.tableName) ?? str(d.table) ?? str(d.name)
 
+  // An architecture change awaiting approval says what it would change, in the
+  // engine's own words — never a generic "finding" sentence.
+  if (type === 'architecture_evolution') {
+    const ev = (d.evolution ?? {}) as { summary?: { change?: string }; subject?: string }
+    return ev.summary?.change ?? `Backenly prepared an improvement to how ${ev.subject ?? 'a table'} is stored`
+  }
+
   // ── Aliased families first ────────────────────────────────────────────────
   // The normalizer maps these onto a canonical base so the FIX engine knows
   // what to do (arch_migration → shadow_mutation, n_plus_one_risk →

@@ -119,13 +119,15 @@ export async function GET(request: NextRequest) {
       maintenance[s.value.disposition] = (maintenance[s.value.disposition] ?? 0) + 1
     }
 
-    // Tier D — structural evolution, resume-only. It never proposes, approves
-    // or starts anything a person did not approve; it advances an approved
-    // extraction past its backfill so a long one finishes without somebody
-    // pressing the button again. Behind its own switch, loaded only when on.
+    // Tier D — the Architecture Evolution Engine. It never approves anything
+    // and never starts a change a person did not approve. Per project, at most:
+    // observe the changes that are cut over (reads only), advance one approved
+    // change past its backfill (only when mutations are on), and once a day
+    // look for new changes worth asking about (assessment and a rehearsal that
+    // is always rolled back). Behind its own switch, loaded only when on.
     if (FLAGS.ENABLE_EVOLUTION_SCHEDULER) {
-      const { sweepProjectEvolution } = await import('@/lib/structural-evolution')
-      const evo = await Promise.allSettled(batch.map(p => sweepProjectEvolution({ projectId: p.id })))
+      const { sweepArchitecture } = await import('@/lib/evolution-engine/engine')
+      const evo = await Promise.allSettled(batch.map(p => sweepArchitecture({ projectId: p.id })))
       for (let j = 0; j < evo.length; j++) {
         const e = evo[j]
         if (e.status === 'rejected') {
