@@ -41,16 +41,86 @@
  * update policy is enforced on every satellite write. Writing a refund needs
  * exactly the permission it needed when the refund was a column.
  *
- * ── Sync: both directions, one guard ────────────────────────────────────────
+ * ── Sync: both directions, fail-closed, one authority ───────────────────────
  *
- * Forward (host → satellite) is SECURITY DEFINER and swallows its own errors,
- * like the maintenance dual-write: it mirrors a write the parent's policies
- * already allowed, and it must never abort a customer's write to the table they
- * have always written. Reconciliation is what catches it if it ever fails.
+ * The rule the whole dual representation rests on: a transaction that commits
+ * leaves the two representations equal, or it does not commit. There is no
+ * third outcome — no committed state in which `orders.refund_amount` says 20
+ * and `order_refunds.refund_amount` says 40 — so there is nothing for software
+ * to guess about afterwards.
  *
- * Reverse (satellite → host) is SECURITY INVOKER and raises. It is the NEW path,
- * a client using it is new code, and refusing a write is strictly better than
- * letting the two representations disagree.
+ *   forward  (host → satellite)  AFTER ROW on the host, SECURITY DEFINER, in
+ *                                the writer's transaction. Any error ABORTS the
+ *                                writer's statement. It used to swallow errors
+ *                                so an old client's write could never fail
+ *                                because of it; but a swallowed deadlock,
+ *                                serialization failure or lock timeout commits
+ *                                the host write without its mirror — a
+ *                                divergence nobody can resolve later. A
+ *                                retryable error now is strictly better.
+ *   reverse  (satellite → host)  AFTER ROW on the satellite, SECURITY INVOKER,
+ *                                applies the write to the host as the caller.
+ *                                Zero rows on a parent that exists means the
+ *                                parent's update policy said no: raised as
+ *                                42501, and the satellite write aborts with it.
+ *
+ * Authority: until a person runs `contract`, the HOST is the source of truth
+ * and the satellite is a projection of it that also accepts writes. A satellite
+ * write that did not reach the host did not happen (it aborted). If the two
+ * ever disagree anyway — only possible by bypassing triggers, e.g.
+ * `session_replication_role = replica` or `ALTER TABLE … DISABLE TRIGGER` —
+ * reconciliation reports it, the ladder stops (`blocked`), rollback refuses,
+ * and nothing is "repaired" by software guessing which side was meant.
+ *
+ * ── Concurrency, case by case ──────────────────────────────────────────────
+ *
+ * Lock order: an old writer locks host row → satellite row; a new writer
+ * locks satellite row → host row (the reverse sync); the backfill share-locks
+ * host rows → satellite rows and never WAITS for a host row (NOWAIT).
+ *
+ *   old vs old (same row)    host row lock serialises them; each forward
+ *                            mirror writes every member from NEW, so the
+ *                            later committer wins in both places
+ *   new vs new (same row)    satellite row lock serialises them; the reverse
+ *                            sync writes every member, later committer wins
+ *   old vs new (same row)    usually serialised by whichever lock is taken
+ *                            first. The crossing case — each holding one and
+ *                            wanting the other — is a deadlock; PostgreSQL
+ *                            aborts one WHOLE transaction (40P01) and the
+ *                            survivor's value lands in both. Before
+ *                            fail-closed, the abort could hit inside the
+ *                            forward trigger and be swallowed.
+ *   backfill vs writers      the batch share-locks its host rows with NOWAIT,
+ *                            so a row being written makes the batch retry
+ *                            instead of waiting; a backfill can therefore never
+ *                            be part of a deadlock cycle, and a writer waits at
+ *                            most one batch. The lock also stops a stale copy
+ *                            overwriting a newer mirror.
+ *   echo                     each direction sets one transaction-local guard
+ *                            around its own nested write and clears it right
+ *                            after; inside a savepoint that is rolled back,
+ *                            PostgreSQL restores the setting with it
+ *   parent key changes       ON UPDATE CASCADE rewrites the satellite's
+ *                            reference; the reverse sync recognises the cascade
+ *                            (old key gone, new key present, members equal)
+ *                            and lets it through. A client moving a satellite
+ *                            row to another parent is still refused (0A000).
+ *   deletes                  deleting a parent cascades to its satellite row;
+ *                            the reverse sync finds no parent and writes
+ *                            nothing. Deleting a satellite row clears the
+ *                            parent's members, as the caller.
+ *   TRUNCATE                 refused on the satellite (row triggers do not
+ *                            fire for it, so it would silently diverge);
+ *                            TRUNCATE of the host needs CASCADE because of the
+ *                            foreign key, and then empties both
+ *   satellite removed by     the forward sync finds no satellite and lets the
+ *   hand                     host write through: there is no second
+ *                            representation left to disagree with, and old
+ *                            clients keep working. Observation reports it.
+ *   retries, crashes         every rung is one transaction and idempotent, or
+ *                            adopted when its postcondition already holds (a
+ *                            crash between COMMIT and the ledger write); one
+ *                            ladder per project at a time (advisory lock)
  *
  * The echo of each direction is suppressed by one transaction-local setting,
  * set immediately around the nested write and cleared immediately after — not
@@ -60,7 +130,6 @@
 
 import { createHash } from 'node:crypto'
 import { jwtClaimFunctionSql, serviceRoleClause, SERVICE_ROLE } from '@/lib/postgrest/rls-translation'
-import { FAULT_TABLE } from '@/lib/autonomy/maintenance/primitives/dual-write'
 import { IDENT, LADDER_OBJECT_PREFIX, type TableFacts } from './facts'
 import { singular } from './lexicon'
 
@@ -93,6 +162,8 @@ export interface LadderNames {
   present: string
   forward: string
   reverse: string
+  /** Statement trigger + function refusing TRUNCATE on the satellite. */
+  truncateGuard: string
   policies: { service: string; select: string; insert: string; update: string; delete: string }
   /** Custom GUC suppressing each direction's echo. */
   guc: string
@@ -120,6 +191,7 @@ export function ladderNames(spec: ExtractionSpec): LadderNames {
     present: p('present'),
     forward: p('fwd'),
     reverse: p('rev'),
+    truncateGuard: p('trunc'),
     policies: { service: p('svc'), select: p('sel'), insert: p('ins'), update: p('upd'), delete: p('del') },
     guc: `bkn_evo.sync_${hash}`,
     carriedConstraint: i => `${p('ck')}_${i}`,
@@ -260,6 +332,21 @@ export function createSatelliteSql(
     `ALTER TABLE ${x.sat} ENABLE ROW LEVEL SECURITY`,
     `ALTER TABLE ${x.sat} FORCE ROW LEVEL SECURITY`,
     `CREATE POLICY ${qi(n.policies.service)} ON ${x.sat} FOR ALL USING (${x.svc}) WITH CHECK (${x.svc})`,
+    // Row triggers do not fire for TRUNCATE, so emptying the satellite would
+    // leave the host carrying values the satellite silently lost.
+    [
+      `CREATE OR REPLACE FUNCTION ${fq(target.schema, n.truncateGuard)}()`,
+      `RETURNS trigger`,
+      `LANGUAGE plpgsql`,
+      `SET search_path = ${qi(target.schema)}, pg_temp`,
+      `AS $bkn$`,
+      `BEGIN`,
+      `  RAISE EXCEPTION '${spec.satellite} mirrors ${spec.host} and cannot be truncated; delete its rows instead, each delete reaches ${spec.host}'`,
+      `    USING ERRCODE = '0A000';`,
+      `END;`,
+      `$bkn$`,
+    ].join('\n'),
+    `CREATE TRIGGER ${qi(n.truncateGuard)} BEFORE TRUNCATE ON ${x.sat} FOR EACH STATEMENT EXECUTE FUNCTION ${fq(target.schema, n.truncateGuard)}()`,
     // Starts closed: undo whatever the schema's default privileges granted at
     // CREATE, so nobody but the owner reaches it until a later rung says so.
     [
@@ -286,6 +373,7 @@ export function forwardSyncSql(facts: TableFacts, spec: ExtractionSpec, target: 
   const n = x.names
   const S = qi(target.schema)
   const fn = fq(target.schema, n.forward)
+  const satRegclass = lit(`${qi(target.schema)}.${qi(spec.satellite)}`)
   const body = [
     `CREATE OR REPLACE FUNCTION ${fn}()`,
     `RETURNS trigger`,
@@ -303,37 +391,32 @@ export function forwardSyncSql(facts: TableFacts, spec: ExtractionSpec, target: 
     `  IF TG_OP = 'UPDATE' AND ${rowOf('OLD', x.m)} IS NOT DISTINCT FROM ${rowOf('NEW', x.m)} THEN`,
     `    RETURN NULL;`,
     `  END IF;`,
-    `  BEGIN`,
-    `    PERFORM set_config('${n.guc}', '1', true);`,
-    `    PERFORM set_config('request.jwt.claims', '{"role":"${SERVICE_ROLE}"}', true);`,
-    `    IF ${allNull('NEW', x.m)} THEN`,
-    `      DELETE FROM ${x.sat} WHERE ${x.fk} = NEW.${x.pk};`,
-    `    ELSE`,
-    `      INSERT INTO ${x.sat} AS s (${x.fk}, ${x.m.join(', ')})`,
-    `      VALUES (NEW.${x.pk}, ${x.m.map(c => `NEW.${c}`).join(', ')})`,
-    `      ON CONFLICT (${x.fk}) DO UPDATE SET ${x.m.map(c => `${c} = EXCLUDED.${c}`).join(', ')};`,
-    `    END IF;`,
-    `    PERFORM set_config('request.jwt.claims', COALESCE(prev_claims, ''), true);`,
-    `    PERFORM set_config('${n.guc}', '', true);`,
-    `  EXCEPTION WHEN OTHERS THEN`,
-    `    -- The customer's write to ${spec.host} completes. Reconciliation is what`,
-    `    -- notices the satellite fell behind; this only records that it knew.`,
-    `    BEGIN`,
-    `      INSERT INTO ${fq(target.schema, FAULT_TABLE)} AS f (object_name, faults, last_error, last_at)`,
-    `      VALUES ('${n.forward}', 1, SQLERRM, now())`,
-    `      ON CONFLICT (object_name) DO UPDATE`,
-    `        SET faults = f.faults + 1, last_error = EXCLUDED.last_error, last_at = EXCLUDED.last_at;`,
-    `    EXCEPTION WHEN OTHERS THEN`,
-    `      NULL;`,
-    `    END;`,
-    `  END;`,
+    `  IF TG_OP = 'INSERT' AND ${allNull('NEW', x.m)} THEN`,
+    `    RETURN NULL;`,
+    `  END IF;`,
+    `  -- Removed outside the ladder: there is no second representation left to`,
+    `  -- disagree with, and the customer's write goes through.`,
+    `  IF to_regclass(${satRegclass}) IS NULL THEN`,
+    `    RETURN NULL;`,
+    `  END IF;`,
+    `  -- No exception handler, on purpose: if the mirror cannot be written, the`,
+    `  -- write to ${spec.host} does not commit either.`,
+    `  PERFORM set_config('${n.guc}', '1', true);`,
+    `  PERFORM set_config('request.jwt.claims', '{"role":"${SERVICE_ROLE}"}', true);`,
+    `  IF ${allNull('NEW', x.m)} THEN`,
+    `    DELETE FROM ${x.sat} WHERE ${x.fk} = NEW.${x.pk};`,
+    `  ELSE`,
+    `    INSERT INTO ${x.sat} AS s (${x.fk}, ${x.m.join(', ')})`,
+    `    VALUES (NEW.${x.pk}, ${x.m.map(c => `NEW.${c}`).join(', ')})`,
+    `    ON CONFLICT (${x.fk}) DO UPDATE SET ${x.m.map(c => `${c} = EXCLUDED.${c}`).join(', ')};`,
+    `  END IF;`,
+    `  PERFORM set_config('request.jwt.claims', COALESCE(prev_claims, ''), true);`,
+    `  PERFORM set_config('${n.guc}', '', true);`,
     `  RETURN NULL;`,
     `END;`,
     `$bkn$`,
   ].join('\n')
   return [
-    `CREATE TABLE IF NOT EXISTS ${fq(target.schema, FAULT_TABLE)} (\n` +
-      `  object_name text PRIMARY KEY,\n  faults bigint NOT NULL DEFAULT 0,\n  last_error text,\n  last_at timestamptz\n)`,
     body,
     `DROP TRIGGER IF EXISTS ${qi(n.forward)} ON ${x.host}`,
     `CREATE TRIGGER ${qi(n.forward)} AFTER INSERT OR UPDATE OF ${x.m.join(', ')} ON ${x.host} ` +
@@ -344,11 +427,13 @@ export function forwardSyncSql(facts: TableFacts, spec: ExtractionSpec, target: 
 /**
  * One backfill batch. `$1` is the cursor as text, NULL for the first batch.
  *
- * The batch's host rows are taken `FOR SHARE`. Without that a write landing
- * between this batch reading a row and upserting it would be overwritten by the
- * stale copy — the forward trigger would have mirrored the new value, and the
- * backfill would then mirror the old one over it. The lock makes such a writer
- * wait one batch, which is why batches are small.
+ * The batch's host rows are taken `FOR SHARE NOWAIT`. The share lock stops a
+ * write landing between this batch reading a row and upserting it — the
+ * forward trigger would mirror the new value and the backfill would then
+ * mirror the stale one over it. NOWAIT means the batch never waits for a
+ * writer: a row being written fails the batch with 55P03 and the caller
+ * retries it. A backfill that never waits can never be part of a deadlock
+ * cycle, and a writer waits at most for one small batch.
  */
 export function backfillBatchSql(
   facts: TableFacts,
@@ -365,7 +450,7 @@ export function backfillBatchSql(
     `   WHERE $1::text IS NULL OR h.${x.pk} > ($1::text)::${x.pkType}`,
     `   ORDER BY h.${x.pk}`,
     `   LIMIT ${Math.max(1, Math.floor(batchRows))}`,
-    `   FOR SHARE OF h`,
+    `   FOR SHARE OF h NOWAIT`,
     `), up AS (`,
     `  INSERT INTO ${x.sat} AS s (${x.fk}, ${x.m.join(', ')})`,
     `  SELECT b.k, ${b.join(', ')} FROM batch b WHERE ${anySet('b', x.m)}`,
@@ -380,7 +465,9 @@ export function backfillBatchSql(
     `SELECT (SELECT count(*) FROM batch)::bigint AS scanned,`,
     `       (SELECT count(*) FROM up)::bigint AS upserted,`,
     `       (SELECT count(*) FROM gone)::bigint AS removed,`,
-    `       (SELECT k::text FROM batch ORDER BY k DESC LIMIT 1) AS next_cursor`,
+    // Cast AFTER ordering. In `SELECT k::text … ORDER BY k` the ORDER BY binds
+    // to the text output column and sorts integer keys as text ('999' > '1000').
+    `       (SELECT b.k FROM batch b ORDER BY b.k DESC LIMIT 1)::text AS next_cursor`,
   ].join('\n')
 }
 
@@ -420,6 +507,9 @@ export function exposeReadsSql(
 ): string[] {
   const x = parts(facts, spec, target)
   return [
+    // Every rung is safe to run twice: a crash after COMMIT and before the
+    // ledger recorded it re-runs the rung on the next attempt.
+    `DROP POLICY IF EXISTS ${qi(x.names.policies.select)} ON ${x.sat}`,
     `CREATE POLICY ${qi(x.names.policies.select)} ON ${x.sat} FOR SELECT USING ${followsParent(x)}`,
     ...(readers.length > 0 ? [`GRANT SELECT ON ${x.sat} TO ${grantList(readers)}`] : []),
   ]
@@ -444,27 +534,50 @@ export function openWritesSql(
     `DECLARE`,
     `  n bigint;`,
     `  k ${x.pkType};`,
+    `  r record;`,
+    `  wanted text;`,
     `BEGIN`,
     `  -- The forward direction is writing ${spec.satellite}; this is its echo.`,
     `  IF current_setting('${n.guc}', true) = '1' THEN`,
     `    RETURN NULL;`,
     `  END IF;`,
     `  IF TG_OP = 'UPDATE' AND NEW.${x.fk} IS DISTINCT FROM OLD.${x.fk} THEN`,
+    `    -- ${spec.host}'s own key changed and ON UPDATE CASCADE carried it here:`,
+    `    -- the old key is gone, the new one exists, nothing else moved.`,
+    `    IF ${rowOf('OLD', x.m)} IS NOT DISTINCT FROM ${rowOf('NEW', x.m)}`,
+    `       AND NOT EXISTS (SELECT 1 FROM ${x.host} WHERE ${x.pk} = OLD.${x.fk})`,
+    `       AND EXISTS (SELECT 1 FROM ${x.host} WHERE ${x.pk} = NEW.${x.fk}) THEN`,
+    `      RETURN NULL;`,
+    `    END IF;`,
     `    RAISE EXCEPTION '${spec.satellite}.${n.fkColumn} cannot change while ${spec.host} still carries these columns; delete and insert instead'`,
     `      USING ERRCODE = '0A000';`,
     `  END IF;`,
     `  IF TG_OP = 'DELETE' THEN`,
     `    k := OLD.${x.fk};`,
+    `    wanted := ROW(${x.members.map(c => `NULL::${c.type}`).join(', ')})::text;`,
     `  ELSE`,
     `    k := NEW.${x.fk};`,
+    `    wanted := ${rowOf('NEW', x.m)};`,
     `  END IF;`,
     `  PERFORM set_config('${n.guc}', '1', true);`,
     `  IF TG_OP = 'DELETE' THEN`,
-    `    UPDATE ${x.host} SET ${x.m.map(c => `${c} = NULL`).join(', ')} WHERE ${x.pk} = k;`,
+    `    UPDATE ${x.host} SET ${x.m.map(c => `${c} = NULL`).join(', ')} WHERE ${x.pk} = k RETURNING * INTO r;`,
     `  ELSE`,
-    `    UPDATE ${x.host} SET ${x.m.map(c => `${c} = NEW.${c}`).join(', ')} WHERE ${x.pk} = k;`,
+    `    UPDATE ${x.host} SET ${x.m.map(c => `${c} = NEW.${c}`).join(', ')} WHERE ${x.pk} = k RETURNING * INTO r;`,
     `  END IF;`,
     `  GET DIAGNOSTICS n = ROW_COUNT;`,
+    `  -- ${spec.host} is the authority. If one of its own triggers stored`,
+    `  -- something other than what was written, ${spec.satellite} takes what`,
+    `  -- ${spec.host} stored, in this same statement.`,
+    `  IF n = 1 AND ${rowOf('r', x.m)} IS DISTINCT FROM wanted THEN`,
+    `    IF ${allNull('r', x.m)} THEN`,
+    `      DELETE FROM ${x.sat} WHERE ${x.fk} = k;`,
+    `    ELSE`,
+    `      INSERT INTO ${x.sat} AS s (${x.fk}, ${x.m.join(', ')})`,
+    `      VALUES (k, ${x.m.map(c => `r.${c}`).join(', ')})`,
+    `      ON CONFLICT (${x.fk}) DO UPDATE SET ${x.m.map(c => `${c} = EXCLUDED.${c}`).join(', ')};`,
+    `    END IF;`,
+    `  END IF;`,
     `  PERFORM set_config('${n.guc}', '', true);`,
     `  -- Run as the caller, so ${spec.host}'s own update policy decided. Zero rows`,
     `  -- on a parent the caller can see means that policy said no. A DELETE whose`,
@@ -482,8 +595,11 @@ export function openWritesSql(
     body,
     `DROP TRIGGER IF EXISTS ${qi(n.reverse)} ON ${x.sat}`,
     `CREATE TRIGGER ${qi(n.reverse)} AFTER INSERT OR UPDATE OR DELETE ON ${x.sat} FOR EACH ROW EXECUTE FUNCTION ${fn}()`,
+    `DROP POLICY IF EXISTS ${qi(n.policies.insert)} ON ${x.sat}`,
     `CREATE POLICY ${qi(n.policies.insert)} ON ${x.sat} FOR INSERT WITH CHECK ${parent}`,
+    `DROP POLICY IF EXISTS ${qi(n.policies.update)} ON ${x.sat}`,
     `CREATE POLICY ${qi(n.policies.update)} ON ${x.sat} FOR UPDATE USING ${parent} WITH CHECK ${parent}`,
+    `DROP POLICY IF EXISTS ${qi(n.policies.delete)} ON ${x.sat}`,
     `CREATE POLICY ${qi(n.policies.delete)} ON ${x.sat} FOR DELETE USING ${parent}`,
     ...(writers.length > 0 ? [`GRANT INSERT, UPDATE, DELETE ON ${x.sat} TO ${grantList(writers)}`] : []),
   ]
@@ -498,6 +614,8 @@ export function contractSql(facts: TableFacts, spec: ExtractionSpec, target: Ren
     `DROP FUNCTION IF EXISTS ${fq(target.schema, n.reverse)}()`,
     `DROP TRIGGER IF EXISTS ${qi(n.forward)} ON ${x.host}`,
     `DROP FUNCTION IF EXISTS ${fq(target.schema, n.forward)}()`,
+    `DROP TRIGGER IF EXISTS ${qi(n.truncateGuard)} ON ${x.sat}`,
+    `DROP FUNCTION IF EXISTS ${fq(target.schema, n.truncateGuard)}()`,
     `ALTER TABLE ${x.host} ${x.m.map(c => `DROP COLUMN ${c}`).join(', ')}`,
   ]
 }
@@ -507,7 +625,10 @@ export function contractSql(facts: TableFacts, spec: ExtractionSpec, target: Ren
 export function dropSatelliteSql(spec: ExtractionSpec, target: RenderTarget): string[] {
   // RESTRICT, the default. Anything someone built on top of the satellite
   // makes this fail loudly rather than disappear with it.
-  return [`DROP TABLE ${fq(target.schema, spec.satellite)}`]
+  return [
+    `DROP TABLE ${fq(target.schema, spec.satellite)}`,
+    `DROP FUNCTION IF EXISTS ${fq(target.schema, ladderNames(spec).truncateGuard)}()`,
+  ]
 }
 
 export function dropForwardSyncSql(spec: ExtractionSpec, target: RenderTarget): string[] {

@@ -468,7 +468,6 @@ describe('after the extraction, as a real role under row-level security', () => 
     expect(await asService(`SELECT 1 FROM ${t('order_refunds')} WHERE ${fk} = $1::uuid`, mine.id)).toEqual([])
     const r = await reconcileExtraction(projectId, (await readTableFacts(schema, 'orders'))!, SPEC)
     expect(r.consistent).toBe(true)
-    expect(r.faults).toBeNull()
   })
 
   it('reports the extraction as done, and never analyses the new table as a host', async () => {

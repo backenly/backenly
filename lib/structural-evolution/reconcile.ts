@@ -2,11 +2,11 @@
  * RECONCILE — the only thing allowed to say the two representations agree
  * =======================================================================
  *
- * The forward sync swallows its own errors so a customer's write can never fail
- * because of it. That makes it untrustworthy as a witness: a trigger that
- * failed and a trigger that worked both report nothing. The maintenance ladder
- * learned this first and built reconciliation before anything that mutates;
- * this is the same rule for a table split.
+ * Both syncs are fail-closed (see ./sql.ts), so through any supported path a
+ * committed transaction leaves the two representations equal. Reconciliation
+ * is what checks that instead of believing it: a write that bypassed triggers
+ * (replica mode, a disabled trigger, a restore) leaves no other trace. Nothing
+ * is opened to clients, observed as stable or rolled back without it.
  *
  * Three ways to disagree, each counted and sampled:
  *
@@ -24,9 +24,8 @@
 
 import { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db'
-import { readDualWriteFaults, type DualWriteFaults } from '@/lib/autonomy/maintenance/primitives/dual-write'
 import type { TableFacts } from './facts'
-import { ladderNames, reconcileSql, type ExtractionSpec, type RenderTarget } from './sql'
+import { reconcileSql, type ExtractionSpec, type RenderTarget } from './sql'
 
 export interface ReconcileResult {
   consistent: boolean
@@ -36,8 +35,6 @@ export interface ReconcileResult {
   orphaned: number
   mismatched: number
   samples: { missing: string[]; orphaned: string[]; mismatched: string[] }
-  /** What the forward sync admitted to. Telemetry, never the verdict. */
-  faults: DualWriteFaults | null
   summary: string
 }
 
@@ -48,7 +45,7 @@ export async function reconcileWith(
   facts: TableFacts,
   spec: ExtractionSpec,
   target: RenderTarget,
-): Promise<Omit<ReconcileResult, 'faults'>> {
+): Promise<ReconcileResult> {
   const rows = await tx.$queryRawUnsafe<Array<Record<string, unknown>>>(reconcileSql(facts, spec, target))
   const r = rows[0] ?? {}
   const n = (k: string) => Number(r[k] ?? 0)
@@ -74,12 +71,12 @@ export async function reconcileWith(
 
 /** Reconcile the live tables. */
 export async function reconcileExtraction(
-  projectId: string,
+  _projectId: string,
   facts: TableFacts,
   spec: ExtractionSpec,
 ): Promise<ReconcileResult> {
   const { rlsSessionSql, rlsSessionParams } = await import('@/lib/services/rls-session')
-  const result = await prisma.$transaction(
+  return prisma.$transaction(
     async tx => {
       await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = '120s'`)
       await tx.$executeRawUnsafe(
@@ -90,6 +87,4 @@ export async function reconcileExtraction(
     },
     { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 130_000, maxWait: 10_000 },
   )
-  const faults = await readDualWriteFaults(projectId, ladderNames(spec).forward).catch(() => null)
-  return { ...result, faults }
 }

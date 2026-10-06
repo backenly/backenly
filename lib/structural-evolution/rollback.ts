@@ -20,6 +20,14 @@
  * way for software to know which is right). Either refuses, naming the keys. A
  * MISSING row is fine: the host has the data and the satellite never did.
  *
+ * It is checked twice. Once before anything is touched, so a refusal leaves
+ * the extraction exactly as it was. Then again after writes to the satellite
+ * are closed and before anything is dropped: from that moment the satellite
+ * only changes through the forward mirror of the host, so a clean second check
+ * means nothing written afterwards can exist only in the satellite. Without
+ * the second check, a write landing between the first check and the close —
+ * or anything that bypassed the sync in that window — would go unexamined.
+ *
  * ── It must be the satellite this ladder created ────────────────────────────
  *
  * The ledger recorded the table's oid when `create_satellite` committed. A
@@ -109,18 +117,6 @@ async function undo(input: { projectId: string; planId: string; requestedBy: str
         actions,
       }
     }
-
-    // Lossless, at one snapshot, with both syncs still live.
-    const r = await reconcileExtraction(projectId, host, spec)
-    if (r.orphaned > 0 || r.mismatched > 0) {
-      return {
-        status: 'refused',
-        reason:
-          `${spec.satellite} holds data ${spec.host} does not (${r.orphaned} orphaned, ${r.mismatched} different; ` +
-          `keys ${[...r.samples.orphaned, ...r.samples.mismatched].join(', ')}). Dropping it would lose that; reconcile by hand first.`,
-        actions,
-      }
-    }
   }
 
   const step = async (
@@ -148,9 +144,35 @@ async function undo(input: { projectId: string; planId: string; requestedBy: str
     return true
   }
 
+  const lossless = async (): Promise<string | null> => {
+    const facts = await readTableFacts(schema, spec.host)
+    if (!facts) return `${spec.host} no longer exists`
+    const r = await reconcileExtraction(projectId, facts, spec)
+    return r.orphaned > 0 || r.mismatched > 0
+      ? `${spec.satellite} holds data ${spec.host} does not (${r.orphaned} orphaned, ${r.mismatched} different; ` +
+          `keys ${[...r.samples.orphaned, ...r.samples.mismatched].join(', ')}). Dropping it would lose that; reconcile by hand first.`
+      : null
+  }
+
+  // The first lossless check: at one snapshot, with both syncs still live,
+  // before anything is touched.
+  if (sat) {
+    const problem = await lossless()
+    if (problem) return { status: 'refused', reason: problem, actions }
+  }
+
   const writers = (recorded('open_writes')?.granted as string[] | undefined) ?? []
   const readers = (recorded('expose_reads')?.granted as string[] | undefined) ?? []
   const satNow = () => readTableFacts(schema, spec.satellite)
+
+  // The second lossless check, after the satellite stopped taking writes.
+  const recheck = async (): Promise<boolean> => {
+    if (!sat) return true
+    const problem = await lossless().catch(err => `the lossless check could not run: ${err instanceof Error ? err.message : String(err)}`)
+    if (!problem) return true
+    actions.push({ action: 'close_writes', outcome: 'failed', detail: `writes are closed, nothing was dropped: ${problem}` })
+    return false
+  }
 
   const okSoFar =
     (await step(
@@ -163,6 +185,7 @@ async function undo(input: { projectId: string; planId: string; requestedBy: str
       },
       `writes to ${spec.satellite} closed; ${writers.length} role grant(s) revoked`,
     )) &&
+    (await recheck()) &&
     (await step(
       'revoke_reads',
       !!sat && sat.policies.some(p => p.name === n.policies.select),

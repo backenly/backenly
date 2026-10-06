@@ -33,10 +33,11 @@
 import { prisma } from '@/lib/db'
 import { FLAGS } from '@/lib/config/flags'
 import { withMaintenanceSingleFlight } from '@/lib/autonomy/maintenance/single-flight'
-import { inspectBackgroundJob } from '@/lib/autonomy/maintenance/execute'
+import { enqueue } from '@/lib/queue'
 import { readLiveEvolutionApproval } from './consent'
 import { requiredTier, type ExtractionPlan, type ExtractionStep } from './plan'
-import { runStep } from './primitives'
+import { runStep, rungAlreadyApplied } from './primitives'
+import { inspectEvolutionChain } from './backfill-job'
 import { resolveExtractionPlan, isResolveRefusal } from './resolve'
 
 export type ExtractionRunStatus =
@@ -140,7 +141,18 @@ async function runLadder(input: {
       continue
     }
     if (existing?.status === 'dispatched' && existing.backgroundJobId) {
-      const job = await inspectBackgroundJob(await chainHead(projectId, plan.planVersion, existing.backgroundJobId))
+      const job = await inspectEvolutionChain(projectId, plan.planVersion, existing.backgroundJobId)
+      if (job.state === 'paused' && job.resumeFrom) {
+        // Paused by a withdrawn consent that is live again (re-read above):
+        // the stopped batch is queued again exactly as it was, cursor and all.
+        if (!mutationsEnabled) {
+          return halt(executionId, plan, steps, `step ${step.ordinal} (${step.kind}) is paused and mutations are disabled for this run`)
+        }
+        const resumed = await enqueue('evolution_backfill', job.resumeFrom as unknown as Record<string, unknown>, { projectId })
+        await prisma.maintenanceStepExecution.update({ where: { id: existing.id }, data: { backgroundJobId: resumed.id } })
+        steps.push({ ordinal: step.ordinal, kind: step.kind, status: 'dispatched', detail: `resumed from key ${job.resumeFrom.cursor ?? 'start'} as job ${resumed.id}` })
+        return awaiting(executionId, plan, steps, `step ${step.ordinal} (${step.kind}) resumed as job ${resumed.id}`)
+      }
       if (job.state === 'pending') {
         steps.push({ ordinal: step.ordinal, kind: step.kind, status: 'dispatched', detail: job.detail })
         return awaiting(executionId, plan, steps, `step ${step.ordinal} (${step.kind}) is waiting on job ${existing.backgroundJobId}`)
@@ -159,6 +171,26 @@ async function runLadder(input: {
       })
       steps.push({ ordinal: step.ordinal, kind: step.kind, status: 'completed', detail: job.detail })
       continue
+    }
+
+    // The previous attempt may have committed this rung and stopped before the
+    // ledger heard; a rung that cannot simply run twice is adopted instead.
+    if (existing?.status === 'running') {
+      const adopted = await rungAlreadyApplied(plan, step)
+      if (adopted) {
+        await prisma.maintenanceStepExecution.update({
+          where: { id: existing.id },
+          data: {
+            status: 'completed',
+            completedAt: new Date(),
+            observedPostState: adopted.observed as object,
+            postconditionEvidence: { declared: step.postconditions, detail: adopted.detail },
+            result: { detail: adopted.detail, adopted: true },
+          },
+        })
+        steps.push({ ordinal: step.ordinal, kind: step.kind, status: 'completed', detail: adopted.detail })
+        continue
+      }
     }
 
     if (!NON_MUTATING.includes(step.kind) && !mutationsEnabled) {
@@ -226,27 +258,6 @@ async function runLadder(input: {
     data: { status: 'completed', completedAt: new Date(), haltReason: null },
   })
   return { status: 'completed', executionId, planVersion: plan.planVersion, haltReason: null, steps }
-}
-
-/**
- * The newest job of a backfill chain.
- *
- * Each batch queues the next one, so the job the ledger recorded is only the
- * FIRST of the chain, and it completes with `done: false` the moment a second
- * batch exists. Inspecting it would report "more remain" forever and the ladder
- * would never resume on any table longer than one batch. The chain is
- * identified by the plan version every batch carries; its newest job is the
- * one whose state is the chain's state.
- */
-async function chainHead(projectId: string, planVersion: string, firstJobId: string): Promise<string> {
-  const newest = await prisma.backgroundJob
-    .findFirst({
-      where: { projectId, type: 'evolution_backfill', payload: { path: ['planVersion'], equals: planVersion } },
-      orderBy: { createdAt: 'desc' },
-      select: { id: true },
-    })
-    .catch(() => null)
-  return newest?.id ?? firstJobId
 }
 
 async function openExecution(

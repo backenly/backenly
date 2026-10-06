@@ -34,6 +34,7 @@ import { readTableFacts, relationExists, type TableFacts } from './facts'
 import { ladderNames, type ExtractionSpec } from './sql'
 import { reconcileExtraction } from './reconcile'
 import { rehearseExtraction } from './rehearse'
+import { inFlightChain } from './backfill-job'
 import type { ExtractionPlan, ExtractionStep } from './plan'
 
 export const LOCK_TIMEOUT_MS = 3_000
@@ -109,6 +110,39 @@ export async function unregisterTable(projectId: string, schema: string, name: s
   await prisma.table.deleteMany({ where: { projectId, schema, name } }).catch(() => {})
 }
 
+/**
+ * Is this rung's effect already present, from an attempt the ledger never heard
+ * finish?
+ *
+ * A rung commits its own transaction and the ledger records it afterwards; a
+ * crash between the two leaves the row `running` over a change that happened.
+ * Every rung but one is idempotent and is simply run again. `create_satellite`
+ * is not — CREATE TABLE refuses a table that exists, which is exactly what makes
+ * it safe against namesakes — so it is ADOPTED instead, and only when the table
+ * is unmistakably the one this rung creates: our foreign key by its hashed
+ * name, closed exactly as the rung leaves it, every member column present, the
+ * truncate guard in place.
+ */
+export async function rungAlreadyApplied(plan: ExtractionPlan, step: ExtractionStep): Promise<StepRunResult | null> {
+  if (step.kind !== 'create_satellite') return null
+  const { spec, schema } = plan
+  const sat = await readTableFacts(schema, spec.satellite)
+  if (!sat || !isOurSatellite(sat, spec)) return null
+  const n = ladderNames(spec)
+  const closed =
+    sat.rowSecurity &&
+    sat.forceRowSecurity &&
+    nonOwnerGrants(sat).length === 0 &&
+    spec.members.every(m => sat.columns.some(c => c.name === m)) &&
+    sat.triggers.some(t => t.name === n.truncateGuard)
+  if (!closed) return null
+  return {
+    status: 'completed',
+    detail: `${spec.satellite} was created by an attempt that stopped before recording it (oid ${sat.oid}); adopted`,
+    observed: { kind: 'satellite', oid: sat.oid, columns: sat.columns.map(c => `${c.name}:${c.type}`), adopted: true },
+  }
+}
+
 // ── Rungs ────────────────────────────────────────────────────────────────────
 
 export async function runStep(projectId: string, plan: ExtractionPlan, step: ExtractionStep): Promise<StepRunResult> {
@@ -182,6 +216,12 @@ export async function runStep(projectId: string, plan: ExtractionPlan, step: Ext
     }
 
     case 'backfill': {
+      // A dispatch that crashed after queueing and before the ledger recorded
+      // it must not start a second chain beside the first.
+      const running = await inFlightChain(projectId, plan.planVersion)
+      if (running) {
+        return { status: 'dispatched', detail: `backfill already running as job ${running}`, backgroundJobId: running }
+      }
       const job = await enqueue(
         'evolution_backfill',
         {
