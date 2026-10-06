@@ -90,4 +90,11 @@ describe('the request row cannot be approved by any generic path', () => {
   ])('%s refuses it', file => {
     expect(read(file)).toMatch(/isEvolutionApprovalFinding\(/)
   })
+
+  it('is never shown to a model, or rewritten, by the escalation diagnosis', () => {
+    // It reads pending rows, calls a model and writes the row back whole: on
+    // this type that would send the plan's SQL out and revert the engine's
+    // own updates made during the call.
+    expect(read('lib/autonomy/escalation-diagnosis.ts')).toMatch(/type: \{ not: EVOLUTION_FINDING_TYPE \}/)
+  })
 })

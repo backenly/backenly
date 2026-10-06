@@ -29,6 +29,7 @@
 import { prisma } from '@/lib/db/prisma'
 import { getOpenAIClient, trackCompletionCost } from '@/lib/ai/openai-service'
 import { summariseFinding } from '@/lib/core/finding-summaries'
+import { EVOLUTION_FINDING_TYPE } from '@/lib/core/types'
 
 /**
  * Strong-model pass for the few escalations; env-overridable. Defaults to the
@@ -71,6 +72,10 @@ export async function diagnoseEscalatedFindings(projectId: string): Promise<numb
           { status: 'pending_approval' },
           { status: 'open', severity: 'critical' },
         ],
+        // An architecture change awaiting a person is explained by the engine
+        // that prepared it, deterministically; its row is the engine's handle
+        // and is never rewritten, or shown to a model, by generic code.
+        type: { not: EVOLUTION_FINDING_TYPE },
       },
       orderBy: { detectedAt: 'desc' },
       take: 10,
