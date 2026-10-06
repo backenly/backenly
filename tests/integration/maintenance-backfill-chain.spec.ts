@@ -118,3 +118,20 @@ describe('a backfill chain longer than one batch', () => {
     expect(r).toMatchObject({ jobId: job.id, progress: { state: 'done' } })
   })
 })
+
+describe('the batch cursor on integer keys', () => {
+  it('advances by key, not by its text, so no batch re-reads the one before it', async () => {
+    const KEY = `cursor-${randomUUID()}`
+    await enqueue('maintenance_backfill', payload(KEY) as unknown as Record<string, unknown>, { projectId: PROJECT_ID })
+    const ran = await drain()
+    const results = await prisma.backgroundJob.findMany({
+      where: { id: { in: ran } },
+      orderBy: { createdAt: 'asc' },
+      select: { result: true },
+    })
+    const cursors = results.map(r => (r.result as { cursor?: string | null }).cursor)
+    // Ordered as text, the cursor after keys 1..2000 was '999' and the next
+    // batch scanned 1000..1999 again.
+    expect(cursors).toEqual(['2000', '4000', '4500'])
+  })
+})

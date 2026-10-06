@@ -163,7 +163,11 @@ SELECT (SELECT count(*) FROM batch)::bigint                  AS scanned,
        -- max() aggregate for uuid, which is the most common primary key here,
        -- so an aggregate would fail on exactly the tables this runs against.
        -- ORDER BY works for every type that can be paged through at all.
-       (SELECT k::text FROM batch ORDER BY k DESC LIMIT 1)   AS next_cursor`
+       -- Cast AFTER ordering: in \`SELECT k::text … ORDER BY k\` the ORDER BY
+       -- binds to the text output column, so integer keys sorted as text and
+       -- the cursor after 1..2000 was '999' — every later batch re-read most
+       -- of the one before it.
+       (SELECT b.k FROM batch b ORDER BY b.k DESC LIMIT 1)::text AS next_cursor`
 
   const { rlsSessionSql, rlsSessionParams } = await import('@/lib/services/rls-session')
 
