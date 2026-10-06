@@ -305,6 +305,11 @@ describe('rehearsal', () => {
     ])
     expect(r.passed).toBe(true)
     expect(r.sampledRows).toBe(260) // 60 with refunds + 200 without (capped)
+    // Access was rehearsed, identity by identity, not only data.
+    expect(r.authorization.status).toBe('passed')
+    expect(r.authorization.identities).toBeGreaterThanOrEqual(3)
+    expect(r.authorization.checks.filter(c => c.outcome === 'failed')).toEqual([])
+    expect(r.notRehearsed.join('\n')).not.toMatch(/who may read and write/)
 
     const scratch = await rows(`SELECT 1 FROM pg_namespace WHERE nspname LIKE 'bkn_rehearsal_%'`)
     expect(scratch).toEqual([])
