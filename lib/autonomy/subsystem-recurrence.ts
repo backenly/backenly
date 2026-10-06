@@ -53,6 +53,7 @@ import {
   type EdgeProvenance,
   type SubsystemMap,
 } from './subsystem'
+import { tableOfRequestPath } from '@/lib/traffic/table-path'
 
 // ── Firing contract ───────────────────────────────────────────────────────────
 
@@ -207,13 +208,14 @@ export function findingTable(details: Record<string, unknown> | null | undefined
 /**
  * The table an API request touched, from its path.
  *
- * Covers the generated data plane (`/api/v1/{projectId}/db/{table}`) only.
- * Function invocations and custom routes are not attributable this way, which
- * is part of why `attributionCoverage` is reported.
+ * Covers the generated data plane in both shapes it is recorded in —
+ * `/db/{table}` (v1) and `/{table}` (v2, PostgREST-native); see
+ * lib/traffic/table-path.ts. Function invocations and custom routes are not
+ * attributable this way, which is part of why `attributionCoverage` is
+ * reported.
  */
 export function requestTable(path: string): string | null {
-  const m = /\/db\/([A-Za-z0-9_]+)/.exec(path)
-  return m ? m[1] : null
+  return tableOfRequestPath(path)
 }
 
 /**

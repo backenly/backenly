@@ -42,6 +42,7 @@ import {
   type PresenceSample,
   type RepairRecord,
 } from './concerns'
+import { nonTableSegmentsParam, tableOfRequestPathSql } from '@/lib/traffic/table-path'
 
 /** Rows read per table. Enough to measure co-presence; never a scan of a big table. */
 export const SAMPLE_ROWS = 5_000
@@ -255,13 +256,16 @@ export async function readRepairs(projectId: string, since: Date): Promise<Array
  */
 export async function readRequestsByTable(projectId: string, since: Date): Promise<Map<string, number> | null> {
   try {
+    // Both shapes table traffic is recorded in: /db/<table> (v1) and /<table>
+    // (v2, PostgREST-native). See lib/traffic/table-path.ts.
     const rows = await prisma.$queryRawUnsafe<Array<{ t: string; n: bigint }>>(
-      `SELECT substring(path FROM '^/db/([A-Za-z0-9_]+)') AS t, count(*)::bigint AS n
+      `SELECT ${tableOfRequestPathSql('path', 3)} AS t, count(*)::bigint AS n
          FROM api_request_logs
-        WHERE "projectId" = $1 AND "branchId" IS NULL AND "timestamp" >= $2 AND path LIKE '/db/%'
+        WHERE "projectId" = $1 AND "branchId" IS NULL AND "timestamp" >= $2 AND path NOT LIKE '/api/%'
         GROUP BY 1`,
       projectId,
       since,
+      nonTableSegmentsParam(),
     )
     const m = new Map<string, number>()
     for (const r of rows) if (r.t) m.set(r.t, Number(r.n))
