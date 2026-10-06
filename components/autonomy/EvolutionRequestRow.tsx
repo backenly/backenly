@@ -37,7 +37,8 @@
  *             so the next click consents to what the person is now looking at.
  *   Resume /  POST /api/projects/[id]/architecture { action, decisionId }
  *   Undo      Undo asks once more before it runs.
- *   Not now   POST /api/projects/[id]/health { findingId } (the queue's dismiss)
+ *   Not now   POST /api/projects/[id]/health { findingId } (the queue's dismiss;
+ *             a 409 means someone already decided it, and the queue re-reads)
  *
  * Never /health/approve or /approvals: both refuse this type, and neither can
  * bind consent to a plan version.
@@ -179,7 +180,13 @@ export function EvolutionRequestRow({
   const notNow = async () => {
     setState({ phase: 'busy', action: 'dismiss' })
     try {
-      const { res } = await post(`/api/projects/${projectId}/health`, { findingId: request.id })
+      const { res, j } = await post(`/api/projects/${projectId}/health`, { findingId: request.id })
+      if (res.status === 409) {
+        // Someone already decided it; show where it is now.
+        setState({ phase: 'moved', message: j.error || 'This change was already decided.' })
+        await onRefresh()
+        return
+      }
       if (!res.ok) {
         setState({ phase: 'error', message: 'Could not dismiss. Try again.' })
         return

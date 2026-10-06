@@ -698,3 +698,9 @@ tests/integration/structural-evolution-authorization.spec.ts
 # the queue, approved only for the rehearsed version, observed before it is
 # called stable, judged only on measurements, undone, and remembered.
 tests/integration/evolution-engine.spec.ts
+
+# The engine never strands a decision: a change kept after a stop, a table that
+# changed after approval, a pause mid-run, a decline under a thousand newer rows,
+# a dropped table, a pass cut off part-way, a refused or part-way undo, a stale
+# "not now", an abandoned approval claim. Real extractions on a real schema.
+tests/integration/evolution-engine-recovery.spec.ts

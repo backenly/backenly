@@ -109,8 +109,9 @@ const NEXT: Readonly<Record<LifecycleState, readonly LifecycleState[]>> = {
   // Unblocking resumes the stage that stopped, after a person acted.
   blocked: ['rehearsing', 'awaiting_approval', 'approved', 'expanding', 'backfilling', 'verifying', 'cutover', 'observing', 'rolling_back'],
   failed: ['rolling_back', 'expanding', 'backfilling', 'verifying', 'cutover'],
-  // A refused or failed undo leaves things as they were, stopped.
-  rolling_back: ['rolled_back', 'blocked'],
+  // An undo refused before it touched anything returns the change to exactly
+  // where it was; one that failed part-way leaves it stopped.
+  rolling_back: ['rolled_back', ...UNDOABLE],
   // Re-proposing a reversed change needs new evidence; see ./memory.ts.
   rolled_back: ['proposed'],
 }

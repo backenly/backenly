@@ -46,7 +46,7 @@ import { readTableFacts } from './facts'
 import { latestRun, ledgerSteps, readLatestEvolutionApproval } from './consent'
 import { reconcileExtraction } from './reconcile'
 import { isOurSatellite, reloadDataPlane, runStatements, unregisterTable } from './primitives'
-import { closeWritesSql, dropForwardSyncSql, dropSatelliteSql, ladderNames, revokeReadsSql } from './sql'
+import { closeWritesSql, dropForwardSyncSql, dropSatelliteSql, fq, ladderNames, revokeReadsSql } from './sql'
 
 export interface RollbackAction {
   action: 'close_writes' | 'revoke_reads' | 'drop_forward_sync' | 'drop_satellite' | 'withdraw_consent'
@@ -133,7 +133,7 @@ async function undo(input: { projectId: string; planId: string; requestedBy: str
     try {
       await runStatements(sql)
     } catch (err) {
-      actions.push({ action, outcome: 'failed', detail: err instanceof Error ? err.message : String(err) })
+      actions.push({ action, outcome: 'failed', detail: databaseWords(err) })
       return false
     }
     if (!(await verify())) {
@@ -159,6 +159,18 @@ async function undo(input: { projectId: string; planId: string; requestedBy: str
   if (sat) {
     const problem = await lossless()
     if (problem) return { status: 'refused', reason: problem, actions }
+    // Whatever was built on the new table since (a view, another table's
+    // foreign key) would make the last step fail after the others had
+    // already closed it: refused now, while nothing has been removed.
+    const users = await dependentsOf(fq(schema, spec.satellite))
+    if (users.length > 0) {
+      const them = users.length === 1 ? 'it' : 'them'
+      return {
+        status: 'refused',
+        reason: `${users.join(', ')} ${users.length === 1 ? 'depends' : 'depend'} on ${spec.satellite}, and removing it would break ${them}; change or drop ${them} first`,
+        actions,
+      }
+    }
   }
 
   const writers = (recorded('open_writes')?.granted as string[] | undefined) ?? []
@@ -222,6 +234,40 @@ async function undo(input: { projectId: string; planId: string; requestedBy: str
   await withdraw(approval.id, input.requestedBy, actions)
   await markLedger(projectId, planId, 'verified', actions)
   return { status: 'rolled_back', reason: reload, actions }
+}
+
+/**
+ * Objects outside the satellite that a DROP TABLE would refuse to break: views
+ * and rules over it, and other tables' foreign keys into it. Its own indexes,
+ * constraints, policies, triggers and rules go with it and are not listed.
+ */
+async function dependentsOf(satellite: string): Promise<string[]> {
+  const rows = await prisma.$queryRawUnsafe<Array<{ what: string }>>(
+    `SELECT DISTINCT CASE d.classid
+              WHEN 'pg_rewrite'::regclass THEN 'the view ' || r.ev_class::regclass::text
+              WHEN 'pg_constraint'::regclass THEN 'the foreign key ' || quote_ident(c.conname) || ' on ' || c.conrelid::regclass::text
+              ELSE pg_describe_object(d.classid, d.objid, d.objsubid)
+            END AS what
+       FROM pg_depend d
+       LEFT JOIN pg_rewrite r ON d.classid = 'pg_rewrite'::regclass AND r.oid = d.objid
+       LEFT JOIN pg_constraint c ON d.classid = 'pg_constraint'::regclass AND c.oid = d.objid
+       LEFT JOIN pg_policy pol ON d.classid = 'pg_policy'::regclass AND pol.oid = d.objid
+       LEFT JOIN pg_trigger tg ON d.classid = 'pg_trigger'::regclass AND tg.oid = d.objid
+       LEFT JOIN pg_class cl ON d.classid = 'pg_class'::regclass AND cl.oid = d.objid
+      WHERE d.refclassid = 'pg_class'::regclass AND d.refobjid = $1::regclass AND d.deptype = 'n'
+        AND COALESCE(r.ev_class, c.conrelid, pol.polrelid, tg.tgrelid, cl.oid) IS DISTINCT FROM $1::regclass
+        AND NOT (d.classid = 'pg_class'::regclass AND cl.relkind = 'i')
+      ORDER BY 1`,
+    satellite,
+  )
+  return rows.map(r => r.what)
+}
+
+/** A driver error in the database's own words, on one line. */
+function databaseWords(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err)
+  const m = /Message: `(?:ERROR: )?([^`]*)`/.exec(raw)
+  return (m ? m[1] : raw).replace(/\s+/g, ' ').trim().slice(0, 300)
 }
 
 async function withdraw(approvalId: string, by: string, actions: RollbackAction[]): Promise<void> {

@@ -175,7 +175,9 @@ export interface MemoryEntry {
   record: EvolutionRecord
 }
 
-function toEntry(row: { timestamp: Date; action: string; details: string | null; userId: string | null; metadata: unknown }): MemoryEntry | null {
+type MemoryRow = { timestamp: Date; action: string; details: string | null; userId: string | null; metadata: unknown }
+
+function toEntry(row: MemoryRow): MemoryEntry | null {
   const record = ((row.metadata ?? {}) as { evolution?: EvolutionRecord }).evolution
   if (!record || record.v !== 1) return null
   let sentence = ''
@@ -187,17 +189,45 @@ function toEntry(row: { timestamp: Date; action: string; details: string | null;
   return { at: row.timestamp, milestone: row.action === MILESTONE_ACTION, sentence, userId: row.userId, record }
 }
 
-/** Every decision's trail for a project, oldest first. One query. */
-export async function readMemory(projectId: string, opts: { limit?: number } = {}): Promise<MemoryEntry[]> {
-  const rows = await prisma.auditLog
-    .findMany({
-      where: { projectId, type: ARCHITECTURE_LOG_TYPE },
+const SELECT_ROW = { timestamp: true, action: true, details: true, userId: true, metadata: true } as const
+
+const eventIs = (event: MemoryEvent) => ({ metadata: { path: ['evolution', 'event'], equals: event } })
+
+/** How many recent assessments a project read carries: enough for "the latest per concern". */
+export const RECENT_ASSESSMENTS = 1_000
+
+/**
+ * What the engine decides from, for a whole project, oldest first.
+ *
+ * Every row that sets a decision's state or a concern's prior (transitions,
+ * declines, withdrawals, outcomes) is read, however old: a decline must hold
+ * however many rows came after it. Assessments are a series read for their
+ * latest values, so only the most recent ones are. Observation passes and
+ * snapshots belong to one decision and are read with its trail
+ * (`decisionTrail`), never here.
+ *
+ * A failed read throws. "Could not read" must never look like "nothing was
+ * ever decided", which would raise a declined change again.
+ */
+export async function readMemory(projectId: string): Promise<MemoryEntry[]> {
+  const base = { projectId, type: ARCHITECTURE_LOG_TYPE }
+  const [decisive, assessments] = await Promise.all([
+    prisma.auditLog.findMany({
+      where: { ...base, NOT: [eventIs('assessed'), eventIs('observed'), eventIs('measured')] },
+      orderBy: { timestamp: 'asc' },
+      select: SELECT_ROW,
+    }),
+    prisma.auditLog.findMany({
+      where: { ...base, AND: [eventIs('assessed')] },
       orderBy: { timestamp: 'desc' },
-      take: opts.limit ?? 1_000,
-      select: { timestamp: true, action: true, details: true, userId: true, metadata: true },
-    })
-    .catch(() => [] as Array<{ timestamp: Date; action: string; details: string | null; userId: string | null; metadata: unknown }>)
-  return rows.map(toEntry).filter((e): e is MemoryEntry => e !== null).reverse()
+      take: RECENT_ASSESSMENTS,
+      select: SELECT_ROW,
+    }),
+  ])
+  return [...decisive, ...(assessments as MemoryRow[]).reverse()]
+    .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
+    .map(toEntry)
+    .filter((e): e is MemoryEntry => e !== null)
 }
 
 /** One decision, every event, oldest first — the "View details" trail. */
@@ -236,6 +266,14 @@ export interface DecisionSummary {
   regressed: boolean
   /** When the change entered `observing`: the start of "after". */
   cutoverAt?: Date
+  /**
+   * When the current watch began: the latest entry into `observing`. Equal to
+   * `cutoverAt` unless a person kept the change after a stop, when watching
+   * starts again from that decision and earlier passes no longer judge it.
+   */
+  observingSince?: Date
+  /** An undo removed part of the change and then failed: only undo remains. */
+  undoIncomplete: boolean
   /** The latest benefit verdict, if one was reached. */
   outcome?: { verdict: string; summary: string; at: Date }
   /** The latest sentence a person was shown about this decision. */
@@ -270,6 +308,7 @@ export function summarizeDecisions(entries: MemoryEntry[]): DecisionSummary[] {
         declined: false,
         withdrawn: false,
         regressed: false,
+        undoIncomplete: false,
         startedAt: e.at,
         updatedAt: e.at,
       } as DecisionSummary)
@@ -279,6 +318,7 @@ export function summarizeDecisions(entries: MemoryEntry[]): DecisionSummary[] {
       reason?: string
       verdict?: string
       benefit?: { verdict?: string; summary?: string }
+      undoIncomplete?: boolean
     }
     if (r.planVersion) d.planVersion = r.planVersion
     if (r.evidenceHash) d.evidenceHash = r.evidenceHash
@@ -288,7 +328,12 @@ export function summarizeDecisions(entries: MemoryEntry[]): DecisionSummary[] {
       d.state = r.state
       if (r.state === 'approved') d.everApproved = true
       if (r.state === 'observing' && !d.cutoverAt) d.cutoverAt = e.at
+      // A refused undo hands the change back to where it was: the watch goes on.
+      if (r.state === 'observing' && r.from !== 'rolling_back') d.observingSince = e.at
       if (r.state === 'blocked' || r.state === 'failed') d.stoppedBecause = p.reason
+      // Only a later undo, finished or not, says otherwise.
+      if (r.state === 'blocked' && p.undoIncomplete) d.undoIncomplete = true
+      if (r.state === 'rolling_back' || r.state === 'rolled_back') d.undoIncomplete = false
       // Re-entering a stage after a stop clears the stop; resuming is a fresh start.
       if (!['blocked', 'failed'].includes(r.state)) {
         d.stoppedBecause = undefined

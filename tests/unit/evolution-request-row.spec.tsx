@@ -211,6 +211,17 @@ describe('an architecture change waiting for approval', () => {
     expect(onRefresh).toHaveBeenCalledTimes(1)
   })
 
+  it('"Not now" on a request someone already decided says so and re-reads, instead of failing', async () => {
+    mockFetch(() => json(409, { error: 'This change was already decided. Refresh to see where it is now.' }))
+    const { onRefresh } = mountRow(evolution())
+    await act(async () => {
+      fireEvent.click(button(/Not now/))
+    })
+    expect(onRefresh).toHaveBeenCalledTimes(1)
+    expect(screen.getByText('This change was already decided. Refresh to see where it is now.')).toBeTruthy()
+    expect(screen.queryByText(/Could not dismiss/)).toBeNull()
+  })
+
   it('does not offer Approve, or claim a rehearsal, for a version that has not passed its own', () => {
     // An older version passed; this one has not been rehearsed yet.
     mountRow(evolution({ rehearsal: { planVersion: 'pv-0', passed: true, authorization: 'passed', detail: '', at: '' } }))

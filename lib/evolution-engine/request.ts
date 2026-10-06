@@ -79,6 +79,8 @@ export interface EvolutionRequestDetails {
   }
   /** Why a change stopped, for `ask: 'resume_or_undo'`. */
   stoppedBecause?: string
+  /** When an approval attempt claimed the row; a claim older than CLAIM_LEASE_MS is abandoned. */
+  claimedAt?: string
   /**
    * Opt-in detail, never shown by default: the steps with their exact SQL, the
    * evidence, what this change deliberately does not decide, what a person
@@ -151,8 +153,9 @@ export async function raiseRequest(projectId: string, evolution: EvolutionReques
   // The only shape this row may ever have. Spelled out so nobody adds `fix`.
   const details = { evolution } as object
   const existing = await liveRequestFor(projectId, evolution.concernKey)
-  // Mid-approval: the claim holder decides what the row becomes next.
-  if (existing?.status === 'approving') return existing.findingId
+  // Mid-approval: the claim holder decides what the row becomes next, unless
+  // the claim was abandoned (the process died between claim and outcome).
+  if (existing?.status === 'approving' && !isClaimAbandoned(existing.evolution)) return existing.findingId
   if (existing) {
     await prisma.healthFinding.update({
       where: { id: existing.findingId },
@@ -175,16 +178,49 @@ export async function raiseRequest(projectId: string, evolution: EvolutionReques
   return row.id
 }
 
+/** How long an approval attempt may hold its claim before the row counts as waiting again. */
+export const CLAIM_LEASE_MS = 2 * 60_000
+
+/** An approval claim older than the lease: the attempt that took it died before deciding. */
+export const isClaimAbandoned = (ev: EvolutionRequestDetails, now = Date.now()) =>
+  !ev.claimedAt || now - new Date(ev.claimedAt).getTime() > CLAIM_LEASE_MS
+
+const ABANDONED_CLAIM_SQL = `status = 'approving'
+  AND COALESCE((details #>> '{evolution,claimedAt}')::timestamptz, '-infinity') < clock_timestamp() - $LEASE::int * interval '1 second'`
+
 /**
  * Claim a waiting request for one approval attempt. Atomic: of two clicks, or
- * two tabs, exactly one gets it.
+ * two tabs, exactly one gets it. A claim carries its time, so one abandoned by
+ * a process that died mid-approval lapses instead of hiding the row for good.
  */
 export async function claimRequest(projectId: string, findingId: string): Promise<boolean> {
-  const r = await prisma.healthFinding.updateMany({
-    where: { id: findingId, projectId, type: EVOLUTION_FINDING_TYPE, status: 'pending_approval' },
-    data: { status: 'approving' },
-  })
-  return r.count === 1
+  const n = await prisma.$executeRawUnsafe(
+    `UPDATE health_findings
+        SET status = 'approving',
+            details = jsonb_set(details, '{evolution,claimedAt}', to_jsonb(to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')))
+      WHERE id = $1 AND "projectId" = $2 AND type = $3
+        AND (status = 'pending_approval' OR (${ABANDONED_CLAIM_SQL.replace('$LEASE', '$4')}))`,
+    findingId,
+    projectId,
+    EVOLUTION_FINDING_TYPE,
+    CLAIM_LEASE_MS / 1000,
+  )
+  return n === 1
+}
+
+/**
+ * Put every abandoned approval claim back in the queue, where a person can see
+ * it again: the queue lists waiting rows only, so a claim nobody will finish
+ * would otherwise hide its request for good. Run by every proposal pass.
+ */
+export async function releaseAbandonedClaims(projectId: string): Promise<number> {
+  return prisma.$executeRawUnsafe(
+    `UPDATE health_findings SET status = 'pending_approval'
+      WHERE "projectId" = $1 AND type = $2 AND ${ABANDONED_CLAIM_SQL.replace('$LEASE', '$3')}`,
+    projectId,
+    EVOLUTION_FINDING_TYPE,
+    CLAIM_LEASE_MS / 1000,
+  )
 }
 
 export async function setRequestStatus(

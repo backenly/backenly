@@ -54,7 +54,8 @@ describe('the lifecycle', () => {
     ['expanding', 'stable'],
     ['stable', 'expanding'],
     ['rolled_back', 'expanding'],   // a reversed change starts over, as a proposal
-    ['rolling_back', 'stable'],
+    ['rolling_back', 'approved'],   // an undo never turns back into consent
+    ['rolling_back', 'awaiting_approval'],
   ] as Array<[LifecycleState, LifecycleState]>)('refuses %s → %s', (from, to) => {
     expect(canTransition(from, to)).toBe(false)
     expect(() => assertTransition(from, to)).toThrow(InvalidTransition)
@@ -67,6 +68,12 @@ describe('the lifecycle', () => {
     }
     for (const s of ['proposed', 'rehearsing', 'rehearsed', 'awaiting_approval', 'approved', 'rolled_back'] as LifecycleState[]) {
       expect(canUndoFrom(s)).toBe(false)
+    }
+  })
+
+  it('hands an undo refused before it touched anything back to exactly where it was', () => {
+    for (const s of ['expanding', 'backfilling', 'verifying', 'cutover', 'observing', 'stable', 'blocked', 'failed'] as LifecycleState[]) {
+      expect(canTransition('rolling_back', s)).toBe(true)
     }
   })
 

@@ -76,13 +76,16 @@ import {
   type ExecutionOutcome,
   type Opportunity,
   type Rehearsal,
+  type RollbackResult,
   type RungStage,
   type SnapshotPhase,
   type UserFacingSummary,
 } from './primitive'
 import {
   claimRequest,
+  isClaimAbandoned,
   raiseRequest,
+  releaseAbandonedClaims,
   requestById,
   requestForDecision,
   setRequestStatus,
@@ -268,6 +271,7 @@ const PASS_MARKER: DecisionRef = {
 export async function proposeChanges(projectId: string, opts: { now?: Date } = {}): Promise<ProposalPassResult> {
   const now = opts.now ?? new Date()
   const out: ProposalPassResult = { assessed: 0, requested: 0, refreshed: 0, rehearsalFailed: 0, skipped: [] }
+  await releaseAbandonedClaims(projectId)
   const memory = await readMemory(projectId)
   const decisions = summarizeDecisions(memory)
   const recommendations: RecommendationView[] = []
@@ -330,8 +334,16 @@ export async function proposeChanges(projectId: string, opts: { now?: Date } = {
     // in front of the owner as if it were current.
     for (const d of decisions) {
       if (d.primitive !== primitive.id || d.state !== 'awaiting_approval' || d.declined) continue
-      if (!assessedSubjects.has(d.subject) || stillProposed.has(d.concernKey)) continue
-      await withdrawRequest(projectId, refOf(d), 'it is no longer proposed: the latest analysis of this table no longer supports it')
+      if (stillProposed.has(d.concernKey)) continue
+      if (assessedSubjects.has(d.subject)) {
+        await withdrawRequest(projectId, refOf(d), 'it is no longer proposed: the latest analysis of this table no longer supports it')
+        continue
+      }
+      // Not assessed this pass: skipped for size, or gone. A table that was
+      // dropped or renamed can never be approved, so its request goes too.
+      const spec = primitive.normaliseSpec(d.spec)
+      const resolved = spec ? await primitive.resolvePlan(projectId, spec) : { refusal: 'the request can no longer be read' }
+      if ('refusal' in resolved) await withdrawRequest(projectId, refOf(d), `no plan can be built any more: ${resolved.refusal}`)
     }
   }
 
@@ -398,6 +410,31 @@ async function requestApproval(
         primitive: primitive.id,
         subject: opp.subject,
       }
+  try {
+    return await prepareRequest(projectId, primitive, opp, now, plan, d, existing)
+  } catch (err) {
+    // Whatever stopped it part-way, the decision must not be left between
+    // proposing and asking, where nothing would ever pick it up again: it is
+    // stopped, and a later pass retries it like a failed rehearsal.
+    const reason = `preparing it failed: ${err instanceof Error ? err.message : String(err)}`
+    await enter(projectId, d, 'blocked', {
+      sentence: `Backenly could not finish preparing a change to ${opp.subject}, so it was not proposed.`,
+      payload: { reason },
+    }).catch(() => false)
+    await resolveRequest(projectId, d.decisionId).catch(() => {})
+    throw err
+  }
+}
+
+async function prepareRequest(
+  projectId: string,
+  primitive: EvolutionPrimitive<any, any>,
+  opp: Opportunity,
+  now: Date,
+  plan: EnginePlan,
+  d: DecisionRef,
+  existing: DecisionRef | undefined,
+): Promise<RequestOutcome> {
   const firedBy = opp.pressure.filter(p => p.class === 'measured_cost').map(p => p.kind)
   if (!existing) {
     await enter(projectId, d, 'proposed', {
@@ -437,6 +474,12 @@ async function requestApproval(
   const requirement = approvalRequirement(traits)
   if (requirement.humanOnly) {
     if (existing) await withdrawRequest(projectId, d, `software may not run it: ${requirement.reason}`)
+    else {
+      await enter(projectId, d, 'blocked', {
+        sentence: `The change to ${opp.subject} is not one software may run, so it was not proposed.`,
+        payload: { reason: `software may not run it: ${requirement.reason}` },
+      })
+    }
     return `not runnable by software: ${requirement.reason}`
   }
   const summary = primitive.describe(plan, opp)
@@ -486,7 +529,13 @@ function technicalFor(plan: EnginePlan, opp: Opportunity): EvolutionRequestDetai
   }
 }
 
-/** A waiting request whose plan moved, or a rehearsal that failed a day ago: try again. */
+/** States between proposing a change and asking about it, held only while a pass works on it. */
+const PREPARING: LifecycleState[] = ['proposed', 'rehearsing', 'rehearsed']
+
+/** How long a decision may sit in a PREPARING state before it counts as abandoned. */
+export const ABANDONED_AFTER_MS = 3_600_000
+
+/** A waiting request whose plan moved, a rehearsal that failed a day ago, or a pass cut off part-way: try again. */
 async function refreshIfStale(
   projectId: string,
   primitive: EvolutionPrimitive<any, any>,
@@ -499,6 +548,10 @@ async function refreshIfStale(
   const everApproved = trail.some(e => e.record.event === 'transition' && e.record.state === 'approved')
   if (everApproved) return 'current'
   const retryRehearsal = open.state === 'blocked' && now.getTime() - open.updatedAt.getTime() > 86_400_000
+  // A pass that stopped between proposing and asking (a deploy, a timeout)
+  // left the decision part-way; after an hour nothing is still working on it.
+  const abandoned =
+    !!open.state && PREPARING.includes(open.state) && now.getTime() - open.updatedAt.getTime() > ABANDONED_AFTER_MS
   let drifted = false
   if (open.state === 'awaiting_approval') {
     const resolved = await primitive.resolvePlan(projectId, opp.spec)
@@ -506,7 +559,7 @@ async function refreshIfStale(
     // re-proposed — or withdrawn — by requestApproval.
     drifted = 'refusal' in resolved || resolved.plan.planVersion !== open.planVersion
   }
-  if (!retryRehearsal && !drifted) return 'current'
+  if (!retryRehearsal && !drifted && !abandoned) return 'current'
   const r = await requestApproval(projectId, primitive, opp, now, refOf(open))
   return r === 'requested' ? 'refreshed' : 'current'
 }
@@ -553,7 +606,10 @@ export async function approveRequest(input: {
   if (!req) return { ok: false, status: 404, error: 'No such approval request in this project.' }
   const ev = req.evolution
   if (ev.ask !== 'approve') return { ok: false, status: 409, error: 'This change is waiting for a resume or undo decision, not an approval.' }
-  if (req.status !== 'pending_approval') return { ok: false, status: 409, error: 'This request was already decided.' }
+  // A claim whose attempt died before deciding is taken over, not honoured.
+  if (req.status !== 'pending_approval' && !(req.status === 'approving' && isClaimAbandoned(ev))) {
+    return { ok: false, status: 409, error: 'This request was already decided.' }
+  }
   if (ev.planVersion !== planVersion) {
     return {
       ok: false,
@@ -632,17 +688,21 @@ export async function approveRequest(input: {
   }
 }
 
+/**
+ * Rehearse the change for the table as it is now and put that version in
+ * front of the person, on the same decision. 'requested' when it was.
+ */
 async function reRequest(
   projectId: string,
   primitive: EvolutionPrimitive<any, any>,
   d: DecisionRef,
-  ev: EvolutionRequestDetails,
+  about: { subject: string; concernKey: string },
   now: Date,
-): Promise<void> {
-  const assessment = await primitive.assess(projectId, { subjects: [ev.subject], now })
-  const opp = assessment.opportunities.find(o => o.concernKey === ev.concernKey)
-  if (!opp || opp.level !== 'executable_proposal') return
-  await requestApproval(projectId, primitive, opp, now, d)
+): Promise<RequestOutcome> {
+  const assessment = await primitive.assess(projectId, { subjects: [about.subject], now })
+  const opp = assessment.opportunities.find(o => o.concernKey === about.concernKey)
+  if (!opp || opp.level !== 'executable_proposal') return 'no longer proposed'
+  return requestApproval(projectId, primitive, opp, now, d)
 }
 
 /** The person said "not now" to an approval request. Remembered, and respected until something new is measured. */
@@ -651,6 +711,10 @@ export async function recordDecline(projectId: string, findingId: string, userId
   if (!req) return
   const ev = req.evolution
   if (ev.ask !== 'approve') return
+  // Only a change still waiting for its approval can be declined: a stale tab
+  // saying "not now" to one already approved and running declines nothing.
+  const { summary, trail } = await decision(projectId, ev.decisionId)
+  if (summary?.state !== 'awaiting_approval') return
   await remember({
     projectId,
     record: {
@@ -663,6 +727,7 @@ export async function recordDecline(projectId: string, findingId: string, userId
       primitive: ev.primitive,
       subject: ev.subject,
       event: 'declined',
+      attempt: trail.filter(e => e.record.event === 'declined').length + 1,
     },
     milestone: false,
     sentence: `You declined: ${ev.summary.headline}. Backenly will not raise it again unless something new is measured.`,
@@ -711,6 +776,14 @@ export async function advance(input: {
 
   const outcome = await primitive.execute(projectId, summary.planId, { mutationsEnabled: exec.enabled })
   const subject = summary.subject
+
+  // A person may have paused (or undone) the change while it ran. Their
+  // decision stands: what this run reached is not walked over it, and their
+  // own pause is not put back in front of them as a stop to decide on.
+  const latest = (await decision(projectId, decisionId)).summary
+  if (latest?.state && latest.state !== summary.state && !ADVANCEABLE.includes(latest.state)) {
+    return { state: latest.state, message: `The change is ${userFacingStatus(latest.state).label.toLowerCase()}.`, outcome }
+  }
   const traceFor = (s: LifecycleState) => `${userFacingStatus(s).label}: ${subject}.`
 
   if (outcome.status === 'in_flight_elsewhere') {
@@ -800,7 +873,7 @@ export const isActionRefusal = (r: ActionResult): r is Extract<ActionResult, { o
 
 export async function pause(input: { projectId: string; decisionId: string; userId: string }): Promise<ActionResult> {
   const { projectId, decisionId, userId } = input
-  const { summary } = await decision(projectId, decisionId)
+  const { summary, trail } = await decision(projectId, decisionId)
   if (!summary?.state) return { ok: false, status: 404, error: 'No such change.' }
   if (!ADVANCEABLE.includes(summary.state)) return { ok: false, status: 409, error: 'Only a change that is still being applied can be paused.' }
   const primitive = primitiveById(summary.primitive)
@@ -810,7 +883,8 @@ export async function pause(input: { projectId: string; decisionId: string; user
   const d = refOf(summary)
   await remember({
     projectId,
-    record: { ...base(d), event: 'withdrawn' },
+    // Each pause is its own event: a second pause after a resume is recorded too.
+    record: { ...base(d), event: 'withdrawn', attempt: trail.filter(e => e.record.event === 'withdrawn').length + 1 },
     milestone: true,
     sentence: `You paused the change to ${summary.subject}. Nothing further runs until you resume it; your app works as before.`,
     userId,
@@ -825,6 +899,14 @@ export async function resume(input: { projectId: string; decisionId: string; use
   if (!summary?.state) return { ok: false, status: 404, error: 'No such change.' }
   const primitive = primitiveById(summary.primitive)
   if (!primitive) return { ok: false, status: 409, error: 'Unknown change type.' }
+  // Resuming continues what a person approved; it is never a way to approve.
+  // A change nobody approved goes through the queue, rehearsed and shown first.
+  if (!summary.everApproved) {
+    return { ok: false, status: 409, error: 'This change was never approved, so there is nothing to resume. Approve it from the queue when Backenly proposes it.' }
+  }
+  if (summary.undoIncomplete) {
+    return { ok: false, status: 409, error: 'Part of this change was already undone, so it cannot carry on as approved. Undo it to finish.' }
+  }
   const d = refOf(summary)
 
   // A change regressed in observation, kept on purpose: watching resumes.
@@ -832,7 +914,7 @@ export async function resume(input: { projectId: string; decisionId: string; use
   if (summary.state === 'blocked' && stoppedIn === 'observing') {
     await enter(projectId, d, 'observing', { sentence: `You kept the change to ${summary.subject}; Backenly is watching it again.`, milestone: true, userId })
     await clearQueue(projectId, decisionId)
-    return { ok: true, message: 'Kept. Backenly continues to watch it.', state: 'observing' }
+    return { ok: true, message: 'Kept. Backenly watches it again from now.', state: 'observing' }
   }
   if (!['blocked', 'failed', ...ADVANCEABLE].includes(summary.state)) {
     return { ok: false, status: 409, error: 'This change is not stopped.' }
@@ -844,12 +926,22 @@ export async function resume(input: { projectId: string; decisionId: string; use
     if (!spec || !summary.planVersion) return { ok: false, status: 409, error: 'This change cannot be resumed; undo it instead.' }
     const granted = await primitive.grant({ projectId, spec, planVersion: summary.planVersion, approvedBy: userId, decisionId })
     if (isConsentRefusal(granted)) {
+      if (!granted.currentPlanVersion) return { ok: false, status: 409, error: `It cannot resume: ${granted.refusal}` }
+      // The table changed since the approval: what was approved no longer
+      // exists. Rehearse the change for the table as it is now and ask again,
+      // on the same decision; the approval queue shows the new version.
+      const again = await reRequest(projectId, primitive, d, summary, new Date())
+      if (again === 'requested') {
+        return {
+          ok: true,
+          message: 'The table changed since you approved this, so Backenly checked the change again against the table as it is now. Review and approve the updated version in your queue.',
+          state: 'awaiting_approval',
+        }
+      }
       return {
         ok: false,
         status: 409,
-        error: granted.currentPlanVersion
-          ? 'The table changed since this was approved, so it cannot simply resume. Undo it, and Backenly will propose the change again for the table as it is now.'
-          : `It cannot resume: ${granted.refusal}`,
+        error: 'The table changed since you approved this, and the change no longer fits it as it is now. Undo removes what was done so far; nothing else runs.',
       }
     }
     const back = stoppedIn && ADVANCEABLE.includes(stoppedIn) ? stoppedIn : 'approved'
@@ -886,12 +978,20 @@ export async function undo(input: { projectId: string; decisionId: string; userI
   const primitive = primitiveById(summary.primitive)
   if (!primitive) return { ok: false, status: 409, error: 'Unknown change type.' }
   const d = refOf(summary)
+  const before = summary.state
 
-  const result = await primitive.rollback(projectId, summary.planId, userId)
-  if (result.status === 'in_flight_elsewhere') {
-    return { ok: false, status: 409, error: 'Another change is running on this project. Try again in a minute.' }
-  }
+  // Claimed before anything is touched: an observation pass that lands while
+  // the change is being removed must find it being undone, not "removed
+  // outside Backenly".
   await enter(projectId, d, 'rolling_back', { sentence: `Undoing the change to ${summary.subject}.`, userId })
+  const result: RollbackResult = await primitive.rollback(projectId, summary.planId, userId).catch(err => ({
+    status: 'failed' as const,
+    reason: err instanceof Error ? err.message : String(err),
+    // Not known what ran before it threw: treated as part-way, so only undo
+    // (which re-reads the catalog and skips what is already gone) is offered.
+    actions: [{ action: 'unknown', outcome: 'done' as const, detail: 'the undo stopped part-way' }],
+  }))
+
   if (result.status === 'rolled_back' || result.status === 'nothing_to_undo') {
     await enter(projectId, d, 'rolled_back', {
       sentence: `${input.automatic ? 'Backenly' : 'You'} undid the change to ${summary.subject}. It is exactly as it was before, and no data was lost.`,
@@ -903,15 +1003,42 @@ export async function undo(input: { projectId: string; decisionId: string; userI
     if (req) await setRequestStatus(projectId, req.findingId, 'resolved')
     return { ok: true, message: 'Undone. Everything is exactly as it was, and no data was lost.', state: 'rolled_back' }
   }
+
   const reason = result.reason ?? 'the undo could not complete'
+  const removed = result.actions.filter(a => a.outcome === 'done' && a.action !== 'withdraw_consent')
+  if (removed.length === 0) {
+    // Refused, or stopped at its first step: nothing was touched, so the
+    // change is exactly where it was.
+    const busy = result.status === 'in_flight_elsewhere'
+    await enter(projectId, d, before, {
+      sentence: busy
+        ? `The undo of the change to ${summary.subject} waited: another change was running.`
+        : `Backenly did not undo the change to ${summary.subject}: ${reason}. Nothing was removed; it is as it was.`,
+      milestone: !busy,
+      userId,
+      payload: { reason: summary.stoppedBecause, undoRefused: reason },
+    })
+    return {
+      ok: false,
+      status: 409,
+      error: busy ? 'Another change is running on this project. Try again in a minute.' : `Not undone, and nothing was removed: ${reason}.`,
+    }
+  }
+
+  // Part of it was removed before a step failed. Saying "nothing was removed"
+  // would be false, and resuming would carry on with parts missing: only
+  // undo, which skips what is already gone, is offered.
   await enter(projectId, d, 'blocked', {
-    sentence: `Backenly did not undo the change to ${summary.subject}: ${reason}. Nothing was removed.`,
+    sentence:
+      `Backenly could not finish undoing the change to ${summary.subject}: ${reason}. ` +
+      `It had already done this: ${removed.map(a => a.detail).join('; ')}. Undo it again to finish once that is fixed.`,
     milestone: true,
     userId,
-    payload: { reason, rollback: result },
+    payload: { reason, rollback: result, undoIncomplete: true },
   })
-  await askToResumeOrUndo(projectId, d, reason)
-  return { ok: false, status: 409, error: `Not undone: ${reason}` }
+  const req = await requestForDecision(projectId, decisionId)
+  if (req && req.status === 'pending_approval') await setRequestStatus(projectId, req.findingId, 'resolved')
+  return { ok: false, status: 409, error: `Undone only part-way: ${reason}. Undo it again to finish once that is fixed.` }
 }
 
 // ── Observe and judge ────────────────────────────────────────────────────────
@@ -941,18 +1068,21 @@ export async function observe(input: { projectId: string; decisionId: string; no
   if (!primitive || !spec) return { state: summary.state, verdict: 'continue', reason: 'unknown change type' }
   const resolved = await primitive.resolvePlan(projectId, spec)
   const d = refOf(summary)
+  // The current watch: from cutover, or from when a person kept the change
+  // after a stop. A pass from before that decision no longer judges it.
+  const since = summary.observingSince ?? summary.cutoverAt
   const signals =
     'refusal' in resolved
       ? [{ name: CONSISTENCY_SIGNAL, status: 'regressed' as const, detail: resolved.refusal }]
-      : await primitive.observe(projectId, resolved.plan, { since: summary.cutoverAt, now })
+      : await primitive.observe(projectId, resolved.plan, { since, now })
   await remember({
     projectId,
     record: { ...base(d), event: 'observed', payload: { signals } },
     milestone: false,
     sentence: signals.map(s => `${s.name}: ${s.status}`).join(', '),
   })
-  const passes = [...passesOf(trail), { at: now.toISOString(), signals }]
-  const verdict = observationVerdict({ passes, cutoverAt: summary.cutoverAt, now, policy })
+  const passes = [...passesSince(trail, since), { at: now.toISOString(), signals }]
+  const verdict = observationVerdict({ passes, cutoverAt: since, now, policy })
   if (verdict.status === 'continue') return { state: 'observing', verdict: 'continue', reason: verdict.reason }
 
   if (verdict.status === 'regressed') {
@@ -966,7 +1096,7 @@ export async function observe(input: { projectId: string; decisionId: string; no
   // answered from measurements only.
   if ('refusal' in resolved) return { state: 'observing', verdict: 'continue', reason: resolved.refusal }
   await snapshot(projectId, d, primitive, resolved.plan, 'S2', now)
-  const benefit = await judge(projectId, primitive, resolved.plan, decisionId, now)
+  const benefit = await judge(projectId, primitive, resolved.plan, decisionId, now, since)
   if (benefit.verdict === 'regressed') {
     await stopForRegression(projectId, d, summary.subject, asClause(benefit.summary), policy, input)
     return { state: 'blocked', verdict: 'regressed', reason: benefit.summary, benefit }
@@ -1019,11 +1149,13 @@ async function judge(
   plan: EnginePlan,
   decisionId: string,
   now: Date,
+  /** The start of the current watch; passes before it were already decided on. */
+  since: Date,
 ): Promise<BenefitReport> {
   const { trail } = await decision(projectId, decisionId)
   const snapshots = snapshotsOf(trail)
   const measurements = await primitive.measure(projectId, plan, snapshots, { firedBy: firedByOf(trail), now }).catch(() => [])
-  const passes = passesOf(trail)
+  const passes = passesSince(trail, since)
   const lastConsistency = [...passes].reverse().flatMap(p => p.signals).find(s => s.name === CONSISTENCY_SIGNAL)
   const rehearsed = trail
     .map(e => ((e.record.payload ?? {}) as { rehearsal?: { authorization?: string } }).rehearsal)
@@ -1037,6 +1169,10 @@ async function judge(
     },
     measurements,
   )
+}
+
+function passesSince(trail: MemoryEntry[], since: Date): ReturnType<typeof passesOf> {
+  return passesOf(trail).filter(p => new Date(p.at).getTime() >= since.getTime())
 }
 
 /** Benefits that take weeks to show are re-judged 30 and 90 days after cutover. */
@@ -1054,7 +1190,7 @@ async function longHorizon(projectId: string, d: DecisionSummary, now: Date): Pr
   if ('refusal' in resolved) return
   const ref = refOf(d)
   await snapshot(projectId, ref, primitive, resolved.plan, due, now)
-  const benefit = await judge(projectId, primitive, resolved.plan, d.decisionId, now)
+  const benefit = await judge(projectId, primitive, resolved.plan, d.decisionId, now, d.observingSince ?? d.cutoverAt)
   const changed = benefit.verdict !== d.outcome?.verdict
   await remember({
     projectId,
@@ -1184,7 +1320,8 @@ export async function listChanges(projectId: string, opts: { limit?: number; now
           undo: canUndoFrom(state),
           pause: ADVANCEABLE.includes(state),
           // Without the scheduler, a person pushes an in-progress change on.
-          resume: state === 'blocked' || state === 'failed' || (!schedulerOn && ADVANCEABLE.includes(state)),
+          // After a part-way undo only undo remains.
+          resume: !d.undoIncomplete && (state === 'blocked' || state === 'failed' || (!schedulerOn && ADVANCEABLE.includes(state))),
         },
         ...(pendingBy.get(d.decisionId) ? { findingId: pendingBy.get(d.decisionId)! } : {}),
       }

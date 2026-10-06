@@ -306,17 +306,25 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
           },
         }),
       ])
+    } else if (isEvolutionApprovalFinding(finding.type)) {
+      // "Not now" on an architecture change is a decision Backenly remembers:
+      // it is not raised again unless something new is measured. Only while it
+      // is still waiting: a stale tab must not set aside a change someone else
+      // already approved, which is running.
+      const set = await prisma.healthFinding.updateMany({
+        where: { id: findingId, projectId, status: 'pending_approval' },
+        data: { status: 'dismissed' },
+      })
+      if (set.count === 0) {
+        return NextResponse.json({ error: 'This change was already decided. Refresh to see where it is now.' }, { status: 409 })
+      }
+      const { recordDecline } = await import('@/lib/evolution-engine/engine')
+      await recordDecline(projectId, findingId, validated.userId ?? null).catch(() => {})
     } else {
       await prisma.healthFinding.update({
         where: { id: findingId },
         data: { status: 'dismissed' },
       })
-      // "Not now" on an architecture change is a decision Backenly remembers:
-      // it is not raised again unless something new is measured.
-      if (isEvolutionApprovalFinding(finding.type)) {
-        const { recordDecline } = await import('@/lib/evolution-engine/engine')
-        await recordDecline(projectId, findingId, validated.userId ?? null).catch(() => {})
-      }
     }
 
     // Keep the Memory timeline in step with the Review-Queue decision so a
