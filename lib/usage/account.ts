@@ -39,6 +39,19 @@ export async function billingAccountOf(projectId: string): Promise<string | null
 }
 
 /**
+ * The account a project's AI credits are gated on and charged to, or null when
+ * it cannot be read right now.
+ *
+ * The credit gate is FAIL-OPEN (enforceAiCredits): a billing hiccup must never
+ * wedge an agent. So a failed lookup is null, which the gate treats as "do not
+ * block" and a charge as "nothing to charge", never as some other account to
+ * fall back to.
+ */
+export async function creditAccountOf(projectId: string): Promise<string | null> {
+  return billingAccountOf(projectId).catch(() => null)
+}
+
+/**
  * Delete an account's own counters and balances (account_ai_usage,
  * account_credits). These used to live on, or hang off, the User row and were
  * deleted with it; keyed by a plain string they no longer are, so whatever

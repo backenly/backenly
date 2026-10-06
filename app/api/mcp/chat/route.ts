@@ -35,7 +35,7 @@ import { runBrain, type BrainEvent } from '@/lib/ai/brain/agent'
 import { assertAiAllowed } from '@/lib/platform-controls'
 import { createApprovalRequest } from '@/lib/mcp/approvals'
 import { enforceAiCredits, chargeAiCredits } from '@/lib/entitlements/policy'
-import { billingAccountOf } from '@/lib/usage/account'
+import { creditAccountOf } from '@/lib/usage/account'
 
 const MAX_BRAIN_MS = 90_000
 const ENDPOINT = '/api/mcp/chat'
@@ -88,9 +88,10 @@ export async function POST(request: NextRequest) {
   // user gets the same answer regardless of what they asked for.
   //
   // The credits are the project's billing account's (its organization on
-  // Cloud), not the caller's: a teammate's agent spends the team's budget.
-  const creditAccount = (await billingAccountOf(auth.projectId)) ?? auth.userId
-  const credits = await enforceAiCredits(creditAccount)
+  // Cloud), not the caller's: a teammate's agent spends the team's budget. An
+  // account that cannot be read is not blocked, the same fail-open rule.
+  const creditAccount = await creditAccountOf(auth.projectId)
+  const credits = creditAccount ? await enforceAiCredits(creditAccount) : true
   if (credits !== true) {
     recordMcpCall(
       { ...auth, endpoint: ENDPOINT, startedAt },
@@ -145,7 +146,7 @@ export async function POST(request: NextRequest) {
   const chargeOnce = () => {
     if (charged || spentTokens <= 0) return
     charged = true
-    chargeAiCredits(creditAccount, spentTokens).catch(() => {})
+    if (creditAccount) chargeAiCredits(creditAccount, spentTokens).catch(() => {})
   }
 
   const timeoutPromise = new Promise<never>((_, reject) => {

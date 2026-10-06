@@ -52,6 +52,13 @@ jest.mock('@/lib/mcp/approvals', () => {
   }
 })
 
+// The project's billing account, which the route gates and charges credits on.
+// Read from the database in the route; a fixed one here, as this suite has none.
+jest.mock('@/lib/usage/account', () => ({
+  ...jest.requireActual('@/lib/usage/account'),
+  creditAccountOf: async () => 'account-1',
+}))
+
 jest.mock('@/lib/entitlements/policy', () => ({
   enforceAiCredits: jest.fn(async () =>
     mockCreditsExhausted
@@ -320,6 +327,9 @@ describe('the tool route', () => {
     expect(res.status).toBe(402)
     expect(body.code).toBe('AI_CREDITS_EXHAUSTED')
     expect(mockDispatched).toEqual([])
+    // Gated on the project's billing account, not on the caller.
+    const { enforceAiCredits } = jest.requireMock('@/lib/entitlements/policy')
+    expect(enforceAiCredits).toHaveBeenLastCalledWith('account-1')
   })
 
   it('keeps a readiness read side-effect free through the deploy tool too', async () => {
