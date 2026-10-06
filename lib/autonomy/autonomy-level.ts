@@ -171,7 +171,7 @@ export function coerceAutonomyLevel(input: unknown): AutonomyLevel | null {
 /**
  * Map a plan's internal name (SANDBOX / BUILDER / SCALE) to the user-facing
  * label shown everywhere in the product (Free / Pro / Enterprise). Kept in
- * sync with app/app/billing/billing-panel.tsx. Unknown names pass through so a
+ * sync with components/cloud/BillingPanel.tsx (Cloud). Unknown names pass through so a
  * future plan doesn't render as a blank.
  *
  * The empty case is edition-dependent. A self-hosted deployment never writes
