@@ -40,6 +40,7 @@
 import { FLAGS } from '@/lib/config/flags'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
 import { getProjectAutonomyLevel } from '@/lib/autonomy/autonomy-level'
+import type { PriorOutcome } from '@/lib/evolution-engine/levels'
 import { listBaseTables, readTableFacts, relationExists } from './facts'
 import {
   analyzeTable,
@@ -107,11 +108,20 @@ export interface EvolutionReport {
   projectId: string
   analyzedAt: string
   windowDays: number
-  /** Concerns that cleared the gate, or that already have consent or a run. */
+  /** Executable proposals, and concerns that already have consent or a run. */
   proposals: ProposalView[]
-  /** Cohesive concerns with no measured cost yet. Watched, not proposed. */
+  /** A different shape would likely be better; said, explained, not proposed to run. */
+  recommendations: ConcernAssessment[]
+  /** Cohesive concerns with nothing yet showing they matter. Watched, not proposed. */
   watching: ConcernAssessment[]
-  tables: Array<Pick<TableAssessment, 'table' | 'rows' | 'coverage'> & { concerns: number }>
+  /**
+   * Cohesive concerns deliberately left alone — counterproductive to move, or
+   * held by memory (declined, undone, already in effect) — each with its reason.
+   */
+  held: ConcernAssessment[]
+  /** Tables looked at hard and left alone on purpose, with the reason. */
+  noChange: Array<{ table: string; reason: string }>
+  tables: Array<Pick<TableAssessment, 'table' | 'rows' | 'coverage' | 'subject'> & { concerns: number }>
   limits: string[]
 }
 
@@ -159,7 +169,12 @@ function stateOf(
  */
 export async function analyzeStructuralEvolution(
   projectId: string,
-  opts: { tables?: string[]; now?: Date } = {},
+  /**
+   * `priors` is what architecture memory recalls per concern (see
+   * lib/evolution-engine/memory.ts `priorsFor`): a change that was declined,
+   * undone or is already in effect is not proposed again on the same evidence.
+   */
+  opts: { tables?: string[]; now?: Date; priors?: Record<string, PriorOutcome> } = {},
 ): Promise<EvolutionReport> {
   const now = opts.now ?? new Date()
   const since = new Date(now.getTime() - WINDOW_DAYS * 86_400_000)
@@ -195,15 +210,18 @@ export async function analyzeStructuralEvolution(
           windowDays: WINDOW_DAYS,
           repairs: repairs.filter(r => r.table === table),
           hostRequests: requests ? requests.get(table) ?? 0 : null,
-          consumers: consumersOf(consumers, table, eligible),
+          consumers: consumersOf(consumers, table, facts.columns.map(c => c.name)),
           now,
         },
+        priors: opts.priors,
       }),
     )
   }
 
   const proposals: ProposalView[] = []
+  const recommendations: ConcernAssessment[] = []
   const watching: ConcernAssessment[] = []
+  const held: ConcernAssessment[] = []
 
   for (const t of tables) {
     const facts = await readTableFacts(schema, t.table)
@@ -212,8 +230,11 @@ export async function analyzeStructuralEvolution(
       const planId = extractionPlanId(projectId, c.host, c.members)
       const approval = await readLatestEvolutionApproval(projectId, planId)
       const run = await latestRun(projectId, planId)
-      if (!c.fires && !approval && !run) {
-        if (c.cohesive) watching.push(c)
+      // The level decides; `fires` (the churn-blind gate) is one of its inputs.
+      if (c.level !== 'executable_proposal' && !approval && !run) {
+        if (c.level === 'recommendation_only') recommendations.push(c)
+        else if (c.level === 'watching') watching.push(c)
+        else if (c.cohesive) held.push(c)
         continue
       }
 
@@ -274,8 +295,13 @@ export async function analyzeStructuralEvolution(
     analyzedAt: now.toISOString(),
     windowDays: WINDOW_DAYS,
     proposals,
+    recommendations,
     watching,
-    tables: tables.map(t => ({ table: t.table, rows: t.rows, coverage: t.coverage, concerns: t.concerns.length })),
+    held,
+    noChange: tables
+      .filter(t => t.subject.noChangeReason !== null && t.subject.level === 'no_change_recommended')
+      .map(t => ({ table: t.table, reason: t.subject.noChangeReason! })),
+    tables: tables.map(t => ({ table: t.table, rows: t.rows, coverage: t.coverage, subject: t.subject, concerns: t.concerns.length })),
     limits: [
       'Readers that select columns in their own requests — PostgREST clients and direct connection strings — cannot be enumerated, so retiring the old columns is always a person\'s decision.',
       ...(all.length > MAX_TABLES ? [`Only the first ${MAX_TABLES} of ${all.length} tables were analysed.`] : []),

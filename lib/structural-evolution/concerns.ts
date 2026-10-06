@@ -62,7 +62,14 @@
  */
 
 import type { TableFacts } from './facts'
-import { readName, hostStem, defaultSatelliteName } from './lexicon'
+import { readName, hostStem, defaultSatelliteName, isBookkeeping, singular } from './lexicon'
+import {
+  classifyOpportunity,
+  explainNoChange,
+  LEVEL_RANK,
+  type EvolutionLevel,
+  type PriorOutcome,
+} from '@/lib/evolution-engine/levels'
 
 // ── Thresholds ───────────────────────────────────────────────────────────────
 
@@ -150,6 +157,11 @@ export interface PressureInputs {
   repairs: RepairRecord[]
   /** Requests served for the host in the window, or null when unreadable. */
   hostRequests: number | null
+  /**
+   * Consumers that name ANY column of the host, with every host column each
+   * one names — so a consumer that uses only one concern can be told apart from
+   * one that uses the whole row.
+   */
   consumers: Consumer[]
   now: Date
 }
@@ -160,6 +172,13 @@ export interface TableAnalysisInput {
   presenceUnavailableReason?: string
   history: ColumnHistory
   pressure: PressureInputs
+  /**
+   * What architecture memory recalls, keyed by concern (`<host>:<label>`, see
+   * `concernKeyOf`). Keyed by concern rather than by column list so that a
+   * column joining the group after a reversal does not erase what was learned.
+   * Absent means nothing is remembered.
+   */
+  priors?: Record<string, PriorOutcome>
 }
 
 // ── Outputs ──────────────────────────────────────────────────────────────────
@@ -173,10 +192,25 @@ export interface FamilyFinding {
   detail: string
 }
 
+/** Costs that have actually happened. Only these can make a change executable. */
 export type PressureKind = 'repeating_group' | 'attributed_repairs' | 'hot_host_change'
+
+/**
+ * Pressure that has not cost anything yet: the concern changing on its own,
+ * consumers that use only it. Enough to RECOMMEND, before anything is damaged;
+ * never enough to propose running a migration.
+ */
+export type EmergingKind = 'independent_evolution' | 'specialized_consumers'
 
 export interface PressureSignal {
   kind: PressureKind
+  detail: string
+  /** When the cost was last incurred, if it has a time. */
+  at?: string
+}
+
+export interface EmergingSignal {
+  kind: EmergingKind
   detail: string
 }
 
@@ -197,8 +231,18 @@ export interface Separability {
   caveats: string[]
 }
 
+/**
+ * The stable name of WHAT is being reorganised: the host and the word its
+ * columns are named for. Architecture memory ties decisions together by it.
+ */
+export function concernKeyOf(host: string, label: string): string {
+  return `${host}:${label}`
+}
+
 export interface ConcernAssessment {
   key: string
+  /** `<host>:<label>`; survives the column list changing. See `concernKeyOf`. */
+  concernKey: string
   host: string
   /** The word the columns are named for, as written (`refund`). */
   label: string
@@ -216,7 +260,15 @@ export interface ConcernAssessment {
     hostRows: number | null
   }
   priority: { score: number; label: 'high' | 'medium' | 'low' }
+  /** The churn-blind gate: cohesive, separable, not dense, a measured cost. */
   fires: boolean
+  /** Forward-looking pressure. Can raise a recommendation, never a migration. */
+  emerging: EmergingSignal[]
+  /** The engine's level for this concern, before the plan's own validity is known. */
+  level: EvolutionLevel
+  levelReason: string
+  /** What this change keeps exactly as it is, and what it deliberately does not decide. */
+  semanticBoundary: string
   /** One sentence: why this is or is not proposed. */
   verdict: string
   defaultSatellite: string
@@ -228,6 +280,8 @@ export interface TableAssessment {
   core: string[]
   eligible: string[]
   concerns: ConcernAssessment[]
+  /** The table as a whole: the highest level any concern reached, and why nothing changes if nothing does. */
+  subject: { level: EvolutionLevel; noChangeReason: string | null; changesInWindow: number }
   coverage: {
     presence: 'measured' | 'unavailable'
     presenceDetail?: string
@@ -699,6 +753,7 @@ function assessPressure(
     signals.push({
       kind: 'attributed_repairs',
       detail: `the healing loop repaired these columns ${ids.size} time(s) in the last ${p.windowDays} days (${[...new Set(repairs.map(r => r.type))].join(', ')})`,
+      at: repairs.map(r => r.at).sort().at(-1),
     })
   }
 
@@ -717,10 +772,75 @@ function assessPressure(
       detail:
         `changing this concern took an exclusive lock on ${facts.table} (${load}) — ` +
         `${events.length} time(s) in the last ${p.windowDays} days`,
+      at: events.map(e => e.at).sort().at(-1),
     })
   }
 
   return { signals, eventsInWindow: events.length }
+}
+
+/** Two separate changes that touched this concern and nothing else on the table. */
+export const INDEPENDENT_CHANGES = 2
+/** Consumers that read or write this concern and no other distinctive column of the table. */
+export const SPECIALIZED_CONSUMERS = 2
+
+/**
+ * Pressure that has not cost anything yet.
+ *
+ * The one place change frequency is read as more than a ranking — and only
+ * changes that touched the concern ALONE, on a concern cohesion already
+ * established. It can raise a recommendation and nothing more: the level
+ * classifier gives emerging pressure no path to an executable proposal.
+ */
+function assessEmerging(
+  facts: TableFacts,
+  members: string[],
+  history: ColumnHistory,
+  p: PressureInputs,
+): EmergingSignal[] {
+  const set = new Set(members)
+  const since = p.now.getTime() - p.windowDays * 86_400_000
+  const out: EmergingSignal[] = []
+
+  const alone = history.available
+    ? history.events.filter(e => new Date(e.at).getTime() >= since && e.columns.length > 0 && e.columns.every(c => set.has(c)))
+    : []
+  if (alone.length >= INDEPENDENT_CHANGES) {
+    out.push({
+      kind: 'independent_evolution',
+      detail: `these columns changed on their own ${alone.length} times in the last ${p.windowDays} days, with nothing else on ${facts.table} changing alongside them`,
+    })
+  }
+
+  const pk = new Set(facts.primaryKey)
+  const distinctive = (c: string) => !pk.has(c) && !isBookkeeping(c)
+  const specialized = p.consumers.filter(c => {
+    const named = c.columns.filter(distinctive)
+    return named.length > 0 && named.every(col => set.has(col))
+  })
+  if (specialized.length >= SPECIALIZED_CONSUMERS) {
+    out.push({
+      kind: 'specialized_consumers',
+      detail: `${specialized.length} of Backenly's functions and triggers use these columns and nothing else distinctive on ${facts.table} (${specialized.map(c => c.name).join(', ')})`,
+    })
+  }
+  return out
+}
+
+/**
+ * What a behaviour-preserving extraction keeps, and what it does not decide.
+ *
+ * Seeing that columns move together is evidence about structure, not about the
+ * business. Whether a parent can have several of these — partial refunds,
+ * repeated attempts, a history — is a change of MEANING, and it is never part
+ * of a structural change.
+ */
+export function semanticBoundaryFor(host: string, label: string): string {
+  return (
+    `This keeps today's meaning exactly: at most one ${label} record per ${singular(host)}, the same values and the ` +
+    `same access. Whether a ${singular(host)} should be able to have several — or whether ${label} is really a ` +
+    'history of events — is a change of meaning, which this does not make and which would need your decision.'
+  )
 }
 
 // ── Priority (ordering only) ─────────────────────────────────────────────────
@@ -795,16 +915,15 @@ export function analyzeTable(input: TableAnalysisInput): TableAssessment {
     const dense = presenceRate !== null && presenceRate >= DENSE_PRESENCE
 
     const { signals, eventsInWindow } = assessPressure(facts, members, history, pressure)
-    const shape: ConcernShape = signals.some(s => s.kind === 'repeating_group')
-      ? 'repeating_group'
-      : dense
-        ? 'dense_one_to_one'
-        : 'optional_one_to_one'
+    const emerging = c.cohesive ? assessEmerging(facts, members, history, pressure) : []
+    const repeating = signals.some(s => s.kind === 'repeating_group')
+    const shape: ConcernShape = repeating ? 'repeating_group' : dense ? 'dense_one_to_one' : 'optional_one_to_one'
+    const separable = separability.expandBlockers.length === 0
 
     const fires = firesConcernExtraction({
       supporting: c.supporting,
       contradicting: c.contradicting,
-      separable: separability.expandBlockers.length === 0,
+      separable,
       dense,
       pressureCount: signals.length,
     })
@@ -816,20 +935,52 @@ export function analyzeTable(input: TableAnalysisInput): TableAssessment {
       [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].length - b[0].length || a[0].localeCompare(b[0]))[0]?.[0] ??
       'concern'
 
-    const verdict = fires
-      ? `Proposed: ${members.join(', ')} behave as one ${label} concern and keeping them on ${facts.table} has a measured cost.`
-      : !c.cohesive
-        ? c.contradicting.length > 0
-          ? `Not proposed: ${c.contradicting.join(', ')} measured that these columns do not belong together.`
-          : `Not proposed: only ${c.supporting.length === 0 ? 'nothing' : c.supporting.join(' and ')} supports grouping them, and cohesion needs two families with at least one measured.`
-        : separability.expandBlockers.length > 0
-          ? `Not proposed: ${separability.expandBlockers[0]}.`
-          : dense
-            ? `Not proposed: ${Math.round((presenceRate ?? 0) * 100)}% of rows carry this concern, so a separate table would add a join to nearly every read and remove no cost.`
-            : `Watching: the columns form one concern, but nothing measured shows that keeping them on ${facts.table} costs anything yet.`
+    // ── The engine's level ────────────────────────────────────────────────
+    const concernKey = concernKeyOf(facts.table, label)
+    const prior = input.priors?.[concernKey] ?? { kind: 'none' as const }
+    const costAts = signals.map(x => x.at).filter((x): x is string => !!x)
+    const newEvidenceSincePrior =
+      (prior.kind === 'reversed' || prior.kind === 'declined') &&
+      costAts.some(at => new Date(at).getTime() > new Date(prior.at).getTime())
+    const measuredFamiliesBlind = c.families.some(
+      f => f.verdict === 'unavailable' && ['co_presence', 'cohort', 'lifecycle'].includes(f.family),
+    )
+    const decision = classifyOpportunity({
+      cohesive: c.cohesive,
+      contradicted: c.contradicting.length > 0,
+      partialEvidence: !c.cohesive && c.supporting.length > 0 && measuredFamiliesBlind,
+      separable,
+      counterproductive: dense
+        ? `${Math.round((presenceRate ?? 0) * 100)}% of rows carry this concern, so a separate table would add a join to nearly every read and remove no cost`
+        : null,
+      measuredCost: signals.length,
+      emergingPressure: emerging.length,
+      executable: !repeating,
+      notExecutableBecause: repeating
+        ? 'these are numbered copies of one field and need a different change (one row per number), which is not automated'
+        : undefined,
+      prior,
+      newEvidenceSincePrior,
+    })
+
+    const verdict =
+      decision.level === 'executable_proposal'
+        ? `Proposed: ${members.join(', ')} behave as one ${label} concern and keeping them on ${facts.table} has a measured cost.`
+        : decision.level === 'recommendation_only'
+          ? `Recommended, not proposed to run: ${decision.reason}.`
+          : !c.cohesive
+            ? c.contradicting.length > 0
+              ? `Not proposed: ${c.contradicting.join(', ')} measured that these columns do not belong together.`
+              : `Not proposed: only ${c.supporting.length === 0 ? 'nothing' : c.supporting.join(' and ')} supports grouping them, and cohesion needs two families with at least one measured.`
+            : !separable
+              ? `Not proposed: ${separability.expandBlockers[0]}.`
+              : decision.level === 'no_change_recommended'
+                ? `Not proposed: ${decision.reason}.`
+                : `Watching: the columns form one concern, but nothing measured shows that keeping them on ${facts.table} costs anything yet.`
 
     return {
       key: `${facts.table}:${members.join(',')}`,
+      concernKey,
       host: facts.table,
       label,
       members,
@@ -853,12 +1004,52 @@ export function analyzeTable(input: TableAnalysisInput): TableAssessment {
         supportingFamilies: new Set(c.supporting).size,
       }),
       fires,
+      emerging,
+      level: decision.level,
+      levelReason: decision.reason,
+      semanticBoundary: semanticBoundaryFor(facts.table, label),
       verdict,
       defaultSatellite: defaultSatelliteName(facts.table, label),
     }
   })
 
-  concerns.sort((a, b) => Number(b.fires) - Number(a.fires) || b.priority.score - a.priority.score || a.key.localeCompare(b.key))
+  concerns.sort(
+    (a, b) =>
+      LEVEL_RANK[b.level] - LEVEL_RANK[a.level] ||
+      b.priority.score - a.priority.score ||
+      a.key.localeCompare(b.key),
+  )
+
+  // ── The table as a whole ────────────────────────────────────────────────
+  //
+  // "No change" is an answer, and for a table a naive system would be tempted
+  // by — busy, big, frequently changed — it is said out loud with its reasons.
+  const since = pressure.now.getTime() - pressure.windowDays * 86_400_000
+  const changesInWindow = history.available
+    ? history.events.filter(e => new Date(e.at).getTime() >= since).length
+    : 0
+  const top = concerns.reduce<EvolutionLevel>(
+    (best, c) => (LEVEL_RANK[c.level] > LEVEL_RANK[best] ? c.level : best),
+    'no_change_recommended',
+  )
+  const notes = concerns
+    .filter(c => c.cohesive && LEVEL_RANK[c.level] < LEVEL_RANK.recommendation_only)
+    .map(c =>
+      c.level === 'watching'
+        ? `watching ${c.members.join(', ')}: they behave as one ${c.label} concern, and nothing shows it matters yet`
+        : `${c.members.join(', ')} stay where they are: ${c.levelReason}`,
+    )
+  const noChangeReason =
+    LEVEL_RANK[top] >= LEVEL_RANK.recommendation_only
+      ? null
+      : explainNoChange({
+          subject: facts.table,
+          changesInWindow,
+          windowDays: pressure.windowDays,
+          rows: facts.stats?.liveRows ?? null,
+          requests: pressure.hostRequests,
+          notes,
+        })
 
   return {
     table: facts.table,
@@ -866,6 +1057,7 @@ export function analyzeTable(input: TableAnalysisInput): TableAssessment {
     core,
     eligible,
     concerns,
+    subject: { level: top, noChangeReason, changesInWindow },
     coverage: {
       presence: presence ? 'measured' : 'unavailable',
       ...(presence ? {} : { presenceDetail: input.presenceUnavailableReason ?? 'rows could not be sampled' }),

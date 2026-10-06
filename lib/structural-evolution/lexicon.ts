@@ -46,6 +46,11 @@ const BOOKKEEPING = new Set([
   'org_id', 'organization_id', 'project_id', 'account_id', 'version',
 ])
 
+/** A bookkeeping column every table may carry (`id`, `created_at`, `user_id` …). */
+export function isBookkeeping(column: string): boolean {
+  return BOOKKEEPING.has(column.toLowerCase())
+}
+
 /** Split snake_case / camelCase / digits into lowercase words. */
 export function tokenize(name: string): string[] {
   return name
