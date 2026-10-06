@@ -28,6 +28,11 @@
  * security and lets read every statement's text; client work is therefore run
  * under `SET LOCAL ROLE` to a NOSUPERUSER role, which is also what makes it
  * client work rather than Backenly's own in pg_stat_statements.
+ *
+ * Statement statistics need pg_stat_statements preloaded, which a server must
+ * be restarted for. Where it is (docker-compose.dev.yml, CI's autonomy job),
+ * the statement-time measurement is held to its numbers; where it is not, to
+ * saying so: `extension_missing`, never a zero. Neither case skips a test.
  */
 
 import { randomUUID, randomBytes } from 'node:crypto'
@@ -78,6 +83,8 @@ let ownerId = ''
 let projectId = ''
 let schema = ''
 let plan: ExtractionPlan
+/** Whether pg_stat_statements is installed and readable here; see the header. */
+let PGSS = false
 const snap: Partial<Record<'R' | 'S0' | 'S1' | 'S2', TelemetrySnapshot>> = {}
 const originalFlag = process.env.ENABLE_EVOLUTION_MUTATIONS
 
@@ -201,6 +208,9 @@ async function finding(at: Date, type: string, details: object) {
 }
 
 beforeAll(async () => {
+  PGSS = await prisma
+    .$queryRawUnsafe<Array<{ n: bigint }>>(`SELECT count(*) AS n FROM pg_stat_statements`)
+    .then(() => true, () => false)
   ownerId = (await prisma.user.create({
     data: { email: `evo-tm-${randomBytes(6).toString('hex')}@example.test`, password: 'not-a-real-hash', name: 'evo' },
   })).id
@@ -336,10 +346,17 @@ describe('snapshots along the ladder', () => {
     expect(d.tables.host).toMatchObject({ live: expect.any(Number), bytes: expect.any(Number) })
     expect(d.tables.host!.oid).toBeGreaterThan(0)
     expect(d.tables.satellite).toBeNull()
-    // A superuser reads every statement; the extension is installed for tests.
-    expect(d.pgss.state).toBe('available')
-    expect(d.statements).not.toBeNull()
-    expect(snap.R.unavailable).toEqual([])
+    if (PGSS) {
+      // A superuser reads every statement.
+      expect(d.pgss.state).toBe('available')
+      expect(d.statements).not.toBeNull()
+      expect(snap.R.unavailable).toEqual([])
+    } else {
+      // Not installed, or installed but not preloaded: either way, said.
+      expect(['missing', 'unreadable']).toContain(d.pgss.state)
+      expect(d.statements).toBeNull()
+      expect(snap.R.unavailable).toEqual([expect.objectContaining({ metric: 'statements', reason: 'extension_missing' })])
+    }
     // The refunds arriving on orders 60 days ago is a change to the concern on
     // the host; coupons arriving is not. Repairs: the five on member columns
     // (four on orders, one on the satellite), not coupon_code, not Backenly's own request.
@@ -396,9 +413,13 @@ describe('snapshots along the ladder', () => {
       await tx.$executeRawUnsafe(`SET LOCAL ROLE "${ROLE}"`)
       return readStatementClasses(schema, 'orders', 'order_refunds', (sql, ...p) => tx.$queryRawUnsafe(sql, ...p) as Promise<any>)
     })
+    expect(reading.classes).toBeNull()
+    if (!PGSS) {
+      expect(['missing', 'unreadable']).toContain(reading.state)
+      return
+    }
     expect(reading.state).toBe('text_hidden')
     expect(reading.hidden).toBeGreaterThan(0)
-    expect(reading.classes).toBeNull()
     expect(reading.detail).toMatch(/pg_read_all_stats/)
   })
 })
@@ -487,6 +508,10 @@ describe('measurement', () => {
 
   it('measures database time per write from statement-class deltas, or says why it cannot', async () => {
     const m = byName(ms, 'orders write time in the database')
+    if (!PGSS) {
+      expect(m).toMatchObject({ before: null, after: null, reason: 'extension_missing' })
+      return
+    }
     // Only evictions INSIDE a measured pair matter: R→S0 and S1→S2. One during
     // the ladder itself, between S0 and S1, is outside both.
     const [r, s0, s1, s2] = all().map(s => data(s).pgss.dealloc)
@@ -576,6 +601,12 @@ describe('never a fabricated number', () => {
     const [R, S0s, S1, S2] = [snap.R!, S0(), snap.S1!, snap.S2!].map(steady)
     const run = async (r: TelemetrySnapshot, s0: TelemetrySnapshot, s2 = S2) =>
       byName(await measureExtraction(projectId, plan, [r, s0, S1, s2], { firedBy: [], now: AT.S2 }), write)
+    if (!PGSS) {
+      // Without the extension every snapshot already says so, and nothing a
+      // later reading could say changes that.
+      expect(await run(R, S0s)).toMatchObject({ before: null, after: null, reason: 'extension_missing' })
+      return
+    }
 
     expect((await run(R, S0s)).before).not.toBeNull()
     expect(await run(R, clone(S0s, d => { d.pgss.statsReset = '2026-01-01T00:00:00.000Z' }))).toMatchObject({ before: null, reason: 'stats_reset' })

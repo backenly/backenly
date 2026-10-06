@@ -674,3 +674,27 @@ tests/integration/branch-auth.spec.ts
 # The SQL form of the request-path classifier gives the function's answers, in
 # PostgreSQL itself, for v1 /db/<table>, v2 /<table> and v1's own routes.
 tests/integration/table-path-sql.spec.ts
+
+# A maintenance backfill longer than one batch resumes from where it stopped and
+# orders its cursor by key, not by the key's text, on a real table.
+tests/integration/maintenance-backfill-chain.spec.ts
+
+# Structural evolution, end to end on a real schema: detection on measured
+# evidence, rehearsal on a rolled-back copy, consent bound to the shown version,
+# the governed ladder, behaviour under row-level security as a real role, and a
+# lossless undo. A policy nobody rendered stops the access rungs before a grant.
+tests/integration/structural-evolution.spec.ts
+
+# The dual representation is fail-closed under concurrency: each interleaving of
+# writers, the backfill and cascades is forced with real sessions and locks.
+tests/integration/structural-evolution-concurrency.spec.ts
+
+# Who may read and write the new table is rehearsed identity by identity
+# against its parent on a copy, and planted flaws (wider, narrower, unsynced, a
+# write policy wider only on hidden rows) are caught. Real roles and RLS.
+tests/integration/structural-evolution-authorization.spec.ts
+
+# The Architecture Evolution Engine's lifecycle over a real extraction: asked in
+# the queue, approved only for the rehearsed version, observed before it is
+# called stable, judged only on measurements, undone, and remembered.
+tests/integration/evolution-engine.spec.ts
