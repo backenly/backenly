@@ -72,6 +72,7 @@ const plans: Plan[] = [
     bestFor: 'First prototypes and serious experiments',
     cta: 'Start free',
     limits: [
+      { label: 'API requests', value: 'Unlimited' },
       { label: 'Projects', value: '1 live project' },
       { label: 'Users', value: '50,000 MAU' },
       { label: 'Autonomy', value: 'Self-healing every minute' },
@@ -92,6 +93,7 @@ const plans: Plan[] = [
     cta: 'Get Pro',
     highlighted: true,
     limits: [
+      { label: 'API requests', value: 'Unlimited' },
       { label: 'Users', value: `${PRO_INCLUDED.mau.toLocaleString('en-US')} MAU` },
       { label: 'Autonomy', value: 'Every minute, full dial' },
       { label: 'AI credits', value: '3,000 monthly' },
@@ -99,7 +101,7 @@ const plans: Plan[] = [
     ],
     features: [
       'The same uncapped self-healing loop as Free: you pay for capacity, never for uptime',
-      'Unlimited projects and API requests, 2M function runs, triggers, webhooks, custom domains',
+      'Unlimited projects, 2M function runs, triggers, webhooks, custom domains',
       '5 team seats with project-level access, full deployment history and rollback, 30-day logs',
     ],
   },
@@ -112,6 +114,7 @@ const plans: Plan[] = [
     cta: 'Talk to us',
     ctaHref: `mailto:support@backenly.com?subject=Backenly%20Enterprise`,
     limits: [
+      { label: 'API requests', value: 'Unlimited' },
       { label: 'Users', value: 'Custom MAU' },
       { label: 'Autonomy', value: 'Every minute, full dial' },
       { label: 'AI credits', value: 'Custom pool' },
@@ -154,7 +157,7 @@ type MatrixGroup = { icon: LucideIcon; title: string; rows: MatrixRow[] }
  * their rates come from lib/pricing/catalog.ts, the catalog that also prices the
  * usage, so the page cannot state a rate the product does not charge. A rate
  * appears only in a build that publishes usage pricing, and only once the
- * catalog publishes that axis's rate (database waits on its measured cost).
+ * catalog publishes that axis's rate.
  */
 function comparisonGroups(published: boolean): MatrixGroup[] {
   const pro = new Map(proUsagePriceRows().map((r) => [r.axis, r]))
@@ -177,7 +180,7 @@ function comparisonGroups(published: boolean): MatrixGroup[] {
       title: 'Database',
       rows: [
         { label: 'Postgres database', hint: 'Shared by every project on your account', cells: ['512 MB', metered('db_bytes'), 'Custom'] },
-        { label: 'API requests', hint: 'No per-request fee on any plan', cells: ['100,000 total', 'Unlimited', 'Unlimited'] },
+        { label: 'API requests', hint: 'No cap and no per-request fee on any plan', cells: ['Unlimited', 'Unlimited', 'Unlimited'] },
         { label: 'Daily backups', cells: ['7 days kept', '7 days kept', '7 days kept'] },
         { label: 'Direct Postgres access and pg_dump export', cells: [true, true, true] },
         { label: 'Deployment history and rollback', cells: [false, 'Full history', 'Full history'] },
