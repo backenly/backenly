@@ -7,8 +7,7 @@
  * table, even one with the same name.
  */
 
-import { prisma } from '@/lib/db'
-import { tableOfRequestPath, tableOfRequestPathSql, nonTableSegmentsParam, NON_TABLE_SEGMENTS } from '@/lib/traffic/table-path'
+import { tableOfRequestPath, NON_TABLE_SEGMENTS } from '@/lib/traffic/table-path'
 import { requestTable } from '@/lib/autonomy/subsystem-recurrence'
 
 describe('tableOfRequestPath', () => {
@@ -25,20 +24,19 @@ describe('tableOfRequestPath', () => {
     ['/fn/send-mail', null],
     ['/rpc/my_function', null],
     ['/database/query', null],
+    // The platform's own rows: never a table, unless an old full path names one.
+    ['/api/projects/abc/health', null],
+    ['/api', null],
     ['/', null],
   ])('%s → %s', (path, table) => {
     expect(tableOfRequestPath(path)).toBe(table)
     expect(requestTable(path)).toBe(table)
   })
 
-  it('agrees with its SQL form', async () => {
-    const paths = ['/db/orders', '/db/orders/1', '/orders', '/orders/1', '/auth/x', '/rpc/f', '/storage/u', '/']
-    const rows = await prisma.$queryRawUnsafe<Array<{ p: string; t: string | null }>>(
-      `SELECT p, ${tableOfRequestPathSql('p', 1)} AS t FROM unnest($2::text[]) AS p`,
-      nonTableSegmentsParam(),
-      paths,
-    )
-    for (const r of rows) expect(r.t).toBe(tableOfRequestPath(r.p))
+  it('never takes a v1 route for a table', () => {
     expect(NON_TABLE_SEGMENTS).toContain('auth')
   })
 })
+
+// Its SQL form is held to the same answers against a real database in
+// tests/integration/table-path-sql.spec.ts.

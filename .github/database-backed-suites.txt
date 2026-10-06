@@ -670,3 +670,7 @@ tests/integration/branch-auth.spec.ts
 # the resolved (decrypted) project secret every verifier uses, and refresh binds
 # the id as the column's type, so it works on the canonical uuid users table.
 # Real provisioned projects (encrypted secrets) and real users are the property.
+
+# The SQL form of the request-path classifier gives the function's answers, in
+# PostgreSQL itself, for v1 /db/<table>, v2 /<table> and v1's own routes.
+tests/integration/table-path-sql.spec.ts
