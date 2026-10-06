@@ -32,6 +32,17 @@
  * process would otherwise count again. Both carry `INTERNAL_TRAFFIC_HEADER`
  * with a value derived from the platform secret, so a client cannot use the
  * header to keep its own requests out of the log.
+ *
+ * ── What it also counts ─────────────────────────────────────────────────────
+ *
+ * Each written batch is added to its owners' monthly API request count
+ * (`UserAiUsage.apiRequestCount`), the number the Usage page shows. It is
+ * counted here because every request a project's API serves passes through
+ * this file exactly once, whichever process answered it: the data API, auth,
+ * functions and realtime as much as storage. What is never recorded is never
+ * counted, and an MCP call from a coding agent is not a request to the
+ * project's API, so it is not counted either. The count only informs: API
+ * requests are unlimited on every plan, and nothing reads it to refuse one.
  */
 
 import { createHmac, timingSafeEqual } from 'crypto'
@@ -182,9 +193,38 @@ export async function flushRecordedRequests(): Promise<number> {
     })
     if (data.length === 0) return 0
     const written = await prisma.apiRequestLog.createMany({ data })
+    await countApiRequests(data)
     return written.count
   } catch (err: any) {
     console.warn(`[RequestRecorder] dropped ${batch.length} request rows: ${err?.message ?? err}`)
     return 0
   }
+}
+
+/**
+ * Add a written batch to each owner's API request count, in the month each
+ * request was served. One write per owner and month rather than per request.
+ * Never throws: a failed count costs the Usage page a few requests, and never
+ * the log rows already written.
+ */
+async function countApiRequests(rows: Array<{ userId: string; timestamp: Date }>): Promise<void> {
+  const counts = new Map<string, { userId: string; month: string; n: number }>()
+  for (const r of rows) {
+    const month = r.timestamp.toISOString().slice(0, 7) // YYYY-MM, UTC
+    const key = `${r.userId}:${month}`
+    const c = counts.get(key)
+    if (c) c.n++
+    else counts.set(key, { userId: r.userId, month, n: 1 })
+  }
+  const results = await Promise.allSettled(
+    [...counts.values()].map(({ userId, month, n }) =>
+      prisma.userAiUsage.upsert({
+        where: { userId_date: { userId, date: month } },
+        update: { apiRequestCount: { increment: n } },
+        create: { userId, date: month, apiRequestCount: BigInt(n) },
+      }),
+    ),
+  )
+  const failed = results.filter(r => r.status === 'rejected').length
+  if (failed > 0) console.warn(`[RequestRecorder] API request count not updated for ${failed} account-months`)
 }

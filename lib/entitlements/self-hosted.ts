@@ -27,10 +27,6 @@ export function selfHostedEntitlements(): UserEntitlements {
     maxProjects: 1, // one deployment is one project
     maxAiBuildActionsPerMonth: null,
     monthlyAiCredits: null,
-    maxApiRequestsPerMonth: null,
-    // Irrelevant while the cap is null, but false is the honest value: nothing
-    // here is metered against a lifetime total.
-    apiQuotaIsLifetime: false,
     maxMonthlyActiveUsers: null,
     maxPostgresStorageMb: null,
     maxFileStorageMb: null,
