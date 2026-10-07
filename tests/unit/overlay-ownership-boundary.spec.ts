@@ -120,9 +120,9 @@ describe('MOVE 1: quota kernel is public', () => {
   })
 
   it('is not under any private-owned path', () => {
-    // Quota enforcement runs on the API, MCP, storage, realtime and end-user
-    // auth hot paths. If the overlay owned it, the public product could not
-    // enforce its own limits.
+    // Quota enforcement runs on the API, storage, realtime and end-user auth
+    // hot paths. If the overlay owned it, the public product could not enforce
+    // its own limits.
     for (const entry of allowlist.private) {
       const prefix = entry.endsWith('/**') ? entry.slice(0, -2) : entry
       expect('lib/quota/kernel.ts'.startsWith(prefix)).toBe(false)
@@ -137,9 +137,10 @@ describe('MOVE 1: quota kernel is public', () => {
   })
 
   it('public runtime call sites import the public path', () => {
+    // Not lib/mcp/guard.ts: an MCP call carries no plan quota, since API
+    // requests are unlimited and MCP calls are not counted as API requests.
     const callers = [
       'lib/api/v1/middleware.ts',
-      'lib/mcp/guard.ts',
       'lib/realtime/listener-hub.ts',
       'lib/services/storageQuota.ts',
       'lib/services/end-user-auth-flows.ts',
@@ -384,6 +385,11 @@ describe('overlay-allowlist.json', () => {
         'app/app/billing/**',
         'app/app/invite/**',
         'app/app/members/**',
+        // Organizations: their projects, members and settings pages, the list,
+        // and creating one. The projects page they render is public.
+        'app/app/new-organization/**',
+        'app/app/org/**',
+        'app/app/organizations/**',
         'app/app/referral/**',
         'app/startups/**',
         'components/app/AmplitudeAnalytics.tsx',

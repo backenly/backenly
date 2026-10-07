@@ -56,27 +56,31 @@ export interface UpdateProjectData {
   apiUrlProd?: string | null
 }
 
-// Memory cache for projects
-let cachedProjects: Project[] | null = null
-let cachedProjectsTime = 0
+// Memory cache for project lists, one entry per organization filter, so one
+// team's list can never be served for another's.
+const listCache = new Map<string, { data: Project[]; time: number }>()
 const PROJECTS_CACHE_TTL = 30000 // 30 seconds
 
 const projectCache = new Map<string, { data: Project; time: number }>()
 const PROJECT_CACHE_TTL = 30000 // 30 seconds
 
-export async function getProjects(userId?: string): Promise<Project[]> {
+export async function getProjects(userId?: string, options: { orgId?: string | null } = {}): Promise<Project[]> {
   const now = Date.now()
-  if (cachedProjects && (now - cachedProjectsTime < PROJECTS_CACHE_TTL)) {
-    return cachedProjects
+  const key = options.orgId ?? ''
+  const cached = listCache.get(key)
+  if (cached && (now - cached.time < PROJECTS_CACHE_TTL)) {
+    return cached.data
   }
 
-  const url = userId ? `/api/projects?userId=${userId}` : '/api/projects'
-  const response = await fetch(url, { credentials: 'include' })
+  const params = new URLSearchParams()
+  if (userId) params.set('userId', userId)
+  if (options.orgId) params.set('orgId', options.orgId)
+  const query = params.toString()
+  const response = await fetch(query ? `/api/projects?${query}` : '/api/projects', { credentials: 'include' })
   const data = await response.json()
   if (!data.success) throw new Error(data.error || 'Failed to fetch projects')
-  
-  cachedProjects = data.data
-  cachedProjectsTime = now
+
+  listCache.set(key, { data: data.data, time: now })
   return data.data
 }
 
@@ -125,7 +129,7 @@ export async function deleteProject(id: string): Promise<void> {
   if (!data.success) throw new Error(data.error || 'Failed to delete project')
   
   // Invalidate cache
-  cachedProjects = null
+  listCache.clear()
   projectCache.delete(id)
 }
 

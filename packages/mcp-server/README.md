@@ -134,7 +134,6 @@ What this package serves (tools, instructions, resources, result shapes) is what
 
 - MCP keys (`mcp_live_…`) are **scope-gated** — `/api/mcp/*` rejects `runtime` SDK keys. A leaked SDK key cannot be replayed against MCP to drop tables.
 - **Destructive tools are not exposed.** `drop_table`, `delete_bucket`, `truncate_table`, etc. are never executed from MCP. Ask for one via `backend_chat` and it parks in the project's **Review Queue** and returns an approval id; a human decides in the dashboard and you poll `check_approval` until it is executed or rejected. The agent cannot self-approve.
-- **Plan quota** is enforced per request via `enforceAndTrackApiRequest`. Hitting your plan cap returns 429.
 - **Per-key rate limit** — sliding-window using `ApiKey.rateLimit` / `rateLimitWindow`. 429 includes `Retry-After` + `X-RateLimit-*` headers.
 - **Audit log** — every mutation through MCP writes an `AuditLog` row on your project timeline.
 - **Local config** is written with `0600` permissions (user-only readable).
