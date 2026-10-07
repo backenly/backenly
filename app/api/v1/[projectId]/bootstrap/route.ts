@@ -32,6 +32,7 @@ export const dynamic = 'force-dynamic'
  */
 
 import { NextRequest, NextResponse } from 'next/server'
+import { clientIpFromHeaders } from '@/lib/security/client-ip'
 import { createHash, randomBytes } from 'crypto'
 import { prisma } from '@/lib/db'
 import { generateApiKey } from '@/lib/auth/apiKeyAuth'
@@ -77,9 +78,7 @@ async function handleGET(request: NextRequest, props: { params: Promise<{ projec
   }
 
   // ── 1. Rate limit per (project, IP) so this can't be enumeration-spammed ───
-  const ip = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim()
-    ?? request.headers.get('x-real-ip')
-    ?? 'unknown'
+  const ip = clientIpFromHeaders(request) ?? 'unknown'
   const rl = checkRateLimit(`${projectId}:${ip}`)
   if (rl.allowed === false) {
     return NextResponse.json(

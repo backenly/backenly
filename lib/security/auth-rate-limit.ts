@@ -33,6 +33,7 @@
  */
 
 import { getRateLimitBackend, type RateLimitResult } from './rate-limit-backend'
+import { clientIpFromHeaders } from './client-ip'
 
 export type { RateLimitResult }
 
@@ -79,18 +80,13 @@ export async function refund(key: string): Promise<void> {
 }
 
 /**
- * Best-effort client IP. Trusts X-Forwarded-For only when behind a known proxy.
- * Falls back to 'unknown' which still works as a coarse bucket.
+ * The client address for a limit key: the rightmost X-Forwarded-For entry that
+ * is not a trusted proxy (lib/security/client-ip.ts), never the leftmost, which
+ * is whatever the client chose to send. Falls back to 'unknown', which still
+ * works as a coarse bucket.
  */
 export function clientIp(request: { headers: { get: (n: string) => string | null } }): string {
-  const xff = request.headers.get('x-forwarded-for')
-  if (xff) {
-    const first = xff.split(',')[0]?.trim()
-    if (first) return first
-  }
-  const real = request.headers.get('x-real-ip')
-  if (real) return real.trim()
-  return 'unknown'
+  return clientIpFromHeaders(request) ?? 'unknown'
 }
 
 // ── Preset policies — pick one per surface to keep things consistent ────────

@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express'
+import { clientIpFromNodeRequest } from '@/lib/security/client-ip'
 import { prisma } from '@/lib/db'
 import { hashPassword, verifyPassword } from '@/lib/auth/password'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
@@ -81,8 +82,8 @@ const signInSchema = z.object({
   password: z.string(),
 })
 
-// In-memory IP throttle for the public end-user auth surface. The runtime is
-// behind nginx; X-Forwarded-For is trusted. Each project also has API-key
+// In-memory IP throttle for the public end-user auth surface. The address is
+// the one lib/security/client-ip.ts resolves. Each project also has API-key
 // rate limiting on /api/v1/* but auth signup/signin run BEFORE the project's
 // API-key gate, so they need their own brake.
 const SIGNUP_LIMITS = { limit: 10, windowMs: 60 * 60 * 1000 }
@@ -100,9 +101,7 @@ const SIGNUP_INTERNAL_LIMITS = { limit: 100, windowMs: 60 * 60 * 1000 }
 // implementations of one endpoint cannot hold two different limits again.
 const ipBuckets = new Map<string, { count: number; resetAt: number }>()
 function ipFrom(req: Request): string {
-  const xff = req.headers['x-forwarded-for']
-  const xffStr = Array.isArray(xff) ? xff[0] : xff
-  return (xffStr?.split(',')[0]?.trim()) || req.socket.remoteAddress || 'unknown'
+  return clientIpFromNodeRequest(req) ?? 'unknown'
 }
 function throttle(key: string, policy: { limit: number; windowMs: number }): { allowed: boolean; retryAfter: number } {
   const now = Date.now()

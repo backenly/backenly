@@ -179,6 +179,19 @@ describe.each(Object.keys(runtimes) as Array<keyof typeof runtimes>)('%s runtime
     // CONTROL: another address in the project is unaffected.
     expect((await signin('bystander@example.test', PASSWORD, freshIp())).status).toBe(200)
   }, 180_000)
+
+  it('does not give a made-up X-Forwarded-For a fresh budget', async () => {
+    // The load balancer appends the real address; whatever the client wrote
+    // stays in front of it. The limit used to key on that front entry, so a
+    // new made-up value per request was a new budget per request.
+    const real = freshIp()
+    const statuses: number[] = []
+    for (let i = 0; i < SIGNIN.ipFailures.limit; i++) {
+      statuses.push((await signin(`spoof-${i}@example.test`, WRONG, `192.0.2.${i}, ${real}`)).status)
+    }
+    expect(statuses).toEqual(Array(SIGNIN.ipFailures.limit).fill(401))
+    expect((await signin('spoof-next@example.test', WRONG, `192.0.2.250, ${real}`)).status).toBe(429)
+  }, 180_000)
 })
 
 it('both runtimes give the same refusal', async () => {

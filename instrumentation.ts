@@ -33,7 +33,11 @@ export async function register() {
     // with a control that is quietly weaker than it reads.
     const { assertRateLimitStoreSupportsTopology, assertSharedStoreIsOperational } =
       await import('./lib/security/rate-limit-store')
+    const { assertTrustedProxiesParse } = await import('./lib/security/client-ip')
     try {
+      // Every per-address limit keys on the client address, which depends on
+      // which proxies are trusted (lib/security/client-ip.ts).
+      assertTrustedProxiesParse()
       assertRateLimitStoreSupportsTopology()
       // And then prove it. The check above reads configuration; this one makes
       // the store answer. A declared-but-unreachable Redis would otherwise boot
