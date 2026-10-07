@@ -98,6 +98,20 @@ export interface RateLimitHealth {
 export interface RateLimitBackend {
   consume(key: string, limit: number, windowMs: number): Promise<RateLimitResult>
   reset(key: string): Promise<void>
+  /**
+   * Give back ONE unit that `consume` took in the current window.
+   *
+   * Not `reset`. A budget that counts failures is spent before the outcome is
+   * known, so a concurrent burst cannot outrun it, and the attempt that turns
+   * out to have succeeded hands its own unit back. Resetting instead would wipe
+   * every OTHER failure in the window too, so anyone holding one valid
+   * credential could clear a stuffing run's count by signing in between
+   * guesses. A refund only ever undoes the caller's own consume.
+   *
+   * Never goes below zero, and does nothing once the window has gone: a unit
+   * from an expired window was never in the new one.
+   */
+  refund(key: string): Promise<void>
   /** Which store this is, for diagnostics and the startup report. */
   readonly kind: 'memory' | 'redis'
   health(): RateLimitHealth
@@ -187,6 +201,11 @@ export class MemoryRateLimitBackend implements RateLimitBackend {
     this.buckets.delete(key)
   }
 
+  async refund(key: string): Promise<void> {
+    const b = this.buckets.get(key)
+    if (b && b.resetAt > Date.now() && b.count > 0) b.count--
+  }
+
   health(): RateLimitHealth {
     // The heap is always reachable. There is no store to be down.
     return { kind: 'memory', ready: true, lastError: null, lastErrorAt: null }
@@ -226,6 +245,21 @@ if ttl < 0 then
   ttl = tonumber(ARGV[1])
 end
 return {current, ttl}
+`
+
+/**
+ * DECR only a counter that exists and is above zero, in one step.
+ *
+ * A bare DECR on a key whose window has expired would create it at -1 with no
+ * expiry: a negative balance that never resets, which is a permanent extra
+ * allowance. DECR on an existing key keeps its TTL, so the window is unchanged.
+ */
+const REFUND_SCRIPT = `
+local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+if current > 0 then
+  return redis.call('DECR', KEYS[1])
+end
+return 0
 `
 
 export class RedisRateLimitBackend implements RateLimitBackend {
@@ -366,6 +400,16 @@ export class RedisRateLimitBackend implements RateLimitBackend {
       // limiter stricter, never weaker, so it is not worth failing a request
       // that has already succeeded.
       console.warn('[RateLimit] could not clear counter:', err?.message ?? err)
+    }
+  }
+
+  async refund(key: string): Promise<void> {
+    try {
+      await this.withTimeout(this.redis.eval(REFUND_SCRIPT, 1, key) as Promise<number>)
+    } catch (err: any) {
+      // Same reasoning as reset: the unit stays spent, which is stricter, and
+      // the request it belongs to has already succeeded.
+      console.warn('[RateLimit] could not refund counter:', err?.message ?? err)
     }
   }
 }
