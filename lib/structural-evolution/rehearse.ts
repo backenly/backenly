@@ -83,6 +83,7 @@
  * or in the authorization detail rather than being quietly skipped.
  */
 
+import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db'
 import type { RlsIdentity } from '@/lib/services/rls-session'
@@ -95,7 +96,9 @@ import {
   exposeReadsSql,
   forwardSyncSql,
   fq,
+  ladderAccessSql,
   ladderNames,
+  lit,
   openWritesSql,
   policiesWiderThanParent,
   qi,
@@ -192,8 +195,12 @@ export async function rehearseExtraction(
 ): Promise<RehearsalReport> {
   const started = Date.now()
   const names = ladderNames(spec)
-  const scratch: RenderTarget = { schema: `bkn_rehearsal_${names.hash}` }
   const live = facts.schema
+  // Named for the project's schema too: the same table pair in two projects,
+  // or two passes over one, must not wait on each other's uncommitted schema.
+  const scratch: RenderTarget = {
+    schema: `bkn_rehearsal_${createHash('sha256').update(`${live}|${names.hash}`).digest('hex').slice(0, 16)}`,
+  }
   const pk = qi(facts.primaryKey[0])
   const m = spec.members.map(qi)
   const anySet = `(${m.map(c => `${c} IS NOT NULL`).join(' OR ')})`
@@ -230,6 +237,10 @@ export async function rehearseExtraction(
         await exec(`SET LOCAL statement_timeout = '20s'`)
         await exec(`SET LOCAL lock_timeout = '2s'`)
         await exec(rlsSessionSql(1), ...rlsSessionParams(SERVICE))
+        // The platform's own exercises run in the ladder's context, as
+        // production's backfill and reconciliation do; every identity below
+        // runs outside it, as a client would.
+        await exec(ladderAccessSql(spec))
         const platformRole = (await rows<{ u: string }>(`SELECT current_user::text AS u`))[0].u
 
         // ── The copy ────────────────────────────────────────────────────────
@@ -615,7 +626,14 @@ async function rehearseAccess(scope: AccessScope): Promise<AuthorizationRehearsa
   if (!facts.rowSecurity && nonOwner.length === 0) {
     return unavailable(`${spec.host} has no row-level security and no role other than its owner holds a privilege on it; there is no access to compare`)
   }
-  const allRoles = [...new Set([...scope.readers, ...scope.writers])].filter(r => r !== 'PUBLIC')
+  // The runtime serves end users as the platform role itself, claims set. When
+  // the host's row-level security binds its owner and the platform is that
+  // owner, the platform is one of the identities that must get from the new
+  // table exactly what it gets from the host, and it is rehearsed first.
+  const servesAsOwner = facts.forceRowSecurity && facts.owner === scope.platformRole
+  const allRoles = [...new Set([...(servesAsOwner ? [scope.platformRole] : []), ...scope.readers, ...scope.writers])].filter(
+    r => r !== 'PUBLIC',
+  )
   if (allRoles.length === 0) {
     return unavailable(
       scope.readers.includes('PUBLIC')
@@ -708,6 +726,7 @@ async function rehearseAccess(scope: AccessScope): Promise<AuthorizationRehearsa
       try {
         await exec(`SET LOCAL ROLE ${qi(scope.platformRole)}`)
         await exec(session.sql(1), ...session.params(SERVICE))
+        await exec(ladderAccessSql(spec))
         problem = await inspect(count > 0)
       } catch (err) {
         problem = `could not be inspected: ${brief(message(err))}`
@@ -953,6 +972,8 @@ async function rehearseAccess(scope: AccessScope): Promise<AuthorizationRehearsa
       try {
         await exec(`SET LOCAL ROLE ${qi(role)}`)
         await exec(session.sql(1), ...session.params(ctx.identity))
+        // A client, not the ladder: whatever the platform's own work set.
+        await exec(`SELECT set_config(${lit(names.access)}, '', true)`)
         for (const c of await checkIdentity()) result.checks.push({ identity, ...c })
       } catch (err) {
         // Fail closed: a check that could not finish proves nothing.

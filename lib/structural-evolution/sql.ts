@@ -31,10 +31,15 @@
  *
  * ── Access: the satellite can never be more open than its parent ────────────
  *
- * Created with row-level security forced, one policy for the role that
- * creates it — the platform, which the forward sync and Backenly's own
- * backfill and reconciliation run as — and every grant revoked, including any
- * a schema's default privileges handed out at CREATE. Reads open later with a
+ * Created with row-level security forced, every grant revoked (including any a
+ * schema's default privileges handed out at CREATE), and one policy for the
+ * role that creates it: the platform. That role is ALSO who the runtime serves
+ * end users as, with only claims and forced row security between them, so the
+ * policy admits it only inside the ladder's own context — a transaction-local
+ * setting the forward sync sets around its own write and Backenly's backfill,
+ * reconciliation and rehearsal set in their own transactions
+ * (`ladderAccessSql`), and nothing that serves a client ever sets. Serving a
+ * client, the platform gets what every role gets. Reads open later with a
  * policy that says "you may see this row iff you may see its parent", which is
  * evaluated by running the parent's OWN policy, so whatever rule protects
  * `orders` protects `order_refunds` without being restated. Nothing else is
@@ -71,10 +76,22 @@
  * Authority: until a person runs `contract`, the HOST is the source of truth
  * and the satellite is a projection of it that also accepts writes. A satellite
  * write that did not reach the host did not happen (it aborted). If the two
- * ever disagree anyway — only possible by bypassing triggers, e.g.
- * `session_replication_role = replica` or `ALTER TABLE … DISABLE TRIGGER` —
+ * ever disagree anyway — by bypassing triggers (`session_replication_role =
+ * replica`, `ALTER TABLE … DISABLE TRIGGER`), or by the one forgery below —
  * reconciliation reports it, the ladder stops (`blocked`), rollback refuses,
  * and nothing is "repaired" by software guessing which side was meant.
+ *
+ * What a session can and cannot forge. Every guard here is a custom setting,
+ * and any session may set one. The echo guards are only honoured from inside a
+ * trigger (`pg_trigger_depth() > 1`), which a client's own statement never is,
+ * so setting them by hand skips nothing: a satellite write still goes through
+ * the parent's update policy. The cascade counters cannot be told apart that
+ * way (PostgreSQL runs a foreign key's cascade at the caller's depth, as the
+ * caller), so a principal that can run arbitrary SQL — never an end user of
+ * the runtime or the REST API, which cannot set settings — and holds the
+ * satellite's write grant could, within one statement, delete or re-key a
+ * satellite row it can SEE without the host changing. That widens no read and
+ * writes nothing to the host; it is a divergence, which observation reports.
  *
  * ── Concurrency, case by case ──────────────────────────────────────────────
  *
@@ -102,7 +119,8 @@
  *                            overwriting a newer mirror.
  *   echo                     each direction sets one transaction-local guard
  *                            around its own nested write and clears it right
- *                            after; inside a savepoint that is rolled back,
+ *                            after, and honours it only from inside a trigger;
+ *                            inside a savepoint that is rolled back,
  *                            PostgreSQL restores the setting with it
  *   parent key changes       ON UPDATE CASCADE rewrites the satellite's
  *                            reference. A BEFORE row trigger on the host counts
@@ -158,7 +176,7 @@ export interface RenderTarget {
 
 export const qi = (name: string) => `"${name.replace(/"/g, '""')}"`
 export const fq = (schema: string, name: string) => `${qi(schema)}.${qi(name)}`
-const lit = (s: string) => `'${s.replace(/'/g, "''")}'`
+export const lit = (s: string) => `'${s.replace(/'/g, "''")}'`
 
 // ── Names ────────────────────────────────────────────────────────────────────
 
@@ -185,6 +203,12 @@ export interface LadderNames {
   policies: { owner: string; select: string; insert: string; update: string; delete: string }
   /** Custom GUC suppressing each direction's echo. */
   guc: string
+  /**
+   * Transaction-local GUC under which the platform's own ladder work (the
+   * forward sync, backfill, reconciliation) reaches every satellite row; see
+   * `ladderAccessSql`.
+   */
+  access: string
   carriedConstraint: (i: number) => string
   carriedIndex: (i: number) => string
 }
@@ -215,6 +239,7 @@ export function ladderNames(spec: ExtractionSpec): LadderNames {
     moved: `bkn_evo.moved_${hash}`,
     policies: { owner: p('own'), select: p('sel'), insert: p('ins'), update: p('upd'), delete: p('del') },
     guc: `bkn_evo.sync_${hash}`,
+    access: `bkn_evo.access_${hash}`,
     carriedConstraint: i => `${p('ck')}_${i}`,
     carriedIndex: i => `${p('ix')}_${i}`,
   }
@@ -354,13 +379,36 @@ export function policiesWiderThanParent(
   names: LadderNames,
 ): { reference: string | null; wider: string[] } {
   const reference = policies.find(p => p.name === names.policies.select)?.using ?? null
+  // The owner's own: one named role, and nothing but the ladder's context as
+  // its test, on both sides.
   const owners = (p: (typeof policies)[number]) =>
-    p.name === names.policies.owner && p.roles.length === 1 && p.roles[0].toLowerCase() !== 'public'
+    p.name === names.policies.owner &&
+    p.roles.length === 1 &&
+    p.roles[0].toLowerCase() !== 'public' &&
+    p.using !== null &&
+    p.using === p.withCheck &&
+    p.using.includes(`current_setting('${names.access}'`) &&
+    !/\bOR\b/i.test(p.using)
   const wider = policies
     .filter(p => p.permissive && !owners(p))
     .filter(p => reference === null || [p.using, p.withCheck].some(e => e !== null && e !== reference))
     .map(p => p.name)
   return { reference, wider }
+}
+
+/**
+ * Put the current transaction into the ladder's own context: the satellite's
+ * owner policy admits the platform role only here. Run by Backenly's backfill,
+ * reconciliation and rehearsal, in their own transactions, never by anything
+ * that serves a client.
+ */
+export function ladderAccessSql(spec: ExtractionSpec): string {
+  return `SELECT set_config(${lit(ladderNames(spec).access)}, 'on', true)`
+}
+
+/** The owner policy's whole test: the ladder's own context, nothing else. */
+function ladderOnly(n: LadderNames): string {
+  return `(current_setting(${lit(n.access)}, true) = 'on')`
 }
 
 function grantList(roles: string[]): string {
@@ -395,9 +443,13 @@ export function createSatelliteSql(
     ...carried.indexes.map(i => i.definition),
     `ALTER TABLE ${x.sat} ENABLE ROW LEVEL SECURITY`,
     `ALTER TABLE ${x.sat} FORCE ROW LEVEL SECURITY`,
-    // The creating role: the platform. It is who the forward sync runs as
-    // (SECURITY DEFINER) and who backfills and reconciles; no client is.
-    `CREATE POLICY ${qi(n.policies.owner)} ON ${x.sat} FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true)`,
+    // The creating role is the platform, and the platform is also who the
+    // runtime serves end users as (claims set, row-level security forced). So
+    // its own policy admits it only inside the ladder's own work (the forward
+    // sync, backfill, reconciliation), which sets a transaction-local context
+    // the runtime never does. Serving a client, the platform role gets exactly
+    // what every other role gets: the parent's visibility, once reads open.
+    `CREATE POLICY ${qi(n.policies.owner)} ON ${x.sat} FOR ALL TO CURRENT_USER USING ${ladderOnly(n)} WITH CHECK ${ladderOnly(n)}`,
     // Row triggers do not fire for TRUNCATE, so emptying the satellite would
     // leave the host carrying values the satellite silently lost.
     [
@@ -447,9 +499,13 @@ export function forwardSyncSql(facts: TableFacts, spec: ExtractionSpec, target: 
     `SECURITY DEFINER`,
     `SET search_path = ${S}, pg_temp`,
     `AS $bkn$`,
+    `DECLARE`,
+    `  prior text;`,
     `BEGIN`,
-    `  -- The reverse direction is writing ${spec.host}; this is its echo.`,
-    `  IF current_setting('${n.guc}', true) = '1' THEN`,
+    `  -- The reverse direction is writing ${spec.host}; this is its echo. It only`,
+    `  -- ever arrives from inside that trigger, so a direct write (depth 1) is`,
+    `  -- never an echo, whatever the session has set.`,
+    `  IF current_setting('${n.guc}', true) = '1' AND pg_trigger_depth() > 1 THEN`,
     `    RETURN NULL;`,
     `  END IF;`,
     `  IF TG_OP = 'UPDATE' AND ${rowOf('OLD', x.m)} IS NOT DISTINCT FROM ${rowOf('NEW', x.m)} THEN`,
@@ -465,7 +521,10 @@ export function forwardSyncSql(facts: TableFacts, spec: ExtractionSpec, target: 
     `  END IF;`,
     `  -- No exception handler, on purpose: if the mirror cannot be written, the`,
     `  -- write to ${spec.host} does not commit either.`,
-    `  -- Runs as the satellite's owner (SECURITY DEFINER), whose policy admits it.`,
+    `  -- Runs as the satellite's owner (SECURITY DEFINER), in the ladder's own`,
+    `  -- context, which its policy admits; the context is restored right after.`,
+    `  prior := current_setting('${n.access}', true);`,
+    `  PERFORM set_config('${n.access}', 'on', true);`,
     `  PERFORM set_config('${n.guc}', '1', true);`,
     `  IF ${allNull('NEW', x.m)} THEN`,
     `    DELETE FROM ${x.sat} WHERE ${x.fk} = NEW.${x.pk};`,
@@ -475,6 +534,7 @@ export function forwardSyncSql(facts: TableFacts, spec: ExtractionSpec, target: 
     `    ON CONFLICT (${x.fk}) DO UPDATE SET ${x.m.map(c => `${c} = EXCLUDED.${c}`).join(', ')};`,
     `  END IF;`,
     `  PERFORM set_config('${n.guc}', '', true);`,
+    `  PERFORM set_config('${n.access}', COALESCE(prior, ''), true);`,
     `  RETURN NULL;`,
     `END;`,
     `$bkn$`,
@@ -628,8 +688,11 @@ export function openWritesSql(
     `  r record;`,
     `  wanted text;`,
     `BEGIN`,
-    `  -- The forward direction is writing ${spec.satellite}; this is its echo.`,
-    `  IF current_setting('${n.guc}', true) = '1' THEN`,
+    `  -- The forward direction (or this trigger's own correction below) is`,
+    `  -- writing ${spec.satellite}; this is its echo. Both arrive from inside a`,
+    `  -- trigger; a client's own write is at depth 1 and is never skipped, so`,
+    `  -- setting the guard by hand cannot bypass ${spec.host}'s update policy.`,
+    `  IF current_setting('${n.guc}', true) = '1' AND pg_trigger_depth() > 1 THEN`,
     `    RETURN NULL;`,
     `  END IF;`,
     `  IF TG_OP = 'UPDATE' AND NEW.${x.fk} IS DISTINCT FROM OLD.${x.fk} THEN`,

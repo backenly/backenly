@@ -62,7 +62,12 @@ describe('the extraction ladder', () => {
     expect(sql).toMatch(/FORCE ROW LEVEL SECURITY/)
     // The creating role (the platform, which the forward sync runs as) and
     // nobody else. Not the service-role claim: any role can set a claim.
-    expect(sql).toMatch(/FOR ALL TO CURRENT_USER USING \(true\) WITH CHECK \(true\)/)
+    // The platform's own policy admits it only inside the ladder's own context:
+    // the runtime serves end users as the same role.
+    expect(sql).toMatch(
+      /FOR ALL TO CURRENT_USER USING \(current_setting\('bkn_evo\.access_[0-9a-f]+', true\) = 'on'\) WITH CHECK \(current_setting\('bkn_evo\.access_[0-9a-f]+', true\) = 'on'\)/,
+    )
+    expect(sql).not.toMatch(/USING \(true\)/)
     expect(sql).not.toMatch(/service_role/)
     expect(sql).toMatch(/REVOKE ALL ON %s FROM %s/)
     expect(sql).not.toMatch(/GRANT /)

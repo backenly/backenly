@@ -25,7 +25,7 @@
 import { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db'
 import type { TableFacts } from './facts'
-import { reconcileSql, type ExtractionSpec, type RenderTarget } from './sql'
+import { ladderAccessSql, reconcileSql, type ExtractionSpec, type RenderTarget } from './sql'
 
 export interface ReconcileResult {
   consistent: boolean
@@ -83,6 +83,8 @@ export async function reconcileExtraction(
         rlsSessionSql(1),
         ...rlsSessionParams({ userId: '', isServiceRole: true, userRole: 'service' }),
       )
+      // Every satellite row, not only those a client could see.
+      await tx.$executeRawUnsafe(ladderAccessSql(spec))
       return reconcileWith(tx, facts, spec, { schema: facts.schema })
     },
     { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 130_000, maxWait: 10_000 },

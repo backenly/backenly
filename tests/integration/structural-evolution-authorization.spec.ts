@@ -320,9 +320,11 @@ afterAll(async () => {
 
 describe('the access rungs as rendered', () => {
   let r: RehearsalReport
+  let P: ReturnType<typeof identitiesOf>
 
   beforeAll(async () => {
     r = await rehearse(SPEC)
+    P = identitiesOf((await rows<{ u: string }>(`SELECT current_user::text AS u`))[0].u)
   })
 
   it('pass for every identity, and access is no longer listed as not rehearsed', () => {
@@ -333,16 +335,20 @@ describe('the access rungs as rendered', () => {
     expect(r.passed).toBe(true)
 
     // Each role, times anonymous, three subjects and the service-role claim.
+    // First the platform itself: orders forces row security on its owner, and
+    // the runtime serves end users as that owner. (Here it is a superuser,
+    // which row-level security exempts; in production it is not.)
     expect(r.authorization.identities).toBeGreaterThanOrEqual(3)
-    expect(r.authorization.identities).toBe(10)
+    expect(r.authorization.identities).toBe(15)
     // Then the catalog, once, for every role.
     expect(distinct(r.authorization.checks.map(c => c.identity))).toEqual([
+      P.anonymous, ...P.subjects, P.service,
       W.anonymous, ...W.subjects, W.service,
       R.anonymous, ...R.subjects, R.service,
       'every role',
     ])
     expect(checksOf(r, 'every role').policies_follow_parent.outcome).toBe('passed')
-    expect(r.authorization.detail).toMatch(/^order_refunds gave the same answer as orders in all \d+ check\(s\) across 10 identities/)
+    expect(r.authorization.detail).toMatch(/^order_refunds gave the same answer as orders in all \d+ check\(s\) across 15 identities/)
     expect(r.authorization.detail).toMatch(/3 signed-in subject\(s\) drawn from user_id/)
 
     // Every signed-in subject of the writing role owns some orders and may

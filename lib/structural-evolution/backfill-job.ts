@@ -34,7 +34,7 @@ import { prisma } from '@/lib/db'
 import { enqueue } from '@/lib/queue'
 import { inspectBackgroundJob } from '@/lib/autonomy/maintenance/execute'
 import { basisFingerprint, readTableFacts } from './facts'
-import { backfillBatchSql, type ExtractionSpec } from './sql'
+import { backfillBatchSql, ladderAccessSql, type ExtractionSpec } from './sql'
 import { BACKFILL_BATCH_ROWS } from './plan'
 import { LOCK_TIMEOUT_MS } from './primitives'
 import { readLiveEvolutionApproval } from './consent'
@@ -107,6 +107,8 @@ export async function handleEvolutionBackfillJob(payload: EvolutionBackfillPaylo
         rlsSessionSql(1),
         ...rlsSessionParams({ userId: '', isServiceRole: true, userRole: 'service' }),
       )
+      // The ladder's own context: the satellite's owner policy admits the copy.
+      await tx.$executeRawUnsafe(ladderAccessSql(payload.spec))
       // Same transaction, same connection: SET LOCAL bounds the batch below it.
       // NOWAIT covers the host rows; this bounds the satellite side.
       await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT_MS}ms'`)

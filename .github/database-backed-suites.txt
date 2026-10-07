@@ -704,3 +704,8 @@ tests/integration/evolution-engine.spec.ts
 # a dropped table, a pass cut off part-way, a refused or part-way undo, a stale
 # "not now", an abandoned approval claim. Real extractions on a real schema.
 tests/integration/evolution-engine-recovery.spec.ts
+
+# The new table as the runtime reaches it: the workspace owned by a NOSUPERUSER
+# NOBYPASSRLS platform role, as in production. Closed until opened, then exactly
+# the host's visibility claim by claim; a hand-set echo guard bypasses nothing.
+tests/integration/structural-evolution-runtime-role.spec.ts
