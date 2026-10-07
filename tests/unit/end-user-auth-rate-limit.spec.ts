@@ -28,6 +28,7 @@ import {
   admitSigninRequest,
   endUserSigninKeys,
 } from '@/lib/security/end-user-signin-limit'
+import { admitExistenceCheck, admitSignupRequest } from '@/lib/security/end-user-signup-limit'
 
 const IP = '203.0.113.7'
 const OTHER_IP = '203.0.113.8'
@@ -226,6 +227,58 @@ describe('sign-in counts failures, not sign-ins', () => {
     // CONTROL: per address and per project.
     expect((await admitSigninRequest(project, OTHER_IP)).allowed).toBe(true)
     expect((await admitSigninRequest(freshProject(), IP)).allowed).toBe(true)
+  })
+})
+
+describe('sign-up: a loose cap on accounts, a tight one on "already registered"', () => {
+  const SIGNUP = AUTH_LIMITS.endUserSignup
+
+  it('lets far more customers sign up from one address than it used to (10 an hour)', async () => {
+    const project = freshProject()
+    for (let i = 0; i < SIGNUP.ip.limit; i++) {
+      expect((await admitSignupRequest(project, IP)).allowed).toBe(true)
+    }
+    expect(SIGNUP.ip.limit).toBeGreaterThan(10)
+    // The cap still exists: what one address can create is bounded.
+    expect((await admitSignupRequest(project, IP)).allowed).toBe(false)
+    expect((await admitSignupRequest(project, OTHER_IP)).allowed).toBe(true)
+  })
+
+  it('keeps the existence oracle as tight as the old limit', () => {
+    expect(SIGNUP.ipConflicts.limit).toBeLessThanOrEqual(10)
+    expect(SIGNUP.ipConflicts.limit).toBeLessThan(SIGNUP.ip.limit)
+  })
+
+  it('counts only answers that an address is taken', async () => {
+    const project = freshProject()
+    // Free addresses give their unit back, however many there are.
+    for (let i = 0; i < SIGNUP.ipConflicts.limit * 3; i++) {
+      const check = await admitExistenceCheck(project, IP)
+      expect(check.denied).toBeNull()
+      await check.addressFree()
+    }
+    // Taken addresses keep it, until the budget refuses the lookup itself.
+    for (let i = 0; i < SIGNUP.ipConflicts.limit; i++) {
+      expect((await admitExistenceCheck(project, IP)).denied).toBeNull()
+    }
+    const refused = await admitExistenceCheck(project, IP)
+    expect(refused.denied?.outcome).toBe('limit_exceeded')
+    // Refused before the lookup, so the answer is the same for a free address.
+    await refused.addressFree()
+    expect((await admitExistenceCheck(project, IP)).denied).not.toBeNull()
+
+    // CONTROL: per address.
+    expect((await admitExistenceCheck(project, OTHER_IP)).denied).toBeNull()
+  })
+
+  it('refunds once, however many times it is told', async () => {
+    const project = freshProject()
+    for (let i = 0; i < SIGNUP.ipConflicts.limit - 1; i++) await admitExistenceCheck(project, IP)
+    const check = await admitExistenceCheck(project, IP)
+    await check.addressFree()
+    await check.addressFree()
+    expect((await admitExistenceCheck(project, IP)).denied).toBeNull()
+    expect((await admitExistenceCheck(project, IP)).denied).not.toBeNull()
   })
 })
 
