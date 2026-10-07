@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express'
 import { clientIpFromNodeRequest } from '@/lib/security/client-ip'
 import { prisma } from '@/lib/db'
-import { hashPassword, verifyPassword } from '@/lib/auth/password'
+import { hashPassword, verifyPassword, verifyPasswordAgainstDecoy } from '@/lib/auth/password'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { ensureAuthUsersTable, buildUserInsert, isReservedTestEmail, AuthNotProvisionedError } from '@/lib/services/end-user-auth-table'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
@@ -398,17 +398,16 @@ async function handleSignIn(req: Request, res: Response) {
     )
 
     const user = users[0]
-    const storedHash = user?.password ?? user?.password_hash
-    if (!user || !storedHash) {
-      sendError(res, ErrorCodes.UNAUTHORIZED, 'Invalid email or password', 401)
-      return
-    }
-    if (user.is_blocked === true) {
-      sendError(res, ErrorCodes.FORBIDDEN, 'This account has been suspended.', 403)
-      return
-    }
+    const storedHash: string | undefined = user ? (user.password ?? user.password_hash) : undefined
 
-    const isValid = await verifyPassword(password, storedHash)
+    // Both paths cost the same, as on the Next route. An unknown address used
+    // to answer at once while a real one paid for a bcrypt comparison first: the
+    // same message, and a measurable difference in time. So an absent user is
+    // compared against a decoy hash at the product's cost factor, which cannot
+    // match; only the work is wanted.
+    const isValid = storedHash
+      ? await verifyPassword(password, storedHash)
+      : await verifyPasswordAgainstDecoy(password)
     if (!isValid) {
       sendError(res, ErrorCodes.UNAUTHORIZED, 'Invalid email or password', 401)
       return
@@ -416,6 +415,15 @@ async function handleSignIn(req: Request, res: Response) {
 
     // The password is right, so this attempt was not a guess.
     await attempt.credentialsVerified()
+
+    // Suspension is disclosed only to someone who proved the password. It was
+    // checked first, so any address with a junk password answered 403 for a
+    // suspended account and 401 for the rest: enumeration, and moderation state,
+    // with no credential at all.
+    if (user.is_blocked === true) {
+      sendError(res, ErrorCodes.FORBIDDEN, 'This account has been suspended.', 403)
+      return
+    }
 
     // Email-verification gate — opt-in via ProjectAuthConfig. Only blocks when
     // the column exists AND is explicitly false, so legacy users tables
