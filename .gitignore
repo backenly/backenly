@@ -193,6 +193,9 @@ jest-integration.json
 /app/app/billing/
 /app/app/invite/
 /app/app/members/
+/app/app/new-organization/
+/app/app/org/
+/app/app/organizations/
 /app/app/referral/
 /app/startups/
 /components/app/AmplitudeAnalytics.tsx

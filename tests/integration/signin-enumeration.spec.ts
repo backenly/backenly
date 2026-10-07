@@ -26,12 +26,19 @@
  * bcrypt hashes, and the actual exported POST handler. A unit test of the
  * comparison helper would have been green throughout the period both oracles
  * were open.
+ *
+ * Both runtimes serve this endpoint, and the Express one (the single-box
+ * ingress, server/routes/auth.ts) kept both oracles after the Next route closed
+ * them. So the oracle cases run against each, the Express one over real HTTP.
  */
 
 import { PrismaClient } from '@prisma/client'
 import crypto from 'crypto'
+import http from 'http'
+import type { AddressInfo } from 'net'
 import type { NextRequest } from 'next/server'
 
+import app from '@/server/app'
 import { POST as signin } from '@/app/api/v1/[projectId]/auth/signin/route'
 import { hashPassword, verifyPassword, verifyPasswordAgainstDecoy } from '@/lib/auth/password'
 
@@ -75,7 +82,21 @@ function request(body: Record<string, unknown>): NextRequest {
   } as unknown as NextRequest
 }
 
-async function attempt(body: Record<string, unknown>) {
+type Runtime = 'next' | 'express'
+const RUNTIMES: Runtime[] = ['next', 'express']
+let server: http.Server
+let base: string
+
+async function attempt(body: Record<string, unknown>, runtime: Runtime = 'next') {
+  if (runtime === 'express') {
+    ipCounter += 1
+    const res = await fetch(`${base}/api/v1/${projectId}/auth/signin`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-forwarded-for': `203.0.113.${ipCounter % 250}` },
+      body: JSON.stringify(body),
+    })
+    return { status: res.status, body: await res.json() }
+  }
   const res = await signin(request(body), { params: Promise.resolve({ projectId }) })
   return { status: res.status, body: await res.json() }
 }
@@ -124,6 +145,10 @@ beforeAll(async () => {
             ('blocked@example.test', $1, 'Blocked', true)`,
     hash,
   )
+
+  server = http.createServer(app)
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
 }, 180_000)
 
 afterAll(async () => {
@@ -131,11 +156,13 @@ afterAll(async () => {
   await prisma.project.deleteMany({ where: { userId: ownerId } }).catch(() => {})
   await prisma.user.delete({ where: { id: ownerId } }).catch(() => {})
   await prisma.$disconnect()
+  server?.closeAllConnections()
+  await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()))
 }, 120_000)
 
 describe('the fixture is real, so the assertions below mean something', () => {
-  it('lets a correct password through, which is the control for every refusal', async () => {
-    const ok = await attempt({ email: 'active@example.test', password: GOOD_PASSWORD })
+  it.each(RUNTIMES)('lets a correct password through on %s, which is the control for every refusal', async (runtime) => {
+    const ok = await attempt({ email: 'active@example.test', password: GOOD_PASSWORD }, runtime)
 
     // Without this, every "returns 401" test below would also pass against a
     // sign-in route that was simply broken for all inputs.
@@ -155,11 +182,11 @@ describe('the fixture is real, so the assertions below mean something', () => {
   })
 })
 
-describe('the status oracle: suspension is not observable before the password is proven', () => {
+describe.each(RUNTIMES)('the status oracle (%s): suspension is not observable before the password is proven', (runtime) => {
   it('answers a blocked account with a WRONG password exactly like any other failure', async () => {
-    const blocked = await attempt({ email: 'blocked@example.test', password: WRONG_PASSWORD })
-    const unknown = await attempt({ email: 'nobody@example.test', password: WRONG_PASSWORD })
-    const active = await attempt({ email: 'active@example.test', password: WRONG_PASSWORD })
+    const blocked = await attempt({ email: 'blocked@example.test', password: WRONG_PASSWORD }, runtime)
+    const unknown = await attempt({ email: 'nobody@example.test', password: WRONG_PASSWORD }, runtime)
+    const active = await attempt({ email: 'active@example.test', password: WRONG_PASSWORD }, runtime)
 
     // The regression this pins: 403 here told an anonymous caller both that the
     // address exists and that it is suspended.
@@ -174,7 +201,7 @@ describe('the status oracle: suspension is not observable before the password is
   }, 60_000)
 
   it('tells the account holder it is suspended, once they have proven the password', async () => {
-    const proven = await attempt({ email: 'blocked@example.test', password: GOOD_PASSWORD })
+    const proven = await attempt({ email: 'blocked@example.test', password: GOOD_PASSWORD }, runtime)
 
     // Not withheld from the person entitled to know why they cannot get in.
     // Asserted so that "matched responses" is never achieved by deleting the
@@ -184,7 +211,7 @@ describe('the status oracle: suspension is not observable before the password is
   }, 60_000)
 
   it('never issues a token to a suspended account', async () => {
-    const proven = await attempt({ email: 'blocked@example.test', password: GOOD_PASSWORD })
+    const proven = await attempt({ email: 'blocked@example.test', password: GOOD_PASSWORD }, runtime)
     expect(JSON.stringify(proven.body)).not.toMatch(/token/)
   }, 60_000)
 })
@@ -204,7 +231,7 @@ describe('the timing oracle: an unknown address costs what a known one costs', (
     expect(decoyCost).toBeGreaterThan(20)
   }, 120_000)
 
-  it('the ROUTE itself spends that work, not merely the helper', async () => {
+  it.each(RUNTIMES)('the ROUTE itself spends that work, not merely the helper (%s)', async (runtime) => {
     // The test above proves the helper is expensive. This proves the route
     // calls it: without the decoy, the unknown-address path returns in single
     // -digit milliseconds because it never reaches a comparison at all.
@@ -213,10 +240,10 @@ describe('the timing oracle: an unknown address costs what a known one costs', (
     // runner a ratio drifts and gets loosened until it proves nothing, while
     // the floor is unsatisfiable without doing a bcrypt round.
     const unknown = await measure(() =>
-      attempt({ email: 'definitely-nobody@example.test', password: WRONG_PASSWORD }),
+      attempt({ email: 'definitely-nobody@example.test', password: WRONG_PASSWORD }, runtime),
     )
     const known = await measure(() =>
-      attempt({ email: 'active@example.test', password: WRONG_PASSWORD }),
+      attempt({ email: 'active@example.test', password: WRONG_PASSWORD }, runtime),
     )
 
     // CONTROL: the known-address path is the cost being disguised, so if IT

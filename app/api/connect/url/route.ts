@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { clientIpFromHeaders } from '@/lib/security/client-ip'
 import { authenticateRequest } from '@/lib/auth/middleware'
 import { prisma } from '@/lib/db'
 import crypto from 'crypto'
@@ -105,7 +106,7 @@ export async function POST(request: NextRequest) {
           reconstructedAt: new Date().toISOString(),
         },
         expiresAt,
-        ipAddress: request.headers.get('x-forwarded-for') || 'unknown',
+        ipAddress: clientIpFromHeaders(request) ?? 'unknown',
         userAgent: request.headers.get('user-agent') || 'unknown',
       },
     })
