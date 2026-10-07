@@ -25,6 +25,7 @@
  */
 
 import { NextRequest } from 'next/server'
+import { clientIpFromHeaders } from '@/lib/security/client-ip'
 import { authenticateRequest } from '@/lib/auth/middleware'
 import { recordSecurityEvent } from '@/lib/platform-controls'
 import {
@@ -90,10 +91,7 @@ export async function getCurrentProjectId(request: NextRequest): Promise<string>
       // and stays on the Security tab. Asking for NO project is a client bug,
       // not an attack, so it is not reported as one.
       if (!(err instanceof ProjectContextRequiredError) && requested) {
-        const ip =
-          request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
-          request.headers.get('x-real-ip') ||
-          null
+        const ip = clientIpFromHeaders(request)
         recordSecurityEvent({
           kind: 'cross_tenant',
           severity: 'high',

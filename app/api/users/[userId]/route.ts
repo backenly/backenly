@@ -159,11 +159,26 @@ export async function PUT(request: NextRequest, props: { params: Promise<{ userI
   }
 }
 
+/**
+ * Delete a platform user. Admin only.
+ *
+ * It checked only that the caller was signed in, then deleted the account named
+ * in the path: any account could delete any other, with every project it owned.
+ * GET and PUT were fixed by the route-authorization sweep; this one was missed.
+ *
+ * Not self-service either: deleting your own account is
+ * DELETE /api/auth/delete-account, which also purges your projects' workspaces.
+ * A bare row delete here would leave them behind.
+ */
 export async function DELETE(request: NextRequest, props: { params: Promise<{ userId: string }> }) {
   const params = await props.params;
   try {
     await requireAuth(request)
-    
+    if ((await requireAdmin(request)) !== null) {
+      // 404, not 403: this endpoint must not confirm which user ids exist.
+      return NextResponse.json({ error: 'User not found' }, { status: 404 })
+    }
+
     await prisma.user.delete({
       where: { id: params.userId },
     })

@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express'
+import { clientIpFromNodeRequest } from '@/lib/security/client-ip'
 import { prisma } from '@/lib/db'
-import { hashPassword, verifyPassword } from '@/lib/auth/password'
+import { hashPassword, verifyPassword, verifyPasswordAgainstDecoy } from '@/lib/auth/password'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { ensureAuthUsersTable, buildUserInsert, isReservedTestEmail, AuthNotProvisionedError } from '@/lib/services/end-user-auth-table'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
@@ -32,8 +33,23 @@ import {
   type AuthEnvironment,
 } from '@/lib/branches/auth-environment'
 import { ENVIRONMENT_HEADER, environmentHeaderValue } from '@/lib/branches/key-scope'
+import { admitSigninAttempt, admitSigninRequest } from '@/lib/security/end-user-signin-limit'
+import { admitExistenceCheck, admitSignupRequest } from '@/lib/security/end-user-signup-limit'
+import { isPlatformProbe } from '@/lib/security/platform-probe'
+import { throttleDecision } from '@/lib/security/rate-limit-decision'
+import type { RateLimitResult } from '@/lib/security/auth-rate-limit'
 
 const router = Router()
+
+/**
+ * A throttled sign-in, answered exactly as the Next route answers it: 429 for
+ * a budget that ran out, 503 when the limiter's store cannot be reached.
+ */
+function sendThrottled(res: Response, result: RateLimitResult) {
+  const d = throttleDecision(result)
+  res.set(d.headers)
+  sendError(res, d.code, d.message, d.status)
+}
 
 /**
  * The environment this request's key chose, production or its preview branch,
@@ -68,26 +84,18 @@ const signInSchema = z.object({
   password: z.string(),
 })
 
-// In-memory IP throttle for the public end-user auth surface. The runtime is
-// behind nginx; X-Forwarded-For is trusted. Each project also has API-key
-// rate limiting on /api/v1/* but auth signup/signin run BEFORE the project's
-// API-key gate, so they need their own brake.
-const SIGNUP_LIMITS = { limit: 10, windowMs: 60 * 60 * 1000 }
-// Reserved test accounts (…@*.internal) get their own generous bucket. The
-// behavioral verifier signs one up on every build / scan / deploy-readiness run,
-// all from the server's single egress IP — sharing the 10/hr real-user bucket,
-// those self-tests exhaust it and the verifier then gets 429, which fails the
-// "Live HTTP endpoints" check and blocks the deploy for a perfectly healthy
-// backend. A separate bucket means real users and the verifier can never starve
-// each other; still bounded (these accounts are auto-purged + excluded from
-// quotas, so the cap is pure anti-abuse, not a product limit).
-const SIGNUP_INTERNAL_LIMITS = { limit: 100, windowMs: 60 * 60 * 1000 }
-const SIGNIN_LIMITS = { limit: 30, windowMs: 15 * 60 * 1000 }
+// In-memory IP throttle for the emailed end-user flows below (recovery,
+// verification, magic links). The address is the one lib/security/client-ip.ts
+// resolves. Each project also has API-key rate limiting on /api/v1/* but these
+// run BEFORE the project's API-key gate, so they need their own brake.
+//
+// Sign-up and sign-in are not throttled here: they use the same policies and
+// store as the Next routes (lib/security/end-user-signup-limit.ts and
+// end-user-signin-limit.ts), so the two implementations of one endpoint cannot
+// hold two different limits again.
 const ipBuckets = new Map<string, { count: number; resetAt: number }>()
 function ipFrom(req: Request): string {
-  const xff = req.headers['x-forwarded-for']
-  const xffStr = Array.isArray(xff) ? xff[0] : xff
-  return (xffStr?.split(',')[0]?.trim()) || req.socket.remoteAddress || 'unknown'
+  return clientIpFromNodeRequest(req) ?? 'unknown'
 }
 function throttle(key: string, policy: { limit: number; windowMs: number }): { allowed: boolean; retryAfter: number } {
   const now = Date.now()
@@ -120,33 +128,21 @@ if (typeof setInterval !== 'undefined') {
 async function handleSignUp(req: Request, res: Response) {
   const { projectId } = req.params
 
-  // IP rate limit — applies BEFORE any DB lookup so we can't be used as a
-  // free email-existence oracle. Peeking at the already-parsed body email to
-  // pick the bucket is a pure string check (no DB), so the oracle protection is
-  // preserved. Reserved test emails route to their own bucket (see above).
+  // Every attempt counts against the address's cap, before any DB lookup.
+  // Backenly's own contract probe is not counted, exactly as on the Next route:
+  // it needs the signed internal-traffic token AND a reserved address
+  // (lib/security/platform-probe.ts). A reserved address alone is counted like
+  // any customer's; it used to get a bucket of its own here, and nowhere else.
   const ip = ipFrom(req)
-  const isInternalTest = isReservedTestEmail((req.body as { email?: unknown })?.email as string | undefined)
-  const rl = isInternalTest
-    ? throttle(`v1-signup-internal:${projectId}:${ip}`, SIGNUP_INTERNAL_LIMITS)
-    : throttle(`v1-signup:${projectId}:${ip}`, SIGNUP_LIMITS)
-  if (!rl.allowed) {
-    res.setHeader('Retry-After', String(rl.retryAfter))
-    // ── State the limit and the wait, not "try again later" ──────────────────
-    //
-    // "Try again later" is unactionable: it names no threshold, so the caller
-    // cannot tell whether they tripped a burst guard or an hourly cap, and no
-    // wait, so their only option is to poll. A developer doing ordinary testing
-    // hit this, had no idea what the limit was, and had to guess how long to
-    // pause. The numbers are not a secret — they are configuration, and stating
-    // them turns a dead end into a decision.
-    sendError(
-      res,
-      ErrorCodes.RATE_LIMIT_EXCEEDED,
-      `Too many signup attempts — the limit is ${SIGNUP_LIMITS.limit} per hour per IP, per project. ` +
-      `Retry in ${rl.retryAfter}s (see the Retry-After header).`,
-      429,
-    )
-    return
+  const bodyEmail = (req.body as { email?: unknown })?.email
+  const isInternalTest = isReservedTestEmail(bodyEmail as string | undefined)
+  const probe = isPlatformProbe({ headers: { get: (name: string) => req.get(name) ?? null } }, bodyEmail)
+  if (!probe) {
+    const limit = await admitSignupRequest(projectId, ip)
+    if (!limit.allowed) {
+      sendThrottled(res, limit)
+      return
+    }
   }
 
   try {
@@ -196,6 +192,14 @@ async function handleSignUp(req: Request, res: Response) {
     // Service-role: workspace users tables may have FORCE ROW LEVEL SECURITY.
     // Anonymous signups need the service-role bypass; without it, both the
     // SELECT-existing and the INSERT below hit PG 42501.
+    //
+    // The answer is the existence oracle, so it is budgeted before it is looked
+    // up, and given back when the address turns out to be free.
+    const check = probe ? null : await admitExistenceCheck(projectId, ip)
+    if (check?.denied) {
+      sendThrottled(res, check.denied)
+      return
+    }
     const existing = await executeWithUserContext<any>(
       '',
       true,
@@ -206,6 +210,7 @@ async function handleSignUp(req: Request, res: Response) {
       sendError(res, ErrorCodes.CONFLICT, 'An account with this email already exists', 409)
       return
     }
+    await check?.addressFree()
 
     // The account's MAU cap, as on the Next signup route: only a NEW end user
     // is refused, existing users keep working. This route serves signups on
@@ -323,18 +328,12 @@ async function handleSignUp(req: Request, res: Response) {
 async function handleSignIn(req: Request, res: Response) {
   const { projectId } = req.params
 
-  // IP rate limit for brute-force protection.
+  // The all-attempts ceiling, before any lookup. The failure budgets follow
+  // once the body names the account.
   const ip = ipFrom(req)
-  const rl = throttle(`v1-signin:${projectId}:${ip}`, SIGNIN_LIMITS)
-  if (!rl.allowed) {
-    res.setHeader('Retry-After', String(rl.retryAfter))
-    sendError(
-      res,
-      ErrorCodes.RATE_LIMIT_EXCEEDED,
-      `Too many sign-in attempts — the limit is ${SIGNIN_LIMITS.limit} per 15 minutes per IP, per project. ` +
-      `Retry in ${rl.retryAfter}s (see the Retry-After header).`,
-      429,
-    )
+  const source = await admitSigninRequest(projectId, ip)
+  if (!source.allowed) {
+    sendThrottled(res, source)
     return
   }
 
@@ -358,6 +357,14 @@ async function handleSignIn(req: Request, res: Response) {
 
     const { email, password } = parsed.data
     const schemaName = env.schemaName
+
+    // Failed attempts per address and per account, spent now and refunded
+    // once the password proves correct.
+    const attempt = await admitSigninAttempt(projectId, ip, email)
+    if (attempt.denied) {
+      sendThrottled(res, attempt.denied)
+      return
+    }
 
     const tableCheck = await prisma.$queryRawUnsafe<{ exists: boolean }[]>(
       `SELECT EXISTS (
@@ -391,19 +398,30 @@ async function handleSignIn(req: Request, res: Response) {
     )
 
     const user = users[0]
-    const storedHash = user?.password ?? user?.password_hash
-    if (!user || !storedHash) {
+    const storedHash: string | undefined = user ? (user.password ?? user.password_hash) : undefined
+
+    // Both paths cost the same, as on the Next route. An unknown address used
+    // to answer at once while a real one paid for a bcrypt comparison first: the
+    // same message, and a measurable difference in time. So an absent user is
+    // compared against a decoy hash at the product's cost factor, which cannot
+    // match; only the work is wanted.
+    const isValid = storedHash
+      ? await verifyPassword(password, storedHash)
+      : await verifyPasswordAgainstDecoy(password)
+    if (!isValid) {
       sendError(res, ErrorCodes.UNAUTHORIZED, 'Invalid email or password', 401)
-      return
-    }
-    if (user.is_blocked === true) {
-      sendError(res, ErrorCodes.FORBIDDEN, 'This account has been suspended.', 403)
       return
     }
 
-    const isValid = await verifyPassword(password, storedHash)
-    if (!isValid) {
-      sendError(res, ErrorCodes.UNAUTHORIZED, 'Invalid email or password', 401)
+    // The password is right, so this attempt was not a guess.
+    await attempt.credentialsVerified()
+
+    // Suspension is disclosed only to someone who proved the password. It was
+    // checked first, so any address with a junk password answered 403 for a
+    // suspended account and 401 for the rest: enumeration, and moderation state,
+    // with no credential at all.
+    if (user.is_blocked === true) {
+      sendError(res, ErrorCodes.FORBIDDEN, 'This account has been suspended.', 403)
       return
     }
 

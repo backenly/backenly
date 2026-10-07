@@ -1,7 +1,8 @@
 export const dynamic = 'force-dynamic'
 
 import { NextRequest } from 'next/server'
-import { consume, AUTH_LIMITS, clientIp } from '@/lib/security/auth-rate-limit'
+import { clientIp } from '@/lib/security/auth-rate-limit'
+import { admitExistenceCheck, admitSignupRequest } from '@/lib/security/end-user-signup-limit'
 import { throttledV1Response } from '@/lib/security/rate-limit-response'
 import { carriesInternalToken, isPlatformProbe } from '@/lib/security/platform-probe'
 import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
@@ -51,27 +52,17 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
 
 async function signUp(request: NextRequest, projectId: string, env: AuthEnvironment): Promise<Response> {
   try {
-    // Throttled per IP AND per project. This surface had no rate limiting of
-    // any kind: it is unauthenticated by design, because it is how a
-    // customer's own users sign in, but the platform's own /api/auth/login has
-    // IP brute-force protection and this had none. That left credential
-    // stuffing against every end user of every project unthrottled.
-    //
-    // Keyed on both so one project under attack cannot lock out sign-up attempts for a
-    // different project behind the same egress address.
+    // Throttled per project and address: every attempt under one cap, and the
+    // "already registered" answer under a much tighter one, because it is the
+    // existence oracle (lib/security/end-user-signup-limit.ts).
     const ip = clientIp(request)
-    const consumeIp = () => consume(
-      `v1:endUserSignup:${projectId}:${ip}`,
-      AUTH_LIMITS.endUserSignup.ip.limit,
-      AUTH_LIMITS.endUserSignup.ip.windowMs,
-    )
     // Backenly's own contract probe is not counted (lib/security/platform-probe.ts),
     // and whether a request is the probe depends on the address in its body. So a
     // request carrying the internal-traffic token is counted once that address is
     // known, below; every other request is counted here, before anything else.
     const mayBeProbe = carriesInternalToken(request)
     if (!mayBeProbe) {
-      const limit = await consumeIp()
+      const limit = await admitSignupRequest(projectId, ip)
       if (!limit.allowed) return throttledV1Response(limit)
     }
 
@@ -102,8 +93,9 @@ async function signUp(request: NextRequest, projectId: string, env: AuthEnvironm
 
     const { email, password, name } = validation.data
 
-    if (mayBeProbe && !isPlatformProbe(request, email)) {
-      const limit = await consumeIp()
+    const probe = mayBeProbe && isPlatformProbe(request, email)
+    if (mayBeProbe && !probe) {
+      const limit = await admitSignupRequest(projectId, ip)
       if (!limit.allowed) return throttledV1Response(limit)
     }
 
@@ -124,6 +116,11 @@ async function signUp(request: NextRequest, projectId: string, env: AuthEnvironm
     // Signup is a server-side admin operation — the user does NOT yet have a
     // session-context user id, so we run as service-role to bypass RLS that
     // would otherwise reject the SELECT/INSERT (PG 42501).
+    //
+    // The answer is the existence oracle, so it is budgeted before it is looked
+    // up, and given back when the address turns out to be free.
+    const check = probe ? null : await admitExistenceCheck(projectId, ip)
+    if (check?.denied) return throttledV1Response(check.denied)
     const existing = await executeWithUserContext<any>(
       '',
       true,
@@ -134,6 +131,7 @@ async function signUp(request: NextRequest, projectId: string, env: AuthEnvironm
     if (existing.length > 0) {
       return createErrorResponse(ErrorCodes.CONFLICT, 'An account with this email already exists', 409)
     }
+    await check?.addressFree()
 
     // MAU cap (Plan-driven): once this project hits its monthly-active-user
     // limit, NEW sign-ups are blocked — existing users keep working. The
