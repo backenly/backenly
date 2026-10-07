@@ -75,14 +75,12 @@ describe('single-tenant entitlements', () => {
     // null means UNLIMITED throughout the seam. Zero would mean "blocked", and
     // a number would mean "metered", so this is the assertion that keeps a
     // self-hoster's own hardware from being capped.
-    expect(ent.maxApiRequestsPerMonth).toBeNull()
     expect(ent.maxPostgresStorageMb).toBeNull()
     expect(ent.maxFileStorageMb).toBeNull()
     expect(ent.maxRealtimeConnections).toBeNull()
     expect(ent.maxMonthlyActiveUsers).toBeNull()
     expect(ent.maxAiFunctionInvocationsPerMonth).toBeNull()
     expect(ent.maxTriggersPerProject).toBeNull()
-    expect(ent.apiQuotaIsLifetime).toBe(false)
   })
 
   it('caps projects at one, because that is the edition', async () => {

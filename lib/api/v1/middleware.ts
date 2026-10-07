@@ -9,7 +9,7 @@ import { scanRequest } from '@/lib/services/waf'
 import crypto from 'crypto'
 import { markFrontendConnected, markExternalUsage } from '@/lib/projects/milestones'
 import { recordUsageMetrics } from '@/lib/platform-signals'
-import { enforceAndTrackApiRequest, noteEndUserActivity } from '@/lib/quota/kernel'
+import { noteEndUserActivity } from '@/lib/quota/kernel'
 import { getPlatformControls, recordSecurityEvent } from '@/lib/platform-controls'
 import { PAUSED_CODE, PAUSED_MESSAGE, pausedDetails } from '@/lib/projects/serving-state'
 import { touchProjectActivity } from '@/lib/projects/activity'
@@ -385,27 +385,9 @@ export async function v1ApiMiddleware(
     }
   }
 
-  // 7. Plan-driven API request quota — the Plan table is the source of truth.
-  //    Free = lifetime total, paid = per-month, null = unlimited. The 80%
-  //    warning is fired inside the kernel (soft); here we hard-block at 100%.
-  //    Fail-open: a billing hiccup never refuses a paying customer's request.
-  const apiQuota = await enforceAndTrackApiRequest(apiKeyRecord.userId)
-  if (!apiQuota.allowed) {
-    return {
-      context: {} as V1ApiContext,
-      response: NextResponse.json(
-        {
-          error: apiQuota.message,
-          code: apiQuota.code,
-          plan: apiQuota.plan,
-          used: apiQuota.used,
-          limit: apiQuota.max,
-          upgradeUrl: '/pricing',
-        },
-        { status: 429, headers: { 'Retry-After': '3600' } },
-      ),
-    }
-  }
+  // No plan quota on API requests: they are unlimited on every plan. The
+  // owner's monthly count for the Usage page is kept by the request recorder
+  // every v1 route is wrapped in (lib/traffic/request-recorder.ts).
 
   // ── End-user identity for RLS context ─────────────────────────────────────
   // End-users receive a project-scoped JWT from /v1/{projectId}/auth/signin.

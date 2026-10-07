@@ -32,7 +32,9 @@ import { PROJECT_LIST_SELECT } from '@/lib/edition/project-listing'
 import type {
   ProjectCreateInput,
   ProjectCreateResult,
+  ProjectCreationAccount,
   ProjectListEntry,
+  ProjectListOptions,
 } from '@/lib/edition/types'
 
 /**
@@ -40,15 +42,27 @@ import type {
  *
  * The clause comes from ProjectResolver, which is the one authority for project
  * access. Listing is the same question as resolving, asked of many rows at
- * once, and the two answered it separately until they disagreed.
+ * once, and the two answered it separately until they disagreed. There is no
+ * organization layer here, so an organization filter is ignored.
  */
-export async function listAccessibleProjects(userId: string): Promise<ProjectListEntry[]> {
+export async function listAccessibleProjects(
+  userId: string,
+  _options?: ProjectListOptions,
+): Promise<ProjectListEntry[]> {
   const projects = await prisma.project.findMany({
     where: await getProjectResolver().accessibleProjectsWhere(userId),
     select: PROJECT_LIST_SELECT,
     orderBy: { updatedAt: 'desc' },
   })
   return projects as ProjectListEntry[]
+}
+
+/** With no organizations, a project belongs to the account that creates it. */
+export async function creationAccount(
+  userId: string,
+  _organizationId?: string | null,
+): Promise<ProjectCreationAccount> {
+  return { ok: true, ownerId: userId, organizationId: null }
 }
 
 /** Create a fully provisioned project, with no organization to attach it to. */

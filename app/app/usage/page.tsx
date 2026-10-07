@@ -33,8 +33,6 @@ interface UsageData {
   aiFunctionInvocationsUsed: number
   maxAiFunctionInvocationsPerMonth: number | null
   apiRequestsUsed: string
-  maxApiRequestsPerMonth: string | null
-  apiQuotaIsLifetime: boolean
   monthlyActiveUsersUsed: number
   maxMonthlyActiveUsers: number | null
   maxPostgresStorageMb: number | null
@@ -140,12 +138,13 @@ function Meter({
         <span className={`text-[20px] font-semibold leading-[26px] tracking-[-0.02em] tabular-nums ${over ? 'text-rose-300' : warn ? 'text-amber-200' : 'text-zinc-50'}`}>
           {format(used)}
         </span>
-        <span className="text-[12.5px] tabular-nums text-zinc-500">
-          of {max === null ? 'unlimited' : format(max)}
-        </span>
+        {max !== null && <span className="text-[12.5px] tabular-nums text-zinc-500">of {format(max)}</span>}
       </div>
 
-      {max !== null && (
+      {/* No bar without a limit: a part-filled bar reads as a ceiling coming up. */}
+      {max === null ? (
+        <p className="mt-2 text-[12px] text-zinc-500">Unlimited</p>
+      ) : (
         <div
           className="mt-2.5 h-[5px] overflow-hidden rounded-full bg-white/[0.06]"
           role="meter"
@@ -509,7 +508,6 @@ export default function UsagePage() {
     : ''
   const resetNote = usage ? `Resets ${resetDate}` : undefined
   const apiReqUsed = usage ? parseInt(usage.apiRequestsUsed, 10) || 0 : 0
-  const apiReqMax = usage?.maxApiRequestsPerMonth ? parseInt(usage.maxApiRequestsPerMonth, 10) : null
 
   return (
     <OrgShell>
@@ -555,14 +553,8 @@ export default function UsagePage() {
                 signal a user got was their agent being refused.
               */}
               <Meter icon={Sparkles} label="AI credits" used={usage.aiCreditsUsed} max={usage.monthlyAiCredits} format={fmtNum} resetNote={resetNote} />
-              <Meter
-                icon={Activity}
-                label="API requests"
-                used={apiReqUsed}
-                max={apiReqMax}
-                format={fmtNum}
-                resetNote={usage.apiQuotaIsLifetime ? 'Total · no reset' : resetNote}
-              />
+              {/* A count, not a quota: API requests are unlimited on every plan. */}
+              <Meter icon={Activity} label="API requests" used={apiReqUsed} max={null} format={fmtNum} />
               {account ? (
                 account.axes.map((a) => (
                   <AxisMeter key={a.axis} a={a} resetNote={resetNote} planBillsOverage={account.axes.some((x) => x.billable)} />
