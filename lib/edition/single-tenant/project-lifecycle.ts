@@ -24,6 +24,7 @@ import type {
   Edition,
   ProjectCreateInput,
   ProjectCreateResult,
+  ProjectCreationAccount,
   ProjectLifecycle,
   ProjectListEntry,
 } from '../types'
@@ -39,6 +40,7 @@ export const singleTenantProjectLifecycle: ProjectLifecycle = {
    * signed up, so an ownership filter showed the operator an empty dashboard on
    * every fresh install while GET /api/projects/<id> returned that same project
    * happily. Two answers to one question is what this seam exists to prevent.
+   * There are no organizations here, so an organization filter is ignored.
    */
   async list(_userId: string): Promise<ProjectListEntry[]> {
     let id: string
@@ -53,6 +55,14 @@ export const singleTenantProjectLifecycle: ProjectLifecycle = {
 
     const project = await prisma.project.findUnique({ where: { id }, select: PROJECT_LIST_SELECT })
     return project ? [project as ProjectListEntry] : []
+  },
+
+  /**
+   * The caller, with no organization. Answered rather than refused so the
+   * refusal stays where it belongs, in create() and the provisioner below it.
+   */
+  async creationAccount(userId: string): Promise<ProjectCreationAccount> {
+    return { ok: true, ownerId: userId, organizationId: null }
   },
 
   /**

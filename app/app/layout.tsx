@@ -25,10 +25,9 @@ function AppLayoutContent({ children }: { children: React.ReactNode }) {
   const isSettingsPage = pathname === '/app/settings'
 
   // Org-shell pages provide their own chrome (OrgShell) — suppress the legacy
-  // AppHeader/AppSidebar so it doesn't double up (§5).
-  const isOrgShellPage = ['/app/usage', '/app/billing', '/app/members', '/app/referral'].some(
-    (p) => pathname?.startsWith(p),
-  )
+  // AppHeader/AppSidebar so it doesn't double up (§5). The organization pages
+  // (/app/org/*, /app/organizations, /app/new-organization) are Cloud's.
+  const isOrgShellPage = ORG_SHELL_PREFIXES.some((p) => pathname?.startsWith(p))
 
   const bare = isOverviewPage || isProjectPage || isSettingsPage || isOrgShellPage
 
@@ -48,10 +47,15 @@ function AppLayoutContent({ children }: { children: React.ReactNode }) {
   )
 }
 
+const ORG_SHELL_PREFIXES = [
+  '/app/usage', '/app/billing', '/app/members', '/app/referral',
+  '/app/org/', '/app/organizations', '/app/new-organization',
+]
+
 function isSelfGuarded(pathname: string | null): boolean {
   if (!pathname) return false
   if (pathname === '/app' || pathname === '/app/' || pathname === '/app/settings' || pathname === '/app/connect') return true
-  const selfGuardedPrefixes = ['/app/projects/', '/app/api-builder', '/app/usage', '/app/billing', '/app/members', '/app/referral']
+  const selfGuardedPrefixes = ['/app/projects/', '/app/api-builder', ...ORG_SHELL_PREFIXES]
   return selfGuardedPrefixes.some((p) => pathname.startsWith(p))
 }
 
