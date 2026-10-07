@@ -13,6 +13,7 @@
  */
 import { prisma } from '../lib/db'
 import { executeAiFunction } from '../lib/services/ai-functions/executor'
+import { accountOf } from '../lib/usage/account'
 
 // v4 pricing: SANDBOX (Free) 10k · BUILDER (Pro $25) 2M · SCALE (Enterprise) null = unlimited
 const EXPECTED: Record<string, number | null> = { SANDBOX: 10_000, BUILDER: 2_000_000, SCALE: null }
@@ -51,7 +52,7 @@ async function main() {
     check('find a project with active functions', false, 'none found')
     return
   }
-  const project = await prisma.project.findUnique({ where: { id: projectId }, select: { userId: true, name: true } })
+  const project = await prisma.project.findUnique({ where: { id: projectId }, select: { userId: true, organizationId: true, name: true } })
   console.log(`\nProject: ${project?.name} (${projectId})`)
 
   const fns = await prisma.aiFunction.findMany({
@@ -82,18 +83,19 @@ async function main() {
   console.log('\n4. Logs + usage tracking')
   const logCount = await prisma.aiFunctionLog.count({ where: { projectId } })
   check('execution log rows exist', logCount > 0, `count=${logCount}`)
-  if (project?.userId) {
-    const usage = await prisma.userAiUsage.findFirst({ where: { userId: project.userId, date: thisMonth() } })
+  const account = project ? accountOf(project) : null
+  if (account) {
+    const usage = await prisma.accountAiUsage.findFirst({ where: { billingAccountId: account, date: thisMonth() } })
     check('aiFunctionInvocations tracked', (usage?.aiFunctionInvocations ?? 0) > 0, `got ${usage?.aiFunctionInvocations}`)
   }
 
   console.log('\n5. Quota-block path (simulated exhaustion)')
-  if (project?.userId && (routeFn || sandboxFn)) {
+  if (account && (routeFn || sandboxFn)) {
     const fn = (routeFn || sandboxFn)!
-    const usageRow = await prisma.userAiUsage.findFirst({ where: { userId: project.userId, date: thisMonth() } })
+    const usageRow = await prisma.accountAiUsage.findFirst({ where: { billingAccountId: account, date: thisMonth() } })
     const original = usageRow?.aiFunctionInvocations ?? 0
     if (usageRow) {
-      await prisma.userAiUsage.update({ where: { id: usageRow.id }, data: { aiFunctionInvocations: 99_999_999 } })
+      await prisma.accountAiUsage.update({ where: { id: usageRow.id }, data: { aiFunctionInvocations: 99_999_999 } })
       const blocked = await executeAiFunction(fn.id, projectId, { type: 'manual', data: {} })
       check('blocked run returns success:false', blocked.success === false)
       check('blocked run carries PLAN_LIMIT_EXCEEDED', blocked.errorCode === 'PLAN_LIMIT_EXCEEDED', blocked.errorCode)
@@ -106,7 +108,7 @@ async function main() {
       const after = await prisma.aiFunction.findUnique({ where: { id: fn.id }, select: { status: true } })
       check('function NOT flipped to error status by the block', after?.status === 'active', after?.status)
       // restore
-      await prisma.userAiUsage.update({ where: { id: usageRow.id }, data: { aiFunctionInvocations: original } })
+      await prisma.accountAiUsage.update({ where: { id: usageRow.id }, data: { aiFunctionInvocations: original } })
       console.log(`    (usage restored to ${original})`)
     } else {
       console.log('  (no usage row yet — skipped simulation)')

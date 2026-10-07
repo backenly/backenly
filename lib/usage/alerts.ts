@@ -213,24 +213,25 @@ async function setOverState(billingAccountId: string, axis: OverageAxis, over: b
 }
 
 /**
- * The sweep: every account that owns a project. Runs every few minutes from
+ * The sweep: every billing account that has a project. Runs every few minutes from
  * instrumentation.ts; one account's failure never stops the rest.
  */
 export async function evaluateUsageAlerts(now: Date = new Date()): Promise<AlertEvaluation & { accounts: number; failed: number }> {
   // A self-hosted install has no quotas, so there is nothing to alert on.
   const { currentEdition } = await import('@/lib/edition')
   if (currentEdition() === 'single-tenant') return { accounts: 0, recorded: 0, sent: 0, failed: 0 }
-  const owners = await prisma.$queryRaw<Array<{ userId: string }>>`
-    SELECT DISTINCT "userId" FROM "projects" WHERE "userId" IS NOT NULL`
-  const total = { accounts: owners.length, recorded: 0, sent: 0, failed: 0 }
-  for (const { userId } of owners) {
+  const accounts = await prisma.$queryRaw<Array<{ account: string }>>`
+    SELECT DISTINCT COALESCE("organizationId", "userId") AS "account" FROM "projects"
+    WHERE COALESCE("organizationId", "userId") IS NOT NULL`
+  const total = { accounts: accounts.length, recorded: 0, sent: 0, failed: 0 }
+  for (const { account } of accounts) {
     try {
-      const r = await evaluateAccountAlerts(userId, now)
+      const r = await evaluateAccountAlerts(account, now)
       total.recorded += r.recorded
       total.sent += r.sent
     } catch (err: any) {
       total.failed++
-      console.warn(`[usage-alerts] ${userId}: ${err?.message}`)
+      console.warn(`[usage-alerts] ${account}: ${err?.message}`)
     }
   }
   return total

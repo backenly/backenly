@@ -106,5 +106,5 @@ export interface OveragePolicy {
  * every caller already handles; it does not mean "unlimited".
  */
 export interface CloudEntitlementsProvider {
-  cloudEntitlements(userId: string): Promise<UserEntitlements | null>
+  cloudEntitlements(billingAccountId: string): Promise<UserEntitlements | null>
 }

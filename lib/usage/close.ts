@@ -26,7 +26,7 @@
  *  gauges (db_bytes, file_bytes)          byte-months: for each day, the sum of
  *      every project's daily maximum; then the average over EVERY day of the
  *      month (a day with no sample counts as zero), rounded down.
- *  ai_tokens                              UserAiUsage.tokenCount for the month,
+ *  ai_tokens                              AccountAiUsage.tokenCount for the month,
  *      the same number the AI credit meter already enforces.
  */
 
@@ -86,9 +86,9 @@ export async function computePeriodTotals(period: string, db: Db = prisma): Prom
       AND "axis" = ANY(${['db_bytes', 'file_bytes']}::text[])
     GROUP BY 1, 2, 3`
 
-  const ai = await db.userAiUsage.findMany({
+  const ai = await db.accountAiUsage.findMany({
     where: { date: period, tokenCount: { gt: 0 } },
-    select: { userId: true, tokenCount: true },
+    select: { billingAccountId: true, tokenCount: true },
   })
 
   const rows = new Map<string, CloseRow>()
@@ -128,12 +128,12 @@ export async function computePeriodTotals(period: string, db: Db = prisma): Prom
   }
 
   for (const r of ai) {
-    rows.set(key(r.userId, AI_TOKENS_AXIS), {
-      billingAccountId: r.userId,
+    rows.set(key(r.billingAccountId, AI_TOKENS_AXIS), {
+      billingAccountId: r.billingAccountId,
       axis: AI_TOKENS_AXIS,
       quantity: BigInt(r.tokenCount),
       unit: 'tokens',
-      detail: { source: 'user_ai_usage' },
+      detail: { source: 'account_ai_usage' },
     })
   }
 

@@ -3,7 +3,8 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { verifyToken } from '@/lib/auth/jwt'
-import { getUserEntitlements } from '@/lib/entitlements'
+import { getAccountEntitlements } from '@/lib/entitlements'
+import { accountOf } from '@/lib/usage/account'
 import { canAccessProject } from '@/lib/edition/guard'
 
 const QUOTA_DISABLED = process.env.DISABLE_QUOTA_ENFORCEMENT === 'true'
@@ -43,7 +44,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
 
     const project = await prisma.project.findUnique({
       where: { id: projectId },
-      select: { id: true, activeGraphId: true },
+      select: { id: true, activeGraphId: true, organizationId: true, userId: true },
     })
 
     if (!project) {
@@ -58,7 +59,8 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
     let historyLimit: number | null = null // null = unlimited
 
     if (!QUOTA_DISABLED) {
-      const entitlements = await getUserEntitlements(userId)
+      // The plan of the account the project bills to, not the viewer's own
+      const entitlements = await getAccountEntitlements(accountOf(project) ?? userId)
       const maxHistory = entitlements?.maxDeploymentHistory ?? 0
 
       if (maxHistory === 0) {

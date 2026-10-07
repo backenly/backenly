@@ -23,11 +23,12 @@
  *
  * ── Attribution ─────────────────────────────────────────────────────────────
  *
- * A row belongs to the project's billing account, which today is the owning
- * user (projects."userId"). The owner is resolved when the batch is applied,
- * unless the caller already knew it. Usage for a project that no longer exists
- * and whose owner was never seen is dropped with a log line, in the customer's
- * favour, rather than attributed to a guess.
+ * A row belongs to the project's billing account (lib/usage/account.ts): its
+ * organization on Cloud, its owning user where there are no organizations. The
+ * account is resolved when the batch is applied, unless the caller already
+ * knew it. Usage for a project that no longer exists and whose account was
+ * never seen is dropped with a log line, in the customer's favour, rather than
+ * attributed to a guess.
  */
 
 import { randomUUID } from 'crypto'
@@ -114,9 +115,9 @@ export async function applyUsageBatch(batch: LedgerBatch, db: Db = prisma): Prom
       )
       const owners = new Map<string, string>()
       if (unknown.length > 0) {
-        const found = await tx.$queryRaw<Array<{ id: string; userId: string | null }>>`
-          SELECT "id", "userId" FROM "projects" WHERE "id" = ANY(${unknown}::text[])`
-        for (const row of found) if (row.userId) owners.set(row.id, row.userId)
+        const found = await tx.$queryRaw<Array<{ id: string; account: string | null }>>`
+          SELECT "id", COALESCE("organizationId", "userId") AS "account" FROM "projects" WHERE "id" = ANY(${unknown}::text[])`
+        for (const row of found) if (row.account) owners.set(row.id, row.account)
       }
 
       let rows = 0

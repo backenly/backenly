@@ -25,7 +25,7 @@ import type { UserEntitlements } from '@/lib/entitlements/types'
 let fileStorageMb: number | null = null
 jest.mock('@/lib/entitlements', () => ({
   ...jest.requireActual('@/lib/entitlements'),
-  getUserEntitlements: (): Promise<UserEntitlements> =>
+  getAccountEntitlements: (): Promise<UserEntitlements> =>
     Promise.resolve({ ...selfHostedEntitlements(), planName: 'TEST', maxFileStorageMb: fileStorageMb }),
 }))
 

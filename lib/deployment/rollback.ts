@@ -13,7 +13,8 @@
 import { prisma } from '@/lib/db/prisma'
 import { emit } from '@/lib/events/bus'
 import { emitTrace } from '@/lib/ai/execution-tracer'
-import { getUserEntitlements } from '@/lib/entitlements'
+import { getAccountEntitlements } from '@/lib/entitlements'
+import { accountOf } from '@/lib/usage/account'
 import { recordRollbackMemory } from '@/lib/operational-memory/ledger'
 import { canAdministerProject } from '@/lib/edition/guard'
 
@@ -78,15 +79,15 @@ export async function rollbackDeploy(
 
   const project = await prisma.project.findUnique({
     where: { id: projectId },
-    select: { activeGraphId: true },
+    select: { activeGraphId: true, organizationId: true, userId: true },
   })
   if (!project) {
     return { kind: 'error', success: false, error: 'Project not found', code: 'NOT_FOUND' }
   }
 
-  // Plan gate
+  // Plan gate, on the plan of the account the project bills to
   if (!QUOTA_DISABLED) {
-    const entitlements = await getUserEntitlements(userId)
+    const entitlements = await getAccountEntitlements(accountOf(project) ?? userId)
     if (!entitlements?.allowDeploymentRollback) {
       return {
         kind: 'error',

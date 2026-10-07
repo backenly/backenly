@@ -44,6 +44,7 @@ async function project() {
 
 async function drop(p: { userId: string; projectId: string }) {
   await prisma.project.deleteMany({ where: { id: p.projectId } })
+  await prisma.accountAiUsage.deleteMany({ where: { billingAccountId: p.userId } })
   await prisma.user.deleteMany({ where: { id: p.userId } })
 }
 
@@ -111,7 +112,7 @@ describe('the recorder', () => {
     expect(projectRelativePath(id, '/api/ai/chat').startsWith('/api/')).toBe(false)
   })
 
-  it("counts every served request toward the owner's month, and never Backenly's own", async () => {
+  it("counts every served request toward the billing account's month, and never Backenly's own", async () => {
     // The Usage page's API request count. It used to be kept only by the
     // Next-owned v1 routes and MCP calls, so /db, /auth and /fn traffic that
     // the runtime serves never showed up in it. API requests are unlimited;
@@ -137,8 +138,9 @@ describe('the recorder', () => {
       await flushRecordedRequests()
 
       const month = new Date().toISOString().slice(0, 7)
-      const usage = await prisma.userAiUsage.findUnique({
-        where: { userId_date: { userId: p.userId, date: month } },
+      // The project has no organization, so its billing account is its owner.
+      const usage = await prisma.accountAiUsage.findUnique({
+        where: { billingAccountId_date: { billingAccountId: p.userId, date: month } },
         select: { apiRequestCount: true },
       })
       expect(usage?.apiRequestCount).toBe(BigInt(4))

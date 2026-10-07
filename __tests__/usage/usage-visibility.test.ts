@@ -23,7 +23,7 @@ let ent: UserEntitlements
 let policy: OveragePolicy | null = null
 jest.mock('@/lib/entitlements', () => ({
   ...jest.requireActual('@/lib/entitlements'),
-  getUserEntitlements: () => Promise.resolve(ent),
+  getAccountEntitlements: () => Promise.resolve(ent),
   getOveragePolicy: () => Promise.resolve(policy),
 }))
 

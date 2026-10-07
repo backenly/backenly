@@ -8,7 +8,8 @@
  * credits would be refused the moment its plan allowance ran out.
  *
  * The seam is replaced here because it IS the Cloud provider's answer; the
- * month's usage is read from a real `user_ai_usage` row in Postgres.
+ * month's usage is read from a real `account_ai_usage` row in Postgres, keyed
+ * by the billing account (here the user's own, as with no organization).
  */
 
 let mockBonus = 0
@@ -33,9 +34,9 @@ let userId: string
 
 async function useCredits(credits: number): Promise<void> {
   const tokenCount = credits * TOKENS_PER_CREDIT
-  await prisma.userAiUsage.upsert({
-    where: { userId_date: { userId, date: thisMonth() } },
-    create: { userId, date: thisMonth(), tokenCount },
+  await prisma.accountAiUsage.upsert({
+    where: { billingAccountId_date: { billingAccountId: userId, date: thisMonth() } },
+    create: { billingAccountId: userId, date: thisMonth(), tokenCount },
     update: { tokenCount },
   })
 }
@@ -55,7 +56,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   process.env.BACKENLY_EDITION = ORIGINAL_EDITION
-  await prisma.userAiUsage.deleteMany({ where: { userId } }).catch(() => {})
+  await prisma.accountAiUsage.deleteMany({ where: { billingAccountId: userId } }).catch(() => {})
   await prisma.user.delete({ where: { id: userId } }).catch(() => {})
   await prisma.$disconnect()
 }, 60_000)

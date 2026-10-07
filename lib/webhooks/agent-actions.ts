@@ -15,6 +15,7 @@
 
 import { canAccessProject, canWriteProject, canAdministerProject } from '@/lib/edition/guard'
 import { enforceWebhook } from '@/lib/entitlements/policy'
+import { billingAccountOf } from '@/lib/usage/account'
 import {
   createWebhook,
   deleteWebhook,
@@ -54,7 +55,8 @@ async function refuse(actor: WebhookActor, access: Access): Promise<WebhookActio
   if (!(await GUARD[access](actor.userId, actor.projectId))) {
     return { ok: false, code: 'PROJECT_NOT_FOUND', summary: 'Project not found, or this key may not do that here.' }
   }
-  const entitlement = await enforceWebhook(actor.userId)
+  // The plan of the account the project bills to, not the caller's own.
+  const entitlement = await enforceWebhook((await billingAccountOf(actor.projectId)) ?? actor.userId)
   if (entitlement !== true) {
     return {
       ok: false,

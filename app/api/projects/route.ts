@@ -6,6 +6,7 @@ import { z } from 'zod'
 import { withAuth } from '@/lib/auth/route-protection'
 import { enforceProjectCreation } from '@/lib/entitlements/policy'
 import { initializeAccountEntitlements } from '@/lib/entitlements'
+import { accountProjectsWhere } from '@/lib/usage/account'
 import { recordProductEvent } from '@/lib/platform-signals'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import { assertWritable } from '@/lib/platform-controls'
@@ -122,8 +123,9 @@ export const POST = withAuth(async (request: NextRequest, { user }) => {
     const body = await request.json()
     const validatedData = createProjectSchema.parse(body)
 
-    // Who the project will belong to. Inside a team that is the team's owner,
-    // whose allowance it spends; elsewhere, the caller.
+    // Who the project will belong to, and the billing account whose plan it
+    // counts against: inside an organization, the organization; elsewhere, the
+    // caller.
     const lifecycle = getProjectLifecycle()
     const account = await lifecycle.creationAccount(user.userId, validatedData.organizationId ?? null)
     if (account.ok === false) {
@@ -134,13 +136,14 @@ export const POST = withAuth(async (request: NextRequest, { user }) => {
     }
 
     // ─── Plan enforcement: project limit ─────────────────────────────────────
-    const existingCount = await prisma.project.count({ where: { userId: account.ownerId } })
+    const billingAccount = account.organizationId ?? account.ownerId
+    const existingCount = await prisma.project.count({ where: accountProjectsWhere(billingAccount) })
 
     // Give a first-time account whatever entitlements it needs. A no-op in
     // single-tenant, where entitlements come from the edition rather than a row.
     await initializeAccountEntitlements(user.userId)
 
-    const limitCheck = await enforceProjectCreation(account.ownerId, existingCount)
+    const limitCheck = await enforceProjectCreation(billingAccount, existingCount)
     if (limitCheck !== true) {
       return NextResponse.json(
         {

@@ -51,7 +51,7 @@ jest.mock('@/lib/entitlements', () => {
   const actual = jest.requireActual('@/lib/entitlements')
   return {
     ...actual,
-    getUserEntitlements: async () => ({ ...actual.selfHostedEntitlements(), planName: 'BUILDER', apiRateLimitPerMin: ratePerMin }),
+    getAccountEntitlements: async () => ({ ...actual.selfHostedEntitlements(), planName: 'BUILDER', apiRateLimitPerMin: ratePerMin }),
   }
 })
 

@@ -32,9 +32,9 @@ jest.mock('@/lib/db/prisma', () => ({
   },
 }))
 
-const mockGetUserEntitlements = jest.fn()
+const mockGetAccountEntitlements = jest.fn()
 jest.mock('@/lib/entitlements', () => ({
-  getUserEntitlements: (...a: unknown[]) => mockGetUserEntitlements(...a),
+  getAccountEntitlements: (...a: unknown[]) => mockGetAccountEntitlements(...a),
 }))
 
 jest.mock('@/lib/notifications/platform', () => ({ createPlatformNotification: jest.fn() }))
@@ -63,14 +63,14 @@ describe('API requests', () => {
 describe('monthly active users', () => {
   it('fails open when there are no entitlements', async () => {
     // A billing hiccup must never stop a customer's end users signing up.
-    mockGetUserEntitlements.mockResolvedValue(null)
+    mockGetAccountEntitlements.mockResolvedValue(null)
 
     await expect(canAcceptNewEndUser('project-1')).resolves.toMatchObject({ allowed: true })
     expect(mockPrisma.projectActiveUser.count).not.toHaveBeenCalled()
   })
 
   it('blocks a new end-user at the MAU cap', async () => {
-    mockGetUserEntitlements.mockResolvedValue(entitlements({ maxMonthlyActiveUsers: 5 }))
+    mockGetAccountEntitlements.mockResolvedValue(entitlements({ maxMonthlyActiveUsers: 5 }))
     mockPrisma.projectActiveUser.count.mockResolvedValue(5)
 
     const decision = await canAcceptNewEndUser('project-1')
@@ -80,14 +80,14 @@ describe('monthly active users', () => {
   })
 
   it('allows below the cap', async () => {
-    mockGetUserEntitlements.mockResolvedValue(entitlements({ maxMonthlyActiveUsers: 5 }))
+    mockGetAccountEntitlements.mockResolvedValue(entitlements({ maxMonthlyActiveUsers: 5 }))
     mockPrisma.projectActiveUser.count.mockResolvedValue(4)
 
     await expect(canAcceptNewEndUser('project-1')).resolves.toMatchObject({ allowed: true })
   })
 
   it('never counts when MAU is unlimited', async () => {
-    mockGetUserEntitlements.mockResolvedValue(entitlements({ maxMonthlyActiveUsers: null }))
+    mockGetAccountEntitlements.mockResolvedValue(entitlements({ maxMonthlyActiveUsers: null }))
 
     await expect(canAcceptNewEndUser('project-1')).resolves.toMatchObject({ allowed: true })
     expect(mockPrisma.projectActiveUser.count).not.toHaveBeenCalled()
@@ -95,14 +95,23 @@ describe('monthly active users', () => {
 })
 
 describe('realtime connection limit', () => {
-  it('reports the owner, plan and cap from entitlements', async () => {
-    mockGetUserEntitlements.mockResolvedValue(entitlements({ maxRealtimeConnections: 25 }))
+  it("reports the billing account, plan and cap from that account's entitlements", async () => {
+    mockGetAccountEntitlements.mockResolvedValue(entitlements({ maxRealtimeConnections: 25 }))
 
     await expect(getRealtimeConnectionLimit('project-1')).resolves.toEqual({
-      ownerId: 'owner-1',
+      accountId: 'owner-1',
       planName: 'PRO',
       max: 25,
     })
+    expect(mockGetAccountEntitlements).toHaveBeenCalledWith('owner-1')
+  })
+
+  it("uses the project's organization, not its owner, when it has one", async () => {
+    mockPrisma.project.findUnique.mockResolvedValue({ userId: 'owner-1', organizationId: 'org-1' })
+    mockGetAccountEntitlements.mockResolvedValue(entitlements({ maxRealtimeConnections: 25 }))
+
+    await expect(getRealtimeConnectionLimit('project-1')).resolves.toMatchObject({ accountId: 'org-1' })
+    expect(mockGetAccountEntitlements).toHaveBeenCalledWith('org-1')
   })
 })
 
@@ -112,7 +121,7 @@ describe('single-tenant', () => {
     // all, which returned null and fell through to fail-open. It now resolves
     // real entitlements whose caps are null, which reaches the same decision
     // for a stated reason rather than by accident.
-    mockGetUserEntitlements.mockResolvedValue(selfHostedEntitlements())
+    mockGetAccountEntitlements.mockResolvedValue(selfHostedEntitlements())
 
     await expect(canAcceptNewEndUser('project-1')).resolves.toMatchObject({ allowed: true })
   })

@@ -5,6 +5,7 @@ import { withAuth } from '@/lib/auth/route-protection'
 import { addCustomDomain, getProjectDomains, deleteDomain, verifyDomain, isValidDomain, isReservedDomain } from '@/lib/domains'
 import { enforceCustomDomain } from '@/lib/entitlements/policy'
 import { canAccessProject, canAdministerProject, canWriteProject } from '@/lib/edition/guard'
+import { billingAccountOf } from '@/lib/usage/account'
 
 /**
  * GET /api/projects/[id]/domains
@@ -20,8 +21,8 @@ export const GET = withAuth(async (request: NextRequest, { user, params }) => {
       return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
 
-    // Enforce PRO plan requirement
-    const entitlementCheck = await enforceCustomDomain(user.userId)
+    // Enforce PRO plan requirement, on the plan of the account the project bills to
+    const entitlementCheck = await enforceCustomDomain((await billingAccountOf(projectId)) ?? user.userId)
     if (entitlementCheck !== true) {
       return NextResponse.json({
         error: 'Custom domains require PRO plan',
@@ -85,8 +86,8 @@ export const POST = withAuth(async (request: NextRequest, { user, params }) => {
       return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
 
-    // Enforce PRO plan requirement
-    const entitlementCheck = await enforceCustomDomain(user.userId)
+    // Enforce PRO plan requirement, on the plan of the account the project bills to
+    const entitlementCheck = await enforceCustomDomain((await billingAccountOf(projectId)) ?? user.userId)
     if (entitlementCheck !== true) {
       return NextResponse.json({
         error: 'Custom domains require PRO plan',
@@ -146,8 +147,8 @@ export const DELETE = withAuth(async (request: NextRequest, { user, params }) =>
       return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
 
-    // Enforce PRO plan requirement
-    const entitlementCheck = await enforceCustomDomain(user.userId)
+    // Enforce PRO plan requirement, on the plan of the account the project bills to
+    const entitlementCheck = await enforceCustomDomain((await billingAccountOf(projectId)) ?? user.userId)
     if (entitlementCheck !== true) {
       return NextResponse.json({
         error: 'Custom domains require PRO plan',

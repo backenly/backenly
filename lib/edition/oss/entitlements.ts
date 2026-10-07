@@ -33,23 +33,38 @@ import type { OveragePolicy, UserEntitlements } from '@/lib/entitlements/types'
  * before the provider is consulted, which is what lets a self-host install run
  * with no Plan and no Subscription row at all.
  */
-export async function cloudEntitlements(_userId: string): Promise<UserEntitlements | null> {
+export async function cloudEntitlements(_billingAccountId: string): Promise<UserEntitlements | null> {
   return null
 }
 
 /** No commercial ledger, so no granted credits. */
-export async function bonusCredits(_userId: string): Promise<number> {
+export async function bonusCredits(_billingAccountId: string): Promise<number> {
   return 0
 }
 
 /** Nothing is sold, so nothing was bought. */
-export async function purchasedCredits(_userId: string): Promise<number> {
+export async function purchasedCredits(_billingAccountId: string): Promise<number> {
   return 0
 }
 
 /** Nothing to charge. */
-export async function recordAiConsumption(_userId: string, _tokensUsed: number): Promise<void> {
+export async function recordAiConsumption(_billingAccountId: string, _tokensUsed: number): Promise<void> {
   // no-op
+}
+
+/** With no organizations, a person's billing account is themselves. */
+export async function accountOfUser(userId: string): Promise<string> {
+  return userId
+}
+
+/** With no organizations, the only account a caller can read is their own. */
+export async function accountForCaller(userId: string, requested: string | null): Promise<string | null> {
+  return !requested || requested === userId ? userId : null
+}
+
+/** With no organizations, an account's notices go to the account itself. */
+export async function accountOwner(billingAccountId: string): Promise<string | null> {
+  return billingAccountId
 }
 
 /**

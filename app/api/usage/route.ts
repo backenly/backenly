@@ -3,18 +3,21 @@ export const dynamic = 'force-dynamic'
 /**
  * GET /api/usage
  *
- * Returns per-project usage for the authenticated user for the current (or specified) month.
+ * Returns per-project usage for a billing account for the current (or specified) month:
+ * the caller's own, or (on Cloud) an organization they belong to named by orgId.
  * Includes sandbox countdown info for sandbox projects.
  *
  * Query params:
  *   month     — optional YYYY-MM (defaults to current month)
  *   projectId — optional, filter to a single project
+ *   orgId     — optional, an organization the caller belongs to (Cloud)
  */
 
 import { NextRequest, NextResponse } from 'next/server'
 import { withAuth } from '@/lib/auth/route-protection'
 import { prisma } from '@/lib/db/prisma'
-import { getUserEntitlements } from '@/lib/entitlements'
+import { accountForCaller, getAccountEntitlements } from '@/lib/entitlements'
+import { accountProjectsWhere } from '@/lib/usage/account'
 import { getSandboxStatus } from '@/lib/projects/sandbox-lifecycle'
 
 export const GET = withAuth(async (request: NextRequest, { user }) => {
@@ -33,9 +36,11 @@ export const GET = withAuth(async (request: NextRequest, { user }) => {
       )
     }
 
-    const ent = await getUserEntitlements(userId)
+    const account = await accountForCaller(userId, searchParams.get('orgId'))
+    if (!account) return NextResponse.json({ error: 'NOT_FOUND', message: 'Not found' }, { status: 404 })
+    const ent = await getAccountEntitlements(account)
 
-    const projectWhere: Record<string, unknown> = { userId }
+    const projectWhere: Record<string, unknown> = { ...accountProjectsWhere(account) }
     if (projectIdFilter) projectWhere.id = projectIdFilter
 
     const projects = await prisma.project.findMany({

@@ -176,7 +176,11 @@ export async function POST(request: NextRequest) {
   // set in sync when a new model-backed tool lands.
   if (MODEL_BACKED_TOOLS.has(effectiveTool)) {
     const { enforceAiCredits } = await import('@/lib/entitlements/policy')
-    const credits = await enforceAiCredits(auth.userId)
+    const { creditAccountOf } = await import('@/lib/usage/account')
+    // The project's billing account's credits, not the caller's own. An
+    // account that cannot be read is not blocked: the gate is fail-open.
+    const account = await creditAccountOf(auth.projectId)
+    const credits = account ? await enforceAiCredits(account) : true
     if (credits !== true) {
       recordMcpCall(
         { ...auth, endpoint: ENDPOINT, startedAt },
@@ -779,8 +783,11 @@ export async function POST(request: NextRequest) {
     ))
   } finally {
     if (metered && tokenScope.tokens > 0) {
-      import('@/lib/entitlements/policy')
-        .then(({ chargeAiCredits }) => chargeAiCredits(auth.userId, tokenScope.tokens))
+      Promise.all([import('@/lib/entitlements/policy'), import('@/lib/usage/account')])
+        .then(async ([{ chargeAiCredits }, { creditAccountOf }]) => {
+          const account = await creditAccountOf(auth.projectId)
+          if (account) await chargeAiCredits(account, tokenScope.tokens)
+        })
         .catch(() => {})
     }
   }

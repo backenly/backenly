@@ -25,6 +25,7 @@
  * take down a customer's API.
  */
 import { prisma } from '@/lib/db/prisma'
+import { billingAccountOf } from '@/lib/usage/account'
 
 export const GRACE_DAYS = 7
 const DAY_MS = 86_400_000
@@ -74,9 +75,9 @@ function evaluate(overSince: Date | null, now: Date): Restriction {
 /** The restriction on the account that owns a project. */
 export async function projectRestriction(projectId: string, axis: RestrictedAxis, now: Date = new Date()): Promise<Restriction> {
   try {
-    const project = await prisma.project.findUnique({ where: { id: projectId }, select: { userId: true } })
-    if (!project?.userId) return NONE
-    return await accountRestriction(project.userId, axis, now)
+    const account = await billingAccountOf(projectId)
+    if (!account) return NONE
+    return await accountRestriction(account, axis, now)
   } catch {
     return NONE
   }
@@ -92,8 +93,8 @@ export const RESTRICTED_CODE = 'PLAN_LIMIT_EXCEEDED'
 export function restrictionMessage(axis: RestrictedAxis, r: Restriction): string {
   const since = r.overSince ? r.overSince.toISOString().slice(0, 10) : 'recently'
   return axis === 'db_bytes'
-    ? `This project's owner has been over their database storage limit since ${since}, past the ${GRACE_DAYS}-day grace period, so the data API is read-only. Reads and deletes still work. It becomes writable again once usage is back under the limit or the owner raises it.`
-    : `This project's owner has been over their egress limit since ${since}, past the ${GRACE_DAYS}-day grace period, so files are not being served. Downloads resume when the owner raises their limit or the month resets.`
+    ? `The account this project bills to has been over its database storage limit since ${since}, past the ${GRACE_DAYS}-day grace period, so the data API is read-only. Reads and deletes still work. It becomes writable again once usage is back under the limit or the limit is raised.`
+    : `The account this project bills to has been over its egress limit since ${since}, past the ${GRACE_DAYS}-day grace period, so files are not being served. Downloads resume when the limit is raised or the month resets.`
 }
 
 export function restrictionDetails(axis: RestrictedAxis, r: Restriction): Record<string, unknown> {
