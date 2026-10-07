@@ -24,8 +24,6 @@ export const dynamic = 'force-dynamic'
  * chat"; it was not, and the claim is what hid the hole. Both halves are wired
  * now: the pre-gate below, and the charge after the brain returns.
  *
- * `mcpGuard` additionally counts the request against `apiRequestCount`.
- *
  * Hard wall-clock cap at 90s so an MCP host never hangs forever.
  */
 

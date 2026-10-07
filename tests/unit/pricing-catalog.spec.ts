@@ -3,15 +3,16 @@
  *
  *   - Usage pricing appears only when published (NEXT_PUBLIC_USAGE_PRICING),
  *     which the release turns on with production in shadow mode or later.
- *   - Each rate appears only once the catalog publishes it: a rate is published
- *     when measured cost confirms it sits above its floor. Database is held back
- *     until the backup dumps move to S3 and that cost is measured.
+ *   - Each rate appears, and is charged, only once the catalog publishes it.
+ *   - Every rate matches or undercuts Supabase's Pro rate, and reads with every
+ *     digit it has, never rounded to the cent.
  *   - The rates shown are the rates billed: one catalog feeds both.
  */
 import {
   axisBillable,
   egressBillable,
   formatRate,
+  formatUnitPrice,
   includedEgressMb,
   overageCents,
   OVERAGE_RATE_PUBLISHED,
@@ -38,7 +39,7 @@ describe('charging egress: one switch, and never the direct rate', () => {
       expect(axisBillable('SCALE', axis, true)).toBe(false)
     }
     expect(axisBillable('BUILDER', 'egress_bytes', false)).toBe(false)
-    expect(axisBillable('BUILDER', 'egress_bytes', true)).toBe(false)
+    expect(axisBillable('BUILDER', 'egress_bytes', true)).toBe(true)
     expect(axisBillable('SANDBOX', 'egress_bytes', true)).toBe(false)
   })
 
@@ -64,26 +65,35 @@ describe('publishing', () => {
     expect(usagePricingPublished('published')).toBe(true)
   })
 
-  it('publishes all rates except egress (held back: thin margin on CloudFront India PAYG)', () => {
+  it('publishes every rate', () => {
     expect(OVERAGE_RATE_PUBLISHED).toEqual({
       mau: true,
       db_bytes: true,
       file_bytes: true,
       fn_runs: true,
-      egress_bytes: false,
+      egress_bytes: true,
     })
   })
 })
 
 describe('the Pro usage table', () => {
-  it('lists what Pro includes and each published rate past it', () => {
+  it('lists what Pro includes and each published rate past it, at or below Supabase Pro', () => {
     expect(proUsagePriceRows()).toEqual([
       { axis: 'mau', label: 'Monthly active users', included: '100,000', rate: '$0.003 per MAU' },
-      { axis: 'db_bytes', label: 'Database', included: '8 GB', rate: '$0.30 per GB-month' },
-      { axis: 'file_bytes', label: 'File storage', included: '100 GB', rate: '$0.03 per GB-month' },
+      { axis: 'db_bytes', label: 'Database', included: '8 GB', rate: '$0.125 per GB-month' },
+      { axis: 'file_bytes', label: 'File storage', included: '100 GB', rate: '$0.0213 per GB-month' },
       { axis: 'fn_runs', label: 'Function runs', included: '2M', rate: '$2.00 per 1M runs' },
-      { axis: 'egress_bytes', label: 'Egress', included: '250 GB', rate: null },
+      { axis: 'egress_bytes', label: 'Egress', included: '250 GB', rate: '$0.09 per GB' },
     ])
+  })
+
+  it('states a rate with every digit it has, never rounded to the cent', () => {
+    expect(formatUnitPrice({ cents: 12.5, per: GIB, label: 'per GB-month' })).toBe('$0.125 per GB-month')
+    expect(formatUnitPrice({ cents: 2.13, per: GIB, label: 'per GB-month' })).toBe('$0.0213 per GB-month')
+    expect(formatUnitPrice({ cents: 0.3, per: 1, label: 'per MAU' })).toBe('$0.003 per MAU')
+    expect(formatUnitPrice({ cents: 0.325, per: 1, label: 'per MAU' })).toBe('$0.00325 per MAU')
+    expect(formatUnitPrice({ cents: 9, per: GIB, label: 'per GB' })).toBe('$0.09 per GB')
+    expect(formatUnitPrice({ cents: 200, per: 1_000_000, label: 'per 1M runs' })).toBe('$2.00 per 1M runs')
   })
 
   it('advertises the competitive included quotas', () => {
@@ -99,15 +109,16 @@ describe('the Pro usage table', () => {
   it('bills exactly the rate it shows', () => {
     expect(overageCents('mau', 1_000)).toBeCloseTo(300, 9)
     expect(overageCents('fn_runs', 1_000_000)).toBeCloseTo(200, 9)
-    expect(overageCents('file_bytes', GIB)).toBeCloseTo(3, 9)
-    expect(overageCents('egress_bytes', GIB, 'cdn')).toBeCloseTo(12, 9)
-    expect(overageCents('egress_bytes', GIB, 'direct')).toBeCloseTo(12, 9)
-    expect(formatRate('egress_bytes')).toBe('$0.12 per GB')
+    expect(overageCents('file_bytes', GIB)).toBeCloseTo(2.13, 9)
+    expect(overageCents('file_bytes', 100 * GIB)).toBeCloseTo(213, 9)
+    expect(overageCents('egress_bytes', GIB, 'cdn')).toBeCloseTo(9, 9)
+    expect(overageCents('egress_bytes', GIB, 'direct')).toBeCloseTo(9, 9)
+    expect(formatRate('egress_bytes')).toBe('$0.09 per GB')
   })
 
-  it('prices database overage at the published $0.30 per GB-month, above its measured cost', () => {
-    expect(overageCents('db_bytes', GIB)).toBeCloseTo(30, 9)
-    expect(overageCents('db_bytes', 2.5 * GIB)).toBeCloseTo(75, 9)
-    expect(formatRate('db_bytes')).toBe('$0.30 per GB-month')
+  it('prices database overage at Supabase’s $0.125 per GB-month', () => {
+    expect(overageCents('db_bytes', GIB)).toBeCloseTo(12.5, 9)
+    expect(overageCents('db_bytes', 8 * GIB)).toBeCloseTo(100, 9)
+    expect(formatRate('db_bytes')).toBe('$0.125 per GB-month')
   })
 })

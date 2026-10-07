@@ -500,7 +500,7 @@ export const ATLAS: AtlasGroup[] = [
     title: 'Teams, security and hosting',
     lede: 'The questions a company asks before it trusts a backend with production.',
     items: [
-      { icon: Users, name: 'Organizations and roles', body: 'Invite teammates with roles. Pro includes five seats.' },
+      { icon: Users, name: 'Organizations and roles', body: 'Invite teammates with roles. Free includes two seats and Pro five.' },
       { icon: Globe, name: 'Custom domains', body: 'Serve your backend from your own domain on Pro and Enterprise.' },
       { icon: ScrollText, name: 'Logs', body: 'Kept for 7 days on Free, 30 on Pro and 90 on Enterprise.' },
       { icon: LockKeyhole, name: 'Single sign-on', body: 'OIDC sign-on for your team, on Enterprise.' },
