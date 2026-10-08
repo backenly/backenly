@@ -11,6 +11,10 @@
  *   2. cloud delegates to the @cloud/* provider, which resolves overlay-first,
  *      so the private overlay can replace it without touching public source.
  *
+ * Entitlements belong to a billing account (lib/usage/account.ts): on Cloud an
+ * organization, so a person's own entitlements are their own account's, which
+ * only the provider can name.
+ *
  * The alias assertions exist because the whole mechanism is a build-time
  * resolution order. Reversing the two entries in `paths` would silently make
  * the public fallback win inside composed Cloud, and nothing else in the suite
@@ -37,9 +41,21 @@ jest.mock('@/lib/db/prisma', () => ({
 }))
 
 const mockCloudEntitlements = jest.fn()
-jest.mock('@cloud/entitlements', () => ({ cloudEntitlements: (...a: unknown[]) => mockCloudEntitlements(...a) }))
+const mockAccountOfUser = jest.fn()
+const mockAccountForCaller = jest.fn()
+jest.mock('@cloud/entitlements', () => ({
+  cloudEntitlements: (...a: unknown[]) => mockCloudEntitlements(...a),
+  accountOfUser: (...a: unknown[]) => mockAccountOfUser(...a),
+  accountForCaller: (...a: unknown[]) => mockAccountForCaller(...a),
+}))
 
-import { getUserEntitlements, selfHostedEntitlements } from '@/lib/entitlements'
+import {
+  accountForCaller,
+  accountOfUser,
+  getAccountEntitlements,
+  getUserEntitlements,
+  selfHostedEntitlements,
+} from '@/lib/entitlements'
 
 const ORIGINAL_EDITION = process.env.BACKENLY_EDITION
 
@@ -75,19 +91,26 @@ describe('single-tenant entitlements', () => {
     // null means UNLIMITED throughout the seam. Zero would mean "blocked", and
     // a number would mean "metered", so this is the assertion that keeps a
     // self-hoster's own hardware from being capped.
-    expect(ent.maxApiRequestsPerMonth).toBeNull()
     expect(ent.maxPostgresStorageMb).toBeNull()
     expect(ent.maxFileStorageMb).toBeNull()
     expect(ent.maxRealtimeConnections).toBeNull()
     expect(ent.maxMonthlyActiveUsers).toBeNull()
     expect(ent.maxAiFunctionInvocationsPerMonth).toBeNull()
     expect(ent.maxTriggersPerProject).toBeNull()
-    expect(ent.apiQuotaIsLifetime).toBe(false)
   })
 
   it('caps projects at one, because that is the edition', async () => {
     const ent = (await getUserEntitlements('any-user'))!
     expect(ent.maxProjects).toBe(1)
+  })
+
+  it('has no organizations: a person is their own account, and the only one they can read', async () => {
+    await expect(accountOfUser('user-1')).resolves.toBe('user-1')
+    await expect(accountForCaller('user-1')).resolves.toBe('user-1')
+    await expect(accountForCaller('user-1', 'user-1')).resolves.toBe('user-1')
+    await expect(accountForCaller('user-1', 'someone-else')).resolves.toBeNull()
+    expect(mockAccountOfUser).not.toHaveBeenCalled()
+    expect(mockAccountForCaller).not.toHaveBeenCalled()
   })
 })
 
@@ -99,10 +122,30 @@ describe('cloud entitlements', () => {
   it('delegates to the @cloud provider', async () => {
     mockCloudEntitlements.mockResolvedValue({ ...selfHostedEntitlements(), planName: 'PRO' })
 
+    const ent = await getAccountEntitlements('org-1')
+
+    expect(mockCloudEntitlements).toHaveBeenCalledWith('org-1')
+    expect(ent!.planName).toBe('PRO')
+  })
+
+  it("answers a person's own entitlements from the account the provider names for them", async () => {
+    mockAccountOfUser.mockResolvedValue('org-of-user-1')
+    mockCloudEntitlements.mockResolvedValue({ ...selfHostedEntitlements(), planName: 'PRO' })
+
     const ent = await getUserEntitlements('user-1')
 
-    expect(mockCloudEntitlements).toHaveBeenCalledWith('user-1')
+    expect(mockAccountOfUser).toHaveBeenCalledWith('user-1')
+    expect(mockCloudEntitlements).toHaveBeenCalledWith('org-of-user-1')
     expect(ent!.planName).toBe('PRO')
+  })
+
+  it('lets the provider decide which account a caller may read', async () => {
+    mockAccountForCaller.mockResolvedValueOnce('org-1').mockResolvedValueOnce(null)
+
+    await expect(accountForCaller('user-1', 'org-1')).resolves.toBe('org-1')
+    await expect(accountForCaller('user-1', 'org-2')).resolves.toBeNull()
+    expect(mockAccountForCaller).toHaveBeenNthCalledWith(1, 'user-1', 'org-1')
+    expect(mockAccountForCaller).toHaveBeenNthCalledWith(2, 'user-1', 'org-2')
   })
 
   it('passes a missing subscription through as null rather than unlimited', async () => {
@@ -111,7 +154,7 @@ describe('cloud entitlements', () => {
     // Cloud account an uncapped platform.
     mockCloudEntitlements.mockResolvedValue(null)
 
-    await expect(getUserEntitlements('user-2')).resolves.toBeNull()
+    await expect(getAccountEntitlements('org-2')).resolves.toBeNull()
   })
 })
 

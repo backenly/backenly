@@ -1,7 +1,8 @@
 export const dynamic = 'force-dynamic'
 
 import { NextRequest } from 'next/server'
-import { consume, AUTH_LIMITS, clientIp } from '@/lib/security/auth-rate-limit'
+import { clientIp } from '@/lib/security/auth-rate-limit'
+import { admitSigninAttempt, admitSigninRequest } from '@/lib/security/end-user-signin-limit'
 import { throttledV1Response } from '@/lib/security/rate-limit-response'
 import { carriesInternalToken, isPlatformProbe } from '@/lib/security/platform-probe'
 import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
@@ -35,27 +36,18 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
 async function signIn(request: NextRequest, projectId: string, env: AuthEnvironment): Promise<Response> {
   try {
 
-    // Throttled per IP AND per project. This surface had no rate limiting of
-    // any kind: it is unauthenticated by design, because it is how a
-    // customer's own users sign in, but the platform's own /api/auth/login has
-    // IP brute-force protection and this had none. That left credential
-    // stuffing against every end user of every project unthrottled.
-    //
-    // Keyed on both so one project under attack cannot lock out sign-in attempts for a
-    // different project behind the same egress address.
+    // Throttled per project, on FAILED attempts per address and per account,
+    // under a ceiling on all attempts per address. Successful sign-ins are
+    // never what runs a budget out: lib/security/end-user-signin-limit.ts has
+    // what counting them did to real users.
     const ip = clientIp(request)
-    const consumeIp = () => consume(
-      `v1:endUserSignin:${projectId}:${ip}`,
-      AUTH_LIMITS.endUserSignin.ip.limit,
-      AUTH_LIMITS.endUserSignin.ip.windowMs,
-    )
     // Backenly's own contract probe is not counted (lib/security/platform-probe.ts),
     // and whether a request is the probe depends on the address in its body. So a
     // request carrying the internal-traffic token is counted once that address is
     // known, below; every other request is counted here, before anything else.
     const mayBeProbe = carriesInternalToken(request)
     if (!mayBeProbe) {
-      const limit = await consumeIp()
+      const limit = await admitSigninRequest(projectId, ip)
       if (!limit.allowed) return throttledV1Response(limit)
     }
 
@@ -86,31 +78,20 @@ async function signIn(request: NextRequest, projectId: string, env: AuthEnvironm
 
     const probe = mayBeProbe && isPlatformProbe(request, email)
     if (mayBeProbe && !probe) {
-      const limit = await consumeIp()
+      const limit = await admitSigninRequest(projectId, ip)
       if (!limit.allowed) return throttledV1Response(limit)
     }
 
-    // A SECOND budget, keyed on the identity being guessed.
+    // The failure budgets, per address and per account. The account one is
+    // what stops distributed stuffing: a botnet spends one attempt per address
+    // and never trips a per-address limit, but every guess at one account
+    // lands in the same bucket.
     //
-    // The per-IP limit above is weak against distributed credential stuffing:
-    // a botnet spends one attempt per address and never trips it. Keying on
-    // project + normalised email means a single account cannot be hammered
-    // from many sources either. The platform's own login has account lockout
-    // for the same reason; this is its end-user equivalent.
-    //
-    // Normalised, so `Alice@x.com` and `alice@x.com` share one budget rather
-    // than doubling it.
-    if (!probe) {
-      const identityLimit = await consume(
-        `v1:endUserSignin:${projectId}:${String(email).trim().toLowerCase()}`,
-        AUTH_LIMITS.endUserSignin.ip.limit,
-        AUTH_LIMITS.endUserSignin.ip.windowMs,
-      )
-      // Deliberately the same answer as an IP trip, and the same shape as a
-      // wrong password: a different response here would confirm the address
-      // exists and is being defended.
-      if (!identityLimit.allowed) return throttledV1Response(identityLimit)
-    }
+    // Spent now and refunded once the password proves correct, below. Keyed on
+    // the address as typed (normalised), never on whether it exists: a
+    // different answer for real accounts would confirm which ones are real.
+    const attempt = probe ? null : await admitSigninAttempt(projectId, ip, email)
+    if (attempt?.denied) return throttledV1Response(attempt.denied)
     const schemaName = env.schemaName
 
     // Check if users table exists
@@ -184,6 +165,11 @@ async function signIn(request: NextRequest, projectId: string, env: AuthEnvironm
     if (!isValid) {
       return createErrorResponse(ErrorCodes.UNAUTHORIZED, 'Invalid email or password', 401)
     }
+
+    // The password is right, so this attempt was not a guess: it gives back
+    // what it drew from the failure budgets. Before the suspension and
+    // verification answers, which refuse someone who knows the password.
+    await attempt?.credentialsVerified()
 
     // ── Suspension is disclosed only to someone who proved the password ─────
     //

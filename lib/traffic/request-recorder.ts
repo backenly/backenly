@@ -32,10 +32,22 @@
  * process would otherwise count again. Both carry `INTERNAL_TRAFFIC_HEADER`
  * with a value derived from the platform secret, so a client cannot use the
  * header to keep its own requests out of the log.
+ *
+ * ── What it also counts ─────────────────────────────────────────────────────
+ *
+ * Each written batch is added to its billing accounts' monthly API request
+ * count (`AccountAiUsage.apiRequestCount`), the number the Usage page shows. It is
+ * counted here because every request a project's API serves passes through
+ * this file exactly once, whichever process answered it: the data API, auth,
+ * functions and realtime as much as storage. What is never recorded is never
+ * counted, and an MCP call from a coding agent is not a request to the
+ * project's API, so it is not counted either. The count only informs: API
+ * requests are unlimited on every plan, and nothing reads it to refuse one.
  */
 
 import { createHmac, timingSafeEqual } from 'crypto'
 import { prisma } from '@/lib/db/prisma'
+import { accountOf } from '@/lib/usage/account'
 
 export const INTERNAL_TRAFFIC_HEADER = 'x-backenly-internal'
 
@@ -90,7 +102,9 @@ interface Pending {
 
 const buffer: Pending[] = []
 let timer: ReturnType<typeof setTimeout> | null = null
-const owners = new Map<string, { userId: string | null; at: number }>()
+// Per project: its owner (written on each log row) and its billing account
+// (lib/usage/account.ts), which the monthly API request count belongs to.
+const owners = new Map<string, { userId: string | null; account: string | null; at: number }>()
 
 export interface ServedRequest {
   projectId: string | null | undefined
@@ -138,25 +152,27 @@ export function recordRuntimeRequest(req: ServedRequest): void {
   }
 }
 
-async function ownersOf(projectIds: string[]): Promise<Map<string, string | null>> {
+type ProjectAccount = { userId: string | null; account: string | null }
+
+async function ownersOf(projectIds: string[]): Promise<Map<string, ProjectAccount>> {
   const now = Date.now()
-  const out = new Map<string, string | null>()
+  const out = new Map<string, ProjectAccount>()
   const missing: string[] = []
   for (const id of projectIds) {
     const hit = owners.get(id)
-    if (hit && now - hit.at < OWNER_TTL_MS) out.set(id, hit.userId)
+    if (hit && now - hit.at < OWNER_TTL_MS) out.set(id, { userId: hit.userId, account: hit.account })
     else missing.push(id)
   }
   if (missing.length > 0) {
     const rows = await prisma.project.findMany({
       where: { id: { in: missing } },
-      select: { id: true, userId: true },
+      select: { id: true, userId: true, organizationId: true },
     })
-    const found = new Map(rows.map(r => [r.id, r.userId]))
+    const found = new Map(rows.map(r => [r.id, { userId: r.userId, account: accountOf(r) }]))
     for (const id of missing) {
-      const userId = found.get(id) ?? null
-      owners.set(id, { userId, at: now })
-      out.set(id, userId)
+      const hit = found.get(id) ?? { userId: null, account: null }
+      owners.set(id, { ...hit, at: now })
+      out.set(id, hit)
     }
   }
   return out
@@ -177,14 +193,49 @@ export async function flushRecordedRequests(): Promise<number> {
   try {
     const byProject = await ownersOf([...new Set(batch.map(r => r.projectId))])
     const data = batch.flatMap(r => {
-      const userId = byProject.get(r.projectId)
+      const userId = byProject.get(r.projectId)?.userId
       return userId ? [{ ...r, userId }] : []
     })
     if (data.length === 0) return 0
     const written = await prisma.apiRequestLog.createMany({ data })
+    await countApiRequests(
+      data.flatMap(r => {
+        const account = byProject.get(r.projectId)?.account
+        return account ? [{ account, timestamp: r.timestamp }] : []
+      }),
+    )
     return written.count
   } catch (err: any) {
     console.warn(`[RequestRecorder] dropped ${batch.length} request rows: ${err?.message ?? err}`)
     return 0
   }
+}
+
+/**
+ * Add a written batch to each billing account's API request count, in the
+ * month each request was served. One write per account and month rather than
+ * per request.
+ * Never throws: a failed count costs the Usage page a few requests, and never
+ * the log rows already written.
+ */
+async function countApiRequests(rows: Array<{ account: string; timestamp: Date }>): Promise<void> {
+  const counts = new Map<string, { account: string; month: string; n: number }>()
+  for (const r of rows) {
+    const month = r.timestamp.toISOString().slice(0, 7) // YYYY-MM, UTC
+    const key = `${r.account}:${month}`
+    const c = counts.get(key)
+    if (c) c.n++
+    else counts.set(key, { account: r.account, month, n: 1 })
+  }
+  const results = await Promise.allSettled(
+    [...counts.values()].map(({ account, month, n }) =>
+      prisma.accountAiUsage.upsert({
+        where: { billingAccountId_date: { billingAccountId: account, date: month } },
+        update: { apiRequestCount: { increment: n } },
+        create: { billingAccountId: account, date: month, apiRequestCount: BigInt(n) },
+      }),
+    ),
+  )
+  const failed = results.filter(r => r.status === 'rejected').length
+  if (failed > 0) console.warn(`[RequestRecorder] API request count not updated for ${failed} account-months`)
 }

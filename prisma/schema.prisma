@@ -1299,6 +1299,47 @@ model UserAiUsage {
   @@map("user_ai_usage")
 }
 
+// The same monthly counters, kept per BILLING ACCOUNT rather than per user.
+//
+// A plan's allowances (AI credits, function runs, the API request count the
+// Usage page shows) belong to whoever pays for them: an organization on
+// Backenly Cloud, the owning account where there are no organizations. Keyed
+// by a plain string like the usage ledger (usage_daily), not a foreign key, so
+// one table serves both. UserAiUsage above is the per-user history these
+// counters were kept in before organizations were billed on their own; nothing
+// writes it any more.
+model AccountAiUsage {
+  id                    String   @id @default(uuid())
+  billingAccountId      String
+  date                  String // YYYY-MM
+  intentCount           Int      @default(0) // AI build actions this month (committed)
+  reservedCount         Int      @default(0) // AI build actions reserved but not yet committed
+  tokenCount            Int      @default(0)
+  apiRequestCount       BigInt   @default(0) // API requests this month
+  aiFunctionInvocations Int      @default(0) // AI Function invocations this month
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@unique([billingAccountId, date])
+  @@index([date])
+  @@map("account_ai_usage")
+}
+
+// A billing account's two credit balances, bonus and purchased, and the last
+// month whose consumption has been reconciled into them. Formerly columns on
+// User (bonusCredits, purchasedCredits, bonusReconciledThrough), which now
+// only hold the history this table started from.
+model AccountCredits {
+  billingAccountId       String   @id
+  bonusCredits           Int      @default(0)
+  purchasedCredits       Int      @default(0)
+  bonusReconciledThrough String?
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  @@map("account_credits")
+}
+
 // Monthly Active Users — one row per (project, end-user, calendar month).
 // An end-user is "active" when they authenticate (sign-in / token refresh /
 // OAuth) against a project in a given YYYY-MM. Distinct count per project per
@@ -1322,18 +1363,21 @@ model ProjectActiveUser {
 // Status transitions: reserved → committed (on success) or refunded (on failure/timeout).
 // Stale reservations (status=reserved past expiresAt) are cleaned up by the nightly cron.
 model CreditReservation {
-  id          String    @id @default(uuid())
-  userId      String
-  date        String // YYYY-MM — must match the UserAiUsage row it debits
-  amount      Int       @default(1)
-  jobId       String    @unique // opaque caller-supplied job identifier
-  status      String    @default("reserved") // reserved | committed | refunded
-  createdAt   DateTime  @default(now())
-  expiresAt   DateTime // stale reservations auto-refunded after this time
-  committedAt DateTime?
-  refundedAt  DateTime?
+  id               String    @id @default(uuid())
+  userId           String
+  // The billing account whose AccountAiUsage row this reservation debits.
+  billingAccountId String?
+  date             String // YYYY-MM — must match the usage row it debits
+  amount           Int       @default(1)
+  jobId            String    @unique // opaque caller-supplied job identifier
+  status           String    @default("reserved") // reserved | committed | refunded
+  createdAt        DateTime  @default(now())
+  expiresAt        DateTime // stale reservations auto-refunded after this time
+  committedAt      DateTime?
+  refundedAt       DateTime?
 
   @@index([userId, date])
+  @@index([billingAccountId, date])
   @@index([jobId])
   @@index([status, expiresAt])
   @@map("credit_reservations")
@@ -1344,28 +1388,33 @@ model CreditReservation {
 // grants (referral, promo, signup bonus) and purchases as positive amounts, and
 // month-rollover burns (credits consumed beyond the plan allowance) as
 // negatives. The Billing "Credit activity" tab reads from here;
-// `User.bonusCredits` and `User.purchasedCredits` are the running balances.
+// AccountCredits holds the running balances.
 model CreditLedgerEntry {
-  id           String   @id @default(uuid())
-  userId       String
+  id               String   @id @default(uuid())
+  // Who the movement concerns: the account owner, or the user a grant was for.
+  userId           String
+  // The billing account whose balance moved. Null only on a row written by a
+  // release from before balances were kept per billing account.
+  billingAccountId String?
   // Signed credits: +grant, -burn. Summed over one balance's reasons, equals
   // that balance's net movement.
-  amount       Int
+  amount           Int
   // That balance immediately AFTER this entry (for a clean history UI).
-  balanceAfter Int
+  balanceAfter     Int
   // Bonus: 'referral_signup' | 'referral_paid' | 'promo' | 'admin_grant' |
   //        'monthly_bonus_burn' | 'signup_bonus'
   // Purchased: 'purchase' | 'monthly_purchased_burn'
-  reason       String
+  reason           String
   // Free-form human note shown in the history row.
-  description  String?
+  description      String?
   // Optional link to the originating record (ReferralGrant id, promo code, …).
-  referenceId  String?
-  createdAt    DateTime @default(now())
+  referenceId      String?
+  createdAt        DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, createdAt])
+  @@index([billingAccountId, createdAt])
   @@map("credit_ledger_entries")
 }
 
@@ -1375,17 +1424,21 @@ model CreditLedgerEntry {
 // so a webhook delivered twice can never credit an account twice. Written only
 // by the Cloud overlay; Stripe stays the payment authority.
 model AiCreditPurchase {
-  id              String   @id @default(uuid())
-  userId          String
-  stripeSessionId String   @unique
-  credits         Int
-  amountCents     Int
-  currency        String
-  createdAt       DateTime @default(now())
+  id               String   @id @default(uuid())
+  // Who paid.
+  userId           String
+  // The billing account the credits were added to.
+  billingAccountId String?
+  stripeSessionId  String   @unique
+  credits          Int
+  amountCents      Int
+  currency         String
+  createdAt        DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, createdAt])
+  @@index([billingAccountId, createdAt])
   @@map("ai_credit_purchases")
 }
 
@@ -1876,19 +1929,19 @@ model PaddleSubscription {
 // on name or schemaName made re-creating "staging" after a merge fail after the
 // new schema had already been created and registered.
 model WorkspaceBranch {
-  id           String                      @id @default(uuid())
+  id           String                     @id @default(uuid())
   projectId    String
   name         String // slug, e.g. "add-payments"
   schemaName   String // workspace_{projectId}_br_{name}
-  status       String                      @default("active") // active | merged | discarded
+  status       String                     @default("active") // active | merged | discarded
   createdBy    String
-  createdAt    DateTime                    @default(now())
+  createdAt    DateTime                   @default(now())
   mergedAt     DateTime?
   discardedAt  DateTime?
   // Main's schema when the branch was cut: what a merge compares against to
   // tell a change made on the branch from one made on main since.
   baseSnapshot Json?
-  project      Project                     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project      Project                    @relation(fields: [projectId], references: [id], onDelete: Cascade)
   apiKeys      ApiKey[]
   migrations   WorkspaceBranchMigration[]
 
@@ -2096,8 +2149,8 @@ model Plan {
   autonomyMonthlyScanBudget        Int? // Hard cap on expensive scans/project/month (null = unlimited / fair-use)
   autonomyMaxLevel                 String  @default("AGGRESSIVE") // Ceiling for the owner's risk dial: CONSERVATIVE | BALANCED | AGGRESSIVE. Tier-2+ still always needs a human, at every level.
   autonomyMaxActionsPerWindow      Int? // Circuit-breaker ceiling: autonomous mutations/project/rolling-window (null = unlimited — healing is never a paywall)
-  maxApiRequestsPerMonth           BigInt? // API request cap — monthly OR lifetime (see apiQuotaIsLifetime)
-  apiQuotaIsLifetime               Boolean @default(false) // true = maxApiRequestsPerMonth is a lifetime total that never resets (Free)
+  maxApiRequestsPerMonth           BigInt? // RETIRED: API requests are unlimited on every plan. Read by nothing; drop once no deployed image selects it.
+  apiQuotaIsLifetime               Boolean @default(false) // RETIRED with maxApiRequestsPerMonth.
   inactivityPauseDays              Int? // Days without real use before a project on this plan is paused. null = never paused.
   pausedFreeResumeDays             Int? // Days after pausing that resuming stays free on this plan. null = always free to resume.
   maxPostgresStorageMb             Int? // PostgreSQL storage in MB

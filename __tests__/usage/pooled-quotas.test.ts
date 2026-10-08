@@ -28,7 +28,7 @@ let ent: UserEntitlements
 let policy: OveragePolicy | null = null
 jest.mock('@/lib/entitlements', () => ({
   ...jest.requireActual('@/lib/entitlements'),
-  getUserEntitlements: () => Promise.resolve(ent),
+  getAccountEntitlements: () => Promise.resolve(ent),
   getOveragePolicy: () => Promise.resolve(policy),
 }))
 
@@ -41,6 +41,7 @@ const { evaluateAccountAlerts, recordQuotaWarning } = require('@/lib/usage/alert
 
 const DB_URL = process.env.TEST_DATABASE_URL ?? ''
 const users: string[] = []
+const orgs: string[] = []
 
 function assertSafeTestDatabase(): void {
   if (process.env.NODE_ENV !== 'test') throw new Error('Refusing: NODE_ENV is not test')
@@ -84,6 +85,35 @@ async function account(storage: [number, number] = [0, 0]) {
   return { userId: user.id, a: a.id, b: b.id }
 }
 
+/**
+ * One organization with two projects, each owned by a different member: the
+ * organization is the billing account, so the two pool, whoever owns each one.
+ */
+async function orgAccount(storage: [number, number] = [0, 0]) {
+  const [first, second] = await Promise.all(
+    [0, 1].map(() =>
+      prisma.user.create({ data: { email: `pool-org-${randomUUID()}@test.invalid`, name: 'Pool' }, select: { id: true } }),
+    ),
+  )
+  users.push(first.id, second.id)
+  const org = await prisma.organization.create({ data: { name: 'Pool org', ownerId: first.id }, select: { id: true } })
+  orgs.push(org.id)
+  const [a, b] = await Promise.all(
+    [first.id, second.id].map((userId, i) =>
+      prisma.project.create({
+        data: {
+          name: `pool-org-${i}-${randomUUID().slice(0, 6)}`,
+          userId,
+          organizationId: org.id,
+          storageUsed: BigInt(storage[i]),
+        },
+        select: { id: true },
+      }),
+    ),
+  )
+  return { orgId: org.id, ownerA: first.id, ownerB: second.id, a: a.id, b: b.id }
+}
+
 async function activeUsers(projectId: string, n: number) {
   for (let i = 0; i < n; i++) {
     await prisma.projectActiveUser.create({ data: { projectId, endUserId: randomUUID(), month: utcPeriod() } })
@@ -111,11 +141,13 @@ beforeEach(() => {
 })
 
 afterAll(async () => {
-  await prisma.$executeRaw`DELETE FROM "usage_alerts" WHERE "billingAccountId" = ANY(${users}::text[])`
-  await prisma.$executeRaw`DELETE FROM "usage_limit_states" WHERE "billingAccountId" = ANY(${users}::text[])`
-  await prisma.$executeRaw`DELETE FROM "usage_daily" WHERE "billingAccountId" = ANY(${users}::text[])`
-  await prisma.userAiUsage.deleteMany({ where: { userId: { in: users } } })
+  const accounts = [...users, ...orgs]
+  await prisma.$executeRaw`DELETE FROM "usage_alerts" WHERE "billingAccountId" = ANY(${accounts}::text[])`
+  await prisma.$executeRaw`DELETE FROM "usage_limit_states" WHERE "billingAccountId" = ANY(${accounts}::text[])`
+  await prisma.$executeRaw`DELETE FROM "usage_daily" WHERE "billingAccountId" = ANY(${accounts}::text[])`
+  await prisma.accountAiUsage.deleteMany({ where: { billingAccountId: { in: accounts } } })
   await prisma.project.deleteMany({ where: { userId: { in: users } } })
+  await prisma.organization.deleteMany({ where: { id: { in: orgs } } })
   await prisma.user.deleteMany({ where: { id: { in: users } } })
 })
 
@@ -199,6 +231,57 @@ describe('quotas pool across the owner\'s projects', () => {
   })
 })
 
+describe('an organization is one billing account', () => {
+  it('pools file storage across its projects, whoever owns each one', async () => {
+    const { a, b } = await orgAccount([6 * GiB, 5 * GiB])
+
+    await expect(assertQuotaAvailable(a, MiB)).rejects.toBeInstanceOf(QuotaExceededError)
+    await expect(assertQuotaAvailable(b, MiB)).rejects.toBeInstanceOf(QuotaExceededError)
+    expect((await getProjectQuota(b)).used).toBe(BigInt(11 * GiB))
+  })
+
+  it('pools MAU and database size under the organization, not under either owner', async () => {
+    const { orgId, ownerA, ownerB, a, b } = await orgAccount()
+    await activeUsers(a, 2)
+    await activeUsers(b, 1)
+    await dbSize(a, 6 * 1024)
+    await dbSize(b, 5 * 1024)
+
+    await expect(canAcceptNewEndUser(b)).resolves.toMatchObject({ allowed: false, max: 3, used: 3 })
+    await expect(enforceDbStorage(a)).resolves.toMatchObject({ allowed: false })
+
+    const pooled = await accountUsage(orgId)
+    expect(pooled.mau).toBe(3)
+    expect(pooled.dbBytes).toBe(BigInt(11 * GiB))
+    // Neither member's own account holds any of it.
+    for (const owner of [ownerA, ownerB]) {
+      const own = await accountUsage(owner)
+      expect(own.mau).toBe(0)
+      expect(own.dbBytes).toBe(BigInt(0))
+    }
+  })
+
+  it("keeps an owner's org-less projects out of the organization's pool", async () => {
+    const { ownerA, a } = await orgAccount()
+    const personal = await prisma.project.create({
+      data: { name: `pool-personal-${randomUUID().slice(0, 6)}`, userId: ownerA },
+      select: { id: true },
+    })
+    await activeUsers(personal.id, 3)
+    await activeUsers(a, 1)
+
+    await expect(canAcceptNewEndUser(a)).resolves.toMatchObject({ allowed: true })
+    await expect(canAcceptNewEndUser(personal.id)).resolves.toMatchObject({ allowed: false, used: 3 })
+  })
+
+  it('counts function runs on the organization', async () => {
+    const { orgId } = await orgAccount()
+    await prisma.accountAiUsage.create({ data: { billingAccountId: orgId, date: utcPeriod(), aiFunctionInvocations: 10 } })
+
+    await expect(enforceAiFunctionInvocation(orgId)).resolves.not.toBe(true)
+  })
+})
+
 describe('only an enforce policy with a spend limit raises a cap', () => {
   it('buys exactly the units the remaining limit pays for', async () => {
     const { a, b, userId } = await account()
@@ -232,9 +315,9 @@ describe('only an enforce policy with a spend limit raises a cap', () => {
 
   it('files: overage already used is paid from the same limit', async () => {
     const { a } = await account([11 * GiB, 0])
-    // 1 GB past the plan is an estimated $0.03 of a $0.30 limit; the $0.27
-    // left buys 9 GB more at $0.03 per GB, so the cap is 20 GB.
-    policy = { mode: 'enforce', spendLimitCents: 30 }
+    // 1 GB past the plan is an estimated $0.0213 of a $0.22 limit; the $0.1987
+    // left buys about 9.3 GB more at $0.0213 per GB, so the cap is about 20.3 GB.
+    policy = { mode: 'enforce', spendLimitCents: 22 }
 
     await expect(assertQuotaAvailable(a, 8 * GiB)).resolves.toBeUndefined()
     invalidateAccountLimits()
@@ -243,7 +326,7 @@ describe('only an enforce policy with a spend limit raises a cap', () => {
 
   it('function runs: past the included runs only within the limit', async () => {
     const { userId } = await account()
-    await prisma.userAiUsage.create({ data: { userId, date: utcPeriod(), aiFunctionInvocations: 10 } })
+    await prisma.accountAiUsage.create({ data: { billingAccountId: userId, date: utcPeriod(), aiFunctionInvocations: 10 } })
 
     await expect(enforceAiFunctionInvocation(userId)).resolves.not.toBe(true)
 
@@ -292,12 +375,14 @@ describe('only an enforce policy with a spend limit raises a cap', () => {
     expect(off.axes.egress_bytes.headroom).toBe(0)
     expect(off.axes.egress_bytes.cap).toBe(3 * 1024 * 1024 * 1024)
 
-    // Even with the egress billing switch on, egress stays non-billable while
-    // its rate is unpublished (OVERAGE_RATE_PUBLISHED.egress_bytes = false).
+    // With the switch on, egress is priced at its published rate like any
+    // other axis: 2 GB past the plan at $0.09 is 18 cents, and the $99.82 left
+    // of the limit buys more.
     const on = computeAccountLimits(pro(), over, enforce, 'cdn', true)
-    expect(on.axes.egress_bytes.billable).toBe(false)
-    expect(on.axes.egress_bytes.estimatedCents).toBe(0)
-    expect(on.axes.egress_bytes.headroom).toBe(0)
+    expect(on.axes.egress_bytes.billable).toBe(true)
+    expect(on.axes.egress_bytes.estimatedCents).toBeCloseTo(18, 9)
+    expect(on.axes.egress_bytes.headroom).toBe(Math.floor(((10_000 - 18) / 9) * GiB))
+    expect(on.axes.egress_bytes.cap).toBe(3 * GiB + on.axes.egress_bytes.headroom)
   })
 })
 
@@ -340,7 +425,7 @@ describe('usage alerts', () => {
 
   it('alerts on the spend limit when overage is being used', async () => {
     const { userId } = await account()
-    await prisma.userAiUsage.create({ data: { userId, date: utcPeriod(), aiFunctionInvocations: 10 + 450_000 } })
+    await prisma.accountAiUsage.create({ data: { billingAccountId: userId, date: utcPeriod(), aiFunctionInvocations: 10 + 450_000 } })
     policy = { mode: 'enforce', spendLimitCents: 100 } // $0.90 of $1.00 estimated
 
     await evaluateAccountAlerts(userId)
@@ -351,13 +436,13 @@ describe('usage alerts', () => {
     expect(levels.map((l) => l.level).sort()).toEqual(['50', '80'])
   })
 
-  it('warns once on quotas that are never billed', async () => {
+  it('warns once on a quota that is never billed', async () => {
     const { userId } = await account()
-    await expect(recordQuotaWarning(userId, 'api_requests', 85, 100, 'LIFETIME')).resolves.toBe(true)
-    await expect(recordQuotaWarning(userId, 'api_requests', 95, 100, 'LIFETIME')).resolves.toBe(false)
     await expect(recordQuotaWarning(userId, 'realtime_connections', 10, 100, utcPeriod())).resolves.toBe(false)
+    await expect(recordQuotaWarning(userId, 'realtime_connections', 85, 100, utcPeriod())).resolves.toBe(true)
+    await expect(recordQuotaWarning(userId, 'realtime_connections', 95, 100, utcPeriod())).resolves.toBe(false)
     const sent = await usageNotifications(userId)
     expect(sent).toHaveLength(1)
-    expect(sent[0].title).toBe("You're at 85% of your API requests")
+    expect(sent[0].title).toBe("You're at 85% of your concurrent realtime connections")
   })
 })

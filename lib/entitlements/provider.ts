@@ -1,12 +1,15 @@
 /**
  * The Cloud side of the Entitlements seam.
  *
- * Six operations, each one a thing the public product genuinely needs from
+ * Nine operations, each one a thing the public product genuinely needs from
  * Backenly's commercial implementation and cannot answer for itself. The list
  * is deliberately short and deliberately concrete: this is a seam for the calls
  * that actually exist, not a plugin framework.
  *
- *   cloudEntitlements            what may this account do?
+ *   cloudEntitlements            what may this billing account do?
+ *   accountOfUser                a person's own billing account
+ *   accountOwner                 who receives an account's notices
+ *   accountForCaller             which account a caller may read
  *   bonusCredits                 granted credits that extend the monthly cap
  *   purchasedCredits             bought credits, spent after plan + bonus
  *   recordAiConsumption          charge a completed turn to the usage ledger
@@ -27,20 +30,32 @@ import type { OveragePolicy, UserEntitlements } from './types'
 
 export interface CloudEntitlementsProvider {
   /** `null` means no active subscription. It does not mean unlimited. */
-  cloudEntitlements(userId: string): Promise<UserEntitlements | null>
+  cloudEntitlements(billingAccountId: string): Promise<UserEntitlements | null>
+
+  /** A person's own billing account. The person themselves where there are no organizations. */
+  accountOfUser(userId: string): Promise<string>
+
+  /**
+   * The account a caller asks about: the one they name if they may read it,
+   * else their own; null when they named one they may not read.
+   */
+  accountForCaller(userId: string, requested: string | null): Promise<string | null>
+
+  /** Who an account's notices go to; null when the account no longer exists. */
+  accountOwner(billingAccountId: string): Promise<string | null>
 
   /**
    * Granted credits (referral or promo) that extend the monthly cap.
    * Zero in single-tenant, where the cap is already unlimited.
    */
-  bonusCredits(userId: string): Promise<number>
+  bonusCredits(billingAccountId: string): Promise<number>
 
   /**
    * Credits the account bought outright. They extend the cap like bonus
    * credits, but month rollover never expires them: only usage beyond plan +
    * bonus spends them. Zero wherever nothing is sold.
    */
-  purchasedCredits(userId: string): Promise<number>
+  purchasedCredits(billingAccountId: string): Promise<number>
 
   /**
    * Record a completed AI turn's token usage.
@@ -49,7 +64,7 @@ export interface CloudEntitlementsProvider {
    * code calls it, but only after the public policy layer has already decided
    * the turn was allowed. Never throws and never blocks the caller.
    */
-  recordAiConsumption(userId: string, tokensUsed: number): Promise<void>
+  recordAiConsumption(billingAccountId: string, tokensUsed: number): Promise<void>
 
   /**
    * Give a newly created account whatever it needs to have entitlements.

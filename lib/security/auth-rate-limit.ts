@@ -33,6 +33,7 @@
  */
 
 import { getRateLimitBackend, type RateLimitResult } from './rate-limit-backend'
+import { clientIpFromHeaders } from './client-ip'
 
 export type { RateLimitResult }
 
@@ -71,18 +72,21 @@ export async function reset(key: string): Promise<void> {
 }
 
 /**
- * Best-effort client IP. Trusts X-Forwarded-For only when behind a known proxy.
- * Falls back to 'unknown' which still works as a coarse bucket.
+ * Give back the one unit this caller's `consume` took, once the attempt turned
+ * out not to be the thing the budget counts. See RateLimitBackend.refund.
+ */
+export async function refund(key: string): Promise<void> {
+  await getRateLimitBackend().refund(key)
+}
+
+/**
+ * The client address for a limit key: the rightmost X-Forwarded-For entry that
+ * is not a trusted proxy (lib/security/client-ip.ts), never the leftmost, which
+ * is whatever the client chose to send. Falls back to 'unknown', which still
+ * works as a coarse bucket.
  */
 export function clientIp(request: { headers: { get: (n: string) => string | null } }): string {
-  const xff = request.headers.get('x-forwarded-for')
-  if (xff) {
-    const first = xff.split(',')[0]?.trim()
-    if (first) return first
-  }
-  const real = request.headers.get('x-real-ip')
-  if (real) return real.trim()
-  return 'unknown'
+  return clientIpFromHeaders(request) ?? 'unknown'
 }
 
 // ── Preset policies — pick one per surface to keep things consistent ────────
@@ -117,8 +121,41 @@ export const AUTH_LIMITS = {
   // Keyed per project as well as per IP, so one project under attack cannot
   // lock out sign-in for a different project sharing an egress address, and a
   // single IP cannot spend one global budget across every tenant.
-  endUserSignin:  { ip: { limit: 10, windowMs: 15 * 60_000 } },
-  endUserSignup:  { ip: { limit: 10, windowMs: 60 * 60_000 } },
+  //
+  // Sign-in counts FAILED attempts, not attempts. It used to spend 10 per 15
+  // minutes on every request, successful ones included, per address and per
+  // account. That is not a brute-force control, it is a cap on sign-ins: a
+  // shop's shoppers behind one office, campus or mobile-carrier NAT shared ten
+  // sign-ins between them, a frontend that signs in from its own server shared
+  // ten across its whole user base, and a developer testing their own login
+  // locked themselves out on the eleventh go. Guessing is made of failures, so
+  // failures are what is budgeted (lib/security/end-user-signin-limit.ts).
+  endUserSignin: {
+    // Every attempt from one address, successful or not. Not the guessing
+    // control (the two below are): a ceiling on how much password hashing one
+    // address can buy. Supabase allows 150 password sign-ins per 5 minutes
+    // per IP; this is lower and has no burst allowance on top.
+    ip:              { limit: 300, windowMs: 15 * 60_000 },
+    // Failed attempts from one address against any account in the project:
+    // credential stuffing from a single source.
+    ipFailures:      { limit: 30,  windowMs: 15 * 60_000 },
+    // Failed attempts against one account from any address: guessing one
+    // person's password. Ten, Auth0's default brute-force threshold.
+    accountFailures: { limit: 10,  windowMs: 15 * 60_000 },
+  },
+  // Sign-up was 10 per hour per address, every attempt. A shop's launch from one
+  // campus or office address, or a frontend signing users up from its own
+  // server, was refused on the eleventh customer. But that limit was also the
+  // only brake on sign-up's one oracle, "An account with this email already
+  // exists", so it is split rather than simply raised
+  // (lib/security/end-user-signup-limit.ts):
+  endUserSignup: {
+    // Every attempt from one address: accounts created, MAU and rows.
+    ip:          { limit: 60, windowMs: 60 * 60_000 },
+    // Answers that the address is already registered, from one address: the
+    // existence oracle stays exactly as tight as it was.
+    ipConflicts: { limit: 10, windowMs: 60 * 60_000 },
+  },
   endUserRecover: { ip: { limit: 5,  windowMs: 15 * 60_000 } },
 } as const
 

@@ -5,6 +5,7 @@ import { withAuth } from '@/lib/auth/route-protection'
 import { verifyDomain } from '@/lib/domains'
 import { enforceCustomDomain } from '@/lib/entitlements/policy'
 import { prisma } from '@/lib/db/prisma'
+import { accountOf } from '@/lib/usage/account'
 
 /**
  * POST /api/domains/[id]/verify
@@ -22,15 +23,16 @@ export const POST = withAuth(async (request: NextRequest, { user, params }) => {
         project: {
           userId: user.userId
         }
-      }
+      },
+      include: { project: { select: { organizationId: true, userId: true } } },
     })
 
     if (!domain) {
       return NextResponse.json({ error: 'Domain not found' }, { status: 404 })
     }
 
-    // Enforce PRO plan requirement
-    const entitlementCheck = await enforceCustomDomain(user.userId)
+    // Enforce PRO plan requirement, on the plan of the account the project bills to
+    const entitlementCheck = await enforceCustomDomain(accountOf(domain.project) ?? user.userId)
     if (entitlementCheck !== true) {
       return NextResponse.json({
         error: 'Custom domains require PRO plan',

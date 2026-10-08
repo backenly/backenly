@@ -20,14 +20,16 @@
  * the edition itself, which is why a self-host install needs no billing seed.
  *
  * SEMANTICS (product decisions, locked):
- *   • Quotas belong to the billing account (the project owner today) and are
+ *   • Quotas belong to the billing account (lib/usage/account.ts: the project's
+ *     organization on Cloud, its owner elsewhere) and are
  *     POOLED across all of its projects: 8 GB of database is 8 GB for the
  *     account, not 8 GB per project (lib/usage/pool.ts).
- *   • At the quota the gate blocks, unless the owner's spend limit allows
+ *   • At the quota the gate blocks, unless the account's spend limit allows
  *     overage (lib/usage/overage.ts effectiveCap). Alerts at 50/80/100% are
  *     sent once each by lib/usage/alerts.ts.
- *   • API requests: Free = lifetime TOTAL (never resets, `apiQuotaIsLifetime`);
- *     paid = per calendar month; `null` cap = unlimited.
+ *   • API requests are not a quota on any plan: never capped, never billed,
+ *     so nothing here gates them. lib/traffic/request-recorder.ts counts them
+ *     per calendar month, for the Usage page only.
  *   • MAU: distinct end-users who authenticated this calendar month. At the
  *     cap, NEW end-user signups are blocked; existing users keep working.
  *
@@ -38,8 +40,9 @@
 
 import { randomUUID } from 'crypto'
 import { prisma } from '@/lib/db/prisma'
-import { getUserEntitlements } from '@/lib/entitlements'
+import { accountOfUser, getAccountEntitlements } from '@/lib/entitlements'
 import { isReservedTestEmail } from '@/lib/services/end-user-auth-table'
+import { accountOf, accountProjectsWhere } from '@/lib/usage/account'
 import { recordUsage } from '@/lib/usage/ledger'
 import { recordQuotaWarning } from '@/lib/usage/alerts'
 import { effectiveCap } from '@/lib/usage/overage'
@@ -71,105 +74,52 @@ function thisMonth(): string {
   return new Date().toISOString().slice(0, 7) // YYYY-MM
 }
 
-// ─── 80% warning on the quotas the usage sweep does not cover ────────────────
+// ─── 80% warning on the quota the usage sweep does not cover ─────────────────
 //
-// API requests and realtime connections are never billed, so the usage-alert
-// sweep (lib/usage/alerts.ts) does not evaluate them; their gates warn here.
+// Realtime connections are never billed, so the usage-alert sweep
+// (lib/usage/alerts.ts) does not evaluate them; their gate warns here.
 // The warning is recorded durably and sent once per account and period; this
 // set only spares the database a repeated no-op insert on a hot path.
 
 const warnedKeys = new Set<string>()
 
 function fireThresholdWarning(
-  userId: string,
-  axis: 'api_requests' | 'realtime_connections',
+  billingAccountId: string,
+  axis: 'realtime_connections',
   used: number,
   max: number,
   period: string,
 ): void {
   if (max <= 0 || used / max < WARN_RATIO) return
-  const dedupeKey = `${userId}:${axis}:${period}`
+  const dedupeKey = `${billingAccountId}:${axis}:${period}`
   if (warnedKeys.has(dedupeKey)) return
   if (warnedKeys.size > 50_000) warnedKeys.clear()
   warnedKeys.add(dedupeKey)
-  recordQuotaWarning(userId, axis, used, max, period).catch(() => {})
+  recordQuotaWarning(billingAccountId, axis, used, max, period).catch(() => {})
 }
 
 function blocked(plan: string, message: string, used?: number, max?: number | null): QuotaDecision {
   return { allowed: false, code: 'PLAN_LIMIT_EXCEEDED', message, plan, used, max }
 }
 
-// ─── API requests (lifetime for Free, monthly for paid) ──────────────────────
-
-/**
- * Enforce + track ONE API request against the project owner's plan.
- * Called from the v1 API middleware — the single choke point for every
- * `/api/v1/[projectId]/**` request.
- *
- * - `null` cap            → unlimited: track for display, always allow.
- * - `apiQuotaIsLifetime`  → count against a never-resetting LIFETIME row.
- * - otherwise             → count against the current YYYY-MM.
- *
- * The counter is incremented atomically (row-level upsert) and the post-
- * increment value is compared to the cap, so the request that trips the
- * limit is the one that's refused. Concurrency overshoot is at most a few
- * requests — acceptable for API volume, unlike AI build actions.
- */
-export async function enforceAndTrackApiRequest(userId: string): Promise<QuotaDecision> {
-  try {
-    const ent = await getUserEntitlements(userId)
-    if (!ent) return ALLOW // no entitlements on a hot path → fail open
-
-    const max = ent.maxApiRequestsPerMonth // BigInt | null
-    const isLifetime = ent.apiQuotaIsLifetime
-    const periodKey = isLifetime ? 'LIFETIME' : thisMonth()
-
-    const record = await prisma.userAiUsage.upsert({
-      where: { userId_date: { userId, date: periodKey } },
-      update: { apiRequestCount: { increment: 1 } },
-      create: { userId, date: periodKey, apiRequestCount: BigInt(1) },
-      select: { apiRequestCount: true },
-    })
-
-    if (max === null) return ALLOW // unlimited — tracked for display only
-
-    const used = Number(record.apiRequestCount)
-    const limit = Number(max)
-
-    fireThresholdWarning(userId, 'api_requests', used, limit, periodKey)
-
-    if (used > limit) {
-      return blocked(
-        ent.planName,
-        isLifetime
-          ? `You've used all ${limit.toLocaleString()} API requests included with the Free plan. Upgrade to Pro ($25/mo) for unlimited API requests.`
-          : `You've hit your ${limit.toLocaleString()} API requests for this month on the ${ent.planName} plan. Resets on the 1st, or upgrade for more.`,
-        used,
-        limit,
-      )
-    }
-    return ALLOW
-  } catch {
-    return ALLOW // never break the API because billing had a hiccup
-  }
-}
-
 // ─── MAU (monthly active end-users) ──────────────────────────────────────────
 
-async function ownerEntitlements(projectId: string): Promise<{ ownerId: string; ent: UserEntitlements } | null> {
+/** The project's billing account (lib/usage/account.ts) and that account's plan. */
+async function accountEntitlements(projectId: string): Promise<{ accountId: string; ent: UserEntitlements } | null> {
   const project = await prisma.project.findUnique({
     where: { id: projectId },
-    select: { userId: true },
+    select: { organizationId: true, userId: true },
   })
-  if (!project?.userId) return null
-  const ent = await getUserEntitlements(project.userId)
+  const accountId = project ? accountOf(project) : null
+  if (!accountId) return null
+  const ent = await getAccountEntitlements(accountId)
   if (!ent) return null
-  return { ownerId: project.userId, ent }
+  return { accountId, ent }
 }
 
-/** Distinct end users this month across every project the account owns. */
-async function accountMau(ownerId: string, month: string): Promise<number> {
-  return prisma.projectActiveUser.count({ where: { month, project: { userId: ownerId } } })
+/** Distinct end users this month across every project that bills to the account. */
+async function accountMau(accountId: string, month: string): Promise<number> {
+  return prisma.projectActiveUser.count({ where: { month, project: accountProjectsWhere(accountId) } })
 }
 
 /**
@@ -239,21 +189,21 @@ export function noteEndUserActivity(
 /**
  * Decide whether a NEW end-user may sign up for this project.
  * Blocks (only the new signup) once distinct MAU for the month, across all of
- * the owner's projects, has reached the cap: the plan's included MAU, raised
- * only by the owner's spend limit. Existing users are unaffected.
+ * the account's projects, has reached the cap: the plan's included MAU, raised
+ * only by the account's spend limit. Existing users are unaffected.
  */
 export async function canAcceptNewEndUser(projectId: string): Promise<QuotaDecision> {
   try {
-    const info = await ownerEntitlements(projectId)
+    const info = await accountEntitlements(projectId)
     const included = info?.ent.maxMonthlyActiveUsers ?? null
     if (!info || included === null) return ALLOW
-    const count = await accountMau(info.ownerId, thisMonth())
+    const count = await accountMau(info.accountId, thisMonth())
     if (count < included) return ALLOW
-    const cap = await effectiveCap(info.ownerId, 'mau', included, info.ent)
+    const cap = await effectiveCap(info.accountId, 'mau', included, info.ent)
     if (count >= cap) {
       return blocked(
         info.ent.planName,
-        `This app's owner has reached the ${cap.toLocaleString()} monthly active users their ${info.ent.planName} plan allows across all of their projects. New sign-ups resume on the 1st, or when the owner raises their limit.`,
+        `The account this app bills to has reached the ${cap.toLocaleString()} monthly active users its ${info.ent.planName} plan allows across all of its projects. New sign-ups resume on the 1st, or when its limit is raised.`,
         count,
         cap,
       )
@@ -272,7 +222,7 @@ export async function canAcceptNewEndUser(projectId: string): Promise<QuotaDecis
  * project (the realtime runtime keeps an in-process registry — all SSE flows
  * through the single `backenly-runtime` process). When the caller can also
  * count other projects, `countProjects` makes the cap pooled across the
- * owner's projects like every other quota. Blocks the NEW connection at the
+ * account's projects like every other quota. Blocks the NEW connection at the
  * cap; existing streams are untouched. Never raised by a spend limit: realtime
  * connections are a hard cap and never billed.
  */
@@ -282,13 +232,9 @@ export async function enforceRealtimeConnection(
   countProjects?: (projectIds: string[]) => number,
 ): Promise<QuotaDecision> {
   try {
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-      select: { userId: true },
-    })
-    if (!project?.userId) return ALLOW
-    const ent = await getUserEntitlements(project.userId)
-    if (!ent) return ALLOW
+    const info = await accountEntitlements(projectId)
+    if (!info) return ALLOW
+    const { accountId, ent } = info
     const max = ent.maxRealtimeConnections
     if (max === null || max === undefined) return ALLOW
     let existing = currentConnections
@@ -296,18 +242,15 @@ export async function enforceRealtimeConnection(
       // The billing account's projects, read from the account. This is not an
       // access decision (the connection was already authorized for this
       // project); it is which live streams share the account's quota.
-      const account = await prisma.user.findUnique({
-        where: { id: project.userId },
-        select: { projects: { select: { id: true } } },
-      })
-      const others = (account?.projects ?? []).map((p) => p.id).filter((id) => id !== projectId)
+      const projects = await prisma.project.findMany({ where: accountProjectsWhere(accountId), select: { id: true } })
+      const others = projects.map((p) => p.id).filter((id) => id !== projectId)
       existing += countProjects(others)
     }
-    fireThresholdWarning(project.userId, 'realtime_connections', existing, max, thisMonth())
+    fireThresholdWarning(accountId, 'realtime_connections', existing, max, thisMonth())
     if (existing >= max) {
       return blocked(
         ent.planName,
-        `This app's owner has reached the ${max.toLocaleString()} concurrent realtime connections their ${ent.planName} plan allows across all of their projects.`,
+        `The account this app bills to has reached the ${max.toLocaleString()} concurrent realtime connections its ${ent.planName} plan allows across all of its projects.`,
         existing,
         max,
       )
@@ -319,22 +262,17 @@ export async function enforceRealtimeConnection(
 }
 
 export async function getRealtimeConnectionLimit(projectId: string): Promise<{
-  ownerId: string
+  accountId: string
   planName: string
   max: number | null
 } | null> {
   try {
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-      select: { userId: true },
-    })
-    if (!project?.userId) return null
-    const ent = await getUserEntitlements(project.userId)
-    if (!ent) return null
+    const info = await accountEntitlements(projectId)
+    if (!info) return null
     return {
-      ownerId: project.userId,
-      planName: ent.planName,
-      max: ent.maxRealtimeConnections ?? null,
+      accountId: info.accountId,
+      planName: info.ent.planName,
+      max: info.ent.maxRealtimeConnections ?? null,
     }
   } catch {
     return null
@@ -352,14 +290,14 @@ export async function getRealtimeConnectionLimit(projectId: string): Promise<{
  */
 export async function enforceDbStorage(projectId: string): Promise<QuotaDecision> {
   try {
-    const info = await ownerEntitlements(projectId)
+    const info = await accountEntitlements(projectId)
     const maxMb = info?.ent.maxPostgresStorageMb ?? null
     if (!info || maxMb === null) return ALLOW
 
-    const usedBytes = await accountDbBytes(info.ownerId)
+    const usedBytes = await accountDbBytes(info.accountId)
     const included = maxMb * MB
     if (usedBytes < included) return ALLOW
-    const cap = await effectiveCap(info.ownerId, 'db_bytes', included, info.ent)
+    const cap = await effectiveCap(info.accountId, 'db_bytes', included, info.ent)
     if (usedBytes >= cap) {
       const usedMb = Math.round(usedBytes / MB)
       const capMb = Math.floor(cap / MB)
@@ -377,14 +315,14 @@ export async function enforceDbStorage(projectId: string): Promise<QuotaDecision
 }
 
 /** Each of the account's projects' latest measured database size, summed, in bytes. */
-async function accountDbBytes(ownerId: string): Promise<number> {
+async function accountDbBytes(accountId: string): Promise<number> {
   const rows = await prisma.$queryRaw<Array<{ mb: number | null }>>`
     SELECT COALESCE(SUM(latest."dbStorageUsedMb"), 0)::float8 AS mb
     FROM (
       SELECT DISTINCT ON (u."projectId") u."dbStorageUsedMb"
       FROM "project_usage" u
       JOIN "projects" p ON p."id" = u."projectId"
-      WHERE p."userId" = ${ownerId}
+      WHERE COALESCE(p."organizationId", p."userId") = ${accountId}
       ORDER BY u."projectId", u."month" DESC
     ) latest`
   return Math.round((rows[0]?.mb ?? 0) * MB)
@@ -393,22 +331,17 @@ async function accountDbBytes(ownerId: string): Promise<number> {
 // ─── Plan-driven file-storage limit (consumed by storageQuota.ts) ────────────
 
 /**
- * The file-storage bytes the owner's plan includes, for the whole account
- * (every project the owner has shares it). Replaces the hardcoded TIER_QUOTAS
+ * The file-storage bytes the account's plan includes, for the whole account
+ * (every project billed to it shares it). Replaces the hardcoded TIER_QUOTAS
  * table that advertised 50/200 GB but enforced 10/100 GB. Returns null for
  * "unlimited". lib/services/storageQuota.ts compares it with the account's
- * pooled usage and raises it only within the owner's spend limit.
+ * pooled usage and raises it only within the account's spend limit.
  */
 export async function getFileStorageLimitBytes(projectId: string): Promise<bigint | null> {
   try {
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-      select: { userId: true },
-    })
-    if (!project?.userId) return null
-    const ent = await getUserEntitlements(project.userId)
-    if (!ent) return null
-    const mb = ent.maxFileStorageMb
+    const info = await accountEntitlements(projectId)
+    if (!info) return null
+    const mb = info.ent.maxFileStorageMb
     if (mb === null || mb === undefined) return null // unlimited
     return BigInt(mb) * BigInt(1024 * 1024)
   } catch {
@@ -419,13 +352,13 @@ export async function getFileStorageLimitBytes(projectId: string): Promise<bigin
 // ─── API key rate ceiling (fair use, never billed) ───────────────────────────
 
 /**
- * Refuse an API key rate its owner's plan does not allow, or return null.
+ * Refuse an API key rate its account's plan does not allow, or return null.
  *
  * API requests are never billed; the plan's `apiRateLimitPerMin` is a fair-use
  * ceiling on how fast any one key may be configured to go. A key's own limit
  * is `rateLimit` requests per `rateLimitWindow` seconds, so the comparison is
- * on the per-minute rate that works out to. The owner is the project's owner
- * for a project key and the caller for an account-level key. A lookup failure
+ * on the per-minute rate that works out to. The plan is the project's account's
+ * for a project key and the caller's own account's for an account-level key. A lookup failure
  * refuses nothing: this bounds configuration, it never breaks it.
  */
 export async function apiKeyRateCeilingViolation(
@@ -435,12 +368,14 @@ export async function apiKeyRateCeilingViolation(
   rateLimitWindowSec: number,
 ): Promise<string | null> {
   try {
-    let ownerId = callerUserId
+    // A project key answers to the project's account; an account-level key
+    // to the caller's own.
+    let accountId: string | null = null
     if (projectId) {
-      const project = await prisma.project.findUnique({ where: { id: projectId }, select: { userId: true } })
-      if (project?.userId) ownerId = project.userId
+      const project = await prisma.project.findUnique({ where: { id: projectId }, select: { organizationId: true, userId: true } })
+      accountId = project ? accountOf(project) : null
     }
-    const ent = await getUserEntitlements(ownerId)
+    const ent = await getAccountEntitlements(accountId ?? (await accountOfUser(callerUserId)))
     const perMin = ent?.apiRateLimitPerMin ?? null
     if (perMin === null || rateLimitWindowSec <= 0) return null
     const requested = (rateLimit * 60) / rateLimitWindowSec

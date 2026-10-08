@@ -87,5 +87,7 @@ export async function snapshotProjectDbStorage(projectId: string, billingAccount
 export async function snapshotScheduledDbStorage(): Promise<void> {
   const { getFleetScheduler } = await import('@/lib/edition')
   const targets = await getFleetScheduler().maintenanceTargets()
-  await Promise.allSettled(targets.map(t => snapshotProjectDbStorage(t.id, t.userId)))
+  // The ledger resolves each project's billing account (its organization on
+  // Cloud) when it applies the batch; the target's owner is not that account.
+  await Promise.allSettled(targets.map(t => snapshotProjectDbStorage(t.id)))
 }

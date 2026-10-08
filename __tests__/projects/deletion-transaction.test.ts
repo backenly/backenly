@@ -330,11 +330,17 @@ describe('E. account deletion — multiple projects', () => {
       `workspace_${projectA}_br_feature_1`,
       `workspace_${projectB}`,
     ]
+    // The account's own AI usage and credit balances are keyed by a plain
+    // string, not a foreign key, so nothing cascades them: deletion must.
+    await prisma.accountAiUsage.create({ data: { billingAccountId: userId, date: '2026-10', tokenCount: 1 } })
+    await prisma.accountCredits.create({ data: { billingAccountId: userId, purchasedCredits: 5 } })
 
     const result = await deleteAccountCompletely(userId)
 
     for (const s of schemas) expect(await schemaExists(s)).toBe(false)
     expect(await prisma.user.findUnique({ where: { id: userId } })).toBeNull()
+    expect(await prisma.accountAiUsage.count({ where: { billingAccountId: userId } })).toBe(0)
+    expect(await prisma.accountCredits.count({ where: { billingAccountId: userId } })).toBe(0)
     expect(await prisma.project.findMany({ where: { id: { in: [projectA, projectB] } } })).toHaveLength(0)
     expect(result.projectIds.sort()).toEqual([projectA, projectB].sort())
     // One purge record per project, not one per account.

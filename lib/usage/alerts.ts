@@ -22,7 +22,7 @@
 import { randomUUID } from 'crypto'
 import { prisma } from '@/lib/db/prisma'
 import { createPlatformNotification } from '@/lib/notifications/platform'
-import { OVERAGE_AXES, overagePrice, type OverageAxis } from '@/lib/pricing/catalog'
+import { OVERAGE_AXES, formatUnitPrice, overagePrice, type OverageAxis } from '@/lib/pricing/catalog'
 import { accountLimits, type AccountLimits } from './overage'
 import { GRACE_DAYS } from './restrictions'
 
@@ -111,10 +111,10 @@ async function notify(
     title = `Your ${resource} reached what your spend limit allows`
     body = `You've used ${usedLabel} of ${resource} this month, the most your spend limit allows. ${atQuotaBehaviour(axis)} Raise the spend limit to continue.`
   } else if (level === '100') {
-    const price = overagePrice(axis, limits.terms)
+    const price = formatUnitPrice(overagePrice(axis, limits.terms))
     title = `You've used all of your included ${resource}`
     body = limits.overageActive && limits.axes[axis].billable
-      ? `You've used ${usedLabel} of the ${limitLabel} included this month. Usage past it is billed at $${(price.cents / 100).toFixed(price.cents < 1 ? 4 : 2)} ${price.label}, within your $${(limits.spendLimitCents / 100).toFixed(0)} spend limit.`
+      ? `You've used ${usedLabel} of the ${limitLabel} included this month. Usage past it is billed at ${price}, within your $${(limits.spendLimitCents / 100).toFixed(0)} spend limit.`
       : `You've used ${usedLabel} of the ${limitLabel} included this month. ${atQuotaBehaviour(axis)}`
   } else {
     title = `You've used ${level}% of your included ${resource}`
@@ -213,38 +213,37 @@ async function setOverState(billingAccountId: string, axis: OverageAxis, over: b
 }
 
 /**
- * The sweep: every account that owns a project. Runs every few minutes from
+ * The sweep: every billing account that has a project. Runs every few minutes from
  * instrumentation.ts; one account's failure never stops the rest.
  */
 export async function evaluateUsageAlerts(now: Date = new Date()): Promise<AlertEvaluation & { accounts: number; failed: number }> {
   // A self-hosted install has no quotas, so there is nothing to alert on.
   const { currentEdition } = await import('@/lib/edition')
   if (currentEdition() === 'single-tenant') return { accounts: 0, recorded: 0, sent: 0, failed: 0 }
-  const owners = await prisma.$queryRaw<Array<{ userId: string }>>`
-    SELECT DISTINCT "userId" FROM "projects" WHERE "userId" IS NOT NULL`
-  const total = { accounts: owners.length, recorded: 0, sent: 0, failed: 0 }
-  for (const { userId } of owners) {
+  const accounts = await prisma.$queryRaw<Array<{ account: string }>>`
+    SELECT DISTINCT COALESCE("organizationId", "userId") AS "account" FROM "projects"
+    WHERE COALESCE("organizationId", "userId") IS NOT NULL`
+  const total = { accounts: accounts.length, recorded: 0, sent: 0, failed: 0 }
+  for (const { account } of accounts) {
     try {
-      const r = await evaluateAccountAlerts(userId, now)
+      const r = await evaluateAccountAlerts(account, now)
       total.recorded += r.recorded
       total.sent += r.sent
     } catch (err: any) {
       total.failed++
-      console.warn(`[usage-alerts] ${userId}: ${err?.message}`)
+      console.warn(`[usage-alerts] ${account}: ${err?.message}`)
     }
   }
   return total
 }
 
 const WARNING_RESOURCE = {
-  api_requests: 'API requests',
   realtime_connections: 'concurrent realtime connections',
 } as const
 
 /**
- * The 80% warning for quotas that are never billed (API requests on Free,
- * realtime connections), recorded once per account and period and sent once.
- * `period` is YYYY-MM, or LIFETIME for Free's lifetime API allowance.
+ * The 80% warning for a quota that is never billed (realtime connections),
+ * recorded once per account and period and sent once. `period` is YYYY-MM.
  */
 export async function recordQuotaWarning(
   billingAccountId: string,
@@ -258,12 +257,11 @@ export async function recordQuotaWarning(
   if (!inserted.length) return false
   const resource = WARNING_RESOURCE[axis]
   const pct = Math.min(100, Math.round((used / max) * 100))
-  const scope = period === 'LIFETIME' ? 'included with your plan' : `this month (${period})`
   await createPlatformNotification({
     userId: billingAccountId,
     type: 'usage_limit',
     title: `You're at ${pct}% of your ${resource}`,
-    body: `You've used ${Math.round(used).toLocaleString('en-US')} of the ${max.toLocaleString('en-US')} ${resource} ${scope}, across all of your projects.`,
+    body: `You've used ${Math.round(used).toLocaleString('en-US')} of the ${max.toLocaleString('en-US')} ${resource} this month (${period}), across all of your projects.`,
     metadata: {
       axis,
       level: '80',

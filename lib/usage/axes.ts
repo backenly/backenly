@@ -82,7 +82,7 @@ export type UsageAxisName = keyof typeof USAGE_AXES
 
 /**
  * AI usage is not a daily per-project axis: it is already metered per account
- * in UserAiUsage.tokenCount (lib/entitlements/policy.ts, charged at the model
+ * in AccountAiUsage.tokenCount (lib/entitlements/policy.ts, charged at the model
  * client boundary). The close reads it from there rather than keeping a second
  * count that could disagree.
  */

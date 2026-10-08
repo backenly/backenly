@@ -11,6 +11,7 @@
  */
 
 import { Request, Response, NextFunction } from 'express'
+import { clientIpFromNodeRequest } from '@/lib/security/client-ip'
 import crypto from 'crypto'
 import { prisma } from '@/lib/db'
 import { verifyPassword } from '@/lib/auth/password'
@@ -235,10 +236,7 @@ export async function v1AuthMiddleware(req: Request, res: Response, next: NextFu
     const origin = (req.headers['origin'] as string | undefined)
       ?? (req.headers['referer'] as string | undefined)
       ?? null
-    const ip = (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim()
-      ?? (req.headers['x-real-ip'] as string | undefined)
-      ?? req.socket?.remoteAddress
-      ?? null
+    const ip = clientIpFromNodeRequest(req)
 
     // Feed the Connection Health dashboard surface — non-blocking.
     // SKIP internal origins (backenly.com, localhost): the dashboard

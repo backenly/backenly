@@ -18,6 +18,7 @@
 
 import 'dotenv/config'
 import { assertEditionCompositionOrExit } from '../lib/edition/cloud-extension'
+import { assertTrustedProxiesParse } from '../lib/security/client-ip'
 import { installProcessSafetyNet } from './lib/async-route'
 import { startUsageLedger, usageLedger } from '../lib/usage/ledger'
 import app from './app'
@@ -27,6 +28,16 @@ import app from './app'
 // here rather than answer one request with single-tenant tenancy rules. A no-op
 // unless BACKENLY_EDITION is explicitly cloud.
 assertEditionCompositionOrExit('Runtime Server')
+
+// Every per-address limit here keys on the client address, which depends on
+// which proxies are trusted (lib/security/client-ip.ts). A bad entry stops the
+// process now rather than failing each request that needs an address.
+try {
+  assertTrustedProxiesParse()
+} catch (err) {
+  console.error(`[Runtime Server] ${err instanceof Error ? err.message : String(err)}`)
+  process.exit(1)
+}
 
 const PORT = parseInt(process.env.RUNTIME_PORT || '3001', 10)
 

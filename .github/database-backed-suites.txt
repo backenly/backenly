@@ -311,6 +311,12 @@ __tests__/auth/ai-workspace-tenant-isolation.test.ts
 # privilege escalation and 2FA bypass. Separates WHO may touch a record from
 # WHICH fields they may set: self-service must not become self-promotion.
 __tests__/auth/user-record-authorization.test.ts
+
+# DELETE on the same route checked only that the caller was signed in, so any
+# account could delete any other with every project it owned. Admin only now,
+# and not self-service (that is /api/auth/delete-account). Calls the real
+# handler; two-sided.
+__tests__/auth/user-delete-authorization.test.ts
 # A fresh install must not fill its log with errors about a non-event. The
 # autonomy sweep purges end-user auth tables that do not exist until a project
 # enables auth; its information_schema pre-check treated an EMPTY answer as a
@@ -627,9 +633,23 @@ tests/integration/last-login-id-type.spec.ts
 
 # The contract probe is exempt from the end-user auth limits only with the
 # internal-traffic token AND a reserved address; every other combination,
-# and every customer, keeps the 10-per-window budgets. The routes' own check
+# and every customer, keeps the published budgets. The routes' own check
 # order against a real workspace is the property, so it needs a real Postgres.
 tests/integration/probe-auth-rate-limit.spec.ts
+
+# End-user sign-in budgets failures, not sign-ins, on both runtimes: a shopper
+# signing in repeatedly, and many shoppers behind one address, are never
+# refused, while ten wrong passwords still lock an account and thirty from one
+# address still refuse it. Real routes, bcrypt and workspace users tables are
+# the property, so it needs a real Postgres.
+tests/integration/end-user-signin-counts-failures.spec.ts
+
+# End-user sign-up lets a shared address bring in more customers than the old
+# limit of ten, and still refuses the eleventh "already registered" answer (the
+# existence oracle) on both runtimes; Backenly's probe is exempt only with its
+# signed token. Real routes and workspace users tables are the property, so it
+# needs a real Postgres.
+tests/integration/end-user-signup-limit.spec.ts
 tests/integration/go-live-empty-guard.spec.ts
 
 # One-time tours remain caller-scoped, idempotent and unavailable until their

@@ -7815,13 +7815,13 @@ async function executeGetErrors(params: any, projectId: string): Promise<Executi
  */
 async function executeGetUsage(projectId: string): Promise<ExecutionResult> {
   try {
-    const { prisma } = await import('@/lib/db')
-    const project = await prisma.project.findUnique({ where: { id: projectId }, select: { userId: true } })
-    if (!project?.userId) {
+    const { billingAccountOf } = await import('@/lib/usage/account')
+    const account = await billingAccountOf(projectId)
+    if (!account) {
       return { success: false, message: 'This project has no owning account to read usage for.' }
     }
     const { describeAccountUsage } = await import('@/lib/usage/describe')
-    const usage = await describeAccountUsage(project.userId)
+    const usage = await describeAccountUsage(account)
     if (!usage) {
       return { success: false, message: 'No plan is attached to the account that owns this project, so there is no usage to read.' }
     }

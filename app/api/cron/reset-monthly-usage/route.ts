@@ -42,9 +42,12 @@ export async function POST(request: NextRequest) {
   const threeMonthsAgo = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 3, 1))
   const cutoffMonth = threeMonthsAgo.toISOString().slice(0, 7)
 
-  const { count } = await prisma.userAiUsage.deleteMany({
-    where: { date: { lt: cutoffMonth } },
-  })
+  // Both the per-account counters and the per-user history they replaced.
+  const [accounts, users] = await Promise.all([
+    prisma.accountAiUsage.deleteMany({ where: { date: { lt: cutoffMonth } } }),
+    prisma.userAiUsage.deleteMany({ where: { date: { lt: cutoffMonth } } }),
+  ])
+  const count = accounts.count + users.count
 
   console.log(`[cron/reset-monthly-usage] Purged ${count} stale usage records (< ${cutoffMonth})`)
 

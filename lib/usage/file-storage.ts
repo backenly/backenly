@@ -43,7 +43,8 @@ export async function reconcileFileStorage(targets: Array<{ id: string; userId: 
       axis: 'file_bytes',
       quantity: sizes.get(t.id) ?? BigInt(0),
       source: 'metadata',
-      billingAccountId: t.userId,
+      // Left to the ledger, which resolves the project's billing account (its
+      // organization on Cloud). The target's owner is not that account.
     })
   }
   return targets.length

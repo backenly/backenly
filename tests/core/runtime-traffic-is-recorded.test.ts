@@ -44,6 +44,7 @@ async function project() {
 
 async function drop(p: { userId: string; projectId: string }) {
   await prisma.project.deleteMany({ where: { id: p.projectId } })
+  await prisma.accountAiUsage.deleteMany({ where: { billingAccountId: p.userId } })
   await prisma.user.deleteMany({ where: { id: p.userId } })
 }
 
@@ -109,6 +110,43 @@ describe('the recorder', () => {
     expect(projectRelativePath(id, `/api/v2/${id}/todos`)).toBe('/todos')
     expect(projectRelativePath(id, `/api/v1/${id}`)).toBe('/')
     expect(projectRelativePath(id, '/api/ai/chat').startsWith('/api/')).toBe(false)
+  })
+
+  it("counts every served request toward the billing account's month, and never Backenly's own", async () => {
+    // The Usage page's API request count. It used to be kept only by the
+    // Next-owned v1 routes and MCP calls, so /db, /auth and /fn traffic that
+    // the runtime serves never showed up in it. API requests are unlimited;
+    // this only counts.
+    const p = await project()
+    try {
+      const token = internalTrafficHeaders()[INTERNAL_TRAFFIC_HEADER]
+      for (const pathname of ['db/todos', 'auth/signin', 'fn/hello']) {
+        recordRuntimeRequest({
+          projectId: p.projectId, method: 'POST', pathname: `/api/v1/${p.projectId}/${pathname}`,
+          statusCode: 200, durationMs: 5,
+        })
+      }
+      recordRuntimeRequest({
+        projectId: p.projectId, method: 'GET', pathname: `/api/v1/${p.projectId}/db/todos`,
+        statusCode: 200, durationMs: 5, internalHeader: token,
+      })
+      await flushRecordedRequests()
+      recordRuntimeRequest({
+        projectId: p.projectId, method: 'GET', pathname: `/api/v2/${p.projectId}/todos`,
+        statusCode: 200, durationMs: 5,
+      })
+      await flushRecordedRequests()
+
+      const month = new Date().toISOString().slice(0, 7)
+      // The project has no organization, so its billing account is its owner.
+      const usage = await prisma.accountAiUsage.findUnique({
+        where: { billingAccountId_date: { billingAccountId: p.userId, date: month } },
+        select: { apiRequestCount: true },
+      })
+      expect(usage?.apiRequestCount).toBe(BigInt(4))
+    } finally {
+      await drop(p)
+    }
   })
 })
 

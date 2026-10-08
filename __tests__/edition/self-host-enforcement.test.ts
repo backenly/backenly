@@ -20,7 +20,10 @@
 const mockPrisma = {
   subscription: { findFirst: jest.fn() },
   plan: { findUnique: jest.fn(), findMany: jest.fn() },
-  userAiUsage: { findUnique: jest.fn(), upsert: jest.fn() },
+  accountAiUsage: { findUnique: jest.fn(), upsert: jest.fn() },
+  // A composed Cloud provider asks whether the account is an organization;
+  // these accounts are not, and have no organization of their own.
+  organization: { findUnique: jest.fn(), findFirst: jest.fn() },
 }
 jest.mock('@/lib/db/prisma', () => ({
   prisma: {
@@ -29,9 +32,13 @@ jest.mock('@/lib/db/prisma', () => ({
       findUnique: (...a: unknown[]) => mockPrisma.plan.findUnique(...a),
       findMany: (...a: unknown[]) => mockPrisma.plan.findMany(...a),
     },
-    userAiUsage: {
-      findUnique: (...a: unknown[]) => mockPrisma.userAiUsage.findUnique(...a),
-      upsert: (...a: unknown[]) => mockPrisma.userAiUsage.upsert(...a),
+    accountAiUsage: {
+      findUnique: (...a: unknown[]) => mockPrisma.accountAiUsage.findUnique(...a),
+      upsert: (...a: unknown[]) => mockPrisma.accountAiUsage.upsert(...a),
+    },
+    organization: {
+      findUnique: (...a: unknown[]) => mockPrisma.organization.findUnique(...a),
+      findFirst: (...a: unknown[]) => mockPrisma.organization.findFirst(...a),
     },
   },
 }))

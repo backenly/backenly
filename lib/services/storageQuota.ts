@@ -11,6 +11,7 @@
 import { prisma } from '@/lib/db/postgres'
 import { getFileStorageLimitBytes } from '@/lib/quota/kernel'
 import { effectiveCap } from '@/lib/usage/overage'
+import { accountOf } from '@/lib/usage/account'
 
 /**
  * @deprecated Hardcoded tier table — NO LONGER the source of truth. The real
@@ -45,16 +46,17 @@ export interface QuotaStatus {
 }
 
 /**
- * Get the storage quota for a project, which is its owning account's quota.
+ * Get the storage quota for a project, which is its billing account's quota
+ * (lib/usage/account.ts: its organization on Cloud, its owner elsewhere).
  *
- * The limit is the owner's Plan file-storage cap, and nothing else. `null` from
- * the kernel means unlimited (a self-hosted install, or fail-open). `used` is
- * every project of the same owner, because the plan's storage is the
+ * The limit is the account's Plan file-storage cap, and nothing else. `null`
+ * from the kernel means unlimited (a self-hosted install, or fail-open). `used`
+ * is every project of the same account, because the plan's storage is the
  * account's: counting one project made the real cap N times the plan.
  *
  * `incoming` is the size of an upload about to happen. Only when it would pass
- * the included bytes is the owner's spend limit consulted, so a quota read for
- * display, and every upload well inside the plan, costs no extra query.
+ * the included bytes is the account's spend limit consulted, so a quota read
+ * for display, and every upload well inside the plan, costs no extra query.
  *
  * Project.storageLimit is NOT consulted. It was meant as a per-project override,
  * but nothing ever writes it, so every project carried its column default of
@@ -64,7 +66,7 @@ export interface QuotaStatus {
 export async function getProjectQuota(projectId: string, incoming: bigint = BigInt(0)): Promise<QuotaStatus> {
   const project = await prisma.project.findUnique({
     where: { id: projectId },
-    select: { storageUsed: true, userId: true },
+    select: { storageUsed: true, userId: true, organizationId: true },
   })
 
   if (!project) {
@@ -80,19 +82,20 @@ export async function getProjectQuota(projectId: string, incoming: bigint = BigI
   }
 
   const projectUsed = project.storageUsed > BigInt(0) ? project.storageUsed : BigInt(0)
+  const account = accountOf(project)
   let used = projectUsed
-  if (project.userId) {
+  if (account) {
     const rows = await prisma.$queryRaw<Array<{ bytes: bigint | null }>>`
       SELECT COALESCE(SUM(GREATEST("storageUsed", 0)), 0)::bigint AS bytes
-      FROM "projects" WHERE "userId" = ${project.userId}`
+      FROM "projects" WHERE COALESCE("organizationId", "userId") = ${account}`
     used = BigInt(rows[0]?.bytes ?? 0)
   }
 
   const planLimitBytes = await getFileStorageLimitBytes(projectId)
   const included = planLimitBytes !== null ? planLimitBytes : UNLIMITED_BYTES
   let limit = included
-  if (planLimitBytes !== null && project.userId && used + incoming > planLimitBytes) {
-    const cap = await effectiveCap(project.userId, 'file_bytes', Number(planLimitBytes))
+  if (planLimitBytes !== null && account && used + incoming > planLimitBytes) {
+    const cap = await effectiveCap(account, 'file_bytes', Number(planLimitBytes))
     limit = BigInt(Math.floor(cap))
   }
   const available = limit > used ? limit - used : BigInt(0)

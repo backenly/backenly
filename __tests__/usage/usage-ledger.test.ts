@@ -78,7 +78,7 @@ beforeAll(() => assertSafeTestDatabase())
 afterAll(async () => {
   await prisma.usageDaily.deleteMany({ where: { projectId: { in: createdProjects } } })
   await prisma.usagePeriodClose.deleteMany({ where: { billingAccountId: { in: createdUsers } } })
-  await prisma.userAiUsage.deleteMany({ where: { userId: { in: createdUsers } } })
+  await prisma.accountAiUsage.deleteMany({ where: { billingAccountId: { in: createdUsers } } })
   await prisma.$executeRaw`DELETE FROM "usage_applied_batches" WHERE "id" = ANY(${batchIds}::text[])`
   await prisma.project.deleteMany({ where: { id: { in: createdProjects } } })
   await prisma.user.deleteMany({ where: { id: { in: createdUsers } } })
@@ -289,7 +289,7 @@ describe('monthly close', () => {
     const GB = 1024 ** 3
     for (let d = 1; d <= 10; d++) await seed(a, userId, 'db_bytes', `2019-04-${String(d).padStart(2, '0')}`, 'pg', 6 * GB)
     for (let d = 1; d <= 30; d++) await seed(b, userId, 'db_bytes', `2019-04-${String(d).padStart(2, '0')}`, 'pg', 5 * GB)
-    await prisma.userAiUsage.create({ data: { userId, date: PERIOD, tokenCount: 123_456 } })
+    await prisma.accountAiUsage.create({ data: { billingAccountId: userId, date: PERIOD, tokenCount: 123_456 } })
     // outside the period: ignored
     await seed(a, userId, 'fn_runs', '2019-05-01', 'executor', 1_000)
 

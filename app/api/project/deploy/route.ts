@@ -25,6 +25,7 @@ import { withAuth } from '@/lib/auth/route-protection'
 import { prisma } from '@/lib/db/prisma'
 import { promoteSandboxToProduction } from '@/lib/projects/sandbox-lifecycle'
 import { enforceDeployment } from '@/lib/entitlements/policy'
+import { accountOf } from '@/lib/usage/account'
 import { canWriteProject } from '@/lib/edition/guard'
 
 export const POST = withAuth(async (request: NextRequest, { user }) => {
@@ -51,7 +52,7 @@ export const POST = withAuth(async (request: NextRequest, { user }) => {
 
     const project = await prisma.project.findUnique({
       where: { id: projectId },
-      select: { id: true, name: true, expiresAt: true, isDeployed: true, environment: true },
+      select: { id: true, name: true, expiresAt: true, isDeployed: true, environment: true, organizationId: true, userId: true },
     })
 
     if (!project) {
@@ -61,8 +62,8 @@ export const POST = withAuth(async (request: NextRequest, { user }) => {
       )
     }
 
-    // Check plan allows deployment
-    const deployCheck = await enforceDeployment(userId)
+    // Check the plan of the account the project bills to allows deployment
+    const deployCheck = await enforceDeployment(accountOf(project) ?? userId)
     if (deployCheck !== true) {
       return NextResponse.json(
         {

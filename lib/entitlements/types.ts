@@ -19,15 +19,8 @@ export interface UserEntitlements {
   maxProjects: number | null
   maxAiBuildActionsPerMonth: number | null
   monthlyAiCredits: number | null
-  maxApiRequestsPerMonth: bigint | null
-  /**
-   * true = `maxApiRequestsPerMonth` is a lifetime total that never resets.
-   *
-   * Free is metered this way in Cloud, which is why the quota kernel keys its
-   * counter on 'LIFETIME' rather than the month. Carried here because the
-   * kernel used to read it off `Plan` directly and must not any more.
-   */
-  apiQuotaIsLifetime: boolean
+  // No API request field, deliberately: API requests are unlimited on every
+  // plan and in every edition, so there is nothing to entitle.
   maxMonthlyActiveUsers: number | null
   maxPostgresStorageMb: number | null
   maxFileStorageMb: number | null
@@ -41,7 +34,7 @@ export interface UserEntitlements {
   /**
    * The fair-use ceiling on requests per minute for any one API key. `null`
    * means no ceiling beyond the key's own setting. API requests are never
-   * billed; this only bounds what one key may be configured to send.
+   * capped or billed; this only bounds what one key may be configured to send.
    */
   apiRateLimitPerMin: number | null
   maxTriggersPerProject: number | null
@@ -113,5 +106,5 @@ export interface OveragePolicy {
  * every caller already handles; it does not mean "unlimited".
  */
 export interface CloudEntitlementsProvider {
-  cloudEntitlements(userId: string): Promise<UserEntitlements | null>
+  cloudEntitlements(billingAccountId: string): Promise<UserEntitlements | null>
 }

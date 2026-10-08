@@ -239,8 +239,13 @@ export async function decideApproval(input: {
   const chargeOnce = () => {
     if (charged || spentTokens <= 0) return
     charged = true
-    import('@/lib/entitlements/policy')
-      .then(({ chargeAiCredits }) => chargeAiCredits(input.approverUserId, spentTokens))
+    // Charged to the project's billing account, like every other model run in
+    // a project, not to whoever happened to approve it.
+    Promise.all([import('@/lib/entitlements/policy'), import('@/lib/usage/account')])
+      .then(async ([{ chargeAiCredits }, { creditAccountOf }]) => {
+        const account = await creditAccountOf(input.projectId)
+        if (account) await chargeAiCredits(account, spentTokens)
+      })
       .catch(() => {})
   }
 

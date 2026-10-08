@@ -23,7 +23,7 @@ let ent: UserEntitlements
 let policy: OveragePolicy | null = null
 jest.mock('@/lib/entitlements', () => ({
   ...jest.requireActual('@/lib/entitlements'),
-  getUserEntitlements: () => Promise.resolve(ent),
+  getAccountEntitlements: () => Promise.resolve(ent),
   getOveragePolicy: () => Promise.resolve(policy),
 }))
 
@@ -142,9 +142,10 @@ describe('the account description', () => {
     expect(d.overage).toMatchObject({ mode: 'enforce', spendLimitCents: 1_000, active: true })
     const files = d.axes.find((a: any) => a.axis === 'file_bytes')
     expect(files).toMatchObject({ unit: 'bytes', used: 2 * GiB, included: GiB })
-    // 1 GB past the plan at $0.03 is 3 cents; the $10 limit leaves $9.97 of headroom.
-    expect(files.estimatedCents).toBe(3)
-    expect(files.cap).toBe(2 * GiB + Math.floor((997 / 3) * GiB))
+    // 1 GB past the plan at $0.0213 is 2.13 cents, shown as 2; the $10 limit
+    // leaves $9.9787 of headroom.
+    expect(files.estimatedCents).toBe(2)
+    expect(files.cap).toBe(2 * GiB + Math.floor(((1_000 - 2.13) / 2.13) * GiB))
     expect(JSON.parse(JSON.stringify(d))).toEqual(d) // JSON-safe: no BigInt anywhere
   })
 

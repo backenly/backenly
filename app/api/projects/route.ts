@@ -6,6 +6,7 @@ import { z } from 'zod'
 import { withAuth } from '@/lib/auth/route-protection'
 import { enforceProjectCreation } from '@/lib/entitlements/policy'
 import { initializeAccountEntitlements } from '@/lib/entitlements'
+import { accountProjectsWhere } from '@/lib/usage/account'
 import { recordProductEvent } from '@/lib/platform-signals'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import { assertWritable } from '@/lib/platform-controls'
@@ -43,6 +44,8 @@ const createProjectSchema = z.object({
   apiUrlStaging: z.string().url().optional().nullable(),
   apiUrlProd: z.string().url().optional().nullable(),
   userId: z.string().uuid(),
+  // The organization to create it in (Cloud). Omitted: the creator's own.
+  organizationId: z.string().uuid().optional().nullable(),
 })
 
 /** BigInt does not survive JSON.stringify, and every listing carries four. */
@@ -72,10 +75,14 @@ function serializeProject(project: ProjectListEntry, user: { id: string; email: 
 /**
  * GET /api/projects - List the projects this caller may see
  * 🔒 Protected: Requires authentication
+ *
+ * ?orgId= narrows the list to one organization's projects. It only ever
+ * narrows: the access clause still decides which projects are visible at all.
  */
-export const GET = withAuth(async (_request: NextRequest, { user }) => {
+export const GET = withAuth(async (request: NextRequest, { user }) => {
   try {
-    const projects = await getProjectLifecycle().list(user.userId)
+    const organizationId = request.nextUrl?.searchParams.get('orgId') || null
+    const projects = await getProjectLifecycle().list(user.userId, { organizationId })
 
     // Use the authenticated user rather than refetching: auth already loaded it.
     const identity = { id: user.userId, email: user.email, name: (user as any).name || null }
@@ -116,14 +123,27 @@ export const POST = withAuth(async (request: NextRequest, { user }) => {
     const body = await request.json()
     const validatedData = createProjectSchema.parse(body)
 
+    // Who the project will belong to, and the billing account whose plan it
+    // counts against: inside an organization, the organization; elsewhere, the
+    // caller.
+    const lifecycle = getProjectLifecycle()
+    const account = await lifecycle.creationAccount(user.userId, validatedData.organizationId ?? null)
+    if (account.ok === false) {
+      return NextResponse.json(
+        { success: false, error: account.error, code: account.code },
+        { status: account.status },
+      )
+    }
+
     // ─── Plan enforcement: project limit ─────────────────────────────────────
-    const existingCount = await prisma.project.count({ where: { userId: user.userId } })
+    const billingAccount = account.organizationId ?? account.ownerId
+    const existingCount = await prisma.project.count({ where: accountProjectsWhere(billingAccount) })
 
     // Give a first-time account whatever entitlements it needs. A no-op in
     // single-tenant, where entitlements come from the edition rather than a row.
     await initializeAccountEntitlements(user.userId)
 
-    const limitCheck = await enforceProjectCreation(user.userId, existingCount)
+    const limitCheck = await enforceProjectCreation(billingAccount, existingCount)
     if (limitCheck !== true) {
       return NextResponse.json(
         {
@@ -138,7 +158,7 @@ export const POST = withAuth(async (request: NextRequest, { user }) => {
       )
     }
 
-    const { project, apiKey } = await getProjectLifecycle().create({
+    const { project, apiKey } = await lifecycle.create({
       name: validatedData.name,
       description: validatedData.description ?? null,
       environment: validatedData.environment,
@@ -146,6 +166,7 @@ export const POST = withAuth(async (request: NextRequest, { user }) => {
       apiUrlStaging: validatedData.apiUrlStaging,
       apiUrlProd: validatedData.apiUrlProd,
       userId: user.userId,
+      organizationId: account.organizationId,
     })
 
     // Track project_created event (non-blocking)
