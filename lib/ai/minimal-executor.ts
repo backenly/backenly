@@ -4510,8 +4510,8 @@ async function executeCreateTable(
 
     // ── Domain endpoint generation ────────────────────────────────────────────
     // The table's CRUD surface needs no registration step: under PostgREST the
-    // API IS the schema, so `/db/{tableName}` is live the moment the table
-    // exists, resolved from the PostgreSQL catalog per request.
+    // `/db/{tableName}` is served from PostgREST's schema cache, which reloads
+    // after DDL. The runtime retries requests that arrive during that reload.
     //
     // executeGenerateAPI is still called because it also authors the DOMAIN
     // endpoints for this table (the business-logic functions CRUD cannot

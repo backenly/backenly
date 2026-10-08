@@ -76,7 +76,7 @@ export const article: ArticleData = {
       blocks: [
         {
           kind: 'p',
-          text: 'Tables are served by PostgREST, reading the PostgreSQL catalog directly. There is no API registry to keep in sync: `/db/<table>` is live the moment the table exists, which is why there is no "generate API" step in the tool surface. Authorization is Postgres grants plus row-level security, so an embedded resource is subject to the same privileges as a direct read.',
+          text: 'Tables are served by PostgREST, which reloads its schema cache after a table is created. The runtime retries a request that arrives during that reload. There is no separate "generate API" step in the tool surface. Authorization is Postgres grants plus row-level security, so an embedded resource is subject to the same privileges as a direct read.',
         },
         {
           kind: 'p',

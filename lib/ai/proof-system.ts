@@ -340,7 +340,7 @@ export function formatProof(proof: ProofBlock): string {
     // fine, auth owns that table" and "generate_api never ran".
     lines.push('**APIs** · none yet')
     lines.push(
-      'REST endpoints are automatic — `/db/<table>` is live the moment a table exists, with no ' +
+      'REST endpoints are automatic — `/db/<table>` needs no separate ' +
       'generate_api step. The only table here is `users`, which is managed through `/auth/*` ' +
       '(signup/signin) and deliberately never exposed as `/db/users` because it holds password hashes.',
     )

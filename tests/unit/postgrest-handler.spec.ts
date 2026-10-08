@@ -277,6 +277,156 @@ describe('response translation', () => {
 })
 
 describe('error handling', () => {
+  it('replays one request after a newly-created table misses the schema cache', async () => {
+    queryRawUnsafe.mockResolvedValue([{ present: true }])
+    const responses = [
+      { ok: false, status: 404, body: { code: 'PGRST205', message: 'Could not find the table' } },
+      { ok: true, status: 200, body: [{ id: 1, name: 'ready' }] },
+    ]
+    global.fetch = jest.fn(async () => {
+      const next = responses.shift()!
+      return {
+        ok: next.ok,
+        status: next.status,
+        headers: { get: () => null },
+        text: async () => JSON.stringify(next.body),
+      }
+    }) as unknown as typeof fetch
+
+    jest.useFakeTimers()
+    try {
+      const res = mockRes()
+      const pending = handleViaPostgrest(mockReq('GET'), res, ['orders'], { projectId: PROJECT })
+      await jest.advanceTimersByTimeAsync(999)
+      expect(global.fetch).toHaveBeenCalledTimes(1)
+      await jest.advanceTimersByTimeAsync(1)
+      await pending
+
+      expect(global.fetch).toHaveBeenCalledTimes(2)
+      const [firstUrl, firstRequest] = (global.fetch as jest.Mock).mock.calls[0]
+      const [secondUrl, secondRequest] = (global.fetch as jest.Mock).mock.calls[1]
+      expect(secondUrl).toBe(firstUrl)
+      expect(secondRequest.method).toBe(firstRequest.method)
+      expect(secondRequest.headers).toBe(firstRequest.headers)
+      expect(secondRequest.body).toBe(firstRequest.body)
+      expect(res.statusCode).toBe(200)
+      expect(res.body.data).toEqual([{ id: 1, name: 'ready' }])
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+
+  it('replays PGRST205 only once when the cache miss persists', async () => {
+    queryRawUnsafe.mockResolvedValue([{ present: true }])
+    stubUpstream(404, { code: 'PGRST205', message: 'Could not find the table' })
+
+    jest.useFakeTimers()
+    try {
+      const res = mockRes()
+      const pending = handleViaPostgrest(mockReq('GET'), res, ['orders'], { projectId: PROJECT })
+      await jest.advanceTimersByTimeAsync(1_000)
+      await pending
+
+      expect(global.fetch).toHaveBeenCalledTimes(2)
+      expect(res.statusCode).toBe(503)
+      expect(res.body.layer).toBe('platform')
+      expect(res.body.diagnosis).toMatch(/schema cache/i)
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+
+  it('returns an immediate 404 when the table really is absent', async () => {
+    queryRawUnsafe.mockResolvedValue([{ present: false }])
+    stubUpstream(404, { code: 'PGRST205', message: 'Could not find the table' })
+
+    const res = mockRes()
+    await handleViaPostgrest(mockReq('GET'), res, ['orders'], { projectId: PROJECT })
+
+    expect(global.fetch).toHaveBeenCalledTimes(1)
+    expect(res.statusCode).toBe(404)
+    expect(res.body.layer).toBe('api')
+  })
+
+  it('returns 503 if it cannot check whether the table exists', async () => {
+    queryRawUnsafe.mockRejectedValue(new Error('catalog unavailable'))
+    stubUpstream(404, { code: 'PGRST205' })
+
+    const res = mockRes()
+    await handleViaPostgrest(mockReq('GET'), res, ['orders'], { projectId: PROJECT })
+
+    expect(global.fetch).toHaveBeenCalledTimes(1)
+    expect(res.statusCode).toBe(503)
+  })
+
+  it('keeps the original cache miss when the replay cannot reach PostgREST', async () => {
+    queryRawUnsafe.mockResolvedValue([{ present: true }])
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        headers: { get: () => null },
+        text: async () => JSON.stringify({ code: 'PGRST205' }),
+      })
+      .mockRejectedValueOnce(new Error('connection lost')) as unknown as typeof fetch
+
+    jest.useFakeTimers()
+    try {
+      const res = mockRes()
+      const pending = handleViaPostgrest(mockReq('GET'), res, ['orders'], { projectId: PROJECT })
+      await jest.advanceTimersByTimeAsync(1_000)
+      await pending
+
+      expect(global.fetch).toHaveBeenCalledTimes(2)
+      expect(res.statusCode).toBe(503)
+      expect(res.body.code).toBe('DATA_PLANE_UNAVAILABLE')
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+
+  it('replays a write only after PostgREST reports it never found the table', async () => {
+    queryRawUnsafe.mockResolvedValue([{ present: true }])
+    const responses = [
+      { ok: false, status: 404, body: { code: 'PGRST205' } },
+      { ok: true, status: 201, body: [{ id: 1 }] },
+    ]
+    global.fetch = jest.fn(async () => {
+      const next = responses.shift()!
+      return {
+        ok: next.ok,
+        status: next.status,
+        headers: { get: () => null },
+        text: async () => JSON.stringify(next.body),
+      }
+    }) as unknown as typeof fetch
+
+    jest.useFakeTimers()
+    try {
+      const res = mockRes()
+      const branchSchema = `workspace_${PROJECT}_br_test`
+      const pending = handleViaPostgrest(mockReq('POST', {}, { name: 'new' }), res, ['orders'], {
+        projectId: PROJECT,
+        branchSchema,
+      })
+      await jest.advanceTimersByTimeAsync(1_000)
+      await pending
+
+      expect(global.fetch).toHaveBeenCalledTimes(2)
+      const first = (global.fetch as jest.Mock).mock.calls[0]
+      const second = (global.fetch as jest.Mock).mock.calls[1]
+      expect(second[0]).toBe(first[0])
+      expect(second[1].method).toBe('POST')
+      expect(second[1].body).toBe(first[1].body)
+      expect(second[1].headers).toBe(first[1].headers)
+      expect(second[1].headers['content-profile']).toBe(branchSchema)
+      expect(queryRawUnsafe).toHaveBeenCalledWith(expect.stringContaining('pg_class'), branchSchema, 'orders')
+      expect(res.statusCode).toBe(201)
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+
   it('maps a unique violation to 409', async () => {
     stubUpstream(400, { code: '23505', message: 'duplicate key' })
     const res = mockRes()
