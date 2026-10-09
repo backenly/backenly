@@ -668,6 +668,13 @@ tests/integration/end-user-session-tokens.spec.ts
 # branch rows is the property, so it needs a real Postgres.
 tests/integration/branch-key-surfaces.spec.ts
 
+# A key is served only where it belongs: an MCP key is refused by every runtime
+# surface from anywhere, and a service-role key by every surface from a browser,
+# at both doors and again in each route's own authentication, while a key in its
+# own place still reaches its router. Real key rows and mount order are the
+# property, so it needs a real Postgres.
+tests/integration/key-placement-surfaces.spec.ts
+
 # A preview branch has a working endpoint: the agent tool issues a branch key,
 # the runtime serves the branch and tags its request log rows, every production
 # health reader ignores those rows, and the branch's OpenAPI spec reads the

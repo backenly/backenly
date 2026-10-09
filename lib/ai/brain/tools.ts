@@ -1219,6 +1219,8 @@ export const BRAIN_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   fn('create_api_key',
     'Issue a new API key for this project. Returns the secret in plaintext ONCE — relay it to the user. ' +
     'Keys look like `proj_live_…` (NOT `sk_live_…`, which is Stripe\'s prefix).\n' +
+    'This is the key an APP uses. Your own MCP key (`mcp_live_…`) is refused by the runtime API from ' +
+    'anywhere, so never put it in app code; create one of these instead.\n' +
     'WHICH KIND YOU GET, AND WHERE IT MAY GO:\n' +
     '  • Default (`serviceRole` omitted or false) — a PUBLISHABLE key. It is safe in a browser bundle, a ' +
     'mobile app, or a public repo: it names the project but is not a user, so it reads only what your ' +
@@ -1969,8 +1971,9 @@ export async function dispatchTool(
         '',
         '## 4. The runtime API (the app you build)',
         `- Base URL: \`${base}\``,
-        '- Header `x-api-key: <proj_live_... runtime key>` on every call. A Backenly project key starts `proj_live_` (publishable, RLS-bound) or `svc_live_` (service role, server-side only). `sk_live_` is Stripe\'s secret-key prefix; only keys Backenly issued before it adopted these prefixes start with it, and they keep working.',
-        '- **The project key is SAFE IN A BROWSER BUNDLE.** It identifies the project, it is not a user. On its own it can only read what your SELECT policies make public, and every write is refused until you also send `X-User-Token`. It is the equivalent of a publishable/anon key — ship it in your frontend. The key you must NEVER ship is a SERVICE-ROLE key, which bypasses RLS entirely.',
+        '- Header `x-api-key: <project key>` on every call. Get one with `connect { action: "create_api_key", description: "web app" }`. A Backenly project key starts `proj_live_` (publishable, RLS-bound, the default) or `svc_live_` (service role with `serviceRole: true`, server-side only). `sk_live_` is Stripe\'s secret-key prefix; only keys Backenly issued before it adopted these prefixes start with it, and they keep working.',
+        '- **Never use your own MCP key (`mcp_live_…`) here.** It drives these tools only. The runtime API refuses it from anywhere, browser or server, with `MCP_KEY_IN_APP`, so an app built on it does not work and ships a credential that can change the backend.',
+        '- **The project key is SAFE IN A BROWSER BUNDLE.** It identifies the project, it is not a user. On its own it can only read what your SELECT policies make public, and every write is refused until you also send `X-User-Token`. It is the equivalent of a publishable/anon key — ship it in your frontend. The key you must NEVER ship is a SERVICE-ROLE key, which bypasses RLS entirely; one sent from a browser is refused with `SERVICE_ROLE_IN_BROWSER`. An app with no end-user sign-in that must write does it in a Backenly function or its own server, never by shipping a service-role key.',
         '- End-user auth: `POST /auth/signup` and `POST /auth/signin` → `{ token }`. Send that token as header **`X-User-Token: <token>`** on data calls — RLS then scopes rows to that user. (An API key alone is NOT a user; owner writes without a user token are correctly denied on own-rows tables.)',
         '- **CRUD paths — one form only:** `GET /db/<table>`, `POST /db/<table>`, `GET /db/<table>/<id>`, `PATCH /db/<table>/<id>` (PUT is accepted as the same update), `DELETE /db/<table>/<id>`. The `/db/` prefix is required. There is no bare `/<table>` route.',
         '- PostgREST grammar is also available at `/api/v2/<projectId>/<table>` — `?select=*,author(*)`, `?price=gte.100`, `?order=createdAt.desc`. Same auth, same RLS.',

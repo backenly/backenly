@@ -200,14 +200,15 @@ export const DOMAIN_TOOLS: DomainTool[] = [
     name: 'connect',
     title: 'Connect',
     summary:
-      'Keys, secrets and connections for the apps and tools that use this backend. To rotate a key without ' +
+      'Keys, secrets and connections for the apps and tools that use this backend. An app never uses your ' +
+      'MCP key, which the runtime API refuses: create_api_key issues the key it does. To rotate a key without ' +
       'downtime: create_api_key, move the app to the new key, then revoke_api_key the old one.',
     // No rotate_api_key: the executor puts the new secret in its summary, and an
     // approved exact call stores that summary where check_approval and the
     // approvals list serve it. Create-then-revoke rotates with nothing stored.
     actions: {
       whoami: { tool: 'get_connection_identity', gloss: 'the project this connection is bound to, and the key or OAuth connection calling' },
-      create_api_key: { tool: 'create_api_key', gloss: 'a scoped key for an app, optionally bound to a preview branch' },
+      create_api_key: { tool: 'create_api_key', gloss: 'the key an app uses: publishable by default and safe in a browser, serviceRole for server code; optionally bound to a preview branch' },
       list_api_keys: { tool: 'list_api_keys', gloss: 'every key with its scope and last use' },
       set_key_permissions: { tool: 'set_key_permissions', gloss: 'change what a key may do' },
       revoke_api_key: { tool: 'revoke_api_key', gloss: 'disable a key (apps using it stop working)' },
