@@ -227,9 +227,6 @@ function Hero() {
             <Icon icon="ri:github-fill" width={18} aria-hidden />
             Star on GitHub
           </a>
-          <span className="mt-1 text-[13px] text-zinc-500 sm:ml-3 sm:mt-0">
-            Free plan, no card. Apache-2.0.
-          </span>
         </motion.div>
 
         <motion.div
