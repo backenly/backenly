@@ -35,6 +35,7 @@ import { recordedV1 } from '@/lib/traffic/recorded-v1'
 import { v1ApiMiddleware } from '@/lib/api/v1/middleware'
 import { MCP_KEY_HINT, MCP_KEY_IN_APP, clearKeyPlacementCache } from '@/lib/security/key-placement'
 import { SERVICE_ROLE_BROWSER_BLOCKED, SERVICE_ROLE_IN_BROWSER } from '@/lib/security/service-role-exposure'
+import { connectionIdentity } from '@/lib/mcp/identity'
 
 const CHROME_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
@@ -213,6 +214,14 @@ describe('an MCP key on the runtime API', () => {
     const row = await prisma.apiKey.findUnique({ where: { id: mcpKeyId }, select: { lastUsed: true, requestCount: true } })
     expect(row?.lastUsed).toBeNull()
     expect(row?.requestCount).toBe(0)
+  })
+
+  it('is described as tools-only by connect whoami, where the agent asks what it holds', async () => {
+    const identity = await connectionIdentity({ projectId, apiKeyId: mcpKeyId })
+    expect(identity.ok).toBe(true)
+    expect(identity.summary).toContain('"MCP Key"')
+    expect(identity.summary).toMatch(/the runtime API refuses it/)
+    expect(identity.summary).toContain('connect { action: "create_api_key" }')
   })
 })
 

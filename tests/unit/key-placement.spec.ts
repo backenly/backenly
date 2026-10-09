@@ -10,7 +10,9 @@
  * The refusal is read by a developer or an agent at the moment it can act, so it
  * also has to name a fix that exists. The call it tells an agent to make is
  * checked against the MCP catalog here, so the message cannot drift from the
- * tool it names.
+ * tool it names. And because a refusal is the last line, the first one is pinned
+ * too: every surface an agent reads before writing app code says which key an
+ * app uses.
  *
  * The doors themselves, over a real socket and a real database, are in
  * tests/integration/key-placement-surfaces.spec.ts.
@@ -25,9 +27,12 @@ import {
   mcpKeyRefusalMessage,
   serviceRoleInBrowserRefusal,
 } from '@/lib/security/key-placement'
+import fs from 'fs'
+import path from 'path'
 import { SERVICE_ROLE_IN_BROWSER } from '@/lib/security/service-role-exposure'
 import { getDomainTool } from '@/lib/mcp/domains'
-import { BRAIN_TOOLS } from '@/lib/ai/brain/tools'
+import { BRAIN_TOOLS, dispatchTool } from '@/lib/ai/brain/tools'
+import { buildMcpInstructions } from '@/lib/mcp/protocol/shared'
 
 describe('isMcpCredential', () => {
   it('is true for a key minted on Connect → Agents', () => {
@@ -119,5 +124,54 @@ describe('the refusal body speaks the surface it answers on', () => {
     expect(r.status).toBe(403)
     expect(r.body.code).toBe(SERVICE_ROLE_IN_BROWSER)
     expect(r.body.error).toMatch(/service-role key and this request came from a browser/)
+  })
+})
+
+describe('an agent is told which key an app uses, before it writes one', () => {
+  // The refusal is the safety net. This is the first line: every surface an
+  // agent reads before writing app code says its own key is not an app key and
+  // how to get the one that is. Nothing said so when the MCP key was shipped in a
+  // frontend, so the wording is pinned here rather than trusted to survive edits.
+  const read = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), 'utf8')
+  const CREATE = 'connect { action: "create_api_key"'
+
+  it('in the brief every MCP host injects on connect', () => {
+    const brief = buildMcpInstructions('Demo', 20)
+    expect(brief).toContain('mcp_live_')
+    expect(brief).toMatch(/the runtime API refuses it/)
+    expect(brief).toContain(CREATE)
+  })
+
+  it('in the workflow guide', async () => {
+    const res = await dispatchTool('get_instructions', {}, {
+      projectId: '00000000-0000-4000-8000-000000000000',
+      userId: 'test',
+      sessionToken: undefined,
+      destructiveConfirmed: false,
+      mcpOwnerConfirmed: false,
+      createdThisTurn: new Set<string>(),
+    } as any)
+    expect(res.summary).toMatch(/Never use your own MCP key/)
+    expect(res.summary).toContain(CREATE)
+    expect(res.summary).toContain(MCP_KEY_IN_APP)
+  })
+
+  it.each([
+    { file: 'public/llms.txt' },
+    { file: 'public/skill.md' },
+    { file: 'public/docs/agents/client-setup.md' },
+  ])('in $file', ({ file }) => {
+    const text = read(file)
+    expect(text).toMatch(/project key is (never your|not the) MCP key/i)
+    expect(text).toContain(CREATE)
+    expect(text).toContain(MCP_KEY_IN_APP)
+  })
+
+  it('and the SDK quickstart does not read the app key from the MCP key’s variable', () => {
+    // BACKENLY_API_KEY is where @backenly/mcp-server and the CLI read the MCP key
+    // from, so an app reading the same name picks up the agent's key.
+    const readme = read('packages/sdk/README.md')
+    expect(readme).not.toMatch(/apiKey:\s*process\.env\.BACKENLY_API_KEY\b/)
+    expect(readme).toContain('mcp_live_')
   })
 })

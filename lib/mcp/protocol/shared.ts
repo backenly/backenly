@@ -49,6 +49,10 @@ export function publicResources(): Array<Omit<McpResourceDescriptor, 'tool'>> {
  * The brief an MCP host injects on connect. Short on purpose: it costs context
  * in every session, so it earns its place by getting the agent to confirm the
  * connection, know what it can do, and ground itself before changing anything.
+ *
+ * The key rule is here, not only in the docs, because the agent already holds
+ * its MCP key when it starts writing an app, and an agent that was never told
+ * otherwise put that key in the frontend (lib/security/key-placement.ts).
  */
 export function buildMcpInstructions(projectLabel: string, toolCount: number | null): string {
   const project = projectLabel ? `"${projectLabel}"` : 'this project'
@@ -71,6 +75,9 @@ export function buildMcpInstructions(projectLabel: string, toolCount: number | n
     `  proposing or making changes. Never guess at tables or config.`,
     `- For precise work use run_query, apply_migration, set_rls, db_* and the section tools. Use`,
     `  backend_chat for what you would rather describe than specify.`,
+    `- Your connection key (mcp_live_…) drives these tools only; the runtime API refuses it. Never`,
+    `  put it in app code or an app's env. An app's key comes from connect { action: "create_api_key" }:`,
+    `  publishable by default and safe in a browser; serviceRole: true only for server code.`,
     `- Never fabricate results. If a tool returns nothing or errors, say so plainly.`,
   ].join('\n')
 }
