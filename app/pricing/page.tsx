@@ -1,7 +1,6 @@
 'use client'
 
 import { useState, type ReactNode } from 'react'
-import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import {
   ArrowRight,
@@ -25,7 +24,7 @@ import { HorizonClose, Page, PageHero, Section, SectionHead } from '@/components
 import { Faq } from '@/components/site/Faq'
 import { Reveal } from '@/components/site/Reveal'
 import { StartButton } from '@/components/site/StartButton'
-import { HEADING, INK, PANEL, PRIMARY_CTA, SECONDARY_CTA, TITLE } from '@/components/site/tokens'
+import { HEADING, PANEL, PRIMARY_CTA, SECONDARY_CTA, TITLE } from '@/components/site/tokens'
 import { useUserSession } from '@/lib/hooks/useUserSession'
 import {
   PRO_INCLUDED,
@@ -39,13 +38,15 @@ import {
 
    Unchanged on purpose: every number, every plan row, the catalog-driven
    rates (a rate only appears once lib/pricing/catalog.ts publishes it), the
-   startup offer above the plan cards and its single action (founder
-   decisions, see #178), the portability line, and the FAQ text.
+   portability line, and the FAQ text.
 
    What moved: the plans stand on the lit stage under the hero; Pro carries the
    page's one light instead of a "Most popular" badge nobody can verify; a
    monthly / yearly switch shows the real annual price; the comparison table's
    plan header sticks under the navbar so a long table never loses its columns.
+
+   The startup program is not on this page. It has its own page at /startups,
+   which Backenly Cloud provides together with the application behind it.
 ───────────────────────────────────────────────────────────── */
 
 type Cadence = 'monthly' | 'yearly'
@@ -263,37 +264,6 @@ function comparisonGroups(published: boolean): MatrixGroup[] {
   return groups
 }
 
-/**
- * Backenly for Startups: two months of Pro at no cost for early-stage teams.
- *
- * Applying happens at /startups/apply, which Backenly Cloud provides: the
- * applicant describes the startup, confirms a code sent to an address at its
- * domain, then signs in or creates an account as usual. The founding team
- * reviews it, and approval switches Pro on for the pass. The months here must
- * stay equal to what the program grants (STARTUP_PASS_MONTHS in the Cloud
- * overlay's lib/billing/startup-program.ts).
- */
-const STARTUP_MONTHS = 2
-const PRO_MONTHLY_USD = 25
-
-const STARTUP_APPLY_PATH = '/startups/apply'
-
-const startupSources = ['Supabase', 'Appwrite', 'Firebase', 'Self-hosted', 'Starting fresh']
-
-const startupPass = [
-  `${PRO_INCLUDED.mau.toLocaleString('en-US')}\u00a0MAU, ${PRO_INCLUDED.dbGib}\u00a0GB Postgres, ${PRO_INCLUDED.fileGib}\u00a0GB files`,
-  'Unlimited projects and API requests, 5 team seats',
-  '3,000 AI credits every month',
-  'Self-healing every minute, never metered',
-  'Help from our team planning your move',
-]
-
-const startupSteps = [
-  { title: 'Apply in two minutes', body: 'Tell us about your startup and confirm an email at its domain, then sign in as usual.' },
-  { title: 'Get Pro switched on', body: `Once approved, Pro runs on your account for ${STARTUP_MONTHS} months. No card needed.` },
-  { title: 'Move over and ship', body: 'Run production on Backenly. Your data stays standard Postgres, exportable anytime.' },
-]
-
 const faqs = [
   {
     q: 'Can I start without a credit card?',
@@ -364,9 +334,7 @@ export default function PricingPage() {
         />
 
         <Section flush aria-label="Plans">
-          <StartupProgram />
-
-          <div className="mt-[72px] flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between md:mt-[96px]">
+          <div className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
             <h2 className={`text-[26px] text-white md:text-[34px] ${TITLE}`}>Plans</h2>
             <CadenceSwitch value={cadence} onChange={setCadence} />
           </div>
@@ -571,141 +539,6 @@ function PlanCard({ plan, cadence, onCta }: { plan: Plan; cadence: Cadence; onCt
         </p>
       </div>
     </article>
-  )
-}
-
-/* ── Startups ────────────────────────────────────────────────────────────── */
-
-/**
- * The startup program, first thing under the hero and above the plan cards, so
- * a founder meets the offer before comparing tiers. The pitch and the pass sit
- * side by side at lg and the three steps run along the bottom. Violet is the
- * only colour, as light: an edge along the top and a wash falling from it.
- */
-function StartupProgram() {
-  return (
-    <section
-      id="startups"
-      aria-labelledby="startups-title"
-      className={`relative scroll-mt-[92px] overflow-hidden rounded-2xl border border-violet-300/[0.18] ${INK}`}
-    >
-      <span
-        aria-hidden
-        className="pointer-events-none absolute inset-x-0 top-0 h-px bg-[linear-gradient(to_right,transparent,rgba(167,139,250,0.6),transparent)]"
-      />
-      <span
-        aria-hidden
-        className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_70%_55%_at_25%_0%,rgba(139,92,246,0.12),transparent_70%)]"
-      />
-
-      <div className="relative grid gap-10 p-6 sm:p-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,380px)] lg:gap-14 lg:p-12">
-        <div className="min-w-0">
-          <p className="text-[14px] font-medium tracking-[-0.006em] text-violet-200">Backenly for Startups</p>
-          <h2
-            id="startups-title"
-            className={`mt-4 max-w-[20ch] text-[30px] text-white [text-wrap:balance] md:text-[40px] ${TITLE}`}
-          >
-            Startups get Pro free for {STARTUP_MONTHS} months
-          </h2>
-          <p className="mt-5 max-w-[58ch] text-[16px] leading-[1.7] text-zinc-400">
-            Switching from Supabase, Appwrite, Firebase, or a backend you run yourself? Apply once and
-            your team gets the complete Pro plan at no cost: enough time to move a real product over
-            and judge Backenly on production traffic, not a demo.
-          </p>
-
-          <p className="mt-8 text-[13px] text-zinc-500">Coming from</p>
-          <ul className="mt-3 flex flex-wrap gap-2">
-            {startupSources.map((source) => (
-              <li
-                key={source}
-                className="rounded-md border border-white/[0.10] bg-white/[0.03] px-3 py-1.5 text-[14px] text-zinc-300"
-              >
-                {source}
-              </li>
-            ))}
-          </ul>
-
-          <div className="mt-9">
-            <Link href={STARTUP_APPLY_PATH} className={PRIMARY_CTA}>
-              Apply for startup access
-              <ArrowRight aria-hidden className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
-            </Link>
-          </div>
-          <p className="mt-4 max-w-[58ch] text-[13px] leading-[1.6] text-zinc-500">
-            For early-stage teams, bootstrapped through Series A. One pass per company, and every
-            application is read by the founding team.
-          </p>
-        </div>
-
-        <StartupPass />
-      </div>
-
-      {/* A real sequence, so it is numbered. */}
-      <ol className="relative grid divide-y divide-white/[0.08] border-t border-white/[0.08] md:grid-cols-3 md:divide-x md:divide-y-0">
-        {startupSteps.map((step, i) => (
-          <li key={step.title} className="p-6 sm:px-8 lg:px-12 lg:py-8">
-            <p className="text-[13px] tabular-nums text-violet-300">Step {i + 1}</p>
-            <h3 className={`mt-2 text-[16px] text-white ${HEADING}`}>{step.title}</h3>
-            <p className="mt-1.5 text-[14px] leading-[1.6] text-zinc-400">{step.body}</p>
-          </li>
-        ))}
-      </ol>
-    </section>
-  )
-}
-
-/** The offer itself, drawn as a pass: a price you keep, torn from what it is worth. */
-function StartupPass() {
-  return (
-    <div className="relative self-start rounded-2xl border border-white/[0.12] bg-black/50 shadow-[0_40px_120px_-60px_rgba(139,92,246,0.55)]">
-      <div className="p-6 sm:p-7">
-        <div className="flex items-center justify-between gap-4">
-          <p className="text-[14px] font-medium text-violet-200">Startup pass</p>
-          <span className="rounded-md border border-white/[0.10] bg-white/[0.04] px-2 py-1 text-[12px] font-medium text-zinc-300">
-            Pro plan
-          </span>
-        </div>
-        <div className="mt-6 flex items-end gap-3">
-          <span className="text-[60px] font-semibold leading-none tracking-[-0.04em] text-white">$0</span>
-          <div className="pb-1 text-[14px]">
-            <p className="text-zinc-500">
-              <s className="decoration-zinc-500">
-                <span className="sr-only">Regular price </span>${PRO_MONTHLY_USD * STARTUP_MONTHS}
-              </s>{' '}
-              value
-            </p>
-            <p className="text-zinc-300">for your first {STARTUP_MONTHS} months</p>
-          </div>
-        </div>
-        <p className="mt-4 text-[13px] text-zinc-500">
-          Normally ${PRO_MONTHLY_USD} a month. Nothing to pay while the pass runs.
-        </p>
-      </div>
-
-      {/* The tear line: a dashed rule with a notch bitten out of each edge. The
-          notches are filled with the band's own ink, so they read as holes. */}
-      <div aria-hidden className="relative h-px">
-        <span className="absolute inset-x-6 top-0 border-t border-dashed border-white/15" />
-        <span className="absolute -left-[11px] -top-[11px] h-[22px] w-[22px] rounded-full border border-white/[0.12] bg-[#0a0b0d] [clip-path:inset(0_0_0_50%)]" />
-        <span className="absolute -right-[11px] -top-[11px] h-[22px] w-[22px] rounded-full border border-white/[0.12] bg-[#0a0b0d] [clip-path:inset(0_50%_0_0)]" />
-      </div>
-
-      <div className="p-6 sm:p-7">
-        <p className="text-[13px] text-zinc-500">Included on the pass</p>
-        <ul className="mt-4 flex flex-col gap-3">
-          {startupPass.map((item) => (
-            <li key={item} className="flex gap-3 text-[14px] leading-[1.6] text-zinc-300">
-              <Check aria-hidden className="mt-[3px] h-4 w-4 shrink-0 text-violet-300" strokeWidth={2.25} />
-              <span>{item}</span>
-            </li>
-          ))}
-        </ul>
-        <p className="mt-6 border-t border-white/[0.08] pt-5 text-[13px] leading-[1.6] text-zinc-500">
-          When the {STARTUP_MONTHS} months end, you choose: stay on Pro at ${PRO_MONTHLY_USD} a month,
-          or return to Free and keep your project. Nothing renews without your say.
-        </p>
-      </div>
-    </div>
   )
 }
 

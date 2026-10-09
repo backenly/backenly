@@ -22,6 +22,11 @@ export const ROUTES = {
   login: '/auth/login',
   app: '/app',
   pricing: '/pricing',
+  // Backenly for Startups. The page and its application are Backenly Cloud's
+  // (the overlay owns app/startups/**); like every marketing page here, the
+  // link is only ever rendered on Cloud, since self-hosted installs redirect
+  // the marketing site to /app.
+  startups: '/startups',
   features: '/features',
   useCases: '/use-cases',
   comparisons: '/comparisons',
@@ -449,6 +454,7 @@ export function SiteFooter() {
   const product = [
     { label: 'Features', href: ROUTES.features },
     { label: 'Pricing', href: ROUTES.pricing },
+    { label: 'Startup program', href: ROUTES.startups },
     { label: 'Use cases', href: ROUTES.useCases },
     { label: 'Comparisons', href: ROUTES.comparisons },
     { label: 'Alternatives', href: ROUTES.alternatives },
