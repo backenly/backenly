@@ -10,6 +10,8 @@ export default function sitemap(): MetadataRoute.Sitemap {
   const core: MetadataRoute.Sitemap = [
     { url: APP_URL,                          lastModified: now, changeFrequency: 'weekly',  priority: 1.0 },
     { url: `${APP_URL}/pricing`,             lastModified: now, changeFrequency: 'monthly', priority: 0.9 },
+    // Served by the Backenly Cloud overlay, like the site this sitemap describes.
+    { url: `${APP_URL}/startups`,            lastModified: now, changeFrequency: 'monthly', priority: 0.8 },
     { url: `${APP_URL}/alternatives`,        lastModified: now, changeFrequency: 'monthly', priority: 0.8 },
     { url: `${APP_URL}/contact`,             lastModified: now, changeFrequency: 'monthly', priority: 0.6 },
     { url: `${APP_URL}/terms`,               lastModified: now, changeFrequency: 'yearly',  priority: 0.3 },
