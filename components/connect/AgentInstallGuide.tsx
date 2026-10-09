@@ -128,6 +128,15 @@ function codexRemoteToml(_projectId: string, key: string): string {
 }
 
 const RUN_THEN_NEW_SESSION = 'Run it in a terminal, then start a new Claude Code session.'
+/**
+ * Cursor reads a user config and a per-project one. This block carries a real
+ * key, so it goes in the user config: a project's `.cursor/mcp.json` gets
+ * committed, and it sits beside the app code an agent writes, which is how an
+ * MCP key ended up in a frontend bundle (lib/security/key-placement.ts).
+ */
+const CURSOR_NEXT = (
+  <>Paste into <code>~/.cursor/mcp.json</code>, not the project&apos;s, so the key never reaches git. Then reload the window.</>
+)
 const ANTIGRAVITY_NEXT = (
   <>Paste into <code>mcp_config.json</code> (Manage MCP Servers → View raw config), then restart Antigravity.</>
 )
@@ -140,8 +149,8 @@ const AGENTS: Agent[] = [
   },
   {
     id: 'cursor', name: 'Cursor',
-    local: { kind: 'json', next: <>Paste into <code>.cursor/mcp.json</code>, then reload the window.</>, build: stdioJson },
-    remote: { kind: 'json', next: <>Paste into <code>.cursor/mcp.json</code>, then reload the window.</>, build: cursorRemoteJson },
+    local: { kind: 'json', next: CURSOR_NEXT, build: stdioJson },
+    remote: { kind: 'json', next: CURSOR_NEXT, build: cursorRemoteJson },
   },
   {
     id: 'codex', name: 'Codex',
@@ -246,7 +255,7 @@ export function AgentInstallGuide({
               {key ? 'Key ready' : 'One key for this project, scoped and revocable'}
             </p>
             <p className="mt-0.5 text-[12.5px] text-zinc-500">
-              {key ? 'It is in the command below. Revoke it any time from the list.' : 'Never a root key. It can request a destructive change, never approve one.'}
+              {key ? 'It is in the command below, for your agent only: an app gets its own key. Revoke it any time from the list.' : 'Never a root key. It can request a destructive change, never approve one.'}
             </p>
           </div>
           <KitButton

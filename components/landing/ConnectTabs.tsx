@@ -13,6 +13,10 @@
  *
  * The Claude Code command uses a genuine shell line continuation, so pasting
  * the two lines runs exactly one command.
+ *
+ * The agent's key is `<mcp-key>`, never `<api-key>`: the SDK tab's `apiKey` is
+ * the app's own key, and the runtime refuses an MCP key, so one word for both
+ * credentials taught exactly the mix-up that shipped MCP keys in frontends.
  */
 
 import { useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
@@ -29,7 +33,7 @@ const DOORS: Door[] = [
     language: 'bash',
     code: `# Project id and key: dashboard, Connect, Agents
 claude mcp add backenly -- \\
-  npx -y @backenly/mcp-server --project <project-id> --key <api-key>
+  npx -y @backenly/mcp-server --project <project-id> --key <mcp-key>
 
 # Then, in a new session:
 # > add comments to posts. Only the author can delete theirs.`,
@@ -38,13 +42,13 @@ claude mcp add backenly -- \\
   {
     id: 'cursor',
     label: 'Cursor',
-    file: '.cursor/mcp.json',
+    file: '~/.cursor/mcp.json',
     language: 'json',
     code: `{
   "mcpServers": {
     "backenly": {
       "command": "npx",
-      "args": ["-y", "@backenly/mcp-server", "--project", "<project-id>", "--key", "<api-key>"]
+      "args": ["-y", "@backenly/mcp-server", "--project", "<project-id>", "--key", "<mcp-key>"]
     }
   }
 }`,
@@ -57,7 +61,7 @@ claude mcp add backenly -- \\
     language: 'bash',
     code: `# Project id and key: dashboard, Connect, Agents
 codex mcp add backenly -- \\
-  npx -y @backenly/mcp-server --project <project-id> --key <api-key>
+  npx -y @backenly/mcp-server --project <project-id> --key <mcp-key>
 
 # Then, in a new session, ask for what you want built.`,
     note: 'Relaunch the Codex CLI to load the server.',
@@ -67,7 +71,7 @@ codex mcp add backenly -- \\
     label: 'CLI',
     file: 'terminal',
     language: 'bash',
-    code: `npx @backenly/cli link --project <project-id> --key <api-key>
+    code: `npx @backenly/cli link --project <project-id> --key <mcp-key>
 
 npx @backenly/cli schema           # every table, column and relation
 npx @backenly/cli types --client   # typed client from the live schema
