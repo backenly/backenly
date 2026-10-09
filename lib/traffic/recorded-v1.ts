@@ -18,12 +18,17 @@
  * end-user sign-up, sign-in, refresh and logout, none of these routes is
  * branch-aware, so serving one would read or write production. The refusal is
  * recorded like any other response. lib/branches/key-scope.ts.
+ *
+ * It is also where a key used in the wrong place is refused, before the route
+ * authenticates and spends the key's rate limit: an MCP key on the runtime API
+ * at all, or a service-role key from a browser. lib/security/key-placement.ts.
  */
 
 import { NextResponse } from 'next/server'
 import { recordRuntimeRequest, INTERNAL_TRAFFIC_HEADER, isInternalTraffic } from './request-recorder'
 import { meterResponseBody } from '@/lib/usage/egress'
 import { branchIdForRequest, refuseBranchKeyOffDataPlane } from '@/lib/branches/key-scope'
+import { refuseMisplacedKey } from '@/lib/security/key-placement'
 
 export function recordedV1<R extends Request, C, T extends Response>(
   handler: (request: R, context: C) => T | Promise<T>,
@@ -37,7 +42,9 @@ export function recordedV1<R extends Request, C, T extends Response>(
     // some callers construct) from throwing before the route runs.
     const url = new URL(request.url, 'http://localhost')
     try {
-      const refusal = await refuseBranchKeyOffDataPlane(url.pathname, request.headers, url)
+      const refusal =
+        (await refuseMisplacedKey(url.pathname, request.headers, url, request.method)) ??
+        (await refuseBranchKeyOffDataPlane(url.pathname, request.headers, url))
       if (refusal) {
         statusCode = refusal.status
         return NextResponse.json(refusal.body, { status: refusal.status }) as unknown as T

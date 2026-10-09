@@ -19,6 +19,7 @@ import { projectServingGate } from './lib/serving-gate'
 import { recordRuntimeRequest, INTERNAL_TRAFFIC_HEADER, isInternalTraffic } from '@/lib/traffic/request-recorder'
 import { meterNodeResponse } from '@/lib/usage/egress'
 import { branchIdForRequest, refuseBranchKeyOffDataPlane } from '@/lib/branches/key-scope'
+import { refuseMisplacedKey } from '@/lib/security/key-placement'
 
 const app = express()
 
@@ -145,6 +146,25 @@ app.use(['/api/v1/:projectId', '/api/v2/:projectId'], (req, res, next) => {
 // the Next-owned surfaces only, so /db, /v2, end-user auth, functions and
 // realtime kept serving a sealed project. See lib/projects/serving-state.ts.
 app.use(['/api/v1/:projectId', '/api/v2/:projectId'], asyncRoute(projectServingGate))
+
+// ── A key is served only where it belongs ──────────────────────────────────────
+// An MCP key drives an agent's tools and is never an app's key, so the runtime
+// refuses it from anywhere; a service-role key never answers a browser. Refused
+// here, before the Next proxy, every router and any rate-limit accounting, so no
+// surface can forget either rule. lib/security/key-placement.ts.
+app.use(['/api/v1', '/api/v2'], asyncRoute(async (req, res, next) => {
+  const refusal = await refuseMisplacedKey(
+    req.originalUrl,
+    { get: (name: string) => req.get(name) },
+    new URL(req.originalUrl, 'http://runtime.internal'),
+    req.method,
+  )
+  if (refusal) {
+    res.status(refusal.status).json(refusal.body)
+    return
+  }
+  next()
+}))
 
 // ── A branch-bound key stays on the data plane ─────────────────────────────────
 // Only /db/*, /api/v2 and end-user sign-up, sign-in, refresh and logout are

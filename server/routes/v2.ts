@@ -50,6 +50,7 @@ import { stripUpstreamError } from '@/lib/postgrest/translate'
 import { ensureSchemaRegistered } from '@/lib/postgrest/registration'
 import { getProjectIdFromAuth } from './dynamic'
 import { ENVIRONMENT_HEADER, environmentHeaderValue } from '@/lib/branches/key-scope'
+import { isKeyPlacementRefusal } from '@/lib/security/key-placement'
 import { enforceRateLimitByKeyId } from '../lib/auth'
 import { asyncRoute } from '../lib/async-route'
 import { touchProjectActivity } from '@/lib/projects/activity'
@@ -115,15 +116,16 @@ router.all('/:projectId/*', asyncRoute(async (req: Request, res: Response) => {
 
   const auth = await getProjectIdFromAuth(req)
   if (!auth.success || auth.projectId !== projectId) {
-    // A service-role key refused because the request came from a browser is an
-    // AUTHORIZATION decision about a valid credential, not a failed one. 401
-    // would tell the developer their key is wrong and send them to re-issue it,
-    // which is the opposite of the fix — the key is fine, the place it is being
-    // used from is not.
-    const status = auth.code === 'SERVICE_ROLE_IN_BROWSER' ? 403 : 401
+    // A key refused for WHERE it was used (a service-role key from a browser, an
+    // MCP key on the runtime at all) is an AUTHORIZATION decision about a valid
+    // credential, not a failed one. 401 would tell the developer their key is
+    // wrong and send them to re-issue it, which is the opposite of the fix: the
+    // key is fine, the place it is being used from is not.
+    const status = !auth.success && isKeyPlacementRefusal(auth.code) ? 403 : 401
     return res.status(status).json({
       code: auth.success ? 'PROJECT_MISMATCH' : (auth.code ?? 'UNAUTHORIZED'),
       message: auth.success ? 'This key does not belong to that project.' : (auth.error ?? 'Unauthorized'),
+      ...(!auth.success && auth.hint ? { hint: auth.hint } : {}),
     })
   }
 

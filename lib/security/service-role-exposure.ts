@@ -48,6 +48,9 @@ import type { RawFinding } from '@/lib/core/types'
 /** Audit action recording one refused service-role request. The probe's evidence. */
 export const SERVICE_ROLE_BROWSER_BLOCKED = 'SERVICE_ROLE_BROWSER_BLOCKED'
 
+/** The error code a refused request answers with, on every surface. */
+export const SERVICE_ROLE_IN_BROWSER = 'SERVICE_ROLE_IN_BROWSER'
+
 /** How far back the invariant probe looks for refused requests. */
 export const EXPOSURE_WINDOW_HOURS = 24
 
@@ -141,7 +144,8 @@ export function serviceRoleRefusalMessage(keyName: string | null): string {
     `Service-role keys bypass row-level security completely — every row of every ` +
     `table in this project would be readable by anyone who opens developer tools. ` +
     `Backenly refuses these requests rather than serving them.\n\n` +
-    `Use a client key in browser code (Project → API keys → client key): it is ` +
+    `Use a client key in browser code (Settings → API keys → New key → Client, or ` +
+    `connect { action: "create_api_key" } from a coding agent): it is ` +
     `subject to your RLS policies, so end-users see only their own rows. Keep the ` +
     `service-role key on a server — an API route, a server component, or a ` +
     `Backenly function — and never in code that ships to the browser.`

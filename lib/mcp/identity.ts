@@ -84,6 +84,11 @@ export async function connectionIdentity(ctx: {
       // "lands in this project's branch" told an agent its migrations were
       // isolated when they were live.
       `. Every change made through this connection lands in this project's main schema. ` +
+      // Said where the agent asks what it is holding: the runtime refuses this
+      // key, and an app built with it ships a credential that can change the
+      // backend (lib/security/key-placement.ts).
+      'This connection drives Backenly\'s tools only: the runtime API refuses it, so never put its key in app code. ' +
+      'An app needs its own key from connect { action: "create_api_key" }. ' +
       'To work on a different project, re-point the connection: npx @backenly/cli link --project <id> --key <key>, ' +
       'or run Connect for that project in the dashboard. Creating a project is done in the dashboard.',
     data,

@@ -81,6 +81,7 @@ A read-only key or connection sees **16** tools: the read tools, and each sectio
 
 - MCP: the key goes in `x-api-key`, or the remote endpoint signs in through the browser.
 - Your app's runtime API: `x-api-key: <project key>` on every request, and `X-User-Token: <end-user JWT>` for anything row-level security protects. Do not send the project key as `Authorization: Bearer`: the data API reads that header as an end-user JWT and the request fails with 401.
+- The project key is never your MCP key. Create the app's own with `connect { action: "create_api_key", description: "web app" }`: publishable by default (`proj_live_…`), safe in a browser and bound by row-level security; `serviceRole: true` issues a server-only `svc_live_…` key. The runtime API refuses an MCP key (`mcp_live_…`) from anywhere with `MCP_KEY_IN_APP`, and a service-role key from a browser with `SERVICE_ROLE_IN_BROWSER`.
 
 ## Topics
 

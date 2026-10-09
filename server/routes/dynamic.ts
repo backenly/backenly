@@ -22,10 +22,18 @@ import { hashApiKey, resolveEndUserFromToken, crossEnvironmentUserToken } from '
 import { handleViaPostgrest } from './postgrest-handler'
 import { v1NotFoundBody } from '@/lib/api/v1/route-not-found'
 import {
+  SERVICE_ROLE_IN_BROWSER,
   detectBrowserOrigin,
   recordServiceRoleBrowserBlock,
   serviceRoleRefusalMessage,
 } from '@/lib/security/service-role-exposure'
+import {
+  MCP_KEY_HINT,
+  MCP_KEY_IN_APP,
+  isKeyPlacementRefusal,
+  isMcpCredential,
+  mcpKeyRefusalMessage,
+} from '@/lib/security/key-placement'
 import { asyncRoute } from '../lib/async-route'
 import { refuseUnlessServing } from '../lib/serving-gate'
 import { touchProjectActivity } from '@/lib/projects/activity'
@@ -79,12 +87,25 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
       select: {
         id: true, name: true, keyPrefix: true, projectId: true, userId: true,
         permissions: true, rateLimit: true, expiresAt: true, serviceRole: true,
+        scope: true, keyType: true,
         branch: { select: { id: true, schemaName: true, status: true, name: true } },
       },
     })
     if (!key) return { success: false, error: 'Invalid API key', code: 'INVALID_API_KEY' }
     if (key.expiresAt && key.expiresAt < new Date()) return { success: false, error: 'API key has expired', code: 'API_KEY_EXPIRED' }
     if (!key.projectId) return { success: false, error: 'API key is not associated with a project', code: 'NO_PROJECT_ID' }
+
+    // ── An MCP credential is never an app's key ──────────────────────────────
+    //
+    // This function used to serve any row its hash matched, as service role, so
+    // an agent's own MCP key worked as a data key from curl and from Node and
+    // was shipped in app code. The runtime's doors refuse it first
+    // (lib/security/key-placement.ts); this is the same rule at the point that
+    // grants data access, for a request a door let through. Checked before the
+    // browser rule because it applies from anywhere.
+    if (isMcpCredential(key)) {
+      return { success: false, error: mcpKeyRefusalMessage(key.name ?? null), code: MCP_KEY_IN_APP, hint: MCP_KEY_HINT }
+    }
 
     // ── A service-role key must never answer a browser ────────────────────────
     //
@@ -109,7 +130,7 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
         return {
           success: false,
           error: serviceRoleRefusalMessage(key.name ?? null),
-          code: 'SERVICE_ROLE_IN_BROWSER',
+          code: SERVICE_ROLE_IN_BROWSER,
         }
       }
     }
@@ -320,7 +341,9 @@ async function handleDynamicRequest(req: Request, res: Response) {
 
   const authResult = await getProjectIdFromAuth(req)
   if (!authResult.success) {
-    res.status(401).json({
+    // A valid key used in the wrong place is refused, not unauthenticated: 401
+    // would send the developer to re-issue a key that is fine. Matches /api/v2.
+    res.status(isKeyPlacementRefusal(authResult.code) ? 403 : 401).json({
       error: authResult.error || 'Authentication required',
       code: authResult.code || 'AUTHENTICATION_REQUIRED',
       hint: authResult.hint ?? 'Include x-api-key header or Authorization: Bearer token',

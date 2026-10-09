@@ -60,12 +60,14 @@ Stripe events arrive at `/api/v1/{projectId}/webhooks/stripe`, which verifies th
 
 Two headers: `x-api-key: <project key>` on every request, and `X-User-Token: <end-user JWT>` for anything RLS protects. Never send the project key as `Authorization: Bearer`; the runtime parses that header as a JWT and answers 401.
 
+**The project key is never your MCP key.** Create the app's own with `connect { action: "create_api_key", description: "web app" }`: publishable by default, safe in a browser and bound by RLS; `serviceRole: true` only for a key that stays on a server. The runtime refuses an MCP key from anywhere (`MCP_KEY_IN_APP`) and a service-role key from a browser (`SERVICE_ROLE_IN_BROWSER`). An app with no end-user sign-in that must write does it in a Backenly function or its own server, never with a service-role key in the browser.
+
 - `/api/v1/{projectId}/db/{table}`: `GET` (list), `POST`, `GET /{id}`, `PATCH /{id}` (`PUT` is accepted as the same update), `DELETE /{id}`.
 - `/api/v2/{projectId}/{table}`: PostgREST grammar: `?price=gte.100`, `?order=createdAt.desc`, `?select=*,author(*)`.
 - `/auth/signup`, `/auth/signin`, `/auth/refresh-token`, `/auth/logout`, `/auth/forgot-password`, `/auth/reset-password`, `/auth/me`, magic links, OAuth, email verification.
 - `/db/users` is never served; users live behind `/auth/*`.
 
-SDK: `npm install @backenly/sdk`, then `createClient({ projectId, apiKey })`.
+SDK: `npm install @backenly/sdk`, then `createClient({ projectId, apiKey })` with that project key.
 
 ## The workflow that works
 
@@ -77,7 +79,7 @@ SDK: `npm install @backenly/sdk`, then `createClient({ projectId, apiKey })`.
 
 ## Errors
 
-Structured JSON: `{ ok: false, error, code }`. `RATE_LIMITED`: respect `retry-after`. `PLAN_LIMIT_EXCEEDED` / `AI_CREDITS_EXHAUSTED`: the human must act; do not retry in a loop (only `backend_chat` and `generate_function` spend credits). `READ_ONLY_KEY`: ask for a read-write key. `INVALID_KEY` / `NO_AUTH`: ask for a fresh key from Connect → Agents.
+Structured JSON: `{ ok: false, error, code }`. `RATE_LIMITED`: respect `retry-after`. `PLAN_LIMIT_EXCEEDED` / `AI_CREDITS_EXHAUSTED`: the human must act; do not retry in a loop (only `backend_chat` and `generate_function` spend credits). `READ_ONLY_KEY`: ask for a read-write key. `INVALID_KEY` / `NO_AUTH`: ask for a fresh key from Connect → Agents. `MCP_KEY_IN_APP` / `SERVICE_ROLE_IN_BROWSER`: the app holds the wrong key; give it a project key as above, and if the refused key was committed or shipped, tell your human to revoke it.
 
 ## Worth telling your human
 
