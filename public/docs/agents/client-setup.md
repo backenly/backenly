@@ -34,7 +34,7 @@ codex mcp add backenly -- npx -y @backenly/mcp-server --project <id> --key <scop
 
 Codex remote takes the key only through `~/.codex/config.toml`: a `[mcp_servers.backenly]` table with `url = "https://backenly.com/api/mcp"` and `http_headers = { "x-api-key" = "<scoped-key>" }`.
 
-Cursor and Antigravity take JSON, and the Connect page prints the exact block for each with the key filled in: `.cursor/mcp.json` for Cursor; for Antigravity, the `mcp_config.json` that Agent panel ⋯ → MCP Servers → Manage MCP Servers → View raw config opens. Antigravity's remote entry names the endpoint `serverUrl`, not `url`; restart Antigravity after editing the file.
+Cursor and Antigravity take JSON, and the Connect page prints the exact block for each with the key filled in: `~/.cursor/mcp.json` for Cursor (the user config, not the project's, so the key is never committed beside the app); for Antigravity, the `mcp_config.json` that Agent panel ⋯ → MCP Servers → Manage MCP Servers → View raw config opens. Antigravity's remote entry names the endpoint `serverUrl`, not `url`; restart Antigravity after editing the file.
 
 Cline takes the same `mcpServers` block as Cursor, in `cline_mcp_settings.json`. Its remote entry must set `"type": "streamableHttp"`, or it falls back to SSE and the endpoint answers 405.
 
@@ -80,6 +80,8 @@ Two headers, and they are not interchangeable:
 
 - `x-api-key: <project key>` identifies the **project**. Required on every request. Do not send the project key as `Authorization: Bearer`: the data API reads that header as an end-user JWT, and a project key is not one, so the request fails with 401.
 - `X-User-Token: <end-user JWT>` identifies the **end-user**; it is what row-level security reads. Without it the request is anonymous and RLS-protected rows come back empty rather than erroring.
+
+The project key is not the MCP key this page set up. Create the app's own with `connect { action: "create_api_key", description: "web app" }`: publishable by default (`proj_live_…`), safe in a browser and bound by row-level security; `serviceRole: true` issues a server-only `svc_live_…` key. The runtime refuses an MCP key from anywhere (`MCP_KEY_IN_APP`) and a service-role key from a browser (`SERVICE_ROLE_IN_BROWSER`). Without an end-user's `X-User-Token` a publishable key only reads, so an app with no sign-in writes through a Backenly function or its own server.
 
 Data, two grammars over one engine:
 

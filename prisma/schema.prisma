@@ -883,9 +883,11 @@ model ApiKey {
   //   "runtime" (default) — /api/v1/{projectId}/* runtime data API (SDK clients).
   //                         Cannot reach brain tools or any /api/mcp/* surface.
   //   "mcp"               — issued from the MCP setup page. Can call /api/mcp/*
-  //                         (brain chat + direct tool dispatch + runtime data).
-  //                         These can create/alter/drop tables — never embed
-  //                         them in a public client.
+  //                         only (brain chat, direct tool dispatch and the db_*
+  //                         row tools). These can create/alter/drop tables. The
+  //                         runtime API (/api/v1, /api/v2) refuses them from
+  //                         anywhere with MCP_KEY_IN_APP, so one is never an
+  //                         app's key (lib/security/key-placement.ts).
   // A leaked SDK key cannot drop tables; a leaked MCP key can. Splitting the
   // scope keeps that blast radius explicit and auditable.
   scope           String            @default("runtime")

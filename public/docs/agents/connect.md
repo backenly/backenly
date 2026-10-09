@@ -14,7 +14,7 @@ Call as `connect { action: "<action>", … }`.
 | Action | What it does | Needs | Read-only key | Approval |
 | --- | --- | --- | --- | --- |
 | `whoami` | the project this connection is bound to, and the key or OAuth connection calling | nothing | yes | no |
-| `create_api_key` | a scoped key for an app, optionally bound to a preview branch | nothing | no | no |
+| `create_api_key` | the key an app uses: publishable by default and safe in a browser, serviceRole for server code; optionally bound to a preview branch | nothing | no | no |
 | `list_api_keys` | every key with its scope and last use | nothing | yes | no |
 | `set_key_permissions` | change what a key may do | `keyId`, `permissions` | no | no |
 | `revoke_api_key` | disable a key (apps using it stop working) | `keyId` | no | waits for a human |
@@ -29,7 +29,7 @@ Call as `connect { action: "<action>", … }`.
 
 ## Keys
 
-`create_api_key` returns the new key once. By default it is a publishable key: safe in a browser, it reads only what row-level security lets anonymous callers read and writes nothing without an end-user's `X-User-Token`. `serviceRole: true` makes a secret key that bypasses row-level security entirely, for servers only; one sent from a browser is refused. To rotate with no downtime, create the new key, move the app to it, then revoke the old one (`revoke_api_key` waits for a human). MCP keys for agents are issued in the dashboard only, by design, and read-only is chosen there.
+`create_api_key` returns the new key once. By default it is a publishable key: safe in a browser, it reads only what row-level security lets anonymous callers read and writes nothing without an end-user's `X-User-Token`. `serviceRole: true` makes a secret key that bypasses row-level security entirely, for servers only; one sent from a browser is refused. To rotate with no downtime, create the new key, move the app to it, then revoke the old one (`revoke_api_key` waits for a human). MCP keys for agents are issued in the dashboard only, by design, and read-only is chosen there. An app always uses a key from `create_api_key`, never an MCP key: the runtime API refuses MCP keys from anywhere with `MCP_KEY_IN_APP`.
 
 ## Environment variables
 
