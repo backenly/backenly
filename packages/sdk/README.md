@@ -13,11 +13,16 @@ import { createClient } from '@backenly/sdk'
 
 const backend = createClient({
   projectId: process.env.BACKENLY_PROJECT_ID!,
-  apiKey: process.env.BACKENLY_API_KEY!,
+  apiKey: process.env.BACKENLY_CLIENT_KEY!,
 })
 
 const { data, error } = await backend.from('posts').select().eq('published', true).order('created_at', { ascending: false })
 ```
+
+`apiKey` is a client (publishable) key: Settings → API keys → New key → Client
+in the dashboard, or `connect { action: "create_api_key" }` from your coding
+agent. It is safe in browser code and bound by your row-level security. Never
+use your agent's MCP key (`mcp_live_…`) here: the API refuses it.
 
 ## Auth
 

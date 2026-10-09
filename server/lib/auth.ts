@@ -24,6 +24,7 @@ import {
   recordServiceRoleBrowserBlock,
   serviceRoleRefusalMessage,
 } from '@/lib/security/service-role-exposure'
+import { MCP_KEY_HINT, MCP_KEY_IN_APP, isMcpCredential, mcpKeyRefusalMessage } from '@/lib/security/key-placement'
 import { touchProjectActivity } from '@/lib/projects/activity'
 
 export interface V1ApiContext {
@@ -279,6 +280,15 @@ export async function v1AuthMiddleware(req: Request, res: Response, next: NextFu
   }
 
   const { apiKeyRecord } = resolved
+
+  // An MCP key is refused by the key-type check below as well, but its wording
+  // ("Dashboard keys") names a different credential and sent agents looking for
+  // one. The runtime's doors refuse it first; this answers the same way for a
+  // request a door let through. lib/security/key-placement.ts.
+  if (isMcpCredential(apiKeyRecord)) {
+    sendError(res, MCP_KEY_IN_APP, mcpKeyRefusalMessage(apiKeyRecord.name ?? null), 403, { hint: MCP_KEY_HINT })
+    return
+  }
 
   if (apiKeyRecord.keyType !== 'public') {
     sendError(
