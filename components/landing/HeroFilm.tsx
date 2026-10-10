@@ -28,12 +28,25 @@
  *
  * Files, all cut from the one 1920x1080 60fps master (H.264 + AAC, 69.6 MB):
  *
- *   hero-film-v4.mp4          desktop, H.264 High 5.1 CRF 28 (veryslow) + AAC
+ *   hero-film-v4.1.mp4        desktop, H.264 High 5.1 CRF 28 (veryslow) + AAC
  *                             128k, 60fps, moov atom at the front, ~10.5 MB.
- *   hero-film-v4-1280.mp4     phones: H.264 High 4.0, 1280x720, 30fps, CRF 28
+ *   hero-film-v4.1-1280.mp4   phones: H.264 High 4.0, 1280x720, 30fps, CRF 28
  *                             + AAC 96k, ~5.2 MB. Every phone decodes H.264
  *                             in hardware.
  *   hero-film-v4-poster.webp  the frame at OPEN_AT, ~49 KB
+ *
+ * COLOUR IS TAGGED. The cuts were encoded the way ffmpeg encodes by default:
+ * RGB to YUV through the BT.601 matrix, with no colour description in the
+ * stream. An untagged HD stream leaves the matrix to each browser's guess,
+ * and the guesses differ: Chromium decodes it as BT.601, which is right,
+ * while players that assume BT.709 for HD (Safari among them) turn the
+ * violet greyer and the magenta dusty, and the film no longer matches its own
+ * poster. v4.1 is v4 with the description written in, byte for byte the same
+ * picture (`-c copy` through `h264_metadata`, plus an MP4 `colr` box):
+ * primaries and transfer BT.709, matrix BT.601 (smpte170m), limited range.
+ * A re-render should encode with explicit tags (`-colorspace`,
+ * `-color_primaries`, `-color_trc`) so this never needs doing again; check
+ * with ffprobe that `color_space` is not `unknown`.
  *
  * The master's backdrop carries a fine animated grain (it keeps the violet
  * gradient from banding), and grain is what the bitrate pays for here. It is
@@ -104,11 +117,11 @@ const FILM = {
  */
 const SOURCES = [
   {
-    src: '/media/hero-film-v4-1280.mp4',
+    src: '/media/hero-film-v4.1-1280.mp4',
     type: 'video/mp4; codecs="avc1.640028, mp4a.40.2"',
     media: '(max-width: 767px)',
   },
-  { src: '/media/hero-film-v4.mp4', type: 'video/mp4; codecs="avc1.640033, mp4a.40.2"' },
+  { src: '/media/hero-film-v4.1.mp4', type: 'video/mp4; codecs="avc1.640033, mp4a.40.2"' },
 ] as const satisfies readonly { src: string; type: string; media?: string }[]
 
 /**
