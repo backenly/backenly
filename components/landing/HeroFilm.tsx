@@ -98,7 +98,7 @@
  * in an effect anyway, where the poster and first picture are identical.
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { type RefObject, useEffect, useRef, useState } from 'react'
 import { useInView } from 'framer-motion'
 import { Pause, Play, Volume2, VolumeX } from 'lucide-react'
 import { useSettledReducedMotion } from '@/lib/hooks/useSettledReducedMotion'
@@ -149,8 +149,109 @@ const FEATHER = {
   maskComposite: 'intersect',
   WebkitMaskComposite: 'source-in',
 } as const
-/** The fade widths: a phone's picture is too small to give 9% of it away. */
-const FEATHER_SIZE = '[--fx:4%] [--fb:12%] md:[--fx:9%] md:[--fb:26%]'
+/** The fade widths, shorter on a phone, whose picture is too small to give much away. */
+const FEATHER_SIZE = '[--fx:7%] [--fb:16%] md:[--fx:9%] md:[--fb:26%]'
+
+/**
+ * AMBIENT LIGHT. The film's own colour spills onto the page around it, the
+ * way a screen lights the wall behind it. A fixed violet glow could not do
+ * this: the film is violet at the top left, blue at the right and magenta at
+ * the bottom left, and nearly black whenever the camera is in close on the
+ * console, so any one colour was wrong for most of it and sat as a coloured
+ * haze around a dark picture.
+ *
+ * Each frame is drawn into a 32x18 canvas lying exactly under the video,
+ * and a CSS blur spreads it out past the film's edges. Aligned, every colour
+ * glows out from where it sits in the picture; a canvas scaled up past the
+ * film instead shifted its light (the wordmark's showed as a smudge above
+ * the film). The blur runs on the compositor over a tiny canvas, and the
+ * canvas is redrawn at most 30 times a second and never while the film is
+ * paused. Each new frame is mixed into the last rather than replacing it,
+ * so the backdrop's grain never flickers in the light and cuts arrive as a
+ * quick fade. Until the film has a frame of its own, the glow comes from the
+ * poster, which is the same picture.
+ */
+const AMBIENT = { width: 32, height: 18 } as const
+
+/** How much of each new frame mixes into the glow. */
+const AMBIENT_BLEND = 0.3
+
+/** The fastest the glow is redrawn. Light this soft needs no more. */
+const AMBIENT_INTERVAL_MS = 1000 / 30
+
+/** Draws the ambient light; returns whether it has anything to show yet. */
+function useAmbientLight(
+  videoRef: RefObject<HTMLVideoElement | null>,
+  canvasRef: RefObject<HTMLCanvasElement | null>
+) {
+  const [lit, setLit] = useState(false)
+
+  useEffect(() => {
+    const video = videoRef.current
+    const ctx = canvasRef.current?.getContext('2d')
+    if (!video || !ctx) return
+    ctx.imageSmoothingEnabled = true
+    ctx.imageSmoothingQuality = 'high'
+
+    let cancelled = false
+    let painted = false
+    function paint(source: CanvasImageSource, blend: number) {
+      ctx.globalAlpha = painted ? blend : 1
+      ctx.drawImage(source, 0, 0, AMBIENT.width, AMBIENT.height)
+      if (!painted) {
+        painted = true
+        setLit(true)
+      }
+    }
+
+    const poster = new Image()
+    poster.src = FILM.poster
+    poster
+      .decode()
+      .then(() => {
+        if (!cancelled && !painted) paint(poster, 1)
+      })
+      .catch(() => {})
+
+    // requestVideoFrameCallback runs once per frame the film actually shows,
+    // and not at all while it is paused. Where it is missing, animation
+    // frames stand in, only while the film plays.
+    const perFrame = typeof video.requestVideoFrameCallback === 'function'
+    let handle = 0
+    let last = -Infinity
+
+    function onFrame(now: number) {
+      if (now - last >= AMBIENT_INTERVAL_MS && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+        last = now
+        paint(video, AMBIENT_BLEND)
+      }
+      next()
+    }
+    function next() {
+      if (cancelled) return
+      if (perFrame) handle = video.requestVideoFrameCallback(onFrame)
+      else if (!video.paused) handle = requestAnimationFrame(onFrame)
+    }
+    function onPlay() {
+      cancelAnimationFrame(handle)
+      next()
+    }
+
+    if (perFrame) next()
+    else video.addEventListener('play', onPlay)
+
+    return () => {
+      cancelled = true
+      if (perFrame) video.cancelVideoFrameCallback(handle)
+      else {
+        cancelAnimationFrame(handle)
+        video.removeEventListener('play', onPlay)
+      }
+    }
+  }, [videoRef, canvasRef])
+
+  return lit
+}
 
 /**
  * `auto` follows the reduced-motion preference; `play` and `pause` are the
@@ -200,6 +301,8 @@ export function HeroFilm() {
   const [intent, setIntent] = useState<Intent>('auto')
   const [sound, setSound] = useState(false)
   const [playing, setPlaying] = useState(false)
+  const ambientRef = useRef<HTMLCanvasElement>(null)
+  const lit = useAmbientLight(videoRef, ambientRef)
 
   const shouldPlay = inView && (intent === 'play' || (intent === 'auto' && !reduced))
 
@@ -263,14 +366,17 @@ export function HeroFilm() {
 
   return (
     <figure ref={frameRef} className="group relative isolate">
-      {/* The light the film's violet stage spills onto the page, so its
-          feathered edges fade into colour rather than straight to black.
-          Static and filter-free: a radial gradient already has soft edges,
-          and a `blur()` this large would re-raster under the hero's entrance
-          transform. */}
-      <div
+      {/* The film's own light on the page; see AMBIENT LIGHT. The blur
+          carries it past the film on every side, so the feathered edges fade
+          into the colour they carry, not into black. */}
+      <canvas
+        ref={ambientRef}
         aria-hidden
-        className="pointer-events-none absolute -inset-x-[8%] -inset-y-[10%] -z-10 bg-[radial-gradient(50%_50%_at_50%_42%,rgba(124,58,237,0.20),rgba(124,58,237,0.06)_60%,transparent)]"
+        width={AMBIENT.width}
+        height={AMBIENT.height}
+        className={`pointer-events-none absolute inset-0 -z-10 h-full w-full scale-[1.04] blur-[40px] transition-opacity duration-1000 motion-reduce:transition-none md:blur-[72px] ${
+          lit ? 'opacity-80' : 'opacity-0'
+        }`}
       />
 
       <div

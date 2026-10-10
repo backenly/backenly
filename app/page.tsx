@@ -208,7 +208,7 @@ function Hero() {
         <motion.p
           variants={heroItem}
           transition={{ duration: quiet ? 0 : 0.95, ease: EASE_OUT }}
-          className={`mt-7 max-w-[54ch] text-[17px] text-zinc-400 [text-wrap:pretty] md:mt-8 md:text-[20px] ${LEDE}`}
+          className={`relative z-10 mt-7 max-w-[54ch] text-[17px] text-zinc-400 [text-wrap:pretty] md:mt-8 md:text-[20px] ${LEDE}`}
         >
           Real Postgres, APIs, auth, storage, and realtime, driven by your agent over MCP, with
           every change governed, verified, and reversible.
@@ -217,7 +217,9 @@ function Hero() {
         <motion.div
           variants={heroItem}
           transition={{ duration: quiet ? 0 : 0.95, ease: EASE_OUT }}
-          className="mt-9 flex flex-col gap-3 sm:flex-row sm:items-center"
+          // Above the film: its ambient light spreads up this far, and would
+          // otherwise tint the buttons with whatever the film is showing.
+          className="relative z-10 mt-9 flex flex-col gap-3 sm:flex-row sm:items-center"
         >
           <Link href={isLoggedIn ? ROUTES.app : ROUTES.signup} className={PRIMARY_CTA}>
             {isLoggedIn ? 'Go to console' : 'Start free'}
