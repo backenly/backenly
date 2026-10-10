@@ -1,8 +1,17 @@
 # Backenly
 
-> Backenly is a backend platform operated by coding agents over MCP or the CLI: PostgreSQL tables in a per-project schema, REST APIs, end-user auth, storage, realtime, functions and third-party integrations. Every change goes through one governed kernel that plans, applies, verifies and journals it; destructive and high-risk changes wait for a human.
+> Backenly is an autonomous backend platform built for coding agents. Coding agents can build a real production backend with Postgres, APIs, auth, storage, realtime and functions through MCP. Once it's built, Backenly autonomously maintains the backend, detects and fixes issues, and can restructure the system as it evolves, while keeping risky or destructive actions human-controlled, verified and reversible.
 
-This is the index. Each topic below is its own document: fetch one with `fetch_docs { topic: "<topic>" }` or from its URL.
+## What Backenly is
+
+- **Built through your coding agent.** Claude Code, Codex, Cursor, Antigravity, Cline or any other MCP client builds the backend through Backenly's MCP server or CLI. The dashboard is for oversight: inspecting the backend, approving parked actions, reading the change history.
+- **A real backend.** Each project has its own PostgreSQL schema, and REST endpoints are live the moment a table exists, served by PostgREST. Each project also gets auth for the app's own users, file storage, realtime, functions with schedules, signed webhooks, provider integrations (Stripe, Resend, OpenAI, Anthropic, PostHog), deploys with rollback, and preview branches on Backenly Cloud.
+- **Governed change.** Every structural change made through Backenly is checked before it runs, applied, verified against the live database and snapshotted so it can be rolled back. Reads stay open: read-only SQL or a direct Postgres connection.
+- **Autonomous maintenance.** A loop watches each active project. On its own it applies only additive, snapshotted fixes it can verify and reverse: missing indexes, drift it can reconcile, broken triggers. Schema restructuring runs as a staged expand-and-contract plan, only with the owner's consent and only when every step can be undone; the final step, dropping the old structure, is always left to a human. Anything the loop will not apply becomes a finding with evidence. It runs no model and draws no AI credits.
+- **Humans approve the risky calls.** Destructive or irreversible actions, such as dropping a table, deploying, rolling back or revoking a key, are parked until a human approves them on the project's **Autonomy** page. The approved call runs exactly as it was made.
+- **Open source.** The platform, autonomy engine included, is Apache-2.0 at https://github.com/backenly/backenly, and the SDK, CLI and MCP server are MIT. Self-host it (one deployment serves one project) or use Backenly Cloud at https://backenly.com, which has a free plan. Current plans and prices: https://backenly.com/pricing.
+
+The rest of this file is the index for coding agents. Each topic below is its own document: fetch one with `fetch_docs { topic: "<topic>" }` or from its URL.
 
 ## Connect
 
@@ -13,7 +22,7 @@ claude mcp add backenly -- npx -y @backenly/mcp-server --project <id> --key <sco
 claude mcp add --transport http backenly https://backenly.com/api/mcp --header "x-api-key: <scoped-key>"
 ```
 
-The remote endpoint also accepts a browser sign-in instead of a key. Other hosts (Codex, Cursor, Antigravity, Cline) are in `client-setup`.
+The remote endpoint also accepts a browser sign-in instead of a key. Other hosts (Codex, Cursor, Antigravity, Cline) are in `client-setup`. The agent skill is at https://backenly.com/skill.md.
 
 **If the Backenly tools are not in this conversation** (you registered the server during it), do not ask your human to restart. The CLI calls the same tools with the same key and the same governance:
 
@@ -49,7 +58,7 @@ Exactly **23** tools are advertised; `tools/list` is the authority. Every tool e
 | `generate_types` | TypeScript types, a typed client or OpenAPI from the live catalog. |
 | `branch` | Preview branches: `list`, `create`, `connect`, `diff`, `merge`. `create` and `connect` return the branch's preview endpoint and a key bound to it; `merge` replays the branch's migrations onto production once a human approves. |
 | `check_approval` | Poll an action waiting for a human. |
-| `backend_chat` | Plain-English requests to Backenly's own engine. Draws AI credits. |
+| `backend_chat` | Natural-language requests to Backenly's own engine. Draws AI credits. |
 | `fetch_docs` | These docs, one topic at a time. |
 
 One tool per dashboard section, each with an `action`:
