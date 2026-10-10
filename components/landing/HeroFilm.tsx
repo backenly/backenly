@@ -119,6 +119,27 @@ const SOURCES = [
 const OPEN_AT = 4.95
 
 /**
+ * NO FRAME. The film is already staged: a violet backdrop with the console
+ * window floating on it. Wrapping that in a border (or a bezel, or a lit top
+ * edge) made a box inside a box inside a box. Instead the picture itself
+ * fades out at its edges, shorter at the sides and top, longer at the bottom,
+ * so the violet stage reads as light on the page, and when the camera is in
+ * close the console runs straight into the page. Phones get shorter fades.
+ * The mask is on the video alone; the controls stay crisp.
+ */
+const MASK =
+  'linear-gradient(to right, transparent, #000 var(--fx), #000 calc(100% - var(--fx)), transparent), ' +
+  'linear-gradient(to bottom, transparent, #000 var(--fx), #000 calc(100% - var(--fb)), transparent)'
+const FEATHER = {
+  maskImage: MASK,
+  WebkitMaskImage: MASK,
+  maskComposite: 'intersect',
+  WebkitMaskComposite: 'source-in',
+} as const
+/** The fade widths: a phone's picture is too small to give 9% of it away. */
+const FEATHER_SIZE = '[--fx:4%] [--fb:12%] md:[--fx:9%] md:[--fb:26%]'
+
+/**
  * `auto` follows the reduced-motion preference; `play` and `pause` are the
  * visitor's own choice and outrank it.
  */
@@ -229,16 +250,18 @@ export function HeroFilm() {
 
   return (
     <figure ref={frameRef} className="group relative isolate">
-      {/* The light the frame sits in. Static and filter-free: a radial
-          gradient already has soft edges, and a `blur()` this large would
-          re-raster under the hero's entrance transform. */}
+      {/* The light the film's violet stage spills onto the page, so its
+          feathered edges fade into colour rather than straight to black.
+          Static and filter-free: a radial gradient already has soft edges,
+          and a `blur()` this large would re-raster under the hero's entrance
+          transform. */}
       <div
         aria-hidden
-        className="pointer-events-none absolute -inset-x-[6%] -top-[12%] -z-10 h-[70%] bg-[radial-gradient(50%_55%_at_50%_45%,rgba(139,92,246,0.14),transparent)]"
+        className="pointer-events-none absolute -inset-x-[8%] -inset-y-[10%] -z-10 bg-[radial-gradient(50%_50%_at_50%_42%,rgba(124,58,237,0.20),rgba(124,58,237,0.06)_60%,transparent)]"
       />
 
       <div
-        className="relative overflow-hidden rounded-xl border border-white/[0.10] bg-[#101116]"
+        className="relative"
         // The box is sized before a byte of video arrives, so the page below
         // never shifts when the poster lands.
         style={{ aspectRatio: `${FILM.width} / ${FILM.height}` }}
@@ -258,7 +281,8 @@ export function HeroFilm() {
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
           onEnded={finish}
-          className="absolute inset-0 h-full w-full object-cover"
+          className={`absolute inset-0 h-full w-full object-cover ${FEATHER_SIZE}`}
+          style={FEATHER}
         >
           {SOURCES.map((source) => (
             <source
@@ -269,13 +293,6 @@ export function HeroFilm() {
             />
           ))}
         </video>
-
-        {/* Catches light along the top edge, the way the hero's own top rule
-            does. */}
-        <span
-          aria-hidden
-          className="pointer-events-none absolute inset-x-0 top-0 h-px bg-[linear-gradient(to_right,transparent,rgba(255,255,255,0.18),transparent)]"
-        />
 
         {/* Bottom right, where a player's controls are looked for. The sound
             button is always shown, because a visitor cannot otherwise know

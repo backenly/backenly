@@ -163,8 +163,8 @@ function Grain() {
    on, the way Linear and Vercel set theirs.
 
    The light is the point of the composition: a cold white key light from the
-   top left, a violet fill behind the film, and a horizon line the film sits
-   on. All static gradients, no blur filters, so it costs nothing per frame.
+   top left, and a violet fill behind the film that its own violet stage
+   dissolves into. All static gradients, no blur filters, so it costs nothing per frame.
 ───────────────────────────────────────────────────────────── */
 
 function Hero() {
@@ -234,18 +234,11 @@ function Hero() {
           transition={{ duration: quiet ? 0 : 1.2, ease: EASE_OUT }}
           className="relative mt-[56px] md:mt-[80px]"
         >
-          {/* The horizon: a lit edge along the top of the frame. */}
-          <div
-            aria-hidden
-            className="pointer-events-none absolute -top-px left-[8%] right-[8%] z-10 h-px bg-[linear-gradient(to_right,transparent,rgba(196,181,253,0.7),rgba(255,255,255,0.9),rgba(196,181,253,0.7),transparent)]"
-          />
-          <div
-            aria-hidden
-            className="pointer-events-none absolute -top-[60px] left-1/2 z-0 h-[120px] w-[70%] -translate-x-1/2 bg-[radial-gradient(closest-side,rgba(167,139,250,0.28),transparent)]"
-          />
-          <div className="relative rounded-[18px] border border-white/[0.08] bg-white/[0.02] p-1.5 shadow-[0_60px_160px_-40px_rgba(0,0,0,1)] sm:p-2">
-            <HeroFilm />
-          </div>
+          {/* No bezel, border or horizon line around it: the film brings its
+              own violet stage and console window, and every frame the page
+              added on top read as a box inside a box. HeroFilm feathers its
+              edges into the page instead. */}
+          <HeroFilm />
         </motion.div>
       </div>
     </motion.section>
@@ -721,7 +714,7 @@ function FaqItem({
    Closing
 
    Centred, and the page's last light: a horizon arc rising behind the ask,
-   answering the lit edge the hero film sits on.
+   answering the violet light the hero film opens the page in.
 ───────────────────────────────────────────────────────────── */
 
 function ClosingSection() {
