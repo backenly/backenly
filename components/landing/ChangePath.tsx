@@ -30,7 +30,8 @@
  * desktop drawing now sits in a panel like the console it comes from: the
  * key and a live status in its header, the caption in its footer, night as a
  * band the panel clips. Cards are dark with tinted badges (TONES), so colour
- * stays a signal. The scene, its timing and its geometry are unchanged.
+ * stays a signal. The story and its timing are unchanged; the dotted ruler
+ * is gone and the nodes and step rings are a little smaller.
  *
  * THE SCENE is the three things a Backenly user needs to understand, in the
  * order they would meet them:
@@ -50,8 +51,9 @@
  * Overview recorded in HeroFilm). Times and names are illustrative, and the
  * caption says so.
  *
- * HOW IT DRAWS. One SVG in a fixed 1260x500 coordinate space, scaled to the
- * container, shown from xl up (below that the text would scale under 10px, so
+ * HOW IT DRAWS. One SVG in a fixed 1260x500 coordinate space (padded by
+ * PAD_X/PAD_TOP/PAD_BOTTOM inside its panel), scaled to the container, shown
+ * from xl up (below that the text would scale under 10px, so
  * smaller screens get the same day drawn upright; see PhoneScene). Lines draw
  * with framer's pathLength; dashed lines draw through a mask, because
  * pathLength works by rewriting stroke-dasharray and would erase the dashes.
@@ -75,7 +77,10 @@ const GREEN = '#4ade80'
 const AMBER = '#fbbf24'
 const VIOLET = '#a78bfa'
 
-/** The panel the drawing sits on; discs that cover the line are filled with it. */
+/**
+ * The desktop panel's colour. Discs that cover a line are filled with it; on
+ * the phone, which has no panel, it is close enough to the page ground.
+ */
 const PANEL = '#0b0c0f'
 const CARD = '#121317'
 const CARD_STROKE = 'rgba(255,255,255,0.09)'
@@ -286,8 +291,10 @@ function Outcome({ cx, cy, glyph, color, label, below, delay, kit }: {
   return (
     <>
       <motion.g variants={kit.pop(delay)} style={CENTRED}>
-        <circle cx={cx} cy={cy} r={16} fill={PANEL} />
-        <circle cx={cx} cy={cy} r={16} fill={color} fillOpacity={0.1} stroke={color} strokeOpacity={0.55} strokeWidth={1.25} />
+        {/* r=17: the connectors stop 18 from the centre and their round caps
+            reach 17.25, which has to land inside this ring's stroke. */}
+        <circle cx={cx} cy={cy} r={17} fill={PANEL} />
+        <circle cx={cx} cy={cy} r={17} fill={color} fillOpacity={0.1} stroke={color} strokeOpacity={0.55} strokeWidth={1.25} />
         <path d={GLYPHS[glyph]} transform={`translate(${cx} ${cy}) scale(0.85)`} stroke={color} strokeWidth={1.9} fill="none" strokeLinecap="round" strokeLinejoin="round" />
       </motion.g>
       <motion.text
@@ -295,7 +302,7 @@ function Outcome({ cx, cy, glyph, color, label, below, delay, kit }: {
         y={below ? cy + 37 : cy - 27}
         textAnchor="middle"
         fontSize={12}
-        className="fill-zinc-500"
+        className="fill-zinc-400"
         variants={kit.fade(delay + 0.1)}
       >
         {label}
@@ -398,20 +405,20 @@ function Scene({ kit }: { kit: Kit }) {
         <svg x={0} y={-22} width={13} height={13} viewBox="0 0 24 24">
           <path d={SUN} stroke="#71717a" strokeWidth={2} fill="none" strokeLinecap="round" />
         </svg>
-        <text x={21} y={-12} fontSize={11} letterSpacing="0.08em" className="fill-zinc-500 font-mono">
+        <text x={21} y={-12} fontSize={12} letterSpacing="0.08em" className="fill-zinc-400 font-mono">
           DAY · YOU&apos;RE ONLINE
         </text>
       </motion.g>
 
-      {/* Night falls once the day's work has merged: a band the panel's
-          edges clip, so it has no border of its own. */}
+      {/* Night falls once the day's work has merged: a band that runs to the
+          panel's edges, marked off from the day by a dashed divider. */}
       <motion.g variants={kit.fade(2.5, 0.9)}>
         <rect x={NIGHT} y={-PAD_TOP} width={W - NIGHT + PAD_X} height={H + PAD_TOP + PAD_BOTTOM} fill="url(#cp-night)" />
         <line x1={NIGHT} x2={NIGHT} y1={-PAD_TOP} y2={H + PAD_BOTTOM} stroke="rgba(167,139,250,0.22)" strokeDasharray="2 4" />
         <svg x={NIGHT + 20} y={-22} width={13} height={13} viewBox="0 0 24 24">
           <path d="M20 14.5 A8.5 8.5 0 1 1 9.5 4 A7 7 0 0 0 20 14.5 Z" fill={VIOLET} fillOpacity={0.8} />
         </svg>
-        <text x={NIGHT + 41} y={-12} fontSize={11} letterSpacing="0.08em" className="font-mono" fill="#8b86a8">
+        <text x={NIGHT + 41} y={-12} fontSize={12} letterSpacing="0.08em" className="font-mono" fill="#a5a0c4">
           NIGHT · NOBODY ONLINE
         </text>
       </motion.g>
@@ -604,7 +611,7 @@ function MOutcome({ cx, cy, glyph, color, label, delay, kit }: {
         y={cy + 4}
         textAnchor={labelLeft ? 'end' : 'start'}
         fontSize={12}
-        className="fill-zinc-500"
+        className="fill-zinc-400"
         variants={kit.fade(delay + 0.1)}
       >
         {label}
@@ -825,8 +832,8 @@ export function ChangePath() {
               <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400" />
             </span>
             <span className="text-zinc-200">production</span>
-            <span className="text-zinc-700">/</span>
-            <span className="text-zinc-500">change history</span>
+            <span className="text-zinc-600">/</span>
+            <span className="text-zinc-400">change history</span>
           </div>
           <ul aria-label="How to read the timeline" className="flex items-center gap-x-6 text-[12.5px] text-zinc-400">
             {LEGEND.map((item) => (
@@ -862,7 +869,7 @@ export function ChangePath() {
         </div>
         <div className="flex items-center justify-between border-t border-white/[0.06] px-6 py-3 text-[12px] text-zinc-500">
           <span>One project, one day and one night, drawn from the real flow. Names and times are illustrative.</span>
-          <span className="font-mono text-zinc-600">3 changes · each reversible</span>
+          <span className="font-mono text-zinc-500">3 changes · 1 approval</span>
         </div>
       </div>
 
