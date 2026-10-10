@@ -24,6 +24,14 @@
  * ends, and its facts (every minute, no model calls, snapshot first) are in
  * the third explanation.
  *
+ * 2026-10-10, made to look finished. Light cards with solid badges on a dark
+ * page read as stickers, and the loose parts (a key floating above, a night
+ * gradient with a hard right edge, a dotted ruler) read as a sketch. The
+ * desktop drawing now sits in a panel like the console it comes from: the
+ * key and a live status in its header, the caption in its footer, night as a
+ * band the panel clips. Cards are dark with tinted badges (TONES), so colour
+ * stays a signal. The scene, its timing and its geometry are unchanged.
+ *
  * THE SCENE is the three things a Backenly user needs to understand, in the
  * order they would meet them:
  *
@@ -58,10 +66,31 @@ import { useSettledReducedMotion } from '@/lib/hooks/useSettledReducedMotion'
 const W = 1260
 const H = 500
 const TRACK_Y = 240
+/** Room around the drawing inside its panel, in drawing units. */
+const PAD_X = 40
+const PAD_TOP = 56
+const PAD_BOTTOM = 36
 
 const GREEN = '#4ade80'
 const AMBER = '#fbbf24'
 const VIOLET = '#a78bfa'
+
+/** The panel the drawing sits on; discs that cover the line are filled with it. */
+const PANEL = '#0b0c0f'
+const CARD = '#121317'
+const CARD_STROKE = 'rgba(255,255,255,0.09)'
+
+/**
+ * Badge tones. Tinted, not solid: on a dark panel, solid light cards and
+ * saturated badges read as stickers; a tint keeps the colour as a signal.
+ */
+type Tone = 'neutral' | 'green' | 'amber' | 'violet'
+const TONES: Record<Tone, { bg: string; text: string }> = {
+  neutral: { bg: 'rgba(255,255,255,0.07)', text: '#d4d4d8' },
+  green: { bg: 'rgba(74,222,128,0.12)', text: GREEN },
+  amber: { bg: 'rgba(251,191,36,0.13)', text: AMBER },
+  violet: { bg: 'rgba(167,139,250,0.15)', text: '#c4b5fd' },
+}
 
 
 /* ── Motion factories ────────────────────────────────────────────────────── */
@@ -146,8 +175,8 @@ function Dashed({ d, delay, duration, kit, stroke = 'rgba(255,255,255,0.32)', cl
 function EventNode({ x, color, delay, kit }: { x: number; color: string; delay: number; kit: Kit }) {
   return (
     <motion.g variants={kit.pop(delay)} style={CENTRED}>
-      <circle cx={x} cy={TRACK_Y} r={8} fill="#08090a" stroke={color} strokeOpacity={0.55} strokeWidth={1.25} />
-      <circle cx={x} cy={TRACK_Y} r={3.5} fill={color} />
+      <circle cx={x} cy={TRACK_Y} r={7} fill={PANEL} stroke={color} strokeOpacity={0.5} strokeWidth={1.25} />
+      <circle cx={x} cy={TRACK_Y} r={3} fill={color} />
     </motion.g>
   )
 }
@@ -201,8 +230,8 @@ function ActorPill({ cx, cy, actor, action, delay, kit }: {
         width={w}
         height={36}
         rx={18}
-        fill="#0c0d10"
-        stroke={actor === 'autonomy' ? 'rgba(167,139,250,0.4)' : 'rgba(255,255,255,0.14)'}
+        fill={CARD}
+        stroke={actor === 'autonomy' ? 'rgba(167,139,250,0.32)' : CARD_STROKE}
       />
       <svg x={x + 16} y={cy - 8} width={16} height={16} viewBox="0 0 24 24">
         <path d={a.d} stroke={a.color} strokeWidth={2} fill="none" strokeLinecap="round" strokeLinejoin="round" />
@@ -210,7 +239,7 @@ function ActorPill({ cx, cy, actor, action, delay, kit }: {
       <text x={x + 40} y={cy + 4} fontSize={12} className="font-mono" fill={actor === 'autonomy' ? VIOLET : '#71717a'}>
         {a.name}
       </text>
-      <text x={x + 40 + nameW + 10} y={cy + 4} fontSize={12} className="fill-zinc-100 font-mono">
+      <text x={x + 40 + nameW + 10} y={cy + 4} fontSize={12} className="fill-zinc-200 font-mono">
         {action}
       </text>
     </motion.g>
@@ -222,20 +251,21 @@ function stageWidth(badge: string, label: string) {
   return 8 + (badge.length * 6.6 + 16) + 10 + label.length * 7.8 + 14
 }
 
-/** A stage of the change: light card, dark badge. */
-function StageCard({ x, cy, badge, label, badgeFill = '#09090b', badgeText = '#fafafa', delay, kit }: {
-  x: number; cy: number; badge: string; label: string; badgeFill?: string; badgeText?: string; delay: number; kit: Kit
+/** A stage of the change: dark card, tinted badge. */
+function StageCard({ x, cy, badge, label, tone = 'neutral', delay, kit }: {
+  x: number; cy: number; badge: string; label: string; tone?: Tone; delay: number; kit: Kit
 }) {
   const bw = badge.length * 6.6 + 16
   const w = stageWidth(badge, label)
+  const t = TONES[tone]
   return (
     <motion.g variants={kit.rise(delay)}>
-      <rect x={x} y={cy - 20} width={w} height={40} rx={8} fill="#f4f4f5" />
-      <rect x={x + 8} y={cy - 12} width={bw} height={24} rx={4} fill={badgeFill} />
-      <text x={x + 8 + bw / 2} y={cy + 4} textAnchor="middle" fontSize={11} letterSpacing="0.06em" fill={badgeText} className="font-mono">
+      <rect x={x} y={cy - 20} width={w} height={40} rx={9} fill={CARD} stroke={CARD_STROKE} />
+      <rect x={x + 8} y={cy - 12} width={bw} height={24} rx={5} fill={t.bg} />
+      <text x={x + 8 + bw / 2} y={cy + 4} textAnchor="middle" fontSize={11} fontWeight={500} letterSpacing="0.06em" fill={t.text} className="font-mono">
         {badge}
       </text>
-      <text x={x + 8 + bw + 10} y={cy + 5} fontSize={13} fill="#09090b" className="font-mono">
+      <text x={x + 8 + bw + 10} y={cy + 5} fontSize={13} fill="#e4e4e7" className="font-mono">
         {label}
       </text>
     </motion.g>
@@ -256,15 +286,16 @@ function Outcome({ cx, cy, glyph, color, label, below, delay, kit }: {
   return (
     <>
       <motion.g variants={kit.pop(delay)} style={CENTRED}>
-        <circle cx={cx} cy={cy} r={18} fill="#08090a" stroke={color} strokeWidth={1.5} />
-        <path d={GLYPHS[glyph]} transform={`translate(${cx} ${cy})`} stroke={color} strokeWidth={1.75} fill="none" strokeLinecap="round" strokeLinejoin="round" />
+        <circle cx={cx} cy={cy} r={16} fill={PANEL} />
+        <circle cx={cx} cy={cy} r={16} fill={color} fillOpacity={0.1} stroke={color} strokeOpacity={0.55} strokeWidth={1.25} />
+        <path d={GLYPHS[glyph]} transform={`translate(${cx} ${cy}) scale(0.85)`} stroke={color} strokeWidth={1.9} fill="none" strokeLinecap="round" strokeLinejoin="round" />
       </motion.g>
       <motion.text
         x={cx}
-        y={below ? cy + 40 : cy - 30}
+        y={below ? cy + 37 : cy - 27}
         textAnchor="middle"
-        fontSize={13}
-        className="fill-zinc-400"
+        fontSize={12}
+        className="fill-zinc-500"
         variants={kit.fade(delay + 0.1)}
       >
         {label}
@@ -292,7 +323,7 @@ function Receipt({ x, y, delay, kit, w = 380 }: { x: number; y: number; delay: n
   const h = 176
   return (
     <motion.g variants={kit.rise(delay)}>
-      <rect x={x} y={y} width={w} height={h} rx={10} fill="#0c0d10" stroke="rgba(167,139,250,0.35)" />
+      <rect x={x} y={y} width={w} height={h} rx={10} fill={CARD} stroke="rgba(167,139,250,0.28)" />
       <path
         d={GLYPHS.check}
         transform={`translate(${x + 24} ${y + 22}) scale(0.85)`}
@@ -314,7 +345,7 @@ function Receipt({ x, y, delay, kit, w = 380 }: { x: number; y: number; delay: n
           <text x={x + 18} y={y + 66 + i * 22} fontSize={12} className="fill-zinc-500 font-mono">
             {row.time}
           </text>
-          <text x={x + 70} y={y + 66 + i * 22} fontSize={12} fill={VIOLET} className="font-mono">
+          <text x={x + 70} y={y + 66 + i * 22} fontSize={12} fill="#c4b5fd" className="font-mono">
             {row.step}
           </text>
           <text x={x + 150} y={y + 66 + i * 22} fontSize={12} className="fill-zinc-200 font-mono">
@@ -337,9 +368,6 @@ const SUN =
 /* ── The scene ───────────────────────────────────────────────────────────── */
 
 function Scene({ kit }: { kit: Kit }) {
-  const ticks: number[] = []
-  for (let x = 230; x < W - 20; x += 70) ticks.push(x)
-
   // Branch geometry. Day: A rises, B drops. Night: C rises, and its receipt
   // hangs below the line in the space the day stories leave empty.
   const A = { x: 230, card: 290, cy: 76 }
@@ -350,80 +378,57 @@ function Scene({ kit }: { kit: Kit }) {
   const cEnd = C.card + stageWidth('FIX', 'add missing index')
   const NIGHT = 830
   const RECEIPT_Y = 300
-  const nodes = [A.x, B.x, 720, 790, C.x, 1220]
 
   return (
     <>
       <defs>
-        <linearGradient id="cp-track" gradientUnits="userSpaceOnUse" x1={168} x2={W} y1={0} y2={0}>
-          <stop offset="0" stopColor="#fff" stopOpacity="0.22" />
-          <stop offset="0.93" stopColor="#fff" stopOpacity="0.22" />
+        <linearGradient id="cp-track" gradientUnits="userSpaceOnUse" x1={168} x2={W + PAD_X} y1={0} y2={0}>
+          <stop offset="0" stopColor="#fff" stopOpacity="0.16" />
+          <stop offset="0.94" stopColor="#fff" stopOpacity="0.16" />
           <stop offset="1" stopColor="#fff" stopOpacity="0" />
         </linearGradient>
-        {/* Night: a violet dusk that deepens to the right and fades off the
-            top and bottom of the figure. */}
-        <linearGradient id="cp-night-x" gradientUnits="userSpaceOnUse" x1={NIGHT} x2={W} y1={0} y2={0}>
-          <stop offset="0" stopColor="#4c1d95" stopOpacity="0" />
-          <stop offset="0.45" stopColor="#4c1d95" stopOpacity="0.2" />
-          <stop offset="1" stopColor="#4c1d95" stopOpacity="0.3" />
+        <linearGradient id="cp-night" gradientUnits="userSpaceOnUse" x1={NIGHT} x2={W + PAD_X} y1={0} y2={0}>
+          <stop offset="0" stopColor="#8b5cf6" stopOpacity="0.03" />
+          <stop offset="1" stopColor="#8b5cf6" stopOpacity="0.09" />
         </linearGradient>
-        <linearGradient id="cp-night-y" x1="0" x2="0" y1="0" y2="1">
-          <stop offset="0" stopColor="#fff" stopOpacity="0" />
-          <stop offset="0.2" stopColor="#fff" stopOpacity="1" />
-          <stop offset="0.8" stopColor="#fff" stopOpacity="1" />
-          <stop offset="1" stopColor="#fff" stopOpacity="0" />
-        </linearGradient>
-        <mask id="cp-night-mask" maskUnits="userSpaceOnUse" x={NIGHT} y={-30} width={W - NIGHT} height={H + 30}>
-          <rect x={NIGHT} y={-30} width={W - NIGHT} height={H + 30} fill="url(#cp-night-y)" />
-        </mask>
       </defs>
 
       {/* Day: someone is at the keyboard. */}
       <motion.g variants={kit.fade(0.2, 0.6)}>
-        <svg x={200} y={4} width={14} height={14} viewBox="0 0 24 24">
-          <path d={SUN} stroke="#a1a1aa" strokeWidth={2} fill="none" strokeLinecap="round" />
+        <svg x={0} y={-22} width={13} height={13} viewBox="0 0 24 24">
+          <path d={SUN} stroke="#71717a" strokeWidth={2} fill="none" strokeLinecap="round" />
         </svg>
-        <text x={222} y={15} fontSize={12} className="fill-zinc-500 font-mono">
-          you&apos;re online
+        <text x={21} y={-12} fontSize={11} letterSpacing="0.08em" className="fill-zinc-500 font-mono">
+          DAY · YOU&apos;RE ONLINE
         </text>
       </motion.g>
 
-      {/* Night falls once the day's work has merged. */}
+      {/* Night falls once the day's work has merged: a band the panel's
+          edges clip, so it has no border of its own. */}
       <motion.g variants={kit.fade(2.5, 0.9)}>
-        <rect x={NIGHT} y={-30} width={W - NIGHT} height={H + 30} fill="url(#cp-night-x)" mask="url(#cp-night-mask)" />
-        <svg x={NIGHT + 36} y={4} width={14} height={14} viewBox="0 0 24 24">
+        <rect x={NIGHT} y={-PAD_TOP} width={W - NIGHT + PAD_X} height={H + PAD_TOP + PAD_BOTTOM} fill="url(#cp-night)" />
+        <line x1={NIGHT} x2={NIGHT} y1={-PAD_TOP} y2={H + PAD_BOTTOM} stroke="rgba(167,139,250,0.22)" strokeDasharray="2 4" />
+        <svg x={NIGHT + 20} y={-22} width={13} height={13} viewBox="0 0 24 24">
           <path d="M20 14.5 A8.5 8.5 0 1 1 9.5 4 A7 7 0 0 0 20 14.5 Z" fill={VIOLET} fillOpacity={0.8} />
         </svg>
-        <text x={NIGHT + 58} y={15} fontSize={12} className="font-mono" fill="#8b86a8">
-          nobody online
+        <text x={NIGHT + 41} y={-12} fontSize={11} letterSpacing="0.08em" className="font-mono" fill="#8b86a8">
+          NIGHT · NOBODY ONLINE
         </text>
       </motion.g>
 
       {/* Production, and the line it runs along. */}
       <motion.g variants={kit.rise(0)}>
-        <rect x={0} y={TRACK_Y - 20} width={168} height={40} rx={8} fill="#f4f4f5" />
-        <rect x={8} y={TRACK_Y - 12} width={44} height={24} rx={4} fill="#16a34a" />
-        <text x={30} y={TRACK_Y + 4} textAnchor="middle" fontSize={11} letterSpacing="0.06em" fill="#f0fdf4" className="font-mono">
+        <rect x={0} y={TRACK_Y - 20} width={168} height={40} rx={9} fill={CARD} stroke={CARD_STROKE} />
+        <rect x={8} y={TRACK_Y - 12} width={54} height={24} rx={5} fill={TONES.green.bg} />
+        <circle cx={19} cy={TRACK_Y} r={2.75} fill={GREEN} />
+        <text x={27} y={TRACK_Y + 4} fontSize={11} fontWeight={500} letterSpacing="0.06em" fill={GREEN} className="font-mono">
           LIVE
         </text>
-        <text x={62} y={TRACK_Y + 5} fontSize={14} fontWeight={500} fill="#09090b">
+        <text x={72} y={TRACK_Y + 5} fontSize={14} fontWeight={500} fill="#f4f4f5">
           Production
         </text>
       </motion.g>
-      <motion.path d={`M168 ${TRACK_Y} H${W}`} stroke="url(#cp-track)" strokeWidth={1.25} fill="none" variants={kit.draw(0.15, 1.6)} />
-      {ticks
-        .filter((x) => nodes.every((n) => Math.abs(n - x) > 14))
-        .map((x) => (
-          <motion.circle
-            key={x}
-            cx={x}
-            cy={TRACK_Y}
-            r={2.5}
-            fill="rgba(255,255,255,0.28)"
-            variants={kit.pop(0.15 + ((x - 168) / (W - 168)) * 1.6, 0.3)}
-            style={CENTRED}
-          />
-        ))}
+      <motion.path d={`M168 ${TRACK_Y} H${W + PAD_X}`} stroke="url(#cp-track)" strokeWidth={1.25} fill="none" variants={kit.draw(0.15, 1.6)} />
 
       {/* 1 · Afternoon. Your agent adds comments: planned, applied, tested. */}
       <EventNode x={A.x} color="#e4e4e7" delay={0.35} kit={kit} />
@@ -445,7 +450,7 @@ function Scene({ kit }: { kit: Kit }) {
       <Dashed d={`M${B.x} ${TRACK_Y + 8} V292`} delay={1.0} duration={0.3} kit={kit} />
       <ActorPill cx={B.x} cy={310} actor="agent" action="drop legacy_slug" delay={1.2} kit={kit} />
       <Dashed d={`M${B.x} 328 V380 A24 24 0 0 0 ${B.x + 24} ${B.cy} H${B.card}`} delay={1.4} duration={0.45} kit={kit} />
-      <StageCard x={B.card} cy={B.cy} badge="NEEDS YOU" label="1,284 rows at risk" badgeFill={AMBER} badgeText="#1c1407" delay={1.75} kit={kit} />
+      <StageCard x={B.card} cy={B.cy} badge="NEEDS YOU" label="1,284 rows at risk" tone="amber" delay={1.75} kit={kit} />
       <Line d={`M${bEnd} ${B.cy} H612`} stroke={AMBER} delay={2.0} duration={0.25} kit={kit} />
       <Outcome cx={630} cy={B.cy} glyph="person" color={AMBER} label="You approved" below delay={2.25} kit={kit} />
       <Line d={`M648 ${B.cy} H702`} stroke={GREEN} delay={2.4} duration={0.25} kit={kit} />
@@ -466,7 +471,7 @@ function Scene({ kit }: { kit: Kit }) {
         kit={kit}
         stroke="rgba(167,139,250,0.55)"
       />
-      <StageCard x={C.card} cy={C.cy} badge="FIX" label="add missing index" badgeFill="#7c3aed" delay={4.0} kit={kit} />
+      <StageCard x={C.card} cy={C.cy} badge="FIX" label="add missing index" tone="violet" delay={4.0} kit={kit} />
       <Line d={`M${cEnd} ${C.cy} H1132`} stroke={GREEN} delay={4.25} duration={0.2} kit={kit} />
       <Outcome cx={1150} cy={C.cy} glyph="check" color={GREEN} label="Tested" delay={4.4} kit={kit} />
       <Line d={`M1168 ${C.cy} H1190 A30 30 0 0 1 1220 106 V${TRACK_Y - 8}`} stroke={GREEN} delay={4.55} duration={0.5} kit={kit} />
@@ -512,7 +517,7 @@ function fit(center: number, w: number, side: 'left' | 'right') {
 function MNode({ y, color, delay, kit }: { y: number; color: string; delay: number; kit: Kit }) {
   return (
     <motion.g variants={kit.pop(delay)} style={CENTRED}>
-      <circle cx={TX} cy={y} r={7.5} fill="#08090a" stroke={color} strokeOpacity={0.55} strokeWidth={1.25} />
+      <circle cx={TX} cy={y} r={7.5} fill={PANEL} stroke={color} strokeOpacity={0.55} strokeWidth={1.25} />
       <circle cx={TX} cy={y} r={3.25} fill={color} />
     </motion.g>
   )
@@ -548,8 +553,8 @@ function MPill({ col, cy, side, actor, action, delay, kit }: {
         width={w}
         height={32}
         rx={16}
-        fill="#0c0d10"
-        stroke={actor === 'autonomy' ? 'rgba(167,139,250,0.45)' : 'rgba(255,255,255,0.16)'}
+        fill={CARD}
+        stroke={actor === 'autonomy' ? 'rgba(167,139,250,0.32)' : CARD_STROKE}
       />
       <svg x={x + 14} y={cy - 7} width={14} height={14} viewBox="0 0 24 24">
         <path d={a.d} stroke={a.color} strokeWidth={2} fill="none" strokeLinecap="round" strokeLinejoin="round" />
@@ -561,20 +566,21 @@ function MPill({ col, cy, side, actor, action, delay, kit }: {
   )
 }
 
-function MCard({ col, cy, side, badge, label, badgeFill = '#09090b', badgeText = '#fafafa', delay, kit }: {
-  col: number; cy: number; side: 'left' | 'right'; badge: string; label: string; badgeFill?: string; badgeText?: string; delay: number; kit: Kit
+function MCard({ col, cy, side, badge, label, tone = 'neutral', delay, kit }: {
+  col: number; cy: number; side: 'left' | 'right'; badge: string; label: string; tone?: Tone; delay: number; kit: Kit
 }) {
+  const t = TONES[tone]
   const bw = badge.length * 6 + 14
   const w = 7 + bw + 8 + label.length * MONO_11 + 12
   const x = fit(col, w, side)
   return (
     <motion.g variants={kit.rise(delay)}>
-      <rect x={x} y={cy - 18} width={w} height={36} rx={8} fill="#f4f4f5" />
-      <rect x={x + 7} y={cy - 11} width={bw} height={22} rx={4} fill={badgeFill} />
-      <text x={x + 7 + bw / 2} y={cy + 3.5} textAnchor="middle" fontSize={10} letterSpacing="0.06em" fill={badgeText} className="font-mono">
+      <rect x={x} y={cy - 18} width={w} height={36} rx={8} fill={CARD} stroke={CARD_STROKE} />
+      <rect x={x + 7} y={cy - 11} width={bw} height={22} rx={4} fill={t.bg} />
+      <text x={x + 7 + bw / 2} y={cy + 3.5} textAnchor="middle" fontSize={10} fontWeight={500} letterSpacing="0.06em" fill={t.text} className="font-mono">
         {badge}
       </text>
-      <text x={x + 7 + bw + 8} y={cy + 4} fontSize={11} fill="#09090b" className="font-mono">
+      <text x={x + 7 + bw + 8} y={cy + 4} fontSize={11} fill="#e4e4e7" className="font-mono">
         {label}
       </text>
     </motion.g>
@@ -589,15 +595,16 @@ function MOutcome({ cx, cy, glyph, color, label, delay, kit }: {
   return (
     <>
       <motion.g variants={kit.pop(delay)} style={CENTRED}>
-        <circle cx={cx} cy={cy} r={16} fill="#08090a" stroke={color} strokeWidth={1.5} />
-        <path d={GLYPHS[glyph]} transform={`translate(${cx} ${cy}) scale(0.9)`} stroke={color} strokeWidth={1.75} fill="none" strokeLinecap="round" strokeLinejoin="round" />
+        <circle cx={cx} cy={cy} r={15} fill={PANEL} />
+        <circle cx={cx} cy={cy} r={15} fill={color} fillOpacity={0.1} stroke={color} strokeOpacity={0.55} strokeWidth={1.25} />
+        <path d={GLYPHS[glyph]} transform={`translate(${cx} ${cy}) scale(0.8)`} stroke={color} strokeWidth={1.75} fill="none" strokeLinecap="round" strokeLinejoin="round" />
       </motion.g>
       <motion.text
         x={labelLeft ? cx - 26 : cx + 26}
         y={cy + 4}
         textAnchor={labelLeft ? 'end' : 'start'}
         fontSize={12}
-        className="fill-zinc-400"
+        className="fill-zinc-500"
         variants={kit.fade(delay + 0.1)}
       >
         {label}
@@ -654,12 +661,12 @@ function PhoneScene({ kit, quiet }: { kit: Kit; quiet: boolean }) {
           </text>
         </motion.g>
         <motion.g variants={kit.rise(0)}>
-          <rect x={TX - 76} y={32} width={152} height={38} rx={8} fill="#f4f4f5" />
-          <rect x={TX - 68} y={40} width={40} height={22} rx={4} fill="#16a34a" />
-          <text x={TX - 48} y={55} textAnchor="middle" fontSize={10} letterSpacing="0.06em" fill="#f0fdf4" className="font-mono">
+          <rect x={TX - 76} y={32} width={152} height={38} rx={8} fill={CARD} stroke={CARD_STROKE} />
+          <rect x={TX - 68} y={40} width={40} height={22} rx={4} fill={TONES.green.bg} />
+          <text x={TX - 48} y={55} textAnchor="middle" fontSize={10} fontWeight={500} letterSpacing="0.06em" fill={GREEN} className="font-mono">
             LIVE
           </text>
-          <text x={TX - 20} y={56} fontSize={13} fontWeight={500} fill="#09090b">
+          <text x={TX - 20} y={56} fontSize={13} fontWeight={500} fill="#f4f4f5">
             Production
           </text>
         </motion.g>
@@ -700,7 +707,7 @@ function PhoneScene({ kit, quiet }: { kit: Kit; quiet: boolean }) {
         <Dashed d={`M${TX - 8} 196 H${LC + 20} A20 20 0 0 0 ${LC} 216 V234`} delay={0.15} duration={0.35} kit={kit} box={box} />
         <MPill col={LC} cy={250} side="left" actor="agent" action="drop legacy_slug" delay={0.4} kit={kit} />
         <Dashed d={`M${LC} 266 V290`} delay={0.6} duration={0.2} kit={kit} box={box} />
-        <MCard col={LC} cy={308} side="left" badge="NEEDS YOU" label="1,284 rows" badgeFill={AMBER} badgeText="#1c1407" delay={0.75} kit={kit} />
+        <MCard col={LC} cy={308} side="left" badge="NEEDS YOU" label="1,284 rows" tone="amber" delay={0.75} kit={kit} />
         <Line d={`M${LC} 326 V356`} stroke={AMBER} delay={0.95} duration={0.2} kit={kit} />
         <MOutcome cx={LC} cy={372} glyph="person" color={AMBER} label="You approved" delay={1.1} kit={kit} />
         <Line d={`M${LC} 388 V418`} stroke={GREEN} delay={1.25} duration={0.2} kit={kit} />
@@ -725,7 +732,7 @@ function PhoneScene({ kit, quiet }: { kit: Kit; quiet: boolean }) {
         <Dashed d={`M${TX + 8} 600 H${RC - 20} A20 20 0 0 1 ${RC} 620 V638`} delay={0.35} duration={0.35} kit={kit} stroke={violet} box={box} />
         <MPill col={RC} cy={654} side="right" actor="autonomy" action="finds slow queries" delay={0.6} kit={kit} />
         <Dashed d={`M${RC} 670 V694`} delay={0.8} duration={0.2} kit={kit} stroke={violet} box={box} />
-        <MCard col={RC} cy={712} side="right" badge="FIX" label="add missing index" badgeFill="#7c3aed" delay={0.95} kit={kit} />
+        <MCard col={RC} cy={712} side="right" badge="FIX" label="add missing index" tone="violet" delay={0.95} kit={kit} />
         <Line d={`M${RC} 730 V760`} stroke={GREEN} delay={1.15} duration={0.2} kit={kit} />
         <MOutcome cx={RC} cy={776} glyph="check" color={GREEN} label="Tested" delay={1.3} kit={kit} />
         <Line d={`M${RC} 792 V812 A22 22 0 0 1 ${RC - 22} 834 H${TX + 8}`} stroke={GREEN} delay={1.45} duration={0.45} kit={kit} />
@@ -784,10 +791,11 @@ export function ChangePath() {
 
   return (
     <figure>
-      {/* The key: what each colour on the drawing means. */}
+      {/* The key: what each colour on the drawing means. On desktop it sits
+          in the panel's header instead. */}
       <ul
         aria-label="How to read the timeline"
-        className="mx-auto mb-10 grid max-w-[440px] grid-cols-2 gap-x-4 gap-y-3 text-[13px] text-zinc-400 xl:mx-0 xl:flex xl:max-w-none xl:flex-wrap xl:items-center xl:gap-x-7 xl:gap-y-2.5"
+        className="mx-auto mb-10 grid max-w-[440px] grid-cols-2 gap-x-4 gap-y-3 text-[13px] text-zinc-400 xl:hidden"
       >
         {LEGEND.map((item) => (
           <li key={item.label} className="flex items-center gap-2">
@@ -803,17 +811,59 @@ export function ChangePath() {
         ))}
       </ul>
 
-      <div ref={ref} className="hidden xl:block">
-        <motion.svg
-          viewBox={`0 0 ${W} ${H}`}
-          className="block h-auto w-full select-none overflow-visible"
-          role="img"
-          aria-label={DESCRIPTION}
-          initial="hidden"
-          animate={inView || quiet ? 'visible' : 'hidden'}
+      {/* Desktop: the drawing sits in a panel, like the console it comes
+          from, so it reads as one framed figure rather than loose parts. */}
+      <div
+        ref={ref}
+        className="hidden overflow-hidden rounded-2xl border border-white/[0.08] shadow-[0_24px_80px_-32px_rgba(0,0,0,0.8)] xl:block"
+        style={{ background: PANEL }}
+      >
+        <div className="flex items-center justify-between gap-6 border-b border-white/[0.06] px-6 py-3.5">
+          <div className="flex items-center gap-2.5 font-mono text-[12px]">
+            <span aria-hidden className="relative flex h-2 w-2">
+              <span className="absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-40 motion-safe:animate-ping" />
+              <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400" />
+            </span>
+            <span className="text-zinc-200">production</span>
+            <span className="text-zinc-700">/</span>
+            <span className="text-zinc-500">change history</span>
+          </div>
+          <ul aria-label="How to read the timeline" className="flex items-center gap-x-6 text-[12.5px] text-zinc-400">
+            {LEGEND.map((item) => (
+              <li key={item.label} className="flex items-center gap-2">
+                <span
+                  aria-hidden
+                  className="flex h-3.5 w-3.5 items-center justify-center rounded-full border"
+                  style={{ borderColor: item.color }}
+                >
+                  <span className="h-1.5 w-1.5 rounded-full" style={{ background: item.color }} />
+                </span>
+                {item.label}
+              </li>
+            ))}
+          </ul>
+        </div>
+        <div
+          style={{
+            backgroundImage: 'radial-gradient(rgba(255,255,255,0.045) 1px, transparent 1px)',
+            backgroundSize: '22px 22px',
+          }}
         >
-          <Scene kit={kit} />
-        </motion.svg>
+          <motion.svg
+            viewBox={`${-PAD_X} ${-PAD_TOP} ${W + PAD_X * 2} ${H + PAD_TOP + PAD_BOTTOM}`}
+            className="block h-auto w-full select-none"
+            role="img"
+            aria-label={DESCRIPTION}
+            initial="hidden"
+            animate={inView || quiet ? 'visible' : 'hidden'}
+          >
+            <Scene kit={kit} />
+          </motion.svg>
+        </div>
+        <div className="flex items-center justify-between border-t border-white/[0.06] px-6 py-3 text-[12px] text-zinc-500">
+          <span>One project, one day and one night, drawn from the real flow. Names and times are illustrative.</span>
+          <span className="font-mono text-zinc-600">3 changes · each reversible</span>
+        </div>
       </div>
 
       {/* Phones and tablets: the same day, upright. */}
@@ -826,11 +876,10 @@ export function ChangePath() {
         >
           <PhoneScene kit={kit} quiet={quiet} />
         </svg>
+        <p className="mx-auto mt-3 max-w-[440px] text-center text-[13px] text-zinc-600">
+          One project, one day and one night, drawn from the real flow. Names and times are illustrative.
+        </p>
       </div>
-
-      <p className="mx-auto mt-3 max-w-[440px] text-center text-[13px] text-zinc-600 xl:mt-2 xl:max-w-none xl:text-right">
-        One project, one day and one night, drawn from the real flow. Names and times are illustrative.
-      </p>
 
       {/* What just happened, keyed by the times on the drawing. */}
       <figcaption className="mt-12 grid gap-x-10 gap-y-9 md:grid-cols-3 xl:mt-14">
