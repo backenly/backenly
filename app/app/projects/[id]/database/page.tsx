@@ -87,9 +87,10 @@ import { DatabaseSnapshots } from '@/components/database/DatabaseSnapshots'
 import { useParams, useRouter } from 'next/navigation'
 import { getCurrentProjectId } from '@/lib/api/client'
 import EnhancedSchemaVisualizer from '@/components/database/EnhancedSchemaVisualizer'
+import SchemaDiagram from '@/components/database/SchemaDiagram'
 
 
-type ViewMode = 'data' | 'structure'
+type ViewMode = 'data' | 'structure' | 'diagram'
 type TableView = 'data' | 'structure'
 type DatabaseView = 'tables' | 'visualization' | 'sql' | 'history' | 'snapshots' | 'types' | 'extensions'
 
@@ -425,7 +426,9 @@ export default function ProjectDatabasePage() {
     setCommittedSearch('')
     setSortColumn(null)
     setSortDirection('asc')
-    setViewMode('data')
+    if (viewMode !== 'diagram') {
+      setViewMode('data')
+    }
     setEditingRow(null)
     loadStructure()
     loadRows({ page: 1, search: '', sortBy: null, sortOrder: 'asc' })
@@ -1432,11 +1435,19 @@ export default function ProjectDatabasePage() {
                   </div>
                 </div>
                 <div className="min-h-0 flex-1 overflow-hidden">
-                  <EnhancedSchemaVisualizer
-                    schema={selectedSchema}
-                    databaseType={activeDb}
+                  <SchemaDiagram
                     projectId={resolvedProjectId || undefined}
-                    view={databaseView}
+                    activeSchema={selectedSchema}
+                    activeTable={selectedTable}
+                    databaseType={activeDb}
+                    onSelectTable={(tableName) => {
+                      setSelectedTable(tableName)
+                    }}
+                    onOpenTableData={(tableName) => {
+                      setSelectedTable(tableName)
+                      setShowVisualization('tables')
+                      setViewMode('data')
+                    }}
                   />
                 </div>
               </>
@@ -1474,6 +1485,7 @@ export default function ProjectDatabasePage() {
                       options={[
                         { value: 'data', label: 'Data', icon: Rows },
                         { value: 'structure', label: 'Structure', icon: Columns },
+                        { value: 'diagram', label: 'Diagram', icon: Network },
                       ]}
                     />
                     {viewMode === 'data' && (
@@ -1729,7 +1741,7 @@ export default function ProjectDatabasePage() {
                       </div>
                     )}
                   </>
-                ) : (
+                ) : viewMode === 'structure' ? (
                   <div className="min-h-0 flex-1 overflow-auto px-3 py-5 sm:px-5 sm:py-6">
                     {/* Columns */}
                     <section aria-labelledby="db-columns-title">
@@ -1930,6 +1942,20 @@ export default function ProjectDatabasePage() {
                       </section>
                     )}
                   </div>
+                ) : (
+                  <div className="min-h-0 flex-1 overflow-hidden relative">
+                    <SchemaDiagram
+                      projectId={resolvedProjectId || undefined}
+                      activeSchema={selectedSchema}
+                      activeTable={selectedTable}
+                      databaseType={activeDb}
+                      onSelectTable={(tableName) => setSelectedTable(tableName)}
+                      onOpenTableData={(tableName) => {
+                        setSelectedTable(tableName)
+                        setViewMode('data')
+                      }}
+                    />
+                  </div>
                 )}
               </>
             ) : (
@@ -1991,11 +2017,20 @@ export default function ProjectDatabasePage() {
               <IconButton icon={Minimize2} label="Exit full screen" onClick={() => setIsVisualizationExpanded(false)} />
             </div>
             <div className="min-h-0 flex-1 overflow-hidden">
-              <EnhancedSchemaVisualizer
-                schema={selectedSchema}
-                databaseType={activeDb}
+              <SchemaDiagram
                 projectId={resolvedProjectId || undefined}
-                view={databaseView}
+                activeSchema={selectedSchema}
+                activeTable={selectedTable}
+                databaseType={activeDb}
+                onSelectTable={(tableName) => {
+                  setSelectedTable(tableName)
+                }}
+                onOpenTableData={(tableName) => {
+                  setSelectedTable(tableName)
+                  setIsVisualizationExpanded(false)
+                  setShowVisualization('tables')
+                  setViewMode('data')
+                }}
               />
             </div>
           </motion.div>
