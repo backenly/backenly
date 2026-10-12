@@ -172,10 +172,10 @@ export async function POST(request: NextRequest) {
           userId: auth.userId,
           message: parsed.message,
           sessionToken: undefined,
-          // Headless surface: a call that needs approval is stopped by the
-          // brain's gate and queued for the Review Queue below, never confirmed
-          // by message.
-          surface: 'mcp',
+          // The MCP door, not a page: it keys the protected-production agent
+          // gate, and the system prompt must never tell an MCP caller its
+          // "current page" is "mcp" (see #228).
+          door: 'mcp',
           // ── Verification is budgeted, not hoped for ─────────────────────────
           //
           // The brain now stops taking new steps while a verification reserve

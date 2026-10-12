@@ -166,6 +166,29 @@ describe('a turn on the gateway', () => {
     )
   }, 60_000)
 
+  it('an MCP turn is told no current page, behind the agent door (#228)', async () => {
+    // The MCP route used to pass surface: 'mcp', and the loop rendered any
+    // surface into the system prompt as a page name. This is the behaviour
+    // guard for the split the route now makes: door: 'mcp', no page.
+    const provider = scriptedProvider([
+      classified('QUESTION'),
+      scriptedMessage({
+        thinking: 'Answer from the live state.',
+        toolUse: [{ id: 'toolu_finish', name: 'finish', input: { summary: 'One table: keep_me.' } }],
+        usage: { input_tokens: 200, output_tokens: 100 },
+      }),
+    ])
+
+    const { result } = await turn(provider, 'what tables do I have?', { door: 'mcp' })
+
+    expect(result).toMatchObject({ success: true, summary: 'One table: keep_me.' })
+    expect(provider.calls).toHaveLength(2)
+    const first = provider.calls[1].params
+    const system = first.system as Anthropic.TextBlockParam[]
+    expect(system[1].text).toMatch(/INTENT CLASSIFICATION \(advisory\): QUESTION/)
+    expect(system[1].text).not.toMatch(/USER'S CURRENT PAGE/)
+  }, 60_000)
+
   it('stops a destructive call at the approval gate, answers it as an error, and returns it to queue', async () => {
     const provider = scriptedProvider([
       classified('DESTRUCTIVE'),

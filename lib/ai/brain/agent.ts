@@ -124,10 +124,19 @@ export interface BrainInput {
    */
   requestId?: string | null
   /**
+   * The door a caller came through — who is calling, not what they see.
+   * `'mcp'` marks a coding agent driving Backenly over MCP, which is what
+   * keys the protected-production gate (see `agentSurface`). Never a page
+   * name: the system prompt must not tell an MCP caller its "current page"
+   * is "mcp" (backenly#228).
+   */
+  door?: string | null
+  /**
    * The product section the user is looking at while making a request.
    * E.g. "Database", "Auth & Users",
    * "Monitoring". Advisory only: lets "add an index to this table" or "why is
-   * this failing" resolve without re-asking. Never required.
+   * this failing" resolve without re-asking. Never required. A page name only
+   * — the door a caller came through is `door`, never this field.
    */
   surface?: string | null
   /**
@@ -547,7 +556,7 @@ export async function runBrain(
     userMessage: input.message,
     understandingBlock,
     // A coding agent over MCP: the protected-production gate applies.
-    agentSurface: input.surface === 'mcp',
+    agentSurface: input.door === 'mcp',
     createdThisTurn: new Set<string>(),
     onToolEvent: (e) => {
       if (e.phase === 'start') emit({ type: 'tool_start', tool: e.tool, title: e.title })
@@ -1204,6 +1213,20 @@ async function singleToolTurn(
   }
 }
 
+/**
+ * The `USER'S CURRENT PAGE` turn-context line, if a page name was supplied.
+ *
+ * Only a page name belongs here. A caller's door (`'mcp'`, ...) is a separate
+ * field and never renders: telling a coding agent its "current page" is "mcp"
+ * made every MCP turn resolve "this table" against a page that does not exist
+ * (backenly#228).
+ */
+export function userPageContext(surface?: string | null): string {
+  return surface
+    ? `USER'S CURRENT PAGE: ${surface} — deictic references ("this table", "this page", "why is this failing") likely point at what that section shows. Use it to resolve ambiguity; never refuse because a name was omitted when the page implies it.\n`
+    : ''
+}
+
 /** Full tool-use loop for build/modify/fix/destructive/question/confirm intents. */
 async function runAgentLoop(
   input: BrainInput,
@@ -1233,9 +1256,7 @@ async function runAgentLoop(
     (rolledSummary ? `EARLIER CONTEXT:\n${rolledSummary}\n\n` : '') +
     `INTENT CLASSIFICATION (advisory): ${classification.intent} (${classification.confidence.toFixed(2)}) — ${classification.reasoning}\n` +
     `${intentHint}\n` +
-    (input.surface
-      ? `USER'S CURRENT PAGE: ${input.surface} — deictic references ("this table", "this page", "why is this failing") likely point at what that section shows. Use it to resolve ambiguity; never refuse because a name was omitted when the page implies it.\n`
-      : '')
+    userPageContext(input.surface)
   const messages = conversationFor(recent, input.message)
 
   let mutated = false
