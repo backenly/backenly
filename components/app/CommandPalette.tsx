@@ -34,6 +34,7 @@ import {
   Gauge,
   Users,
   CreditCard,
+  LifeBuoy,
   Sparkles,
   CornerDownLeft,
 } from 'lucide-react'
@@ -122,6 +123,7 @@ export function CommandPalette() {
             { id: 'a-usage',    label: 'Usage',            icon: Gauge,        category: 'Account', action: go('/app/usage'),    keywords: ['quota', 'limits', 'requests'] },
             { id: 'a-members',  label: 'Members',          icon: Users,        category: 'Account', action: go('/app/members'),  keywords: ['team', 'invite', 'organization'] },
             { id: 'a-billing',  label: 'Billing',          icon: CreditCard,   category: 'Account', action: go('/app/billing'), keywords: ['plan', 'subscription', 'upgrade', 'pro'] },
+            { id: 'a-support',  label: 'Support',          icon: LifeBuoy,     category: 'Account', action: go('/app/support'), keywords: ['help', 'ticket', 'case', 'contact', 'issue'] },
           ]
         : []),
       { id: 'a-settings', label: 'Account settings', icon: Settings,     category: 'Account', action: go('/app/settings'), keywords: ['profile', 'password', 'email'] },

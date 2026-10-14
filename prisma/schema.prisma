@@ -199,6 +199,7 @@ model Project {
   roles                   Role[]
   securityIssues          SecurityIssue[]
   securityScans           SecurityScan[]
+  supportTickets          SupportTicket[]
   storageBuckets          StorageBucket[]
   storageFiles            StorageFile[]
   multipartUploads        MultipartUpload[]
@@ -3581,20 +3582,65 @@ model UnsupportedRequest {
 
 // In-app support inbox. User submits via Settings → "Contact support" form.
 // Founder reads from admin Feedback tab. No email round-trip required.
+// A support case (Backenly Cloud). `message` is the opening description and
+// renders as the thread's first entry; replies live in SupportMessage. The AI
+// first response is platform-paid (purpose `support.answer`) and never spends
+// the customer's plan credits. Routes refuse off Cloud: on a self-hosted
+// install there is nobody behind the ticket box, so the surface must not exist.
 model SupportTicket {
-  id        String   @id @default(uuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  subject   String
-  message   String
-  status    String   @default("open") // open | resolved | dismissed
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id         String   @id @default(uuid())
+  // Human reference ("Case #1042"). The only autoincrement in the schema, on
+  // purpose: people quote case numbers in email and chat, and a uuid cannot be
+  // read aloud.
+  caseNumber Int      @unique @default(autoincrement())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Optional: the project the case is about. SetNull so deleting a project
+  // keeps the correspondence.
+  projectId  String?
+  project    Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  subject    String
+  message    String
+  category   String   @default("other") // database | api | auth | storage | functions | realtime | deploy | agent | billing | account | security | other
+  severity   String   @default("normal") // low | normal | high | urgent — high/urgent need a paid plan (lib/support/constants.ts)
+  status     String   @default("open") // open | waiting_on_customer | resolved | closed (legacy "dismissed" rows were migrated to closed)
+  // What the AI first responder did: none (not attempted yet) | replied |
+  // unavailable (no provider configured) | failed (provider errored). Honesty
+  // field — the admin queue must know which tickets got no instant answer.
+  aiState    String   @default("none")
+  // Thread ordering and queue triage without joining messages.
+  lastMessageAt     DateTime  @default(now())
+  lastMessageBy     String    @default("user") // user | ai | staff
+  firstStaffReplyAt DateTime?
+  resolvedAt        DateTime?
+  resolvedBy        String? // user | staff
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  messages   SupportMessage[]
 
   @@index([userId])
   @@index([status])
   @@index([createdAt])
+  @@index([lastMessageAt])
+  @@index([projectId])
   @@map("support_tickets")
+}
+
+// One correspondence entry on a support case, in the AWS Support sense: the
+// customer, the AI first responder and the team write into one thread.
+model SupportMessage {
+  id           String        @id @default(uuid())
+  ticketId     String
+  ticket       SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  author       String // user | ai | staff
+  // The platform user who wrote it: the customer for `user`, the responding
+  // founder/operator for `staff`, null for `ai`.
+  authorUserId String?
+  body         String
+  createdAt    DateTime      @default(now())
+
+  @@index([ticketId, createdAt])
+  @@map("support_messages")
 }
 
 // Founder's roadmap, written by users. Submitted via Settings → "Feature requests" form.

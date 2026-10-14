@@ -169,6 +169,16 @@ function classify(file: string): RouteRecord {
     // never become. Teaching the detector about a helper that really does
     // authorize keeps the ratchet meaningful for the next route that uses it.
     'guardWebhookRoute',
+    // lib/support/service.ts: every customer-side entry takes the caller's
+    // userId and scopes its own query `where: { id: ticketId, userId }` — the
+    // stronger, no-window form of authorization described at the api-keys note
+    // below, living in the service instead of the route file so the Cloud
+    // admin overlay can compose the same logic. Pinned two-sided against a
+    // real database in tests/integration/support-center.spec.ts. The
+    // staff-side functions are deliberately NOT listed: no public route may
+    // call them. createTicket authorizes its optional projectId input by
+    // calling canAccessProject before the row is written.
+    'createTicket', 'getTicket', 'addCustomerReply', 'resolveTicket', 'reopenTicket',
   ].filter(h => new RegExp(`\\b${h}\\s*\\(`).test(src))
 
   const pathParams = Array.from(route.matchAll(/\[([^\]]+)\]/g)).map(m => m[1])

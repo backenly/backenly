@@ -36,6 +36,7 @@ export type PlatformNotificationType =
   | 'system'
   | 'autonomous_action'   // "While you were away" — autonomous background fixes and findings
   | 'health_alert'        // A confirmed critical in one of their backends, still unresolved
+  | 'support_update'      // Backenly replied to or resolved one of their support cases
 
 // All valid types — used for preference initialization
 export const ALL_NOTIFICATION_TYPES: PlatformNotificationType[] = [
@@ -49,6 +50,7 @@ export const ALL_NOTIFICATION_TYPES: PlatformNotificationType[] = [
   'system',
   'autonomous_action',
   'health_alert',
+  'support_update',
 ]
 
 export interface CreateNotificationInput {

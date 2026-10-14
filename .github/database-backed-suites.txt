@@ -332,6 +332,13 @@ __tests__/services/fresh-install-auth-purge.test.ts
 # not run. Real findings, audit rows and preferences are the property.
 tests/integration/fixed-claims-from-verified-state.spec.ts
 
+# Support cases at the real routes: owner-scoped reads and writes (another
+# account's case is 404), the paid-plan severity gate, the status machine
+# (reply reopens, closed refuses), the AI first responder recording
+# replied/unavailable/failed truthfully, and 404 CLOUD_ONLY_FEATURE off Cloud.
+# Case rows, thread rows and the in-app notification are the property.
+tests/integration/support-center.spec.ts
+
 # Five destructive routes that did not check who was asking. Three had NO
 # authentication at all - anyone reaching the server could roll back a live
 # deployment or rebuild a workspace database. Two verified a token and then
