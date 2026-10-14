@@ -17,6 +17,7 @@ import { AiError, aiAvailability, generate } from '@/lib/ai/llm'
 import { getUserEntitlements } from '@/lib/entitlements'
 import { planDisplayName } from '@/lib/entitlements/policy'
 import { prisma } from '@/lib/db/prisma'
+import { listExposedTables } from '@/lib/mcp/schema-introspection'
 import { SUPPORT_SEVERITIES } from './constants'
 
 const DOCS_SLUGS = [
@@ -48,13 +49,17 @@ function severityLabel(severity: string): string {
   return SUPPORT_SEVERITIES.find((s) => s.id === severity)?.label ?? severity
 }
 
-/** Owner-scoped surface facts about the attached project. Best-effort: absent beats wrong. */
+/**
+ * Owner-scoped surface facts about the attached project. Best-effort: absent
+ * beats wrong. Table truth comes from the live workspace catalog
+ * (listExposedTables), never from the retired ApiDefinition rows — each
+ * exposed table IS a REST resource since the PostgREST cutover.
+ */
 async function projectFacts(projectId: string): Promise<string[]> {
   try {
-    const [project, tables, apis, lastDeployment] = await Promise.all([
+    const [project, exposedTables, lastDeployment] = await Promise.all([
       prisma.project.findUnique({ where: { id: projectId }, select: { name: true, createdAt: true, pausedAt: true } }),
-      prisma.table.count({ where: { projectId } }).catch(() => null),
-      prisma.apiDefinition.count({ where: { projectId } }).catch(() => null),
+      listExposedTables(projectId).catch(() => null),
       prisma.deployment
         .findFirst({ where: { projectId }, orderBy: { createdAt: 'desc' }, select: { status: true, createdAt: true } })
         .catch(() => null),
@@ -63,8 +68,9 @@ async function projectFacts(projectId: string): Promise<string[]> {
     const facts = [
       `Attached project: "${project.name}" (created ${project.createdAt.toISOString().slice(0, 10)}${project.pausedAt ? ', currently paused for inactivity' : ''})`,
     ]
-    if (tables !== null) facts.push(`Tables in the project: ${tables}`)
-    if (apis !== null) facts.push(`Generated API endpoints: ${apis}`)
+    if (exposedTables !== null) {
+      facts.push(`Tables exposed through the data API: ${exposedTables.length}${exposedTables.length ? ` (${exposedTables.slice(0, 12).map((t) => t.name).join(', ')}${exposedTables.length > 12 ? ', …' : ''})` : ''}`)
+    }
     if (lastDeployment) {
       facts.push(`Last deployment: ${lastDeployment.status} at ${lastDeployment.createdAt.toISOString()}`)
     }
