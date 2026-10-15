@@ -47,6 +47,7 @@
  */
 
 import { Pool } from 'pg'
+import { disconnectRegionalClients, projectPool } from '@/lib/data-plane/regional'
 
 /** What an allowlisted extension is for, and whether we can install it. */
 export interface AllowedExtension {
@@ -171,16 +172,17 @@ export interface ExtensionStatus extends AllowedExtension {
   blockedReason: string | null
 }
 
-let pool: Pool | null = null
-function getPool(): Pool {
-  if (!pool) pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 2 })
-  return pool
+/**
+ * The project's own database, in its region: extensions are installed per
+ * database, so a regional project's live in its region's database.
+ */
+function getPool(projectId: string): Promise<Pool> {
+  return projectPool(projectId, 'extensions', { max: 2 })
 }
 
-/** Test seam: drop the pool so a suite can point at a different database. */
+/** Test seam: drop the pools so a suite can point at a different database. */
 export async function resetExtensionPool(): Promise<void> {
-  if (pool) await pool.end().catch(() => {})
-  pool = null
+  await disconnectRegionalClients()
 }
 
 /**
@@ -190,8 +192,8 @@ export async function resetExtensionPool(): Promise<void> {
  * assertion. The register exists because "the code says it supports X" and "the
  * database has X" kept turning out to be different claims.
  */
-export async function listExtensions(): Promise<ExtensionStatus[]> {
-  const { rows } = await getPool().query<{
+export async function listExtensions(projectId: string): Promise<ExtensionStatus[]> {
+  const { rows } = await (await getPool(projectId)).query<{
     name: string
     default_version: string | null
     installed_version: string | null
@@ -283,7 +285,7 @@ export interface InstallOutcome {
  * `IF NOT EXISTS` so a second click is not an error, and the outcome says which
  * happened rather than reporting a no-op as a fresh install.
  */
-export async function installExtension(name: string): Promise<InstallOutcome> {
+export async function installExtension(projectId: string, name: string): Promise<InstallOutcome> {
   if (!isAllowedExtension(name)) {
     return {
       ok: false,
@@ -297,7 +299,7 @@ export async function installExtension(name: string): Promise<InstallOutcome> {
     }
   }
 
-  const status = (await listExtensions()).find(e => e.name === name)!
+  const status = (await listExtensions(projectId)).find(e => e.name === name)!
 
   if (status.installed) {
     return { ok: true, alreadyInstalled: true, version: status.installedVersion, code: null, message: null }
@@ -313,7 +315,7 @@ export async function installExtension(name: string): Promise<InstallOutcome> {
     // Quoted because the name contains a hyphen in at least one case
     // (`uuid-ossp`), and because an unquoted identifier here would be a habit
     // worth not forming.
-    await getPool().query(`CREATE EXTENSION IF NOT EXISTS "${name.replace(/"/g, '""')}"`)
+    await (await getPool(projectId)).query(`CREATE EXTENSION IF NOT EXISTS "${name.replace(/"/g, '""')}"`)
   } catch (err: any) {
     // The server's own words. An operator reading "permission denied to create
     // extension" can act; one reading "install failed" cannot.
@@ -323,7 +325,7 @@ export async function installExtension(name: string): Promise<InstallOutcome> {
     }
   }
 
-  const after = (await listExtensions()).find(e => e.name === name)!
+  const after = (await listExtensions(projectId)).find(e => e.name === name)!
   if (!after.installed) {
     // CREATE EXTENSION reported no error and the catalog disagrees. Reporting
     // success from the absence of an exception is the failure mode this program

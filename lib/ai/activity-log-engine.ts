@@ -5,6 +5,8 @@
  * Fire-and-forget, non-blocking.
  */
 
+import { workspaceRawClient } from '@/lib/data-plane/regional'
+
 export interface ActivityLogEntry {
   action: 'created' | 'updated' | 'deleted'
   entityType: string
@@ -79,12 +81,14 @@ export function buildNotificationFromActivity(
 
 export async function logActivity(entry: ActivityLogEntry): Promise<void> {
   try {
-    const { prisma } = await import('@/lib/db')
+    // The project's database, in its region. Inside the try: activity logging is
+    // best-effort and never fails the operation it describes.
+    const db = await workspaceRawClient(entry.projectId)
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const { postgresSchema } = getWorkspaceDatabaseNames(entry.projectId)
 
     // Check if activity_logs table exists in workspace
-    const tableExists = await prisma.$queryRawUnsafe<{ exists: boolean }[]>(
+    const tableExists = await db.$queryRawUnsafe<{ exists: boolean }[]>(
       `SELECT EXISTS (
          SELECT 1 FROM information_schema.tables
          WHERE table_schema = $1 AND table_name = 'activity_logs'
@@ -94,7 +98,7 @@ export async function logActivity(entry: ActivityLogEntry): Promise<void> {
 
     if (!tableExists[0]?.exists) return
 
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       `INSERT INTO "${postgresSchema}"."activity_logs"
        (action, entity_type, entity_id, description, actor_id, metadata, created_at)
        VALUES ($1, $2, $3, $4, $5, $6::jsonb, NOW())
@@ -114,12 +118,14 @@ export async function logActivity(entry: ActivityLogEntry): Promise<void> {
 
 export async function triggerNotification(payload: NotificationPayload): Promise<void> {
   try {
-    const { prisma } = await import('@/lib/db')
+    // The project's database, in its region. Inside the try: activity logging is
+    // best-effort and never fails the operation it describes.
+    const db = await workspaceRawClient(payload.projectId)
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const { postgresSchema } = getWorkspaceDatabaseNames(payload.projectId)
 
     // Check if notifications table exists
-    const tableExists = await prisma.$queryRawUnsafe<{ exists: boolean }[]>(
+    const tableExists = await db.$queryRawUnsafe<{ exists: boolean }[]>(
       `SELECT EXISTS (
          SELECT 1 FROM information_schema.tables
          WHERE table_schema = $1 AND table_name = 'notifications'
@@ -129,7 +135,7 @@ export async function triggerNotification(payload: NotificationPayload): Promise
 
     if (!tableExists[0]?.exists) return
 
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       `INSERT INTO "${postgresSchema}"."notifications"
        (user_id, title, body, type, read, metadata, created_at)
        VALUES ($1, $2, $3, $4, false, $5::jsonb, NOW())
@@ -171,7 +177,9 @@ export async function triggerActivityAndNotification(
   if (shouldAutoNotify(entityType, action)) {
     // Find relevant users to notify based on entity type
     try {
-      const { prisma } = await import('@/lib/db')
+      // The project's database, in its region. Inside the try: activity logging is
+      // best-effort and never fails the operation it describes.
+      const db = await workspaceRawClient(projectId)
       const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
       const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
 
@@ -186,7 +194,7 @@ export async function triggerActivityAndNotification(
         const parentTable = data.task_id ? 'tasks' : 'posts'
         const parentId = data.task_id || data.post_id
 
-        const parentRow = await prisma.$queryRawUnsafe<{ user_id?: string; author_id?: string }[]>(
+        const parentRow = await db.$queryRawUnsafe<{ user_id?: string; author_id?: string }[]>(
           `SELECT user_id, author_id FROM "${postgresSchema}"."${parentTable}" WHERE id = $1 LIMIT 1`,
           parentId
         ).catch(() => [])

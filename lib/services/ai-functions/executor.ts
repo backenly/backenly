@@ -162,7 +162,7 @@ function buildDbProxy(projectId: string, caller: FunctionCallerContext = {}) {
       if (where && Object.keys(where).length > 0) {
         const keys = Object.keys(where).map(k => k.replace(/[^a-z0-9_]/gi, ''))
         const raw = Object.keys(where)
-        const types = await columnTypes(schemaName, safeName)
+        const types = await columnTypes(projectId, schemaName, safeName)
         const conditions = keys.map((c, i) => `"${c}" = ${dbCast(types.get(c), where[raw[i]], i + 1)}`).join(' AND ')
         return executeWithUserContext<any>(
           projectId,
@@ -188,7 +188,7 @@ function buildDbProxy(projectId: string, caller: FunctionCallerContext = {}) {
       const cols = Object.keys(data).filter(c => /^[a-z_][a-z0-9_]*$/i.test(c))
       if (cols.length === 0) throw new Error('No valid columns to insert')
       const colList = cols.map(c => `"${c}"`).join(', ')
-      const types = await columnTypes(schemaName, safeName)
+      const types = await columnTypes(projectId, schemaName, safeName)
       const placeholders = cols.map((c, i) => dbCast(types.get(c), data[c], i + 1)).join(', ')
       const result = await executeWithUserContext<any>(
         projectId,
@@ -207,7 +207,7 @@ function buildDbProxy(projectId: string, caller: FunctionCallerContext = {}) {
       const whereCols = Object.keys(where).filter(c => /^[a-z_][a-z0-9_]*$/i.test(c))
       if (setCols.length === 0) throw new Error('No valid columns to update')
       if (whereCols.length === 0) throw new Error('WHERE clause required for update')
-      const types = await columnTypes(schemaName, safeName)
+      const types = await columnTypes(projectId, schemaName, safeName)
       const setClause = setCols.map((c, i) => `"${c}" = ${dbCast(types.get(c), data[c], i + 1)}`).join(', ')
       const whereClause = whereCols.map((c, i) => `"${c}" = ${dbCast(types.get(c), where[c], setCols.length + i + 1)}`).join(' AND ')
       return executeWithUserContext<any>(
@@ -227,7 +227,7 @@ function buildDbProxy(projectId: string, caller: FunctionCallerContext = {}) {
       const safeName = table.replace(/[^a-z0-9_]/gi, '')
       const cols = Object.keys(where).filter(c => /^[a-z_][a-z0-9_]*$/i.test(c))
       if (cols.length === 0) throw new Error('WHERE clause required for delete')
-      const types = await columnTypes(schemaName, safeName)
+      const types = await columnTypes(projectId, schemaName, safeName)
       const conditions = cols.map((c, i) => `"${c}" = ${dbCast(types.get(c), where[c], i + 1)}`).join(' AND ')
       await executeWithUserContext<any>(
         projectId,

@@ -21,6 +21,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
+import { isRegionError, workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { profileForBranchSchema } from '@/lib/postgrest/gateway'
 
@@ -105,11 +106,15 @@ function jsonSafe<T>(value: T): T {
 export async function workspaceTableExists(projectId: string, tableName: string): Promise<boolean> {
   const t = String(tableName || '').toLowerCase()
   if (!IDENT.test(t) || !isExposedTable(t)) return false
-  return tableExists(schemaFor(projectId), t)
+  return tableExists(await workspaceRawClient(projectId), schemaFor(projectId), t)
 }
 
-async function tableExists(schema: string, table: string): Promise<boolean> {
-  const rows = await prisma.$queryRawUnsafe<Array<{ exists: boolean }>>(
+/**
+ * Asked of the project's own database, in its region (lib/data-plane/regional.ts):
+ * any other database has no such schema and would answer "no table".
+ */
+async function tableExists(db: WorkspaceRawClient, schema: string, table: string): Promise<boolean> {
+  const rows = await db.$queryRawUnsafe<Array<{ exists: boolean }>>(
     `SELECT EXISTS (
        SELECT 1 FROM information_schema.tables
        WHERE table_schema = $1 AND table_name = $2
@@ -130,7 +135,9 @@ async function recordCount(projectId: string, schema: string, table: string): Pr
       `SELECT count(*)::int AS c FROM "${schema}"."${table}"`,
     )
     return Number(rows[0]?.c ?? 0)
-  } catch {
+  } catch (err) {
+    // An unreachable region is not an empty table.
+    if (isRegionError(err)) throw err
     return 0
   }
 }
@@ -344,20 +351,21 @@ export async function getTableSchema(
   const table = String(tableNameRaw || '').toLowerCase()
   if (!IDENT.test(table)) throw new Error(`Invalid table name "${tableNameRaw}".`)
   const schema = schemaFor(projectId, scope)
-  if (!(await tableExists(schema, table))) {
+  const db = await workspaceRawClient(projectId)
+  if (!(await tableExists(db, schema, table))) {
     throw new Error(`Table "${table}" does not exist in this project.`)
   }
 
   const [colsRaw, pkRaw, fksRaw, idxRaw, checksRaw, trigRaw, rlsRaw, polRaw, count] =
     await Promise.all([
-      prisma.$queryRawUnsafe<Array<any>>(
+      db.$queryRawUnsafe<Array<any>>(
         `SELECT column_name, data_type, is_nullable, column_default, character_maximum_length
            FROM information_schema.columns
           WHERE table_schema = $1 AND table_name = $2
           ORDER BY ordinal_position`,
         schema, table,
       ),
-      prisma.$queryRawUnsafe<Array<{ column_name: string }>>(
+      db.$queryRawUnsafe<Array<{ column_name: string }>>(
         `SELECT kcu.column_name
            FROM information_schema.table_constraints tc
            JOIN information_schema.key_column_usage kcu
@@ -365,7 +373,7 @@ export async function getTableSchema(
           WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = $1 AND tc.table_name = $2`,
         schema, table,
       ),
-      prisma.$queryRawUnsafe<Array<any>>(
+      db.$queryRawUnsafe<Array<any>>(
         `SELECT kcu.column_name AS from_col,
                 ccu.table_name  AS to_table,
                 ccu.column_name AS to_col,
@@ -380,11 +388,11 @@ export async function getTableSchema(
           WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = $1 AND tc.table_name = $2`,
         schema, table,
       ),
-      prisma.$queryRawUnsafe<Array<{ indexname: string; indexdef: string }>>(
+      db.$queryRawUnsafe<Array<{ indexname: string; indexdef: string }>>(
         `SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = $1 AND tablename = $2`,
         schema, table,
       ),
-      prisma.$queryRawUnsafe<Array<{ conname: string; def: string }>>(
+      db.$queryRawUnsafe<Array<{ conname: string; def: string }>>(
         `SELECT con.conname, pg_get_constraintdef(con.oid) AS def
            FROM pg_constraint con
            JOIN pg_class rel ON rel.oid = con.conrelid
@@ -392,18 +400,18 @@ export async function getTableSchema(
           WHERE con.contype = 'c' AND nsp.nspname = $1 AND rel.relname = $2`,
         schema, table,
       ),
-      prisma.$queryRawUnsafe<Array<any>>(
+      db.$queryRawUnsafe<Array<any>>(
         `SELECT trigger_name, action_timing, event_manipulation
            FROM information_schema.triggers
           WHERE trigger_schema = $1 AND event_object_table = $2`,
         schema, table,
       ),
-      prisma.$queryRawUnsafe<Array<{ relrowsecurity: boolean; relforcerowsecurity: boolean }>>(
+      db.$queryRawUnsafe<Array<{ relrowsecurity: boolean; relforcerowsecurity: boolean }>>(
         `SELECT relrowsecurity, relforcerowsecurity FROM pg_class
           WHERE relname = $2 AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = $1)`,
         schema, table,
       ),
-      prisma.$queryRawUnsafe<Array<any>>(
+      db.$queryRawUnsafe<Array<any>>(
         `SELECT policyname, cmd, roles, permissive, qual, with_check
            FROM pg_policies WHERE schemaname = $1 AND tablename = $2`,
         schema, table,
@@ -492,18 +500,19 @@ export async function listExposedTables(
   scope: IntrospectionScope = {},
 ): Promise<Array<{ name: string; columns: number; recordCount: number; rlsEnabled: boolean }>> {
   const schema = schemaFor(projectId, scope)
+  const db = await workspaceRawClient(projectId)
   const [tableRows, colCounts, rlsRows] = await Promise.all([
-    prisma.$queryRawUnsafe<Array<{ table_name: string }>>(
+    db.$queryRawUnsafe<Array<{ table_name: string }>>(
       `SELECT table_name FROM information_schema.tables
         WHERE table_schema = $1 AND table_type = 'BASE TABLE' ORDER BY table_name`,
       schema,
     ),
-    prisma.$queryRawUnsafe<Array<{ table_name: string; c: number }>>(
+    db.$queryRawUnsafe<Array<{ table_name: string; c: number }>>(
       `SELECT table_name, count(*)::int AS c FROM information_schema.columns
         WHERE table_schema = $1 GROUP BY table_name`,
       schema,
     ),
-    prisma.$queryRawUnsafe<Array<{ relname: string; relrowsecurity: boolean }>>(
+    db.$queryRawUnsafe<Array<{ relname: string; relrowsecurity: boolean }>>(
       `SELECT relname, relrowsecurity FROM pg_class
         WHERE relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = $1) AND relkind = 'r'`,
       schema,
@@ -540,29 +549,30 @@ export interface BackendMetadata {
  */
 export async function getBackendMetadata(projectId: string, scope: IntrospectionScope = {}): Promise<BackendMetadata> {
   const schema = schemaFor(projectId, scope)
+  const db = await workspaceRawClient(projectId)
 
   const [tableRows, colCounts, policyCounts, rlsRows, fkRows] = await Promise.all([
-    prisma.$queryRawUnsafe<Array<{ table_name: string }>>(
+    db.$queryRawUnsafe<Array<{ table_name: string }>>(
       `SELECT table_name FROM information_schema.tables
         WHERE table_schema = $1 AND table_type = 'BASE TABLE'
         ORDER BY table_name`,
       schema,
     ),
-    prisma.$queryRawUnsafe<Array<{ table_name: string; c: number }>>(
+    db.$queryRawUnsafe<Array<{ table_name: string; c: number }>>(
       `SELECT table_name, count(*)::int AS c FROM information_schema.columns
         WHERE table_schema = $1 GROUP BY table_name`,
       schema,
     ),
-    prisma.$queryRawUnsafe<Array<{ tablename: string; c: number }>>(
+    db.$queryRawUnsafe<Array<{ tablename: string; c: number }>>(
       `SELECT tablename, count(*)::int AS c FROM pg_policies WHERE schemaname = $1 GROUP BY tablename`,
       schema,
     ),
-    prisma.$queryRawUnsafe<Array<{ relname: string; relrowsecurity: boolean }>>(
+    db.$queryRawUnsafe<Array<{ relname: string; relrowsecurity: boolean }>>(
       `SELECT relname, relrowsecurity FROM pg_class
         WHERE relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = $1) AND relkind = 'r'`,
       schema,
     ),
-    prisma.$queryRawUnsafe<Array<any>>(
+    db.$queryRawUnsafe<Array<any>>(
       `SELECT tc.table_name AS from_table, kcu.column_name AS from_col,
               ccu.table_name AS to_table, ccu.column_name AS to_col
          FROM information_schema.table_constraints tc

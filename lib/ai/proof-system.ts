@@ -22,6 +22,7 @@
 import { prisma } from '@/lib/db/prisma'
 import { isReservedWorkspaceTable } from '@/lib/security/workspace-schema'
 import { isLegacyAliasVaultId } from '@/lib/services/integrationKeyStore'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 
 /** The four commands a policy can govern — used to name the ones that are NOT covered. */
 const ALL_COMMANDS = ['SELECT', 'INSERT', 'UPDATE', 'DELETE'] as const
@@ -62,12 +63,13 @@ export interface ProofResponseResult {
 // ── State readers (each queries real DB) ─────────────────────────────────────
 
 async function readTables(projectId: string): Promise<string[]> {
+  const db = await workspaceRawClient(projectId)
   try {
     // Catalog is the single source of truth. Reading prisma.table (a metadata copy
     // written after CREATE_TABLE) could drift from the real schema — an agent would
     // then reason about a table that no longer exists (or miss one adopted via
     // external DDL). information_schema can never drift from the live schema.
-    const rows = await prisma.$queryRawUnsafe<Array<{ table_name: string }>>(
+    const rows = await db.$queryRawUnsafe<Array<{ table_name: string }>>(
       `SELECT table_name FROM information_schema.tables
         WHERE table_schema = $1 AND table_type = 'BASE TABLE'
         ORDER BY table_name`,
@@ -123,6 +125,7 @@ async function readRls(
   policies: Array<{ table: string; operation: string; policyName: string }>
   byTable: ProofBlock['rlsByTable']
 }> {
+  const db = await workspaceRawClient(projectId)
   // ── pg_policies, not PermissionPolicy ──────────────────────────────────────
   //
   // The metadata table records ONE row per applied template while the database
@@ -137,7 +140,7 @@ async function readRls(
   try {
     // One row per (table, policy). Tables with no policy still appear, with
     // NULLs — that LEFT JOIN is what makes a zero-policy table visible.
-    const rows = await prisma.$queryRawUnsafe<Array<{
+    const rows = await db.$queryRawUnsafe<Array<{
       table_name: string
       rls_enabled: boolean
       forced: boolean

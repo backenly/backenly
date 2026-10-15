@@ -20,6 +20,7 @@
  */
 
 import { prisma } from '@/lib/db'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 
 // ⚠️ ROGUE ENGINE — PERMANENTLY DISABLED.
 //
@@ -272,11 +273,15 @@ export async function checkDatabaseRowQuota(
     select: { name: true, schema: true },
   })
 
+  // The project's database, in its region. Outside the per-table catch below,
+  // which skips a table it cannot count: an unreachable region would read as
+  // an empty project and let every insert through.
+  const db = await workspaceRawClient(projectId)
   let totalRows = 0
   for (const table of tables) {
     const schema = table.schema || 'public'
     try {
-      const result = await prisma.$queryRawUnsafe<{ count: bigint }[]>(
+      const result = await db.$queryRawUnsafe<{ count: bigint }[]>(
         `SELECT COUNT(*) as count FROM "${schema}"."${table.name}"`
       )
       totalRows += Number(result[0]?.count || 0)

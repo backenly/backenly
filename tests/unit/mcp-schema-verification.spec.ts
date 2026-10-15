@@ -25,6 +25,12 @@ const mockPrisma = {
 
 jest.mock('@/lib/db', () => ({ prisma: mockPrisma }))
 jest.mock('@/lib/db/prisma', () => ({ prisma: mockPrisma }))
+// The project resolves to the home region, whose raw client is the one above.
+// Which region a project is in is tests/integration/project-region.spec.ts.
+jest.mock('@/lib/data-plane/regional', () => ({
+  ...jest.requireActual('@/lib/data-plane/regional'),
+  workspaceRawClient: async () => mockPrisma,
+}))
 
 jest.mock('@/lib/ai/execution-timeline', () => ({
   trackAction: async (_projectId: string, _runId: string, _action: unknown, work: () => Promise<unknown>) => work(),

@@ -10,6 +10,7 @@ import {
   markFailure, 
   closeJournal 
 } from './execution-journal'
+import { projectDatabaseUrl, workspaceRawClient } from '@/lib/data-plane/regional'
 
 const execAsync = promisify(exec)
 
@@ -161,8 +162,9 @@ datasource db {
 
     // 🔧 Create .env file with workspace-specific DATABASE_URL
     if (!existsSync(envPath)) {
-      // Get the main DATABASE_URL and modify it to use workspace schema
-      const mainDbUrl = process.env.DATABASE_URL || ''
+      // The connection to the project's own database, in its region, scoped to
+      // its workspace schema. Never another region's.
+      const mainDbUrl = await projectDatabaseUrl(projectId)
       const workspaceSchema = `workspace_${projectId}`
       
       // Add schema parameter to the connection string
@@ -573,6 +575,7 @@ async function insertMockData(
   dataInfo: string | any,
   projectId: string
 ): Promise<ExecutionResult> {
+  const db = await workspaceRawClient(projectId)
   try {
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const { executeInWorkspaceSchema } = await import('@/lib/services/workspaceDatabase')
@@ -643,7 +646,6 @@ async function insertMockData(
     const targetSchema = dbNames.postgresSchema
     
     // Query actual table structure from PostgreSQL
-    const { prisma } = await import('@/lib/db')
     
     console.log(`🔍 Querying actual columns for table "${tableName}" in schema "${targetSchema}"`)
     
@@ -655,7 +657,7 @@ async function insertMockData(
       AND LOWER(table_name) = LOWER('${tableName}');
     `
     
-    const tableResults: Array<{ table_name: string }> = await prisma.$queryRawUnsafe(tableExistsQuery)
+    const tableResults: Array<{ table_name: string }> = await db.$queryRawUnsafe(tableExistsQuery)
     
     if (tableResults.length === 0) {
       throw new Error(`Table "${tableName}" not found in schema "${targetSchema}". Please verify the table exists.`)
@@ -677,7 +679,7 @@ async function insertMockData(
       ORDER BY ordinal_position;
     `
     
-    const actualColumns: Array<{ column_name: string; data_type: string }> = await prisma.$queryRawUnsafe(columnsQuery)
+    const actualColumns: Array<{ column_name: string; data_type: string }> = await db.$queryRawUnsafe(columnsQuery)
     
     const actualColumnNames = actualColumns.map(c => c.column_name)
     console.log(`✅ Found ${actualColumns.length} columns:`, actualColumnNames.join(', '))

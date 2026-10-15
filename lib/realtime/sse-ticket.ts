@@ -37,7 +37,7 @@
 
 import jwt from 'jsonwebtoken'
 import { randomUUID } from 'crypto'
-import { prisma } from '@/lib/db/prisma'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 
 /** Deliberately short: long enough for a slow handshake, too short to harvest. */
 export const SSE_TICKET_TTL_SECONDS = 30
@@ -169,8 +169,12 @@ export async function redeemSseTicket(
  */
 async function ensureTicketLedger(projectId: string): Promise<boolean> {
   const schemaName = `workspace_${projectId}`
+  // The ledger is in the project's database, in its region. Resolved outside
+  // the catch: a region this process cannot reach mints no ticket at all,
+  // rather than one reported as replayable.
+  const db = await workspaceRawClient(projectId)
   try {
-    await prisma.$executeRawUnsafe(`
+    await db.$executeRawUnsafe(`
       CREATE TABLE IF NOT EXISTS "${schemaName}"."_token_blacklist" (
         jti        TEXT        PRIMARY KEY,
         expires_at TIMESTAMPTZ NOT NULL,
@@ -190,13 +194,17 @@ async function burnTicket(
 ): Promise<'burned' | 'already_used' | 'unenforced'> {
   const schemaName = `workspace_${projectId}`
   const expiresAt = exp ? new Date(exp * 1000) : new Date(Date.now() + SSE_TICKET_TTL_SECONDS * 1000)
+  // The ledger is in the project's database, in its region. Resolved outside
+  // the catch, which answers 'unenforced': an unreachable region would make
+  // every ticket replayable, so it refuses the redemption instead.
+  const db = await workspaceRawClient(projectId)
   try {
     // Cheap opportunistic prune — tickets expire in 30s, so this table would
     // otherwise accumulate one row per realtime connection forever.
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       `DELETE FROM "${schemaName}"."_token_blacklist" WHERE expires_at < NOW() - INTERVAL '1 hour'`,
     )
-    const inserted = await prisma.$executeRawUnsafe(
+    const inserted = await db.$executeRawUnsafe(
       `INSERT INTO "${schemaName}"."_token_blacklist" (jti, expires_at)
        VALUES ($1, $2)
        ON CONFLICT (jti) DO NOTHING`,

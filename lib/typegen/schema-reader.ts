@@ -6,10 +6,8 @@
  * the type-generator needs to produce accurate TypeScript types.
  */
 
-import { Pool } from 'pg'
+import { projectPool } from '@/lib/data-plane/regional'
 import { isReservedWorkspaceTable } from '@/lib/security/workspace-schema'
-
-const pool = new Pool({ connectionString: process.env.DATABASE_URL })
 
 export interface ColumnInfo {
   tableName: string
@@ -54,6 +52,9 @@ function isInternalTable(tableName: string): boolean {
 export async function readWorkspaceSchema(projectId: string): Promise<WorkspaceSchema> {
   const schemaName = `workspace_${projectId}`
 
+  // The catalog of the project's own database, in its region. Any other has no
+  // such schema, and every generated type would be empty.
+  const pool = await projectPool(projectId, 'typegen')
   const client = await pool.connect()
   try {
     // ── Columns ──────────────────────────────────────────────────────────────

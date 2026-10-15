@@ -13,6 +13,13 @@ jest.mock('@/lib/postgrest/exposure', () => ({
   tableHasSoftDelete: jest.fn(async () => false),
 }))
 jest.mock('@/lib/postgrest/registration', () => ({ ensureSchemaRegistered: jest.fn(async () => {}) }))
+// The project resolves to the home region, whose PostgREST is POSTGREST_URL.
+// Region resolution itself is tests/integration/project-region.spec.ts.
+jest.mock('@/lib/data-plane/regional', () => {
+  const actual = jest.requireActual('@/lib/data-plane/regional')
+  const { HOME_REGION } = jest.requireActual('@/lib/regions')
+  return { ...actual, projectPostgrest: async () => actual.regionPostgrest(HOME_REGION) }
+})
 
 const logSpy = jest.fn()
 jest.mock('@/lib/observability/pgrst-clock-diagnostic', () => {

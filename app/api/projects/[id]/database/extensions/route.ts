@@ -27,7 +27,7 @@ export const GET = withAuth(async (_request: NextRequest, { user, params }) => {
 
   // Read from the live catalog every time. A cached list is how a dashboard
   // ends up reporting an extension that an operator removed at a psql prompt.
-  return NextResponse.json({ extensions: await listExtensions() })
+  return NextResponse.json({ extensions: await listExtensions(projectId) })
 })
 
 export const POST = withAuth(async (request: NextRequest, { user, params }) => {
@@ -48,14 +48,14 @@ export const POST = withAuth(async (request: NextRequest, { user, params }) => {
     )
   }
 
-  const result = await installExtension(name)
+  const result = await installExtension(projectId, name)
 
   if (result.ok) {
     return NextResponse.json({
       installed: true,
       alreadyInstalled: result.alreadyInstalled,
       version: result.version,
-      extensions: await listExtensions(),
+      extensions: await listExtensions(projectId),
     })
   }
 

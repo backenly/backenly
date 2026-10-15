@@ -43,6 +43,19 @@ export function workspaceSchemaName(projectId: unknown): string {
   return `workspace_${projectId}`
 }
 
+const PROJECT_SCHEMA_RE =
+  /^workspace_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:_[a-z0-9_]+)?$/i
+
+/**
+ * The project a workspace schema belongs to: its own `workspace_<id>`, or one
+ * named after it such as a preview branch's `workspace_<id>_br_<name>`. Null
+ * for any other name. Every such schema lives in the project's database, so
+ * this is how code holding only a schema name finds the region to ask.
+ */
+export function projectIdOfWorkspaceSchema(schemaName: string): string | null {
+  return PROJECT_SCHEMA_RE.exec(schemaName)?.[1] ?? null
+}
+
 /**
  * Workspace realtime notification channel name (`workspace_<id>_changes`).
  * Same validation; same rules.

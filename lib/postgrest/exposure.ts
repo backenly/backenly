@@ -17,7 +17,7 @@
  * cannot express.
  */
 
-import { prisma } from '@/lib/db'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 
 export type Operation = 'list' | 'get' | 'create' | 'update' | 'delete'
 
@@ -151,13 +151,16 @@ export function isOperationEnabled(operations: unknown, operation: Operation): b
 const softDeleteCache = new Map<string, { value: boolean; expiresAt: number }>()
 const SOFT_DELETE_TTL_MS = 60_000
 
-export async function tableHasSoftDelete(schema: string, table: string): Promise<boolean> {
+export async function tableHasSoftDelete(projectId: string, schema: string, table: string): Promise<boolean> {
   const cacheKey = `${schema}.${table}`
   const hit = softDeleteCache.get(cacheKey)
   if (hit && hit.expiresAt > Date.now()) return hit.value
 
+  // The catalog of the project's database, in its region. Outside the catch:
+  // an unreachable region fails the request rather than being guessed about.
+  const db = await workspaceRawClient(projectId)
   try {
-    const rows = await prisma.$queryRawUnsafe<Array<{ n: bigint }>>(
+    const rows = await db.$queryRawUnsafe<Array<{ n: bigint }>>(
       `SELECT count(*)::bigint AS n FROM information_schema.columns
         WHERE table_schema = $1 AND table_name = $2 AND column_name = 'deleted_at'`,
       schema,

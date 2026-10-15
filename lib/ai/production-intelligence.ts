@@ -14,17 +14,22 @@
 import { prisma } from '@/lib/db/prisma'
 import { Pool } from 'pg'
 import { jwtClaimFunctionSql, ownRowsPredicate } from '@/lib/postgrest/rls-translation'
+import { projectPool } from '@/lib/data-plane/regional'
 
 // ---------------------------------------------------------------------------
 // Shared pg pool for information_schema / pg_catalog queries
 // ---------------------------------------------------------------------------
-const pgPool = new Pool({ connectionString: process.env.DATABASE_URL })
+/** This module's pool on the project's own database, in its region. */
+function pgPool(projectId: string): Promise<Pool> {
+  return projectPool(projectId, 'production-intelligence')
+}
 
 async function pgQuery<T extends Record<string, unknown> = Record<string, unknown>>(
+  projectId: string,
   sql: string,
   params: unknown[] = [],
 ): Promise<T[]> {
-  const client = await pgPool.connect()
+  const client = await (await pgPool(projectId)).connect()
   try {
     const result = await client.query(sql, params)
     return result.rows as T[]
@@ -84,6 +89,7 @@ async function detectMissingIndexes(projectId: string): Promise<ProductionIssue[
       table_name: string
       column_name: string
     }>(
+      projectId,
       `SELECT c.table_name, c.column_name
        FROM information_schema.columns c
        JOIN information_schema.tables t
@@ -99,6 +105,7 @@ async function detectMissingIndexes(projectId: string): Promise<ProductionIssue[
 
     // Which (table, column) pairs already have an index?
     const indexedCols = await pgQuery<{ tablename: string; indexdef: string }>(
+      projectId,
       `SELECT tablename, indexdef
        FROM pg_indexes
        WHERE schemaname = $1`,
@@ -183,6 +190,7 @@ async function detectWeakRLS(projectId: string): Promise<ProductionIssue[]> {
 
     // Tables with user_id or owner_id columns
     const ownerCols = await pgQuery<{ table_name: string; column_name: string }>(
+      projectId,
       `SELECT table_name, column_name
        FROM information_schema.columns
        WHERE table_schema = $1
@@ -196,6 +204,7 @@ async function detectWeakRLS(projectId: string): Promise<ProductionIssue[]> {
 
     // Check RLS status for those tables
     const rlsStatus = await pgQuery<{ relname: string; relrowsecurity: boolean }>(
+      projectId,
       `SELECT c.relname, c.relrowsecurity
        FROM pg_class c
        JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -288,6 +297,7 @@ async function detectWebhookReplayRisk(projectId: string): Promise<ProductionIss
 
     // Tables with webhook-like names
     const webhookTables = await pgQuery<{ table_name: string }>(
+      projectId,
       `SELECT DISTINCT table_name
        FROM information_schema.tables
        WHERE table_schema = $1
@@ -298,6 +308,7 @@ async function detectWebhookReplayRisk(projectId: string): Promise<ProductionIss
 
     // Also check for tables that contain an event_id column (webhook event log pattern)
     const eventTables = await pgQuery<{ table_name: string }>(
+      projectId,
       `SELECT DISTINCT table_name
        FROM information_schema.columns
        WHERE table_schema = $1
@@ -315,6 +326,7 @@ async function detectWebhookReplayRisk(projectId: string): Promise<ProductionIss
 
       // Verify idempotency_key column is indeed absent
       const existingCols = await pgQuery<{ column_name: string }>(
+        projectId,
         `SELECT column_name
          FROM information_schema.columns
          WHERE table_schema = $1
@@ -431,6 +443,7 @@ async function detectMissingRetryQueues(projectId: string): Promise<ProductionIs
 
     // Check if any async-work-style tables exist in the workspace
     const workspaceTables = await pgQuery<{ table_name: string }>(
+      projectId,
       `SELECT table_name
        FROM information_schema.tables
        WHERE table_schema = $1
@@ -492,6 +505,10 @@ async function detectMissingRetryQueues(projectId: string): Promise<ProductionIs
 export async function analyzeProductionReadiness(
   projectId: string,
 ): Promise<ProductionIntelligenceReport> {
+  // The project's own database, in its region. Resolved before the catch below,
+  // which answers any failure with a clean report.
+  await pgPool(projectId)
+
   try {
     const [
       missingIndexes,

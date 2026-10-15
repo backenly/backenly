@@ -40,7 +40,19 @@
  */
 
 import { prisma } from '@/lib/db'
-import { workspaceSchemaName } from '@/lib/security/workspace-schema'
+import { regionRawClient, workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
+import { HOME_REGION, type CloudRegionId } from '@/lib/regions'
+import { projectIdOfWorkspaceSchema, workspaceSchemaName } from '@/lib/security/workspace-schema'
+
+/**
+ * The database a schema is registered in: its project's, in that project's
+ * region, where the registry helpers and the PostgREST serving it live. A name
+ * that belongs to no project is the home database's own.
+ */
+async function databaseFor(schema: string): Promise<WorkspaceRawClient> {
+  const projectId = projectIdOfWorkspaceSchema(schema)
+  return projectId ? workspaceRawClient(projectId) : prisma
+}
 
 /**
  * A branch schema, and nothing else that merely contains `_br_`.
@@ -57,14 +69,15 @@ const BRANCH_SCHEMA_RE =
  * Is every table protected on the project also protected on the branch?
  *
  * Read-only, and one-directional: a branch may be MORE restrictive than main,
- * never less. Uses the platform pool because it inspects the catalog only.
+ * never less. Reads the catalog of the project's database, where both live.
  */
 async function verifyBranchProtection(
+  db: WorkspaceRawClient,
   mainSchema: string,
   branchSchema: string,
 ): Promise<{ ok: boolean; reason?: string }> {
   try {
-    const rows = await prisma.$queryRawUnsafe<Array<{ relname: string }>>(
+    const rows = await db.$queryRawUnsafe<Array<{ relname: string }>>(
       `WITH main_protected AS (
          SELECT c.relname FROM pg_class c
            JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = $1
@@ -130,8 +143,8 @@ export interface RegistrationResult {
  * installed by the same script and in the same transaction as the register
  * side, so its presence answers for both.
  */
-export async function postgrestRegistryInstalled(): Promise<boolean> {
-  const rows = await prisma.$queryRaw<Array<{ present: boolean }>>`
+export async function postgrestRegistryInstalled(region: CloudRegionId = HOME_REGION): Promise<boolean> {
+  const rows = await regionRawClient(region).$queryRaw<Array<{ present: boolean }>>`
     SELECT EXISTS (
       SELECT 1
       FROM pg_proc p
@@ -175,6 +188,16 @@ export async function ensureSchemaRegistered(projectId: string): Promise<Registr
  * every caller catches and logs. See the guard below for the measurement.
  */
 export async function registerSchemaByName(schema: string): Promise<RegistrationResult> {
+  // The project's database, in its region. A region this process cannot reach
+  // is reported as not registered, like any other failure here: registration
+  // never throws.
+  let db: WorkspaceRawClient
+  try {
+    db = await databaseFor(schema)
+  } catch (err) {
+    return { registered: false, schema, error: err instanceof Error ? err.message : String(err) }
+  }
+
   // ── A branch may be served only once it is as protected as its project ────
   //
   // The registry's canonical-name check exists because a branch clone is a copy
@@ -188,7 +211,7 @@ export async function registerSchemaByName(schema: string): Promise<Registration
   // never had one, is refused even though createBranch succeeded.
   if (BRANCH_SCHEMA_RE.test(schema)) {
     const mainSchema = schema.replace(/_br_[a-z0-9_]+$/, '')
-    const parity = await verifyBranchProtection(mainSchema, schema)
+    const parity = await verifyBranchProtection(db, mainSchema, schema)
     if (!parity.ok) {
       return {
         registered: false,
@@ -214,7 +237,7 @@ export async function registerSchemaByName(schema: string): Promise<Registration
       // now (register_schema calls prepare_schema), but the order is stated here
       // too because getting it backwards produces a schema PostgREST serves and
       // has no privileges on — a 403 that looks like an RLS bug.
-      await prisma.$executeRawUnsafe(`SELECT public.backenly_pgrst_register_schema($1)`, schema)
+      await db.$executeRawUnsafe(`SELECT public.backenly_pgrst_register_schema($1)`, schema)
       recentlyRegistered.set(schema, Date.now() + REGISTER_TTL_MS)
       return { registered: true, schema }
     } catch (err) {
@@ -248,13 +271,16 @@ export async function registerSchemaByName(schema: string): Promise<Registration
  * down every tenant at once — loud, and already covered. This one catches a
  * per-project silent death, which is what actually shipped.
  */
-export async function unregisteredSchemas(): Promise<string[]> {
-  const listRows = await prisma.$queryRawUnsafe<Array<{ list: string | null }>>(
+export async function unregisteredSchemas(region: CloudRegionId = HOME_REGION): Promise<string[]> {
+  // One region's database and its own registry. Each region's PostgREST
+  // serves only the schemas in that region.
+  const db = regionRawClient(region)
+  const listRows = await db.$queryRawUnsafe<Array<{ list: string | null }>>(
     `SELECT public.backenly_pgrst_current_schemas() AS list`,
   )
   const registered = new Set((listRows[0]?.list ?? '').split(',').filter(Boolean))
 
-  const existing = await prisma.$queryRawUnsafe<Array<{ schema_name: string }>>(
+  const existing = await db.$queryRawUnsafe<Array<{ schema_name: string }>>(
     `SELECT schema_name FROM information_schema.schemata
       WHERE schema_name LIKE 'workspace\\_%'`,
   )
@@ -267,7 +293,8 @@ export async function unregisteredSchemas(): Promise<string[]> {
  * read or written, and re-registering restores it exactly.
  */
 export async function unregisterSchema(schema: string): Promise<void> {
-  await prisma.$executeRawUnsafe(`SELECT public.backenly_pgrst_unregister_schema($1)`, schema)
+  const db = await databaseFor(schema)
+  await db.$executeRawUnsafe(`SELECT public.backenly_pgrst_unregister_schema($1)`, schema)
   recentlyRegistered.delete(schema)
 }
 

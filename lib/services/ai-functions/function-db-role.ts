@@ -25,8 +25,8 @@
 
 import { createHash, createHmac } from 'crypto'
 import { PrismaClient } from '@prisma/client'
-import { prisma } from '@/lib/db/prisma'
-import { projectDatabaseUrl, workspaceRawClient } from '@/lib/data-plane/regional'
+import { projectDatabaseUrl, regionRawClient, workspaceRawClient } from '@/lib/data-plane/regional'
+import { HOME_REGION, type CloudRegionId } from '@/lib/regions'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
 
 export interface FunctionDbHandle {
@@ -109,9 +109,13 @@ async function syncRole(projectId: string, schema: string, password: string): Pr
   return role
 }
 
-/** Whether scripts/sql/function-roles.sql is installed. A catalog probe, so nothing logs an error. */
-export async function functionRoleHelperInstalled(): Promise<boolean> {
-  const rows = await prisma.$queryRaw<Array<{ ok: boolean }>>`
+/**
+ * Whether scripts/sql/function-roles.sql is installed in a region's database
+ * (home by default; each region needs its own copy). A catalog probe, so
+ * nothing logs an error.
+ */
+export async function functionRoleHelperInstalled(region: CloudRegionId = HOME_REGION): Promise<boolean> {
+  const rows = await regionRawClient(region).$queryRaw<Array<{ ok: boolean }>>`
     SELECT to_regprocedure('public.backenly_fn_role_sync(text, text)') IS NOT NULL AS ok
   `
   return rows[0]?.ok === true

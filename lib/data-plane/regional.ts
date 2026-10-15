@@ -13,10 +13,12 @@
  *   regionDatabaseUrl(region, role)  that region's connection string for a role
  *   projectDatabaseUrl(id, role)     both together
  *   workspaceRawClient(id)           raw SQL on the project's database
+ *   projectPostgrest(id)             the PostgREST serving the project's region
  *
  * The home region keeps the variables it always had: DATABASE_URL, DIRECT_URL,
- * BACKUP_DATABASE_URL and BACKENLY_ADMIN_DATABASE_URL. Every other region uses
- * the same names with the region appended, e.g. DATABASE_URL_US_EAST_1.
+ * BACKUP_DATABASE_URL, BACKENLY_ADMIN_DATABASE_URL, POSTGREST_URL and
+ * POSTGREST_JWT_SECRET. Every other region uses the same names with the region
+ * appended, e.g. DATABASE_URL_US_EAST_1.
  *
  * NO FALLBACK BETWEEN REGIONS. A project in a region this process has no
  * connection for gets RegionNotConfiguredError, never the home database. Its
@@ -42,6 +44,7 @@
  */
 
 import { PrismaClient } from '@prisma/client'
+import { Pool, type PoolConfig } from 'pg'
 import { prisma } from '@/lib/db/prisma'
 import { HOME_REGION, findRegion, type CloudRegionId } from '@/lib/regions'
 
@@ -65,11 +68,30 @@ const HOME_VARIABLES: Record<DataPlaneRole, string> = {
 /** A plain record rather than NodeJS.ProcessEnv, so a test can pass one in. */
 type Env = Readonly<Record<string, string | undefined>>
 
-/** "DATABASE_URL" in the home region, "DATABASE_URL_US_EAST_1" in us-east-1. */
-export function regionEnvName(region: CloudRegionId, role: DataPlaneRole = 'app'): string {
-  const name = HOME_VARIABLES[role]
+/** The home region's variable name as is; any other region's with the region appended. */
+function regionalVariable(name: string, region: CloudRegionId): string {
   if (region === HOME_REGION) return name
   return `${name}_${region.toUpperCase().replace(/-/g, '_')}`
+}
+
+/** "DATABASE_URL" in the home region, "DATABASE_URL_US_EAST_1" in us-east-1. */
+export function regionEnvName(region: CloudRegionId, role: DataPlaneRole = 'app'): string {
+  return regionalVariable(HOME_VARIABLES[role], region)
+}
+
+/**
+ * Any other per-region setting, named the same way: `name` in the home region,
+ * `name_<REGION>` elsewhere (DIRECT_DB_HOST_US_EAST_1). `value` is undefined
+ * when unset or blank, and is never the home value for another region.
+ */
+export function regionSetting(
+  name: string,
+  region: CloudRegionId,
+  env: Env = process.env,
+): { variable: string; value: string | undefined } {
+  const variable = regionalVariable(name, region)
+  const value = env[variable]
+  return { variable, value: value && value.trim() ? value : undefined }
 }
 
 /**
@@ -203,13 +225,15 @@ export type WorkspaceRawClient = Pick<
 const regionalClients = new Map<CloudRegionId, PrismaClient>()
 
 /**
- * The shared client for a home-region project, exactly as before; one client
- * per other region, created on first use. The region's connection is checked
- * on every call, so an unconfigured region is refused even after a client
- * exists.
+ * Raw SQL against a region's database: the shared client in the home region,
+ * exactly as before; one client per other region, created on first use. The
+ * region's connection is checked on every call, so an unconfigured region is
+ * refused even after a client exists.
+ *
+ * For work about a region rather than one project, such as reading its
+ * PostgREST registry. A project's own queries go through workspaceRawClient.
  */
-export async function workspaceRawClient(projectId: string): Promise<WorkspaceRawClient> {
-  const region = await projectRegion(projectId)
+export function regionRawClient(region: CloudRegionId, projectId?: string): WorkspaceRawClient {
   if (region === HOME_REGION) return prisma
 
   const url = requireRegionDatabaseUrl(region, 'app', { projectId })
@@ -221,9 +245,82 @@ export async function workspaceRawClient(projectId: string): Promise<WorkspaceRa
   return client
 }
 
+/** Raw SQL against the database holding a project's data, in its region. */
+export async function workspaceRawClient(projectId: string): Promise<WorkspaceRawClient> {
+  return regionRawClient(await projectRegion(projectId), projectId)
+}
+
+/** The PostgREST serving a region's projects, and the secret its tokens are signed with. */
+export interface RegionPostgrest {
+  url: string
+  jwtSecret: string
+}
+
+/**
+ * A region's PostgREST, or null when this process has none for it.
+ *
+ * The home region keeps POSTGREST_URL and POSTGREST_JWT_SECRET; every other
+ * region uses the same names with the region appended (POSTGREST_URL_US_EAST_1).
+ * Both must be set. Never the home pair for another region: that PostgREST
+ * serves the home database, where a regional project's schema does not exist.
+ */
+export function regionPostgrest(region: CloudRegionId, env: Env = process.env): RegionPostgrest | null {
+  const url = env[regionalVariable('POSTGREST_URL', region)]
+  const jwtSecret = env[regionalVariable('POSTGREST_JWT_SECRET', region)]
+  if (!url || !url.trim() || !jwtSecret || !jwtSecret.trim()) return null
+  return { url, jwtSecret }
+}
+
+/** The PostgREST serving this project's region, or null when this process has none for it. */
+export async function projectPostgrest(projectId: string): Promise<RegionPostgrest | null> {
+  return regionPostgrest(await projectRegion(projectId))
+}
+
 /** Close every regional client. The home client is the shared one and stays. */
 export async function disconnectRegionalClients(): Promise<void> {
   const clients = [...regionalClients.values()]
   regionalClients.clear()
-  await Promise.all(clients.map((client) => client.$disconnect().catch(() => {})))
+  const pools = [...regionPools.values()]
+  regionPools.clear()
+  await Promise.all([
+    ...clients.map((client) => client.$disconnect().catch(() => {})),
+    ...pools.map((pool) => pool.end().catch(() => {})),
+  ])
+}
+
+const regionPools = new Map<string, Pool>()
+
+/**
+ * A node-postgres pool on a region's database, one per subsystem (`name`), for
+ * code that needs pg itself: a transaction on one connection, or a module that
+ * has always held its own pool (branches, type generation, import). The home
+ * region connects with DATABASE_URL, as those modules did. The region's
+ * connection is checked on every call, so an unconfigured region is refused
+ * even after a pool exists.
+ */
+export function regionPool(
+  region: CloudRegionId,
+  name: string,
+  config: Omit<PoolConfig, 'connectionString'> = {},
+  projectId?: string,
+): Pool {
+  const url = requireRegionDatabaseUrl(region, 'app', { projectId })
+  const key = `${region}:${name}`
+  const existing = regionPools.get(key)
+  if (existing) return existing
+
+  const pool = new Pool({ ...config, connectionString: url })
+  // An idle client's error is emitted on the pool; unhandled, it ends the process.
+  pool.on('error', (err) => console.error(`[regional] ${name} pool in ${region}:`, err.message))
+  regionPools.set(key, pool)
+  return pool
+}
+
+/** regionPool for the region holding this project's data. */
+export async function projectPool(
+  projectId: string,
+  name: string,
+  config: Omit<PoolConfig, 'connectionString'> = {},
+): Promise<Pool> {
+  return regionPool(await projectRegion(projectId), name, config, projectId)
 }

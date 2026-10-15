@@ -89,7 +89,7 @@ describe('the extension allowlist is the boundary', () => {
     ]) {
       expect(isAllowedExtension(attempt)).toBe(false)
 
-      const outcome = await installExtension(attempt)
+      const outcome = await installExtension(projectId, attempt)
       expect(outcome.ok).toBe(false)
       expect(outcome.code).toBe('NOT_ALLOWED')
     }
@@ -100,7 +100,7 @@ describe('the extension allowlist is the boundary', () => {
   }, 60_000)
 
   it('reports what the SERVER says about each allowlisted extension', async () => {
-    const listed = await listExtensions()
+    const listed = await listExtensions(projectId)
     expect(listed).toHaveLength(ALLOWED_EXTENSIONS.length)
 
     // Every entry answered from the live catalog rather than from this file's
@@ -121,7 +121,7 @@ describe('the extension allowlist is the boundary', () => {
   }, 60_000)
 
   it('never offers to install something the catalog says is unavailable', async () => {
-    const listed = await listExtensions()
+    const listed = await listExtensions(projectId)
     for (const entry of listed) {
       if (!entry.available) {
         expect(entry.installable).toBe(false)
@@ -185,7 +185,7 @@ describe('what a NON-SUPERUSER role may actually install', () => {
   }, 60_000)
 
   it('installs a TRUSTED extension, and is refused a non-trusted one', async () => {
-    const listed = await listExtensions()
+    const listed = await listExtensions(projectId)
 
     const trusted = listed.find(e => e.trusted === true && e.available && !e.installed)
     const untrusted = listed.find(e => e.trusted === false && e.available && !e.installed)
@@ -216,7 +216,7 @@ describe('what a NON-SUPERUSER role may actually install', () => {
     // The surface's claim and the database's behaviour have to be the same
     // claim. A dashboard offering a button that PostgreSQL refuses is the
     // "looks built" failure the register exists to catch.
-    const listed = await listExtensions()
+    const listed = await listExtensions(projectId)
     for (const entry of listed) {
       if (!entry.available || entry.installed) continue
       const actual = await attemptAs(entry.name)

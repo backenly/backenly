@@ -17,6 +17,11 @@
  *   end-user auth: the users table, the token blacklist and the
  *   request-time blocked check          in the region; without a connection
  *                                       the request fails, it never fails open
+ *   the v1 data routes and the health check
+ *                                       the region's catalog and rows; 503
+ *                                       without a connection
+ *   PostgREST                           the region's own URL and secret, and
+ *                                       schema registration in the region
  *   a region this build does not know   refused, never read as home
  *
  * The refusal is the property that matters. The home database holds no schema
@@ -32,11 +37,31 @@ import { NextRequest } from 'next/server'
 import { Client } from 'pg'
 import { GET as queryRoute } from '@/app/api/v1/[projectId]/database/query/route'
 import { GET as healthzRoute } from '@/app/api/v1/[projectId]/healthz/route'
+import { POST as broadcastRoute } from '@/app/api/v1/[projectId]/broadcast/route'
 import { mintKey } from '@/lib/auth/key-prefix'
 import { prisma } from '@/lib/db'
-import { disconnectRegionalClients, projectRegion, workspaceRawClient } from '@/lib/data-plane/regional'
+import { disconnectRegionalClients, projectPostgrest, projectRegion, workspaceRawClient } from '@/lib/data-plane/regional'
 import { PostgresService } from '@/lib/db/hybrid'
-import { functionDbClient, functionRoleName, provisionFunctionRole } from '@/lib/services/ai-functions/function-db-role'
+import { clearRegistrationCache, ensureSchemaRegistered } from '@/lib/postgrest/registration'
+import { listenerHub } from '@/lib/realtime/listener-hub'
+import { mintSseTicket, redeemSseTicket } from '@/lib/realtime/sse-ticket'
+import { existingTables } from '@/lib/mcp/apply-migration'
+import { runReadQuery } from '@/lib/mcp/read-query'
+import { createBranch, discardBranch } from '@/lib/branches/engine'
+import { readWorkspaceSchema } from '@/lib/typegen/schema-reader'
+import { executeAction, introspectSchema } from '@/lib/ai/minimal-executor'
+import { logActivity } from '@/lib/ai/activity-log-engine'
+import { buildWorkspaceTableNameMap } from '@/lib/ai/fk-repair'
+import { collectProof } from '@/lib/ai/proof-system'
+import { describeTable } from '@/lib/ai/schema-tools'
+import { detectSchemaDrift } from '@/lib/ai/schema-reconciler'
+import { analyzeProductionReadiness } from '@/lib/ai/production-intelligence'
+import { runInfraIntelligence } from '@/lib/ai/infra-intelligence'
+import { listExtensions } from '@/lib/services/extensions'
+import { directAccessRoleNames, provisionDirectAccess, revokeDirectAccess } from '@/lib/services/direct-access'
+import { columnTypes } from '@/lib/mcp/runtime-db'
+import { getTableSchema, listExposedTables, workspaceTableExists } from '@/lib/mcp/schema-introspection'
+import { functionDbClient, functionRoleHelperInstalled, functionRoleName, provisionFunctionRole } from '@/lib/services/ai-functions/function-db-role'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
 import { ensureEmailVerifiedColumn, logoutEndUser } from '@/lib/services/end-user-auth-flows'
 import { buildUserInsert, introspectAuthUsersTable } from '@/lib/services/end-user-auth-table'
@@ -156,6 +181,10 @@ afterAll(async () => {
   await disconnectRegionalClients()
   if (regionalDbCreated) {
     await run(homeUrl(), `DROP DATABASE IF EXISTS "${REGIONAL_DB}" WITH (FORCE)`).catch(() => {})
+  }
+  // The direct-access block's role is cluster-wide; its grants went with the database.
+  if (regionalProject) {
+    await run(homeUrl(), `DROP ROLE IF EXISTS "${directAccessRoleNames(regionalProject).ro}"`).catch(() => {})
   }
   if (homeProject) {
     await run(homeUrl(), `DROP SCHEMA IF EXISTS "${schemaOf(homeProject)}" CASCADE`).catch(() => {})
@@ -448,6 +477,465 @@ describe('the v1 data routes read the project’s own database', () => {
     const down = await (await get(healthzRoute, '/healthz')).json()
     expect(down.status).toBe('degraded')
     expect(down.database).toMatchObject({ status: 'error', error: 'Data region not reachable from this server' })
+  })
+})
+
+describe('PostgREST, per region', () => {
+  const saved = { url: process.env.POSTGREST_URL, secret: process.env.POSTGREST_JWT_SECRET }
+
+  beforeAll(async () => {
+    // A stand-in for the registry helper (scripts/sql/postgrest-schema-registry.sql),
+    // in the regional database only. It records which schemas it was asked to
+    // register, so a registration sent anywhere else leaves no row here.
+    await run(
+      regionalUrl,
+      `CREATE TABLE public.pgrst_register_calls (schema_name text);
+       CREATE FUNCTION public.backenly_pgrst_register_schema(s text) RETURNS void LANGUAGE sql AS $$
+         INSERT INTO public.pgrst_register_calls VALUES (s)
+       $$`,
+    )
+  })
+
+  beforeEach(() => clearRegistrationCache())
+
+  afterAll(() => {
+    for (const [name, value] of [['POSTGREST_URL', saved.url], ['POSTGREST_JWT_SECRET', saved.secret]] as const) {
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
+    delete process.env.POSTGREST_URL_US_EAST_1
+    delete process.env.POSTGREST_JWT_SECRET_US_EAST_1
+  })
+
+  it('serves a regional project only from its own region’s PostgREST', async () => {
+    process.env.POSTGREST_URL = 'http://postgrest.home.test:3000'
+    process.env.POSTGREST_JWT_SECRET = 'home-secret'
+    delete process.env.POSTGREST_URL_US_EAST_1
+    delete process.env.POSTGREST_JWT_SECRET_US_EAST_1
+
+    expect(await projectPostgrest(homeProject)).toEqual({ url: 'http://postgrest.home.test:3000', jwtSecret: 'home-secret' })
+    // The home PostgREST serves the home database, which has no schema for it.
+    expect(await projectPostgrest(regionalProject)).toBeNull()
+
+    process.env.POSTGREST_URL_US_EAST_1 = 'http://postgrest.virginia.test:3000'
+    process.env.POSTGREST_JWT_SECRET_US_EAST_1 = 'virginia-secret'
+    expect(await projectPostgrest(regionalProject)).toEqual({
+      url: 'http://postgrest.virginia.test:3000',
+      jwtSecret: 'virginia-secret',
+    })
+  })
+
+  it('registers a regional project’s schema in its own region', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const result = await ensureSchemaRegistered(regionalProject)
+    expect(result).toMatchObject({ registered: true, schema: schemaOf(regionalProject) })
+    const calls = await rowsIn<{ schema_name: string }>(regionalUrl, 'SELECT schema_name FROM public.pgrst_register_calls')
+    expect(calls).toEqual([{ schema_name: schemaOf(regionalProject) }])
+  })
+
+  it('reports the schema unregistered when the region cannot be reached, and asks nowhere else', async () => {
+    delete process.env[REGION_VARIABLE]
+    const result = await ensureSchemaRegistered(regionalProject)
+    expect(result.registered).toBe(false)
+    expect(result.error).toMatch(REGION_VARIABLE)
+    process.env[REGION_VARIABLE] = regionalUrl
+    const calls = await rowsIn<{ schema_name: string }>(regionalUrl, 'SELECT schema_name FROM public.pgrst_register_calls')
+    expect(calls).toHaveLength(1)
+  })
+})
+
+describe('realtime listens and notifies on the project’s own database', () => {
+  // LISTEN/NOTIFY never crosses databases: a listener on the home database
+  // would subscribe successfully and then hear nothing a regional project's
+  // database sends. Each event below is sent on one database only.
+  const channelOf = (projectId: string) => `workspace_${projectId}_changes`
+
+  async function subscribe(projectId: string) {
+    let deliver!: (payload: Record<string, unknown>) => void
+    const received = new Promise<Record<string, unknown>>((resolve) => { deliver = resolve })
+    const result = await listenerHub.subscribe(projectId, (payload) => deliver(payload))
+    if (!result.ok) throw new Error(result.message)
+    const event = () =>
+      Promise.race([
+        received,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('no notification arrived')), 10_000)),
+      ])
+    return { event, unsubscribe: result.unsubscribe }
+  }
+
+  it('refuses to subscribe while this process has no connection to the region', async () => {
+    delete process.env[REGION_VARIABLE]
+    await expect(listenerHub.subscribe(regionalProject, () => {})).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+    expect(listenerHub.connectionCount(regionalProject)).toBe(0)
+  })
+
+  it('hears a regional project’s channel on the regional database', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const sub = await subscribe(regionalProject)
+    try {
+      await run(regionalUrl, `SELECT pg_notify('${channelOf(regionalProject)}', '{"from":"us-east-1"}')`)
+      expect(await sub.event()).toEqual({ from: 'us-east-1' })
+    } finally {
+      sub.unsubscribe()
+    }
+  })
+
+  it('still hears a home project’s channel on the home database', async () => {
+    const sub = await subscribe(homeProject)
+    try {
+      await run(homeUrl(), `SELECT pg_notify('${channelOf(homeProject)}', '{"from":"home"}')`)
+      expect(await sub.event()).toEqual({ from: 'home' })
+    } finally {
+      sub.unsubscribe()
+    }
+  })
+
+  it('refuses again once the connection is gone, though the regional listener is still open', async () => {
+    delete process.env[REGION_VARIABLE]
+    await expect(listenerHub.subscribe(regionalProject, () => {})).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+  })
+
+  it('delivers a broadcast to a regional project’s subscribers', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const minted = mintKey({ keyType: 'public', serviceRole: true })
+    await prisma.apiKey.create({
+      data: {
+        name: 'region broadcast', keyPrefix: minted.prefix, keyHash: hashApiKey(minted.key), keyType: 'public',
+        serviceRole: true, permissions: ['read', 'write', 'admin'], capabilities: ['database'],
+        projectId: regionalProject, userId: ownerId,
+      },
+    })
+    const sub = await subscribe(regionalProject)
+    try {
+      const res = await broadcastRoute(
+        new NextRequest(`https://backenly.test/api/v1/${regionalProject}/broadcast`, {
+          method: 'POST',
+          headers: { 'x-api-key': minted.key, 'content-type': 'application/json' },
+          body: JSON.stringify({ channel: 'room', payload: { hello: 'virginia' } }),
+        }),
+        { params: Promise.resolve({ projectId: regionalProject }) },
+      )
+      expect(res.status).toBe(200)
+      expect(await sub.event()).toMatchObject({ type: 'broadcast', channel: 'room', payload: { hello: 'virginia' } })
+    } finally {
+      sub.unsubscribe()
+    }
+  })
+
+  it('burns a realtime ticket once, on the regional ledger, and mints none without a connection', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const secret = randomBytes(32).toString('hex')
+    const minted = await mintSseTicket(secret, { projectId: regionalProject, serviceRole: true })
+    expect(minted.singleUse).toBe(true)
+    expect((await redeemSseTicket(regionalProject, secret, minted.ticket)).ok).toBe(true)
+    expect(await redeemSseTicket(regionalProject, secret, minted.ticket)).toMatchObject({ ok: false, code: 'ALREADY_USED' })
+
+    delete process.env[REGION_VARIABLE]
+    await expect(mintSseTicket(secret, { projectId: regionalProject, serviceRole: true })).rejects.toMatchObject({
+      code: 'REGION_NOT_CONFIGURED',
+    })
+  })
+})
+
+describe('MCP reads a project’s catalog in its own region', () => {
+  // The regional marker table alone has a `deleted_at` column (added by the v1
+  // routes block above); the home one, under the home project, has `note` only.
+  it('describes a regional project’s table from its region', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    expect(await workspaceTableExists(regionalProject, 'marker')).toBe(true)
+    const table = await getTableSchema(regionalProject, 'marker')
+    expect(table.columns.map((c) => c.name).sort()).toEqual(['deleted_at', 'note'])
+    // `users` is the one the end-user auth block created, also only in the region.
+    const listed = await listExposedTables(regionalProject)
+    expect(listed.map((t) => [t.name, t.columns]).sort()).toEqual([['marker', 2], ['users', 6]])
+  })
+
+  it('reads column types and existing tables from the region', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const schema = schemaOf(regionalProject)
+    const types = await columnTypes(regionalProject, schema, 'marker')
+    expect(types.get('deleted_at')).toBe('timestamp with time zone')
+    expect(await existingTables(regionalProject, schema, ['marker', 'absent'])).toEqual(new Set(['marker']))
+  })
+
+  it('refuses without a connection instead of answering “no such table”', async () => {
+    delete process.env[REGION_VARIABLE]
+    const schema = schemaOf(regionalProject)
+    await expect(workspaceTableExists(regionalProject, 'marker')).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+    await expect(listExposedTables(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+    await expect(columnTypes(regionalProject, schema, 'marker')).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+    await expect(existingTables(regionalProject, schema, ['marker'])).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+  })
+})
+
+describe('direct database access and agents’ read-only SQL use the project’s region', () => {
+  // Stand-ins for the definer helpers (scripts/setup-direct-access.sql), in the
+  // regional database only. They record each call, and create_role makes a real
+  // login role with SELECT on the schema, so read-only SQL can connect as it.
+  // Locally both databases share one cluster, so the role is told apart by the
+  // database it reads: the regional marker row says 'us-east-1'.
+  const HOST_VARIABLE = 'DIRECT_DB_HOST_US_EAST_1'
+  const calls = () =>
+    rowsIn<{ op: string; role: string | null; schema_name: string | null }>(
+      regionalUrl,
+      'SELECT op, role, schema_name FROM public.direct_access_calls ORDER BY seq',
+    )
+
+  beforeAll(async () => {
+    await run(
+      regionalUrl,
+      `CREATE TABLE public.direct_access_calls (seq serial, op text, role text, schema_name text);
+       CREATE FUNCTION public.backenly_direct_create_role(r text, p text, s text, m text) RETURNS boolean
+       LANGUAGE plpgsql AS $$
+       BEGIN
+         INSERT INTO public.direct_access_calls (op, role, schema_name) VALUES ('create', r, s);
+         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
+           EXECUTE format('CREATE ROLE %I LOGIN PASSWORD %L', r, p);
+         END IF;
+         EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), r);
+         EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', s, r);
+         EXECUTE format('GRANT SELECT ON ALL TABLES IN SCHEMA %I TO %I', s, r);
+         RETURN true;
+       END $$;
+       CREATE FUNCTION public.backenly_direct_sync_schema(s text, ro text, rw text, o text) RETURNS boolean
+       LANGUAGE sql AS $$ INSERT INTO public.direct_access_calls (op, role, schema_name) VALUES ('sync', ro, s) RETURNING true $$;
+       CREATE FUNCTION public.backenly_direct_drop_role(r text) RETURNS boolean
+       LANGUAGE sql AS $$ INSERT INTO public.direct_access_calls (op, role) VALUES ('drop', r) RETURNING true $$;`,
+    )
+  })
+
+  afterAll(async () => {
+    delete process.env[HOST_VARIABLE]
+    await prisma.databaseCredential.deleteMany({ where: { projectId: regionalProject } }).catch(() => {})
+  })
+
+  it('refuses to hand out a credential with no public host for the region, before creating any role', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    delete process.env[HOST_VARIABLE]
+    await expect(provisionDirectAccess(regionalProject, 'READ_ONLY')).rejects.toMatchObject({
+      code: 'REGION_NOT_CONFIGURED',
+      variable: HOST_VARIABLE,
+    })
+    expect(await calls()).toEqual([])
+  })
+
+  it('creates the role in the region and points the developer at the region’s host and database', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    process.env[HOST_VARIABLE] = 'db.virginia.test'
+    const schema = schemaOf(regionalProject)
+    const credential = await provisionDirectAccess(regionalProject, 'READ_ONLY')
+    expect(credential).toMatchObject({ host: 'db.virginia.test', database: REGIONAL_DB })
+    expect(credential.connectionString).toContain(`@db.virginia.test:5432/${REGIONAL_DB}?`)
+    expect(await calls()).toEqual([
+      { op: 'create', role: credential.roleName, schema_name: schema },
+      { op: 'sync', role: credential.roleName, schema_name: schema },
+    ])
+  })
+
+  it('runs an agent’s read-only SQL on the regional database as that role', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const result = await runReadQuery(regionalProject, 'SELECT note FROM marker WHERE deleted_at IS NULL')
+    expect(result.rows).toEqual([{ note: 'us-east-1' }])
+  })
+
+  it('revokes the role in the region', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    await revokeDirectAccess(regionalProject, 'READ_ONLY')
+    const ops = (await calls()).map((c) => c.op)
+    expect(ops[ops.length - 1]).toBe('drop')
+  })
+
+  it('refuses read-only SQL without a connection to the region', async () => {
+    delete process.env[REGION_VARIABLE]
+    await expect(runReadQuery(regionalProject, 'SELECT 1')).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+  })
+})
+
+describe('type generation and preview branches use the project’s region', () => {
+  const savedEdition = process.env.BACKENLY_EDITION
+  const inSchema = (url: string, schema: string) =>
+    rowsIn<{ table_name: string }>(
+      url,
+      `SELECT table_name FROM information_schema.tables WHERE table_schema = '${schema}' ORDER BY table_name`,
+    )
+
+  afterAll(async () => {
+    if (savedEdition === undefined) delete process.env.BACKENLY_EDITION
+    else process.env.BACKENLY_EDITION = savedEdition
+    await prisma.workspaceBranch.deleteMany({ where: { projectId: regionalProject } }).catch(() => {})
+  })
+
+  it('reads a regional project’s schema for its generated types from its region', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const schema = await readWorkspaceSchema(regionalProject)
+    const marker = schema.tables.find((t) => t.tableName === 'marker')
+    expect(marker?.columns.map((c) => c.columnName).sort()).toEqual(['deleted_at', 'note'])
+  })
+
+  it('cuts and discards a regional project’s branch in its region, and nowhere else', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    process.env.BACKENLY_EDITION = 'cloud'
+    const created = await createBranch(regionalProject, ownerId, 'feature-x')
+    if (!created.ok) throw new Error(created.error)
+    const branchSchema = created.branch.schemaName
+
+    expect((await inSchema(regionalUrl, branchSchema)).map((r) => r.table_name)).toContain('marker')
+    expect(await inSchema(homeUrl(), branchSchema)).toEqual([])
+
+    expect(await discardBranch(regionalProject, ownerId, created.branch.id)).toEqual({ ok: true })
+    expect(await inSchema(regionalUrl, branchSchema)).toEqual([])
+  })
+
+  it('refuses without a connection to the region', async () => {
+    delete process.env[REGION_VARIABLE]
+    await expect(readWorkspaceSchema(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+  })
+})
+
+describe('the AI executor reads and writes the project’s region', () => {
+  const regionalColumns = (table: string) =>
+    rowsIn<{ column_name: string }>(
+      regionalUrl,
+      `SELECT column_name FROM information_schema.columns
+        WHERE table_schema = '${schemaOf(regionalProject)}' AND table_name = '${table}' ORDER BY column_name`,
+    )
+  const addColumn = (columnName: string) =>
+    executeAction(
+      { action: 'ADD_COLUMN', params: { tableName: 'marker', columnName, columnType: 'text' } } as any,
+      regionalProject,
+      undefined,
+      0,
+      undefined,
+      false,
+    )
+
+  it('describes a regional project’s schema to the AI from its region', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const described = await introspectSchema(regionalProject)
+    expect(described).toContain('marker')
+    expect(described).toContain('deleted_at')
+  })
+
+  it('adds a column to a regional project’s table in its region', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const result = await addColumn('tag')
+    expect(result.success).toBe(true)
+    expect((await regionalColumns('marker')).map((c) => c.column_name)).toContain('tag')
+  })
+
+  it('fails without a connection instead of reading the project as empty', async () => {
+    delete process.env[REGION_VARIABLE]
+    await expect(introspectSchema(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+    const result = await addColumn('never_added').catch((err) => ({ success: false, error: err }))
+    expect(result.success).toBe(false)
+    process.env[REGION_VARIABLE] = regionalUrl
+    expect((await regionalColumns('marker')).map((c) => c.column_name)).not.toContain('never_added')
+  })
+})
+
+describe('the AI build tools read and write the project’s region', () => {
+  const activityRows = () =>
+    rowsIn<{ entity_id: string }>(
+      regionalUrl,
+      `SELECT entity_id FROM "${schemaOf(regionalProject)}".activity_logs ORDER BY entity_id`,
+    )
+  const entry = (entityId: string) => ({
+    projectId: regionalProject,
+    action: 'created' as const,
+    entityType: 'marker',
+    entityId,
+    description: 'region test',
+  })
+
+  beforeAll(async () => {
+    await run(
+      regionalUrl,
+      `CREATE TABLE "${schemaOf(regionalProject)}".activity_logs (
+         action text, entity_type text, entity_id text, description text,
+         actor_id text, metadata jsonb, created_at timestamptz
+       )`,
+    )
+  })
+
+  it('reads a regional project’s catalog for table descriptions, FK repair and the proof block', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const described = await describeTable(regionalProject, 'marker')
+    expect(described?.columns.map((c) => c.name)).toContain('deleted_at')
+    expect((await buildWorkspaceTableNameMap(regionalProject)).has('marker')).toBe(true)
+    expect((await collectProof(regionalProject)).tables).toContain('marker')
+  })
+
+  it('writes the activity log into the regional schema', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    await logActivity(entry('logged-in-region'))
+    expect(await activityRows()).toEqual([{ entity_id: 'logged-in-region' }])
+  })
+
+  it('refuses the readers without a connection, while activity logging stays best-effort', async () => {
+    delete process.env[REGION_VARIABLE]
+    await expect(describeTable(regionalProject, 'marker')).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+    await expect(buildWorkspaceTableNameMap(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+    await expect(collectProof(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+    await expect(logActivity(entry('never-logged'))).resolves.toBeUndefined()
+    process.env[REGION_VARIABLE] = regionalUrl
+    expect(await activityRows()).toEqual([{ entity_id: 'logged-in-region' }])
+  })
+})
+
+describe('the AI analysis modules with their own pools read the project’s region', () => {
+  // A snapshot that expects `marker` with `note` only. Read from the region,
+  // the table is there and its regional-only `deleted_at` is an extra column;
+  // read anywhere else, `marker` would be a missing table.
+  beforeAll(async () => {
+    await prisma.workspaceSchemaSnapshot.create({
+      data: {
+        projectId: regionalProject,
+        versionNum: 1,
+        trigger: 'manual',
+        rawDdl: '',
+        tables: [{ name: 'marker', columns: [{ name: 'note', type: 'text', nullable: true }] }],
+      },
+    })
+  })
+
+  afterAll(async () => {
+    await prisma.workspaceSchemaSnapshot.deleteMany({ where: { projectId: regionalProject } }).catch(() => {})
+  })
+
+  it('reconciles a regional project’s schema against its regional catalog', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const report = await detectSchemaDrift(regionalProject)
+    expect(report.drifts.filter((d) => d.type === 'missing_table')).toEqual([])
+    expect(
+      report.drifts.some((d) => d.type === 'extra_column' && d.tableName === 'marker' && d.columnName === 'deleted_at'),
+    ).toBe(true)
+  })
+
+  it('refuses without a connection instead of reporting a clean or empty result', async () => {
+    delete process.env[REGION_VARIABLE]
+    await expect(detectSchemaDrift(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+    await expect(analyzeProductionReadiness(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+    await expect(runInfraIntelligence(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+  })
+})
+
+describe('the remaining services read the project’s region', () => {
+  it('finds the function-role helper in the regional database it is installed in', async () => {
+    // The stand-in backenly_fn_role_sync exists only in the regional database.
+    process.env[REGION_VARIABLE] = regionalUrl
+    expect(await functionRoleHelperInstalled('us-east-1')).toBe(true)
+  })
+
+  it('lists a regional project’s extensions from its region', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const listed = await listExtensions(regionalProject)
+    expect(Array.isArray(listed)).toBe(true)
+  })
+
+  it('refuses without a connection to the region', async () => {
+    delete process.env[REGION_VARIABLE]
+    await expect(functionRoleHelperInstalled('us-east-1')).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+    await expect(listExtensions(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
   })
 })
 

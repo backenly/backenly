@@ -29,6 +29,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 
 export interface EndpointTestInput {
   projectId: string
@@ -101,9 +102,10 @@ async function loadTableColumns(
   projectId: string,
   tableName: string,
 ): Promise<Array<{ name: string; type: string; nullable: boolean }> | null> {
+  const db = await workspaceRawClient(projectId)
   try {
     const schema = await resolveWorkspaceSchema(projectId)
-    const rows = await prisma.$queryRawUnsafe<
+    const rows = await db.$queryRawUnsafe<
       Array<{ column_name: string; data_type: string; is_nullable: string }>
     >(
       `SELECT column_name, data_type, is_nullable

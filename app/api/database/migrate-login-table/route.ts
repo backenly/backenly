@@ -2,9 +2,9 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { requireAuth } from '@/lib/auth/middleware'
-import { prisma } from '@/lib/db/postgres'
 import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 import { canWriteProject } from '@/lib/edition/guard'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 
 /**
  * Add missing columns to login table
@@ -26,18 +26,20 @@ export async function POST(request: NextRequest) {
     }
 
     const postgresSchema = workspaceSchemaName(projectId)
+    // The project's database, in its region.
+    const db = await workspaceRawClient(projectId)
 
     console.log(`🔧 Adding email and password columns to ${postgresSchema}.login...`)
 
     // Add columns if they don't exist
-    await prisma.$executeRawUnsafe(`
+    await db.$executeRawUnsafe(`
       ALTER TABLE "${postgresSchema}"."login"
       ADD COLUMN IF NOT EXISTS "email" VARCHAR(255),
       ADD COLUMN IF NOT EXISTS "password" VARCHAR(255);
     `)
 
     // Add unique constraint on email
-    await prisma.$executeRawUnsafe(`
+    await db.$executeRawUnsafe(`
       DO $$
       BEGIN
         IF NOT EXISTS (

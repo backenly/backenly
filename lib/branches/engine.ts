@@ -24,7 +24,7 @@
  * and one created before logging merges the older additive way.
  */
 
-import { Pool } from 'pg'
+import { projectPool } from '@/lib/data-plane/regional'
 import { prisma } from '@/lib/db/prisma'
 import { executeAction } from '@/lib/ai/minimal-executor'
 import { readWorkspaceSchema } from '@/lib/typegen/schema-reader'
@@ -34,11 +34,19 @@ import { replicateRls, verifyRlsParity, type RlsCloneResult } from './rls-clone'
 import { isolateBranchSequences, verifySequenceIsolation } from './sequence-isolation'
 import { registerSchemaByName } from '@/lib/postgrest/registration'
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 4 })
 const MAX_ACTIVE_BRANCHES = 5
+
+/**
+ * A branch schema lives beside its project's own, in the project's database in
+ * its region: cloned from there, read from there, dropped from there.
+ */
+function branchPool(projectId: string) {
+  return projectPool(projectId, 'branches', { max: 4 })
+}
 
 /** Read a WorkspaceSchema-shaped snapshot for an arbitrary schema name. */
 async function readSchemaSnapshot(projectId: string, schemaName: string) {
+  const pool = await branchPool(projectId)
   const res = await pool.query(
     `SELECT table_name, column_name, data_type, udt_name, is_nullable = 'YES' AS is_nullable
        FROM information_schema.columns
@@ -120,6 +128,7 @@ export async function createBranch(
   let rls: RlsCloneResult = { policiesCreated: 0, tablesEnabled: 0, tablesForced: 0, failures: [] }
   let sequencesIsolated = 0
 
+  const pool = await branchPool(projectId)
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
@@ -333,6 +342,7 @@ async function dropBranchSchema(projectId: string, schemaName: string): Promise<
   } catch (e: any) {
     console.warn(`[Branch] PostgREST unregister failed for ${schemaName}:`, e?.message)
   }
+  const pool = await branchPool(projectId)
   await pool.query(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`)
 }
 

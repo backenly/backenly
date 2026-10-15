@@ -78,7 +78,7 @@ export async function applyBranchMigration(
   const plan = planMigration(sql)
   if (!plan.ok) return plan as MigrationRefusal
   const planned = (plan as { ok: true; planned: PlannedAction[] }).planned
-  const existing = await existingTables(branch.schemaName, tablesNamed(planned))
+  const existing = await existingTables(projectId, branch.schemaName, tablesNamed(planned))
   const checked = checkPlan(planned, existing, `on branch "${branch.name}"`)
   if (!checked.ok) return checked as MigrationRefusal
   const ok = checked as Extract<typeof checked, { ok: true }>

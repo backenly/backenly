@@ -20,6 +20,7 @@ import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 import { executeAiFunction, validateSandboxFunction } from './executor'
 import { isRouteModuleFunction, validateRouteModule } from './route-module-runner'
 import { isFunctionSwitchedOff } from './status'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 
 export interface FunctionActor {
   userId?: string
@@ -395,7 +396,9 @@ export async function deployFunctionCode(
   if (denied) return denied
 
   if (table) {
-    const found = await prisma.$queryRaw<Array<{ n: number }>>`
+    // The catalog of the project's database, in its region.
+    const db = await workspaceRawClient(actor.projectId)
+    const found = await db.$queryRaw<Array<{ n: number }>>`
       SELECT count(*)::int AS n FROM information_schema.tables
       WHERE table_schema = ${workspaceSchemaName(actor.projectId)} AND table_name = ${table}`
     if (!found[0]?.n) {

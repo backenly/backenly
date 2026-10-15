@@ -8,6 +8,7 @@ import { isProjectLive } from '@/lib/orchestration/graph-pointer'
 import { getProjectAuthStatus } from '@/lib/services/auth-status'
 import { isReservedWorkspaceTable } from '@/lib/security/workspace-schema'
 import { canAccessProject } from '@/lib/edition/guard'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 
 /**
  * GET /api/projects/[projectId]/state
@@ -84,10 +85,13 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
     // Fetch live column counts from workspace schema for tables with no graph field data
     let liveColumnCounts: Record<string, number> = {}
     if (emptyGraphTables.length > 0) {
+      // The project's database, in its region. Outside the catch below: an
+      // unreachable region is not a project whose tables have no columns.
+      const db = await workspaceRawClient(params.id)
       try {
         const workspaceSchema = `workspace_${params.id}`
-        const placeholders = tableNames.map((_, i) => `$${i + 2}`).join(', ')
-        const rows = await prisma.$queryRawUnsafe<Array<{ table_name: string; col_count: string }>>(
+        const placeholders = tableNames.map((_, i) => `${i + 2}`).join(', ')
+        const rows = await db.$queryRawUnsafe<Array<{ table_name: string; col_count: string }>>(
           `SELECT table_name, COUNT(*) AS col_count
            FROM information_schema.columns
            WHERE table_schema = $1 AND table_name IN (${placeholders})
