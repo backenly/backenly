@@ -2569,8 +2569,12 @@ export async function dispatchTool(
     // ── Autonomy: read dial + trust report ────────────────────────────────
     if (name === 'get_autonomy_status') {
       const { buildTrustReport } = await import('@/lib/autonomy/trust-report')
+      const { listPendingAgentApprovals } = await import('@/lib/mcp/pending-approvals')
       const windowDays = Math.max(1, Math.min(90, Number(args.windowDays ?? 30)))
-      const report = await buildTrustReport(ctx.projectId, windowDays).catch(() => null)
+      const [report, agentRequests] = await Promise.all([
+        buildTrustReport(ctx.projectId, windowDays).catch(() => null),
+        listPendingAgentApprovals(ctx.projectId).catch(() => []),
+      ])
       if (!report) {
         return finalize({
           ok: false,
@@ -2584,7 +2588,13 @@ export async function dispatchTool(
       const modeLine = report.executionMode?.repairsAreApplied
         ? ''
         : `\n\n**NOT REPAIRING.** ${report.executionMode?.explanation ?? ''}`
-      const pending = report.pendingApprovals.length
+      // Two queues wait on a human, as the briefing tool says: fixes the loop
+      // is holding, and calls agents parked. This counted the first and
+      // labelled it "Awaiting approval", so an agent that had parked two calls
+      // briefed its human "Awaiting approval: 0" while the Review Queue
+      // showed both (AUT-07).
+      const heldFixes = report.pendingApprovals.length
+      const pending = heldFixes + agentRequests.length
       const verifiedPct =
         s.verifiedRate === null ? '—' : `${Math.round(s.verifiedRate * 100)}%`
       const capLine =
@@ -2594,7 +2604,9 @@ export async function dispatchTool(
       const summary =
         `Autonomy: **${report.level}** (window: ${windowDays}d)\n` +
         `Self-applied: ${s.autonomousFixes} · ` +
-        `Awaiting approval: ${pending} · ` +
+        `Awaiting approval: ${pending} (${agentRequests.length} agent-requested ` +
+        `operation${agentRequests.length === 1 ? '' : 's'} in the Review Queue, ` +
+        `${heldFixes} autonomy fix${heldFixes === 1 ? '' : 'es'} held) · ` +
         `Escalated: ${s.escalations} · ` +
         `Rollbacks: ${s.rollbacks} · ` +
         `Verified: ${verifiedPct} · ` +
@@ -2611,6 +2623,14 @@ export async function dispatchTool(
           // cannot miss it behind the dial.
           executionMode: report.executionMode,
           windowDays,
+          // The calls agents parked, which check_approval polls by id.
+          agentApprovals: agentRequests.map((r) => ({
+            id: r.id,
+            tool: r.tool,
+            target: r.target,
+            createdAt: r.createdAt.toISOString(),
+            expiresAt: r.expiresAt.toISOString(),
+          })),
           report,
         },
       })
@@ -3058,6 +3078,7 @@ export async function dispatchTool(
     // or queued since anyone last looked. Read-only aggregation.
     if (name === 'get_pending_incidents') {
       const { prisma } = await import('@/lib/db/prisma')
+      const { listPendingAgentApprovals } = await import('@/lib/mcp/pending-approvals')
       const { summariseFinding } = await import('@/lib/core/finding-summaries')
       const { fixVerificationOf } = await import('@/lib/autonomy/resolution')
       const { loadSensorState } = await import('@/lib/autonomy/sensor-state')
@@ -3069,12 +3090,7 @@ export async function dispatchTool(
           orderBy: { detectedAt: 'desc' },
           take: 25,
         }),
-        prisma.agentApprovalRequest.findMany({
-          where: { projectId: ctx.projectId, status: 'pending', expiresAt: { gt: new Date() } },
-          orderBy: { createdAt: 'desc' },
-          take: 10,
-          select: { id: true, tool: true, target: true, createdAt: true, expiresAt: true },
-        }).catch(() => []),
+        listPendingAgentApprovals(ctx.projectId, 10).catch(() => []),
         prisma.schemaDriftEvent.count({
           where: { projectId: ctx.projectId, status: 'pending' },
         }).catch(() => 0),

@@ -1084,6 +1084,13 @@ tests/integration/model-spend-on-every-tool.spec.ts
 # Postgres.
 tests/integration/functions-runtime-honesty.spec.ts
 
+# Calls a coding agent parked for approval are counted where the owner and the
+# agent look: /health answers agentApprovalsPending (live requests only) beside
+# a findings-only needsAttention, get_autonomy_status names both queues as the
+# briefing does, and creating a request notifies the project's owner. Real
+# approval, finding and notification rows are the property, so it needs a real
+# Postgres.
+tests/integration/parked-approvals-visible.spec.ts
 # The dashboard's resource cards answer the real table count with a card-sized
 # list in the card's shape: 15 real workspace tables give tableCount 15 and
 # twelve { name, rowCount, estimated } entries with exact counts, and the

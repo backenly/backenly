@@ -17,6 +17,7 @@ import { summariseFinding } from '@/lib/core/finding-summaries'
 import { getLastLoopTickAt } from '@/lib/autonomy/loop-tick'
 import { countRepairs, recentlyResolved } from '@/lib/autonomy/resolution'
 import { loadSensorState } from '@/lib/autonomy/sensor-state'
+import { countPendingAgentApprovals } from '@/lib/mcp/pending-approvals'
 
 /**
  * How many findings the summary payload carries. A preview, not the truth —
@@ -134,7 +135,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
     }
 
     // Default: health summary for the dashboard widget
-    const [findings, repairs, resolved, sensors, lastScan, project, lastLoopTick] = await Promise.all([
+    const [findings, repairs, resolved, sensors, lastScan, project, lastLoopTick, agentApprovals] = await Promise.all([
       prisma.healthFinding.findMany({
         where: { projectId, status: { in: ['open', 'pending_approval'] } },
         orderBy: [{ severity: 'asc' }, { detectedAt: 'desc' }],
@@ -169,6 +170,10 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
       // lastObservedAt below — see lib/autonomy/loop-tick.ts for why conflating
       // the daily observer with the per-minute reconciler is the bug this fixes.
       getLastLoopTickAt(projectId),
+      // The other queue that waits on the owner: calls their coding agent
+      // parked for approval. Not findings, so not in `findings` or
+      // `needsAttention`, and counted where every surface can read it.
+      countPendingAgentApprovals(projectId).catch(() => 0),
     ])
 
     const critical = findings.filter(f => f.severity === 'critical')
@@ -202,6 +207,12 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
         autoFixedThisWeek: repairs.verified,
         unverifiedRepairsThisWeek: repairs.unverified,
         needsAttention: needsAction.length,
+        // Agent requests parked for approval, waiting in the Review Queue on
+        // the Autonomy page. Kept apart from needsAttention, which counts held
+        // FINDINGS (actionableTotal - needsAttention is the open findings).
+        // The Overview and the top bar read both; they read only the findings
+        // before, so a parked deploy or drop was invisible there (OV-1, AUT-08).
+        agentApprovalsPending: agentApprovals,
         criticalCount: critical.length,
         warningCount: warnings.length,
         // Uncapped count of everything still needing attention. `findings` below
