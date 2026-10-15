@@ -155,7 +155,7 @@ async function signUp(request: NextRequest, projectId: string, env: AuthEnvironm
     // not say which branch it belongs to (SKIPPED_ON_BRANCH_SIGNUP).
     const requireVerification =
       !isInternalTest && !env.branch && (await getAuthEmailContext(projectId)).requireEmailVerification
-    if (requireVerification) await ensureEmailVerifiedColumn(schemaName)
+    if (requireVerification) await ensureEmailVerifiedColumn(projectId, schemaName)
 
     const hashedPassword = await hashPassword(password)
     const displayName = name || email.split('@')[0]

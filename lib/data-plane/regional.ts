@@ -117,6 +117,15 @@ export class UnknownRegionError extends Error {
   }
 }
 
+/**
+ * Whether an error means the project's data could not be reached at all.
+ * A catch that turns failures into an answer ("not revoked", "invalid token",
+ * "logged out") rethrows or reports these instead: the data was never read.
+ */
+export function isRegionError(err: unknown): err is RegionNotConfiguredError | UnknownRegionError {
+  return err instanceof RegionNotConfiguredError || err instanceof UnknownRegionError
+}
+
 /** regionDatabaseUrl, or RegionNotConfiguredError naming the missing variable. */
 export function requireRegionDatabaseUrl(
   region: CloudRegionId,

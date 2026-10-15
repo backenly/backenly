@@ -87,7 +87,7 @@ export async function saveAuthEmailPolicy(projectId: string, raw: unknown): Prom
     if (smtp.activeSource === 'none') return { ok: false, code: 'NO_EMAIL_SENDER', message: NO_SENDER_MESSAGE }
     // Accounts that exist now are recorded as verified, so the switch itself
     // cannot lock out the users the app already has.
-    await ensureEmailVerifiedColumn(workspaceSchemaName(projectId))
+    await ensureEmailVerifiedColumn(projectId, workspaceSchemaName(projectId))
   }
 
   const data = {

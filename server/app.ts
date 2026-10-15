@@ -20,6 +20,7 @@ import { recordRuntimeRequest, INTERNAL_TRAFFIC_HEADER, isInternalTraffic } from
 import { meterNodeResponse } from '@/lib/usage/egress'
 import { branchIdForRequest, refuseBranchKeyOffDataPlane } from '@/lib/branches/key-scope'
 import { refuseMisplacedKey } from '@/lib/security/key-placement'
+import { isRegionError } from '@/lib/data-plane/regional'
 
 const app = express()
 
@@ -256,6 +257,19 @@ app.use((err: any, _req: express.Request, res: express.Response, next: express.N
   // after that point lands here with nothing sendable. Express's default
   // handler destroys the socket, which is the only correct answer.
   if (res.headersSent) return next(err)
+
+  // The project's data is in a region this process has no connection to, or
+  // its row names a region this build does not know. Nothing was read from
+  // another region's database instead (lib/data-plane/regional.ts). Retryable
+  // once the deployment is configured, so 503 rather than 500, with the code
+  // an operator can search for and without the variable names.
+  if (isRegionError(err)) {
+    res.status(503).json({
+      error: "This project's data region is not reachable from this server.",
+      code: err.code,
+    })
+    return
+  }
 
   res.status(500).json({ error: 'Internal server error', code: 'INTERNAL_ERROR' })
 })
