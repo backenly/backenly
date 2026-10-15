@@ -47,6 +47,8 @@ import { listenerHub } from '@/lib/realtime/listener-hub'
 import { mintSseTicket, redeemSseTicket } from '@/lib/realtime/sse-ticket'
 import { existingTables } from '@/lib/mcp/apply-migration'
 import { runReadQuery } from '@/lib/mcp/read-query'
+import { createBranch, discardBranch } from '@/lib/branches/engine'
+import { readWorkspaceSchema } from '@/lib/typegen/schema-reader'
 import { directAccessRoleNames, provisionDirectAccess, revokeDirectAccess } from '@/lib/services/direct-access'
 import { columnTypes } from '@/lib/mcp/runtime-db'
 import { getTableSchema, listExposedTables, workspaceTableExists } from '@/lib/mcp/schema-introspection'
@@ -737,6 +739,47 @@ describe('direct database access and agents’ read-only SQL use the project’s
   it('refuses read-only SQL without a connection to the region', async () => {
     delete process.env[REGION_VARIABLE]
     await expect(runReadQuery(regionalProject, 'SELECT 1')).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+  })
+})
+
+describe('type generation and preview branches use the project’s region', () => {
+  const savedEdition = process.env.BACKENLY_EDITION
+  const inSchema = (url: string, schema: string) =>
+    rowsIn<{ table_name: string }>(
+      url,
+      `SELECT table_name FROM information_schema.tables WHERE table_schema = '${schema}' ORDER BY table_name`,
+    )
+
+  afterAll(async () => {
+    if (savedEdition === undefined) delete process.env.BACKENLY_EDITION
+    else process.env.BACKENLY_EDITION = savedEdition
+    await prisma.workspaceBranch.deleteMany({ where: { projectId: regionalProject } }).catch(() => {})
+  })
+
+  it('reads a regional project’s schema for its generated types from its region', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const schema = await readWorkspaceSchema(regionalProject)
+    const marker = schema.tables.find((t) => t.tableName === 'marker')
+    expect(marker?.columns.map((c) => c.columnName).sort()).toEqual(['deleted_at', 'note'])
+  })
+
+  it('cuts and discards a regional project’s branch in its region, and nowhere else', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    process.env.BACKENLY_EDITION = 'cloud'
+    const created = await createBranch(regionalProject, ownerId, 'feature-x')
+    if (!created.ok) throw new Error(created.error)
+    const branchSchema = created.branch.schemaName
+
+    expect((await inSchema(regionalUrl, branchSchema)).map((r) => r.table_name)).toContain('marker')
+    expect(await inSchema(homeUrl(), branchSchema)).toEqual([])
+
+    expect(await discardBranch(regionalProject, ownerId, created.branch.id)).toEqual({ ok: true })
+    expect(await inSchema(regionalUrl, branchSchema)).toEqual([])
+  })
+
+  it('refuses without a connection to the region', async () => {
+    delete process.env[REGION_VARIABLE]
+    await expect(readWorkspaceSchema(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
   })
 })
 

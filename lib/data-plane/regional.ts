@@ -44,6 +44,7 @@
  */
 
 import { PrismaClient } from '@prisma/client'
+import { Pool, type PoolConfig } from 'pg'
 import { prisma } from '@/lib/db/prisma'
 import { HOME_REGION, findRegion, type CloudRegionId } from '@/lib/regions'
 
@@ -279,5 +280,47 @@ export async function projectPostgrest(projectId: string): Promise<RegionPostgre
 export async function disconnectRegionalClients(): Promise<void> {
   const clients = [...regionalClients.values()]
   regionalClients.clear()
-  await Promise.all(clients.map((client) => client.$disconnect().catch(() => {})))
+  const pools = [...regionPools.values()]
+  regionPools.clear()
+  await Promise.all([
+    ...clients.map((client) => client.$disconnect().catch(() => {})),
+    ...pools.map((pool) => pool.end().catch(() => {})),
+  ])
+}
+
+const regionPools = new Map<string, Pool>()
+
+/**
+ * A node-postgres pool on a region's database, one per subsystem (`name`), for
+ * code that needs pg itself: a transaction on one connection, or a module that
+ * has always held its own pool (branches, type generation, import). The home
+ * region connects with DATABASE_URL, as those modules did. The region's
+ * connection is checked on every call, so an unconfigured region is refused
+ * even after a pool exists.
+ */
+export function regionPool(
+  region: CloudRegionId,
+  name: string,
+  config: Omit<PoolConfig, 'connectionString'> = {},
+  projectId?: string,
+): Pool {
+  const url = requireRegionDatabaseUrl(region, 'app', { projectId })
+  const key = `${region}:${name}`
+  const existing = regionPools.get(key)
+  if (existing) return existing
+
+  const pool = new Pool({ ...config, connectionString: url })
+  // An idle client's error is emitted on the pool; unhandled, it ends the process.
+  pool.on('error', (err) => console.error(`[regional] ${name} pool in ${region}:`, err.message))
+  regionPools.set(key, pool)
+  return pool
+}
+
+/** regionPool for the region holding this project's data. */
+export async function projectPool(
+  projectId: string,
+  name: string,
+  config: Omit<PoolConfig, 'connectionString'> = {},
+): Promise<Pool> {
+  return regionPool(await projectRegion(projectId), name, config, projectId)
 }
