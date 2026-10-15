@@ -83,6 +83,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
                        SET deleted_at = NOW(), "updatedAt" = NOW()
                        ${whereClause} AND deleted_at IS NULL RETURNING id`
       result = await executeWithUserContext(
+        context.projectId,
         context.endUserId ?? '',
         context.apiKey.serviceRole,
         softSql,
@@ -92,6 +93,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     } else {
       const hardSql = `DELETE FROM "${schemaName}"."${tableName}" ${whereClause} RETURNING id`
       result = await executeWithUserContext(
+        context.projectId,
         context.endUserId ?? '',
         context.apiKey.serviceRole,
         hardSql,

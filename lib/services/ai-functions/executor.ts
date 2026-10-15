@@ -165,6 +165,7 @@ function buildDbProxy(projectId: string, caller: FunctionCallerContext = {}) {
         const types = await columnTypes(schemaName, safeName)
         const conditions = keys.map((c, i) => `"${c}" = ${dbCast(types.get(c), where[raw[i]], i + 1)}`).join(' AND ')
         return executeWithUserContext<any>(
+          projectId,
           endUserId,
           serviceRole,
           `SELECT * FROM "${schemaName}"."${safeName}" WHERE ${conditions} LIMIT 100`,
@@ -173,6 +174,7 @@ function buildDbProxy(projectId: string, caller: FunctionCallerContext = {}) {
         )
       }
       return executeWithUserContext<any>(
+        projectId,
         endUserId,
         serviceRole,
         `SELECT * FROM "${schemaName}"."${safeName}" LIMIT 100`,
@@ -189,6 +191,7 @@ function buildDbProxy(projectId: string, caller: FunctionCallerContext = {}) {
       const types = await columnTypes(schemaName, safeName)
       const placeholders = cols.map((c, i) => dbCast(types.get(c), data[c], i + 1)).join(', ')
       const result = await executeWithUserContext<any>(
+        projectId,
         endUserId,
         serviceRole,
         `INSERT INTO "${schemaName}"."${safeName}" (${colList}) VALUES (${placeholders}) RETURNING *`,
@@ -208,6 +211,7 @@ function buildDbProxy(projectId: string, caller: FunctionCallerContext = {}) {
       const setClause = setCols.map((c, i) => `"${c}" = ${dbCast(types.get(c), data[c], i + 1)}`).join(', ')
       const whereClause = whereCols.map((c, i) => `"${c}" = ${dbCast(types.get(c), where[c], setCols.length + i + 1)}`).join(' AND ')
       return executeWithUserContext<any>(
+        projectId,
         endUserId,
         serviceRole,
         `UPDATE "${schemaName}"."${safeName}" SET ${setClause} WHERE ${whereClause} RETURNING *`,
@@ -226,6 +230,7 @@ function buildDbProxy(projectId: string, caller: FunctionCallerContext = {}) {
       const types = await columnTypes(schemaName, safeName)
       const conditions = cols.map((c, i) => `"${c}" = ${dbCast(types.get(c), where[c], i + 1)}`).join(' AND ')
       await executeWithUserContext<any>(
+        projectId,
         endUserId,
         serviceRole,
         `DELETE FROM "${schemaName}"."${safeName}" WHERE ${conditions}`,

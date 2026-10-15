@@ -149,8 +149,8 @@ router.post('/:projectId/database/query', asyncRoute(v1AuthMiddleware), asyncRou
 
     const rls = await resolveRlsIdentity(req, ctx.projectId, ctx.apiKey.serviceRole)
     const [countResult, rows] = await Promise.all([
-      executeWithUserContext<{ count: number }>(rls.userId, rls.isServiceRole, countSql, whereValues, rls.role),
-      executeWithUserContext<any>(rls.userId, rls.isServiceRole, dataSql, whereValues, rls.role),
+      executeWithUserContext<{ count: number }>(ctx.projectId, rls.userId, rls.isServiceRole, countSql, whereValues, rls.role),
+      executeWithUserContext<any>(ctx.projectId, rls.userId, rls.isServiceRole, dataSql, whereValues, rls.role),
     ])
 
     if (include) {
@@ -214,7 +214,7 @@ router.post('/:projectId/database/insert', asyncRoute(v1AuthMiddleware), asyncRo
       const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ')
       const values = cols.map(c => row[c])
       const sql = `INSERT INTO "${schemaName}"."${tableName}" (${colList}) VALUES (${placeholders}) RETURNING *`
-      const result = await executeWithUserContext<any>(rls.userId, rls.isServiceRole, sql, values, rls.role)
+      const result = await executeWithUserContext<any>(ctx.projectId, rls.userId, rls.isServiceRole, sql, values, rls.role)
       if (result[0]) inserted.push(result[0])
     }
 
@@ -282,7 +282,7 @@ router.post('/:projectId/database/update', asyncRoute(v1AuthMiddleware), asyncRo
 
     const sql = `UPDATE "${schemaName}"."${tableName}" SET ${setParts.join(', ')} ${whereClause} RETURNING *`
     const rls = await resolveRlsIdentity(req, ctx.projectId, ctx.apiKey.serviceRole)
-    const result = await executeWithUserContext<any>(rls.userId, rls.isServiceRole, sql, values, rls.role)
+    const result = await executeWithUserContext<any>(ctx.projectId, rls.userId, rls.isServiceRole, sql, values, rls.role)
 
     if (result.length > 0) {
       const { fireTriggers } = await import('@/lib/services/trigger-service')
@@ -339,7 +339,7 @@ router.post('/:projectId/database/delete', asyncRoute(v1AuthMiddleware), asyncRo
 
     const sql = `DELETE FROM "${schemaName}"."${tableName}" ${whereClause} RETURNING id`
     const rls = await resolveRlsIdentity(req, ctx.projectId, ctx.apiKey.serviceRole)
-    const result = await executeWithUserContext<any>(rls.userId, rls.isServiceRole, sql, values, rls.role)
+    const result = await executeWithUserContext<any>(ctx.projectId, rls.userId, rls.isServiceRole, sql, values, rls.role)
 
     if (result.length > 0) {
       const { fireTriggers } = await import('@/lib/services/trigger-service')

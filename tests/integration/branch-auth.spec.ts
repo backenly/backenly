@@ -133,7 +133,7 @@ async function emails(schema: string): Promise<string[]> {
   const exists = await prisma.$queryRaw<Array<{ n: number }>>`
     SELECT count(*)::int AS n FROM information_schema.tables WHERE table_schema = ${schema} AND table_name = 'users'`
   if (exists[0].n === 0) return []
-  const rows = await executeWithUserContext<{ email: string }>('', true, `SELECT email FROM "${schema}"."users" ORDER BY email`)
+  const rows = await executeWithUserContext<{ email: string }>(projectId, '', true, `SELECT email FROM "${schema}"."users" ORDER BY email`)
   return rows.map((r) => r.email)
 }
 
@@ -308,6 +308,7 @@ describe('sign-in', () => {
       const up = await auth('signup', { email: 'unverified@example.test', password: PASSWORD }, previewKey)
       expect(up.status).toBe(201)
       const row = await executeWithUserContext<{ email_verified: boolean }>(
+        projectId,
         '', true, `SELECT email_verified FROM "${qa.schemaName}"."users" WHERE email = $1`, ['unverified@example.test'],
       )
       expect(row[0].email_verified).toBe(false)

@@ -305,7 +305,7 @@ export async function handleStripeBusinessLogic(projectId: string, payload: Reco
   const { executeWithUserContext } = await import('@/lib/services/workspace-rls')
   const svcSql = async <T = any>(sql: string, ...values: unknown[]): Promise<T[]> => {
     try {
-      return await executeWithUserContext<T>('', true, sql, values)
+      return await executeWithUserContext<T>(projectId, '', true, sql, values)
     } catch (err: any) {
       console.error('[Webhook] Stripe business logic SQL failed:', err?.message ?? err)
       throw err

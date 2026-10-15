@@ -103,6 +103,7 @@ async function countEndUsers(projectId: string): Promise<number | null> {
   // Service-role: the users table is RLS-FORCED with a service-role-only
   // policy. Ownership was already proven by withProjectValidation above.
   const rows = await executeWithUserContext<{ count: number }>(
+    projectId,
     '',
     true,
     `SELECT COUNT(*)::int AS count FROM "${schema.schemaName}"."users" WHERE ${where.join(' AND ')}`,

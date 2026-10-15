@@ -56,9 +56,9 @@ jest.mock('@/lib/services/workspace-rls', () => {
   const actual = jest.requireActual('@/lib/services/workspace-rls')
   return {
     ...actual,
-    executeWithUserContext: jest.fn(async (userId: string, serviceRole: boolean, sql: string, values: unknown[] = [], role?: string) => {
+    executeWithUserContext: jest.fn(async (projectId: string, userId: string, serviceRole: boolean, sql: string, values: unknown[] = [], role?: string) => {
       svcCalls.push({ userId, serviceRole })
-      return actual.executeWithUserContext(userId, serviceRole, sql, values, role)
+      return actual.executeWithUserContext(projectId, userId, serviceRole, sql, values, role)
     }),
   }
 })

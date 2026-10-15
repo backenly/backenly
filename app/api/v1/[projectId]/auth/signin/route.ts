@@ -135,6 +135,7 @@ async function signIn(request: NextRequest, projectId: string, env: AuthEnvironm
     // hide the row. Run as service-role — sign-in is a platform-internal
     // privileged operation, exactly what the service-role escape hatch is for.
     const users = await executeWithUserContext<any>(
+      projectId,
       '',
       true,
       `SELECT ${selectCols} FROM "${schemaName}"."users" WHERE email = $1 LIMIT 1`,

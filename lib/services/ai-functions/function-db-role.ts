@@ -16,11 +16,17 @@
  * app's connection: a function whose login cannot be established fails with
  * FUNCTION_DB_ROLE_UNAVAILABLE, because running it anyway is the exposure this
  * exists to close.
+ *
+ * The role, its grants and the login all live in the database holding the
+ * project's schema, in the project's region (lib/data-plane/regional.ts). A
+ * project in a region this process cannot reach fails with
+ * REGION_NOT_CONFIGURED; it is never tried against another region's database.
  */
 
 import { createHash, createHmac } from 'crypto'
 import { PrismaClient } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
+import { projectDatabaseUrl, workspaceRawClient } from '@/lib/data-plane/regional'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
 
 export interface FunctionDbHandle {
@@ -59,9 +65,12 @@ export function functionRolePassword(schema: string): string {
   return createHmac('sha256', derivationKey()).update(`backenly:function-db-role:v1:${schema}`).digest('base64url')
 }
 
-/** The app's own URL with the function login swapped in and a small pool. */
-export function functionDatabaseUrl(role: string, password: string, base = process.env.DATABASE_URL): string {
-  if (!base) throw new FunctionDbRoleUnavailableError('DATABASE_URL is not set')
+/**
+ * The project's own database URL (lib/data-plane/regional.ts) with the function
+ * login swapped in and a small pool. The base is required: a default would be
+ * the home region's database, which holds no schema for a project elsewhere.
+ */
+export function functionDatabaseUrl(role: string, password: string, base: string): string {
   const url = new URL(base)
   url.username = role
   url.password = password
@@ -70,11 +79,17 @@ export function functionDatabaseUrl(role: string, password: string, base = proce
   return url.toString()
 }
 
-/** Create or re-assert the role and its grants. Returns the role name. */
-async function syncRole(schema: string, password: string): Promise<string> {
+/**
+ * Create or re-assert the role and its grants, in the database holding the
+ * project's schema: roles and grants live in that cluster. Returns the role name.
+ */
+async function syncRole(projectId: string, schema: string, password: string): Promise<string> {
+  // Outside the try: a region this process cannot reach is its own error, not
+  // a missing helper.
+  const db = await workspaceRawClient(projectId)
   let role: string | undefined
   try {
-    const rows = await prisma.$queryRaw<Array<{ role: string }>>`
+    const rows = await db.$queryRaw<Array<{ role: string }>>`
       SELECT public.backenly_fn_role_sync(${schema}, ${password}) AS role
     `
     role = rows[0]?.role
@@ -108,10 +123,11 @@ export async function provisionFunctionRole(projectId: string): Promise<{ role: 
   if (!SCHEMA_RE.test(schema)) {
     throw new FunctionDbRoleUnavailableError(`"${schema}" is not a workspace schema`)
   }
-  const rows = await prisma.$queryRaw<Array<{ n: number }>>`
+  const db = await workspaceRawClient(projectId)
+  const rows = await db.$queryRaw<Array<{ n: number }>>`
     SELECT count(*)::int AS n FROM pg_roles WHERE rolname = ${functionRoleName(schema)}
   `
-  const role = await syncRole(schema, functionRolePassword(schema))
+  const role = await syncRole(projectId, schema, functionRolePassword(schema))
   return { role, existed: (rows[0]?.n ?? 0) > 0 }
 }
 
@@ -161,7 +177,7 @@ export async function functionDbClient(projectId: string): Promise<FunctionDbHan
   }
 
   const password = functionRolePassword(schema)
-  const role = await syncRole(schema, password)
+  const role = await syncRole(projectId, schema, password)
   if (cached) {
     cached.syncedAt = now
     cached.usedAt = now
@@ -169,7 +185,9 @@ export async function functionDbClient(projectId: string): Promise<FunctionDbHan
   }
 
   evictIdleAndOverflow()
-  const client = new PrismaClient({ datasourceUrl: functionDatabaseUrl(role, password) })
+  const client = new PrismaClient({
+    datasourceUrl: functionDatabaseUrl(role, password, await projectDatabaseUrl(projectId)),
+  })
   const handle = { client, schema, role }
   clients.set(schema, { handle, syncedAt: now, usedAt: now })
   return handle

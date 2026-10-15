@@ -11,6 +11,9 @@
  *   regional project, connection set    served from the regional database,
  *                                       whose marker row exists nowhere else
  *   the raw-SQL client                  the same split
+ *   RLS-scoped SQL (executeWithUserContext), the workspace client
+ *   (getWorkspacePostgresClient) and a function's role sync
+ *                                       the same split, each in the region
  *   a region this build does not know   refused, never read as home
  *
  * The refusal is the property that matters. The home database holds no schema
@@ -23,8 +26,11 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { Client } from 'pg'
 import { prisma } from '@/lib/db'
 import { disconnectRegionalClients, projectRegion, workspaceRawClient } from '@/lib/data-plane/regional'
+import { functionDbClient, functionRoleName, provisionFunctionRole } from '@/lib/services/ai-functions/function-db-role'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
 import { closeAllWorkspacePools, queryWorkspace } from '@/lib/services/workspace-pool'
+import { executeWithUserContext } from '@/lib/services/workspace-rls'
+import { getWorkspacePostgresClient } from '@/lib/services/workspaceDatabase'
 
 jest.setTimeout(120_000)
 
@@ -53,6 +59,16 @@ async function run(connectionString: string, sql: string): Promise<void> {
   await client.connect()
   try {
     await client.query(sql)
+  } finally {
+    await client.end().catch(() => {})
+  }
+}
+
+async function rowsIn<T>(connectionString: string, sql: string): Promise<T[]> {
+  const client = new Client({ connectionString })
+  await client.connect()
+  try {
+    return (await client.query(sql)).rows as T[]
   } finally {
     await client.end().catch(() => {})
   }
@@ -96,6 +112,29 @@ beforeAll(async () => {
   await run(homeUrl(), `CREATE DATABASE "${REGIONAL_DB}"`)
   regionalDbCreated = true
   await seedMarker(regionalUrl, schemaOf(regionalProject), 'us-east-1')
+
+  // The workspace row a provisioned project has, so getWorkspacePostgresClient
+  // goes straight to its queries instead of provisioning.
+  await prisma.workspace.create({
+    data: {
+      name: 'region fixture',
+      projectId: regionalProject,
+      postgresSchema: schemaOf(regionalProject),
+      databaseProvisioned: true,
+    },
+  })
+
+  // A stand-in for the function-role helper (scripts/sql/function-roles.sql),
+  // in the regional database only. It records where it ran and answers with
+  // the role name the real helper derives.
+  await run(
+    regionalUrl,
+    `CREATE TABLE public.fn_role_sync_calls (schema_name text);
+     CREATE FUNCTION public.backenly_fn_role_sync(s text, p text) RETURNS text LANGUAGE sql AS $$
+       INSERT INTO public.fn_role_sync_calls VALUES (s);
+       SELECT 'bkn_fn_' || left(encode(sha256(convert_to(s, 'UTF8')), 'hex'), 12);
+     $$`,
+  )
 })
 
 afterAll(async () => {
@@ -168,6 +207,53 @@ describe('a project in another region', () => {
     delete process.env[REGION_VARIABLE]
     await expect(queryWorkspace(regionalProject, 'SELECT 1')).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
     await expect(workspaceRawClient(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+  })
+})
+
+describe('the shared helpers that run a project’s SQL', () => {
+  it('run RLS-scoped SQL for a home project in the home database', async () => {
+    const rows = await executeWithUserContext<{ db: string; note: string }>(
+      homeProject,
+      '',
+      true,
+      `SELECT current_database() AS db, note FROM "${schemaOf(homeProject)}".marker`,
+    )
+    expect(rows).toEqual([{ db: homeDb, note: 'home' }])
+  })
+
+  it('run RLS-scoped SQL for a regional project in its region, and refuse without a connection', async () => {
+    const sql = `SELECT current_database() AS db, note FROM "${schemaOf(regionalProject)}".marker`
+
+    delete process.env[REGION_VARIABLE]
+    await expect(executeWithUserContext(regionalProject, '', true, sql)).rejects.toMatchObject({
+      code: 'REGION_NOT_CONFIGURED',
+    })
+
+    process.env[REGION_VARIABLE] = regionalUrl
+    const rows = await executeWithUserContext<{ db: string; note: string }>(regionalProject, '', true, sql)
+    expect(rows).toEqual([{ db: REGIONAL_DB, note: 'us-east-1' }])
+  })
+
+  it('give a regional project a workspace client on its own database', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const client = await getWorkspacePostgresClient(regionalProject)
+    const rows = await client.queryRaw('SELECT current_database() AS db, note FROM {schema}.marker')
+    expect(rows).toEqual([{ db: REGIONAL_DB, note: 'us-east-1' }])
+  })
+
+  it('sync a regional project’s function role in its own database', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const schema = schemaOf(regionalProject)
+    const { role } = await provisionFunctionRole(regionalProject)
+    expect(role).toBe(functionRoleName(schema))
+    // The stand-in helper exists only in the regional database, and it ran there.
+    const calls = await rowsIn<{ schema_name: string }>(regionalUrl, 'SELECT schema_name FROM public.fn_role_sync_calls')
+    expect(calls).toEqual([{ schema_name: schema }])
+  })
+
+  it('refuse a regional function login when this process cannot reach the region', async () => {
+    delete process.env[REGION_VARIABLE]
+    await expect(functionDbClient(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
   })
 })
 

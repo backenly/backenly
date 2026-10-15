@@ -79,8 +79,8 @@ export async function GET(request: NextRequest) {
       const countSql = `SELECT COUNT(*)::int AS count FROM "${schemaName}"."users" ${whereClause}`
 
       const [rows, countRows] = await Promise.all([
-        executeWithUserContext<any>('', true, listSql, values),
-        executeWithUserContext<{ count: number }>('', true, countSql, values),
+        executeWithUserContext<any>(projectId, '', true, listSql, values),
+        executeWithUserContext<{ count: number }>(projectId, '', true, countSql, values),
       ])
 
       const total = countRows[0]?.count ?? 0

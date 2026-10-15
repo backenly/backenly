@@ -122,6 +122,7 @@ async function signUp(request: NextRequest, projectId: string, env: AuthEnvironm
     const check = probe ? null : await admitExistenceCheck(projectId, ip)
     if (check?.denied) return throttledV1Response(check.denied)
     const existing = await executeWithUserContext<any>(
+      projectId,
       '',
       true,
       `SELECT id FROM "${schemaName}"."users" WHERE email = $1 LIMIT 1`,
@@ -176,7 +177,7 @@ async function signUp(request: NextRequest, projectId: string, env: AuthEnvironm
     // on the users table don't block the very first signup — the policies'
     // service-role escape hatch (current_setting('app.is_service_role')) is
     // designed exactly for this internal-platform path.
-    const created = await executeWithUserContext<any>('', true, plan.sql, plan.values)
+    const created = await executeWithUserContext<any>(projectId, '', true, plan.sql, plan.values)
 
     const user = created[0]
 

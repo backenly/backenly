@@ -7551,11 +7551,13 @@ async function executeListUsers(projectId: string, params?: any): Promise<Execut
     const { executeWithUserContext } = await import('@/lib/services/workspace-rls')
     const orderBy = createdCol ? `ORDER BY "${createdCol}" DESC` : ''
     const rows = await executeWithUserContext<any>(
+      projectId,
       '', true,
       `SELECT ${select.join(', ')} FROM "${schemaName}"."users" ${orderBy} LIMIT ${limit}`,
     )
 
     const countRows = await executeWithUserContext<{ count: bigint }>(
+      projectId,
       '', true,
       `SELECT COUNT(*)::bigint AS count FROM "${schemaName}"."users"`,
     )
@@ -7641,6 +7643,7 @@ async function executeBlockUser(params: any, projectId: string): Promise<Executi
     const { executeWithUserContext } = await import('@/lib/services/workspace-rls')
     const where = identifier === 'email' ? `"email" = $1` : `"id"::text = $1`
     const updated = await executeWithUserContext<{ id: string }>(
+      projectId,
       '',
       true,
       `UPDATE "${schemaName}"."users" SET is_blocked = TRUE WHERE ${where} RETURNING id`,
@@ -7685,6 +7688,7 @@ async function executeResetPassword(params: any, projectId: string): Promise<Exe
     const identifier = email ? 'email' : 'id'
     const paramValue = String(email || userId)
     const users = await executeWithUserContext<{ id: string; email: string | null }>(
+      projectId,
       '',
       true,
       `SELECT id, email FROM "${schemaName}"."users" WHERE "${identifier}" = $1 LIMIT 1`,
@@ -7772,6 +7776,7 @@ async function executeUnblockUser(params: any, projectId: string): Promise<Execu
     const { executeWithUserContext } = await import('@/lib/services/workspace-rls')
     const where = identifier === 'email' ? `"email" = $1` : `"id"::text = $1`
     const updated = await executeWithUserContext<{ id: string }>(
+      projectId,
       '',
       true,
       `UPDATE "${schemaName}"."users" SET is_blocked = FALSE WHERE ${where} RETURNING id`,

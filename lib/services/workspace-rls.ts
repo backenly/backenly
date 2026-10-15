@@ -21,6 +21,7 @@
  */
 
 import { prisma } from '@/lib/db'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { executeInWorkspaceSchema, queryWorkspaceSchema } from './workspaceDatabase'
 import { rlsSessionSql, rlsSessionParams } from './rls-session'
 import {
@@ -2057,28 +2058,19 @@ export async function removePermissionPolicy(
 }
 
 /**
- * Set app.current_user_id in the current DB session.
- * Called by the v1 database API routes for every authenticated request.
- */
-export async function setCurrentUserInSession(
-  userId: string,
-  isServiceRole: boolean = false
-): Promise<void> {
-  await prisma.$executeRawUnsafe(
-    rlsSessionSql(),
-    ...rlsSessionParams({ userId, isServiceRole }),
-  )
-}
-
-/**
  * Execute a raw SQL query with RLS session context set atomically in the same
  * transaction.  Using `is_local = true` (the third arg to set_config) means
  * the settings revert at transaction end so they never leak to pooled connections.
  *
- * Always use this helper instead of calling setCurrentUserInSession + a separate
- * prisma.$queryRawUnsafe — those two calls may land on different connections in
- * the pool and therefore RLS would not be enforced.
+ * Always use this helper rather than setting the session context and querying
+ * in two separate calls: those may land on different pooled connections, and
+ * RLS would then not be enforced. (The separate setter that invited exactly
+ * that, setCurrentUserInSession, had no callers left and is gone.)
  *
+ * The query runs on the database holding the project's data, in the project's
+ * region (lib/data-plane/regional.ts), never on another region's.
+ *
+ * @param projectId     The project whose workspace the SQL addresses.
  * @param userId        End-user ID (from their project-scoped JWT).  Pass '' to
  *                      clear the context (policies will match no rows on own_rows
  *                      tables — secure default).
@@ -2087,6 +2079,7 @@ export async function setCurrentUserInSession(
  * @param values        Positional parameters for the SQL query.
  */
 export async function executeWithUserContext<T = any>(
+  projectId: string,
   userId: string,
   isServiceRole: boolean,
   sql: string,
@@ -2105,7 +2098,8 @@ export async function executeWithUserContext<T = any>(
   // hides its SQL, the verbatim statement is in the Postgres server log
   // (/var/log/postgresql/postgresql-16-main.log) on the STATEMENT: line, and a
   // stack log at the shared choke point beats another round of grepping.
-  return prisma.$transaction(async (tx) => {
+  const db = await workspaceRawClient(projectId)
+  return db.$transaction(async (tx) => {
     await tx.$executeRawUnsafe(
       rlsSessionSql(),
       ...rlsSessionParams({ userId, isServiceRole, userRole }),

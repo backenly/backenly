@@ -280,6 +280,7 @@ export async function applyIncludes(opts: {
         `WHERE "${foreignKey}" IN (${placeholders}) ${softDelete} ` +
         `LIMIT ${MAX_RELATED_ROWS - related.length}`
       const batch = await executeWithUserContext<any>(
+        projectId,
         rls.userId, rls.isServiceRole, sql, group, rls.role,
       )
       related.push(...batch)

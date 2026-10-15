@@ -471,6 +471,7 @@ async function handleOAuthCallback(req: Request, res: Response) {
 
     // 4. Upsert by oauth_id OR email — under service-role (RLS is forced).
     const existing = await executeWithUserContext<any>(
+      projectId,
       '',
       true,
       `SELECT id, email, name FROM "${schemaName}"."users" WHERE oauth_id = $1 OR email = $2 LIMIT 1`,
@@ -489,6 +490,7 @@ async function handleOAuthCallback(req: Request, res: Response) {
       const setParts = ['oauth_provider = $1', 'oauth_id = $2', 'avatar_url = COALESCE(avatar_url, $3)']
       if (schema.updatedAtColumn) setParts.push(`"${schema.updatedAtColumn}" = NOW()`)
       await executeWithUserContext(
+        projectId,
         '',
         true,
         `UPDATE "${schemaName}"."users" SET ${setParts.join(', ')} WHERE id = $4`,
@@ -512,7 +514,7 @@ async function handleOAuthCallback(req: Request, res: Response) {
         oauth_provider: provider,
         oauth_id: providerUser.id,
       })
-      const createdRows = await executeWithUserContext<any>('', true, plan.sql, plan.values)
+      const createdRows = await executeWithUserContext<any>(projectId, '', true, plan.sql, plan.values)
       userId = String(createdRows[0]?.id)
       userEmail = providerUser.email
       userName = providerUser.name

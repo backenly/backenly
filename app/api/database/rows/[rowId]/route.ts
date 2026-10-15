@@ -71,7 +71,7 @@ export const PUT = withProjectAccess(async (
     const ownershipError = assertSchemaOwnership(schema, projectId)
     if (ownershipError) return ownershipError
 
-    const result = await HybridDatabase.updateRow(type, schema, table, rowId, body.data)
+    const result = await HybridDatabase.updateRow(projectId, type, schema, table, rowId, body.data)
 
     if (!result) {
       return NextResponse.json(
@@ -117,7 +117,7 @@ export const DELETE = withProjectAccess(async (
     const ownershipError = assertSchemaOwnership(schema, projectId)
     if (ownershipError) return ownershipError
 
-    const success = await HybridDatabase.deleteRow(type, schema, table, rowId)
+    const success = await HybridDatabase.deleteRow(projectId, type, schema, table, rowId)
 
     if (!success) {
       return NextResponse.json(

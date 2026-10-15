@@ -463,6 +463,7 @@ export class PostgresService {
    * Get table rows with pagination and filtering
    */
   static async getTableRows(
+    projectId: string,
     schema: string,
     tableName: string,
     pagination: PaginationParams = {},
@@ -545,13 +546,13 @@ export class PostgresService {
     // asserted the opposite of the truth, which is how a working backend gets
     // mistaken for a broken one.
     //
-    // `executeWithUserContext(_, true, …)` is the same service-role path
+    // `executeWithUserContext(projectId, _, true, …)` is the same service-role path
     // get_table_schema's recordCount already used — which is exactly why
     // run_query reported 1 row while this reported 0 in the same second.
     const { executeWithUserContext } = await import('@/lib/services/workspace-rls')
     const runAsOwner = async <R>(q: Prisma.Sql): Promise<R[]> => {
       const { sql, values } = toRawSql(q)
-      return executeWithUserContext<R>('', true, sql, values)
+      return executeWithUserContext<R>(projectId, '', true, sql, values)
     }
 
     const countResult = await runAsOwner<{ count: bigint }>(countQuery)
@@ -590,7 +591,7 @@ export class PostgresService {
   /**
    * Insert a new row
    */
-  static async insertRow(schema: string, tableName: string, data: Record<string, any>): Promise<any> {
+  static async insertRow(projectId: string, schema: string, tableName: string, data: Record<string, any>): Promise<any> {
     console.log('[PostgresService.insertRow] Input data:', data)
     
     // Get the table structure to know exact column names
@@ -636,6 +637,7 @@ export class PostgresService {
     // had secured.
     const { executeWithUserContext } = await import('@/lib/services/workspace-rls')
     const result = await executeWithUserContext<any>(
+      projectId,
       '',
       true,
       `INSERT INTO ${escapedSchema}.${escapedTable} (${columnList.join(', ')}) VALUES (${placeholders}) RETURNING *`,
@@ -649,6 +651,7 @@ export class PostgresService {
    * Update a row
    */
   static async updateRow(
+    projectId: string,
     schema: string,
     tableName: string,
     id: any,
@@ -665,6 +668,7 @@ export class PostgresService {
     // table matches zero rows and the dashboard edit silently did nothing.
     const { executeWithUserContext } = await import('@/lib/services/workspace-rls')
     const result = await executeWithUserContext<any>(
+      projectId,
       '',
       true,
       // ::text on the id: the RLS session layer binds parameters as text, and a
@@ -680,13 +684,14 @@ export class PostgresService {
   /**
    * Delete a row
    */
-  static async deleteRow(schema: string, tableName: string, id: any): Promise<boolean> {
+  static async deleteRow(projectId: string, schema: string, tableName: string, id: any): Promise<boolean> {
     const escapedSchema = `"${schema}"`
     const escapedTable = `"${tableName}"`
 
     // Service-role context — see insertRow.
     const { executeWithUserContext } = await import('@/lib/services/workspace-rls')
     const result = await executeWithUserContext<{ id: any }>(
+      projectId,
       '',
       true,
       `DELETE FROM ${escapedSchema}.${escapedTable} WHERE "id"::text = $1 RETURNING "id"`,
@@ -919,6 +924,7 @@ export class HybridDatabase {
    * Get rows/documents with pagination
    */
   static async getRows(
+    projectId: string,
     dbType: DatabaseType,
     schema: string | undefined,
     tableName: string,
@@ -927,7 +933,7 @@ export class HybridDatabase {
   ): Promise<{ data: any[]; total: number; page: number; limit: number }> {
     if (dbType === 'postgresql') {
       if (!schema) throw new Error('Schema is required for PostgreSQL')
-      return await PostgresService.getTableRows(schema, tableName, pagination, filters)
+      return await PostgresService.getTableRows(projectId, schema, tableName, pagination, filters)
     } else {
       return await MongoService.getCollectionDocuments(tableName, pagination, filters)
     }
@@ -937,6 +943,7 @@ export class HybridDatabase {
    * Insert row/document
    */
   static async insertRow(
+    projectId: string,
     dbType: DatabaseType,
     schema: string | undefined,
     tableName: string,
@@ -944,7 +951,7 @@ export class HybridDatabase {
   ): Promise<any> {
     if (dbType === 'postgresql') {
       if (!schema) throw new Error('Schema is required for PostgreSQL')
-      return await PostgresService.insertRow(schema, tableName, data)
+      return await PostgresService.insertRow(projectId, schema, tableName, data)
     } else {
       return await MongoService.insertDocument(tableName, data)
     }
@@ -954,6 +961,7 @@ export class HybridDatabase {
    * Update row/document
    */
   static async updateRow(
+    projectId: string,
     dbType: DatabaseType,
     schema: string | undefined,
     tableName: string,
@@ -962,7 +970,7 @@ export class HybridDatabase {
   ): Promise<any> {
     if (dbType === 'postgresql') {
       if (!schema) throw new Error('Schema is required for PostgreSQL')
-      return await PostgresService.updateRow(schema, tableName, id, data)
+      return await PostgresService.updateRow(projectId, schema, tableName, id, data)
     } else {
       return await MongoService.updateDocument(tableName, id, data)
     }
@@ -972,6 +980,7 @@ export class HybridDatabase {
    * Delete row/document
    */
   static async deleteRow(
+    projectId: string,
     dbType: DatabaseType,
     schema: string | undefined,
     tableName: string,
@@ -979,7 +988,7 @@ export class HybridDatabase {
   ): Promise<boolean> {
     if (dbType === 'postgresql') {
       if (!schema) throw new Error('Schema is required for PostgreSQL')
-      return await PostgresService.deleteRow(schema, tableName, id)
+      return await PostgresService.deleteRow(projectId, schema, tableName, id)
     } else {
       return await MongoService.deleteDocument(tableName, id)
     }

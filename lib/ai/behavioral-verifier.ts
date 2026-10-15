@@ -507,7 +507,7 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
         buildInsertSql(schemaName, refTable, allRefCols, allRefVals, allRefColInfoMap)
 
       try {
-        const refInserted = await executeWithUserContext<any>(dummyUserId, true, refSql, refParams)
+        const refInserted = await executeWithUserContext<any>(projectId, dummyUserId, true, refSql, refParams)
         if (!refInserted[0]) continue
         const parentId = String(refInserted[0].id ?? refInserted[0][Object.keys(refInserted[0])[0]])
         // Recorded BEFORE anything else can fail, so cleanup can always find it.
@@ -544,7 +544,7 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
     const { insertCols, insertVals, colInfoMap } = buildInsertParts(cols, { ...checkOverrides, ...fkOverrides, ...ownerOverrides })
     const { sql: insertSql, params: insertParams } = buildInsertSql(schemaName, tableName, insertCols, insertVals, colInfoMap)
 
-    const inserted = await executeWithUserContext<any>(dummyUserId, true, insertSql, insertParams)
+    const inserted = await executeWithUserContext<any>(projectId, dummyUserId, true, insertSql, insertParams)
     if (!inserted[0]) {
       return { ...base, error: 'INSERT returned no row', details: [...base.details, '✗ INSERT failed'] }
     }
@@ -553,7 +553,7 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
 
     // ── READ ──────────────────────────────────────────────────────────────────
     const readSql = `SELECT * FROM "${schemaName}"."${tableName}" WHERE id = $1::uuid`
-    const readRows = await executeWithUserContext<any>(dummyUserId, true, readSql, [testId])
+    const readRows = await executeWithUserContext<any>(projectId, dummyUserId, true, readSql, [testId])
     if (readRows.length === 0) {
       return { ...base, error: 'READ returned 0 rows after INSERT', details: [...base.details, '✗ READ failed'] }
     }
@@ -566,7 +566,7 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
     )
     if (textCol) {
       const updateSql = `UPDATE "${schemaName}"."${tableName}" SET "${textCol.column_name}" = $1 WHERE id = $2::uuid RETURNING id`
-      const updated = await executeWithUserContext<any>(dummyUserId, true, updateSql, ['__bv_updated__', testId])
+      const updated = await executeWithUserContext<any>(projectId, dummyUserId, true, updateSql, ['__bv_updated__', testId])
       if (updated.length > 0) {
         base.details.push(`✓ UPDATE succeeded on column '${textCol.column_name}'`)
       } else {
@@ -578,7 +578,7 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
 
     // ── DELETE ────────────────────────────────────────────────────────────────
     const deleteSql = `DELETE FROM "${schemaName}"."${tableName}" WHERE id = $1::uuid RETURNING id`
-    const deleted = await executeWithUserContext<any>(dummyUserId, true, deleteSql, [testId])
+    const deleted = await executeWithUserContext<any>(projectId, dummyUserId, true, deleteSql, [testId])
     if (deleted.length === 0) {
       return { ...base, error: 'DELETE matched 0 rows', details: [...base.details, '✗ DELETE failed'] }
     }
@@ -587,7 +587,7 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
     base.details.push('✓ DELETE succeeded')
 
     // ── POST-DELETE READ — must return 0 rows ─────────────────────────────────
-    const postDeleteRows = await executeWithUserContext<any>(dummyUserId, true, readSql, [deletedId])
+    const postDeleteRows = await executeWithUserContext<any>(projectId, dummyUserId, true, readSql, [deletedId])
     if (postDeleteRows.length > 0) {
       return {
         ...base,
@@ -612,7 +612,7 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
     // silently leaks the row rather than erroring.
     if (testId) {
       try {
-        await executeWithUserContext(dummyUserId, true, `DELETE FROM "${schemaName}"."${tableName}" WHERE id = $1::uuid`, [testId])
+        await executeWithUserContext(projectId, dummyUserId, true, `DELETE FROM "${schemaName}"."${tableName}" WHERE id = $1::uuid`, [testId])
       } catch {
         // Last resort: try without user context
         try {
@@ -624,7 +624,7 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
     for (const parent of [...seededParentRows].reverse()) {
       const delSql = `DELETE FROM "${schemaName}"."${parent.table}" WHERE id = $1::uuid`
       try {
-        await executeWithUserContext(dummyUserId, true, delSql, [parent.id])
+        await executeWithUserContext(projectId, dummyUserId, true, delSql, [parent.id])
       } catch {
         try { await prisma.$executeRawUnsafe(delSql, parent.id) } catch { /* non-fatal */ }
       }
@@ -721,6 +721,7 @@ async function checkAuthFlow(projectId: string): Promise<BehavioralCheck> {
     // behavior, otherwise PG 42501 surfaces here even though the live
     // signup route would succeed.
     const signupResult = await executeWithUserContext<any>(
+      projectId,
       '',
       true,
       `INSERT INTO "${schemaName}"."users" (${colList}) VALUES (${placeholders})
@@ -780,6 +781,7 @@ async function checkAuthFlow(projectId: string): Promise<BehavioralCheck> {
     // resolving the user record from JWT claims is a privileged lookup, not
     // a user-scoped query, so RLS should not gate it.
     const protectedRead = await executeWithUserContext<any>(
+      projectId,
       '',
       true,
       `SELECT id, email FROM "${schemaName}"."users" WHERE id = $1::uuid`,
@@ -799,6 +801,7 @@ async function checkAuthFlow(projectId: string): Promise<BehavioralCheck> {
         // Service-role cleanup — RLS would otherwise hide the row from the
         // delete and the test user would persist across runs.
         await executeWithUserContext(
+          projectId,
           '',
           true,
           `DELETE FROM "${schemaName}"."users" WHERE id = $1::uuid`,
@@ -923,7 +926,7 @@ async function checkRlsIsolation(projectId: string): Promise<BehavioralCheck> {
         buildInsertSql(schemaName, refTable, allRefCols, allRefVals, allRefColInfoMap)
 
       try {
-        const refInserted = await executeWithUserContext<any>(userAId, true, refSql, refParams)
+        const refInserted = await executeWithUserContext<any>(projectId, userAId, true, refSql, refParams)
         if (refInserted[0]) {
           const parentId = String(refInserted[0].id ?? refInserted[0][Object.keys(refInserted[0])[0]])
           seededParentRows.push({ table: refTable, id: parentId })
@@ -958,7 +961,7 @@ async function checkRlsIsolation(projectId: string): Promise<BehavioralCheck> {
     const { sql: insertSql, params: insertParams } = buildInsertSql(schemaName, targetTable, insertCols, insertVals, rlsColInfoMap)
 
     // User A inserts via service role (bypass existing RLS for test setup)
-    const inserted = await executeWithUserContext<any>(userAId, true, insertSql, insertParams)
+    const inserted = await executeWithUserContext<any>(projectId, userAId, true, insertSql, insertParams)
     if (!inserted[0]) {
       return { ...base, error: `RLS test: INSERT as user A into '${targetTable}' failed`, details: base.details }
     }
@@ -967,7 +970,7 @@ async function checkRlsIsolation(projectId: string): Promise<BehavioralCheck> {
 
     // User B tries to read user A's row — must be denied by RLS
     const readSql = `SELECT id FROM "${schemaName}"."${targetTable}" WHERE id = $1::uuid`
-    const userBRows = await executeWithUserContext<any>(userBId, false, readSql, [testId])
+    const userBRows = await executeWithUserContext<any>(projectId, userBId, false, readSql, [testId])
 
     if (userBRows.length > 0) {
       return {
@@ -982,7 +985,7 @@ async function checkRlsIsolation(projectId: string): Promise<BehavioralCheck> {
     base.details.push(`✓ User B (${userBId.slice(0, 8)}…) correctly denied — 0 rows returned`)
 
     // User A reads their own row — should succeed
-    const userARows = await executeWithUserContext<any>(userAId, false, readSql, [testId])
+    const userARows = await executeWithUserContext<any>(projectId, userAId, false, readSql, [testId])
     if (userARows.length > 0) {
       base.details.push('✓ User A can read their own row (self-access allowed)')
     } else {
@@ -1031,6 +1034,7 @@ async function checkRlsIsolation(projectId: string): Promise<BehavioralCheck> {
     if (testId && targetTable) {
       try {
         await executeWithUserContext(
+          projectId,
           '', true,
           `DELETE FROM "${schemaName}"."${targetTable}" WHERE id = $1::uuid`,
           [testId],
@@ -1047,7 +1051,7 @@ async function checkRlsIsolation(projectId: string): Promise<BehavioralCheck> {
     for (const parent of [...seededParentRows].reverse()) {
       const delSql = `DELETE FROM "${schemaName}"."${parent.table}" WHERE id = $1::uuid`
       try {
-        await executeWithUserContext('', true, delSql, [parent.id])
+        await executeWithUserContext(projectId, '', true, delSql, [parent.id])
       } catch {
         try { await prisma.$executeRawUnsafe(delSql, parent.id) } catch { /* non-fatal */ }
       }
@@ -1144,7 +1148,7 @@ async function checkTriggerExecution(projectId: string): Promise<BehavioralCheck
         buildInsertParts(refCols, { ...refCheckOverrides, id: seedId, email: `__bv_trg_${seedId.slice(0, 8)}@test.internal` })
       const { sql: rSql, params: rParams } = buildInsertSql(schemaName, refTable, rc, rv, rcm)
       try {
-        const rInserted = await executeWithUserContext<any>('', true, rSql, rParams)
+        const rInserted = await executeWithUserContext<any>(projectId, '', true, rSql, rParams)
         if (rInserted[0]) {
           const parentId = String(rInserted[0].id ?? rInserted[0][Object.keys(rInserted[0])[0]])
           seededTriggerParents.push({ table: refTable, id: parentId })
@@ -1174,7 +1178,7 @@ async function checkTriggerExecution(projectId: string): Promise<BehavioralCheck
     const beforeRunCount = fn.runCount ?? 0
 
     // Fire the triggering event (service role — bypass RLS for test setup)
-    const inserted = await executeWithUserContext<any>('', true, insertSql, insertParams)
+    const inserted = await executeWithUserContext<any>(projectId, '', true, insertSql, insertParams)
     if (!inserted[0]) {
       return { ...base, error: `Trigger test: INSERT into '${triggerTable}' returned no row`, details: base.details }
     }
@@ -1212,6 +1216,7 @@ async function checkTriggerExecution(projectId: string): Promise<BehavioralCheck
     if (testId) {
       try {
         await executeWithUserContext(
+          projectId,
           '', true,
           `DELETE FROM "${schemaName}"."${triggerTable}" WHERE id = $1::uuid`,
           [testId],
@@ -1225,7 +1230,7 @@ async function checkTriggerExecution(projectId: string): Promise<BehavioralCheck
     for (const parent of [...seededTriggerParents].reverse()) {
       const delSql = `DELETE FROM "${schemaName}"."${parent.table}" WHERE id = $1::uuid`
       try {
-        await executeWithUserContext('', true, delSql, [parent.id])
+        await executeWithUserContext(projectId, '', true, delSql, [parent.id])
       } catch {
         try { await prisma.$executeRawUnsafe(delSql, parent.id) } catch { /* non-fatal */ }
       }

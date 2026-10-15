@@ -137,6 +137,7 @@ async function handleGET(
     let rows: Array<Record<string, unknown>>
     try {
       rows = await executeWithUserContext<Record<string, unknown>>(
+        params.projectId,
         middleware.context.endUserId ?? '',
         middleware.context.apiKey.serviceRole,
         sql,
@@ -172,6 +173,7 @@ async function handleGET(
     let hint: string | undefined
     if (data.length === 0) {
       const counted = await executeWithUserContext<{ n: number }>(
+        params.projectId,
         middleware.context.endUserId ?? '',
         middleware.context.apiKey.serviceRole,
         `SELECT count(*)::int AS n FROM "${postgresSchema}"."${params.tableName}" WHERE "${embeddingColumn}" IS NULL`,
