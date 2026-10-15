@@ -77,7 +77,8 @@ export function buildMcpInstructions(projectLabel: string, toolCount: number | n
     `  backend_chat for what you would rather describe than specify.`,
     `- Your connection key (mcp_live_…) drives these tools only; the runtime API refuses it. Never`,
     `  put it in app code or an app's env. An app's key comes from connect { action: "create_api_key" }:`,
-    `  publishable by default and safe in a browser; serviceRole: true only for server code.`,
+    `  publishable and safe in a browser. A server's service-role key is created by your human in`,
+    `  Settings, never by an agent.`,
     `- Never fabricate results. If a tool returns nothing or errors, say so plainly.`,
   ].join('\n')
 }

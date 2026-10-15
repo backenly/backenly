@@ -79,9 +79,9 @@ export const MCP_KEY_HINT =
   'Use a project key in the app. For browser or mobile code, create a client key: ' +
   'connect { action: "create_api_key", description: "web app" } from your agent, or ' +
   'Settings → API keys → New key → Client in the dashboard. It is bound by row-level ' +
-  "security, and writes also need the signed-in user's X-User-Token. Pass serviceRole: true " +
-  'only for a key that stays on a server. If this MCP key was committed or shipped, revoke it ' +
-  'in Connect → Agents and generate a new one.'
+  "security, and writes also need the signed-in user's X-User-Token. A key that stays on a " +
+  'server and bypasses row-level security is an Admin key a person creates in Settings → API keys. ' +
+  'If this MCP key was committed or shipped, revoke it in Connect → Agents and generate a new one.'
 
 export interface KeyPlacementRefusal {
   status: 403

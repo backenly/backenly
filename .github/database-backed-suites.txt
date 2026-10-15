@@ -1084,6 +1084,12 @@ tests/integration/model-spend-on-every-tool.spec.ts
 # Postgres.
 tests/integration/functions-runtime-honesty.spec.ts
 
+# A service-role key is never minted by an agent: create_api_key with
+# serviceRole true is refused on the typed MCP door and the brain's door with
+# SERVICE_KEY_REQUIRES_HUMAN and mints nothing, publishable keys still work, and
+# no agent-facing text offers one. Real route, MCP key and key rows are the
+# property, so it needs a real Postgres.
+tests/integration/service-key-human-only.spec.ts
 # Agent credentials are managed in one place: Settings, API keys lists the
 # app's keys only (never an MCP key or a browser-authorised agent connection),
 # and the Disconnect the Agents tab offers ends a real OAuth connection, its

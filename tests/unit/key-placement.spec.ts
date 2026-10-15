@@ -86,7 +86,10 @@ describe('the MCP refusal', () => {
     expect(MCP_KEY_HINT).toContain('connect { action: "create_api_key", description: "web app" }')
     expect(MCP_KEY_HINT).toContain('Settings → API keys → New key → Client')
     expect(MCP_KEY_HINT).toContain('X-User-Token')
-    expect(MCP_KEY_HINT).toContain('serviceRole: true')
+    // A server's RLS-bypassing key is a person's to create; agents are refused
+    // one (CON-12), so the hint no longer suggests passing serviceRole.
+    expect(MCP_KEY_HINT).toContain('an Admin key a person creates in Settings → API keys')
+    expect(MCP_KEY_HINT).not.toContain('serviceRole: true')
     // And what to do about the key that leaked.
     expect(MCP_KEY_HINT).toMatch(/revoke it in Connect → Agents/)
   })

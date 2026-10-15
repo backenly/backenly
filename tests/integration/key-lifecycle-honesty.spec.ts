@@ -108,8 +108,18 @@ describe('SET-09: set_key_permissions is gated, validated and cannot escalate', 
   }, 60_000)
 
   it('refuses editing a service-role key, whose access is not permission-driven', async () => {
-    const created = await createKey({ description: 'worker', serviceRole: true })
-    const out = await setPermissions({ keyId: (created.data as any).keyId, permissions: ['read'], confirmed: true })
+    // A person creates a service-role key in Settings; the agent tool refuses
+    // to mint one (CON-12, service-key-human-only.spec.ts), so it is made here
+    // the way the Settings route stores it.
+    const svc = await prisma.apiKey.create({
+      data: {
+        name: 'worker', keyHash: `test:${crypto.randomBytes(16).toString('hex')}`, keyPrefix: 'svc_live_test',
+        projectId, userId: ownerId, permissions: ['read', 'write'], keyType: 'public', scope: 'runtime',
+        role: 'admin', serviceRole: true,
+      },
+      select: { id: true },
+    })
+    const out = await setPermissions({ keyId: svc.id, permissions: ['read'], confirmed: true })
     expect(out.success).toBe(false)
     expect(out.error).toBe('SERVICE_ROLE_KEY_NOT_PERMISSION_DRIVEN')
   }, 60_000)
