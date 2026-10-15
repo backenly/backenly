@@ -18,6 +18,7 @@
 import { prisma } from '@/lib/db/prisma'
 import { projectSchemaPrefix, workspaceSchemaName } from '@/lib/security/workspace-schema'
 import { recordUsage } from '@/lib/usage/ledger'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 
 function thisMonth(): string {
   return new Date().toISOString().slice(0, 7) // YYYY-MM
@@ -31,11 +32,17 @@ function thisMonth(): string {
  * `left(nspname, length(prefix)) = prefix`, the same rule project deletion uses:
  * `_` is a LIKE wildcard and `workspace_` is full of them, so a LIKE here would
  * be one escaping mistake away from measuring another tenant.
+ *
+ * Measured on the database in the project's region. Asked of another region's
+ * database, the schemas are simply absent and the answer is 0 bytes, which would
+ * be recorded as the project's size for the quota check and for billing. A
+ * region this process cannot reach throws instead, and nothing is recorded.
  */
 export async function measureProjectDbBytes(projectId: string): Promise<bigint> {
   const canonical = workspaceSchemaName(projectId)
   const prefix = projectSchemaPrefix(projectId)
-  const rows = await prisma.$queryRaw<Array<{ total_bytes: bigint | null }>>`
+  const db = await workspaceRawClient(projectId)
+  const rows = await db.$queryRaw<Array<{ total_bytes: bigint | null }>>`
     SELECT COALESCE(SUM(pg_total_relation_size(c.oid)), 0)::bigint AS total_bytes
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace

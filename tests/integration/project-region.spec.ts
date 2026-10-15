@@ -80,6 +80,7 @@ import { collectBaseline } from '@/lib/autonomy/baseline/collector'
 import { checkIntentConformance } from '@/lib/autonomy/intent-conformance'
 import { verifyPostcondition } from '@/lib/autonomy/action-postconditions'
 import { hasCapability, resetCapabilityCache } from '@/lib/autonomy/platform-capabilities'
+import { measureProjectDbBytes, snapshotProjectDbStorage } from '@/lib/usage/db-storage'
 
 jest.setTimeout(120_000)
 
@@ -1069,6 +1070,27 @@ describe('the autonomy probes read the project’s region', () => {
       verifyPostcondition('ADD_COLUMN', regionalProject, { tableName: 'marker', columnName: 'note', columnType: 'text' }),
     ).rejects.toMatchObject(refused)
     await expect(hasCapability('pg_stat_statements', 'us-east-1')).rejects.toMatchObject(refused)
+  })
+})
+
+describe('storage is measured in the project’s region', () => {
+  afterAll(async () => {
+    await prisma.projectUsage.deleteMany({ where: { projectId: regionalProject } })
+  })
+
+  it('measures the regional schemas, and records nothing it could not measure', async () => {
+    // Read from the home database the schema is absent: 0 bytes, recorded as
+    // the project's size for the quota check and for billing.
+    delete process.env[REGION_VARIABLE]
+    await expect(measureProjectDbBytes(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+    await snapshotProjectDbStorage(regionalProject)
+    expect(await prisma.projectUsage.count({ where: { projectId: regionalProject } })).toBe(0)
+
+    process.env[REGION_VARIABLE] = regionalUrl
+    expect(await measureProjectDbBytes(regionalProject)).toBeGreaterThan(BigInt(0))
+    await snapshotProjectDbStorage(regionalProject)
+    const usage = await prisma.projectUsage.findFirst({ where: { projectId: regionalProject } })
+    expect(usage?.dbStorageUsedMb ?? 0).toBeGreaterThan(0)
   })
 })
 
