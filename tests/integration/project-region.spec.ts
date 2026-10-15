@@ -17,6 +17,11 @@
  *   end-user auth: the users table, the token blacklist and the
  *   request-time blocked check          in the region; without a connection
  *                                       the request fails, it never fails open
+ *   the v1 data routes and the health check
+ *                                       the region's catalog and rows; 503
+ *                                       without a connection
+ *   PostgREST                           the region's own URL and secret, and
+ *                                       schema registration in the region
  *   a region this build does not know   refused, never read as home
  *
  * The refusal is the property that matters. The home database holds no schema
@@ -34,8 +39,9 @@ import { GET as queryRoute } from '@/app/api/v1/[projectId]/database/query/route
 import { GET as healthzRoute } from '@/app/api/v1/[projectId]/healthz/route'
 import { mintKey } from '@/lib/auth/key-prefix'
 import { prisma } from '@/lib/db'
-import { disconnectRegionalClients, projectRegion, workspaceRawClient } from '@/lib/data-plane/regional'
+import { disconnectRegionalClients, projectPostgrest, projectRegion, workspaceRawClient } from '@/lib/data-plane/regional'
 import { PostgresService } from '@/lib/db/hybrid'
+import { clearRegistrationCache, ensureSchemaRegistered } from '@/lib/postgrest/registration'
 import { functionDbClient, functionRoleName, provisionFunctionRole } from '@/lib/services/ai-functions/function-db-role'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
 import { ensureEmailVerifiedColumn, logoutEndUser } from '@/lib/services/end-user-auth-flows'
@@ -448,6 +454,70 @@ describe('the v1 data routes read the project’s own database', () => {
     const down = await (await get(healthzRoute, '/healthz')).json()
     expect(down.status).toBe('degraded')
     expect(down.database).toMatchObject({ status: 'error', error: 'Data region not reachable from this server' })
+  })
+})
+
+describe('PostgREST, per region', () => {
+  const saved = { url: process.env.POSTGREST_URL, secret: process.env.POSTGREST_JWT_SECRET }
+
+  beforeAll(async () => {
+    // A stand-in for the registry helper (scripts/sql/postgrest-schema-registry.sql),
+    // in the regional database only. It records which schemas it was asked to
+    // register, so a registration sent anywhere else leaves no row here.
+    await run(
+      regionalUrl,
+      `CREATE TABLE public.pgrst_register_calls (schema_name text);
+       CREATE FUNCTION public.backenly_pgrst_register_schema(s text) RETURNS void LANGUAGE sql AS $$
+         INSERT INTO public.pgrst_register_calls VALUES (s)
+       $$`,
+    )
+  })
+
+  beforeEach(() => clearRegistrationCache())
+
+  afterAll(() => {
+    for (const [name, value] of [['POSTGREST_URL', saved.url], ['POSTGREST_JWT_SECRET', saved.secret]] as const) {
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
+    delete process.env.POSTGREST_URL_US_EAST_1
+    delete process.env.POSTGREST_JWT_SECRET_US_EAST_1
+  })
+
+  it('serves a regional project only from its own region’s PostgREST', async () => {
+    process.env.POSTGREST_URL = 'http://postgrest.home.test:3000'
+    process.env.POSTGREST_JWT_SECRET = 'home-secret'
+    delete process.env.POSTGREST_URL_US_EAST_1
+    delete process.env.POSTGREST_JWT_SECRET_US_EAST_1
+
+    expect(await projectPostgrest(homeProject)).toEqual({ url: 'http://postgrest.home.test:3000', jwtSecret: 'home-secret' })
+    // The home PostgREST serves the home database, which has no schema for it.
+    expect(await projectPostgrest(regionalProject)).toBeNull()
+
+    process.env.POSTGREST_URL_US_EAST_1 = 'http://postgrest.virginia.test:3000'
+    process.env.POSTGREST_JWT_SECRET_US_EAST_1 = 'virginia-secret'
+    expect(await projectPostgrest(regionalProject)).toEqual({
+      url: 'http://postgrest.virginia.test:3000',
+      jwtSecret: 'virginia-secret',
+    })
+  })
+
+  it('registers a regional project’s schema in its own region', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const result = await ensureSchemaRegistered(regionalProject)
+    expect(result).toMatchObject({ registered: true, schema: schemaOf(regionalProject) })
+    const calls = await rowsIn<{ schema_name: string }>(regionalUrl, 'SELECT schema_name FROM public.pgrst_register_calls')
+    expect(calls).toEqual([{ schema_name: schemaOf(regionalProject) }])
+  })
+
+  it('reports the schema unregistered when the region cannot be reached, and asks nowhere else', async () => {
+    delete process.env[REGION_VARIABLE]
+    const result = await ensureSchemaRegistered(regionalProject)
+    expect(result.registered).toBe(false)
+    expect(result.error).toMatch(REGION_VARIABLE)
+    process.env[REGION_VARIABLE] = regionalUrl
+    const calls = await rowsIn<{ schema_name: string }>(regionalUrl, 'SELECT schema_name FROM public.pgrst_register_calls')
+    expect(calls).toHaveLength(1)
   })
 })
 

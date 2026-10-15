@@ -46,6 +46,7 @@ import {
   profileForProject,
 } from '@/lib/postgrest/gateway'
 import { checkExposure, type Operation } from '@/lib/postgrest/exposure'
+import { projectPostgrest } from '@/lib/data-plane/regional'
 import { stripUpstreamError } from '@/lib/postgrest/translate'
 import { ensureSchemaRegistered } from '@/lib/postgrest/registration'
 import { getProjectIdFromAuth, refuseIfKeyLacksMethodPermission } from './dynamic'
@@ -149,11 +150,14 @@ router.all('/:projectId/*', asyncRoute(async (req: Request, res: Response) => {
   // Deployment configuration is judged AFTER the credential: a self-host
   // without PostgREST still answers a bad key with the refusal it deserves,
   // not with a 503 that hides the authorization result.
-  const baseUrl = process.env.POSTGREST_URL
-  const secret = process.env.POSTGREST_JWT_SECRET
-  if (!baseUrl || !secret) {
+  //
+  // The PostgREST serving the project's region; never another region's, which
+  // serves a database without this project's schema.
+  const postgrest = await projectPostgrest(projectId)
+  if (!postgrest) {
     return res.status(503).json({ code: 'V2_UNAVAILABLE', message: 'PostgREST is not configured.' })
   }
+  const { url: baseUrl, jwtSecret: secret } = postgrest
 
   // Authenticated, in quota, and past the serving gate: real use.
   void touchProjectActivity(projectId)

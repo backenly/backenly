@@ -22,6 +22,19 @@ jest.mock('@/lib/db', () => ({
     $queryRawUnsafe: (...a: unknown[]) => queryRawUnsafe(...a),
   },
 }))
+// The project resolves to the home region, as every project does until regions
+// open: its PostgREST is POSTGREST_URL, and its raw client the one above. Which
+// region a project is in, and that nothing crosses regions, is
+// tests/integration/project-region.spec.ts.
+jest.mock('@/lib/data-plane/regional', () => {
+  const actual = jest.requireActual('@/lib/data-plane/regional')
+  const { HOME_REGION } = jest.requireActual('@/lib/regions')
+  return {
+    ...actual,
+    projectPostgrest: async () => actual.regionPostgrest(HOME_REGION),
+    workspaceRawClient: async () => jest.requireMock('@/lib/db').prisma,
+  }
+})
 
 import { handleViaPostgrest } from '@/server/routes/postgrest-handler'
 import { clearSoftDeleteCache } from '@/lib/postgrest/exposure'

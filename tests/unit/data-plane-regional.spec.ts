@@ -12,10 +12,12 @@ import {
   regionDatabaseUrl,
   regionEnvName,
   regionOfRecord,
+  regionPostgrest,
   requireRegionDatabaseUrl,
   type DataPlaneRole,
 } from '@/lib/data-plane/regional'
 import { CLOUD_REGIONS, HOME_REGION } from '@/lib/regions'
+import { projectIdOfWorkspaceSchema } from '@/lib/security/workspace-schema'
 
 const ROLES: DataPlaneRole[] = ['app', 'direct', 'backup', 'admin']
 
@@ -106,5 +108,56 @@ describe('regionOfRecord', () => {
     expect(() => regionOfRecord('p-odd', 'mars-north-1')).toThrow(UnknownRegionError)
     expect(() => regionOfRecord('p-odd', 'mars-north-1')).toThrow(/mars-north-1/)
     expect(() => regionOfRecord('p-odd', '')).toThrow(UnknownRegionError)
+  })
+})
+
+describe('regionPostgrest', () => {
+  const POSTGREST_ENV = {
+    POSTGREST_URL: 'http://postgrest.home.test:3000',
+    POSTGREST_JWT_SECRET: 'home-secret',
+    POSTGREST_URL_US_EAST_1: 'http://postgrest.virginia.test:3000',
+    POSTGREST_JWT_SECRET_US_EAST_1: 'virginia-secret',
+    POSTGREST_URL_US_WEST_2: 'http://postgrest.oregon.test:3000',
+  }
+
+  it('keeps the home region on POSTGREST_URL and POSTGREST_JWT_SECRET', () => {
+    expect(regionPostgrest(HOME_REGION, POSTGREST_ENV)).toEqual({
+      url: 'http://postgrest.home.test:3000',
+      jwtSecret: 'home-secret',
+    })
+  })
+
+  it("reads each region's own pair", () => {
+    expect(regionPostgrest('us-east-1', POSTGREST_ENV)).toEqual({
+      url: 'http://postgrest.virginia.test:3000',
+      jwtSecret: 'virginia-secret',
+    })
+  })
+
+  it('never answers with the home PostgREST for another region', () => {
+    expect(regionPostgrest('eu-central-1', POSTGREST_ENV)).toBeNull()
+  })
+
+  it('needs both the URL and the secret', () => {
+    // Oregon has a URL and no secret of its own; the home secret is not borrowed.
+    expect(regionPostgrest('us-west-2', POSTGREST_ENV)).toBeNull()
+    expect(regionPostgrest(HOME_REGION, { POSTGREST_URL: 'http://x.test', POSTGREST_JWT_SECRET: '  ' })).toBeNull()
+  })
+})
+
+describe('projectIdOfWorkspaceSchema', () => {
+  const id = '0b5c1a3e-7d2f-4c8e-9a61-3f0d2e4b5c6a'
+
+  it("finds the project behind its own schema and the schemas named after it", () => {
+    expect(projectIdOfWorkspaceSchema(`workspace_${id}`)).toBe(id)
+    expect(projectIdOfWorkspaceSchema(`workspace_${id}_br_feature_x`)).toBe(id)
+    expect(projectIdOfWorkspaceSchema(`workspace_${id}_staging`)).toBe(id)
+  })
+
+  it('answers null for anything else', () => {
+    expect(projectIdOfWorkspaceSchema('public')).toBeNull()
+    expect(projectIdOfWorkspaceSchema('workspace_not-a-uuid')).toBeNull()
+    expect(projectIdOfWorkspaceSchema(`workspace_${id}-x`)).toBeNull()
+    expect(projectIdOfWorkspaceSchema(`x_workspace_${id}`)).toBeNull()
   })
 })
