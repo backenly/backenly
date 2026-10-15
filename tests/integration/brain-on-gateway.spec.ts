@@ -80,6 +80,10 @@ beforeEach(async () => {
   ledger = memorySpendLedger()
   setSpendLedgerForTests(ledger)
   await prisma.aiUsage.deleteMany({ where: { projectId } })
+  // Every turn saves its messages to this one project. Past 20, saveMessages
+  // starts a summary without waiting, and that model call takes the next test's
+  // scripted reply. Each test starts with no history.
+  await prisma.conversationMessage.deleteMany({ where: { projectId } })
 })
 
 afterEach(() => {
@@ -170,6 +174,20 @@ describe('a turn on the gateway', () => {
         expect.objectContaining({ endpoint: 'brain-agent', metadata: expect.objectContaining({ cacheReadTokens: 16000 }) }),
       ]),
     )
+  }, 60_000)
+
+  it('does not present an MCP caller as dashboard page context', async () => {
+    const provider = scriptedProvider([
+      classified('QUESTION'),
+      scriptedMessage({
+        toolUse: [{ id: 'toolu_finish', name: 'finish', input: { summary: 'No page context.' } }],
+      }),
+    ])
+
+    await turn(provider, 'what can I do here?', { door: 'mcp' })
+
+    const system = provider.calls[1].params.system as Anthropic.TextBlockParam[]
+    expect(system.map((block) => block.text).join('\n')).not.toContain("USER'S CURRENT PAGE")
   }, 60_000)
 
   it('stops a destructive call at the approval gate, answers it as an error, and returns it to queue', async () => {

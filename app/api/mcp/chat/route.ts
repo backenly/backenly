@@ -172,10 +172,10 @@ export async function POST(request: NextRequest) {
           userId: auth.userId,
           message: parsed.message,
           sessionToken: undefined,
-          // Headless surface: a call that needs approval is stopped by the
+          // Headless caller: a call that needs approval is stopped by the
           // brain's gate and queued for the Review Queue below, never confirmed
           // by message.
-          surface: 'mcp',
+          door: 'mcp',
           // ── Verification is budgeted, not hoped for ─────────────────────────
           //
           // The brain now stops taking new steps while a verification reserve
