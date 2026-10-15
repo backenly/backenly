@@ -80,6 +80,10 @@ beforeEach(async () => {
   ledger = memorySpendLedger()
   setSpendLedgerForTests(ledger)
   await prisma.aiUsage.deleteMany({ where: { projectId } })
+  // Every turn saves its messages to this one project. Past 20, saveMessages
+  // starts a summary without waiting, and that model call takes the next test's
+  // scripted reply. Each test starts with no history.
+  await prisma.conversationMessage.deleteMany({ where: { projectId } })
 })
 
 afterEach(() => {
