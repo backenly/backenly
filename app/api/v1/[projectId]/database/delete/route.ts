@@ -2,10 +2,11 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest } from 'next/server'
 import { v1ApiMiddleware, requirePermission, requireCapability } from '@/lib/api/v1/middleware'
-import { createErrorResponse, createSuccessResponse, handleValidationError, ErrorCodes } from '@/lib/api/v1/errors'
+import { createErrorResponse, createSuccessResponse, handleValidationError, ErrorCodes, regionErrorResponse } from '@/lib/api/v1/errors'
 import { deleteSchema } from '@/lib/api/v1/schemas'
 import { validateRequestBody } from '@/lib/validation/schemas'
 import { prisma } from '@/lib/db'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
@@ -71,7 +72,11 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     // Prefer soft delete when the table has a deleted_at column.
     // Fall back to hard delete for tables created before this feature or without the column.
     let result: any[]
-    const hasSoftDelete = await prisma.$queryRawUnsafe<{ count: number }[]>(
+    // The catalog of the project's database, in its region. Resolved before
+    // the fail-soft catch below, which reads any failure as "no deleted_at
+    // column" and so as a HARD delete.
+    const db = await workspaceRawClient(context.projectId)
+    const hasSoftDelete = await db.$queryRawUnsafe<{ count: number }[]>(
       `SELECT COUNT(*)::int AS count FROM information_schema.columns
        WHERE table_schema = $1 AND table_name = $2 AND column_name = 'deleted_at'`,
       schemaName, tableName
@@ -118,7 +123,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     return createSuccessResponse({ success: true, deleted: result.length })
   } catch (error: any) {
     console.error('Database delete error:', error)
-    return createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Failed to delete data', 500)
+    return regionErrorResponse(error) ?? createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Failed to delete data', 500)
   }
 }
 

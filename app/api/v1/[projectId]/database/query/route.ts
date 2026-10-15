@@ -2,10 +2,11 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest } from 'next/server'
 import { v1ApiMiddleware, requirePermission, requireCapability } from '@/lib/api/v1/middleware'
-import { createErrorResponse, createSuccessResponse, handleValidationError, ErrorCodes } from '@/lib/api/v1/errors'
+import { createErrorResponse, createSuccessResponse, handleValidationError, ErrorCodes, regionErrorResponse } from '@/lib/api/v1/errors'
 import { querySchema, PAGINATION_DEFAULT_LIMIT, PAGINATION_MAX_LIMIT } from '@/lib/api/v1/schemas'
 import { validateRequestBody } from '@/lib/validation/schemas'
 import { prisma } from '@/lib/db'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
@@ -82,14 +83,18 @@ async function handleGET(request: NextRequest, props: { params: Promise<{ projec
       }
     }
 
+    // The catalog of the project's database, in its region. Resolved before
+    // the fail-soft catches below: an unreachable region is not "no columns".
+    const db = await workspaceRawClient(context.projectId)
+
     // Auto-exclude soft-deleted rows (tables with deleted_at column)
-    const hasSoftDelete = await prisma.$queryRawUnsafe<{ count: number }[]>(
+    const hasSoftDelete = await db.$queryRawUnsafe<{ count: number }[]>(
       `SELECT COUNT(*)::int AS count FROM information_schema.columns
        WHERE table_schema = $1 AND table_name = $2 AND column_name = 'deleted_at'`,
       schemaName, tableName
     ).then(r => Number(r[0]?.count ?? 0) > 0).catch(() => false)
 
-    const liveColumns = await prisma.$queryRawUnsafe<{ column_name: string }[]>(
+    const liveColumns = await db.$queryRawUnsafe<{ column_name: string }[]>(
       `SELECT column_name FROM information_schema.columns
        WHERE table_schema = $1 AND table_name = $2`,
       schemaName, tableName
@@ -154,7 +159,7 @@ async function handleGET(request: NextRequest, props: { params: Promise<{ projec
     )
   } catch (error: any) {
     console.error('Database query GET error:', error)
-    return createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Failed to execute database query', 500)
+    return regionErrorResponse(error) ?? createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Failed to execute database query', 500)
   }
 }
 
@@ -237,7 +242,9 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     // Auto-exclude soft-deleted rows (tables with deleted_at column) unless caller explicitly filters on it
     const callerFilteredDeletedAt = whereParts.some(p => p.includes('"deleted_at"'))
     if (!callerFilteredDeletedAt) {
-      const hasSoftDeletePost = await prisma.$queryRawUnsafe<{ count: number }[]>(
+      // The project's database, in its region; outside the fail-soft catch.
+      const db = await workspaceRawClient(context.projectId)
+      const hasSoftDeletePost = await db.$queryRawUnsafe<{ count: number }[]>(
         `SELECT COUNT(*)::int AS count FROM information_schema.columns
          WHERE table_schema = $1 AND table_name = $2 AND column_name = 'deleted_at'`,
         `workspace_${context.projectId}`, tableName
@@ -279,7 +286,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     )
   } catch (error: any) {
     console.error('Database query error:', error)
-    return createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Failed to execute database query', 500)
+    return regionErrorResponse(error) ?? createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Failed to execute database query', 500)
   }
 }
 

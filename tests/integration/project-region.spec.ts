@@ -25,9 +25,14 @@
  * query could answer from the platform's own tables instead.
  */
 
+import '@/tests/helpers/real-web-standard'
 import { randomBytes, randomUUID } from 'node:crypto'
 import jwt from 'jsonwebtoken'
+import { NextRequest } from 'next/server'
 import { Client } from 'pg'
+import { GET as queryRoute } from '@/app/api/v1/[projectId]/database/query/route'
+import { GET as healthzRoute } from '@/app/api/v1/[projectId]/healthz/route'
+import { mintKey } from '@/lib/auth/key-prefix'
 import { prisma } from '@/lib/db'
 import { disconnectRegionalClients, projectRegion, workspaceRawClient } from '@/lib/data-plane/regional'
 import { PostgresService } from '@/lib/db/hybrid'
@@ -35,7 +40,7 @@ import { functionDbClient, functionRoleName, provisionFunctionRole } from '@/lib
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
 import { ensureEmailVerifiedColumn, logoutEndUser } from '@/lib/services/end-user-auth-flows'
 import { buildUserInsert, introspectAuthUsersTable } from '@/lib/services/end-user-auth-table'
-import { resolveEndUserFromToken } from '@/server/lib/end-user-identity'
+import { hashApiKey, resolveEndUserFromToken } from '@/server/lib/end-user-identity'
 import { closeAllWorkspacePools, queryWorkspace } from '@/lib/services/workspace-pool'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { getWorkspacePostgresClient } from '@/lib/services/workspaceDatabase'
@@ -385,6 +390,64 @@ describe('end-user auth reads and writes the project’s own database', () => {
     expect(result.status).toBe(503)
     expect(result.body.error.code).toBe('REGION_NOT_CONFIGURED')
     await expect(introspectAuthUsersTable(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+  })
+})
+
+describe('the v1 data routes read the project’s own database', () => {
+  // A soft-delete column and a deleted row exist only in the regional
+  // database. The query route excludes deleted rows only when its catalog
+  // read finds `deleted_at`, so a read sent anywhere else returns both rows.
+  let key = ''
+  const get = (handler: typeof queryRoute, path: string) =>
+    handler(
+      new NextRequest(`https://backenly.test/api/v1/${regionalProject}${path}`, { headers: { 'x-api-key': key } }),
+      { params: Promise.resolve({ projectId: regionalProject }) },
+    )
+
+  beforeAll(async () => {
+    const minted = mintKey({ keyType: 'public', serviceRole: true })
+    key = minted.key
+    await prisma.apiKey.create({
+      data: {
+        name: 'region fixture', keyPrefix: minted.prefix, keyHash: hashApiKey(key), keyType: 'public',
+        serviceRole: true, permissions: ['read', 'write', 'admin'], capabilities: ['database'],
+        projectId: regionalProject, userId: ownerId,
+      },
+    })
+    await prisma.table.create({ data: { name: 'marker', projectId: regionalProject } })
+    await run(
+      regionalUrl,
+      `ALTER TABLE "${schemaOf(regionalProject)}".marker ADD COLUMN deleted_at timestamptz;
+       INSERT INTO "${schemaOf(regionalProject)}".marker VALUES ('deleted', now())`,
+    )
+  })
+
+  it('serves a regional project’s rows from its region, with its soft-delete column honoured', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const res = await get(queryRoute, '/database/query?table=marker')
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.data.data).toEqual([{ note: 'us-east-1', deleted_at: null }])
+  })
+
+  it('answers 503 REGION_NOT_CONFIGURED without a connection, not an empty result', async () => {
+    delete process.env[REGION_VARIABLE]
+    const res = await get(queryRoute, '/database/query?table=marker')
+    expect(res.status).toBe(503)
+    const body = await res.json()
+    expect(body.error.code).toBe('REGION_NOT_CONFIGURED')
+    expect(JSON.stringify(body)).not.toContain(REGION_VARIABLE)
+  })
+
+  it('reports the regional database in the health check, and an unreachable region as degraded', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const up = await (await get(healthzRoute, '/healthz')).json()
+    expect(up.database.status).toBe('ok')
+
+    delete process.env[REGION_VARIABLE]
+    const down = await (await get(healthzRoute, '/healthz')).json()
+    expect(down.status).toBe('degraded')
+    expect(down.database).toMatchObject({ status: 'error', error: 'Data region not reachable from this server' })
   })
 })
 

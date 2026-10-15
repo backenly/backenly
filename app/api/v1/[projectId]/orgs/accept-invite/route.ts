@@ -21,6 +21,7 @@ export const maxDuration = 15
 
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
+import { isRegionError, workspaceRawClient } from '@/lib/data-plane/regional'
 import jwt from 'jsonwebtoken'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
@@ -81,9 +82,13 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     }
 
     const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
+    // The project's database, in its region. Resolved before the users
+    // lookup's fail-soft catch, which would read an unreachable region as
+    // "no account".
+    const db = await workspaceRawClient(projectId)
 
     // ── Lookup invitation ──────────────────────────────────────────────────
-    const invites = await prisma.$queryRawUnsafe<Array<{
+    const invites = await db.$queryRawUnsafe<Array<{
       id: string
       organization_id: string
       email: string
@@ -122,7 +127,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     // was addressed to.
     let endUserEmail: string | null = null
     try {
-      const rows = await prisma.$queryRawUnsafe<Array<{ email: string }>>(
+      const rows = await db.$queryRawUnsafe<Array<{ email: string }>>(
         `SELECT email FROM "${postgresSchema}"."users" WHERE id = $1 LIMIT 1`,
         payload.userId,
       )
@@ -147,14 +152,14 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     }
 
     // ── Already a member? Treat as idempotent success ──────────────────────
-    const existing = await prisma.$queryRawUnsafe<Array<{ id: string }>>(
+    const existing = await db.$queryRawUnsafe<Array<{ id: string }>>(
       `SELECT id FROM "${postgresSchema}"."organization_members"
         WHERE organization_id = $1::uuid AND user_id = $2::uuid LIMIT 1`,
       invite.organization_id, payload.userId,
     )
     if (existing.length > 0) {
       // Still mark the invite consumed so it can't be reused later.
-      await prisma.$executeRawUnsafe(
+      await db.$executeRawUnsafe(
         `UPDATE "${postgresSchema}"."organization_invitations"
             SET accepted_at = NOW() WHERE id = $1::uuid`,
         invite.id,
@@ -168,14 +173,14 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     }
 
     // ── Insert member + consume invite atomically ──────────────────────────
-    await prisma.$transaction([
-      prisma.$executeRawUnsafe(
+    await db.$transaction([
+      db.$executeRawUnsafe(
         `INSERT INTO "${postgresSchema}"."organization_members"
            (id, organization_id, user_id, role, joined_at)
          VALUES (gen_random_uuid(), $1::uuid, $2::uuid, $3, NOW())`,
         invite.organization_id, payload.userId, invite.role || 'member',
       ),
-      prisma.$executeRawUnsafe(
+      db.$executeRawUnsafe(
         `UPDATE "${postgresSchema}"."organization_invitations"
             SET accepted_at = NOW() WHERE id = $1::uuid`,
         invite.id,
@@ -189,6 +194,14 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       role: invite.role || 'member',
     })
   } catch (err: any) {
+    // A region this process cannot reach: say so, without the message's
+    // variable names.
+    if (isRegionError(err)) {
+      return NextResponse.json(
+        { error: "This project's data region is not reachable from this server.", code: err.code },
+        { status: 503 },
+      )
+    }
     return NextResponse.json(
       { error: err?.message ?? 'Unexpected error', code: 'INTERNAL' },
       { status: 500 },

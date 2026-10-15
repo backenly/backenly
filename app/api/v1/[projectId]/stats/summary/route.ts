@@ -2,8 +2,9 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest } from 'next/server'
 import { v1ApiMiddleware, requirePermission } from '@/lib/api/v1/middleware'
-import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
+import { createErrorResponse, createSuccessResponse, ErrorCodes, regionErrorResponse } from '@/lib/api/v1/errors'
 import { prisma } from '@/lib/db'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 /**
@@ -51,10 +52,15 @@ async function handleGET(request: NextRequest, props: { params: Promise<{ projec
 
     const stats: Record<string, any> = {}
 
+    // The project's database, in its region. Resolved before the fail-soft
+    // reads below, which answer zero for anything they cannot read: an
+    // unreachable region would otherwise report no products, orders or revenue.
+    const db = await workspaceRawClient(context.projectId)
+
     // ── Products ────────────────────────────────────────────────────────────────
     if (tableNames.has('products')) {
       // Detect the stock column name
-      const stockColRows = await prisma.$queryRawUnsafe<Array<{ column_name: string }>>(
+      const stockColRows = await db.$queryRawUnsafe<Array<{ column_name: string }>>(
         `SELECT column_name FROM information_schema.columns
          WHERE table_schema = $1 AND table_name = 'products'
            AND column_name IN ('stock', 'stock_quantity')
@@ -63,7 +69,7 @@ async function handleGET(request: NextRequest, props: { params: Promise<{ projec
       ).catch(() => [])
       const stockCol = stockColRows[0]?.column_name ?? null
 
-      const productRows = await prisma.$queryRawUnsafe<Array<{ total: string; low_stock: string }>>(
+      const productRows = await db.$queryRawUnsafe<Array<{ total: string; low_stock: string }>>(
         stockCol
           ? `SELECT COUNT(*)::int AS total,
                     COUNT(*) FILTER (WHERE "${stockCol}" < ${lowStockThreshold})::int AS low_stock
@@ -81,7 +87,7 @@ async function handleGET(request: NextRequest, props: { params: Promise<{ projec
     // ── Orders ──────────────────────────────────────────────────────────────────
     if (tableNames.has('orders')) {
       // Detect total column name
-      const totalColRows = await prisma.$queryRawUnsafe<Array<{ column_name: string }>>(
+      const totalColRows = await db.$queryRawUnsafe<Array<{ column_name: string }>>(
         `SELECT column_name FROM information_schema.columns
          WHERE table_schema = $1 AND table_name = 'orders'
            AND column_name IN ('total', 'total_amount', 'amount')
@@ -91,7 +97,7 @@ async function handleGET(request: NextRequest, props: { params: Promise<{ projec
       ).catch(() => [])
       const totalCol = totalColRows[0]?.column_name ?? null
 
-      const orderSummaryRows = await prisma.$queryRawUnsafe<Array<{
+      const orderSummaryRows = await db.$queryRawUnsafe<Array<{
         total_count: string
         pending_count: string
         revenue: string
@@ -114,7 +120,7 @@ async function handleGET(request: NextRequest, props: { params: Promise<{ projec
       stats.totalRevenue = parseFloat(String(orderSummaryRows[0]?.revenue ?? 0))
 
       // Recent orders
-      const recentRows = await prisma.$queryRawUnsafe<any[]>(
+      const recentRows = await db.$queryRawUnsafe<any[]>(
         `SELECT * FROM "${schemaName}"."orders"
          ORDER BY created_at DESC NULLS LAST
          LIMIT ${recentLimit}`,
@@ -130,7 +136,7 @@ async function handleGET(request: NextRequest, props: { params: Promise<{ projec
     return createSuccessResponse(stats)
   } catch (err: any) {
     console.error('[stats/summary GET]', err?.message)
-    return createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Failed to fetch stats', 500)
+    return regionErrorResponse(err) ?? createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Failed to fetch stats', 500)
   }
 }
 

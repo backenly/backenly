@@ -91,6 +91,22 @@ export function handleValidationError(error: ZodError): NextResponse<ApiError> {
 }
 
 /**
+ * The answer for a project whose data is in a region this process has no
+ * connection to (REGION_NOT_CONFIGURED), or whose row names a region this
+ * build does not know (UNKNOWN_REGION); null for any other error.
+ *
+ * 503, not 500: nothing was read from another region's database instead
+ * (lib/data-plane/regional.ts), and the request succeeds once the deployment
+ * is configured. The message names no variables. Matched on the code so this
+ * module stays free of the database client.
+ */
+export function regionErrorResponse(error: unknown): NextResponse<ApiError> | null {
+  const code = (error as { code?: unknown } | null | undefined)?.code
+  if (code !== 'REGION_NOT_CONFIGURED' && code !== 'UNKNOWN_REGION') return null
+  return createErrorResponse(code, "This project's data region is not reachable from this server.", 503)
+}
+
+/**
  * Common error codes
  */
 export const ErrorCodes = {
