@@ -117,6 +117,22 @@ function PostHogLogo({ className, style }: LogoProps) {
 interface KeyVaultStatus {
   maskedKey: string
   connectedAt: string
+  /** What the provider said about the stored key — never fold into a
+   *  boolean "connected": a rejected key rendering green is how dead
+   *  credentials sit unnoticed until a function fails with them. */
+  verification?: 'verified' | 'rejected' | 'unverifiable' | 'unreachable' | 'unchecked'
+  verificationDetail?: string
+}
+
+/** Tone + label for a stored key, from the provider's own verdict. */
+function keyVerificationBadge(status?: KeyVaultStatus): { tone: 'operational' | 'failed' | 'attention' | 'neutral'; label: string } {
+  switch (status?.verification) {
+    case 'verified':     return { tone: 'operational', label: 'Connected · key confirmed' }
+    case 'rejected':     return { tone: 'failed', label: 'Key rejected by the provider' }
+    case 'unreachable':  return { tone: 'attention', label: 'Stored · provider unreachable' }
+    case 'unverifiable': return { tone: 'neutral', label: 'Stored · cannot be confirmed' }
+    default:             return { tone: 'neutral', label: 'Stored · not yet checked' }
+  }
 }
 
 interface QuickOption {
@@ -741,7 +757,11 @@ function ConnectorCard({
       <div className="flex flex-1 flex-col p-5">
         <div className="mb-4 flex items-start justify-between gap-3">
           <ProviderMark provider={provider} category={category} size="lg" />
-          {provider.enabled && <StatusDot tone="operational" label="Connected" />}
+          {provider.enabled && (
+            provider.keyStatus
+              ? <StatusDot tone={keyVerificationBadge(provider.keyStatus).tone} label={keyVerificationBadge(provider.keyStatus).label} />
+              : <StatusDot tone="operational" label="Connected" />
+          )}
         </div>
 
         <h3 className="text-[14px] font-semibold leading-[20px] tracking-[-0.01em] text-zinc-50">{provider.name}</h3>
@@ -791,7 +811,10 @@ function ConnectorDetail({
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
               <h1 className="text-[22px] font-semibold leading-[28px] tracking-[-0.022em] text-zinc-50">{provider.name}</h1>
-              <StatusDot tone={provider.enabled ? 'operational' : 'neutral'} label={provider.enabled ? 'Connected' : 'Not connected'} />
+              <StatusDot
+                tone={!provider.enabled ? 'neutral' : provider.keyStatus ? keyVerificationBadge(provider.keyStatus).tone : 'operational'}
+                label={!provider.enabled ? 'Not connected' : provider.keyStatus ? keyVerificationBadge(provider.keyStatus).label : 'Connected'}
+              />
             </div>
             <p className="mt-0.5 text-[14px] text-zinc-400">{provider.tagline}</p>
           </div>
@@ -809,8 +832,12 @@ function ConnectorDetail({
               <div className="min-w-0">
                 <p className="font-mono text-[12.5px] text-zinc-100">{provider.envVar}</p>
                 <p className="mt-0.5 font-mono text-[12px] text-zinc-500">{provider.keyStatus.maskedKey}</p>
+                {(provider.keyStatus.verification === 'rejected' || provider.keyStatus.verification === 'unreachable') &&
+                  provider.keyStatus.verificationDetail && (
+                    <p className="mt-1 text-[12px] leading-[18px] text-amber-200/80">{provider.keyStatus.verificationDetail}</p>
+                  )}
               </div>
-              <StatusDot tone="operational" label="Stored" />
+              <StatusDot tone={keyVerificationBadge(provider.keyStatus).tone} label={keyVerificationBadge(provider.keyStatus).label} />
             </div>
           ) : (
             <div className="rounded-[10px] border border-dashed border-white/[0.10]">
@@ -860,7 +887,7 @@ export function IntegrationsPanel() {
       if (!res.ok) { setFetchError(true); return }
       const { integrations, keyVault } = await res.json() as {
         integrations: Record<string, { enabled: boolean }>
-        keyVault: Record<string, { maskedKey: string; connectedAt: string }>
+        keyVault: Record<string, KeyVaultStatus>
       }
 
       setFetchError(false)
