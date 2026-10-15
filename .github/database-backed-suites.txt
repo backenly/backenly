@@ -869,6 +869,13 @@ tests/integration/integrations-connect-contract.spec.ts
 # Real provisioned projects (encrypted secrets) and real users are the property.
 tests/integration/end-user-session-tokens.spec.ts
 
+# Presence identity is bound to the caller's sign-in on both runtimes: the
+# public key alone or a mismatched X-User-Token can no longer mark another
+# user online or kick them offline, while self, and service-role callers,
+# still work. Real key rows, real tokens and the real workspace presence
+# table are the property.
+tests/integration/presence-identity-binding.spec.ts
+
 # A key bound to a preview branch is refused by every runtime surface that is
 # not branch-scoped, at both doors (the Express app and recordedV1), and the
 # data plane says which environment answered. Mount order against real key and
