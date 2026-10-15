@@ -25,6 +25,7 @@
 
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3'
 import { UploadRejectedError, assertFileAllowed, assertFileSize, uploadExtension } from '@/lib/storage/upload-policy'
+import { clampIsPublic } from '@/lib/storage/access-policy'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import { prisma } from '@/lib/db'
 import crypto from 'crypto'
@@ -263,6 +264,7 @@ export class S3StorageService implements StorageService {
         name: true,
         projectId: true,
         isPublic: true,
+        accessPolicy: true,
         allowedMimeTypes: true,
         allowedExtensions: true,
         blockExecutables: true,
@@ -440,7 +442,15 @@ export class S3StorageService implements StorageService {
           path: s3Key, // S3 key is stored as path
           size: BigInt(file.buffer.length),
           mimeType: detectedMimeType || null,
-          isPublic: options?.isPublic ?? bucket.isPublic,
+          // The bucket's policy is the ceiling at WRITE time, exactly as in
+          // the local driver: a caller-supplied `true` must not plant a
+          // world-readable row in a private bucket and leave the serving
+          // path to quietly clean up after it. This driver is the one Cloud
+          // runs, and it was the only writer without the clamp.
+          isPublic: clampIsPublic(
+            options?.isPublic,
+            bucket.accessPolicy ?? (bucket.isPublic ? 'public_read' : 'private'),
+          ),
           projectId: options.projectId,
           uploadedBy: options?.uploadedBy || null,
         },

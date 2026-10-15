@@ -867,6 +867,13 @@ tests/integration/key-lifecycle-honesty.spec.ts
 # typed call with send_push naming what is missing. Real vault rows are the
 # property; PostHog (stored-unverifiable) keeps CI off external APIs.
 tests/integration/integrations-connect-contract.spec.ts
+# The storage runtime is correct on both drivers: the S3 driver clamps a
+# requested isPublic to the bucket policy at write time like the local one,
+# multipart complete leaves exactly one real row and counts the bytes once,
+# the signed-upload fallback plants no phantom row, and metadata answers from
+# the row without fetching the object. Real buckets, rows and chunk files are
+# the property; only the S3 network call is stubbed.
+tests/integration/storage-runtime-correctness.spec.ts
 # "Already up to date" is decided by a hash of the live catalog, recorded on
 # the Deployment row, never by the graph pointer the MCP schema path does not
 # move: an agent ALTER publishes a new version, an unchanged catalog is a
