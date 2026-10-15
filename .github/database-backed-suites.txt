@@ -1082,3 +1082,11 @@ tests/integration/model-spend-on-every-tool.spec.ts
 # Real function, log and workspace rows are the property, so it needs a real
 # Postgres.
 tests/integration/functions-runtime-honesty.spec.ts
+
+# Agent credentials are managed in one place: Settings, API keys lists the
+# app's keys only (never an MCP key or a browser-authorised agent connection),
+# and the Disconnect the Agents tab offers ends a real OAuth connection, its
+# access token refused and its refresh token gone. Real key rows, a real OAuth
+# token exchange and a platform session are the property, so it needs a real
+# Postgres.
+tests/integration/agent-connections-revocable.spec.ts
