@@ -21,6 +21,8 @@ import { prisma } from '@/lib/db/prisma'
 import {
   storeIntegrationKey,
   listKeyVaultStatuses,
+  removeIntegrationKey,
+  canonicalVaultId,
 } from '@/lib/services/integrationKeyStore'
 
 // ── GET — list all stored keys (masked) ───────────────────────────────────────
@@ -123,9 +125,10 @@ export const DELETE = withProjectAccess(async (req: NextRequest, { projectId }) 
     )
   }
 
-  await prisma.projectIntegrationKey.deleteMany({
-    where: { projectId, integrationId },
-  })
+  // The key and any legacy alias row beside it. Deleting the exact id alone
+  // left `stripe_secret_key`, which the runtime still read as Stripe's key.
+  const vaultId = canonicalVaultId(integrationId)
+  await removeIntegrationKey(projectId, vaultId)
 
   // The dashboard derives "Connected" from activeIntegrations[id].enabled,
   // which only the connect paths wrote — without this, a removed key kept
@@ -136,14 +139,14 @@ export const DELETE = withProjectAccess(async (req: NextRequest, { projectId }) 
       select: { activeIntegrations: true },
     })
     const active = (proj?.activeIntegrations as Record<string, any>) ?? {}
-    if (active[integrationId]) {
+    if (active[vaultId]) {
       await prisma.project.update({
         where: { id: projectId },
         data: {
           activeIntegrations: {
             ...active,
-            [integrationId]: {
-              ...active[integrationId],
+            [vaultId]: {
+              ...active[vaultId],
               enabled: false,
               disconnectedAt: new Date().toISOString(),
             },
@@ -160,7 +163,7 @@ export const DELETE = withProjectAccess(async (req: NextRequest, { projectId }) 
       projectId,
       action: 'INTEGRATION_KEY_REMOVED',
       type: 'integration',
-      details: JSON.stringify({ integrationId }),
+      details: JSON.stringify({ integrationId: vaultId }),
       timestamp: new Date(),
     },
   }).catch(() => {})
