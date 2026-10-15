@@ -116,12 +116,10 @@ export class DatabaseBrain {
       
       console.log(`📊 Analyzing PostgreSQL schemas:`, schemasToAnalyze)
       
-      // Verify schemas exist
-      const allSchemas = await HybridDatabase.listSchemas('postgresql')
-      console.log(`📋 Available schemas:`, allSchemas)
-      
       for (const projectSchema of schemasToAnalyze) {
-        if (!allSchemas.includes(projectSchema)) {
+        // Asked of the project's own database, in its region, rather than
+        // listing (and logging) every schema in the platform database.
+        if (!(await HybridDatabase.schemaExists(projectId, projectSchema))) {
           console.warn(`⚠️ Schema not found: ${projectSchema}`)
           continue
         }
@@ -129,7 +127,7 @@ export class DatabaseBrain {
         // Get tables ONLY in this schema
         console.log(`🔍 Fetching tables for schema: ${projectSchema}...`)
         const startTime = Date.now()
-        const tables = await HybridDatabase.listTables('postgresql', projectSchema)
+        const tables = await HybridDatabase.listTables(projectId, 'postgresql', projectSchema)
         const duration = Date.now() - startTime
         console.log(`📊 Found ${tables.length} tables in ${projectSchema} (took ${duration}ms)`)
         
@@ -144,17 +142,18 @@ export class DatabaseBrain {
           // SAFE MODE: Schema-only analysis (no row scanning)
           if (mode === 'safe') {
             // Check for missing indexes on foreign keys (metadata only)
-            const missingIndexIssues = await this.checkMissingIndexes(projectSchema, table.name)
+            const missingIndexIssues = await this.checkMissingIndexes(projectId, projectSchema, table.name)
             issues.push(...missingIndexIssues)
 
             // Check for tables without primary keys (metadata only)
-            const pkIssues = await this.checkPrimaryKeys(projectSchema, table.name)
+            const pkIssues = await this.checkPrimaryKeys(projectId, projectSchema, table.name)
             issues.push(...pkIssues)
           }
 
           // DEEP MODE: Includes row count analysis (opt-in only)
           if (mode === 'deep' && table.rows && table.rows > 1000) {
             const largeTableIssues = await this.checkLargeTableIndexes(
+              projectId,
               projectSchema,
               table.name,
               table.rows
@@ -247,7 +246,7 @@ export class DatabaseBrain {
       // Get PostgreSQL tables from project schema ONLY
       const pgTables: string[] = []
       try {
-        const tables = await HybridDatabase.listTables('postgresql', projectSchema)
+        const tables = await HybridDatabase.listTables(projectId, 'postgresql', projectSchema)
         pgTables.push(...tables.map(t => `${projectSchema}.${t.name}`))
       } catch (error) {
         console.warn(`No PostgreSQL schema for project ${projectId}`)
@@ -292,15 +291,15 @@ export class DatabaseBrain {
   /**
    * Check for missing indexes on columns that might need them
    */
-  private static async checkMissingIndexes(schema: string, tableName: string): Promise<DetectedIssue[]> {
+  private static async checkMissingIndexes(projectId: string, schema: string, tableName: string): Promise<DetectedIssue[]> {
     const issues: DetectedIssue[] = []
 
     try {
       // Get table structure
-      const structure = await HybridDatabase.getStructure('postgresql', schema, tableName)
+      const structure = await HybridDatabase.getStructure(projectId, 'postgresql', schema, tableName)
       
       // Get existing indexes
-      const indexes = await HybridDatabase.getTableIndexes(schema, tableName)
+      const indexes = await HybridDatabase.getTableIndexes(projectId, schema, tableName)
       const indexedColumns = new Set<string>()
       
       for (const index of indexes) {
@@ -376,11 +375,11 @@ export class DatabaseBrain {
   /**
    * Check for tables without primary keys
    */
-  private static async checkPrimaryKeys(schema: string, tableName: string): Promise<DetectedIssue[]> {
+  private static async checkPrimaryKeys(projectId: string, schema: string, tableName: string): Promise<DetectedIssue[]> {
     const issues: DetectedIssue[] = []
 
     try {
-      const structure = await HybridDatabase.getStructure('postgresql', schema, tableName)
+      const structure = await HybridDatabase.getStructure(projectId, 'postgresql', schema, tableName)
       const hasPrimaryKey = structure.some(col => col.primary)
 
       if (!hasPrimaryKey) {
@@ -407,12 +406,12 @@ export class DatabaseBrain {
   /**
    * Check large tables for missing indexes
    */
-  private static async checkLargeTableIndexes(schema: string, tableName: string, rowCount: number): Promise<DetectedIssue[]> {
+  private static async checkLargeTableIndexes(projectId: string, schema: string, tableName: string, rowCount: number): Promise<DetectedIssue[]> {
     const issues: DetectedIssue[] = []
 
     try {
-      const structure = await HybridDatabase.getStructure('postgresql', schema, tableName)
-      const indexes = await HybridDatabase.getTableIndexes(schema, tableName)
+      const structure = await HybridDatabase.getStructure(projectId, 'postgresql', schema, tableName)
+      const indexes = await HybridDatabase.getTableIndexes(projectId, schema, tableName)
       const indexedColumns = new Set<string>()
       
       for (const index of indexes) {

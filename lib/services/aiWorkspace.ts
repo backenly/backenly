@@ -1,6 +1,7 @@
 import { projectWorkspaceDir } from '@/lib/workspace/paths'
 import OpenAI from 'openai'
 import { prisma } from '@/lib/db'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { chat } from '@/lib/ai/llm/chat'
 
 export interface BackendChangePlan {
@@ -71,15 +72,19 @@ export async function getProjectContext(projectId?: string): Promise<ProjectCont
   let schemaTables: Array<{ name: string; columns: Array<{ name: string; type: string; nullable: boolean }> }> = []
   
   if (projectId) {
+    // The database holding the project's data, in its region. Resolved outside
+    // the try below: a region this process cannot reach must not read as a
+    // project with no tables.
+    const db = await workspaceRawClient(projectId)
     try {
       // Import workspace database utilities
       const { getWorkspaceDatabaseNames } = await import('./databaseProvisioning')
       const { HybridDatabase } = await import('../db/hybrid')
-      
+
       const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
-      
+
       // Query ACTUAL tables from workspace schema
-      const actualTables = await prisma.$queryRawUnsafe<Array<{ table_name: string }>>(
+      const actualTables = await db.$queryRawUnsafe<Array<{ table_name: string }>>(
         `SELECT table_name FROM information_schema.tables WHERE table_schema = '${postgresSchema}' AND table_type = 'BASE TABLE' ORDER BY table_name`
       )
       
@@ -87,7 +92,7 @@ export async function getProjectContext(projectId?: string): Promise<ProjectCont
       schemaTables = await Promise.all(
         actualTables.map(async (table) => {
           try {
-            const structure = await HybridDatabase.getStructure('postgresql', postgresSchema, table.table_name)
+            const structure = await HybridDatabase.getStructure(projectId, 'postgresql', postgresSchema, table.table_name)
             return {
               name: table.table_name,
               columns: structure.map(col => ({

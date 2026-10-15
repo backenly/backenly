@@ -68,7 +68,7 @@ export const GET = withProjectAccess(async (request: NextRequest, { user, projec
       })
     } else {
       // Use default Prisma client for platform schemas
-      indexes = await PostgresService.getTableIndexes(validated.schema, validated.table)
+      indexes = await PostgresService.getTableIndexes(projectId, validated.schema, validated.table)
     }
 
     return NextResponse.json({

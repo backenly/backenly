@@ -26,6 +26,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { Client } from 'pg'
 import { prisma } from '@/lib/db'
 import { disconnectRegionalClients, projectRegion, workspaceRawClient } from '@/lib/data-plane/regional'
+import { PostgresService } from '@/lib/db/hybrid'
 import { functionDbClient, functionRoleName, provisionFunctionRole } from '@/lib/services/ai-functions/function-db-role'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
 import { closeAllWorkspacePools, queryWorkspace } from '@/lib/services/workspace-pool'
@@ -254,6 +255,40 @@ describe('the shared helpers that run a project’s SQL', () => {
   it('refuse a regional function login when this process cannot reach the region', async () => {
     delete process.env[REGION_VARIABLE]
     await expect(functionDbClient(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+  })
+})
+
+describe('schema introspection reads the project’s own database', () => {
+  // Each answer below exists only in the regional database: a misrouted read
+  // would find no schema, no tables and no columns rather than these.
+  it('finds a regional project’s schema, tables and columns in its region', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const schema = schemaOf(regionalProject)
+
+    expect(await PostgresService.schemaExists(regionalProject, schema)).toBe(true)
+    const tables = await PostgresService.listTables(regionalProject, schema)
+    expect(tables.map((t) => t.name)).toEqual(['marker'])
+    const columns = await PostgresService.getTableStructure(regionalProject, schema, 'marker')
+    expect(columns.map((c) => c.name)).toEqual(['note'])
+  })
+
+  it('still reads a home project’s schema in the home database', async () => {
+    const schema = schemaOf(homeProject)
+    expect(await PostgresService.schemaExists(homeProject, schema)).toBe(true)
+    expect((await PostgresService.listTables(homeProject, schema)).map((t) => t.name)).toEqual(['marker'])
+    // The regional project's schema is not in the home database at all.
+    expect(await PostgresService.schemaExists(homeProject, schemaOf(regionalProject))).toBe(false)
+  })
+
+  it('refuses to introspect a regional project without a connection', async () => {
+    delete process.env[REGION_VARIABLE]
+    const schema = schemaOf(regionalProject)
+    await expect(PostgresService.schemaExists(regionalProject, schema)).rejects.toMatchObject({
+      code: 'REGION_NOT_CONFIGURED',
+    })
+    await expect(PostgresService.getTableStructure(regionalProject, schema, 'marker')).rejects.toMatchObject({
+      code: 'REGION_NOT_CONFIGURED',
+    })
   })
 })
 

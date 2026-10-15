@@ -23,7 +23,7 @@
  */
 
 import { z, ZodTypeAny } from 'zod'
-import { prisma } from '@/lib/db/prisma'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 
 const CACHE_TTL_MS = 60_000   // Refresh schema cache every 60s
 
@@ -127,8 +127,10 @@ function buildZodTypeForColumn(col: ColumnMeta): ZodTypeAny | null {
 
 async function loadColumns(projectId: string, tableName: string): Promise<ColumnMeta[]> {
   const schemaName = `workspace_${projectId}`
+  // The catalog of the database holding the project's data, in its region.
+  const db = await workspaceRawClient(projectId)
 
-  const rows = await prisma.$queryRawUnsafe<{
+  const rows = await db.$queryRawUnsafe<{
     column_name: string
     data_type: string
     udt_name: string
@@ -152,7 +154,7 @@ async function loadColumns(projectId: string, tableName: string): Promise<Column
   )
 
   // Primary keys
-  const pkRows = await prisma.$queryRawUnsafe<{ column_name: string }[]>(
+  const pkRows = await db.$queryRawUnsafe<{ column_name: string }[]>(
     `SELECT kcu.column_name
      FROM information_schema.table_constraints tc
      JOIN information_schema.key_column_usage kcu

@@ -14,6 +14,7 @@
  */
 
 import { prisma } from '@/lib/db'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 import * as Sentry from '@sentry/nextjs'
 import crypto from 'crypto'
 
@@ -426,7 +427,9 @@ async function executeInsertRow(
     VALUES (${placeholders})
   `
 
-  await prisma.$executeRawUnsafe(sql, ...values)
+  // On the database holding the project's data, in its region.
+  const db = await workspaceRawClient(projectId)
+  await db.$executeRawUnsafe(sql, ...values)
 
   console.log(`[Triggers] ✅ Inserted row into "${trigger.targetTable}" via trigger "${trigger.name}"`)
 
@@ -480,7 +483,9 @@ async function executeUpdateRow(
     WHERE ${whereClauses.join(' AND ')}
   `
 
-  await prisma.$executeRawUnsafe(sql, ...setValues, ...whereValues)
+  // On the database holding the project's data, in its region.
+  const db = await workspaceRawClient(projectId)
+  await db.$executeRawUnsafe(sql, ...setValues, ...whereValues)
 
   console.log(`[Triggers] ✅ Updated rows in "${trigger.targetTable}" via trigger "${trigger.name}"`)
 
@@ -522,7 +527,9 @@ async function executeDeleteRows(
     WHERE ${whereClauses.join(' AND ')}
   `
 
-  await prisma.$executeRawUnsafe(sql, ...values)
+  // On the database holding the project's data, in its region.
+  const db = await workspaceRawClient(projectId)
+  await db.$executeRawUnsafe(sql, ...values)
 
   console.log(`[Triggers] ✅ Deleted rows from "${trigger.targetTable}" via trigger "${trigger.name}"`)
 

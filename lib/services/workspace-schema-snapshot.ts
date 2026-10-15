@@ -327,7 +327,9 @@ export async function rollbackToSchemaVersion(
   const start = Date.now()
 
   try {
-    const { prisma } = await import('@/lib/db/prisma')
+    // The rollback DDL runs on the database holding the project's data, in its region.
+    const { workspaceRawClient } = await import('@/lib/data-plane/regional')
+    const db = await workspaceRawClient(projectId)
     const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
 
     const targetSnapshot = await getSchemaSnapshot(projectId, targetVersionNum)
@@ -349,7 +351,7 @@ export async function rollbackToSchemaVersion(
 
     let appliedSteps = 0
     for (const sql of rollbackSteps) {
-      await prisma.$executeRawUnsafe(sql)
+      await db.$executeRawUnsafe(sql)
       appliedSteps++
     }
 
@@ -379,10 +381,12 @@ async function readLiveSchema(
   projectId: string,
   postgresSchema: string,
 ): Promise<TableSnapshot[]> {
-  const { prisma } = await import('@/lib/db/prisma')
+  // The catalog of the database holding the project's data, in its region.
+  const { workspaceRawClient } = await import('@/lib/data-plane/regional')
+  const db = await workspaceRawClient(projectId)
 
   // ── Get all tables in the schema ──────────────────────────────────────────
-  const tableRows = await prisma.$queryRawUnsafe<Array<{ table_name: string }>>(
+  const tableRows = await db.$queryRawUnsafe<Array<{ table_name: string }>>(
     `SELECT table_name FROM information_schema.tables
      WHERE table_schema = $1 AND table_type = 'BASE TABLE'
      ORDER BY table_name`,
@@ -393,7 +397,7 @@ async function readLiveSchema(
 
   for (const { table_name } of tableRows) {
     // ── Columns ───────────────────────────────────────────────────────────
-    const colRows = await prisma.$queryRawUnsafe<Array<{
+    const colRows = await db.$queryRawUnsafe<Array<{
       column_name: string
       data_type: string
       is_nullable: string
@@ -407,7 +411,7 @@ async function readLiveSchema(
       table_name,
     )
 
-    const primaryKeyRows = await prisma.$queryRawUnsafe<Array<{ column_name: string }>>(
+    const primaryKeyRows = await db.$queryRawUnsafe<Array<{ column_name: string }>>(
       `SELECT kcu.column_name
        FROM information_schema.table_constraints tc
        JOIN information_schema.key_column_usage kcu
@@ -428,7 +432,7 @@ async function readLiveSchema(
     }))
 
     // ── Indexes ───────────────────────────────────────────────────────────
-    const idxRows = await prisma.$queryRawUnsafe<Array<{
+    const idxRows = await db.$queryRawUnsafe<Array<{
       indexname: string
       indexdef: string
     }>>(
@@ -440,7 +444,7 @@ async function readLiveSchema(
 
     // Indexes owned by a constraint (PK/UNIQUE) — DROP INDEX cannot touch
     // these, so the rollback DDL engine needs to know which they are.
-    const conIdxRows = await prisma.$queryRawUnsafe<Array<{ relname: string }>>(
+    const conIdxRows = await db.$queryRawUnsafe<Array<{ relname: string }>>(
       `SELECT ci.relname FROM pg_constraint con
        JOIN pg_class ci ON ci.oid = con.conindid
        JOIN pg_class c  ON c.oid  = con.conrelid
@@ -460,7 +464,7 @@ async function readLiveSchema(
     }))
 
     // ── Foreign keys ──────────────────────────────────────────────────────
-    const fkRows = await prisma.$queryRawUnsafe<Array<{
+    const fkRows = await db.$queryRawUnsafe<Array<{
       constraint_name: string
       column_name: string
       foreign_table_name: string
@@ -495,7 +499,7 @@ async function readLiveSchema(
     }))
 
     // ── Row estimate ──────────────────────────────────────────────────────
-    const countRows = await prisma.$queryRawUnsafe<Array<{ reltuples: bigint | number }>>(
+    const countRows = await db.$queryRawUnsafe<Array<{ reltuples: bigint | number }>>(
       `SELECT reltuples::bigint AS reltuples FROM pg_class c
        JOIN pg_namespace n ON n.oid = c.relnamespace
        WHERE n.nspname = $1 AND c.relname = $2`,
@@ -510,7 +514,7 @@ async function readLiveSchema(
     // ── RLS state + policies ──────────────────────────────────────────────
     // These are the objects SET_PERMISSION creates. Without capturing them,
     // one-click undo of an RLS fix is structurally impossible.
-    const rlsRows = await prisma.$queryRawUnsafe<Array<{ relrowsecurity: boolean }>>(
+    const rlsRows = await db.$queryRawUnsafe<Array<{ relrowsecurity: boolean }>>(
       `SELECT c.relrowsecurity FROM pg_class c
        JOIN pg_namespace n ON n.oid = c.relnamespace
        WHERE n.nspname = $1 AND c.relname = $2`,
@@ -519,7 +523,7 @@ async function readLiveSchema(
     )
     const rlsEnabled = rlsRows[0]?.relrowsecurity === true
 
-    const polRows = await prisma.$queryRawUnsafe<Array<{
+    const polRows = await db.$queryRawUnsafe<Array<{
       policyname: string
       permissive: string
       roles: string[] | string
@@ -547,7 +551,7 @@ async function readLiveSchema(
 
     // ── User triggers (NOT tgisinternal — excludes FK/PK machinery) ───────
     // These are the objects FIX_REALTIME creates (NOTIFY triggers).
-    const trgRows = await prisma.$queryRawUnsafe<Array<{ tgname: string; def: string }>>(
+    const trgRows = await db.$queryRawUnsafe<Array<{ tgname: string; def: string }>>(
       `SELECT t.tgname, pg_get_triggerdef(t.oid) AS def
        FROM pg_trigger t
        JOIN pg_class c ON c.oid = t.tgrelid
