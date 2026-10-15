@@ -21,8 +21,8 @@ import {
   Shield, Rocket, Upload, Database, Code, AlertTriangle,
 } from 'lucide-react'
 import {
-  getMetrics, getStats, getAnomalies, getActiveIncidents, getPerformanceBreakdown,
-  type DataPoint, type MetricStats, type Anomaly, type Incident, type PerformanceBreakdown,
+  getMetrics, getStats, getActiveIncidents, getPerformanceBreakdown,
+  type DataPoint, type MetricStats, type Incident, type PerformanceBreakdown,
 } from '@/lib/api/monitoring'
 import {
   CommandBar, EmptyState, IconButton, KIT, KitButton, KitTab, KitTabs, NoticeStrip, Segmented, Spinner, StatusDot,
@@ -47,9 +47,12 @@ export function MonitoringWorkbench({ projectId }: { projectId: string }) {
   const [activeView, setActiveView] = useState<'overview' | 'performance' | 'logs'>('overview')
 
   const [metrics, setMetrics] = useState<MetricStats | null>(null)
+  // A failed stats fetch is NOT zero traffic. When this is set, the strip
+  // keeps its last known values and a banner says so, instead of rendering
+  // fabricated zeros that read as "healthy and quiet".
+  const [loadFailed, setLoadFailed] = useState(false)
   const [responseTimeData, setResponseTimeData] = useState<DataPoint[]>([])
   const [requestVolumeData, setRequestVolumeData] = useState<DataPoint[]>([])
-  const [anomalies, setAnomalies] = useState<Anomaly[]>([])
   const [, setIncidents] = useState<Incident[]>([])
   const [performanceBreakdowns, setPerformanceBreakdowns] = useState<PerformanceBreakdown[]>([])
   const [isBackendLive, setIsBackendLive] = useState<boolean | null>(null)
@@ -87,9 +90,8 @@ export function MonitoringWorkbench({ projectId }: { projectId: string }) {
       }
       setRefreshing(true)
 
-      const [statsData, anomaliesData, incidentsData, eventsData, requestLogsData] = await Promise.all([
+      const [statsData, incidentsData, eventsData, requestLogsData] = await Promise.all([
         getStats(timeRange, projectId).catch(() => null),
-        getAnomalies(10, projectId).catch(() => []),
         getActiveIncidents(projectId).catch(() => []),
         fetch(`/api/monitoring/events?projectId=${projectId}&limit=8`)
           .then((res) => (res.ok ? res.json() : { events: [] }))
@@ -107,35 +109,23 @@ export function MonitoringWorkbench({ projectId }: { projectId: string }) {
         getPerformanceBreakdown(timeRange, 'api', projectId).catch(() => []),
       ])
 
-      setMetrics(
-        statsData ?? {
-          responseTime: { value: 0, change: 0, status: 'healthy' },
-          requests: { value: 0, change: 0, status: 'healthy' },
-          errors: { value: 0, change: 0, status: 'healthy' },
-          uptime: { value: 0, change: 0, status: 'healthy' },
-        }
-      )
+      // A null statsData means /api/monitoring/stats FAILED (getStats throws
+      // on any non-2xx). That is not a measurement of zero — keep whatever
+      // the strip last showed and raise the banner instead of forging zeros.
+      setLoadFailed(statsData === null)
+      if (statsData) setMetrics(statsData)
       setResponseTimeData(responseTime)
       setRequestVolumeData(requestVolume)
       setPerformanceBreakdowns(apiPerformance)
-      setAnomalies(anomaliesData)
       setIncidents(incidentsData)
       setSystemEvents(eventsData.map((event: any) => ({ ...event, icon: getIconForEventType(event.type) })))
       setRequestLog(requestLogsData)
     } catch (error: any) {
       console.error('Error fetching monitoring data:', error)
-      setMetrics({
-        responseTime: { value: 0, change: 0, status: 'healthy' },
-        requests: { value: 0, change: 0, status: 'healthy' },
-        errors: { value: 0, change: 0, status: 'healthy' },
-        uptime: { value: 0, change: 0, status: 'healthy' },
-      })
-      setResponseTimeData([])
-      setRequestVolumeData([])
-      setPerformanceBreakdowns([])
-      setAnomalies([])
-      setIncidents([])
-      setRequestLog([])
+      // Same principle: an exception is a failed read, not empty data. Keep
+      // the last known values on screen, visibly flagged, rather than
+      // replacing them with zeros indistinguishable from a quiet backend.
+      setLoadFailed(true)
     } finally {
       setLoading(false)
       setRefreshing(false)
@@ -264,7 +254,7 @@ export function MonitoringWorkbench({ projectId }: { projectId: string }) {
   // Traffic that arrives before publishing (tests, a local frontend, an agent
   // exercising endpoints) is real, so it is shown rather than hidden behind
   // this state while the strip above reports it.
-  if (isBackendLive === false && !hasTraffic && requestLog.length === 0) {
+  if (isBackendLive === false && !hasTraffic && requestLog.length === 0 && !loadFailed) {
     return shell(
       <div className="flex h-full w-full flex-col items-center justify-center overflow-y-auto px-6">
         <EmptyState
@@ -344,6 +334,20 @@ export function MonitoringWorkbench({ projectId }: { projectId: string }) {
     <>
       {/* Main column — charts band on top, request log takes the rest */}
       <div className="flex min-w-0 flex-1 flex-col">
+        {loadFailed && (
+          <NoticeStrip
+            icon={AlertTriangle}
+            tone="danger"
+            action={
+              <KitButton size="sm" onClick={() => fetchData()}>
+                Retry
+              </KitButton>
+            }
+          >
+            <strong>Monitoring data could not be loaded.</strong> The numbers shown are the last
+            known values, not a measurement of zero traffic.
+          </NoticeStrip>
+        )}
         {isBackendLive === false && (
           <NoticeStrip
             icon={Rocket}
@@ -447,46 +451,19 @@ export function MonitoringWorkbench({ projectId }: { projectId: string }) {
         </div>
       </div>
 
-      {/* Right rail — anomalies and system events stay visible beside the log */}
+      {/* Right rail — system events stay visible beside the log. There is no
+          anomalies section: no detector writes the Anomaly store from
+          monitoring (unusual behaviour is the autonomy loop's job and
+          surfaces on the Autonomy page), and rendering a rail that nothing
+          can ever populate claimed a capability this page does not have. */}
       <div className={`hidden w-[300px] flex-shrink-0 flex-col border-l border-white/[0.06] xl:flex ${KIT.rail}`}>
         <div className="flex h-[44px] flex-shrink-0 items-center justify-between border-b border-white/[0.06] px-4">
-          <span className="text-[13px] font-medium text-zinc-200">Signals</span>
-          {anomalies.length > 0 && (
-            <StatusDot tone="attention" label={`${anomalies.length} ${anomalies.length === 1 ? 'anomaly' : 'anomalies'}`} />
-          )}
+          <span className="text-[13px] font-medium text-zinc-200">System events</span>
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto">
-          {anomalies.length > 0 && (
-            <section className="border-b border-white/[0.06]">
-              <h3 className="px-4 pb-1 pt-4 text-[12px] font-medium text-zinc-500">Anomalies</h3>
-              <ul className="divide-y divide-white/[0.05]">
-                {anomalies.map((anomaly) => (
-                  <li key={anomaly.id} className="px-4 py-3">
-                    <div className="mb-1 flex items-center justify-between gap-2">
-                      <span className="flex min-w-0 items-center gap-2">
-                        <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0 text-amber-300" strokeWidth={1.75} />
-                        <span className="truncate text-[13px] font-medium text-zinc-100">{anomaly.metric}</span>
-                      </span>
-                      <span className="flex-shrink-0 text-[12.5px] tabular-nums text-amber-200">
-                        {anomaly.type === 'spike' ? '+' : '−'}
-                        {Math.abs(anomaly.deviation).toFixed(0)}%
-                      </span>
-                    </div>
-                    <p className="text-[12.5px] leading-[19px] text-zinc-400">{anomaly.explanation}</p>
-                    <p className="mt-1.5 text-[12px] tabular-nums text-zinc-500">
-                      Expected {anomaly.expectedValue}, saw <span className="text-zinc-300">{anomaly.value}</span>
-                      <span className="text-zinc-700"> · </span>
-                      {new Date(anomaly.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                    </p>
-                  </li>
-                ))}
-              </ul>
-            </section>
-          )}
-
           <section>
-            <h3 className="px-4 pb-1 pt-4 text-[12px] font-medium text-zinc-500">System events</h3>
+            <h3 className="sr-only">System events</h3>
             {systemEvents.length === 0 ? (
               <p className="px-4 pb-4 pt-1 text-[12.5px] leading-[19px] text-zinc-500">
                 Deploys, incidents and significant changes land here as they happen.

@@ -491,7 +491,7 @@ await backend.auth.signIn({ email, password })
     summary:
       'Monitoring shows how your backend is behaving: how many requests it serves, how fast it answers and how often it fails. It breaks the numbers down by endpoint and keeps a searchable log of every request.',
     metaDescription:
-      'What Monitoring shows: request volume, latency, success rate and reliability, per-endpoint p95 latency and error rates, anomalies, and a searchable request log.',
+      'What Monitoring shows: request volume, latency, success rate and reliability, per-endpoint p95 latency and error rates, system events, and a searchable request log.',
     why:
       'When a user says the app is slow or broken, you need to know whether the backend agrees: which endpoint, since when, and with what error. Without monitoring that means guessing, or adding logging after the fact and waiting for it to happen again. Monitoring records it from the first request, so the evidence is already there when you need it.',
     examples: [
@@ -514,8 +514,8 @@ await backend.auth.signIn({ email, password })
         body: 'Traffic, p95 latency and error rate per endpoint, so a slow or failing route stands out.',
       },
       {
-        title: 'Unusual behaviour is flagged',
-        body: 'Anomalies and system events appear beside the charts. Problems that need a decision go to Autonomy.',
+        title: 'System events sit beside the log',
+        body: 'Deploys, incidents and significant changes appear next to the charts. Unusual behaviour is the autonomy loop’s job: problems that need a decision surface on Autonomy.',
       },
     ],
     prompts: ['Is anything in my backend failing right now? Show me the errors grouped by endpoint.'],
