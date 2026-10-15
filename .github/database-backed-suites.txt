@@ -886,6 +886,11 @@ tests/integration/storage-files-pagination.spec.ts
 # Real provisioned projects (encrypted secrets) and real users are the property.
 tests/integration/end-user-session-tokens.spec.ts
 
+# Blocking an end user stops their EXISTING token at request time on both
+# data doors (the promised 403), unblocking restores it, and a legacy
+# workspace without is_blocked keeps serving. Real workspace users tables,
+# real tokens and a real key row are the property.
+tests/integration/blocked-end-user-tokens.spec.ts
 # Presence identity is bound to the caller's sign-in on both runtimes: the
 # public key alone or a mismatched X-User-Token can no longer mark another
 # user online or kick them offline, while self, and service-role callers,

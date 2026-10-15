@@ -17,6 +17,8 @@ interface RlsIdentity {
   userId: string
   isServiceRole: boolean
   role: string
+  /** The token belonged to a user the owner blocked — the request must 403. */
+  blocked?: boolean
 }
 
 /**
@@ -32,8 +34,18 @@ async function resolveRlsIdentity(req: Request, projectId: string, serviceRole: 
     projectId,
     req.headers['x-user-token'] as string | undefined,
   )
+  // A blocked user gets the promised 403, never a silent downgrade to the
+  // anonymous identity — public-readable tables would still serve them.
+  if (endUser === 'blocked') return { userId: '', isServiceRole: false, role: 'user', blocked: true }
   if (endUser) return { userId: endUser.userId, isServiceRole: false, role: endUser.role }
   return { userId: '', isServiceRole: false, role: 'user' }
+}
+
+/** Answer the promised 403 for a blocked end-user; true when the request is done. */
+function refuseIfBlocked(res: Response, rls: RlsIdentity): boolean {
+  if (!rls.blocked) return false
+  sendError(res, ErrorCodes.FORBIDDEN, 'This account has been blocked by the project owner.', 403)
+  return true
 }
 
 // ── Schemas ────────────────────────────────────────────────────────────────────
@@ -148,6 +160,7 @@ router.post('/:projectId/database/query', asyncRoute(v1AuthMiddleware), asyncRou
     const dataSql  = `SELECT * FROM "${schemaName}"."${tableName}" ${whereClause} ${orderByClause} LIMIT ${Number(limit)} OFFSET ${Number(offset)}`
 
     const rls = await resolveRlsIdentity(req, ctx.projectId, ctx.apiKey.serviceRole)
+    if (refuseIfBlocked(res, rls)) return
     const [countResult, rows] = await Promise.all([
       executeWithUserContext<{ count: number }>(ctx.projectId, rls.userId, rls.isServiceRole, countSql, whereValues, rls.role),
       executeWithUserContext<any>(ctx.projectId, rls.userId, rls.isServiceRole, dataSql, whereValues, rls.role),
@@ -207,6 +220,7 @@ router.post('/:projectId/database/insert', asyncRoute(v1AuthMiddleware), asyncRo
     const inserted: any[] = []
 
     const rls = await resolveRlsIdentity(req, ctx.projectId, ctx.apiKey.serviceRole)
+    if (refuseIfBlocked(res, rls)) return
     for (const row of rows) {
       const cols = Object.keys(row).filter(c => /^[a-z_][a-z0-9_]*$/i.test(c))
       if (cols.length === 0) continue
@@ -282,6 +296,7 @@ router.post('/:projectId/database/update', asyncRoute(v1AuthMiddleware), asyncRo
 
     const sql = `UPDATE "${schemaName}"."${tableName}" SET ${setParts.join(', ')} ${whereClause} RETURNING *`
     const rls = await resolveRlsIdentity(req, ctx.projectId, ctx.apiKey.serviceRole)
+    if (refuseIfBlocked(res, rls)) return
     const result = await executeWithUserContext<any>(ctx.projectId, rls.userId, rls.isServiceRole, sql, values, rls.role)
 
     if (result.length > 0) {
@@ -339,6 +354,7 @@ router.post('/:projectId/database/delete', asyncRoute(v1AuthMiddleware), asyncRo
 
     const sql = `DELETE FROM "${schemaName}"."${tableName}" ${whereClause} RETURNING id`
     const rls = await resolveRlsIdentity(req, ctx.projectId, ctx.apiKey.serviceRole)
+    if (refuseIfBlocked(res, rls)) return
     const result = await executeWithUserContext<any>(ctx.projectId, rls.userId, rls.isServiceRole, sql, values, rls.role)
 
     if (result.length > 0) {

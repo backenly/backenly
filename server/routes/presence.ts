@@ -47,6 +47,14 @@ async function presenceIdentityError(
     projectId,
     req.headers['x-user-token'] as string | undefined,
   )
+  // A blocked user's token still verifies, but blocking promises it stops
+  // working: refuse it as the data routes do, never read it as a sign-in.
+  if (identity === 'blocked') {
+    return {
+      status: 403,
+      body: { error: 'This account has been blocked by the project owner.', code: 'END_USER_BLOCKED' },
+    }
+  }
   if (identity) {
     if (identity.userId === userId) return null
     return {
