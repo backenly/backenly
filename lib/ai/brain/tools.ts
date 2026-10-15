@@ -1845,6 +1845,85 @@ const FIX_TARGET_TO_ACTION: Record<string, AIAction['action']> = {
  * their chat. This is the standard funded-platform pattern: the model gets to
  * iterate against the validator in private; users only see real work.
  */
+/**
+ * Refuse a create_table of a table that exists, or an add_column on one that
+ * does not, with the wording apply_migration uses. Reads the catalog through
+ * the same helper apply_migration does, on the database in the project's
+ * region, so the doors cannot disagree.
+ */
+async function tableExistencePreflight(
+  name: 'create_table' | 'add_column',
+  args: Record<string, unknown>,
+  projectId: string,
+): Promise<ToolResult | null> {
+  const raw = String(args.tableName ?? '').trim()
+  // No name: the executor's own "table name is required" answers that.
+  if (!raw) return null
+  // create_table lowercases the name it creates; add_column uses it as given.
+  const table = name === 'create_table' ? raw.toLowerCase() : raw
+  const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
+  const { existingTables } = await import('@/lib/mcp/apply-migration')
+  const schema = getWorkspaceDatabaseNames(projectId).postgresSchema
+  const exists = (await existingTables(projectId, schema, [table])).has(table)
+
+  if (name === 'create_table' && exists) {
+    return {
+      ok: false,
+      code: 'TABLE_EXISTS',
+      summary:
+        `Table ${table} already exists, so create_table would change nothing. Nothing was created. ` +
+        `To add columns use add_column; get_table_schema shows what ${table} has now.`,
+    }
+  }
+  if (name === 'add_column' && !exists) {
+    const suggestion = await closestTableName(projectId, schema, table)
+    return {
+      ok: false,
+      code: 'TABLE_NOT_FOUND',
+      summary:
+        `There is no table ${table} in this project, so add_column cannot run. Nothing was changed.` +
+        (suggestion ? ` Did you mean ${suggestion}?` : '') +
+        ' If it is a new table, create it first with create_table.',
+    }
+  }
+  return null
+}
+
+/**
+ * The existing table whose name is closest to `wanted` (edit distance ≤ 2, or a
+ * case-only difference), read in the project's region like existingTables: the
+ * home database holds no regional project's tables, so it would never suggest one.
+ */
+async function closestTableName(projectId: string, schema: string, wanted: string): Promise<string | null> {
+  const { workspaceRawClient } = await import('@/lib/data-plane/regional')
+  const db = await workspaceRawClient(projectId)
+  const rows = await db.$queryRawUnsafe<Array<{ table_name: string }>>(
+    `SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'BASE TABLE'`,
+    schema,
+  )
+  const target = wanted.toLowerCase()
+  let best: { name: string; distance: number } | null = null
+  for (const { table_name } of rows) {
+    const d = editDistance(target, table_name.toLowerCase())
+    if (d <= 2 && (!best || d < best.distance)) best = { name: table_name, distance: d }
+  }
+  return best?.name ?? null
+}
+
+function editDistance(a: string, b: string): number {
+  const prev = Array.from({ length: b.length + 1 }, (_, j) => j)
+  for (let i = 1; i <= a.length; i++) {
+    let diag = prev[0]
+    prev[0] = i
+    for (let j = 1; j <= b.length; j++) {
+      const up = prev[j]
+      prev[j] = Math.min(prev[j] + 1, prev[j - 1] + 1, diag + (a[i - 1] === b[j - 1] ? 0 : 1))
+      diag = up
+    }
+  }
+  return prev[b.length]
+}
+
 function preflightValidate(
   name: string,
   args: Record<string, unknown>,
@@ -1949,6 +2028,17 @@ export async function dispatchTool(
       const refusal = branchRequired(`${name}${args.tableName ? ` on "${String(args.tableName)}"` : ''}`)
       return { ok: false, summary: `${refusal.error} ${refusal.hint}`, code: refusal.code }
     }
+  }
+
+  // ── The table a schema call names must be in the state it assumes ─────────
+  // apply_migration's rule (checkPlan), on the typed doors too: create_table of
+  // an existing table changed nothing and answered "Created", and add_column on
+  // a missing table CREATED it, so a typo made a stray one-column table while
+  // the agent believed it had changed the real one (DB-06). Internal callers of
+  // the executor (blueprints, auto-wiring) keep their idempotent create.
+  if (name === 'create_table' || name === 'add_column') {
+    const refusal = await tableExistencePreflight(name, args, ctx.projectId)
+    if (refusal) return refusal
   }
 
   ctx.onToolEvent?.({ phase: 'start', tool: name as ToolName, title })

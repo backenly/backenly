@@ -915,6 +915,11 @@ tests/integration/integrations-connect-contract.spec.ts
 # rows and the real credentials, keys and build-status routes are the
 # property; PostHog and seeded rows keep CI off provider APIs.
 tests/integration/integration-key-one-row.spec.ts
+# The typed schema doors agree with apply_migration: create_table of an
+# existing table and add_column on a missing one are refused with nothing
+# changed, and a mistyped name is answered with the closest real table.
+# Real workspace tables are the property.
+tests/integration/db-doors-agree.spec.ts
 # A readiness read changes nothing: the scorer's checks write only when fixing
 # is asked for, the agent read defaults to a read, and the Deploy page reads
 # on load and fixes only on an explicit action. Real project, users table and
