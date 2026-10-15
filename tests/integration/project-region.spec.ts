@@ -49,6 +49,7 @@ import { existingTables } from '@/lib/mcp/apply-migration'
 import { runReadQuery } from '@/lib/mcp/read-query'
 import { createBranch, discardBranch } from '@/lib/branches/engine'
 import { readWorkspaceSchema } from '@/lib/typegen/schema-reader'
+import { executeAction, introspectSchema } from '@/lib/ai/minimal-executor'
 import { directAccessRoleNames, provisionDirectAccess, revokeDirectAccess } from '@/lib/services/direct-access'
 import { columnTypes } from '@/lib/mcp/runtime-db'
 import { getTableSchema, listExposedTables, workspaceTableExists } from '@/lib/mcp/schema-introspection'
@@ -780,6 +781,47 @@ describe('type generation and preview branches use the project’s region', () =
   it('refuses without a connection to the region', async () => {
     delete process.env[REGION_VARIABLE]
     await expect(readWorkspaceSchema(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+  })
+})
+
+describe('the AI executor reads and writes the project’s region', () => {
+  const regionalColumns = (table: string) =>
+    rowsIn<{ column_name: string }>(
+      regionalUrl,
+      `SELECT column_name FROM information_schema.columns
+        WHERE table_schema = '${schemaOf(regionalProject)}' AND table_name = '${table}' ORDER BY column_name`,
+    )
+  const addColumn = (columnName: string) =>
+    executeAction(
+      { action: 'ADD_COLUMN', params: { tableName: 'marker', columnName, columnType: 'text' } } as any,
+      regionalProject,
+      undefined,
+      0,
+      undefined,
+      false,
+    )
+
+  it('describes a regional project’s schema to the AI from its region', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const described = await introspectSchema(regionalProject)
+    expect(described).toContain('marker')
+    expect(described).toContain('deleted_at')
+  })
+
+  it('adds a column to a regional project’s table in its region', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const result = await addColumn('tag')
+    expect(result.success).toBe(true)
+    expect((await regionalColumns('marker')).map((c) => c.column_name)).toContain('tag')
+  })
+
+  it('fails without a connection instead of reading the project as empty', async () => {
+    delete process.env[REGION_VARIABLE]
+    await expect(introspectSchema(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+    const result = await addColumn('never_added').catch((err) => ({ success: false, error: err }))
+    expect(result.success).toBe(false)
+    process.env[REGION_VARIABLE] = regionalUrl
+    expect((await regionalColumns('marker')).map((c) => c.column_name)).not.toContain('never_added')
   })
 })
 

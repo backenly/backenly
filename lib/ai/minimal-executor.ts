@@ -19,6 +19,18 @@ import { riskLevelForExecutorAction, queuePendingActionFinding } from '@/lib/ope
 import { plaintextForStorage } from '@/lib/auth/api-key-plaintext'
 import { chat } from '@/lib/ai/llm/chat'
 
+/**
+ * The project's own database, in its region (lib/data-plane/regional.ts), for
+ * the raw SQL on its workspace schema. Every executor below resolves it first,
+ * before any fail-soft catch, so a region this process cannot reach fails the
+ * action instead of reading as "no such table" or "no rows". Platform models
+ * stay on the shared `prisma` client.
+ */
+async function projectDb(projectId: string) {
+  const { workspaceRawClient } = await import('@/lib/data-plane/regional')
+  return workspaceRawClient(projectId)
+}
+
 export interface AIAction {
   /** Optional trace explaining why this action was chosen — aids debugging hallucinations */
   reasoning?: string
@@ -957,13 +969,13 @@ type RelEntry = {
  *           (fixes partial graphs, not just empty graphs)
  */
 export async function inferAndSaveRelationships(projectId: string): Promise<void> {
+  const db = await projectDb(projectId)
   try {
-    const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
 
     // ── 1. Table names ─────────────────────────────────────────────────────────
-    const tableRows = await prisma.$queryRawUnsafe<{ table_name: string }[]>(
+    const tableRows = await db.$queryRawUnsafe<{ table_name: string }[]>(
       `SELECT table_name FROM information_schema.tables
        WHERE table_schema = $1 AND table_type = 'BASE TABLE'`,
       postgresSchema
@@ -972,7 +984,7 @@ export async function inferAndSaveRelationships(projectId: string): Promise<void
     if (tableNames.size === 0) return
 
     // ── Layer 1: Real FK constraints (authoritative) ───────────────────────────
-    const realFKRows = await prisma.$queryRawUnsafe<{
+    const realFKRows = await db.$queryRawUnsafe<{
       child_table: string; child_col: string
       parent_table: string; parent_col: string
     }[]>(
@@ -1005,7 +1017,7 @@ export async function inferAndSaveRelationships(projectId: string): Promise<void
     }))
 
     // ── All columns (needed for layers 2a–2d) ─────────────────────────────────
-    const allCols = await prisma.$queryRawUnsafe<{
+    const allCols = await db.$queryRawUnsafe<{
       table_name: string; column_name: string
     }[]>(
       `SELECT table_name, column_name
@@ -1201,6 +1213,7 @@ export async function inferAndSaveRelationships(projectId: string): Promise<void
  * EXPORTED for use by intent planner
  */
 export async function introspectSchema(projectId: string): Promise<string> {
+  const db = await projectDb(projectId)
   try {
     const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
@@ -1219,7 +1232,7 @@ export async function introspectSchema(projectId: string): Promise<string> {
     // as product tables in prisma.table (the bug that leaked auth-runtime tables
     // into the dashboard count, gave them generated REST APIs, and exposed them).
     const AI_CONTEXT_SKIP_PREFIXES = ['audit_log', 'email_event', 'sms_event']
-    const liveTables = await prisma.$queryRawUnsafe<{ table_name: string }[]>(
+    const liveTables = await db.$queryRawUnsafe<{ table_name: string }[]>(
       `SELECT table_name FROM information_schema.tables
        WHERE table_schema = $1 AND table_type = 'BASE TABLE'
        ORDER BY table_name`,
@@ -1260,7 +1273,7 @@ export async function introspectSchema(projectId: string): Promise<string> {
     // Pre-fetch all FK relationships for the schema in one query
     let fkMap: Map<string, Map<string, string>> = new Map()
     try {
-      const fkRows = await prisma.$queryRawUnsafe<any[]>(
+      const fkRows = await db.$queryRawUnsafe<any[]>(
         `SELECT
            kcu.table_name,
            kcu.column_name,
@@ -1288,7 +1301,7 @@ export async function introspectSchema(projectId: string): Promise<string> {
       const tableName = table.table_name
       try {
         // Get basic column information
-        const columns = await prisma.$queryRawUnsafe<any[]>(
+        const columns = await db.$queryRawUnsafe<any[]>(
           `SELECT
             column_name,
             data_type,
@@ -1411,6 +1424,7 @@ export async function extractAction(
   conversationHistory?: Array<{ role: 'user' | 'ai'; content: string }>,
   semanticEnrichment?: string,
 ): Promise<AIAction> {
+  const db = await projectDb(projectId)
   // Normalize input before parsing
   const normalizedMessage = normalizeUserInput(userMessage)
   
@@ -1427,7 +1441,6 @@ export async function extractAction(
     if (tableMatch) {
       const tableName = tableMatch[1]
       try {
-        const { prisma } = await import('@/lib/db')
         const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
         const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
         
@@ -1444,7 +1457,7 @@ export async function extractAction(
           ORDER BY ordinal_position
         `
         
-        const columns: any[] = await prisma.$queryRawUnsafe(columnsQuery, postgresSchema, tableName)
+        const columns: any[] = await db.$queryRawUnsafe(columnsQuery, postgresSchema, tableName)
         
         if (columns.length > 0) {
           const requiredFields = columns
@@ -1948,6 +1961,7 @@ export async function validateAction(
   action: AIAction,
   projectId: string
 ): Promise<ValidationResult> {
+  const db = await projectDb(projectId)
   const errors: string[] = []
   const warnings: string[] = []
   let preview = ''
@@ -2001,7 +2015,6 @@ export async function validateAction(
       } else {
         // CHECK: Does column already exist?
         try {
-          const { prisma } = await import('@/lib/db')
           const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
           const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
           
@@ -2011,7 +2024,7 @@ export async function validateAction(
             WHERE table_schema = $1 AND table_name = $2 AND column_name = $3
           `
           
-          const existingColumn: any[] = await prisma.$queryRawUnsafe(
+          const existingColumn: any[] = await db.$queryRawUnsafe(
             columnCheckQuery,
             postgresSchema,
             action.params.tableName,
@@ -2929,6 +2942,7 @@ async function verifyExecution(
   result: ExecutionResult,
   projectId: string
 ): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   // Only verify if execution succeeded
   if (!result.success) return result
   
@@ -2940,7 +2954,7 @@ async function verifyExecution(
     switch (action.action) {
       case 'CREATE_TABLE': {
         // Verify table exists in DB
-        const tableCheck = await prisma.$queryRawUnsafe<any[]>(
+        const tableCheck = await db.$queryRawUnsafe<any[]>(
           `SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2`,
           postgresSchema,
           action.params.tableName
@@ -2977,7 +2991,7 @@ async function verifyExecution(
 
       case 'ADD_COLUMN': {
         // Verify column exists
-        const columnCheck = await prisma.$queryRawUnsafe<any[]>(
+        const columnCheck = await db.$queryRawUnsafe<any[]>(
           `SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 AND column_name = $3`,
           postgresSchema,
           action.params.tableName,
@@ -3854,12 +3868,12 @@ async function addColumnWithConstraints(
   projectId: string,
   postgresSchema: string
 ): Promise<void> {
-  const { prisma } = await import('@/lib/db')
+  const db = await projectDb(projectId)
   
   try {
     const alterSQL = `ALTER TABLE "${postgresSchema}"."${tableName}" ADD COLUMN ${columnSQL}`
     console.log(`[Constraints] Executing: ${alterSQL}`)
-    await prisma.$executeRawUnsafe(alterSQL)
+    await db.$executeRawUnsafe(alterSQL)
     console.log(`[Constraints] Column added successfully`)
   } catch (error: any) {
     // If column already exists, that's fine (idempotent)
@@ -3869,7 +3883,7 @@ async function addColumnWithConstraints(
       // Referenced table doesn't exist yet — add column without FK constraint so the table still gets its column
       console.warn(`[Constraints] FK reference failed (${error.code}), retrying without REFERENCES constraint`)
       const plainSQL = columnSQL.replace(/\s+REFERENCES\s+"[^"]*"\."[^"]*"\("[^"]*"\)[^,;]*/gi, '').trim()
-      await prisma.$executeRawUnsafe(`ALTER TABLE "${postgresSchema}"."${tableName}" ADD COLUMN ${plainSQL}`)
+      await db.$executeRawUnsafe(`ALTER TABLE "${postgresSchema}"."${tableName}" ADD COLUMN ${plainSQL}`)
       console.log(`[Constraints] Column added without FK constraint (referenced table missing)`)
     } else {
       throw error
@@ -3904,6 +3918,7 @@ async function executeCreateTable(
   apiKey?: string,
   target: SchemaTarget = {},
 ): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const branchMode = !!target.targetSchema
   console.log('[AI Executor] Creating table:', params.tableName)
   console.log('[AI Executor] Params:', JSON.stringify(params, null, 2))
@@ -4184,7 +4199,7 @@ async function executeCreateTable(
     const createTableSQL = `CREATE TABLE IF NOT EXISTS "${postgresSchema}"."${tableName}" (\n  ${columnDefs.join(',\n  ')}\n);`
 
     console.log(`📝 [AI Executor] Executing SQL:`, createTableSQL)
-    await prisma.$executeRawUnsafe(createTableSQL)
+    await db.$executeRawUnsafe(createTableSQL)
 
     console.log(`✅ [AI Executor] Table created with ${columnDefs.length} columns`)
 
@@ -4209,7 +4224,7 @@ async function executeCreateTable(
       // Create the shared trigger function once per schema (idempotent).
       // CREATE OR REPLACE upgrades every existing table's trigger in this
       // schema automatically the next time create_table runs here.
-      await prisma.$executeRawUnsafe(`
+      await db.$executeRawUnsafe(`
         CREATE OR REPLACE FUNCTION "${postgresSchema}".set_updated_at()
         RETURNS TRIGGER AS $$
         BEGIN
@@ -4223,7 +4238,7 @@ async function executeCreateTable(
         $$ LANGUAGE plpgsql;
       `)
       // Attach to the new table
-      await prisma.$executeRawUnsafe(`
+      await db.$executeRawUnsafe(`
         CREATE OR REPLACE TRIGGER trg_set_updated_at_${tableName}
         BEFORE UPDATE ON "${postgresSchema}"."${tableName}"
         FOR EACH ROW EXECUTE FUNCTION "${postgresSchema}".set_updated_at();
@@ -4289,7 +4304,7 @@ async function executeCreateTable(
       seenIndexCols.add(col.toLowerCase())
       const indexName = `idx_${tableName}_${col.toLowerCase().replace(/[^a-z0-9]/g, '_')}`
       try {
-        await prisma.$executeRawUnsafe(
+        await db.$executeRawUnsafe(
           `CREATE INDEX IF NOT EXISTS "${indexName}" ON "${postgresSchema}"."${tableName}" ("${col}")`
         )
         console.log(`📑 [AI Executor] Index created: ${indexName}`)
@@ -4419,9 +4434,8 @@ async function executeCreateTable(
       // Columns whose REFERENCES clause was stripped (referenced table didn't
       // exist yet) get a second chance now that all tables in this batch exist.
       try {
-        const { prisma: _rp } = await import('@/lib/db')
         // Build case-insensitive table map for this workspace
-        const allTablesInWs = await _rp.$queryRawUnsafe<{ table_name: string }[]>(
+        const allTablesInWs = await db.$queryRawUnsafe<{ table_name: string }[]>(
           `SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'BASE TABLE'`,
           postgresSchema
         )
@@ -4449,7 +4463,7 @@ async function executeCreateTable(
           if (!refTable || refTable.toLowerCase() === tableName.toLowerCase()) continue
 
           try {
-            const fkExists = await _rp.$queryRawUnsafe<{ count: string }[]>(
+            const fkExists = await db.$queryRawUnsafe<{ count: string }[]>(
               `SELECT COUNT(*) AS count FROM information_schema.table_constraints tc
                JOIN information_schema.key_column_usage kcu
                  ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
@@ -4459,7 +4473,7 @@ async function executeCreateTable(
             ).then(r => parseInt(r[0]?.count ?? '0', 10) > 0)
 
             if (!fkExists) {
-              await _rp.$executeRawUnsafe(
+              await db.$executeRawUnsafe(
                 `ALTER TABLE "${postgresSchema}"."${tableName}"
                  ADD CONSTRAINT "${tableName}_${col.name}_fkey"
                  FOREIGN KEY ("${col.name}") REFERENCES "${postgresSchema}"."${refTable}"(id) ON DELETE SET NULL`
@@ -4493,7 +4507,7 @@ async function executeCreateTable(
         if (target === tableName.toLowerCase()) continue // self-ref handled by name rules
 
         // Target must actually exist, otherwise ALTER TABLE aborts the turn.
-        const targetExists = await prisma.$queryRawUnsafe<{ count: string }[]>(
+        const targetExists = await db.$queryRawUnsafe<{ count: string }[]>(
           `SELECT COUNT(*) AS count FROM information_schema.tables
             WHERE table_schema = $1 AND table_name = $2 AND table_type = 'BASE TABLE'`,
           postgresSchema, target,
@@ -4503,7 +4517,7 @@ async function executeCreateTable(
           continue
         }
 
-        const alreadyHasFk = await prisma.$queryRawUnsafe<{ count: string }[]>(
+        const alreadyHasFk = await db.$queryRawUnsafe<{ count: string }[]>(
           `SELECT COUNT(*) AS count FROM information_schema.table_constraints tc
              JOIN information_schema.key_column_usage kcu
                ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
@@ -4518,7 +4532,7 @@ async function executeCreateTable(
         const onDelete = constraints.isRequired ? 'CASCADE' : 'SET NULL'
         const constraintName = `fk_${tableName}_${col.name}`.slice(0, 63)
 
-        await prisma.$executeRawUnsafe(
+        await db.$executeRawUnsafe(
           `ALTER TABLE "${postgresSchema}"."${tableName}"
              ADD CONSTRAINT "${constraintName}"
              FOREIGN KEY ("${col.name}") REFERENCES "${postgresSchema}"."${target}"("id")
@@ -4766,6 +4780,7 @@ async function executeCreateJunctionTable(
   params: any,
   projectId: string
 ): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const { tableA, tableB, junctionName } = params
 
   if (!tableA || !tableB) {
@@ -4792,13 +4807,13 @@ async function executeCreateJunctionTable(
     // Pre-condition: ensure both referenced tables physically exist in the DB
     // (Prisma metadata can diverge from actual PostgreSQL state)
     for (const tbl of [first, second]) {
-      const check = await prisma.$queryRawUnsafe<{ exists: boolean }[]>(
+      const check = await db.$queryRawUnsafe<{ exists: boolean }[]>(
         `SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2) AS exists`,
         postgresSchema,
         tbl,
       )
       if (!check[0]?.exists) {
-        await prisma.$executeRawUnsafe(
+        await db.$executeRawUnsafe(
           `CREATE TABLE IF NOT EXISTS "${postgresSchema}"."${tbl}" (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), "createdAt" TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP, "updatedAt" TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)`
         )
         // Register in metadata if missing
@@ -4816,7 +4831,7 @@ async function executeCreateJunctionTable(
     // FIX 3: Detect real PK type for each referenced table to avoid int/uuid mismatch (error 42804)
     const getPrimaryKeyType = async (schema: string, tableName: string): Promise<string> => {
       try {
-        const rows = await prisma.$queryRawUnsafe<{ data_type: string }[]>(
+        const rows = await db.$queryRawUnsafe<{ data_type: string }[]>(
           `SELECT c.data_type FROM information_schema.columns c
            JOIN information_schema.table_constraints tc ON tc.table_schema = c.table_schema AND tc.table_name = c.table_name
            JOIN information_schema.key_column_usage kcu ON kcu.constraint_name = tc.constraint_name AND kcu.column_name = c.column_name
@@ -4867,9 +4882,9 @@ async function executeCreateJunctionTable(
     const indexASQL = `CREATE INDEX IF NOT EXISTS "idx_${finalName}_${singularA}Id" ON "${postgresSchema}"."${finalName}"("${singularA}Id")`
     const indexBSQL = `CREATE INDEX IF NOT EXISTS "idx_${finalName}_${singularB}Id" ON "${postgresSchema}"."${finalName}"("${singularB}Id")`
 
-    await prisma.$executeRawUnsafe(createTableSQL)
-    await prisma.$executeRawUnsafe(indexASQL)
-    await prisma.$executeRawUnsafe(indexBSQL)
+    await db.$executeRawUnsafe(createTableSQL)
+    await db.$executeRawUnsafe(indexASQL)
+    await db.$executeRawUnsafe(indexBSQL)
 
     // Save metadata
     const existingMeta = await prisma.table.findFirst({ where: { projectId, name: finalName } })
@@ -5597,6 +5612,7 @@ async function executeAddColumn(
   apiKey?: string,
   target: SchemaTarget = {},
 ): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const branchMode = !!target.targetSchema
   console.log('[AI Executor] Adding column:', params)
 
@@ -5622,7 +5638,7 @@ async function executeAddColumn(
     const postgresSchema = target.targetSchema ?? getWorkspaceDatabaseNames(projectId).postgresSchema
 
     // ── REAL DB CHECK: does the table actually exist in PostgreSQL? ──────────
-    const tableCheck = await prisma.$queryRawUnsafe<{ exists: boolean }[]>(
+    const tableCheck = await db.$queryRawUnsafe<{ exists: boolean }[]>(
       `SELECT EXISTS (
          SELECT 1 FROM information_schema.tables
          WHERE table_schema = $1 AND table_name = $2
@@ -5641,7 +5657,7 @@ async function executeAddColumn(
     if (!tableExistsInDB) {
       // Auto-create the table with just an id column so we can add columns to it
       console.warn(`[AI Executor] Table "${tableName}" not in DB — auto-creating before adding columns`)
-      await prisma.$executeRawUnsafe(
+      await db.$executeRawUnsafe(
         `CREATE TABLE IF NOT EXISTS "${postgresSchema}"."${tableName}" (
            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
            "createdAt" TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
@@ -5694,7 +5710,7 @@ async function executeAddColumn(
       const type = normalizeColumnType(String(spec!.type ?? colsToAdd[0].type), name)
       const definition = `${type}${defaultSql}${spec!.nullable === false ? ' NOT NULL' : ''}${spec!.unique === true ? ' UNIQUE' : ''}${referencesSql}`
       try {
-        await prisma.$executeRawUnsafe(`ALTER TABLE "${postgresSchema}"."${tableName}" ADD COLUMN "${name}" ${definition}`)
+        await db.$executeRawUnsafe(`ALTER TABLE "${postgresSchema}"."${tableName}" ADD COLUMN "${name}" ${definition}`)
       } catch (err: any) {
         // Prisma reports this one as "Code: `23502`. Message: `N/A`", which an agent cannot act on.
         if (String(err?.message ?? '').includes('23502')) {
@@ -5710,7 +5726,7 @@ async function executeAddColumn(
       // A foreign key is indexed, as addColumnToTable and create_table do.
       if (referencesSql) {
         const indexName = `idx_${tableName}_${name.toLowerCase()}`.slice(0, 63)
-        await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "${indexName}" ON "${postgresSchema}"."${tableName}" ("${name}")`)
+        await db.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "${indexName}" ON "${postgresSchema}"."${tableName}" ("${name}")`)
       }
       import('@/lib/services/workspace-validator').then(({ invalidateSchemaCache }) => invalidateSchemaCache(projectId, tableName)).catch(() => {})
       return { success: true, message: `✅ Added "${name}" ${definition.replace(` REFERENCES "${postgresSchema}".`, ' REFERENCES ')} to table "${tableName}"` }
@@ -5735,6 +5751,7 @@ async function executeAddColumn(
 }
 
 async function executeDropTable(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const tableName = (params.tableName as string)?.toLowerCase()?.trim()
   if (!tableName) return { success: false, message: 'Table name is required' }
   try {
@@ -5745,7 +5762,7 @@ async function executeDropTable(params: any, projectId: string): Promise<Executi
     // Count APIs before deletion so we can report the number removed
     const removedApiCount = await prisma.apiDefinition.count({ where: { projectId, name: tableName } }).catch(() => 0)
 
-    await prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS "${postgresSchema}"."${tableName}" CASCADE`)
+    await db.$executeRawUnsafe(`DROP TABLE IF EXISTS "${postgresSchema}"."${tableName}" CASCADE`)
     await prisma.table.deleteMany({ where: { projectId, name: tableName } })
     await prisma.apiDefinition.deleteMany({ where: { projectId, name: tableName } })
     const { supersedeSchemaIntent } = await import('@/lib/autonomy/intent-conformance')
@@ -5789,13 +5806,13 @@ async function executeDropTable(params: any, projectId: string): Promise<Executi
 }
 
 async function executeTruncateTable(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const tableName = (params.tableName as string)?.toLowerCase()?.trim()
   if (!tableName) return { success: false, message: 'Table name is required' }
   try {
-    const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
-    await prisma.$executeRawUnsafe(`TRUNCATE TABLE "${postgresSchema}"."${tableName}" RESTART IDENTITY CASCADE`)
+    await db.$executeRawUnsafe(`TRUNCATE TABLE "${postgresSchema}"."${tableName}" RESTART IDENTITY CASCADE`)
     import('@/lib/services/workspace-table-stats').then(({ invalidateTableStats }) => invalidateTableStats(projectId, tableName)).catch(() => {})
     return { success: true, message: `Table \`${tableName}\` truncated — all rows deleted.` }
   } catch (err: any) {
@@ -5812,6 +5829,7 @@ async function executeInsertData(
   projectId: string,
   apiKey?: string
 ): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   console.log('[AI Executor] Inserting data:', params)
   
   const { tableName, rows = [] } = params
@@ -5824,7 +5842,6 @@ async function executeInsertData(
   }
   
   try {
-    const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     
     const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
@@ -5843,7 +5860,7 @@ async function executeInsertData(
       ORDER BY ordinal_position
     `
     
-    const columns: any[] = await prisma.$queryRawUnsafe(columnsQuery, postgresSchema, tableName)
+    const columns: any[] = await db.$queryRawUnsafe(columnsQuery, postgresSchema, tableName)
     
     // Filter out auto-generated columns
     const userColumns = columns.filter(c => !['id', 'createdAt', 'updatedAt'].includes(c.column_name))
@@ -5928,7 +5945,7 @@ async function executeInsertData(
       `
 
       console.log(`📝 [AI Executor] Executing:`, insertSQL, 'with values:', values)
-      await prisma.$executeRawUnsafe(insertSQL, ...values)
+      await db.$executeRawUnsafe(insertSQL, ...values)
       insertedCount++
     }
     
@@ -5965,8 +5982,8 @@ async function addColumnToTable(
   apiKey?: string,
   target: SchemaTarget = {},
 ): Promise<void> {
+  const db = await projectDb(projectId)
   try {
-    const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
 
     const postgresSchema = target.targetSchema ?? getWorkspaceDatabaseNames(projectId).postgresSchema
@@ -5977,7 +5994,7 @@ async function addColumnToTable(
       FROM information_schema.columns
       WHERE table_schema = $1 AND table_name = $2 AND column_name = $3
     `
-    const existingColumn: any[] = await prisma.$queryRawUnsafe(columnsQuery, postgresSchema, tableName, column.name)
+    const existingColumn: any[] = await db.$queryRawUnsafe(columnsQuery, postgresSchema, tableName, column.name)
     
     if (existingColumn.length > 0) {
       console.log(`⚠️ [AI Executor] Column "${column.name}" already exists in "${tableName}" - skipping (idempotent)`)
@@ -5999,7 +6016,7 @@ async function addColumnToTable(
 
     console.log(`📝 [AI Executor] Adding column SQL:`, alterSQL)
     try {
-      await prisma.$executeRawUnsafe(alterSQL)
+      await db.$executeRawUnsafe(alterSQL)
     } catch (fkError: any) {
       // FK reference failed — retry without REFERENCES so the column is still added
       if (fkError.code === '42P01' || fkError.code === '42830' || (fkError.message && fkError.message.includes('does not exist'))) {
@@ -6008,7 +6025,7 @@ async function addColumnToTable(
           .replace(/\s+REFERENCES\s+"[^"]*"\."[^"]*"\("[^"]*"\)[^,;]*/gi, '')
           .replace(/\s+NOT NULL(?!\s*DEFAULT|\s*GENERATED)/gi, ' DEFAULT NULL')
           .trim()
-        await prisma.$executeRawUnsafe(`ALTER TABLE "${postgresSchema}"."${tableName}" ADD COLUMN IF NOT EXISTS ${plainSQL}`)
+        await db.$executeRawUnsafe(`ALTER TABLE "${postgresSchema}"."${tableName}" ADD COLUMN IF NOT EXISTS ${plainSQL}`)
       } else {
         throw fkError
       }
@@ -6031,7 +6048,7 @@ async function addColumnToTable(
     if (isFkColumn) {
       const indexName = `idx_${tableName}_${lower.replace(/[^a-z0-9]/g, '_')}`.slice(0, 63)
       try {
-        await prisma.$executeRawUnsafe(
+        await db.$executeRawUnsafe(
           `CREATE INDEX IF NOT EXISTS "${indexName}" ON "${postgresSchema}"."${tableName}" ("${column.name}")`,
         )
         console.log(`📑 [AI Executor] Index created for added FK column: ${indexName}`)
@@ -6058,6 +6075,7 @@ async function addColumnToTable(
  *     so the change is reversible via LIST_SCHEMA_VERSIONS / ROLLBACK_TO_VERSION
  */
 async function executeDropColumn(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const tableName = String(params?.tableName ?? '').trim()
   const columnName = String(params?.columnName ?? '').trim()
 
@@ -6074,13 +6092,12 @@ async function executeDropColumn(params: any, projectId: string): Promise<Execut
   }
 
   try {
-    const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
 
     // Verify the column actually exists before issuing the DDL — gives a
     // truthful "no such column" error rather than the cryptic Postgres one.
-    const exists = await prisma.$queryRawUnsafe<Array<{ exists: boolean }>>(
+    const exists = await db.$queryRawUnsafe<Array<{ exists: boolean }>>(
       `SELECT EXISTS (
          SELECT 1 FROM information_schema.columns
          WHERE table_schema = $1 AND table_name = $2 AND column_name = $3
@@ -6097,7 +6114,7 @@ async function executeDropColumn(params: any, projectId: string): Promise<Execut
 
     // CASCADE so any view / trigger / index that references this column is
     // also dropped — without it Postgres refuses on dependent objects.
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       `ALTER TABLE "${postgresSchema}"."${tableName}" DROP COLUMN IF EXISTS "${columnName}" CASCADE`
     )
 
@@ -7078,6 +7095,7 @@ async function executeEnableAuth(projectId: string): Promise<ExecutionResult> {
  * Does not require an active BackendGraph — works directly on the workspace schema.
  */
 async function executeEnableRealtime(params: Record<string, any>, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   try {
     const tableName: string | undefined = params?.table || params?.tableName
 
@@ -7135,11 +7153,10 @@ async function executeEnableRealtime(params: Record<string, any>, projectId: str
     } else {
       // Install on every existing workspace table — query workspace schema directly
       // (does not depend on graph or Prisma Table model, which may lag behind actual DB state)
-      const { prisma: rtPrisma } = await import('@/lib/db')
       const workspaceSchema = `workspace_${projectId}`
       let tableNames: string[] = []
       try {
-        const rows = await rtPrisma.$queryRawUnsafe<Array<{ table_name: string }>>(
+        const rows = await db.$queryRawUnsafe<Array<{ table_name: string }>>(
           `SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'BASE TABLE' ORDER BY table_name`,
           workspaceSchema
         )
@@ -7148,6 +7165,7 @@ async function executeEnableRealtime(params: Record<string, any>, projectId: str
           .filter((n: string) => !isReservedWorkspaceTable(n))
       } catch {
         // Fallback: Prisma Table model
+        const { prisma: rtPrisma } = await import('@/lib/db')
         const rows = await rtPrisma.table.findMany({ where: { projectId }, select: { name: true } })
         tableNames = rows.map((t: { name: string }) => t.name)
       }
@@ -7429,6 +7447,7 @@ async function executeGetRealtimeStatus(projectId: string): Promise<ExecutionRes
  * users table has the required OAuth columns.
  */
 async function executeAddProvider(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const { provider, clientId, clientSecret } = params
 
   const providerName = (provider || '').toLowerCase()
@@ -7476,7 +7495,7 @@ async function executeAddProvider(params: any, projectId: string): Promise<Execu
   // Ensure OAuth columns exist in the workspace users table (if it exists)
   const schemaName = `workspace_${projectId}`
   try {
-    const tableCheck = await prisma.$queryRawUnsafe<{ exists: boolean }[]>(
+    const tableCheck = await db.$queryRawUnsafe<{ exists: boolean }[]>(
       `SELECT EXISTS (
         SELECT 1 FROM information_schema.tables
         WHERE table_schema = $1 AND table_name = 'users'
@@ -7484,7 +7503,7 @@ async function executeAddProvider(params: any, projectId: string): Promise<Execu
       schemaName
     )
     if (tableCheck[0]?.exists) {
-      await prisma.$executeRawUnsafe(
+      await db.$executeRawUnsafe(
         `ALTER TABLE "${schemaName}"."users"
            ADD COLUMN IF NOT EXISTS oauth_provider TEXT,
            ADD COLUMN IF NOT EXISTS oauth_id TEXT,
@@ -7577,13 +7596,13 @@ Users of your project can now sign in with ${displayName}.`,
  * surfaced an identity those tools could never act on.
  */
 async function executeListUsers(projectId: string, params?: any): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   try {
-    const { prisma } = await import('@/lib/db')
     const schemaName = `workspace_${projectId}`
     const limit = Math.max(1, Math.min(200, Number(params?.limit) || 50))
 
     // The workspace users table is created lazily on first signup.
-    const tableCheck = await prisma.$queryRawUnsafe<{ exists: boolean }[]>(
+    const tableCheck = await db.$queryRawUnsafe<{ exists: boolean }[]>(
       `SELECT EXISTS (
         SELECT 1 FROM information_schema.tables
         WHERE table_schema = $1 AND table_name = 'users'
@@ -7601,7 +7620,7 @@ async function executeListUsers(projectId: string, params?: any): Promise<Execut
     // Introspect columns so the SELECT tolerates whatever auth schema the
     // project generated (snake_case vs camelCase timestamps, optional
     // provider / verified / blocked columns, OAuth columns, etc.).
-    const cols = await prisma.$queryRawUnsafe<{ column_name: string }[]>(
+    const cols = await db.$queryRawUnsafe<{ column_name: string }[]>(
       `SELECT column_name FROM information_schema.columns
        WHERE table_schema = $1 AND table_name = 'users'`,
       schemaName,
@@ -7693,15 +7712,15 @@ async function executeListUsers(projectId: string, params?: any): Promise<Execut
  * Signin route checks this column and rejects blocked users.
  */
 async function executeBlockUser(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const { userId, email } = params
   if (!userId && !email) return { success: false, message: 'userId or email is required' }
 
   try {
-    const { prisma } = await import('@/lib/db')
     const schemaName = `workspace_${projectId}`
 
     // Ensure is_blocked column exists (idempotent)
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       `ALTER TABLE "${schemaName}"."users" ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN DEFAULT FALSE`
     )
 
@@ -7834,17 +7853,17 @@ async function executeResetPassword(params: any, projectId: string): Promise<Exe
  * Flips is_blocked back to false so the user can sign in again.
  */
 async function executeUnblockUser(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const { userId, email } = params
   if (!userId && !email) return { success: false, message: 'userId or email is required' }
 
   try {
-    const { prisma } = await import('@/lib/db')
     const schemaName = `workspace_${projectId}`
 
     // is_blocked must exist before we can unblock — BLOCK_USER adds it on
     // first block, but a user might be calling unblock on a never-blocked
     // project.
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       `ALTER TABLE "${schemaName}"."users" ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN DEFAULT FALSE`
     )
 
@@ -8210,6 +8229,7 @@ async function executeSetAlert(_params: any, _projectId: string): Promise<Execut
 // ============================================================================
 
 async function executeVacuumTable(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const tableName = params?.tableName ?? params?.table
   if (!tableName) {
     return {
@@ -8221,7 +8241,6 @@ async function executeVacuumTable(params: any, projectId: string): Promise<Execu
   }
 
   try {
-    const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
 
@@ -8239,7 +8258,7 @@ async function executeVacuumTable(params: any, projectId: string): Promise<Execu
 
     // Must still exist. A finding can outlive its table, and VACUUM on a missing
     // relation is an error rather than a no-op.
-    const exists = await prisma.$queryRawUnsafe<Array<{ one: number }>>(
+    const exists = await db.$queryRawUnsafe<Array<{ one: number }>>(
       `SELECT 1 AS one FROM information_schema.tables
         WHERE table_schema = $1 AND table_name = $2 LIMIT 1`,
       postgresSchema, tableName,
@@ -8253,7 +8272,7 @@ async function executeVacuumTable(params: any, projectId: string): Promise<Execu
       }
     }
 
-    const before = await prisma.$queryRawUnsafe<Array<{ dead: string; live: string }>>(
+    const before = await db.$queryRawUnsafe<Array<{ dead: string; live: string }>>(
       `SELECT n_dead_tup::text AS dead, n_live_tup::text AS live
          FROM pg_stat_user_tables WHERE schemaname = $1 AND relname = $2`,
       postgresSchema, tableName,
@@ -8262,9 +8281,9 @@ async function executeVacuumTable(params: any, projectId: string): Promise<Execu
 
     // VACUUM cannot run inside a transaction block, so this must go through
     // $executeRawUnsafe (autocommit) and never $transaction.
-    await prisma.$executeRawUnsafe(`VACUUM (ANALYZE) "${postgresSchema}"."${tableName}"`)
+    await db.$executeRawUnsafe(`VACUUM (ANALYZE) "${postgresSchema}"."${tableName}"`)
 
-    const after = await prisma.$queryRawUnsafe<Array<{ dead: string }>>(
+    const after = await db.$queryRawUnsafe<Array<{ dead: string }>>(
       `SELECT n_dead_tup::text AS dead
          FROM pg_stat_user_tables WHERE schemaname = $1 AND relname = $2`,
       postgresSchema, tableName,
@@ -8311,6 +8330,7 @@ async function executeVacuumTable(params: any, projectId: string): Promise<Execu
  * the cost of the approved change and is stated in the result.
  */
 async function executeDropIndex(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const indexName = params?.indexName ?? params?.index
   const tableName = params?.tableName ?? params?.table
 
@@ -8324,7 +8344,6 @@ async function executeDropIndex(params: any, projectId: string): Promise<Executi
   }
 
   try {
-    const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
 
@@ -8340,7 +8359,7 @@ async function executeDropIndex(params: any, projectId: string): Promise<Executi
 
     // One catalog read answers every precondition at once, scoped to this
     // project's schema so the name can only ever resolve inside this tenant.
-    const rows = await prisma.$queryRawUnsafe<Array<{
+    const rows = await db.$queryRawUnsafe<Array<{
       table_name: string
       is_primary: boolean
       is_unique: boolean
@@ -8397,7 +8416,7 @@ async function executeDropIndex(params: any, projectId: string): Promise<Executi
       }
     }
 
-    await prisma.$executeRawUnsafe(`DROP INDEX "${postgresSchema}"."${indexName}"`)
+    await db.$executeRawUnsafe(`DROP INDEX "${postgresSchema}"."${indexName}"`)
 
     return {
       success: true,
@@ -8432,6 +8451,7 @@ async function executeDropIndex(params: any, projectId: string): Promise<Executi
  * reclaimed and "reindexed successfully" is not evidence of that.
  */
 async function executeReindexIndex(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const indexName = params?.indexName ?? params?.index
 
   if (!indexName) {
@@ -8444,7 +8464,6 @@ async function executeReindexIndex(params: any, projectId: string): Promise<Exec
   }
 
   try {
-    const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
 
@@ -8458,7 +8477,7 @@ async function executeReindexIndex(params: any, projectId: string): Promise<Exec
       }
     }
 
-    const before = await prisma.$queryRawUnsafe<Array<{ table_name: string; size_bytes: string }>>(
+    const before = await db.$queryRawUnsafe<Array<{ table_name: string; size_bytes: string }>>(
       `SELECT t.relname AS table_name, pg_relation_size(i.oid)::text AS size_bytes
          FROM pg_index ix
          JOIN pg_class i     ON i.oid = ix.indexrelid
@@ -8479,11 +8498,11 @@ async function executeReindexIndex(params: any, projectId: string): Promise<Exec
     }
 
     const sizeBefore = Number(before[0].size_bytes) || 0
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       `REINDEX INDEX CONCURRENTLY "${postgresSchema}"."${indexName}"`,
     )
 
-    const after = await prisma.$queryRawUnsafe<Array<{ size_bytes: string }>>(
+    const after = await db.$queryRawUnsafe<Array<{ size_bytes: string }>>(
       `SELECT pg_relation_size(i.oid)::text AS size_bytes
          FROM pg_class i
          JOIN pg_namespace n ON n.oid = i.relnamespace
@@ -8538,6 +8557,7 @@ async function executeReindexIndex(params: any, projectId: string): Promise<Exec
  * it is still a full scan.
  */
 async function executeValidateConstraint(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const tableName = params?.tableName ?? params?.table
   const constraintName = params?.constraintName ?? params?.constraint
 
@@ -8551,7 +8571,6 @@ async function executeValidateConstraint(params: any, projectId: string): Promis
   }
 
   try {
-    const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
 
@@ -8567,7 +8586,7 @@ async function executeValidateConstraint(params: any, projectId: string): Promis
       }
     }
 
-    const rows = await prisma.$queryRawUnsafe<Array<{ convalidated: boolean; definition: string }>>(
+    const rows = await db.$queryRawUnsafe<Array<{ convalidated: boolean; definition: string }>>(
       `SELECT c.convalidated, pg_get_constraintdef(c.oid) AS definition
          FROM pg_constraint c
          JOIN pg_class rel   ON rel.oid = c.conrelid
@@ -8592,7 +8611,7 @@ async function executeValidateConstraint(params: any, projectId: string): Promis
       }
     }
 
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       `ALTER TABLE "${postgresSchema}"."${tableName}" VALIDATE CONSTRAINT "${constraintName}"`,
     )
 
@@ -8619,6 +8638,7 @@ async function executeValidateConstraint(params: any, projectId: string): Promis
 }
 
 async function executeCreateIndex(params: any, projectId: string, target: SchemaTarget = {}): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const { tableName } = params
   // Accept { columnName } (autonomy buildFixAction) or { columns: [...] } (chat,
   // MCP, migration parser). A param-name drift here must never silently no-op.
@@ -8679,7 +8699,6 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
   }
 
   try {
-    const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const postgresSchema = target.targetSchema ?? getWorkspaceDatabaseNames(projectId).postgresSchema
 
@@ -8709,7 +8728,7 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
     // question.
     let softDeleteScoped = false
     let effectiveWhere = wherePredicate
-    if (unique && !wherePredicate && (await hasSoftDeleteColumn(prisma, postgresSchema, tableName))) {
+    if (unique && !wherePredicate && (await hasSoftDeleteColumn(db, postgresSchema, tableName))) {
       effectiveWhere = '"deleted_at" IS NULL'
       softDeleteScoped = true
     }
@@ -8724,7 +8743,7 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
     // exists over different columns — or without UNIQUE — Postgres returns
     // success and leaves the old one in place. That is exactly how a "created"
     // unique index turned out to be a pre-existing non-unique one.
-    const existing = await prisma.$queryRawUnsafe<Array<{ indexdef: string }>>(
+    const existing = await db.$queryRawUnsafe<Array<{ indexdef: string }>>(
       `SELECT indexdef FROM pg_indexes WHERE schemaname = $1 AND tablename = $2 AND indexname = $3`,
       postgresSchema, tableName, idxName,
     )
@@ -8753,10 +8772,10 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
       }
     }
 
-    await prisma.$executeRawUnsafe(ddl)
+    await db.$executeRawUnsafe(ddl)
 
     // ── Verify, do not assume ───────────────────────────────────────────────
-    const after = await prisma.$queryRawUnsafe<Array<{ indexdef: string }>>(
+    const after = await db.$queryRawUnsafe<Array<{ indexdef: string }>>(
       `SELECT indexdef FROM pg_indexes WHERE schemaname = $1 AND tablename = $2 AND indexname = $3`,
       postgresSchema, tableName, idxName,
     )
@@ -8910,16 +8929,16 @@ export function indexDefColumns(indexdef: string): string[] {
  * DATABASE: Rename Column
  */
 async function executeRenameColumn(params: any, projectId: string, target: SchemaTarget = {}): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const { tableName, oldName, newName } = params
   if (!tableName || !oldName || !newName) {
     return { success: false, message: 'tableName, oldName and newName are required', error: 'Missing parameters' }
   }
   try {
-    const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const postgresSchema = target.targetSchema ?? getWorkspaceDatabaseNames(projectId).postgresSchema
     const safe = (s: string) => s.replace(/[^a-z0-9_]/gi, '')
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       `ALTER TABLE "${postgresSchema}"."${safe(tableName)}" RENAME COLUMN "${safe(oldName)}" TO "${safe(newName)}"`
     )
     // The ledger describes MAIN; a branch's rename is applied when it is merged.
@@ -9016,6 +9035,7 @@ export async function executeBranchSchemaAction(
 }
 
 async function executeAddConstraint(params: any, projectId: string, schemaTarget: SchemaTarget = {}): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const branchMode = !!schemaTarget.targetSchema
   const { tableName, constraintName, constraintDefinition, referencedTable } = params
   const columnName = params.columnName ? String(params.columnName).trim() : ''
@@ -9118,7 +9138,6 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
   }
 
   try {
-    const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const postgresSchema = schemaTarget.targetSchema ?? getWorkspaceDatabaseNames(projectId).postgresSchema
     const qualified = `"${postgresSchema}"."${tableName}"`
@@ -9132,7 +9151,7 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
     if (ct === 'not_null' || ct === 'drop_not_null') {
       const verb = ct === 'not_null' ? 'SET NOT NULL' : 'DROP NOT NULL'
       try {
-        await prisma.$executeRawUnsafe(`ALTER TABLE ${qualified} ALTER COLUMN "${columnName}" ${verb}`)
+        await db.$executeRawUnsafe(`ALTER TABLE ${qualified} ALTER COLUMN "${columnName}" ${verb}`)
       } catch (err: any) {
         if (err?.code === '23502' || /contains null values/i.test(err?.message ?? '')) {
           return {
@@ -9147,7 +9166,7 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
         }
         throw err
       }
-      const nullable = await columnIsNullable(prisma, postgresSchema, tableName, columnName)
+      const nullable = await columnIsNullable(db, postgresSchema, tableName, columnName)
       if (nullable === null) {
         return {
           success: false,
@@ -9176,7 +9195,7 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
 
     if (ct === 'set_default' || ct === 'drop_default') {
       if (ct === 'drop_default') {
-        await prisma.$executeRawUnsafe(`ALTER TABLE ${qualified} ALTER COLUMN "${columnName}" DROP DEFAULT`)
+        await db.$executeRawUnsafe(`ALTER TABLE ${qualified} ALTER COLUMN "${columnName}" DROP DEFAULT`)
         return {
           success: true,
           message: `✅ Dropped the default on ${tableName}.${columnName}`,
@@ -9197,7 +9216,7 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
           code: 'VALIDATION',
         }
       }
-      await prisma.$executeRawUnsafe(`ALTER TABLE ${qualified} ALTER COLUMN "${columnName}" SET DEFAULT ${expr}`)
+      await db.$executeRawUnsafe(`ALTER TABLE ${qualified} ALTER COLUMN "${columnName}" SET DEFAULT ${expr}`)
       return {
         success: true,
         message: `✅ ${tableName}.${columnName} now defaults to ${expr}`,
@@ -9250,7 +9269,7 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
       // is routed to executeCreateIndex, which applies the `deleted_at IS NULL`
       // scoping and reports it. Uniqueness is delivered; only the catalog object
       // differs, and the response says so.
-      if (await hasSoftDeleteColumn(prisma, postgresSchema, tableName)) {
+      if (await hasSoftDeleteColumn(db, postgresSchema, tableName)) {
         const idxResult = await executeCreateIndex(
           { tableName, columns, unique: true, ...(constraintName ? { indexName: constraintName } : {}) },
           projectId,
@@ -9300,7 +9319,7 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
 
     // ── Compare before claiming idempotency ─────────────────────────────────
     // "already exists" is only good news if what exists is what was asked for.
-    const existing = await prisma.$queryRawUnsafe<Array<{ conname: string; def: string }>>(
+    const existing = await db.$queryRawUnsafe<Array<{ conname: string; def: string }>>(
       `SELECT con.conname, pg_get_constraintdef(con.oid) AS def
          FROM pg_constraint con
          JOIN pg_class rel ON rel.oid = con.conrelid
@@ -9335,7 +9354,7 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
     // An equivalent constraint under a DIFFERENT name is also already-satisfied.
     // Without this, an author who wrote the same CHECK twice under two names got
     // two identical constraints on the table.
-    const equivalent = await prisma.$queryRawUnsafe<Array<{ conname: string; def: string }>>(
+    const equivalent = await db.$queryRawUnsafe<Array<{ conname: string; def: string }>>(
       `SELECT con.conname, pg_get_constraintdef(con.oid) AS def
          FROM pg_constraint con
          JOIN pg_class rel ON rel.oid = con.conrelid
@@ -9354,10 +9373,10 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
       }
     }
 
-    await prisma.$executeRawUnsafe(`ALTER TABLE ${qualified} ADD CONSTRAINT "${cName}" ${definition}`)
+    await db.$executeRawUnsafe(`ALTER TABLE ${qualified} ADD CONSTRAINT "${cName}" ${definition}`)
 
     // ── Verify against the catalog ──────────────────────────────────────────
-    const after = await prisma.$queryRawUnsafe<Array<{ def: string }>>(
+    const after = await db.$queryRawUnsafe<Array<{ def: string }>>(
       `SELECT pg_get_constraintdef(con.oid) AS def
          FROM pg_constraint con
          JOIN pg_class rel ON rel.oid = con.conrelid
@@ -11851,6 +11870,7 @@ async function executeGenerateRestrictedEndpoint(params: any, projectId: string)
  * params: { issue?: string, provider?: string }
  */
 async function executeFixAuth(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const { issue, provider } = params ?? {}
   const fixes: string[] = []
   const warnings: string[] = []
@@ -11900,14 +11920,14 @@ async function executeFixAuth(params: any, projectId: string): Promise<Execution
 
     // ── 3. Ensure workspace users table exists ────────────────────────────────
     const schema = `workspace_${projectId}`
-    const rows = await prisma.$queryRawUnsafe<Array<{ table_name: string }>>(
+    const rows = await db.$queryRawUnsafe<Array<{ table_name: string }>>(
       `SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'users'`,
       schema
     ).catch(() => [] as Array<{ table_name: string }>)
 
     if (rows.length === 0) {
       // Bootstrap the users table — same DDL that the workspace creation uses
-      await prisma.$executeRawUnsafe(`
+      await db.$executeRawUnsafe(`
         CREATE TABLE IF NOT EXISTS "${schema}"."users" (
           "id"         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           "email"      TEXT UNIQUE NOT NULL,
@@ -12074,6 +12094,7 @@ async function executeFixApi(params: any, projectId: string): Promise<ExecutionR
  * params: { tableName: string, missingColumns?: Array<{name:string,type:string}> }
  */
 async function executeFixTable(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const { tableName, missingColumns } = params ?? {}
   if (!tableName) return { success: false, message: 'tableName is required for FIX_TABLE' }
 
@@ -12104,7 +12125,7 @@ async function executeFixTable(params: any, projectId: string): Promise<Executio
     }
 
     // ── 1. Check Postgres table existence ────────────────────────────────────
-    const pgCheck = await prisma.$queryRawUnsafe<Array<{ table_name: string }>>(
+    const pgCheck = await db.$queryRawUnsafe<Array<{ table_name: string }>>(
       `SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2`,
       schema, tableName
     ).catch(() => [] as Array<{ table_name: string }>)
@@ -12121,7 +12142,7 @@ async function executeFixTable(params: any, projectId: string): Promise<Executio
           ].join(',\n  ')
         : `"id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n  "createdAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW()`
 
-      await prisma.$executeRawUnsafe(
+      await db.$executeRawUnsafe(
         `CREATE TABLE IF NOT EXISTS "${schema}"."${tableName}" (\n  ${colDefs}\n)`
       )
       fixes.push(`Recreated table \`${tableName}\` in database (${blueprint ? blueprint.length + 2 : 2} columns)`)
@@ -12137,7 +12158,7 @@ async function executeFixTable(params: any, projectId: string): Promise<Executio
       const colsToAdd: Array<{ name: string; type: string }> = missingColumns ?? []
 
       // Compare existing Postgres columns vs domain blueprint to find gaps
-      const pgCols = await prisma.$queryRawUnsafe<Array<{ column_name: string }>>(
+      const pgCols = await db.$queryRawUnsafe<Array<{ column_name: string }>>(
         `SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2`,
         schema, tableName
       ).catch(() => [] as Array<{ column_name: string }>)
@@ -12148,7 +12169,7 @@ async function executeFixTable(params: any, projectId: string): Promise<Executio
 
       for (const col of colsToAdd) {
         try {
-          await prisma.$executeRawUnsafe(
+          await db.$executeRawUnsafe(
             `ALTER TABLE "${schema}"."${tableName}" ADD COLUMN IF NOT EXISTS "${col.name}" ${pgTypeFor(col.type)}`
           )
           fixes.push(`Added missing column \`${col.name}\` (${col.type}) to \`${tableName}\``)
@@ -12315,6 +12336,7 @@ async function executeFixDeploy(params: any, projectId: string): Promise<Executi
  * params: { tableName?: string }
  */
 async function executeFixRealtime(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const { tableName } = params ?? {}
 
   try {
@@ -12324,11 +12346,10 @@ async function executeFixRealtime(params: any, projectId: string): Promise<Execu
       listTablesWithRealtimeTriggers,
     } = await import('@/lib/services/realtimeTriggers')
 
-    const { prisma } = await import('@/lib/db')
     const schema = `workspace_${projectId}`
 
     // ── 1. Discover all workspace tables ─────────────────────────────────────
-    const pgTables = await prisma.$queryRawUnsafe<Array<{ table_name: string }>>(
+    const pgTables = await db.$queryRawUnsafe<Array<{ table_name: string }>>(
       `SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'BASE TABLE' ORDER BY table_name`,
       schema
     ).catch(() => [] as Array<{ table_name: string }>)
@@ -12642,6 +12663,7 @@ async function executeFixIntegration(params: any, projectId: string): Promise<Ex
 // ============================================================================
 
 async function executeFixWorkflow(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const { workflow, missingComponents, details } = params ?? {}
   const components: string[] = Array.isArray(missingComponents) ? missingComponents : []
   const workflowName = workflow ?? details?.workflow ?? 'workflow'
@@ -12705,10 +12727,9 @@ async function executeFixWorkflow(params: any, projectId: string): Promise<Execu
       }
       if (key === 'user_data_rls') {
         // Find any table with a user_id column and protect it
-        const { prisma } = await import('@/lib/db')
         const { notReservedTableSql } = await import('@/lib/security/workspace-schema')
         const schema = `workspace_${projectId}`
-        const tables = await prisma.$queryRawUnsafe<Array<{ tablename: string }>>(
+        const tables = await db.$queryRawUnsafe<Array<{ tablename: string }>>(
           `SELECT DISTINCT t.tablename
            FROM pg_tables t
            JOIN information_schema.columns c
@@ -12799,6 +12820,7 @@ async function executeFixWorkflow(params: any, projectId: string): Promise<Execu
 // ============================================================================
 
 async function executeRegisterTable(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const tableName: string | undefined = params?.tableName
   if (!tableName) {
     return { success: false, message: 'tableName is required to register a table', error: 'Missing tableName' }
@@ -12814,7 +12836,7 @@ async function executeRegisterTable(params: any, projectId: string): Promise<Exe
     if (isReservedWorkspaceTable(tableName)) {
       return { success: false, message: `"${tableName}" is an internal Backenly table and cannot be registered.` }
     }
-    const exists = await prisma.$queryRawUnsafe<Array<{ one: number }>>(
+    const exists = await db.$queryRawUnsafe<Array<{ one: number }>>(
       `SELECT 1 AS one FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2 LIMIT 1`,
       postgresSchema, tableName,
     ).catch(() => [])
@@ -13005,6 +13027,7 @@ async function executeHealDataPlane(projectId: string): Promise<ExecutionResult>
 // ============================================================================
 
 async function executeAddFulltextSearch(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const { tableName, columns } = params
   if (!tableName) return { success: false, message: 'tableName is required', error: 'Missing tableName' }
 
@@ -13020,7 +13043,7 @@ async function executeAddFulltextSearch(params: any, projectId: string): Promise
     const safeTable = safe(tableName)
 
     // Get actual columns that exist in the table
-    const existingCols = await prisma.$queryRawUnsafe<{column_name: string}[]>(
+    const existingCols = await db.$queryRawUnsafe<{column_name: string}[]>(
       `SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2`,
       postgresSchema, safeTable
     )
@@ -13039,7 +13062,7 @@ async function executeAddFulltextSearch(params: any, projectId: string): Promise
       .join(` || ' ' || `)
 
     // 1. Add tsvector column (idempotent)
-    await prisma.$executeRawUnsafe(`
+    await db.$executeRawUnsafe(`
       ALTER TABLE "${postgresSchema}"."${safeTable}"
       ADD COLUMN IF NOT EXISTS search_vector tsvector
       GENERATED ALWAYS AS (to_tsvector('english', ${vectorExpr})) STORED
@@ -13047,7 +13070,7 @@ async function executeAddFulltextSearch(params: any, projectId: string): Promise
 
     // 2. Create GIN index (idempotent)
     const idxName = `idx_${safeTable}_search_vector`
-    await prisma.$executeRawUnsafe(`
+    await db.$executeRawUnsafe(`
       CREATE INDEX IF NOT EXISTS "${idxName}"
       ON "${postgresSchema}"."${safeTable}" USING GIN (search_vector)
     `)
@@ -13106,6 +13129,7 @@ async function executeAddFulltextSearch(params: any, projectId: string): Promise
 // ============================================================================
 
 async function executeEnableVectorSearch(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const { tableName, sourceColumns } = params
   if (!tableName) {
     return { success: false, message: 'tableName is required', error: 'Missing tableName' }
@@ -13139,7 +13163,7 @@ async function executeEnableVectorSearch(params: any, projectId: string): Promis
     // 1. Ensure pgvector is installed. CREATE EXTENSION is database-level and
     //    superuser-only on some setups; surface a clear error if not allowed.
     try {
-      await prisma.$executeRawUnsafe(`CREATE EXTENSION IF NOT EXISTS vector`)
+      await db.$executeRawUnsafe(`CREATE EXTENSION IF NOT EXISTS vector`)
     } catch (extErr: any) {
       return {
         success: false,
@@ -13154,7 +13178,7 @@ async function executeEnableVectorSearch(params: any, projectId: string): Promis
     }
 
     // 2. Confirm columns exist on the table; filter requested → valid.
-    const existingCols = await prisma.$queryRawUnsafe<{ column_name: string; data_type: string; udt_name: string }[]>(
+    const existingCols = await db.$queryRawUnsafe<{ column_name: string; data_type: string; udt_name: string }[]>(
       `SELECT column_name, data_type, udt_name
          FROM information_schema.columns
         WHERE table_schema = $1 AND table_name = $2`,
@@ -13184,7 +13208,7 @@ async function executeEnableVectorSearch(params: any, projectId: string): Promis
     // 3. Add embedding column (idempotent).
     const EMBEDDING_COLUMN = 'embedding'
     const DIMENSIONS = EMBEDDING_DIMENSIONS
-    await prisma.$executeRawUnsafe(`
+    await db.$executeRawUnsafe(`
       ALTER TABLE "${postgresSchema}"."${safeTable}"
       ADD COLUMN IF NOT EXISTS "${EMBEDDING_COLUMN}" vector(${DIMENSIONS})
     `)
@@ -13195,7 +13219,7 @@ async function executeEnableVectorSearch(params: any, projectId: string): Promis
     const idxName = `idx_${safeTable}_embedding_hnsw`
     let indexKind = 'hnsw'
     try {
-      await prisma.$executeRawUnsafe(`
+      await db.$executeRawUnsafe(`
         CREATE INDEX IF NOT EXISTS "${idxName}"
         ON "${postgresSchema}"."${safeTable}"
         USING hnsw ("${EMBEDDING_COLUMN}" vector_cosine_ops)
@@ -13205,7 +13229,7 @@ async function executeEnableVectorSearch(params: any, projectId: string): Promis
       // ivfflat needs the table to have rows to train effectively, but the
       // index itself creates fine on an empty table — it just rebuilds as
       // data lands. lists=100 is the documented default for small/medium sets.
-      await prisma.$executeRawUnsafe(`
+      await db.$executeRawUnsafe(`
         CREATE INDEX IF NOT EXISTS "${idxName}"
         ON "${postgresSchema}"."${safeTable}"
         USING ivfflat ("${EMBEDDING_COLUMN}" vector_cosine_ops)
@@ -13300,6 +13324,7 @@ async function executeEnableVectorSearch(params: any, projectId: string): Promis
 // ============================================================================
 
 async function executeEnableTeams(params: any, projectId: string, apiKey?: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   try {
     // 1. Ensure end-user auth is on — orgs need real users.
     const graph = await getActiveGraph(projectId).catch(() => null)
@@ -13364,18 +13389,17 @@ async function executeEnableTeams(params: any, projectId: string, apiKey?: strin
 
     // 4. Indexes that matter for org lookup performance.
     try {
-      const { prisma } = await import('@/lib/db')
       const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
       const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
-      await prisma.$executeRawUnsafe(`
+      await db.$executeRawUnsafe(`
         CREATE INDEX IF NOT EXISTS idx_org_members_user
           ON "${postgresSchema}"."organization_members" (user_id)
       `)
-      await prisma.$executeRawUnsafe(`
+      await db.$executeRawUnsafe(`
         CREATE INDEX IF NOT EXISTS idx_org_members_org_user
           ON "${postgresSchema}"."organization_members" (organization_id, user_id)
       `)
-      await prisma.$executeRawUnsafe(`
+      await db.$executeRawUnsafe(`
         CREATE INDEX IF NOT EXISTS idx_org_invites_token
           ON "${postgresSchema}"."organization_invitations" (token)
       `)
@@ -13553,13 +13577,13 @@ async function executeSendPush(params: any, projectId: string): Promise<Executio
 // ============================================================================
 
 async function executeAlterColumnType(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const { tableName, columnName, newType, castExpression } = params
   if (!tableName || !columnName || !newType) {
     return { success: false, message: 'tableName, columnName, and newType are required' }
   }
 
   try {
-    const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
     const safe = (s: string) => s.replace(/[^a-z0-9_]/gi, '')
@@ -13597,7 +13621,7 @@ async function executeAlterColumnType(params: any, projectId: string): Promise<E
     }
 
     // Get current column type
-    const colInfo = await prisma.$queryRawUnsafe<{data_type: string}[]>(
+    const colInfo = await db.$queryRawUnsafe<{data_type: string}[]>(
       `SELECT data_type FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 AND column_name = $3`,
       postgresSchema, safe(tableName), safe(columnName)
     )
@@ -13608,7 +13632,7 @@ async function executeAlterColumnType(params: any, projectId: string): Promise<E
       || USING_CLAUSES[normalizedType]?.[currentType]
       || `"${safe(columnName)}"::${normalizedType}`
 
-    await prisma.$executeRawUnsafe(`
+    await db.$executeRawUnsafe(`
       ALTER TABLE "${postgresSchema}"."${safe(tableName)}"
       ALTER COLUMN "${safe(columnName)}"
       TYPE ${normalizedType}
