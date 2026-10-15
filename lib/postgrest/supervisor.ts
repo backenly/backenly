@@ -27,10 +27,10 @@
  *   2. STRICTLY IMPROVING. It only acts when the plane is already unreachable
  *      or wedged — i.e. when every tenant is already getting 502/503. There is
  *      no healthy traffic left to disrupt.
- *   3. SINGLE-FLIGHT, PLATFORM-WIDE. Every project detects the same outage in
- *      the same minute. A pg advisory lock on a fixed key collapses that into
- *      one restart; the losers report "a heal is already running" rather than
- *      queueing a second one behind it.
+ *   3. SINGLE-FLIGHT, PER REGION. Every project in a region detects the same
+ *      outage in the same minute. A pg advisory lock on a fixed key per region
+ *      collapses that into one restart; the losers report "a heal is already
+ *      running" rather than queueing a second one behind it.
  *   4. RATE-CEILINGED. A cooldown bounds restarts per window, so a fault that
  *      survives a restart (bad config, dead database) degrades into one honest
  *      escalation instead of a restart loop that turns an outage into a crash
@@ -44,20 +44,41 @@
  * to repair. Inferring `systemctl restart postgrest` and being wrong means
  * shelling an arbitrary string as root on a production box — the failure mode
  * is worse than the outage.
+ *
+ * ── One data plane per region ────────────────────────────────────────────────
+ *
+ * Each region runs its own PostgREST over its own database. Everything above
+ * applies to one region at a time: the probe, the prune, the lock, the cooldown
+ * and the restart channel are all the region's, and a heal in one region never
+ * touches, waits on or counts against another.
  */
 
+import { Client } from 'pg'
 import { prisma } from '@/lib/db'
+import { CLOUD_REGIONS, HOME_REGION, type CloudRegionId } from '@/lib/regions'
+import { projectRegion, regionSetting } from '@/lib/data-plane/regional'
 import { diagnoseAndHeal, probePostgrest, type PostgrestStatus } from './health'
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
 /**
- * Fixed advisory-lock key for the platform-wide data-plane heal. Distinct from
+ * Fixed advisory-lock key for the home region's data-plane heal. Distinct from
  * `build-lock`'s project-derived keys, which are `Math.abs(djb2(projectId))` —
  * a value this small cannot collide with one of those in practice, and the
  * namespace is documented here so a future fixed-key lock picks a different one.
+ * Other regions take the keys just above it (healLockKey).
  */
 const HEAL_LOCK_KEY = 8_474_001
+
+/**
+ * The lock key for one region's heal. The home region keeps HEAL_LOCK_KEY, so a
+ * process running an older build still excludes this one while both are live.
+ */
+export function healLockKey(region: CloudRegionId): number {
+  if (region === HOME_REGION) return HEAL_LOCK_KEY
+  const others = CLOUD_REGIONS.filter((r) => r.id !== HOME_REGION).map((r) => r.id)
+  return HEAL_LOCK_KEY + 1 + others.indexOf(region)
+}
 
 /** Minimum gap between restarts. Bounds a crash-loop to one restart per window. */
 const RESTART_COOLDOWN_MS = 5 * 60 * 1000
@@ -78,8 +99,10 @@ export type HealOutcome =
   | 'healed_without_restart'
   /** Restarted, and the plane answered again afterwards. */
   | 'healed_by_restart'
-  /** Another heal holds the platform lock right now. */
+  /** Another heal holds the region's lock right now. */
   | 'in_progress'
+  /** The region has a data plane this process has no address for. */
+  | 'region_not_reachable'
   /** Verified outage, but a restart happened too recently to try again. */
   | 'cooling_down'
   /** Verified outage requiring a restart, with no configured restart channel. */
@@ -98,26 +121,45 @@ export interface HealResult {
   notes: string[]
 }
 
-// ── Platform-wide single flight ──────────────────────────────────────────────
+// ── Single flight per region ─────────────────────────────────────────────────
 
-async function tryLock(): Promise<boolean> {
+/**
+ * Take the region's heal lock on a connection of its own, held for the whole
+ * heal. The lock is in the control-plane database, which every process shares.
+ *
+ * An advisory lock belongs to the session that took it. This used to go through
+ * the pooled Prisma client, so the unlock could run on a different connection
+ * than the lock: it released nothing, and the connection that did hold the lock
+ * went back to the pool still holding it. Every later heal on another
+ * connection then read "in progress" until that connection happened to close.
+ * One dedicated connection, closed at the end, cannot leave the lock behind.
+ *
+ * Null when the lock is held elsewhere, or when the control-plane database is
+ * unreachable. Refusing the heal is correct then too: without the lock this
+ * could fan out into one restart per project, and a data plane whose own
+ * database is down will not be fixed by a restart.
+ */
+async function tryLock(key: number): Promise<Client | null> {
+  const client = new Client({ connectionString: process.env.DATABASE_URL })
   try {
-    const rows = await prisma.$queryRaw<[{ acquired: boolean }]>`
-      SELECT pg_try_advisory_lock(${HEAL_LOCK_KEY}::bigint) AS acquired
-    `
-    return rows[0]?.acquired === true
+    await client.connect()
+    const res = await client.query<{ acquired: boolean }>(
+      'SELECT pg_try_advisory_lock($1::bigint) AS acquired',
+      [key],
+    )
+    if (res.rows[0]?.acquired === true) return client
   } catch {
-    // The control-plane database is unreachable. Refusing the heal is correct:
-    // without the lock this could fan out into one restart per project, and a
-    // data plane whose own database is down will not be fixed by a restart.
-    return false
+    /* refused below */
   }
+  await client.end().catch(() => {})
+  return null
 }
 
-async function unlock(): Promise<void> {
+async function unlock(client: Client, key: number): Promise<void> {
   try {
-    await prisma.$queryRaw`SELECT pg_advisory_unlock(${HEAL_LOCK_KEY}::bigint)`
-  } catch { /* session-scoped — released when the connection cycles */ }
+    await client.query('SELECT pg_advisory_unlock($1::bigint)', [key])
+  } catch { /* closing the session below releases it regardless */ }
+  await client.end().catch(() => {})
 }
 
 // ── Cooldown, persisted so it survives a process restart ─────────────────────
@@ -127,11 +169,20 @@ async function unlock(): Promise<void> {
  * Express runtime are separate processes, and either can run a reconcile pass —
  * an in-memory cooldown would be per-process and would let two processes restart
  * PostgREST back to back.
+ *
+ * Per region: a restart of one region's PostgREST says nothing about another's.
+ * Every heal row records its region (audit, below); rows written before heals
+ * were per region carry none, and were all the home region's.
  */
-async function lastRestartAt(): Promise<Date | null> {
+async function lastRestartAt(region: CloudRegionId): Promise<Date | null> {
+  const marker = `"region":"${region}"`
+  const inRegion =
+    region === HOME_REGION
+      ? { OR: [{ details: { contains: marker } }, { NOT: { details: { contains: '"region":' } } }] }
+      : { details: { contains: marker } }
   try {
     const row = await prisma.auditLog.findFirst({
-      where: { action: 'DATA_PLANE_RESTARTED', type: 'health' },
+      where: { action: 'DATA_PLANE_RESTARTED', type: 'health', ...inRegion },
       orderBy: { timestamp: 'desc' },
       select: { timestamp: true },
     })
@@ -144,6 +195,7 @@ async function lastRestartAt(): Promise<Date | null> {
 async function audit(
   action: string,
   projectId: string | null,
+  region: CloudRegionId,
   payload: Record<string, unknown>,
 ): Promise<void> {
   try {
@@ -152,7 +204,8 @@ async function audit(
         projectId,
         action,
         type: 'health',
-        details: JSON.stringify(payload),
+        // Region first, so lastRestartAt can match it in the serialized text.
+        details: JSON.stringify({ region, ...payload }),
         timestamp: new Date(),
       },
     })
@@ -178,12 +231,16 @@ async function audit(
  * The old `POSTGREST_RESTART_COMMAND` is still honoured for one transitional
  * cycle so that redeploying an older host, or rolling back, does not silently
  * lose its emergency fallback just because the variable was not renamed.
+ *
+ * Per region, like every other setting: POSTGREST_LOCAL_RESTART_COMMAND_<REGION>
+ * outside the home region, and never the home command, which restarts the home
+ * process. The deprecated name only ever existed for the home region.
  */
-function resolveLocalRestartCommand(): { command: string | null; deprecated: boolean } {
-  const preferred = process.env.POSTGREST_LOCAL_RESTART_COMMAND?.trim()
+function resolveLocalRestartCommand(region: CloudRegionId): { command: string | null; deprecated: boolean } {
+  const preferred = regionSetting('POSTGREST_LOCAL_RESTART_COMMAND', region).value?.trim()
   if (preferred) return { command: preferred, deprecated: false }
 
-  const legacy = process.env.POSTGREST_RESTART_COMMAND?.trim()
+  const legacy = region === HOME_REGION ? process.env.POSTGREST_RESTART_COMMAND?.trim() : undefined
   if (legacy) return { command: legacy, deprecated: true }
 
   return { command: null, deprecated: false }
@@ -227,12 +284,12 @@ async function runRestartCommand(command: string): Promise<{ ok: boolean; detail
  * the plane was still down, which is precisely the "reported a fix that did not
  * happen" failure the auto-fix engine's re-check guard exists to prevent.
  */
-async function waitForRecovery(): Promise<PostgrestStatus> {
+async function waitForRecovery(region: CloudRegionId): Promise<PostgrestStatus> {
   const deadline = Date.now() + RECOVERY_TIMEOUT_MS
-  let status = await probePostgrest()
+  let status = await probePostgrest(region)
   while (status.state !== 'healthy' && Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, RECOVERY_POLL_MS))
-    status = await probePostgrest()
+    status = await probePostgrest(region)
   }
   return status
 }
@@ -243,20 +300,31 @@ async function waitForRecovery(): Promise<PostgrestStatus> {
  * Diagnose the data plane and repair it, restarting the process when — and only
  * when — an independent probe confirms that is what it needs.
  *
- * Never throws. A repair that can take down its caller is worse than the fault
- * it fixes; callers read `outcome` / `healthy`.
+ * Never throws once it knows the region. A repair that can take down its caller
+ * is worse than the fault it fixes; callers read `outcome` / `healthy`.
+ * Looking up a project's region can throw (a region this build does not know,
+ * or the control-plane database failing), and that is left to the caller, which
+ * already handles a throw: guessing a region would heal the wrong data plane.
  *
- * @param projectId  The project whose finding prompted the heal. Recorded for
- *                   traceability only — it never influences the decision, which
- *                   is made platform-wide from the probe.
+ * @param projectId  The project whose finding prompted the heal. It decides the
+ *                   region, when `region` is not given, and nothing else: the
+ *                   decision is made for the whole region, from the probe.
+ * @param region     The region whose data plane to heal. Defaults to the
+ *                   project's, or the home region when there is no project.
  */
-export async function healDataPlane(projectId: string | null = null): Promise<HealResult> {
+export async function healDataPlane(
+  projectId: string | null = null,
+  region?: CloudRegionId,
+): Promise<HealResult> {
   const notes: string[] = []
+  const target = region ?? (projectId ? await projectRegion(projectId) : HOME_REGION)
 
   // ── 1. Single-flight ──────────────────────────────────────────────────────
-  if (!(await tryLock())) {
-    const status = await probePostgrest()
-    notes.push('Another data-plane heal is already running on this platform.')
+  const lockKey = healLockKey(target)
+  const lock = await tryLock(lockKey)
+  if (!lock) {
+    const status = await probePostgrest(target)
+    notes.push(`Another data-plane heal is already running for ${target}.`)
     return {
       outcome: 'in_progress',
       healthy: status.state === 'healthy',
@@ -272,7 +340,7 @@ export async function healDataPlane(projectId: string | null = null): Promise<He
     // diagnoseAndHeal is the independent diagnosis: it probes PostgREST
     // directly, prunes dangling schemas when the cache is wedged, and re-probes
     // before concluding anything.
-    const attempt = await diagnoseAndHeal()
+    const attempt = await diagnoseAndHeal(target)
     notes.push(...attempt.notes)
 
     if (attempt.status.state === 'healthy') {
@@ -286,10 +354,27 @@ export async function healDataPlane(projectId: string | null = null): Promise<He
           'not a data-plane fault, so nothing was restarted.',
         )
       }
-      await audit('DATA_PLANE_HEAL_VERIFIED', projectId, { outcome, notes })
+      await audit('DATA_PLANE_HEAL_VERIFIED', projectId, target, { outcome, notes })
       return {
         outcome,
         healthy: true,
+        status: attempt.status,
+        prunedSchemas: attempt.prunedSchemas,
+        restarted: false,
+        notes,
+      }
+    }
+
+    if (attempt.status.state === 'not_configured' && target !== HOME_REGION) {
+      // Not "nothing to heal". The region has a data plane, and this process
+      // has no address for it, so it can neither see nor repair it. Reporting
+      // that as healthy would close a finding about a plane nobody looked at.
+      const { variable } = regionSetting('POSTGREST_URL', target)
+      notes.push(`${variable} is not set, so this process cannot reach the data plane in ${target} to check or repair it.`)
+      await audit('DATA_PLANE_REGION_UNREACHABLE', projectId, target, { variable, notes })
+      return {
+        outcome: 'region_not_reachable',
+        healthy: false,
         status: attempt.status,
         prunedSchemas: attempt.prunedSchemas,
         restarted: false,
@@ -322,7 +407,7 @@ export async function healDataPlane(projectId: string | null = null): Promise<He
     }
 
     // ── 3. Rate ceiling ─────────────────────────────────────────────────────
-    const last = await lastRestartAt()
+    const last = await lastRestartAt(target)
     if (last && Date.now() - last.getTime() < RESTART_COOLDOWN_MS) {
       const waitSec = Math.ceil((RESTART_COOLDOWN_MS - (Date.now() - last.getTime())) / 1000)
       notes.push(
@@ -330,7 +415,7 @@ export async function healDataPlane(projectId: string | null = null): Promise<He
         `is still failing. Holding off ${waitSec}s — restarting again this soon would be a crash ` +
         `loop, not a repair.`,
       )
-      await audit('DATA_PLANE_HEAL_COOLDOWN', projectId, { waitSec, status: attempt.status, notes })
+      await audit('DATA_PLANE_HEAL_COOLDOWN', projectId, target, { waitSec, status: attempt.status, notes })
       return {
         outcome: 'cooling_down',
         healthy: false,
@@ -342,7 +427,7 @@ export async function healDataPlane(projectId: string | null = null): Promise<He
     }
 
     // ── 4. Restart ──────────────────────────────────────────────────────────
-    const { command, deprecated } = resolveLocalRestartCommand()
+    const { command, deprecated } = resolveLocalRestartCommand(target)
     if (deprecated) {
       // Names the replacement, never the value.
       notes.push(
@@ -360,7 +445,7 @@ export async function healDataPlane(projectId: string | null = null): Promise<He
         'POSTGREST_LOCAL_RESTART_COMMAND to the supervisor command (for example a systemctl or pm2 ' +
         'restart of the postgrest process) and the loop will repair this class of outage on its own.',
       )
-      await audit('DATA_PLANE_RESTART_UNCONFIGURED', projectId, { status: attempt.status, notes })
+      await audit('DATA_PLANE_RESTART_UNCONFIGURED', projectId, target, { status: attempt.status, notes })
       return {
         outcome: 'restart_channel_unconfigured',
         healthy: false,
@@ -374,7 +459,7 @@ export async function healDataPlane(projectId: string | null = null): Promise<He
     // Recorded BEFORE the command runs. If the process dies mid-restart, the
     // cooldown must still be in effect on the next pass — a crash that loses the
     // record is exactly when the loop is most likely to restart repeatedly.
-    await audit('DATA_PLANE_RESTARTED', projectId, {
+    await audit('DATA_PLANE_RESTARTED', projectId, target, {
       reason: attempt.status.state,
       prunedSchemas: attempt.prunedSchemas,
     })
@@ -383,10 +468,10 @@ export async function healDataPlane(projectId: string | null = null): Promise<He
     notes.push(run.ok ? `Restart command accepted: ${run.detail}` : `Restart command failed: ${run.detail}`)
 
     // ── 5. Verify recovery, never assume it ─────────────────────────────────
-    const recovered = await waitForRecovery()
+    const recovered = await waitForRecovery(target)
     if (recovered.state === 'healthy') {
       notes.push(`PostgREST is answering again (${recovered.latencyMs}ms).`)
-      await audit('DATA_PLANE_HEAL_SUCCEEDED', projectId, { notes })
+      await audit('DATA_PLANE_HEAL_SUCCEEDED', projectId, target, { notes })
       return {
         outcome: 'healed_by_restart',
         healthy: true,
@@ -401,7 +486,7 @@ export async function healDataPlane(projectId: string | null = null): Promise<He
       `PostgREST did not recover within ${RECOVERY_TIMEOUT_MS / 1000}s of the restart — the cause ` +
       `is outside the data-plane process itself.`,
     )
-    await audit('DATA_PLANE_HEAL_FAILED', projectId, { status: recovered, notes })
+    await audit('DATA_PLANE_HEAL_FAILED', projectId, target, { status: recovered, notes })
     return {
       outcome: 'unrecovered',
       healthy: false,
@@ -424,7 +509,7 @@ export async function healDataPlane(projectId: string | null = null): Promise<He
       notes,
     }
   } finally {
-    await unlock()
+    await unlock(lock, lockKey)
   }
 }
 
@@ -455,6 +540,8 @@ export function describeHeal(result: HealResult): string {
       return 'Data plane restored: the database API service was restarted and is answering again.'
     case 'in_progress':
       return 'A data-plane repair is already running — this will clear on the next check.'
+    case 'region_not_reachable':
+      return 'Backenly could not check the database API service in this project\'s region from here. This is platform infrastructure, not your project — it has been escalated and needs no action from you.'
     case 'cooling_down':
       return 'The data plane was just restarted and is still failing, so Backenly is not restarting it again immediately. This is platform infrastructure and is being escalated — there is nothing to change in your project.'
     case 'restart_channel_unconfigured':
