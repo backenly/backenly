@@ -17,6 +17,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
+import { workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
 import type { VerificationCheck, VerificationReport } from './verifier'
 
@@ -78,13 +79,15 @@ export async function runLoadTestBaseline(
   const schemaName = getWorkspaceDatabaseNames(projectId).postgresSchema
   const tables     = await getProjectTableNames(projectId)
   const results: EndpointLoadResult[] = []
+  // The project's own database, in its region: the one its requests are served from.
+  const db = await workspaceRawClient(projectId)
 
   // 1. Connection latency baseline (SELECT 1 — pure connection timing)
-  results.push(await benchConnLatency(CONN_LATENCY_SAMPLES, concurrency))
+  results.push(await benchConnLatency(db, CONN_LATENCY_SAMPLES, concurrency))
 
   // 2. Per-table query timing
   for (const table of tables.slice(0, 5)) {
-    results.push(await benchTableQuery(schemaName, table, samplesPerObj, concurrency))
+    results.push(await benchTableQuery(db, schemaName, table, samplesPerObj, concurrency))
   }
 
   // 3. Aggregate
@@ -181,6 +184,7 @@ export function clearLoadTestCache(): void {}
  * Benchmark raw DB connection latency by running SELECT 1 N times concurrently.
  */
 async function benchConnLatency(
+  db: WorkspaceRawClient,
   totalSamples: number,
   concurrency: number,
 ): Promise<EndpointLoadResult> {
@@ -191,7 +195,7 @@ async function benchConnLatency(
     const batch = Array.from({ length: Math.min(concurrency, totalSamples - sent) }, async () => {
       const start = Date.now()
       try {
-        await prisma.$queryRaw`SELECT 1 AS ok`
+        await db.$queryRaw`SELECT 1 AS ok`
         latencies.push(Date.now() - start)
       } catch {
         latencies.push(Date.now() - start)
@@ -217,6 +221,7 @@ async function benchConnLatency(
  * Uses EXPLAIN ANALYZE instead of full SELECT to avoid loading real data.
  */
 async function benchTableQuery(
+  db: WorkspaceRawClient,
   schema: string,
   table: string,
   samples: number,
@@ -231,7 +236,7 @@ async function benchTableQuery(
       try {
         // COUNT(*) is the lightest meaningful query — forces a full table scan
         // measurement without returning actual row data to the application.
-        await prisma.$queryRawUnsafe(
+        await db.$queryRawUnsafe(
           `SELECT COUNT(*) FROM "${schema}"."${table}" LIMIT 1`,
         )
         latencies.push(Date.now() - start)

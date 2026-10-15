@@ -6,6 +6,8 @@
  * Eliminates "tried to create a table that already exists" bugs.
  */
 
+import { workspaceRawClient } from '@/lib/data-plane/regional'
+
 export interface TableInfo {
   name: string
   columns: Array<{ name: string; type: string; nullable: boolean; foreignKey?: string }>
@@ -44,12 +46,13 @@ export async function tableExists(projectId: string, tableName: string): Promise
 }
 
 export async function describeTable(projectId: string, tableName: string): Promise<TableInfo | null> {
+  const db = await workspaceRawClient(projectId)
   const { prisma } = await import('@/lib/db/prisma')
   try {
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
 
-    const columns = await prisma.$queryRawUnsafe<any[]>(
+    const columns = await db.$queryRawUnsafe<any[]>(
       `SELECT column_name, data_type, is_nullable
        FROM information_schema.columns
        WHERE table_schema = $1 AND table_name = $2
@@ -58,7 +61,7 @@ export async function describeTable(projectId: string, tableName: string): Promi
     )
     if (columns.length === 0) return null
 
-    const fkRows = await (prisma.$queryRawUnsafe<any[]>(
+    const fkRows = await (db.$queryRawUnsafe<any[]>(
       `SELECT kcu.column_name, ccu.table_name AS referenced_table
        FROM information_schema.table_constraints tc
        JOIN information_schema.key_column_usage kcu

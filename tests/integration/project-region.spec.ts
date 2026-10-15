@@ -50,6 +50,10 @@ import { runReadQuery } from '@/lib/mcp/read-query'
 import { createBranch, discardBranch } from '@/lib/branches/engine'
 import { readWorkspaceSchema } from '@/lib/typegen/schema-reader'
 import { executeAction, introspectSchema } from '@/lib/ai/minimal-executor'
+import { logActivity } from '@/lib/ai/activity-log-engine'
+import { buildWorkspaceTableNameMap } from '@/lib/ai/fk-repair'
+import { collectProof } from '@/lib/ai/proof-system'
+import { describeTable } from '@/lib/ai/schema-tools'
 import { directAccessRoleNames, provisionDirectAccess, revokeDirectAccess } from '@/lib/services/direct-access'
 import { columnTypes } from '@/lib/mcp/runtime-db'
 import { getTableSchema, listExposedTables, workspaceTableExists } from '@/lib/mcp/schema-introspection'
@@ -822,6 +826,55 @@ describe('the AI executor reads and writes the project’s region', () => {
     expect(result.success).toBe(false)
     process.env[REGION_VARIABLE] = regionalUrl
     expect((await regionalColumns('marker')).map((c) => c.column_name)).not.toContain('never_added')
+  })
+})
+
+describe('the AI build tools read and write the project’s region', () => {
+  const activityRows = () =>
+    rowsIn<{ entity_id: string }>(
+      regionalUrl,
+      `SELECT entity_id FROM "${schemaOf(regionalProject)}".activity_logs ORDER BY entity_id`,
+    )
+  const entry = (entityId: string) => ({
+    projectId: regionalProject,
+    action: 'created' as const,
+    entityType: 'marker',
+    entityId,
+    description: 'region test',
+  })
+
+  beforeAll(async () => {
+    await run(
+      regionalUrl,
+      `CREATE TABLE "${schemaOf(regionalProject)}".activity_logs (
+         action text, entity_type text, entity_id text, description text,
+         actor_id text, metadata jsonb, created_at timestamptz
+       )`,
+    )
+  })
+
+  it('reads a regional project’s catalog for table descriptions, FK repair and the proof block', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const described = await describeTable(regionalProject, 'marker')
+    expect(described?.columns.map((c) => c.name)).toContain('deleted_at')
+    expect((await buildWorkspaceTableNameMap(regionalProject)).has('marker')).toBe(true)
+    expect((await collectProof(regionalProject)).tables).toContain('marker')
+  })
+
+  it('writes the activity log into the regional schema', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    await logActivity(entry('logged-in-region'))
+    expect(await activityRows()).toEqual([{ entity_id: 'logged-in-region' }])
+  })
+
+  it('refuses the readers without a connection, while activity logging stays best-effort', async () => {
+    delete process.env[REGION_VARIABLE]
+    await expect(describeTable(regionalProject, 'marker')).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+    await expect(buildWorkspaceTableNameMap(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+    await expect(collectProof(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+    await expect(logActivity(entry('never-logged'))).resolves.toBeUndefined()
+    process.env[REGION_VARIABLE] = regionalUrl
+    expect(await activityRows()).toEqual([{ entity_id: 'logged-in-region' }])
   })
 })
 

@@ -1004,9 +1004,11 @@ async function executePermissionsNode(
     // as failures. Count policies actually present in the workspace schema.
     let actualApplied = successCount
     try {
-      const { prisma: rlsPrisma } = await import('@/lib/db')
+      // The catalog of the project's database, in its region.
+      const { workspaceRawClient } = await import('@/lib/data-plane/regional')
+      const db = await workspaceRawClient(projectId)
       const schemaName = `workspace_${projectId}`
-      const policyRows = await rlsPrisma.$queryRawUnsafe<Array<{ tablename: string }>>(
+      const policyRows = await db.$queryRawUnsafe<Array<{ tablename: string }>>(
         `SELECT DISTINCT tablename FROM pg_policies
          WHERE schemaname = $1 AND policyname LIKE '%own_rows%'`,
         schemaName

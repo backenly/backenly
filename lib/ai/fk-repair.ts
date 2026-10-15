@@ -11,6 +11,7 @@
  */
 
 import { deriveFkBase } from '@/lib/db/fk-shape'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 
 const SET_NULL_COLUMNS = ['assigned_to', 'assignee_id', 'updated_by', 'deleted_by', 'approved_by', 'actor_id']
 
@@ -167,10 +168,10 @@ export { deriveFkBase } from '@/lib/db/fk-shape'
  * in a workspace schema. Used to resolve a column's referenced table.
  */
 export async function buildWorkspaceTableNameMap(projectId: string): Promise<Map<string, string>> {
-  const { prisma } = await import('@/lib/db')
+  const db = await workspaceRawClient(projectId)
   const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
   const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
-  const rows = await prisma.$queryRawUnsafe<{ table_name: string }[]>(
+  const rows = await db.$queryRawUnsafe<{ table_name: string }[]>(
     `SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'BASE TABLE'`,
     postgresSchema,
   )
@@ -247,7 +248,7 @@ export async function repairForeignKeyColumn(
   columnName: string,
   referencedTable?: string,
 ): Promise<{ success: boolean; message: string; referencedTable?: string }> {
-  const { prisma } = await import('@/lib/db')
+  const db = await workspaceRawClient(projectId)
   const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
   const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
 
@@ -276,7 +277,7 @@ export async function repairForeignKeyColumn(
   const isSelfRef = refTable.toLowerCase() === tableName.toLowerCase()
 
   // Idempotency: skip if a FK already exists on this column.
-  const existing = await prisma.$queryRawUnsafe<{ one: number }[]>(
+  const existing = await db.$queryRawUnsafe<{ one: number }[]>(
     `SELECT 1 AS one
        FROM information_schema.table_constraints tc
        JOIN information_schema.key_column_usage kcu
@@ -293,7 +294,7 @@ export async function repairForeignKeyColumn(
   // A self-referential SET NULL rule needs a nullable column; check before choosing.
   let nullable = true
   if (isSelfRef) {
-    const nn = await prisma.$queryRawUnsafe<{ is_nullable: string }[]>(
+    const nn = await db.$queryRawUnsafe<{ is_nullable: string }[]>(
       `SELECT is_nullable FROM information_schema.columns
         WHERE table_schema = $1 AND table_name = $2 AND column_name = $3 LIMIT 1`,
       postgresSchema, tableName, columnName,
@@ -306,7 +307,7 @@ export async function repairForeignKeyColumn(
   const constraintName = `fk_${tableName}_${base}`.replace(/[^a-z0-9_]/gi, '_').slice(0, 63)
 
   try {
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       `ALTER TABLE "${postgresSchema}"."${tableName}"
        ADD CONSTRAINT "${constraintName}"
        FOREIGN KEY ("${columnName}") REFERENCES "${postgresSchema}"."${refTable}"(id) ${cascadeStr}`,
@@ -325,7 +326,7 @@ export async function repairForeignKeyColumn(
 }
 
 export async function repairForeignKeysWithDetails(projectId: string): Promise<FKRepairResult> {
-  const { prisma } = await import('@/lib/db')
+  const db = await workspaceRawClient(projectId)
   const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
   const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
 
@@ -335,7 +336,7 @@ export async function repairForeignKeysWithDetails(projectId: string): Promise<F
 
   try {
     // Get all tables in this workspace
-    const tableRows = await prisma.$queryRawUnsafe<{ table_name: string }[]>(
+    const tableRows = await db.$queryRawUnsafe<{ table_name: string }[]>(
       `SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'BASE TABLE'`,
       postgresSchema
     )
@@ -348,13 +349,13 @@ export async function repairForeignKeysWithDetails(projectId: string): Promise<F
     }
 
     // Get all columns across all tables (is_nullable drives the self-ref rule)
-    const allCols = await prisma.$queryRawUnsafe<{ table_name: string; column_name: string; is_nullable: string }[]>(
+    const allCols = await db.$queryRawUnsafe<{ table_name: string; column_name: string; is_nullable: string }[]>(
       `SELECT table_name, column_name, is_nullable FROM information_schema.columns WHERE table_schema = $1 AND column_name != 'id'`,
       postgresSchema
     )
 
     // Get all existing FK constraints
-    const existingFKs = await prisma.$queryRawUnsafe<{ table_name: string; column_name: string }[]>(
+    const existingFKs = await db.$queryRawUnsafe<{ table_name: string; column_name: string }[]>(
       `SELECT kcu.table_name, kcu.column_name
        FROM information_schema.table_constraints tc
        JOIN information_schema.key_column_usage kcu
@@ -388,7 +389,7 @@ export async function repairForeignKeysWithDetails(projectId: string): Promise<F
         // Use fk_<table>_<base> naming to preserve semantic role and avoid conflicts
         // e.g. orders.sellerId → fk_orders_seller, orders.buyerId → fk_orders_buyer
         const constraintName = `fk_${table_name}_${base}`
-        await prisma.$executeRawUnsafe(
+        await db.$executeRawUnsafe(
           `ALTER TABLE "${postgresSchema}"."${table_name}"
            ADD CONSTRAINT "${constraintName}"
            FOREIGN KEY ("${column_name}") REFERENCES "${postgresSchema}"."${refTable}"(id) ${cascadeStr}`
