@@ -16,8 +16,8 @@ Call as `auth { action: "<action>", … }`.
 | `remove_oauth_provider` | turn a sign-in provider off | `provider` | no | waits for a human |
 | `list_users` | the end-users who have signed up | nothing | yes | no |
 | `reset_password` | send a password reset to one user (userId or email) | nothing | no | no |
-| `block_user` | stop one user from signing in | nothing | no | waits for a human |
-| `unblock_user` | let a blocked user sign in again | nothing | no | no |
+| `block_user` | stop one user from signing in | `userId or email` | no | waits for a human |
+| `unblock_user` | let a blocked user sign in again | `userId or email` | no | no |
 | `enable_teams` | organizations with members and roles | nothing | no | no |
 | `email_settings` | how verification and password-reset emails are sent, whether the last test worked, and the templates | nothing | yes | no |
 | `set_smtp` | the SMTP server auth emails are sent through (the password is stored encrypted and never returned) | `host`, `port`, `username`, `fromAddress` | no | no |

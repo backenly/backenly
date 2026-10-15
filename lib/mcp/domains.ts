@@ -297,8 +297,22 @@ function brainParams(tool: string): { properties: Record<string, JsonSchema>; re
   return { properties: def?.parameters?.properties ?? {}, required: def?.parameters?.required ?? [] }
 }
 
+/**
+ * Tools whose executor requires ONE OF several arguments. Their brain schema
+ * declares `required: []` (JSON Schema here cannot express the alternative),
+ * which rendered as "Needs: nothing" — and the executor then refused the
+ * call. The docs and descriptions print this declared alternative instead.
+ */
+const REQUIRED_ALTERNATIVES: Record<string, string> = {
+  rotate_webhook_secret: 'triggerName or triggerId',
+  block_end_user: 'userId or email',
+  unblock_end_user: 'userId or email',
+}
+
 /** The arguments an action's target tool requires, as its description lists them. */
 export function actionRequires(tool: string): string[] {
+  const alternative = REQUIRED_ALTERNATIVES[tool]
+  if (alternative) return [alternative]
   return brainParams(tool).required.filter((p) => p !== 'action')
 }
 
@@ -359,7 +373,7 @@ export function domainInputSchema(domain: DomainTool, opts?: { readOnly?: boolea
 /** The advertised description: the summary, then one line per action. */
 export function domainDescription(domain: DomainTool): string {
   const lines = Object.entries(domain.actions).map(([action, { tool, gloss }]) => {
-    const needs = brainParams(tool).required
+    const needs = actionRequires(tool)
     const args = needs.length ? ` (needs ${needs.join(', ')})` : ''
     const gate = needsApproval(tool) ? ' [waits for human approval; poll check_approval]' : ''
     return `• ${action}: ${gloss}${args}${gate}`

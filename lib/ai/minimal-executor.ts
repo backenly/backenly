@@ -13383,7 +13383,10 @@ async function executeRotateWebhookSecret(params: any, projectId: string): Promi
         `**New secret** (shown once — save it now):\n\n\`${newSecret}\`\n\n` +
         `Future deliveries to \`${trigger.webhookUrl}\` are signed with this secret as \`X-Backenly-Signature: sha256=<hmac>\`. ` +
         `Verify in your receiver before trusting any payload.`,
-      data: { triggerId: trigger.id, triggerName: trigger.name },
+      // The docs promise the secret in data.secret — an agent updating a
+      // receiver should not have to parse it out of prose. Shown once, as
+      // the message says; it is never readable again.
+      data: { triggerId: trigger.id, triggerName: trigger.name, secret: newSecret },
     }
   } catch (error: any) {
     return { success: false, message: `Failed to rotate webhook secret: ${error.message}`, error: error.message }

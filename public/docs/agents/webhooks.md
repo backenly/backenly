@@ -22,7 +22,7 @@ Call as `webhooks { action: "<action>", … }`.
 | `triggers` | the table triggers, including those whose action calls a URL | nothing | yes | no |
 | `trigger_deliveries` | recent trigger deliveries, filterable by SUCCESS, FAILED or DEAD | nothing | yes | no |
 | `replay_trigger_delivery` | send a DEAD trigger delivery again | `id` | no | no |
-| `rotate_trigger_secret` | a new signing secret for a trigger | nothing | no | no |
+| `rotate_trigger_secret` | a new signing secret for a trigger | `triggerName or triggerId` | no | no |
 <!-- end generated -->
 
 - `create` returns the endpoint's signing secret once, in `data.secret`, never in the summary; store it where the receiver can read it.
