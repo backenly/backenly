@@ -9,7 +9,8 @@
  *   auto-fixable — will be deterministically fixed before re-evaluation
  *
  * Usage:
- *   const report = await scoreReadiness(projectId)
+ *   const report = await scoreReadiness(projectId)                 // a read
+ *   const fixed  = await scoreReadiness(projectId, { autoFix: true }) // applies safe fixes
  *   if (!report.ready) { ... show report.blockers ... }
  */
 
@@ -47,7 +48,11 @@ export interface ReadinessReport {
 }
 
 export interface ReadinessOptions {
-  /** When true, run safe deterministic fixes before evaluating blockers. Default: true */
+  /**
+   * When true, run safe deterministic fixes before evaluating blockers.
+   * Default false: a readiness read changes nothing. Fixing is asked for
+   * explicitly (the deploy itself, POST /readiness, autoFix: true).
+   */
   autoFix?: boolean
 }
 
@@ -65,7 +70,7 @@ export async function scoreReadiness(
   projectId: string,
   options: ReadinessOptions = {},
 ): Promise<ReadinessReport> {
-  const { autoFix = true } = options
+  const { autoFix = false } = options
 
   // Load everything we need in one round-trip
   // `apiDefs` was destructured here and never referenced again in this file —
@@ -113,11 +118,11 @@ export async function scoreReadiness(
     checkRlsApplied(projectId, entities, policies, autoFix),
     checkWebhookSecurity(triggers),
     checkApiExposure(projectId),
-    checkEndUserAuthTable(projectId, project),  // auth enabled → users table must exist
+    checkEndUserAuthTable(projectId, project, autoFix),  // auth enabled → users table must exist
     checkMonitoringBasics(projectId),
     checkBehavioralVerification(projectId),
     checkSecurityAudit(projectId),          // #31/#7 security — blocks deploy on critical/high findings
-    checkFunctionTriggers(projectId),        // signup functions must have auto-triggers; placeholders must be cleaned up
+    checkFunctionTriggers(projectId, autoFix), // signup functions must have auto-triggers; placeholders must be cleaned up
   ])
 
   return buildReport(projectId, checks)
@@ -731,6 +736,7 @@ async function checkBehavioralVerification(projectId: string): Promise<Readiness
 async function checkEndUserAuthTable(
   projectId: string,
   project: { jwtSecret: string | null; authManifest: any },
+  autoFix: boolean,
 ): Promise<ReadinessCheck> {
   const base: Omit<ReadinessCheck, 'status' | 'message' | 'details' | 'fixApplied'> = {
     id: 'end_user_auth_table',
@@ -757,6 +763,17 @@ async function checkEndUserAuthTable(
 
     // Auth manifest flag not set but users table + jwtSecret already exist → auto-correct the flag.
     // This happens when Google OAuth is connected but the AI build flow skipped the manifest write.
+    // Only when fixing was asked for: a read (autoFix false) reports it and changes nothing.
+    if (!authEnabled && jwtReady && usersTableExists && !autoFix) {
+      return {
+        ...base,
+        severity: 'auto-fixable',
+        status: 'fail',
+        message: 'Auth is not marked enabled although the users table and a JWT secret exist',
+        details: ['→ Applying safe fixes sets authManifest.enabled'],
+        fixApplied: false,
+      }
+    }
     if (!authEnabled && jwtReady && usersTableExists) {
       try {
         const existing = (typeof project.authManifest === 'object' && project.authManifest !== null)
@@ -934,7 +951,7 @@ async function checkSecurityAudit(projectId: string): Promise<ReadinessCheck> {
  *
  * Placeholder functions with active triggers are auto-deactivated.
  */
-async function checkFunctionTriggers(projectId: string): Promise<ReadinessCheck> {
+async function checkFunctionTriggers(projectId: string, autoFix: boolean): Promise<ReadinessCheck> {
   const base: Omit<ReadinessCheck, 'status' | 'message' | 'details' | 'fixApplied'> = {
     id: 'function_triggers',
     name: 'AI function trigger configuration',
@@ -979,9 +996,13 @@ async function checkFunctionTriggers(projectId: string): Promise<ReadinessCheck>
       }
     }
 
-    // Auto-deactivate placeholder functions that have live triggers
+    // Auto-deactivate placeholder functions that have live triggers, only
+    // when fixing was asked for: a read (autoFix false) reports and changes nothing.
     let fixApplied = false
-    if (toDeactivate.length > 0) {
+    if (toDeactivate.length > 0 && !autoFix) {
+      issues.push(`→ Applying safe fixes deactivates ${toDeactivate.length} placeholder function${toDeactivate.length !== 1 ? 's' : ''} with live triggers`)
+    }
+    if (toDeactivate.length > 0 && autoFix) {
       try {
         await prisma.aiFunction.updateMany({
           where: { id: { in: toDeactivate } },
