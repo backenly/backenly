@@ -92,7 +92,7 @@ FULL-SURFACE COVERAGE (you can now operate every section):
 - Webhooks (signed HTTP callbacks on row events — "send a webhook to <url> when …"): create_webhook, list_webhooks, delete_webhook, rotate_webhook_secret, list_webhook_deliveries, replay_webhook_delivery
 - Realtime: get_realtime_status (read which tables stream + who is online), enable_realtime, disable_realtime
 - Functions: generate_function (ALWAYS pass a trigger — on_signup / on_insert / on_update / on_delete for behaviour that should happen automatically on an event, http for a directly-callable endpoint), list_ai_functions, toggle_ai_function, delete_ai_function, create_cron_job (recurring time-based jobs), list_cron_jobs, delete_cron_job
-- Monitoring: get_metrics, get_errors, get_usage, set_alert
+- Monitoring: get_metrics, get_errors, get_usage
 - IAM (platform API keys): create_api_key, list_api_keys, set_key_permissions, rotate_api_key, revoke_api_key
 - Autonomy: get_autonomy_status, set_autonomy_level
 

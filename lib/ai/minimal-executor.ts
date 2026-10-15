@@ -1541,7 +1541,6 @@ IAM (API KEYS):
 MONITORING:
 - GET_METRICS - Get API metrics
 - GET_ERRORS - Get error logs
-- SET_ALERT - Set monitoring alert
 - GET_USAGE - Get usage statistics
 
 TRIGGERS (event automation — "when X happens, do Y automatically"):
@@ -8077,59 +8076,22 @@ async function executeGetUsage(projectId: string): Promise<ExecutionResult> {
  * MONITORING: Set Alert — persists alert config as JSON in project.activeIntegrations
  * Stored under the `_monitoring_alerts` key so no schema migration is needed.
  */
-async function executeSetAlert(params: any, projectId: string): Promise<ExecutionResult> {
-  const { metric, threshold, operator = 'gt', channel = 'in_app', name } = params ?? {}
-
-  if (!metric || threshold === undefined) {
-    return {
-      success: false,
-      message: 'Alert requires metric and threshold. Example: { metric: "error_rate", threshold: 5, operator: "gt" }',
-    }
-  }
-
-  try {
-    const { prisma } = await import('@/lib/db')
-
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-      select: { activeIntegrations: true },
-    })
-
-    const existing = (project?.activeIntegrations as Record<string, any>) ?? {}
-    const alerts: any[] = existing._monitoring_alerts ?? []
-
-    const newAlert = {
-      id: `alert_${Date.now()}`,
-      name: name || `${metric} alert`,
-      metric,
-      threshold: Number(threshold),
-      operator,   // 'gt' | 'lt' | 'gte' | 'lte'
-      channel,    // 'in_app' | 'email' | 'webhook'
-      enabled: true,
-      createdAt: new Date().toISOString(),
-    }
-
-    // Replace existing alert for same metric (idempotent)
-    const updated = alerts.filter(a => a.metric !== metric)
-    updated.push(newAlert)
-
-    await prisma.project.update({
-      where: { id: projectId },
-      data: { activeIntegrations: { ...existing, _monitoring_alerts: updated } },
-    })
-
-    const opLabel = operator === 'gt' ? 'exceeds' : operator === 'lt' ? 'drops below' : 'reaches'
-    return {
-      success: true,
-      message: `✅ Alert set: notify when ${metric} ${opLabel} ${threshold}. Active on Monitoring tab.`,
-      data: newAlert,
-    }
-  } catch (error: any) {
-    return {
-      success: false,
-      message: `Failed to save alert: ${error.message}`,
-      error: error.message,
-    }
+async function executeSetAlert(_params: any, _projectId: string): Promise<ExecutionResult> {
+  // This used to store the alert under project.activeIntegrations and answer
+  // with a green set-and-active receipt — but NOTHING evaluates those
+  // rows: no cron, no reconciler pass, no console surface reads them. The
+  // agent was told a watchdog existed that could never bark, which is worse
+  // than having none. The MCP door already removed its set_alert action and
+  // the brain no longer offers the tool; this refusal covers any caller that
+  // still carries the action name. It returns when an evaluator exists.
+  return {
+    success: false,
+    message:
+      'Alerts are not available yet: nothing evaluates stored alert rules, so setting one would ' +
+      'claim a watchdog that can never fire. Watch the backend directly instead — ' +
+      'monitoring { "action": "metrics" } and { "action": "errors" } — or rely on the autonomy ' +
+      'loop, which already surfaces failing endpoints on the Autonomy page.',
+    error: 'ALERTS_NOT_EVALUATED',
   }
 }
 

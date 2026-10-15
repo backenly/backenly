@@ -155,8 +155,6 @@ export type ToolName =
   | 'toggle_ai_function'
   | 'delete_ai_function'
   | 'delete_cron_job'
-  // Monitoring
-  | 'set_alert'
   // Autonomy
   | 'set_autonomy_level'
   // Agent-native operator surface (open loop / 24-7 brain)
@@ -1350,15 +1348,12 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     { jobId: { type: 'string' }, name: { type: 'string' } }),
 
   // ── Monitoring ────────────────────────────────────────────────────────────
-  fn('set_alert',
-    'Configure a monitoring alert. Supported channels: email + dashboard. Trigger types: error_rate, latency_p95, request_rate, integration_failure.',
-    {
-      type: { type: 'string', enum: ['error_rate', 'latency_p95', 'request_rate', 'integration_failure'] },
-      threshold: { type: 'number', description: 'Numeric threshold (e.g. 5 for "5% error rate", 800 for "800ms p95").' },
-      windowMinutes: { type: 'integer', minimum: 5, maximum: 1440 },
-      channel: { type: 'string', enum: ['email', 'dashboard', 'both'] },
-    },
-    ['type', 'threshold']),
+  // No set_alert: it stored config under project.activeIntegrations that
+  // nothing ever evaluates, so the agent was told an alert was "active" that
+  // could never fire — and its mapper sent `type` where the executor read
+  // `metric`, so even the storage path always failed. The MCP door already
+  // removed it (see lib/mcp/domains.ts); the brain follows. It returns when
+  // an evaluator exists.
 
   // ── Autonomy ──────────────────────────────────────────────────────────────
   fn('set_autonomy_level',
@@ -1802,11 +1797,6 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
   delete_ai_function: (a) => ({ action: 'DELETE_AI_FUNCTION', params: { functionId: a.functionId, name: a.name } }),
   delete_cron_job: (a) => ({ action: 'DELETE_CRON_JOB', params: { jobId: a.jobId, name: a.name } }),
 
-  // Monitoring
-  set_alert: (a) => ({
-    action: 'SET_ALERT',
-    params: { type: a.type, threshold: a.threshold, windowMinutes: a.windowMinutes, channel: a.channel || 'dashboard' },
-  }),
 }
 
 const FIX_TARGET_TO_ACTION: Record<string, AIAction['action']> = {
@@ -3420,7 +3410,6 @@ export function humanTitle(name: string, args: Record<string, unknown>): string 
     case 'toggle_ai_function': return `${args.active ? 'Enabling' : 'Disabling'} function ${args.name ?? args.functionId ?? ''}`.trim()
     case 'delete_ai_function': return `Deleting function ${args.name ?? args.functionId ?? ''}`.trim()
     case 'delete_cron_job': return `Deleting job ${args.name ?? args.jobId ?? ''}`.trim()
-    case 'set_alert': return `Setting alert: ${args.type ?? ''} > ${args.threshold ?? ''}`
     case 'set_autonomy_level': return `Setting autonomy to ${args.level ?? ''}`
     case 'propose_plan': return 'Proposing a plan'
     case 'ask_user': return 'Asking for clarification'
