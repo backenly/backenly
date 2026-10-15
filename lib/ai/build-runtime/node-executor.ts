@@ -1064,9 +1064,17 @@ async function executeStorageNode(
     return {
       nodeId: node.id,
       status: 'verified',
-      detail: `Created storage bucket \`${bucketName}\``,
+      detail: (result.data as { existed?: boolean } | undefined)?.existed
+        ? `Bucket \`${bucketName}\` already exists`
+        : `Created storage bucket \`${bucketName}\``,
       artifacts: result.artifacts,
     }
+  }
+
+  // An existing bucket with the OTHER visibility is not this node done: the
+  // build asked for public (or private) storage and did not get it.
+  if (result.error === 'BUCKET_VISIBILITY_MISMATCH') {
+    return { nodeId: node.id, status: 'failed', failureReason: result.message }
   }
 
   if (result.message?.toLowerCase().includes('already exists')) {

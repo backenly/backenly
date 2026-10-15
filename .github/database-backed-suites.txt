@@ -908,6 +908,12 @@ tests/integration/integrations-connect-contract.spec.ts
 # rows and the real credentials, keys and build-status routes are the
 # property; PostHog and seeded rows keep CI off provider APIs.
 tests/integration/integration-key-one-row.spec.ts
+# Storage answers agents with what the runtime will do: no shareable link into
+# an owner_only bucket, a file still flagged public in a private bucket gets
+# an expiring signed link on both drivers, and create_bucket on an existing
+# bucket reports its real visibility and refuses a contradicting request.
+# Real bucket and file rows are the property; the S3 case only presigns.
+tests/integration/storage-agent-truth.spec.ts
 # A parked executor action is pollable: the APPROVAL_REQUIRED refusal carries
 # the Review Queue finding's id and the poll call, check_approval resolves
 # parked findings alongside destructive-gate approvals with one status

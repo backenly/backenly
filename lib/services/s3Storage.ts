@@ -25,7 +25,7 @@
 
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3'
 import { UploadRejectedError, assertFileAllowed, assertFileSize, uploadExtension } from '@/lib/storage/upload-policy'
-import { clampIsPublic } from '@/lib/storage/access-policy'
+import { clampIsPublic, policyAllowsPublic } from '@/lib/storage/access-policy'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import { prisma } from '@/lib/db'
 import crypto from 'crypto'
@@ -589,6 +589,7 @@ export class S3StorageService implements StorageService {
 
     const file = await prisma.storageFile.findUnique({
       where: { id: fileId },
+      include: { bucket: { select: { accessPolicy: true } } },
     })
 
     if (!file || file.deletedAt) {
@@ -605,7 +606,13 @@ export class S3StorageService implements StorageService {
     // access), so a direct `{endpoint}/{bucket}/{key}` URL returns 401. Only a
     // genuine CDN/public host (different from the S3 API endpoint) can serve the
     // object directly.
-    if (file.isPublic) {
+    //
+    // "Public" is the download route's rule (mayRead): the bucket's CURRENT
+    // policy must permit public objects AND the file must be marked public. The
+    // file's flag alone outlives a bucket tightened to private, and a permanent
+    // public URL for such a file is one the route refuses (or, via a public
+    // CDN host, one that serves what the owner made private).
+    if (policyAllowsPublic(file.bucket.accessPolicy) && file.isPublic) {
       // A SIGNED CDN serves nothing unsigned, so a public file's permanent URL
       // is the app route, which mints a fresh signed URL on every request.
       const cdnBase = signedCdnConfig() ? null : this.publicCdnBase()

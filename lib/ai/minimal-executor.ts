@@ -6476,15 +6476,48 @@ async function executeCreateBucket(params: any, projectId: string): Promise<Exec
     }
   } catch (error: any) {
     if (error.message?.includes('already exists')) {
-      // Even on "already exists", verify it's actually there
+      // Even on "already exists", verify it's actually there, and report what
+      // it IS. This used to answer success whatever visibility was asked for,
+      // so an agent that asked for a public bucket told its user the files
+      // were public when the existing bucket was private (or the reverse).
       try {
         const { prisma: prismaCheck } = await import('@/lib/db')
         const existing = await prismaCheck.storageBucket.findFirst({
           where: { name: bucketName, projectId },
-          select: { id: true, name: true, isPublic: true },
+          select: { id: true, name: true, isPublic: true, accessPolicy: true },
         })
         if (existing) {
-          return { success: true, message: `✅ Bucket "${bucketName}" confirmed in DB (already existed)`, data: { bucketName, verified: true } }
+          const { policyAllowsPublic } = await import('@/lib/storage/access-policy')
+          const existingPublic = policyAllowsPublic(existing.accessPolicy)
+          const requestedPublic = !!isPublic
+          const visibility = (pub: boolean) => (pub ? 'public' : 'private')
+          const data = {
+            bucketId: existing.id,
+            bucketName: existing.name,
+            existed: true,
+            isPublic: existingPublic,
+            accessPolicy: existing.accessPolicy,
+            verified: true,
+          }
+          if (requestedPublic !== existingPublic) {
+            return {
+              success: false,
+              message:
+                `Bucket "${bucketName}" already exists and is ${visibility(existingPublic)} ` +
+                `(policy ${existing.accessPolicy}); this call asked for a ${visibility(requestedPublic)} bucket. ` +
+                'Nothing changed. To change its visibility, call storage { "action": "set_public" } or ' +
+                'storage { "action": "set_policy" }.',
+              error: 'BUCKET_VISIBILITY_MISMATCH',
+              data,
+            }
+          }
+          return {
+            success: true,
+            message:
+              `Bucket "${bucketName}" already exists and is ${visibility(existingPublic)} ` +
+              `(policy ${existing.accessPolicy}). Nothing changed.`,
+            data,
+          }
         }
       } catch { /* fall through */ }
       return { success: false, message: `Bucket "${bucketName}" reported as existing but could not be verified in DB`, error: 'verification_failed' }
@@ -10341,18 +10374,22 @@ async function resolveStorageFile(
   params: any,
   projectId: string,
 ): Promise<
-  | { file: { id: string; name: string; isPublic: boolean } }
+  | { file: { id: string; name: string; isPublic: boolean; bucket: { name: string; accessPolicy: string } } }
   | { error: string }
 > {
   const { prisma } = await import('@/lib/db')
   const fileId: string | undefined = params.fileId
   const fileName: string | undefined = params.path ?? params.fileName
   const bucketName: string | undefined = params.bucketName
+  const fileSelect = {
+    id: true, name: true, isPublic: true,
+    bucket: { select: { name: true, accessPolicy: true } },
+  } as const
 
   if (fileId) {
     const file = await prisma.storageFile.findFirst({
       where: { id: fileId, projectId, deletedAt: null },
-      select: { id: true, name: true, isPublic: true },
+      select: fileSelect,
     })
     return file ? { file } : { error: `No file with id "${fileId}" in this project.` }
   }
@@ -10375,7 +10412,7 @@ async function resolveStorageFile(
 
   const file = await prisma.storageFile.findFirst({
     where: { projectId, name: fileName, deletedAt: null, ...(bucketId ? { bucketId } : {}) },
-    select: { id: true, name: true, isPublic: true },
+    select: fileSelect,
     orderBy: { createdAt: 'desc' },
   })
   return file
@@ -10443,6 +10480,27 @@ async function executeGenerateSignedUrl(params: any, projectId: string): Promise
     }
     const { file } = resolved
 
+    // The bucket's CURRENT policy decides, as it does at the download route.
+    // owner_only exists so that no anonymous grant can read its objects: the
+    // route refuses a signed link (403), and on the S3 driver a presigned link
+    // would go straight to the bucket and read it anyway. Refuse to mint one.
+    const { normalisePolicy, policyAllowsPublic } = await import('@/lib/storage/access-policy')
+    const policy = normalisePolicy(file.bucket.accessPolicy)
+    if (policy === 'owner_only') {
+      return {
+        success: false,
+        message:
+          `"${file.bucket.name}" is an owner_only bucket, so no shareable link can be issued for ${file.name}: ` +
+          'a signed link cannot identify the uploader, and the download route refuses it. The end user who ' +
+          'uploaded the file reads it with their own signed-in session; change the bucket policy with ' +
+          'storage { "action": "set_policy" } if links should work.',
+        error: 'OWNER_ONLY_BUCKET',
+      }
+    }
+    // Public only when the policy permits public objects AND the file is
+    // marked public: a file's own flag outlives a bucket tightened to private.
+    const effectivePublic = policyAllowsPublic(policy) && file.isPublic
+
     // Use storageService.getFileUrl — it issues an HMAC-signed, time-limited
     // URL that /api/storage/files/{id}/download actually validates. The old
     // hand-rolled token pointed at a route that never checked it (and required
@@ -10462,7 +10520,7 @@ async function executeGenerateSignedUrl(params: any, projectId: string): Promise
       expiresIn >= 3600
         ? `${Math.round(expiresIn / 3600)}h`
         : `${Math.round(expiresIn / 60)}m`
-    const expiryNote = file.isPublic
+    const expiryNote = effectivePublic
       ? 'this file is public — the link does not expire'
       : `expires in ${ttlLabel}`
 
@@ -10473,8 +10531,9 @@ async function executeGenerateSignedUrl(params: any, projectId: string): Promise
         url: fullUrl,
         fileId: file.id,
         fileName: file.name,
-        isPublic: file.isPublic,
-        expiresInSeconds: file.isPublic ? null : expiresIn,
+        isPublic: effectivePublic,
+        bucketPolicy: policy,
+        expiresInSeconds: effectivePublic ? null : expiresIn,
       },
     }
   } catch (error: any) {
