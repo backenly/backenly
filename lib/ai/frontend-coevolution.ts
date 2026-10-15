@@ -25,6 +25,7 @@ import { loadProjectMemory, saveProjectMemory } from '@/lib/ai/project-memory'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
 import { prisma } from '@/lib/db/prisma'
 import { Pool } from 'pg'
+import { projectDatabaseUrl } from '@/lib/data-plane/regional'
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -133,6 +134,9 @@ export async function recordApiUsageEvent(
  * Requires at least 5 events before producing gaps.
  */
 export async function analyzeCoevolutionGaps(projectId: string): Promise<CoevolutionReport> {
+  // The project's own database, in its region; resolved before any catch, so an
+  // unreachable region fails here instead of reading as an empty catalog.
+  const projectDbUrl = await projectDatabaseUrl(projectId)
   const analyzedAt = new Date().toISOString()
   const emptyReport: CoevolutionReport = {
     projectId,
@@ -189,7 +193,7 @@ export async function analyzeCoevolutionGaps(projectId: string): Promise<Coevolu
     let knownColumns: Map<string, Set<string>> = new Map()
     try {
       const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
-      const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 2 })
+      const pool = new Pool({ connectionString: projectDbUrl, max: 2 })
       try {
         const result = await pool.query<{ table_name: string; column_name: string }>(
           `SELECT table_name, column_name
@@ -299,6 +303,9 @@ export async function applyAutoApprovedProposals(
   projectId: string,
   report: CoevolutionReport,
 ): Promise<string[]> {
+  // The project's own database, in its region; resolved before any catch, so an
+  // unreachable region fails here instead of reading as an empty catalog.
+  const projectDbUrl = await projectDatabaseUrl(projectId)
   const applied: string[] = []
 
   const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
@@ -312,7 +319,7 @@ export async function applyAutoApprovedProposals(
     // Extra safety: never auto-apply to protected tables
     if (isProtectedTable(gap.tableName)) continue
 
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 2 })
+    const pool = new Pool({ connectionString: projectDbUrl, max: 2 })
     try {
       // Scope the SQL to the correct schema by setting search_path for this connection
       await pool.query(`SET search_path TO "${postgresSchema}", public`)
@@ -536,6 +543,9 @@ export async function runAndStoreFrontendCoevolution(
   projectId: string,
   userId: string,
 ): Promise<void> {
+  // The project's own database, in its region; resolved before any catch, so an
+  // unreachable region fails here instead of reading as an empty catalog.
+  const projectDbUrl = await projectDatabaseUrl(projectId)
   try {
     // Layer 1: SDK telemetry analysis (field-level gaps)
     const [sdkReport, auditSignals] = await Promise.allSettled([
@@ -589,7 +599,7 @@ export async function runAndStoreFrontendCoevolution(
     const heldSignals = new Set(
       signals.filter(s => s.requiresApproval || !indexPermit?.allowed),
     )
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 3 })
+    const pool = new Pool({ connectionString: projectDbUrl, max: 3 })
     try {
       for (const sig of signals.filter(s => !s.requiresApproval && s.sqlFix && indexPermit?.allowed)) {
         try {

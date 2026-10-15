@@ -18,6 +18,7 @@
  */
 
 import { Pool } from 'pg'
+import { projectDatabaseUrl } from '@/lib/data-plane/regional'
 
 // Warn once per server restart if pg_stat_statements is unavailable.
 // Avoids spamming logs on every cron invocation.
@@ -146,8 +147,9 @@ export interface InfraReport {
 
 // ── Connection helper ─────────────────────────────────────────────────────────
 
-function getPool(): Pool {
-  return new Pool({ connectionString: process.env.DATABASE_URL, max: 3 })
+/** A short-lived pool on the project's own database, in its region. */
+async function getPool(projectId: string): Promise<Pool> {
+  return new Pool({ connectionString: await projectDatabaseUrl(projectId), max: 3 })
 }
 
 // ── Detection: Hot tables ─────────────────────────────────────────────────────
@@ -685,7 +687,7 @@ export async function runInfraIntelligence(
   const schema = schemaName ?? `workspace_${projectId}`
   const scannedAt = new Date().toISOString()
 
-  const pool = getPool()
+  const pool = await getPool(projectId)
   try {
     const [hotTables, partitionCandidates, slowQueries, wsPressure] =
       await Promise.allSettled([
@@ -993,7 +995,7 @@ export async function runAndStoreInfraIntelligence(
 // ── Safe auto-fix execution ───────────────────────────────────────────────────
 
 async function _applyAutoFixes(projectId: string, sqls: string[]): Promise<void> {
-  const pool = getPool()
+  const pool = await getPool(projectId)
   try {
     for (const sql of sqls) {
       try {

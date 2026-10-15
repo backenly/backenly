@@ -19,6 +19,7 @@
 import { prisma } from '@/lib/db/prisma'
 import { Pool } from 'pg'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
+import { projectDatabaseUrl } from '@/lib/data-plane/regional'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -217,6 +218,9 @@ export async function rollbackFix(
   projectId: string,
   findingId: string,
 ): Promise<RollbackResult> {
+  // The project's own database, in its region; resolved before any catch, so an
+  // unreachable region fails here instead of reading as an empty catalog.
+  const projectDbUrl = await projectDatabaseUrl(projectId)
   // Find the snapshot taken immediately before this fix
   const snapshot = await prisma.workspaceSchemaSnapshot.findFirst({
     where: {
@@ -239,7 +243,7 @@ export async function rollbackFix(
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
 
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL })
+    const pool = new Pool({ connectionString: projectDbUrl })
     try {
       await pool.query(`SET search_path = "${postgresSchema}"`)
       await pool.query(snapshot.rawDdl)
@@ -298,10 +302,13 @@ export async function getPendingApprovals(projectId: string): Promise<ApprovalPr
 
 /** Public — used by mutate.ts for pre-mutation snapshots. */
 export async function takeSnapshot(projectId: string, trigger: string): Promise<string> {
+  // The project's own database, in its region; resolved before any catch, so an
+  // unreachable region fails here instead of reading as an empty catalog.
+  const projectDbUrl = await projectDatabaseUrl(projectId)
   const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
   const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
 
-  const pool = new Pool({ connectionString: process.env.DATABASE_URL })
+  const pool = new Pool({ connectionString: projectDbUrl })
   try {
     // Get current table list + DDL
     const tablesRes = await pool.query<{ table_name: string }>(
@@ -350,10 +357,13 @@ export async function takeSnapshot(projectId: string, trigger: string): Promise<
 }
 
 async function executeSql(projectId: string, sql: string): Promise<string> {
+  // The project's own database, in its region; resolved before any catch, so an
+  // unreachable region fails here instead of reading as an empty catalog.
+  const projectDbUrl = await projectDatabaseUrl(projectId)
   const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
   const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
 
-  const pool = new Pool({ connectionString: process.env.DATABASE_URL })
+  const pool = new Pool({ connectionString: projectDbUrl })
   try {
     const fullSql = `SET search_path = "${postgresSchema}"; ${sql}`
     await pool.query(fullSql)

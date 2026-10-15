@@ -27,6 +27,7 @@
 import { prisma } from '@/lib/db/prisma'
 import { Pool } from 'pg'
 import { countExposedResources } from '@/lib/api/exposed-resources'
+import { projectDatabaseUrl } from '@/lib/data-plane/regional'
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -132,6 +133,9 @@ const NEXT_STAGE: Record<ArchStage, ArchStage | null> = {
 // ── Evidence collection ───────────────────────────────────────────────────────
 
 async function collectEvidence(projectId: string): Promise<StageEvidence> {
+  // The project's own database, in its region; resolved before any catch, so an
+  // unreachable region fails here instead of reading as an empty catalog.
+  const projectDbUrl = await projectDatabaseUrl(projectId)
   const schemaName = `workspace_${projectId}`
 
   const [tableCount, integrationCount, apiCount, rlsCount, auditTableExists] = await Promise.all([
@@ -147,7 +151,7 @@ async function collectEvidence(projectId: string): Promise<StageEvidence> {
   let totalRows = 0
   let hasRealtime = false
   try {
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 2 })
+    const pool = new Pool({ connectionString: projectDbUrl, max: 2 })
     try {
       const rows = await pool.query<{ tablename: string; n_live_tup: string }>(
         // `relname AS tablename`, not `tablename` — pg_stat_user_tables exposes
@@ -414,6 +418,9 @@ async function detectTechDebt(
   tableNames: string[],
   evidence: StageEvidence,
 ): Promise<TechDebtItem[]> {
+  // The project's own database, in its region; resolved before any catch, so an
+  // unreachable region fails here instead of reading as an empty catalog.
+  const projectDbUrl = await projectDatabaseUrl(projectId)
   const debt: TechDebtItem[] = []
   const schemaName = `workspace_${projectId}`
 
@@ -433,7 +440,7 @@ async function detectTechDebt(
 
   // Missing soft-delete on core tables (no deleted_at column)
   try {
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 2 })
+    const pool = new Pool({ connectionString: projectDbUrl, max: 2 })
     try {
       const cols = await pool.query<{ tablename: string; attname: string }>(
         `SELECT c.relname AS tablename, a.attname

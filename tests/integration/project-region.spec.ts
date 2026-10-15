@@ -54,6 +54,9 @@ import { logActivity } from '@/lib/ai/activity-log-engine'
 import { buildWorkspaceTableNameMap } from '@/lib/ai/fk-repair'
 import { collectProof } from '@/lib/ai/proof-system'
 import { describeTable } from '@/lib/ai/schema-tools'
+import { detectSchemaDrift } from '@/lib/ai/schema-reconciler'
+import { analyzeProductionReadiness } from '@/lib/ai/production-intelligence'
+import { runInfraIntelligence } from '@/lib/ai/infra-intelligence'
 import { directAccessRoleNames, provisionDirectAccess, revokeDirectAccess } from '@/lib/services/direct-access'
 import { columnTypes } from '@/lib/mcp/runtime-db'
 import { getTableSchema, listExposedTables, workspaceTableExists } from '@/lib/mcp/schema-introspection'
@@ -875,6 +878,43 @@ describe('the AI build tools read and write the project’s region', () => {
     await expect(logActivity(entry('never-logged'))).resolves.toBeUndefined()
     process.env[REGION_VARIABLE] = regionalUrl
     expect(await activityRows()).toEqual([{ entity_id: 'logged-in-region' }])
+  })
+})
+
+describe('the AI analysis modules with their own pools read the project’s region', () => {
+  // A snapshot that expects `marker` with `note` only. Read from the region,
+  // the table is there and its regional-only `deleted_at` is an extra column;
+  // read anywhere else, `marker` would be a missing table.
+  beforeAll(async () => {
+    await prisma.workspaceSchemaSnapshot.create({
+      data: {
+        projectId: regionalProject,
+        versionNum: 1,
+        trigger: 'manual',
+        rawDdl: '',
+        tables: [{ name: 'marker', columns: [{ name: 'note', type: 'text', nullable: true }] }],
+      },
+    })
+  })
+
+  afterAll(async () => {
+    await prisma.workspaceSchemaSnapshot.deleteMany({ where: { projectId: regionalProject } }).catch(() => {})
+  })
+
+  it('reconciles a regional project’s schema against its regional catalog', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const report = await detectSchemaDrift(regionalProject)
+    expect(report.drifts.filter((d) => d.type === 'missing_table')).toEqual([])
+    expect(
+      report.drifts.some((d) => d.type === 'extra_column' && d.tableName === 'marker' && d.columnName === 'deleted_at'),
+    ).toBe(true)
+  })
+
+  it('refuses without a connection instead of reporting a clean or empty result', async () => {
+    delete process.env[REGION_VARIABLE]
+    await expect(detectSchemaDrift(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+    await expect(analyzeProductionReadiness(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+    await expect(runInfraIntelligence(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
   })
 })
 
