@@ -26,7 +26,8 @@ export interface RollbackOptions {
   /** Either a deployment id OR a version number — caller can pick. */
   deploymentId?: string
   version?: number
-  confirmedBy: 'CHAT' | 'UI' | 'API'
+  /** APPROVAL: a person approved an agent's exact call; `userId` is that person. */
+  confirmedBy: 'CHAT' | 'UI' | 'API' | 'APPROVAL'
   /** Skip the second-layer "Type ROLLBACK to confirm" prompt. */
   force?: boolean
 }

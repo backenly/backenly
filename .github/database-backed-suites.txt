@@ -908,6 +908,13 @@ tests/integration/integrations-connect-contract.spec.ts
 # rows and the real credentials, keys and build-status routes are the
 # property; PostHog and seeded rows keep CI off provider APIs.
 tests/integration/integration-key-one-row.spec.ts
+# The deploy tool tells the truth: status names the current published version
+# (after a rollback too), deploy has no staging target, the first publish,
+# an update and a no-op each say what happened, and an approved deploy is
+# audited as the approver acting by approval. Real deployment, graph and
+# audit rows are the property; only the readiness gate's verdict is fixed,
+# because a superuser test connection bypasses the RLS it checks.
+tests/integration/deploy-tool-truth.spec.ts
 # A parked executor action is pollable: the APPROVAL_REQUIRED refusal carries
 # the Review Queue finding's id and the poll call, check_approval resolves
 # parked findings alongside destructive-gate approvals with one status

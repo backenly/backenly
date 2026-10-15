@@ -2,7 +2,7 @@
 
 Index: https://backenly.com/llms.txt
 
-Versioned deployments with history and rollback. A deployment that would break the live schema is refused at plan time.
+Versioned deployments with history and rollback. A deploy runs the readiness gate first and is refused while the gate reports blockers. Each deploy publishes the project's one production deployment; there is no staging target.
 
 ## Actions
 
@@ -22,4 +22,4 @@ Call as `deploy { action: "<action>", … }`.
 - `history` lists every published version, which one is serving, and which can be rolled back to.
 - `deploy` and `rollback` wait for a human's approval (see `autonomy`); the approved call runs exactly as you made it.
 
-Custom domains are set in the dashboard.
+Custom domains have no console setting yet. The project is served at its base URL, which `deploy { action: "status" }` returns.
