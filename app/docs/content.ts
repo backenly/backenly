@@ -557,7 +557,7 @@ await backend.auth.signIn({ email, password })
       },
       {
         title: 'Merge or discard',
-        body: 'New tables merge back through the governed path, and anything else comes back for review. Discarding drops the copy and leaves production untouched.',
+        body: 'Merging replays the branch’s schema changes onto production, in order, after your approval. Discarding drops the copy and leaves production untouched.',
       },
     ],
     prompts: [

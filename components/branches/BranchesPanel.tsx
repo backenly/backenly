@@ -8,7 +8,7 @@
  *   POST   /branches {name, includeData}
  *                               create (schema clone; rows only when asked)
  *   GET    /branches/[id]       schema diff vs main
- *   POST   /branches/[id]       merge (additive auto, rest → review items)
+ *   POST   /branches/[id]       merge (replays the branch's logged statements onto production, after the confirm dialog)
  *   DELETE /branches/[id]       discard (drops the clone)
  *   POST   /branches/[id]/keys  issue a key bound to the branch (BranchPreviewCard)
  *
@@ -432,7 +432,7 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
           <EmptyState
             icon={GitBranch}
             title="No preview branches"
-            description="Create one to test against an isolated copy of your schema, then merge new tables back through the governed path."
+            description="Create one to test against an isolated copy of your schema, then merge to replay its schema changes onto production."
           />
         ) : (
           <ul className="divide-y divide-white/[0.06]">
