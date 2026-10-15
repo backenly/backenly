@@ -42,7 +42,7 @@ export interface AIAction {
     // API
     | 'GENERATE_API' | 'LIST_APIS'
     // Storage
-    | 'CREATE_BUCKET' | 'DELETE_BUCKET' | 'UPLOAD_FILE' | 'LIST_FILES' | 'LIST_BUCKETS' | 'DELETE_FILE' | 'GENERATE_SIGNED_URL' | 'SET_BUCKET_PUBLIC'
+    | 'CREATE_BUCKET' | 'DELETE_BUCKET' | 'UPLOAD_FILE' | 'LIST_FILES' | 'LIST_BUCKETS' | 'DELETE_FILE' | 'GENERATE_SIGNED_URL' | 'SET_BUCKET_PUBLIC' | 'SET_BUCKET_POLICY'
     // Connect Frontend
     | 'CONNECT_FRONTEND' | 'DISCONNECT_FRONTEND' | 'LIST_CONNECTED_APPS'
     // Deploy
@@ -1495,6 +1495,7 @@ API:
 STORAGE:
 - CREATE_BUCKET - Create storage bucket
 - SET_BUCKET_PUBLIC - Make bucket public/private
+- SET_BUCKET_POLICY - Set a bucket's access policy (public_read | cdn_cacheable | private | owner_only)
 - LIST_BUCKETS - List all storage buckets
 - UPLOAD_FILE - Upload file to bucket
 - LIST_FILES - List files in bucket
@@ -2116,6 +2117,16 @@ export async function validateAction(
         errors.push('Bucket name is required')
       }
       preview = `Make bucket "${action.params.bucketName}" ${action.params.isPublic ? 'public' : 'private'}`
+      break
+
+    case 'SET_BUCKET_POLICY':
+      if (!action.params.bucketName) {
+        errors.push('Bucket name is required')
+      }
+      if (!action.params.policy) {
+        errors.push('policy is required (public_read | cdn_cacheable | private | owner_only)')
+      }
+      preview = `Set bucket "${action.params.bucketName}" access policy to ${action.params.policy}`
       break
 
     case 'DELETE_BUCKET':
@@ -3414,7 +3425,10 @@ async function executeSingleAction(
 
       case 'SET_BUCKET_PUBLIC':
         return await executeSetBucketPublic(action.params, projectId)
-      
+
+      case 'SET_BUCKET_POLICY':
+        return await executeSetBucketPolicy(action.params, projectId)
+
       case 'LIST_BUCKETS':
         return await executeListBuckets(projectId)
       
@@ -6501,6 +6515,50 @@ async function executeSetBucketPublic(params: any, projectId: string): Promise<E
     }
   } catch (error: any) {
     return { success: false, message: `Failed to update bucket: ${error.message}`, error: error.message }
+  }
+}
+
+/**
+ * STORAGE: Set a bucket's access policy — the four-value contract the
+ * serving path, upload clamping and the console enforce. set_bucket_public
+ * covers only public_read ↔ private; without this, owner_only and
+ * cdn_cacheable were unreachable from the agent lane.
+ */
+async function executeSetBucketPolicy(params: any, projectId: string): Promise<ExecutionResult> {
+  const { bucketName, policy } = params
+  if (!bucketName) return { success: false, message: 'Bucket name is required' }
+
+  const { ACCESS_POLICIES, policyAllowsPublic, POLICY_LABELS } = await import('@/lib/storage/access-policy')
+  if (!(ACCESS_POLICIES as readonly string[]).includes(policy)) {
+    return {
+      success: false,
+      message: `Unknown access policy "${policy}". The serving path enforces exactly: ${ACCESS_POLICIES.join(', ')}.`,
+      error: 'UNKNOWN_ACCESS_POLICY',
+    }
+  }
+
+  try {
+    const { prisma } = await import('@/lib/db')
+    const bucket = await prisma.storageBucket.findFirst({ where: { name: bucketName, projectId } })
+    if (!bucket) return { success: false, message: `Bucket "${bucketName}" not found` }
+
+    // isPublic stays a derived label, exactly as executeSetBucketPublic
+    // writes it, so the two doors can never leave the pair disagreeing.
+    const updated = await prisma.storageBucket.update({
+      where: { id: bucket.id },
+      data: { accessPolicy: policy, isPublic: policyAllowsPublic(policy) },
+      select: { accessPolicy: true, isPublic: true },
+    })
+    const label = POLICY_LABELS[updated.accessPolicy as keyof typeof POLICY_LABELS]
+    return {
+      success: true,
+      message:
+        `✅ Bucket **"${bucketName}"** access policy is now **${updated.accessPolicy}**` +
+        (label ? ` — ${label.means}` : ''),
+      data: { bucketName, accessPolicy: updated.accessPolicy, isPublic: updated.isPublic },
+    }
+  } catch (error: any) {
+    return { success: false, message: `Failed to set bucket policy: ${error.message}`, error: error.message }
   }
 }
 

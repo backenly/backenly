@@ -883,6 +883,11 @@ tests/integration/key-lifecycle-honesty.spec.ts
 # typed call with send_push naming what is missing. Real vault rows are the
 # property; PostHog (stored-unverifiable) keeps CI off external APIs.
 tests/integration/integrations-connect-contract.spec.ts
+# The agent can set the access policy the runtime enforces: set_bucket_policy
+# writes all four values to a real bucket row with the derived isPublic
+# label, refuses unknown policies naming the vocabulary, and the catalog and
+# docs advertise the contract. Real bucket rows are the property.
+tests/integration/storage-policy-action.spec.ts
 # Realtime scope is explicit: enable without a tableName refuses instead of
 # silently streaming every table, allTables is the named project-wide switch
 # the agent's tool cannot forward, and both park paths name the tables a

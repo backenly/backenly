@@ -75,7 +75,8 @@ export const DOMAIN_TOOLS: DomainTool[] = [
     summary: 'Buckets and files. Uploads happen from the app through the SDK or REST, not here.',
     actions: {
       create_bucket: { tool: 'create_bucket', gloss: 'a new bucket, private unless isPublic' },
-      set_public: { tool: 'set_bucket_public', gloss: 'make a bucket public or private' },
+      set_public: { tool: 'set_bucket_public', gloss: 'make a bucket public or private (shorthand for the public_read / private policies)' },
+      set_policy: { tool: 'set_bucket_policy', gloss: 'set the enforced access policy: public_read, cdn_cacheable, private or owner_only' },
       list_buckets: { tool: 'list_buckets', gloss: 'every bucket with its visibility' },
       list_files: { tool: 'list_files', gloss: 'the files in one bucket' },
       signed_url: { tool: 'generate_signed_url', gloss: 'a time-limited download link for one file' },

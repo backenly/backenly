@@ -80,6 +80,7 @@ export type ToolName =
   | 'disable_oauth_provider'
   | 'create_bucket'
   | 'set_bucket_public'
+  | 'set_bucket_policy'
   | 'add_rls'
   | 'set_rls'
   | 'create_trigger'
@@ -1170,9 +1171,19 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
 
   // ── Storage edit / delete ─────────────────────────────────────────────────
   fn('set_bucket_public',
-    'Flip a bucket public ↔ private. Public buckets serve files at a stable URL; private buckets require a signed URL. Changes apply immediately to all files.',
+    'Flip a bucket public ↔ private (shorthand for the public_read / private access policies). Public buckets serve files at a stable URL; private buckets require a signed URL. Changes apply immediately to all files. For owner_only or cdn_cacheable, use set_bucket_policy.',
     { bucketName: { type: 'string' }, isPublic: { type: 'boolean' } },
     ['bucketName', 'isPublic']),
+  fn('set_bucket_policy',
+    "Set a bucket's access policy — the field serving, upload clamping and the console all enforce. " +
+    'public_read: anyone with the URL reads objects marked public. cdn_cacheable: public_read plus aggressive caching. ' +
+    'private: signed URLs only. owner_only: each object is readable only by the end user who uploaded it (and operators). ' +
+    'The answer reports the enforced state read back from the bucket.',
+    {
+      bucketName: { type: 'string' },
+      policy: { type: 'string', enum: ['public_read', 'cdn_cacheable', 'private', 'owner_only'] },
+    },
+    ['bucketName', 'policy']),
   fn('delete_bucket',
     'DESTRUCTIVE. Delete a storage bucket AND every file inside it. Requires explicit user confirmation in the same turn.',
     { bucketName: { type: 'string' } },
@@ -1516,6 +1527,7 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
   // dispatchTool() that handles the "no credentials yet → ask the user" flow.
   create_bucket: (a) => ({ action: 'CREATE_BUCKET', params: { bucketName: a.bucketName, isPublic: !!a.isPublic } }),
   set_bucket_public: (a) => ({ action: 'SET_BUCKET_PUBLIC', params: { bucketName: a.bucketName, isPublic: !!a.isPublic } }),
+  set_bucket_policy: (a) => ({ action: 'SET_BUCKET_POLICY', params: { bucketName: a.bucketName, policy: a.policy } }),
   // ── set_rls: the four commands arrive as top-level arguments ───────────────
   //
   // Flat `select`/`insert`/`update`/`delete` rather than a nested `commands`
@@ -3392,6 +3404,7 @@ export function humanTitle(name: string, args: Record<string, unknown>): string 
     case 'get_autonomy_status': return 'Reading autonomy + trust report'
     case 'get_maintenance_ladder': return 'Reading the maintenance ladder'
     case 'set_bucket_public': return `Making ${args.bucketName ?? 'bucket'} ${args.isPublic ? 'public' : 'private'}`
+    case 'set_bucket_policy': return `Setting ${args.bucketName ?? 'bucket'} access policy to ${args.policy ?? '…'}`
     case 'delete_bucket': return `Deleting bucket ${args.bucketName ?? ''}`.trim()
     case 'delete_file': return `Deleting file ${args.path ?? ''}`.trim()
     case 'connect_frontend': return `Connecting frontend ${args.url ?? ''}`.trim()

@@ -164,7 +164,7 @@ const BUILD_TOOLS = new Set<string>([
   'create_table', 'add_column', 'create_index', 'rename_column', 'add_constraint',
   // (list_branches / diff_branch are read tools; all four are reachable through
   // the single advertised `branch` tool — see BRANCH_ACTIONS.)
-  'generate_api', 'enable_auth', 'create_bucket', 'set_bucket_public', 'add_rls', 'set_rls',
+  'generate_api', 'enable_auth', 'create_bucket', 'set_bucket_public', 'set_bucket_policy', 'add_rls', 'set_rls',
   'create_trigger', 'enable_realtime', 'generate_function', 'enable_vector_search',
   'create_cron_job', 'set_rate_limit', 'generate_aggregate_api', 'enable_teams',
   'send_push', 'rotate_webhook_secret', 'connect_frontend',
