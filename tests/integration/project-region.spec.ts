@@ -45,6 +45,9 @@ import { PostgresService } from '@/lib/db/hybrid'
 import { clearRegistrationCache, ensureSchemaRegistered } from '@/lib/postgrest/registration'
 import { listenerHub } from '@/lib/realtime/listener-hub'
 import { mintSseTicket, redeemSseTicket } from '@/lib/realtime/sse-ticket'
+import { existingTables } from '@/lib/mcp/apply-migration'
+import { columnTypes } from '@/lib/mcp/runtime-db'
+import { getTableSchema, listExposedTables, workspaceTableExists } from '@/lib/mcp/schema-introspection'
 import { functionDbClient, functionRoleName, provisionFunctionRole } from '@/lib/services/ai-functions/function-db-role'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
 import { ensureEmailVerifiedColumn, logoutEndUser } from '@/lib/services/end-user-auth-flows'
@@ -614,6 +617,37 @@ describe('realtime listens and notifies on the project’s own database', () => 
     await expect(mintSseTicket(secret, { projectId: regionalProject, serviceRole: true })).rejects.toMatchObject({
       code: 'REGION_NOT_CONFIGURED',
     })
+  })
+})
+
+describe('MCP reads a project’s catalog in its own region', () => {
+  // The regional marker table alone has a `deleted_at` column (added by the v1
+  // routes block above); the home one, under the home project, has `note` only.
+  it('describes a regional project’s table from its region', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    expect(await workspaceTableExists(regionalProject, 'marker')).toBe(true)
+    const table = await getTableSchema(regionalProject, 'marker')
+    expect(table.columns.map((c) => c.name).sort()).toEqual(['deleted_at', 'note'])
+    // `users` is the one the end-user auth block created, also only in the region.
+    const listed = await listExposedTables(regionalProject)
+    expect(listed.map((t) => [t.name, t.columns]).sort()).toEqual([['marker', 2], ['users', 6]])
+  })
+
+  it('reads column types and existing tables from the region', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const schema = schemaOf(regionalProject)
+    const types = await columnTypes(regionalProject, schema, 'marker')
+    expect(types.get('deleted_at')).toBe('timestamp with time zone')
+    expect(await existingTables(regionalProject, schema, ['marker', 'absent'])).toEqual(new Set(['marker']))
+  })
+
+  it('refuses without a connection instead of answering “no such table”', async () => {
+    delete process.env[REGION_VARIABLE]
+    const schema = schemaOf(regionalProject)
+    await expect(workspaceTableExists(regionalProject, 'marker')).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+    await expect(listExposedTables(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+    await expect(columnTypes(regionalProject, schema, 'marker')).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+    await expect(existingTables(regionalProject, schema, ['marker'])).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
   })
 })
 

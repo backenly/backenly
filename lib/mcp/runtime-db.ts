@@ -16,6 +16,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { redactRows } from './read-query'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { explainDbError, type QueryContext } from '@/lib/db/query-errors'
@@ -91,7 +92,9 @@ async function assertTable(projectId: string, tableName: string, target: Target)
   // A branch's tables are in its catalog only; main's metadata does not list
   // a table created on the branch, and must not.
   if (target.branch) {
-    const found = await prisma.$queryRawUnsafe<Array<{ exists: boolean }>>(
+    // The branch schema lives in the project's database, in its region.
+    const db = await workspaceRawClient(projectId)
+    const found = await db.$queryRawUnsafe<Array<{ exists: boolean }>>(
       `SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2) AS exists`,
       target.schema, tableName.toLowerCase(),
     )
@@ -109,10 +112,13 @@ async function assertTable(projectId: string, tableName: string, target: Target)
 
 /**
  * Map of column name → PostgreSQL data_type for a workspace table. Read from the
- * live catalog so casts always match reality.
+ * live catalog so casts always match reality: the catalog of the project's
+ * database, in its region. Any other catalog answers no columns, and every
+ * cast would silently be dropped.
  */
-export async function columnTypes(schema: string, table: string): Promise<Map<string, string>> {
-  const rows = await prisma.$queryRawUnsafe<Array<{ column_name: string; data_type: string }>>(
+export async function columnTypes(projectId: string, schema: string, table: string): Promise<Map<string, string>> {
+  const db = await workspaceRawClient(projectId)
+  const rows = await db.$queryRawUnsafe<Array<{ column_name: string; data_type: string }>>(
     `SELECT column_name, data_type FROM information_schema.columns
       WHERE table_schema = $1 AND table_name = $2`,
     schema, table,
@@ -279,7 +285,7 @@ export async function dbQuery(projectId: string, input: DbQueryInput) {
   const limit = Math.min(Math.max(1, Number(input.limit ?? 50)), 200)
   const offset = Math.max(0, Number(input.offset ?? 0))
 
-  const types = await columnTypes(schema, table)
+  const types = await columnTypes(projectId, schema, table)
   const where = buildWhere(input.filter, 1, types)
   let orderBy = ''
   if (input.orderBy && typeof input.orderBy === 'object') {
@@ -323,7 +329,7 @@ export async function dbInsert(projectId: string, input: DbInsertInput) {
   const cols = Object.keys(row).filter((c) => IDENT.test(c))
   if (cols.length === 0) throw new Error('`row` must include at least one valid column.')
 
-  const types = await columnTypes(schema, table)
+  const types = await columnTypes(projectId, schema, table)
   const colList = cols.map((c) => `"${c}"`).join(', ')
   const placeholders = cols.map((c, i) => `$${i + 1}${castSuffix(types.get(c))}`).join(', ')
   const values = cols.map((c) => coerceValue(types.get(c), (row as any)[c]))
@@ -359,7 +365,7 @@ export async function dbUpdate(projectId: string, input: DbUpdateInput) {
     throw new Error('`filter` is required and must be non-empty (refusing table-wide UPDATE).')
   }
 
-  const types = await columnTypes(schema, table)
+  const types = await columnTypes(projectId, schema, table)
   let idx = 1
   const setSqlParts: string[] = []
   const setValues: unknown[] = []
@@ -401,7 +407,7 @@ export async function dbDelete(projectId: string, input: DbDeleteInput) {
     throw new Error('`filter` is required and must be non-empty (refusing table-wide DELETE).')
   }
 
-  const types = await columnTypes(schema, table)
+  const types = await columnTypes(projectId, schema, table)
   const where = buildWhere(input.filter, 1, types)
   if (!where.sql) throw new Error('`filter` is required (refusing table-wide DELETE).')
 
