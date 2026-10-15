@@ -658,7 +658,7 @@ await backend.auth.signIn({ email, password })
     notes: [
       'Destructive operations, such as dropping a table, never run straight from an agent. They wait for a person in the [Autonomy](/docs/autonomy) review queue.',
       'After approval, the exact parked call runs without being reinterpreted. Poll `check_approval` until its status is final. If it fails, read `resultSummary` and check the current state before asking again, because a call can stop after applying part of its work.',
-      'A key is a credential. Keep it out of your repository, and revoke keys you stop using in [Settings](/docs/settings).',
+      'A key is a credential. Keep it out of your repository. Revoke agent keys you stop using, and disconnect agents you signed in from the browser, on the Agents tab; your app’s keys are revoked in [Settings](/docs/settings).',
       '`pg_dump` exports (full, schema only, or data only) restore on any PostgreSQL, so your data is never locked in.',
     ],
   },

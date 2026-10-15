@@ -87,9 +87,14 @@ export async function GET(request: NextRequest) {
     if (!(await canAccessProject(auth.userId, projectId))) {
       return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
+    // Client keys only. Agent credentials (MCP keys and browser-authorised
+    // agent connections, scope 'mcp') are listed and revoked on Connect ->
+    // Agents. Listed here they were labelled "Client", and a connection, which
+    // never had a plaintext, showed a masked key tagged "Shown once" (T4, CON-09).
     const apiKeys = await prisma.apiKey.findMany({
       where: {
         projectId, // Tenant isolation
+        scope: { not: 'mcp' },
       },
       orderBy: { createdAt: 'desc' },
       include: { branch: { select: { id: true, name: true, status: true } } },
