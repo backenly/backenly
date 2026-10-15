@@ -98,7 +98,7 @@ export async function GET(request: NextRequest) {
       })
       const spec = generateOpenApiSpec(schema, {
         title: project?.name ? `${project.name} API` : 'Backenly Project API',
-        serverUrl: `https://backenly.com/api/v1/${auth.projectId}`,
+        serverUrl: `${(await import('@/lib/services/public-url')).resolvePublicBaseUrl(request)}/api/v1/${auth.projectId}`,
       })
       res = NextResponse.json(spec, { status: 200, headers: baseHeaders })
     }

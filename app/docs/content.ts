@@ -315,7 +315,7 @@ await backend.auth.signIn({ email, password })
       },
       {
         title: 'You choose what starts it',
-        body: 'A user signing up; an insert, update or delete on a table; a schedule (every 15 minutes, or a 5-field cron expression); an HTTP request to `/api/v1/{projectId}/fn/{name}`; or only when you run it by hand.',
+        body: 'A user signing up; an insert, update or delete on a table (captured inside the database, so it fires no matter which door wrote the row, within about a minute); a schedule (every 15 minutes, or a 5-field cron expression); an HTTP request to `/api/v1/{projectId}/fn/{name}`; or only when you run it by hand.',
       },
       {
         title: 'It runs on the server',
@@ -600,7 +600,7 @@ await backend.auth.signIn({ email, password })
       },
       {
         title: 'Roll back if you need to',
-        body: 'Pick an earlier version to make it current again. If a publish fails, the version before it stays current.',
+        body: 'Pick an earlier version to mark it current in the history. This is bookkeeping: the live schema and data are unchanged. To restore structure, use the Database page schema History or a Snapshot.',
       },
     ],
     prompts: ['Is my backend ready to publish? List anything that is blocking it.'],

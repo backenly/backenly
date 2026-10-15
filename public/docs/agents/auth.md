@@ -35,15 +35,14 @@ Relative to `https://backenly.com/api/v1/{projectId}`, with `x-api-key: <project
 
 | Method | Path | Body / notes |
 | --- | --- | --- |
-| POST | `/auth/signup` | `{ email, password, name? }` returns `{ user, accessToken, refreshToken }` |
-| POST | `/auth/signin` | `{ email, password }` returns `{ user, accessToken, refreshToken }` |
-| POST | `/auth/refresh-token` | `{ refreshToken }` returns `{ accessToken, refreshToken }` |
-| POST | `/auth/logout` | `X-User-Token` required; revokes the session |
+| POST | `/auth/signup` | `{ email, password, name? }` returns `{ data: { user, token } }` |
+| POST | `/auth/signin` | `{ email, password }` returns `{ data: { user, token } }` |
+| POST | `/auth/refresh-token` | current token as `Authorization: Bearer <token>` (or `{ token }`) returns `{ data: { token, user } }` — there is no separate refresh token |
+| POST | `/auth/logout` | current token as `Authorization: Bearer <token>` (or `{ token }`); revokes it. Always answers 200 |
 | POST | `/auth/forgot-password` | `{ email }`, always 200 (no account enumeration) |
 | POST | `/auth/reset-password` | `{ token, password }` |
-| GET | `/auth/me` | `X-User-Token` required; the current end-user |
-| GET | `/auth/{provider}?redirect_to=…` | OAuth start; redirects back to `redirect_to` with the tokens |
+| GET | `/auth/{provider}?redirect_to=…` | OAuth start; redirects back to `redirect_to` with `?token=…&user_id=…` |
 | POST | `/auth/magic-link` | `{ email, redirectTo? }` emails a one-time sign-in link |
 | POST | `/auth/verify-email` | `{ token }` |
 
-Send the access token as `X-User-Token` on data requests; that is what row-level security reads. `users` is never served through `/db/users`.
+Send the token as `X-User-Token` on data requests; that is what row-level security reads. There is no `/auth/me`: the signup/signin/refresh responses carry the `user` object, and the token's claims carry `userId`. `users` is never served through `/db/users`.

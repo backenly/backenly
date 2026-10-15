@@ -64,7 +64,7 @@ Two headers: `x-api-key: <project key>` on every request, and `X-User-Token: <en
 
 - `/api/v1/{projectId}/db/{table}`: `GET` (list), `POST`, `GET /{id}`, `PATCH /{id}` (`PUT` is accepted as the same update), `DELETE /{id}`.
 - `/api/v2/{projectId}/{table}`: PostgREST grammar: `?price=gte.100`, `?order=createdAt.desc`, `?select=*,author(*)`.
-- `/auth/signup`, `/auth/signin`, `/auth/refresh-token`, `/auth/logout`, `/auth/forgot-password`, `/auth/reset-password`, `/auth/me`, magic links, OAuth, email verification.
+- `/auth/signup`, `/auth/signin`, `/auth/refresh-token`, `/auth/logout`, `/auth/forgot-password`, `/auth/reset-password`, magic links, OAuth, email verification. Signup/signin answer `{ data: { user, token } }`; there is no `/auth/me`.
 - `/db/users` is never served; users live behind `/auth/*`.
 
 SDK: `npm install @backenly/sdk`, then `createClient({ projectId, apiKey })` with that project key.

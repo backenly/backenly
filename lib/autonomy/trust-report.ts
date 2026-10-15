@@ -13,6 +13,7 @@
  * autonomous history exactly.
  */
 
+import { redactSecretParams } from '@/lib/mcp/withhold-secrets'
 import { prisma } from '@/lib/db/prisma'
 import { AUTONOMOUS_AUDIT_ACTIONS } from './circuit-breaker'
 import {
@@ -567,7 +568,11 @@ export async function buildTrustReport(
   for (const pr of proposals) if (!proposalByFinding.has(pr.findingId)) proposalByFinding.set(pr.findingId, pr)
 
   const pendingApprovals: PendingApproval[] = pending.map(p => {
-    const det = (p.details ?? {}) as Record<string, any>
+    const raw = (p.details ?? {}) as Record<string, any>
+    // Legacy pending rows stored executor params unredacted; never serve them.
+    const det = raw.executorParams
+      ? { ...raw, executorParams: redactSecretParams(raw.executorParams), executorParamsSealed: undefined }
+      : raw
     return {
       id: p.id,
       type: p.type,
@@ -600,7 +605,10 @@ export async function buildTrustReport(
   })
 
   const appliedChanges: AppliedChange[] = applied.map(f => {
-    const det = (f.details ?? {}) as Record<string, any>
+    const rawDet = (f.details ?? {}) as Record<string, any>
+    const det = rawDet.executorParams
+      ? { ...rawDet, executorParams: redactSecretParams(rawDet.executorParams), executorParamsSealed: undefined }
+      : rawDet
     const eligibility = revertEligibility(f.type, det)
     return {
       findingId: f.id,

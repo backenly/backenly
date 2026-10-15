@@ -36,4 +36,4 @@ Use `set_rls` whenever you can write the predicate. Describing a policy to a mod
 
 ## Direct access
 
-`connect { action: "database_credentials" }` issues a read-only Postgres role on demand, and a read-write role only after a human arms it in the dashboard. `pg_dump` of the workspace schema works. DDL run over a direct connection bypasses the kernel; reconcile it afterwards with `adopt_external_schema`, which updates Backenly's metadata and never emits DDL itself.
+`connect { action: "database_credentials" }` issues a read-only Postgres role on demand, and a read-write role only after a human arms it in the dashboard. `pg_dump` of the workspace schema works when run with `--enable-row-security` (the copied command includes it; without the flag, pg_dump refuses every RLS table the read-only role is subject to). DDL run over a direct connection bypasses the kernel; reconcile it afterwards with `adopt_external_schema`, which updates Backenly's metadata and never emits DDL itself.

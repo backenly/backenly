@@ -100,6 +100,15 @@ router.get('/:projectId/realtime', asyncRoute(realtimeAuth), asyncRoute(async (r
       cleanup()
       return
     }
+    // The client can disconnect DURING the subscribe await (React StrictMode
+    // remounts, the SDK recycling a connection when its filter changes). The
+    // close handler has already run with `subscription` still null, so this
+    // slot would never be released — it counted against the plan's concurrent
+    // cap until the process restarted.
+    if (closed) {
+      result.unsubscribe()
+      return
+    }
     subscription = result
 
     send({ type: 'connected', projectId, channel: result.channel })

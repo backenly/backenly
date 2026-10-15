@@ -20,7 +20,7 @@ Disabling a table disconnects its live subscribers, which is why it waits for a 
 
 ## Subscribing from an app
 
-With the SDK: `backend.posts.subscribe(({ event, row }) => { … })`.
+With the SDK the callback receives the event object itself: `backend.posts.subscribe((event) => { if (event.type === 'insert') addRow(event.data) })`.
 
 Without it: `EventSource` cannot send headers, so exchange them for a short-lived, single-use ticket first.
 
@@ -32,8 +32,8 @@ X-User-Token: <end-user JWT>
 ```
 
 ```
-GET /api/v1/{projectId}/realtime/subscribe?table=<table>&ticket=<ticket>
+GET /api/v1/{projectId}/realtime?table=<table>&ticket=<ticket>
 Accept: text/event-stream
 ```
 
-Each event is one `data:` line: `{ "type": "insert" | "update" | "delete" | "connected" | "error", "table", "record", "old", "at" }`. Presence and broadcast use the same transport with `?channel=<name>`. The older `?apiKey=&userToken=` query form still works and is deprecated, because a JWT in a URL ends up in logs.
+Each event is one `data:` line: `{ "type": "insert" | "update" | "delete" | "connected" | "error", "table", "data", "old", "truncated", "timestamp" }` — the changed row is in `data` (`old` carries the previous row on updates; `truncated: true` means the row was too large to embed). Broadcast messages are published with `POST /api/v1/{projectId}/broadcast { channel, payload }` and arrive on this same stream as `{ "type": "broadcast", "channel", "payload" }` frames. The older `?apiKey=&userToken=` query form still works and is deprecated, because a JWT in a URL ends up in logs.

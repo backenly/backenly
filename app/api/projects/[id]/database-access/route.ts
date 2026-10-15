@@ -27,11 +27,16 @@ function parseMode(v: unknown): DirectAccessMode | null {
   return v === 'READ_ONLY' || v === 'READ_WRITE' ? v : null
 }
 
+// ADMIN on every verb, GET included: the status response carries the decrypted
+// password and connection string (see the header), so reading it GRANTS the
+// credential. Classified by what it grants, not by the verb — the same rule
+// that holds ai-functions/admin-key, a credential-returning GET, at ADMIN.
+// Membership alone handed an organization VIEWER a live Postgres login.
 export async function GET(request: NextRequest) {
   return withProjectValidation<any>(request, async (validated) => {
     const status = await getDirectAccessStatus(validated.projectId)
     return NextResponse.json(status)
-  })
+  }, { floor: 'administer' })
 }
 
 export async function POST(request: NextRequest) {
@@ -57,7 +62,7 @@ export async function POST(request: NextRequest) {
       }
       return NextResponse.json({ error: 'Could not provision database credentials.' }, { status: 500 })
     }
-  })
+  }, { floor: 'administer' })
 }
 
 export async function DELETE(request: NextRequest) {
@@ -73,5 +78,5 @@ export async function DELETE(request: NextRequest) {
       console.error('[database-access] revoke failed:', err?.message)
       return NextResponse.json({ error: 'Could not revoke database credentials.' }, { status: 500 })
     }
-  })
+  }, { floor: 'administer' })
 }

@@ -19,5 +19,5 @@ export async function POST(
   return withProjectValidation<any>(request, async (validated) => {
     const result = await rollbackFix(validated.projectId, params.findingId)
     return NextResponse.json(result, { status: result.success ? 200 : 422 })
-  })
+  }, { floor: 'administer' })
 }

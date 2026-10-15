@@ -104,7 +104,7 @@ await backend.auth.signUp({ email, password })
 await backend.posts.create({ title: "Hello" })
 await backend.posts.list({ filter: { published: true }, search: "launch" })
 await backend.storage.upload(file)
-backend.posts.subscribe(({ event, row }) => { /* … */ })
+backend.posts.subscribe((event) => { /* event.type, event.data, event.old */ })
 ```
 
 Query operators include `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `isNull`, `ilike`, `search`, `count`, `sum`, `avg`. A supabase-js compatible entry point is `@backenly/sdk/supabase`. For a plain HTML page with no build step there are bundles at `https://backenly.com/backenly-sdk.js` and `https://backenly.com/backenly-sdk.esm.js`.

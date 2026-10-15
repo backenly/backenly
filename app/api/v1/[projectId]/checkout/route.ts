@@ -234,9 +234,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     // ── 9. Fire triggers (non-blocking) ───────────────────────────────────────
     try {
       const { fireTriggers } = await import('@/lib/services/trigger-service')
-      const { fireAiFunctions } = await import('@/lib/services/ai-functions/executor')
       fireTriggers(context.projectId, { type: 'insert', table: 'orders', data: order }).catch(() => {})
-      fireAiFunctions(context.projectId, { type: 'insert', table: 'orders', data: order }).catch(() => {})
     } catch { /* non-fatal */ }
 
     return createSuccessResponse({

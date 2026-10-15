@@ -333,7 +333,10 @@ async function handleComplete(request: NextRequest, uploadId: string, totalParts
   const storedFile = await storageService.uploadFile(
     bucket.id,
     { name: fileRecord.name, buffer: assembled, mimeType: fileRecord.mimeType || 'application/octet-stream' },
-    { isPublic: fileRecord.isPublic, projectId, uploadedBy: '' }
+    // Multipart's initiate step carries no end-user identity yet, so the
+    // uploader is unknown, not ''. Null reads as operator-only under
+    // owner_only — closed rather than broken.
+    { isPublic: fileRecord.isPublic, projectId, uploadedBy: undefined }
   )
   // Clean up temp chunks
   fs.rm(chunkDir, { recursive: true, force: true }).catch(() => null)

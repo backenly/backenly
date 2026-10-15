@@ -181,6 +181,11 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
       },
     })
 
+    // Row-event functions fire from the database-level capture; make sure the
+    // trigger is on the tables before this answer says the function is live.
+    const { syncCaptureForFunctionChange } = await import('@/lib/webhooks/capture')
+    await syncCaptureForFunctionChange(params.id, triggerType)
+
     return NextResponse.json({ function: fn }, { status: 201 })
   } catch (error: any) {
     console.error('[AI Functions] POST error:', error)

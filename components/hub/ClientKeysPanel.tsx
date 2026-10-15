@@ -72,7 +72,7 @@ const ROLE_LABEL: Record<string, string> = {
 }
 
 const ROLE_OPTIONS: Array<{ value: NewRole; label: string; body: string }> = [
-  { value: 'admin', label: 'Admin', body: 'Full access. Server-side only, never in a browser.' },
+  { value: 'admin', label: 'Admin', body: 'Full access, bypasses row security (svc_live_). Server-side only — the runtime refuses it from a browser.' },
   { value: 'write', label: 'Write', body: 'Read and write data, no administration.' },
   { value: 'read-only', label: 'Read only', body: 'Reads data, changes nothing.' },
   { value: 'client', label: 'Client', body: 'Safe to embed in a frontend app.' },
@@ -135,7 +135,12 @@ export function ClientKeysPanel() {
           keyType: 'public',
           role: newKeyRole,
           capabilities: ['database', 'auth', 'storage', 'functions', 'ai'],
-          serviceRole: false,
+          // The runtime's elevation switch is serviceRole, not the role string.
+          // The Admin option used to send serviceRole:false, which minted a
+          // publishable proj_live_ key: not full access (RLS still applied, the
+          // data plane demanded an end-user token) and served from browsers —
+          // the exact opposite of this option's copy.
+          serviceRole: newKeyRole === 'admin',
           projectId,
         }),
       })

@@ -13,6 +13,7 @@ import { NextRequest } from 'next/server'
 import { v1ApiMiddleware } from '@/lib/api/v1/middleware'
 import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
 import { prisma } from '@/lib/db'
+import { FUNCTION_OFF_STATUSES } from '@/lib/services/ai-functions/status'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
@@ -33,13 +34,16 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       return createErrorResponse(ErrorCodes.VALIDATION_ERROR, 'Function name is required', 400)
     }
 
+    // Refuse only the deliberate OFF states. `status: 'error'` records the
+    // last run, not deployment — filtering on 'active' here made one thrown
+    // run remove the endpoint from this surface while /fn/ kept serving it.
     const fn = await prisma.aiFunction.findFirst({
-      where: { projectId: params.projectId, name, status: 'active' },
+      where: { projectId: params.projectId, name, status: { notIn: [...FUNCTION_OFF_STATUSES] } },
       select: { id: true },
     })
 
     if (!fn) {
-      return createErrorResponse(ErrorCodes.NOT_FOUND, `Function "${name}" not found or inactive`, 404)
+      return createErrorResponse(ErrorCodes.NOT_FOUND, `Function "${name}" not found or switched off`, 404)
     }
 
     // Forward the caller's auth/signature headers to the function handler —

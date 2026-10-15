@@ -15,6 +15,7 @@ import { prisma } from '@/lib/db/prisma'
 import { mcpGuard, recordMcpCall } from '@/lib/mcp/guard'
 import { readWorkspaceSchema } from '@/lib/typegen/schema-reader'
 import { countExposedResources } from '@/lib/api/exposed-resources'
+import { resolvePublicBaseUrl } from '@/lib/services/public-url'
 
 const ENDPOINT = '/api/cli/overview'
 
@@ -79,7 +80,9 @@ export async function GET(request: NextRequest) {
         endpoints: endpointCount,
         functions: functionCount,
       },
-      apiBase: `https://backenly.com/api/v1/${project.id}`,
+      // Derived from the deployment the caller actually reached — a self-host
+      // must hand its own runtime base to the CLI, not Backenly Cloud's.
+      apiBase: `${resolvePublicBaseUrl(request)}/api/v1/${project.id}`,
     }
 
     recordMcpCall(

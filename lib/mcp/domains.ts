@@ -193,7 +193,7 @@ export const DOMAIN_TOOLS: DomainTool[] = [
       history: { tool: 'list_deploy_versions', gloss: 'every published version, which one is serving, and which can be rolled back to' },
       readiness: { tool: 'get_readiness', gloss: 'the 0-100 readiness score with blockers; fixes nothing unless autoFix is true', readGloss: 'the 0-100 readiness score with its blockers' },
       deploy: { tool: 'trigger_deploy', gloss: 'publish the current backend' },
-      rollback: { tool: 'rollback_deploy', gloss: 'return to an earlier version' },
+      rollback: { tool: 'rollback_deploy', gloss: 'mark an earlier published version as current (version bookkeeping; the live backend is unchanged)' },
     },
   },
   {

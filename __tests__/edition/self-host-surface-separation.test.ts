@@ -85,13 +85,15 @@ describeOss('self-host surface separation', () => {
       }
     })
 
-    it('keeps /docs/llms.txt answering off Cloud, though /docs is marketing', () => {
+    it('keeps /docs/llms.txt and /mcp/authorize answering off Cloud, though their prefixes are marketing', () => {
       // The published CLI and older MCP setup prompts fetch /docs/llms.txt, and
       // middleware runs before the rewrite that serves it, so without the
-      // exemption a self-hosted install would bounce an agent to /app.
+      // exemption a self-hosted install would bounce an agent to /app. The MCP
+      // OAuth consent page at /mcp/authorize is product, not marketing: a
+      // self-hosted operator authorizing their agent must reach it too.
       // Raw source: see the note on the next test about code() and this region.
       const mw = read('middleware.ts')
-      expect(mw).toMatch(/const marketingExemptions = \['\/docs\/llms\.txt'\]/)
+      expect(mw).toMatch(/const marketingExemptions = \['\/docs\/llms\.txt', '\/mcp\/authorize'\]/)
       const fn = mw.slice(mw.indexOf('function isMarketingPath'))
       expect(fn.indexOf('marketingExemptions')).toBeGreaterThan(-1)
       expect(fn.indexOf('marketingExemptions')).toBeLessThan(fn.indexOf('marketingPrefixes'))

@@ -2159,7 +2159,7 @@ export async function validateAction(
 
     case 'ROLLBACK_DEPLOY':
       preview = action.params.version ? `Rollback to v${action.params.version}` : 'Rollback to previous deployment'
-      warnings.push('Live consumers will see the older schema immediately')
+      warnings.push('Moves the recorded current version only; the live schema, data and functions do not change')
       break
 
     case 'GET_READINESS':
@@ -4348,6 +4348,19 @@ async function executeCreateTable(
       console.warn(`[AI Executor] Realtime trigger install failed (non-fatal):`, rtErr?.message)
     }
 
+    // ── Webhook row-capture follows the project, like realtime above ─────────
+    // syncWebhookCapture's contract says it runs "after a table is added", but
+    // nothing on the creation path ever called it, so a webhook saved on
+    // Monday never saw rows written to a table created on Tuesday — while the
+    // Webhooks page promised capture "for every writer". Idempotent, and a
+    // no-op when the project has no active row webhooks.
+    try {
+      const { syncWebhookCapture } = await import('@/lib/webhooks/capture')
+      await syncWebhookCapture(projectId)
+    } catch (whErr: any) {
+      console.warn(`[AI Executor] Webhook capture sync failed (non-fatal):`, whErr?.message)
+    }
+
     // ── Auto-create storage buckets for video/asset domain tables ────────────
     // When a generation_jobs, render_jobs, or similar video/asset table is created,
     // automatically provision the "videos", "thumbnails", and "source-assets" buckets
@@ -6373,7 +6386,7 @@ async function executeCreateBucket(params: any, projectId: string): Promise<Exec
     const { prisma: prismaVerify } = await import('@/lib/db')
     const verified = await prismaVerify.storageBucket.findFirst({
       where: { name: bucketName, projectId },
-      select: { id: true, name: true, isPublic: true },
+      select: { id: true, name: true, isPublic: true, accessPolicy: true },
     })
 
     if (!verified) {
@@ -6405,7 +6418,11 @@ async function executeCreateBucket(params: any, projectId: string): Promise<Exec
       console.warn('[executeCreateBucket] Graph update failed:', graphErr)
     }
 
-    const visibilityLabel = isPublic ? 'public' : 'private'
+    // Reported from the ENFORCED field, read back — not from the request.
+    const visibilityLabel =
+      verified.accessPolicy === 'public_read' || verified.accessPolicy === 'cdn_cacheable'
+        ? 'public'
+        : 'private'
     const bucketList = allBucketNames.map(b => `  • ${b}`).join('\n')
     const message = [
       `Done — created \`${bucketName}\` bucket.`,
@@ -6425,7 +6442,13 @@ async function executeCreateBucket(params: any, projectId: string): Promise<Exec
     return {
       success: true,
       message,
-      data: { bucketId: verified.id, bucketName: verified.name, isPublic: verified.isPublic, verified: true },
+      data: {
+        bucketId: verified.id,
+        bucketName: verified.name,
+        isPublic: verified.isPublic,
+        accessPolicy: verified.accessPolicy,
+        verified: true,
+      },
       artifacts: { buckets: [bucketName] },
       diff: { added: [bucketName], modified: [], removed: [] },
       verifiedAt: new Date().toISOString(),
@@ -6461,11 +6484,21 @@ async function executeSetBucketPublic(params: any, projectId: string): Promise<E
     const bucket = await prisma.storageBucket.findFirst({ where: { name: bucketName, projectId } })
     if (!bucket) return { success: false, message: `Bucket "${bucketName}" not found` }
 
-    await prisma.storageBucket.update({ where: { id: bucket.id }, data: { isPublic } })
+    // accessPolicy is the field serving, upload clamping and the console
+    // enforce; isPublic is a label. Writing only the label told the agent
+    // "now public" (or worse, "now private" after a leak) while every object
+    // kept serving exactly as before. Both are written, then READ BACK, and
+    // the answer reports the enforced state.
+    const updated = await prisma.storageBucket.update({
+      where: { id: bucket.id },
+      data: { isPublic, accessPolicy: isPublic ? 'public_read' : 'private' },
+      select: { isPublic: true, accessPolicy: true },
+    })
+    const enforcedPublic = updated.accessPolicy === 'public_read' || updated.accessPolicy === 'cdn_cacheable'
     return {
       success: true,
-      message: `✅ Bucket **"${bucketName}"** is now **${isPublic ? 'public' : 'private'}**`,
-      data: { bucketName, isPublic },
+      message: `✅ Bucket **"${bucketName}"** is now **${enforcedPublic ? 'public' : 'private'}** (access policy: ${updated.accessPolicy})`,
+      data: { bucketName, isPublic: updated.isPublic, accessPolicy: updated.accessPolicy },
     }
   } catch (error: any) {
     return { success: false, message: `Failed to update bucket: ${error.message}`, error: error.message }
@@ -6488,9 +6521,13 @@ async function executeListBuckets(projectId: string): Promise<ExecutionResult> {
       }
     }
 
-    const list = buckets.map(b =>
-      `• **${b.name}** — ${b.fileCount} file${b.fileCount !== 1 ? 's' : ''} · ${b.isPublic ? 'public' : 'private'}`
-    ).join('\n')
+    const list = buckets.map(b => {
+      // Report the ENFORCED visibility (accessPolicy), not the isPublic label:
+      // the two disagreed on buckets whose policy was changed elsewhere, and
+      // this read-back is how an agent confirms a set_public took effect.
+      const enforcedPublic = b.accessPolicy === 'public_read' || b.accessPolicy === 'cdn_cacheable'
+      return `• **${b.name}** — ${b.fileCount} file${b.fileCount !== 1 ? 's' : ''} · ${enforcedPublic ? 'public' : 'private'} (${b.accessPolicy})`
+    }).join('\n')
 
     // StorageBucket carries BigInt columns (storageUsed / maxFileSize). Left raw,
     // they crash JSON.stringify at the MCP boundary ("Do not know how to
@@ -6969,15 +7006,34 @@ async function executeEnableRealtime(params: Record<string, any>, projectId: str
 
     const installedTables: string[] = []
     const failedTables: string[] = []
+    const skippedTables: Array<{ table: string; reason: string }> = []
 
     if (tableName) {
-      // Install on the specified table only
+      // Install on the specified table only. A refusal (internal or
+      // auth-managed table) and a failure (table missing, wrong case) are
+      // ANSWERS: reporting either under a "Realtime active" banner sent the
+      // agent away believing a stream existed while nothing was installed.
       try {
-        await installRealtimeTrigger(projectId, tableName)
+        const result = await installRealtimeTrigger(projectId, tableName)
+        if (!result.installed) {
+          return {
+            success: false,
+            message: `Realtime was NOT enabled for \`${tableName}\`: ${result.reason}.`,
+            error: 'REALTIME_TABLE_REFUSED',
+            data: { enabled: false, table: tableName, reason: result.reason },
+          }
+        }
         installedTables.push(tableName)
       } catch (err: any) {
         console.warn(`[enableRealtime] Failed to install trigger on ${tableName}:`, err?.message)
-        failedTables.push(tableName)
+        return {
+          success: false,
+          message:
+            `Realtime was NOT enabled for \`${tableName}\` — the trigger could not be installed: ` +
+            `${err?.message ?? err}. Check the table exists (names are case-sensitive as created).`,
+          error: 'REALTIME_TABLE_NOT_FOUND',
+          data: { enabled: false, table: tableName },
+        }
       }
     } else {
       // Install on every existing workspace table — query workspace schema directly
@@ -6999,8 +7055,10 @@ async function executeEnableRealtime(params: Record<string, any>, projectId: str
         tableNames = rows.map((t: { name: string }) => t.name)
       }
       if (tableNames.length > 0) {
-        await installRealtimeTriggersForAllTables(projectId, tableNames)
-        installedTables.push(...tableNames)
+        const batch = await installRealtimeTriggersForAllTables(projectId, tableNames)
+        installedTables.push(...batch.installed)
+        skippedTables.push(...batch.skipped)
+        failedTables.push(...batch.failed.map((f) => f.table))
       }
     }
 
@@ -7031,6 +7089,19 @@ async function executeEnableRealtime(params: Record<string, any>, projectId: str
     // the result of a single-table call is what made a scoped `enable_realtime`
     // on `orders` look like it had silently enabled `products` and `order_items`
     // too. Name the delta and the pre-existing set as different things.
+    // Single-table calls are additionally gated on the POST-INSTALL read-back:
+    // success means "the catalog shows the trigger", not "no exception thrown".
+    if (tableName && !verifiedTables.includes(tableName)) {
+      return {
+        success: false,
+        message:
+          `Realtime was NOT enabled for \`${tableName}\`: the install ran but the read-back ` +
+          `does not show a trigger on it. Nothing is streaming for this table.`,
+        error: 'REALTIME_NOT_VERIFIED',
+        data: { enabled: false, table: tableName, watchedTables: verifiedTables },
+      }
+    }
+
     const alreadyOn = verifiedTables.filter((t) => !installedTables.includes(t))
     const scope = tableName ? `\`${tableName}\`` : `${installedTables.length} table(s)`
     const changedList = installedTables.length > 0
@@ -7039,15 +7110,48 @@ async function executeEnableRealtime(params: Record<string, any>, projectId: str
     const alreadyList = alreadyOn.length > 0
       ? `\n\n**Already streaming before this call (unchanged):**\n${alreadyOn.map((t) => `- \`${t}\``).join('\n')}`
       : ''
-    const failNote = failedTables.length > 0
-      ? `\n\n⚠️ Could not install trigger on: ${failedTables.map(t => `\`${t}\``).join(', ')} — table may not exist yet.`
+    const skippedList = skippedTables.length > 0
+      ? `\n\n**Skipped (never streamed):**\n${skippedTables.map((s) => `- \`${s.table}\` — ${s.reason}`).join('\n')}`
       : ''
+
+    // A project-wide call that installed nothing is not "Realtime active".
+    if (!tableName && installedTables.length === 0 && failedTables.length === 0) {
+      return {
+        success: true,
+        message:
+          verifiedTables.length > 0
+            ? `Realtime is already active on ${verifiedTables.length} table(s); this call changed nothing.${skippedList}`
+            : `No realtime triggers were installed: this project has no streamable tables yet. Create a table first, then enable realtime.${skippedList}`,
+        data: { enabled: verifiedTables.length > 0, table: null, enabledNow: [], alreadyEnabled: verifiedTables, watchedTables: verifiedTables },
+      }
+    }
+
+    // Partial failure is FAILURE with a ledger — the apply_migration contract.
+    // "Active, with a footnote" sent agents away from tables that never streamed.
+    if (failedTables.length > 0) {
+      return {
+        success: false,
+        message:
+          `Realtime was only PARTIALLY enabled.\n\n` +
+          `**Installed (streaming now):**\n${installedTables.length ? installedTables.map((t) => `- \`${t}\``).join('\n') : '- (none)'}\n\n` +
+          `**Failed (NOT streaming):**\n${failedTables.map((t) => `- \`${t}\``).join('\n')}` +
+          skippedList,
+        error: 'REALTIME_PARTIAL',
+        data: {
+          enabled: installedTables.length > 0,
+          table: tableName ?? null,
+          enabledNow: installedTables,
+          failed: failedTables,
+          watchedTables: verifiedTables,
+        },
+      }
+    }
 
     const exampleTable = tableName ?? installedTables[0] ?? verifiedTables[0] ?? 'messages'
 
     return {
       success: true,
-      message: `✅ **Realtime active for ${scope}.**\n\nPostgreSQL NOTIFY triggers installed — live INSERT/UPDATE/DELETE events flow to subscribers immediately.\n\nSDK usage:\n\`\`\`js\nbackend.${exampleTable}.subscribe((event) => console.log(event))\n\`\`\`${changedList}${alreadyList}${failNote}`,
+      message: `✅ **Realtime active for ${scope}.**\n\nPostgreSQL NOTIFY triggers installed — live INSERT/UPDATE/DELETE events flow to subscribers immediately.\n\nSDK usage:\n\`\`\`js\nbackend.${exampleTable}.subscribe((event) => console.log(event))\n\`\`\`${changedList}${alreadyList}${skippedList}`,
       data: {
         enabled: true,
         table: tableName ?? null,
@@ -7512,12 +7616,22 @@ async function executeBlockUser(params: any, projectId: string): Promise<Executi
       paramValue = userId
     }
 
-    const result = await prisma.$executeRawUnsafe(
-      `UPDATE "${schemaName}"."users" SET is_blocked = TRUE WHERE "${identifier}" = $1`,
-      paramValue
+    // Service-role UPDATE: the users table is FORCE row-level security with an
+    // own-rows policy, so a claimless query matches ZERO rows — this exact
+    // UPDATE used to report every real account as "not found" while is_blocked
+    // stayed false, including after a human approved the block. Same pattern as
+    // executeResetPassword's read below; `id` is cast because the column may be
+    // uuid. RETURNING is the row count executeWithUserContext can report.
+    const { executeWithUserContext } = await import('@/lib/services/workspace-rls')
+    const where = identifier === 'email' ? `"email" = $1` : `"id"::text = $1`
+    const updated = await executeWithUserContext<{ id: string }>(
+      '',
+      true,
+      `UPDATE "${schemaName}"."users" SET is_blocked = TRUE WHERE ${where} RETURNING id`,
+      [String(paramValue)]
     )
 
-    if (result === 0) {
+    if (updated.length === 0) {
       return { success: false, message: `User "${email || userId}" not found in this project` }
     }
 
@@ -7636,12 +7750,19 @@ async function executeUnblockUser(params: any, projectId: string): Promise<Execu
     const identifier = email ? 'email' : 'id'
     const paramValue = email || userId
 
-    const result = await prisma.$executeRawUnsafe(
-      `UPDATE "${schemaName}"."users" SET is_blocked = FALSE WHERE "${identifier}" = $1`,
-      paramValue,
+    // Service-role UPDATE, for the same reason as executeBlockUser: FORCE RLS
+    // hides every row from a claimless query, so unblock reported "not found"
+    // and changed nothing.
+    const { executeWithUserContext } = await import('@/lib/services/workspace-rls')
+    const where = identifier === 'email' ? `"email" = $1` : `"id"::text = $1`
+    const updated = await executeWithUserContext<{ id: string }>(
+      '',
+      true,
+      `UPDATE "${schemaName}"."users" SET is_blocked = FALSE WHERE ${where} RETURNING id`,
+      [String(paramValue)]
     )
 
-    if (result === 0) {
+    if (updated.length === 0) {
       return { success: false, message: `User "${email || userId}" not found in this project` }
     }
 
@@ -7737,50 +7858,49 @@ async function executeDisableProvider(params: any, projectId: string): Promise<E
 
 /**
  * MONITORING: Get Metrics
+ *
+ * Reads what the runtime actually records: ApiRequestLog, through the same
+ * window-stats service the Monitoring page uses. The old implementation
+ * grouped `Log` rows of type 'api_request' — a type nothing in the codebase
+ * has ever written — so every project, however busy, was told "No API metrics
+ * available yet" while the docs promised latency percentiles and error rate.
  */
 async function executeGetMetrics(params: any, projectId: string): Promise<ExecutionResult> {
   try {
-    const { prisma } = await import('@/lib/db')
-    
-    // Get API metrics from logs
-    const metrics = await prisma.log.groupBy({
-      by: ['endpoint'],
-      where: {
-        projectId,
-        type: 'api_request',
-        timestamp: {
-          gte: new Date(Date.now() - 24 * 60 * 60 * 1000) // Last 24 hours
-        }
-      },
-      _count: true,
-      _avg: {
-        duration: true
-      },
-      orderBy: {
-        _count: {
-          endpoint: 'desc'
-        }
-      },
-      take: 10
-    })
-    
-    if (metrics.length === 0) {
+    const { getRuntimeWindowStats, getPerformanceBreakdown } = await import('@/lib/services/metrics')
+
+    const windowMinutes = Math.min(Math.max(Number(params?.windowMinutes) || 24 * 60, 5), 30 * 24 * 60)
+    const end = new Date()
+    const start = new Date(end.getTime() - windowMinutes * 60 * 1000)
+    const stats = await getRuntimeWindowStats(projectId, start, end)
+
+    if (stats.count === 0) {
       return {
         success: true,
-        message: "📊 No API metrics available yet.\n\nStart making API calls to see performance data.",
-        data: { metrics: [] }
+        message:
+          `📊 No runtime API traffic in the last ${windowMinutes >= 60 ? `${Math.round(windowMinutes / 60)}h` : `${windowMinutes}m`}.` +
+          `\n\nMetrics appear here once your app calls the project's API.`,
+        data: { windowMinutes, stats, endpoints: [] },
       }
     }
-    
-    const metricsList = metrics.map(m => {
-      const avgTime = m._avg.duration ? `${Math.round(m._avg.duration)}ms` : 'N/A'
-      return `📈 **${m.endpoint}** - ${m._count} calls, avg ${avgTime}`
-    }).join('\n')
-    
+
+    // Top endpoints over the service's nearest canonical range.
+    const range = windowMinutes <= 60 ? '1h' : windowMinutes <= 24 * 60 ? '24h' : windowMinutes <= 7 * 24 * 60 ? '7d' : '30d'
+    const endpoints = await getPerformanceBreakdown(range, 'api', projectId).catch(() => [])
+
+    const top = endpoints
+      .slice(0, 10)
+      .map((e) => `📈 **${e.id}** — ${e.requests} req · avg ${Math.round(e.avgResponseTime)}ms · p95 ${Math.round(e.p95)}ms · ${e.errorRate.toFixed(1)}% errors`)
+      .join('\n')
+
     return {
       success: true,
-      message: `📊 **API Metrics (Last 24h):**\n\n${metricsList}`,
-      data: { metrics }
+      message:
+        `📊 **API Metrics (last ${windowMinutes >= 60 ? `${Math.round(windowMinutes / 60)}h` : `${windowMinutes}m`}):**\n\n` +
+        `${stats.count} requests · error rate ${stats.errorRatePct.toFixed(1)}% (${stats.serverErrorCount} × 5xx)\n` +
+        `latency p50 ${Math.round(stats.p50)}ms · p95 ${Math.round(stats.p95)}ms · p99 ${Math.round(stats.p99)}ms` +
+        (top ? `\n\n**Top endpoints (${range}):**\n${top}` : ''),
+      data: { windowMinutes, stats, endpoints },
     }
   } catch (error: any) {
     return {
@@ -7793,47 +7913,65 @@ async function executeGetMetrics(params: any, projectId: string): Promise<Execut
 
 /**
  * MONITORING: Get Errors
+ *
+ * 5xx from the runtime's own record (ApiRequestLog), grouped by method + path
+ * with count and last-seen — what the tool has always promised. The old
+ * implementation read `Log` rows with severity 'error', which no runtime path
+ * writes, so it answered "No errors in the last hour! Your APIs are running
+ * smoothly." while request_logs showed the 500s.
  */
 async function executeGetErrors(params: any, projectId: string): Promise<ExecutionResult> {
   try {
     const { prisma } = await import('@/lib/db')
-    
-    const errors = await prisma.log.findMany({
-      where: {
-        projectId,
-        severity: 'error',
-        timestamp: {
-          gte: new Date(Date.now() - 60 * 60 * 1000) // Last hour
-        }
-      },
-      orderBy: { timestamp: 'desc' },
-      take: 10,
-      select: {
-        id: true,
-        message: true,
-        endpoint: true,
-        statusCode: true,
-        timestamp: true
-      }
-    })
-    
-    if (errors.length === 0) {
+
+    const windowMinutes = Math.min(Math.max(Number(params?.windowMinutes) || 60, 5), 30 * 24 * 60)
+    const limit = Math.min(Math.max(Number(params?.limit) || 10, 1), 50)
+    const since = new Date(Date.now() - windowMinutes * 60 * 1000)
+
+    const groups = await prisma.$queryRawUnsafe<Array<{
+      method: string
+      path: string
+      status_code: number
+      count: number
+      last_seen: Date
+    }>>(
+      `SELECT "method", "path", "statusCode" AS status_code,
+              COUNT(*)::int AS count,
+              MAX("timestamp") AS last_seen
+         FROM "api_request_logs"
+        WHERE "projectId" = $1 AND "statusCode" >= 500
+          AND "timestamp" >= ($2::timestamptz AT TIME ZONE 'UTC')
+          AND "branchId" IS NULL
+        GROUP BY "method", "path", "statusCode"
+        ORDER BY MAX("timestamp") DESC
+        LIMIT $3`,
+      projectId,
+      since.toISOString(),
+      limit
+    )
+
+    const windowLabel = windowMinutes >= 60 ? `${Math.round(windowMinutes / 60)}h` : `${windowMinutes}m`
+
+    if (groups.length === 0) {
       return {
         success: true,
-        message: "✅ No errors in the last hour!\n\nYour APIs are running smoothly.",
-        data: { errors: [], count: 0 }
+        message: `✅ No 5xx responses from the runtime API in the last ${windowLabel}.`,
+        data: { windowMinutes, errors: [], count: 0 },
       }
     }
-    
-    const errorList = errors.map(e => {
-      const time = new Date(e.timestamp).toLocaleTimeString()
-      return `❌ **[${time}]** ${e.endpoint || 'Unknown'} - ${e.statusCode || 500}: ${e.message.substring(0, 80)}`
-    }).join('\n')
-    
+
+    const total = groups.reduce((n, g) => n + g.count, 0)
+    const errorList = groups
+      .map((g) => {
+        const last = new Date(g.last_seen).toISOString()
+        return `❌ **${g.method} ${g.path}** — ${g.status_code} × ${g.count}, last ${last}`
+      })
+      .join('\n')
+
     return {
       success: true,
-      message: `🚨 **Recent Errors (${errors.length}):**\n\n${errorList}`,
-      data: { errors, count: errors.length }
+      message: `🚨 **5xx in the last ${windowLabel} (${total} across ${groups.length} endpoint(s)):**\n\n${errorList}`,
+      data: { windowMinutes, errors: groups, count: total },
     }
   } catch (error: any) {
     return {
@@ -9500,6 +9638,17 @@ async function executeCreateTrigger(params: any, projectId: string): Promise<Exe
     return { success: false, message: 'name, sourceTable, event, and actionType are required' }
   }
 
+  // A webhook trigger without a destination used to be CREATED and reported as
+  // "calls your webhook at `undefined`"; every later matching write then threw
+  // 'webhook trigger requires webhookUrl' and logged a DEAD delivery. Refuse
+  // at creation, where the caller can still fix it.
+  if (actionType === 'webhook' && !(typeof webhookUrl === 'string' && /^https?:\/\//i.test(webhookUrl.trim()))) {
+    return {
+      success: false,
+      message: 'A webhook trigger needs webhookUrl — the http(s) endpoint it calls. Pass webhookUrl, or use create_webhook for a signed row webhook.',
+    }
+  }
+
   try {
     const { prisma } = await import('@/lib/db')
     const { createTrigger } = await import('@/lib/services/trigger-service')
@@ -10299,7 +10448,7 @@ async function executeCreateAiFunction(params: any, projectId: string): Promise<
     // This prevents the LLM from generating internal-sounding names like
     // "describe_ai_function_with_trigger" when the name-generation call gets confused.
     const suppliedName = typeof params.name === 'string' && params.name.trim()
-      ? params.name.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/__+/g, '_').replace(/^_|_$/g, '').slice(0, 50)
+      ? params.name.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '_').replace(/__+/g, '_').replace(/^[_-]|[_-]$/g, '').slice(0, 50)
       : null
 
     const generated = await generateFunctionCode(description, triggerType, triggerTable || null, projectId)
@@ -10703,6 +10852,11 @@ async function executeDeleteAiFunction(params: any, projectId: string): Promise<
 
     await prisma.aiFunction.delete({ where: { id: fn.id } })
 
+    // Deleting the last row-event subscriber takes the capture trigger off the
+    // tables, so an unused capture costs nothing.
+    const { syncCaptureForFunctionChange } = await import('@/lib/webhooks/capture')
+    await syncCaptureForFunctionChange(projectId, fn.triggerType)
+
     return {
       success: true,
       message: `✅ AI function \`${fn.name}\` deleted.`,
@@ -10731,6 +10885,11 @@ async function executeToggleAiFunction(params: any, projectId: string): Promise<
 
     const newStatus = active ? 'active' : 'inactive'
     await prisma.aiFunction.update({ where: { id: fn.id }, data: { status: newStatus } })
+
+    // A row-event function going on or off changes what the database-level
+    // capture must record; the sync derives the answer from the rows.
+    const { syncCaptureForFunctionChange } = await import('@/lib/webhooks/capture')
+    await syncCaptureForFunctionChange(projectId, fn.triggerType)
 
     return {
       success: true,
@@ -10915,47 +11074,51 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
         if (col2.success) autoWiredSteps.push(`✅ Added \`status\` to \`${tableName}\``)
       }
 
-      // Generate POST /checkout/session endpoint
-      const { executeGenerateFunction } = await import('@/lib/ai/function-generator')
-
-      const checkoutResult = await executeGenerateFunction(
+      // SANDBOX functions, not route modules: ctx.integrations only exists in
+      // the sandbox runtime, and route modules deliberately cannot reach stored
+      // provider keys (their curated env withholds them). The old auto-wire
+      // generated route modules whose own description told the model to call a
+      // ctx that does not exist there — every generated endpoint was dead on
+      // arrival (ReferenceError or an empty key).
+      const checkoutResult = await executeCreateAiFunction(
         {
-          functionName: 'stripe-checkout-session',
+          name: 'stripe-checkout-session',
+          triggerType: 'manual',
           description: [
             'Create a Stripe Checkout session.',
-            'Accept { lineItems, successUrl, cancelUrl, customerEmail? } in the request body.',
+            'Read { lineItems, successUrl, cancelUrl, customerEmail? } from event.data.',
             'Call ctx.integrations.stripe.createCheckoutSession({ lineItems, successUrl, cancelUrl, customerEmail }) — it returns { id, url }.',
             'Each lineItem is { price: "price_xxx", quantity } or { priceData: { currency, unitAmount, productName, recurringInterval? }, quantity }.',
-            'Require authentication — reject unauthenticated requests with 401.',
+            'If event.data has no lineItems, return { error: "lineItems required" } without calling Stripe.',
             'Return { checkoutUrl: session.url, sessionId: session.id }.',
           ].join(' '),
-          method: 'POST',
         },
         projectId,
       )
-      if (checkoutResult.success) autoWiredSteps.push('✅ Generated `POST /checkout/session`')
+      if (checkoutResult.success) autoWiredSteps.push(`✅ Generated \`POST /api/v1/${projectId}/fn/stripe-checkout-session\``)
 
-      // Generate the Stripe webhook handler.
-      // The platform receiver at POST /api/v1/{projectId}/webhooks/stripe already
-      // verifies the Stripe-Signature header and runs deterministic order/subscription
-      // updates BEFORE this function fires — so this function works on an
-      // already-verified event.data payload and must NOT re-verify signatures.
-      const webhookResult = await executeGenerateFunction(
+      // The Stripe webhook handler: triggerType on_webhook / triggerTable
+      // 'stripe' — the ONLY shape the platform receiver fires. It used to be
+      // stored as a 'manual' route module, which the receiver never fires
+      // (functionsTriggered: 0 on every delivery) while readiness reported the
+      // integration Complete.
+      const webhookResult = await executeCreateAiFunction(
         {
-          functionName: 'stripe-webhook',
+          name: 'stripe-webhook',
+          triggerType: 'on_webhook',
+          triggerTable: 'stripe',
           description: [
             'Process a verified Stripe webhook event delivered in event.data.',
             'The platform webhook receiver has already verified the signature — do not re-verify.',
             'Read event.data.type for the Stripe event type and event.data.data.object for the payload.',
-            'On checkout.session.completed: update the matching order row status to "paid".',
-            'On payment_intent.succeeded: log the payment.',
+            'On checkout.session.completed: update the matching order row status to "paid" via ctx.db.',
+            'On payment_intent.succeeded: ctx.log the payment.',
             'Return { handled: true } for recognised events.',
           ].join(' '),
-          method: 'POST',
         },
         projectId,
       )
-      if (webhookResult.success) autoWiredSteps.push('✅ Generated `stripe-webhook` handler')
+      if (webhookResult.success) autoWiredSteps.push('✅ Generated `stripe-webhook` handler (fires on verified Stripe deliveries)')
     }
 
     // ── PROMPT 2.2: Email triggers ──────────────────────────────────────────
@@ -11000,45 +11163,42 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
 
     // ── PROMPT 2.3: AI route generation ────────────────────────────────────
     if (integrationId === 'openai' || integrationId === 'anthropic') {
-      const { executeGenerateFunction } = await import('@/lib/ai/function-generator')
-
-      // POST /ai/chat — rate-limited, auth-protected
-      const chatResult = await executeGenerateFunction(
+      // Sandbox functions: ctx.integrations.<id>.complete/embed only exist in
+      // the sandbox runtime (see the Stripe note above).
+      const chatResult = await executeCreateAiFunction(
         {
-          functionName: `${integrationId}-chat`,
+          name: `${integrationId}-chat`,
+          triggerType: 'manual',
           description: [
-            `AI chat endpoint backed by ${integrationId}.`,
-            'Accept { prompt, systemPrompt?, maxTokens? } in the request body.',
+            `AI chat backed by ${integrationId}.`,
+            'Read { prompt, systemPrompt?, maxTokens? } from event.data.',
             `Call ctx.integrations.${integrationId}.complete(prompt, maxTokens, systemPrompt) — it returns the assistant reply as a string.`,
-            'Apply rate limiting of 10 requests per minute per authenticated user.',
-            'Require authentication — reject unauthenticated requests with 401.',
+            'If event.data has no prompt, return { error: "prompt required" } without calling the provider.',
             'Return { reply }.',
           ].join(' '),
-          method: 'POST',
         },
         projectId,
       )
-      if (chatResult.success) autoWiredSteps.push('✅ Generated `POST /ai/chat` (rate-limited, auth-protected)')
+      if (chatResult.success) autoWiredSteps.push(`✅ Generated \`POST /api/v1/${projectId}/fn/${integrationId}-chat\``)
 
-      // POST /ai/embed — OpenAI only. Anthropic has no embeddings API, so an
+      // Embeddings — OpenAI only. Anthropic has no embeddings API, so an
       // anthropic-embed function would be unrunnable — never generate it.
       if (integrationId === 'openai') {
-        const embedResult = await executeGenerateFunction(
+        const embedResult = await executeCreateAiFunction(
           {
-            functionName: 'openai-embed',
+            name: 'openai-embed',
+            triggerType: 'manual',
             description: [
-              'Text embedding endpoint backed by OpenAI.',
-              'Accept { text } in the request body.',
+              'Text embedding backed by OpenAI.',
+              'Read { text } from event.data.',
               'Call ctx.integrations.openai.embed(text) — it returns a number[] embedding vector.',
-              'Apply rate limiting of 20 requests per minute per authenticated user.',
-              'Require authentication — reject unauthenticated requests with 401.',
+              'If event.data has no text, return { error: "text required" } without calling the provider.',
               'Return { embedding }.',
             ].join(' '),
-            method: 'POST',
           },
           projectId,
         )
-        if (embedResult.success) autoWiredSteps.push('✅ Generated `POST /ai/embed` (rate-limited, auth-protected)')
+        if (embedResult.success) autoWiredSteps.push(`✅ Generated \`POST /api/v1/${projectId}/fn/openai-embed\``)
       }
     }
 
@@ -11223,42 +11383,11 @@ async function executeRemoveIntegrationKey(params: any, projectId: string): Prom
 // BACKGROUND JOBS / CRON SCHEDULING
 // ============================================================================
 
-/**
- * Translate human-readable schedule to a cron expression.
- * e.g. "every day at 9am" → "0 9 * * *"
- */
-function toCronExpression(schedule: string): string {
-  const s = schedule.toLowerCase().trim()
-
-  // Already a cron expression (5 parts)
-  if (/^[\d\*\/\-,]+ [\d\*\/\-,]+ [\d\*\/\-,]+ [\d\*\/\-,]+ [\d\*\/\-,]+$/.test(s)) {
-    return s
-  }
-
-  // Common patterns
-  if (s.includes('every minute') || s === 'minutely') return '* * * * *'
-  if (s.includes('every 5 min')) return '*/5 * * * *'
-  if (s.includes('every 15 min')) return '*/15 * * * *'
-  if (s.includes('every 30 min')) return '*/30 * * * *'
-  if (s.includes('every hour') || s === 'hourly') return '0 * * * *'
-  if (s.includes('every day') || s === 'daily') {
-    const hourMatch = s.match(/at (\d+)(am|pm)?/)
-    if (hourMatch) {
-      let hour = parseInt(hourMatch[1])
-      if (hourMatch[2] === 'pm' && hour < 12) hour += 12
-      if (hourMatch[2] === 'am' && hour === 12) hour = 0
-      return `0 ${hour} * * *`
-    }
-    return '0 9 * * *' // default 9am
-  }
-  if (s.includes('every week') || s === 'weekly') return '0 9 * * 1' // Monday 9am
-  if (s.includes('every month') || s === 'monthly') return '0 9 1 * *' // 1st of month 9am
-  if (s.includes('midnight')) return '0 0 * * *'
-  if (s.includes('noon')) return '0 12 * * *'
-
-  // Default: daily at 9am
-  return '0 9 * * *'
-}
+// Schedule parsing lives in lib/services/cron-expression.ts, shared with the
+// runner that fires the jobs. The parser that used to live here defaulted every
+// phrase it did not recognise to daily 09:00 UTC — including the console's own
+// example "Every night at 02:00" — and the job then silently ran seven hours
+// late. An unrecognised schedule is now a refusal, never a default.
 
 /**
  * CREATE_CRON_JOB: Create a scheduled background job (AI function + schedule)
@@ -11275,7 +11404,17 @@ async function executeCreateCronJob(params: any, projectId: string): Promise<Exe
   if (!schedule) return { success: false, message: 'schedule is required (e.g. "every day at 9am", "0 9 * * *")' }
 
   try {
-    const cronExpr = toCronExpression(schedule)
+    const { scheduleToCron } = await import('@/lib/services/cron-expression')
+    const cronExpr = scheduleToCron(schedule)
+    if (!cronExpr) {
+      return {
+        success: false,
+        message:
+          `Could not understand the schedule "${schedule}", so no job was created. ` +
+          `Pass a five-field cron expression (e.g. "0 2 * * *" for 02:00 UTC daily, "0 9 * * 1-5" for weekdays at 09:00 UTC) ` +
+          `or a phrase like "every 10 minutes", "every day at 21:30", "every weekday at 8am", "every monday at 9am". All times are UTC.`,
+      }
+    }
     const { generateFunctionCode } = await import('@/lib/services/ai-functions/generator')
     const { prisma: db } = await import('@/lib/db')
 
@@ -11305,7 +11444,7 @@ async function executeCreateCronJob(params: any, projectId: string): Promise<Exe
 
     return {
       success: true,
-      message: `Scheduled job created: "${fn.name}"\n\nSchedule: ${schedule} (${cronExpr})\nDescription: ${description}\n\nThe job will run automatically on the configured schedule.`,
+      message: `Scheduled job created: "${fn.name}"\n\nSchedule: ${schedule} (${cronExpr}, UTC)\nDescription: ${description}\n\nThe job will run automatically on the configured schedule.`,
       data: { functionId: fn.id, name: fn.name, cron: cronExpr },
     }
   } catch (error: any) {

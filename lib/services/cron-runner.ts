@@ -24,6 +24,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
+import { matchesCronExpression } from '@/lib/services/cron-expression'
 import { executeAiFunction, FunctionEvent } from '@/lib/services/ai-functions/executor'
 import { retryFailedWebhooks } from '@/lib/webhooks/index'
 import { drainWebhookOutbox } from '@/lib/webhooks/capture'
@@ -31,35 +32,13 @@ import { detectAndTimeoutStuckJobs, enqueue } from '@/lib/queue/index'
 import { processBackgroundJobs, processPurgeJobs } from '@/lib/queue/worker'
 
 // ─── Cron Expression Matching ─────────────────────────────────────────────────
+//
+// The grammar lives in cron-expression.ts, shared with the schedule parser so
+// an expression the parser accepts is always one this runner can fire. The old
+// in-file matcher used parseInt on each field, so the range in "0 9 * * 1-5"
+// read as 1 and the job ran on Mondays only.
 
-export function matchesCronExpression(expr: string, now: Date): boolean {
-  const parts = expr.trim().split(/\s+/)
-  if (parts.length !== 5) return false
-
-  const [minuteExpr, hourExpr, domExpr, monthExpr, dowExpr] = parts
-
-  function matchesPart(part: string, value: number): boolean {
-    if (part === '*') return true
-    if (part.startsWith('*/')) {
-      const step = parseInt(part.slice(2))
-      return !isNaN(step) && value % step === 0
-    }
-    // Support comma-separated values: "1,15"
-    if (part.includes(',')) {
-      return part.split(',').some(p => parseInt(p.trim()) === value)
-    }
-    const num = parseInt(part)
-    return !isNaN(num) && num === value
-  }
-
-  return (
-    matchesPart(minuteExpr, now.getUTCMinutes()) &&
-    matchesPart(hourExpr, now.getUTCHours()) &&
-    matchesPart(domExpr, now.getUTCDate()) &&
-    matchesPart(monthExpr, now.getUTCMonth() + 1) &&
-    matchesPart(dowExpr, now.getUTCDay())
-  )
-}
+export { matchesCronExpression, isValidCronExpression } from '@/lib/services/cron-expression'
 
 // ─── User Cron Jobs ───────────────────────────────────────────────────────────
 

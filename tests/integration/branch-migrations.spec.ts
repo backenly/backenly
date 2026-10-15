@@ -289,7 +289,15 @@ describe('building on a branch', () => {
     expect(r.body.status).toBe('awaiting_approval')
     const approval = await prisma.agentApprovalRequest.findUnique({ where: { id: r.body.approval.id } })
     expect(approval?.tool).toBe('merge_branch')
-    expect(approval?.toolArgs).toEqual({ branchId })
+    // The exact statements the human reads are frozen into the request: the
+    // replay refuses MERGE_STALE if the log changes after approval.
+    expect(approval?.toolArgs).toEqual({
+      branchId,
+      approvedMigrations: [
+        'CREATE TABLE invoices (amount integer NOT NULL, user_id uuid)',
+        'ALTER TABLE orders ADD COLUMN note text',
+      ],
+    })
     expect(approval?.message).toContain('CREATE TABLE invoices')
     expect(await tableExists(mainSchema, 'invoices')).toBe(false)
 

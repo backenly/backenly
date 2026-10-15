@@ -45,6 +45,30 @@ async function handleGET(
       )
     }
 
+    // The same per-object decision the download route makes. Without it, any
+    // read key resolved any file id in a private or owner_only bucket to its
+    // metadata and a working URL. Denied reads answer 404, not 403: a file id
+    // must not become an existence oracle.
+    {
+      const { prisma } = await import('@/lib/db/prisma')
+      const row = await prisma.storageFile.findFirst({
+        where: { id: params.fileId, projectId: context.projectId },
+        select: { isPublic: true, uploadedBy: true, bucket: { select: { accessPolicy: true } } },
+      })
+      const { mayRead } = await import('@/lib/storage/access-policy')
+      const reader = context.endUserId
+        ? { kind: 'endUser' as const, userId: context.endUserId }
+        : context.apiKey.serviceRole || context.apiKey.role === 'admin'
+          ? { kind: 'operator' as const, userId: context.apiKey.userId }
+          : { kind: 'anonymous' as const }
+      const decision = row
+        ? mayRead({ bucketPolicy: row.bucket.accessPolicy, fileIsPublic: row.isPublic, uploadedBy: row.uploadedBy }, reader)
+        : { allowed: false }
+      if (!decision.allowed) {
+        return createErrorResponse(ErrorCodes.NOT_FOUND, 'File not found', 404)
+      }
+    }
+
     // Get file URL
     const url = await storageService.getFileUrl(params.fileId, context.projectId)
 
@@ -101,6 +125,29 @@ async function handleDELETE(
     const capabilityCheck = requireCapability(context, request.nextUrl.pathname)
     if (capabilityCheck) {
       return capabilityCheck
+    }
+
+    // Deleting is held to ownership or operator authority. 'write' permission
+    // alone let any publishable key — "safe in a browser" — delete any file in
+    // the project by id.
+    {
+      const { prisma } = await import('@/lib/db/prisma')
+      const row = await prisma.storageFile.findFirst({
+        where: { id: params.fileId, projectId: context.projectId, deletedAt: null },
+        select: { uploadedBy: true },
+      })
+      if (!row) {
+        return createErrorResponse(ErrorCodes.NOT_FOUND, 'File not found', 404)
+      }
+      const operatorGrade = context.apiKey.serviceRole || context.apiKey.role === 'admin'
+      const isUploader = context.endUserId !== null && row.uploadedBy === context.endUserId
+      if (!operatorGrade && !isUploader) {
+        return createErrorResponse(
+          ErrorCodes.FORBIDDEN,
+          'Only the end user who uploaded this file, or a server-side service key, may delete it.',
+          403
+        )
+      }
     }
 
     await storageService.deleteFile(params.fileId, context.projectId)

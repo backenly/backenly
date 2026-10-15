@@ -15,7 +15,7 @@ Call as `deploy { action: "<action>", … }`.
 | `history` | every published version, which one is serving, and which can be rolled back to | nothing | yes | no |
 | `readiness` | the 0-100 readiness score with blockers; fixes nothing unless autoFix is true | nothing | yes | no |
 | `deploy` | publish the current backend | nothing | no | waits for a human |
-| `rollback` | return to an earlier version | nothing | no | waits for a human |
+| `rollback` | mark an earlier published version as current (version bookkeeping; the live backend is unchanged) | nothing | no | waits for a human |
 <!-- end generated -->
 
 - `readiness` reports what stands between the project and a working deploy. It is a read and fixes nothing, unless a read-write key passes `autoFix: true`; a read-only key's readiness read never changes anything.

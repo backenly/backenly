@@ -2,7 +2,7 @@
 
 Index: https://backenly.com/llms.txt
 
-Server-side code, fired by an end-user signing up (`on_signup`), a row event (`on_insert`, `on_update`, `on_delete` on a table), an HTTP request (`http`), a schedule, or by hand (`manual`). There are two ways to make one:
+Server-side code, fired by an end-user signing up (`on_signup`), a row event (`on_insert`, `on_update`, `on_delete` on a table), an HTTP request (`http`), a schedule, or by hand (`manual`). Row events are captured inside PostgreSQL, so every writer fires them — REST, SDK, MCP, SQL in another function — within about a minute of the write; auth-managed tables (`users`) are not captured, so use `on_signup` for sign-ups. There are two ways to make one:
 
 - `functions { action: "create" }`: Backenly writes the code from your plain-English spec with its own model, which draws AI credits. Name the tables it touches and the integrations it calls.
 - `functions { action: "deploy_code" }`: you write the code; it is stored exactly as written, with no model reading or rewriting it, after the runtime that will run it checks that it can.

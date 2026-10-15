@@ -9,6 +9,7 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
+import { redactSecretParams } from '@/lib/mcp/withhold-secrets'
 import { prisma } from '@/lib/db/prisma'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import { resolvePendingActionMemory } from '@/lib/operational-memory/ledger'
@@ -38,6 +39,22 @@ const RESOLVED_WINDOW_MS = 10 * 60 * 1000
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000
 
 // ─── GET ──────────────────────────────────────────────────────────────────────
+
+
+/**
+ * A finding as it may be SERVED. Pending-action findings carry the parked
+ * call's executor params in `details`; the display copy is redacted at write
+ * since the sealed-params split, and this covers the legacy rows that stored
+ * them raw. The sealed copy is for the approval replay, not for clients.
+ */
+function withServableDetails<T extends { details: unknown }>(row: T): T {
+  const det = row.details as Record<string, unknown> | null
+  if (!det || typeof det !== 'object' || !('executorParams' in det)) return row
+  return {
+    ...row,
+    details: { ...det, executorParams: redactSecretParams(det.executorParams), executorParamsSealed: undefined },
+  }
+}
 
 export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
   const params = await props.params
@@ -97,7 +114,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
             details: true,
             detectedAt: true,
           },
-        }),
+        }).then(rows => rows.map(withServableDetails)),
         prisma.platformNotification.findMany({
           where: {
             metadata: { path: ['projectId'], equals: projectId },
@@ -129,7 +146,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
           status: true,
           detectedAt: true,
         },
-      }),
+      }).then(rows => rows.map(withServableDetails)),
       // Repairs in the last 7 days, split by whether a re-check confirmed them.
       // Only the confirmed ones may be called fixed.
       countRepairs(projectId, new Date(Date.now() - WEEK_MS)),
@@ -236,7 +253,7 @@ export async function PATCH(request: NextRequest, props: { params: Promise<{ id:
         where: { projectId, status: { in: ['open', 'pending_approval'] } },
         orderBy: [{ severity: 'asc' }, { detectedAt: 'desc' }],
         select: { id: true, type: true, severity: true, details: true, status: true, detectedAt: true },
-      }),
+      }).then(rows => rows.map(withServableDetails)),
       countRepairs(projectId, new Date(Date.now() - WEEK_MS)),
       recentlyResolved(projectId, new Date(Date.now() - RESOLVED_WINDOW_MS)),
       loadSensorState(projectId),
@@ -355,7 +372,7 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
     }
 
     return NextResponse.json({ success: true })
-  })
+  }, { floor: 'write' })
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

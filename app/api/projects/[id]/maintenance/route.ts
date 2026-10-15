@@ -133,7 +133,7 @@ export async function POST(
       .catch(() => {})
 
     return NextResponse.json({ ok: true, approval: result.approval })
-  })
+  }, { floor: 'administer' })
 }
 
 export async function DELETE(
@@ -170,5 +170,5 @@ export async function DELETE(
       .catch(() => {})
 
     return NextResponse.json({ ok: true, approvalId })
-  })
+  }, { floor: 'administer' })
 }

@@ -38,11 +38,13 @@ export const V1_ROUTES: Record<string, string[]> = {
     'DELETE /db/{table}/{id}       delete one row',
   ],
   auth: [
-    'POST   /auth/signup           { email, password } → { token, user }',
-    'POST   /auth/signin           { email, password } → { token, user }',
-    'POST   /auth/signout',
-    'GET    /auth/me               requires X-User-Token',
-    'POST   /auth/refresh',
+    // Only routes the runtime actually serves: this hint once listed a
+    // profile route and a signout route that both 404 — an agent that trusted
+    // its own 404's hint retried the same shape forever.
+    'POST   /auth/signup           { email, password } → { data: { user, token } }',
+    'POST   /auth/signin           { email, password } → { data: { user, token } }',
+    'POST   /auth/logout           Authorization: Bearer <token>',
+    'POST   /auth/refresh          Authorization: Bearer <token> → { data: { token, user } }',
   ],
   storage: [
     'POST   /storage/upload            multipart: file, bucket, path, isPublic',

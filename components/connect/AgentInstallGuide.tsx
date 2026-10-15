@@ -56,8 +56,21 @@ import { CodeSurface, CliText, JsonText } from './CodeSurface'
  */
 const USER_DOCS = '/docs/connect'
 const KEY_PLACEHOLDER = '<SCOPED_KEY>'
+/**
+ * The dashboard's own origin — which is the backend these commands must point
+ * at. Hardcoding backenly.com here sent every SELF-HOSTED operator's agent to
+ * Backenly Cloud, where their key is unknown and the connection dies with
+ * INVALID_KEY — the one-command install was broken for exactly the audience
+ * that cannot fall back to the hosted product. Client component, so the
+ * browser's origin is the truth; the env fallback only covers prerender.
+ */
+export function dashboardOrigin(): string {
+  if (typeof window !== 'undefined') return window.location.origin
+  return (process.env.NEXT_PUBLIC_APP_URL || 'https://backenly.com').replace(/\/+$/, '')
+}
+
 /** The remote (Streamable-HTTP) MCP endpoint — app/api/mcp/route.ts. No npx. */
-const REMOTE_URL = 'https://backenly.com/api/mcp'
+export const remoteUrl = () => `${dashboardOrigin()}/api/mcp`
 
 type Transport = 'local' | 'remote'
 
@@ -85,7 +98,13 @@ interface Agent {
   remote: Variant
 }
 
-const NPX_ARGS = (p: string, k: string) => ['-y', '@backenly/mcp-server', '--project', p, '--key', k]
+export const NPX_ARGS = (p: string, k: string) => {
+  const args = ['-y', '@backenly/mcp-server', '--project', p, '--key', k]
+  // The stdio package defaults to backenly.com; a self-host must say where it
+  // lives. Cloud commands stay exactly as they were.
+  const origin = dashboardOrigin()
+  return origin === 'https://backenly.com' ? args : [...args, '--endpoint', origin]
+}
 
 /**
  * JSON the way people write mcp.json by hand: two-space indent, with an array
@@ -105,7 +124,7 @@ function stdioJson(projectId: string, key: string): string {
 
 /** Cursor remote: url + headers; Cursor infers the transport from the url. */
 function cursorRemoteJson(_projectId: string, key: string): string {
-  return configJson({ mcpServers: { backenly: { url: REMOTE_URL, headers: { 'x-api-key': key } } } })
+  return configJson({ mcpServers: { backenly: { url: remoteUrl(), headers: { 'x-api-key': key } } } })
 }
 
 /**
@@ -116,7 +135,7 @@ function cursorRemoteJson(_projectId: string, key: string): string {
  * Servers → View raw config; its path on disk has moved between releases.
  */
 function antigravityRemoteJson(_projectId: string, key: string): string {
-  return configJson({ mcpServers: { backenly: { serverUrl: REMOTE_URL, headers: { 'x-api-key': key } } } })
+  return configJson({ mcpServers: { backenly: { serverUrl: remoteUrl(), headers: { 'x-api-key': key } } } })
 }
 
 /**
@@ -125,7 +144,7 @@ function antigravityRemoteJson(_projectId: string, key: string): string {
  * live under `http_headers`. Codex infers http from the `url` key (no `type`).
  */
 function codexRemoteToml(_projectId: string, key: string): string {
-  return `[mcp_servers.backenly]\nurl = "${REMOTE_URL}"\nhttp_headers = { "x-api-key" = "${key}" }`
+  return `[mcp_servers.backenly]\nurl = "${remoteUrl()}"\nhttp_headers = { "x-api-key" = "${key}" }`
 }
 
 const RUN_THEN_NEW_SESSION = 'Run it in a terminal, then start a new Claude Code session.'
@@ -146,7 +165,7 @@ const AGENTS: Agent[] = [
   {
     id: 'claude-code', name: 'Claude Code',
     local: { kind: 'cli', next: RUN_THEN_NEW_SESSION, build: (p, k) => `claude mcp add backenly -- npx -y @backenly/mcp-server --project ${p} --key ${k}` },
-    remote: { kind: 'cli', next: RUN_THEN_NEW_SESSION, build: (_p, k) => `claude mcp add --transport http backenly ${REMOTE_URL} --header "x-api-key: ${k}"` },
+    remote: { kind: 'cli', next: RUN_THEN_NEW_SESSION, build: (_p, k) => `claude mcp add --transport http backenly ${remoteUrl()} --header "x-api-key: ${k}"` },
   },
   {
     id: 'cursor', name: 'Cursor',
@@ -170,7 +189,7 @@ const AGENTS: Agent[] = [
   {
     id: 'other', name: 'Other',
     local: { kind: 'cli', next: 'Use it as the server command in any MCP host, then restart the host.', build: (p, k) => `npx -y @backenly/mcp-server --project ${p} --key ${k}` },
-    remote: { kind: 'cli', next: 'Add it as a Streamable HTTP server in any MCP host, then restart the host.', build: (_p, k) => `URL     ${REMOTE_URL}\nHeader  x-api-key: ${k}` },
+    remote: { kind: 'cli', next: 'Add it as a Streamable HTTP server in any MCP host, then restart the host.', build: (_p, k) => `URL     ${remoteUrl()}\nHeader  x-api-key: ${k}` },
   },
 ]
 

@@ -10,7 +10,7 @@ integrations { action: "connect", integrationId: "stripe", apiKey: "sk_test_…"
 
 The secret key (`sk_test_…` or `sk_live_…`) is checked with Stripe before it is stored. The webhook signing secret cannot be checked by an API call, so it is stored as unverifiable.
 
-Storing the key from an agent also creates a `POST /checkout/session` function and a `stripe-webhook` handler, and if an orders or payments table exists, it gains the Stripe session and status columns.
+Storing the key from an agent also creates a `stripe-checkout-session` function (invoke it at `POST /api/v1/{projectId}/fn/stripe-checkout-session`) and a `stripe-webhook` handler that fires on verified Stripe deliveries, and if an orders or payments table exists, it gains the `stripeSessionId` and `status` columns.
 
 ## Receiving events
 

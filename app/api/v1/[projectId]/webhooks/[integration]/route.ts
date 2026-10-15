@@ -291,22 +291,38 @@ async function handlePOST(
 // Handles standard Stripe events deterministically against workspace tables.
 // This runs in addition to (not instead of) any AI-function webhook handlers.
 
-async function handleStripeBusinessLogic(projectId: string, payload: Record<string, any>): Promise<void> {
+export async function handleStripeBusinessLogic(projectId: string, payload: Record<string, any>): Promise<void> {
   const eventType: string = payload.type
   const data = payload.data?.object ?? {}
   const schemaName = `workspace_${projectId}`
 
+  // Workspace tables carry FORCE ROW LEVEL SECURITY. A bare prisma call runs
+  // as the app role with NO claims, so the policies filtered every row and
+  // denied every write — silently, because every call ended in catch(() => {}).
+  // These are Backenly's own deterministic writes, so they run with the
+  // service-role claims, and a failure is LOGGED before it is absorbed
+  // (a missing optional table is normal; an invisible one never is).
+  const { executeWithUserContext } = await import('@/lib/services/workspace-rls')
+  const svcSql = async <T = any>(sql: string, ...values: unknown[]): Promise<T[]> => {
+    try {
+      return await executeWithUserContext<T>('', true, sql, values)
+    } catch (err: any) {
+      console.error('[Webhook] Stripe business logic SQL failed:', err?.message ?? err)
+      throw err
+    }
+  }
+
   // Idempotency: skip if already logged
   const eventId: string = payload.id
   if (eventId) {
-    const alreadyLogged = await prisma.$queryRawUnsafe<{ count: number }[]>(
+    const alreadyLogged = await svcSql<{ count: number }>(
       `SELECT COUNT(*)::int AS count
          FROM information_schema.tables
         WHERE table_schema = $1 AND table_name = 'payment_events'`,
       schemaName
     ).then(r => {
       if (Number(r[0]?.count ?? 0) === 0) return false
-      return prisma.$queryRawUnsafe<{ count: number }[]>(
+      return svcSql<{ count: number }>(
         `SELECT COUNT(*)::int AS count FROM "${schemaName}"."payment_events" WHERE stripe_event_id = $1`,
         eventId
       ).then(r2 => Number(r2[0]?.count ?? 0) > 0)
@@ -318,7 +334,7 @@ async function handleStripeBusinessLogic(projectId: string, payload: Record<stri
     }
 
     // Log the event
-    await prisma.$executeRawUnsafe(
+    await svcSql(
       `INSERT INTO "${schemaName}"."payment_events"
          (stripe_event_id, event_type, payload, processed, processed_at)
        VALUES ($1, $2, $3::jsonb, true, now())
@@ -337,17 +353,18 @@ async function handleStripeBusinessLogic(projectId: string, payload: Record<stri
       if (!paymentIntentId) break
 
       // 1. Update orders table (match by stripe_payment_intent_id)
-      const updatedOrders = await prisma.$executeRawUnsafe(
+      const updatedOrders = await svcSql(
         `UPDATE "${schemaName}"."orders"
             SET status = 'paid',
                 stripe_payment_intent_id = $1,
                 "updatedAt" = now()
-          WHERE stripe_payment_intent_id = $1`,
+          WHERE stripe_payment_intent_id = $1
+          RETURNING 1`,
         paymentIntentId
-      ).catch(() => 0)
+      ).then(rows => rows.length).catch(() => 0)
 
       // 2. Update payments table
-      await prisma.$executeRawUnsafe(
+      await svcSql(
         `UPDATE "${schemaName}"."payments"
             SET status = 'paid',
                 stripe_payment_intent_id = $1,
@@ -362,16 +379,17 @@ async function handleStripeBusinessLogic(projectId: string, payload: Record<stri
       const userId = metadata.user_id ?? metadata.userId ?? null
       if (creditsAmount > 0 && userId) {
         // Try wallet model first (single row with balance column)
-        const walletUpdated = await prisma.$executeRawUnsafe(
+        const walletUpdated = await svcSql(
           `UPDATE "${schemaName}"."credit_wallets"
               SET balance = balance + $1, "updatedAt" = now()
-            WHERE user_id = $2`,
+            WHERE user_id = $2
+            RETURNING 1`,
           creditsAmount, userId
-        ).catch(() => 0)
+        ).then(rows => rows.length).catch(() => 0)
 
         // Fall back to ledger model (insert positive credit transaction)
         if (!walletUpdated) {
-          await prisma.$executeRawUnsafe(
+          await svcSql(
             `INSERT INTO "${schemaName}"."credit_transactions" (user_id, amount, reason, stripe_payment_intent_id, "createdAt")
              VALUES ($1, $2, 'purchase', $3, now())
              ON CONFLICT DO NOTHING`,
@@ -386,7 +404,7 @@ async function handleStripeBusinessLogic(projectId: string, payload: Record<stri
       //    Looks for an order_items / line_items table linked to the paid order
       if (updatedOrders > 0) {
         // Try to decrement product stock atomically (prevents overselling)
-        await prisma.$executeRawUnsafe(
+        await svcSql(
           `UPDATE "${schemaName}"."products" p
               SET stock_quantity = GREATEST(0, p.stock_quantity - oi.quantity),
                   "updatedAt" = now()
@@ -398,7 +416,7 @@ async function handleStripeBusinessLogic(projectId: string, payload: Record<stri
         ).catch(() => {}) // Tables may not exist in all projects — non-fatal
 
         // Insert success notification for the end-user who placed the order
-        const orderUserRow = await prisma.$queryRawUnsafe<{ user_id: string; id: string }[]>(
+        const orderUserRow = await svcSql<{ user_id: string; id: string }>(
           `SELECT user_id, id FROM "${schemaName}"."orders"
             WHERE stripe_payment_intent_id = $1 LIMIT 1`,
           paymentIntentId
@@ -407,7 +425,7 @@ async function handleStripeBusinessLogic(projectId: string, payload: Record<stri
         const orderUserId = orderUserRow[0]?.user_id
         const orderId = orderUserRow[0]?.id
         if (orderUserId) {
-          await prisma.$executeRawUnsafe(
+          await svcSql(
             `INSERT INTO "${schemaName}"."notifications" (user_id, type, title, message, "createdAt")
              VALUES ($1, 'payment_succeeded', 'Payment Confirmed',
                      $2, now())
@@ -428,21 +446,21 @@ async function handleStripeBusinessLogic(projectId: string, payload: Record<stri
       const paymentIntentId: string | undefined = data.payment_intent
       if (!sessionId) break
 
-      await prisma.$executeRawUnsafe(
+      await svcSql(
         `UPDATE "${schemaName}"."orders"
             SET status = 'paid',
                 stripe_payment_intent_id = $1,
-                updated_at = now()
-          WHERE stripe_session_id = $2`,
+                "updatedAt" = now()
+          WHERE "stripeSessionId" = $2`,
         paymentIntentId ?? null, sessionId
       ).catch(() => {})
 
-      await prisma.$executeRawUnsafe(
+      await svcSql(
         `UPDATE "${schemaName}"."payments"
             SET status = 'paid',
                 stripe_payment_intent_id = $1,
-                updated_at = now()
-          WHERE stripe_session_id = $2`,
+                "updatedAt" = now()
+          WHERE "stripeSessionId" = $2`,
         paymentIntentId ?? null, sessionId
       ).catch(() => {})
 
@@ -458,7 +476,7 @@ async function handleStripeBusinessLogic(projectId: string, payload: Record<stri
         ? new Date(data.current_period_end * 1000)
         : null
 
-      await prisma.$executeRawUnsafe(
+      await svcSql(
         `UPDATE "${schemaName}"."subscriptions"
             SET status = $1,
                 current_period_end = $2,
@@ -475,7 +493,7 @@ async function handleStripeBusinessLogic(projectId: string, payload: Record<stri
     case 'customer.subscription.deleted': {
       const subscriptionId: string = data.id
 
-      await prisma.$executeRawUnsafe(
+      await svcSql(
         `UPDATE "${schemaName}"."subscriptions"
             SET status = 'inactive',
                 cancel_at_period_end = true,
@@ -485,7 +503,7 @@ async function handleStripeBusinessLogic(projectId: string, payload: Record<stri
       ).catch(() => {})
 
       // Send dunning / downgrade notification via workspace notification system
-      const userRow = await prisma.$queryRawUnsafe<{ user_id: string }[]>(
+      const userRow = await svcSql<{ user_id: string }>(
         `SELECT user_id FROM "${schemaName}"."subscriptions"
           WHERE stripe_subscription_id = $1 LIMIT 1`,
         subscriptionId
@@ -493,7 +511,7 @@ async function handleStripeBusinessLogic(projectId: string, payload: Record<stri
 
       const endUserId = userRow[0]?.user_id
       if (endUserId) {
-        await prisma.$executeRawUnsafe(
+        await svcSql(
           `INSERT INTO "${schemaName}"."notifications" (user_id, type, title, message, created_at)
            VALUES ($1, 'subscription_canceled', 'Subscription Canceled',
                    'Your subscription has been canceled. You have been downgraded to the free tier.', now())
@@ -511,7 +529,7 @@ async function handleStripeBusinessLogic(projectId: string, payload: Record<stri
       const subscriptionId: string | undefined = data.subscription
 
       if (subscriptionId) {
-        await prisma.$executeRawUnsafe(
+        await svcSql(
           `UPDATE "${schemaName}"."subscriptions"
               SET status = 'past_due',
                   updated_at = now()
@@ -520,7 +538,7 @@ async function handleStripeBusinessLogic(projectId: string, payload: Record<stri
         ).catch(() => {})
 
         // Retrieve the user_id for dunning email
-        const userRow = await prisma.$queryRawUnsafe<{ user_id: string }[]>(
+        const userRow = await svcSql<{ user_id: string }>(
           `SELECT user_id FROM "${schemaName}"."subscriptions"
             WHERE stripe_subscription_id = $1 LIMIT 1`,
           subscriptionId
@@ -529,7 +547,7 @@ async function handleStripeBusinessLogic(projectId: string, payload: Record<stri
         const endUserId = userRow[0]?.user_id
         if (endUserId) {
           // Insert dunning notification
-          await prisma.$executeRawUnsafe(
+          await svcSql(
             `INSERT INTO "${schemaName}"."notifications" (user_id, type, title, message, created_at)
              VALUES ($1, 'payment_failed', 'Payment Failed',
                      'Your most recent payment failed. Please update your payment method to keep your subscription active.', now())
@@ -547,7 +565,7 @@ async function handleStripeBusinessLogic(projectId: string, payload: Record<stri
     case 'invoice.paid': {
       const subscriptionId: string | undefined = data.subscription
       if (subscriptionId) {
-        await prisma.$executeRawUnsafe(
+        await svcSql(
           `UPDATE "${schemaName}"."subscriptions"
               SET status = 'active',
                   updated_at = now()

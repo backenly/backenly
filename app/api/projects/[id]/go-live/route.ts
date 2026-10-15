@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getProjectContext, UnauthorizedError, ForbiddenError } from '@/lib/auth/server'
+import { canWriteProject } from '@/lib/edition/guard'
 import { goLive } from '@/lib/deployment/go-live'
 import { markDeployed } from '@/lib/projects/milestones'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
@@ -16,6 +17,16 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
   try {
     const projectId = params.id
     const { user } = await getProjectContext(projectId)
+
+    // DEVELOPER: publishing runs the readiness engine with autoFix on (live
+    // DDL), writes auth state and flips the project LIVE. getProjectContext
+    // alone admits a VIEWER; POST /readiness already requires canWriteProject.
+    if (!(await canWriteProject(user.userId, projectId))) {
+      return NextResponse.json(
+        { success: false, error: 'Project not found or access denied', code: 'PROJECT_ROLE_INSUFFICIENT' },
+        { status: 403 },
+      )
+    }
 
     // UI button click is its own confirmation — pass force:true so the engine
     // skips the "Type DEPLOY" second-layer prompt (that's for the chat path).

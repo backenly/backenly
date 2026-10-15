@@ -34,16 +34,24 @@ const MAX_PAYLOAD_BYTES = 7_500 // Stay safely below pg_notify's 8 000-byte limi
  * System tables (prefixed `_backenly_`) are skipped — they carry their own
  * specialized NOTIFY functions (e.g. presence uses backenly_notify_presence).
  */
+/** Why a table was not given a trigger, when it was not. */
+export interface TriggerInstallResult {
+  installed: boolean
+  reason?: string
+}
+
 export async function installRealtimeTrigger(
   projectId: string,
   tableName: string
-): Promise<void> {
+): Promise<TriggerInstallResult> {
   // Skip ALL internal tables (any leading-underscore name: _backenly_presence,
   // _email_verifications, _apis, …). These are platform plumbing — streaming
   // them leaks internal writes onto the public realtime channel and pads the
   // "streaming on N tables" count with tables no end-user app subscribes to.
   // (_backenly_* additionally carry their own specialized NOTIFY triggers.)
-  if (tableName.startsWith('_')) return
+  if (tableName.startsWith('_')) {
+    return { installed: false, reason: 'internal table — platform plumbing is never streamed' }
+  }
 
   // NEVER stream the auth table.
   //
@@ -63,7 +71,9 @@ export async function installRealtimeTrigger(
   // definition. A second copy here is how one surface gets fixed and another
   // does not.
   const { isAuthManagedTable } = await import('@/lib/mcp/schema-introspection')
-  if (isAuthManagedTable(tableName)) return
+  if (isAuthManagedTable(tableName)) {
+    return { installed: false, reason: 'auth-managed table — rows include credentials and are never streamed' }
+  }
 
   const schemaName = `workspace_${projectId}`
   const channel = `workspace_${projectId}_changes`
@@ -129,6 +139,8 @@ export async function installRealtimeTrigger(
       EXECUTE FUNCTION "${schemaName}".backenly_notify_realtime()
     `
   )
+
+  return { installed: true }
 }
 
 /**
@@ -138,17 +150,24 @@ export async function installRealtimeTrigger(
 export async function installRealtimeTriggersForAllTables(
   projectId: string,
   tableNames: string[]
-): Promise<void> {
+): Promise<{ installed: string[]; skipped: Array<{ table: string; reason: string }>; failed: Array<{ table: string; error: string }> }> {
+  const installed: string[] = []
+  const skipped: Array<{ table: string; reason: string }> = []
+  const failed: Array<{ table: string; error: string }> = []
   for (const tableName of tableNames) {
     try {
-      await installRealtimeTrigger(projectId, tableName)
+      const result = await installRealtimeTrigger(projectId, tableName)
+      if (result.installed) installed.push(tableName)
+      else skipped.push({ table: tableName, reason: result.reason ?? 'refused' })
     } catch (err: any) {
       console.warn(
         `[realtime] Failed to install trigger on ${tableName}:`,
         err?.message ?? err
       )
+      failed.push({ table: tableName, error: err?.message ?? String(err) })
     }
   }
+  return { installed, skipped, failed }
 }
 
 /**

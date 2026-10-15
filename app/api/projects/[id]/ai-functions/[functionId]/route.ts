@@ -26,12 +26,21 @@ export async function PUT(
       return NextResponse.json({ error: 'status must be active or inactive' }, { status: 400 })
     }
 
-    const fn = await prisma.aiFunction.updateMany({
+    const existing = await prisma.aiFunction.findFirst({
       where: { id: params.functionId, projectId: params.id },
+      select: { triggerType: true },
+    })
+    if (!existing) return NextResponse.json({ error: 'Function not found' }, { status: 404 })
+
+    await prisma.aiFunction.update({
+      where: { id: params.functionId },
       data: { status },
     })
 
-    if (fn.count === 0) return NextResponse.json({ error: 'Function not found' }, { status: 404 })
+    // A row-event function going on or off changes what the database-level
+    // capture must record.
+    const { syncCaptureForFunctionChange } = await import('@/lib/webhooks/capture')
+    await syncCaptureForFunctionChange(params.id, existing.triggerType)
 
     return NextResponse.json({ success: true, status })
   } catch (error: any) {
@@ -55,9 +64,19 @@ export async function DELETE(
 
     if (!(await canAdministerProject(auth.userId, params.id))) return NextResponse.json({ error: 'Project not found' }, { status: 404 })
 
+    const existing = await prisma.aiFunction.findFirst({
+      where: { id: params.functionId, projectId: params.id },
+      select: { triggerType: true },
+    })
+
     await prisma.aiFunction.deleteMany({
       where: { id: params.functionId, projectId: params.id },
     })
+
+    if (existing) {
+      const { syncCaptureForFunctionChange } = await import('@/lib/webhooks/capture')
+      await syncCaptureForFunctionChange(params.id, existing.triggerType)
+    }
 
     return NextResponse.json({ success: true })
   } catch (error: any) {

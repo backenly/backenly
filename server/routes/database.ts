@@ -221,13 +221,9 @@ router.post('/:projectId/database/insert', asyncRoute(v1AuthMiddleware), asyncRo
     // Non-blocking triggers + AI functions
     if (inserted.length > 0) {
       const { fireTriggers } = await import('@/lib/services/trigger-service')
-      const { fireAiFunctions } = await import('@/lib/services/ai-functions/executor')
       for (const row of inserted) {
         fireTriggers(ctx.projectId, { type: 'insert', table: tableName, data: row }).catch(
           (err: any) => console.warn('[Triggers] fire failed (non-fatal):', err?.message)
-        )
-        fireAiFunctions(ctx.projectId, { type: 'insert', table: tableName, data: row }).catch(
-          (err: any) => console.warn('[AiFunctions] fire failed (non-fatal):', err?.message)
         )
       }
     }
@@ -290,13 +286,9 @@ router.post('/:projectId/database/update', asyncRoute(v1AuthMiddleware), asyncRo
 
     if (result.length > 0) {
       const { fireTriggers } = await import('@/lib/services/trigger-service')
-      const { fireAiFunctions } = await import('@/lib/services/ai-functions/executor')
       for (const row of result) {
         fireTriggers(ctx.projectId, { type: 'update', table: tableName, data: row }).catch(
           (err: any) => console.warn('[Triggers] fire failed (non-fatal):', err?.message)
-        )
-        fireAiFunctions(ctx.projectId, { type: 'update', table: tableName, data: row }).catch(
-          (err: any) => console.warn('[AiFunctions] fire failed (non-fatal):', err?.message)
         )
       }
     }
@@ -351,13 +343,9 @@ router.post('/:projectId/database/delete', asyncRoute(v1AuthMiddleware), asyncRo
 
     if (result.length > 0) {
       const { fireTriggers } = await import('@/lib/services/trigger-service')
-      const { fireAiFunctions } = await import('@/lib/services/ai-functions/executor')
       for (const row of result) {
         fireTriggers(ctx.projectId, { type: 'delete', table: tableName, data: row }).catch(
           (err: any) => console.warn('[Triggers] fire failed (non-fatal):', err?.message)
-        )
-        fireAiFunctions(ctx.projectId, { type: 'delete', table: tableName, data: row }).catch(
-          (err: any) => console.warn('[AiFunctions] fire failed (non-fatal):', err?.message)
         )
       }
     }

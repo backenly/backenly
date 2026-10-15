@@ -23,6 +23,7 @@
 
 import { normalizeFindingType } from './types'
 import type { AIAction } from '@/lib/ai/minimal-executor'
+import { unsealParams } from '@/lib/operational-memory/sealed-params'
 
 // ── Data-plane outage discrimination ─────────────────────────────────────────
 
@@ -373,7 +374,13 @@ export function buildFixAction(
     case 'ai_action_pending': {
       const executorAction = rawDetails.executorAction as string | undefined
       if (!executorAction) return null
-      const executorParams = (rawDetails.executorParams as Record<string, unknown>) ?? {}
+      // The sealed copy carries the exact arguments; the stored executorParams
+      // are the DISPLAY copy with secret fields redacted. Legacy rows predate
+      // the split and stored the raw params with no sealed copy, so the
+      // fallback keeps them approvable.
+      const executorParams =
+        unsealParams(rawDetails.executorParamsSealed) ??
+        ((rawDetails.executorParams as Record<string, unknown>) ?? {})
       return {
         action: executorAction as AIAction['action'],
         params: { ...executorParams, confirmed: true },

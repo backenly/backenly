@@ -60,6 +60,32 @@ export function namedSecrets(data: unknown): string[] {
   return [...new Set(out)].sort((a, b) => b.length - a.length)
 }
 
+/**
+ * Field names whose values must never be DISPLAYED from stored executor
+ * params. `value` is here on top of SECRET_FIELD because SET_ENV_VAR carries
+ * its secret under that name, and a display copy never needs it — replay reads
+ * the sealed copy (lib/operational-memory/sealed-params.ts).
+ */
+const PARAM_SECRET_FIELD = new RegExp(SECRET_FIELD.source.replace(')$', '|value|envValue)$'), 'i')
+
+/**
+ * A deep copy of `params` safe to show and to store for showing: every string
+ * under a secret-named key is replaced. Arrays and nesting are preserved so
+ * the Review Queue card still renders the action's shape.
+ */
+export function redactSecretParams<T>(params: T, depth = 0): T {
+  if (depth > 6 || params == null || typeof params !== 'object') return params
+  if (Array.isArray(params)) {
+    return params.map((v) => redactSecretParams(v, depth + 1)) as unknown as T
+  }
+  const out: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(params as Record<string, unknown>)) {
+    if (PARAM_SECRET_FIELD.test(k) && typeof v === 'string' && v.length > 0) out[k] = PLACEHOLDER
+    else out[k] = redactSecretParams(v, depth + 1)
+  }
+  return out as T
+}
+
 /** `text` as it may be stored: named values and issued shapes withheld. */
 export function withholdSecrets(text: string, data?: unknown): string {
   let out = text

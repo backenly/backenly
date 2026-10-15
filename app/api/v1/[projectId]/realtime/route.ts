@@ -86,6 +86,12 @@ async function handleGET(request: NextRequest, props: { params: Promise<{ projec
         try { controller.close() } catch { /* already closed */ }
       }
 
+      // Registered BEFORE the subscribe await: an abort during that window
+      // used to fire into nothing (the listener was only added afterwards),
+      // and the just-reserved slot then counted against the plan's concurrent
+      // cap until the process restarted.
+      request.signal.addEventListener('abort', cleanup)
+
       try {
         const result = await listenerHub.subscribe(projectId, (payload) => {
           if (!tableFilter || payload.table === tableFilter) {
@@ -98,6 +104,12 @@ async function handleGET(request: NextRequest, props: { params: Promise<{ projec
           cleanup()
           return
         }
+        // The client may have aborted during the await — cleanup already ran
+        // while `subscription` was still null. Release the slot, not leak it.
+        if (closed || request.signal.aborted) {
+          result.unsubscribe()
+          return
+        }
         subscription = result
 
         send({ type: 'connected', projectId, channel: result.channel })
@@ -106,8 +118,6 @@ async function handleGET(request: NextRequest, props: { params: Promise<{ projec
         keepaliveTimer = setInterval(() => {
           if (!closed) sendComment('keepalive')
         }, 25_000)
-
-        request.signal.addEventListener('abort', cleanup)
       } catch (err: any) {
         console.warn('[Realtime SSE] subscribe failed:', err?.message)
         send({ type: 'error', message: 'Failed to connect to realtime stream' })

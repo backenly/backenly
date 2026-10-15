@@ -125,7 +125,13 @@ const marketingPrefixes = [
 // next.config.js), and an agent on a self-hosted install needs that answered
 // rather than bounced to /app. Middleware runs before rewrites, so the
 // exemption has to be by path here.
-const marketingExemptions = ['/docs/llms.txt']
+//
+// /mcp/authorize is the OAuth CONSENT PAGE — the only place an authorization
+// code is minted. A self-hosted install serves the 401 challenge and the
+// OAuth metadata, the agent's host opens the browser at the consent URL, and
+// this redirect used to bounce it to /app: the dashboard opened, no code was
+// ever issued, and the host waited on a callback that never came.
+const marketingExemptions = ['/docs/llms.txt', '/mcp/authorize']
 
 function isMarketingPath(pathname: string): boolean {
   if (marketingExemptions.includes(pathname)) return false

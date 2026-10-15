@@ -193,7 +193,12 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     const fileRecord = await storageService.uploadFile(
       bucketRecord.id,
       { name: finalPath, buffer, mimeType: finalMimeType },
-      { isPublic, projectId: context.projectId, uploadedBy: context.apiKey.userId }
+      // The uploader of record is the END USER from X-User-Token — the
+      // identity owner_only policies compare against. The key's platform owner
+      // is not an end user, and recording it made owner_only buckets
+      // unreadable by their own uploaders. Key-only server calls record null,
+      // which owner_only treats as operator-only: closed, not broken.
+      { isPublic, projectId: context.projectId, uploadedBy: context.endUserId ?? undefined }
     )
 
 

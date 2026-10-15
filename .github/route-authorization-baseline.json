@@ -341,7 +341,7 @@
   },
   {
     "route": "/api/workspace-oauth/[provider]",
-    "status": "ACCEPTED",
-    "reason": "requireAuth, and the handler scopes its work to the authenticated caller rather than to a path-supplied identity."
+    "status": "SAFE",
+    "reason": "DELETE now goes through requireProjectCapability(canAdministerProject) in lib/tenant/isolation.ts, which resolves the x-project-id header for the caller and refuses a project they may not administer. The earlier ACCEPTED reason was wrong: the handler carried a `// TODO: Verify user has access to this project` and scoped to the header, not the caller, so any signed-in account could delete another project's OAuth client. Pinned by __tests__/auth/workspace-oauth-authorization.test.ts."
   }
 ]

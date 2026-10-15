@@ -13,6 +13,7 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectAccess } from '@/lib/auth/route-protection'
+import { canWriteProject } from '@/lib/edition/guard'
 import { isCloudEdition } from '@/lib/edition/cloud-only'
 import { createBranch, listBranches } from '@/lib/branches/engine'
 import {
@@ -59,6 +60,15 @@ export const GET = withProjectAccess(async (req: NextRequest, { projectId }) => 
 
 export const POST = withProjectAccess(async (req: NextRequest, { user, projectId }) => {
   if (!isCloudEdition()) return cloudOnly404()
+  // DEVELOPER: a branch is build tooling, and with includeData it copies
+  // production rows into a new schema.
+  if (!(await canWriteProject(user.userId, projectId))) {
+    return NextResponse.json(
+      { success: false, error: 'Project not found or access denied', code: 'PROJECT_ROLE_INSUFFICIENT' },
+      { status: 403 },
+    )
+  }
+
   let body: { name?: string; includeData?: boolean }
   try {
     body = await req.json()

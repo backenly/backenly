@@ -208,41 +208,52 @@ async function smokeTestRouteModule(
   projectId: string,
   functionName: string,
   method: string,
-): Promise<{ ok: boolean; error?: string; status?: number }> {
+): Promise<{ ok: boolean; untested?: boolean; error?: string; status?: number }> {
   try {
-    const { executeRouteModuleFunction } = await import('@/lib/services/ai-functions/route-module-runner')
-    const result = await executeRouteModuleFunction(
-      code,
-      projectId,
-      { type: 'manual', data: {} },
-      `${method.toUpperCase()} /api/v1/${projectId}/fn/${functionName}`,
-      // testRun mints a project-scoped admin token + admin key, so an
-      // auth-gated handler exercises its real path instead of dead-ending on a
-      // 401 that tells us nothing about whether its logic works.
-      { testRun: true },
-    )
+    const { executeRouteModuleFunction, RouteModuleHandlerError } = await import('@/lib/services/ai-functions/route-module-runner')
+    try {
+      const result = await executeRouteModuleFunction(
+        code,
+        projectId,
+        { type: 'manual', data: {} },
+        `${method.toUpperCase()} /api/v1/${projectId}/fn/${functionName}`,
+        // testRun mints a project-scoped admin token + admin key, so an
+        // auth-gated handler exercises its real path instead of dead-ending on a
+        // 401 that tells us nothing about whether its logic works.
+        { testRun: true },
+      )
 
-    const status = result.returnValue?.status ?? 200
-    if (status >= 500) {
-      const body = result.returnValue?.body
-      const detail =
-        (body && typeof body === 'object' && (body as any).error) ||
-        (typeof body === 'string' ? body : JSON.stringify(body ?? {}).slice(0, 300))
-      return { ok: false, status, error: `HTTP ${status} — ${detail}` }
-    }
-    return { ok: true, status }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    // Distinguish "the function is broken" from "we could not test it". Only
-    // the former should trigger a repair; the latter must not block creation.
-    if (/failed to compile|evaluation error|exports no/i.test(msg)) {
-      return { ok: false, error: msg }
-    }
-    if (/timeout|ECONN|database|connect/i.test(msg)) {
+      const status = result.returnValue?.status ?? 200
+      if (status >= 500) {
+        const body = result.returnValue?.body
+        const detail =
+          (body && typeof body === 'object' && (body as any).error) ||
+          (typeof body === 'string' ? body : JSON.stringify(body ?? {}).slice(0, 300))
+        return { ok: false, status, error: `HTTP ${status} — ${detail}` }
+      }
+      return { ok: true, status }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      // "The function is broken" vs "we could not test it", decided by TYPE:
+      // the runner throws RouteModuleHandlerError only for failures that came
+      // out of the handler itself. The old text sniff here classified any
+      // handler error that mentioned "database" or "connect" — the most common
+      // words in a broken query's message — as untestable infrastructure, and
+      // the broken function was then reported clean.
+      if (err instanceof RouteModuleHandlerError) {
+        return { ok: false, error: msg }
+      }
+      if (/failed to compile|evaluation error|exports no/i.test(msg)) {
+        return { ok: false, error: msg }
+      }
       console.warn(`[FunctionGenerator] Smoke test could not run for ${functionName}: ${msg}`)
-      return { ok: true }
+      return { ok: true, untested: true, error: msg }
     }
-    return { ok: false, error: msg }
+  } catch (err) {
+    // Even loading the runner failed — machinery, not the function.
+    const msg = err instanceof Error ? err.message : String(err)
+    console.warn(`[FunctionGenerator] Smoke test could not run for ${functionName}: ${msg}`)
+    return { ok: true, untested: true, error: msg }
   }
 }
 
@@ -433,9 +444,16 @@ export async function executeGenerateFunction(
     // rejected bad input, which is the behaviour we want. Only a 5xx or a
     // thrown exception counts as a failure. (A handler that DOES write on empty
     // input is itself a bug, and this catches that too.)
+    let verification: 'passed' | 'repaired' | 'failed' | 'untested' = 'passed'
+    let verificationError: string | undefined
     const smoke = await smokeTestRouteModule(code, projectId, functionName, method)
-    if (!smoke.ok) {
+    if (smoke.ok) {
+      verification = smoke.untested ? 'untested' : 'passed'
+      verificationError = smoke.untested ? smoke.error : undefined
+    } else {
       console.warn(`[FunctionGenerator] ${functionName} failed its smoke test: ${smoke.error}`)
+      verification = 'failed'
+      verificationError = smoke.error
       const fixed = await generateFixedRouteModule(
         code,
         `The function was invoked and failed at RUNTIME with: ${smoke.error}`,
@@ -447,14 +465,17 @@ export async function executeGenerateFunction(
         const recheck = validateRouteModule(fixed, method)
         if (recheck.valid) {
           const retry = await smokeTestRouteModule(fixed, projectId, functionName, method)
+          // Store the repaired version either way — it is no worse than the
+          // original and may fail only for want of real input — but the
+          // outcome travels into the stored row and the response below, not
+          // just this log line.
+          code = fixed
           if (retry.ok) {
-            code = fixed
-            console.log(`[FunctionGenerator] ${functionName} repaired from its runtime error and now runs.`)
+            verification = retry.untested ? 'untested' : 'repaired'
+            verificationError = retry.untested ? retry.error : undefined
+            if (!retry.untested) console.log(`[FunctionGenerator] ${functionName} repaired from its runtime error and now runs.`)
           } else {
-            // Store the repaired version anyway — it is no worse than the
-            // original and may fail only for want of real input — but say so
-            // plainly rather than reporting a clean creation.
-            code = fixed
+            verificationError = retry.error
             console.warn(`[FunctionGenerator] ${functionName} still failing after repair: ${retry.error}`)
           }
         }
@@ -469,7 +490,12 @@ export async function executeGenerateFunction(
     }
 
     // Persist to AiFunction table (reuse existing model)
-    // First check if one exists, then upsert
+    // First check if one exists, then upsert. A function that failed its own
+    // smoke test is stored (the code is inspectable and repairable), but as
+    // status 'error' with the runtime error on the row — the console and
+    // functions {action:'logs'} then show the truth instead of a healthy row.
+    const storedStatus = verification === 'failed' ? 'error' : 'active'
+    const storedError = verification === 'failed' ? `SMOKE_TEST_FAILED: ${verificationError ?? 'unknown error'}`.slice(0, 500) : null
     const existing = await prisma.aiFunction.findFirst({
       where: { projectId, name: functionName },
       select: { id: true },
@@ -482,7 +508,8 @@ export async function executeGenerateFunction(
             generatedCode: code,
             triggerType: 'manual',
             triggerTable: `${method} ${endpoint}`,
-            status: 'active',
+            status: storedStatus,
+            lastError: storedError,
           },
         })
       : await prisma.aiFunction.create({
@@ -493,7 +520,8 @@ export async function executeGenerateFunction(
             generatedCode: code,
             triggerType: 'manual',
             triggerTable: `${method} ${endpoint}`,
-            status: 'active',
+            status: storedStatus,
+            lastError: storedError,
           },
         })
 
@@ -520,20 +548,46 @@ export async function executeGenerateFunction(
     //
     // The rename is fine. Not mentioning it is not.
     const renamed = rawName && rawName !== functionName
-    const message = renamed
-      ? `Generated ${method} ${endpoint} — custom function ready. ` +
-        `NOTE: deployed as "${functionName}", not "${rawName}" — function names are ` +
+    const renameNote = renamed
+      ? ` NOTE: deployed as "${functionName}", not "${rawName}" — function names are ` +
         `normalised to lowercase kebab-case because they are URL path segments. ` +
         `Call it at ${endpoint}.`
-      : `Generated ${method} ${endpoint} — custom function ready. Code stored in database.`
+      : ''
+    const extraData = {
+      ...(renamed ? { requestedName: rawName, deployedName: functionName, renamed: true } : {}),
+      verification,
+      ...(verificationError ? { verificationError } : {}),
+    }
+
+    // The message states what the smoke test actually found. "Ready" is only
+    // said about code that was invoked and ran — reporting a clean creation
+    // over a failed smoke test is how an agent tells its human the endpoint
+    // works and the first real request 500s.
+    if (verification === 'failed') {
+      return {
+        success: false,
+        message:
+          `Generated ${method} ${endpoint}, but it FAILED its runtime smoke test and would answer HTTP 500 as written: ${verificationError}. ` +
+          `The code is stored with status 'error' so you can inspect it (functions { action: "get", name: "${functionName}" }) ` +
+          `and replace it (functions { action: "deploy_code", name: "${functionName}", code: ... }), or re-create it with a more specific description.` +
+          renameNote,
+        data: { ...result, ...extraData },
+      }
+    }
+
+    const verificationNote =
+      verification === 'untested'
+        ? ` NOTE: the runtime smoke test could not run (${verificationError ?? 'infrastructure unavailable'}), so the function has not been proven to run — invoke it once before relying on it.`
+        : verification === 'repaired'
+          ? ' The first draft failed at runtime and was repaired; the stored version was invoked and runs.'
+          : ''
+
+    const message = `Generated ${method} ${endpoint} — custom function ready. Code stored in database.${verificationNote}${renameNote}`
 
     return {
       success: true,
       message,
-      data: {
-        ...result,
-        ...(renamed ? { requestedName: rawName, deployedName: functionName, renamed: true } : {}),
-      },
+      data: { ...result, ...extraData },
     }
   } catch (err: any) {
     console.error('[FunctionGenerator] Error:', err)

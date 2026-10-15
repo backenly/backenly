@@ -628,9 +628,18 @@ export class PostgresService {
     console.log('[PostgresService.insertRow] SQL:', `INSERT INTO ${escapedSchema}.${escapedTable} (${columnList.join(', ')}) VALUES (${placeholders})`)
     console.log('[PostgresService.insertRow] Values:', values)
 
-    const result = await prisma.$queryRawUnsafe<any[]>(
+    // Service-role context, the same escape getTableRows above was fixed to
+    // use: these tables are FORCE row-level security, so a claimless write
+    // from the NOBYPASSRLS app role matches the owner predicate against a NULL
+    // claim and fails (or touches nothing) on every policied table. The
+    // dashboard's own insert button was broken on exactly the tables the agent
+    // had secured.
+    const { executeWithUserContext } = await import('@/lib/services/workspace-rls')
+    const result = await executeWithUserContext<any>(
+      '',
+      true,
       `INSERT INTO ${escapedSchema}.${escapedTable} (${columnList.join(', ')}) VALUES (${placeholders}) RETURNING *`,
-      ...values
+      values
     )
 
     return result[0]
@@ -652,10 +661,17 @@ export class PostgresService {
     const escapedSchema = `"${schema}"`
     const escapedTable = `"${tableName}"`
 
-    const result = await prisma.$queryRawUnsafe<any[]>(
-      `UPDATE ${escapedSchema}.${escapedTable} SET ${updates} WHERE "id" = $${idValue} RETURNING *`,
-      ...values,
-      id
+    // Service-role context — see insertRow. A claimless UPDATE on a FORCE-RLS
+    // table matches zero rows and the dashboard edit silently did nothing.
+    const { executeWithUserContext } = await import('@/lib/services/workspace-rls')
+    const result = await executeWithUserContext<any>(
+      '',
+      true,
+      // ::text on the id: the RLS session layer binds parameters as text, and a
+      // bare uuid = text comparison is a 42883. The cast matches uuid, int and
+      // text primary keys alike.
+      `UPDATE ${escapedSchema}.${escapedTable} SET ${updates} WHERE "id"::text = $${idValue} RETURNING *`,
+      [...values, id]
     )
 
     return result[0]
@@ -668,9 +684,13 @@ export class PostgresService {
     const escapedSchema = `"${schema}"`
     const escapedTable = `"${tableName}"`
 
-    const result = await prisma.$queryRawUnsafe<Array<{ id: any }>>(
-      `DELETE FROM ${escapedSchema}.${escapedTable} WHERE "id" = $1 RETURNING "id"`,
-      id
+    // Service-role context — see insertRow.
+    const { executeWithUserContext } = await import('@/lib/services/workspace-rls')
+    const result = await executeWithUserContext<{ id: any }>(
+      '',
+      true,
+      `DELETE FROM ${escapedSchema}.${escapedTable} WHERE "id"::text = $1 RETURNING "id"`,
+      [id]
     )
 
     return result.length > 0

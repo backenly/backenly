@@ -1007,7 +1007,9 @@ async function parkBranchMerge(auth: McpGuardAuth, branchId: string, startedAt: 
       apiKeyId: auth.keyId,
       message: `Requested by an agent over MCP: ${target}. These statements will be applied to production, in order:\n${statements}`,
       danger: { tool: 'merge_branch', target, rowCount: null, reversible: false },
-      toolArgs: { branchId },
+      // The replay is held to exactly these statements (MERGE_STALE otherwise):
+      // the card's text and the executed DDL are the same list by construction.
+      toolArgs: { branchId, approvedMigrations: d.migrations },
     })
     recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 200, tool: callLabel, mutation: false, summary: `awaiting approval ${row.id}` })
     return NextResponse.json({

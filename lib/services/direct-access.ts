@@ -106,7 +106,12 @@ function buildCredential(
     // search_path is pinned per-role server-side, so plain psql lands in the
     // project's schema — `\dt` just works.
     psqlCommand: `psql "${connectionString}"`,
-    pgDumpCommand: `pg_dump "${connectionString}" --schema="${schema}" --no-owner --no-privileges > backup.sql`,
+    // --enable-row-security is load-bearing: pg_dump defaults row_security to
+    // OFF, and PostgreSQL then refuses to dump any RLS table the NOBYPASSRLS
+    // bkn_ro_ role is subject to ("query would be affected by row-level
+    // security policy"). With the flag on, the role reads through its
+    // pass-through SELECT policy and the dump completes.
+    pgDumpCommand: `pg_dump "${connectionString}" --schema="${schema}" --enable-row-security --no-owner --no-privileges > backup.sql`,
     createdAt: row.createdAt.toISOString(),
     rotatedAt: row.rotatedAt ? row.rotatedAt.toISOString() : null,
   }

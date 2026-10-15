@@ -2637,6 +2637,7 @@ model AiFunction {
   name          String // Auto-generated short name
   description   String // User's natural language description
   generatedCode String    @db.Text // AI-generated JS function body
+  codeOrigin    String    @default("generated") // generated (Backenly model — self-heal may rewrite) | agent (deploy_code — never model-rewritten)
   triggerType   String // on_signup | on_db_insert | on_db_update | on_db_delete | manual | cron
   triggerTable  String? // Table name for db triggers; for cron jobs stores the cron expression (e.g. "0 9 * * *")
   status        String    @default("active") // active | inactive | error

@@ -119,6 +119,10 @@ export async function POST(
   props: { params: Promise<{ id: string }> },
 ) {
   const params = await props.params
+  // ADMIN: this mints a real credential with full write over MCP. Issuing one
+  // is administration, the same rule /api/api-keys applies and the same rank
+  // the OAuth connect door asks at consent — membership alone let an
+  // organization VIEWER mint a key that bypasses every role they hold.
   return withProjectValidation<any>(req, async ({ projectId, userId }) => {
     let body: { label?: string; name?: string; readOnly?: boolean } = {}
     try { body = await req.json() ?? {} } catch { /* allow empty */ }
@@ -186,5 +190,5 @@ export async function POST(
         createdAt: record.createdAt,
       },
     })
-  })
+  }, { floor: 'administer' })
 }

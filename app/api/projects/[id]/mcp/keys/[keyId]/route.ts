@@ -16,6 +16,8 @@ export async function DELETE(
   props: { params: Promise<{ id: string; keyId: string }> }
 ) {
   const params = await props.params;
+  // ADMIN: revoking a credential is credential lifecycle, held to the same
+  // rank as issuing one. Every MCP host using the key stops working at once.
   return withProjectValidation<any>(req, async ({ projectId, userId }) => {
     const keyId = params.keyId
     if (!keyId) {
@@ -51,5 +53,5 @@ export async function DELETE(
     }).catch(() => {})
 
     return NextResponse.json({ ok: true, revoked: keyId })
-  })
+  }, { floor: 'administer' })
 }

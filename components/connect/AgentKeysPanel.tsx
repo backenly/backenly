@@ -36,6 +36,7 @@ interface McpKey {
   id: string
   name: string
   label: string | null
+  readOnly: boolean
   masked: string
   createdAt: string
   lastUsed: string | null
@@ -74,6 +75,7 @@ export function AgentKeysPanel({
   const [creating, setCreating] = useState(false)
   const [newKey, setNewKey] = useState<{ rawKey: string; label: string | null } | null>(null)
   const [newLabel, setNewLabel] = useState('')
+  const [newReadOnly, setNewReadOnly] = useState(false)
   const [revoking, setRevoking] = useState<string | null>(null)
   const [revokeTarget, setRevokeTarget] = useState<McpKey | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -110,12 +112,15 @@ export function AgentKeysPanel({
       const res = await fetch(`/api/projects/${projectId}/mcp/keys`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ label: newLabel.trim() || null }),
+        // The runtime serves a read-only key 16 tools instead of 23; the docs
+        // say read-only is chosen at issuance, and this is the issuance.
+        body: JSON.stringify({ label: newLabel.trim() || null, readOnly: newReadOnly }),
       })
       const { ok, status, data } = await readJson(res)
       if (!ok || !data?.rawKey) throw new Error(data?.error || `Could not create key (HTTP ${status})`)
       setNewKey({ rawKey: data.rawKey, label: data.key.label })
       setNewLabel('')
+      setNewReadOnly(false)
       setTestResult(null)
       fetchAll()
     } catch (err) {
@@ -249,6 +254,16 @@ export function AgentKeysPanel({
               disabled={creating}
               className="w-full sm:w-48"
             />
+            <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-[12.5px] text-zinc-400">
+              <input
+                type="checkbox"
+                checked={newReadOnly}
+                onChange={(e) => setNewReadOnly(e.target.checked)}
+                disabled={creating}
+                className="h-3.5 w-3.5 accent-violet-400"
+              />
+              Read-only
+            </label>
             <KitButton type="submit" icon={Plug2} loading={creating}>
               New key
             </KitButton>
@@ -316,6 +331,7 @@ export function AgentKeysPanel({
                         <div className="truncate text-[13px] font-medium text-zinc-100">{k.label || k.name}</div>
                         <div className="mt-0.5 flex flex-wrap items-center gap-2">
                           <code className="font-mono text-[12px] text-zinc-500">{k.masked}</code>
+                          {k.readOnly && <Tag tone="neutral">Read-only</Tag>}
                           {stat && stat.calls7d > 0 && (
                             <span className="text-[12px] tabular-nums text-zinc-500">{stat.calls7d.toLocaleString()} calls this week</span>
                           )}

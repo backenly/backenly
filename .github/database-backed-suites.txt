@@ -38,10 +38,22 @@ tests/build-runs/build-run-service.test.ts
 tests/build-runs/hydration.test.ts
 tests/integration/mcp-oauth-flow.spec.ts
 tests/integration/webhook-delivery.spec.ts
+tests/integration/webhook-trigger-url-required.spec.ts
+tests/integration/state-webhooks-section.spec.ts
+tests/integration/integrations-auto-wiring.spec.ts
 tests/integration/end-user-email-verification-opt-in.spec.ts
 tests/integration/signin-enumeration.spec.ts
 tests/integration/project-smtp-and-templates.spec.ts
 tests/integration/storage-bucket-policy.spec.ts
+tests/integration/storage-runtime-policy.spec.ts
+tests/integration/function-off-switch.spec.ts
+tests/integration/function-create-truthful.spec.ts
+tests/integration/function-selfheal-consent.spec.ts
+tests/integration/function-egress-guard.spec.ts
+tests/integration/function-row-events-data-plane.spec.ts
+tests/integration/project-route-response-shape.spec.ts
+tests/integration/realtime-sse-slot-release.spec.ts
+tests/integration/export-database-rls.spec.ts
 tests/integration/postgres-admin.spec.ts
 
 # Needs a real Postgres AND a git worktree of an older release.
@@ -101,6 +113,100 @@ __tests__/auth/project-routes-authorization.test.ts
 # project owns and there is no undo, so the VIEWER/DEVELOPER/ADMIN/OWNER matrix
 # gets its own suite rather than being folded into the general route tests.
 __tests__/auth/project-delete-authorization.test.ts
+
+# Workspace OAuth client credentials (end-user social sign-in). The routes took
+# the project from the x-project-id header after requireAuth and nothing else,
+# so any signed-in account could list, replace or delete another project's OAuth
+# client. Pins the role ladder: stranger nothing (404, no existence oracle),
+# VIEWER read, DEVELOPER save, ADMIN delete. Real sessions, real resolver, real
+# membership rows.
+__tests__/auth/workspace-oauth-authorization.test.ts
+
+# The workspace ZIP download had the same shape: authenticated, then the header
+# project id trusted. Pins that the guard is getCurrentProjectId like its
+# workspace/files siblings: 401 / 403 / 404 / 400 before any disk access, and an
+# authorized caller reaches the route's own disk lookup.
+__tests__/auth/workspace-download-authorization.test.ts
+
+# Credential surfaces are held to a role, not to membership. The Connect page's
+# routes (mint/revoke MCP keys, read/provision/rotate direct Postgres
+# credentials, full pg_dump export) authorized with withProjectValidation alone,
+# so a Cloud organization VIEWER could mint a full-write mcp_live_ key or
+# exfiltrate the tenant. Pins the floor: VIEWER/DEVELOPER 403 with no side
+# effect, ADMIN/OWNER allowed, masked key list stays a VIEWER read, and
+# single-tenant operators unaffected. Real sessions, resolver and guard.
+__tests__/auth/connect-credential-authorization.test.ts
+
+# Operate decisions (approve a parked agent request, run or undo a repair,
+# dismiss findings, set the autonomy dial, grant Tier-2 maintenance consent,
+# create/merge/discard branches, publish) authorized membership only, so a Cloud
+# VIEWER could be the "human approval" the safety model hinges on. Pins the
+# floors: DEVELOPER for build-grade decisions, ADMIN for approvals, consent,
+# merge and rollback; reads stay VIEWER; single-tenant operators unaffected.
+__tests__/auth/operate-role-floors.test.ts
+# Blocking an end user must flip the row. The workspace users table is FORCE
+# row-level security, and BLOCK_USER/UNBLOCK_USER ran their UPDATE with no
+# claims, so under the production app role every approved block answered "not
+# found" and changed nothing. Pins the FORCE premise under a non-superuser
+# role, that the executor takes the service-role claims path, and the real
+# row flip both ways through the real executor door.
+__tests__/auth/block-user-rls.test.ts
+# ENABLE_REALTIME answered "Realtime active" for tables that never streamed: a
+# failed CREATE TRIGGER (missing/wrong-case table) was a footnote under the
+# banner, a refused table (internal, auth-managed users) was listed under
+# "Enabled by this call", and an empty project got "active for 0 table(s)".
+# Pins failure codes, refusal reasons, catalog read-back gating, the skipped
+# ledger on project-wide calls, and the honest empty-project answer.
+__tests__/services/realtime-enable-honesty.test.ts
+# The dashboard's Insert/Edit/Delete row buttons ran bare prisma writes, which
+# FORCE row-level security refuses under the production app role — the better
+# the agent's RLS, the more broken the data grid. getTableRows was fixed to
+# read as owner; the writes were not. Pins the refusal premise under a
+# non-superuser role, all three writes through the service-role machinery
+# (environment-independent mechanism pin), and the real row effects.
+__tests__/database/dashboard-row-writes-rls.test.ts
+# Schema snapshots stored ZERO tables (the parser expected a format the
+# introspector never emitted), so the History snapshot view was always empty
+# and rollback diffed two empty sets and reported "Dropped 0 table(s)" as
+# success. Pins catalog-true snapshots (columns, types, uniques, defaults,
+# FKs), a real rollback that names what it dropped, the users-table guard,
+# honest failure when dropped structure cannot be recreated, and the no-diff
+# answer.
+__tests__/database/schema-version-snapshots.test.ts
+
+# Monitoring read what nothing writes: metrics/errors read the Log table (its
+# only writers are platform auth events with no projectId) and told every
+# project "No API metrics available yet" / "Your APIs are running smoothly"
+# while api_request_logs held the traffic and the 500s; the Logs tab was empty
+# forever. Pins metrics/errors derived from the runtime record (branch rows
+# excluded, windows honoured, session-timezone-proof bounds) and the explorer
+# serving the union of both stores with working filters and DB-side counts.
+__tests__/monitoring/monitoring-truth.test.ts
+
+# Trigger webhooks fired a RAW fetch on the stored URL from the web process and
+# persisted the failure text — an SSRF primitive with a persistence layer,
+# readable back over MCP — while endpoint webhooks had already moved to
+# safeFetch. And syncWebhookCapture's "after a table is added" contract had no
+# caller on any creation path, so webhooks never saw rows in newer tables.
+# Pins guard-validated creation, guarded delivery (raw fetch never touched),
+# the capped stored failure, and the capture sync on CREATE_TABLE.
+__tests__/services/trigger-webhook-egress.test.ts
+# ApiKey.permissions was written by set_key_permissions and the key editor but
+# never read by the data plane: /api/v1 db and /api/v2 served writes to any
+# valid key, so narrowing a leaked key to ['read'] changed nothing while the
+# tool answered "permissions updated". Pins the method gate on BOTH doors
+# (read-only refused on writes with INSUFFICIENT_KEY_PERMISSIONS, read+write
+# and service-role unaffected) and that SET_KEY_PERMISSIONS over the real
+# executor takes effect on the very next request. Real server, real socket.
+tests/integration/key-permission-gate.spec.ts
+# A parked branch merge replayed the migration log as it was at EXECUTION time,
+# so an agent could park an innocent merge and append statements before the
+# human clicked approve — breaking the approvals contract "what executes is
+# exactly what the human read". Pins the approved statement list frozen into
+# the request: a grown log refuses MERGE_STALE (unit and end-to-end through
+# createApprovalRequest/decideApproval), a matching log merges, and the
+# console's unpinned live-diff merge is unchanged.
+__tests__/branches/merge-approval-freeze.test.ts
 
 # Single-tenant bootstrap (commit 3). Runs the real script against a database it
 # creates and drops, because everything worth asserting is a side effect on
@@ -582,6 +688,22 @@ tests/integration/mcp-acceptance-cases.spec.ts
 # the unused Project.storageLimit column (1 GiB on every project), not a
 # hardcoded 10 GB on the S3 path, and never a client-supplied storageUsed.
 __tests__/storage/storage-quota-follows-plan.test.ts
+
+# The nightly cleanup sweep destroyed live data two ways: an "incomplete
+# uploads" step that soft-deleted 100 arbitrary active rows per run without ever
+# checking storage, and an orphan sweep whose known-paths set excluded
+# soft-deleted rows, so files inside the 7-day recovery window had their objects
+# physically destroyed. Pins: active files untouched, retention honoured both
+# ways, fresh objects/rows spared by grace windows, dryRun inert. Real database;
+# S3 is the injected in-memory double the function signature exists for.
+__tests__/storage/storage-lifecycle-cleanup.test.ts
+# Bucket visibility must be TRUE: create_bucket/set_public wrote only the
+# isPublic label while serving, upload clamping and the console enforce
+# accessPolicy, so the agent was told "now private" after a leak while every
+# object kept serving to anonymous callers. Pins both fields written together,
+# the lock-down of a diverged legacy bucket, and read-backs (create message,
+# set_public, list_buckets) reporting the ENFORCED policy via the real mayRead.
+__tests__/storage/bucket-visibility-truth.test.ts
 
 # The usage ledger counts every metered quantity exactly once: batches applied
 # with an exactly-once id, a failed or ambiguous flush retried without double

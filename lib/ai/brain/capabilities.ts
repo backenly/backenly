@@ -373,7 +373,7 @@ export const TOOL_CAPABILITIES: Capability[] = [
   {
     id: 'rollback_deploy',
     name: 'Roll back the deploy (destructive)',
-    what: 'Revert live to a previous published version. Engine returns a "Type ROLLBACK" confirmation prompt unless force:true. Live consumers see the older schema immediately.',
+    what: 'Mark a previous published version as current in the version history. Bookkeeping only: the live schema, data, RLS and functions do not change. Engine returns a "Type ROLLBACK" confirmation prompt unless force:true.',
     tool: 'rollback_deploy',
   },
   {

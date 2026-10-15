@@ -57,13 +57,14 @@ export interface RouteRecord {
     | 'withProjectAccess' | 'withTenantIsolation' | 'withProjectValidation'
     | 'withAuth' | 'requireAuth' | 'authenticateRequest' | 'requireAdmin' | 'verifySession'
     | 'requireUser'
-    | 'v1ApiMiddleware' | 'getProjectContext'
+    | 'v1ApiMiddleware' | 'getProjectContext' | 'requireProjectCapability'
+    | 'getCurrentProjectId'
     | 'mcpGuard' | 'verifyToken' | 'sharedSecret' | 'none'
   /** Explicit authorization helpers called in the file. */
   authz: string[]
   /** A dynamic segment, e.g. [id] or [webhookId]. */
   pathParams: string[]
-  /** Reads a project id from the query string or the body. */
+  /** Reads a project id from the query string, the body or the x-project-id header. */
   readsProjectIdFromInput: boolean
   mutating: boolean
   /** The query filters on the authenticated caller's id, which IS authorization. */
@@ -119,6 +120,16 @@ function classify(file: string): RouteRecord {
     // Calls requireUser AND canAccessProject before returning the project, so
     // it is both the authentication and the authorization for its callers.
     : /getProjectContext\s*\(/.test(src) ? 'getProjectContext'
+    // Authenticates, resolves the requested project for the caller (404 to a
+    // stranger), then asks the guard for the role the route passes in. It is
+    // authentication and authorization in one call, like getProjectContext.
+    : /requireProjectCapability\s*\(/.test(src) ? 'requireProjectCapability'
+    // Authenticates (throws 401 UNAUTHENTICATED) AND resolves the requested
+    // project for the caller, refusing one they may not see — authn and authz
+    // in a single call, which is why the sibling workspace/files routes are
+    // authorized by it alone. Placed above withTenantIsolation, which is the
+    // thin wrapper around it.
+    : /getCurrentProjectId\s*\(/.test(src) ? 'getCurrentProjectId'
     : /withTenantIsolation\s*[(<]/.test(src) ? 'withTenantIsolation'
     : /requireAdmin\s*\(/.test(src) ? 'requireAdmin'
     : /withAuth\s*\(/.test(src) ? 'withAuth'
@@ -161,6 +172,9 @@ function classify(file: string): RouteRecord {
     // cross-tenant request, recording a security event. It is authentication
     // and authorization in one call.
     'getCurrentProjectId',
+    // getCurrentProjectId plus the guard function the route names, so a write
+    // or a delete on the header path is held to its role, not to membership.
+    'requireProjectCapability',
     // Delegates straight to canAccessProject / canWriteProject /
     // canAdministerProject by access level, then applies the plan entitlement
     // SECOND and separately. Listed here rather than baselining the five
@@ -183,8 +197,14 @@ function classify(file: string): RouteRecord {
 
   const pathParams = Array.from(route.matchAll(/\[([^\]]+)\]/g)).map(m => m[1])
 
+  // A project id in a HEADER is input exactly like one in the query or the
+  // body: the caller chose it. Not counting it is how /api/workspace-oauth
+  // shipped reading `x-project-id` after requireAuth and nothing else, letting
+  // any signed-in account replace or delete another project's OAuth client,
+  // while this check reported nothing because the route had no path param.
   const readsProjectIdFromInput =
     /searchParams\.get\(\s*['"]projectId['"]\s*\)/.test(src) ||
+    /headers\.get\(\s*['"]x-project-id['"]\s*\)/i.test(src) ||
     /\bbody\s*\.\s*projectId\b/.test(src) ||
     /\{[^}]*\bprojectId\b[^}]*\}\s*=\s*(?:body|await\s+request\.json)/.test(src)
 
@@ -284,7 +304,7 @@ function classify(file: string): RouteRecord {
   const authorizingGuard =
     authn === 'withProjectAccess' || authn === 'withTenantIsolation' ||
     authn === 'withProjectValidation' || authn === 'v1ApiMiddleware' ||
-    authn === 'getProjectContext'
+    authn === 'getProjectContext' || authn === 'requireProjectCapability'
 
   if (
     bareFindUnique && takesResourceId && !scopedByCallerIdentity &&

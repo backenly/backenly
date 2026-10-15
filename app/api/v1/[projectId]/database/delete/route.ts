@@ -103,15 +103,11 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     // Fire event triggers + AI functions + activity log + notifications (non-blocking)
     if (result.length > 0) {
       const { fireTriggers } = await import('@/lib/services/trigger-service')
-      const { fireAiFunctions } = await import('@/lib/services/ai-functions/executor')
       const { triggerActivityAndNotification } = await import('@/lib/ai/activity-log-engine')
       const actorId = context.apiKey?.userId
       for (const row of result) {
         fireTriggers(context.projectId, { type: 'delete', table: tableName, data: row }).catch(
           (err: any) => console.warn('[Triggers] fire failed (non-fatal):', err?.message)
-        )
-        fireAiFunctions(context.projectId, { type: 'delete', table: tableName, data: row }).catch(
-          (err: any) => console.warn('[AiFunctions] fire failed (non-fatal):', err?.message)
         )
         triggerActivityAndNotification(context.projectId, 'deleted', tableName, String(row.id || ''), actorId, row).catch(() => {})
       }

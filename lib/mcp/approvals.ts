@@ -31,6 +31,7 @@
 import { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
 import { dispatchTool, type ToolDispatchContext, type ToolResult } from '@/lib/ai/brain/tools'
+import { withholdSecrets } from '@/lib/mcp/withhold-secrets'
 
 export const APPROVAL_TTL_MS = 24 * 60 * 60 * 1000
 
@@ -246,7 +247,7 @@ export async function decideApproval(input: {
   })
   await prisma.agentApprovalRequest.update({
     where: { id: row.id },
-    data: { status: outcome.status, executedAt: new Date(), resultSummary: outcome.summary.slice(0, 2000) },
+    data: { status: outcome.status, executedAt: new Date(), resultSummary: storableResultSummary(outcome.summary) },
   })
   return { ok: outcome.status === 'executed', status: outcome.status, resultSummary: outcome.summary }
 }
@@ -327,4 +328,18 @@ export async function runApprovedCall(
   } finally {
     if (timer) clearTimeout(timer)
   }
+}
+
+/**
+ * A result summary as it may be PERSISTED.
+ *
+ * `resultSummary` is served forever: `listApprovals` hands it to every project
+ * member on the Review Queue, and `check_approval` hands it to the agent's key.
+ * An executor summary can carry a credential — executeRotateKey prints the new
+ * key under "copy now — shown once" — and storing that summary made "once"
+ * mean "until the row is deleted". The live response to the approving admin
+ * keeps the raw summary; what is stored never may.
+ */
+export function storableResultSummary(summary: string): string {
+  return withholdSecrets(summary).slice(0, 2000)
 }
