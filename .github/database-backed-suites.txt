@@ -1066,3 +1066,11 @@ tests/integration/reset-password-sends-link.spec.ts
 # role sync reach only the regional database. Two real databases are the
 # property, so it needs a real Postgres.
 tests/integration/project-region.spec.ts
+
+# Function runs say what they do: an HTTP function's creation check asks a GET
+# handler for its contract instead of running it, and every check is recorded
+# in the function's run log; ctx.db.query pages with an explicit limit, offset
+# and orderBy (default 100, at most 1000), so a job can reach every row once.
+# Real function, log and workspace rows are the property, so it needs a real
+# Postgres.
+tests/integration/functions-runtime-honesty.spec.ts

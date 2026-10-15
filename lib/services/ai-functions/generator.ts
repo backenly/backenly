@@ -152,7 +152,10 @@ The function receives two arguments:
   event — object with: { data: Record<string, any>, old?: Record<string, any>, type: string, table?: string }
   ctx   — execution context with these APIs:
 
-ctx.db.query(table, where?)         → Promise<rows[]>       — query rows with optional WHERE filter
+ctx.db.query(table, where?, opts?)  → Promise<rows[]>       — rows matching where (each key = value, ANDed; no ranges or LIKE).
+                                                              Returns at most opts.limit rows (default 100, max 1000), in no particular order
+                                                              unless opts.orderBy is given, e.g. { id: 'asc' }. To act on every matching row,
+                                                              page with opts.offset under one fixed opts.orderBy, collect the ids, then act.
 ctx.db.insert(table, data)          → Promise<row>          — insert a single row, returns inserted row
 ctx.db.update(table, where, data)   → Promise<rows[]>       — update rows matching where
 ctx.db.delete(table, where)         → Promise<void>         — delete rows matching where
@@ -256,7 +259,7 @@ export async function generateFixedFunctionCode(
   const systemPrompt = `You are a backend function debugger for Backenly. Fix the broken JavaScript function body below.
 
 AVAILABLE APIs (same as before):
-ctx.db.query(table, where?) / ctx.db.insert(table, data) / ctx.db.update(table, where, data) / ctx.db.delete(table, where)
+ctx.db.query(table, where?, { limit, offset, orderBy }?) / ctx.db.insert(table, data) / ctx.db.update(table, where, data) / ctx.db.delete(table, where)
 ctx.http.get(url, headers?) / ctx.http.post(url, body, headers?)
 ctx.log(...args)
 ctx.integrations.* — see the connected-integration surface below (only those methods exist)
