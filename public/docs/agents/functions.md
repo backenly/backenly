@@ -22,7 +22,7 @@ Call as `functions { action: "<action>", … }`.
 | `logs` | recent runs from every trigger, with errors and ctx.log lines | nothing | yes | no |
 | `set_active` | turn a function on or off | `active` | no | no |
 | `delete` | remove a function | nothing | no | waits for a human |
-| `schedule` | a job on a schedule ("every 15 minutes" or 5-field cron) | `description`, `schedule` | no | no |
+| `schedule` | a job on a schedule ("every 15 minutes" or 5-field cron), its code written from your description by Backenly's model | `description`, `schedule` | no | no |
 | `list_schedules` | every scheduled job | nothing | yes | no |
 | `delete_schedule` | remove a scheduled job | nothing | no | waits for a human |
 <!-- end generated -->
@@ -81,4 +81,4 @@ The name is lowercased to kebab-case, because it is a URL path segment, and the 
 
 ## Schedules
 
-`schedule { description, schedule }` takes "every 15 minutes" or a five-field cron expression.
+`schedule { description, schedule }` takes "every 15 minutes" or a five-field cron expression. Backenly's model writes the job's code from `description`, which draws AI credits; with none left the call is refused with `AI_CREDITS_EXHAUSTED` and nothing is created.

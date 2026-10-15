@@ -548,6 +548,9 @@ export async function runBrain(
     understandingBlock,
     // A coding agent over MCP: the protected-production gate applies.
     agentSurface: input.surface === 'mcp',
+    // The brain's loop keeps the executor's replanning, as it always has;
+    // every other dispatcher caller runs typed calls without it.
+    allowReplan: true,
     createdThisTurn: new Set<string>(),
     onToolEvent: (e) => {
       if (e.phase === 'start') emit({ type: 'tool_start', tool: e.tool, title: e.title })

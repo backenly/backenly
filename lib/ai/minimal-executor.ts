@@ -11192,6 +11192,18 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
     }
 
     const autoWiredSteps: string[] = []
+    // Each function this connect meant to wire and could not, with the reason:
+    // its code is written by Backenly's model, so a month with no AI credits
+    // left refuses it, and a generation can fail. The key is stored either way.
+    // These used to be dropped, so "stripe connected" could arrive with no word
+    // that the webhook handler was never made.
+    const notWired: string[] = []
+    const wiringFailed = (fn: string, result: ExecutionResult) => {
+      const reason = (result.data as any)?.syntaxValid === false
+        ? 'its generated code has a syntax error, so it is stored but will not run until fixed'
+        : String(result.error ?? result.message ?? 'it could not be generated').split('\n')[0]
+      notWired.push(`\`${fn}\`: ${reason}`)
+    }
 
     // ── PROMPT 2.1: Stripe auto-wiring ─────────────────────────────────────
     if (integrationId === 'stripe') {
@@ -11242,6 +11254,7 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
         projectId,
       )
       if (checkoutResult.success) autoWiredSteps.push(`✅ Generated \`POST /api/v1/${projectId}/fn/stripe-checkout-session\``)
+      else wiringFailed('stripe-checkout-session', checkoutResult)
 
       // The Stripe webhook handler: triggerType on_webhook / triggerTable
       // 'stripe' — the ONLY shape the platform receiver fires. It used to be
@@ -11265,6 +11278,7 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
         projectId,
       )
       if (webhookResult.success) autoWiredSteps.push('✅ Generated `stripe-webhook` handler (fires on verified Stripe deliveries)')
+      else wiringFailed('stripe-webhook', webhookResult)
     }
 
     // ── PROMPT 2.2: Email triggers ──────────────────────────────────────────
@@ -11273,9 +11287,12 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
       const authEnabled = graph?.auth?.providers?.email?.enabled === true
 
       if (authEnabled) {
-        // Welcome email on user sign-up
+        // Welcome email on user sign-up. Named, like every function a connect
+        // wires, so connecting again finds it instead of paying to generate a
+        // second one that would send every new user two welcome emails.
         const welcomeResult = await executeCreateAiFunction(
           {
+            name: `${integrationId}-welcome-email`,
             description: `When a user signs up, send them a welcome email using ctx.integrations.${integrationId}.send(). Address the email to the user's email, use a friendly subject line, and include their name if available.`,
             triggerType: 'on_signup',
           },
@@ -11283,6 +11300,8 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
         )
         if (welcomeResult.success) {
           autoWiredSteps.push(`✅ Created welcome email trigger (on_signup → ${integrationId})`)
+        } else {
+          wiringFailed(`welcome email on sign-up (${integrationId})`, welcomeResult)
         }
 
         // Password-reset email when a reset record is inserted
@@ -11294,6 +11313,7 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
         if (resetTable) {
           const resetResult = await executeCreateAiFunction(
             {
+              name: `${integrationId}-password-reset-email`,
               description: `When a password reset record is inserted into \`${resetTable.name}\`, send a password reset email to the user using ctx.integrations.${integrationId}.send(). Include the reset token as a link. Log the delivery result.`,
               triggerType: 'on_db_insert',
               triggerTable: resetTable.name,
@@ -11302,6 +11322,8 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
           )
           if (resetResult.success) {
             autoWiredSteps.push(`✅ Created password reset trigger (${resetTable.name}.insert → ${integrationId})`)
+          } else {
+            wiringFailed(`password reset email on ${resetTable.name} insert (${integrationId})`, resetResult)
           }
         }
       }
@@ -11326,6 +11348,7 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
         projectId,
       )
       if (chatResult.success) autoWiredSteps.push(`✅ Generated \`POST /api/v1/${projectId}/fn/${integrationId}-chat\``)
+      else wiringFailed(`${integrationId}-chat`, chatResult)
 
       // Embeddings — OpenAI only. Anthropic has no embeddings API, so an
       // anthropic-embed function would be unrunnable — never generate it.
@@ -11345,6 +11368,7 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
           projectId,
         )
         if (embedResult.success) autoWiredSteps.push(`✅ Generated \`POST /api/v1/${projectId}/fn/openai-embed\``)
+        else wiringFailed('openai-embed', embedResult)
       }
     }
 
@@ -11409,6 +11433,10 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
     const autoWiredMsg = autoWiredSteps.length > 0
       ? `\n\n**Auto-wired:**\n${autoWiredSteps.join('\n')}`
       : ''
+    const notWiredMsg = notWired.length > 0
+      ? `\n\n**Not wired:**\n${notWired.map((line) => `⚠ ${line}`).join('\n')}\n` +
+        'Connect again once that is resolved to wire them; what is already wired is kept.'
+      : ''
 
     const appIdGap = oneSignalAppIdPending
       ? `\n\n⚠ **Push sending is NOT active yet.** OneSignal also needs your App ID: ` +
@@ -11417,7 +11445,7 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
 
     return {
       success: true,
-      message: `${integrationId} connected. Key stored securely (${status.maskedKey}).${keyValidationNote}${webhookUrl}${webhookGap}${appIdGap}${autoWiredMsg}\n\nAI functions can now use \`ctx.integrations.${integrationId}.*\` to call ${integrationId} APIs.`,
+      message: `${integrationId} connected. Key stored securely (${status.maskedKey}).${keyValidationNote}${webhookUrl}${webhookGap}${appIdGap}${autoWiredMsg}${notWiredMsg}\n\nAI functions can now use \`ctx.integrations.${integrationId}.*\` to call ${integrationId} APIs.`,
       data: {
         integrationId,
         maskedKey: status.maskedKey,
@@ -11426,6 +11454,7 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
         webhookSecretPending,
         oneSignalAppIdPending,
         autoWired: autoWiredSteps,
+        notWired,
       },
     }
   } catch (error: any) {
@@ -13351,15 +13380,18 @@ async function executeEnableTeams(params: any, projectId: string, apiKey?: strin
 
     const created: string[] = []
     const failed: string[] = []
+    // Never replanned: a failed step here is reported in `failed`. A model's
+    // substitute action could succeed and record the table as created when it
+    // was not.
     for (const t of tables) {
-      const r = await executeAction({ action: 'CREATE_TABLE', params: t }, projectId, apiKey)
+      const r = await executeAction({ action: 'CREATE_TABLE', params: t }, projectId, apiKey, 0, undefined, false)
       if (r.success) created.push(t.tableName)
       else failed.push(`${t.tableName}: ${r.error ?? r.message}`)
     }
 
     // 3. Generate the standard CRUD APIs for each table.
     for (const t of tables) {
-      await executeAction({ action: 'GENERATE_API', params: { tableName: t.tableName } }, projectId, apiKey).catch(() => {})
+      await executeAction({ action: 'GENERATE_API', params: { tableName: t.tableName } }, projectId, apiKey, 0, undefined, false).catch(() => {})
     }
 
     // 4. Indexes that matter for org lookup performance.

@@ -216,3 +216,62 @@ describe('AI credit holds', () => {
     expect(provider.calls).toHaveLength(0)
   })
 })
+
+describe('a turn that names who pays', () => {
+  // A route that charges a turn names its account on the meter, so a model
+  // call deep inside a tool is gated and charged without passing `billing`
+  // itself. Before, such a call held nothing and was charged by nobody.
+
+  it('holds a call that names no account against the account its turn names', async () => {
+    cap = 100 // room for functions.generate's worst case
+    setSpendLedgerForTests(memorySpendLedger())
+    const turn = createTokenScope({ billingAccountId: account })
+    setProviderForTests(scriptedProvider([scriptedMessage({ text: 'ok', usage: { input_tokens: 0, output_tokens: 40 } })]))
+    await runInTokenScope(turn, () => generate({ purpose: 'functions.generate', messages: [{ role: 'user', content: 'write it' }] }))
+    expect(turn.holds).toHaveLength(1)
+    expect(await hold(turn.holds[0])).toMatchObject({ billingAccountId: account, status: 'used', usedTokens: 40 })
+    expect(turn.tokens).toBe(40)
+  })
+
+  it('refuses such a call, unsent, when the turn’s account has no credits left', async () => {
+    cap = 0
+    setSpendLedgerForTests(memorySpendLedger())
+    const provider = scriptedProvider([scriptedMessage({ text: 'never sent' })])
+    setProviderForTests(provider)
+    const turn = createTokenScope({ billingAccountId: account })
+    await expect(
+      runInTokenScope(turn, () => generate({ purpose: 'functions.generate', messages: [{ role: 'user', content: 'write it' }] })),
+    ).rejects.toMatchObject({ kind: 'credits_exhausted' })
+    expect(provider.calls).toHaveLength(0)
+  })
+
+  it('never counts a platform-paid call toward the turn’s charge', async () => {
+    cap = 0
+    setSpendLedgerForTests(memorySpendLedger())
+    const turn = createTokenScope({ billingAccountId: account })
+    setProviderForTests(scriptedProvider([scriptedMessage({ text: 'ok', usage: { input_tokens: 10, output_tokens: 5 } })]))
+    await runInTokenScope(turn, () => generate({ purpose: 'autonomy.investigate', messages: [{ role: 'user', content: 'why' }] }))
+    expect(turn.holds).toHaveLength(0)
+    expect(turn.tokens).toBe(0)
+    expect(await prisma.aiCreditHold.count({ where: { billingAccountId: account } })).toBe(0)
+  })
+
+  it('holds nothing for a call made after the turn ended, as background healing is', async () => {
+    cap = 0
+    setSpendLedgerForTests(memorySpendLedger())
+    const provider = scriptedProvider([scriptedMessage({ text: 'ok', usage: { input_tokens: 0, output_tokens: 5 } })])
+    setProviderForTests(provider)
+    const turn = createTokenScope({ billingAccountId: account })
+    let later: Promise<unknown> | undefined
+    await runInTokenScope(turn, async () => {
+      // Set going inside the turn, run after it: the reconciler's self-heal shape.
+      later = new Promise((resolve) => setTimeout(resolve, 50)).then(() =>
+        generate({ purpose: 'functions.generate', messages: [{ role: 'user', content: 'fix it' }] }),
+      )
+    })
+    await later
+    expect(provider.calls).toHaveLength(1)
+    expect(turn.holds).toHaveLength(0)
+    expect(await prisma.aiCreditHold.count({ where: { billingAccountId: account } })).toBe(0)
+  })
+})

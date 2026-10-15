@@ -201,6 +201,24 @@ describe('the billing contract is wired at every boundary', () => {
     expect(route).toContain('tokenScope.tokens')
   })
 
+  it('the MCP tool route gates and charges every tool’s model calls, not a listed few', () => {
+    // The charge used to apply only to MODEL_BACKED_TOOLS, so functions.schedule
+    // and integrations.connect spent the model budget ungated and uncharged
+    // (FN-12, FN-19, INT-15). The scope names who pays, so each model call holds
+    // credits, and the charge is whatever the scope measured.
+    // tests/integration/model-spend-on-every-tool.spec.ts shows the behaviour.
+    const route = read('app/api/mcp/tool/route.ts')
+    expect(route).toContain('createTokenScope({ projectId: auth.projectId })')
+    expect(route).not.toMatch(/metered\s*\?/)
+    expect(route).toContain('closeCreditTurn(await creditAccountOf(auth.projectId), tokenScope, tokenScope.tokens)')
+  })
+
+  it('a typed call is never handed to a model for a different action unless its caller opts in', () => {
+    // A failed typed call used to be "replanned": a model picked another
+    // action from the error and the executor ran it, uncharged.
+    expect(read('lib/ai/brain/tools.ts')).toContain('ctx.allowReplan ?? false')
+  })
+
   it('the natural-language route still charges what the brain burned', () => {
     // Guards hole #1 against regression.
     const route = read('app/api/mcp/chat/route.ts')
@@ -228,6 +246,7 @@ describe('the billing contract is wired at every boundary', () => {
     expect(match).not.toBeNull()
     const members = [...match![1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1])
     expect(members).toContain('generate_function')
+    expect(members).toContain('create_cron_job')
     expect(members.length).toBeGreaterThan(0)
   })
 })
