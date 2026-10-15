@@ -55,7 +55,11 @@ export interface GoLiveOptions {
    * readiness gate. The UI button is the one path that should pass
    * `force:true` on first call (the click itself is the confirmation).
    */
-  confirmedBy?: 'UI' | 'CHAT' | 'API'
+  /**
+   * How the deploy was authorised, recorded on its audit row with `userId`.
+   * APPROVAL: a person approved an agent's exact call; `userId` is that person.
+   */
+  confirmedBy?: 'UI' | 'CHAT' | 'API' | 'APPROVAL'
   /** Skip the second-layer "Type DEPLOY" prompt. */
   force?: boolean
 }
@@ -172,7 +176,7 @@ export async function goLive(
 
   // If already LIVE, create a new versioned deployment (publish update)
   if (project.projectStatus === 'LIVE') {
-    return await publishUpdate(projectId, userId, publicUrl, project.activeGraphId)
+    return await publishUpdate(projectId, userId, publicUrl, project.activeGraphId, options.confirmedBy)
   }
 
   // First-time publish: PRIVATE → DEPLOYING → LIVE
@@ -182,6 +186,10 @@ export async function goLive(
   })
 
   try {
+    // v1 records the catalog it published, like every later version, so an
+    // identical publish right after going live is a truthful no-op instead of
+    // a second version that changes nothing.
+    const catalogSchemaHash = await liveCatalogHash(projectId)
     const result = await prisma.$transaction(async (tx) => {
       // Validate project has a backend graph
       const projectWithGraph = await tx.project.findUnique({
@@ -231,6 +239,8 @@ export async function goLive(
           version: 1,
           graphSnapshotId: project.activeGraphId,
           changeSummary,
+          // What the next publish compares against to decide "no changes".
+          config: { catalogSchemaHash },
         },
       })
 
@@ -246,6 +256,7 @@ export async function goLive(
             publicUrl,
             projectSlug,
             version: 1,
+            triggerSource: options.confirmedBy ?? null,
             timestamp: new Date().toISOString(),
           }),
           timestamp: new Date(),
@@ -270,6 +281,25 @@ export async function goLive(
 }
 
 /**
+ * Fingerprint of the LIVE catalog, recorded on every published version so the
+ * next publish can tell "nothing changed" from "changed". The MCP schema path
+ * (apply_migration, the typed executors) changes real tables without moving
+ * activeGraphId, so comparing graph pointers answered "Already up to date"
+ * after an agent reshaped the schema. information_schema is ordered
+ * (table_name, ordinal_position), so the hash is stable; generatedAt is
+ * excluded because it changes on every read.
+ */
+async function liveCatalogHash(projectId: string): Promise<string> {
+  const { readWorkspaceSchema } = await import('@/lib/typegen/schema-reader')
+  const liveSchema = await readWorkspaceSchema(projectId)
+  return crypto
+    .createHash('sha256')
+    .update(JSON.stringify(liveSchema.tables))
+    .digest('hex')
+    .slice(0, 16)
+}
+
+/**
  * Publish an update for an already-live project.
  * Creates a new versioned deployment snapshot pointing to the current activeGraphId.
  *
@@ -281,21 +311,10 @@ export async function publishUpdate(
   userId: string,
   publicUrl: string,
   activeGraphId: string,
+  triggerSource?: GoLiveOptions['confirmedBy'],
 ): Promise<GoLiveResult | GoLiveError> {
   try {
-    // Fingerprint the LIVE catalog, not the graph pointer. The MCP schema
-    // path (apply_migration, the typed executors) changes real tables without
-    // moving activeGraphId, so comparing pointers answered "Already up to
-    // date" after an agent reshaped the schema. information_schema is ordered
-    // (table_name, ordinal_position), so the hash is stable; generatedAt is
-    // excluded because it changes on every read.
-    const { readWorkspaceSchema } = await import('@/lib/typegen/schema-reader')
-    const liveSchema = await readWorkspaceSchema(projectId)
-    const catalogSchemaHash = crypto
-      .createHash('sha256')
-      .update(JSON.stringify(liveSchema.tables))
-      .digest('hex')
-      .slice(0, 16)
+    const catalogSchemaHash = await liveCatalogHash(projectId)
 
     const result = await prisma.$transaction(async (tx) => {
       // Get next version number
@@ -396,6 +415,7 @@ export async function publishUpdate(
             version: nextVersion,
             graphSnapshotId: activeGraphId,
             changeSummary,
+            triggerSource: triggerSource ?? null,
             timestamp: new Date().toISOString(),
           }),
           timestamp: new Date(),

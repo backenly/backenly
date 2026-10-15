@@ -6795,6 +6795,23 @@ async function executeListConnectedApps(projectId: string): Promise<ExecutionRes
 }
 
 /**
+ * Who a deploy or rollback is recorded as acting. runExecutor names the real
+ * actor (the person who approved the call, or the holder of the key on the
+ * MCP door) and how the call was authorised; any other caller falls back to
+ * the project owner acting from chat, as before.
+ */
+function deployActor(
+  params: any,
+  ownerUserId: string,
+): { actorUserId: string; actorVia: 'APPROVAL' | 'API' | 'CHAT' } {
+  const via = params?.actorVia
+  return {
+    actorUserId: typeof params?.actorUserId === 'string' && params.actorUserId ? params.actorUserId : ownerUserId,
+    actorVia: via === 'APPROVAL' || via === 'API' ? via : 'CHAT',
+  }
+}
+
+/**
  * DEPLOY: Trigger Deploy
  * Calls the shared go-live function — same logic used by the UI button and AI chat.
  * Phase 5: goLive now runs the readiness gate first. If it blocks, we surface
@@ -6813,10 +6830,25 @@ async function executeTriggerDeploy(params: any, projectId: string): Promise<Exe
       return { success: false, message: 'Project not found', error: 'Project not found' }
     }
 
-    // Brain flow: `confirmed` is set by runExecutor when the user authorised
-    // this turn (e.g. typed DEPLOY). Without it, engine returns the preview.
+    // There is one production deployment per project. The tool used to offer
+    // environment: 'staging', print it on the approval card, and publish
+    // production anyway; a caller that still sends it is refused.
+    if (params?.environment !== undefined && params.environment !== 'production') {
+      return {
+        success: false,
+        message:
+          `There is no "${params.environment}" environment: every deploy publishes the project's one ` +
+          'production version. Nothing was deployed.',
+        error: 'ENVIRONMENT_NOT_SUPPORTED',
+      }
+    }
+
+    // `confirmed` is set by runExecutor once a person approved this exact call
+    // (or the MCP door applied its own approval rule). Without it, the engine
+    // returns the preview.
     const force = !!(params?.force || params?.confirmed)
-    const result = await goLive(projectId, project.userId, { confirmedBy: 'CHAT', force })
+    const { actorUserId, actorVia } = deployActor(params, project.userId)
+    const result = await goLive(projectId, actorUserId, { confirmedBy: actorVia, force })
 
     if (result.kind === 'error') {
       if (result.readinessReport) {
@@ -6843,18 +6875,36 @@ async function executeTriggerDeploy(params: any, projectId: string): Promise<Exe
       }
     }
 
+    // Three different outcomes, three different answers. A published update
+    // used to read "already live", so an agent reported that nothing was
+    // published; and every answer pointed at a "Publish" section that does not
+    // exist (the console calls it Deploy).
+    if (result.noChanges) {
+      return {
+        success: true,
+        message:
+          `Nothing new to publish: v${result.version} is already the latest version and the live schema has ` +
+          `not changed since it was published. No new version was created.\n\n**Base URL:** \`${result.publicUrl}\``,
+        data: { publicUrl: result.publicUrl, alreadyLive: true, noChanges: true, published: false, version: result.version },
+      }
+    }
+
     if (result.alreadyLive) {
       return {
         success: true,
-        message: `Your backend is already live (v${result.version}).\n\n**Base URL:** \`${result.publicUrl}\`\n\nCheck the **Publish** section for deployment details and SDK snippets.`,
-        data: { publicUrl: result.publicUrl, alreadyLive: true, version: result.version },
+        message:
+          `Published v${result.version}: the live backend now serves this version.\n\n**Base URL:** \`${result.publicUrl}\`\n\n` +
+          'The **Deploy** section lists every version and can mark an earlier one as current.',
+        data: { publicUrl: result.publicUrl, alreadyLive: true, noChanges: false, published: true, version: result.version },
       }
     }
 
     return {
       success: true,
-      message: `Your backend is now live (v${result.version}).\n\n**Base URL:** \`${result.publicUrl}\`\n\nCheck the **Publish** section for deployment details. Your SDK snippet is ready in the **Connect** tab.`,
-      data: { publicUrl: result.publicUrl, alreadyLive: false, version: result.version },
+      message:
+        `Published v${result.version}: your backend is now live.\n\n**Base URL:** \`${result.publicUrl}\`\n\n` +
+        'The **Deploy** section shows its versions, and the **Connect** section has the client setup.',
+      data: { publicUrl: result.publicUrl, alreadyLive: false, noChanges: false, published: true, version: result.version },
     }
   } catch (error: any) {
     return { success: false, message: `Deployment failed: ${error.message}`, error: error.message }
@@ -9575,12 +9625,13 @@ async function executeRollbackDeploy(params: any, projectId: string): Promise<Ex
 
     const { rollbackDeploy } = await import('@/lib/deployment/rollback')
     const force = !!(params?.force || params?.confirmed)
+    const { actorUserId, actorVia } = deployActor(params, project.userId)
     const result = await rollbackDeploy({
       projectId,
-      userId: project.userId,
+      userId: actorUserId,
       deploymentId: params?.deploymentId,
       version: typeof params?.version === 'number' ? params.version : undefined,
-      confirmedBy: 'CHAT',
+      confirmedBy: actorVia,
       force,
     })
 
@@ -9607,28 +9658,57 @@ async function executeRollbackDeploy(params: any, projectId: string): Promise<Ex
 }
 
 /**
- * DEPLOY: Get Deploy Status — reads real deployment record from DB
+ * DEPLOY: Get Deploy Status — the CURRENT published version, from the same
+ * authority as the Deploy page's history (listPublishedVersions).
+ *
+ * This used to answer with the newest deployment row by createdAt and no
+ * version. A rollback adds no row, so after rolling back to v1 it reported
+ * v2 as live, and an agent that checked status before acting, as the tool
+ * tells it to, was told the wrong version was current (DEP-07).
  */
 async function executeGetDeployStatus(projectId: string): Promise<ExecutionResult> {
   try {
     const { prisma } = await import('@/lib/db')
-    const deployment = await prisma.deployment.findFirst({
-      where: { projectId },
-      orderBy: { createdAt: 'desc' },
+    const { listPublishedVersions } = await import('@/lib/deployment/published-versions')
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { projectStatus: true },
     })
-    if (!deployment) {
+    if (!project) return { success: false, message: 'Project not found', error: 'Project not found' }
+
+    const published = await listPublishedVersions(projectId)
+    const latest = published?.versions[0] ?? null
+    if (!published || !latest) {
       return {
         success: true,
-        message: `ℹ️ No deployments found for this project yet.\n\nUse the **Deploy** tab to publish your backend.`,
-        data: { status: 'not_deployed' }
+        message:
+          `ℹ️ Nothing has been published for this project yet (project status: ${project.projectStatus ?? 'unknown'}).\n\n` +
+          'Publish from the **Deploy** section, or call deploy { "action": "deploy" }, which waits for the owner\'s approval.',
+        data: { status: 'not_deployed', projectStatus: project.projectStatus, version: null, latestVersion: null },
       }
     }
-    const statusEmoji = deployment.status === 'live' ? '✅' : deployment.status === 'building' ? '🔄' : '❌'
-    const lastDeploy = deployment.createdAt ? new Date(deployment.createdAt).toLocaleString() : 'unknown'
+
+    const current = published.versions.find((v) => v.isActive) ?? latest
+    const row = await prisma.deployment.findUnique({ where: { id: current.id }, select: { url: true } })
+    const rolledBack = current.version !== latest.version
+    const publishedAt = new Date(current.publishedAt).toLocaleString()
     return {
       success: true,
-      message: `🚀 **Deployment Status:**\n\n${statusEmoji} **Status:** ${deployment.status}\n🌐 **URL:** ${deployment.url || 'Not available'}\n⏱️ **Last Deploy:** ${lastDeploy}`,
-      data: { status: deployment.status, deploymentId: deployment.id, createdAt: deployment.createdAt }
+      message:
+        `🚀 **Deploy status:** v${current.version} is the current version` +
+        (rolledBack ? ` (marked current by a rollback; the latest published is v${latest.version})` : '') +
+        `, published ${publishedAt}.\n🌐 **URL:** ${row?.url || 'Not recorded'}\n📋 **Project status:** ${project.projectStatus ?? 'unknown'}\n\n` +
+        'Every published version: deploy { "action": "history" }.',
+      data: {
+        status: 'live',
+        projectStatus: project.projectStatus,
+        version: current.version,
+        latestVersion: latest.version,
+        isLatest: !rolledBack,
+        publishedAt: current.publishedAt,
+        publicUrl: row?.url ?? null,
+        deploymentId: current.id,
+      },
     }
   } catch (error: any) {
     return { success: false, message: `Failed to fetch deployment status: ${error.message}`, error: error.message }

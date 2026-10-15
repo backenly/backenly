@@ -21,6 +21,9 @@ import { kickReconciler, shouldKickFor } from '@/lib/autonomy/event-trigger'
 import { WEBHOOK_EVENT_TYPES } from '@/lib/webhooks/events'
 import { SERVED_OAUTH_PROVIDERS, isServedOAuthProvider } from '@/lib/services/oauth-providers'
 
+/** Executor actions whose audit rows record who acted (see runExecutor). */
+const ACTOR_AUDITED_ACTIONS = new Set<string>(['TRIGGER_DEPLOY', 'ROLLBACK_DEPLOY'])
+
 /** Brain tools served by lib/email/agent-actions.ts. */
 const AUTH_EMAIL_TOOLS = new Set<string>([
   'get_auth_email_settings', 'set_auth_smtp', 'test_auth_smtp', 'remove_auth_smtp',
@@ -1225,17 +1228,13 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
 
   // ── Publish / Deploy ──────────────────────────────────────────────────────
   fn('trigger_deploy',
-    'DESTRUCTIVE-grade. Publish the current backend (tables, APIs, auth, storage, triggers, RLS become publicly callable). The engine runs a readiness gate and a "Type DEPLOY to confirm" prompt — surface the prompt verbatim to the user. Re-call with force:true ONLY after the user replies DEPLOY. Use when the user says "ship it" / "publish" / "go live".',
-    {
-      environment: { type: 'string', enum: ['production', 'staging'], description: 'Default production.' },
-      force: { type: 'boolean', description: 'Set true ONLY when the user has typed DEPLOY verbatim this turn.' },
-    }),
+    'DESTRUCTIVE-grade. Publish the current backend (tables, APIs, auth, storage, triggers, RLS become publicly callable) as the next production version. There is one production deployment per project; deploy has no staging target. It waits for a person: the call is queued for the project owner to approve in the dashboard, and the approved call runs the readiness gate and publishes. Nothing typed in chat approves it. Use when the user says "ship it" / "publish" / "go live".',
+    {}),
   fn('rollback_deploy',
-    'DESTRUCTIVE. Mark a previous published version as current in the version history. This is bookkeeping: it does NOT change the live schema, data, RLS or functions, and the API keeps serving exactly what is deployed now. To restore structure, roll back a schema version from the Database page or restore a Snapshot. Engine returns a "Type ROLLBACK to confirm" prompt unless force:true. Always call get_deploy_status first.',
+    'DESTRUCTIVE. Mark a previous published version as current in the version history. This is bookkeeping: it does NOT change the live schema, data, RLS or functions, and the API keeps serving exactly what is deployed now. To restore structure, roll back a schema version from the Database page or restore a Snapshot. It waits for a person: the call is queued for the project owner to approve in the dashboard, and the approved call runs exactly as made. Always call get_deploy_status first.',
     {
       version: { type: 'integer', description: 'Target published version number (e.g. 2). Either version OR deploymentId is required.' },
       deploymentId: { type: 'string', description: 'Specific deployment id to roll back to.' },
-      force: { type: 'boolean', description: 'Set true ONLY when the user has typed ROLLBACK verbatim this turn.' },
     }),
   fn('get_readiness',
     'Read the production-readiness scorecard for this project (0-100). Returns blockers, warnings, and auto-fixable items. Call before trigger_deploy so you can tell the user exactly what is missing.',
@@ -1791,8 +1790,8 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
   disconnect_frontend: (a) => ({ action: 'DISCONNECT_FRONTEND', params: { url: a.url, force: !!a.force } }),
 
   // Publish / Deploy
-  trigger_deploy: (a) => ({ action: 'TRIGGER_DEPLOY', params: { environment: a.environment || 'production', force: !!a.force } }),
-  rollback_deploy: (a) => ({ action: 'ROLLBACK_DEPLOY', params: { version: a.version, deploymentId: a.deploymentId, force: !!a.force } }),
+  trigger_deploy: () => ({ action: 'TRIGGER_DEPLOY', params: {} }),
+  rollback_deploy: (a) => ({ action: 'ROLLBACK_DEPLOY', params: { version: a.version, deploymentId: a.deploymentId } }),
   get_readiness: (a) => ({ action: 'GET_READINESS', params: { autoFix: a.autoFix } }),
   set_env_var: (a) => ({ action: 'SET_ENV_VAR', params: { key: a.key, value: a.value, description: a.description } }),
   list_env_vars: () => ({ action: 'LIST_ENV_VARS', params: {} }),
@@ -3235,9 +3234,21 @@ async function runExecutor(
   // already applied its own approval rule, forward `confirmed:true` so the
   // executor's second gate does not ask again for a confirmation that was
   // already given. The brain's agent loop never sets either flag.
-  const params = (ctx.destructiveConfirmed || ctx.mcpOwnerConfirmed)
+  const confirmedParams = (ctx.destructiveConfirmed || ctx.mcpOwnerConfirmed)
     ? { ...(action.params || {}), confirmed: true }
     : action.params
+  // Deploys and rollbacks write audit rows that name a person. executeAction
+  // has no user argument, so the executors used to record the project owner
+  // acting "from CHAT" even when an org admin approved an agent's call. Name
+  // the real actor and how the call was authorised; set here, after the tool
+  // mapper, so no argument an agent sends can stand in for them (DEP-11).
+  const params = ACTOR_AUDITED_ACTIONS.has(action.action) && ctx.userId
+    ? {
+        ...(confirmedParams || {}),
+        actorUserId: ctx.userId,
+        actorVia: ctx.destructiveConfirmed ? 'APPROVAL' : ctx.mcpOwnerConfirmed ? 'API' : 'CHAT',
+      }
+    : confirmedParams
   const result = await executeAction(
     { ...action, params },
     ctx.projectId,
