@@ -55,6 +55,12 @@ tests/integration/function-row-events-data-plane.spec.ts
 tests/integration/project-route-response-shape.spec.ts
 tests/integration/realtime-sse-slot-release.spec.ts
 
+# Connect auto-wiring does what its receipt lists: Stripe adds the payment
+# columns and registers a webhook handler in the one shape the receiver fires,
+# email providers wire the on_signup welcome trigger only where auth exists,
+# and every connect syncs activeIntegrations. The live provider probe and the
+# LLM generator are the two stubbed seams; vault, executor and DDL are real.
+tests/integration/integrations-autowiring.spec.ts
 # Realtime surfaces CI can honestly cover: SSE tickets burn in the project's
 # real _token_blacklist ledger (single-use, expiry, project binding) and the
 # broadcast route enforces its payload cap over a real pg_notify. Frame
