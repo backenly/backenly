@@ -18,7 +18,8 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
+import { regionErrorResponse } from '@/lib/api/v1/errors'
 import { v1ApiMiddleware } from '@/lib/api/v1/middleware'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
@@ -67,8 +68,11 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
 
     const notifyChannel = `workspace_${projectId}_changes`
 
-    // pg_notify works fine through PgBouncer — no persistent connection needed
-    await prisma.$executeRawUnsafe(
+    // pg_notify works fine through PgBouncer — no persistent connection needed.
+    // On the project's database, in its region: only listeners on that
+    // database hear it, and that is where the listener hub LISTENs for it.
+    const db = await workspaceRawClient(projectId)
+    await db.$executeRawUnsafe(
       `SELECT pg_notify($1, $2)`,
       notifyChannel,
       notifyPayload
@@ -76,7 +80,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
 
     return NextResponse.json({ success: true })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return regionErrorResponse(err) ?? NextResponse.json({ error: err.message }, { status: 500 })
   }
 }
 

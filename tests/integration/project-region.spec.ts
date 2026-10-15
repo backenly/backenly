@@ -37,11 +37,14 @@ import { NextRequest } from 'next/server'
 import { Client } from 'pg'
 import { GET as queryRoute } from '@/app/api/v1/[projectId]/database/query/route'
 import { GET as healthzRoute } from '@/app/api/v1/[projectId]/healthz/route'
+import { POST as broadcastRoute } from '@/app/api/v1/[projectId]/broadcast/route'
 import { mintKey } from '@/lib/auth/key-prefix'
 import { prisma } from '@/lib/db'
 import { disconnectRegionalClients, projectPostgrest, projectRegion, workspaceRawClient } from '@/lib/data-plane/regional'
 import { PostgresService } from '@/lib/db/hybrid'
 import { clearRegistrationCache, ensureSchemaRegistered } from '@/lib/postgrest/registration'
+import { listenerHub } from '@/lib/realtime/listener-hub'
+import { mintSseTicket, redeemSseTicket } from '@/lib/realtime/sse-ticket'
 import { functionDbClient, functionRoleName, provisionFunctionRole } from '@/lib/services/ai-functions/function-db-role'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
 import { ensureEmailVerifiedColumn, logoutEndUser } from '@/lib/services/end-user-auth-flows'
@@ -518,6 +521,99 @@ describe('PostgREST, per region', () => {
     process.env[REGION_VARIABLE] = regionalUrl
     const calls = await rowsIn<{ schema_name: string }>(regionalUrl, 'SELECT schema_name FROM public.pgrst_register_calls')
     expect(calls).toHaveLength(1)
+  })
+})
+
+describe('realtime listens and notifies on the project’s own database', () => {
+  // LISTEN/NOTIFY never crosses databases: a listener on the home database
+  // would subscribe successfully and then hear nothing a regional project's
+  // database sends. Each event below is sent on one database only.
+  const channelOf = (projectId: string) => `workspace_${projectId}_changes`
+
+  async function subscribe(projectId: string) {
+    let deliver!: (payload: Record<string, unknown>) => void
+    const received = new Promise<Record<string, unknown>>((resolve) => { deliver = resolve })
+    const result = await listenerHub.subscribe(projectId, (payload) => deliver(payload))
+    if (!result.ok) throw new Error(result.message)
+    const event = () =>
+      Promise.race([
+        received,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('no notification arrived')), 10_000)),
+      ])
+    return { event, unsubscribe: result.unsubscribe }
+  }
+
+  it('refuses to subscribe while this process has no connection to the region', async () => {
+    delete process.env[REGION_VARIABLE]
+    await expect(listenerHub.subscribe(regionalProject, () => {})).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+    expect(listenerHub.connectionCount(regionalProject)).toBe(0)
+  })
+
+  it('hears a regional project’s channel on the regional database', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const sub = await subscribe(regionalProject)
+    try {
+      await run(regionalUrl, `SELECT pg_notify('${channelOf(regionalProject)}', '{"from":"us-east-1"}')`)
+      expect(await sub.event()).toEqual({ from: 'us-east-1' })
+    } finally {
+      sub.unsubscribe()
+    }
+  })
+
+  it('still hears a home project’s channel on the home database', async () => {
+    const sub = await subscribe(homeProject)
+    try {
+      await run(homeUrl(), `SELECT pg_notify('${channelOf(homeProject)}', '{"from":"home"}')`)
+      expect(await sub.event()).toEqual({ from: 'home' })
+    } finally {
+      sub.unsubscribe()
+    }
+  })
+
+  it('refuses again once the connection is gone, though the regional listener is still open', async () => {
+    delete process.env[REGION_VARIABLE]
+    await expect(listenerHub.subscribe(regionalProject, () => {})).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+  })
+
+  it('delivers a broadcast to a regional project’s subscribers', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const minted = mintKey({ keyType: 'public', serviceRole: true })
+    await prisma.apiKey.create({
+      data: {
+        name: 'region broadcast', keyPrefix: minted.prefix, keyHash: hashApiKey(minted.key), keyType: 'public',
+        serviceRole: true, permissions: ['read', 'write', 'admin'], capabilities: ['database'],
+        projectId: regionalProject, userId: ownerId,
+      },
+    })
+    const sub = await subscribe(regionalProject)
+    try {
+      const res = await broadcastRoute(
+        new NextRequest(`https://backenly.test/api/v1/${regionalProject}/broadcast`, {
+          method: 'POST',
+          headers: { 'x-api-key': minted.key, 'content-type': 'application/json' },
+          body: JSON.stringify({ channel: 'room', payload: { hello: 'virginia' } }),
+        }),
+        { params: Promise.resolve({ projectId: regionalProject }) },
+      )
+      expect(res.status).toBe(200)
+      expect(await sub.event()).toMatchObject({ type: 'broadcast', channel: 'room', payload: { hello: 'virginia' } })
+    } finally {
+      sub.unsubscribe()
+    }
+  })
+
+  it('burns a realtime ticket once, on the regional ledger, and mints none without a connection', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const secret = randomBytes(32).toString('hex')
+    const minted = await mintSseTicket(secret, { projectId: regionalProject, serviceRole: true })
+    expect(minted.singleUse).toBe(true)
+    expect((await redeemSseTicket(regionalProject, secret, minted.ticket)).ok).toBe(true)
+    expect(await redeemSseTicket(regionalProject, secret, minted.ticket)).toMatchObject({ ok: false, code: 'ALREADY_USED' })
+
+    delete process.env[REGION_VARIABLE]
+    await expect(mintSseTicket(secret, { projectId: regionalProject, serviceRole: true })).rejects.toMatchObject({
+      code: 'REGION_NOT_CONFIGURED',
+    })
   })
 })
 

@@ -15,7 +15,8 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
+import { workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
+import { regionErrorResponse } from '@/lib/api/v1/errors'
 import { v1ApiMiddleware } from '@/lib/api/v1/middleware'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
@@ -37,14 +38,14 @@ function channelName(projectId: string) {
 // are safe.
 const bootstrappedProjects = new Set<string>()
 
-async function ensurePresenceTable(projectId: string): Promise<void> {
+async function ensurePresenceTable(db: WorkspaceRawClient, projectId: string): Promise<void> {
   if (bootstrappedProjects.has(projectId)) return
 
   const schema = schemaName(projectId)
   const channel = channelName(projectId)
 
   // 1. Create table
-  await prisma.$executeRawUnsafe(`
+  await db.$executeRawUnsafe(`
     CREATE TABLE IF NOT EXISTS "${schema}"."_backenly_presence" (
       "userId"   TEXT        NOT NULL PRIMARY KEY,
       "metadata" JSONB       NOT NULL DEFAULT '{}',
@@ -57,7 +58,7 @@ async function ensurePresenceTable(projectId: string): Promise<void> {
   //    Fires { type: "presence", event: "join"|"leave"|"update", userId, metadata }
   //    — NOT the generic insert/update/delete format.
   //    UPDATE events are suppressed when only lastSeen changed (heartbeat noise).
-  await prisma.$executeRawUnsafe(`
+  await db.$executeRawUnsafe(`
     CREATE OR REPLACE FUNCTION "${schema}".backenly_notify_presence()
     RETURNS trigger LANGUAGE plpgsql AS $$
     BEGIN
@@ -107,12 +108,12 @@ async function ensurePresenceTable(projectId: string): Promise<void> {
   `)
 
   // 3. Install trigger (drop first to handle function replacement)
-  await prisma.$executeRawUnsafe(`
+  await db.$executeRawUnsafe(`
     DROP TRIGGER IF EXISTS backenly_presence_notify
     ON "${schema}"."_backenly_presence"
   `)
 
-  await prisma.$executeRawUnsafe(`
+  await db.$executeRawUnsafe(`
     CREATE TRIGGER backenly_presence_notify
       AFTER INSERT OR UPDATE OR DELETE
       ON "${schema}"."_backenly_presence"
@@ -172,9 +173,12 @@ async function handleGET(request: NextRequest, props: { params: Promise<{ projec
   const schema = schemaName(projectId)
 
   try {
-    await ensurePresenceTable(projectId)
+    // The project's database, in its region, whose trigger NOTIFYs the channel
+    // its listeners hear (lib/realtime/listener-hub.ts).
+    const db = await workspaceRawClient(projectId)
+    await ensurePresenceTable(db, projectId)
 
-    const users = await prisma.$queryRawUnsafe<
+    const users = await db.$queryRawUnsafe<
       Array<{ userId: string; metadata: any; joinedAt: Date; lastSeen: Date }>
     >(
       `SELECT "userId", "metadata", "joinedAt", "lastSeen"
@@ -185,7 +189,7 @@ async function handleGET(request: NextRequest, props: { params: Promise<{ projec
 
     return NextResponse.json({ users })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return regionErrorResponse(err) ?? NextResponse.json({ error: err.message }, { status: 500 })
   }
 }
 
@@ -212,10 +216,13 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     const identityError = presenceIdentityError(auth.context, userId)
     if (identityError) return identityError
 
-    await ensurePresenceTable(projectId)
+    // The project's database, in its region, whose trigger NOTIFYs the channel
+    // its listeners hear (lib/realtime/listener-hub.ts).
+    const db = await workspaceRawClient(projectId)
+    await ensurePresenceTable(db, projectId)
 
     // Upsert: insert on first join, update lastSeen (and metadata) on heartbeat
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       `INSERT INTO "${schema}"."_backenly_presence" ("userId", "metadata", "lastSeen")
        VALUES ($1, $2::jsonb, now())
        ON CONFLICT ("userId") DO UPDATE
@@ -226,14 +233,14 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     )
 
     // Prune stale entries on every heartbeat (cheap — uses indexed lastSeen)
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       `DELETE FROM "${schema}"."_backenly_presence"
        WHERE "lastSeen" < now() - interval '${PRESENCE_TTL_SECONDS} seconds'`
     )
 
     return NextResponse.json({ success: true })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return regionErrorResponse(err) ?? NextResponse.json({ error: err.message }, { status: 500 })
   }
 }
 
@@ -261,16 +268,19 @@ async function handleDELETE(request: NextRequest, props: { params: Promise<{ pro
     const identityError = presenceIdentityError(auth.context, userId)
     if (identityError) return identityError
 
-    await ensurePresenceTable(projectId)
+    // The project's database, in its region, whose trigger NOTIFYs the channel
+    // its listeners hear (lib/realtime/listener-hub.ts).
+    const db = await workspaceRawClient(projectId)
+    await ensurePresenceTable(db, projectId)
 
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       `DELETE FROM "${schema}"."_backenly_presence" WHERE "userId" = $1`,
       userId
     )
 
     return NextResponse.json({ success: true })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return regionErrorResponse(err) ?? NextResponse.json({ error: err.message }, { status: 500 })
   }
 }
 

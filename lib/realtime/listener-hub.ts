@@ -1,5 +1,5 @@
 /**
- * Realtime Listener Hub — the single LISTEN connection per process.
+ * Realtime Listener Hub — one LISTEN connection per region, per process.
  *
  * WHY THIS EXISTS
  * ---------------
@@ -11,25 +11,35 @@
  * connections PER PROJECT. Those numbers are only physically possible when
  * the LISTEN fan-out is shared.
  *
- * This hub holds exactly ONE direct pg connection per process, LISTENs on
- * every channel that has at least one subscriber, and dispatches NOTIFY
- * payloads to in-process handlers. SSE responses are plain HTTP — they no
- * longer consume any database connection.
+ * This hub holds exactly ONE direct pg connection per region per process,
+ * LISTENs on every channel that has at least one subscriber, and dispatches
+ * NOTIFY payloads to in-process handlers. SSE responses are plain HTTP — they
+ * no longer consume any database connection.
+ *
+ * REGIONS: a project's channel is NOTIFYed by its own database, in the region
+ * the project lives in (lib/data-plane/regional.ts), so it is LISTENed there and
+ * nowhere else. A LISTEN on another region's database would succeed and then
+ * never hear anything. Until a project lives outside the home region, the only
+ * connection ever opened is the home one, exactly as before.
  *
  * QUOTA: because nginx routes all /api/v1 traffic to a single runtime
  * process (and dev traffic to a single next dev process), the in-process
  * subscriber count per project is the exact live connection count. The
  * plan cap is enforced here, on subscribe, via the quota kernel — reserve
  * first, then check, so two racing connects can't both slip under the cap.
+ * The count is the hub's, not a region's: the cap is the account's, across
+ * every region its projects are in.
  *
- * RESILIENCE: if the pg connection drops, the hub reconnects with capped
- * exponential backoff and re-LISTENs every active channel. Subscribers stay
- * attached through the gap (their HTTP streams are independent); events
+ * RESILIENCE: if a region's pg connection drops, its listener reconnects with
+ * capped exponential backoff and re-LISTENs every active channel. Subscribers
+ * stay attached through the gap (their HTTP streams are independent); events
  * during the outage are lost, which matches LISTEN/NOTIFY semantics —
  * clients needing gapless data must re-fetch via REST.
  */
 
 import { Client } from 'pg'
+import { projectRegion, regionDatabaseUrl, requireRegionDatabaseUrl } from '@/lib/data-plane/regional'
+import type { CloudRegionId } from '@/lib/regions'
 import { workspaceChannelName } from '@/lib/security/workspace-schema'
 import { enforceRealtimeConnection } from '@/lib/quota/kernel'
 
@@ -45,93 +55,53 @@ const RECONNECT_MAX_MS = 15_000
 // subscriber notices missing events. Local DB, so this is nearly free.
 const PING_INTERVAL_MS = 4 * 60_000
 
-class ListenerHub {
+/** One region's LISTEN connection and the channels it carries. */
+class RegionListener {
   private client: Client | null = null
   private connectPromise: Promise<void> | null = null
-  private handlers = new Map<string, Set<NotificationHandler>>() // channel → handlers
-  private counts = new Map<string, number>() // projectId → live subscriber count
+  readonly handlers = new Map<string, Set<NotificationHandler>>() // channel → handlers
   private reconnectAttempt = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private pingTimer: ReturnType<typeof setInterval> | null = null
   private destroyed = false
 
-  /** Live subscriber count for a project (exposed for status/verification). */
-  connectionCount(projectId: string): number {
-    return this.counts.get(projectId) ?? 0
-  }
-
-  /** Total channels currently LISTENed (for verification). */
-  channelCount(): number {
-    return this.handlers.size
-  }
+  constructor(readonly region: CloudRegionId) {}
 
   /**
-   * Register a subscriber for a project's realtime channel.
-   * Enforces the plan's concurrent-connection cap. Reserve-then-check: the
-   * count is bumped BEFORE the async quota read so concurrent connects at
-   * the cap can't both pass.
+   * LISTEN needs a direct connection — PgBouncer transaction mode drops it.
+   * The region's direct connection, else its application one, as
+   * DIRECT_URL || DATABASE_URL always was at home. Never another region's: an
+   * unconfigured region throws REGION_NOT_CONFIGURED.
    */
-  async subscribe(projectId: string, handler: NotificationHandler): Promise<SubscribeResult> {
-    let channel: string
-    try {
-      channel = workspaceChannelName(projectId)
-    } catch {
-      return { ok: false, code: 'INVALID_PROJECT', message: 'Invalid project ID' }
+  private connectionString(): string {
+    return regionDatabaseUrl(this.region, 'direct') ?? requireRegionDatabaseUrl(this.region, 'app')
+  }
+
+  /** Start delivering a channel's notifications to `handler`; returns the way to stop. */
+  async listen(channel: string, handler: NotificationHandler): Promise<() => void> {
+    // Checked on every subscribe, as workspaceRawClient checks on every call:
+    // a region whose connection was removed is refused even while a listener
+    // opened earlier is still up.
+    this.connectionString()
+    await this.ensureConnected()
+
+    let set = this.handlers.get(channel)
+    if (!set) {
+      set = new Set()
+      this.handlers.set(channel, set)
+      await this.client!.query(`LISTEN "${channel}"`)
     }
+    set.add(handler)
 
-    const reserved = (this.counts.get(projectId) ?? 0) + 1
-    this.counts.set(projectId, reserved)
-
-    let released = false
-    const release = () => {
-      if (released) return
-      released = true
-      const current = this.counts.get(projectId) ?? 0
-      if (current <= 1) this.counts.delete(projectId)
-      else this.counts.set(projectId, current - 1)
-    }
-
-    try {
-      // reserved - 1 = connections that existed before this one. The cap is
-      // the account's, so the owner's other projects' live streams count too.
-      const decision = await enforceRealtimeConnection(projectId, reserved - 1, (others) =>
-        others.reduce((sum, id) => sum + this.connectionCount(id), 0),
-      )
-      if (!decision.allowed) {
-        release()
-        return {
-          ok: false,
-          code: 'PLAN_LIMIT_EXCEEDED',
-          message: decision.message ?? 'Realtime connection limit reached',
-        }
+    return () => {
+      const current = this.handlers.get(channel)
+      if (!current) return
+      current.delete(handler)
+      if (current.size === 0) {
+        this.handlers.delete(channel)
+        // Best-effort UNLISTEN — session teardown covers failures.
+        this.client?.query(`UNLISTEN "${channel}"`).catch(() => {})
       }
-
-      await this.ensureConnected()
-
-      let set = this.handlers.get(channel)
-      if (!set) {
-        set = new Set()
-        this.handlers.set(channel, set)
-        await this.client!.query(`LISTEN "${channel}"`)
-      }
-      set.add(handler)
-
-      const unsubscribe = () => {
-        release()
-        const current = this.handlers.get(channel)
-        if (!current) return
-        current.delete(handler)
-        if (current.size === 0) {
-          this.handlers.delete(channel)
-          // Best-effort UNLISTEN — session teardown covers failures.
-          this.client?.query(`UNLISTEN "${channel}"`).catch(() => {})
-        }
-      }
-
-      return { ok: true, channel, unsubscribe }
-    } catch (err) {
-      release()
-      throw err
     }
   }
 
@@ -150,8 +120,7 @@ class ListenerHub {
 
   private async openConnection(): Promise<void> {
     const client = new Client({
-      // LISTEN needs a direct connection — PgBouncer transaction mode drops it.
-      connectionString: process.env.DIRECT_URL || process.env.DATABASE_URL,
+      connectionString: this.connectionString(),
       connectionTimeoutMillis: 10_000,
     })
 
@@ -203,17 +172,99 @@ class ListenerHub {
       if (this.handlers.size === 0) return // nobody listening — reconnect lazily on next subscribe
       try {
         await this.ensureConnected()
-        console.log('[ListenerHub] Reconnected to Postgres, channels re-LISTENed:', this.handlers.size)
+        console.log(`[ListenerHub] Reconnected to Postgres in ${this.region}, channels re-LISTENed:`, this.handlers.size)
       } catch (err: any) {
-        console.warn('[ListenerHub] Reconnect failed:', err?.message)
+        console.warn(`[ListenerHub] Reconnect in ${this.region} failed:`, err?.message)
         this.scheduleReconnect()
       }
     }, delay)
   }
 }
 
+class ListenerHub {
+  private regions = new Map<CloudRegionId, RegionListener>()
+  private counts = new Map<string, number>() // projectId → live subscriber count
+
+  /** Live subscriber count for a project (exposed for status/verification). */
+  connectionCount(projectId: string): number {
+    return this.counts.get(projectId) ?? 0
+  }
+
+  /** Total channels currently LISTENed, across regions (for verification). */
+  channelCount(): number {
+    let total = 0
+    for (const listener of this.regions.values()) total += listener.handlers.size
+    return total
+  }
+
+  /**
+   * Register a subscriber for a project's realtime channel.
+   * Enforces the plan's concurrent-connection cap. Reserve-then-check: the
+   * count is bumped BEFORE the async quota read so concurrent connects at
+   * the cap can't both pass.
+   */
+  async subscribe(projectId: string, handler: NotificationHandler): Promise<SubscribeResult> {
+    let channel: string
+    try {
+      channel = workspaceChannelName(projectId)
+    } catch {
+      return { ok: false, code: 'INVALID_PROJECT', message: 'Invalid project ID' }
+    }
+
+    const reserved = (this.counts.get(projectId) ?? 0) + 1
+    this.counts.set(projectId, reserved)
+
+    let released = false
+    const release = () => {
+      if (released) return
+      released = true
+      const current = this.counts.get(projectId) ?? 0
+      if (current <= 1) this.counts.delete(projectId)
+      else this.counts.set(projectId, current - 1)
+    }
+
+    try {
+      // reserved - 1 = connections that existed before this one. The cap is
+      // the account's, so the owner's other projects' live streams count too.
+      const decision = await enforceRealtimeConnection(projectId, reserved - 1, (others) =>
+        others.reduce((sum, id) => sum + this.connectionCount(id), 0),
+      )
+      if (!decision.allowed) {
+        release()
+        return {
+          ok: false,
+          code: 'PLAN_LIMIT_EXCEEDED',
+          message: decision.message ?? 'Realtime connection limit reached',
+        }
+      }
+
+      // The channel is NOTIFYed by the project's own database, in its region.
+      const stopListening = await this.listenerFor(await projectRegion(projectId)).listen(channel, handler)
+
+      const unsubscribe = () => {
+        release()
+        stopListening()
+      }
+
+      return { ok: true, channel, unsubscribe }
+    } catch (err) {
+      release()
+      throw err
+    }
+  }
+
+  private listenerFor(region: CloudRegionId): RegionListener {
+    let listener = this.regions.get(region)
+    if (!listener) {
+      listener = new RegionListener(region)
+      this.regions.set(region, listener)
+    }
+    return listener
+  }
+}
+
 // One hub per process. Survives Next.js dev HMR via globalThis stash — module
-// re-evaluation must not orphan the pg connection or the subscriber registry.
+// re-evaluation must not orphan the pg connections or the subscriber registry.
 const globalStore = globalThis as unknown as { __backenlyListenerHub?: ListenerHub }
 
 export const listenerHub: ListenerHub =
