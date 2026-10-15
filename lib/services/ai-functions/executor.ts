@@ -13,7 +13,7 @@
  *  - Parent-side 10-second hard timeout kills the worker thread
  *
  * Context API available to generated functions:
- *  ctx.db.query(table, where?)        → Promise<rows[]>
+ *  ctx.db.query(table, where?, opts?) → Promise<rows[]>  (where: equality, ANDed; opts: { limit ≤ 1000, default 100, offset, orderBy })
  *  ctx.db.insert(table, data)         → Promise<row>
  *  ctx.db.update(table, where, data)  → Promise<rows[]>
  *  ctx.db.delete(table, where)        → Promise<void>
@@ -150,6 +150,26 @@ function dbCast(dataType: string | undefined, val: any, idx: number): string {
   return `$${idx}`
 }
 
+/**
+ * `{ column: 'asc' | 'desc' }` as an ORDER BY, the shape db_query and the REST
+ * query route take. A key that is not a column name, or a direction that is not
+ * asc or desc, is refused rather than dropped: an order the caller asked for and
+ * silently did not get makes offset pages overlap and skip rows.
+ */
+function queryOrderBy(orderBy: unknown): string {
+  if (orderBy === undefined || orderBy === null) return ''
+  if (typeof orderBy !== 'object' || Array.isArray(orderBy)) {
+    throw new Error(`orderBy must be an object such as { id: 'asc' }`)
+  }
+  const parts = Object.entries(orderBy as Record<string, unknown>).map(([column, direction]) => {
+    if (!/^[a-z_][a-z0-9_]*$/i.test(column)) throw new Error(`orderBy: "${column}" is not a column name`)
+    const dir = String(direction).toLowerCase()
+    if (dir !== 'asc' && dir !== 'desc') throw new Error(`orderBy: the direction for "${column}" must be 'asc' or 'desc'`)
+    return `"${column}" ${dir.toUpperCase()}`
+  })
+  return parts.length ? `ORDER BY ${parts.join(', ')} ` : ''
+}
+
 function buildDbProxy(projectId: string, caller: FunctionCallerContext = {}) {
   const schemaName = `workspace_${projectId}`
   const serviceRole = caller.serviceRole ?? true
@@ -157,8 +177,17 @@ function buildDbProxy(projectId: string, caller: FunctionCallerContext = {}) {
   const endUserRole = caller.endUserRole ?? 'user'
 
   return {
-    async 'db.query'([table, where]: [string, Record<string, any> | undefined]) {
+    async 'db.query'([table, where, opts]: [string, Record<string, any> | undefined, { limit?: unknown; offset?: unknown; orderBy?: unknown } | undefined]) {
       const safeName = table.replace(/[^a-z0-9_]/gi, '')
+      // An explicit page. This used to be a silent, fixed LIMIT 100, so a job
+      // "deleting every stale session" saw 100 arbitrary rows per run and
+      // reported success (FN-14). The default stays 100 rows; up to 1000 per
+      // call, and offset reaches the rest. Without orderBy, rows come in no
+      // particular order and two calls may not agree on one, so a caller
+      // paging with offset passes a fixed orderBy.
+      const limit = Math.min(Math.max(Math.trunc(Number(opts?.limit ?? 100)) || 100, 1), 1000)
+      const offset = Math.max(Math.trunc(Number(opts?.offset ?? 0)) || 0, 0)
+      const page = `${queryOrderBy(opts?.orderBy)}LIMIT ${limit} OFFSET ${offset}`
       if (where && Object.keys(where).length > 0) {
         const keys = Object.keys(where).map(k => k.replace(/[^a-z0-9_]/gi, ''))
         const raw = Object.keys(where)
@@ -168,7 +197,7 @@ function buildDbProxy(projectId: string, caller: FunctionCallerContext = {}) {
           projectId,
           endUserId,
           serviceRole,
-          `SELECT * FROM "${schemaName}"."${safeName}" WHERE ${conditions} LIMIT 100`,
+          `SELECT * FROM "${schemaName}"."${safeName}" WHERE ${conditions} ${page}`,
           keys.map((c, i) => coerceValue(types.get(c), where[raw[i]])),
           endUserRole
         )
@@ -177,7 +206,7 @@ function buildDbProxy(projectId: string, caller: FunctionCallerContext = {}) {
         projectId,
         endUserId,
         serviceRole,
-        `SELECT * FROM "${schemaName}"."${safeName}" LIMIT 100`,
+        `SELECT * FROM "${schemaName}"."${safeName}" ${page}`,
         [],
         endUserRole
       )

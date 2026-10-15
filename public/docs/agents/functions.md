@@ -55,7 +55,7 @@ await ctx.integrations.email.send({ to: event.data.email, subject: 'Thanks', htm
 return { count: rows.length }
 ```
 
-- `ctx.db.query(table, where?)`, `ctx.db.insert(table, row)`, `ctx.db.update(table, where, patch)`, `ctx.db.delete(table, where)`: this project's tables only; update and delete need a non-empty `where`.
+- `ctx.db.query(table, where?, { limit, offset, orderBy }?)`, `ctx.db.insert(table, row)`, `ctx.db.update(table, where, patch)`, `ctx.db.delete(table, where)`: this project's tables only; update and delete need a non-empty `where`. `where` matches by equality: every key equals its value, ANDed, with no ranges or patterns. `query` returns at most `limit` rows (default 100, at most 1000), in no particular order unless you pass `orderBy`, such as `{ id: 'asc' }`. To act on every matching row, page with `offset` under one fixed `orderBy` and collect the ids first.
 - `ctx.http.get(url, headers?)`, `ctx.http.post(url, body, headers?)`: outbound requests through the egress guard, which refuses private and metadata addresses.
 - `ctx.log(...)`: lines recorded with the run.
 - `ctx.integrations.<provider>`: connected providers, with their keys kept server side (`integrations`, and each provider's topic).

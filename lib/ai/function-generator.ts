@@ -61,9 +61,11 @@ const ROUTE_MODULE_CONTRACT = `RUNTIME CONTRACT (the code runs in Backenly's rou
       required: { lineItems: 'array of { price, quantity }', successUrl: 'string', cancelUrl: 'string' },
     }, { status: 400 })
   The \`required\` object IS the contract — include it on every 400 so one failed call teaches the caller the whole shape.
-- Answer GET /?describe=1 (and OPTIONS, for a POST-only handler) with the contract instead of doing the work:
-    NextResponse.json({ method: 'POST', required: {...}, optional: {...}, returns: {...} })
-  This is what makes a generated endpoint discoverable without reading its source.`
+- Answer ?describe=1 with the contract instead of doing the work, on every method you export (GET /?describe=1, POST /?describe=1, ...), and check for it first, before validating input or touching the database (and answer OPTIONS the same way, for a POST-only handler):
+    if (new URL(request.url).searchParams.get('describe') === '1') {
+      return NextResponse.json({ method: 'POST', required: {...}, optional: {...}, returns: {...} })
+    }
+  This is what makes a generated endpoint discoverable without reading its source. Backenly also calls it once when the function is created, to check that the handler runs, so it must never do the work.`
 
 /**
  * Generate TypeScript code for a custom backend function.
@@ -192,30 +194,61 @@ async function buildSchemaContext(projectId: string, description: string): Promi
   }
 }
 
+type SmokeResult = { ok: boolean; untested?: boolean; error?: string; status?: number }
+
+/** One creation check: what was sent, and how long it took, for the run log. */
+interface SmokeRun extends SmokeResult {
+  probe: string
+  durationMs: number
+}
+
 /**
- * Invoke a generated module once and report whether it actually runs.
+ * The creation check for a generated module: the contract call, never the work.
  *
- * Returns `ok: false` ONLY for a thrown exception or a 5xx — a 4xx means the
- * handler ran and rejected the empty smoke input, which is correct behaviour
- * and the common case for a mutating endpoint.
- *
- * Never throws: a smoke test that takes down generation would be worse than the
- * bug it detects. An infrastructure failure here reports `ok: true` with a note,
- * because "we could not check" must not be reported as "the function is broken".
+ * Every handler is asked `?describe=1`, which the generation contract requires
+ * it to answer with its contract before doing anything. The old check called
+ * the handler for real, as admin, with an empty body: a "GET /send-digest that
+ * emails every subscriber" emailed every subscriber at creation, a POST that
+ * needs no input did its work the same way, and no run appeared anywhere
+ * (FN-11). A handler that ignores the contract still runs once; like every
+ * check, that run is recorded in the function's run log once it is stored.
  */
 async function smokeTestRouteModule(
   code: string,
   projectId: string,
   functionName: string,
   method: string,
-): Promise<{ ok: boolean; untested?: boolean; error?: string; status?: number }> {
+): Promise<SmokeRun> {
+  const started = Date.now()
+  const result = await runSmokeOnce(code, projectId, functionName, method, { describe: '1' })
+  return { ...result, probe: `${method.toUpperCase()} ?describe=1`, durationMs: Date.now() - started }
+}
+
+/**
+ * Invoke a generated module once and report whether it actually runs.
+ *
+ * Returns `ok: false` ONLY for a thrown exception or a 5xx — a 4xx means the
+ * handler ran and answered, as one that validates its input before reading
+ * `describe` does, which is not a failure.
+ *
+ * Never throws: a smoke test that takes down generation would be worse than the
+ * bug it detects. An infrastructure failure here reports `ok: true` with a note,
+ * because "we could not check" must not be reported as "the function is broken".
+ */
+async function runSmokeOnce(
+  code: string,
+  projectId: string,
+  functionName: string,
+  method: string,
+  data: Record<string, string>,
+): Promise<SmokeResult> {
   try {
     const { executeRouteModuleFunction, RouteModuleHandlerError } = await import('@/lib/services/ai-functions/route-module-runner')
     try {
       const result = await executeRouteModuleFunction(
         code,
         projectId,
-        { type: 'manual', data: {} },
+        { type: 'manual', data },
         `${method.toUpperCase()} /api/v1/${projectId}/fn/${functionName}`,
         // testRun mints a project-scoped admin token + admin key, so an
         // auth-gated handler exercises its real path instead of dead-ending on a
@@ -422,31 +455,32 @@ export async function executeGenerateFunction(
       code = fixed
       check = validateRouteModule(code, method)
     }
-    // ── Behavioural gate: actually RUN it before calling it deployed ─────────
+    // ── Behavioural gate: run it before calling it deployed ─────────────────
     //
     // The gate above is honest about its own limit — "never invokes the
-    // handler", catches "code-shape errors". So a function that references a
-    // column that does not exist, forgets a ::uuid cast, or returns a BigInt
-    // from COUNT(*) passes every check, deploys, and 500s on the first real
-    // request. That is precisely what was reported: three of four generated
-    // functions returned bare 500s from specs that read perfectly well.
+    // handler", catches "code-shape errors". So the handler is invoked once,
+    // and if it throws or 500s the ACTUAL RUNTIME ERROR is fed back into the
+    // repair pass, which is better information than a static check produces.
     //
-    // Compiling is not working. So the function is invoked once, for real, and
-    // if it throws or 500s the ACTUAL RUNTIME ERROR is fed back into the repair
-    // pass — which is strictly better information than a static check can
-    // produce, because it is what the database actually said.
+    // ── It is the contract call, never the work ──────────────────────────────
     //
-    // ── Why this is safe to do to a mutating handler ─────────────────────────
-    //
-    // The smoke call sends an EMPTY body. A correct POST/PUT/PATCH/DELETE
-    // handler validates its input and returns 4xx — it cannot mutate anything
-    // it was never given. A 4xx here is therefore a PASS: the handler ran and
-    // rejected bad input, which is the behaviour we want. Only a 5xx or a
-    // thrown exception counts as a failure. (A handler that DOES write on empty
-    // input is itself a bug, and this catches that too.)
+    // This used to send an EMPTY body for real, reasoning that a correct
+    // mutating handler rejects empty input with a 4xx. A GET, or a POST that
+    // needs no input, has nothing to reject: it did its work at creation, as
+    // admin, with no run recorded anywhere (FN-11). So the call is now
+    // `?describe=1` (smokeTestRouteModule), which every handler must answer
+    // with its contract, and each check is recorded in the function's run log.
+    // The cost is coverage: a query that breaks only on real input (a column
+    // that does not exist, a missing ::uuid cast) is no longer caught here. It
+    // fails on the first real call instead, which is logged with its error.
+    // The trade is deliberate: a failed first call can be fixed, and work done
+    // at creation cannot be undone. A 4xx is a PASS, as before: only a 5xx or a
+    // thrown exception fails.
     let verification: 'passed' | 'repaired' | 'failed' | 'untested' = 'passed'
     let verificationError: string | undefined
+    const smokeRuns: SmokeRun[] = []
     const smoke = await smokeTestRouteModule(code, projectId, functionName, method)
+    smokeRuns.push(smoke)
     if (smoke.ok) {
       verification = smoke.untested ? 'untested' : 'passed'
       verificationError = smoke.untested ? smoke.error : undefined
@@ -465,6 +499,7 @@ export async function executeGenerateFunction(
         const recheck = validateRouteModule(fixed, method)
         if (recheck.valid) {
           const retry = await smokeTestRouteModule(fixed, projectId, functionName, method)
+          smokeRuns.push(retry)
           // Store the repaired version either way — it is no worse than the
           // original and may fail only for want of real input — but the
           // outcome travels into the stored row and the response below, not
@@ -524,6 +559,25 @@ export async function executeGenerateFunction(
             lastError: storedError,
           },
         })
+
+    // The creation checks are runs of this function: record them where its
+    // other runs are, so nothing it did at creation is invisible.
+    for (const run of smokeRuns) {
+      await prisma.aiFunctionLog.create({
+        data: {
+          functionId: fn.id,
+          projectId,
+          success: run.ok,
+          logs: [
+            `Creation check (${run.probe}): ` +
+              (run.untested ? 'could not run' : run.status ? `HTTP ${run.status}` : run.ok ? 'ran' : 'failed'),
+          ],
+          error: run.ok ? null : (run.error ?? null),
+          durationMs: run.durationMs,
+          triggerType: 'creation_check',
+        },
+      }).catch(() => { /* the log must never block creation */ })
+    }
 
     const result: GeneratedFunction = {
       id: fn.id,
