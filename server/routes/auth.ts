@@ -201,6 +201,7 @@ async function handleSignUp(req: Request, res: Response) {
       return
     }
     const existing = await executeWithUserContext<any>(
+      projectId,
       '',
       true,
       `SELECT id FROM "${schemaName}"."users" WHERE email = $1 LIMIT 1`,
@@ -249,7 +250,7 @@ async function handleSignUp(req: Request, res: Response) {
     })
 
     // Service-role INSERT — see comment on `existing` SELECT above.
-    const created = await executeWithUserContext<any>('', true, plan.sql, plan.values)
+    const created = await executeWithUserContext<any>(projectId, '', true, plan.sql, plan.values)
     const user = created[0]
 
     // A branch session is signed with the branch's own secret, so it cannot be
@@ -391,6 +392,7 @@ async function handleSignIn(req: Request, res: Response) {
     // authenticate user", but the real cause is schema mismatch, not bad
     // credentials).
     const users = await executeWithUserContext<any>(
+      projectId,
       '',
       true,
       `SELECT * FROM "${schemaName}"."users" WHERE email = $1 LIMIT 1`,

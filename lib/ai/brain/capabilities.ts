@@ -335,7 +335,7 @@ export const TOOL_CAPABILITIES: Capability[] = [
   {
     id: 'connect_frontend',
     name: 'Connect a frontend to this backend',
-    what: 'Connect a frontend URL (any Replit/Lovable/Bolt/Vercel/custom URL) to the deployed backend. Normalizes the URL, verifies the backend is deployed, pins the deployment version, and gates on a CONNECT confirmation. Use whenever the user names their frontend URL.',
+    what: 'Connect a frontend URL (any Replit/Lovable/Bolt/Vercel/custom URL) to this backend. Normalizes the URL, records the published version when there is one (no publish is needed first), and gates on a CONNECT confirmation. Use whenever the user names their frontend URL.',
     tool: 'connect_frontend',
   },
   {
@@ -542,12 +542,8 @@ export const TOOL_CAPABILITIES: Capability[] = [
     what: 'Read AI credits used, storage MB, request count, and plan limits. Use for "how close am I to my plan?".',
     tool: 'get_usage',
   },
-  {
-    id: 'set_alert',
-    name: 'Configure a monitoring alert',
-    what: 'Configure an alert on error rate, p95 latency, request rate, or integration failure. Channel: email + dashboard.',
-    tool: 'set_alert',
-  },
+  // No set_alert capability: nothing evaluates stored alerts, so advertising
+  // one promised a watchdog that can never bark (see lib/mcp/domains.ts).
 
   // ── Autonomy ──────────────────────────────────────────────────────────────
   {

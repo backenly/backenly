@@ -62,7 +62,7 @@
  * silently is worse than an honest "I could not tell".
  */
 
-import { prisma } from '@/lib/db'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 
 /** The end-user identity table in every workspace schema. */
 const END_USER_TABLE = 'users'
@@ -226,8 +226,12 @@ export async function loadOwnershipCatalog(
   // give them. Defaults to the project's main schema.
   schemaName = `workspace_${projectId}`,
 ): Promise<OwnershipCatalog> {
+  // The catalog of the database holding the project's data, in its region.
+  // Resolved outside the fail-soft catches below: a region this process cannot
+  // reach is an error to report, not an empty catalog to infer from.
+  const db = await workspaceRawClient(projectId)
 
-  const columnRows = await prisma.$queryRawUnsafe<Array<{ table_name: string; column_name: string }>>(
+  const columnRows = await db.$queryRawUnsafe<Array<{ table_name: string; column_name: string }>>(
     `SELECT table_name, column_name
        FROM information_schema.columns
       WHERE table_schema = $1
@@ -245,7 +249,7 @@ export async function loadOwnershipCatalog(
   // Single-column foreign keys only. A composite FK cannot be expressed as a
   // one-column ownership hop, and guessing which part carries ownership is the
   // kind of silent inference this module exists to avoid.
-  const fkRows = await prisma.$queryRawUnsafe<Array<{
+  const fkRows = await db.$queryRawUnsafe<Array<{
     child_table: string
     child_column: string
     parent_table: string

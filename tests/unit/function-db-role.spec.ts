@@ -10,6 +10,13 @@ jest.mock('@/lib/db/prisma', () => ({ prisma: { $queryRaw: (...a: unknown[]) => 
 jest.mock('@/lib/services/workspace-pool', () => ({
   resolveWorkspaceSchema: async (id: string) => (id === 'bad' ? 'public' : `workspace_${id}`),
 }))
+// Every project here is in the home region: its raw client is the mocked
+// shared one and its database URL is DATABASE_URL. The regional routing itself
+// is proven against real databases in tests/integration/project-region.spec.ts.
+jest.mock('@/lib/data-plane/regional', () => ({
+  workspaceRawClient: async () => ({ $queryRaw: (...a: unknown[]) => mockQueryRaw(...a) }),
+  projectDatabaseUrl: async () => process.env.DATABASE_URL,
+}))
 
 import {
   functionRoleName,
@@ -59,8 +66,8 @@ describe('the password', () => {
 })
 
 describe('the connection string', () => {
-  it('is the app’s own, with the login swapped in and a small pool', () => {
-    const url = new URL(functionDatabaseUrl('bkn_fn_0123456789ab', 'pw'))
+  it('is the project database’s own, with the login swapped in and a small pool', () => {
+    const url = new URL(functionDatabaseUrl('bkn_fn_0123456789ab', 'pw', process.env.DATABASE_URL as string))
     expect(url.username).toBe('bkn_fn_0123456789ab')
     expect(url.password).toBe('pw')
     expect(url.host).toBe('db.internal:5432')

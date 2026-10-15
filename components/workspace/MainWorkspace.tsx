@@ -141,6 +141,22 @@ export function MainWorkspace({ projectId, projectName }: MainWorkspaceProps) {
     }
   }, [fetchBackendState, fetchBuildStatus])
 
+  // Re-read /state when the user returns to the tab. The agent builds from a
+  // TERMINAL: the user connects Claude Code, asks for a backend, and tabs
+  // back — and this page kept saying "This backend is empty" until a hard
+  // reload, because the focus refresh lived only in WorkspaceHome, which is
+  // not even mounted while the empty state shows. No polling while hidden.
+  useEffect(() => {
+    const onVisible = () => { if (!document.hidden) { fetchBackendState(); fetchBuildStatus() } }
+    const onFocus = () => { fetchBackendState(); fetchBuildStatus() }
+    document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('focus', onFocus)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [fetchBackendState, fetchBuildStatus])
+
   const retryBackendState = useCallback(() => {
     setStateStatus('loading')
     fetchBackendState()

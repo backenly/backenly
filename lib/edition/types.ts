@@ -213,6 +213,8 @@ export interface ProjectListEntry {
   updatedAt: Date
   /** Set while the project is paused for inactivity (Backenly Cloud only). */
   pausedAt: Date | null
+  /** The Backenly Cloud region holding the project's data. Null is the home region. */
+  region: string | null
   _count: { tables: number; workspaces: number }
 }
 

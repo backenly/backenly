@@ -11,7 +11,7 @@
  */
 
 import { INTEGRATION_PROVIDERS, resolveProviderId } from '@/lib/services/ai-functions/integration-registry'
-import { listKeyVaultStatuses, recheckIntegrationKey } from '@/lib/services/integrationKeyStore'
+import { canonicalVaultId, listKeyVaultStatuses, recheckIntegrationKey } from '@/lib/services/integrationKeyStore'
 import { verificationLabel } from '@/lib/integrations/key-verification'
 
 export interface IntegrationActionResult {
@@ -23,9 +23,6 @@ export interface IntegrationActionResult {
 
 /** Vault ids that are not providers, but facts about one. */
 const SUB_RECORD = /_webhook_secret$/
-
-/** Stored under a second name for historical reasons. */
-const VAULT_ALIASES: Record<string, string[]> = { stripe: ['stripe_secret_key'] }
 
 function origin(): string {
   return (process.env.NEXT_PUBLIC_APP_URL || 'https://backenly.com').replace(/\/+$/, '')
@@ -49,8 +46,7 @@ export async function integrationCapabilities(
 
   const statuses = await listKeyVaultStatuses(projectId)
   const byId = new Map(statuses.map((s) => [s.integrationId.toLowerCase(), s]))
-  const stored = (vaultId: string) =>
-    [vaultId, ...(VAULT_ALIASES[vaultId] ?? [])].map((id) => byId.get(id)).find(Boolean)
+  const stored = (vaultId: string) => byId.get(vaultId)
 
   const providers = Object.values(INTEGRATION_PROVIDERS)
     .filter((spec) => !wanted || spec.id === wanted)
@@ -110,9 +106,11 @@ export async function verifyIntegration(
   if (SUB_RECORD.test(raw)) {
     return { ok: false, code: 'INVALID_ARGUMENT', summary: 'A webhook signing secret cannot be checked against its provider; verify the provider key instead.' }
   }
-  const spec = INTEGRATION_PROVIDERS[resolveProviderId(raw) ?? '']
+  // An env-var name ("stripe_secret_key") names its provider's one vault row.
+  const vaultName = canonicalVaultId(raw)
+  const spec = INTEGRATION_PROVIDERS[resolveProviderId(vaultName) ?? '']
   const statuses = await listKeyVaultStatuses(projectId)
-  const candidates = spec ? spec.keyStoreIds.flatMap((id) => [id, ...(VAULT_ALIASES[id] ?? [])]) : [raw]
+  const candidates = spec ? spec.keyStoreIds : [vaultName]
   const vaultId = candidates.find((id) => statuses.some((s) => s.integrationId.toLowerCase() === id))
   if (!vaultId) {
     return {

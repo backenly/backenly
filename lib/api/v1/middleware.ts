@@ -478,6 +478,45 @@ export async function v1ApiMiddleware(
           }
         }
 
+        // Blocking promises "existing JWT tokens stop working immediately" —
+        // true only if request time checks it. Before this, is_blocked was
+        // read at sign-in and refresh alone, so a blocked user's live token
+        // kept serving data for up to seven days. A missing table or column
+        // means nobody was ever blocked; other failures fail open, loudly,
+        // like the revocation check above.
+        let blocked = false
+        if (!blacklisted) {
+          try {
+            const schemaName = `workspace_${projectId}`
+            const rows = await prisma.$queryRawUnsafe<{ is_blocked: boolean | null }[]>(
+              `SELECT is_blocked FROM "${schemaName}"."users" WHERE id::text = $1 LIMIT 1`,
+              String(payload.userId)
+            )
+            blocked = rows[0]?.is_blocked === true
+          } catch (err: any) {
+            const text = String(err?.message ?? err)
+            const absent =
+              err?.code === '42P01' || err?.code === '42703' || text.includes('42P01') || text.includes('42703')
+            if (!absent) {
+              console.error(
+                `[V1Middleware] is_blocked check FAILED OPEN for project ${projectId}: ${text}. ` +
+                `A blocked user's token would have been accepted.`
+              )
+            }
+          }
+        }
+
+        if (blocked) {
+          return {
+            context: {} as V1ApiContext,
+            response: createErrorResponse(
+              ErrorCodes.FORBIDDEN,
+              'This account has been blocked by the project owner.',
+              403
+            ),
+          }
+        }
+
         if (!blacklisted) {
           endUserId = String(payload.userId)
           endUserRole = (payload as any).role ?? 'user'

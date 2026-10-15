@@ -24,10 +24,22 @@ export async function GET(
       listKeyVaultStatuses(validated.projectId),
     ])
 
-    // Build a lookup: integrationId → maskedKey
-    const keyVault: Record<string, { maskedKey: string; connectedAt: string }> = {}
+    // Build a lookup: integrationId → masked key + what the provider said.
+    // verification/verificationDetail travel to the console on purpose: the
+    // store's contract says never to fold them into a boolean "connected" —
+    // a key the provider REJECTED rendering as a green "Connected" card is
+    // exactly how a dead credential sits unnoticed until a function fails.
+    const keyVault: Record<
+      string,
+      { maskedKey: string; connectedAt: string; verification: string; verificationDetail?: string }
+    > = {}
     for (const ks of keyStatuses) {
-      keyVault[ks.integrationId] = { maskedKey: ks.maskedKey, connectedAt: ks.connectedAt }
+      keyVault[ks.integrationId] = {
+        maskedKey: ks.maskedKey,
+        connectedAt: ks.connectedAt,
+        verification: ks.verification,
+        verificationDetail: ks.verificationDetail,
+      }
     }
 
     return NextResponse.json({

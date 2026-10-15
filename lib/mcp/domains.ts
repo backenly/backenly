@@ -61,7 +61,8 @@ export const DOMAIN_TOOLS: DomainTool[] = [
       block_user: { tool: 'block_end_user', gloss: 'stop one user from signing in' },
       unblock_user: { tool: 'unblock_end_user', gloss: 'let a blocked user sign in again' },
       enable_teams: { tool: 'enable_teams', gloss: 'organizations with members and roles' },
-      email_settings: { tool: 'get_auth_email_settings', gloss: 'how verification and password-reset emails are sent, whether the last test worked, and the templates' },
+      email_settings: { tool: 'get_auth_email_settings', gloss: 'how verification and password-reset emails are sent, whether the last test worked, the templates, and the sign-in email policy' },
+      set_email_policy: { tool: 'set_auth_email_policy', gloss: 'the app name and URL auth emails link to, whether sign-in requires a verified email (needs a working sender first), and whether magic links are on' },
       set_smtp: { tool: 'set_auth_smtp', gloss: 'the SMTP server auth emails are sent through (the password is stored encrypted and never returned)' },
       test_smtp: { tool: 'test_auth_smtp', gloss: 'send one real test email and record whether it arrived at the server' },
       remove_smtp: { tool: 'remove_auth_smtp', gloss: 'remove the SMTP settings' },
@@ -75,7 +76,8 @@ export const DOMAIN_TOOLS: DomainTool[] = [
     summary: 'Buckets and files. Uploads happen from the app through the SDK or REST, not here.',
     actions: {
       create_bucket: { tool: 'create_bucket', gloss: 'a new bucket, private unless isPublic' },
-      set_public: { tool: 'set_bucket_public', gloss: 'make a bucket public or private' },
+      set_public: { tool: 'set_bucket_public', gloss: 'make a bucket public or private (shorthand for the public_read / private policies)' },
+      set_policy: { tool: 'set_bucket_policy', gloss: 'set the enforced access policy: public_read, cdn_cacheable, private or owner_only' },
       list_buckets: { tool: 'list_buckets', gloss: 'every bucket with its visibility' },
       list_files: { tool: 'list_files', gloss: 'the files in one bucket' },
       signed_url: { tool: 'generate_signed_url', gloss: 'a time-limited download link for one file' },
@@ -127,7 +129,7 @@ export const DOMAIN_TOOLS: DomainTool[] = [
       list: { tool: 'list_integration_keys', gloss: 'connected providers, masked keys and verification state' },
       capabilities: { tool: 'list_integration_capabilities', gloss: 'the exact ctx.integrations methods each provider gives a function, and for Stripe its receiver URL and signing-secret state' },
       verify: { tool: 'verify_integration_key', gloss: 'ask the provider again whether the stored key works' },
-      connect: { tool: 'store_integration_key', gloss: 'store a provider key (Stripe also takes webhookSecret) and wire the first functions' },
+      connect: { tool: 'store_integration_key', gloss: 'store a provider key (Stripe also takes webhookSecret, OneSignal also takes appId) and wire the first functions' },
       disconnect: { tool: 'remove_integration_key', gloss: 'remove a provider key' },
       send_push: { tool: 'send_push', gloss: 'a push notification through the connected OneSignal app' },
     },
@@ -297,8 +299,22 @@ function brainParams(tool: string): { properties: Record<string, JsonSchema>; re
   return { properties: def?.parameters?.properties ?? {}, required: def?.parameters?.required ?? [] }
 }
 
+/**
+ * Tools whose executor requires ONE OF several arguments. Their brain schema
+ * declares `required: []` (JSON Schema here cannot express the alternative),
+ * which rendered as "Needs: nothing" — and the executor then refused the
+ * call. The docs and descriptions print this declared alternative instead.
+ */
+const REQUIRED_ALTERNATIVES: Record<string, string> = {
+  rotate_webhook_secret: 'triggerName or triggerId',
+  block_end_user: 'userId or email',
+  unblock_end_user: 'userId or email',
+}
+
 /** The arguments an action's target tool requires, as its description lists them. */
 export function actionRequires(tool: string): string[] {
+  const alternative = REQUIRED_ALTERNATIVES[tool]
+  if (alternative) return [alternative]
   return brainParams(tool).required.filter((p) => p !== 'action')
 }
 
@@ -359,7 +375,7 @@ export function domainInputSchema(domain: DomainTool, opts?: { readOnly?: boolea
 /** The advertised description: the summary, then one line per action. */
 export function domainDescription(domain: DomainTool): string {
   const lines = Object.entries(domain.actions).map(([action, { tool, gloss }]) => {
-    const needs = brainParams(tool).required
+    const needs = actionRequires(tool)
     const args = needs.length ? ` (needs ${needs.join(', ')})` : ''
     const gate = needsApproval(tool) ? ' [waits for human approval; poll check_approval]' : ''
     return `• ${action}: ${gloss}${args}${gate}`

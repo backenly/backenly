@@ -93,6 +93,7 @@ interface AgentApproval {
   message: string
   createdAt: string
   expiresAt: string
+  executedAt: string | null
   resultSummary: string | null
 }
 
@@ -455,16 +456,22 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
   }
 
   const pendingAgents = agentApprovals.filter(a => a.status === 'pending')
+  // An approval the human already granted must not vanish from the queue
+  // while it runs — and if its execution died (server reports failed with no
+  // executedAt: the terminal update never ran), the unknown outcome is the
+  // human's to look at, not something to hide.
+  const runningAgents = agentApprovals.filter(a => a.status === 'approved')
+  const stuckAgents = agentApprovals.filter(a => a.status === 'failed' && !a.executedAt)
   // The header counts FINDINGS (what the user must clear), the list renders
   // GROUPS (what they must decide). Both numbers are shown, so folding nine
   // rows into one never looks like eight findings quietly disappearing.
-  const total = data.pendingApprovals.length + pendingAgents.length
+  const total = data.pendingApprovals.length + pendingAgents.length + stuckAgents.length
 
   return (
     <section className={CARD}>
       <PanelHeader
         count={total}
-        groupCount={groups.length + pendingAgents.length}
+        groupCount={groups.length + pendingAgents.length + stuckAgents.length}
         refreshing={refreshing}
         onRefresh={() => fetchReport(true)}
       />
@@ -494,7 +501,7 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
         </div>
       )}
 
-      {total === 0 ? (
+      {total === 0 && runningAgents.length === 0 ? (
         <div className="px-5 py-12 text-center">
           <CheckCircle2 className="mx-auto mb-3 size-5 text-emerald-400/70" />
           <p className="text-[13px] font-medium text-zinc-300">Nothing waiting on you</p>
@@ -522,6 +529,12 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
               onReject={() => decideAgentRequest(a.id, 'reject')}
               onResetError={() => setRow(a.id, { phase: 'idle' })}
             />
+          ))}
+          {runningAgents.map(a => (
+            <AgentOutcomeRow key={a.id} request={a} running />
+          ))}
+          {stuckAgents.map(a => (
+            <AgentOutcomeRow key={a.id} request={a} />
           ))}
         </ul>
       )}
@@ -629,6 +642,11 @@ function AgentRequestRow({
   onResetError: () => void
 }) {
   const busy = state.phase === 'applying' || state.phase === 'dismissing'
+  // The card is the ONLY thing the human reads before approving — a merge
+  // message carries the exact statements that reach production, and cutting
+  // it at 180 characters asked them to approve what they could not see.
+  const [showFull, setShowFull] = useState(false)
+  const long = a.message.length > 180
   return (
     <li className="px-5 py-3.5">
       <div className="flex items-start gap-3">
@@ -637,9 +655,17 @@ function AgentRequestRow({
           <p className="text-[13px] font-medium text-zinc-100">
             Your coding agent wants to run <span className="font-mono text-[12px] text-violet-200">{a.tool}</span> on {a.target}
           </p>
-          <p className="mt-1 break-words text-[12px] leading-relaxed text-zinc-500">
-            “{a.message.length > 180 ? a.message.slice(0, 180) + '…' : a.message}”
+          <p className="mt-1 whitespace-pre-wrap break-words text-[12px] leading-relaxed text-zinc-500">
+            “{long && !showFull ? a.message.slice(0, 180) + '…' : a.message}”
           </p>
+          {long && (
+            <button
+              onClick={() => setShowFull(v => !v)}
+              className="mt-1 text-[12px] font-medium text-violet-300/90 underline underline-offset-2 transition-colors hover:text-violet-200"
+            >
+              {showFull ? 'Show less' : 'Show the full request'}
+            </button>
+          )}
           <p className="mt-1.5 font-mono text-[12px] text-zinc-600">
             {a.rowCount !== null && a.rowCount > 0 && (
               <span className="text-amber-400/90">{a.rowCount} live row{a.rowCount === 1 ? '' : 's'} · </span>
@@ -671,6 +697,34 @@ function AgentRequestRow({
             </>
           )}
         </div>
+      </div>
+    </li>
+  )
+}
+
+/**
+ * An agent request after the human decided: still executing, or approved and
+ * never heard from again (the terminal update never ran — a restart mid-run).
+ * No buttons: there is no decision left, only an outcome to witness. These
+ * rows exist so an approval can never silently vanish from the queue while
+ * its outcome is undecided or unknown.
+ */
+function AgentOutcomeRow({ request: a, running }: { request: AgentApproval; running?: boolean }) {
+  return (
+    <li className="px-5 py-3.5">
+      <div className="flex items-start gap-3">
+        <span className={`mt-1.5 size-1.5 shrink-0 rounded-full ${running ? 'bg-sky-400' : 'bg-amber-400'}`} />
+        <div className="min-w-0 flex-1">
+          <p className="text-[13px] font-medium text-zinc-100">
+            {running ? 'Approved — running now: ' : 'Approved, but the outcome is unknown: '}
+            <span className="font-mono text-[12px] text-violet-200">{a.tool}</span> on {a.target}
+          </p>
+          {!running && a.resultSummary && (
+            <p className="mt-1 break-words text-[12px] leading-relaxed text-amber-200/80">{a.resultSummary}</p>
+          )}
+          <p className="mt-1.5 font-mono text-[12px] text-zinc-600">MCP · {timeAgo(a.createdAt)}</p>
+        </div>
+        {running && <Loader2 className="size-3.5 shrink-0 animate-spin text-zinc-500" />}
       </div>
     </li>
   )

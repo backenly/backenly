@@ -13,6 +13,7 @@ import {
   isReservedTestEmail,
 } from '@/lib/services/end-user-auth-table'
 import { canAcceptNewEndUser, trackEndUserActive } from '@/lib/quota/kernel'
+import { emitEndUserCreated } from '@/lib/services/end-user-auth-events'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import { asyncRoute } from '../lib/async-route'
 import { touchProjectActivity } from '@/lib/projects/activity'
@@ -201,7 +202,8 @@ export async function resolveRedirectTarget(
     return {
       rejected:
         `origin ${url.origin} is not a connected frontend for this project. ` +
-        `Connect it first so the platform knows this app is yours.`,
+        `Connect it first so the platform knows this app is yours — over MCP: ` +
+        `connect { "action": "connect_frontend", "url": "${url.origin}" }.`,
     }
   }
 
@@ -471,6 +473,7 @@ async function handleOAuthCallback(req: Request, res: Response) {
 
     // 4. Upsert by oauth_id OR email — under service-role (RLS is forced).
     const existing = await executeWithUserContext<any>(
+      projectId,
       '',
       true,
       `SELECT id, email, name FROM "${schemaName}"."users" WHERE oauth_id = $1 OR email = $2 LIMIT 1`,
@@ -489,6 +492,7 @@ async function handleOAuthCallback(req: Request, res: Response) {
       const setParts = ['oauth_provider = $1', 'oauth_id = $2', 'avatar_url = COALESCE(avatar_url, $3)']
       if (schema.updatedAtColumn) setParts.push(`"${schema.updatedAtColumn}" = NOW()`)
       await executeWithUserContext(
+        projectId,
         '',
         true,
         `UPDATE "${schemaName}"."users" SET ${setParts.join(', ')} WHERE id = $4`,
@@ -512,10 +516,18 @@ async function handleOAuthCallback(req: Request, res: Response) {
         oauth_provider: provider,
         oauth_id: providerUser.id,
       })
-      const createdRows = await executeWithUserContext<any>('', true, plan.sql, plan.values)
+      const createdRows = await executeWithUserContext<any>(projectId, '', true, plan.sql, plan.values)
       userId = String(createdRows[0]?.id)
       userEmail = providerUser.email
       userName = providerUser.name
+      // A first OAuth sign-in IS a sign-up. auth.user.created fired only from
+      // the password routes, so webhook subscribers never heard of OAuth users.
+      void emitEndUserCreated(projectId, {
+        id: userId,
+        email: userEmail,
+        name: userName,
+        created_at: createdRows[0]?.created_at,
+      })
     }
 
     // 5. Mark config used + count activity (never block auth on these).

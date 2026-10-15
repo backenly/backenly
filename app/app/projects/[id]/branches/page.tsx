@@ -26,7 +26,7 @@ export default function BranchesPage() {
         className="!px-0"
         title="Branches"
         meta={<Tag tone="violet">Beta</Tag>}
-        description="Clone your backend, schema and data, so an agent can build against the copy. New tables merge back through the governed path; anything else comes back for review."
+        description="Clone your backend, schema and data, so an agent can build against the copy. Merging replays the branch's schema changes onto production, in order, after your approval."
       />
       <BranchesPanel projectId={projectId} />
     </div>

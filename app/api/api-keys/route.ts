@@ -6,7 +6,7 @@ import { requireAuth } from '@/lib/auth/middleware'
 import { z } from 'zod'
 import crypto from 'crypto'
 import { maskFromPrefix, plaintextForStorage } from '@/lib/auth/api-key-plaintext'
-import { canAdministerProject } from '@/lib/edition/guard'
+import { canAccessProject, canAdministerProject } from '@/lib/edition/guard'
 import { mintKey } from '@/lib/auth/key-prefix'
 import { apiKeyRateCeilingViolation } from '@/lib/quota/kernel'
 
@@ -78,9 +78,17 @@ export async function GET(request: NextRequest) {
       )
     }
     
+    // Membership check, then EVERY key for the project — not just the
+    // caller's own rows. Agent-created keys belong to the project owner, so
+    // an org ADMIN opening Settings → API keys saw an empty table and could
+    // not revoke a leaked key from the one place the docs say to do it. The
+    // list is masked metadata (no plaintext exists to leak), so a member read
+    // is the right floor.
+    if (!(await canAccessProject(auth.userId, projectId))) {
+      return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+    }
     const apiKeys = await prisma.apiKey.findMany({
       where: {
-        userId: auth.userId,
         projectId, // Tenant isolation
       },
       orderBy: { createdAt: 'desc' },

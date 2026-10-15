@@ -98,7 +98,7 @@ function timeAgo(iso: string | null): string {
  */
 function dispositionCopy(level: Level | undefined): string {
   if (level === 'CONSERVATIVE') {
-    return 'Backenly found these and has not acted. Under Review-only it raises each one for your approval on its next pass — or fix any of them now.'
+    return 'Backenly found these and has not acted yet. On its next pass, Review-only applies the silent additive ones (indexes, API definitions) and raises everything else for your approval — or fix any of them now.'
   }
   if (level === 'OFF') {
     return 'Backenly found these while checking the runtime. Autonomy is off, so nothing will be applied until you pick a mode or fix them here.'

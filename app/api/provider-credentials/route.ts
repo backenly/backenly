@@ -9,7 +9,8 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { ProviderCredentialsService } from '@/lib/services/provider-credentials'
-import { withTenantIsolation, TenantIsolationError } from '@/lib/tenant/isolation'
+import { withTenantIsolation, requireProjectCapability, TenantIsolationError } from '@/lib/tenant/isolation'
+import { canAdministerProject } from '@/lib/edition/guard'
 
 // GET /api/provider-credentials - List credentials
 export async function GET(request: NextRequest) {
@@ -40,41 +41,42 @@ export async function GET(request: NextRequest) {
 // POST /api/provider-credentials - Save credentials
 export async function POST(request: NextRequest) {
   try {
-    return await withTenantIsolation(request, async (projectId) => {
-      const body = await request.json()
-      const { provider, credentials, name } = body
+    // Saving a deploy-provider token is a credential surface: ADMIN floor,
+    // like the other credential routes.
+    const { projectId } = await requireProjectCapability(request, canAdministerProject)
+    const body = await request.json()
+    const { provider, credentials, name } = body
 
-      if (!provider || !credentials) {
-        return NextResponse.json(
-          { error: 'Provider and credentials are required' },
-          { status: 400 }
-        )
-      }
-
-      const saved = await ProviderCredentialsService.saveCredentials(
-        projectId,
-        provider,
-        credentials,
-        name
+    if (!provider || !credentials) {
+      return NextResponse.json(
+        { error: 'Provider and credentials are required' },
+        { status: 400 }
       )
+    }
 
-      return NextResponse.json({
-        success: true,
-        credential: {
-          id: saved.id,
-          provider: saved.provider,
-          name: saved.name,
-          lastUsedAt: saved.lastUsedAt,
-          createdAt: saved.createdAt,
-          updatedAt: saved.updatedAt,
-        },
-      })
+    const saved = await ProviderCredentialsService.saveCredentials(
+      projectId,
+      provider,
+      credentials,
+      name
+    )
+
+    return NextResponse.json({
+      success: true,
+      credential: {
+        id: saved.id,
+        provider: saved.provider,
+        name: saved.name,
+        lastUsedAt: saved.lastUsedAt,
+        createdAt: saved.createdAt,
+        updatedAt: saved.updatedAt,
+      },
     })
   } catch (error: any) {
     if (error instanceof TenantIsolationError) {
       return NextResponse.json(
         { error: error.message },
-        { status: 403 }
+        { status: error.status ?? 403 }
       )
     }
     console.error('Failed to save credentials:', error)

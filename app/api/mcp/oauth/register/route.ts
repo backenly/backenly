@@ -27,6 +27,7 @@ export const runtime = 'nodejs'
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/prisma'
 import { isAcceptableRedirectUri, oauthError, randomToken } from '@/lib/mcp/oauth'
+import { clientIp, consume } from '@/lib/security/auth-rate-limit'
 
 const MAX_REDIRECT_URIS = 10
 const MAX_NAME_LEN = 120
@@ -43,6 +44,20 @@ export function OPTIONS() {
 }
 
 export async function POST(request: NextRequest) {
+  // The cap the header comment promises. A registration costs a row, and a
+  // loop was free to mint millions of client_ids — each a valid consent-screen
+  // starter. Real hosts register once per install, so a per-IP minute cap
+  // never touches them. `consume` is the shared, fail-closed store the auth
+  // surfaces use — NOT lib/middleware/rateLimiter.checkRateLimit, which counts
+  // marker rows nothing writes and skips itself under NODE_ENV=test.
+  const rate = await consume(`mcp-register:${clientIp(request)}`, 5, 60_000)
+  if (!rate.allowed) {
+    return NextResponse.json(
+      { error: 'temporarily_unavailable', error_description: 'Too many registrations from this address. Try again shortly.' },
+      { status: 429, headers: { ...HEADERS, 'retry-after': String(rate.retryAfter ?? 60) } },
+    )
+  }
+
   let body: any
   try {
     body = await request.json()
@@ -94,12 +109,24 @@ export async function POST(request: NextRequest) {
       ? body.client_name.trim().slice(0, MAX_NAME_LEN)
       : 'MCP client'
 
-  const clientId = `mcpc_${randomToken(16)}`
-
+  // Same name + same redirect set is the SAME client: hand back the existing
+  // registration instead of minting another row. Public clients carry no
+  // secret, so reuse grants nothing — and a crash-looping host (or an abuse
+  // loop sending one fixed body) stops growing the table.
+  const sortedUris = [...redirectUris].sort()
+  let clientId = `mcpc_${randomToken(16)}`
   try {
-    await prisma.mcpOAuthClient.create({
-      data: { clientId, clientName, redirectUris },
+    const existing = await prisma.mcpOAuthClient.findFirst({
+      where: { clientName, redirectUris: { equals: sortedUris } },
+      select: { clientId: true },
     })
+    if (existing) {
+      clientId = existing.clientId
+    } else {
+      await prisma.mcpOAuthClient.create({
+        data: { clientId, clientName, redirectUris: sortedUris },
+      })
+    }
   } catch (err) {
     console.error('[mcp/oauth/register] create failed:', err)
     return oauthError('server_error', 'Could not register the client.', 500)

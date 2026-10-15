@@ -123,6 +123,43 @@ async function ensurePresenceTable(projectId: string): Promise<void> {
   bootstrappedProjects.add(projectId)
 }
 
+// ── Identity ──────────────────────────────────────────────────────────────────
+
+/**
+ * Who may act as `userId`? Presence names are identities, not labels: a row
+ * here renders as "that user is online" in every subscribed client. The old
+ * handlers took userId from the body unchecked, so any holder of the public
+ * anon key could mark ANY user online with arbitrary metadata, or kick anyone
+ * offline. The rule now matches the data plane's:
+ *   - service-role key          → any userId (trusted server-side caller)
+ *   - public key + X-User-Token → only the token's own userId
+ *   - public key, no token      → refused, with the remedy named
+ * Metadata stays client-supplied display data — bind the IDENTITY, and treat
+ * the metadata as what the signed-in user chose to show.
+ */
+function presenceIdentityError(
+  ctx: { endUserId: string | null; apiKey: { serviceRole: boolean } },
+  userId: string,
+): NextResponse | null {
+  if (ctx.apiKey.serviceRole) return null
+  if (ctx.endUserId) {
+    if (ctx.endUserId === userId) return null
+    return NextResponse.json(
+      { error: 'The signed-in user may only announce or clear presence as themselves.', code: 'PRESENCE_IDENTITY_MISMATCH' },
+      { status: 403 },
+    )
+  }
+  return NextResponse.json(
+    {
+      error:
+        "Presence identifies callers by their sign-in. Send the end user's X-User-Token " +
+        'together with the public key, or use a service-role key for server-side presence.',
+      code: 'PRESENCE_TOKEN_REQUIRED',
+    },
+    { status: 401 },
+  )
+}
+
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 /** GET — list users online right now */
@@ -172,6 +209,9 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       return NextResponse.json({ error: 'userId too long (max 255)' }, { status: 400 })
     }
 
+    const identityError = presenceIdentityError(auth.context, userId)
+    if (identityError) return identityError
+
     await ensurePresenceTable(projectId)
 
     // Upsert: insert on first join, update lastSeen (and metadata) on heartbeat
@@ -217,6 +257,9 @@ async function handleDELETE(request: NextRequest, props: { params: Promise<{ pro
     if (!userId) {
       return NextResponse.json({ error: 'userId is required' }, { status: 400 })
     }
+
+    const identityError = presenceIdentityError(auth.context, userId)
+    if (identityError) return identityError
 
     await ensurePresenceTable(projectId)
 

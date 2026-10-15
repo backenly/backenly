@@ -53,6 +53,7 @@ function assertSafeTestDatabase(): void {
 
 const createdUserIds: string[] = []
 const createdProjectIds: string[] = []
+let projectId = ''
 let schema = ''
 
 beforeAll(async () => {
@@ -67,6 +68,7 @@ beforeAll(async () => {
     select: { id: true },
   })
   createdProjectIds.push(p.id)
+  projectId = p.id
   schema = `workspace_${p.id}`
 
   await prisma.$executeRawUnsafe(`CREATE SCHEMA IF NOT EXISTS "${schema}"`)
@@ -102,6 +104,7 @@ afterAll(async () => {
 
 const serviceSelect = (title: string) =>
   executeWithUserContext<{ id: string; title: string }>(
+    projectId,
     '',
     true,
     `SELECT id, title FROM "${schema}"."notes" WHERE title = $1`,
@@ -139,37 +142,41 @@ describe('dashboard row writes through PostgresService', () => {
   it('insertRow inserts, and did it through the service-role claims machinery', async () => {
     rlsCalls.length = 0
 
-    const row = await PostgresService.insertRow(schema, 'notes', { title: 'first note' })
+    const row = await PostgresService.insertRow(projectId, schema, 'notes', { title: 'first note' })
 
     expect(row?.title).toBe('first note')
     expect(await serviceSelect('first note')).toHaveLength(1)
-    const call = rlsCalls.find((c) => typeof c[2] === 'string' && (c[2] as string).startsWith('INSERT INTO'))
+    const call = rlsCalls.find((c) => typeof c[3] === 'string' && (c[3] as string).startsWith('INSERT INTO'))
     expect(call).toBeDefined()
-    expect(call![0]).toBe('')
-    expect(call![1]).toBe(true)
+    // Named by project, so the write runs on the database in its region.
+    expect(call![0]).toBe(projectId)
+    expect(call![1]).toBe('')
+    expect(call![2]).toBe(true)
   })
 
   it('updateRow updates the row it names', async () => {
     const [existing] = await serviceSelect('first note')
     rlsCalls.length = 0
 
-    const updated = await PostgresService.updateRow(schema, 'notes', existing.id, { title: 'renamed note' })
+    const updated = await PostgresService.updateRow(projectId, schema, 'notes', existing.id, { title: 'renamed note' })
 
     expect(updated?.title).toBe('renamed note')
     expect(await serviceSelect('renamed note')).toHaveLength(1)
-    const call = rlsCalls.find((c) => typeof c[2] === 'string' && (c[2] as string).startsWith('UPDATE'))
-    expect(call?.[1]).toBe(true)
+    const call = rlsCalls.find((c) => typeof c[3] === 'string' && (c[3] as string).startsWith('UPDATE'))
+    expect(call?.[0]).toBe(projectId)
+    expect(call?.[2]).toBe(true)
   })
 
   it('deleteRow removes it', async () => {
     const [existing] = await serviceSelect('renamed note')
     rlsCalls.length = 0
 
-    const gone = await PostgresService.deleteRow(schema, 'notes', existing.id)
+    const gone = await PostgresService.deleteRow(projectId, schema, 'notes', existing.id)
 
     expect(gone).toBe(true)
     expect(await serviceSelect('renamed note')).toHaveLength(0)
-    const call = rlsCalls.find((c) => typeof c[2] === 'string' && (c[2] as string).startsWith('DELETE'))
-    expect(call?.[1]).toBe(true)
+    const call = rlsCalls.find((c) => typeof c[3] === 'string' && (c[3] as string).startsWith('DELETE'))
+    expect(call?.[0]).toBe(projectId)
+    expect(call?.[2]).toBe(true)
   })
 })

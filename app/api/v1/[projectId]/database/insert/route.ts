@@ -88,6 +88,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
 
       const sql = `INSERT INTO "${schemaName}"."${tableName}" (${colList}) VALUES (${placeholders}) RETURNING *`
       const result = await executeWithUserContext(
+        context.projectId,
         context.endUserId ?? '',
         context.apiKey.serviceRole,
         sql,

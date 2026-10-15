@@ -9,6 +9,7 @@
  */
 
 import { prisma } from '@/lib/db'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { Prisma } from '@prisma/client'
 import { MongoClient, Db, Collection, Document } from 'mongodb'
 import { getWorkspaceDatabaseNames } from './databaseProvisioning'
@@ -85,7 +86,7 @@ export async function getWorkspaceMongoCollection<T extends Document = Document>
  * In the future, we could create a Prisma client per workspace.
  */
 export async function getWorkspacePostgresClient(projectId: string) {
-  // Get workspace info
+  // Get workspace info (a platform row, so the shared client)
   const workspace = await prisma.workspace.findFirst({
     where: { projectId },
     select: {
@@ -94,12 +95,17 @@ export async function getWorkspacePostgresClient(projectId: string) {
     },
   })
 
+  // The schema itself lives in the project's own database, in its region
+  // (lib/data-plane/regional.ts). Resolved before the provisioning try below,
+  // so a region this process cannot reach is reported, not swallowed.
+  const db = await workspaceRawClient(projectId)
+
   if (!workspace || !workspace.databaseProvisioned || !workspace.postgresSchema) {
     // Auto-provision if not already done
     const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
     try {
       const sanitizedSchema = postgresSchema.replace(/"/g, '""') // Escape quotes
-      await prisma.$executeRawUnsafe(
+      await db.$executeRawUnsafe(
         `CREATE SCHEMA IF NOT EXISTS "${sanitizedSchema}"`
       )
 
@@ -133,14 +139,14 @@ export async function getWorkspacePostgresClient(projectId: string) {
     schema: resolvedSchema,
     executeRaw: async (query: string, ...params: any[]) => {
       const schemaQualifiedQuery = query.replace(/\{schema\}/g, `"${resolvedSchema}"`)
-      return prisma.$transaction(async (tx) => {
+      return db.$transaction(async (tx) => {
         await tx.$executeRawUnsafe(`SET LOCAL search_path TO "${resolvedSchema}", public`)
         return tx.$executeRawUnsafe(schemaQualifiedQuery, ...params)
       })
     },
     queryRaw: async (query: string, ...params: any[]) => {
       const schemaQualifiedQuery = query.replace(/\{schema\}/g, `"${resolvedSchema}"`)
-      return prisma.$transaction(async (tx) => {
+      return db.$transaction(async (tx) => {
         await tx.$executeRawUnsafe(`SET LOCAL search_path TO "${resolvedSchema}", public`)
         return tx.$queryRawUnsafe(schemaQualifiedQuery, ...params)
       })

@@ -21,6 +21,7 @@
 
 import { prisma } from '@/lib/db/prisma'
 import { isReservedWorkspaceTable } from '@/lib/security/workspace-schema'
+import { isLegacyAliasVaultId } from '@/lib/services/integrationKeyStore'
 
 /** The four commands a policy can govern — used to name the ones that are NOT covered. */
 const ALL_COMMANDS = ['SELECT', 'INSERT', 'UPDATE', 'DELETE'] as const
@@ -99,23 +100,18 @@ async function readAuth(
   projectId: string,
 ): Promise<{ enabled: boolean; providers: string[] }> {
   try {
-    // Auth is enabled if the project has a jwtSecret set
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-      select: { jwtSecret: true },
-    })
-    const jwtEnabled = !!(project?.jwtSecret)
-
-    // Check OAuth providers
-    const oauthConfigs = await prisma.workspaceOAuthConfig.findMany({
-      where: { projectId, enabled: true },
-      select: { provider: true },
-    })
+    // The SAME authority the console uses (lib/services/auth-status.ts). The
+    // old read keyed "enabled" off the seeded jwtSecret — infrastructure every
+    // project gets at creation — so the agent grounded itself on
+    // "Auth: email/password" for backends where nobody had enabled anything,
+    // skipped auth { action: "enable" }, and told the developer sign-up was
+    // configured while the console truthfully said "Not set up".
+    const { getProjectAuthStatus } = await import('@/lib/services/auth-status')
+    const status = await getProjectAuthStatus(projectId)
     const providers: string[] = []
-    if (jwtEnabled) providers.push('email/password')
-    for (const o of oauthConfigs) providers.push(o.provider)
-
-    return { enabled: jwtEnabled || oauthConfigs.length > 0, providers }
+    if (status.emailPasswordEnabled) providers.push('email/password')
+    for (const p of status.oauthProviders) providers.push(p)
+    return { enabled: providers.length > 0, providers }
   } catch {
     return { enabled: false, providers: [] }
   }
@@ -201,7 +197,9 @@ async function readIntegrations(projectId: string): Promise<string[]> {
       select: { integrationId: true },
       orderBy: { connectedAt: 'asc' },
     })
-    return keys.map(k => k.integrationId)
+    // A legacy alias row is the same credential under its env-var name, not
+    // a second integration.
+    return keys.map(k => k.integrationId).filter(id => !isLegacyAliasVaultId(id))
   } catch {
     return []
   }

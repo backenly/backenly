@@ -260,6 +260,16 @@ describe('integration readiness does not require tables a product may not need (
     const mod: any = await import('@/lib/integrations/readiness')
     expect(mod.__DEPENDENCY_SPECS.stripe.requiredKeys).toContain('stripe_webhook_secret')
   })
+
+  it('does not block Resend or PostHog on functions only the retired executors created (INT-07)', async () => {
+    // 'send-transactional-email' and 'posthog-capture'/'posthog-identify' are
+    // written only by the dead dispatchIntegration executors; the live MCP
+    // connect path never creates them. Requiring them left readiness
+    // permanently blocked with a next step that no call could satisfy.
+    const mod: any = await import('@/lib/integrations/readiness')
+    expect(mod.__DEPENDENCY_SPECS.resend.requiredFunctionPatterns).toEqual([])
+    expect(mod.__DEPENDENCY_SPECS.posthog.requiredFunctionPatterns).toEqual([])
+  })
 })
 
 // ── #40 — one integration list, not three ────────────────────────────────────

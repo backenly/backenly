@@ -23,7 +23,7 @@ import { WEBHOOK_EVENT_TYPES } from '@/lib/webhooks/events'
 /** Brain tools served by lib/email/agent-actions.ts. */
 const AUTH_EMAIL_TOOLS = new Set<string>([
   'get_auth_email_settings', 'set_auth_smtp', 'test_auth_smtp', 'remove_auth_smtp',
-  'set_auth_email_template', 'reset_auth_email_template',
+  'set_auth_email_template', 'reset_auth_email_template', 'set_auth_email_policy',
 ])
 
 /** Brain tools served by lib/webhooks/agent-actions.ts. */
@@ -80,6 +80,7 @@ export type ToolName =
   | 'disable_oauth_provider'
   | 'create_bucket'
   | 'set_bucket_public'
+  | 'set_bucket_policy'
   | 'add_rls'
   | 'set_rls'
   | 'create_trigger'
@@ -122,13 +123,14 @@ export type ToolName =
   | 'verify_integration_key'
   // Which project and credential this caller is acting as
   | 'get_connection_identity'
-  // End-user auth email: sender and templates (the Auth page)
+  // End-user auth email: sender, templates and policy (the Auth page)
   | 'get_auth_email_settings'
   | 'set_auth_smtp'
   | 'test_auth_smtp'
   | 'remove_auth_smtp'
   | 'set_auth_email_template'
   | 'reset_auth_email_template'
+  | 'set_auth_email_policy'
   // Connect Frontend
   | 'connect_frontend'
   | 'disconnect_frontend'
@@ -155,8 +157,6 @@ export type ToolName =
   | 'toggle_ai_function'
   | 'delete_ai_function'
   | 'delete_cron_job'
-  // Monitoring
-  | 'set_alert'
   // Autonomy
   | 'set_autonomy_level'
   // Agent-native operator surface (open loop / 24-7 brain)
@@ -950,6 +950,18 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     'Go back to Backenly\'s default template for one auth email.',
     { kind: { type: 'string', enum: ['verification', 'password_reset', 'magic_link'] } },
     ['kind']),
+  fn('set_auth_email_policy',
+    'Set what this project\'s auth emails say and when they are required. Pass only the fields to change. ' +
+    'Turning requireEmailVerification on needs a working sender first (set_auth_smtp, then test_auth_smtp): ' +
+    'sign-in refuses an unverified address while it is on, so without a sender every new user would be stranded. ' +
+    'Users who already exist are recorded as verified when it is turned on, so they are not locked out.',
+    {
+      appName: { type: 'string', description: 'The name auth emails are branded with; empty falls back to the project name.' },
+      appUrl: { type: 'string', description: 'The app\'s base URL; password reset links land on it. Empty falls back to the published URL.' },
+      requireEmailVerification: { type: 'boolean', description: 'Refuse sign-in until the address is verified.' },
+      magicLinksEnabled: { type: 'boolean', description: 'Offer passwordless sign-in by emailed link.' },
+    },
+    []),
   fn('fix_backend',
     'Repair a broken subsystem. target: auth | api | table | deploy | realtime | storage | integration | workflow. Use when read_backend_state shows something is broken.',
     {
@@ -1046,9 +1058,11 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     'Returns the branch\'s PREVIEW ENDPOINT, ready to test: the base URL (the same as production), a client key ' +
     'bound to the branch (shown once), the X-Backenly-Environment value every data response will carry, an OpenAPI ' +
     'URL, and instructions to hand to a test. That key reads and writes the branch through the data API (/db and ' +
-    '/api/v2) and is REFUSED by every other endpoint (auth, functions, storage, realtime) rather than served from ' +
-    'production. connect_branch issues more keys.\n' +
-    'Schema changes made with apply_migration, create_table or any other build tool still apply to main, not to a branch.',
+    '/api/v2) and runs end-user auth on the branch (signup, signin, refresh-token, logout — branch users only). ' +
+    'Functions, storage, realtime and the emailed auth flows REFUSE it rather than serve from production. ' +
+    'connect_branch issues more keys.\n' +
+    'Schema changes target the branch when apply_migration is called WITH its branchId; without one — and from ' +
+    'create_table or any other build tool — they still apply to main.',
     {
       name: { type: 'string', description: 'Branch name, e.g. "add-payments". Lowercase kebab-case.' },
       includeData: {
@@ -1170,9 +1184,19 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
 
   // ── Storage edit / delete ─────────────────────────────────────────────────
   fn('set_bucket_public',
-    'Flip a bucket public ↔ private. Public buckets serve files at a stable URL; private buckets require a signed URL. Changes apply immediately to all files.',
+    'Flip a bucket public ↔ private (shorthand for the public_read / private access policies). Public buckets serve files at a stable URL; private buckets require a signed URL. Changes apply immediately to all files. For owner_only or cdn_cacheable, use set_bucket_policy.',
     { bucketName: { type: 'string' }, isPublic: { type: 'boolean' } },
     ['bucketName', 'isPublic']),
+  fn('set_bucket_policy',
+    "Set a bucket's access policy — the field serving, upload clamping and the console all enforce. " +
+    'public_read: anyone with the URL reads objects marked public. cdn_cacheable: public_read plus aggressive caching. ' +
+    'private: signed URLs only. owner_only: each object is readable only by the end user who uploaded it (and operators). ' +
+    'The answer reports the enforced state read back from the bucket.',
+    {
+      bucketName: { type: 'string' },
+      policy: { type: 'string', enum: ['public_read', 'cdn_cacheable', 'private', 'owner_only'] },
+    },
+    ['bucketName', 'policy']),
   fn('delete_bucket',
     'DESTRUCTIVE. Delete a storage bucket AND every file inside it. Requires explicit user confirmation in the same turn.',
     { bucketName: { type: 'string' } },
@@ -1184,7 +1208,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
 
   // ── Connect Frontend ──────────────────────────────────────────────────────
   fn('connect_frontend',
-    'Connect a deployed frontend to this backend. Pass the frontend URL the user gave you ("app.acme.com", "https://app.replit.com/x", "localhost:3000"). The engine normalizes it to an exact origin, verifies the backend has been deployed, and (unless force=true) returns a confirmation prompt — the user must type CONNECT to proceed. Pin to the deployed backend version. Use whenever the user says "hook up my app at <url>", "connect my Replit / Lovable / Vercel frontend", "let app.x.com call my APIs".',
+    'Connect a frontend to this backend. Pass the frontend URL the user gave you ("app.acme.com", "https://app.replit.com/x", "localhost:3000"). The engine normalizes it to an exact origin and (unless force=true) returns a confirmation prompt — the user must type CONNECT to proceed. No publish is needed first: the API already answers, and the connection records the published version when there is one. Use whenever the user says "hook up my app at <url>", "connect my Replit / Lovable / Vercel frontend", "let app.x.com call my APIs".',
     {
       url: { type: 'string', description: 'The frontend URL the user named. Will be normalized to a CORS origin.' },
       force: { type: 'boolean', description: 'Set true ONLY when the user has already typed CONNECT in this turn — skips the confirmation gate.' },
@@ -1267,7 +1291,20 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     'a property of the key, not of the request, so there is no header or parameter that switches it later.',
     {
       description: { type: 'string', description: 'Human label, e.g. "web frontend" or "cron worker".' },
-      permissions: { type: 'array', items: { type: 'string' }, description: 'e.g. ["read:posts","write:posts"]. Default ["read:*"].' },
+      permissions: {
+        type: 'array',
+        items: { type: 'string', enum: ['read', 'write', 'ai-only'] },
+        description:
+          'The runtime reads exactly these values — there is no per-table scoping. Default ["read","write"].',
+      },
+      expiresInDays: {
+        type: 'integer',
+        minimum: 1,
+        maximum: 3650,
+        description:
+          'Optional. Omitted means the key NEVER expires (same as dashboard keys). When set, the runtime ' +
+          'refuses the key after this many days and the response says the exact date.',
+      },
       serviceRole: {
         type: 'boolean',
         description:
@@ -1291,10 +1328,10 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     { keyId: { type: 'string' } },
     ['keyId']),
   fn('set_key_permissions',
-    'Update the permission set on an existing API key (e.g. add write access to a new table).',
+    "Replace a publishable key's permission set. Vocabulary: read, write, ai-only — the whole set the runtime reads; there is no per-table scoping. 'admin' is not grantable here (it passes every gate; that escalation belongs to the project owner in Settings), and service-role keys are refused because their access is not permission-driven.",
     {
       keyId: { type: 'string' },
-      permissions: { type: 'array', items: { type: 'string' } },
+      permissions: { type: 'array', items: { type: 'string', enum: ['read', 'write', 'ai-only'] } },
     },
     ['keyId', 'permissions']),
 
@@ -1309,6 +1346,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
       apiKey: { type: 'string', description: 'The secret to store (encrypted). Omit to trigger the inline "paste your key" prompt.' },
       label: { type: 'string', description: 'Optional human label, e.g. "Stripe live key".' },
       webhookSecret: { type: 'string', description: 'Stripe only: the endpoint signing secret (whsec_…). Until it is stored, the Stripe receiver rejects every event.' },
+      appId: { type: 'string', description: 'OneSignal only: the App ID, sent with the REST API key. Push stays off until both are stored.' },
     },
     ['integrationId']),
   fn('remove_integration_key',
@@ -1336,15 +1374,12 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     { jobId: { type: 'string' }, name: { type: 'string' } }),
 
   // ── Monitoring ────────────────────────────────────────────────────────────
-  fn('set_alert',
-    'Configure a monitoring alert. Supported channels: email + dashboard. Trigger types: error_rate, latency_p95, request_rate, integration_failure.',
-    {
-      type: { type: 'string', enum: ['error_rate', 'latency_p95', 'request_rate', 'integration_failure'] },
-      threshold: { type: 'number', description: 'Numeric threshold (e.g. 5 for "5% error rate", 800 for "800ms p95").' },
-      windowMinutes: { type: 'integer', minimum: 5, maximum: 1440 },
-      channel: { type: 'string', enum: ['email', 'dashboard', 'both'] },
-    },
-    ['type', 'threshold']),
+  // No set_alert: it stored config under project.activeIntegrations that
+  // nothing ever evaluates, so the agent was told an alert was "active" that
+  // could never fire — and its mapper sent `type` where the executor read
+  // `metric`, so even the storage path always failed. The MCP door already
+  // removed it (see lib/mcp/domains.ts); the brain follows. It returns when
+  // an evaluator exists.
 
   // ── Autonomy ──────────────────────────────────────────────────────────────
   fn('set_autonomy_level',
@@ -1505,6 +1540,7 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
   // dispatchTool() that handles the "no credentials yet → ask the user" flow.
   create_bucket: (a) => ({ action: 'CREATE_BUCKET', params: { bucketName: a.bucketName, isPublic: !!a.isPublic } }),
   set_bucket_public: (a) => ({ action: 'SET_BUCKET_PUBLIC', params: { bucketName: a.bucketName, isPublic: !!a.isPublic } }),
+  set_bucket_policy: (a) => ({ action: 'SET_BUCKET_POLICY', params: { bucketName: a.bucketName, policy: a.policy } }),
   // ── set_rls: the four commands arrive as top-level arguments ───────────────
   //
   // Flat `select`/`insert`/`update`/`delete` rather than a nested `commands`
@@ -1773,13 +1809,13 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
   // environment can be chosen — the data plane reads its schema from the
   // credential, never from the request. Dropping it here is what made branch
   // routing unreachable from the agent lane.
-  create_api_key: (a) => ({ action: 'CREATE_KEY', params: { description: a.description, permissions: a.permissions, serviceRole: a.serviceRole === true, branchId: a.branchId } }),
+  create_api_key: (a) => ({ action: 'CREATE_KEY', params: { description: a.description, permissions: a.permissions, serviceRole: a.serviceRole === true, branchId: a.branchId, expiresInDays: a.expiresInDays } }),
   revoke_api_key: (a) => ({ action: 'REVOKE_KEY', params: { keyId: a.keyId } }),
   rotate_api_key: (a) => ({ action: 'ROTATE_KEY', params: { keyId: a.keyId } }),
   set_key_permissions: (a) => ({ action: 'SET_KEY_PERMISSIONS', params: { keyId: a.keyId, permissions: a.permissions } }),
 
   // Integrations
-  store_integration_key: (a) => ({ action: 'STORE_INTEGRATION_KEY', params: { integrationId: a.integrationId, apiKey: a.apiKey, label: a.label, webhookSecret: a.webhookSecret } }),
+  store_integration_key: (a) => ({ action: 'STORE_INTEGRATION_KEY', params: { integrationId: a.integrationId, apiKey: a.apiKey, label: a.label, webhookSecret: a.webhookSecret, appId: a.appId } }),
   remove_integration_key: (a) => ({ action: 'REMOVE_INTEGRATION_KEY', params: { integrationId: a.integrationId } }),
   delete_trigger: (a) => ({ action: 'DELETE_TRIGGER', params: { triggerId: a.triggerId, name: a.name } }),
 
@@ -1788,11 +1824,6 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
   delete_ai_function: (a) => ({ action: 'DELETE_AI_FUNCTION', params: { functionId: a.functionId, name: a.name } }),
   delete_cron_job: (a) => ({ action: 'DELETE_CRON_JOB', params: { jobId: a.jobId, name: a.name } }),
 
-  // Monitoring
-  set_alert: (a) => ({
-    action: 'SET_ALERT',
-    params: { type: a.type, threshold: a.threshold, windowMinutes: a.windowMinutes, channel: a.channel || 'dashboard' },
-  }),
 }
 
 const FIX_TARGET_TO_ACTION: Record<string, AIAction['action']> = {
@@ -2206,7 +2237,12 @@ export async function dispatchTool(
             : '  • No key was issued: call connect_branch for one.',
           `  • Every data response carries ${endpoint.environmentHeader.name}: ${endpoint.environmentHeader.value}`,
           `  • Smoke test: ${preview.previewCurl(endpoint, 'your_table', keyText)}`,
-          `  • Only /db and /api/v2 are branch-scoped; auth, functions, storage and realtime refuse this key.`,
+          // Mirrors BRANCH_SCOPED_SURFACES (lib/branches/key-scope.ts) — the
+          // instructions in data.preview say the same; this line used to
+          // claim auth refuses the key while they said auth runs on the
+          // branch, in the same response.
+          `  • Branch-scoped: /db, /api/v2, and end-user auth (signup, signin, refresh-token, logout). ` +
+          `Functions, storage, realtime and the emailed auth flows refuse this key (403 BRANCH_SURFACE_UNAVAILABLE).`,
         ]
         return {
           summary: lines.join('\n'),
@@ -2747,6 +2783,7 @@ export async function dispatchTool(
         remove_auth_smtp: () => e.removeSmtp(actor),
         set_auth_email_template: () => e.setEmailTemplate(actor, args),
         reset_auth_email_template: () => e.resetEmailTemplate(actor, args),
+        set_auth_email_policy: () => e.setEmailPolicy(actor, args),
       }
       return finalize(await run[name]())
     }
@@ -3352,6 +3389,7 @@ export function humanTitle(name: string, args: Record<string, unknown>): string 
     case 'remove_auth_smtp': return 'Removing the auth email sender'
     case 'set_auth_email_template': return `Saving the ${args.kind ?? ''} email template`.replace(/  +/g, ' ')
     case 'reset_auth_email_template': return `Resetting the ${args.kind ?? ''} email template`.replace(/  +/g, ' ')
+    case 'set_auth_email_policy': return 'Saving the auth email policy'
     case 'verify_integration_key': return `Checking the ${args.integrationId ?? ''} key with its provider`.replace(/\s+/g, ' ')
     case 'fix_backend': return `Repairing ${args.target ?? 'backend'}`
     case 'apply_proposal': return 'Applying the recommendation list'
@@ -3381,6 +3419,7 @@ export function humanTitle(name: string, args: Record<string, unknown>): string 
     case 'get_autonomy_status': return 'Reading autonomy + trust report'
     case 'get_maintenance_ladder': return 'Reading the maintenance ladder'
     case 'set_bucket_public': return `Making ${args.bucketName ?? 'bucket'} ${args.isPublic ? 'public' : 'private'}`
+    case 'set_bucket_policy': return `Setting ${args.bucketName ?? 'bucket'} access policy to ${args.policy ?? '…'}`
     case 'delete_bucket': return `Deleting bucket ${args.bucketName ?? ''}`.trim()
     case 'delete_file': return `Deleting file ${args.path ?? ''}`.trim()
     case 'connect_frontend': return `Connecting frontend ${args.url ?? ''}`.trim()
@@ -3406,7 +3445,6 @@ export function humanTitle(name: string, args: Record<string, unknown>): string 
     case 'toggle_ai_function': return `${args.active ? 'Enabling' : 'Disabling'} function ${args.name ?? args.functionId ?? ''}`.trim()
     case 'delete_ai_function': return `Deleting function ${args.name ?? args.functionId ?? ''}`.trim()
     case 'delete_cron_job': return `Deleting job ${args.name ?? args.jobId ?? ''}`.trim()
-    case 'set_alert': return `Setting alert: ${args.type ?? ''} > ${args.threshold ?? ''}`
     case 'set_autonomy_level': return `Setting autonomy to ${args.level ?? ''}`
     case 'propose_plan': return 'Proposing a plan'
     case 'ask_user': return 'Asking for clarification'

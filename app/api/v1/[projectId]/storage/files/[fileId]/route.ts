@@ -35,38 +35,39 @@ async function handleGET(
       return capabilityCheck
     }
 
-    const file = await storageService.getFile(params.fileId, context.projectId)
-
-    if (!file) {
-      return createErrorResponse(
-        ErrorCodes.NOT_FOUND,
-        'File not found',
-        404
-      )
-    }
+    // Metadata comes from the ROW, never from the object. This used to call
+    // storageService.getFile — a full GetObject / fs.readFile into memory —
+    // just to report `buffer.length`, on the endpoint the SDK's getUrl hits
+    // before every download. A 2 GB object cost 2 GB of server memory per
+    // metadata request.
+    const row = await prisma.storageFile.findFirst({
+      where: { id: params.fileId, projectId: context.projectId, deletedAt: null },
+      select: {
+        name: true,
+        path: true,
+        size: true,
+        mimeType: true,
+        isPublic: true,
+        uploadedBy: true,
+        bucket: { select: { accessPolicy: true } },
+      },
+    })
 
     // The same per-object decision the download route makes. Without it, any
     // read key resolved any file id in a private or owner_only bucket to its
     // metadata and a working URL. Denied reads answer 404, not 403: a file id
     // must not become an existence oracle.
-    {
-      const { prisma } = await import('@/lib/db/prisma')
-      const row = await prisma.storageFile.findFirst({
-        where: { id: params.fileId, projectId: context.projectId },
-        select: { isPublic: true, uploadedBy: true, bucket: { select: { accessPolicy: true } } },
-      })
-      const { mayRead } = await import('@/lib/storage/access-policy')
-      const reader = context.endUserId
-        ? { kind: 'endUser' as const, userId: context.endUserId }
-        : context.apiKey.serviceRole || context.apiKey.role === 'admin'
-          ? { kind: 'operator' as const, userId: context.apiKey.userId }
-          : { kind: 'anonymous' as const }
-      const decision = row
-        ? mayRead({ bucketPolicy: row.bucket.accessPolicy, fileIsPublic: row.isPublic, uploadedBy: row.uploadedBy }, reader)
-        : { allowed: false }
-      if (!decision.allowed) {
-        return createErrorResponse(ErrorCodes.NOT_FOUND, 'File not found', 404)
-      }
+    const { mayRead } = await import('@/lib/storage/access-policy')
+    const reader = context.endUserId
+      ? { kind: 'endUser' as const, userId: context.endUserId }
+      : context.apiKey.serviceRole || context.apiKey.role === 'admin'
+        ? { kind: 'operator' as const, userId: context.apiKey.userId }
+        : { kind: 'anonymous' as const }
+    const decision = row
+      ? mayRead({ bucketPolicy: row.bucket.accessPolicy, fileIsPublic: row.isPublic, uploadedBy: row.uploadedBy }, reader)
+      : { allowed: false }
+    if (!row || !decision.allowed) {
+      return createErrorResponse(ErrorCodes.NOT_FOUND, 'File not found', 404)
     }
 
     // Get file URL
@@ -74,11 +75,11 @@ async function handleGET(
 
     return createSuccessResponse({
       id: params.fileId,
-      path: file.path,
+      path: row.path,
       url,
-      size: file.buffer.length,
-      contentType: file.mimeType,
-      name: file.name,
+      size: Number(row.size),
+      contentType: row.mimeType,
+      name: row.name,
     })
   } catch (error: any) {
     if (isStorageUnavailable(error)) {

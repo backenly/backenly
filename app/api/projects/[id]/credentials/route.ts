@@ -15,24 +15,14 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
-import { storeIntegrationKey } from '@/lib/services/integrationKeyStore'
+import { storeIntegrationKey, vaultIdForEnvVar } from '@/lib/services/integrationKeyStore'
 import { prisma } from '@/lib/db/prisma'
 import { WorkspaceOAuthService } from '@/lib/services/workspaceOAuth'
 
-// Maps env-var names (as used by CredentialModal) to canonical integration IDs
-const ENV_TO_INTEGRATION: Record<string, string> = {
-  STRIPE_SECRET_KEY:      'stripe',
-  STRIPE_WEBHOOK_SECRET:  'stripe_webhook_secret',  // must match integrationKeyStore lookup
-  RESEND_API_KEY:         'resend',
-  SENDGRID_API_KEY:       'sendgrid',
-  OPENAI_API_KEY:         'openai',
-  ANTHROPIC_API_KEY:      'anthropic',
-  POSTHOG_API_KEY:        'posthog',
-  GOOGLE_CLIENT_ID:       'google',
-  GOOGLE_CLIENT_SECRET:   'google',
-  GITHUB_CLIENT_ID:       'github',
-  GITHUB_CLIENT_SECRET:   'github',
-}
+// Every provider the end-user OAuth runtime serves (server/routes/oauth.ts).
+// A provider missing here saves its keys but never reaches workspaceOAuthConfig,
+// so the runtime keeps answering "not configured" — the AUTH-F7 failure mode.
+const OAUTH_PROVIDERS = ['google', 'github', 'discord', 'facebook']
 
 export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
@@ -60,10 +50,13 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
       const trimmed = rawKey?.trim()
       if (!trimmed) continue
 
-      // Store under the canonical integration ID
-      const canonicalId = ENV_TO_INTEGRATION[envVar] ?? integrationId
+      // One row, under the vault id every reader looks up. This used to write
+      // a second row under the lowercased env-var name, which listed as its
+      // own integration and kept Stripe connected after a disconnect; a lookup
+      // by env-var name now resolves to this row inside the key store.
+      const vaultId = vaultIdForEnvVar(envVar) ?? integrationId
       try {
-        await storeIntegrationKey(projectId, canonicalId, trimmed)
+        await storeIntegrationKey(projectId, vaultId, trimmed)
       } catch (err: any) {
         // Surface format/dangerous-secret errors as a proper 422 so the UI can
         // display the real message ("must start with sk_live_…") instead of a
@@ -72,19 +65,6 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
           { error: err?.message ?? 'Failed to store credential' },
           { status: err?.isFormatError ? 422 : 400 }
         )
-      }
-
-      // Also store by env-var lowercase so the execute route can look it up.
-      // Wrapped in try/catch: the canonical store above already succeeded; the alias
-      // is a convenience lookup and must not fail the request if the env-var name
-      // triggers a false-positive format validation (e.g. stripe_webhook_secret → stripe).
-      const envKey = envVar.toLowerCase()
-      if (envKey !== canonicalId) {
-        try {
-          await storeIntegrationKey(projectId, envKey, trimmed)
-        } catch {
-          // non-fatal — canonical key is already stored above
-        }
       }
 
       stored.push(envVar)
@@ -130,9 +110,10 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
     // We do BOTH: executeAction (which also adds OAuth columns to users table)
     // AND a direct WorkspaceOAuthService.upsertConfig call so the Auth page can
     // reliably read the enabled state even if executeAction fails silently.
-    if (integrationId === 'google' || integrationId === 'github') {
-      const clientId     = values['GOOGLE_CLIENT_ID']     || values['GITHUB_CLIENT_ID']
-      const clientSecret = values['GOOGLE_CLIENT_SECRET'] || values['GITHUB_CLIENT_SECRET']
+    if (OAUTH_PROVIDERS.includes(integrationId)) {
+      const envPrefix    = integrationId.toUpperCase()
+      const clientId     = values[`${envPrefix}_CLIENT_ID`]
+      const clientSecret = values[`${envPrefix}_CLIENT_SECRET`]
       if (clientId && clientSecret) {
         // Direct write first — guaranteed to reach the DB
         try {

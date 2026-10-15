@@ -25,6 +25,7 @@
 
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3'
 import { UploadRejectedError, assertFileAllowed, assertFileSize, uploadExtension } from '@/lib/storage/upload-policy'
+import { clampIsPublic } from '@/lib/storage/access-policy'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import { prisma } from '@/lib/db'
 import crypto from 'crypto'
@@ -263,6 +264,7 @@ export class S3StorageService implements StorageService {
         name: true,
         projectId: true,
         isPublic: true,
+        accessPolicy: true,
         allowedMimeTypes: true,
         allowedExtensions: true,
         blockExecutables: true,
@@ -440,7 +442,15 @@ export class S3StorageService implements StorageService {
           path: s3Key, // S3 key is stored as path
           size: BigInt(file.buffer.length),
           mimeType: detectedMimeType || null,
-          isPublic: options?.isPublic ?? bucket.isPublic,
+          // The bucket's policy is the ceiling at WRITE time, exactly as in
+          // the local driver: a caller-supplied `true` must not plant a
+          // world-readable row in a private bucket and leave the serving
+          // path to quietly clean up after it. This driver is the one Cloud
+          // runs, and it was the only writer without the clamp.
+          isPublic: clampIsPublic(
+            options?.isPublic,
+            bucket.accessPolicy ?? (bucket.isPublic ? 'public_read' : 'private'),
+          ),
           projectId: options.projectId,
           uploadedBy: options?.uploadedBy || null,
         },
@@ -513,6 +523,20 @@ export class S3StorageService implements StorageService {
         url: await this.getFileUrl(file.id, projectId, 3600),
       }))
     )
+  }
+
+  /**
+   * How many active files match — the same WHERE as listFiles. Counts the
+   * metadata DB, not S3, so it is cheap and identical across blob drivers.
+   */
+  async countFiles(bucketId: string | undefined, projectId: string, search?: string): Promise<number> {
+    if (!projectId) {
+      throw new Error('Project ID is required for tenant isolation')
+    }
+    const where: any = { projectId, deletedAt: null }
+    if (bucketId) where.bucketId = bucketId
+    if (search) where.name = { contains: search, mode: 'insensitive' }
+    return prisma.storageFile.count({ where })
   }
 
   async getFile(fileId: string, projectId: string) {

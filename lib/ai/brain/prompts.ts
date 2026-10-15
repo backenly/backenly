@@ -86,13 +86,13 @@ FULL-SURFACE COVERAGE (you can now operate every section):
 - APIs: generate_api, generate_aggregate_api, set_rate_limit, list_apis, run_test
 - Auth (end-user): enable_auth, add_oauth_provider, list_end_users, reset_end_user_password, block_end_user, add_rls, set_rls, list_permissions, remove_permission
 - Storage: create_bucket, set_bucket_public, list_buckets, list_files, generate_signed_url, delete_bucket, delete_file
-- Connect Frontend: connect_frontend (deployment-gated, confirmation-gated), disconnect_frontend, list_connected_apps. When the user names a frontend URL ("connect my Replit app at https://app.x.com", "hook up app.acme.com"), call connect_frontend with the URL — the engine handles deploy-check, normalization, and the CONNECT confirmation prompt. After the user replies "CONNECT" verbatim, call it again with force:true.
+- Connect Frontend: connect_frontend (confirmation-gated; works before a first publish), disconnect_frontend, list_connected_apps. When the user names a frontend URL ("connect my Replit app at https://app.x.com", "hook up app.acme.com"), call connect_frontend with the URL — the engine handles normalization and the CONNECT confirmation prompt. After the user replies "CONNECT" verbatim, call it again with force:true.
 - Publish / Deploy: trigger_deploy and rollback_deploy (each waits for a person: calling one queues it for the project owner to approve in the dashboard, and nothing typed in chat approves it), get_readiness (call BEFORE trigger_deploy so you can name the exact blockers), get_deploy_status (verify a deploy after it has been approved and has run), set_env_var / list_env_vars / delete_env_var (encrypted per-project secrets, exposed to AI functions as ctx.env.KEY)
 - Integrations: store_integration_key, list_integration_keys, remove_integration_key, enable_push_notifications, send_push, create_trigger (kind "webhook" REQUIRES webhookUrl), list_triggers, delete_trigger
 - Webhooks (signed HTTP callbacks on row events — "send a webhook to <url> when …"): create_webhook, list_webhooks, delete_webhook, rotate_webhook_secret, list_webhook_deliveries, replay_webhook_delivery
 - Realtime: get_realtime_status (read which tables stream + who is online), enable_realtime, disable_realtime
 - Functions: generate_function (ALWAYS pass a trigger — on_signup / on_insert / on_update / on_delete for behaviour that should happen automatically on an event, http for a directly-callable endpoint), list_ai_functions, toggle_ai_function, delete_ai_function, create_cron_job (recurring time-based jobs), list_cron_jobs, delete_cron_job
-- Monitoring: get_metrics, get_errors, get_usage, set_alert
+- Monitoring: get_metrics, get_errors, get_usage
 - IAM (platform API keys): create_api_key, list_api_keys, set_key_permissions, rotate_api_key, revoke_api_key
 - Autonomy: get_autonomy_status, set_autonomy_level
 

@@ -279,6 +279,11 @@ export default function PublishPage() {
   const endpointCount = backendState?.endpointCount ?? (backendState?.apis.length ?? 0) * 5
   const tableCount = backendState?.entities.length ?? 0
   const apiResourceCount = backendState?.apis.length ?? 0
+  // What the publish ENGINE will accept (lib/deployment/go-live.ts refuses
+  // when tables, exposed APIs and auth are all absent). hasContent is wider —
+  // functions, buckets or realtime alone flip it — and offering Publish on
+  // that wider set meant the button led straight to a refusal.
+  const publishable = tableCount > 0 || apiResourceCount > 0 || hasAuth
 
   const passingChecks = readinessChecks.filter(c => c.status === 'pass').length
   const blockingChecks = readinessChecks.filter(c => c.status === 'fail' && c.severity === 'blocking')
@@ -595,8 +600,12 @@ export default function PublishPage() {
           <KitColumns
             main={
               <SettingsCard
-                title="Ready to go live"
-                description="Publishing snapshots the backend as version one and marks the project live. The API is already answering, and keeps serving later changes as they are made; publish again to record the next version."
+                title={publishable ? 'Ready to go live' : 'Serving, not yet publishable'}
+                description={
+                  publishable
+                    ? 'Publishing snapshots the backend as version one and marks the project live. The API is already answering, and keeps serving later changes as they are made; publish again to record the next version.'
+                    : 'Functions, storage and realtime are already serving. Publishing records a schema snapshot, so it needs at least one table, a generated API or enabled auth first.'
+                }
                 footer={
                   <span className="flex flex-wrap items-center gap-x-4 gap-y-1 tabular-nums">
                     {tableCount > 0 && <span>{tableCount} {tableCount === 1 ? 'table' : 'tables'}</span>}
@@ -605,7 +614,7 @@ export default function PublishPage() {
                     {hasStorage && <span>Storage</span>}
                   </span>
                 }
-                actions={publishButton('Publish backend')}
+                actions={publishable ? publishButton('Publish backend') : undefined}
               />
             }
             side={readinessPanel('Before you publish')}

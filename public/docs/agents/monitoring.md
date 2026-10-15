@@ -2,7 +2,7 @@
 
 Index: https://backenly.com/llms.txt
 
-Latency percentiles, error rate, anomaly detection, per-endpoint health and incident history, from the project's own request log.
+Latency percentiles, error rate, per-endpoint health and incident history, from the project's own request log. Unusual-behaviour detection runs in the autonomy loop and surfaces on the Autonomy page, not here.
 
 ## Actions
 

@@ -64,7 +64,10 @@ export async function GET(
     // Cap at 12 to keep the dashboard card lean; the kernel already sorts
     // heaviest-first. The size total is summed over ALL tables, not the slice —
     // a project with 30 tables must not report only the top 12's bytes.
-    const tables: TableStat[] = (tableStats ?? []).slice(0, 12).map((s) => ({
+    const tables: TableStat[] = (tableStats ?? []).slice(0, 12)
+    // The slice keeps the card lean; the COUNT must be the real one — the
+    // card once rendered '12 Tables' for a 15-table backend.
+    const tableCount = (tableStats ?? []).length.map((s) => ({
       name: s.name,
       rowCount: s.rows,
       estimated: s.estimated,
@@ -78,7 +81,7 @@ export async function GET(
 
     return NextResponse.json({
       success: true,
-      data: { tables, buckets, summary },
+      data: { tables, tableCount, buckets, summary },
     })
   })
 }
@@ -100,6 +103,7 @@ async function countEndUsers(projectId: string): Promise<number | null> {
   // Service-role: the users table is RLS-FORCED with a service-role-only
   // policy. Ownership was already proven by withProjectValidation above.
   const rows = await executeWithUserContext<{ count: number }>(
+    projectId,
     '',
     true,
     `SELECT COUNT(*)::int AS count FROM "${schema.schemaName}"."users" WHERE ${where.join(' AND ')}`,

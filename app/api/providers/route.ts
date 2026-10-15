@@ -2,8 +2,14 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/postgres'
-import { requireAuth } from '@/lib/auth/middleware'
+import { requireAdmin } from '@/lib/auth/middleware'
+import { redactProvider } from './[providerId]/route'
 import { z } from 'zod'
+
+// Platform AuthProvider rows carry the deployment's OAuth clientSecret. The
+// sibling [providerId] route fixed this exact hole (requireAuth result
+// discarded, whole row returned) and documents why the secret never goes to a
+// browser; this collection route had the same shape and kept it.
 
 const createProviderSchema = z.object({
   name: z.enum(['email', 'google', 'github', 'microsoft']),
@@ -20,13 +26,14 @@ const createProviderSchema = z.object({
 
 export async function GET(request: NextRequest) {
   try {
-    await requireAuth(request)
-    
+    const adminError = await requireAdmin(request)
+    if (adminError) return adminError
+
     const providers = await prisma.authProvider.findMany({
       orderBy: { name: 'asc' },
     })
-    
-    return NextResponse.json({ providers })
+
+    return NextResponse.json({ providers: providers.map(redactProvider) })
   } catch (error) {
     console.error('Get providers error:', error)
     return NextResponse.json(
@@ -38,7 +45,8 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    await requireAuth(request)
+    const adminError = await requireAdmin(request)
+    if (adminError) return adminError
     const body = await request.json()
     const validated = createProviderSchema.parse(body)
     
@@ -57,7 +65,7 @@ export async function POST(request: NextRequest) {
       },
     })
     
-    return NextResponse.json({ provider }, { status: 201 })
+    return NextResponse.json({ provider: redactProvider(provider) }, { status: 201 })
   } catch (error) {
     if (error instanceof z.ZodError) {
       return NextResponse.json(

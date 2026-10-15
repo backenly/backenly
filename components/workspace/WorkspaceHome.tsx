@@ -143,6 +143,8 @@ interface HealthData {
 
 interface DashboardStats {
   tables:  Array<{ name: string; rowCount: number }>
+  /** The REAL table total — `tables` is sliced to 12 for the card. */
+  tableCount?: number
   buckets: Array<{ name: string; totalBytes: number; fileCount: number; isPublic: boolean }>
   /** Headline counters for the resource cards. null members → render '—'. */
   summary?: { endUsers: number | null; dbBytes: number | null }
@@ -453,7 +455,10 @@ export function WorkspaceHome({
   // Table count: the live stats when they've landed, else the server-rendered
   // list, so the card shows a real number on first paint instead of a dash
   // that resolves a second later.
-  const tableCount   = stats?.tables ? stats.tables.length : tables.length
+  // dashboard-stats slices its tables array to 12 for the card; the COUNT is
+  // the real total it sends alongside. Falling back to the slice's length
+  // capped a 15-table backend at '12 Tables'.
+  const tableCount   = stats?.tableCount ?? (stats?.tables ? stats.tables.length : tables.length)
   const bucketCount  = stats?.buckets ? stats.buckets.length : storageBuckets
   const storageBytes = stats?.buckets
     ? stats.buckets.reduce((acc, b) => acc + b.totalBytes, 0)

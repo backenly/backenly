@@ -286,10 +286,18 @@ async function _scheduleRetry(
 export async function retryFailedWebhooks(): Promise<number> {
   const now = new Date()
 
+  // A PENDING row older than this had its first attempt interrupted (crash
+  // or restart between creating the log and the fetch resolving). Its outbox
+  // row is already gone, so nothing else will ever touch it: without this
+  // sweep it sat PENDING forever — never retried, never dead-lettered.
+  const STUCK_PENDING_MS = 10 * 60 * 1000
+
   const pending = await prisma.webhookLog.findMany({
     where: {
-      status: 'RETRYING',
-      nextRetryAt: { lte: now },
+      OR: [
+        { status: 'RETRYING', nextRetryAt: { lte: now } },
+        { status: 'PENDING', createdAt: { lte: new Date(now.getTime() - STUCK_PENDING_MS) } },
+      ],
       attemptCount: { lt: MAX_ATTEMPTS },
       // Pausing cancels these; this keeps one created by a drain that was
       // already in flight from being delivered before that cancellation lands.

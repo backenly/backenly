@@ -97,8 +97,13 @@ const DEPENDENCY_SPECS: Record<string, DependencySpec> = {
     requiredKeys: ['resend'],
     requiredTables: [],
     suggestedTables: [{ name: 'email_events', unlocks: 'delivery/open tracking stored in your own schema.' }],
-    // send-transactional-email is always created; welcome-email is only created when auth is enabled
-    requiredFunctionPatterns: ['send-transactional-email'],
+    // No required functions. 'send-transactional-email' was created only by
+    // the retired dispatchIntegration executor, which the live MCP connect
+    // path never calls — requiring it here blocked readiness forever with a
+    // next step ("store the key to auto-wire it") that cannot be satisfied.
+    // A stored, verified key IS ready: functions reach it as
+    // ctx.integrations.resend without any pre-created helper.
+    requiredFunctionPatterns: [],
   },
   openai: {
     description: 'OpenAI',
@@ -135,7 +140,9 @@ const DEPENDENCY_SPECS: Record<string, DependencySpec> = {
     requiredKeys: ['posthog'],
     requiredTables: [],
     suggestedTables: [{ name: 'analytics_events', unlocks: 'mirroring captured events into your own schema for SQL queries.' }],
-    requiredFunctionPatterns: ['posthog-capture', 'posthog-identify'],
+    // Same reasoning as resend: posthog-capture/posthog-identify exist only in
+    // the retired executor's output. The stored key is the readiness fact.
+    requiredFunctionPatterns: [],
   },
 }
 

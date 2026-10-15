@@ -81,7 +81,7 @@ interface TrustReport {
 // rows render as Autopilot; a legacy OFF row lights neither card and shows
 // "Off" in the header until the owner picks a mode.
 const LEVELS: { id: Level; label: string; blurb: string }[] = [
-  { id: 'CONSERVATIVE', label: 'Review-only', blurb: 'Every change waits for your one-click approval.' },
+  { id: 'CONSERVATIVE', label: 'Review-only', blurb: 'Visible changes wait for your one-click approval. Silent additive repairs (indexes, API definitions) still apply.' },
   {
     id: 'AGGRESSIVE',
     label: 'Autopilot',

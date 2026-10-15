@@ -16,6 +16,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
+import { redactRows } from './read-query'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { explainDbError, type QueryContext } from '@/lib/db/query-errors'
 
@@ -31,12 +32,13 @@ import { explainDbError, type QueryContext } from '@/lib/db/query-errors'
  * ("bypasses end-user RLS").
  */
 async function runAsServiceRole<T = any>(
+  projectId: string,
   sql: string,
   values: unknown[] = [],
   ctx?: QueryContext,
 ): Promise<T[]> {
   try {
-    return await executeWithUserContext<T>('', true, sql, values)
+    return await executeWithUserContext<T>(projectId, '', true, sql, values)
   } catch (err) {
     // Pass the bind context so the error can name the offending column even
     // when PostgreSQL reported only a type and a value (SQLSTATE 22007/22P02).
@@ -289,10 +291,20 @@ export async function dbQuery(projectId: string, input: DbQueryInput) {
 
   const sql =
     `SELECT * FROM "${schema}"."${table}"${where.sql}${orderBy} LIMIT ${limit} OFFSET ${offset}`
-  const rows = await runAsServiceRole(sql, where.values, {
+  const rows = await runAsServiceRole(projectId, sql, where.values, {
     table, columns: Object.keys(input.filter ?? {}), values: where.values, types,
   })
-  return { rows: Array.isArray(rows) ? rows : [], count: Array.isArray(rows) ? rows.length : 0 }
+  // Secret columns never land in an agent transcript. run_query redacts for
+  // exactly this reason; db_query returned the end-user `users` table —
+  // bcrypt hashes included — verbatim. Values are replaced, not dropped, so
+  // the shape still says the column exists.
+  const list = Array.isArray(rows) ? rows : []
+  const { rows: safeRows, redactedColumns } = redactRows(list as Record<string, unknown>[])
+  return {
+    rows: safeRows,
+    count: list.length,
+    ...(redactedColumns.length > 0 ? { redactedColumns } : {}),
+  }
 }
 
 export interface DbInsertInput {
@@ -316,8 +328,10 @@ export async function dbInsert(projectId: string, input: DbInsertInput) {
   const placeholders = cols.map((c, i) => `$${i + 1}${castSuffix(types.get(c))}`).join(', ')
   const values = cols.map((c) => coerceValue(types.get(c), (row as any)[c]))
   const sql = `INSERT INTO "${schema}"."${table}" (${colList}) VALUES (${placeholders}) RETURNING *`
-  const result = await runAsServiceRole(sql, values, { table, columns: cols, values, types })
-  return { row: Array.isArray(result) ? result[0] : null }
+  const result = await runAsServiceRole(projectId, sql, values, { table, columns: cols, values, types })
+  const returned = Array.isArray(result) && result[0] ? [result[0] as Record<string, unknown>] : []
+  const { rows: safeRows, redactedColumns } = redactRows(returned)
+  return { row: safeRows[0] ?? null, ...(redactedColumns.length > 0 ? { redactedColumns } : {}) }
 }
 
 export interface DbUpdateInput {
@@ -358,14 +372,15 @@ export async function dbUpdate(projectId: string, input: DbUpdateInput) {
   if (!where.sql) throw new Error('`filter` is required (refusing table-wide UPDATE).')
 
   const sql = `UPDATE "${schema}"."${table}" SET ${setSqlParts.join(', ')}${where.sql} RETURNING *`
-  const result = await runAsServiceRole(sql, [...setValues, ...where.values], {
+  const result = await runAsServiceRole(projectId, sql, [...setValues, ...where.values], {
     table,
     columns: [...setCols, ...Object.keys(input.filter ?? {})],
     values: [...setValues, ...where.values],
     types,
   })
   const rows = Array.isArray(result) ? result : []
-  return { updated: rows.length, rows }
+  const { rows: safeRows, redactedColumns } = redactRows(rows as Record<string, unknown>[])
+  return { updated: rows.length, rows: safeRows, ...(redactedColumns.length > 0 ? { redactedColumns } : {}) }
 }
 
 export interface DbDeleteInput {
@@ -391,7 +406,7 @@ export async function dbDelete(projectId: string, input: DbDeleteInput) {
   if (!where.sql) throw new Error('`filter` is required (refusing table-wide DELETE).')
 
   const sql = `DELETE FROM "${schema}"."${table}"${where.sql} RETURNING id`
-  const result = await runAsServiceRole(sql, where.values, {
+  const result = await runAsServiceRole(projectId, sql, where.values, {
     table, columns: Object.keys(input.filter ?? {}), values: where.values, types,
   })
   const rows = Array.isArray(result) ? result : []

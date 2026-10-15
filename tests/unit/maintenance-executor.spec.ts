@@ -154,6 +154,15 @@ jest.mock('@/lib/autonomy/maintenance/single-flight', () => ({
   closeMaintenanceLockPool: async () => {},
 }))
 
+// The workspace pool asks which region holds a project's data before it
+// connects (lib/data-plane/regional.ts), and that lookup is a platform-database
+// read. There is no database here and a failed read takes about two seconds,
+// so it is answered as the home region: the pool then reaches exactly the
+// connection it always did, in the time it always did.
+jest.mock('@/lib/data-plane/regional', () => ({
+  projectDatabaseUrl: async () => process.env.DATABASE_URL,
+}))
+
 const mockEnqueue = jest.fn(async () => ({ id: 'job-1' }))
 jest.mock('@/lib/queue', () => ({ enqueue: (...a: any[]) => mockEnqueue(...(a as [])) }))
 

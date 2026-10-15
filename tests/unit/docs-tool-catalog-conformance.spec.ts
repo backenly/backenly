@@ -122,12 +122,18 @@ describe('the agent docs describe the real MCP surface', () => {
     const rlsTemplates = new Set<string>(
       ((addRls?.function?.parameters as any)?.properties?.policy?.enum ?? []) as string[],
     )
+    // Bucket access policy names, likewise from the set_bucket_policy enum.
+    const setBucketPolicy = BRAIN_TOOLS.find((t) => t.function?.name === 'set_bucket_policy')
+    const accessPolicies = new Set<string>(
+      ((setBucketPolicy?.function?.parameters as any)?.properties?.policy?.enum ?? []) as string[],
+    )
     const suspicious = [...mentionedTools()].filter(
       (name) =>
         name.includes('_') &&
         !realTools.has(name) &&
         !KNOWN_NON_TOOLS.has(name) &&
         !rlsTemplates.has(name) &&
+        !accessPolicies.has(name) &&
         !DOMAIN_ACTIONS.has(name),
     )
     expect(suspicious).toEqual([])

@@ -128,8 +128,8 @@ async function handleGET(request: NextRequest, props: { params: Promise<{ projec
     const dataSql  = `SELECT * FROM "${schemaName}"."${tableName}" ${whereClause} ${orderByClause} LIMIT ${limit} OFFSET ${effectiveOffset}`
 
     const [countResult, rows] = await Promise.all([
-      executeWithUserContext<{ count: number }>(context.endUserId ?? '', context.apiKey.serviceRole, countSql, filterValues, context.endUserRole ?? 'user'),
-      executeWithUserContext<any>(context.endUserId ?? '', context.apiKey.serviceRole, dataSql, filterValues, context.endUserRole ?? 'user'),
+      executeWithUserContext<{ count: number }>(context.projectId, context.endUserId ?? '', context.apiKey.serviceRole, countSql, filterValues, context.endUserRole ?? 'user'),
+      executeWithUserContext<any>(context.projectId, context.endUserId ?? '', context.apiKey.serviceRole, dataSql, filterValues, context.endUserRole ?? 'user'),
     ])
 
     const total = countResult[0]?.count ?? 0
@@ -267,8 +267,8 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     const dataSql  = `SELECT ${selectClause} FROM "${schemaName}"."${tableName}" ${whereClause} ${orderByClause} LIMIT ${Number(limit)} OFFSET ${Number(offset)}`
 
     const [countResult, rows] = await Promise.all([
-      executeWithUserContext<{ count: number }>(context.endUserId ?? '', context.apiKey.serviceRole, countSql, whereValues, context.endUserRole ?? 'user'),
-      executeWithUserContext<any>(context.endUserId ?? '', context.apiKey.serviceRole, dataSql, whereValues, context.endUserRole ?? 'user'),
+      executeWithUserContext<{ count: number }>(context.projectId, context.endUserId ?? '', context.apiKey.serviceRole, countSql, whereValues, context.endUserRole ?? 'user'),
+      executeWithUserContext<any>(context.projectId, context.endUserId ?? '', context.apiKey.serviceRole, dataSql, whereValues, context.endUserRole ?? 'user'),
     ])
 
     const total = countResult[0]?.count ?? 0

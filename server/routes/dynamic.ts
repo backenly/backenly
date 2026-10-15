@@ -205,6 +205,15 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
         ? { id: key.branch.id, name: key.branch.name, schemaName: key.branch.schemaName }
         : null
       const endUser = await resolveEndUserFromToken(key.projectId, userToken, branch)
+      if (endUser === 'blocked') {
+        // The promised behavior of block_end_user: a 403 on the next
+        // request, not a silent downgrade to the anonymous identity.
+        return {
+          success: false,
+          error: 'This account has been blocked by the project owner.',
+          code: 'END_USER_BLOCKED',
+        }
+      }
       if (endUser) {
         endUserId = endUser.userId
         userRole = endUser.role

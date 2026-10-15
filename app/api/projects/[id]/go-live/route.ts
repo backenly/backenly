@@ -68,9 +68,13 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
           { status: 422 }
         )
       }
+      // An engine REFUSAL (nothing to publish, a guard said no) is the
+      // caller's state, not a server fault: 422, so the page renders the
+      // reason instead of a generic "something went wrong" 500. Genuine
+      // exceptions still throw into the catch below and answer 500.
       return NextResponse.json(
         { success: false, error: result.error },
-        { status: result.error === 'Project not found' ? 404 : 500 }
+        { status: result.error === 'Project not found' ? 404 : 422 }
       )
     }
 

@@ -115,6 +115,7 @@ const FORWARD_MIGRATIONS = [
   '20261012130000_ai_credit_holds',
   '20261015120000_function_code_origin',
   '20261015120000_support_center',
+  '20261015130000_project_region',
 ]
 
 describe('the assembled migration workspace', () => {

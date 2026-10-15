@@ -29,7 +29,7 @@ Call as `connect { action: "<action>", … }`.
 
 ## Keys
 
-`create_api_key` returns the new key once. By default it is a publishable key: safe in a browser, it reads only what row-level security lets anonymous callers read and writes nothing without an end-user's `X-User-Token`. `serviceRole: true` makes a secret key that bypasses row-level security entirely, for servers only; one sent from a browser is refused. To rotate with no downtime, create the new key, move the app to it, then revoke the old one (`revoke_api_key` waits for a human). MCP keys for agents are issued in the dashboard only, by design, and read-only is chosen there. An app always uses a key from `create_api_key`, never an MCP key: the runtime API refuses MCP keys from anywhere with `MCP_KEY_IN_APP`.
+`create_api_key` returns the new key once. By default it is a publishable key: safe in a browser, it reads only what row-level security lets anonymous callers read and writes nothing without an end-user's `X-User-Token`. `serviceRole: true` makes a secret key that bypasses row-level security entirely, for servers only; one sent from a browser is refused. Keys never expire unless you pass `expiresInDays`; when you do, the response names the exact date the runtime starts refusing it. To rotate with no downtime, create the new key, move the app to it, then revoke the old one (`revoke_api_key` waits for a human). MCP keys for agents are issued in the dashboard only, by design, and read-only is chosen there. An app always uses a key from `create_api_key`, never an MCP key: the runtime API refuses MCP keys from anywhere with `MCP_KEY_IN_APP`.
 
 ## Environment variables
 

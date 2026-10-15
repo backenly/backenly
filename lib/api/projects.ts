@@ -24,6 +24,8 @@ export interface Project {
   updatedAt: Date
   /** Set while the project is paused for inactivity. Never set on a self-hosted deployment. */
   pausedAt?: Date | string | null
+  /** The Backenly Cloud region holding the project's data (lib/regions.ts). Null is the home region. */
+  region?: string | null
   metrics?: {
     totalFunctions: number
     totalTables: number

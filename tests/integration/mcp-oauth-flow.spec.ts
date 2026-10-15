@@ -40,7 +40,12 @@ const sha = (s: string) => crypto.createHash('sha256').update(s).digest('hex')
 const b64u = (b: Buffer) => b.toString('base64url')
 
 /** Minimal stand-in exposing only what these handlers touch. */
-const jsonReq = (body: unknown) => ({ json: async () => body }) as unknown as NextRequest
+const jsonReq = (body: unknown) =>
+  ({
+    json: async () => body,
+    // The register route now keys its per-source cap on the caller's address.
+    headers: { get: (k: string) => (k.toLowerCase() === 'x-forwarded-for' ? '192.0.2.77' : null) },
+  }) as unknown as NextRequest
 const formReq = (params: Record<string, string>) =>
   ({ text: async () => new URLSearchParams(params).toString() }) as unknown as NextRequest
 const bearerReq = (token: string) =>

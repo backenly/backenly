@@ -108,7 +108,7 @@ describe('the empty-backend guard', () => {
     const result = await goLive(projectId, ownerId) as GoLiveError
     
     expect(result.kind).toBe('error')
-    expect(result.error).toMatch(/no backend has been built yet/)
+    expect(result.error).toMatch(/Nothing to publish yet/)
   }, 30_000)
 
   it('admits a backend that only has auth enabled', async () => {
@@ -118,7 +118,7 @@ describe('the empty-backend guard', () => {
     // An auth-only project might fail readiness if it lacks a `users` table schema,
     // but the empty-backend guard itself must let it through.
     if (result.kind === 'error') {
-      expect((result as GoLiveError).error).not.toMatch(/no backend has been built yet/)
+      expect((result as GoLiveError).error).not.toMatch(/Nothing to publish yet/)
       expect((result as GoLiveError).error).toMatch(/Deployment blocked — readiness/)
     } else {
       const confirm = result as GoLiveConfirmation
@@ -132,7 +132,7 @@ describe('the empty-backend guard', () => {
     const result = await goLive(projectId, ownerId, { force: false })
     
     if (result.kind === 'error') {
-      expect((result as GoLiveError).error).not.toMatch(/no backend has been built yet/)
+      expect((result as GoLiveError).error).not.toMatch(/Nothing to publish yet/)
     } else {
       const confirm = result as GoLiveConfirmation
       expect(confirm.kind).toBe('confirmation')
@@ -146,7 +146,7 @@ describe('the empty-backend guard', () => {
     const result = await goLive(projectId, ownerId, { force: false })
     
     if (result.kind === 'error') {
-      expect((result as GoLiveError).error).not.toMatch(/no backend has been built yet/)
+      expect((result as GoLiveError).error).not.toMatch(/Nothing to publish yet/)
     } else {
       const confirm = result as GoLiveConfirmation
       expect(confirm.kind).toBe('confirmation')

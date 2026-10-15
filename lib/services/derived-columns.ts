@@ -37,7 +37,7 @@
  * trigger can never leave a session elevated.
  */
 
-import { prisma } from '@/lib/db'
+import { workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
 import { executeInWorkspaceSchema } from './workspaceDatabase'
 import { jwtClaimFunctionSql, SERVICE_ROLE } from '@/lib/postgrest/rls-translation'
 import { SAFE_IDENT } from '@/lib/db/sql-expression'
@@ -83,8 +83,8 @@ interface ColumnFact {
   isNullable: boolean
 }
 
-async function readColumns(schemaName: string, tableName: string): Promise<ColumnFact[]> {
-  const rows = await prisma.$queryRawUnsafe<Array<{ column_name: string; data_type: string; is_nullable: string }>>(
+async function readColumns(db: WorkspaceRawClient, schemaName: string, tableName: string): Promise<ColumnFact[]> {
+  const rows = await db.$queryRawUnsafe<Array<{ column_name: string; data_type: string; is_nullable: string }>>(
     `SELECT column_name, data_type, is_nullable
        FROM information_schema.columns
       WHERE table_schema = $1 AND table_name = $2`,
@@ -155,9 +155,13 @@ export async function applyDerivedColumn(
   }
 
   // ── Verify against the catalog BEFORE writing DDL ──────────────────────────
+  // The database holding the project's data, in its region. Resolved outside
+  // the catches below, so a region this process cannot reach is reported as
+  // itself rather than as "table does not exist".
+  const db = await workspaceRawClient(projectId)
   const [sourceCols, targetCols] = await Promise.all([
-    readColumns(schemaName, sourceTable).catch(() => [] as ColumnFact[]),
-    readColumns(schemaName, targetTable).catch(() => [] as ColumnFact[]),
+    readColumns(db, schemaName, sourceTable).catch(() => [] as ColumnFact[]),
+    readColumns(db, schemaName, targetTable).catch(() => [] as ColumnFact[]),
   ])
 
   if (sourceCols.length === 0) {
@@ -297,7 +301,7 @@ $bkn$;
     // A sync that only applies to future writes leaves every existing parent
     // wrong, which reads as "the feature does not work". The row count is
     // returned so the result is evidence rather than an assurance.
-    const backfilled = await prisma.$executeRawUnsafe(
+    const backfilled = await db.$executeRawUnsafe(
       `UPDATE ${fq(targetTable)} t
           SET "${targetColumn}" = COALESCE(
                 (SELECT ${aggregate} FROM ${fq(sourceTable)} s WHERE (s."${via}")::text = (t."id")::text),
@@ -306,7 +310,7 @@ $bkn$;
     )
 
     // ── Verify the trigger is actually in the catalog ────────────────────────
-    const installed = await prisma.$queryRawUnsafe<Array<{ tgname: string }>>(
+    const installed = await db.$queryRawUnsafe<Array<{ tgname: string }>>(
       `SELECT tgname FROM pg_trigger tg
          JOIN pg_class c ON c.oid = tg.tgrelid
          JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -393,8 +397,10 @@ export async function listDerivedColumns(
   projectId: string,
 ): Promise<Array<{ sourceTable: string; triggerName: string }>> {
   const schemaName = `workspace_${projectId}`
+  // Outside the try: an unreachable region is not "no derived columns".
+  const db = await workspaceRawClient(projectId)
   try {
-    const rows = await prisma.$queryRawUnsafe<Array<{ tgname: string; relname: string }>>(
+    const rows = await db.$queryRawUnsafe<Array<{ tgname: string; relname: string }>>(
       `SELECT tg.tgname, c.relname
          FROM pg_trigger tg
          JOIN pg_class c ON c.oid = tg.tgrelid

@@ -28,11 +28,12 @@ export async function POST(
     const body = await request.json().catch(() => ({}))
     const testEvent = body.event || {}
 
-    // Re-activate for manual run even if in error state
-    await prisma.aiFunction.update({
-      where: { id: params.functionId },
-      data: { status: 'active' },
-    })
+    // No status write here. The old pre-run `status: 'active'` flip silently
+    // re-enabled functions the owner had switched OFF — clicking Test run on
+    // a disabled function turned it back on for every public surface before
+    // a single line executed. The executor owns status: it refuses
+    // deliberately disabled functions, and a successful run already clears
+    // 'error' on its own.
 
     // testRun: the caller is the authenticated project OWNER, so the runner
     // injects the project's admin key + a short-lived project-scoped admin

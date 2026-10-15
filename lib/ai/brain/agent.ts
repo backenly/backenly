@@ -1131,8 +1131,21 @@ async function describeDanger(
       return { tool, target: `the \`${namedThing ?? 'unknown'}\` bucket and every file in it`, rowCount: null, reversible: false, confirmPhrase: `Confirm — delete the ${namedThing ?? ''} bucket`.trim() }
     case 'delete_file':
       return { tool, target: `the file \`${namedThing ?? 'unknown'}\``, rowCount: null, reversible: false, confirmPhrase: 'Confirm — delete the file' }
-    case 'disable_realtime':
-      return { tool, target: tableName ? `realtime on \`${tableName}\` (live subscribers disconnect)` : 'realtime (live subscribers disconnect)', rowCount: null, reversible: true, confirmPhrase: 'Confirm — disable realtime' }
+    case 'disable_realtime': {
+      if (tableName) {
+        return { tool, target: `realtime on \`${tableName}\` (live subscribers disconnect)`, rowCount: null, reversible: true, confirmPhrase: 'Confirm — disable realtime' }
+      }
+      // Project-wide: the card must name the blast radius, not a bare word.
+      let scope = 'every streaming table (live subscribers disconnect)'
+      try {
+        const { listTablesWithRealtimeTriggers } = await import('@/lib/services/realtimeTriggers')
+        const streaming = await listTablesWithRealtimeTriggers(projectId)
+        scope = streaming.length === 0
+          ? 'realtime project-wide — no table is currently streaming, so nothing disconnects'
+          : `realtime on EVERY streaming table (${streaming.length}: ${streaming.join(', ')}) — their live subscribers disconnect`
+      } catch { /* keep the generic scope */ }
+      return { tool, target: scope, rowCount: null, reversible: true, confirmPhrase: 'Confirm — disable realtime on every table' }
+    }
     case 'trigger_deploy':
       return { tool, target: 'a production deploy', rowCount: null, reversible: true, confirmPhrase: 'Confirm — deploy to production' }
     case 'rollback_deploy':
@@ -1157,6 +1170,32 @@ async function describeDanger(
       return { tool, target: 'a row-level security policy (data exposure may widen)', rowCount: null, reversible: true, confirmPhrase: 'Confirm — remove the permission' }
     case 'disable_oauth_provider':
       return { tool, target: `${namedThing ?? 'an OAuth'} sign-in (end-users on this provider cannot log in)`, rowCount: null, reversible: true, confirmPhrase: 'Confirm — disable the provider' }
+    case 'merge_branch':
+    case 'discard_branch': {
+      // The approval card is the only thing the human reads before a branch
+      // reaches (or loses) production — a bare `merge_branch` target made them
+      // approve blind. Resolve the branch name and statement count; if the
+      // lookup fails the generic shape below still names the id.
+      const branchId = str('branchId') ?? str('branch')
+      let branchName: string | null = null
+      let statementCount: number | null = null
+      if (branchId) {
+        try {
+          const { diffBranch } = await import('@/lib/branches/engine')
+          const diff = await diffBranch(projectId, branchId)
+          if (diff.ok) {
+            branchName = diff.branch
+            statementCount = diff.migrations.length
+          }
+        } catch { /* keep the id-based target */ }
+      }
+      const label = branchName ? `\`${branchName}\`` : `\`${branchId ?? 'unknown'}\``
+      if (tool === 'merge_branch') {
+        const count = statementCount === null ? '' : ` (${statementCount} statement${statementCount === 1 ? '' : 's'} reach production)`
+        return { tool, target: `merge of preview branch ${label} into production${count}`, rowCount: null, reversible: false, confirmPhrase: `Confirm — merge ${branchName ?? branchId ?? 'the branch'} into production`.trim() }
+      }
+      return { tool, target: `the preview branch ${label} and every unmerged change on it`, rowCount: null, reversible: false, confirmPhrase: `Confirm — discard ${branchName ?? branchId ?? 'the branch'}`.trim() }
+    }
     default:
       return { tool, target: `\`${tool}\``, rowCount: null, reversible: false, confirmPhrase: `Confirm — run ${tool}` }
   }

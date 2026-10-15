@@ -24,8 +24,8 @@ import { requireAdmin } from '@/lib/auth/middleware'
  * it turns every log, proxy and browser cache into another place it lives.
  */
 
-/** Never send the client secret to a browser. */
-function redactProvider<T extends { clientSecret?: string | null }>(provider: T) {
+/** Never send the client secret to a browser. Shared with the collection route. */
+export function redactProvider<T extends { clientSecret?: string | null }>(provider: T) {
   const { clientSecret, ...rest } = provider
   return { ...rest, clientSecretSet: Boolean(clientSecret) }
 }

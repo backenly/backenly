@@ -52,6 +52,7 @@ import {
   quoteIdent,
   workspaceSchemaName,
 } from '@/lib/security/workspace-schema'
+import { functionRoleName } from '@/lib/services/ai-functions/function-db-role'
 import { purgeProjectExternals } from '@/lib/projects/purge'
 import { PURGE_JOB_TYPE, PURGE_STATUS } from '@/lib/queue'
 import { purgeAccountState } from '@/lib/usage/account'
@@ -141,6 +142,109 @@ async function resolveProjectSchemas(tx: Tx, projectId: string): Promise<string[
   return schemas
 }
 
+// ── Rows the Project cascade cannot reach ────────────────────────────────────
+//
+// Dozens of models carry a bare `projectId` column with no relation to
+// Project, so `project.delete` left them behind: full DDL snapshots (rawDdl
+// that can recreate the schema), PITR/state graph snapshots, MCP OAuth codes
+// and access tokens, security events — after a deletion whose Settings copy
+// says "every receipt". The list is DERIVED from the Prisma schema at module
+// load, so a future model with a bare projectId is swept automatically instead
+// of quietly joining the orphan class.
+//
+// Deliberately NOT swept:
+const SWEEP_EXCLUDED: Record<string, string> = {
+  // A session belongs to the USER; projectId only records which project was
+  // open. Deleting the row would log the owner out mid-deletion — the pointer
+  // is nulled instead.
+  Session: 'nulled, not deleted',
+  // Billed usage happened and is owed by the billing ACCOUNT. The ledger rows
+  // must survive the project so the month still closes truthfully.
+  UsageDaily: 'billing ledger',
+  UsageMetric: 'billing ledger',
+  // Platform telemetry about Backenly itself, not customer content.
+  ProductEvent: 'platform telemetry',
+}
+
+/** Exported for the deletion test, which seeds and sweeps this exact list. */
+export const ORPHANED_PROJECT_MODELS: string[] = Prisma.dmmf.datamodel.models
+  .filter(
+    (m) =>
+      m.fields.some((f) => f.name === 'projectId' && f.kind === 'scalar') &&
+      !m.fields.some((f) => f.kind === 'object' && f.type === 'Project') &&
+      !(m.name in SWEEP_EXCLUDED),
+  )
+  .map((m) => m.name)
+
+/**
+ * Remove every row the cascade left behind. Runs AFTER the project (or user)
+ * row is deleted, inside the same transaction: by then every cascade-covered
+ * table is already empty, intra-model children (ApiUsageLog,
+ * MaintenanceStepExecution) are gone with their parents, and whatever still
+ * carries this projectId is precisely the orphan class being removed.
+ */
+async function sweepOrphanedProjectRows(tx: Tx, projectId: string): Promise<void> {
+  await tx.session.updateMany({ where: { projectId }, data: { projectId: null } })
+  for (const model of ORPHANED_PROJECT_MODELS) {
+    const delegate = (tx as any)[model.charAt(0).toLowerCase() + model.slice(1)]
+    await delegate.deleteMany({ where: { projectId } })
+  }
+}
+
+/**
+ * Drop the project's own PostgreSQL LOGIN roles.
+ *
+ * run_query provisions bkn_ro_<hex> for any project an agent queries, the
+ * owner may have enabled bkn_rw_<hex>, and the function runtime derives
+ * bkn_fn_<hex> per schema. None of these died with the project: the roles are
+ * cluster-level, pg_hba admits their group remotely, and the encrypted
+ * passwords sat in DatabaseCredential rows the cascade could not reach — so a
+ * contractor's psql kept logging in to the production cluster after the
+ * project was "permanently" deleted.
+ *
+ * Uses public.backenly_direct_drop_role (terminates sessions, strips
+ * policies, reassigns, drops) where the installer created it; otherwise a
+ * guarded manual drop. Existence is CHECKED rather than caught: an error
+ * inside the transaction would abort the whole deletion.
+ */
+async function dropProjectDatabaseRoles(tx: Tx, projectId: string, schemas: string[]): Promise<void> {
+  const credRoles = (
+    await tx.databaseCredential.findMany({ where: { projectId }, select: { roleName: true } })
+  ).map((r) => r.roleName)
+  const fnRoles = schemas.map((schema) => functionRoleName(schema))
+  const candidates = [...new Set([...credRoles, ...fnRoles])].filter((name) =>
+    /^bkn_(ro|rw|fn)_[0-9a-f]{12}$/.test(name),
+  )
+  if (candidates.length === 0) return
+
+  const helper = await tx.$queryRaw<{ n: number }[]>`
+    SELECT count(*)::int AS n FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = 'public' AND p.proname = 'backenly_direct_drop_role'`
+  const hasHelper = Number(helper[0]?.n ?? 0) > 0
+
+  for (const role of candidates) {
+    const exists = await tx.$queryRaw<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM pg_roles WHERE rolname = ${role}`
+    if (Number(exists[0]?.n ?? 0) === 0) continue
+
+    // The installer's helper validates its argument against the direct-access
+    // role shapes (bkn_ro_/bkn_rw_) and refuses bkn_fn_ — those take the
+    // manual path even where the helper exists.
+    if (hasHelper && /^bkn_(ro|rw)_/.test(role)) {
+      await tx.$queryRaw`SELECT public.backenly_direct_drop_role(${role})`
+    } else {
+      // The schemas are already dropped in this transaction, so the role's
+      // grants on them are gone; DROP OWNED clears anything else it holds.
+      await tx.$executeRawUnsafe(
+        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '${role}'`,
+      )
+      await tx.$executeRawUnsafe(`DROP OWNED BY ${quoteIdent(role)}`)
+      await tx.$executeRawUnsafe(`DROP ROLE IF EXISTS ${quoteIdent(role)}`)
+    }
+  }
+}
+
 /**
  * Drop every schema for one project and record the external work.
  *
@@ -159,6 +263,9 @@ async function purgeProjectInTransaction(
     // identifier cannot come from a request body: it came from pg_namespace.
     await tx.$executeRawUnsafe(`DROP SCHEMA IF EXISTS ${quoteIdent(schema)} CASCADE`)
   }
+
+  // After the schemas, so the roles hold no grants that would block the drop.
+  await dropProjectDatabaseRoles(tx, projectId, schemas)
 
   // Written inside the transaction: this is the outbox record, and it must
   // commit with the drops or not at all. Payload carries the project id and
@@ -270,8 +377,11 @@ export async function deleteProjectCompletely(projectId: string): Promise<Deleti
       const result = await purgeProjectInTransaction(tx, projectId)
 
       // Cascades every dependent Prisma table, including WorkspaceBranch and
-      // WorkspaceBackup. Last, so a constraint failure rolls back the drops.
+      // WorkspaceBackup — so a constraint failure rolls back the drops.
       await tx.project.delete({ where: { id: projectId } })
+
+      // After the cascade: whatever still carries this projectId is an orphan.
+      await sweepOrphanedProjectRows(tx, projectId)
 
       return result
     },
@@ -339,6 +449,11 @@ export async function deleteAccountCompletely(userId: string): Promise<DeletionR
 
       // Cascades the projects and everything under them.
       await tx.user.delete({ where: { id: userId } })
+
+      // After the cascade: sweep each project's orphaned rows.
+      for (const project of projects) {
+        await sweepOrphanedProjectRows(tx, project.id)
+      }
 
       return {
         projectIds: projects.map((p) => p.id),

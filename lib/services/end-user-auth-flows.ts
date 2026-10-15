@@ -26,6 +26,7 @@ import { hashPassword } from '@/lib/auth/password'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { ensureAuthUsersTable, introspectAuthUsersTable, stampLastLogin, isReservedTestEmail, userIdCast } from '@/lib/services/end-user-auth-table'
 import { trackEndUserActive } from '@/lib/quota/kernel'
+import { emitEndUserCreated } from '@/lib/services/end-user-auth-events'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import {
   mainAuthEnvironment,
@@ -137,6 +138,7 @@ export async function refreshEndUserToken(
     // id is bound as the column's own type: a bare $1 arrives as text, and on a
     // uuid `id` (the canonical shape) every refresh failed with 42883.
     const users = await executeWithUserContext<any>(
+      projectId,
       '',
       true,
       `SELECT ${selectCols.map(c => `"${c}"`).join(', ')} FROM "${schemaName}"."users" WHERE id = $1${userIdCast(schema)} LIMIT 1`,
@@ -308,6 +310,7 @@ export async function issueEndUserPasswordReset(
   // Look up user — do NOT leak existence via the response.
   // Service-role: caller has no session user id yet, RLS would hide the row.
   const users = await executeWithUserContext<{ id: string; email: string }>(
+    projectId,
     '',
     true,
     `SELECT id, email FROM "${schemaName}"."users" WHERE email = $1 LIMIT 1`,
@@ -419,6 +422,7 @@ export async function resetEndUserPassword(
 
     // Fetch the user — service-role since the caller is not yet authenticated.
     const users = await executeWithUserContext<any>(
+      projectId,
       '',
       true,
       `SELECT id, email, name FROM "${schemaName}"."users" WHERE email = $1 LIMIT 1`,
@@ -438,6 +442,7 @@ export async function resetEndUserPassword(
     const setParts = [`"${usersSchema.passwordColumn}" = $1`]
     if (usersSchema.updatedAtColumn) setParts.push(`"${usersSchema.updatedAtColumn}" = NOW()`)
     await executeWithUserContext(
+      projectId,
       '',
       true,
       `UPDATE "${schemaName}"."users"
@@ -571,6 +576,7 @@ export async function requestEmailVerification(projectId: string, emailRaw: unkn
     await ensureTokenTable(schemaName, '_email_verifications')
 
     const users = await executeWithUserContext<{ id: string; email_verified: boolean }>(
+      projectId,
       '', true,
       `SELECT id, "email_verified" FROM "${schemaName}"."users" WHERE email = $1 LIMIT 1`,
       [email],
@@ -623,6 +629,7 @@ export async function verifyEndUserEmail(projectId: string, tokenRaw: unknown): 
     if ('error' in consumed) return err('BAD_REQUEST', consumed.error, 400)
 
     await executeWithUserContext(
+      projectId,
       '', true,
       `UPDATE "${schemaName}"."users" SET "email_verified" = TRUE WHERE email = $1`,
       [consumed.email],
@@ -714,6 +721,7 @@ export async function verifyMagicLink(projectId: string, tokenRaw: unknown): Pro
     await ensureEmailVerifiedColumn(schemaName)
 
     let users = await executeWithUserContext<any>(
+      projectId,
       '', true,
       `SELECT id, email${usersSchema.hasName ? ', name' : ''}${usersSchema.hasRole ? ', role' : ''} FROM "${schemaName}"."users" WHERE email = $1 LIMIT 1`,
       [email],
@@ -729,13 +737,22 @@ export async function verifyMagicLink(projectId: string, tokenRaw: unknown): Pro
         name: email.split('@')[0],
         email_verified: true,
       })
-      users = await executeWithUserContext<any>('', true, plan.sql, plan.values)
+      users = await executeWithUserContext<any>(projectId, '', true, plan.sql, plan.values)
       if (users.length === 0) {
         return err('INTERNAL_ERROR', 'Failed to create account', 500)
       }
+      // A first magic-link sign-in IS a sign-up — subscribers to
+      // auth.user.created must hear about it like any password sign-up.
+      void emitEndUserCreated(projectId, {
+        id: users[0]?.id,
+        email,
+        name: users[0]?.name ?? null,
+        created_at: users[0]?.created_at,
+      })
     } else {
       // Clicking the emailed link proves inbox ownership.
       await executeWithUserContext(
+        projectId,
         '', true,
         `UPDATE "${schemaName}"."users" SET "email_verified" = TRUE WHERE email = $1`,
         [email],

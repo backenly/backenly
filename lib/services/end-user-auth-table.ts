@@ -172,6 +172,7 @@ export async function purgeSyntheticAuthArtifacts(
   let introspected = false
   try {
     const present = await executeWithUserContext<{ table_name: string }>(
+      projectId,
       '', true,
       `SELECT table_name FROM information_schema.tables WHERE table_schema = $1`,
       [schemaName],
@@ -190,6 +191,7 @@ export async function purgeSyntheticAuthArtifacts(
     if (introspected && !existing.has(table)) return
     try {
       const rows = await executeWithUserContext<{ x: number }>(
+        projectId,
         '', true,
         `DELETE FROM "${schemaName}"."${table}" WHERE ${where} RETURNING 1 AS x`,
         params,
@@ -215,6 +217,7 @@ export async function purgeSyntheticAuthArtifacts(
     if (!introspected || existing.has('users')) {
       try {
         const remaining = await executeWithUserContext<{ n: bigint }>(
+          projectId,
           '', true, `SELECT count(*)::bigint AS n FROM "${schemaName}"."users"`,
         )
         noUsers = remaining.length > 0 && Number(remaining[0].n) === 0
@@ -625,6 +628,7 @@ export async function stampLastLogin(
   // Add the column if a legacy table predates the contract. IF NOT EXISTS keeps
   // this idempotent and cheap; it is a no-op once the column is present.
   await executeWithUserContext(
+    projectId,
     '',
     true,
     `ALTER TABLE "${schemaName}"."users" ADD COLUMN IF NOT EXISTS "last_login" TIMESTAMP WITH TIME ZONE`,
@@ -636,6 +640,7 @@ export async function stampLastLogin(
   // for its VALUES, would break a text id that happens to hold a uuid. Matching
   // the column's type also keeps its primary-key index usable.
   const idType = await executeWithUserContext<{ data_type: string }>(
+    projectId,
     '',
     true,
     `SELECT data_type FROM information_schema.columns
@@ -647,6 +652,7 @@ export async function stampLastLogin(
     ? '::uuid'
     : ['smallint', 'integer', 'bigint'].includes(dataType) ? '::bigint' : ''
   await executeWithUserContext(
+    projectId,
     '',
     true,
     `UPDATE "${schemaName}"."users" SET "last_login" = NOW() WHERE id = $1${cast}`,

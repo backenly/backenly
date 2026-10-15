@@ -70,7 +70,8 @@ async function triggerOn(schema: string, table: string): Promise<boolean> {
 
 const enable = (projectId: string, tableName?: string) =>
   executeAction(
-    { action: 'ENABLE_REALTIME', params: { ...(tableName ? { tableName } : {}), confirmed: true } } as any,
+    // Project-wide is opt-in by name since enabling became per table.
+    { action: 'ENABLE_REALTIME', params: { ...(tableName ? { tableName } : { allTables: true }), confirmed: true } } as any,
     projectId
   )
 

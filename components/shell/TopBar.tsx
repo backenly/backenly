@@ -26,6 +26,7 @@ import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import { getProjects, type Project } from '@/lib/api/projects'
 import { BUTTON_BASE, BUTTON_VARIANTS, Kbd, StatusDot } from '@/components/inspector/kit'
 import { FOCUS, R_CONTROL } from '@/components/console/tokens'
+import { HOME_REGION, regionLabel } from '@/lib/regions'
 import { useAgentConnection } from '@/lib/hooks/useAgentConnection'
 import {
   AccountMenu,
@@ -191,7 +192,7 @@ export function TopBar() {
       <span
         title={
           CLOUD_CONTROL_PLANE
-            ? 'Backenly Cloud runs one environment, in AWS ap-south-1, today'
+            ? `Backenly Cloud runs one environment, in ${regionLabel(HOME_REGION)}, today`
             : 'This deployment runs one environment'
         }
         className="ml-1 hidden h-[22px] items-center gap-1.5 rounded-[5px] border border-white/[0.07] px-1.5 text-[12px] text-zinc-400 lg:inline-flex"

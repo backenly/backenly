@@ -551,6 +551,10 @@ const MEDIUM_RISK_EXECUTOR_ACTIONS = new Set([
   'DELETE_CRON_JOB', 'REMOVE_INTEGRATION_KEY', 'BLOCK_USER',
   'REMOVE_PERMISSION', 'DISABLE_REALTIME', 'DISABLE_PROVIDER',
   'TRIGGER_DEPLOY', 'SET_ENV_VAR', 'RESET_PASSWORD',
+  // Rewrites what a live credential may do. Escalation to 'admin' is refused
+  // outright in the executor; the remaining edits still reshape a key other
+  // clients hold, which is the same band as rotating one.
+  'SET_KEY_PERMISSIONS',
 ])
 
 export function riskLevelForExecutorAction(action: string): BackendRiskLevel {

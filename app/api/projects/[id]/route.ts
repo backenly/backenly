@@ -49,6 +49,8 @@ const PROJECT_RESPONSE_SELECT = {
   createdAt: true,
   updatedAt: true,
   pausedAt: true,
+  // Where the project's data lives (lib/regions.ts); null is the home region.
+  region: true,
   _count: { select: { tables: true, workspaces: true } },
 } as const
 

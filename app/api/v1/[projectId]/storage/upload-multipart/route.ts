@@ -341,17 +341,16 @@ async function handleComplete(request: NextRequest, uploadId: string, totalParts
   // Clean up temp chunks
   fs.rm(chunkDir, { recursive: true, force: true }).catch(() => null)
 
-  await prisma.storageFile.update({
-    where: { id: fileRecord.id },
-    data: { size: BigInt(assembled.length), metadata: { ...meta, url: storedFile.url, status: 'complete' } },
-  })
-
-  // Track storage usage (non-blocking)
-  incrementStorageUsed(projectId, BigInt(assembled.length)).catch(
-    (err: any) => console.warn('[Storage] Failed to increment storage usage:', err?.message)
+  // uploadFile wrote the REAL row (correct path, quota counted inside it).
+  // The pending tracking row is deleted, not kept: updating it in place left
+  // an active second row whose path `${uploadId}/${filename}` no reader can
+  // serve, and the extra incrementStorageUsed here counted the same bytes a
+  // second time. The id handed back is the row downloads actually resolve.
+  await prisma.storageFile.delete({ where: { id: fileRecord.id } }).catch(
+    (err: any) => console.warn('[Multipart] Could not remove pending record:', err?.message)
   )
 
-  return createSuccessResponse({ id: fileRecord.id, url: storedFile.url, path: fileRecord.path, size: assembled.length })
+  return createSuccessResponse({ id: storedFile.id, url: storedFile.url, path: storedFile.path, size: assembled.length })
 }
 
 // ── Route dispatcher ───────────────────────────────────────────────────────────

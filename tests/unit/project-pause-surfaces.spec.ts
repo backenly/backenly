@@ -152,10 +152,20 @@ describe('the MCP client does not retry a paused project', () => {
     expect(err.message).toContain('https://app.example.test/app/projects/p1')
   }, 30_000)
 
-  it('still retries an ordinary 503, so the rule above is not vacuous', async () => {
+  it('still retries an ordinary 503 on a GET, so the rule above is not vacuous', async () => {
+    // The control rides a GET: since the transport-hygiene pass, only GETs
+    // retry — a retried POST re-runs a mutation the server may have already
+    // applied. The next test pins that half.
+    hits = 0
+    body = { ok: false, error: 'Service unavailable' }
+    await client().manifest().catch(() => {})
+    expect(hits).toBe(3)
+  }, 30_000)
+
+  it('a POST 503 answers once — a retry would re-run the mutation', async () => {
     hits = 0
     body = { ok: false, error: 'Service unavailable' }
     await client().dbQuery({ table: 't' }).catch(() => {})
-    expect(hits).toBe(3)
+    expect(hits).toBe(1)
   }, 30_000)
 })

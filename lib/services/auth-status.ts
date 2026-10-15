@@ -1,7 +1,7 @@
 import { prisma } from '@/lib/db/prisma'
 import { loadGraph } from '@/lib/orchestration/backend-state-graph'
 
-export type AuthProviderId = 'email' | 'google' | 'github'
+export type AuthProviderId = 'email' | 'google' | 'github' | 'discord' | 'facebook'
 
 export interface AuthProviderStatus {
   id: AuthProviderId
@@ -19,7 +19,9 @@ export interface ProjectAuthStatus {
   status: AuthOverallStatus
 }
 
-const KNOWN_OAUTH_PROVIDERS: AuthProviderId[] = ['google', 'github']
+// Every OAuth provider the runtime serves (server/routes/oauth.ts). Listing a
+// subset here made /auth-state omit providers an agent had already activated.
+const KNOWN_OAUTH_PROVIDERS: AuthProviderId[] = ['google', 'github', 'discord', 'facebook']
 
 /**
  * Single source of truth for a project's auth status.
@@ -194,6 +196,8 @@ const PROVIDER_LABEL: Record<AuthProviderId, string> = {
   email: 'Email / Password',
   google: 'Google',
   github: 'GitHub',
+  discord: 'Discord',
+  facebook: 'Facebook',
 }
 
 /** Renders a status into the chip label shown on the dashboard, e.g.

@@ -216,19 +216,11 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     const oneTimeToken = crypto.randomBytes(32).toString('hex')
     const tokenExpiry = expiresAt.toISOString()
 
-    // Store token in DB (or in-memory cache in production you'd use Redis)
-    await prisma.storageFile.create({
-      data: {
-        bucketId: bucketRecord.id,
-        projectId: context.projectId,
-        name: safeFilename,
-        path: storagePath,
-        size: BigInt(contentLength),
-        mimeType: contentType,
-        isPublic: Boolean(isPublic),
-        metadata: { uploadId, status: 'pending', oneTimeToken, tokenExpiry },
-      },
-    }).catch(() => null) // non-fatal if file record already exists
+    // No pending StorageFile row here. Nothing ever consumed one — the
+    // fallback upload goes through POST /storage/upload, which creates the
+    // real row itself — so the row this used to create stayed active
+    // forever: a phantom object in every listing and count, at a path no
+    // reader could serve.
 
     const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'
 

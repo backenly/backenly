@@ -37,6 +37,7 @@ tests/bench/prisma-uuid-binding.spec.ts
 tests/build-runs/build-run-service.test.ts
 tests/build-runs/hydration.test.ts
 tests/integration/mcp-oauth-flow.spec.ts
+tests/integration/mcp-transport-hygiene.spec.ts
 tests/integration/webhook-delivery.spec.ts
 tests/integration/webhook-trigger-url-required.spec.ts
 tests/integration/state-webhooks-section.spec.ts
@@ -53,6 +54,18 @@ tests/integration/function-egress-guard.spec.ts
 tests/integration/function-row-events-data-plane.spec.ts
 tests/integration/project-route-response-shape.spec.ts
 tests/integration/realtime-sse-slot-release.spec.ts
+
+# Connect auto-wiring does what its receipt lists: Stripe adds the payment
+# columns and registers a webhook handler in the one shape the receiver fires,
+# email providers wire the on_signup welcome trigger only where auth exists,
+# and every connect syncs activeIntegrations. The live provider probe and the
+# LLM generator are the two stubbed seams; vault, executor and DDL are real.
+tests/integration/integrations-autowiring.spec.ts
+# Realtime surfaces CI can honestly cover: SSE tickets burn in the project's
+# real _token_blacklist ledger (single-use, expiry, project binding) and the
+# broadcast route enforces its payload cap over a real pg_notify. Frame
+# delivery through the LISTEN hub stays a staging case.
+tests/integration/realtime-ticket-broadcast.spec.ts
 tests/integration/export-database-rls.spec.ts
 tests/integration/postgres-admin.spec.ts
 
@@ -84,6 +97,7 @@ tests/integration/rate-limit-shared-store.spec.ts
 
 __tests__/projects/deletion-transaction.test.ts
 __tests__/projects/purge-outbox.test.ts
+tests/integration/project-deletion-complete.spec.ts
 
 # The ProjectResolver regression matrix (commit 2). Pins the behaviour the ~70
 # authorization call sites are being migrated TO, before they are migrated, so
@@ -136,6 +150,15 @@ __tests__/auth/workspace-download-authorization.test.ts
 # effect, ADMIN/OWNER allowed, masked key list stays a VIEWER read, and
 # single-tenant operators unaffected. Real sessions, resolver and guard.
 __tests__/auth/connect-credential-authorization.test.ts
+
+# Provider secrets: the platform AuthProvider collection is admin-only and
+# redacted, and per-project deploy-provider credentials are ADMIN-floored with
+# the decrypted material never leaving the server (INT-11 / INT-12).
+tests/integration/provider-credential-floors.spec.ts
+# Settings API keys are a PROJECT surface (admins see and revoke agent keys,
+# ex-members do not), and the withProjectAccess routes carry explicit floors:
+# share-report ADMIN, Supabase import DEVELOPER (SET-03 / SET-04).
+tests/integration/settings-keys-and-floors.spec.ts
 
 # Operate decisions (approve a parked agent request, run or undo a repair,
 # dismiss findings, set the autonomy dial, grant Tier-2 maintenance consent,
@@ -667,6 +690,8 @@ tests/integration/project-activity-clock.spec.ts
 # approves it. Runs as the cloud edition with only the plan lookup supplied,
 # because the single-tenant resolver rightly refuses a database of many projects.
 tests/integration/mcp-domain-operations.spec.ts
+tests/integration/dbtools-secret-redaction.spec.ts
+tests/integration/overview-truthful-counts.spec.ts
 
 # Sandbox function runs lost every ctx.log line, after a success and after a
 # failure: the worker sends them in the message that ends the run, and the
@@ -842,11 +867,108 @@ tests/integration/go-live-empty-guard.spec.ts
 # migration is applied, so a missing table never repeats the tour.
 tests/integration/tours-seen.spec.ts
 
+# The auth email policy is reachable from the agent's auth tool and from the
+# Auth page, through one service, and neither door can turn verification on
+# while no sender exists: real MCP keys, a real session cookie, real workspace
+# DDL for the grandfathered email_verified column.
+tests/integration/auth-email-policy.spec.ts
+
+# rotate_trigger_secret keeps its advertised contract: the docs print the
+# declared triggerName-or-triggerId alternative instead of "nothing", the
+# new secret rides data.secret and really rotates the row, and a call with
+# neither argument still refuses. A real AppTrigger row is the property.
+tests/integration/rotate-secret-contract.spec.ts
+# Webhook capture and delivery fail loudly or not at all: the sync names the
+# tables it could not capture and both callers surface them, and a PENDING
+# delivery whose first attempt died is swept to a real retry while a fresh
+# one is left alone. Real capture triggers, webhook rows and a live local
+# receiver (behind the per-test egress opt-in) are the property.
+tests/integration/webhook-capture-truth.spec.ts
+# No surface claims an alert that can never fire: SET_ALERT refuses honestly
+# and stores nothing, the brain no longer offers set_alert (matching the MCP
+# door's removal), and prompts/capabilities stopped advertising it. A real
+# project row proves nothing is written.
+tests/integration/monitoring-alerts-honesty.spec.ts
+# The Webhooks console reads the same AppTrigger / TriggerDeliveryLog rows the
+# MCP webhooks tool writes, the trigger list never serves the signing secret,
+# and a dead delivery replays for real against a live receiver. Real rows and
+# a real local HTTP receiver are the property.
+tests/integration/trigger-webhooks-console.spec.ts
+# API keys live an honest lifecycle: create_api_key stamps no silent expiry
+# (opt-in expiresInDays is stored, returned and named), and
+# set_key_permissions parks unapproved calls, validates the real permission
+# vocabulary, refuses admin escalation and service-role edits even when
+# approved, and narrows with a before/after receipt. Real key rows are the
+# property.
+tests/integration/key-lifecycle-honesty.spec.ts
+# The integrations connect door keeps its contract: unknown provider ids are
+# refused with the served list, any alias or casing stores under the one
+# canonical id everything looks up, disconnect clears what the console reads
+# on both doors, and OneSignal connects fully (REST key + App ID) through the
+# typed call with send_push naming what is missing. Real vault rows are the
+# property; PostHog (stored-unverifiable) keeps CI off external APIs.
+tests/integration/integrations-connect-contract.spec.ts
+# One credential is one vault row: a console connect writes no env-var alias,
+# a lookup by env-var name resolves to the stored row (build-status still
+# clears its block), legacy alias rows are never read or listed, and a console
+# DELETE of stripe leaves no alias keeping the runtime connected. Real vault
+# rows and the real credentials, keys and build-status routes are the
+# property; PostHog and seeded rows keep CI off provider APIs.
+tests/integration/integration-key-one-row.spec.ts
+# A parked executor action is pollable: the APPROVAL_REQUIRED refusal carries
+# the Review Queue finding's id and the poll call, check_approval resolves
+# parked findings alongside destructive-gate approvals with one status
+# vocabulary, and another project's finding never resolves. Real finding
+# rows are the property.
+tests/integration/parked-actions-pollable.spec.ts
+# The agent can set the access policy the runtime enforces: set_bucket_policy
+# writes all four values to a real bucket row with the derived isPublic
+# label, refuses unknown policies naming the vocabulary, and the catalog and
+# docs advertise the contract. Real bucket rows are the property.
+tests/integration/storage-policy-action.spec.ts
+# Realtime scope is explicit: enable without a tableName refuses instead of
+# silently streaming every table, allTables is the named project-wide switch
+# the agent's tool cannot forward, and both park paths name the tables a
+# project-wide disable stops. Real workspace tables and NOTIFY triggers are
+# the property.
+tests/integration/realtime-scope-truth.spec.ts
+# The storage runtime is correct on both drivers: the S3 driver clamps a
+# requested isPublic to the bucket policy at write time like the local one,
+# multipart complete leaves exactly one real row and counts the bytes once,
+# the signed-upload fallback plants no phantom row, and metadata answers from
+# the row without fetching the object. Real buckets, rows and chunk files are
+# the property; only the S3 network call is stubbed.
+tests/integration/storage-runtime-correctness.spec.ts
+# "Already up to date" is decided by a hash of the live catalog, recorded on
+# the Deployment row, never by the graph pointer the MCP schema path does not
+# move: an agent ALTER publishes a new version, an unchanged catalog is a
+# truthful no-op, and a legacy row without a hash never claims up to date.
+# Real workspace DDL and Deployment rows are the property.
+tests/integration/publish-noop-truth.spec.ts
+# The storage console pages and counts honestly: the files route forwards
+# limit/offset/search, countFiles answers from the same WHERE on the metadata
+# DB (so it holds for both blob drivers), and one page is never presented as
+# the whole project. Real StorageFile rows past the first page are the
+# property.
+tests/integration/storage-files-pagination.spec.ts
+
 # A new end user's session works from sign-up: the Next sign-up route signs with
 # the resolved (decrypted) project secret every verifier uses, and refresh binds
 # the id as the column's type, so it works on the canonical uuid users table.
 # Real provisioned projects (encrypted secrets) and real users are the property.
 tests/integration/end-user-session-tokens.spec.ts
+
+# Blocking an end user stops their EXISTING token at request time on both
+# data doors (the promised 403), unblocking restores it, and a legacy
+# workspace without is_blocked keeps serving. Real workspace users tables,
+# real tokens and a real key row are the property.
+tests/integration/blocked-end-user-tokens.spec.ts
+# Presence identity is bound to the caller's sign-in on both runtimes: the
+# public key alone or a mismatched X-User-Token can no longer mark another
+# user online or kick them offline, while self, and service-role callers,
+# still work. Real key rows, real tokens and the real workspace presence
+# table are the property.
+tests/integration/presence-identity-binding.spec.ts
 
 # A key bound to a preview branch is refused by every runtime surface that is
 # not branch-scoped, at both doors (the Express app and recordedV1), and the
@@ -900,3 +1022,11 @@ tests/integration/approval-binding.spec.ts
 # never returns a credential; an unknown account is reported plainly. Real
 # workspace users tables are the property, so it needs a real Postgres.
 tests/integration/reset-password-sends-link.spec.ts
+
+# A project's data is read in its own region and nowhere else: a second
+# database stands in for another region's, a regional project with no
+# connection is refused rather than served from the home database, and with
+# one its queries, raw client, RLS-scoped SQL, workspace client and function
+# role sync reach only the regional database. Two real databases are the
+# property, so it needs a real Postgres.
+tests/integration/project-region.spec.ts

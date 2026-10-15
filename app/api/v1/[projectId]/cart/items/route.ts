@@ -55,6 +55,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
 
     // Fetch product to snapshot price + name
     const rows = await executeWithUserContext<any>(
+      context.projectId,
       '', // bypass RLS for product lookup (public read)
       true,
       `SELECT id, name, price, stock FROM "${schemaName}"."products" WHERE id = $1 LIMIT 1`,

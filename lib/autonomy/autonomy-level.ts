@@ -135,29 +135,43 @@ export function isTierAutoAllowed(level: AutonomyLevel, tier: AutonomyTier): boo
  * read failure or unknown value — never throws, never returns an unsafe level.
  */
 export async function getProjectAutonomyLevel(projectId: string): Promise<AutonomyLevel> {
+  // The two reads fail differently. If the PROJECT row cannot be read, the
+  // owner's dial is unknown and the fallback describes the product. But once
+  // the dial IS known, no later failure may widen it: an owner who set OFF or
+  // CONSERVATIVE opted out, and a billing-table blip must never opt them back
+  // in. The old single try/catch returned AGGRESSIVE from a subscription read
+  // failure, discarding a dial it had already read.
+  let requested: AutonomyLevel
+  let ownerId: string | undefined
   try {
     const p = await prisma.project.findUnique({
       where: { id: projectId },
       select: { autonomyLevel: true, userId: true },
     })
     const raw = (p as { autonomyLevel?: string } | null)?.autonomyLevel
-    const requested = raw && VALID.has(raw) ? (raw as AutonomyLevel) : DEFAULT_LEVEL
+    requested = raw && VALID.has(raw) ? (raw as AutonomyLevel) : DEFAULT_LEVEL
+    ownerId = (p as { userId?: string } | null)?.userId ?? undefined
+  } catch {
+    return SAFE_FALLBACK_LEVEL
+  }
 
-    // Clamp to the owner's plan ceiling so a Free project can't run AGGRESSIVE.
-    const ownerId = (p as { userId?: string } | null)?.userId
-    if (!ownerId) return requested
+  // Clamp to the owner's plan ceiling so a Free project can't run AGGRESSIVE.
+  if (!ownerId) return requested
+  try {
     const sub = await prisma.subscription.findFirst({
       where: { userId: ownerId, status: { in: ['ACTIVE', 'FREE', 'GRACE'] } },
       include: { plan: { select: { autonomyMaxLevel: true } } },
       orderBy: { createdAt: 'desc' },
     })
     const capRaw = sub?.plan?.autonomyMaxLevel
-    // If the cap can't be resolved, clamp to SAFE_FALLBACK_LEVEL — never let a
-    // DB blip widen a Free project's effective level past CONSERVATIVE.
+    // If the cap can't be resolved, fall back to the SAFE_FALLBACK_LEVEL
+    // ceiling (AGGRESSIVE — i.e. no clamp; every plan seeds AGGRESSIVE).
     const cap = capRaw && VALID.has(capRaw) ? (capRaw as AutonomyLevel) : SAFE_FALLBACK_LEVEL
     return clampToPlan(requested, cap)
   } catch {
-    return SAFE_FALLBACK_LEVEL
+    // Billing read failed, dial known: honour the dial. clampToPlan against
+    // the fallback ceiling keeps OFF as OFF and CONSERVATIVE as CONSERVATIVE.
+    return clampToPlan(requested, SAFE_FALLBACK_LEVEL)
   }
 }
 

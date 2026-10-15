@@ -22,7 +22,7 @@ Call as `webhooks { action: "<action>", … }`.
 | `triggers` | the table triggers, including those whose action calls a URL | nothing | yes | no |
 | `trigger_deliveries` | recent trigger deliveries, filterable by SUCCESS, FAILED or DEAD | nothing | yes | no |
 | `replay_trigger_delivery` | send a DEAD trigger delivery again | `id` | no | no |
-| `rotate_trigger_secret` | a new signing secret for a trigger | nothing | no | no |
+| `rotate_trigger_secret` | a new signing secret for a trigger | `triggerName or triggerId` | no | no |
 <!-- end generated -->
 
 - `create` returns the endpoint's signing secret once, in `data.secret`, never in the summary; store it where the receiver can read it.
@@ -31,5 +31,7 @@ Call as `webhooks { action: "<action>", … }`.
 - `replay` sends a `FAILED` or `DEAD_LETTER` delivery again, as a new attempt; a delivered event is not sent twice, and a disabled endpoint is not sent to.
 - `rotate_secret` issues a new signing secret; the next delivery is signed with the new one only.
 - `triggers`, `trigger_deliveries`, `replay_trigger_delivery` and `rotate_trigger_secret` are for table triggers whose action calls a URL.
+
+Endpoint events (`row.inserted`, `row.updated`, `row.deleted`, `auth.user.created`) are **project-wide**: an endpoint cannot subscribe to one table. Each delivery's payload carries `data.table`, so the receiver filters. For a genuinely per-table webhook, create a table trigger with a URL action (`create_trigger`); note that triggers fire from the JSON data routes (`/database/insert`, `/database/update`, `/database/delete`), not from every writer the endpoint capture sees.
 
 Destinations are checked by the egress guard, which refuses private and cloud-metadata addresses.

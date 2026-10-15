@@ -63,7 +63,7 @@ let schemaName = ''
 const EMAIL = `blockee-${randomUUID().slice(0, 8)}@test.invalid`
 
 async function serviceRows<T>(sql: string, values: unknown[] = []): Promise<T[]> {
-  return executeWithUserContext<T>('', true, sql, values)
+  return executeWithUserContext<T>(projectId, '', true, sql, values)
 }
 
 beforeAll(async () => {
@@ -164,11 +164,13 @@ describe('the FORCE-RLS premise', () => {
         projectId
       )
       const updateCall = rlsCalls.find(
-        (c) => typeof c[2] === 'string' && /UPDATE .*users.* SET is_blocked = TRUE/.test(c[2] as string)
+        (c) => typeof c[3] === 'string' && /UPDATE .*users.* SET is_blocked = TRUE/.test(c[3] as string)
       )
       expect(updateCall).toBeDefined()
-      expect(updateCall![0]).toBe('')
-      expect(updateCall![1]).toBe(true)
+      // Named by project, so the write runs on the database in its region.
+      expect(updateCall![0]).toBe(projectId)
+      expect(updateCall![1]).toBe('')
+      expect(updateCall![2]).toBe(true)
     } finally {
       await executeAction(
         { action: 'UNBLOCK_USER', params: { email: EMAIL, confirmed: true } } as any,

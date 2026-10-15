@@ -101,6 +101,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     const whereClause = whereParts.length > 0 ? `WHERE ${whereParts.join(' AND ')}` : ''
     const sql = `UPDATE "${schemaName}"."${tableName}" SET ${setParts.join(', ')} ${whereClause} RETURNING *`
     const result = await executeWithUserContext(
+      context.projectId,
       context.endUserId ?? '',
       context.apiKey.serviceRole,
       sql,

@@ -124,6 +124,7 @@ async function recordCount(projectId: string, schema: string, table: string): Pr
   try {
     // ::int keeps count() out of BigInt land; service-role sees FORCE-RLS rows.
     const rows = await executeWithUserContext<{ c: number }>(
+      projectId,
       '',
       true,
       `SELECT count(*)::int AS c FROM "${schema}"."${table}"`,

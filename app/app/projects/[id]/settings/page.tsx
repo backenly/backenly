@@ -39,6 +39,7 @@ import {
 import { PAGE_GUTTER, PAGE_WIDTH } from '@/components/console/tokens'
 import { ClientKeysPanel } from '@/components/hub/ClientKeysPanel'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
+import { regionLabel } from '@/lib/regions'
 
 type Tab = 'general' | 'keys' | 'access'
 
@@ -163,7 +164,15 @@ function GeneralTab({ projectId, onDeleted }: { projectId: string; onDeleted: ()
     }
   }
 
-  const apiBaseUrl = project?.apiUrlProd || project?.apiUrlStaging || project?.apiUrlDev || null
+  // The live base has been the same since the project's first request:
+  // {origin}/api/v1/{projectId}. The old read keyed off apiUrlProd/Staging/Dev,
+  // columns nothing in the product ever writes (the console creates projects
+  // with a name only), so this row said "Set when the project is first
+  // published" forever — publishing never set it either. An operator-supplied
+  // override still wins when one of those columns is actually filled.
+  const apiBaseUrl =
+    project?.apiUrlProd || project?.apiUrlStaging || project?.apiUrlDev ||
+    (typeof window !== 'undefined' ? `${window.location.origin}/api/v1/${projectId}` : null)
 
   const confirmDelete = async () => {
     if (deleteText !== (project?.name ?? '')) return
@@ -245,13 +254,14 @@ function GeneralTab({ projectId, onDeleted }: { projectId: string; onDeleted: ()
             {apiBaseUrl ? (
               <CopyField value={apiBaseUrl} />
             ) : (
-              <span className="text-zinc-500">Set when the project is first published</span>
+              <span className="text-zinc-500">—</span>
             )}
           </DetailRow>
           <DetailRow label="Runs on">
-            {/* Honest per edition: Cloud runs one AWS region today; a
-                self-hosted deployment runs wherever its operator put it. */}
-            {CLOUD_CONTROL_PLANE ? 'Backenly Cloud, AWS ap-south-1' : 'This self-hosted deployment'}
+            {/* Honest per edition: a Cloud project's recorded region, null
+                being the home region (lib/regions.ts); a self-hosted
+                deployment runs wherever its operator put it. */}
+            {CLOUD_CONTROL_PLANE ? `Backenly Cloud, ${regionLabel(project?.region)}` : 'This self-hosted deployment'}
           </DetailRow>
         </DetailList>
       </SettingsCard>

@@ -34,6 +34,12 @@ export interface StorageService {
     createdAt: Date
     url: string
   }>>
+  /**
+   * How many active files match the same WHERE listFiles uses, so a console
+   * page can say "N of M" instead of presenting one page as everything.
+   * Counts the metadata DB, so it is identical across blob drivers.
+   */
+  countFiles(bucketId: string | undefined, projectId: string, search?: string): Promise<number>
   getFile(fileId: string, projectId: string): Promise<{ path: string; buffer: Buffer; mimeType: string | null; name: string } | null>
   getFileUrl(fileId: string, projectId: string, expiresIn?: number): Promise<string>
   /**
@@ -513,6 +519,21 @@ class LocalStorageService implements StorageService {
         ? `${baseUrl}/${file.id}/download`
         : `${baseUrl}/${file.id}/download?token=${this.generateAccessTokenSync(file.id)}`,
     }))
+  }
+
+  /**
+   * How many active files match — the same WHERE as listFiles, so the
+   * console can say "N of M loaded" instead of presenting one page as the
+   * whole project.
+   */
+  async countFiles(bucketId: string | undefined, projectId: string, search?: string): Promise<number> {
+    if (!projectId) {
+      throw new Error('Project ID is required for tenant isolation')
+    }
+    const where: any = { projectId, deletedAt: null }
+    if (bucketId) where.bucketId = bucketId
+    if (search) where.name = { contains: search, mode: 'insensitive' }
+    return prisma.storageFile.count({ where })
   }
 
   async getFile(fileId: string, projectId: string) {

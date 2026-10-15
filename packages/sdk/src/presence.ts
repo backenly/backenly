@@ -69,6 +69,13 @@ export class PresenceModule {
    * Announce that this user is online. Starts a heartbeat loop automatically.
    * Attach metadata (name, avatar, role…) for other clients to display.
    * Call leave() when the user logs out or you want to go offline.
+   *
+   * Identity is bound server-side: with the public key, `userId` must be the
+   * signed-in user's own id (the X-User-Token the client already sends after
+   * auth.signIn / signUp), and without a signed-in user the server refuses
+   * with PRESENCE_TOKEN_REQUIRED. Only service-role keys may announce other
+   * users. Metadata is client-chosen display data — subscribers should treat
+   * it as what the user chose to show, not as verified facts.
    */
   async join(userId: string, metadata: Record<string, unknown> = {}): Promise<void> {
     if (typeof window === 'undefined') return // SSR — no-op

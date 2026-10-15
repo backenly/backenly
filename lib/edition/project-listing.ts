@@ -32,6 +32,9 @@ export const PROJECT_LIST_SELECT = {
   // So the chooser can mark a paused project before anyone opens it. Always
   // null on a self-hosted deployment, where nothing pauses.
   pausedAt: true,
+  // Where the project's data lives (lib/regions.ts). Null is the home region,
+  // which is every project on a self-hosted deployment.
+  region: true,
   // Counted, never fetched: a listing needs the number of tables, not the tables.
   _count: { select: { tables: true, workspaces: true } },
 } as const

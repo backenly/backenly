@@ -21,7 +21,7 @@
  * a user who can't read a row directly can't read it via include either.
  */
 
-import { prisma } from '@/lib/db'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 
 export interface RlsIdentity {
@@ -67,8 +67,10 @@ async function loadSchemaMeta(projectId: string): Promise<SchemaMeta> {
   if (cached && Date.now() - cached.loadedAt < META_TTL_MS) return cached
 
   const schemaName = `workspace_${projectId}`
+  // The catalog of the database holding the project's data, in its region.
+  const db = await workspaceRawClient(projectId)
 
-  const fkRows = await prisma.$queryRawUnsafe<Array<{
+  const fkRows = await db.$queryRawUnsafe<Array<{
     table_name: string
     column_name: string
     foreign_table: string
@@ -91,7 +93,7 @@ async function loadSchemaMeta(projectId: string): Promise<SchemaMeta> {
     schemaName,
   )
 
-  const colRows = await prisma.$queryRawUnsafe<Array<{
+  const colRows = await db.$queryRawUnsafe<Array<{
     table_name: string
     column_name: string
   }>>(
@@ -280,6 +282,7 @@ export async function applyIncludes(opts: {
         `WHERE "${foreignKey}" IN (${placeholders}) ${softDelete} ` +
         `LIMIT ${MAX_RELATED_ROWS - related.length}`
       const batch = await executeWithUserContext<any>(
+        projectId,
         rls.userId, rls.isServiceRole, sql, group, rls.role,
       )
       related.push(...batch)
