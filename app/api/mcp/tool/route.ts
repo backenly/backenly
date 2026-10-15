@@ -380,8 +380,13 @@ export async function POST(request: NextRequest) {
         { status: 400 },
       ))
     }
-    const { getApprovalForProject } = await import('@/lib/mcp/approvals')
-    const approval = await getApprovalForProject(auth.projectId, id)
+    const { getApprovalForProject, getParkedActionForProject } = await import('@/lib/mcp/approvals')
+    // Two kinds of parked request answer here: destructive-gate approvals
+    // (agentApprovalRequest) and executor-gated actions queued as Review
+    // Queue findings. Both ids come back from the refusal that parked them.
+    const approval =
+      (await getApprovalForProject(auth.projectId, id)) ??
+      (await getParkedActionForProject(auth.projectId, id))
     recordMcpCall(
       { ...auth, endpoint: ENDPOINT, startedAt },
       { statusCode: approval ? 200 : 404, tool, mutation: false, summary: approval ? `approval ${approval.status}` : 'approval missing' },

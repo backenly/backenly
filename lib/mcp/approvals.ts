@@ -182,6 +182,41 @@ export async function getApprovalForProject(projectId: string, id: string) {
   }
 }
 
+/**
+ * The other kind of parked request: an executor-gated medium/high action the
+ * chat door queued as an `ai_action_pending` HealthFinding (Review Queue,
+ * Autonomy page). check_approval resolves these too, so a parked action has
+ * an id the agent can poll instead of vanishing from its point of view.
+ */
+export async function getParkedActionForProject(projectId: string, id: string) {
+  const row = await prisma.healthFinding.findFirst({
+    where: { id, projectId, type: 'ai_action_pending' },
+  })
+  if (!row) return null
+  const details = (row.details as Record<string, unknown> | null) ?? {}
+  const statusMap: Record<string, string> = {
+    pending_approval: 'pending',
+    applied: 'executed',
+    auto_fixed: 'executed',
+    dismissed: 'rejected',
+    stale: 'expired',
+  }
+  return {
+    id: row.id,
+    kind: 'parked_action' as const,
+    status: statusMap[row.status] ?? row.status,
+    tool:
+      typeof details.executorAction === 'string'
+        ? details.executorAction
+        : typeof details.title === 'string'
+          ? details.title
+          : row.type,
+    target: typeof details.location === 'string' ? details.location : null,
+    createdAt: row.detectedAt.toISOString(),
+    resultSummary: null,
+  }
+}
+
 export async function listApprovals(projectId: string) {
   const rows = await prisma.agentApprovalRequest.findMany({
     where: { projectId },

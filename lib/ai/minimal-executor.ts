@@ -3327,8 +3327,12 @@ async function executeSingleAction(
     || action.params?.userId || action.params?.path || undefined
   const riskLevel = riskLevelForExecutorAction(action.action)
   if (riskLevel !== 'low' && !action.params?.confirmed) {
+    // The parked finding's id travels back to the caller: without it the
+    // agent had NOTHING to poll — check_approval only knew approval rows —
+    // so a parked action simply vanished from the agent's point of view.
+    let findingId: string | null = null
     try {
-      await queuePendingActionFinding({
+      const finding = await queuePendingActionFinding({
         projectId,
         action: action.action,
         params: action.params ?? {},
@@ -3337,6 +3341,7 @@ async function executeSingleAction(
         source: 'brain-risk',
         reason: `Backenly paused this ${riskLevel}-risk action for your review instead of applying it immediately.`,
       })
+      findingId = (finding as { id?: string } | null)?.id ?? null
     } catch (error) {
       console.error('[ApprovalGate] Failed to queue pending action finding:', error)
     }
@@ -3346,7 +3351,10 @@ async function executeSingleAction(
     // would tell an agent, or the person reading it, something untrue.
     return {
       success: false,
-      message: `⛔ \`${action.action}\`${target ? ` on \`${target}\`` : ''} was not run: it is a ${riskLevel}-risk action and is waiting for the project owner's approval in the Review Queue (Autonomy). Approving it there runs exactly this action.`,
+      message:
+        `⛔ \`${action.action}\`${target ? ` on \`${target}\`` : ''} was not run: it is a ${riskLevel}-risk action and is waiting for the project owner's approval in the Review Queue (Autonomy). Approving it there runs exactly this action.` +
+        (findingId ? ` Poll check_approval with { "id": "${findingId}" } to follow it.` : ''),
+      data: findingId ? { findingId, poll: `check_approval with { "id": "${findingId}" }` } : undefined,
       error: 'APPROVAL_REQUIRED',
     }
   }
