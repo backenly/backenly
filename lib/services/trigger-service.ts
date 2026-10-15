@@ -593,6 +593,9 @@ export async function listTriggers(projectId: string) {
       event: true,
       actionType: true,
       targetTable: true,
+      // The destination a webhook trigger posts to — the console renders it.
+      // webhookSecret is deliberately NOT selected: it never leaves the server.
+      webhookUrl: true,
       enabled: true,
       createdAt: true,
     },

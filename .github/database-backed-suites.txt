@@ -848,6 +848,11 @@ tests/integration/go-live-empty-guard.spec.ts
 # migration is applied, so a missing table never repeats the tour.
 tests/integration/tours-seen.spec.ts
 
+# The Webhooks console reads the same AppTrigger / TriggerDeliveryLog rows the
+# MCP webhooks tool writes, the trigger list never serves the signing secret,
+# and a dead delivery replays for real against a live receiver. Real rows and
+# a real local HTTP receiver are the property.
+tests/integration/trigger-webhooks-console.spec.ts
 # API keys live an honest lifecycle: create_api_key stamps no silent expiry
 # (opt-in expiresInDays is stored, returned and named), and
 # set_key_permissions parks unapproved calls, validates the real permission
