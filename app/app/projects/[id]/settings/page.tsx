@@ -39,6 +39,7 @@ import {
 import { PAGE_GUTTER, PAGE_WIDTH } from '@/components/console/tokens'
 import { ClientKeysPanel } from '@/components/hub/ClientKeysPanel'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
+import { HOME_REGION, regionLabel } from '@/lib/regions'
 
 type Tab = 'general' | 'keys' | 'access'
 
@@ -249,9 +250,10 @@ function GeneralTab({ projectId, onDeleted }: { projectId: string; onDeleted: ()
             )}
           </DetailRow>
           <DetailRow label="Runs on">
-            {/* Honest per edition: Cloud runs one AWS region today; a
-                self-hosted deployment runs wherever its operator put it. */}
-            {CLOUD_CONTROL_PLANE ? 'Backenly Cloud, AWS ap-south-1' : 'This self-hosted deployment'}
+            {/* Honest per edition: every Cloud project is in the home region
+                until a second one opens (lib/regions.ts); a self-hosted
+                deployment runs wherever its operator put it. */}
+            {CLOUD_CONTROL_PLANE ? `Backenly Cloud, ${regionLabel(HOME_REGION)}` : 'This self-hosted deployment'}
           </DetailRow>
         </DetailList>
       </SettingsCard>
