@@ -21,6 +21,7 @@
 
 import { prisma } from '@/lib/db/prisma'
 import { isReservedWorkspaceTable } from '@/lib/security/workspace-schema'
+import { isLegacyAliasVaultId } from '@/lib/services/integrationKeyStore'
 
 /** The four commands a policy can govern — used to name the ones that are NOT covered. */
 const ALL_COMMANDS = ['SELECT', 'INSERT', 'UPDATE', 'DELETE'] as const
@@ -196,7 +197,9 @@ async function readIntegrations(projectId: string): Promise<string[]> {
       select: { integrationId: true },
       orderBy: { connectedAt: 'asc' },
     })
-    return keys.map(k => k.integrationId)
+    // A legacy alias row is the same credential under its env-var name, not
+    // a second integration.
+    return keys.map(k => k.integrationId).filter(id => !isLegacyAliasVaultId(id))
   } catch {
     return []
   }

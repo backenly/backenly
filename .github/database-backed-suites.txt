@@ -901,6 +901,13 @@ tests/integration/key-lifecycle-honesty.spec.ts
 # typed call with send_push naming what is missing. Real vault rows are the
 # property; PostHog (stored-unverifiable) keeps CI off external APIs.
 tests/integration/integrations-connect-contract.spec.ts
+# One credential is one vault row: a console connect writes no env-var alias,
+# a lookup by env-var name resolves to the stored row (build-status still
+# clears its block), legacy alias rows are never read or listed, and a console
+# DELETE of stripe leaves no alias keeping the runtime connected. Real vault
+# rows and the real credentials, keys and build-status routes are the
+# property; PostHog and seeded rows keep CI off provider APIs.
+tests/integration/integration-key-one-row.spec.ts
 # A parked executor action is pollable: the APPROVAL_REQUIRED refusal carries
 # the Review Queue finding's id and the poll call, check_approval resolves
 # parked findings alongside destructive-gate approvals with one status

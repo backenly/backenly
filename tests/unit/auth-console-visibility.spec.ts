@@ -20,6 +20,7 @@ const workbench = fs.readFileSync(path.join(ROOT, 'components', 'auth', 'AuthWor
 const authStatus = fs.readFileSync(path.join(ROOT, 'lib', 'services', 'auth-status.ts'), 'utf8')
 const oauthRoutes = fs.readFileSync(path.join(ROOT, 'server', 'routes', 'oauth.ts'), 'utf8')
 const saveRoute = fs.readFileSync(path.join(ROOT, 'app', 'api', 'projects', '[id]', 'credentials', 'route.ts'), 'utf8')
+const keyStore = fs.readFileSync(path.join(ROOT, 'lib', 'services', 'integrationKeyStore.ts'), 'utf8')
 
 describe('AUTH-F7: provider universe', () => {
   it('the runtime really serves discord and facebook', () => {
@@ -36,9 +37,11 @@ describe('AUTH-F7: provider universe', () => {
   })
 
   it('saving a card reaches workspaceOAuthConfig for every provider', () => {
-    // The save route recognises each provider's env keys…
-    expect(saveRoute).toContain("DISCORD_CLIENT_ID:      'discord'")
-    expect(saveRoute).toContain("FACEBOOK_CLIENT_ID:     'facebook'")
+    // The save route recognises each provider's env keys, through the key
+    // store's one env-var map (INT-08 moved it there so a credential is one row)…
+    expect(saveRoute).toContain('vaultIdForEnvVar(envVar)')
+    expect(keyStore).toContain("discord_client_id: 'discord'")
+    expect(keyStore).toContain("facebook_client_id: 'facebook'")
     // …and gates the workspaceOAuthConfig upsert on the provider SET, not on a
     // hardcoded google/github pair that silently drops everyone else.
     expect(saveRoute).toContain('OAUTH_PROVIDERS.includes(integrationId)')
