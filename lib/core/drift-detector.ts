@@ -21,6 +21,7 @@ import { prisma } from '@/lib/db/prisma'
 import { queryWorkspaceSchema, executeInWorkspaceSchema } from '@/lib/services/workspaceDatabase'
 import { listSchemaSnapshots, getSchemaSnapshot } from '@/lib/services/workspace-schema-snapshot'
 import { isReservedWorkspaceTable, notReservedTableSql } from '@/lib/security/workspace-schema'
+import { isRegionError } from '@/lib/data-plane/regional'
 import type { RawFinding } from './types'
 
 // ─── 3.1 Schema Drift ────────────────────────────────────────────────────────
@@ -51,9 +52,13 @@ import type { RawFinding } from './types'
  * could not look must not report nothing found". Copying it would let the two
  * drift, and the copy that quietly returned [] is exactly the bug this exists
  * to prevent.
+ *
+ * A region error (this process has no connection to the project's region) is
+ * rethrown unchanged, so callers can still tell it apart from a failed query.
  */
 export function probeQueryFailed(probe: string): (err: unknown) => never {
   return (err) => {
+    if (isRegionError(err)) throw err
     throw new Error(
       `[${probe}] catalog query failed: ${err instanceof Error ? err.message : String(err)}`,
     )

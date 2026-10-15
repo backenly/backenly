@@ -40,19 +40,13 @@
  * Read-only.
  */
 
-import { Pool } from 'pg'
 import { queryWorkspaceSchema } from '@/lib/services/workspaceDatabase'
 import { probeQueryFailed } from '@/lib/core/drift-detector'
 import { directAccessRoleNames } from '@/lib/services/direct-access'
 import type { RawFinding } from '@/lib/core/types'
+import { projectPool } from '@/lib/data-plane/regional'
 
 export type ResidueKind = 'invalid_index' | 'unvalidated_constraint' | 'prepared_transaction'
-
-let pool: Pool | null = null
-function getPool(): Pool {
-  if (!pool) pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 2 })
-  return pool
-}
 
 /**
  * How long a prepared transaction may sit before it is a problem rather than a
@@ -159,10 +153,13 @@ export async function detectMigrationResidue(projectId: string): Promise<RawFind
   //
   // Read directly rather than through the workspace pool: pg_prepared_xacts is
   // cluster-wide and filtered by OWNER, which is what makes it attributable to
-  // one project (the same per-project roles connection-health uses).
+  // one project (the same per-project roles connection-health uses). The
+  // cluster is the one in the project's region, resolved before the try so a
+  // region this process cannot reach fails as itself.
+  const pool = await projectPool(projectId, 'migration-residue', { max: 2 })
   try {
     const roles = directAccessRoleNames(projectId)
-    const res = await getPool().query<{ gid: string; age_seconds: string; owner: string }>(
+    const res = await pool.query<{ gid: string; age_seconds: string; owner: string }>(
       `SELECT gid,
               owner,
               EXTRACT(EPOCH FROM (now() - prepared))::int::text AS age_seconds

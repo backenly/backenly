@@ -30,6 +30,7 @@ import crypto from 'crypto'
 import { z } from 'zod'
 import { prisma } from '@/lib/db/prisma'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { normalizeFindingType } from '@/lib/core/types'
 import { executeApprovedProposal, type ProposalExecution } from '@/lib/core/auto-fix-engine'
 import { canRollback, rollbackContract, type RollbackStrategy } from './maintenance/rollback-capability'
@@ -65,9 +66,11 @@ interface ProposableAction {
   catalogFingerprint(projectId: string, params: Record<string, unknown>): Promise<string>
 }
 
+/** Read in the project's region; a region error propagates to the caller. */
 async function tableColumns(projectId: string, table: string) {
+  const db = await workspaceRawClient(projectId)
   const schema = await resolveWorkspaceSchema(projectId)
-  return prisma.$queryRawUnsafe<Array<{ column_name: string; data_type: string; is_nullable: string }>>(
+  return db.$queryRawUnsafe<Array<{ column_name: string; data_type: string; is_nullable: string }>>(
     `SELECT column_name, data_type, is_nullable FROM information_schema.columns
       WHERE table_schema = $1 AND table_name = $2 ORDER BY column_name`,
     schema,

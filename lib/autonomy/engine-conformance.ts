@@ -39,7 +39,7 @@
  * Read-only. Never repairs on its own — see the note on autoFixable below.
  */
 
-import { prisma } from '@/lib/db/prisma'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 import type { RawFinding } from '@/lib/core/types'
 import { usesLegacyGucs } from '@/lib/postgrest/rls-translation'
 
@@ -77,8 +77,9 @@ export async function detectRuntimeEngineMismatch(projectId: string): Promise<Ra
 
   // No try/catch swallowing here. A probe that returns [] when it could not run
   // reports "healthy" for a project it never examined, and this system has been
-  // bitten by exactly that before.
-  const policies = await prisma.$queryRawUnsafe<Array<{ qual: string | null; with_check: string | null }>>(
+  // bitten by exactly that before. The policies are read in the project's region.
+  const db = await workspaceRawClient(projectId)
+  const policies = await db.$queryRawUnsafe<Array<{ qual: string | null; with_check: string | null }>>(
     `SELECT qual, with_check FROM pg_policies WHERE schemaname = $1`,
     schema,
   )

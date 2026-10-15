@@ -28,6 +28,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 import type { RawFinding, FindingSeverity } from '@/lib/core/types'
 
 export interface RequestedColumn {
@@ -311,8 +312,11 @@ export async function checkIntentConformance(projectId: string): Promise<Conform
     return { checked: 0, findings: [], unverifiable: 0 }
   }
 
+  // The intents are platform rows; the columns they describe are in the
+  // project's region, resolved before the fail-soft foreign-key read below.
+  const db = await workspaceRawClient(projectId)
   const schema = `workspace_${projectId}`
-  const rows = await prisma.$queryRawUnsafe<Array<{
+  const rows = await db.$queryRawUnsafe<Array<{
     table_name: string; column_name: string; data_type: string; is_nullable: string
   }>>(
     `SELECT table_name, column_name, data_type, is_nullable
@@ -329,7 +333,7 @@ export async function checkIntentConformance(projectId: string): Promise<Conform
   }))
 
   // Foreign keys actually present, so a requested fkTo can be verified.
-  const fkRows = await prisma.$queryRawUnsafe<Array<{ table_name: string; column_name: string }>>(
+  const fkRows = await db.$queryRawUnsafe<Array<{ table_name: string; column_name: string }>>(
     `SELECT kcu.table_name, kcu.column_name
        FROM information_schema.table_constraints tc
        JOIN information_schema.key_column_usage kcu

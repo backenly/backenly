@@ -37,9 +37,13 @@
  *
  * Read-only. Cached, because this answers a question about the SERVER: it cannot
  * change without a restart, and the reconciler asks once a minute per project.
+ *
+ * Each region has its own server, so the question is asked per region: a
+ * project's probes depend on the extensions of the database holding its data.
  */
 
-import { Pool } from 'pg'
+import { HOME_REGION, type CloudRegionId } from '@/lib/regions'
+import { regionPool } from '@/lib/data-plane/regional'
 
 export type PlatformCapability = 'pg_stat_statements' | 'pgstattuple'
 
@@ -83,29 +87,32 @@ interface CacheEntry {
   state: CapabilityState
 }
 
-const cache = new Map<PlatformCapability, CacheEntry>()
-
-let pool: Pool | null = null
-function getPool(): Pool {
-  if (!pool) pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1 })
-  return pool
-}
+const cache = new Map<string, CacheEntry>()
 
 /**
- * Is a server-level capability present?
+ * Is a server-level capability present on the database server for `region`?
  *
- * Never throws. A check that cannot run reports `available: false` with
+ * A check that cannot run reports `available: false` with
  * `indeterminate: true`, because a capability we could not confirm must not be
  * treated as present — a probe running against a missing extension produces a
  * confusing SQL error instead of an honest "not checked".
+ *
+ * The one thing it throws is a region error, when this process has no
+ * connection to `region` at all: that is not an answer about an extension.
  */
-export async function hasCapability(cap: PlatformCapability): Promise<CapabilityState> {
-  const hit = cache.get(cap)
+export async function hasCapability(
+  cap: PlatformCapability,
+  region: CloudRegionId = HOME_REGION,
+): Promise<CapabilityState> {
+  // Before the cache, so a cached answer never hides a missing connection.
+  const pool = regionPool(region, 'platform-capabilities', { max: 1 })
+  const key = `${region}:${cap}`
+  const hit = cache.get(key)
   if (hit && Date.now() - hit.at < TTL_MS) return hit.state
 
   let state: CapabilityState
   try {
-    const res = await getPool().query(
+    const res = await pool.query(
       `SELECT 1 FROM pg_extension WHERE extname = $1 LIMIT 1`,
       [cap],
     )
@@ -125,7 +132,7 @@ export async function hasCapability(cap: PlatformCapability): Promise<Capability
     }
   }
 
-  cache.set(cap, { at: Date.now(), state })
+  cache.set(key, { at: Date.now(), state })
   return state
 }
 

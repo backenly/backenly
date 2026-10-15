@@ -32,6 +32,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 import type { RawFinding } from '@/lib/core/types'
 import { isReservedWorkspaceTable } from '@/lib/security/workspace-schema'
 
@@ -137,6 +138,10 @@ export async function adoptExternalSchema(
 
   const { resolveWorkspaceSchema } = await import('@/lib/services/workspace-pool')
   const schema = await resolveWorkspaceSchema(projectId)
+  // The live catalog is in the project's region. Resolved before any of the
+  // fail-soft steps below, so a region this process cannot reach fails as
+  // itself instead of reading as an unestablished live set.
+  const db = await workspaceRawClient(projectId)
 
   // 0. Ownership/grants normalization MUST come first: a table created by the
   //    external rw role is owned by that role, and backenly_user (non-superuser,
@@ -167,7 +172,7 @@ export async function adoptExternalSchema(
   // that difference is the difference between reconciling and deleting a
   // project's entire metadata surface.
   let liveEstablished = true
-  const liveRows = await prisma.$queryRawUnsafe<Array<{ table_name: string }>>(
+  const liveRows = await db.$queryRawUnsafe<Array<{ table_name: string }>>(
     `SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'BASE TABLE'`,
     schema,
   ).catch(() => {
@@ -182,7 +187,7 @@ export async function adoptExternalSchema(
   // that is genuinely empty and a schema that does not exist or is not
   // visible both return zero rows, and only one of them means "everything
   // this project had is gone". Asking for the schema separates them.
-  const schemaRows = await prisma.$queryRawUnsafe<Array<{ n: bigint }>>(
+  const schemaRows = await db.$queryRawUnsafe<Array<{ n: bigint }>>(
     `SELECT count(*)::bigint AS n FROM information_schema.schemata WHERE schema_name = $1`,
     schema,
   ).catch(() => {

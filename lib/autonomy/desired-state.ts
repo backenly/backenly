@@ -65,6 +65,7 @@ import { detectBehaviouralRegression } from './baseline/detect'
 import { detectMigrationResidue } from './migration-residue'
 import { detectSubsystemRecurrence } from './subsystem-recurrence'
 import { hasCapability, type PlatformCapability } from './platform-capabilities'
+import { projectRegion, requireRegionDatabaseUrl } from '@/lib/data-plane/regional'
 
 // ── Bounded-autonomy tiers (graded by blast radius) ───────────────────────────
 //
@@ -450,12 +451,19 @@ export async function computeDesiredStateDiff(projectId: string): Promise<Desire
   const errors: string[] = []
   const disabled: DisabledInvariant[] = []
 
-  // Resolve every declared capability ONCE per report. hasCapability caches for
-  // ten minutes, so this is a map lookup on all but the first call in a window.
+  // A project whose region this process cannot reach has no report: the region
+  // error is thrown here, once, rather than recorded by every probe below as
+  // "could not be checked" in a report that otherwise looks like one.
+  const region = await projectRegion(projectId)
+  requireRegionDatabaseUrl(region, 'app', { projectId })
+
+  // Resolve every declared capability ONCE per report, on the server holding
+  // the project's data. hasCapability caches for ten minutes per region, so
+  // this is a map lookup on all but the first call in a window.
   const requiredCaps = [...new Set(INVARIANTS.map(i => i.requires).filter(Boolean))] as PlatformCapability[]
   const capStates = new Map(
     await Promise.all(
-      requiredCaps.map(async (c) => [c, await hasCapability(c)] as const),
+      requiredCaps.map(async (c) => [c, await hasCapability(c, region)] as const),
     ),
   )
 

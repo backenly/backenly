@@ -24,19 +24,28 @@
  * Read-only. Every probe isolates its own failure.
  */
 
-import { Pool } from 'pg'
+import type { Pool } from 'pg'
 import { prisma } from '@/lib/db/prisma'
 import type { RawFinding } from '@/lib/core/types'
 import { notReservedTableSql } from '@/lib/security/workspace-schema'
 import { HOT_TABLE_MIN_LIVE_ROWS } from '@/lib/ai/infra-intelligence'
+import { projectPool } from '@/lib/data-plane/regional'
 
-const pgPool = new Pool({ connectionString: process.env.DATABASE_URL })
+/**
+ * The pool for the database in the project's region. Each probe resolves it
+ * before its try, so a project whose region this process cannot reach fails
+ * with the region error itself rather than a wrapped "probe failed".
+ */
+function probePool(projectId: string): Promise<Pool> {
+  return projectPool(projectId, 'invariant-probes')
+}
 
 async function pgQuery<T extends Record<string, unknown> = Record<string, unknown>>(
+  pool: Pool,
   sql: string,
   params: unknown[] = [],
 ): Promise<T[]> {
-  const client = await pgPool.connect()
+  const client = await pool.connect()
   try {
     const result = await client.query(sql, params)
     return result.rows as T[]
@@ -83,6 +92,7 @@ const HOT_FILTER_COLS = [
  * through the existing CREATE_INDEX action via the auto-fix engine.
  */
 export async function detectMissingHotPathIndexes(projectId: string): Promise<RawFinding[]> {
+  const pool = await probePool(projectId)
   try {
     const schema = `workspace_${projectId}`
 
@@ -104,6 +114,7 @@ export async function detectMissingHotPathIndexes(projectId: string): Promise<Ra
     // genuinely in use and a filter column genuinely benefits. Below it the
     // planner would pick a sequential scan regardless of what we built.
     const columns = await pgQuery<{ table_name: string; column_name: string }>(
+      pool,
       `SELECT c.table_name, c.column_name
        FROM information_schema.columns c
        JOIN information_schema.tables t
@@ -123,6 +134,7 @@ export async function detectMissingHotPathIndexes(projectId: string): Promise<Ra
     if (columns.length === 0) return []
 
     const indexes = await pgQuery<{ tablename: string; indexdef: string }>(
+      pool,
       `SELECT tablename, indexdef FROM pg_indexes WHERE schemaname = $1`,
       [schema],
     )
@@ -200,10 +212,12 @@ const ARCHIVAL_PATTERNS = ['session', 'log', 'audit', 'event', 'notification', '
  * need a human nod on the retention window.
  */
 export async function detectStaleDataOverflow(projectId: string): Promise<RawFinding[]> {
+  const pool = await probePool(projectId)
   try {
     const schema = `workspace_${projectId}`
 
     const tables = await pgQuery<{ table_name: string }>(
+      pool,
       // Reserved tables excluded for the same reason as the token-cleanup probe
       // below: platform plumbing is not the owner's to schedule an archival job
       // for, so reporting it is a gap nobody can close.
@@ -240,6 +254,7 @@ export async function detectStaleDataOverflow(projectId: string): Promise<RawFin
 
       // Approximate row count cheaply via pg_class.reltuples (avoids COUNT(*)).
       const count = await pgQuery<{ rows: number }>(
+        pool,
         `SELECT COALESCE(reltuples, 0)::bigint AS rows
          FROM pg_class c
          JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -287,10 +302,12 @@ export async function detectStaleDataOverflow(projectId: string): Promise<RawFin
  * attackers a wider brute-force window of stolen credentials.
  */
 export async function detectExpiredTokenBuildup(projectId: string): Promise<RawFinding[]> {
+  const pool = await probePool(projectId)
   try {
     const schema = `workspace_${projectId}`
 
     const candidates = await pgQuery<{ table_name: string; column_name: string }>(
+      pool,
       // Reserved tables excluded, like every sibling probe in this file.
       //
       // `_email_verifications` and `_token_blacklist` are Backenly's own auth
@@ -401,6 +418,7 @@ const BLOAT_MIN_DEAD_TUPLES = 1_000
  * anything is caught and escalated instead of being logged as a repair.
  */
 export async function detectTableBloat(projectId: string): Promise<RawFinding[]> {
+  const pool = await probePool(projectId)
   try {
     const schema = `workspace_${projectId}`
 
@@ -410,6 +428,7 @@ export async function detectTableBloat(projectId: string): Promise<RawFinding[]>
       live: string
       ratio: string
     }>(
+      pool,
       `SELECT relname,
               n_dead_tup::text AS dead,
               n_live_tup::text AS live,

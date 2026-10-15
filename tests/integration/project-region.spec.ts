@@ -70,6 +70,16 @@ import { hashApiKey, resolveEndUserFromToken } from '@/server/lib/end-user-ident
 import { closeAllWorkspacePools, queryWorkspace } from '@/lib/services/workspace-pool'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { getWorkspacePostgresClient } from '@/lib/services/workspaceDatabase'
+import { computeDesiredStateDiff } from '@/lib/autonomy/desired-state'
+import { detectExpiredTokenBuildup } from '@/lib/autonomy/invariant-probes'
+import { detectUnregisteredSchema } from '@/lib/autonomy/schema-registration'
+import { detectRuntimeEngineMismatch } from '@/lib/autonomy/engine-conformance'
+import { detectMigrationResidue } from '@/lib/autonomy/migration-residue'
+import { detectIdleInTransaction } from '@/lib/autonomy/connection-health'
+import { collectBaseline } from '@/lib/autonomy/baseline/collector'
+import { checkIntentConformance } from '@/lib/autonomy/intent-conformance'
+import { verifyPostcondition } from '@/lib/autonomy/action-postconditions'
+import { hasCapability, resetCapabilityCache } from '@/lib/autonomy/platform-capabilities'
 
 jest.setTimeout(120_000)
 
@@ -988,6 +998,77 @@ describe('background work skips what it cannot reach, and says so', () => {
 
     process.env[REGION_VARIABLE] = regionalUrl
     expect(await canReach(regionalProject, 'test-pass')).toBe(true)
+  })
+})
+
+describe('the autonomy probes read the project’s region', () => {
+  // Everything here exists only in the regional database: a token table with an
+  // expiry column, a PostgREST registry that has not registered the schema, and
+  // the marker column a recorded intent and an ADD_COLUMN postcondition name.
+  // Read from the home database, the schema is absent and every probe would
+  // find nothing.
+  beforeAll(async () => {
+    await run(
+      regionalUrl,
+      `CREATE TABLE "${schemaOf(regionalProject)}".sessions (id int, expires_at timestamptz);
+       CREATE FUNCTION public.backenly_pgrst_current_schemas() RETURNS text LANGUAGE sql AS $$ SELECT ''::text $$`,
+    )
+    await prisma.schemaIntent.create({
+      data: { projectId: regionalProject, tableName: 'marker', columnName: 'note', requestedType: 'text', source: 'add_column' },
+    })
+  })
+
+  beforeEach(() => resetCapabilityCache())
+
+  afterAll(async () => {
+    await run(
+      regionalUrl,
+      `DROP TABLE IF EXISTS "${schemaOf(regionalProject)}".sessions;
+       DROP FUNCTION IF EXISTS public.backenly_pgrst_current_schemas()`,
+    ).catch(() => {})
+    await prisma.schemaIntent.deleteMany({ where: { projectId: regionalProject } })
+    await prisma.dbBaselineSample.deleteMany({ where: { projectId: regionalProject } })
+    await prisma.projectPreference.deleteMany({ where: { projectId: regionalProject, type: 'baseline_raw' } })
+  })
+
+  it('finds what is in the region', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    expect((await detectExpiredTokenBuildup(regionalProject)).map((f) => f.details?.tableName)).toEqual(['sessions'])
+    expect((await detectUnregisteredSchema(regionalProject)).map((f) => f.type)).toEqual(['schema_not_registered'])
+    expect(await checkIntentConformance(regionalProject)).toMatchObject({ checked: 1, findings: [] })
+    expect(
+      await verifyPostcondition('ADD_COLUMN', regionalProject, { tableName: 'marker', columnName: 'note', columnType: 'text' }),
+    ).toBe('confirmed')
+    expect(await detectRuntimeEngineMismatch(regionalProject)).toEqual([])
+    expect(await detectIdleInTransaction(regionalProject)).toEqual([])
+    expect(await detectMigrationResidue(regionalProject)).toEqual([])
+  })
+
+  it('samples baseline statistics from the region', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    await collectBaseline(regionalProject)
+    const samples = await prisma.dbBaselineSample.findMany({
+      where: { projectId: regionalProject, kind: 'table' },
+      select: { subject: true },
+    })
+    expect(samples.map((s) => s.subject)).toEqual(expect.arrayContaining(['marker:bytes', 'sessions:bytes']))
+  })
+
+  it('fails as the region error without a connection, never as a wrapped probe failure or a clean result', async () => {
+    delete process.env[REGION_VARIABLE]
+    const refused = { code: 'REGION_NOT_CONFIGURED' }
+    await expect(computeDesiredStateDiff(regionalProject)).rejects.toMatchObject(refused)
+    await expect(detectExpiredTokenBuildup(regionalProject)).rejects.toMatchObject(refused)
+    await expect(detectUnregisteredSchema(regionalProject)).rejects.toMatchObject(refused)
+    await expect(detectRuntimeEngineMismatch(regionalProject)).rejects.toMatchObject(refused)
+    await expect(detectMigrationResidue(regionalProject)).rejects.toMatchObject(refused)
+    await expect(detectIdleInTransaction(regionalProject)).rejects.toMatchObject(refused)
+    await expect(checkIntentConformance(regionalProject)).rejects.toMatchObject(refused)
+    await expect(collectBaseline(regionalProject)).rejects.toMatchObject(refused)
+    await expect(
+      verifyPostcondition('ADD_COLUMN', regionalProject, { tableName: 'marker', columnName: 'note', columnType: 'text' }),
+    ).rejects.toMatchObject(refused)
+    await expect(hasCapability('pg_stat_statements', 'us-east-1')).rejects.toMatchObject(refused)
   })
 })
 

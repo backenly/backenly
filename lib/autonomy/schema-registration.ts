@@ -31,7 +31,7 @@
  * that nobody was asking the question.
  */
 
-import { prisma } from '@/lib/db'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 import type { RawFinding } from '@/lib/core/types'
 import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 
@@ -44,16 +44,18 @@ import { workspaceSchemaName } from '@/lib/security/workspace-schema'
  */
 export async function detectUnregisteredSchema(projectId: string): Promise<RawFinding[]> {
   const schema = workspaceSchemaName(projectId)
+  // The schema and the PostgREST registry both live in the project's region.
+  const db = await workspaceRawClient(projectId)
 
   // The schema has to exist before its absence from the registry means anything
   // — a project that was never provisioned is a different (and correct) state.
-  const exists = await prisma.$queryRawUnsafe<Array<{ n: bigint }>>(
+  const exists = await db.$queryRawUnsafe<Array<{ n: bigint }>>(
     `SELECT count(*)::bigint AS n FROM information_schema.schemata WHERE schema_name = $1`,
     schema,
   )
   if (Number(exists[0]?.n ?? 0) === 0) return []
 
-  const rows = await prisma.$queryRawUnsafe<Array<{ list: string | null }>>(
+  const rows = await db.$queryRawUnsafe<Array<{ list: string | null }>>(
     `SELECT public.backenly_pgrst_current_schemas() AS list`,
   )
   const registered = (rows[0]?.list ?? '').split(',').filter(Boolean)
@@ -65,7 +67,7 @@ export async function detectUnregisteredSchema(projectId: string): Promise<RawFi
 
   // How much is actually broken. A project with no tables has a dead plane too,
   // but nothing is reaching for it yet; one with tables is actively failing.
-  const tables = await prisma.$queryRawUnsafe<Array<{ n: bigint }>>(
+  const tables = await db.$queryRawUnsafe<Array<{ n: bigint }>>(
     `SELECT count(*)::bigint AS n FROM information_schema.tables
       WHERE table_schema = $1 AND table_type = 'BASE TABLE' AND table_name NOT LIKE '\\_%'`,
     schema,
