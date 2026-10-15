@@ -20,6 +20,7 @@ import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 import { executeAiFunction, validateSandboxFunction } from './executor'
 import { isRouteModuleFunction, validateRouteModule } from './route-module-runner'
 import { isFunctionSwitchedOff } from './status'
+import { functionNameForms, resolveFunctionByName } from './names'
 
 export interface FunctionActor {
   userId?: string
@@ -44,18 +45,28 @@ async function refused(actor: FunctionActor, write: boolean): Promise<FunctionAc
   return allowed ? null : { ok: false, code: 'PROJECT_NOT_FOUND', summary: 'Project not found, or this key may not do that here.' }
 }
 
-/** A function by id, or by name as requested or as deployed (lowercase kebab-case). */
+/**
+ * A function by id, or by name in any form it may be stored under (as given,
+ * kebab-case, snake_case; see ./names). `undefined` when no target was named;
+ * `{ ambiguous }` when two different functions answer to forms of the name.
+ */
 async function findFunction(projectId: string, args: { functionId?: unknown; name?: unknown }) {
   if (typeof args.functionId === 'string' && args.functionId) {
     return prisma.aiFunction.findFirst({ where: { id: args.functionId, projectId } })
   }
   if (typeof args.name === 'string' && args.name.trim()) {
-    const raw = args.name.trim()
-    const slug = raw.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
-    return prisma.aiFunction.findFirst({ where: { projectId, name: { in: [...new Set([raw, slug])] } } })
+    const found = await resolveFunctionByName(projectId, args.name)
+    if (!found) return null
+    return 'ambiguous' in found ? found : found.fn
   }
   return undefined
 }
+
+const ambiguousName = (names: string[]): FunctionActionResult => ({
+  ok: false,
+  code: 'AMBIGUOUS_NAME',
+  summary: `More than one function answers to that name (${names.join(', ')}). Pass functionId; list them with functions { action: "list" }.`,
+})
 
 const needsTarget: FunctionActionResult = {
   ok: false,
@@ -84,6 +95,7 @@ export async function getFunction(
   const fn = await findFunction(actor.projectId, args)
   if (fn === undefined) return needsTarget
   if (!fn) return notFound(args)
+  if ('ambiguous' in fn) return ambiguousName(fn.ambiguous)
 
   const endpoint = httpEndpoint(fn.triggerTable)
   return {
@@ -123,6 +135,7 @@ export async function invokeFunction(
   const fn = await findFunction(actor.projectId, args)
   if (fn === undefined) return needsTarget
   if (!fn) return notFound(args)
+  if ('ambiguous' in fn) return ambiguousName(fn.ambiguous)
   if (isFunctionSwitchedOff(fn.status)) {
     return {
       ok: false,
@@ -185,6 +198,7 @@ export async function listFunctionLogs(
   if (args.functionId !== undefined || args.name !== undefined) {
     const fn = await findFunction(actor.projectId, args)
     if (!fn) return notFound(args)
+    if ('ambiguous' in fn) return ambiguousName(fn.ambiguous)
     functionId = fn.id
   }
   const take = typeof args.limit === 'number' && Number.isFinite(args.limit)
@@ -403,18 +417,24 @@ export async function deployFunctionCode(
     }
   }
 
-  let existing: Awaited<ReturnType<typeof findFunction>>
+  // Look the function up under every form of the name the agent gave, so a
+  // function created as send_welcome_email is replaced, not duplicated, by a
+  // deploy of "send_welcome_email" (stored kebab-case for new functions).
+  const found = args.functionId !== undefined
+    ? await findFunction(actor.projectId, { functionId: args.functionId })
+    : await findFunction(actor.projectId, { name: rawName })
+  if (found && 'ambiguous' in found) return ambiguousName(found.ambiguous)
+  const existing = found && !('ambiguous' in found) ? found : null
   if (args.functionId !== undefined) {
-    existing = await findFunction(actor.projectId, { functionId: args.functionId })
     if (!existing) return notFound({ functionId: args.functionId })
-    if (existing.name !== name) {
+    if (!functionNameForms(existing.name).includes(name)) {
       return invalid(`Function ${args.functionId} is named ${existing.name}; pass that name. Renaming is not supported.`)
     }
-  } else {
-    existing = await findFunction(actor.projectId, { name })
   }
+  // An existing function keeps its own name, and with it its endpoint.
+  const deployedName = existing?.name ?? name
 
-  const endpoint = method ? `/api/v1/${actor.projectId}/fn/${name}` : null
+  const endpoint = method ? `/api/v1/${actor.projectId}/fn/${deployedName}` : null
   const fields = {
     description: typeof args.description === 'string' && args.description.trim()
       ? args.description.trim().slice(0, 500)
@@ -441,19 +461,23 @@ export async function deployFunctionCode(
   await syncCaptureForFunctionChange(actor.projectId, fn.triggerType)
 
   const sha = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex')
-  const renamed = rawName !== name
+  const renamed = rawName !== deployedName
   return {
     ok: true,
     summary:
-      `${existing ? 'Replaced the code of' : 'Deployed'} ${name} (${fn.id}), trigger ${trigger}` +
+      `${existing ? 'Replaced the code of' : 'Deployed'} ${deployedName} (${fn.id}), trigger ${trigger}` +
       (endpoint ? `, ${method} ${endpoint}` : table ? ` on ${table}` : '') +
-      (renamed ? `. Deployed as "${name}", not "${rawName}": names are lowercase kebab-case because they are URL path segments` : '') +
+      (renamed
+        ? existing
+          ? `. "${rawName}" is stored as "${deployedName}", which this replaced`
+          : `. Deployed as "${deployedName}", not "${rawName}": names are lowercase kebab-case because they are URL path segments`
+        : '') +
       (keptOff ? '. It stays switched off; turn it on with functions { action: "set_active", active: true }' : '') +
       (existing ? '. The previous code is not kept, so there is nothing to roll back to' : '') +
       `. Run it with functions { action: "invoke", functionId: "${fn.id}" } and read its runs with { action: "logs" }.`,
     data: {
       functionId: fn.id,
-      name,
+      name: deployedName,
       ...(renamed ? { requestedName: rawName } : {}),
       created: !existing,
       trigger,

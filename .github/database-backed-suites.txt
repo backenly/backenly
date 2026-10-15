@@ -915,6 +915,13 @@ tests/integration/integrations-connect-contract.spec.ts
 # rows and the real credentials, keys and build-status routes are the
 # property; PostHog and seeded rows keep CI off provider APIs.
 tests/integration/integration-key-one-row.spec.ts
+# Function management names the function it acted on: delete_schedule deletes
+# the exact job, an agent's create of a taken name is refused before any model
+# call, a second function on an event is created with the overlap named, every
+# form of a name finds the function, an HTTP create never converts a hook,
+# set_active needs a direction, and only Stripe functions need Stripe. Real
+# function rows; only the LLM code generator is stubbed.
+tests/integration/functions-agent-contract.spec.ts
 # A parked executor action is pollable: the APPROVAL_REQUIRED refusal carries
 # the Review Queue finding's id and the poll call, check_approval resolves
 # parked findings alongside destructive-gate approvals with one status

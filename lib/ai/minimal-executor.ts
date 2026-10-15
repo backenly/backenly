@@ -10532,19 +10532,23 @@ async function executeCreateAiFunction(params: any, projectId: string): Promise<
     return { success: false, message: 'triggerTable is required for database triggers' }
   }
 
-  // L3 Fix: Guard Stripe-related functions behind a verified stored key.
-  // Creating a Stripe webhook function without a key will silently fail at first invocation.
-  const isStripeRelated = /stripe|payment|checkout|webhook.*pay|pay.*webhook/i.test(description)
+  // Guard functions that call Stripe behind a stored Stripe key: one written
+  // without it fails at its first invocation. Only a description that names
+  // Stripe trips it. The old pattern also matched "payment" and "checkout", so
+  // a function adding a payments row's amount to a balance, on a project that
+  // uses no Stripe at all, was refused as a Stripe function (FN-15).
+  const isStripeRelated = /\bstripe\b/i.test(description)
   if (isStripeRelated) {
     try {
-      const { prisma: _guardPrisma } = await import('@/lib/db')
-      const stripeKey = await _guardPrisma.projectIntegrationKey.findFirst({
-        where: { projectId, integrationId: { in: ['stripe', 'STRIPE_SECRET_KEY'] } },
-      })
-      if (!stripeKey) {
+      const { hasIntegrationKey } = await import('@/lib/services/integrationKeyStore')
+      if (!(await hasIntegrationKey(projectId, 'stripe'))) {
         return {
           success: false,
-          message: `[BLOCKED] Cannot create Stripe function — no Stripe key is stored for this project.\n\nAction: Paste your Stripe secret key (\`sk_live_...\` or \`sk_test_...\`) in the chat to connect Stripe first, then re-request this function.`,
+          message:
+            'Cannot create this function yet: it calls Stripe, and no Stripe key is stored for this project. ' +
+            'Connect Stripe first with integrations { "action": "connect", "integrationId": "stripe", "apiKey": "<the key>" } ' +
+            'or on the Integrations page, then create the function again.',
+          error: 'INTEGRATION_NOT_CONNECTED',
         }
       }
     } catch { /* non-fatal — proceed if guard check itself fails */ }
@@ -10561,6 +10565,12 @@ async function executeCreateAiFunction(params: any, projectId: string): Promise<
       ? params.name.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '_').replace(/__+/g, '_').replace(/^[_-]|[_-]$/g, '').slice(0, 50)
       : null
 
+    // A name that is taken is answered before any model call is spent on it.
+    if (suppliedName) {
+      const taken = await existingFunctionResult(projectId, suppliedName, params.refuseExisting === true)
+      if (taken) return taken
+    }
+
     const generated = await generateFunctionCode(description, triggerType, triggerTable || null, projectId)
     const name = suppliedName || generated.name
     let code = generated.code
@@ -10573,35 +10583,23 @@ async function executeCreateAiFunction(params: any, projectId: string): Promise<
       return { success: false, message: `Could not create AI function — ${fnValidation.reason}. Please provide a concrete description of what this function should do.` }
     }
 
-    // Deduplication: if a function with the same name already exists for this project, skip creation.
-    const existing = await prisma.aiFunction.findFirst({
-      where: { projectId, name },
-    })
-    if (existing) {
-      return {
-        success: true,
-        message: `AI function \`${name}\` already exists — skipped duplicate creation.`,
-        data: { id: existing.id, name: existing.name, status: existing.status },
-        artifacts: { functions: [name] },
-        verifiedAt: new Date().toISOString(),
-      }
+    // The generated name (when none was supplied) can collide as well.
+    if (!suppliedName) {
+      const taken = await existingFunctionResult(projectId, name, params.refuseExisting === true)
+      if (taken) return taken
     }
 
-    // Also deduplicate by trigger (same triggerType + triggerTable combo for non-manual triggers)
-    if (triggerType !== 'manual' && triggerType !== 'cron' && triggerTable) {
-      const sameTriggered = await prisma.aiFunction.findFirst({
-        where: { projectId, triggerType, triggerTable },
-      })
-      if (sameTriggered) {
-        return {
-          success: true,
-          message: `AI function \`${sameTriggered.name}\` already handles \`${triggerType}\` on \`${triggerTable}\` — skipped duplicate.`,
-          data: { id: sameTriggered.id, name: sameTriggered.name, status: sameTriggered.status },
-          artifacts: { functions: [sameTriggered.name] },
-          verifiedAt: new Date().toISOString(),
-        }
-      }
-    }
+    // Other active functions on the same event are not a reason to refuse: the
+    // runtime fires every active function for a trigger (and deploy_code allows
+    // several), so a second one is created and the overlap is named. The old
+    // dedup answered "skipped duplicate" with success and the OTHER function's
+    // id, and nothing was created (FN-08).
+    const sameEvent = triggerType !== 'manual' && triggerType !== 'cron'
+      ? await prisma.aiFunction.findMany({
+          where: { projectId, triggerType, triggerTable: triggerTable || null, status: 'active' },
+          select: { name: true },
+        })
+      : []
 
     let syntaxCheck = validateFunctionSyntax(code)
 
@@ -10687,13 +10685,59 @@ async function executeCreateAiFunction(params: any, projectId: string): Promise<
         .catch(() => {/* non-fatal */ })
     }
 
+    const overlap = sameEvent.map((f) => f.name)
     return {
       success: syntaxCheck.valid,
-      message: baseMessage,
-      data: { functionId: fn.id, name: fn.name, triggerType, triggerTable, syntaxValid: syntaxCheck.valid },
+      message:
+        baseMessage +
+        (overlap.length
+          ? `\n\nAlso running on this event: ${overlap.join(', ')}. Every active function on an event runs; switch one off with set_active if they should not both run.`
+          : ''),
+      data: {
+        functionId: fn.id, name: fn.name, triggerType, triggerTable, syntaxValid: syntaxCheck.valid,
+        ...(overlap.length ? { alsoOnThisEvent: overlap } : {}),
+      },
     }
   } catch (error: any) {
     return { success: false, message: `Failed to create AI function: ${error.message}`, error: error.message }
+  }
+}
+
+/**
+ * What creating a function under a name that is taken answers. An agent's
+ * create (refuseExisting) is refused with ALREADY_EXISTS, naming the function
+ * and how to change it; it used to answer success with the existing
+ * function's id, so the agent reported a function that was never created
+ * (FN-08). Internal callers, such as integration auto-wiring re-run by a
+ * second connect, get an honest idempotent success that says nothing changed.
+ */
+async function existingFunctionResult(
+  projectId: string,
+  name: string,
+  refuseExisting: boolean,
+): Promise<ExecutionResult | null> {
+  const { resolveFunctionByName } = await import('@/lib/services/ai-functions/names')
+  const found = await resolveFunctionByName(projectId, name)
+  if (!found) return null
+  const names = 'ambiguous' in found ? found.ambiguous : [found.fn.name]
+  const fn = 'ambiguous' in found ? null : found.fn
+  if (refuseExisting) {
+    return {
+      success: false,
+      message:
+        `A function named ${names.join(' / ')} already exists` +
+        (fn ? ` (trigger ${fn.triggerType}${fn.triggerTable ? ` on ${fn.triggerTable}` : ''}, ${fn.status})` : '') +
+        '. Nothing was created. Pick another name, replace its code with deploy_code, or switch it with set_active.',
+      error: 'ALREADY_EXISTS',
+      data: fn ? { functionId: fn.id, name: fn.name, status: fn.status } : { names },
+    }
+  }
+  return {
+    success: true,
+    message: `AI function \`${names[0]}\` already exists; it was left unchanged.`,
+    data: fn ? { id: fn.id, name: fn.name, status: fn.status, existed: true } : { names, existed: true },
+    artifacts: { functions: [names[0]] },
+    verifiedAt: new Date().toISOString(),
   }
 }
 
@@ -10952,13 +10996,9 @@ async function executeDeleteAiFunction(params: any, projectId: string): Promise<
 
   try {
     const { prisma } = await import('@/lib/db')
-    const fn = functionId
-      ? await prisma.aiFunction.findFirst({ where: { id: functionId, projectId } })
-      : await prisma.aiFunction.findFirst({ where: { name, projectId } })
-
-    if (!fn) {
-      return { success: false, message: `AI function "${functionId || name}" not found` }
-    }
+    const found = await findAiFunctionForAction(projectId, functionId, name)
+    if ('result' in found) return found.result
+    const fn = found
 
     await prisma.aiFunction.delete({ where: { id: fn.id } })
 
@@ -10980,19 +11020,59 @@ async function executeDeleteAiFunction(params: any, projectId: string): Promise<
 /**
  * TOGGLE_AI_FUNCTION: Enable or disable an AI function
  */
+/**
+ * The function an action names: by id, or by name in any form it may be stored
+ * under (as given, kebab-case, snake_case; lib/services/ai-functions/names.ts).
+ * Returns the row, or the refusal to answer with: not found, or ambiguous.
+ */
+async function findAiFunctionForAction(
+  projectId: string,
+  functionId: unknown,
+  name: unknown,
+  where: Record<string, unknown> = {},
+): Promise<import('@prisma/client').AiFunction | { result: ExecutionResult }> {
+  const { prisma } = await import('@/lib/db')
+  if (typeof functionId === 'string' && functionId) {
+    const byId = await prisma.aiFunction.findFirst({ where: { ...where, id: functionId, projectId } })
+    return byId ?? { result: { success: false, message: `AI function "${functionId}" not found`, error: 'NOT_FOUND' } }
+  }
+  if (typeof name !== 'string' || !name.trim()) {
+    return { result: { success: false, message: 'functionId or name is required', error: 'INVALID_ARGUMENT' } }
+  }
+  const { resolveFunctionByName } = await import('@/lib/services/ai-functions/names')
+  const found = await resolveFunctionByName(projectId, name, where as any)
+  if (!found) return { result: { success: false, message: `AI function "${name}" not found`, error: 'NOT_FOUND' } }
+  if ('ambiguous' in found) {
+    return {
+      result: {
+        success: false,
+        message: `More than one function answers to "${name}" (${found.ambiguous.join(', ')}). Name it by functionId.`,
+        error: 'AMBIGUOUS_NAME',
+      },
+    }
+  }
+  return found.fn
+}
+
 async function executeToggleAiFunction(params: any, projectId: string): Promise<ExecutionResult> {
   const { functionId, name, active } = params
 
-  try {
-    const { prisma } = await import('@/lib/db')
-    const fn = functionId
-      ? await prisma.aiFunction.findFirst({ where: { id: functionId, projectId } })
-      : await prisma.aiFunction.findFirst({ where: { name, projectId } })
-
-    if (!fn) {
-      return { success: false, message: `AI function "${functionId || name}" not found` }
+  // A missing or non-boolean `active` is a question, not an instruction. The
+  // tool used to coerce it with !!, so set_active without it switched the
+  // function OFF (FN-13).
+  if (typeof active !== 'boolean') {
+    return {
+      success: false,
+      message: 'active must be true or false: set_active switches a function on or off, so it needs to be told which.',
+      error: 'INVALID_ARGUMENT',
     }
+  }
 
+  try {
+    const fn = await findAiFunctionForAction(projectId, functionId, name)
+    if ('result' in fn) return fn.result
+
+    const { prisma } = await import('@/lib/db')
     const newStatus = active ? 'active' : 'inactive'
     await prisma.aiFunction.update({ where: { id: fn.id }, data: { status: newStatus } })
 
@@ -11674,18 +11754,23 @@ async function executeDeleteCronJob(params: any, projectId: string): Promise<Exe
 
   try {
     const { prisma: db } = await import('@/lib/db')
-    const job = await db.aiFunction.findFirst({
-      where: {
-        projectId,
-        triggerType: 'cron',
-        OR: [
-          ...(jobId ? [{ id: jobId }] : []),
-          ...(name ? [{ name: { contains: name, mode: 'insensitive' as const } }] : []),
-        ],
-      },
-    })
-
-    if (!job) return { success: false, message: `Cron job "${name || jobId}" not found` }
+    // The exact job, never a substring: "report" used to delete whichever of
+    // weekly_sales_report / daily_inventory_report the database returned
+    // first, while the approval card showed only "report" (FN-07). The name a
+    // person approves is now the job that is deleted.
+    const found = await findAiFunctionForAction(projectId, jobId, name, { triggerType: 'cron' })
+    if ('result' in found) {
+      if (found.result.error !== 'NOT_FOUND') return found.result
+      const jobs = await db.aiFunction.findMany({ where: { projectId, triggerType: 'cron' }, select: { name: true } })
+      return {
+        success: false,
+        message:
+          `No scheduled job is named "${name || jobId}". ` +
+          (jobs.length ? `The scheduled jobs are: ${jobs.map((j) => j.name).join(', ')}.` : 'This project has no scheduled jobs.'),
+        error: 'NOT_FOUND',
+      }
+    }
+    const job = found
 
     await db.aiFunction.delete({ where: { id: job.id } })
     return { success: true, message: `Scheduled job "${job.name}" deleted.` }
