@@ -3,7 +3,7 @@ import { promises as fs } from 'fs'
 import path from 'path'
 import crypto from 'crypto'
 import { S3StorageService } from './s3Storage'
-import { clampIsPublic } from '@/lib/storage/access-policy'
+import { clampIsPublic, policyAllowsPublic } from '@/lib/storage/access-policy'
 import { requireStorageSecret } from '@/lib/auth/jwt-secret'
 import { StorageUnavailableError } from '@/lib/storage/errors'
 import { signExportToken } from '@/lib/storage/export-token'
@@ -585,6 +585,7 @@ class LocalStorageService implements StorageService {
 
     const file = await prisma.storageFile.findUnique({
       where: { id: fileId },
+      include: { bucket: { select: { accessPolicy: true } } },
     })
 
     if (!file) {
@@ -602,7 +603,12 @@ class LocalStorageService implements StorageService {
     }
 
     const baseUrl = process.env.STORAGE_BASE_URL || '/api/storage/files'
-    if (file.isPublic) {
+    // Public only when the bucket's CURRENT policy permits public objects AND
+    // the file is marked public, the rule the download route enforces
+    // (mayRead). The file's own flag outlives a policy change: a bucket
+    // tightened to private keeps isPublic=true on its files, and a token-less
+    // URL for one of them is a link the download route refuses.
+    if (policyAllowsPublic(file.bucket.accessPolicy) && file.isPublic) {
       return `${baseUrl}/${fileId}/download`
     }
 

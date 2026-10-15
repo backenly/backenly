@@ -355,7 +355,7 @@ export const TOOL_CAPABILITIES: Capability[] = [
   {
     id: 'trigger_deploy',
     name: 'Deploy the backend (destructive)',
-    what: 'Publish the project so its REST APIs, auth, storage, triggers, and RLS are publicly callable. Runs the readiness gate first; engine returns a "Type DEPLOY" confirmation prompt unless force:true.',
+    what: 'Publish the project so its REST APIs, auth, storage, triggers, and RLS are publicly callable. It waits for a person: the call is queued for the project owner to approve, and the approved call runs the readiness gate and publishes.',
     tool: 'trigger_deploy',
   },
   {
@@ -373,7 +373,7 @@ export const TOOL_CAPABILITIES: Capability[] = [
   {
     id: 'rollback_deploy',
     name: 'Roll back the deploy (destructive)',
-    what: 'Mark a previous published version as current in the version history. Bookkeeping only: the live schema, data, RLS and functions do not change. Engine returns a "Type ROLLBACK" confirmation prompt unless force:true.',
+    what: 'Mark a previous published version as current in the version history. Bookkeeping only: the live schema, data, RLS and functions do not change. It waits for a person: the call is queued for the project owner to approve, and the approved call runs exactly as made.',
     tool: 'rollback_deploy',
   },
   {

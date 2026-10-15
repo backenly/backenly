@@ -1529,7 +1529,7 @@ DEPLOY:
 
 AUTH:
 - ENABLE_AUTH - Enable authentication (email/password)
-- ADD_PROVIDER - Add an OAuth sign-in provider (Google, GitHub, Discord, Facebook, Apple)
+- ADD_PROVIDER - Add an OAuth sign-in provider (Google, GitHub, Discord, Facebook)
 - DISABLE_PROVIDER - Disable an OAuth sign-in provider (keeps stored credentials)
 - LIST_USERS - List the project's end-users (people who signed up via the project's auth)
 - BLOCK_USER - Block an end-user from signing in
@@ -6493,15 +6493,48 @@ async function executeCreateBucket(params: any, projectId: string): Promise<Exec
     }
   } catch (error: any) {
     if (error.message?.includes('already exists')) {
-      // Even on "already exists", verify it's actually there
+      // Even on "already exists", verify it's actually there, and report what
+      // it IS. This used to answer success whatever visibility was asked for,
+      // so an agent that asked for a public bucket told its user the files
+      // were public when the existing bucket was private (or the reverse).
       try {
         const { prisma: prismaCheck } = await import('@/lib/db')
         const existing = await prismaCheck.storageBucket.findFirst({
           where: { name: bucketName, projectId },
-          select: { id: true, name: true, isPublic: true },
+          select: { id: true, name: true, isPublic: true, accessPolicy: true },
         })
         if (existing) {
-          return { success: true, message: `✅ Bucket "${bucketName}" confirmed in DB (already existed)`, data: { bucketName, verified: true } }
+          const { policyAllowsPublic } = await import('@/lib/storage/access-policy')
+          const existingPublic = policyAllowsPublic(existing.accessPolicy)
+          const requestedPublic = !!isPublic
+          const visibility = (pub: boolean) => (pub ? 'public' : 'private')
+          const data = {
+            bucketId: existing.id,
+            bucketName: existing.name,
+            existed: true,
+            isPublic: existingPublic,
+            accessPolicy: existing.accessPolicy,
+            verified: true,
+          }
+          if (requestedPublic !== existingPublic) {
+            return {
+              success: false,
+              message:
+                `Bucket "${bucketName}" already exists and is ${visibility(existingPublic)} ` +
+                `(policy ${existing.accessPolicy}); this call asked for a ${visibility(requestedPublic)} bucket. ` +
+                'Nothing changed. To change its visibility, call storage { "action": "set_public" } or ' +
+                'storage { "action": "set_policy" }.',
+              error: 'BUCKET_VISIBILITY_MISMATCH',
+              data,
+            }
+          }
+          return {
+            success: true,
+            message:
+              `Bucket "${bucketName}" already exists and is ${visibility(existingPublic)} ` +
+              `(policy ${existing.accessPolicy}). Nothing changed.`,
+            data,
+          }
         }
       } catch { /* fall through */ }
       return { success: false, message: `Bucket "${bucketName}" reported as existing but could not be verified in DB`, error: 'verification_failed' }
@@ -6700,6 +6733,7 @@ async function executeConnectFrontend(params: any, projectId: string): Promise<E
       requiresConfirmation: result.requiresConfirmation,
       origin: result.origin,
       backendVersion: result.backendVersion,
+      firstConnectedOrigin: result.firstConnectedOrigin,
     },
   }
 }
@@ -6761,6 +6795,23 @@ async function executeListConnectedApps(projectId: string): Promise<ExecutionRes
 }
 
 /**
+ * Who a deploy or rollback is recorded as acting. runExecutor names the real
+ * actor (the person who approved the call, or the holder of the key on the
+ * MCP door) and how the call was authorised; any other caller falls back to
+ * the project owner acting from chat, as before.
+ */
+function deployActor(
+  params: any,
+  ownerUserId: string,
+): { actorUserId: string; actorVia: 'APPROVAL' | 'API' | 'CHAT' } {
+  const via = params?.actorVia
+  return {
+    actorUserId: typeof params?.actorUserId === 'string' && params.actorUserId ? params.actorUserId : ownerUserId,
+    actorVia: via === 'APPROVAL' || via === 'API' ? via : 'CHAT',
+  }
+}
+
+/**
  * DEPLOY: Trigger Deploy
  * Calls the shared go-live function — same logic used by the UI button and AI chat.
  * Phase 5: goLive now runs the readiness gate first. If it blocks, we surface
@@ -6779,10 +6830,25 @@ async function executeTriggerDeploy(params: any, projectId: string): Promise<Exe
       return { success: false, message: 'Project not found', error: 'Project not found' }
     }
 
-    // Brain flow: `confirmed` is set by runExecutor when the user authorised
-    // this turn (e.g. typed DEPLOY). Without it, engine returns the preview.
+    // There is one production deployment per project. The tool used to offer
+    // environment: 'staging', print it on the approval card, and publish
+    // production anyway; a caller that still sends it is refused.
+    if (params?.environment !== undefined && params.environment !== 'production') {
+      return {
+        success: false,
+        message:
+          `There is no "${params.environment}" environment: every deploy publishes the project's one ` +
+          'production version. Nothing was deployed.',
+        error: 'ENVIRONMENT_NOT_SUPPORTED',
+      }
+    }
+
+    // `confirmed` is set by runExecutor once a person approved this exact call
+    // (or the MCP door applied its own approval rule). Without it, the engine
+    // returns the preview.
     const force = !!(params?.force || params?.confirmed)
-    const result = await goLive(projectId, project.userId, { confirmedBy: 'CHAT', force })
+    const { actorUserId, actorVia } = deployActor(params, project.userId)
+    const result = await goLive(projectId, actorUserId, { confirmedBy: actorVia, force })
 
     if (result.kind === 'error') {
       if (result.readinessReport) {
@@ -6809,18 +6875,36 @@ async function executeTriggerDeploy(params: any, projectId: string): Promise<Exe
       }
     }
 
+    // Three different outcomes, three different answers. A published update
+    // used to read "already live", so an agent reported that nothing was
+    // published; and every answer pointed at a "Publish" section that does not
+    // exist (the console calls it Deploy).
+    if (result.noChanges) {
+      return {
+        success: true,
+        message:
+          `Nothing new to publish: v${result.version} is already the latest version and the live schema has ` +
+          `not changed since it was published. No new version was created.\n\n**Base URL:** \`${result.publicUrl}\``,
+        data: { publicUrl: result.publicUrl, alreadyLive: true, noChanges: true, published: false, version: result.version },
+      }
+    }
+
     if (result.alreadyLive) {
       return {
         success: true,
-        message: `Your backend is already live (v${result.version}).\n\n**Base URL:** \`${result.publicUrl}\`\n\nCheck the **Publish** section for deployment details and SDK snippets.`,
-        data: { publicUrl: result.publicUrl, alreadyLive: true, version: result.version },
+        message:
+          `Published v${result.version}: the live backend now serves this version.\n\n**Base URL:** \`${result.publicUrl}\`\n\n` +
+          'The **Deploy** section lists every version and can mark an earlier one as current.',
+        data: { publicUrl: result.publicUrl, alreadyLive: true, noChanges: false, published: true, version: result.version },
       }
     }
 
     return {
       success: true,
-      message: `Your backend is now live (v${result.version}).\n\n**Base URL:** \`${result.publicUrl}\`\n\nCheck the **Publish** section for deployment details. Your SDK snippet is ready in the **Connect** tab.`,
-      data: { publicUrl: result.publicUrl, alreadyLive: false, version: result.version },
+      message:
+        `Published v${result.version}: your backend is now live.\n\n**Base URL:** \`${result.publicUrl}\`\n\n` +
+        'The **Deploy** section shows its versions, and the **Connect** section has the client setup.',
+      data: { publicUrl: result.publicUrl, alreadyLive: false, noChanges: false, published: true, version: result.version },
     }
   } catch (error: any) {
     return { success: false, message: `Deployment failed: ${error.message}`, error: error.message }
@@ -7452,11 +7536,14 @@ async function executeAddProvider(params: any, projectId: string): Promise<Execu
 
   const providerName = (provider || '').toLowerCase()
 
-  const SUPPORTED_PROVIDERS = ['google', 'github', 'discord', 'facebook', 'apple']
-  if (!SUPPORTED_PROVIDERS.includes(providerName)) {
+  // Only providers the runtime serves (server/routes/oauth.ts). Apple used to
+  // be accepted here, stored, and reported live while every sign-in 404'd.
+  const { SERVED_OAUTH_PROVIDERS, isServedOAuthProvider } = await import('@/lib/services/oauth-providers')
+  if (!isServedOAuthProvider(providerName)) {
     return {
       success: false,
-      message: `Provider "${provider}" is not supported. Supported providers: ${SUPPORTED_PROVIDERS.join(', ')}`,
+      message: `Provider "${provider}" is not supported. Supported providers: ${SERVED_OAUTH_PROVIDERS.join(', ')}`,
+      error: 'UNSUPPORTED_PROVIDER',
     }
   }
 
@@ -7472,7 +7559,6 @@ async function executeAddProvider(params: any, projectId: string): Promise<Execu
     github:   ['read:user', 'user:email'],
     discord:  ['identify', 'email'],
     facebook: ['email', 'public_profile'],
-    apple:    ['email', 'name'],
   }
 
   const { prisma } = await import('@/lib/db')
@@ -9539,12 +9625,13 @@ async function executeRollbackDeploy(params: any, projectId: string): Promise<Ex
 
     const { rollbackDeploy } = await import('@/lib/deployment/rollback')
     const force = !!(params?.force || params?.confirmed)
+    const { actorUserId, actorVia } = deployActor(params, project.userId)
     const result = await rollbackDeploy({
       projectId,
-      userId: project.userId,
+      userId: actorUserId,
       deploymentId: params?.deploymentId,
       version: typeof params?.version === 'number' ? params.version : undefined,
-      confirmedBy: 'CHAT',
+      confirmedBy: actorVia,
       force,
     })
 
@@ -9571,28 +9658,57 @@ async function executeRollbackDeploy(params: any, projectId: string): Promise<Ex
 }
 
 /**
- * DEPLOY: Get Deploy Status — reads real deployment record from DB
+ * DEPLOY: Get Deploy Status — the CURRENT published version, from the same
+ * authority as the Deploy page's history (listPublishedVersions).
+ *
+ * This used to answer with the newest deployment row by createdAt and no
+ * version. A rollback adds no row, so after rolling back to v1 it reported
+ * v2 as live, and an agent that checked status before acting, as the tool
+ * tells it to, was told the wrong version was current (DEP-07).
  */
 async function executeGetDeployStatus(projectId: string): Promise<ExecutionResult> {
   try {
     const { prisma } = await import('@/lib/db')
-    const deployment = await prisma.deployment.findFirst({
-      where: { projectId },
-      orderBy: { createdAt: 'desc' },
+    const { listPublishedVersions } = await import('@/lib/deployment/published-versions')
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { projectStatus: true },
     })
-    if (!deployment) {
+    if (!project) return { success: false, message: 'Project not found', error: 'Project not found' }
+
+    const published = await listPublishedVersions(projectId)
+    const latest = published?.versions[0] ?? null
+    if (!published || !latest) {
       return {
         success: true,
-        message: `ℹ️ No deployments found for this project yet.\n\nUse the **Deploy** tab to publish your backend.`,
-        data: { status: 'not_deployed' }
+        message:
+          `ℹ️ Nothing has been published for this project yet (project status: ${project.projectStatus ?? 'unknown'}).\n\n` +
+          'Publish from the **Deploy** section, or call deploy { "action": "deploy" }, which waits for the owner\'s approval.',
+        data: { status: 'not_deployed', projectStatus: project.projectStatus, version: null, latestVersion: null },
       }
     }
-    const statusEmoji = deployment.status === 'live' ? '✅' : deployment.status === 'building' ? '🔄' : '❌'
-    const lastDeploy = deployment.createdAt ? new Date(deployment.createdAt).toLocaleString() : 'unknown'
+
+    const current = published.versions.find((v) => v.isActive) ?? latest
+    const row = await prisma.deployment.findUnique({ where: { id: current.id }, select: { url: true } })
+    const rolledBack = current.version !== latest.version
+    const publishedAt = new Date(current.publishedAt).toLocaleString()
     return {
       success: true,
-      message: `🚀 **Deployment Status:**\n\n${statusEmoji} **Status:** ${deployment.status}\n🌐 **URL:** ${deployment.url || 'Not available'}\n⏱️ **Last Deploy:** ${lastDeploy}`,
-      data: { status: deployment.status, deploymentId: deployment.id, createdAt: deployment.createdAt }
+      message:
+        `🚀 **Deploy status:** v${current.version} is the current version` +
+        (rolledBack ? ` (marked current by a rollback; the latest published is v${latest.version})` : '') +
+        `, published ${publishedAt}.\n🌐 **URL:** ${row?.url || 'Not recorded'}\n📋 **Project status:** ${project.projectStatus ?? 'unknown'}\n\n` +
+        'Every published version: deploy { "action": "history" }.',
+      data: {
+        status: 'live',
+        projectStatus: project.projectStatus,
+        version: current.version,
+        latestVersion: latest.version,
+        isLatest: !rolledBack,
+        publishedAt: current.publishedAt,
+        publicUrl: row?.url ?? null,
+        deploymentId: current.id,
+      },
     }
   } catch (error: any) {
     return { success: false, message: `Failed to fetch deployment status: ${error.message}`, error: error.message }
@@ -9693,7 +9809,11 @@ async function executeDeleteEnvVar(params: any, projectId: string): Promise<Exec
 async function executeGetReadiness(params: any, projectId: string): Promise<ExecutionResult> {
   try {
     const { scoreReadiness, formatReadinessReport } = await import('@/lib/deployment/readiness-scorer')
-    const autoFix = params?.autoFix !== false // default true
+    // A readiness read changes nothing unless fixing is asked for in so many
+    // words. This defaulted to true, so the brain's get_readiness, described
+    // as reading the scorecard, enabled RLS policies, generated secrets and
+    // switched functions off whenever an agent looked (DEP-06).
+    const autoFix = params?.autoFix === true
     const report = await scoreReadiness(projectId, { autoFix })
     const summary = formatReadinessReport(report)
 
@@ -10360,18 +10480,22 @@ async function resolveStorageFile(
   params: any,
   projectId: string,
 ): Promise<
-  | { file: { id: string; name: string; isPublic: boolean } }
+  | { file: { id: string; name: string; isPublic: boolean; bucket: { name: string; accessPolicy: string } } }
   | { error: string }
 > {
   const { prisma } = await import('@/lib/db')
   const fileId: string | undefined = params.fileId
   const fileName: string | undefined = params.path ?? params.fileName
   const bucketName: string | undefined = params.bucketName
+  const fileSelect = {
+    id: true, name: true, isPublic: true,
+    bucket: { select: { name: true, accessPolicy: true } },
+  } as const
 
   if (fileId) {
     const file = await prisma.storageFile.findFirst({
       where: { id: fileId, projectId, deletedAt: null },
-      select: { id: true, name: true, isPublic: true },
+      select: fileSelect,
     })
     return file ? { file } : { error: `No file with id "${fileId}" in this project.` }
   }
@@ -10394,7 +10518,7 @@ async function resolveStorageFile(
 
   const file = await prisma.storageFile.findFirst({
     where: { projectId, name: fileName, deletedAt: null, ...(bucketId ? { bucketId } : {}) },
-    select: { id: true, name: true, isPublic: true },
+    select: fileSelect,
     orderBy: { createdAt: 'desc' },
   })
   return file
@@ -10462,6 +10586,27 @@ async function executeGenerateSignedUrl(params: any, projectId: string): Promise
     }
     const { file } = resolved
 
+    // The bucket's CURRENT policy decides, as it does at the download route.
+    // owner_only exists so that no anonymous grant can read its objects: the
+    // route refuses a signed link (403), and on the S3 driver a presigned link
+    // would go straight to the bucket and read it anyway. Refuse to mint one.
+    const { normalisePolicy, policyAllowsPublic } = await import('@/lib/storage/access-policy')
+    const policy = normalisePolicy(file.bucket.accessPolicy)
+    if (policy === 'owner_only') {
+      return {
+        success: false,
+        message:
+          `"${file.bucket.name}" is an owner_only bucket, so no shareable link can be issued for ${file.name}: ` +
+          'a signed link cannot identify the uploader, and the download route refuses it. The end user who ' +
+          'uploaded the file reads it with their own signed-in session; change the bucket policy with ' +
+          'storage { "action": "set_policy" } if links should work.',
+        error: 'OWNER_ONLY_BUCKET',
+      }
+    }
+    // Public only when the policy permits public objects AND the file is
+    // marked public: a file's own flag outlives a bucket tightened to private.
+    const effectivePublic = policyAllowsPublic(policy) && file.isPublic
+
     // Use storageService.getFileUrl — it issues an HMAC-signed, time-limited
     // URL that /api/storage/files/{id}/download actually validates. The old
     // hand-rolled token pointed at a route that never checked it (and required
@@ -10481,7 +10626,7 @@ async function executeGenerateSignedUrl(params: any, projectId: string): Promise
       expiresIn >= 3600
         ? `${Math.round(expiresIn / 3600)}h`
         : `${Math.round(expiresIn / 60)}m`
-    const expiryNote = file.isPublic
+    const expiryNote = effectivePublic
       ? 'this file is public — the link does not expire'
       : `expires in ${ttlLabel}`
 
@@ -10492,8 +10637,9 @@ async function executeGenerateSignedUrl(params: any, projectId: string): Promise
         url: fullUrl,
         fileId: file.id,
         fileName: file.name,
-        isPublic: file.isPublic,
-        expiresInSeconds: file.isPublic ? null : expiresIn,
+        isPublic: effectivePublic,
+        bucketPolicy: policy,
+        expiresInSeconds: effectivePublic ? null : expiresIn,
       },
     }
   } catch (error: any) {
@@ -10551,19 +10697,23 @@ async function executeCreateAiFunction(params: any, projectId: string): Promise<
     return { success: false, message: 'triggerTable is required for database triggers' }
   }
 
-  // L3 Fix: Guard Stripe-related functions behind a verified stored key.
-  // Creating a Stripe webhook function without a key will silently fail at first invocation.
-  const isStripeRelated = /stripe|payment|checkout|webhook.*pay|pay.*webhook/i.test(description)
+  // Guard functions that call Stripe behind a stored Stripe key: one written
+  // without it fails at its first invocation. Only a description that names
+  // Stripe trips it. The old pattern also matched "payment" and "checkout", so
+  // a function adding a payments row's amount to a balance, on a project that
+  // uses no Stripe at all, was refused as a Stripe function (FN-15).
+  const isStripeRelated = /\bstripe\b/i.test(description)
   if (isStripeRelated) {
     try {
-      const { prisma: _guardPrisma } = await import('@/lib/db')
-      const stripeKey = await _guardPrisma.projectIntegrationKey.findFirst({
-        where: { projectId, integrationId: { in: ['stripe', 'STRIPE_SECRET_KEY'] } },
-      })
-      if (!stripeKey) {
+      const { hasIntegrationKey } = await import('@/lib/services/integrationKeyStore')
+      if (!(await hasIntegrationKey(projectId, 'stripe'))) {
         return {
           success: false,
-          message: `[BLOCKED] Cannot create Stripe function — no Stripe key is stored for this project.\n\nAction: Paste your Stripe secret key (\`sk_live_...\` or \`sk_test_...\`) in the chat to connect Stripe first, then re-request this function.`,
+          message:
+            'Cannot create this function yet: it calls Stripe, and no Stripe key is stored for this project. ' +
+            'Connect Stripe first with integrations { "action": "connect", "integrationId": "stripe", "apiKey": "<the key>" } ' +
+            'or on the Integrations page, then create the function again.',
+          error: 'INTEGRATION_NOT_CONNECTED',
         }
       }
     } catch { /* non-fatal — proceed if guard check itself fails */ }
@@ -10580,6 +10730,12 @@ async function executeCreateAiFunction(params: any, projectId: string): Promise<
       ? params.name.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '_').replace(/__+/g, '_').replace(/^[_-]|[_-]$/g, '').slice(0, 50)
       : null
 
+    // A name that is taken is answered before any model call is spent on it.
+    if (suppliedName) {
+      const taken = await existingFunctionResult(projectId, suppliedName, params.refuseExisting === true)
+      if (taken) return taken
+    }
+
     const generated = await generateFunctionCode(description, triggerType, triggerTable || null, projectId)
     const name = suppliedName || generated.name
     let code = generated.code
@@ -10592,35 +10748,23 @@ async function executeCreateAiFunction(params: any, projectId: string): Promise<
       return { success: false, message: `Could not create AI function — ${fnValidation.reason}. Please provide a concrete description of what this function should do.` }
     }
 
-    // Deduplication: if a function with the same name already exists for this project, skip creation.
-    const existing = await prisma.aiFunction.findFirst({
-      where: { projectId, name },
-    })
-    if (existing) {
-      return {
-        success: true,
-        message: `AI function \`${name}\` already exists — skipped duplicate creation.`,
-        data: { id: existing.id, name: existing.name, status: existing.status },
-        artifacts: { functions: [name] },
-        verifiedAt: new Date().toISOString(),
-      }
+    // The generated name (when none was supplied) can collide as well.
+    if (!suppliedName) {
+      const taken = await existingFunctionResult(projectId, name, params.refuseExisting === true)
+      if (taken) return taken
     }
 
-    // Also deduplicate by trigger (same triggerType + triggerTable combo for non-manual triggers)
-    if (triggerType !== 'manual' && triggerType !== 'cron' && triggerTable) {
-      const sameTriggered = await prisma.aiFunction.findFirst({
-        where: { projectId, triggerType, triggerTable },
-      })
-      if (sameTriggered) {
-        return {
-          success: true,
-          message: `AI function \`${sameTriggered.name}\` already handles \`${triggerType}\` on \`${triggerTable}\` — skipped duplicate.`,
-          data: { id: sameTriggered.id, name: sameTriggered.name, status: sameTriggered.status },
-          artifacts: { functions: [sameTriggered.name] },
-          verifiedAt: new Date().toISOString(),
-        }
-      }
-    }
+    // Other active functions on the same event are not a reason to refuse: the
+    // runtime fires every active function for a trigger (and deploy_code allows
+    // several), so a second one is created and the overlap is named. The old
+    // dedup answered "skipped duplicate" with success and the OTHER function's
+    // id, and nothing was created (FN-08).
+    const sameEvent = triggerType !== 'manual' && triggerType !== 'cron'
+      ? await prisma.aiFunction.findMany({
+          where: { projectId, triggerType, triggerTable: triggerTable || null, status: 'active' },
+          select: { name: true },
+        })
+      : []
 
     let syntaxCheck = validateFunctionSyntax(code)
 
@@ -10706,13 +10850,59 @@ async function executeCreateAiFunction(params: any, projectId: string): Promise<
         .catch(() => {/* non-fatal */ })
     }
 
+    const overlap = sameEvent.map((f) => f.name)
     return {
       success: syntaxCheck.valid,
-      message: baseMessage,
-      data: { functionId: fn.id, name: fn.name, triggerType, triggerTable, syntaxValid: syntaxCheck.valid },
+      message:
+        baseMessage +
+        (overlap.length
+          ? `\n\nAlso running on this event: ${overlap.join(', ')}. Every active function on an event runs; switch one off with set_active if they should not both run.`
+          : ''),
+      data: {
+        functionId: fn.id, name: fn.name, triggerType, triggerTable, syntaxValid: syntaxCheck.valid,
+        ...(overlap.length ? { alsoOnThisEvent: overlap } : {}),
+      },
     }
   } catch (error: any) {
     return { success: false, message: `Failed to create AI function: ${error.message}`, error: error.message }
+  }
+}
+
+/**
+ * What creating a function under a name that is taken answers. An agent's
+ * create (refuseExisting) is refused with ALREADY_EXISTS, naming the function
+ * and how to change it; it used to answer success with the existing
+ * function's id, so the agent reported a function that was never created
+ * (FN-08). Internal callers, such as integration auto-wiring re-run by a
+ * second connect, get an honest idempotent success that says nothing changed.
+ */
+async function existingFunctionResult(
+  projectId: string,
+  name: string,
+  refuseExisting: boolean,
+): Promise<ExecutionResult | null> {
+  const { resolveFunctionByName } = await import('@/lib/services/ai-functions/names')
+  const found = await resolveFunctionByName(projectId, name)
+  if (!found) return null
+  const names = 'ambiguous' in found ? found.ambiguous : [found.fn.name]
+  const fn = 'ambiguous' in found ? null : found.fn
+  if (refuseExisting) {
+    return {
+      success: false,
+      message:
+        `A function named ${names.join(' / ')} already exists` +
+        (fn ? ` (trigger ${fn.triggerType}${fn.triggerTable ? ` on ${fn.triggerTable}` : ''}, ${fn.status})` : '') +
+        '. Nothing was created. Pick another name, replace its code with deploy_code, or switch it with set_active.',
+      error: 'ALREADY_EXISTS',
+      data: fn ? { functionId: fn.id, name: fn.name, status: fn.status } : { names },
+    }
+  }
+  return {
+    success: true,
+    message: `AI function \`${names[0]}\` already exists; it was left unchanged.`,
+    data: fn ? { id: fn.id, name: fn.name, status: fn.status, existed: true } : { names, existed: true },
+    artifacts: { functions: [names[0]] },
+    verifiedAt: new Date().toISOString(),
   }
 }
 
@@ -10971,13 +11161,9 @@ async function executeDeleteAiFunction(params: any, projectId: string): Promise<
 
   try {
     const { prisma } = await import('@/lib/db')
-    const fn = functionId
-      ? await prisma.aiFunction.findFirst({ where: { id: functionId, projectId } })
-      : await prisma.aiFunction.findFirst({ where: { name, projectId } })
-
-    if (!fn) {
-      return { success: false, message: `AI function "${functionId || name}" not found` }
-    }
+    const found = await findAiFunctionForAction(projectId, functionId, name)
+    if ('result' in found) return found.result
+    const fn = found
 
     await prisma.aiFunction.delete({ where: { id: fn.id } })
 
@@ -10999,19 +11185,59 @@ async function executeDeleteAiFunction(params: any, projectId: string): Promise<
 /**
  * TOGGLE_AI_FUNCTION: Enable or disable an AI function
  */
+/**
+ * The function an action names: by id, or by name in any form it may be stored
+ * under (as given, kebab-case, snake_case; lib/services/ai-functions/names.ts).
+ * Returns the row, or the refusal to answer with: not found, or ambiguous.
+ */
+async function findAiFunctionForAction(
+  projectId: string,
+  functionId: unknown,
+  name: unknown,
+  where: Record<string, unknown> = {},
+): Promise<import('@prisma/client').AiFunction | { result: ExecutionResult }> {
+  const { prisma } = await import('@/lib/db')
+  if (typeof functionId === 'string' && functionId) {
+    const byId = await prisma.aiFunction.findFirst({ where: { ...where, id: functionId, projectId } })
+    return byId ?? { result: { success: false, message: `AI function "${functionId}" not found`, error: 'NOT_FOUND' } }
+  }
+  if (typeof name !== 'string' || !name.trim()) {
+    return { result: { success: false, message: 'functionId or name is required', error: 'INVALID_ARGUMENT' } }
+  }
+  const { resolveFunctionByName } = await import('@/lib/services/ai-functions/names')
+  const found = await resolveFunctionByName(projectId, name, where as any)
+  if (!found) return { result: { success: false, message: `AI function "${name}" not found`, error: 'NOT_FOUND' } }
+  if ('ambiguous' in found) {
+    return {
+      result: {
+        success: false,
+        message: `More than one function answers to "${name}" (${found.ambiguous.join(', ')}). Name it by functionId.`,
+        error: 'AMBIGUOUS_NAME',
+      },
+    }
+  }
+  return found.fn
+}
+
 async function executeToggleAiFunction(params: any, projectId: string): Promise<ExecutionResult> {
   const { functionId, name, active } = params
 
-  try {
-    const { prisma } = await import('@/lib/db')
-    const fn = functionId
-      ? await prisma.aiFunction.findFirst({ where: { id: functionId, projectId } })
-      : await prisma.aiFunction.findFirst({ where: { name, projectId } })
-
-    if (!fn) {
-      return { success: false, message: `AI function "${functionId || name}" not found` }
+  // A missing or non-boolean `active` is a question, not an instruction. The
+  // tool used to coerce it with !!, so set_active without it switched the
+  // function OFF (FN-13).
+  if (typeof active !== 'boolean') {
+    return {
+      success: false,
+      message: 'active must be true or false: set_active switches a function on or off, so it needs to be told which.',
+      error: 'INVALID_ARGUMENT',
     }
+  }
 
+  try {
+    const fn = await findAiFunctionForAction(projectId, functionId, name)
+    if ('result' in fn) return fn.result
+
+    const { prisma } = await import('@/lib/db')
     const newStatus = active ? 'active' : 'inactive'
     await prisma.aiFunction.update({ where: { id: fn.id }, data: { status: newStatus } })
 
@@ -11211,6 +11437,18 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
     }
 
     const autoWiredSteps: string[] = []
+    // Each function this connect meant to wire and could not, with the reason:
+    // its code is written by Backenly's model, so a month with no AI credits
+    // left refuses it, and a generation can fail. The key is stored either way.
+    // These used to be dropped, so "stripe connected" could arrive with no word
+    // that the webhook handler was never made.
+    const notWired: string[] = []
+    const wiringFailed = (fn: string, result: ExecutionResult) => {
+      const reason = (result.data as any)?.syntaxValid === false
+        ? 'its generated code has a syntax error, so it is stored but will not run until fixed'
+        : String(result.error ?? result.message ?? 'it could not be generated').split('\n')[0]
+      notWired.push(`\`${fn}\`: ${reason}`)
+    }
 
     // ── PROMPT 2.1: Stripe auto-wiring ─────────────────────────────────────
     if (integrationId === 'stripe') {
@@ -11261,6 +11499,7 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
         projectId,
       )
       if (checkoutResult.success) autoWiredSteps.push(`✅ Generated \`POST /api/v1/${projectId}/fn/stripe-checkout-session\``)
+      else wiringFailed('stripe-checkout-session', checkoutResult)
 
       // The Stripe webhook handler: triggerType on_webhook / triggerTable
       // 'stripe' — the ONLY shape the platform receiver fires. It used to be
@@ -11284,6 +11523,7 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
         projectId,
       )
       if (webhookResult.success) autoWiredSteps.push('✅ Generated `stripe-webhook` handler (fires on verified Stripe deliveries)')
+      else wiringFailed('stripe-webhook', webhookResult)
     }
 
     // ── PROMPT 2.2: Email triggers ──────────────────────────────────────────
@@ -11292,9 +11532,12 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
       const authEnabled = graph?.auth?.providers?.email?.enabled === true
 
       if (authEnabled) {
-        // Welcome email on user sign-up
+        // Welcome email on user sign-up. Named, like every function a connect
+        // wires, so connecting again finds it instead of paying to generate a
+        // second one that would send every new user two welcome emails.
         const welcomeResult = await executeCreateAiFunction(
           {
+            name: `${integrationId}-welcome-email`,
             description: `When a user signs up, send them a welcome email using ctx.integrations.${integrationId}.send(). Address the email to the user's email, use a friendly subject line, and include their name if available.`,
             triggerType: 'on_signup',
           },
@@ -11302,6 +11545,8 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
         )
         if (welcomeResult.success) {
           autoWiredSteps.push(`✅ Created welcome email trigger (on_signup → ${integrationId})`)
+        } else {
+          wiringFailed(`welcome email on sign-up (${integrationId})`, welcomeResult)
         }
 
         // Password-reset email when a reset record is inserted
@@ -11313,6 +11558,7 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
         if (resetTable) {
           const resetResult = await executeCreateAiFunction(
             {
+              name: `${integrationId}-password-reset-email`,
               description: `When a password reset record is inserted into \`${resetTable.name}\`, send a password reset email to the user using ctx.integrations.${integrationId}.send(). Include the reset token as a link. Log the delivery result.`,
               triggerType: 'on_db_insert',
               triggerTable: resetTable.name,
@@ -11321,6 +11567,8 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
           )
           if (resetResult.success) {
             autoWiredSteps.push(`✅ Created password reset trigger (${resetTable.name}.insert → ${integrationId})`)
+          } else {
+            wiringFailed(`password reset email on ${resetTable.name} insert (${integrationId})`, resetResult)
           }
         }
       }
@@ -11345,6 +11593,7 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
         projectId,
       )
       if (chatResult.success) autoWiredSteps.push(`✅ Generated \`POST /api/v1/${projectId}/fn/${integrationId}-chat\``)
+      else wiringFailed(`${integrationId}-chat`, chatResult)
 
       // Embeddings — OpenAI only. Anthropic has no embeddings API, so an
       // anthropic-embed function would be unrunnable — never generate it.
@@ -11364,6 +11613,7 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
           projectId,
         )
         if (embedResult.success) autoWiredSteps.push(`✅ Generated \`POST /api/v1/${projectId}/fn/openai-embed\``)
+        else wiringFailed('openai-embed', embedResult)
       }
     }
 
@@ -11428,6 +11678,10 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
     const autoWiredMsg = autoWiredSteps.length > 0
       ? `\n\n**Auto-wired:**\n${autoWiredSteps.join('\n')}`
       : ''
+    const notWiredMsg = notWired.length > 0
+      ? `\n\n**Not wired:**\n${notWired.map((line) => `⚠ ${line}`).join('\n')}\n` +
+        'Connect again once that is resolved to wire them; what is already wired is kept.'
+      : ''
 
     const appIdGap = oneSignalAppIdPending
       ? `\n\n⚠ **Push sending is NOT active yet.** OneSignal also needs your App ID: ` +
@@ -11436,7 +11690,7 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
 
     return {
       success: true,
-      message: `${integrationId} connected. Key stored securely (${status.maskedKey}).${keyValidationNote}${webhookUrl}${webhookGap}${appIdGap}${autoWiredMsg}\n\nAI functions can now use \`ctx.integrations.${integrationId}.*\` to call ${integrationId} APIs.`,
+      message: `${integrationId} connected. Key stored securely (${status.maskedKey}).${keyValidationNote}${webhookUrl}${webhookGap}${appIdGap}${autoWiredMsg}${notWiredMsg}\n\nAI functions can now use \`ctx.integrations.${integrationId}.*\` to call ${integrationId} APIs.`,
       data: {
         integrationId,
         maskedKey: status.maskedKey,
@@ -11445,6 +11699,7 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
         webhookSecretPending,
         oneSignalAppIdPending,
         autoWired: autoWiredSteps,
+        notWired,
       },
     }
   } catch (error: any) {
@@ -11693,18 +11948,23 @@ async function executeDeleteCronJob(params: any, projectId: string): Promise<Exe
 
   try {
     const { prisma: db } = await import('@/lib/db')
-    const job = await db.aiFunction.findFirst({
-      where: {
-        projectId,
-        triggerType: 'cron',
-        OR: [
-          ...(jobId ? [{ id: jobId }] : []),
-          ...(name ? [{ name: { contains: name, mode: 'insensitive' as const } }] : []),
-        ],
-      },
-    })
-
-    if (!job) return { success: false, message: `Cron job "${name || jobId}" not found` }
+    // The exact job, never a substring: "report" used to delete whichever of
+    // weekly_sales_report / daily_inventory_report the database returned
+    // first, while the approval card showed only "report" (FN-07). The name a
+    // person approves is now the job that is deleted.
+    const found = await findAiFunctionForAction(projectId, jobId, name, { triggerType: 'cron' })
+    if ('result' in found) {
+      if (found.result.error !== 'NOT_FOUND') return found.result
+      const jobs = await db.aiFunction.findMany({ where: { projectId, triggerType: 'cron' }, select: { name: true } })
+      return {
+        success: false,
+        message:
+          `No scheduled job is named "${name || jobId}". ` +
+          (jobs.length ? `The scheduled jobs are: ${jobs.map((j) => j.name).join(', ')}.` : 'This project has no scheduled jobs.'),
+        error: 'NOT_FOUND',
+      }
+    }
+    const job = found
 
     await db.aiFunction.delete({ where: { id: job.id } })
     return { success: true, message: `Scheduled job "${job.name}" deleted.` }
@@ -13376,15 +13636,18 @@ async function executeEnableTeams(params: any, projectId: string, apiKey?: strin
 
     const created: string[] = []
     const failed: string[] = []
+    // Never replanned: a failed step here is reported in `failed`. A model's
+    // substitute action could succeed and record the table as created when it
+    // was not.
     for (const t of tables) {
-      const r = await executeAction({ action: 'CREATE_TABLE', params: t }, projectId, apiKey)
+      const r = await executeAction({ action: 'CREATE_TABLE', params: t }, projectId, apiKey, 0, undefined, false)
       if (r.success) created.push(t.tableName)
       else failed.push(`${t.tableName}: ${r.error ?? r.message}`)
     }
 
     // 3. Generate the standard CRUD APIs for each table.
     for (const t of tables) {
-      await executeAction({ action: 'GENERATE_API', params: { tableName: t.tableName } }, projectId, apiKey).catch(() => {})
+      await executeAction({ action: 'GENERATE_API', params: { tableName: t.tableName } }, projectId, apiKey, 0, undefined, false).catch(() => {})
     }
 
     // 4. Indexes that matter for org lookup performance.

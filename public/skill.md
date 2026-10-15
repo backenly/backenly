@@ -79,7 +79,7 @@ SDK: `npm install @backenly/sdk`, then `createClient({ projectId, apiKey })` wit
 
 ## Errors
 
-Structured JSON: `{ ok: false, error, code }`. `RATE_LIMITED`: respect `retry-after`. `PLAN_LIMIT_EXCEEDED` / `AI_CREDITS_EXHAUSTED`: the human must act; do not retry in a loop (only `backend_chat` and `generate_function` spend credits). `READ_ONLY_KEY`: ask for a read-write key. `INVALID_KEY` / `NO_AUTH`: ask for a fresh key from Connect → Agents. `MCP_KEY_IN_APP` / `SERVICE_ROLE_IN_BROWSER`: the app holds the wrong key; give it a project key as above, and if the refused key was committed or shipped, tell your human to revoke it.
+Structured JSON: `{ ok: false, error, code }`. `RATE_LIMITED`: respect `retry-after`. `PLAN_LIMIT_EXCEEDED` / `AI_CREDITS_EXHAUSTED`: the human must act; do not retry in a loop (only Backenly's own model spends credits: `backend_chat`, `functions` `create` and `schedule`, and the functions `integrations` `connect` wires). `READ_ONLY_KEY`: ask for a read-write key. `INVALID_KEY` / `NO_AUTH`: ask for a fresh key from Connect → Agents. `MCP_KEY_IN_APP` / `SERVICE_ROLE_IN_BROWSER`: the app holds the wrong key; give it a project key as above, and if the refused key was committed or shipped, tell your human to revoke it.
 
 ## Worth telling your human
 

@@ -323,7 +323,7 @@ await backend.auth.signIn({ email, password })
       },
       {
         title: 'Every run is logged',
-        body: 'The console shows each run with its result, duration, log lines and error. You can test-run a function from the console before relying on it.',
+        body: 'The console shows each run with its result, duration, log lines and error, including the check Backenly runs when an HTTP function is created. You can test-run a function from the console before relying on it.',
       },
     ],
     prompts: [

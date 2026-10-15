@@ -93,6 +93,34 @@ export default function PublishPage() {
   const [error, setError] = useState<string | null>(null)
   const [successMsg, setSuccessMsg] = useState<string | null>(null)
   const [rollingBackId, setRollingBackId] = useState<string | null>(null)
+  const [applyingFixes, setApplyingFixes] = useState(false)
+  const [fixNote, setFixNote] = useState<string | null>(null)
+
+  /**
+   * Applying fixes is a deliberate act, never a side effect of looking: it can
+   * enable row-level security with an owner policy (rows other users could
+   * read stop appearing to them), generate the project JWT secret, set the
+   * auth flag, and switch off placeholder functions that have live triggers.
+   */
+  const applySafeFixes = async () => {
+    setApplyingFixes(true)
+    setFixNote(null)
+    try {
+      const res = await fetch(`/api/projects/${projectId}/readiness`, { method: 'POST', credentials: 'include' })
+      const r = await res.json().catch(() => ({}))
+      if (res.ok) {
+        setReadinessChecks(r.report?.checks ?? [])
+        const applied: ReadinessCheck[] = r.report?.autoFixed ?? []
+        setFixNote(applied.length > 0 ? `Applied: ${applied.map(c => c.name).join(', ')}.` : 'Nothing needed fixing.')
+      } else {
+        setFixNote(r.error || 'The fixes could not be applied.')
+      }
+    } catch {
+      setFixNote('The fixes could not be applied.')
+    } finally {
+      setApplyingFixes(false)
+    }
+  }
 
   const fetchAll = async () => {
     try {
@@ -123,11 +151,12 @@ export default function PublishPage() {
       const hasRealContent = (state?.hasContent ?? false) || hasAuth
       if (hasRealContent) {
         try {
-          // POST → run auto-fixes (RLS, JWT secret, etc.) BEFORE rendering the
-          // score, so the page shows the post-repair state rather than a stale
-          // snapshot. Same logic the autonomy runtime applies in the background.
+          // GET: a read that changes nothing. This used to POST, which ran the
+          // auto-fixes on every page load: enabling RLS with an owner policy on
+          // tables an agent had left open on purpose, generating secrets and
+          // switching functions off, with no click and no record on the page.
+          // Fixes are the explicit "Apply safe fixes" action in the panel.
           const readinessRes = await fetch(`/api/projects/${projectId}/readiness`, {
-            method: 'POST',
             credentials: 'include',
           })
           if (readinessRes.ok) {
@@ -288,6 +317,8 @@ export default function PublishPage() {
   const passingChecks = readinessChecks.filter(c => c.status === 'pass').length
   const blockingChecks = readinessChecks.filter(c => c.status === 'fail' && c.severity === 'blocking')
   const warningChecks = readinessChecks.filter(c => c.status === 'fail' && c.severity !== 'blocking')
+  // What "Apply safe fixes" would change: failing checks the engine can fix.
+  const fixableChecks = readinessChecks.filter(c => c.status === 'fail' && c.severity === 'auto-fixable' && !c.fixApplied)
 
   /**
    * What the readiness card actually draws: anything that FAILED, then the
@@ -374,6 +405,21 @@ export default function PublishPage() {
             </li>
           )}
         </ul>
+        {(fixableChecks.length > 0 || fixNote) && (
+          <div className={`flex flex-wrap items-center justify-between gap-3 border-t ${RULE} px-4 py-2.5`}>
+            <p className="min-w-0 flex-1 text-[12.5px] leading-[18px] text-zinc-500">
+              {fixNote ??
+                `${fixableChecks.length} ${fixableChecks.length === 1 ? 'item' : 'items'} Backenly can fix: ` +
+                  `${fixableChecks.map(c => c.name).join(', ')}. This can turn on row-level security for tables ` +
+                  'it can find an owner for, so check what each table should show before applying.'}
+            </p>
+            {fixableChecks.length > 0 && (
+              <KitButton onClick={applySafeFixes} loading={applyingFixes}>
+                {applyingFixes ? 'Applying…' : 'Apply safe fixes'}
+              </KitButton>
+            )}
+          </div>
+        )}
         {blockingChecks.length > 0 && (
           <div className={`border-t ${RULE} px-4 py-2.5`}>
             <Link

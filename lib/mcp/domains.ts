@@ -54,7 +54,7 @@ export const DOMAIN_TOOLS: DomainTool[] = [
       'Read the current user list with action "list_users".',
     actions: {
       enable: { tool: 'enable_auth', gloss: 'turn on email + password sign-up with JWT sessions' },
-      add_oauth_provider: { tool: 'add_oauth_provider', gloss: 'Google, GitHub, Discord, Facebook or Apple sign-in, with the provider\'s clientId and clientSecret' },
+      add_oauth_provider: { tool: 'add_oauth_provider', gloss: 'Google, GitHub, Discord or Facebook sign-in, with the provider\'s clientId and clientSecret' },
       remove_oauth_provider: { tool: 'disable_oauth_provider', gloss: 'turn a sign-in provider off' },
       list_users: { tool: 'list_end_users', gloss: 'the end-users who have signed up' },
       reset_password: { tool: 'reset_end_user_password', gloss: 'send a password reset to one user (userId or email)' },
@@ -89,7 +89,7 @@ export const DOMAIN_TOOLS: DomainTool[] = [
     name: 'functions',
     title: 'Functions',
     summary:
-      'Server-side functions and schedules. "create" has Backenly write a function\'s code from your spec with its ' +
+      'Server-side functions and schedules. "create" and "schedule" have Backenly write the code from your spec with its ' +
       'own model, which draws AI credits; name the tables and integrations it uses. "deploy_code" stores code you wrote, ' +
       'exactly as written, after the runtime checks it can run.',
     actions: {
@@ -101,7 +101,7 @@ export const DOMAIN_TOOLS: DomainTool[] = [
       logs: { tool: 'list_ai_function_logs', gloss: 'recent runs from every trigger, with errors and ctx.log lines' },
       set_active: { tool: 'toggle_ai_function', gloss: 'turn a function on or off' },
       delete: { tool: 'delete_ai_function', gloss: 'remove a function' },
-      schedule: { tool: 'create_cron_job', gloss: 'a job on a schedule ("every 15 minutes" or 5-field cron)' },
+      schedule: { tool: 'create_cron_job', gloss: 'a job on a schedule ("every 15 minutes" or 5-field cron), its code written from your description by Backenly\'s model' },
       list_schedules: { tool: 'list_cron_jobs', gloss: 'every scheduled job' },
       delete_schedule: { tool: 'delete_cron_job', gloss: 'remove a scheduled job' },
     },
@@ -129,7 +129,7 @@ export const DOMAIN_TOOLS: DomainTool[] = [
       list: { tool: 'list_integration_keys', gloss: 'connected providers, masked keys and verification state' },
       capabilities: { tool: 'list_integration_capabilities', gloss: 'the exact ctx.integrations methods each provider gives a function, and for Stripe its receiver URL and signing-secret state' },
       verify: { tool: 'verify_integration_key', gloss: 'ask the provider again whether the stored key works' },
-      connect: { tool: 'store_integration_key', gloss: 'store a provider key (Stripe also takes webhookSecret, OneSignal also takes appId) and wire the first functions' },
+      connect: { tool: 'store_integration_key', gloss: 'store a provider key (Stripe also takes webhookSecret, OneSignal also takes appId) and wire the first functions, which Backenly\'s model writes' },
       disconnect: { tool: 'remove_integration_key', gloss: 'remove a provider key' },
       send_push: { tool: 'send_push', gloss: 'a push notification through the connected OneSignal app' },
     },
@@ -218,7 +218,7 @@ export const DOMAIN_TOOLS: DomainTool[] = [
       list_env: { tool: 'list_env_vars', gloss: 'variable names with 4-character previews' },
       delete_env: { tool: 'delete_env_var', gloss: 'remove a variable' },
       database_credentials: { tool: 'get_database_credentials', gloss: 'a Postgres connection string (read-write only after a human arms it)' },
-      connect_frontend: { tool: 'connect_frontend', gloss: 'allow a frontend origin (CORS)' },
+      connect_frontend: { tool: 'connect_frontend', gloss: 'allow a frontend origin (CORS); binds at once, and connected origins become the project\'s CORS allowlist' },
       disconnect_frontend: { tool: 'disconnect_frontend', gloss: 'remove a frontend origin' },
       list_apps: { tool: 'list_connected_apps', gloss: 'the frontends connected to this backend' },
     },

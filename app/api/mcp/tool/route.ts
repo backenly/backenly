@@ -43,22 +43,30 @@ import { AGENT_DOCS_URL, AGENT_DOC_TOPICS, agentDocPublicPath, resolveDocTopic }
 import { readOnlyView, resolveDomainAction, type DomainResolution } from '@/lib/mcp/domains'
 
 /**
- * Tools on this route that spend Backenly's model budget. See the gate in POST
- * for how this set was derived and why everything else stays ungated.
+ * Tools on this route that are model work from their first step, refused up
+ * front with a structured 402 when the month's credits are spent.
  *
- * Membership means BOTH halves apply: the pre-gate below refuses the call when
- * the month's credits are spent, and the token scope around dispatch debits
- * what the call actually burned. A tool that gates without charging is not a
- * cheaper tool — it is an unlimited one, because a meter that never moves never
- * reaches the cap. That was the live state of `generate_function` until the
- * charge below was added.
+ * This set is a courtesy, not the billing boundary. Every customer-paid model
+ * call made while any tool runs holds the account's credits before it is sent
+ * and is charged after: the token scope around dispatch names the project, and
+ * the AI gateway bills each call to it (lib/ai/token-meter.ts). This set used
+ * to BE the boundary, gating and charging only its members, and it drifted:
+ * `create_cron_job` (functions.schedule) writes its job with Backenly's model
+ * and was never refused or charged, and neither were the functions
+ * `store_integration_key` (integrations.connect) wires (FN-12, FN-19, INT-15).
+ * A model-backed tool missing from here is still gated and charged; it is only
+ * refused later, by its first model call, with that call's own message.
+ *
+ * `store_integration_key` is deliberately absent: storing a key needs no model,
+ * so an account with no credits left can still connect a provider, and the
+ * receipt names each function that could not be wired, and why.
  *
  * `answer_question` is currently unreachable here — MCP_EXCLUDE in
  * lib/mcp/catalog.ts keeps the brain's control-loop tools off this surface, so
- * the 404 fires before either half runs. It stays listed deliberately: if it is
- * ever exposed, it arrives already metered rather than repeating this bug.
+ * the 404 fires before the gate runs. It stays listed deliberately: if it is
+ * ever exposed, it arrives already gated.
  */
-const MODEL_BACKED_TOOLS = new Set(['answer_question', 'generate_function'])
+const MODEL_BACKED_TOOLS = new Set(['answer_question', 'generate_function', 'create_cron_job'])
 
 const ENDPOINT = '/api/mcp/tool'
 
@@ -158,22 +166,19 @@ export async function POST(request: NextRequest) {
     return withCors(await parkForApproval(auth, resolved, domainArgs!, startedAt))
   }
 
-  // ── Credit gate for the model-backed tools ────────────────────────────────
+  // ── Early credit refusal for the tools that are model work ─────────────────
   //
   // Most of this route is deterministic — the typed tools compile to SQL via
   // executeAction and cost us no model spend, so they stay open even for a user
-  // with no credits left. Two do call OpenAI on our key and must be gated, or
-  // an exhausted agent could simply route around /api/mcp/chat and keep
-  // spending through here:
+  // with no credits left. The tools in MODEL_BACKED_TOOLS are model work from
+  // their first step, so an exhausted account is refused here, before anything
+  // runs, with a structured 402 an agent can branch on.
   //
-  //   • answer_question   — direct completion (lib/ai/brain/tools.ts)
-  //   • generate_function — executeAction → lib/ai/function-generator +
-  //                         lib/services/ai-functions/generator
-  //
-  // Derived by tracing every dynamic import reachable from executeAction; those
-  // two modules are the only OpenAI callers on the path. GENERATE_API, by
-  // contrast, is pure SQL generation and is deliberately NOT gated. Keep this
-  // set in sync when a new model-backed tool lands.
+  // This used to be the only gate, kept in sync by hand from a trace that said
+  // two modules were the only model callers on the path. They were not
+  // (FN-12, FN-19, INT-15). Every other model call a tool makes is now gated by
+  // its own credit hold when it is sent, and charged below, so a model-backed
+  // tool missing from the set is still never free.
   if (MODEL_BACKED_TOOLS.has(effectiveTool)) {
     const { enforceAiCredits } = await import('@/lib/entitlements/policy')
     const { creditAccountOf } = await import('@/lib/usage/account')
@@ -196,7 +201,7 @@ export async function POST(request: NextRequest) {
           upgradeRequired: true,
           remedy:
             `\`${callLabel}\` uses Backenly's model budget and this month's credits are spent. ` +
-            `Every other tool on this route is deterministic and still works. ` +
+            `Tools that do not call Backenly's model still work. ` +
             `Credits reset on the 1st, or upgrade the plan.`,
           retryable: false,
         },
@@ -706,16 +711,20 @@ export async function POST(request: NextRequest) {
 
   // ── Charge half of the credit contract ────────────────────────────────────
   //
-  // Opened only for the model-backed tools, and only around dispatch. Every
-  // completion issued underneath — the generator's write pass, its repair pass,
-  // any model call a future model-backed tool makes — lands in `scope.tokens`
-  // without that code knowing billing exists (lib/ai/token-meter.ts).
+  // Opened around every dispatch, naming the project that pays. Every
+  // customer-paid model call issued underneath — the generator's write pass,
+  // its repair pass, the functions integrations.connect wires, any model call a
+  // future tool makes — holds the account's credits before it is sent and
+  // lands in `scope.tokens` after, without that code knowing billing exists
+  // (lib/ai/token-meter.ts). This used to be opened for every tool but charged
+  // only for MODEL_BACKED_TOOLS, so a tool missing from that list burned
+  // tokens the scope counted and the charge then dropped (FN-12, FN-19). A
+  // deterministic tool calls no model and is charged nothing.
   //
   // Billed in `finally` because a dispatch that threw still burned the tokens
   // it burned. Fire-and-forget, mirroring the chat route: a billing write must
   // never turn a completed backend change into an error response.
-  const metered = MODEL_BACKED_TOOLS.has(effectiveTool)
-  const tokenScope = createTokenScope()
+  const tokenScope = createTokenScope({ projectId: auth.projectId })
 
   try {
     const result = await runInTokenScope(tokenScope, () => dispatchTool(dispatchName, dispatchArgs, {
@@ -789,13 +798,12 @@ export async function POST(request: NextRequest) {
       { status: 500 },
     ))
   } finally {
-    // Charge a metered tool's tokens, then close its credit holds. A tool that
-    // is not metered still releases any hold a model call inside it took.
-    const charge = metered ? tokenScope.tokens : 0
-    if (charge > 0 || tokenScope.holds.length > 0) {
+    // Charge what the dispatch's customer-paid model calls burned, then close
+    // their credit holds. A tool that called no model has neither.
+    if (tokenScope.tokens > 0 || tokenScope.holds.length > 0) {
       Promise.all([import('@/lib/entitlements/credit-holds'), import('@/lib/usage/account')])
         .then(async ([{ closeCreditTurn }, { creditAccountOf }]) =>
-          closeCreditTurn(await creditAccountOf(auth.projectId), tokenScope, charge),
+          closeCreditTurn(await creditAccountOf(auth.projectId), tokenScope, tokenScope.tokens),
         )
         .catch(() => {})
     }

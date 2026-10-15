@@ -915,6 +915,42 @@ tests/integration/integrations-connect-contract.spec.ts
 # rows and the real credentials, keys and build-status routes are the
 # property; PostHog and seeded rows keep CI off provider APIs.
 tests/integration/integration-key-one-row.spec.ts
+# Function management names the function it acted on: delete_schedule deletes
+# the exact job, an agent's create of a taken name is refused before any model
+# call, a second function on an event is created with the overlap named, every
+# form of a name finds the function, an HTTP create never converts a hook,
+# set_active needs a direction, and only Stripe functions need Stripe. Real
+# function rows; only the LLM code generator is stubbed.
+tests/integration/functions-agent-contract.spec.ts
+# The typed schema doors agree with apply_migration: create_table of an
+# existing table and add_column on a missing one are refused with nothing
+# changed, and a mistyped name is answered with the closest real table.
+# Real workspace tables are the property.
+tests/integration/db-doors-agree.spec.ts
+# A readiness read changes nothing: the scorer's checks write only when fixing
+# is asked for, the agent read defaults to a read, and the Deploy page reads
+# on load and fixes only on an explicit action. Real project, users table and
+# function rows are the property.
+tests/integration/readiness-reads-never-write.spec.ts
+# The deploy tool tells the truth: status names the current published version
+# (after a rollback too), deploy has no staging target, the first publish,
+# an update and a no-op each say what happened, and an approved deploy is
+# audited as the approver acting by approval. Real deployment, graph and
+# audit rows are the property; only the readiness gate's verdict is fixed,
+# because a superuser test connection bypasses the RLS it checks.
+tests/integration/deploy-tool-truth.spec.ts
+# Storage answers agents with what the runtime will do: no shareable link into
+# an owner_only bucket, a file still flagged public in a private bucket gets
+# an expiring signed link on both drivers, and create_bucket on an existing
+# bucket reports its real visibility and refuses a contradicting request.
+# Real bucket and file rows are the property; the S3 case only presigns.
+tests/integration/storage-agent-truth.spec.ts
+# One operation means one thing on every agent door: Apple sign-in is refused
+# (only the providers the runtime serves are offered), a password reset is
+# never parked on one door and run on the other, and the first connected
+# frontend origin says the CORS allowlist is now exclusive. Real OAuth config,
+# end-user, finding and ConnectedApp rows are the property.
+tests/integration/agent-doors-agree.spec.ts
 # A parked executor action is pollable: the APPROVAL_REQUIRED refusal carries
 # the Review Queue finding's id and the poll call, check_approval resolves
 # parked findings alongside destructive-gate approvals with one status
@@ -1030,3 +1066,19 @@ tests/integration/reset-password-sends-link.spec.ts
 # role sync reach only the regional database. Two real databases are the
 # property, so it needs a real Postgres.
 tests/integration/project-region.spec.ts
+
+# Model spend on the MCP tool route is gated and charged wherever it happens:
+# functions.schedule is refused up front with no credits and charged exactly
+# what its model calls used; integrations.connect stores the key with no
+# credits and names each function it could not wire, and with credits every
+# wiring call is held and charged; a failed typed call is reported as it failed,
+# never handed to a model for a different action. Real route, key, holds, vault
+# and usage rows are the property, so it needs a real Postgres.
+tests/integration/model-spend-on-every-tool.spec.ts
+# Function runs say what they do: an HTTP function's creation check asks a GET
+# handler for its contract instead of running it, and every check is recorded
+# in the function's run log; ctx.db.query pages with an explicit limit, offset
+# and orderBy (default 100, at most 1000), so a job can reach every row once.
+# Real function, log and workspace rows are the property, so it needs a real
+# Postgres.
+tests/integration/functions-runtime-honesty.spec.ts

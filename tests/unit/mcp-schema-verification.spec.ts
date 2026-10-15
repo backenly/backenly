@@ -6,6 +6,7 @@
  */
 
 const mockQueryRawUnsafe = jest.fn()
+const mockQueryRaw = jest.fn()
 const mockExecuteRawUnsafe = jest.fn()
 const mockFindFirst = jest.fn()
 const mockFindMany = jest.fn()
@@ -14,6 +15,7 @@ const mockReconcileAutoRls = jest.fn()
 
 const mockPrisma = {
   $queryRawUnsafe: (...args: any[]) => mockQueryRawUnsafe(...args),
+  $queryRaw: (...args: any[]) => mockQueryRaw(...args),
   $executeRawUnsafe: (...args: any[]) => mockExecuteRawUnsafe(...args),
   table: {
     findFirst: (...args: any[]) => mockFindFirst(...args),
@@ -74,6 +76,9 @@ describe('MCP schema mutation verification', () => {
     mockFindMany.mockResolvedValue([])
     mockExecuteRawUnsafe.mockResolvedValue(0)
     mockReconcileAutoRls.mockResolvedValue(undefined)
+    // 0. The dispatch's existence pre-check (DB-06) finds the table in the
+    //    catalog, as apply_migration's check would.
+    mockQueryRaw.mockResolvedValue([{ table_name: 'posts' }])
 
     // 1. The target table exists. 2. The target column does not. 3. DDL runs.
     // 4. Only the postcondition readback loses its connection.
