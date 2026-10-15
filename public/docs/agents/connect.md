@@ -22,7 +22,7 @@ Call as `connect { action: "<action>", … }`.
 | `list_env` | variable names with 4-character previews | nothing | yes | no |
 | `delete_env` | remove a variable | `key` | no | waits for a human |
 | `database_credentials` | a Postgres connection string (read-write only after a human arms it) | nothing | no | no |
-| `connect_frontend` | allow a frontend origin (CORS) | `url` | no | no |
+| `connect_frontend` | allow a frontend origin (CORS); binds at once, and connected origins become the project's CORS allowlist | `url` | no | no |
 | `disconnect_frontend` | remove a frontend origin | `url` | no | waits for a human |
 | `list_apps` | the frontends connected to this backend | nothing | yes | no |
 <!-- end generated -->

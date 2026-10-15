@@ -12,7 +12,7 @@ Call as `auth { action: "<action>", … }`.
 | Action | What it does | Needs | Read-only key | Approval |
 | --- | --- | --- | --- | --- |
 | `enable` | turn on email + password sign-up with JWT sessions | nothing | no | no |
-| `add_oauth_provider` | Google, GitHub, Discord, Facebook or Apple sign-in, with the provider's clientId and clientSecret | `provider` | no | no |
+| `add_oauth_provider` | Google, GitHub, Discord or Facebook sign-in, with the provider's clientId and clientSecret | `provider` | no | no |
 | `remove_oauth_provider` | turn a sign-in provider off | `provider` | no | waits for a human |
 | `list_users` | the end-users who have signed up | nothing | yes | no |
 | `reset_password` | send a password reset to one user (userId or email) | nothing | no | no |

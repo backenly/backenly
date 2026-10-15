@@ -54,7 +54,7 @@ export const DOMAIN_TOOLS: DomainTool[] = [
       'Read the current user list with action "list_users".',
     actions: {
       enable: { tool: 'enable_auth', gloss: 'turn on email + password sign-up with JWT sessions' },
-      add_oauth_provider: { tool: 'add_oauth_provider', gloss: 'Google, GitHub, Discord, Facebook or Apple sign-in, with the provider\'s clientId and clientSecret' },
+      add_oauth_provider: { tool: 'add_oauth_provider', gloss: 'Google, GitHub, Discord or Facebook sign-in, with the provider\'s clientId and clientSecret' },
       remove_oauth_provider: { tool: 'disable_oauth_provider', gloss: 'turn a sign-in provider off' },
       list_users: { tool: 'list_end_users', gloss: 'the end-users who have signed up' },
       reset_password: { tool: 'reset_end_user_password', gloss: 'send a password reset to one user (userId or email)' },
@@ -218,7 +218,7 @@ export const DOMAIN_TOOLS: DomainTool[] = [
       list_env: { tool: 'list_env_vars', gloss: 'variable names with 4-character previews' },
       delete_env: { tool: 'delete_env_var', gloss: 'remove a variable' },
       database_credentials: { tool: 'get_database_credentials', gloss: 'a Postgres connection string (read-write only after a human arms it)' },
-      connect_frontend: { tool: 'connect_frontend', gloss: 'allow a frontend origin (CORS)' },
+      connect_frontend: { tool: 'connect_frontend', gloss: 'allow a frontend origin (CORS); binds at once, and connected origins become the project\'s CORS allowlist' },
       disconnect_frontend: { tool: 'disconnect_frontend', gloss: 'remove a frontend origin' },
       list_apps: { tool: 'list_connected_apps', gloss: 'the frontends connected to this backend' },
     },
