@@ -54,6 +54,12 @@ tests/integration/function-egress-guard.spec.ts
 tests/integration/function-row-events-data-plane.spec.ts
 tests/integration/project-route-response-shape.spec.ts
 tests/integration/realtime-sse-slot-release.spec.ts
+
+# Realtime surfaces CI can honestly cover: SSE tickets burn in the project's
+# real _token_blacklist ledger (single-use, expiry, project binding) and the
+# broadcast route enforces its payload cap over a real pg_notify. Frame
+# delivery through the LISTEN hub stays a staging case.
+tests/integration/realtime-ticket-broadcast.spec.ts
 tests/integration/export-database-rls.spec.ts
 tests/integration/postgres-admin.spec.ts
 
