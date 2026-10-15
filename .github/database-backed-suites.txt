@@ -1110,3 +1110,10 @@ tests/integration/parked-approvals-visible.spec.ts
 # route's fallbacks are typed so a count slip cannot typecheck. Real workspace
 # tables are the property, so it needs a real Postgres.
 tests/integration/dashboard-stats-counts.spec.ts
+# delete_trigger deletes the one trigger it names in this project, or nothing,
+# and says which: an approved call naming no trigger deletes nothing (it used to
+# delete every trigger in the project), another project's id or a mistyped one
+# is recorded as failed instead of executed, a shared name is refused, both REST
+# routes answer 404, and the approval card names the trigger. Real trigger and
+# approval rows are the property, so it needs a real Postgres.
+tests/integration/delete-trigger-scope.spec.ts
