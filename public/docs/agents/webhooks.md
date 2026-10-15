@@ -32,4 +32,6 @@ Call as `webhooks { action: "<action>", … }`.
 - `rotate_secret` issues a new signing secret; the next delivery is signed with the new one only.
 - `triggers`, `trigger_deliveries`, `replay_trigger_delivery` and `rotate_trigger_secret` are for table triggers whose action calls a URL.
 
+Endpoint events (`row.inserted`, `row.updated`, `row.deleted`, `auth.user.created`) are **project-wide**: an endpoint cannot subscribe to one table. Each delivery's payload carries `data.table`, so the receiver filters. For a genuinely per-table webhook, create a table trigger with a URL action (`create_trigger`); note that triggers fire from the JSON data routes (`/database/insert`, `/database/update`, `/database/delete`), not from every writer the endpoint capture sees.
+
 Destinations are checked by the egress guard, which refuses private and cloud-metadata addresses.

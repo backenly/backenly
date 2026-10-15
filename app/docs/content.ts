@@ -698,7 +698,10 @@ await backend.auth.signIn({ email, password })
       },
     ],
     prompts: [
-      'Send a signed webhook to https://example.com/hooks/orders whenever a row is inserted into the orders table.',
+      // Endpoint events are project-wide — the receiver filters on data.table.
+      // The old prompt promised a per-table subscription the endpoint model
+      // cannot express.
+      'Send a signed webhook to https://example.com/hooks/rows whenever a row is inserted in this project. My receiver filters on data.table.',
     ],
     code: {
       label: 'Verify a delivery (Node.js)',

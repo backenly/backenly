@@ -848,6 +848,12 @@ tests/integration/go-live-empty-guard.spec.ts
 # migration is applied, so a missing table never repeats the tour.
 tests/integration/tours-seen.spec.ts
 
+# Webhook capture and delivery fail loudly or not at all: the sync names the
+# tables it could not capture and both callers surface them, and a PENDING
+# delivery whose first attempt died is swept to a real retry while a fresh
+# one is left alone. Real capture triggers, webhook rows and a live local
+# receiver (behind the per-test egress opt-in) are the property.
+tests/integration/webhook-capture-truth.spec.ts
 # No surface claims an alert that can never fire: SET_ALERT refuses honestly
 # and stores nothing, the brain no longer offers set_alert (matching the MCP
 # door's removal), and prompts/capabilities stopped advertising it. A real

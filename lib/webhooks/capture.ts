@@ -362,6 +362,9 @@ async function functionRowEvents(projectId: string): Promise<RowEventType[]> {
 export async function syncWebhookCapture(projectId: string): Promise<{
   events: RowEventType[]
   tables: string[]
+  /** Eligible tables whose trigger could NOT be installed — each one is a
+   *  table whose row events silently never fire until this is surfaced. */
+  uncaptured: Array<{ table: string; reason: string }>
 }> {
   const active = await prisma.webhook.findMany({
     where: { projectId, active: true },
@@ -385,20 +388,24 @@ export async function syncWebhookCapture(projectId: string): Promise<{
         console.warn(`[webhooks] could not drop capture on ${table}:`, err?.message ?? err),
       )
     }
-    return { events: [], tables: [] }
+    return { events: [], tables: [], uncaptured: [] }
   }
 
   await ensureOutbox(projectId)
 
   const eligible = await capturableTables(projectId)
   const installed: string[] = []
+  const uncaptured: Array<{ table: string; reason: string }> = []
 
   for (const table of eligible) {
     try {
       await installCaptureTrigger(projectId, table, wanted)
       installed.push(table)
     } catch (err: any) {
+      // Kept, not just logged: a swallowed per-table failure meant create and
+      // update answered success while this table's row events never fired.
       console.warn(`[webhooks] could not capture ${table}:`, err?.message ?? err)
+      uncaptured.push({ table, reason: String(err?.message ?? err) })
     }
   }
 
@@ -409,7 +416,7 @@ export async function syncWebhookCapture(projectId: string): Promise<{
     if (!eligibleSet.has(table)) await uninstallCaptureTrigger(projectId, table).catch(() => {})
   }
 
-  return { events: wanted, tables: installed }
+  return { events: wanted, tables: installed, uncaptured }
 }
 
 /**
