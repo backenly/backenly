@@ -515,6 +515,20 @@ export class S3StorageService implements StorageService {
     )
   }
 
+  /**
+   * How many active files match — the same WHERE as listFiles. Counts the
+   * metadata DB, not S3, so it is cheap and identical across blob drivers.
+   */
+  async countFiles(bucketId: string | undefined, projectId: string, search?: string): Promise<number> {
+    if (!projectId) {
+      throw new Error('Project ID is required for tenant isolation')
+    }
+    const where: any = { projectId, deletedAt: null }
+    if (bucketId) where.bucketId = bucketId
+    if (search) where.name = { contains: search, mode: 'insensitive' }
+    return prisma.storageFile.count({ where })
+  }
+
   async getFile(fileId: string, projectId: string) {
     if (!projectId) {
       throw new Error('Project ID is required for tenant isolation')

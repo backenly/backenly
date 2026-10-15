@@ -37,6 +37,8 @@ export interface BucketsResponse {
 
 export interface FilesResponse {
   files: StorageFile[]
+  /** Files matching the query on the SERVER — may exceed files.length. */
+  total?: number
 }
 
 export interface StatsResponse {
@@ -126,7 +128,7 @@ export async function getFiles(options?: {
   limit?: number
   offset?: number
   search?: string
-}): Promise<StorageFile[]> {
+}): Promise<{ files: StorageFile[]; total: number }> {
   const params = new URLSearchParams()
   if (options?.bucketId) params.append('bucketId', options.bucketId)
   if (options?.limit) params.append('limit', options.limit.toString())
@@ -135,7 +137,7 @@ export async function getFiles(options?: {
 
   const url = `/api/storage/files${params.toString() ? `?${params.toString()}` : ''}`
   const data: FilesResponse = await apiRequest<FilesResponse>(url)
-  return data.files
+  return { files: data.files, total: data.total ?? data.files.length }
 }
 
 // Upload file

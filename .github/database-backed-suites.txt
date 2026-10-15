@@ -862,6 +862,12 @@ tests/integration/key-lifecycle-honesty.spec.ts
 # typed call with send_push naming what is missing. Real vault rows are the
 # property; PostHog (stored-unverifiable) keeps CI off external APIs.
 tests/integration/integrations-connect-contract.spec.ts
+# The storage console pages and counts honestly: the files route forwards
+# limit/offset/search, countFiles answers from the same WHERE on the metadata
+# DB (so it holds for both blob drivers), and one page is never presented as
+# the whole project. Real StorageFile rows past the first page are the
+# property.
+tests/integration/storage-files-pagination.spec.ts
 
 # A new end user's session works from sign-up: the Next sign-up route signs with
 # the resolved (decrypted) project secret every verifier uses, and refresh binds
