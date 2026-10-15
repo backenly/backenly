@@ -9809,7 +9809,11 @@ async function executeDeleteEnvVar(params: any, projectId: string): Promise<Exec
 async function executeGetReadiness(params: any, projectId: string): Promise<ExecutionResult> {
   try {
     const { scoreReadiness, formatReadinessReport } = await import('@/lib/deployment/readiness-scorer')
-    const autoFix = params?.autoFix !== false // default true
+    // A readiness read changes nothing unless fixing is asked for in so many
+    // words. This defaulted to true, so the brain's get_readiness, described
+    // as reading the scorecard, enabled RLS policies, generated secrets and
+    // switched functions off whenever an agent looked (DEP-06).
+    const autoFix = params?.autoFix === true
     const report = await scoreReadiness(projectId, { autoFix })
     const summary = formatReadinessReport(report)
 

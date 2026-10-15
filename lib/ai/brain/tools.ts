@@ -1238,7 +1238,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     }),
   fn('get_readiness',
     'Read the production-readiness scorecard for this project (0-100). Returns blockers, warnings, and auto-fixable items. Call before trigger_deploy so you can tell the user exactly what is missing.',
-    { autoFix: { type: 'boolean', description: 'Apply safe auto-fixes (JWT generation, default RLS) during the scan. Default true.' } }),
+    { autoFix: { type: 'boolean', description: 'Apply the safe fixes (owner RLS where an owner is clear, the project JWT secret, the auth flag, switching off placeholder functions with live triggers). Default false: a readiness read changes nothing.' } }),
   fn('set_env_var',
     'Save an encrypted env var for this project. Available to AI functions as ctx.env.<KEY>. Keys must be UPPER_SNAKE_CASE. Values are encrypted at rest (AES-256-GCM). Use for third-party secrets the user has (STRIPE_WEBHOOK_SECRET, RESEND_API_KEY, etc). Do NOT use for first-party platform secrets (JWT_SECRET, DATABASE_URL).',
     {
@@ -1792,7 +1792,7 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
   // Publish / Deploy
   trigger_deploy: () => ({ action: 'TRIGGER_DEPLOY', params: {} }),
   rollback_deploy: (a) => ({ action: 'ROLLBACK_DEPLOY', params: { version: a.version, deploymentId: a.deploymentId } }),
-  get_readiness: (a) => ({ action: 'GET_READINESS', params: { autoFix: a.autoFix } }),
+  get_readiness: (a) => ({ action: 'GET_READINESS', params: { autoFix: a.autoFix === true } }),
   set_env_var: (a) => ({ action: 'SET_ENV_VAR', params: { key: a.key, value: a.value, description: a.description } }),
   list_env_vars: () => ({ action: 'LIST_ENV_VARS', params: {} }),
   delete_env_var: (a) => ({ action: 'DELETE_ENV_VAR', params: { key: a.key } }),
