@@ -14,11 +14,12 @@
  * Opening a region is not a flag flip on its own. It ships together with:
  *   - the region's data stack in backenly-infra (database, API runtime,
  *     storage), qualified on staging first;
- *   - a `region` column on Project and the Cloud lifecycle creating the project
- *     in the chosen region's database;
- *   - request routing to that region.
- * Until then every project is created in the home region, which is why the
- * project row does not record a region yet: there is only one it can be.
+ *   - every connection to a project's data opened in the project's region
+ *     (lib/data-plane/regional.ts), and requests routed there;
+ *   - the Cloud lifecycle creating the project in the chosen region's database
+ *     and recording it in Project.region.
+ * Until then every project is created in the home region and Project.region
+ * stays null, which reads as the home region everywhere.
  *
  * Self-hosted deployments do not use this list. They run wherever their
  * operator runs them, and the console says "Self-hosted" instead.

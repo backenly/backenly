@@ -831,8 +831,8 @@ function ProjectCard({
             </h3>
           )}
           <p className="truncate text-[12px] leading-[16px] text-zinc-500">
-            {/* Every Cloud project is in the home region until a second one opens (lib/regions.ts). */}
-            {CLOUD_CONTROL_PLANE ? regionLabel(HOME_REGION) : 'Self-hosted'}
+            {/* The region holding the project's data; null reads as the home region (lib/regions.ts). */}
+            {CLOUD_CONTROL_PLANE ? regionLabel(project.region) : 'Self-hosted'}
           </p>
         </div>
         {/* Always visible: a hover-only trigger would also hide its own open

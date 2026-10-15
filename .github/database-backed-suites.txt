@@ -921,3 +921,10 @@ tests/integration/approval-binding.spec.ts
 # never returns a credential; an unknown account is reported plainly. Real
 # workspace users tables are the property, so it needs a real Postgres.
 tests/integration/reset-password-sends-link.spec.ts
+
+# A project's data is read in its own region and nowhere else: a second
+# database stands in for another region's, a regional project with no
+# connection is refused rather than served from the home database, and with
+# one its queries and raw client reach only the regional database. Two real
+# databases are the property, so it needs a real Postgres.
+tests/integration/project-region.spec.ts

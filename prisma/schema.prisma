@@ -150,6 +150,12 @@ model Project {
   pauseWarnedAt           DateTime? // When the pause warning was DELIVERED. Cleared by real activity. No delivered warning, no pause.
   lastActivityAt          DateTime? // Real use only (runtime traffic, MCP calls, dashboard writes). Never stamped by autonomy, cron or backups.
   pausePolicySince        DateTime? // When the inactivity policy first applied to this project, so a paid-to-Free downgrade gets a full window.
+  // The Backenly Cloud region holding this project's data (lib/regions.ts).
+  // Null is the home region: every project created before a second region
+  // opens, and every self-hosted project. Recorded at creation and never
+  // changed. lib/data-plane/regional.ts opens every connection to the
+  // project's data in this region and never falls back to another.
+  region                  String?
   // Protected production: a coding agent may change this project's schema only
   // on a preview branch, and production only through a branch merge a human
   // approved. Dashboard changes, autonomy fixes and row writes are not gated.

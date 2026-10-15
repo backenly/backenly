@@ -13,6 +13,11 @@
  * Solution: Dedicated Pool per project (up to MAX_POOLS total) with a
  * LRU eviction policy so idle projects don't waste connections.
  *
+ * Each pool connects to the database in the project's own region
+ * (lib/data-plane/regional.ts). A project whose region this process has no
+ * connection for is refused with RegionNotConfiguredError, never served from
+ * another region's database.
+ *
  * Pool parameters (can be overridden via env):
  *   WORKSPACE_POOL_MAX        — max connections per project (default: 5)
  *   WORKSPACE_POOL_IDLE_MS    — idle timeout per connection (default: 10s)
@@ -26,6 +31,7 @@
 
 import { Pool, PoolClient, QueryResult } from 'pg'
 import { prisma } from '@/lib/db/prisma'
+import { projectDatabaseUrl } from '@/lib/data-plane/regional'
 import { getWorkspaceDatabaseNames } from './databaseProvisioning'
 
 const POOL_MAX = parseInt(process.env.WORKSPACE_POOL_MAX ?? '5', 10)
@@ -41,7 +47,7 @@ interface PoolEntry {
 // LRU map: key = projectId, value = PoolEntry
 const pools = new Map<string, PoolEntry>()
 
-function getOrCreatePool(projectId: string): Pool {
+function getOrCreatePool(projectId: string, connectionString: string): Pool {
   const existing = pools.get(projectId)
   if (existing) {
     existing.lastUsed = Date.now()
@@ -66,11 +72,8 @@ function getOrCreatePool(projectId: string): Pool {
     }
   }
 
-  const dbUrl = process.env.DATABASE_URL
-  if (!dbUrl) throw new Error('DATABASE_URL is not set')
-
   const pool = new Pool({
-    connectionString: dbUrl,
+    connectionString,
     max: POOL_MAX,
     idleTimeoutMillis: POOL_IDLE_MS,
     // Statement timeout is set per-query inside acquireWorkspaceClient()
@@ -137,7 +140,9 @@ export async function resolveWorkspaceSchema(projectId: string): Promise<string>
  */
 export async function acquireWorkspaceClient(projectId: string): Promise<PoolClient> {
   const schemaName = await resolveWorkspaceSchema(projectId)
-  const pool = getOrCreatePool(projectId)
+  // The project's own region, every time: a missing connection throws here,
+  // before any pool exists, rather than reaching for the home database.
+  const pool = getOrCreatePool(projectId, await projectDatabaseUrl(projectId))
   const client = await pool.connect()
 
   try {
