@@ -915,6 +915,12 @@ tests/integration/integrations-connect-contract.spec.ts
 # rows and the real credentials, keys and build-status routes are the
 # property; PostHog and seeded rows keep CI off provider APIs.
 tests/integration/integration-key-one-row.spec.ts
+# One operation means one thing on every agent door: Apple sign-in is refused
+# (only the providers the runtime serves are offered), a password reset is
+# never parked on one door and run on the other, and the first connected
+# frontend origin says the CORS allowlist is now exclusive. Real OAuth config,
+# end-user, finding and ConnectedApp rows are the property.
+tests/integration/agent-doors-agree.spec.ts
 # A parked executor action is pollable: the APPROVAL_REQUIRED refusal carries
 # the Review Queue finding's id and the poll call, check_approval resolves
 # parked findings alongside destructive-gate approvals with one status

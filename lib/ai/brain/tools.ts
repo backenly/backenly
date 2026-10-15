@@ -19,6 +19,7 @@ import { AiError, generate } from '../llm'
 import { answererPrompt } from './prompts'
 import { kickReconciler, shouldKickFor } from '@/lib/autonomy/event-trigger'
 import { WEBHOOK_EVENT_TYPES } from '@/lib/webhooks/events'
+import { SERVED_OAUTH_PROVIDERS, isServedOAuthProvider } from '@/lib/services/oauth-providers'
 
 /** Brain tools served by lib/email/agent-actions.ts. */
 const AUTH_EMAIL_TOOLS = new Set<string>([
@@ -487,14 +488,14 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     'If you do NOT have them, call this tool with only `provider` — it stops the turn and asks the user to paste their credentials. ' +
     'Once the user provides them, call again with `clientId` + `clientSecret` and it configures the provider.',
     {
-      provider: { type: 'string', enum: ['google', 'github', 'discord', 'facebook', 'apple'] },
+      provider: { type: 'string', enum: [...SERVED_OAUTH_PROVIDERS] },
       clientId: { type: 'string', description: 'OAuth Client ID from the provider\'s developer console.' },
       clientSecret: { type: 'string', description: 'OAuth Client Secret from the provider\'s developer console.' },
     },
     ['provider']),
   fn('disable_oauth_provider',
     'DESTRUCTIVE. Turn off an OAuth sign-in provider — end-users using it lose the ability to sign in. The stored Client ID and Secret are kept so re-enabling later is a one-step toggle without re-pasting credentials. Requires confirmation.',
-    { provider: { type: 'string', enum: ['google', 'github', 'discord', 'facebook', 'apple'] } },
+    { provider: { type: 'string', enum: [...SERVED_OAUTH_PROVIDERS] } },
     ['provider']),
   fn('create_bucket',
     'Create a storage bucket for file uploads.',
@@ -1208,10 +1209,10 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
 
   // ── Connect Frontend ──────────────────────────────────────────────────────
   fn('connect_frontend',
-    'Connect a frontend to this backend. Pass the frontend URL the user gave you ("app.acme.com", "https://app.replit.com/x", "localhost:3000"). The engine normalizes it to an exact origin and (unless force=true) returns a confirmation prompt — the user must type CONNECT to proceed. No publish is needed first: the API already answers, and the connection records the published version when there is one. Use whenever the user says "hook up my app at <url>", "connect my Replit / Lovable / Vercel frontend", "let app.x.com call my APIs".',
+    'Connect a frontend to this backend. Pass the frontend URL the user gave you ("app.acme.com", "https://app.replit.com/x", "localhost:3000"). The engine normalizes it to an exact origin. In backend_chat it returns a confirmation prompt (unless force=true) and the user must type CONNECT; the typed MCP door, acting on an owner-held key, binds at once. Connected origins become the project\'s CORS allowlist: once one is connected, browser calls from other origins are refused on the SDK routes the web app answers, so connect every frontend that calls this backend. No publish is needed first: the API already answers, and the connection records the published version when there is one. Use whenever the user says "hook up my app at <url>", "connect my Replit / Lovable / Vercel frontend", "let app.x.com call my APIs".',
     {
       url: { type: 'string', description: 'The frontend URL the user named. Will be normalized to a CORS origin.' },
-      force: { type: 'boolean', description: 'Set true ONLY when the user has already typed CONNECT in this turn — skips the confirmation gate.' },
+      force: { type: 'boolean', description: 'backend_chat only: set true ONLY when the user has already typed CONNECT in this turn, which skips the confirmation prompt. The typed MCP door binds without a prompt.' },
     },
     ['url']),
   fn('disconnect_frontend',
@@ -2669,7 +2670,16 @@ export async function dispatchTool(
       const cap = provider ? provider.charAt(0).toUpperCase() + provider.slice(1) : 'that provider'
 
       if (!provider) {
-        return finalize({ ok: false, summary: 'Which OAuth provider? Supported: google, github, discord, facebook, apple.' })
+        return finalize({ ok: false, summary: `Which OAuth provider? Supported: ${SERVED_OAUTH_PROVIDERS.join(', ')}.` })
+      }
+      // Refuse before asking the owner for credentials a provider with no
+      // sign-in flow could never use.
+      if (!isServedOAuthProvider(provider)) {
+        return finalize({
+          ok: false,
+          code: 'UNSUPPORTED_PROVIDER',
+          summary: `${cap} sign-in is not available: the runtime serves ${SERVED_OAUTH_PROVIDERS.join(', ')}.`,
+        })
       }
 
       if (!clientId || !clientSecret) {

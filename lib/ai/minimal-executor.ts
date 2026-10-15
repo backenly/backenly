@@ -1529,7 +1529,7 @@ DEPLOY:
 
 AUTH:
 - ENABLE_AUTH - Enable authentication (email/password)
-- ADD_PROVIDER - Add an OAuth sign-in provider (Google, GitHub, Discord, Facebook, Apple)
+- ADD_PROVIDER - Add an OAuth sign-in provider (Google, GitHub, Discord, Facebook)
 - DISABLE_PROVIDER - Disable an OAuth sign-in provider (keeps stored credentials)
 - LIST_USERS - List the project's end-users (people who signed up via the project's auth)
 - BLOCK_USER - Block an end-user from signing in
@@ -6700,6 +6700,7 @@ async function executeConnectFrontend(params: any, projectId: string): Promise<E
       requiresConfirmation: result.requiresConfirmation,
       origin: result.origin,
       backendVersion: result.backendVersion,
+      firstConnectedOrigin: result.firstConnectedOrigin,
     },
   }
 }
@@ -7452,11 +7453,14 @@ async function executeAddProvider(params: any, projectId: string): Promise<Execu
 
   const providerName = (provider || '').toLowerCase()
 
-  const SUPPORTED_PROVIDERS = ['google', 'github', 'discord', 'facebook', 'apple']
-  if (!SUPPORTED_PROVIDERS.includes(providerName)) {
+  // Only providers the runtime serves (server/routes/oauth.ts). Apple used to
+  // be accepted here, stored, and reported live while every sign-in 404'd.
+  const { SERVED_OAUTH_PROVIDERS, isServedOAuthProvider } = await import('@/lib/services/oauth-providers')
+  if (!isServedOAuthProvider(providerName)) {
     return {
       success: false,
-      message: `Provider "${provider}" is not supported. Supported providers: ${SUPPORTED_PROVIDERS.join(', ')}`,
+      message: `Provider "${provider}" is not supported. Supported providers: ${SERVED_OAUTH_PROVIDERS.join(', ')}`,
+      error: 'UNSUPPORTED_PROVIDER',
     }
   }
 
@@ -7472,7 +7476,6 @@ async function executeAddProvider(params: any, projectId: string): Promise<Execu
     github:   ['read:user', 'user:email'],
     discord:  ['identify', 'email'],
     facebook: ['email', 'public_profile'],
-    apple:    ['email', 'name'],
   }
 
   const { prisma } = await import('@/lib/db')

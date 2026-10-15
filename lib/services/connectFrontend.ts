@@ -41,6 +41,11 @@ export interface ConnectFrontendResult {
   requiresConfirmation?: boolean
   origin?: string
   backendVersion?: number
+  /**
+   * True when this connect made the CORS allowlist exclusive: it is the
+   * project's only active origin, and an empty allowlist admits every origin.
+   */
+  firstConnectedOrigin?: boolean
   errors?: string[]
 }
 
@@ -177,6 +182,14 @@ export async function connectFrontend(options: ConnectFrontendOptions): Promise<
     }
   }
 
+  // Active origins are the CORS allowlist the web app's middleware enforces on
+  // the SDK routes it answers, and an EMPTY list admits every origin. So the
+  // first bind quietly turns every other frontend away; say so instead.
+  const otherActiveOrigins = await prisma.connectedApp.count({
+    where: { projectId, isActive: true, origin: { not: origin } },
+  })
+  const firstConnectedOrigin = otherActiveOrigins === 0
+
   const row = await prisma.connectedApp.upsert({
     where: { projectId_origin: { projectId, origin } },
     update: {
@@ -221,10 +234,18 @@ export async function connectFrontend(options: ConnectFrontendOptions): Promise<
 
   return {
     success: true,
-    message: `Connected: ${origin}\n\nYour frontend can now call your backend APIs.`,
+    message:
+      `Connected: ${origin}\n\nYour frontend can now call your backend APIs.` +
+      (firstConnectedOrigin
+        ? '\n\nThis is the first connected origin, and connected origins are the CORS allowlist on the SDK ' +
+          'routes the web app answers: outside local development, browser calls from any other origin are ' +
+          'now refused there until that origin is connected too. Connect every frontend that calls this ' +
+          'backend (production, preview, local).'
+        : ''),
     connected: true,
     origin,
     backendVersion,
+    firstConnectedOrigin,
   }
 }
 

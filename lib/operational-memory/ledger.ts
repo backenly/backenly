@@ -550,7 +550,12 @@ const MEDIUM_RISK_EXECUTOR_ACTIONS = new Set([
   'REVOKE_KEY', 'ROTATE_KEY', 'DELETE_TRIGGER', 'DELETE_AI_FUNCTION',
   'DELETE_CRON_JOB', 'REMOVE_INTEGRATION_KEY', 'BLOCK_USER',
   'REMOVE_PERMISSION', 'DISABLE_REALTIME', 'DISABLE_PROVIDER',
-  'TRIGGER_DEPLOY', 'SET_ENV_VAR', 'RESET_PASSWORD',
+  'TRIGGER_DEPLOY', 'SET_ENV_VAR',
+  // RESET_PASSWORD is deliberately absent (low): it emails the account's own
+  // address a reset link and changes no credential, bounded by the
+  // per-recipient recovery limit. As medium it was parked over backend_chat
+  // but ran at once over the typed MCP door, which the docs also promise, so
+  // one operation had two answers (medium finding AUTH-F5).
   // Rewrites what a live credential may do. Escalation to 'admin' is refused
   // outright in the executor; the remaining edits still reshape a key other
   // clients hold, which is the same band as rotating one.
