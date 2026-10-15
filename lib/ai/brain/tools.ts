@@ -1848,7 +1848,8 @@ const FIX_TARGET_TO_ACTION: Record<string, AIAction['action']> = {
 /**
  * Refuse a create_table of a table that exists, or an add_column on one that
  * does not, with the wording apply_migration uses. Reads the catalog through
- * the same helper apply_migration does, so the doors cannot disagree.
+ * the same helper apply_migration does, on the database in the project's
+ * region, so the doors cannot disagree.
  */
 async function tableExistencePreflight(
   name: 'create_table' | 'add_column',
@@ -1863,7 +1864,7 @@ async function tableExistencePreflight(
   const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
   const { existingTables } = await import('@/lib/mcp/apply-migration')
   const schema = getWorkspaceDatabaseNames(projectId).postgresSchema
-  const exists = (await existingTables(schema, [table])).has(table)
+  const exists = (await existingTables(projectId, schema, [table])).has(table)
 
   if (name === 'create_table' && exists) {
     return {
@@ -1875,7 +1876,7 @@ async function tableExistencePreflight(
     }
   }
   if (name === 'add_column' && !exists) {
-    const suggestion = await closestTableName(schema, table)
+    const suggestion = await closestTableName(projectId, schema, table)
     return {
       ok: false,
       code: 'TABLE_NOT_FOUND',
@@ -1888,10 +1889,15 @@ async function tableExistencePreflight(
   return null
 }
 
-/** The existing table whose name is closest to `wanted` (edit distance ≤ 2, or a case-only difference). */
-async function closestTableName(schema: string, wanted: string): Promise<string | null> {
-  const { prisma } = await import('@/lib/db/prisma')
-  const rows = await prisma.$queryRawUnsafe<Array<{ table_name: string }>>(
+/**
+ * The existing table whose name is closest to `wanted` (edit distance ≤ 2, or a
+ * case-only difference), read in the project's region like existingTables: the
+ * home database holds no regional project's tables, so it would never suggest one.
+ */
+async function closestTableName(projectId: string, schema: string, wanted: string): Promise<string | null> {
+  const { workspaceRawClient } = await import('@/lib/data-plane/regional')
+  const db = await workspaceRawClient(projectId)
+  const rows = await db.$queryRawUnsafe<Array<{ table_name: string }>>(
     `SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'BASE TABLE'`,
     schema,
   )

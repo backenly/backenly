@@ -11,10 +11,12 @@
  * and a missing table names the closest existing one.
  */
 import crypto from 'crypto'
+import { Client } from 'pg'
 
 import { prisma } from '@/lib/db/prisma'
 import { executeAction } from '@/lib/ai/minimal-executor'
 import { dispatchTool } from '@/lib/ai/brain/tools'
+import { disconnectRegionalClients } from '@/lib/data-plane/regional'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
 
 let ownerId: string
@@ -105,4 +107,66 @@ describe('DB-06: create_table and add_column refuse instead of guessing', () => 
     expect(fresh.ok).toBe(true)
     expect(await tables()).toContain('orders')
   }, 120_000)
+})
+
+describe('the doors read a regional project’s tables in its region', () => {
+  // A project in another region keeps its tables only in that region's
+  // database; the home database holds no schema for it. A second database
+  // stands in for us-east-1, as in project-region.spec.ts.
+  const REGION_VARIABLE = 'DATABASE_URL_US_EAST_1'
+  const REGIONAL_DB = `backenly_region_${crypto.randomBytes(4).toString('hex')}`
+  let regionalProject = ''
+  let regionalDbCreated = false
+
+  function urlFor(database: string): string {
+    const url = new URL(process.env.DATABASE_URL as string)
+    url.pathname = `/${database}`
+    return url.toString()
+  }
+
+  async function run(connectionString: string, sql: string): Promise<void> {
+    const client = new Client({ connectionString })
+    await client.connect()
+    try {
+      await client.query(sql)
+    } finally {
+      await client.end().catch(() => {})
+    }
+  }
+
+  const callRegional = (tool: string, args: Record<string, unknown>) =>
+    dispatchTool(tool, args, { projectId: regionalProject, userId: ownerId, createdThisTurn: new Set<string>() } as any)
+
+  beforeAll(async () => {
+    regionalProject = (
+      await prisma.project.create({ data: { name: 'db-doors-region', userId: ownerId, region: 'us-east-1' }, select: { id: true } })
+    ).id
+    await run(process.env.DATABASE_URL as string, `CREATE DATABASE "${REGIONAL_DB}"`)
+    regionalDbCreated = true
+    const regionalSchema = getWorkspaceDatabaseNames(regionalProject).postgresSchema
+    await run(urlFor(REGIONAL_DB), `CREATE SCHEMA "${regionalSchema}"; CREATE TABLE "${regionalSchema}".customers (name text)`)
+    process.env[REGION_VARIABLE] = urlFor(REGIONAL_DB)
+  }, 60_000)
+
+  afterAll(async () => {
+    delete process.env[REGION_VARIABLE]
+    await disconnectRegionalClients()
+    if (regionalDbCreated) {
+      await run(process.env.DATABASE_URL as string, `DROP DATABASE IF EXISTS "${REGIONAL_DB}" WITH (FORCE)`).catch(() => {})
+    }
+    await prisma.project.deleteMany({ where: { id: regionalProject } }).catch(() => {})
+  }, 60_000)
+
+  it('create_table of a table that exists only in the region is refused', async () => {
+    const out = await callRegional('create_table', { tableName: 'customers', columns: [{ name: 'email', type: 'text' }] })
+    expect(out.ok).toBe(false)
+    expect(out.code).toBe('TABLE_EXISTS')
+  }, 60_000)
+
+  it('a mistyped name is answered with the regional table it meant', async () => {
+    const out = await callRegional('add_column', { tableName: 'customer', columnName: 'email', columnType: 'text' })
+    expect(out.ok).toBe(false)
+    expect(out.code).toBe('TABLE_NOT_FOUND')
+    expect(out.summary).toContain('Did you mean customers?')
+  }, 60_000)
 })
