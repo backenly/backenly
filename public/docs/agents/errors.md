@@ -13,6 +13,7 @@ Every tool and route answers failures as JSON: `{ ok: false, error, code }`, oft
 | `EMBEDDINGS_UNAVAILABLE` | Vector search was asked for on a deployment with no embedding model configured | Tell your human; nothing was searched or enabled |
 | `EMBEDDING_MODEL_MISMATCH` | A table's stored vectors were made with a different model or size than the deployment embeds with now | Do not retry; the vectors need to be made again with the current model |
 | `READ_ONLY_KEY` | This key may only read | Ask your human for a read-write key |
+| `SERVICE_KEY_REQUIRES_HUMAN` | `create_api_key` was asked for a service-role key, which bypasses row-level security | Ask your human to create an Admin key in Settings → API keys and put it in the server's environment, not this conversation |
 | `DESTRUCTIVE_NEEDS_APPROVAL` | A destructive tool was called directly | Use the section tool's action, which parks it for approval (`autonomy`) |
 | `INVALID_KEY` / `NO_AUTH` | The key is missing, wrong or revoked | Ask your human for a new key from Connect → Agents |
 | `PROJECT_PAUSED` | The project is paused | Your human resumes it in the dashboard |

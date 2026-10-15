@@ -124,6 +124,8 @@ interface HealthData {
   unverifiedRepairsThisWeek?: number
   /** Uncapped count of findings held for approval. */
   needsAttention: number
+  /** Calls the user's coding agent parked for approval (not findings). */
+  agentApprovalsPending?: number
   criticalCount?: number
   warningCount?: number
   /** Uncapped count of everything still needing attention (open + held). */
@@ -398,13 +400,31 @@ export function WorkspaceHome({
 
   // ── Agent panel state — one headline, one action, in the agent's voice ───
   const autonomyPending = heldFindings ?? autonomy?.pendingCount ?? 0
+  // Calls the user's coding agent parked for approval. They come first: they
+  // expire unanswered. They are not the loop's findings, so the loop rail
+  // below does not count them; this panel was the one place left to say so,
+  // and it said "No issues detected" over a parked drop (OV-1).
+  const agentWaiting = health?.agentApprovalsPending ?? 0
   const agent: {
     headline: string
     body: string
     cta?: { label: string; onClick: () => void }
     quiet?: { label: string; onClick: () => void }
   } =
-    autonomyPending > 0 ? {
+    agentWaiting > 0 ? {
+      headline: 'Your agent is waiting on you',
+      body:
+        `Your coding agent parked ${agentWaiting === 1 ? 'a call' : `${agentWaiting} calls`} for your approval` +
+        (autonomyPending > 0
+          ? `, and Backenly is holding ${autonomyPending} change${autonomyPending === 1 ? '' : 's'} of its own`
+          : '') +
+        `. Nothing runs until you decide, and ${agentWaiting === 1 ? 'the request expires' : 'each request expires'} after a day.`,
+      cta: {
+        label: agentWaiting === 1 ? 'Review the request' : `Review ${agentWaiting} requests`,
+        onClick: () => router.push(`/app/projects/${projectId}/autonomy`),
+      },
+    }
+    : autonomyPending > 0 ? {
       headline: 'Waiting on your review',
       body: `Backenly prepared ${autonomyPending} change${autonomyPending === 1 ? '' : 's'} and is holding ${autonomyPending === 1 ? 'it' : 'them'}. Destructive and auth-related changes never ship without your OK.`,
       cta: { label: `Review ${autonomyPending === 1 ? 'the change' : `${autonomyPending} changes`}`, onClick: () => router.push(`/app/projects/${projectId}/autonomy`) },
