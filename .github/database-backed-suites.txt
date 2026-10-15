@@ -1083,3 +1083,10 @@ tests/integration/model-spend-on-every-tool.spec.ts
 # Real function, log and workspace rows are the property, so it needs a real
 # Postgres.
 tests/integration/functions-runtime-honesty.spec.ts
+
+# The dashboard's resource cards answer the real table count with a card-sized
+# list in the card's shape: 15 real workspace tables give tableCount 15 and
+# twelve { name, rowCount, estimated } entries with exact counts, and the
+# route's fallbacks are typed so a count slip cannot typecheck. Real workspace
+# tables are the property, so it needs a real Postgres.
+tests/integration/dashboard-stats-counts.spec.ts
