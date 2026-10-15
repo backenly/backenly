@@ -74,6 +74,8 @@ export function buildNotificationEmail(
       return buildHealthAlertEmail(title, body, metadata)
     case 'support_update':
       return buildSupportUpdateEmail(title, body, metadata)
+    case 'approval_requested':
+      return buildApprovalRequestedEmail(title, body, metadata)
     default:
       return buildGenericEmail(title, body)
   }
@@ -257,6 +259,25 @@ function buildHealthAlertEmail(
         </ul>
       </div>` : ''}
     ${button('Open Autonomy', escapeHtml(actionUrl))}
+  `)
+  return { subject: `${title} — Backenly`, html }
+}
+
+/**
+ * The agent asked for something that waits on a person. Says which call, on
+ * what, and that it expires, and links straight to the Review Queue. Everything
+ * interpolated is escaped: the target is whatever the agent named.
+ */
+function buildApprovalRequestedEmail(
+  title: string,
+  body: string,
+  metadata: Record<string, any> = {},
+): NotificationEmailContent {
+  const actionUrl = typeof metadata.actionUrl === 'string' ? metadata.actionUrl : APP_URL + '/app'
+  const html = shell(`
+    <h1 style="font-size:22px;font-weight:800;margin:0 0 8px;color:#ffffff;">${escapeHtml(title)}</h1>
+    <p style="color:#9ca3af;margin:0 0 20px;font-size:15px;line-height:1.6;">${escapeHtml(body)}</p>
+    ${button('Review the request', escapeHtml(actionUrl))}
   `)
   return { subject: `${title} — Backenly`, html }
 }

@@ -6921,6 +6921,26 @@ async function executeCreateKey(params: any, projectId: string): Promise<Executi
   // this tool is asked for most often.
   const serviceRole = params.serviceRole === true
 
+  // A service-role key bypasses row-level security entirely: the same
+  // escalation as granting 'admin', which SET_KEY_PERMISSIONS already leaves to
+  // the owner's click in Settings. Minting one here ran with no human in the
+  // loop on either agent door (CON-12). Parking it for approval would not help:
+  // its plaintext exists once, and an approved call's stored result withholds
+  // it, so the key would be minted and never seen. A person creates it in
+  // Settings, where it is shown to them once to copy.
+  if (serviceRole) {
+    return {
+      success: false,
+      message:
+        'Refused: a service-role key bypasses row-level security entirely, so a person creates it in ' +
+        'Settings → API keys → New key → Admin, where it is shown to them once. It belongs in a server\'s ' +
+        'environment, never in an agent conversation or a browser. To create a publishable key, call ' +
+        'create_api_key without serviceRole.',
+      error: 'SERVICE_KEY_REQUIRES_HUMAN',
+      code: 'SERVICE_KEY_REQUIRES_HUMAN',
+    }
+  }
+
   // Expiry is opt-in (1–3650 days) and echoed in the result; see the note on
   // the create below for why there is no silent default.
   const expiresInDays =
@@ -10358,7 +10378,7 @@ async function executeSetKeyPermissions(params: any, projectId: string): Promise
         message:
           `Refused: adding 'admin' makes \`${key.keyPrefix}...\` pass every permission gate. ` +
           `That escalation is the project owner's decision — grant it from Settings → API keys, ` +
-          `or create a service-role key deliberately with create_api_key { "serviceRole": true }.`,
+          `or have them create an Admin key there (New key → Admin).`,
         error: 'ADMIN_ESCALATION_REQUIRES_HUMAN',
       }
     }

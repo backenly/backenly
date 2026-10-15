@@ -115,21 +115,26 @@ const charged = async () =>
     }))?.tokenCount ?? 0,
   )
 
-/** The route charges after it answers, so wait for the charge to land. */
-async function chargeLands(expected: number): Promise<number> {
-  const until = Date.now() + 10_000
-  let now = await charged()
-  while (now !== expected && Date.now() < until) {
-    await new Promise((r) => setTimeout(r, 100))
-    now = await charged()
-  }
-  return now
-}
-
 /** Give a charge that should never come the time one would take to land. */
 const settle = () => new Promise((r) => setTimeout(r, 1_000))
 
 const holds = () => prisma.aiCreditHold.findMany({ where: { billingAccountId: account }, select: { status: true } })
+
+/**
+ * The route closes the turn after it answers: closeCreditTurn records the
+ * charge first and only then marks the turn's holds charged, so the two land a
+ * moment apart. Waiting for the charge alone and then reading the holds raced
+ * that second write, and lost it on CI. Wait for the whole close.
+ */
+async function turnCloses(expectedTokens: number, expectedHolds: number) {
+  const until = Date.now() + 10_000
+  for (;;) {
+    const [tokens, rows] = await Promise.all([charged(), holds()])
+    const closed = rows.length === expectedHolds && rows.every((h) => h.status === 'charged')
+    if ((tokens === expectedTokens && closed) || Date.now() > until) return { tokens, rows }
+    await new Promise((r) => setTimeout(r, 100))
+  }
+}
 
 const CRON_BODY = [
   "const stale = await ctx.db.query('sessions', { expired: true }, { limit: 1000 })",
@@ -205,8 +210,8 @@ describe('FN-12: functions.schedule is model work, gated and charged', () => {
     expect(r.body.ok).toBe(true)
     expect(provider.calls).toHaveLength(2)
     expect(await prisma.aiFunction.count({ where: { projectId, triggerType: 'cron' } })).toBe(1)
-    expect(await chargeLands(307)).toBe(307)
-    const rows = await holds()
+    const { tokens, rows } = await turnCloses(307, 2)
+    expect(tokens).toBe(307)
     expect(rows).toHaveLength(2)
     expect(rows.every((h) => h.status === 'charged')).toBe(true)
   }, 60_000)
@@ -250,8 +255,8 @@ describe('FN-19, INT-15: integrations.connect wires functions with the same mode
     expect(r.body.data.autoWired).toHaveLength(2)
     expect(r.body.data.notWired).toEqual([])
     expect(await prisma.aiFunction.count({ where: { projectId, name: { in: ['openai-chat', 'openai-embed'] } } })).toBe(2)
-    expect(await chargeLands(410)).toBe(410)
-    const rows = await holds()
+    const { tokens, rows } = await turnCloses(410, 4)
+    expect(tokens).toBe(410)
     expect(rows).toHaveLength(4)
     expect(rows.every((h) => h.status === 'charged')).toBe(true)
   }, 60_000)
