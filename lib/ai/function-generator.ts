@@ -369,7 +369,7 @@ Check the error against the real schema above — a runtime failure here is most
 export async function executeGenerateFunction(
   params: Record<string, any>,
   projectId: string
-): Promise<{ success: boolean; message: string; data?: any }> {
+): Promise<{ success: boolean; message: string; data?: any; error?: string }> {
   const description: string = params.description || params.functionDescription || ''
   const rawName: string = params.functionName || params.name || ''
   const method: string = (params.method || 'GET').toUpperCase()
@@ -396,6 +396,35 @@ export async function executeGenerateFunction(
 
   const endpoint = `/api/v1/${projectId}/fn/${functionName}`
   const filePath = `lib/custom-functions/${projectId}/${functionName}.ts`
+
+  // A name that is taken decides the call before any model work. An agent's
+  // create never overwrites (refuseExisting); any caller is refused when the
+  // existing function is not an HTTP route, because turning a signup hook into
+  // a manual endpoint is not "creating" anything (FN-10). Only an existing
+  // HTTP route may be replaced, by an internal caller, and the answer says so.
+  const { resolveFunctionByName } = await import('@/lib/services/ai-functions/names')
+  const taken = await resolveFunctionByName(projectId, functionName)
+  if (taken && 'ambiguous' in taken) {
+    return {
+      success: false,
+      message: `More than one function answers to "${functionName}" (${taken.ambiguous.join(', ')}). Nothing was changed.`,
+      error: 'AMBIGUOUS_NAME',
+    }
+  }
+  const existingFn = taken && 'fn' in taken ? taken.fn : null
+  const existingIsRoute = !!existingFn && existingFn.triggerType === 'manual' &&
+    /^(GET|POST|PUT|PATCH|DELETE)\s/i.test(existingFn.triggerTable ?? '')
+  if (existingFn && (params.refuseExisting === true || !existingIsRoute)) {
+    return {
+      success: false,
+      message:
+        `A function named ${existingFn.name} already exists (trigger ${existingFn.triggerType}` +
+        `${existingFn.triggerTable ? ` ${existingFn.triggerTable}` : ''}, ${existingFn.status}). Nothing was created or changed. ` +
+        'Pick another name, or replace its code with deploy_code.',
+      error: 'ALREADY_EXISTS',
+      data: { functionId: existingFn.id, name: existingFn.name },
+    }
+  }
 
   console.log(`[FunctionGenerator] Generating ${method} ${endpoint}`)
 
@@ -496,10 +525,8 @@ export async function executeGenerateFunction(
     // functions {action:'logs'} then show the truth instead of a healthy row.
     const storedStatus = verification === 'failed' ? 'error' : 'active'
     const storedError = verification === 'failed' ? `SMOKE_TEST_FAILED: ${verificationError ?? 'unknown error'}`.slice(0, 500) : null
-    const existing = await prisma.aiFunction.findFirst({
-      where: { projectId, name: functionName },
-      select: { id: true },
-    })
+    // Only an existing HTTP route reaches here (see the check above).
+    const existing = existingFn
     const fn = existing
       ? await prisma.aiFunction.update({
           where: { id: existing.id },
@@ -582,7 +609,10 @@ export async function executeGenerateFunction(
           ? ' The first draft failed at runtime and was repaired; the stored version was invoked and runs.'
           : ''
 
-    const message = `Generated ${method} ${endpoint} — custom function ready. Code stored in database.${verificationNote}${renameNote}`
+    const message = (existing
+      ? `Replaced the code of ${method} ${endpoint}; the previous code is not kept. `
+      : `Generated ${method} ${endpoint} — custom function ready. `) +
+      `Code stored in database.${verificationNote}${renameNote}`
 
     return {
       success: true,

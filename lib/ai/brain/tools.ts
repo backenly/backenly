@@ -1721,6 +1721,8 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
           name: a.name,
           description: a.description,
           method: String(a.method || 'POST').toUpperCase(),
+          // An agent's create never overwrites a function that exists (FN-10).
+          refuseExisting: true,
         },
       }
     }
@@ -1743,6 +1745,8 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
         description: a.description,
         triggerType,
         triggerTable: isDbEvent ? (a.table || null) : null,
+        // An agent's create of a name that exists is refused, not a silent no-op (FN-08).
+        refuseExisting: true,
       },
     }
   },
@@ -1820,7 +1824,16 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
   delete_trigger: (a) => ({ action: 'DELETE_TRIGGER', params: { triggerId: a.triggerId, name: a.name } }),
 
   // Functions lifecycle
-  toggle_ai_function: (a) => ({ action: 'TOGGLE_AI_FUNCTION', params: { functionId: a.functionId, name: a.name, active: !!a.active } }),
+  // Only a real boolean (or the exact strings a lax host sends) says which way;
+  // anything else reaches the executor as undefined and is refused (FN-13).
+  toggle_ai_function: (a) => ({
+    action: 'TOGGLE_AI_FUNCTION',
+    params: {
+      functionId: a.functionId,
+      name: a.name,
+      active: a.active === true || a.active === 'true' ? true : a.active === false || a.active === 'false' ? false : undefined,
+    },
+  }),
   delete_ai_function: (a) => ({ action: 'DELETE_AI_FUNCTION', params: { functionId: a.functionId, name: a.name } }),
   delete_cron_job: (a) => ({ action: 'DELETE_CRON_JOB', params: { jobId: a.jobId, name: a.name } }),
 
