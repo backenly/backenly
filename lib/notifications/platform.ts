@@ -12,6 +12,7 @@
  *   - deploy_complete
  *   - system  (maintenance, feature announcements, etc.)
  *   - health_alert  (a critical problem in one of their backends that needs them)
+ *   - approval_requested  (their coding agent parked a call that waits for their approval)
  *
  * Every `createPlatformNotification` call:
  *   1. Checks NotificationPreference — if inAppEnabled=false, skips DB insert.
@@ -37,6 +38,7 @@ export type PlatformNotificationType =
   | 'autonomous_action'   // "While you were away" — autonomous background fixes and findings
   | 'health_alert'        // A confirmed critical in one of their backends, still unresolved
   | 'support_update'      // Backenly replied to or resolved one of their support cases
+  | 'approval_requested'  // Their coding agent parked a call for approval; it expires unanswered
 
 // All valid types — used for preference initialization
 export const ALL_NOTIFICATION_TYPES: PlatformNotificationType[] = [
@@ -51,6 +53,7 @@ export const ALL_NOTIFICATION_TYPES: PlatformNotificationType[] = [
   'autonomous_action',
   'health_alert',
   'support_update',
+  'approval_requested',
 ]
 
 export interface CreateNotificationInput {
@@ -308,6 +311,37 @@ export async function notifyDeployComplete(
       ? `Project "${projectName}" deployed successfully. Your backend is live.`
       : `Project "${projectName}" deployed successfully.`,
     metadata: { projectId, projectName, url },
+  })
+}
+
+/**
+ * Tell a project's owner that their coding agent parked a call for approval.
+ *
+ * The request runs only once a human approves it and expires unanswered after
+ * a day. Nothing else announced it: it appeared only in the Review Queue on the
+ * Autonomy page, so a request nobody happened to look for simply ran out
+ * (AUT-08).
+ */
+export async function notifyApprovalRequested(
+  userId: string,
+  request: { projectId: string; projectName: string; approvalId: string; tool: string; target: string; expiresAt: Date },
+): Promise<void> {
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://backenly.com'
+  await createPlatformNotification({
+    userId,
+    type: 'approval_requested',
+    title: `Your agent is waiting for your approval in "${request.projectName}"`,
+    body:
+      `It asked to run ${request.tool} on ${request.target}. Approve or reject it in the Review Queue on the ` +
+      `Autonomy page. Nothing runs until you do, and the request expires ${request.expiresAt.toUTCString()}.`,
+    metadata: {
+      projectId: request.projectId,
+      approvalId: request.approvalId,
+      tool: request.tool,
+      target: request.target,
+      expiresAt: request.expiresAt.toISOString(),
+      actionUrl: `${appUrl}/app/projects/${request.projectId}/autonomy`,
+    },
   })
 }
 

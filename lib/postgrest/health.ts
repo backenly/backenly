@@ -19,7 +19,8 @@
  * prevention covering every path forever, and the blast radius is every tenant.
  */
 
-import { prisma } from '@/lib/db'
+import { HOME_REGION, type CloudRegionId } from '@/lib/regions'
+import { regionRawClient, regionSetting, type WorkspaceRawClient } from '@/lib/data-plane/regional'
 
 export type PostgrestStatus =
   | { state: 'healthy'; latencyMs: number }
@@ -35,9 +36,13 @@ const PROBE_TIMEOUT_MS = 5_000
  *
  * Deliberately unauthenticated: this asks "is the service able to answer at
  * all", and mixing in a JWT would let a token problem masquerade as an outage.
+ *
+ * Each region has its own PostgREST (POSTGREST_URL in the home region,
+ * POSTGREST_URL_<REGION> elsewhere). `not_configured` means this process has
+ * no address for the region's, never that another region's was asked.
  */
-export async function probePostgrest(): Promise<PostgrestStatus> {
-  const baseUrl = process.env.POSTGREST_URL
+export async function probePostgrest(region: CloudRegionId = HOME_REGION): Promise<PostgrestStatus> {
+  const baseUrl = regionSetting('POSTGREST_URL', region).value
   if (!baseUrl) return { state: 'not_configured' }
 
   const started = Date.now()
@@ -78,16 +83,19 @@ export async function probePostgrest(): Promise<PostgrestStatus> {
  * Returns the number pruned. Runs before any restart is considered: restarting
  * without pruning would rebuild the cache from the same broken list and wedge
  * again, turning a self-heal into a restart loop.
+ *
+ * The registry is in the database the region's PostgREST serves.
  */
-export async function pruneDanglingSchemas(): Promise<number> {
-  const before = await currentSchemas()
-  await prisma.$executeRawUnsafe(`SELECT public.backenly_pgrst_prune_schemas()`)
-  const after = await currentSchemas()
+export async function pruneDanglingSchemas(region: CloudRegionId = HOME_REGION): Promise<number> {
+  const db = regionRawClient(region)
+  const before = await currentSchemas(db)
+  await db.$executeRawUnsafe(`SELECT public.backenly_pgrst_prune_schemas()`)
+  const after = await currentSchemas(db)
   return Math.max(0, before.length - after.length)
 }
 
-async function currentSchemas(): Promise<string[]> {
-  const rows = await prisma.$queryRawUnsafe<Array<{ list: string | null }>>(
+async function currentSchemas(db: WorkspaceRawClient): Promise<string[]> {
+  const rows = await db.$queryRawUnsafe<Array<{ list: string | null }>>(
     `SELECT public.backenly_pgrst_current_schemas() AS list`,
   )
   const list = rows[0]?.list ?? ''
@@ -109,10 +117,12 @@ export interface HealAttempt {
  * would be both unreliable and a privilege this code should not hold. It
  * reports `restartRequired` so the supervising layer can act on a verified
  * diagnosis instead of on a guess.
+ *
+ * About one region's PostgREST and the registry in that region's database.
  */
-export async function diagnoseAndHeal(): Promise<HealAttempt> {
+export async function diagnoseAndHeal(region: CloudRegionId = HOME_REGION): Promise<HealAttempt> {
   const notes: string[] = []
-  const status = await probePostgrest()
+  const status = await probePostgrest(region)
 
   if (status.state === 'healthy' || status.state === 'not_configured') {
     return { status, prunedSchemas: 0, restartRequired: false, notes }
@@ -121,7 +131,7 @@ export async function diagnoseAndHeal(): Promise<HealAttempt> {
   let pruned = 0
   if (status.state === 'schema_cache_failed') {
     try {
-      pruned = await pruneDanglingSchemas()
+      pruned = await pruneDanglingSchemas(region)
       notes.push(
         pruned > 0
           ? `Pruned ${pruned} dangling schema(s) from the PostgREST registry.`
@@ -134,7 +144,7 @@ export async function diagnoseAndHeal(): Promise<HealAttempt> {
 
   // Re-probe: if pruning fixed it without a restart, say so rather than
   // recommending an unnecessary one.
-  const after = await probePostgrest()
+  const after = await probePostgrest(region)
   if (after.state === 'healthy') {
     notes.push('PostgREST recovered without a restart.')
     return { status: after, prunedSchemas: pruned, restartRequired: false, notes }

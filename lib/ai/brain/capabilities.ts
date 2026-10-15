@@ -431,7 +431,7 @@ export const TOOL_CAPABILITIES: Capability[] = [
   {
     id: 'create_api_key',
     name: 'Issue an API key',
-    what: 'Create a platform API key for server-to-server access. Permissions configurable; secret returned once.',
+    what: 'Create a publishable API key for an app, bound by row-level security; returned once. A service-role key is created by a person in Settings, never here.',
     tool: 'create_api_key',
   },
   {

@@ -158,7 +158,7 @@ describe('a project with nothing built is never watched', () => {
 import http from 'http'
 import type { AddressInfo } from 'net'
 import { runContractSweep } from '@/lib/services/workspace-observer'
-import { attributeContractFailures, type ProbeResult } from '@/lib/services/contract-verifier'
+import { attributeAcrossRegions, attributeContractFailures, type ProbeResult } from '@/lib/services/contract-verifier'
 import { reapUnattributableFindings } from '@/lib/core/finding-reaper'
 import { PLATFORM_FAULT_HEADER } from '@/lib/runtime/forward-to-runtime'
 
@@ -372,6 +372,55 @@ describe('a platform fault is never filed against a tenant', () => {
     expect(out.tenantBroken.size).toBe(0)
     expect(out.platformFaults.map(f => f.kind)).toEqual(['surface_unreachable'])
     expect([...(out.unknown.get('only') ?? [])]).toEqual(['db'])
+  })
+
+  describe('across regions, each with its own data plane', () => {
+    const failed = (surface: ProbeResult['surface']): ProbeResult => ({
+      surface, ok: false, critical: true, detail: 'HTTP 502', status: 502, durationMs: 1,
+    })
+    const passed = (surface: ProbeResult['surface']): ProbeResult => ({
+      surface, ok: true, critical: true, detail: 'ok', durationMs: 1,
+    })
+    const home = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']
+    const regionOf = (id: string) => (id.startsWith('v') ? 'us-east-1' : 'ap-south-1')
+
+    it("files one region's outage as that region's, not as each of its tenants'", () => {
+      // Two of eight projects: under the fleet share, so fleet numbers alone
+      // file both as tenant faults.
+      const outcomes = [
+        ...home.map(projectId => ({ projectId, results: [passed('db')] })),
+        { projectId: 'v1', results: [failed('db')] },
+        { projectId: 'v2', results: [failed('db')] },
+      ]
+      expect(attributeContractFailures(outcomes).tenantBroken.size).toBe(2)
+
+      const out = attributeAcrossRegions(outcomes, regionOf)
+      expect(out.tenantBroken.size).toBe(0)
+      expect(out.platformFaults).toEqual([
+        expect.objectContaining({ kind: 'surface_failing_fleetwide', surface: 'db', region: 'us-east-1', projectIds: ['v1', 'v2'] }),
+      ])
+      expect([...(out.unknown.get('v1') ?? [])]).toEqual(['db'])
+    })
+
+    it('keeps an outage everywhere one fleet-wide fault, even for a region with a single project', () => {
+      const outcomes = [...home, 'v1'].map(projectId => ({ projectId, results: [failed('functions')] }))
+      const out = attributeAcrossRegions(outcomes, regionOf)
+      expect(out.platformFaults).toHaveLength(1)
+      expect(out.platformFaults[0]).toMatchObject({ kind: 'surface_failing_fleetwide', surface: 'functions' })
+      expect(out.platformFaults[0].region).toBeUndefined()
+      expect(out.tenantBroken.size).toBe(0)
+    })
+
+    it("still files a failure that is one project's own", () => {
+      const outcomes = [
+        ...home.map(projectId => ({ projectId, results: [passed('storage')] })),
+        { projectId: 'v1', results: [passed('storage')] },
+        { projectId: 'v2', results: [failed('storage')] },
+      ]
+      const out = attributeAcrossRegions(outcomes, regionOf)
+      expect(out.platformFaults).toEqual([])
+      expect([...out.tenantBroken.keys()]).toEqual(['v2'])
+    })
   })
 
   it('withdraws rows that never described a tenant fault', async () => {
