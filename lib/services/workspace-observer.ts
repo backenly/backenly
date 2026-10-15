@@ -59,6 +59,7 @@ import { generateFixPlansFromRawFindings, type FixPlan } from '@/lib/core/fix-pl
 import { runBuiltInVerification, type VerificationExecutionResult } from '@/lib/verification/verification-executor'
 import { FLAGS } from '@/lib/config/flags'
 import { watchableProjectsWhere, isWatchableProject } from '@/lib/projects/backend-presence'
+import { skipUnreachable } from '@/lib/autonomy/region-skip'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -102,10 +103,15 @@ export async function runWorkspaceObserver(): Promise<{
   results: ObserverResult[]
   errors: string[]
 }> {
-  const projects = await prisma.project.findMany({
-    where: watchableProjectsWhere(),
-    select: { id: true, userId: true },
-  })
+  // Only projects this process can reach; the rest are recorded as skipped
+  // (lib/autonomy/region-skip.ts) rather than observed as empty.
+  const projects = await skipUnreachable(
+    await prisma.project.findMany({
+      where: watchableProjectsWhere(),
+      select: { id: true, userId: true },
+    }),
+    'workspace-observer',
+  )
 
   const results: ObserverResult[] = []
   const topLevelErrors: string[] = []
@@ -179,12 +185,17 @@ export async function runContractSweep(options: {
     errors.push(`[reap] ${err?.message ?? String(err)}`)
   })
 
-  const projects = await prisma.project.findMany({
-    where: options.projectIds
-      ? { id: { in: options.projectIds }, ...watchableProjectsWhere() }
-      : watchableProjectsWhere(),
-    select: { id: true },
-  })
+  // Only projects this process can reach; the rest are recorded as skipped
+  // (lib/autonomy/region-skip.ts) rather than probed and filed as broken.
+  const projects = await skipUnreachable(
+    await prisma.project.findMany({
+      where: options.projectIds
+        ? { id: { in: options.projectIds }, ...watchableProjectsWhere() }
+        : watchableProjectsWhere(),
+      select: { id: true },
+    }),
+    'contract-sweep',
+  )
   if (projects.length === 0) return { processed: 0, broken, errors, platformFaults }
 
   const ingress = await probePlatformIngress()

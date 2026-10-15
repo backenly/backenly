@@ -59,6 +59,7 @@ import { prisma } from '@/lib/db/prisma'
 import { executeInWorkspaceSchema, queryWorkspaceSchema } from '@/lib/services/workspaceDatabase'
 import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 import { ROW_EVENT_TYPES, type RowEventType, type WebhookEventType } from './events'
+import { skipUnreachable } from '@/lib/autonomy/region-skip'
 
 /** The trigger attached to every captured table. */
 const TRIGGER_NAME = 'backenly_webhook_capture'
@@ -577,10 +578,15 @@ export async function drainWebhookOutbox(): Promise<number> {
     select: { projectId: true },
     distinct: ['projectId'],
   })
-  const projects = [...new Set([...withWebhooks, ...withRowFunctions].map(p => p.projectId))].map(projectId => ({ projectId }))
+  // A project whose region this process cannot reach is skipped and recorded
+  // (lib/autonomy/region-skip.ts); its captured events wait in its outbox.
+  const projects = await skipUnreachable(
+    [...new Set([...withWebhooks, ...withRowFunctions].map(p => p.projectId))].map(id => ({ id })),
+    'webhook-drain',
+  )
 
   let total = 0
-  for (const { projectId } of projects) {
+  for (const { id: projectId } of projects) {
     try {
       total += await drainProject(projectId)
     } catch (err: any) {

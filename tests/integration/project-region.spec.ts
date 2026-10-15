@@ -40,7 +40,7 @@ import { GET as healthzRoute } from '@/app/api/v1/[projectId]/healthz/route'
 import { POST as broadcastRoute } from '@/app/api/v1/[projectId]/broadcast/route'
 import { mintKey } from '@/lib/auth/key-prefix'
 import { prisma } from '@/lib/db'
-import { disconnectRegionalClients, projectPostgrest, projectRegion, workspaceRawClient } from '@/lib/data-plane/regional'
+import { disconnectRegionalClients, partitionReachable, projectPostgrest, projectRegion, workspaceRawClient } from '@/lib/data-plane/regional'
 import { PostgresService } from '@/lib/db/hybrid'
 import { clearRegistrationCache, ensureSchemaRegistered } from '@/lib/postgrest/registration'
 import { listenerHub } from '@/lib/realtime/listener-hub'
@@ -58,6 +58,7 @@ import { detectSchemaDrift } from '@/lib/ai/schema-reconciler'
 import { analyzeProductionReadiness } from '@/lib/ai/production-intelligence'
 import { runInfraIntelligence } from '@/lib/ai/infra-intelligence'
 import { listExtensions } from '@/lib/services/extensions'
+import { AUTONOMY_SKIPPED, canReach, resetSkipRecords, skipUnreachable } from '@/lib/autonomy/region-skip'
 import { directAccessRoleNames, provisionDirectAccess, revokeDirectAccess } from '@/lib/services/direct-access'
 import { columnTypes } from '@/lib/mcp/runtime-db'
 import { getTableSchema, listExposedTables, workspaceTableExists } from '@/lib/mcp/schema-introspection'
@@ -936,6 +937,57 @@ describe('the remaining services read the project’s region', () => {
     delete process.env[REGION_VARIABLE]
     await expect(functionRoleHelperInstalled('us-east-1')).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
     await expect(listExtensions(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+  })
+})
+
+describe('background work skips what it cannot reach, and says so', () => {
+  const skipRows = () =>
+    prisma.auditLog.findMany({
+      where: { projectId: { in: [homeProject, regionalProject, unknownProject] }, action: AUTONOMY_SKIPPED },
+      select: { projectId: true, details: true },
+    })
+
+  beforeEach(() => resetSkipRecords())
+  afterAll(async () => {
+    await prisma.auditLog.deleteMany({ where: { action: AUTONOMY_SKIPPED, projectId: { in: [regionalProject, unknownProject] } } })
+  })
+
+  it('tells reachable projects from those in a region this process has no connection to', async () => {
+    delete process.env[REGION_VARIABLE]
+    const { reachable, unreachable } = await partitionReachable([
+      { id: homeProject },
+      { id: regionalProject },
+      { id: unknownProject },
+    ])
+    expect(reachable).toEqual([{ id: homeProject }])
+    expect(unreachable).toEqual([
+      { projectId: regionalProject, region: 'us-east-1', code: 'REGION_NOT_CONFIGURED', variable: REGION_VARIABLE },
+      { projectId: unknownProject, region: 'mars-north-1', code: 'UNKNOWN_REGION' },
+    ])
+
+    process.env[REGION_VARIABLE] = regionalUrl
+    expect((await partitionReachable([{ id: regionalProject }])).reachable).toEqual([{ id: regionalProject }])
+  })
+
+  it('records each skip once an hour per project, and leaves reachable projects alone', async () => {
+    delete process.env[REGION_VARIABLE]
+    const targets = [{ id: homeProject }, { id: regionalProject }]
+    expect(await skipUnreachable(targets, 'test-pass')).toEqual([{ id: homeProject }])
+    expect(await skipUnreachable(targets, 'test-pass')).toEqual([{ id: homeProject }])
+    expect(await canReach(regionalProject, 'test-pass')).toBe(false)
+
+    const rows = await skipRows()
+    expect(rows).toHaveLength(1)
+    expect(rows[0].projectId).toBe(regionalProject)
+    expect(JSON.parse(rows[0].details ?? '{}')).toEqual({
+      reason: 'REGION_NOT_CONFIGURED',
+      region: 'us-east-1',
+      variable: REGION_VARIABLE,
+      pass: 'test-pass',
+    })
+
+    process.env[REGION_VARIABLE] = regionalUrl
+    expect(await canReach(regionalProject, 'test-pass')).toBe(true)
   })
 })
 

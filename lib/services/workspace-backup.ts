@@ -56,6 +56,7 @@ import {
   snapshotKey,
   s3Location,
 } from '@/lib/services/snapshot-store'
+import { skipUnreachable } from '@/lib/autonomy/region-skip'
 
 const execFileAsync = promisify(execFile)
 
@@ -716,10 +717,16 @@ export async function runDailyBackups(): Promise<{ ran: number; succeeded: numbe
   // nothing can write to it, so today's dump would equal the one taken when it
   // paused. Skipping it also keeps that snapshot, because pruning below only
   // ever touches projects backed up in this run.
-  const projects = await prisma.project.findMany({
-    where: { deletedAt: null, pausedAt: null },
-    select: { id: true },
-  })
+  // A project in a region this process cannot reach is skipped and recorded
+  // (lib/autonomy/region-skip.ts). Like a paused one, it keeps its existing
+  // snapshots: pruning below only touches projects backed up in this run.
+  const projects = await skipUnreachable(
+    await prisma.project.findMany({
+      where: { deletedAt: null, pausedAt: null },
+      select: { id: true },
+    }),
+    'daily-backup',
+  )
 
   let ran = 0, succeeded = 0, failed = 0
   const succeededIds = new Set<string>()

@@ -212,6 +212,56 @@ export async function projectDatabaseUrl(projectId: string, role: DataPlaneRole 
   return requireRegionDatabaseUrl(await projectRegion(projectId), role, { projectId })
 }
 
+/** A project this process cannot reach, and why. */
+export interface UnreachableProject {
+  projectId: string
+  /** The region its row records (an unknown one is reported as recorded). */
+  region: string
+  code: 'REGION_NOT_CONFIGURED' | 'UNKNOWN_REGION'
+  /** The variable that would connect this process to the region, when one would. */
+  variable?: string
+}
+
+/**
+ * Split projects by whether this process has a connection to the region their
+ * data is in, with one platform query for the lot. Background passes use it to
+ * skip what they cannot reach and say so, instead of reaching each project in
+ * turn and reading the failure as an empty or healthy project.
+ *
+ * Only configuration is checked; nothing is connected to. A project with no
+ * row resolves to the home region, as projectRegion does.
+ */
+export async function partitionReachable<T extends { id: string }>(
+  projects: T[],
+  env: Env = process.env,
+): Promise<{ reachable: T[]; unreachable: UnreachableProject[] }> {
+  if (projects.length === 0) return { reachable: [], unreachable: [] }
+  const rows = await prisma.project.findMany({
+    where: { id: { in: [...new Set(projects.map((p) => p.id))] } },
+    select: { id: true, region: true },
+  })
+  const recorded = new Map(rows.map((row) => [row.id, row.region]))
+
+  const reachable: T[] = []
+  const unreachable: UnreachableProject[] = []
+  for (const project of projects) {
+    const region = findRegion(recorded.get(project.id) ?? HOME_REGION)
+    if (!region) {
+      unreachable.push({ projectId: project.id, region: String(recorded.get(project.id)), code: 'UNKNOWN_REGION' })
+    } else if (!regionDatabaseUrl(region.id, 'app', env)) {
+      unreachable.push({
+        projectId: project.id,
+        region: region.id,
+        code: 'REGION_NOT_CONFIGURED',
+        variable: regionEnvName(region.id),
+      })
+    } else {
+      reachable.push(project)
+    }
+  }
+  return { reachable, unreachable }
+}
+
 /**
  * Raw SQL against a project's database. Narrowed to the raw methods because a
  * regional database holds workspace schemas only: the platform tables a model

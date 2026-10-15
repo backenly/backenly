@@ -41,6 +41,7 @@ import { recordSensorState } from './sensor-state'
 import { runAutoFix } from '@/lib/core/auto-fix-engine'
 import { FLAGS } from '@/lib/config/flags'
 import { loopPrincipals, principalsToMetadata } from '@/lib/principal'
+import { canReach } from './region-skip'
 
 export type ReconcileAction =
   | 'WOULD_AUTO_APPLY'     // tier within dial + breaker budget available
@@ -1021,6 +1022,11 @@ export async function runReconciler(
   // asked. The schedulers already filtered on it; the kick did not, and
   // neither did anything that calls this directly.
   if (!(await isWatchableProject(projectId))) return null
+
+  // A project whose region this process cannot reach is skipped, and the skip
+  // recorded (lib/autonomy/region-skip.ts). Reconciling it here would read its
+  // failures as an empty or healthy backend.
+  if (!(await canReach(projectId, 'reconciler'))) return null
 
   // Plan-driven cadence gate. The "tick" is any prior reconciler audit row
   // — live, shadow, change-freeze, or the dispatcher-written TICK marker. The
