@@ -149,15 +149,21 @@ describe('approvals', () => {
   }, 60_000)
 
   it('CONNECT-DISCONNECT-GOVERNED: disconnecting a frontend waits for a human, and nothing runs', async () => {
-    // Connecting one needs a deployed backend (it says so, which is its own
-    // honest refusal); the governance under test is that a disconnect parks.
-    const parked = await call(RW, 'connect', { action: 'disconnect_frontend', url: 'https://app.example.test' })
+    // Connecting needs no publish (DEP-14), so the frontend really is
+    // connected first; the governance under test is that the disconnect parks
+    // and the connection survives until a human decides.
+    const origin = 'https://app.example.test'
+    const isActive = async () =>
+      (await prisma.connectedApp.findUnique({ where: { projectId_origin: { projectId, origin } } }))?.isActive
+    const connected = await call(RW, 'connect', { action: 'connect_frontend', url: origin })
+    expect(connected.body.ok).toBe(true)
+    expect(await isActive()).toBe(true)
+    const parked = await call(RW, 'connect', { action: 'disconnect_frontend', url: origin })
     expect(parked.body.approval?.id).toBeTruthy()
     const row = await prisma.agentApprovalRequest.findUnique({ where: { id: parked.body.approval.id } })
-    expect(row).toMatchObject({ tool: 'disconnect_frontend', toolArgs: { url: 'https://app.example.test' }, status: 'pending', executedAt: null })
-    const refused = await call(RW, 'connect', { action: 'connect_frontend', url: 'https://app.example.test' })
-    expect(refused.body.ok).toBe(false)
-    expect(refused.body.summary).toMatch(/deploy/i)
+    expect(row).toMatchObject({ tool: 'disconnect_frontend', toolArgs: { url: origin }, status: 'pending', executedAt: null })
+    // Nothing ran: the frontend is still connected.
+    expect(await isActive()).toBe(true)
   }, 60_000)
 })
 

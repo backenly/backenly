@@ -335,7 +335,7 @@ export const TOOL_CAPABILITIES: Capability[] = [
   {
     id: 'connect_frontend',
     name: 'Connect a frontend to this backend',
-    what: 'Connect a frontend URL (any Replit/Lovable/Bolt/Vercel/custom URL) to the deployed backend. Normalizes the URL, verifies the backend is deployed, pins the deployment version, and gates on a CONNECT confirmation. Use whenever the user names their frontend URL.',
+    what: 'Connect a frontend URL (any Replit/Lovable/Bolt/Vercel/custom URL) to this backend. Normalizes the URL, records the published version when there is one (no publish is needed first), and gates on a CONNECT confirmation. Use whenever the user names their frontend URL.',
     tool: 'connect_frontend',
   },
   {

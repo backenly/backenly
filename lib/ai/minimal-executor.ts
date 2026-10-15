@@ -1503,7 +1503,7 @@ STORAGE:
 - GENERATE_SIGNED_URL - Generate signed URL for file
 
 CONNECT FRONTEND:
-- CONNECT_FRONTEND - Connect a frontend URL to this deployed backend (deployment-gated, confirmation-gated)
+- CONNECT_FRONTEND - Connect a frontend URL to this backend (confirmation-gated; works before a first publish)
 - DISCONNECT_FRONTEND - Disconnect a previously-connected frontend (confirmation-gated)
 - LIST_CONNECTED_APPS - List frontends connected to this backend
 
@@ -6660,7 +6660,7 @@ async function executeListConnectedApps(projectId: string): Promise<ExecutionRes
       return {
         success: true,
         message:
-          '**Connected Frontends:**\n\nNone yet. Try: _"Connect my Replit app at https://app.replit.com/my-app"_\n\nFor anything to connect, your backend must be deployed first.',
+          '**Connected Frontends:**\n\nNone yet. Try: _"Connect my Replit app at https://app.replit.com/my-app"_\n\nConnecting works before a first publish too — the API already answers.',
         data: { apps: [], active: [] },
       }
     }

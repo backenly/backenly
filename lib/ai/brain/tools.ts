@@ -1184,7 +1184,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
 
   // ── Connect Frontend ──────────────────────────────────────────────────────
   fn('connect_frontend',
-    'Connect a deployed frontend to this backend. Pass the frontend URL the user gave you ("app.acme.com", "https://app.replit.com/x", "localhost:3000"). The engine normalizes it to an exact origin, verifies the backend has been deployed, and (unless force=true) returns a confirmation prompt — the user must type CONNECT to proceed. Pin to the deployed backend version. Use whenever the user says "hook up my app at <url>", "connect my Replit / Lovable / Vercel frontend", "let app.x.com call my APIs".',
+    'Connect a frontend to this backend. Pass the frontend URL the user gave you ("app.acme.com", "https://app.replit.com/x", "localhost:3000"). The engine normalizes it to an exact origin and (unless force=true) returns a confirmation prompt — the user must type CONNECT to proceed. No publish is needed first: the API already answers, and the connection records the published version when there is one. Use whenever the user says "hook up my app at <url>", "connect my Replit / Lovable / Vercel frontend", "let app.x.com call my APIs".',
     {
       url: { type: 'string', description: 'The frontend URL the user named. Will be normalized to a CORS origin.' },
       force: { type: 'boolean', description: 'Set true ONLY when the user has already typed CONNECT in this turn — skips the confirmation gate.' },
