@@ -19,7 +19,8 @@ Call as `auth { action: "<action>", … }`.
 | `block_user` | stop one user from signing in | `userId or email` | no | waits for a human |
 | `unblock_user` | let a blocked user sign in again | `userId or email` | no | no |
 | `enable_teams` | organizations with members and roles | nothing | no | no |
-| `email_settings` | how verification and password-reset emails are sent, whether the last test worked, and the templates | nothing | yes | no |
+| `email_settings` | how verification and password-reset emails are sent, whether the last test worked, the templates, and the sign-in email policy | nothing | yes | no |
+| `set_email_policy` | the app name and URL auth emails link to, whether sign-in requires a verified email (needs a working sender first), and whether magic links are on | nothing | no | no |
 | `set_smtp` | the SMTP server auth emails are sent through (the password is stored encrypted and never returned) | `host`, `port`, `username`, `fromAddress` | no | no |
 | `test_smtp` | send one real test email and record whether it arrived at the server | `to` | no | no |
 | `remove_smtp` | remove the SMTP settings | nothing | no | waits for a human |

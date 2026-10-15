@@ -66,7 +66,7 @@ One tool per dashboard section, each with an `action`:
 <!-- generated:section-tools by scripts/generate-agent-docs.ts from lib/mcp/domains.ts; do not edit -->
 | Tool | Actions | Docs |
 | --- | --- | --- |
-| `auth` | `enable`, `add_oauth_provider`, `list_users`, `reset_password`, `unblock_user`, `enable_teams`, `email_settings`, `set_smtp`, `test_smtp`, `set_email_template`, `reset_email_template`; `remove_oauth_provider`, `block_user`, `remove_smtp` wait for approval | https://backenly.com/docs/agents/auth.md |
+| `auth` | `enable`, `add_oauth_provider`, `list_users`, `reset_password`, `unblock_user`, `enable_teams`, `email_settings`, `set_email_policy`, `set_smtp`, `test_smtp`, `set_email_template`, `reset_email_template`; `remove_oauth_provider`, `block_user`, `remove_smtp` wait for approval | https://backenly.com/docs/agents/auth.md |
 | `storage` | `create_bucket`, `set_public`, `set_policy`, `list_buckets`, `list_files`, `signed_url`; `delete_file`, `delete_bucket` wait for approval | https://backenly.com/docs/agents/storage.md |
 | `functions` | `create`, `deploy_code`, `list`, `get`, `invoke`, `logs`, `set_active`, `schedule`, `list_schedules`; `delete`, `delete_schedule` wait for approval | https://backenly.com/docs/agents/functions.md |
 | `realtime` | `enable`, `status`; `disable` waits for approval | https://backenly.com/docs/agents/realtime.md |

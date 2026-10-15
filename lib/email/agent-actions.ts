@@ -1,11 +1,13 @@
 /**
  * The Auth page's email settings, as operations an agent can run.
  *
- * Password-reset, verification and magic-link emails need a sender (SMTP) and,
- * usually, templates in the app's own words. Both lived only on the Auth page,
- * so an agent building sign-up could not finish it. These call the same
- * functions the page's routes call, with each route's permission level: reading
- * needs access, templates need write, SMTP needs admin.
+ * Password-reset, verification and magic-link emails need a sender (SMTP),
+ * usually templates in the app's own words, and the policy that decides when
+ * they are sent (app name and URL, required verification, magic links). All of
+ * it lived only on the Auth page, so an agent building sign-up could not finish
+ * it. These call the same functions the page's routes call, with each route's
+ * permission level: reading needs access, templates and policy need write, SMTP
+ * needs admin.
  *
  * The SMTP password goes in and never comes out: every answer carries the
  * settings view, which says only whether a password is stored.
@@ -23,6 +25,7 @@ import {
 } from '@/lib/email/project-smtp'
 import { listProjectTemplates, revertProjectTemplate, saveProjectTemplate } from '@/lib/email/project-templates'
 import { isTemplateKind, TEMPLATE_KINDS } from '@/lib/email/template-kinds'
+import { getAuthEmailPolicy, saveAuthEmailPolicy, type AuthEmailPolicyView } from '@/lib/services/auth-email-policy'
 
 export interface EmailActor {
   userId?: string
@@ -58,18 +61,61 @@ function senderLine(smtp: Awaited<ReturnType<typeof getSmtpConfigView>>): string
   return `Auth emails are sent through ${via}${proof}.`
 }
 
+function policyLine(policy: AuthEmailPolicyView): string {
+  return (
+    `Emails are branded "${policy.effectiveAppName}" and link back to ${policy.effectiveAppUrl ?? 'no app URL (set appUrl so password reset has a page to land on)'}. ` +
+    `Sign-in ${policy.requireEmailVerification ? 'requires' : 'does not require'} a verified email; ` +
+    `magic links are ${policy.magicLinksEnabled ? 'on' : 'off'}.`
+  )
+}
+
 export async function emailSettings(actor: EmailActor): Promise<EmailActionResult> {
   const denied = await refused(actor, 'read')
   if (denied) return denied
-  const [smtp, templates] = await Promise.all([getSmtpConfigView(actor.projectId), listProjectTemplates(actor.projectId)])
+  const [smtp, templates, policy] = await Promise.all([
+    getSmtpConfigView(actor.projectId),
+    listProjectTemplates(actor.projectId),
+    getAuthEmailPolicy(actor.projectId),
+  ])
   const customised = templates.templates.filter((t) => t.customised).map((t) => t.kind)
   return {
     ok: true,
     summary:
-      `${senderLine(smtp)} Templates: ${customised.length ? `customised ${customised.join(', ')}` : 'all defaults'}. ` +
+      `${senderLine(smtp)} ${policy ? `${policyLine(policy)} ` : ''}` +
+      `Templates: ${customised.length ? `customised ${customised.join(', ')}` : 'all defaults'}. ` +
       `A template may use {{${templates.variables.join('}}, {{')}}}, and must include {{${templates.requiredVariables.join('}}, {{')}}}.`,
-    data: { smtp, ...templates },
+    data: { smtp, policy, ...templates },
   }
+}
+
+export async function setEmailPolicy(
+  actor: EmailActor,
+  args: { appName?: unknown; appUrl?: unknown; requireEmailVerification?: unknown; magicLinksEnabled?: unknown },
+): Promise<EmailActionResult> {
+  const denied = await refused(actor, 'write')
+  if (denied) return denied
+  const input = Object.fromEntries(
+    (['appName', 'appUrl', 'requireEmailVerification', 'magicLinksEnabled'] as const)
+      .filter((k) => args[k] !== undefined)
+      .map((k) => [k, args[k]]),
+  )
+  if (Object.keys(input).length === 0) {
+    return {
+      ok: false,
+      code: 'INVALID_ARGUMENT',
+      summary: 'Nothing to change: pass at least one of appName, appUrl, requireEmailVerification, magicLinksEnabled.',
+    }
+  }
+  const result = await saveAuthEmailPolicy(actor.projectId, input)
+  if ('code' in result) {
+    return {
+      ok: false,
+      code: result.code,
+      summary: result.message,
+      ...('problems' in result ? { data: { problems: result.problems } } : {}),
+    }
+  }
+  return { ok: true, summary: `Saved. ${policyLine(result.policy)}`, data: { policy: result.policy } }
 }
 
 export async function setSmtp(
@@ -130,10 +176,16 @@ export async function removeSmtp(actor: EmailActor): Promise<EmailActionResult> 
   const denied = await refused(actor, 'admin')
   if (denied) return denied
   const removed = await deleteSmtpConfig(actor.projectId)
-  const smtp = await getSmtpConfigView(actor.projectId)
+  const [smtp, policy] = await Promise.all([getSmtpConfigView(actor.projectId), getAuthEmailPolicy(actor.projectId)])
+  const stranded = smtp.activeSource === 'none' && policy?.requireEmailVerification === true
   return {
     ok: true,
-    summary: (removed ? 'Removed this project’s SMTP settings. ' : 'This project had no SMTP settings. ') + senderLine(smtp),
+    summary:
+      (removed ? 'Removed this project’s SMTP settings. ' : 'This project had no SMTP settings. ') + senderLine(smtp) +
+      (stranded
+        ? ' Sign-in still requires a verified email, so new users can no longer sign in: configure a sender, or turn ' +
+          'verification off with auth { action: "set_email_policy", requireEmailVerification: false }.'
+        : ''),
     data: { removed, smtp },
   }
 }

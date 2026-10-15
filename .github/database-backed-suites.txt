@@ -860,6 +860,12 @@ tests/integration/go-live-empty-guard.spec.ts
 # migration is applied, so a missing table never repeats the tour.
 tests/integration/tours-seen.spec.ts
 
+# The auth email policy is reachable from the agent's auth tool and from the
+# Auth page, through one service, and neither door can turn verification on
+# while no sender exists: real MCP keys, a real session cookie, real workspace
+# DDL for the grandfathered email_verified column.
+tests/integration/auth-email-policy.spec.ts
+
 # rotate_trigger_secret keeps its advertised contract: the docs print the
 # declared triggerName-or-triggerId alternative instead of "nothing", the
 # new secret rides data.secret and really rotates the row, and a call with

@@ -23,7 +23,7 @@ import { WEBHOOK_EVENT_TYPES } from '@/lib/webhooks/events'
 /** Brain tools served by lib/email/agent-actions.ts. */
 const AUTH_EMAIL_TOOLS = new Set<string>([
   'get_auth_email_settings', 'set_auth_smtp', 'test_auth_smtp', 'remove_auth_smtp',
-  'set_auth_email_template', 'reset_auth_email_template',
+  'set_auth_email_template', 'reset_auth_email_template', 'set_auth_email_policy',
 ])
 
 /** Brain tools served by lib/webhooks/agent-actions.ts. */
@@ -123,13 +123,14 @@ export type ToolName =
   | 'verify_integration_key'
   // Which project and credential this caller is acting as
   | 'get_connection_identity'
-  // End-user auth email: sender and templates (the Auth page)
+  // End-user auth email: sender, templates and policy (the Auth page)
   | 'get_auth_email_settings'
   | 'set_auth_smtp'
   | 'test_auth_smtp'
   | 'remove_auth_smtp'
   | 'set_auth_email_template'
   | 'reset_auth_email_template'
+  | 'set_auth_email_policy'
   // Connect Frontend
   | 'connect_frontend'
   | 'disconnect_frontend'
@@ -949,6 +950,18 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     'Go back to Backenly\'s default template for one auth email.',
     { kind: { type: 'string', enum: ['verification', 'password_reset', 'magic_link'] } },
     ['kind']),
+  fn('set_auth_email_policy',
+    'Set what this project\'s auth emails say and when they are required. Pass only the fields to change. ' +
+    'Turning requireEmailVerification on needs a working sender first (set_auth_smtp, then test_auth_smtp): ' +
+    'sign-in refuses an unverified address while it is on, so without a sender every new user would be stranded. ' +
+    'Users who already exist are recorded as verified when it is turned on, so they are not locked out.',
+    {
+      appName: { type: 'string', description: 'The name auth emails are branded with; empty falls back to the project name.' },
+      appUrl: { type: 'string', description: 'The app\'s base URL; password reset links land on it. Empty falls back to the published URL.' },
+      requireEmailVerification: { type: 'boolean', description: 'Refuse sign-in until the address is verified.' },
+      magicLinksEnabled: { type: 'boolean', description: 'Offer passwordless sign-in by emailed link.' },
+    },
+    []),
   fn('fix_backend',
     'Repair a broken subsystem. target: auth | api | table | deploy | realtime | storage | integration | workflow. Use when read_backend_state shows something is broken.',
     {
@@ -2770,6 +2783,7 @@ export async function dispatchTool(
         remove_auth_smtp: () => e.removeSmtp(actor),
         set_auth_email_template: () => e.setEmailTemplate(actor, args),
         reset_auth_email_template: () => e.resetEmailTemplate(actor, args),
+        set_auth_email_policy: () => e.setEmailPolicy(actor, args),
       }
       return finalize(await run[name]())
     }
@@ -3375,6 +3389,7 @@ export function humanTitle(name: string, args: Record<string, unknown>): string 
     case 'remove_auth_smtp': return 'Removing the auth email sender'
     case 'set_auth_email_template': return `Saving the ${args.kind ?? ''} email template`.replace(/  +/g, ' ')
     case 'reset_auth_email_template': return `Resetting the ${args.kind ?? ''} email template`.replace(/  +/g, ' ')
+    case 'set_auth_email_policy': return 'Saving the auth email policy'
     case 'verify_integration_key': return `Checking the ${args.integrationId ?? ''} key with its provider`.replace(/\s+/g, ' ')
     case 'fix_backend': return `Repairing ${args.target ?? 'backend'}`
     case 'apply_proposal': return 'Applying the recommendation list'
