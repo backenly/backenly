@@ -1044,9 +1044,11 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     'Returns the branch\'s PREVIEW ENDPOINT, ready to test: the base URL (the same as production), a client key ' +
     'bound to the branch (shown once), the X-Backenly-Environment value every data response will carry, an OpenAPI ' +
     'URL, and instructions to hand to a test. That key reads and writes the branch through the data API (/db and ' +
-    '/api/v2) and is REFUSED by every other endpoint (auth, functions, storage, realtime) rather than served from ' +
-    'production. connect_branch issues more keys.\n' +
-    'Schema changes made with apply_migration, create_table or any other build tool still apply to main, not to a branch.',
+    '/api/v2) and runs end-user auth on the branch (signup, signin, refresh-token, logout — branch users only). ' +
+    'Functions, storage, realtime and the emailed auth flows REFUSE it rather than serve from production. ' +
+    'connect_branch issues more keys.\n' +
+    'Schema changes target the branch when apply_migration is called WITH its branchId; without one — and from ' +
+    'create_table or any other build tool — they still apply to main.',
     {
       name: { type: 'string', description: 'Branch name, e.g. "add-payments". Lowercase kebab-case.' },
       includeData: {
@@ -2210,7 +2212,12 @@ export async function dispatchTool(
             : '  • No key was issued: call connect_branch for one.',
           `  • Every data response carries ${endpoint.environmentHeader.name}: ${endpoint.environmentHeader.value}`,
           `  • Smoke test: ${preview.previewCurl(endpoint, 'your_table', keyText)}`,
-          `  • Only /db and /api/v2 are branch-scoped; auth, functions, storage and realtime refuse this key.`,
+          // Mirrors BRANCH_SCOPED_SURFACES (lib/branches/key-scope.ts) — the
+          // instructions in data.preview say the same; this line used to
+          // claim auth refuses the key while they said auth runs on the
+          // branch, in the same response.
+          `  • Branch-scoped: /db, /api/v2, and end-user auth (signup, signin, refresh-token, logout). ` +
+          `Functions, storage, realtime and the emailed auth flows refuse this key (403 BRANCH_SURFACE_UNAVAILABLE).`,
         ]
         return {
           summary: lines.join('\n'),
