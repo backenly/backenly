@@ -15,6 +15,7 @@ import { prisma } from '@/lib/db/prisma'
 import { getProjectAuthStatus } from '@/lib/services/auth-status'
 import { createHash } from 'crypto'
 import { generateApiKey } from '@/lib/auth/apiKeyAuth'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 
 export interface ManifestColumn {
   name: string
@@ -132,13 +133,14 @@ function buildCreateExample(tableName: string, columns: ManifestColumn[]): strin
 // ─── workspace schema fallback (live reflection if Table.schema is empty) ────
 
 async function reflectLiveColumns(projectId: string, tableName: string): Promise<ManifestColumn[]> {
+  const db = await workspaceRawClient(projectId)
   // Use the canonical schema-name helper. The earlier `replace(/-/g, '_')`
   // produced a name that doesn't match the actual workspace schema (which
   // keeps hyphens), so this fallback returned empty columns silently.
   const { workspaceSchemaName } = await import('@/lib/security/workspace-schema')
   const workspaceSchema = workspaceSchemaName(projectId)
   try {
-    const rows = await prisma.$queryRawUnsafe<Array<{
+    const rows = await db.$queryRawUnsafe<Array<{
       column_name: string
       data_type: string
       is_nullable: string

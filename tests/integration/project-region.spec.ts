@@ -57,10 +57,11 @@ import { describeTable } from '@/lib/ai/schema-tools'
 import { detectSchemaDrift } from '@/lib/ai/schema-reconciler'
 import { analyzeProductionReadiness } from '@/lib/ai/production-intelligence'
 import { runInfraIntelligence } from '@/lib/ai/infra-intelligence'
+import { listExtensions } from '@/lib/services/extensions'
 import { directAccessRoleNames, provisionDirectAccess, revokeDirectAccess } from '@/lib/services/direct-access'
 import { columnTypes } from '@/lib/mcp/runtime-db'
 import { getTableSchema, listExposedTables, workspaceTableExists } from '@/lib/mcp/schema-introspection'
-import { functionDbClient, functionRoleName, provisionFunctionRole } from '@/lib/services/ai-functions/function-db-role'
+import { functionDbClient, functionRoleHelperInstalled, functionRoleName, provisionFunctionRole } from '@/lib/services/ai-functions/function-db-role'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
 import { ensureEmailVerifiedColumn, logoutEndUser } from '@/lib/services/end-user-auth-flows'
 import { buildUserInsert, introspectAuthUsersTable } from '@/lib/services/end-user-auth-table'
@@ -915,6 +916,26 @@ describe('the AI analysis modules with their own pools read the project’s regi
     await expect(detectSchemaDrift(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
     await expect(analyzeProductionReadiness(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
     await expect(runInfraIntelligence(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+  })
+})
+
+describe('the remaining services read the project’s region', () => {
+  it('finds the function-role helper in the regional database it is installed in', async () => {
+    // The stand-in backenly_fn_role_sync exists only in the regional database.
+    process.env[REGION_VARIABLE] = regionalUrl
+    expect(await functionRoleHelperInstalled('us-east-1')).toBe(true)
+  })
+
+  it('lists a regional project’s extensions from its region', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const listed = await listExtensions(regionalProject)
+    expect(Array.isArray(listed)).toBe(true)
+  })
+
+  it('refuses without a connection to the region', async () => {
+    delete process.env[REGION_VARIABLE]
+    await expect(functionRoleHelperInstalled('us-east-1')).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+    await expect(listExtensions(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
   })
 })
 

@@ -17,6 +17,7 @@ import { prisma } from '@/lib/db/postgres';
 import path from 'path';
 import { workspaceRoot as sharedWorkspaceRoot } from '@/lib/workspace/paths';
 import fs from 'fs/promises';
+import { projectDatabaseUrl } from '@/lib/data-plane/regional';
 
 const execAsync = promisify(exec);
 
@@ -109,15 +110,14 @@ export class WorkerLifecycleService {
         throw new Error(`File system error: ${fsError.message}`)
       }
 
-      // PHASE 10: DATABASE CONNECTION PREP - Verify database URL
-      if (!process.env.DATABASE_URL) {
-        console.error(`[WorkerLifecycle] ❌ DATABASE_URL environment variable not set`)
-        throw new Error('DATABASE_URL environment variable is required')
-      }
+      // PHASE 10: DATABASE CONNECTION PREP - The project's own database, in its
+      // region. A region this process has no connection for is refused here
+      // (REGION_NOT_CONFIGURED), never handed another region's database.
+      const projectDbUrl = await projectDatabaseUrl(projectId)
       console.log(`[WorkerLifecycle] ✅ Database URL configured`)
 
       // Escape DATABASE_URL for shell execution (Windows-safe)
-      const escapedDbUrl = process.env.DATABASE_URL.replace(/"/g, '\\"');
+      const escapedDbUrl = projectDbUrl.replace(/"/g, '\\"');
 
       // PHASE 10: CONTAINER SPIN - Build Docker command
       console.log(`[WorkerLifecycle] 🐳 Building Docker command...`)

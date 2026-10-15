@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db/prisma'
 import { verifySession } from '@/lib/auth/session'
 import { Pool } from 'pg'
 import { canAccessProject } from '@/lib/edition/guard'
+import { projectDatabaseUrl } from '@/lib/data-plane/regional'
 
 export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
@@ -27,8 +28,10 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
 
     const schemaName = `workspace_${projectId}`
 
-    // Query information_schema to get all tables + their columns in the workspace schema
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL })
+    // Query information_schema to get all tables + their columns in the workspace
+    // schema, on the project's own database in its region. Resolved before the
+    // query, so an unreachable region is not exported as "no tables yet".
+    const pool = new Pool({ connectionString: await projectDatabaseUrl(projectId) })
     let sql = ''
     try {
       const tablesResult = await pool.query<{ table_name: string }>(

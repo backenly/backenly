@@ -6,6 +6,7 @@ import { setupWorkspaceDatabaseFromSchema } from '@/lib/services/workspaceDataba
 import { prisma } from '@/lib/db'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
 import { workspaceSchemaName } from '@/lib/security/workspace-schema'
+import { projectDatabaseUrl } from '@/lib/data-plane/regional'
 
 /**
  * POST /api/database/setup-workspace
@@ -109,7 +110,8 @@ datasource db {
 
         // Create .env file with correct DATABASE_URL
         if (!existsSync(envPath)) {
-          const mainDbUrl = process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/backenly_dev'
+          // The project's own database, in its region; never another region's.
+          const mainDbUrl = await projectDatabaseUrl(projectId)
           // Canonical schema name (hyphens preserved) — must match what the
           // provisioner actually creates. The earlier `replace(/-/g, '_')`
           // wrote a connection URL pointing at a schema that does not exist.
