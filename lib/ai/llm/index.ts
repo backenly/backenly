@@ -21,14 +21,16 @@
  *     so a retry can never run, and bill, a request twice;
  *   - usage comes back in one shape with cache reads and writes kept apart, and
  *     priced at the model's own cache rates (lib/ai/cost-tracker.ts);
- *   - every call that ran is reported to the credit meter of the request that
- *     made it (lib/ai/token-meter.ts) and, with `billing.projectId`, written
- *     to the project's usage log, so no call site has to remember either.
+ *   - every customer-paid call that ran is reported to the credit meter of the
+ *     request that made it (lib/ai/token-meter.ts) and, with a project, written
+ *     to the project's usage log, so no call site has to remember either;
+ *   - a call that names no account bills the request that made it, when that
+ *     request's meter names one, so its credits are held before it is sent.
  */
 
 import type Anthropic from '@anthropic-ai/sdk'
 import { recordAiUsage } from '../cost-tracker'
-import { recordTokens } from '../token-meter'
+import { activeTokenScope, recordTokens } from '../token-meter'
 import { aiAvailability as configuredAvailability, resolveProvider, routeFor, type ProviderConfig } from './config'
 import { AiError, classifyProviderError } from './errors'
 import { buildParams, shouldStream } from './params'
@@ -157,16 +159,17 @@ export async function generate(req: GenerateRequest): Promise<GenerateResult> {
   const route = routeFor(req.purpose, provider.id === 'scripted' ? 'anthropic' : provider.id)
   const params = buildParams(route, req)
   const stream = shouldStream(route, params.max_tokens) || !!req.onText
+  const payment = paymentOf(req)
 
   const reservation = await reserveSpend({
     purpose: req.purpose,
     model: route.model,
-    payer: req.payer ?? defaultPayer(req.purpose),
+    payer: payment.payer,
     amountUsd: maxCostOf(route.model, params),
     maxTokens: maxEffectiveTokensOf(route.model, params),
     expiresInMs: route.timeoutMs * MAX_ATTEMPTS + SETTLE_GRACE_MS,
-    billingAccountId: req.billing?.billingAccountId,
-    projectId: req.billing?.projectId,
+    billingAccountId: payment.billing?.billingAccountId,
+    projectId: payment.billing?.projectId,
   })
 
   for (let attempt = 1; ; attempt++) {
@@ -181,32 +184,55 @@ export async function generate(req: GenerateRequest): Promise<GenerateResult> {
         await sleep(retryDelayMs(attempt))
         continue
       }
-      await settleFailure(reservation, e, route.model, req)
+      await settleFailure(reservation, e, route.model, req, payment)
       throw e
     }
 
     try {
       const result = finish(message, provider.id, route, req, attempt)
-      recordRun(req, route.model, result.usage)
+      recordRun(req, payment, route.model, result.usage)
       await settleSpend(reservation, { consumption: 'ran', costUsd: result.costUsd, usage: result.usage })
       return result
     } catch (err) {
       const e = err instanceof AiError ? err : classifyProviderError(err, provider.id)
       if (!e.model) e.model = route.model
-      await settleFailure(reservation, e, route.model, req)
+      await settleFailure(reservation, e, route.model, req, payment)
       throw e
     }
   }
 }
 
+/** Who pays for a request, and the account and project it bills. */
+interface Payment {
+  payer: 'customer' | 'platform'
+  billing?: { billingAccountId?: string; projectId?: string }
+}
+
 /**
- * Account for a call that ran: its credit-weighted tokens go to the meter of
- * whatever request opened one (a no-op outside a scope), and with a project its
- * usage row is written. Never throws and never waits: the call has happened.
+ * A call that names no account bills the request that made it: the meter a
+ * charging route opened names the project (lib/ai/token-meter.ts). Without
+ * this, a model call deep inside a tool held no credits and was charged by
+ * nobody unless its author remembered to pass `billing`, which is how
+ * `functions.schedule` and `integrations.connect` came to spend Backenly's
+ * model budget for free (FN-12, FN-19).
  */
-function recordRun(req: GenerateRequest, model: string, usage: NormalizedUsage): void {
-  recordTokens(effectiveTokensOf(model, usage))
-  const projectId = req.billing?.projectId
+function paymentOf(req: GenerateRequest): Payment {
+  return {
+    payer: req.payer ?? defaultPayer(req.purpose),
+    billing: req.billing ?? activeTokenScope()?.billing,
+  }
+}
+
+/**
+ * Account for a call that ran. A customer-paid call's credit-weighted tokens go
+ * to the meter of whatever request opened one (a no-op outside a scope); a call
+ * the platform pays for never does, so a customer's turn that triggers one is
+ * not billed for it. With a project, its usage row is written either way.
+ * Never throws and never waits: the call has happened.
+ */
+function recordRun(req: GenerateRequest, payment: Payment, model: string, usage: NormalizedUsage): void {
+  if (payment.payer === 'customer') recordTokens(effectiveTokensOf(model, usage))
+  const projectId = payment.billing?.projectId
   if (!projectId) return
   recordAiUsage(projectId, model, usage.promptTokens, usage.outputTokens, req.label ?? req.purpose, usage.cacheReadTokens, {
     tokens5m: usage.cacheWrite5mTokens,
@@ -219,9 +245,10 @@ async function settleFailure(
   e: AiError,
   model: string,
   req: GenerateRequest,
+  payment: Payment,
 ): Promise<void> {
   if (e.consumption === 'ran' && e.usage) {
-    recordRun(req, model, e.usage)
+    recordRun(req, payment, model, e.usage)
     await settleSpend(reservation, { consumption: 'ran', costUsd: costOf(model, e.usage), usage: e.usage })
   } else if (e.consumption === 'none') {
     await settleSpend(reservation, { consumption: 'none' })

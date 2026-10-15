@@ -8,7 +8,7 @@ Every tool and route answers failures as JSON: `{ ok: false, error, code }`, oft
 | --- | --- | --- |
 | `RATE_LIMITED` | Too many calls | Wait for `retry-after`, then retry |
 | `PLAN_LIMIT_EXCEEDED` | The plan's limit is reached | Tell your human; do not retry in a loop |
-| `AI_CREDITS_EXHAUSTED` | No AI credits left | Only `backend_chat` and `functions` `create` spend credits; every other tool still works |
+| `AI_CREDITS_EXHAUSTED` | No AI credits left | Only Backenly's own model spends credits: `backend_chat`, `functions` `create` and `schedule`, and the functions `integrations` `connect` wires (the key is still stored). Every other tool still works |
 | `AI_UNAVAILABLE` | `backend_chat` could not reach an AI model: none is configured, the provider is out of quota, or a monthly AI spending limit is reached | Do not retry. Anything listed in `applied` landed before it stopped; do the rest with the typed tools, which need no AI, and tell your human |
 | `EMBEDDINGS_UNAVAILABLE` | Vector search was asked for on a deployment with no embedding model configured | Tell your human; nothing was searched or enabled |
 | `EMBEDDING_MODEL_MISMATCH` | A table's stored vectors were made with a different model or size than the deployment embeds with now | Do not retry; the vectors need to be made again with the current model |

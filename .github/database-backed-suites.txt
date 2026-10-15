@@ -1067,6 +1067,14 @@ tests/integration/reset-password-sends-link.spec.ts
 # property, so it needs a real Postgres.
 tests/integration/project-region.spec.ts
 
+# Model spend on the MCP tool route is gated and charged wherever it happens:
+# functions.schedule is refused up front with no credits and charged exactly
+# what its model calls used; integrations.connect stores the key with no
+# credits and names each function it could not wire, and with credits every
+# wiring call is held and charged; a failed typed call is reported as it failed,
+# never handed to a model for a different action. Real route, key, holds, vault
+# and usage rows are the property, so it needs a real Postgres.
+tests/integration/model-spend-on-every-tool.spec.ts
 # Function runs say what they do: an HTTP function's creation check asks a GET
 # handler for its contract instead of running it, and every check is recorded
 # in the function's run log; ctx.db.query pages with an explicit limit, offset

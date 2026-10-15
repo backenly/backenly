@@ -332,9 +332,13 @@ export interface ToolDispatchContext {
    */
   agentSurface?: boolean
   /**
-   * Schema migrations are a declared sequence of typed actions. A failed step
-   * must be reported to the caller, not replaced with an LLM-generated action.
-   * Other dispatcher callers retain the executor's normal replanning default.
+   * Whether a failed executor action may be replaced by one a model picks from
+   * the error (minimal-executor's replanning). Off unless a caller opts in: a
+   * typed call is a declared action, so a failure is reported to the caller,
+   * never swapped for a different action it did not ask for. The MCP tool
+   * route and approved calls used to inherit replanning, so a failed typed
+   * call could run a model-chosen action and spend uncharged model budget.
+   * Only the brain's own loop opts in.
    */
   allowReplan?: boolean
   /**
@@ -3358,7 +3362,7 @@ async function runExecutor(
     ctx.sessionToken,
     0,
     undefined,
-    ctx.allowReplan ?? true,
+    ctx.allowReplan ?? false,
   )
   if (result.success) {
     // Engine-side confirmation gate: stop the loop and surface the prompt to

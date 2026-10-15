@@ -89,7 +89,7 @@ export const DOMAIN_TOOLS: DomainTool[] = [
     name: 'functions',
     title: 'Functions',
     summary:
-      'Server-side functions and schedules. "create" has Backenly write a function\'s code from your spec with its ' +
+      'Server-side functions and schedules. "create" and "schedule" have Backenly write the code from your spec with its ' +
       'own model, which draws AI credits; name the tables and integrations it uses. "deploy_code" stores code you wrote, ' +
       'exactly as written, after the runtime checks it can run.',
     actions: {
@@ -101,7 +101,7 @@ export const DOMAIN_TOOLS: DomainTool[] = [
       logs: { tool: 'list_ai_function_logs', gloss: 'recent runs from every trigger, with errors and ctx.log lines' },
       set_active: { tool: 'toggle_ai_function', gloss: 'turn a function on or off' },
       delete: { tool: 'delete_ai_function', gloss: 'remove a function' },
-      schedule: { tool: 'create_cron_job', gloss: 'a job on a schedule ("every 15 minutes" or 5-field cron)' },
+      schedule: { tool: 'create_cron_job', gloss: 'a job on a schedule ("every 15 minutes" or 5-field cron), its code written from your description by Backenly\'s model' },
       list_schedules: { tool: 'list_cron_jobs', gloss: 'every scheduled job' },
       delete_schedule: { tool: 'delete_cron_job', gloss: 'remove a scheduled job' },
     },
@@ -129,7 +129,7 @@ export const DOMAIN_TOOLS: DomainTool[] = [
       list: { tool: 'list_integration_keys', gloss: 'connected providers, masked keys and verification state' },
       capabilities: { tool: 'list_integration_capabilities', gloss: 'the exact ctx.integrations methods each provider gives a function, and for Stripe its receiver URL and signing-secret state' },
       verify: { tool: 'verify_integration_key', gloss: 'ask the provider again whether the stored key works' },
-      connect: { tool: 'store_integration_key', gloss: 'store a provider key (Stripe also takes webhookSecret, OneSignal also takes appId) and wire the first functions' },
+      connect: { tool: 'store_integration_key', gloss: 'store a provider key (Stripe also takes webhookSecret, OneSignal also takes appId) and wire the first functions, which Backenly\'s model writes' },
       disconnect: { tool: 'remove_integration_key', gloss: 'remove a provider key' },
       send_push: { tool: 'send_push', gloss: 'a push notification through the connected OneSignal app' },
     },
