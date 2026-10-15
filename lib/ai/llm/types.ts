@@ -25,6 +25,7 @@ export type AiPurpose =
   | 'functions.generate'
   | 'insight.explain'
   | 'autonomy.investigate'
+  | 'support.answer'
   | 'runtime.generate'
   | 'runtime.fast'
 

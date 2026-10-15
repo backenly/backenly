@@ -165,8 +165,11 @@ const publicApiRoutes = [
   '/api/cli/',                      // @backenly/cli — same scoped x-api-key auth (mcpGuard) at route level
   '/api/cron/',                     // Cron jobs — CRON_SECRET at route level
   '/api/billing/webhook',           // Paddle webhook — signature-verified
-  '/api/feedback/feature-request',  // Public form (rate limited at route)
-  '/api/feedback/support',          // Public form (rate limited at route)
+  // '/api/feedback/support' and '/api/feedback/feature-request' were allowed
+  // here, but no routes exist at those paths — the real support and
+  // feature-request routes authenticate. With startsWith matching, a future
+  // route under either prefix would have silently skipped auth, so the dead
+  // allowances are removed rather than kept.
   '/api/startups/',                 // Startup program (Cloud overlay): applying is anonymous, gated by
                                     // Turnstile, rate limits and an emailed code; the status and claim
                                     // routes authenticate the session themselves

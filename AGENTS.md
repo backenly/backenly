@@ -223,6 +223,7 @@ Key Prisma models (68 total):
 | `PermissionPolicy` | Row-level security policies |
 | `Subscription` | Billing (Stripe ids on the row; `PaddleSubscription` is a retired, retained table) |
 | `AuditLog` | Compliance audit trail |
+| `SupportTicket` + `SupportMessage` | Support cases (Cloud): AI first response + team correspondence thread (`lib/support/`) |
 | `StorageBucket` + `StorageFile` | File storage |
 | `AgentMemory` | AI agent context/memory |
 | `ProjectPreference` | Learned user preferences |
@@ -322,6 +323,7 @@ STORAGE_S3_BUCKET=
 
 # Email
 SMTP_HOST=  SMTP_PORT=  SMTP_USER=  SMTP_PASS=  SMTP_FROM=
+SUPPORT_NOTIFY_EMAIL=             # Optional: operator inbox emailed when support cases are filed (Cloud)
 
 # OAuth
 GOOGLE_CLIENT_ID=  GOOGLE_CLIENT_SECRET=  GOOGLE_REDIRECT_URI=

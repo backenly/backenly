@@ -41,9 +41,13 @@ export type Payer = 'customer' | 'platform'
 export type SpendScope = 'total' | 'platform'
 export type Settlement = 'settled' | 'released' | 'unknown'
 
-/** Who pays for a purpose unless the call says otherwise. */
+/**
+ * Who pays for a purpose unless the call says otherwise. Autonomy and support
+ * are the deployment's own work: healing a backend and answering a support
+ * case must never spend the customer's plan credits.
+ */
 export function defaultPayer(purpose: AiPurpose): Payer {
-  return purpose.startsWith('autonomy.') ? 'platform' : 'customer'
+  return purpose.startsWith('autonomy.') || purpose.startsWith('support.') ? 'platform' : 'customer'
 }
 
 export interface SpendLimits {

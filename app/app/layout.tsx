@@ -48,7 +48,7 @@ function AppLayoutContent({ children }: { children: React.ReactNode }) {
 }
 
 const ORG_SHELL_PREFIXES = [
-  '/app/usage', '/app/billing', '/app/members', '/app/referral',
+  '/app/usage', '/app/billing', '/app/members', '/app/referral', '/app/support',
   '/app/org/', '/app/organizations', '/app/new-organization',
 ]
 
