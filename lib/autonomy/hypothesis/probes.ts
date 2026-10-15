@@ -14,10 +14,10 @@
  * records the test as unavailable rather than as answered.
  */
 
-import { prisma } from '@/lib/db/prisma'
 import { queryWorkspaceAsOwner, resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
 import { usesLegacyGucs } from '@/lib/postgrest/rls-translation'
 import { probePostgrest } from '@/lib/postgrest/health'
+import { isRegionError, projectPostgrest, projectRegion, workspaceRawClient } from '@/lib/data-plane/regional'
 
 export interface ProbeContext {
   projectId: string
@@ -92,7 +92,9 @@ export const serviceRows: ProbeFn = async ctx => {
     `SELECT count(*)::bigint AS n FROM "${schema}"."${table}"`,
   ).catch((err: unknown) => {
     // Thrown, never coerced to zero. "I could not count" and "I counted none"
-    // are different observations and only one of them is evidence.
+    // are different observations and only one of them is evidence. A region
+    // error keeps its identity.
+    if (isRegionError(err)) throw err
     throw new Error(
       `could not count rows in ${table}: ${err instanceof Error ? err.message : String(err)}`,
     )
@@ -112,7 +114,8 @@ export const serviceRows: ProbeFn = async ctx => {
  * contract, so it cannot be wrong about it.
  */
 export const contractMatch: ProbeFn = async ctx => {
-  const policies = await prisma.$queryRawUnsafe<Array<{ qual: string | null; with_check: string | null }>>(
+  const db = await workspaceRawClient(ctx.projectId)
+  const policies = await db.$queryRawUnsafe<Array<{ qual: string | null; with_check: string | null }>>(
     `SELECT qual, with_check FROM pg_policies WHERE schemaname = $1`,
     await schemaFor(ctx.projectId),
   )
@@ -150,7 +153,8 @@ export const softDeleted: ProbeFn = async ctx => {
 
   // Catalog read. RLS does not filter `information_schema`, so this one
   // correctly needs no claim.
-  const hasCol = await prisma.$queryRawUnsafe<Array<{ n: bigint }>>(
+  const db = await workspaceRawClient(ctx.projectId)
+  const hasCol = await db.$queryRawUnsafe<Array<{ n: bigint }>>(
     `SELECT count(*)::bigint AS n FROM information_schema.columns
       WHERE table_schema = $1 AND table_name = $2 AND column_name = 'deleted_at'`,
     schema,
@@ -169,6 +173,7 @@ export const softDeleted: ProbeFn = async ctx => {
             count(*) FILTER (WHERE deleted_at IS NULL)::bigint AS live
        FROM "${schema}"."${table}"`,
   ).catch((err: unknown) => {
+    if (isRegionError(err)) throw err
     throw new Error(
       `could not count soft-deleted rows in ${table}: ${err instanceof Error ? err.message : String(err)}`,
     )
@@ -185,7 +190,8 @@ export const softDeleted: ProbeFn = async ctx => {
 
 export const tableExists: ProbeFn = async ctx => {
   const table = requireTable(ctx)
-  const rows = await prisma.$queryRawUnsafe<Array<{ n: bigint }>>(
+  const db = await workspaceRawClient(ctx.projectId)
+  const rows = await db.$queryRawUnsafe<Array<{ n: bigint }>>(
     `SELECT count(*)::bigint AS n FROM information_schema.tables
       WHERE table_schema = $1 AND table_name = $2`,
     await schemaFor(ctx.projectId),
@@ -227,12 +233,14 @@ export const apiDefinition: ProbeFn = async ctx => {
  * Reports 'not_applicable' when this project is not served by PostgREST — an
  * outcome no hypothesis predicts, so it eliminates the stale-cache explanation
  * rather than lending it accidental support.
+ *
+ * Asks the PostgREST in the project's region, never another region's.
  */
 export const postgrestVisibility: ProbeFn = async ctx => {
   const table = requireTable(ctx)
-  const baseUrl = process.env.POSTGREST_URL
-  const secret = process.env.POSTGREST_JWT_SECRET
-  if (!baseUrl || !secret) return { outcome: 'not_applicable', detail: 'PostgREST not configured' }
+  const postgrest = await projectPostgrest(ctx.projectId)
+  if (!postgrest) return { outcome: 'not_applicable', detail: 'PostgREST not configured' }
+  const { url: baseUrl, jwtSecret: secret } = postgrest
 
   // No per-project engine check: PostgREST is the only data plane, so this
   // probe applies to every project wherever PostgREST is configured at all.
@@ -266,7 +274,8 @@ export const isInternalTable: ProbeFn = async ctx => {
 
 export const roleGrants: ProbeFn = async ctx => {
   const table = requireTable(ctx)
-  const rows = await prisma.$queryRawUnsafe<Array<{ n: bigint }>>(
+  const db = await workspaceRawClient(ctx.projectId)
+  const rows = await db.$queryRawUnsafe<Array<{ n: bigint }>>(
     `SELECT count(*)::bigint AS n FROM information_schema.role_table_grants
       WHERE table_schema = $1 AND table_name = $2
         AND grantee IN ('authenticated', 'service_role')`,
@@ -286,9 +295,12 @@ export const keyScope: ProbeFn = async () => {
 }
 
 // ── all_tenants_failing ─────────────────────────────────────────────────────
+//
+// "All tenants" means all of the project's region: each region has its own
+// PostgREST and database, so these ask about the region the project is in.
 
-export const postgrestReachable: ProbeFn = async () => {
-  const status = await probePostgrest()
+export const postgrestReachable: ProbeFn = async ctx => {
+  const status = await probePostgrest(await projectRegion(ctx.projectId))
   if (status.state === 'not_configured') return { outcome: 'not_applicable' }
   return {
     outcome: status.state === 'unreachable' ? 'unreachable' : 'reachable',
@@ -296,8 +308,8 @@ export const postgrestReachable: ProbeFn = async () => {
   }
 }
 
-export const schemaCacheState: ProbeFn = async () => {
-  const status = await probePostgrest()
+export const schemaCacheState: ProbeFn = async ctx => {
+  const status = await probePostgrest(await projectRegion(ctx.projectId))
   if (status.state === 'not_configured') return { outcome: 'not_applicable' }
   return {
     outcome: status.state === 'schema_cache_failed' ? 'failed' : 'ok',
@@ -305,14 +317,15 @@ export const schemaCacheState: ProbeFn = async () => {
   }
 }
 
-export const danglingRegistrations: ProbeFn = async () => {
-  const rows = await prisma.$queryRawUnsafe<Array<{ list: string | null }>>(
+export const danglingRegistrations: ProbeFn = async ctx => {
+  const db = await workspaceRawClient(ctx.projectId)
+  const rows = await db.$queryRawUnsafe<Array<{ list: string | null }>>(
     `SELECT public.backenly_pgrst_current_schemas() AS list`,
   )
   const registered = (rows[0]?.list ?? '').split(',').filter(Boolean)
   if (registered.length === 0) return { outcome: 'absent', detail: 'nothing registered' }
 
-  const existing = await prisma.$queryRawUnsafe<Array<{ schema_name: string }>>(
+  const existing = await db.$queryRawUnsafe<Array<{ schema_name: string }>>(
     `SELECT schema_name FROM information_schema.schemata WHERE schema_name = ANY($1::text[])`,
     registered,
   )
@@ -325,8 +338,9 @@ export const danglingRegistrations: ProbeFn = async () => {
   }
 }
 
-export const databaseReachable: ProbeFn = async () => {
-  await prisma.$queryRawUnsafe(`SELECT 1`)
+export const databaseReachable: ProbeFn = async ctx => {
+  const db = await workspaceRawClient(ctx.projectId)
+  await db.$queryRawUnsafe(`SELECT 1`)
   return { outcome: 'reachable' }
 }
 

@@ -50,6 +50,7 @@
 
 import { prisma } from '@/lib/db'
 import { queryWorkspaceAsOwner, resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
+import { workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
 
 const IDENT = /^[a-zA-Z_][a-zA-Z0-9_]*$/
 
@@ -78,8 +79,13 @@ interface TableFacts {
   rows: number
 }
 
-async function liveTable(projectId: string, schema: string, table: string): Promise<TableFacts | null> {
-  const rows = await prisma.$queryRawUnsafe<Array<{ oid: string }>>(
+async function liveTable(
+  db: WorkspaceRawClient,
+  projectId: string,
+  schema: string,
+  table: string,
+): Promise<TableFacts | null> {
+  const rows = await db.$queryRawUnsafe<Array<{ oid: string }>>(
     `SELECT c.oid::text AS oid FROM pg_class c
        JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind = 'r'`,
@@ -103,18 +109,24 @@ async function liveTable(projectId: string, schema: string, table: string): Prom
   return { oid: rows[0].oid, rows: Number(counted[0]?.n ?? -1) }
 }
 
+/**
+ * The column as the catalog has it, or null when it is absent. A read that
+ * fails throws: "could not read" is not "absent", and absent is the condition
+ * that lets this rung add the column.
+ */
 async function liveColumn(
+  db: WorkspaceRawClient,
   schema: string,
   table: string,
   column: string,
 ): Promise<{ dataType: string; isNullable: boolean } | null> {
-  const rows = await prisma.$queryRawUnsafe<Array<{ data_type: string; is_nullable: string }>>(
+  const rows = await db.$queryRawUnsafe<Array<{ data_type: string; is_nullable: string }>>(
     `SELECT data_type, is_nullable FROM information_schema.columns
       WHERE table_schema = $1 AND table_name = $2 AND column_name = $3`,
     schema,
     table,
     column,
-  ).catch(() => [])
+  )
   if (rows.length === 0) return null
   return { dataType: rows[0].data_type, isNullable: rows[0].is_nullable === 'YES' }
 }
@@ -136,14 +148,25 @@ export async function executeMaintenanceAddStructure(spec: AddStructureSpec): Pr
   }
 
   const schema = await resolveWorkspaceSchema(projectId)
+  // The catalog is the one in the project's region. Resolved before any read
+  // below, so a region this process cannot reach fails as itself instead of
+  // reading as a missing table.
+  const db = await workspaceRawClient(projectId)
 
   // 1. The live catalog decides whether the table exists.
-  const before = await liveTable(projectId, schema, table)
+  const before = await liveTable(db, projectId, schema, table)
   if (!before) return refuse(`table "${table}" does not exist in ${schema}`)
 
   // 2. The target must be absent — that is this rung's precondition, and it is
-  //    also what makes it reversible by dropping what it added.
-  if (await liveColumn(schema, table, column)) {
+  //    also what makes it reversible by dropping what it added. A catalog that
+  //    could not be read proves nothing either way, so it refuses.
+  let existing: Awaited<ReturnType<typeof liveColumn>>
+  try {
+    existing = await liveColumn(db, schema, table, column)
+  } catch (err) {
+    return refuse(`could not read whether "${column}" exists on ${table}: ${err instanceof Error ? err.message : String(err)}`)
+  }
+  if (existing) {
     return refuse(`column "${column}" already exists on ${table}; add_structure requires the target to be absent`)
   }
 
@@ -175,8 +198,10 @@ export async function executeMaintenanceAddStructure(spec: AddStructureSpec): Pr
 
   // 5. Read back from the catalog. `success` is the executor's opinion; the
   //    column's existence is a fact.
-  const after = await liveTable(projectId, schema, table)
-  const seen = await liveColumn(schema, table, column)
+  const after = await liveTable(db, projectId, schema, table)
+  // A read-back that fails is reported below as the column not being seen,
+  // which is a failure of the rung, never a success.
+  const seen = await liveColumn(db, schema, table, column).catch(() => null)
   const observed = seen ? { column, ...seen } : null
   const identity = {
     oidBefore: before.oid,

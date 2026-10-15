@@ -13,6 +13,7 @@
  */
 
 import * as Sentry from '@sentry/nextjs'
+import { HOME_REGION } from '@/lib/regions'
 
 export interface PlatformFaultReport {
   /** Stable machine name, e.g. `ingress_unreachable`, `surface_failing_fleetwide`. */
@@ -23,20 +24,28 @@ export interface PlatformFaultReport {
   /** Projects whose probes were affected, when known. */
   projectIds?: string[]
   origin?: string
+  /** The region whose data plane the fault is in, when it is one region's. */
+  region?: string
 }
 
 export function reportPlatformFault(fault: PlatformFaultReport): void {
   const where = fault.surface ? ` surface=${fault.surface}` : ''
   const affected = fault.projectIds ? ` projects=${fault.projectIds.length}` : ''
-  console.error(`[PlatformFault] ${fault.kind}${where}${affected} — ${fault.detail}`)
+  const region = fault.region ? ` region=${fault.region}` : ''
+  console.error(`[PlatformFault] ${fault.kind}${region}${where}${affected} — ${fault.detail}`)
   try {
     Sentry.captureMessage(`Platform fault: ${fault.kind}${where}`, {
       level: 'error',
       // One Sentry issue per kind of fault, not one per sweep.
-      fingerprint: ['platform-fault', fault.kind, fault.surface ?? '*', String(fault.status ?? '*')],
+      // A region outside home is its own incident; home keeps the grouping it had.
+      fingerprint: [
+        'platform-fault', fault.kind, fault.surface ?? '*', String(fault.status ?? '*'),
+        ...(fault.region && fault.region !== HOME_REGION ? [fault.region] : []),
+      ],
       extra: {
         detail: fault.detail,
         origin: fault.origin,
+        region: fault.region ?? null,
         affectedProjects: fault.projectIds?.length ?? null,
         sampleProjectIds: fault.projectIds?.slice(0, 10) ?? [],
       },

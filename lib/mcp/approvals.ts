@@ -108,7 +108,43 @@ export async function createApprovalRequest(input: {
     },
   }).catch(() => {})
 
+  // The owner is told. The request waits for them and expires, and it used to
+  // appear only in the Review Queue, so one nobody looked for simply ran out
+  // (AUT-08). Not awaited: a slow mail server must not hold the agent's answer.
+  notifyOwnerOfRequest(row).catch(() => {})
+
   return row
+}
+
+/** One notice per burst of requests: see notifyOwnerOfRequest. */
+const NOTICE_COALESCE_MS = 10 * 60 * 1000
+
+async function notifyOwnerOfRequest(row: { id: string; projectId: string; tool: string; target: string; expiresAt: Date }) {
+  const project = await prisma.project.findUnique({ where: { id: row.projectId }, select: { userId: true, name: true } })
+  if (!project?.userId) return
+  // An agent that parks ten calls in a minute sends one notice, not ten: the
+  // Review Queue lists every request. A new notice goes out once the owner has
+  // read the last one, or ten minutes after it.
+  const recent = await prisma.platformNotification.findFirst({
+    where: {
+      userId: project.userId,
+      type: 'approval_requested',
+      readAt: null,
+      createdAt: { gt: new Date(Date.now() - NOTICE_COALESCE_MS) },
+      metadata: { path: ['projectId'], equals: row.projectId },
+    },
+    select: { id: true },
+  })
+  if (recent) return
+  const { notifyApprovalRequested } = await import('@/lib/notifications/platform')
+  await notifyApprovalRequested(project.userId, {
+    projectId: row.projectId,
+    projectName: project.name,
+    approvalId: row.id,
+    tool: row.tool,
+    target: row.target,
+    expiresAt: row.expiresAt,
+  })
 }
 
 /**

@@ -80,6 +80,15 @@ import { collectBaseline } from '@/lib/autonomy/baseline/collector'
 import { checkIntentConformance } from '@/lib/autonomy/intent-conformance'
 import { verifyPostcondition } from '@/lib/autonomy/action-postconditions'
 import { hasCapability, resetCapabilityCache } from '@/lib/autonomy/platform-capabilities'
+import http from 'http'
+import type { AddressInfo } from 'net'
+import { pruneDanglingSchemas } from '@/lib/postgrest/health'
+import { healDataPlane } from '@/lib/postgrest/supervisor'
+import { applyRemedy } from '@/lib/autonomy/hypothesis/remedy'
+import { PROBE_REGISTRY } from '@/lib/autonomy/hypothesis/probes'
+import { executeMaintenanceAddStructure } from '@/lib/autonomy/maintenance/primitives/add-structure'
+import { dualWriteInstalled, installDualWrite, removeDualWrite } from '@/lib/autonomy/maintenance/primitives/dual-write'
+import { runBackfillBatch } from '@/lib/autonomy/maintenance/primitives/backfill'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -1077,6 +1086,162 @@ describe('the autonomy probes read the project’s region', () => {
       verifyPostcondition('ADD_COLUMN', regionalProject, { tableName: 'marker', columnName: 'note', columnType: 'text' }),
     ).rejects.toMatchObject(refused)
     await expect(hasCapability('pg_stat_statements', 'us-east-1')).rejects.toMatchObject(refused)
+  })
+})
+
+describe('each region’s data plane is checked and healed on its own', () => {
+  // Stand-ins for the registry helpers (scripts/sql/postgrest-schema-registry.sql),
+  // in the regional database only. The registry holds the project's schema and
+  // one that no longer exists; every call is recorded, so a call sent to any
+  // other database leaves no row here.
+  const saved = { url: process.env.POSTGREST_URL }
+  let regionalPostgrest: http.Server
+  const calls = () => rowsIn<{ op: string; arg: string | null }>(regionalUrl, 'SELECT op, arg FROM public.pgrst_calls ORDER BY seq')
+
+  beforeAll(async () => {
+    await run(
+      regionalUrl,
+      `CREATE TABLE public.pgrst_registry (schema_name text);
+          CREATE TABLE public.pgrst_calls (seq serial, op text, arg text);
+          CREATE FUNCTION public.backenly_pgrst_current_schemas() RETURNS text LANGUAGE sql AS $$
+            SELECT coalesce(string_agg(schema_name, ',' ORDER BY schema_name), '') FROM public.pgrst_registry
+          $$;
+          CREATE FUNCTION public.backenly_pgrst_prune_schemas() RETURNS void LANGUAGE sql AS $$
+            INSERT INTO public.pgrst_calls (op) VALUES ('prune');
+            DELETE FROM public.pgrst_registry r
+             WHERE NOT EXISTS (SELECT 1 FROM information_schema.schemata s WHERE s.schema_name = r.schema_name);
+          $$;
+          CREATE FUNCTION public.backenly_pgrst_reload() RETURNS void LANGUAGE sql AS $$
+            INSERT INTO public.pgrst_calls (op) VALUES ('reload')
+          $$;
+          CREATE FUNCTION public.backenly_pgrst_prepare_schema(s text) RETURNS void LANGUAGE sql AS $$
+            INSERT INTO public.pgrst_calls (op, arg) VALUES ('prepare', s)
+          $$;`,
+    )
+    await run(
+      regionalUrl,
+      `INSERT INTO public.pgrst_registry VALUES ('${schemaOf(regionalProject)}'), ('workspace_gone_from_virginia')`,
+    )
+    // The region's PostgREST: answers its root, as a healthy one does.
+    regionalPostgrest = http.createServer((_req, res) => res.writeHead(200).end('{}'))
+    await new Promise<void>((resolve) => regionalPostgrest.listen(0, '127.0.0.1', () => resolve()))
+  })
+
+  afterAll(async () => {
+    if (saved.url === undefined) delete process.env.POSTGREST_URL
+    else process.env.POSTGREST_URL = saved.url
+    delete process.env.POSTGREST_URL_US_EAST_1
+    await new Promise((resolve) => regionalPostgrest.close(resolve))
+    await run(
+      regionalUrl,
+      `DROP FUNCTION IF EXISTS public.backenly_pgrst_current_schemas(), public.backenly_pgrst_prune_schemas(),
+         public.backenly_pgrst_reload(), public.backenly_pgrst_prepare_schema(text);
+       DROP TABLE IF EXISTS public.pgrst_registry, public.pgrst_calls`,
+    ).catch(() => {})
+    await prisma.auditLog.deleteMany({ where: { projectId: regionalProject, type: 'health' } })
+  })
+
+  it('reads the registry of the project’s region when diagnosing, and repairs it there', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const ctx = { projectId: regionalProject }
+    expect(await PROBE_REGISTRY.dangling_registrations(ctx)).toMatchObject({ outcome: 'present' })
+    expect(await PROBE_REGISTRY.database_reachable(ctx)).toEqual({ outcome: 'reachable' })
+
+    expect(await pruneDanglingSchemas('us-east-1')).toBe(1)
+    const verdict = {
+      kind: 'conclusive',
+      hypothesis: { id: 'h', statement: 's', prior: 1, predicts: {}, remedy: { summary: 'prepare', autoApplicable: true, action: 'POSTGREST_PREPARE_SCHEMA' } },
+    } as unknown as Parameters<typeof applyRemedy>[1]
+    expect(await applyRemedy(regionalProject, verdict)).toMatchObject({ applied: true })
+
+    expect(await calls()).toEqual([
+      { op: 'prune', arg: null },
+      { op: 'prepare', arg: schemaOf(regionalProject) },
+      { op: 'reload', arg: null },
+    ])
+  })
+
+  it('heals the project’s region, asking that region’s PostgREST and never the home one', async () => {
+    // The home PostgREST is down. A heal that asked it would not come back healthy.
+    process.env.POSTGREST_URL = 'http://127.0.0.1:9'
+    process.env.POSTGREST_URL_US_EAST_1 = `http://127.0.0.1:${(regionalPostgrest.address() as AddressInfo).port}`
+
+    const result = await healDataPlane(regionalProject)
+
+    expect(result).toMatchObject({ outcome: 'already_healthy', healthy: true })
+    const rows = await prisma.auditLog.findMany({ where: { projectId: regionalProject, action: 'DATA_PLANE_HEAL_VERIFIED' } })
+    expect(rows.map((r) => JSON.parse(r.details ?? '{}').region)).toEqual(['us-east-1'])
+  })
+
+  it('reports a region it has no PostgREST address for as unreachable, never healthy', async () => {
+    delete process.env.POSTGREST_URL_US_EAST_1
+    const result = await healDataPlane(regionalProject)
+    expect(result).toMatchObject({ outcome: 'region_not_reachable', healthy: false })
+    expect(result.notes.join(' ')).toMatch(/POSTGREST_URL_US_EAST_1/)
+  })
+
+  it('refuses without a connection to the region', async () => {
+    delete process.env[REGION_VARIABLE]
+    const refused = { code: 'REGION_NOT_CONFIGURED' }
+    await expect(PROBE_REGISTRY.dangling_registrations({ projectId: regionalProject })).rejects.toMatchObject(refused)
+    await expect(pruneDanglingSchemas('us-east-1')).rejects.toMatchObject(refused)
+    const verdict = {
+      kind: 'conclusive',
+      hypothesis: { id: 'h', statement: 's', prior: 1, predicts: {}, remedy: { summary: 'reload', autoApplicable: true, action: 'POSTGREST_RELOAD_SCHEMA' } },
+    } as unknown as Parameters<typeof applyRemedy>[1]
+    await expect(applyRemedy(regionalProject, verdict)).rejects.toMatchObject(refused)
+  })
+})
+
+describe('the maintenance primitives act on the project’s region', () => {
+  // `ledger` exists only in the regional database. Read from the home one, every
+  // primitive below would see no table at all.
+  const ledger = () => `"${schemaOf(regionalProject)}".ledger`
+  const upper = { kind: 'upper' } as const
+  // A function: regionalProject is only assigned in the top-level beforeAll.
+  const spec = () => ({ projectId: regionalProject, table: 'ledger', sourceColumn: 'status', targetColumn: 'state', transform: upper })
+
+  beforeAll(async () => {
+    await run(
+      regionalUrl,
+      `CREATE TABLE ${ledger()} (id int PRIMARY KEY, status text, state text);
+       INSERT INTO ${ledger()} VALUES (1, 'open', NULL), (2, 'shut', NULL)`,
+    )
+  })
+
+  afterAll(async () => {
+    await run(regionalUrl, `DROP TABLE IF EXISTS ${ledger()} CASCADE`).catch(() => {})
+  })
+
+  it('reads the regional catalog before it acts, and acts there', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+
+    // The column add_structure would add is already on the regional table.
+    expect(
+      await executeMaintenanceAddStructure({ projectId: regionalProject, table: 'ledger', column: 'status', columnType: 'text' }),
+    ).toMatchObject({ added: false, refusal: expect.stringMatching(/already exists/) })
+
+    const dualWrite = await installDualWrite(spec())
+    expect(dualWrite).toMatchObject({ installed: true, refusal: null })
+    expect(await dualWriteInstalled(regionalProject, 'ledger', dualWrite.objectName)).toBe(true)
+
+    expect(await runBackfillBatch(spec(), null)).toMatchObject({ refusal: null, scanned: 2, updated: 2, done: true })
+    expect(await rowsIn(regionalUrl, `SELECT state FROM ${ledger()} ORDER BY id`)).toEqual([{ state: 'OPEN' }, { state: 'SHUT' }])
+
+    expect(await removeDualWrite(regionalProject, 'ledger', 'state')).toMatchObject({ removed: true })
+    expect(await dualWriteInstalled(regionalProject, 'ledger', dualWrite.objectName)).toBe(false)
+  })
+
+  it('refuses without a connection to the region, and never reports a removal it could not confirm', async () => {
+    delete process.env[REGION_VARIABLE]
+    const refused = { code: 'REGION_NOT_CONFIGURED' }
+    await expect(dualWriteInstalled(regionalProject, 'ledger', 'bkn_dw_ledger_state')).rejects.toMatchObject(refused)
+    expect(await removeDualWrite(regionalProject, 'ledger', 'state')).toMatchObject({ removed: false })
+    await expect(installDualWrite(spec())).rejects.toMatchObject(refused)
+    await expect(runBackfillBatch(spec(), null)).rejects.toMatchObject(refused)
+    await expect(
+      executeMaintenanceAddStructure({ projectId: regionalProject, table: 'ledger', column: 'extra', columnType: 'text' }),
+    ).rejects.toMatchObject(refused)
   })
 })
 

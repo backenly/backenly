@@ -24,6 +24,12 @@ jest.mock('@/lib/db/prisma', () => ({
   },
 }))
 
+// The remedy acts on the PostgREST in the project's region; here, the stub above.
+jest.mock('@/lib/data-plane/regional', () => ({
+  ...jest.requireActual('@/lib/data-plane/regional'),
+  workspaceRawClient: async () => jest.requireMock('@/lib/db/prisma').prisma,
+}))
+
 beforeEach(() => {
   executed.length = 0
 })

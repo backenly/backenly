@@ -40,6 +40,7 @@
 
 import { queryWorkspaceSchema } from '@/lib/services/workspaceDatabase'
 import { queryWorkspaceAsOwner, resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
+import { isRegionError, unlessRegionError } from '@/lib/data-plane/regional'
 import { transformProblem, transformSql, type Transform } from './transform'
 
 /**
@@ -140,7 +141,7 @@ async function primaryKeyColumn(projectId: string, table: string): Promise<strin
       LIMIT 1`,
     await resolveWorkspaceSchema(projectId),
     table,
-  ).catch(() => null)
+  ).catch(unlessRegionError(null))
 
   const col = rowsOf(res)[0]?.column_name
   if (!col || !IDENT.test(col)) {
@@ -164,6 +165,7 @@ async function assertColumnsExist(
     table,
     cols,
   ).catch((err: unknown) => {
+    if (isRegionError(err)) throw err
     throw new Inconclusive(
       `column catalog unreadable: ${err instanceof Error ? err.message : String(err)}`,
     )
@@ -223,6 +225,7 @@ export async function reconcileSourceTarget(
       projectId,
       `SELECT count(*)::bigint AS n FROM "${schema}"."${table}"`,
     ).catch((err: unknown) => {
+      if (isRegionError(err)) throw err
       throw new Inconclusive(`row count failed: ${err instanceof Error ? err.message : String(err)}`)
     })
     const totalRows = Number(rowsOf(countRes)[0]?.n ?? 0)
@@ -281,6 +284,7 @@ export async function reconcileSourceTarget(
       // one, since it has to bind the claim's own parameters first.
       params,
     ).catch((err: unknown) => {
+      if (isRegionError(err)) throw err
       throw new Inconclusive(
         `comparison query failed: ${err instanceof Error ? err.message : String(err)}`,
       )

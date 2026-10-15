@@ -37,6 +37,7 @@ tests/bench/prisma-uuid-binding.spec.ts
 tests/build-runs/build-run-service.test.ts
 tests/build-runs/hydration.test.ts
 tests/integration/mcp-oauth-flow.spec.ts
+tests/integration/mcp-direct-access-url.spec.ts
 tests/integration/mcp-transport-hygiene.spec.ts
 tests/integration/webhook-delivery.spec.ts
 tests/integration/webhook-trigger-url-required.spec.ts
@@ -1082,3 +1083,30 @@ tests/integration/model-spend-on-every-tool.spec.ts
 # Real function, log and workspace rows are the property, so it needs a real
 # Postgres.
 tests/integration/functions-runtime-honesty.spec.ts
+
+# A service-role key is never minted by an agent: create_api_key with
+# serviceRole true is refused on the typed MCP door and the brain's door with
+# SERVICE_KEY_REQUIRES_HUMAN and mints nothing, publishable keys still work, and
+# no agent-facing text offers one. Real route, MCP key and key rows are the
+# property, so it needs a real Postgres.
+tests/integration/service-key-human-only.spec.ts
+# Agent credentials are managed in one place: Settings, API keys lists the
+# app's keys only (never an MCP key or a browser-authorised agent connection),
+# and the Disconnect the Agents tab offers ends a real OAuth connection, its
+# access token refused and its refresh token gone. Real key rows, a real OAuth
+# token exchange and a platform session are the property, so it needs a real
+# Postgres.
+tests/integration/agent-connections-revocable.spec.ts
+# Calls a coding agent parked for approval are counted where the owner and the
+# agent look: /health answers agentApprovalsPending (live requests only) beside
+# a findings-only needsAttention, get_autonomy_status names both queues as the
+# briefing does, and creating a request notifies the project's owner. Real
+# approval, finding and notification rows are the property, so it needs a real
+# Postgres.
+tests/integration/parked-approvals-visible.spec.ts
+# The dashboard's resource cards answer the real table count with a card-sized
+# list in the card's shape: 15 real workspace tables give tableCount 15 and
+# twelve { name, rowCount, estimated } entries with exact counts, and the
+# route's fallbacks are typed so a count slip cannot typecheck. Real workspace
+# tables are the property, so it needs a real Postgres.
+tests/integration/dashboard-stats-counts.spec.ts

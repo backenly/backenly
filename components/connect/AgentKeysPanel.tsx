@@ -43,6 +43,25 @@ interface McpKey {
   expiresAt: string | null
 }
 
+/**
+ * An agent the user authorised by signing in from the browser (OAuth). It has
+ * no key to show: no plaintext was ever issued.
+ */
+interface McpConnection {
+  id: string
+  client: string
+  readOnly: boolean
+  createdAt: string
+  lastUsed: string | null
+}
+
+/** What the confirm dialog is about to remove. */
+interface RevokeTarget {
+  id: string
+  title: string
+  kind: 'key' | 'connection'
+}
+
 interface McpUsage {
   calls24h: number
   calls7d: number
@@ -70,6 +89,7 @@ export function AgentKeysPanel({
   refreshSignal?: number
 }) {
   const [keys, setKeys] = useState<McpKey[]>([])
+  const [connections, setConnections] = useState<McpConnection[]>([])
   const [usage, setUsage] = useState<McpUsage | null>(null)
   const [loading, setLoading] = useState(true)
   const [creating, setCreating] = useState(false)
@@ -77,7 +97,7 @@ export function AgentKeysPanel({
   const [newLabel, setNewLabel] = useState('')
   const [newReadOnly, setNewReadOnly] = useState(false)
   const [revoking, setRevoking] = useState<string | null>(null)
-  const [revokeTarget, setRevokeTarget] = useState<McpKey | null>(null)
+  const [revokeTarget, setRevokeTarget] = useState<RevokeTarget | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null)
@@ -92,6 +112,10 @@ export function AgentKeysPanel({
       const k = await readJson(kRes)
       if (!k.ok) throw new Error(k.data?.error || `Could not load keys (HTTP ${k.status})`)
       setKeys(k.data?.keys ?? [])
+      // Agents authorised from the browser. The route always returned them;
+      // nothing rendered them, so a connected agent could not be seen or
+      // disconnected here, the one place the docs send people (T4, CON-09).
+      setConnections(k.data?.connections ?? [])
 
       const u = await readJson(uRes)
       if (u.ok && u.data) setUsage(u.data)
@@ -231,6 +255,64 @@ export function AgentKeysPanel({
         </section>
       )}
 
+      {/* ── Connected agents (browser sign-in, no key) ────────────────── */}
+      {connections.length > 0 && (
+        <section aria-labelledby="agent-connections-heading">
+          <div className="mb-4">
+            <h2 id="agent-connections-heading" className="text-[15px] font-semibold leading-[22px] tracking-[-0.012em] text-zinc-100">Connected agents</h2>
+            <p className="mt-1 text-[13px] text-zinc-400">Agents you authorised by signing in from the browser. There is no key to copy; disconnect one and it stops working at once.</p>
+          </div>
+          <div className="overflow-x-auto rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
+            <table className="w-full min-w-[520px] text-left">
+              <thead>
+                <tr className="border-b border-white/[0.06] text-[12px] text-zinc-500">
+                  <th scope="col" className="h-[36px] whitespace-nowrap px-4 font-medium">Agent</th>
+                  <th scope="col" className="h-[36px] whitespace-nowrap px-4 font-medium">Connected</th>
+                  <th scope="col" className="h-[36px] whitespace-nowrap px-4 font-medium">Last used</th>
+                  <th scope="col" className="h-[36px] whitespace-nowrap px-4 font-medium"><span className="sr-only">Actions</span></th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/[0.05]">
+                {connections.map((c) => {
+                  const stat = usage?.byKey.find((b) => b.keyId === c.id)
+                  return (
+                    <tr key={c.id} className="group transition-colors hover:bg-white/[0.02]">
+                      <td className="px-4 py-3">
+                        <div className="truncate text-[13px] font-medium text-zinc-100">{c.client}</div>
+                        <div className="mt-0.5 flex flex-wrap items-center gap-2">
+                          {c.readOnly && <Tag tone="neutral">Read-only</Tag>}
+                          {stat && stat.calls7d > 0 && (
+                            <span className="text-[12px] tabular-nums text-zinc-500">{stat.calls7d.toLocaleString()} calls this week</span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3 text-[13px] tabular-nums text-zinc-400">
+                        {new Date(c.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3 text-[13px] tabular-nums text-zinc-400">
+                        {c.lastUsed ? `${timeAgo(c.lastUsed)} ago` : <span className="text-zinc-600">Never</span>}
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        <KitButton
+                          size="sm"
+                          variant="ghost"
+                          icon={Trash2}
+                          loading={revoking === c.id}
+                          onClick={() => setRevokeTarget({ id: c.id, title: c.client, kind: 'connection' })}
+                          className="hover:!bg-rose-500/[0.10] hover:!text-rose-200"
+                        >
+                          Disconnect
+                        </KitButton>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
       {/* ── Keys ──────────────────────────────────────────────────────── */}
       <section aria-labelledby="agent-keys-heading">
         <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
@@ -349,7 +431,7 @@ export function AgentKeysPanel({
                           variant="ghost"
                           icon={Trash2}
                           loading={revoking === k.id}
-                          onClick={() => setRevokeTarget(k)}
+                          onClick={() => setRevokeTarget({ id: k.id, title: k.label || k.name, kind: 'key' })}
                           className="hover:!bg-rose-500/[0.10] hover:!text-rose-200"
                         >
                           Revoke
@@ -371,9 +453,17 @@ export function AgentKeysPanel({
           if (revokeTarget) revokeKey(revokeTarget.id)
           setRevokeTarget(null)
         }}
-        title={`Revoke ${revokeTarget?.label || revokeTarget?.name || 'key'}?`}
-        description="Any agent using it will stop working immediately."
-        confirmLabel="Revoke key"
+        title={
+          revokeTarget?.kind === 'connection'
+            ? `Disconnect ${revokeTarget.title}?`
+            : `Revoke ${revokeTarget?.title || 'key'}?`
+        }
+        description={
+          revokeTarget?.kind === 'connection'
+            ? 'It stops working immediately, and its sign-in cannot be refreshed. To use it again, sign in from the agent.'
+            : 'Any agent using it will stop working immediately.'
+        }
+        confirmLabel={revokeTarget?.kind === 'connection' ? 'Disconnect' : 'Revoke key'}
         danger
       />
     </div>

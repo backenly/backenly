@@ -330,7 +330,10 @@ describe('the elevated context does not leak', () => {
       require('node:path').join(__dirname, '..', '..', 'lib', 'autonomy', 'maintenance', 'primitives', 'backfill.ts'),
       'utf8',
     )
-    const tx = src.slice(src.indexOf('prisma.$transaction'))
+    // The transaction is on the client for the project's region (`db`).
+    const at = src.indexOf('db.$transaction(')
+    expect(at).toBeGreaterThan(-1)
+    const tx = src.slice(at)
     expect(tx.indexOf('rlsSessionSql')).toBeGreaterThan(-1)
     expect(tx.indexOf('SET LOCAL lock_timeout')).toBeGreaterThan(tx.indexOf('rlsSessionSql'))
     // Not CALLED — the name appears in a comment explaining why it is not used.

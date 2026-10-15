@@ -19,6 +19,7 @@ import { AiError, generate } from '../llm'
 import { answererPrompt } from './prompts'
 import { kickReconciler, shouldKickFor } from '@/lib/autonomy/event-trigger'
 import { WEBHOOK_EVENT_TYPES } from '@/lib/webhooks/events'
+import { publicOrigin } from '@/lib/branches/preview'
 import { SERVED_OAUTH_PROVIDERS, isServedOAuthProvider } from '@/lib/services/oauth-providers'
 
 /** Executor actions whose audit rows record who acted (see runExecutor). */
@@ -1286,8 +1287,10 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     'SELECT policies expose to anonymous callers and CANNOT write anything until the caller also sends ' +
     '`X-User-Token` with an end-user JWT. This is the key a frontend uses. It is the equivalent of ' +
     'Supabase\'s anon key.\n' +
-    '  • `serviceRole: true` — a SECRET key that BYPASSES ROW-LEVEL SECURITY ENTIRELY. Server-side only: ' +
-    'cron jobs, backend workers, migrations. Never put one in a browser, a mobile binary, or a client repo. ' +
+    '  • A service-role key, which BYPASSES ROW-LEVEL SECURITY ENTIRELY, is never issued here: ' +
+    '`serviceRole: true` is refused with SERVICE_KEY_REQUIRES_HUMAN. A person creates one in Settings → API ' +
+    'keys → New key → Admin, where it is shown to them once, for a server\'s environment only. Ask them when ' +
+    'server code needs one; never ask them to paste it into this conversation.\n' +
     'The response says which kind was issued and where it may be used — read it before handing the key on.\n' +
     'WHICH ENVIRONMENT IT READS: omit `branchId` for main (production). Pass a branchId from ' +
     'branch(action:"list") to bind the key to that preview branch — every request it makes then reads and ' +
@@ -1312,8 +1315,8 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
       serviceRole: {
         type: 'boolean',
         description:
-          'False/omitted (default) issues a browser-safe publishable key. True issues an RLS-BYPASSING ' +
-          'secret key for server-side use only — never ship one to a client.',
+          'Omit, or false: the browser-safe publishable key. True is refused (SERVICE_KEY_REQUIRES_HUMAN): ' +
+          'an RLS-bypassing key is created by a person in Settings → API keys → New key → Admin.',
       },
       branchId: {
         type: 'string',
@@ -2094,8 +2097,7 @@ export async function dispatchTool(
     // ── Read: agent workflow primer ───────────────────────────────────────
     if (name === 'get_instructions') {
       const pid = ctx.projectId
-      const { appOrigin } = await import('@/lib/mcp/oauth')
-      const base = `${appOrigin()}/api/v1/${pid}`
+      const base = `${publicOrigin()}/api/v1/${pid}`
       // ── Every tool named below MUST be one the manifest advertises ───────────
       //
       // This guide used to instruct agents to call `get_backend_metadata`,
@@ -2141,7 +2143,7 @@ export async function dispatchTool(
         '',
         '## 4. The runtime API (the app you build)',
         `- Base URL: \`${base}\``,
-        '- Header `x-api-key: <project key>` on every call. Get one with `connect { action: "create_api_key", description: "web app" }`. A Backenly project key starts `proj_live_` (publishable, RLS-bound, the default) or `svc_live_` (service role with `serviceRole: true`, server-side only). `sk_live_` is Stripe\'s secret-key prefix; only keys Backenly issued before it adopted these prefixes start with it, and they keep working.',
+        '- Header `x-api-key: <project key>` on every call. Get one with `connect { action: "create_api_key", description: "web app" }`. A Backenly project key starts `proj_live_` (publishable, RLS-bound, the default) or `svc_live_` (service role, server-side only, which a person creates in Settings → API keys). `sk_live_` is Stripe\'s secret-key prefix; only keys Backenly issued before it adopted these prefixes start with it, and they keep working.',
         '- **Never use your own MCP key (`mcp_live_…`) here.** It drives these tools only. The runtime API refuses it from anywhere, browser or server, with `MCP_KEY_IN_APP`, so an app built on it does not work and ships a credential that can change the backend.',
         '- **The project key is SAFE IN A BROWSER BUNDLE.** It identifies the project, it is not a user. On its own it can only read what your SELECT policies make public, and every write is refused until you also send `X-User-Token`. It is the equivalent of a publishable/anon key — ship it in your frontend. The key you must NEVER ship is a SERVICE-ROLE key, which bypasses RLS entirely; one sent from a browser is refused with `SERVICE_ROLE_IN_BROWSER`. An app with no end-user sign-in that must write does it in a Backenly function or its own server, never by shipping a service-role key.',
         '- End-user auth: `POST /auth/signup` and `POST /auth/signin` → `{ token }`. Send that token as header **`X-User-Token: <token>`** on data calls — RLS then scopes rows to that user. (An API key alone is NOT a user; owner writes without a user token are correctly denied on own-rows tables.)',
@@ -2569,8 +2571,12 @@ export async function dispatchTool(
     // ── Autonomy: read dial + trust report ────────────────────────────────
     if (name === 'get_autonomy_status') {
       const { buildTrustReport } = await import('@/lib/autonomy/trust-report')
+      const { listPendingAgentApprovals } = await import('@/lib/mcp/pending-approvals')
       const windowDays = Math.max(1, Math.min(90, Number(args.windowDays ?? 30)))
-      const report = await buildTrustReport(ctx.projectId, windowDays).catch(() => null)
+      const [report, agentRequests] = await Promise.all([
+        buildTrustReport(ctx.projectId, windowDays).catch(() => null),
+        listPendingAgentApprovals(ctx.projectId).catch(() => []),
+      ])
       if (!report) {
         return finalize({
           ok: false,
@@ -2584,7 +2590,13 @@ export async function dispatchTool(
       const modeLine = report.executionMode?.repairsAreApplied
         ? ''
         : `\n\n**NOT REPAIRING.** ${report.executionMode?.explanation ?? ''}`
-      const pending = report.pendingApprovals.length
+      // Two queues wait on a human, as the briefing tool says: fixes the loop
+      // is holding, and calls agents parked. This counted the first and
+      // labelled it "Awaiting approval", so an agent that had parked two calls
+      // briefed its human "Awaiting approval: 0" while the Review Queue
+      // showed both (AUT-07).
+      const heldFixes = report.pendingApprovals.length
+      const pending = heldFixes + agentRequests.length
       const verifiedPct =
         s.verifiedRate === null ? '—' : `${Math.round(s.verifiedRate * 100)}%`
       const capLine =
@@ -2594,7 +2606,9 @@ export async function dispatchTool(
       const summary =
         `Autonomy: **${report.level}** (window: ${windowDays}d)\n` +
         `Self-applied: ${s.autonomousFixes} · ` +
-        `Awaiting approval: ${pending} · ` +
+        `Awaiting approval: ${pending} (${agentRequests.length} agent-requested ` +
+        `operation${agentRequests.length === 1 ? '' : 's'} in the Review Queue, ` +
+        `${heldFixes} autonomy fix${heldFixes === 1 ? '' : 'es'} held) · ` +
         `Escalated: ${s.escalations} · ` +
         `Rollbacks: ${s.rollbacks} · ` +
         `Verified: ${verifiedPct} · ` +
@@ -2611,6 +2625,14 @@ export async function dispatchTool(
           // cannot miss it behind the dial.
           executionMode: report.executionMode,
           windowDays,
+          // The calls agents parked, which check_approval polls by id.
+          agentApprovals: agentRequests.map((r) => ({
+            id: r.id,
+            tool: r.tool,
+            target: r.target,
+            createdAt: r.createdAt.toISOString(),
+            expiresAt: r.expiresAt.toISOString(),
+          })),
           report,
         },
       })
@@ -3058,6 +3080,7 @@ export async function dispatchTool(
     // or queued since anyone last looked. Read-only aggregation.
     if (name === 'get_pending_incidents') {
       const { prisma } = await import('@/lib/db/prisma')
+      const { listPendingAgentApprovals } = await import('@/lib/mcp/pending-approvals')
       const { summariseFinding } = await import('@/lib/core/finding-summaries')
       const { fixVerificationOf } = await import('@/lib/autonomy/resolution')
       const { loadSensorState } = await import('@/lib/autonomy/sensor-state')
@@ -3069,12 +3092,7 @@ export async function dispatchTool(
           orderBy: { detectedAt: 'desc' },
           take: 25,
         }),
-        prisma.agentApprovalRequest.findMany({
-          where: { projectId: ctx.projectId, status: 'pending', expiresAt: { gt: new Date() } },
-          orderBy: { createdAt: 'desc' },
-          take: 10,
-          select: { id: true, tool: true, target: true, createdAt: true, expiresAt: true },
-        }).catch(() => []),
+        listPendingAgentApprovals(ctx.projectId, 10).catch(() => []),
         prisma.schemaDriftEvent.count({
           where: { projectId: ctx.projectId, status: 'pending' },
         }).catch(() => 0),
@@ -3246,7 +3264,7 @@ export async function dispatchTool(
       // reading the refusal, and no link to hand the human. Two sessions dead-
       // ended here. Both facts are cheap — `status` is already loaded — so both
       // ride along on every response, and the refusal carries the deep link.
-      const appUrl = (process.env.NEXT_PUBLIC_APP_URL || 'https://backenly.com').replace(/\/$/, '')
+      const appUrl = publicOrigin()
       const armUrl = `${appUrl}/app/projects/${ctx.projectId}/connect?tab=direct`
       const access = {
         readOnlyProvisioned: status.credentials.some((c) => c.mode === 'READ_ONLY'),
