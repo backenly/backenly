@@ -298,7 +298,7 @@ describe('sign-in', () => {
   it('does not ask a branch user to verify an email the branch cannot send', async () => {
     // A branch whose users table records verification, as one cloned from a
     // production that requires it would: new rows start unverified.
-    await ensureEmailVerifiedColumn(qa.schemaName)
+    await ensureEmailVerifiedColumn(projectId, qa.schemaName)
     await prisma.projectAuthConfig.upsert({
       where: { projectId },
       create: { projectId, requireEmailVerification: true },

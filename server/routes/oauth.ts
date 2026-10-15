@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express'
 import crypto from 'crypto'
 import jwt from 'jsonwebtoken'
 import { prisma } from '@/lib/db'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { WorkspaceOAuthService } from '@/lib/services/workspaceOAuth'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
@@ -458,14 +459,17 @@ async function handleOAuthCallback(req: Request, res: Response) {
     // 3. Bring the users table to the auth contract, then add OAuth columns.
     const baseSchema = await ensureAuthUsersTable(projectId, { email: providerUser.email })
     const schemaName = baseSchema.schemaName
-    await prisma.$executeRawUnsafe(
+    // The project's database, in its region, where ensureAuthUsersTable just
+    // brought the table to the contract.
+    const db = await workspaceRawClient(projectId)
+    await db.$executeRawUnsafe(
       `ALTER TABLE "${schemaName}"."users"
          ADD COLUMN IF NOT EXISTS oauth_provider TEXT,
          ADD COLUMN IF NOT EXISTS oauth_id TEXT,
          ADD COLUMN IF NOT EXISTS avatar_url TEXT`,
     )
     // OAuth users have no password — the credential column must be nullable.
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       `ALTER TABLE "${schemaName}"."users" ALTER COLUMN "${baseSchema.passwordColumn}" DROP NOT NULL`,
     ).catch(() => {})
 

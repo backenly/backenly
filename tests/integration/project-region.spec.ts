@@ -14,6 +14,9 @@
  *   RLS-scoped SQL (executeWithUserContext), the workspace client
  *   (getWorkspacePostgresClient) and a function's role sync
  *                                       the same split, each in the region
+ *   end-user auth: the users table, the token blacklist and the
+ *   request-time blocked check          in the region; without a connection
+ *                                       the request fails, it never fails open
  *   a region this build does not know   refused, never read as home
  *
  * The refusal is the property that matters. The home database holds no schema
@@ -23,12 +26,16 @@
  */
 
 import { randomBytes, randomUUID } from 'node:crypto'
+import jwt from 'jsonwebtoken'
 import { Client } from 'pg'
 import { prisma } from '@/lib/db'
 import { disconnectRegionalClients, projectRegion, workspaceRawClient } from '@/lib/data-plane/regional'
 import { PostgresService } from '@/lib/db/hybrid'
 import { functionDbClient, functionRoleName, provisionFunctionRole } from '@/lib/services/ai-functions/function-db-role'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
+import { ensureEmailVerifiedColumn, logoutEndUser } from '@/lib/services/end-user-auth-flows'
+import { buildUserInsert, introspectAuthUsersTable } from '@/lib/services/end-user-auth-table'
+import { resolveEndUserFromToken } from '@/server/lib/end-user-identity'
 import { closeAllWorkspacePools, queryWorkspace } from '@/lib/services/workspace-pool'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { getWorkspacePostgresClient } from '@/lib/services/workspaceDatabase'
@@ -289,6 +296,95 @@ describe('schema introspection reads the project’s own database', () => {
     await expect(PostgresService.getTableStructure(regionalProject, schema, 'marker')).rejects.toMatchObject({
       code: 'REGION_NOT_CONFIGURED',
     })
+  })
+})
+
+describe('end-user auth reads and writes the project’s own database', () => {
+  // The users table below exists only in the regional database, with shapes
+  // the home database could not have answered: a `password_hash` column, a
+  // CHECK that allows only 'member' or 'admin', and one blocked user.
+  const secret = randomBytes(32).toString('hex')
+  const activeUser = randomUUID()
+  const blockedUser = randomUUID()
+  const tokenFor = (userId: string) =>
+    jwt.sign(
+      { userId, email: `${userId}@region.test`, projectId: regionalProject, role: 'member', jti: randomUUID() },
+      secret,
+      { algorithm: 'HS256', expiresIn: '1h' },
+    )
+
+  beforeAll(async () => {
+    await prisma.project.update({ where: { id: regionalProject }, data: { jwtSecret: secret } })
+    const schema = schemaOf(regionalProject)
+    await run(
+      regionalUrl,
+      `CREATE TABLE "${schema}".users (
+         id uuid PRIMARY KEY,
+         email text UNIQUE NOT NULL,
+         password_hash text,
+         role text NOT NULL CHECK (role IN ('member', 'admin')),
+         is_blocked boolean NOT NULL DEFAULT false
+       );
+       INSERT INTO "${schema}".users VALUES
+         ('${activeUser}', 'active@region.test', 'x', 'member', false),
+         ('${blockedUser}', 'blocked@region.test', 'x', 'member', true)`,
+    )
+  })
+
+  it('describes the regional users table and builds its insert from the regional catalog', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const schema = await introspectAuthUsersTable(regionalProject)
+    expect(schema.projectId).toBe(regionalProject)
+    expect(schema.passwordColumn).toBe('password_hash')
+    // The role default honours the CHECK that exists only in the region.
+    const plan = await buildUserInsert(schema, { email: 'new@region.test', password_hash: 'x' })
+    expect(plan.values).toContain('member')
+  })
+
+  it('adds the email_verified column in the region', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    await ensureEmailVerifiedColumn(regionalProject, schemaOf(regionalProject))
+    const cols = await rowsIn<{ column_name: string }>(
+      regionalUrl,
+      `SELECT column_name FROM information_schema.columns
+        WHERE table_schema = '${schemaOf(regionalProject)}' AND table_name = 'users' AND column_name = 'email_verified'`,
+    )
+    expect(cols).toHaveLength(1)
+  })
+
+  it('reads blocking from the regional users table at request time', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    expect(await resolveEndUserFromToken(regionalProject, tokenFor(blockedUser))).toBe('blocked')
+    expect(await resolveEndUserFromToken(regionalProject, tokenFor(activeUser))).toEqual({
+      userId: activeUser,
+      role: 'member',
+    })
+  })
+
+  it('revokes a token on the regional blacklist, which the next request then honours', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const token = tokenFor(activeUser)
+    const result = await logoutEndUser(regionalProject, token)
+    expect(result.status).toBe(200)
+    const listed = await rowsIn<{ n: string }>(
+      regionalUrl,
+      `SELECT count(*)::text AS n FROM "${schemaOf(regionalProject)}"."_token_blacklist"`,
+    )
+    expect(listed[0].n).toBe('1')
+    expect(await resolveEndUserFromToken(regionalProject, token)).toBeNull()
+  })
+
+  it('without a connection, fails the request instead of failing open or reporting a logout', async () => {
+    delete process.env[REGION_VARIABLE]
+    // Both checks accept a token whose status cannot be read. A region that
+    // cannot be reached must not be read that way: the blocked user stays out.
+    await expect(resolveEndUserFromToken(regionalProject, tokenFor(blockedUser))).rejects.toMatchObject({
+      code: 'REGION_NOT_CONFIGURED',
+    })
+    const result = await logoutEndUser(regionalProject, tokenFor(activeUser))
+    expect(result.status).toBe(503)
+    expect(result.body.error.code).toBe('REGION_NOT_CONFIGURED')
+    await expect(introspectAuthUsersTable(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
   })
 })
 
