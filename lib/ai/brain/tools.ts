@@ -19,6 +19,7 @@ import { AiError, generate } from '../llm'
 import { answererPrompt } from './prompts'
 import { kickReconciler, shouldKickFor } from '@/lib/autonomy/event-trigger'
 import { WEBHOOK_EVENT_TYPES } from '@/lib/webhooks/events'
+import { publicOrigin } from '@/lib/branches/preview'
 import { SERVED_OAUTH_PROVIDERS, isServedOAuthProvider } from '@/lib/services/oauth-providers'
 
 /** Executor actions whose audit rows record who acted (see runExecutor). */
@@ -2094,8 +2095,7 @@ export async function dispatchTool(
     // ── Read: agent workflow primer ───────────────────────────────────────
     if (name === 'get_instructions') {
       const pid = ctx.projectId
-      const { appOrigin } = await import('@/lib/mcp/oauth')
-      const base = `${appOrigin()}/api/v1/${pid}`
+      const base = `${publicOrigin()}/api/v1/${pid}`
       // ── Every tool named below MUST be one the manifest advertises ───────────
       //
       // This guide used to instruct agents to call `get_backend_metadata`,
@@ -3246,7 +3246,7 @@ export async function dispatchTool(
       // reading the refusal, and no link to hand the human. Two sessions dead-
       // ended here. Both facts are cheap — `status` is already loaded — so both
       // ride along on every response, and the refusal carries the deep link.
-      const appUrl = (process.env.NEXT_PUBLIC_APP_URL || 'https://backenly.com').replace(/\/$/, '')
+      const appUrl = publicOrigin()
       const armUrl = `${appUrl}/app/projects/${ctx.projectId}/connect?tab=direct`
       const access = {
         readOnlyProvisioned: status.credentials.some((c) => c.mode === 'READ_ONLY'),
