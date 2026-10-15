@@ -148,6 +148,18 @@ export function isRegionError(err: unknown): err is RegionNotConfiguredError | U
   return err instanceof RegionNotConfiguredError || err instanceof UnknownRegionError
 }
 
+/**
+ * A catch handler for a fail-soft read: `fallback` for any failure except a
+ * region error, which is rethrown unchanged. "This process cannot reach the
+ * project's region" is not the empty or unknown answer a fallback stands for.
+ */
+export function unlessRegionError<T>(fallback: T): (err: unknown) => T {
+  return (err) => {
+    if (isRegionError(err)) throw err
+    return fallback
+  }
+}
+
 /** regionDatabaseUrl, or RegionNotConfiguredError naming the missing variable. */
 export function requireRegionDatabaseUrl(
   region: CloudRegionId,

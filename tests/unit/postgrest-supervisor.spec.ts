@@ -26,15 +26,26 @@ jest.mock('@/lib/postgrest/health', () => ({
   probePostgrest: (...a: unknown[]) => mockProbePostgrest(...a),
 }))
 
-// `$queryRaw` is the advisory lock (tagged template) and `auditLog` records the
-// restart history the cooldown reads. Both are driven per-test.
-const mockQueryRaw = jest.fn()
+// The advisory lock is taken on a dedicated pg connection, and `auditLog`
+// records the restart history the cooldown reads. Both are driven per-test.
+const mockLockQuery = jest.fn()
+const mockLockEnd = jest.fn()
 const mockAuditFindFirst = jest.fn()
 const mockAuditCreate = jest.fn()
 
+jest.mock('pg', () => ({
+  Client: jest.fn().mockImplementation(() => ({
+    connect: () => Promise.resolve(),
+    query: (...a: unknown[]) => mockLockQuery(...a),
+    end: () => {
+      mockLockEnd()
+      return Promise.resolve()
+    },
+  })),
+}))
+
 jest.mock('@/lib/db', () => ({
   prisma: {
-    $queryRaw: (...a: unknown[]) => mockQueryRaw(...a),
     auditLog: {
       findFirst: (...a: unknown[]) => mockAuditFindFirst(...a),
       create: (...a: unknown[]) => mockAuditCreate(...a),
@@ -42,9 +53,23 @@ jest.mock('@/lib/db', () => ({
   },
 }))
 
+// The heal is for the region of the project that reported it.
+const mockProjectRegion = jest.fn()
+jest.mock('@/lib/data-plane/regional', () => ({
+  ...jest.requireActual('@/lib/data-plane/regional'),
+  projectRegion: (...a: unknown[]) => mockProjectRegion(...a),
+}))
+
 jest.mock('node:child_process', () => ({ exec: (...a: unknown[]) => mockExec(...a) }))
 
-import { healDataPlane, describeHeal } from '@/lib/postgrest/supervisor'
+import { healDataPlane, describeHeal, healLockKey } from '@/lib/postgrest/supervisor'
+
+/** The lock query answers `acquired`; the unlock answers nothing in particular. */
+function lockAnswers(acquired: boolean) {
+  mockLockQuery.mockImplementation(async (sql: string) =>
+    sql.includes('pg_try_advisory_lock') ? { rows: [{ acquired }] } : { rows: [] },
+  )
+}
 
 const HEALTHY = { state: 'healthy', latencyMs: 3 } as const
 const DOWN = { state: 'unreachable', detail: 'ECONNREFUSED' } as const
@@ -60,8 +85,9 @@ beforeEach(() => {
   jest.clearAllMocks()
   delete process.env.POSTGREST_RESTART_COMMAND
   delete process.env.POSTGREST_LOCAL_RESTART_COMMAND
-  // Default: lock is free, no restart history.
-  mockQueryRaw.mockResolvedValue([{ acquired: true }])
+  // Default: a home-region project, the lock is free, no restart history.
+  mockProjectRegion.mockResolvedValue('ap-south-1')
+  lockAnswers(true)
   mockAuditFindFirst.mockResolvedValue(null)
   mockAuditCreate.mockResolvedValue({})
 })
@@ -111,9 +137,9 @@ describe('the platform probe decides, not the finding', () => {
 
 // ── 2. Single-flight ─────────────────────────────────────────────────────────
 
-describe('platform-wide single flight', () => {
+describe('single flight per region', () => {
   it('declines when another heal holds the lock', async () => {
-    mockQueryRaw.mockResolvedValue([{ acquired: false }])
+    lockAnswers(false)
     mockProbePostgrest.mockResolvedValue(DOWN)
 
     const r = await healDataPlane('p1')
@@ -127,13 +153,118 @@ describe('platform-wide single flight', () => {
   it('declines rather than fanning out when the control-plane DB is unreachable', async () => {
     // Without the lock this could become one restart per project, and a data
     // plane whose own database is down will not be fixed by restarting it.
-    mockQueryRaw.mockRejectedValue(new Error('control plane down'))
+    mockLockQuery.mockRejectedValue(new Error('control plane down'))
     mockProbePostgrest.mockResolvedValue(DOWN)
 
     const r = await healDataPlane('p1')
 
     expect(r.outcome).toBe('in_progress')
     expect(mockExec).not.toHaveBeenCalled()
+  })
+
+  it('releases the lock on the connection that took it, then closes that connection', async () => {
+    // Through a pool the unlock could land on another session, release nothing,
+    // and leave every later heal reading "in progress".
+    mockDiagnoseAndHeal.mockResolvedValue({ status: HEALTHY, prunedSchemas: 0, restartRequired: false, notes: [] })
+
+    await healDataPlane('p1')
+
+    const calls = mockLockQuery.mock.calls.map(([sql, params]) => [String(sql).match(/pg_\w+/)?.[0], params])
+    expect(calls).toEqual([
+      ['pg_try_advisory_lock', [healLockKey('ap-south-1')]],
+      ['pg_advisory_unlock', [healLockKey('ap-south-1')]],
+    ])
+    expect(mockLockEnd).toHaveBeenCalledTimes(1)
+  })
+
+  it('gives every region its own lock, and keeps the home key older builds take', () => {
+    const keys = ['ap-south-1', 'us-east-1', 'us-west-2', 'eu-central-1', 'ap-southeast-1'].map((r) =>
+      healLockKey(r as Parameters<typeof healLockKey>[0]),
+    )
+    expect(keys[0]).toBe(8_474_001)
+    expect(new Set(keys).size).toBe(keys.length)
+  })
+})
+
+// ── Per region ───────────────────────────────────────────────────────────────
+
+describe('each region heals its own data plane', () => {
+  afterEach(() => {
+    delete process.env.POSTGREST_LOCAL_RESTART_COMMAND_US_EAST_1
+  })
+
+  it('heals the region of the project that reported the outage, under that region’s lock', async () => {
+    mockProjectRegion.mockResolvedValue('us-east-1')
+    mockDiagnoseAndHeal.mockResolvedValue({ status: HEALTHY, prunedSchemas: 0, restartRequired: false, notes: [] })
+
+    await healDataPlane('p-virginia')
+
+    expect(mockProjectRegion).toHaveBeenCalledWith('p-virginia')
+    expect(mockDiagnoseAndHeal).toHaveBeenCalledWith('us-east-1')
+    expect(mockLockQuery.mock.calls[0][1]).toEqual([healLockKey('us-east-1')])
+    expect(JSON.parse(mockAuditCreate.mock.calls[0][0].data.details)).toMatchObject({ region: 'us-east-1' })
+  })
+
+  it('takes an explicit region over the project’s', async () => {
+    mockDiagnoseAndHeal.mockResolvedValue({ status: HEALTHY, prunedSchemas: 0, restartRequired: false, notes: [] })
+
+    await healDataPlane(null, 'eu-central-1')
+
+    expect(mockProjectRegion).not.toHaveBeenCalled()
+    expect(mockDiagnoseAndHeal).toHaveBeenCalledWith('eu-central-1')
+  })
+
+  it('does not call a region healthy when this process has no address for its data plane', async () => {
+    mockProjectRegion.mockResolvedValue('us-east-1')
+    mockDiagnoseAndHeal.mockResolvedValue({
+      status: { state: 'not_configured' }, prunedSchemas: 0, restartRequired: false, notes: [],
+    })
+
+    const r = await healDataPlane('p-virginia')
+
+    expect(r.outcome).toBe('region_not_reachable')
+    expect(r.healthy).toBe(false)
+    expect(r.notes.join(' ')).toMatch(/POSTGREST_URL_US_EAST_1/)
+    expect(mockExec).not.toHaveBeenCalled()
+  })
+
+  it('never borrows the home restart command, which would restart the home process', async () => {
+    process.env.POSTGREST_LOCAL_RESTART_COMMAND = 'restart-home'
+    execSucceeds()
+    mockProjectRegion.mockResolvedValue('us-east-1')
+    mockDiagnoseAndHeal.mockResolvedValue({ status: DOWN, prunedSchemas: 0, restartRequired: true, notes: [] })
+
+    const r = await healDataPlane('p-virginia')
+
+    expect(r.outcome).toBe('restart_channel_unconfigured')
+    expect(mockExec).not.toHaveBeenCalled()
+  })
+
+  it('uses the region’s own restart command when one is set', async () => {
+    process.env.POSTGREST_LOCAL_RESTART_COMMAND = 'restart-home'
+    process.env.POSTGREST_LOCAL_RESTART_COMMAND_US_EAST_1 = 'restart-virginia'
+    execSucceeds()
+    mockProjectRegion.mockResolvedValue('us-east-1')
+    mockDiagnoseAndHeal.mockResolvedValue({ status: DOWN, prunedSchemas: 0, restartRequired: true, notes: [] })
+    mockProbePostgrest.mockResolvedValue(HEALTHY)
+
+    const r = await healDataPlane('p-virginia')
+
+    expect(r.outcome).toBe('healed_by_restart')
+    expect(mockExec.mock.calls.map(([cmd]) => cmd)).toEqual(['restart-virginia'])
+    expect(mockProbePostgrest).toHaveBeenCalledWith('us-east-1')
+  })
+
+  it('cools down on its own region’s restarts only', async () => {
+    mockProjectRegion.mockResolvedValue('us-east-1')
+    mockDiagnoseAndHeal.mockResolvedValue({ status: DOWN, prunedSchemas: 0, restartRequired: true, notes: [] })
+
+    await healDataPlane('p-virginia')
+
+    expect(mockAuditFindFirst.mock.calls[0][0].where).toMatchObject({
+      action: 'DATA_PLANE_RESTARTED',
+      details: { contains: '"region":"us-east-1"' },
+    })
   })
 })
 
@@ -303,7 +434,7 @@ describe('recovery is verified, never assumed', () => {
 describe('describeHeal', () => {
   const OUTCOMES = [
     'already_healthy', 'healed_without_restart', 'healed_by_restart',
-    'in_progress', 'cooling_down', 'restart_channel_unconfigured', 'unrecovered',
+    'in_progress', 'region_not_reachable', 'cooling_down', 'restart_channel_unconfigured', 'unrecovered',
   ] as const
 
   const say = (outcome: (typeof OUTCOMES)[number]) => describeHeal({
@@ -327,7 +458,7 @@ describe('describeHeal', () => {
   })
 
   it('tells the owner when a failure is ours and needs nothing from them', () => {
-    for (const outcome of ['restart_channel_unconfigured', 'unrecovered', 'cooling_down'] as const) {
+    for (const outcome of ['restart_channel_unconfigured', 'unrecovered', 'cooling_down', 'region_not_reachable'] as const) {
       expect(say(outcome)).toMatch(/platform infrastructure/i)
     }
   })

@@ -141,7 +141,7 @@ What this package serves (tools, instructions, resources, result shapes) is what
 - **Per-key rate limit** — sliding-window using `ApiKey.rateLimit` / `rateLimitWindow`. 429 includes `Retry-After` + `X-RateLimit-*` headers.
 - **Audit log** — every mutation through MCP writes an `AuditLog` row on your project timeline.
 - **Local config** is written with `0600` permissions (user-only readable).
-- **Revoke any key** anytime from your project's Connect → Agents page.
+- **Revoke any key, or disconnect an agent you signed in from the browser,** anytime from your project's Connect → Agents page.
 
 ## Environment
 

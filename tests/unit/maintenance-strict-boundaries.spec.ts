@@ -33,6 +33,12 @@ jest.mock('@/lib/db', () => ({
   },
 }))
 
+// The catalog is read in the project's region; here, the stub above.
+jest.mock('@/lib/data-plane/regional', () => ({
+  ...jest.requireActual('@/lib/data-plane/regional'),
+  workspaceRawClient: async () => jest.requireMock('@/lib/db').prisma,
+}))
+
 const mockResolveSchema = jest.fn(async () => 'workspace_p1')
 // The row count reads AS OWNER: the product enables RLS on every table it
 // creates, and an unclaimed count returns 0 on a full table, which is the same

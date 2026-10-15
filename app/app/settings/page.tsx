@@ -734,6 +734,10 @@ const NOTIFICATION_LABELS: Record<string, { label: string; description: string }
     label: 'Backend health alerts',
     description: 'A critical problem in one of your backends that Backenly could not resolve on its own.',
   },
+  approval_requested: {
+    label: 'Agent approval requests',
+    description: 'Your coding agent asked for a change that waits for your approval. Unanswered, it expires after a day.',
+  },
   support_update: {
     label: 'Support cases',
     description: 'The team replied to or resolved one of your support cases.',

@@ -27,7 +27,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
 import { prisma } from '@/lib/db/prisma'
-import { listTableStats } from '@/lib/services/workspace-table-stats'
+import { listTableStats, type TableStat as KernelTableStat } from '@/lib/services/workspace-table-stats'
 import { introspectAuthUsersTable, SYNTHETIC_USER_SQL } from '@/lib/services/end-user-auth-table'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 
@@ -55,23 +55,26 @@ export async function GET(
 
     const [tableStats, buckets, endUsers] = await Promise.all([
       // null (not []) when the kernel throws, so `dbBytes` can stay unknown
-      // instead of collapsing to a confident "0 B".
-      listTableStats(projectId).catch(() => null),
+      // instead of collapsing to a confident "0 B". Each fallback names its
+      // type: with strictNullChecks off, a bare `() => null` widens the result
+      // to `any`, which let `(tableStats ?? []).length.map(...)` typecheck and
+      // throw on every request.
+      listTableStats(projectId).catch((): KernelTableStat[] | null => null),
       collectBucketStats(projectId).catch(() => [] as BucketStat[]),
-      countEndUsers(projectId).catch(() => null),
+      countEndUsers(projectId).catch((): number | null => null),
     ])
 
     // Cap at 12 to keep the dashboard card lean; the kernel already sorts
     // heaviest-first. The size total is summed over ALL tables, not the slice —
     // a project with 30 tables must not report only the top 12's bytes.
-    const tables: TableStat[] = (tableStats ?? []).slice(0, 12)
-    // The slice keeps the card lean; the COUNT must be the real one — the
-    // card once rendered '12 Tables' for a 15-table backend.
-    const tableCount = (tableStats ?? []).length.map((s) => ({
+    const tables: TableStat[] = (tableStats ?? []).slice(0, 12).map((s) => ({
       name: s.name,
       rowCount: s.rows,
       estimated: s.estimated,
     }))
+    // The slice keeps the card lean; the COUNT must be the real one — the
+    // card once rendered '12 Tables' for a 15-table backend.
+    const tableCount = (tableStats ?? []).length
     const summary: Summary = {
       endUsers,
       dbBytes: tableStats

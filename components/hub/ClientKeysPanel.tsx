@@ -11,6 +11,7 @@
  */
 
 import { useState, useEffect } from 'react'
+import Link from 'next/link'
 import { useParams } from 'next/navigation'
 import { Toast } from '@/components/ui/Toast'
 import { KeyRound, Trash2, Plus, Check, Eye, EyeOff, AlertTriangle, Shield } from 'lucide-react'
@@ -27,7 +28,6 @@ import {
   Tag,
 } from '@/components/inspector/kit'
 import { PAGE_GUTTER, PAGE_WIDTH } from '@/components/console/tokens'
-import { refreshAgentConnection } from '@/lib/hooks/useAgentConnection'
 
 interface ApiKey {
   id: string
@@ -177,9 +177,6 @@ export function ClientKeysPanel() {
       setToast({ message: `Deleted “${pendingDelete.name}”`, type: 'success' })
       setPendingDelete(null)
       await loadApiKeys()
-      // This list includes agent keys and OAuth connections; deleting the last
-      // one disconnects the agent, which the top bar should show now.
-      if (projectId) void refreshAgentConnection(projectId)
     } catch (error: any) {
       setToast({ message: error.message || 'Failed to delete API key', type: 'error' })
     } finally {
@@ -207,7 +204,12 @@ export function ClientKeysPanel() {
         <div>
           <h2 className="text-[15px] font-semibold leading-[22px] tracking-[-0.012em] text-zinc-100">API keys</h2>
           <p className="mt-1 max-w-[68ch] text-[13px] leading-[20px] text-zinc-400">
-            Keys for apps, scripts and agents. Client keys are safe to embed; admin keys stay server-side.
+            Keys for apps, scripts and servers. Client keys are safe to embed; admin keys stay server-side.
+            Your coding agent’s keys and connections are on{' '}
+            <Link href={`/app/projects/${projectId}/connect`} className="text-zinc-200 underline decoration-white/20 underline-offset-2 hover:decoration-white/60">
+              Connect, Agents
+            </Link>
+            .
           </p>
         </div>
         <KitButton variant="primary" icon={Plus} onClick={() => setShowCreateModal(true)} disabled={creating}>

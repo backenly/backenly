@@ -45,7 +45,7 @@
  * writer cannot drift.
  */
 
-import { prisma } from '@/lib/db'
+import { workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
 import { executeInWorkspaceSchema } from '@/lib/services/workspaceDatabase'
 import { transformLiteralSql, transformProblem, type Transform } from '../transform'
@@ -80,8 +80,8 @@ export function dualWriteObjectName(table: string, targetColumn: string): string
 
 interface ColumnFact { name: string; dataType: string }
 
-async function readColumns(schema: string, table: string): Promise<ColumnFact[]> {
-  const rows = await prisma.$queryRawUnsafe<Array<{ column_name: string; data_type: string }>>(
+async function readColumns(db: WorkspaceRawClient, schema: string, table: string): Promise<ColumnFact[]> {
+  const rows = await db.$queryRawUnsafe<Array<{ column_name: string; data_type: string }>>(
     `SELECT column_name, data_type FROM information_schema.columns
       WHERE table_schema = $1 AND table_name = $2`,
     schema,
@@ -163,7 +163,10 @@ export async function installDualWrite(spec: DualWriteSpec): Promise<DualWriteRe
   if (problem) return refuse(problem)
 
   const schema = await resolveWorkspaceSchema(projectId)
-  const columns = await readColumns(schema, table).catch(() => null)
+  // The table is in the project's region, resolved before the fail-soft catalog
+  // read below so a region this process cannot reach fails as itself.
+  const db = await workspaceRawClient(projectId)
+  const columns = await readColumns(db, schema, table).catch(() => null)
   if (columns === null) return refuse('column catalog unreadable, so no identifier could be checked')
   if (columns.length === 0) return refuse(`table "${table}" does not exist in ${schema}`)
 
@@ -189,7 +192,13 @@ export async function installDualWrite(spec: DualWriteSpec): Promise<DualWriteRe
 
   // CREATE TRIGGER reporting no error is not the same fact as the trigger being
   // in the catalog, and the difference is a column nothing is maintaining.
-  if (!(await dualWriteInstalled(projectId, table, objectName))) {
+  let present: boolean
+  try {
+    present = await dualWriteInstalled(projectId, table, objectName)
+  } catch (err) {
+    return refuse(`the catalog could not be read to confirm "${objectName}" was installed: ${err instanceof Error ? err.message : String(err)}`)
+  }
+  if (!present) {
     return refuse(
       `CREATE TRIGGER reported no error but "${objectName}" is not in the catalog, so nothing is ` +
         `maintaining ${table}.${targetColumn}`,
@@ -199,9 +208,17 @@ export async function installDualWrite(spec: DualWriteSpec): Promise<DualWriteRe
   return { installed: true, objectName, refusal: null, functionSql: sql }
 }
 
-/** Is the trigger actually there? Asked of pg_trigger, not of the DDL's silence. */
+/**
+ * Is the trigger actually there? Asked of pg_trigger in the project's region,
+ * not of the DDL's silence.
+ *
+ * Throws when the catalog cannot be read. This used to answer false, and false
+ * is what removeDualWrite reports as "removed": a catalog nobody could read was
+ * recorded as a rollback that worked.
+ */
 export async function dualWriteInstalled(projectId: string, table: string, objectName: string): Promise<boolean> {
-  const rows = await prisma.$queryRawUnsafe<Array<{ tgname: string }>>(
+  const db = await workspaceRawClient(projectId)
+  const rows = await db.$queryRawUnsafe<Array<{ tgname: string }>>(
     `SELECT tgname FROM pg_trigger tg
        JOIN pg_class c ON c.oid = tg.tgrelid
        JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -209,7 +226,7 @@ export async function dualWriteInstalled(projectId: string, table: string, objec
     await resolveWorkspaceSchema(projectId),
     table,
     objectName,
-  ).catch(() => [])
+  )
   return rows.length > 0
 }
 
@@ -236,7 +253,17 @@ export async function removeDualWrite(
   } catch (err) {
     return { removed: false, objectName, refusal: `dropping the dual-write failed: ${err instanceof Error ? err.message : String(err)}` }
   }
-  if (await dualWriteInstalled(projectId, table, objectName)) {
+  let still: boolean
+  try {
+    still = await dualWriteInstalled(projectId, table, objectName)
+  } catch (err) {
+    return {
+      removed: false,
+      objectName,
+      refusal: `the catalog could not be read to confirm "${objectName}" is gone: ${err instanceof Error ? err.message : String(err)}`,
+    }
+  }
+  if (still) {
     return { removed: false, objectName, refusal: `"${objectName}" is still in the catalog after DROP TRIGGER` }
   }
   return { removed: true, objectName, refusal: null }
@@ -257,7 +284,10 @@ export interface DualWriteFaults {
  */
 export async function readDualWriteFaults(projectId: string, objectName: string): Promise<DualWriteFaults | null> {
   const schema = await resolveWorkspaceSchema(projectId)
-  const rows = await prisma.$queryRawUnsafe<Array<{ object_name: string; faults: bigint; last_error: string | null; last_at: Date | null }>>(
+  // Resolved outside the catch below, which reads a missing fault table as
+  // "nothing recorded"; a region this process cannot reach is not that.
+  const db = await workspaceRawClient(projectId)
+  const rows = await db.$queryRawUnsafe<Array<{ object_name: string; faults: bigint; last_error: string | null; last_at: Date | null }>>(
     `SELECT object_name, faults, last_error, last_at FROM "${schema}"."${FAULT_TABLE}" WHERE object_name = $1`,
     objectName,
   ).catch(() => [])

@@ -46,7 +46,7 @@ import { verifyWorkflows } from '@/lib/core/workflow-verifier'
 import {
   runContractVerification,
   probePlatformIngress,
-  attributeContractFailures,
+  attributeAcrossRegions,
   settleTenantContract,
   type ProjectProbeOutcome,
 } from '@/lib/services/contract-verifier'
@@ -60,6 +60,8 @@ import { runBuiltInVerification, type VerificationExecutionResult } from '@/lib/
 import { FLAGS } from '@/lib/config/flags'
 import { watchableProjectsWhere, isWatchableProject } from '@/lib/projects/backend-presence'
 import { skipUnreachable } from '@/lib/autonomy/region-skip'
+import { projectRegion } from '@/lib/data-plane/regional'
+import type { CloudRegionId } from '@/lib/regions'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -226,7 +228,20 @@ export async function runContractSweep(options: {
     }
   }
 
-  const attribution = attributeContractFailures(outcomes)
+  // Faults are attributed fleet-wide and within each region, because each
+  // region has its own data plane (attributeAcrossRegions). A project whose
+  // region cannot be looked up is not settled this pass: placing it in the
+  // wrong region would attribute its failures against the wrong plane.
+  const regionOf = new Map<string, CloudRegionId>()
+  for (const { projectId } of outcomes) {
+    try {
+      regionOf.set(projectId, await projectRegion(projectId))
+    } catch (err: any) {
+      errors.push(`[${projectId}] ${err?.message ?? String(err)}`)
+    }
+  }
+  const placed = outcomes.filter(o => regionOf.has(o.projectId))
+  const attribution = attributeAcrossRegions(placed, id => regionOf.get(id) as CloudRegionId)
 
   for (const f of attribution.platformFaults) {
     const fault: PlatformFaultReport = {
@@ -236,32 +251,35 @@ export async function runContractSweep(options: {
       status: f.status,
       projectIds: f.projectIds,
       origin: ingress.origin,
+      ...(f.region ? { region: f.region } : {}),
     }
     reportPlatformFault(fault)
     platformFaults.push(fault)
   }
 
-  // The data plane is shared. When it fails for everyone, the repair is a
-  // platform action taken once, not a finding per tenant. healDataPlane is
-  // single-flighted and re-verifies against its own PostgREST probe before it
-  // restarts anything.
-  const dataPlaneDown = attribution.platformFaults.some(
-    f =>
+  // A data plane serves one region. When it fails for that region's projects,
+  // the repair is a platform action taken once for the region, not a finding
+  // per tenant. healDataPlane is single-flighted per region and re-verifies
+  // against that region's PostgREST probe before it restarts anything.
+  const regionsDown = new Set<CloudRegionId>()
+  for (const f of attribution.platformFaults) {
+    const dataPlane =
       f.kind === 'surface_failing_fleetwide' &&
-      isDataPlaneOutage({ surface: f.surface, httpStatus: f.status === 'timeout' ? null : f.status ?? null }),
-  )
-  if (dataPlaneDown) {
+      isDataPlaneOutage({ surface: f.surface, httpStatus: f.status === 'timeout' ? null : f.status ?? null })
+    if (dataPlane) for (const id of f.projectIds) regionsDown.add(regionOf.get(id) as CloudRegionId)
+  }
+  for (const region of regionsDown) {
     try {
       const { healDataPlane, describeHeal } = await import('@/lib/postgrest/supervisor')
-      const heal = await healDataPlane(null)
-      if (!heal.healthy) errors.push(`[data-plane heal] ${describeHeal(heal)}`)
+      const heal = await healDataPlane(null, region)
+      if (!heal.healthy) errors.push(`[data-plane heal ${region}] ${describeHeal(heal)}`)
     } catch (err: any) {
-      errors.push(`[data-plane heal] ${err?.message ?? String(err)}`)
+      errors.push(`[data-plane heal ${region}] ${err?.message ?? String(err)}`)
     }
   }
 
-  for (let i = 0; i < outcomes.length; i += CONCURRENCY) {
-    const batch = outcomes.slice(i, i + CONCURRENCY)
+  for (let i = 0; i < placed.length; i += CONCURRENCY) {
+    const batch = placed.slice(i, i + CONCURRENCY)
     const settled = await Promise.allSettled(
       batch.map(async ({ projectId, results }) => {
         const findings = await settleTenantContract(
@@ -327,7 +345,7 @@ export async function runContractSweep(options: {
     )
   }
 
-  return { processed: outcomes.length, broken, errors, platformFaults }
+  return { processed: placed.length, broken, errors, platformFaults }
 }
 
 /**

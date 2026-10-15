@@ -21,6 +21,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
 import { backupWorkspace, listBackups, restoreWorkspace, snapshotForJson } from '@/lib/services/workspace-backup'
 import { getProjectServingState } from '@/lib/projects/serving-state'
+import { regionErrorResponse } from '@/lib/api/v1/errors'
 
 export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
   const params = await props.params
@@ -35,7 +36,16 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
   const params = await props.params
   return withProjectValidation<any>(request, async (validated) => {
     const { projectId } = validated
-    const result = await backupWorkspace(projectId)
+    // A region this process cannot reach is thrown as itself, never recorded as
+    // a failed snapshot: 503, as for every other route that cannot reach it.
+    let result: Awaited<ReturnType<typeof backupWorkspace>>
+    try {
+      result = await backupWorkspace(projectId)
+    } catch (err) {
+      const regional = regionErrorResponse(err)
+      if (regional) return regional
+      throw err
+    }
     if (!result.success) {
       return NextResponse.json({ error: result.error }, { status: 500 })
     }
@@ -61,7 +71,14 @@ export async function PUT(request: NextRequest, props: { params: Promise<{ id: s
       )
     }
 
-    const result = await restoreWorkspace(projectId, backupId)
+    let result: Awaited<ReturnType<typeof restoreWorkspace>>
+    try {
+      result = await restoreWorkspace(projectId, backupId)
+    } catch (err) {
+      const regional = regionErrorResponse(err)
+      if (regional) return regional
+      throw err
+    }
     if (!result.success) {
       return NextResponse.json({ error: result.error }, { status: 400 })
     }

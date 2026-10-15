@@ -31,15 +31,16 @@
  * `SET LOCAL lock_timeout` applies to the transaction it runs in, and Prisma
  * pools connections — so issuing it through a pooled helper sets it on whichever
  * connection answered, for whatever runs there next, and not necessarily on the
- * statement it was meant to bound. `prisma.$transaction` pins one connection for
- * its callback, which is why the SET and the UPDATE are inside it together.
+ * statement it was meant to bound. `$transaction` pins one connection for its
+ * callback, which is why the SET and the UPDATE are inside it together. The
+ * connection is to the database in the project's region.
  *
  * A batch that cannot take its locks in time raises, does not retry in place,
  * and leaves the cursor where it was. BackgroundJob owns what happens next:
  * attempts, backoff, dead-lettering. None of that is reimplemented here.
  */
 
-import { prisma } from '@/lib/db'
+import { workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
 import { transformProblem, transformSql, type Transform } from '../transform'
 
@@ -82,8 +83,8 @@ interface KeyFact { column: string; udt: string }
  * the table while reporting a clean finish. It is cast back to the column's own
  * type for every comparison.
  */
-async function primaryKey(schema: string, table: string): Promise<KeyFact | null> {
-  const rows = await prisma.$queryRawUnsafe<Array<{ column_name: string; udt_name: string }>>(
+async function primaryKey(db: WorkspaceRawClient, schema: string, table: string): Promise<KeyFact | null> {
+  const rows = await db.$queryRawUnsafe<Array<{ column_name: string; udt_name: string }>>(
     `SELECT kcu.column_name, c.udt_name
        FROM information_schema.table_constraints tc
        JOIN information_schema.key_column_usage kcu
@@ -131,7 +132,11 @@ export async function runBackfillBatch(
   if (problem) return refuse(problem)
 
   const schema = await resolveWorkspaceSchema(projectId)
-  const key = await primaryKey(schema, table)
+  // The table is in the project's region. Resolved before the key lookup, whose
+  // failure reads as "no primary key", so a region this process cannot reach
+  // fails as itself rather than as a refusal with the wrong reason.
+  const db = await workspaceRawClient(projectId)
+  const key = await primaryKey(db, schema, table)
   if (!key) {
     return refuse(`table "${table}" has no single-column primary key to resume from`)
   }
@@ -167,7 +172,7 @@ SELECT (SELECT count(*) FROM batch)::bigint                  AS scanned,
 
   const { rlsSessionSql, rlsSessionParams } = await import('@/lib/services/rls-session')
 
-  const rows = await prisma.$transaction(async tx => {
+  const rows = await db.$transaction(async tx => {
     // The service-role claim, in THIS transaction.
     //
     // The product enables RLS on every tenant table it creates, so without a

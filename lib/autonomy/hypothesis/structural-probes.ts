@@ -25,6 +25,7 @@
 
 import { queryWorkspaceSchema } from '@/lib/services/workspaceDatabase'
 import { queryWorkspaceAsOwner } from '@/lib/services/workspace-pool'
+import { isRegionError, unlessRegionError } from '@/lib/data-plane/regional'
 import { notReservedTableSql } from '@/lib/security/workspace-schema'
 import { MIN_ROWS_FOR_DESIGN_CLAIM } from '@/lib/autonomy/schema-design'
 import type { ProbeContext, ProbeFn } from './probes'
@@ -97,6 +98,7 @@ export const policyOverlap: ProbeFn = async ctx => {
     `workspace_${ctx.projectId}`,
     tables,
   ).catch((err: unknown) => {
+    if (isRegionError(err)) throw err
     // Not "no overlapping policies". `security-agent.ts:67` documents that
     // pg_policies may be unreadable, and reporting that as absence would let a
     // permissions problem masquerade as a clean bill of health.
@@ -154,6 +156,7 @@ export const constraintCoverage: ProbeFn = async ctx => {
     schema,
     tables,
   ).catch((err: unknown) => {
+    if (isRegionError(err)) throw err
     throw new Error(
       `constraint catalog unreadable: ${err instanceof Error ? err.message : String(err)}`,
     )
@@ -202,6 +205,7 @@ export const columnCoVariation: ProbeFn = async ctx => {
     schema,
     tables,
   ).catch((err: unknown) => {
+    if (isRegionError(err)) throw err
     throw new Error(`column catalog unreadable: ${err instanceof Error ? err.message : String(err)}`)
   })
 
@@ -248,6 +252,7 @@ export const columnCoVariation: ProbeFn = async ctx => {
               count(DISTINCT ("${a}", "${b}"))::int AS dab
          FROM "${schema}"."${table}"`,
     ).catch((err: unknown) => {
+      if (isRegionError(err)) throw err
       throw new Error(`could not sample ${table}: ${err instanceof Error ? err.message : String(err)}`)
     })
 
@@ -296,7 +301,7 @@ export const writeStatementShapes: ProbeFn = async ctx => {
   const ext = await queryWorkspaceSchema(
     ctx.projectId,
     `SELECT 1 AS ok FROM pg_extension WHERE extname = 'pg_stat_statements' LIMIT 1`,
-  ).catch(() => null)
+  ).catch(unlessRegionError(null))
 
   if (!ext || rowsOf(ext).length === 0) {
     // Absent extension is not "one writer". It is no measurement at all.
@@ -309,6 +314,7 @@ export const writeStatementShapes: ProbeFn = async ctx => {
     `SELECT query FROM pg_stat_statements WHERE query ILIKE '%' || $1 || '%' LIMIT 500`,
     schema,
   ).catch((err: unknown) => {
+    if (isRegionError(err)) throw err
     throw new Error(`pg_stat_statements unreadable: ${err instanceof Error ? err.message : String(err)}`)
   })
 
@@ -353,20 +359,20 @@ export async function assessStructuralCoverage(ctx: ProbeContext): Promise<Evide
     ctx.projectId,
     `SELECT 1 AS ok FROM pg_policies WHERE schemaname = $1 LIMIT 1`,
     schema,
-  ).then(() => true).catch(() => false)
+  ).then(() => true).catch(unlessRegionError(false))
   if (!policiesReadable) notes.push('pg_policies could not be read')
 
   const constraintCatalogReadable = await queryWorkspaceSchema(
     ctx.projectId,
     `SELECT 1 AS ok FROM information_schema.table_constraints WHERE table_schema = $1 LIMIT 1`,
     schema,
-  ).then(() => true).catch(() => false)
+  ).then(() => true).catch(unlessRegionError(false))
   if (!constraintCatalogReadable) notes.push('constraint catalog could not be read')
 
   const statementTelemetryAvailable = await queryWorkspaceSchema(
     ctx.projectId,
     `SELECT 1 AS ok FROM pg_extension WHERE extname = 'pg_stat_statements' LIMIT 1`,
-  ).then(r => rowsOf(r).length > 0).catch(() => false)
+  ).then(r => rowsOf(r).length > 0).catch(unlessRegionError(false))
   if (!statementTelemetryAvailable) {
     notes.push('pg_stat_statements absent — split_brain_writers cannot be raised')
   }
@@ -380,7 +386,7 @@ export async function assessStructuralCoverage(ctx: ProbeContext): Promise<Evide
         WHERE ns.nspname = $1 AND c.relname = ANY($2::text[]) AND c.relkind = 'r'`,
       schema,
       tables,
-    ).catch(() => null)
+    ).catch(unlessRegionError(null))
     const n = Number(rowsOf(res)[0]?.n ?? 0)
     largestSampleRows = Number.isFinite(n) && n > 0 ? n : 0
   }
