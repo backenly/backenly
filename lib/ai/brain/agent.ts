@@ -1131,8 +1131,21 @@ async function describeDanger(
       return { tool, target: `the \`${namedThing ?? 'unknown'}\` bucket and every file in it`, rowCount: null, reversible: false, confirmPhrase: `Confirm — delete the ${namedThing ?? ''} bucket`.trim() }
     case 'delete_file':
       return { tool, target: `the file \`${namedThing ?? 'unknown'}\``, rowCount: null, reversible: false, confirmPhrase: 'Confirm — delete the file' }
-    case 'disable_realtime':
-      return { tool, target: tableName ? `realtime on \`${tableName}\` (live subscribers disconnect)` : 'realtime (live subscribers disconnect)', rowCount: null, reversible: true, confirmPhrase: 'Confirm — disable realtime' }
+    case 'disable_realtime': {
+      if (tableName) {
+        return { tool, target: `realtime on \`${tableName}\` (live subscribers disconnect)`, rowCount: null, reversible: true, confirmPhrase: 'Confirm — disable realtime' }
+      }
+      // Project-wide: the card must name the blast radius, not a bare word.
+      let scope = 'every streaming table (live subscribers disconnect)'
+      try {
+        const { listTablesWithRealtimeTriggers } = await import('@/lib/services/realtimeTriggers')
+        const streaming = await listTablesWithRealtimeTriggers(projectId)
+        scope = streaming.length === 0
+          ? 'realtime project-wide — no table is currently streaming, so nothing disconnects'
+          : `realtime on EVERY streaming table (${streaming.length}: ${streaming.join(', ')}) — their live subscribers disconnect`
+      } catch { /* keep the generic scope */ }
+      return { tool, target: scope, rowCount: null, reversible: true, confirmPhrase: 'Confirm — disable realtime on every table' }
+    }
     case 'trigger_deploy':
       return { tool, target: 'a production deploy', rowCount: null, reversible: true, confirmPhrase: 'Confirm — deploy to production' }
     case 'rollback_deploy':

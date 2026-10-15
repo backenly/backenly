@@ -867,6 +867,12 @@ tests/integration/key-lifecycle-honesty.spec.ts
 # typed call with send_push naming what is missing. Real vault rows are the
 # property; PostHog (stored-unverifiable) keeps CI off external APIs.
 tests/integration/integrations-connect-contract.spec.ts
+# Realtime scope is explicit: enable without a tableName refuses instead of
+# silently streaming every table, allTables is the named project-wide switch
+# the agent's tool cannot forward, and both park paths name the tables a
+# project-wide disable stops. Real workspace tables and NOTIFY triggers are
+# the property.
+tests/integration/realtime-scope-truth.spec.ts
 # The storage runtime is correct on both drivers: the S3 driver clamps a
 # requested isPublic to the bucket policy at write time like the local one,
 # multipart complete leaves exactly one real row and counts the bytes once,

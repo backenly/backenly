@@ -7016,6 +7016,22 @@ async function executeEnableRealtime(params: Record<string, any>, projectId: str
   try {
     const tableName: string | undefined = params?.table || params?.tableName
 
+    // Enabling is PER TABLE. Without a name this used to fall through to the
+    // install-on-every-table branch, so `realtime { action: "enable" }` from
+    // an agent that forgot the argument silently started streaming the whole
+    // project. The all-tables branch stays reachable for internal callers that
+    // pass allTables: true; the agent's tool forwards only tableName, so the
+    // refusal names only the call an agent can make.
+    if (!tableName && params?.allTables !== true) {
+      return {
+        success: false,
+        message:
+          'Realtime is enabled per table: pass tableName, e.g. realtime { "action": "enable", "tableName": "posts" }, ' +
+          'once for each table that should stream.',
+        error: 'TABLE_NAME_REQUIRED',
+      }
+    }
+
     // ── Install actual PostgreSQL NOTIFY triggers ──────────────────────────
     const { installRealtimeTrigger, installRealtimeTriggersForAllTables, listTablesWithRealtimeTriggers } =
       await import('@/lib/services/realtimeTriggers')
@@ -7289,8 +7305,8 @@ async function executeGetRealtimeStatus(projectId: string): Promise<ExecutionRes
       return {
         success: true,
         message:
-          'No workspace tables yet — realtime has nothing to stream. Create a table first; ' +
-          'NOTIFY triggers are installed automatically as tables are built.',
+          'No workspace tables yet — realtime has nothing to stream. Realtime is opt-in per table: ' +
+          'after creating a table, call realtime { "action": "enable", "tableName": "<table>" }.',
         data: { ...status, healthy: true },
       }
     }

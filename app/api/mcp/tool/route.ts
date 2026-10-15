@@ -916,6 +916,23 @@ function describeCall(resolution: Extract<DomainResolution, { kind: 'ok' }>, arg
   return text.length > 280 ? text.slice(0, 277) + '…' : text
 }
 
+/**
+ * A project-wide realtime disable parked as bare "Realtime: disable" asked
+ * the human to approve a blast radius the card never named. Resolve it at
+ * park time: every table that would stop streaming, by name.
+ */
+async function describeRealtimeDisableScope(projectId: string, args: Record<string, unknown>): Promise<string> {
+  if (args.tableName || args.table) return ''
+  try {
+    const { listTablesWithRealtimeTriggers } = await import('@/lib/services/realtimeTriggers')
+    const streaming = await listTablesWithRealtimeTriggers(projectId)
+    if (streaming.length === 0) return ' — no table is currently streaming, so nothing disconnects'
+    return ` — EVERY streaming table stops (${streaming.length}: ${streaming.join(', ')}) and their live subscribers disconnect`
+  } catch {
+    return ' — every streaming table stops and its live subscribers disconnect'
+  }
+}
+
 async function parkForApproval(
   auth: McpGuardAuth,
   resolution: Extract<DomainResolution, { kind: 'ok' }>,
@@ -923,7 +940,9 @@ async function parkForApproval(
   startedAt: number,
 ): Promise<NextResponse> {
   const callLabel = `${resolution.domain.name}.${resolution.action}`
-  const described = describeCall(resolution, args)
+  const scopeNote =
+    resolution.target === 'disable_realtime' ? await describeRealtimeDisableScope(auth.projectId, args) : ''
+  const described = describeCall(resolution, args) + scopeNote
   try {
     const { createApprovalRequest } = await import('@/lib/mcp/approvals')
     const row = await createApprovalRequest({
