@@ -80,6 +80,14 @@ import { collectBaseline } from '@/lib/autonomy/baseline/collector'
 import { checkIntentConformance } from '@/lib/autonomy/intent-conformance'
 import { verifyPostcondition } from '@/lib/autonomy/action-postconditions'
 import { hasCapability, resetCapabilityCache } from '@/lib/autonomy/platform-capabilities'
+import { mkdtempSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
+
+// workspace-backup reads BACKUP_DIR when it loads, so it is pinned here and the
+// module is only loaded lazily, in the backup block below.
+const BACKUP_DIR = mkdtempSync(join(tmpdir(), 'project-region-backups-'))
+process.env.BACKUP_DIR = BACKUP_DIR
 
 jest.setTimeout(120_000)
 
@@ -1069,6 +1077,92 @@ describe('the autonomy probes read the project’s region', () => {
       verifyPostcondition('ADD_COLUMN', regionalProject, { tableName: 'marker', columnName: 'note', columnType: 'text' }),
     ).rejects.toMatchObject(refused)
     await expect(hasCapability('pg_stat_statements', 'us-east-1')).rejects.toMatchObject(refused)
+  })
+})
+
+describe('backups, restores and archive cleanup use the project’s region', () => {
+  let backups: typeof import('@/lib/services/workspace-backup')
+  let archives: typeof import('@/lib/rollback/non-destructive-restore')
+  const refused = { code: 'REGION_NOT_CONFIGURED' }
+  const archivedTable = () => `"${schemaOf(regionalProject)}"."Marker__archived__1"`
+  const oldArchive = (archivedName: string) =>
+    prisma.tableArchive.create({
+      data: {
+        projectId: regionalProject,
+        originalName: 'marker',
+        archivedName,
+        archivedAt: new Date(Date.now() - 120 * 24 * 60 * 60 * 1000),
+        reason: 'rollback',
+      },
+    })
+
+  beforeAll(async () => {
+    backups = await import('@/lib/services/workspace-backup')
+    archives = await import('@/lib/rollback/non-destructive-restore')
+  })
+
+  afterAll(async () => {
+    delete process.env.BACKUP_DATABASE_URL_US_EAST_1
+    await prisma.workspaceBackup.deleteMany({ where: { projectId: regionalProject } })
+    await prisma.tableArchive.deleteMany({ where: { projectId: regionalProject } })
+    await run(regionalUrl, `DROP TABLE IF EXISTS ${archivedTable()}`).catch(() => {})
+    rmSync(BACKUP_DIR, { recursive: true, force: true })
+  })
+
+  it('dumps the regional schema and restores it into the region, creating nothing at home', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const schema = schemaOf(regionalProject)
+
+    const snapshot = await backups.backupWorkspace(regionalProject)
+    expect(snapshot).toMatchObject({ success: true })
+    expect(snapshot.filePath?.startsWith(BACKUP_DIR)).toBe(true)
+
+    await run(regionalUrl, `DELETE FROM "${schema}".marker`)
+    expect(await backups.restoreWorkspace(regionalProject)).toMatchObject({ success: true })
+
+    const notes = await rowsIn<{ note: string }>(regionalUrl, `SELECT note FROM "${schema}".marker WHERE note = 'us-east-1'`)
+    expect(notes).toEqual([{ note: 'us-east-1' }])
+    expect(await rowsIn(homeUrl(), `SELECT 1 FROM information_schema.schemata WHERE schema_name = '${schema}'`)).toEqual([])
+  })
+
+  it('drops an expired archive in the region, and only then records it deleted', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    await run(regionalUrl, `CREATE TABLE ${archivedTable()} (note text)`)
+    const archive = await oldArchive('marker__archived__1')
+
+    expect(await archives.cleanupOldArchives(regionalProject)).toMatchObject({ deletedTables: 1 })
+    expect(
+      await rowsIn(regionalUrl, `SELECT 1 FROM information_schema.tables WHERE table_name = 'Marker__archived__1'`),
+    ).toEqual([])
+    expect(await prisma.tableArchive.findUnique({ where: { id: archive.id } })).toMatchObject({ canRestore: false })
+  })
+
+  it('connects with the region’s own credentials, and scrubs them from messages', () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const dbname = (args: string[]) => args[args.indexOf('--dbname') + 1]
+    expect(dbname(backups.buildConnection('read', 'us-east-1').args)).toBe(REGIONAL_DB)
+    expect(dbname(backups.buildConnection('write', 'us-east-1').args)).toBe(REGIONAL_DB)
+
+    process.env.BACKUP_DATABASE_URL_US_EAST_1 = 'postgresql://reader:regional-secret-7f3a@127.0.0.1:5432/x'
+    expect(backups.sanitizeError('pg_dump: password regional-secret-7f3a rejected')).not.toContain('regional-secret-7f3a')
+    delete process.env.BACKUP_DATABASE_URL_US_EAST_1
+  })
+
+  it('refuses without a connection to the region, and records no failed snapshot', async () => {
+    delete process.env[REGION_VARIABLE]
+    await expect(backups.backupWorkspace(regionalProject)).rejects.toMatchObject(refused)
+    expect(await prisma.workspaceBackup.count({ where: { projectId: regionalProject, status: 'failed' } })).toBe(0)
+    await expect(backups.restoreWorkspace(regionalProject)).rejects.toMatchObject(refused)
+    let thrown: unknown
+    try {
+      backups.buildConnection('read', 'us-east-1')
+    } catch (err) {
+      thrown = err
+    }
+    expect(thrown).toMatchObject(refused)
+
+    await oldArchive('marker__archived__2')
+    await expect(archives.cleanupOldArchives(regionalProject)).rejects.toMatchObject(refused)
   })
 })
 

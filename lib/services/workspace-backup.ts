@@ -57,6 +57,15 @@ import {
   s3Location,
 } from '@/lib/services/snapshot-store'
 import { skipUnreachable } from '@/lib/autonomy/region-skip'
+import { CLOUD_REGIONS, HOME_REGION, type CloudRegionId } from '@/lib/regions'
+import {
+  RegionNotConfiguredError,
+  isRegionError,
+  projectRegion,
+  regionDatabaseUrl,
+  regionEnvName,
+  regionRawClient,
+} from '@/lib/data-plane/regional'
 
 const execFileAsync = promisify(execFile)
 
@@ -161,6 +170,7 @@ export function getBackupFilename(): string {
  */
 export function buildConnection(
   purpose: 'read' | 'write' = 'read',
+  region: CloudRegionId = HOME_REGION,
 ): { args: string[]; env: NodeJS.ProcessEnv } {
   // Only the DUMP wants BACKUP_DATABASE_URL. Restoring over that connection
   // makes the backup role the OWNER of the restored schema and every table in
@@ -176,12 +186,19 @@ export function buildConnection(
   //
   // So the backup role stays what its own docstring above describes: read-only
   // with BYPASSRLS. Writing back is the application's own connection.
+  //
+  // Every URL is the region's own (BACKUP_DATABASE_URL_US_EAST_1 and so on): a
+  // project's schema is only in its region's database, and a restore replayed
+  // over another region's connection would create it there instead.
   const url =
-    (purpose === 'read' ? process.env.BACKUP_DATABASE_URL : '') ||
-    process.env.DATABASE_URL ||
-    process.env.DIRECT_URL ||
+    (purpose === 'read' ? regionDatabaseUrl(region, 'backup') : undefined) ||
+    regionDatabaseUrl(region, 'app') ||
+    regionDatabaseUrl(region, 'direct') ||
     ''
-  if (!url) throw new Error('DATABASE_URL not set — cannot run pg_dump')
+  if (!url) {
+    if (region !== HOME_REGION) throw new RegionNotConfiguredError(region, regionEnvName(region, 'app'))
+    throw new Error('DATABASE_URL not set — cannot run pg_dump')
+  }
 
   let parsed: URL
   try {
@@ -217,8 +234,12 @@ export function sanitizeError(message: string): string {
   let out = String(message ?? '')
   // postgres://user:secret@host -> postgres://user:***@host
   out = out.replace(/(\b[a-z]+:\/\/[^:\s/]+:)[^@\s]*(@)/gi, '$1***$2')
-  // Any literal occurrence of the live password, however it got there.
-  for (const key of ['PGPASSWORD', 'BACKUP_DATABASE_URL', 'DATABASE_URL', 'DIRECT_URL']) {
+  // Any literal occurrence of a live password, however it got there: every
+  // region's, since a dump or restore may run on any of them.
+  const regional = CLOUD_REGIONS.flatMap((r) =>
+    (['backup', 'app', 'direct'] as const).map((role) => regionEnvName(r.id, role)),
+  )
+  for (const key of ['PGPASSWORD', ...regional]) {
     const raw = process.env[key]
     if (!raw) continue
     const secret = key === 'PGPASSWORD' ? raw : (() => {
@@ -235,8 +256,8 @@ export function sanitizeError(message: string): string {
  * instead of a bare pg_dump error, because the bare error gave no hint that the
  * cause was a missing role rather than a broken database.
  */
-function usingAppCredentialForBackup(): boolean {
-  return !process.env.BACKUP_DATABASE_URL
+function usingAppCredentialForBackup(region: CloudRegionId): boolean {
+  return !regionDatabaseUrl(region, 'backup')
 }
 
 // ─── Core Backup ─────────────────────────────────────────────────────────────
@@ -267,12 +288,14 @@ export async function backupWorkspace(projectId: string): Promise<BackupResult> 
   // Set once an upload is attempted, so a failure after it can remove the object.
   const bucket = snapshotBucket()
   let uploadedTo: string | null = null
+  // The schema is only in the database of the project's region.
+  const region = await projectRegion(projectId)
 
   try {
     // Ensure backup directory exists
     await fs.promises.mkdir(/*turbopackIgnore: true*/ backupDir, { recursive: true })
 
-    const conn = buildConnection('read')
+    const conn = buildConnection('read', region)
 
     // Dump only the workspace schema (data + structure, no roles).
     // execFile, not exec: no shell, no command string, nothing for an error to
@@ -329,6 +352,10 @@ export async function backupWorkspace(projectId: string): Promise<BackupResult> 
       createdAt,
     }
   } catch (err: any) {
+    // A region this process cannot reach is not a failed backup of the project:
+    // nothing was attempted. Thrown as itself, before anything is recorded.
+    if (isRegionError(err)) throw err
+
     // Name the actual cause. The raw pg_dump line ("query would be affected by
     // row-level security policy") reads like a database fault, so four days of
     // total backup failure looked like something transient. It is a missing
@@ -337,7 +364,7 @@ export async function backupWorkspace(projectId: string): Promise<BackupResult> 
     // logged and persisted, so nothing credential-shaped may survive it.
     const raw = sanitizeError(err?.message ?? '')
     const isRlsBlock = /row-level security policy/i.test(raw)
-    const message = isRlsBlock && usingAppCredentialForBackup()
+    const message = isRlsBlock && usingAppCredentialForBackup(region)
       ? `${raw} — pg_dump is running as the application role, which does not ` +
         `bypass RLS, and these tables use FORCE ROW LEVEL SECURITY (the owner is ` +
         `subject to policies too). Set BACKUP_DATABASE_URL to a read-only role with ` +
@@ -387,6 +414,12 @@ export async function restoreWorkspace(
   backupId?: string
 ): Promise<RestoreResult> {
   const schemaName = `workspace_${projectId}`
+  // The schema, and every statement below that renames, replays or checks it,
+  // is in the project's region. Resolved before anything is touched: replayed
+  // over another region's connection, the dump would create the schema there
+  // and the check would find it, reporting a restore of data that never moved.
+  const region = await projectRegion(projectId)
+  const db = regionRawClient(region, projectId)
 
   // Find the backup to restore from
   const backup = backupId
@@ -422,7 +455,7 @@ export async function restoreWorkspace(
   try {
     // 'write': restoring over BACKUP_DATABASE_URL would re-own the schema to
     // the backup role. See buildConnection.
-    const conn = buildConnection('write')
+    const conn = buildConnection('write', region)
 
     // Fetch (and checksum) the S3 copy BEFORE touching the live schema, for the
     // same reason as decompressing first: a snapshot that is missing, damaged
@@ -451,7 +484,7 @@ export async function restoreWorkspace(
     //
     // Renaming keeps the old data recoverable for the whole operation, so a
     // failure anywhere below is survivable instead of terminal.
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       `ALTER SCHEMA "${schemaName}" RENAME TO "${asideName}"`
     ).then(
       () => { renamed = true },
@@ -470,7 +503,7 @@ export async function restoreWorkspace(
 
     // Belt and braces: psql exiting 0 is necessary, not sufficient. Confirm the
     // schema exists and actually holds relations before destroying the aside.
-    const [{ count }] = await prisma.$queryRawUnsafe<{ count: bigint }[]>(
+    const [{ count }] = await db.$queryRawUnsafe<{ count: bigint }[]>(
       `SELECT count(*)::bigint AS count
          FROM pg_class c
          JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -485,7 +518,7 @@ export async function restoreWorkspace(
 
     // Only now is the old copy safe to destroy.
     if (renamed) {
-      await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${asideName}" CASCADE`)
+      await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${asideName}" CASCADE`)
     }
     await fs.promises.unlink(/*turbopackIgnore: true*/ sqlPath).catch(() => {})
     if (fromS3) await fs.promises.unlink(/*turbopackIgnore: true*/ gzPath).catch(() => {})
@@ -501,8 +534,8 @@ export async function restoreWorkspace(
     // the aside is the thing to keep.
     if (renamed) {
       try {
-        await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`)
-        await prisma.$executeRawUnsafe(`ALTER SCHEMA "${asideName}" RENAME TO "${schemaName}"`)
+        await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`)
+        await db.$executeRawUnsafe(`ALTER SCHEMA "${asideName}" RENAME TO "${schemaName}"`)
         console.error(`[Restore] Rolled ${projectId} back to its pre-restore state`)
       } catch (rollbackErr: any) {
         // Worth shouting about: the data still exists under asideName, and an
@@ -744,7 +777,17 @@ export async function runDailyBackups(): Promise<{ ran: number; succeeded: numbe
     }
 
     ran++
-    const result = await backupWorkspace(project.id)
+    // backupWorkspace throws only when the project's region cannot be looked up
+    // or reached, which the skip above already filters for. One that still
+    // arrives must not cost every later project its backup.
+    let result: BackupResult
+    try {
+      result = await backupWorkspace(project.id)
+    } catch (err: any) {
+      failed++
+      failures.push({ projectId: project.id, error: sanitizeError(err?.message ?? String(err)) })
+      continue
+    }
     if (result.success) {
       succeeded++
       succeededIds.add(project.id)

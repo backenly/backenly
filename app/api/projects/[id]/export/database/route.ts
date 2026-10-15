@@ -30,6 +30,8 @@ import { withProjectValidation } from '@/lib/middleware/projectValidation'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
 import { buildConnection, sanitizeError } from '@/lib/services/workspace-backup'
 import { prisma } from '@/lib/db/prisma'
+import { projectRegion } from '@/lib/data-plane/regional'
+import { regionErrorResponse } from '@/lib/api/v1/errors'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 300
@@ -81,12 +83,13 @@ export async function GET(request: NextRequest) {
     // pg_dump as the NOBYPASSRLS app role aborts at the first protected table
     // — the exact failure that once took the nightly backups to zero. On a
     // production split, BACKUP_DATABASE_URL must exist; the single-role
-    // Compose/self-host stack works on its one superuser connection.
+    // Compose/self-host stack works on its one superuser connection. Each
+    // region has its own, and the schema is only in the project's region.
     let conn: { args: string[]; env: NodeJS.ProcessEnv }
     try {
-      conn = buildConnection('read')
-    } catch {
-      return NextResponse.json({ error: 'Database is not configured.' }, { status: 500 })
+      conn = buildConnection('read', await projectRegion(validated.projectId))
+    } catch (err) {
+      return regionErrorResponse(err) ?? NextResponse.json({ error: 'Database is not configured.' }, { status: 500 })
     }
 
     const args = [
