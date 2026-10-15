@@ -45,4 +45,6 @@ Relative to `https://backenly.com/api/v1/{projectId}`, with `x-api-key: <project
 | POST | `/auth/magic-link` | `{ email, redirectTo? }` emails a one-time sign-in link |
 | POST | `/auth/verify-email` | `{ token }` |
 
-Send the token as `X-User-Token` on data requests; that is what row-level security reads. There is no `/auth/me`: the signup/signin/refresh responses carry the `user` object, and the token's claims carry `userId`. `users` is never served through `/db/users`.
+Send the access token as `X-User-Token` on data requests; that is what row-level security reads. There is no `/auth/me`: the signup/signin/refresh responses carry the `user` object, and the token's claims carry `userId`. `users` is never served through `/db/users`.
+
+OAuth `redirect_to` only redirects to a **connected frontend origin** — connect it first with `connect { "action": "connect_frontend", "url": "…" }`. An unconnected origin never receives a token: the OAuth start refuses with `REDIRECT_NOT_ALLOWED` so the failure is visible on your screen, not after the provider round-trip.

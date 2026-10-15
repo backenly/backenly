@@ -73,6 +73,18 @@ describe('both signup servers', () => {
     expect(src).not.toMatch(/'auth\.user\.created'/)
   })
 
+  // WH-F6: a first OAuth sign-in and a first magic-link sign-in each CREATE
+  // the account, so they are sign-ups. The docs promise "your CRM hears about
+  // each new sign-up" — these paths created users without telling anyone.
+  it.each(['server/routes/oauth.ts', 'lib/services/end-user-auth-flows.ts'])(
+    '%s emits when a first sign-in creates the account',
+    (rel) => {
+      const src = readFileSync(join(ROOT, rel), 'utf8')
+      expect(src).toMatch(/emitEndUserCreated\(projectId, \{/)
+      expect(src).not.toMatch(/'auth\.user\.created'/)
+    },
+  )
+
   it('answer a successful sign-up with 201', () => {
     // A preview branch's sign-up adds `skippedOnBranch` after user and token.
     expect(readFileSync(join(ROOT, NEXT_ROUTE), 'utf8')).toMatch(

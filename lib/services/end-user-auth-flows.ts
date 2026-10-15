@@ -26,6 +26,7 @@ import { hashPassword } from '@/lib/auth/password'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { ensureAuthUsersTable, introspectAuthUsersTable, stampLastLogin, isReservedTestEmail, userIdCast } from '@/lib/services/end-user-auth-table'
 import { trackEndUserActive } from '@/lib/quota/kernel'
+import { emitEndUserCreated } from '@/lib/services/end-user-auth-events'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import {
   mainAuthEnvironment,
@@ -740,6 +741,14 @@ export async function verifyMagicLink(projectId: string, tokenRaw: unknown): Pro
       if (users.length === 0) {
         return err('INTERNAL_ERROR', 'Failed to create account', 500)
       }
+      // A first magic-link sign-in IS a sign-up — subscribers to
+      // auth.user.created must hear about it like any password sign-up.
+      void emitEndUserCreated(projectId, {
+        id: users[0]?.id,
+        email,
+        name: users[0]?.name ?? null,
+        created_at: users[0]?.created_at,
+      })
     } else {
       // Clicking the emailed link proves inbox ownership.
       await executeWithUserContext(

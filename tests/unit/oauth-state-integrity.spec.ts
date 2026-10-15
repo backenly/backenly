@@ -170,6 +170,31 @@ describe('a token only ever leaves to a connected frontend', () => {
     expect(out && 'rejected' in out).toBe(true)
   })
 
+  // AUTH-F13: the connected-origin requirement was enforced but written down
+  // nowhere the developer looks — the refusal, the SDK and the agent docs all
+  // presented redirect_to as unconditional, so the default flow ended on raw
+  // JSON with no hint of what to do next.
+  it('the unconnected-origin refusal names the remedy', async () => {
+    connectedOrigins.push('https://app.example.com')
+    const out = await resolveRedirectTarget(PROJECT, 'https://unconnected.example/cb')
+    expect(out && 'rejected' in out).toBe(true)
+    const why = (out as { rejected: string }).rejected
+    expect(why).toContain('connect_frontend')
+    expect(why).toContain('https://unconnected.example')
+  })
+
+  it('the SDK and the agent docs say the same thing as the refusal', () => {
+    const { readFileSync } = require('fs') as typeof import('fs')
+    const { join } = require('path') as typeof import('path')
+    const root = join(__dirname, '..', '..')
+    const sdk = readFileSync(join(root, 'packages', 'sdk', 'src', 'auth.ts'), 'utf8')
+    expect(sdk).toContain('connect_frontend')
+    expect(sdk).toContain('REDIRECT_NOT_ALLOWED')
+    const doc = readFileSync(join(root, 'public', 'docs', 'agents', 'auth.md'), 'utf8')
+    expect(doc).toContain('connected frontend origin')
+    expect(doc).toContain('connect_frontend')
+  })
+
   it('returns null when no redirect was asked for — the token stays in the body', async () => {
     expect(await resolveRedirectTarget(PROJECT, undefined)).toBeNull()
     expect(await resolveRedirectTarget(PROJECT, '')).toBeNull()

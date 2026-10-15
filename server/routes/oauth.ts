@@ -13,6 +13,7 @@ import {
   isReservedTestEmail,
 } from '@/lib/services/end-user-auth-table'
 import { canAcceptNewEndUser, trackEndUserActive } from '@/lib/quota/kernel'
+import { emitEndUserCreated } from '@/lib/services/end-user-auth-events'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import { asyncRoute } from '../lib/async-route'
 import { touchProjectActivity } from '@/lib/projects/activity'
@@ -201,7 +202,8 @@ export async function resolveRedirectTarget(
     return {
       rejected:
         `origin ${url.origin} is not a connected frontend for this project. ` +
-        `Connect it first so the platform knows this app is yours.`,
+        `Connect it first so the platform knows this app is yours — over MCP: ` +
+        `connect { "action": "connect_frontend", "url": "${url.origin}" }.`,
     }
   }
 
@@ -518,6 +520,14 @@ async function handleOAuthCallback(req: Request, res: Response) {
       userId = String(createdRows[0]?.id)
       userEmail = providerUser.email
       userName = providerUser.name
+      // A first OAuth sign-in IS a sign-up. auth.user.created fired only from
+      // the password routes, so webhook subscribers never heard of OAuth users.
+      void emitEndUserCreated(projectId, {
+        id: userId,
+        email: userEmail,
+        name: userName,
+        created_at: createdRows[0]?.created_at,
+      })
     }
 
     // 5. Mark config used + count activity (never block auth on these).
