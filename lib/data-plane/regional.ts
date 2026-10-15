@@ -79,6 +79,21 @@ export function regionEnvName(region: CloudRegionId, role: DataPlaneRole = 'app'
 }
 
 /**
+ * Any other per-region setting, named the same way: `name` in the home region,
+ * `name_<REGION>` elsewhere (DIRECT_DB_HOST_US_EAST_1). `value` is undefined
+ * when unset or blank, and is never the home value for another region.
+ */
+export function regionSetting(
+  name: string,
+  region: CloudRegionId,
+  env: Env = process.env,
+): { variable: string; value: string | undefined } {
+  const variable = regionalVariable(name, region)
+  const value = env[variable]
+  return { variable, value: value && value.trim() ? value : undefined }
+}
+
+/**
  * The region's connection string for `role`, or undefined when this process
  * has none. Only ever the region's own variable: an unset regional variable
  * stays unset rather than borrowing the home one.

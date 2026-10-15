@@ -25,6 +25,15 @@
 
 import crypto from 'crypto'
 import { prisma } from '@/lib/db/prisma'
+import {
+  RegionNotConfiguredError,
+  projectRegion,
+  regionDatabaseUrl,
+  regionRawClient,
+  regionSetting,
+  workspaceRawClient,
+} from '@/lib/data-plane/regional'
+import { HOME_REGION, type CloudRegionId } from '@/lib/regions'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
 import { assertValidProjectId } from '@/lib/security/workspace-schema'
 import { encryptValue, decryptValue } from '@/lib/security/projectEnvCrypto'
@@ -68,19 +77,38 @@ function generatePassword(): string {
 
 // ── Connection info ───────────────────────────────────────────────────────────
 
-function connectionHost(): { host: string; port: number; database: string; sslmode: string } {
-  const fromEnv = process.env.DIRECT_DB_HOST
+interface ConnectionTarget {
+  host: string
+  port: number
+  database: string
+  sslmode: string
+}
+
+/**
+ * Where a developer connects to reach a project's data: the database in the
+ * project's region, where its role exists.
+ *
+ * The home region keeps DIRECT_DB_HOST / DIRECT_DB_PORT and their defaults.
+ * Any other region needs its own DIRECT_DB_HOST_<REGION> (DIRECT_DB_PORT_<REGION>
+ * optional): without it this refuses, rather than hand out the home host, where
+ * the project's role and schema do not exist.
+ */
+function connectionTargetFor(region: CloudRegionId, projectId: string): ConnectionTarget {
   const isProd = process.env.NODE_ENV === 'production'
   let database = 'backenly'
   try {
-    const url = new URL(process.env.DATABASE_URL ?? '')
+    const url = new URL(regionDatabaseUrl(region) ?? '')
     database = url.pathname.replace(/^\//, '').split('?')[0] || 'backenly'
   } catch {
     /* keep default */
   }
+  const host = regionSetting('DIRECT_DB_HOST', region)
+  if (region !== HOME_REGION && !host.value) {
+    throw new RegionNotConfiguredError(region, host.variable, projectId)
+  }
   return {
-    host: fromEnv || (isProd ? 'backenly.com' : 'localhost'),
-    port: parseInt(process.env.DIRECT_DB_PORT ?? '5432', 10),
+    host: host.value || (isProd ? 'backenly.com' : 'localhost'),
+    port: parseInt(regionSetting('DIRECT_DB_PORT', region).value ?? '5432', 10),
     database,
     // Snakeoil cert on the box → require (encrypted, no CA verification). Local
     // dev clusters usually have ssl off, so don't demand it there.
@@ -88,11 +116,16 @@ function connectionHost(): { host: string; port: number; database: string; sslmo
   }
 }
 
+async function connectionTarget(projectId: string): Promise<ConnectionTarget> {
+  return connectionTargetFor(await projectRegion(projectId), projectId)
+}
+
 function buildCredential(
   row: { mode: string; roleName: string; passwordCipher: string; passwordIv: string; passwordTag: string; createdAt: Date; rotatedAt: Date | null },
   schema: string,
+  target: ConnectionTarget,
 ): DirectAccessCredential {
-  const { host, port, database, sslmode } = connectionHost()
+  const { host, port, database, sslmode } = target
   const password = decryptValue({ valueCipher: row.passwordCipher, valueIv: row.passwordIv, valueTag: row.passwordTag })
   const connectionString = `postgresql://${row.roleName}:${password}@${host}:${port}/${database}?sslmode=${sslmode}`
   return {
@@ -121,14 +154,28 @@ function buildCredential(
 
 export async function provisionDirectAccess(projectId: string, mode: DirectAccessMode): Promise<DirectAccessCredential> {
   assertValidProjectId(projectId)
+  // Where the developer will connect, settled before any role exists: a
+  // region with no public host configured refuses here, not after the fact.
+  const target = await connectionTarget(projectId)
   const schema = await resolveWorkspaceSchema(projectId)
+  const row = await provisionRole(projectId, mode, schema)
+  return buildCredential(row, schema, target)
+}
+
+/**
+ * Create (or re-key) a project's role and record its credential. Roles are
+ * cluster-wide, so it is created on the database holding the project's data,
+ * in its region: a role anywhere else could never reach the schema.
+ */
+async function provisionRole(projectId: string, mode: DirectAccessMode, schema: string) {
+  const db = await workspaceRawClient(projectId)
   const names = directAccessRoleNames(projectId)
   const roleName = mode === 'READ_ONLY' ? names.ro : names.rw
   const password = generatePassword()
 
   // Definer function validates names server-side and is idempotent (re-keys if
   // the role already exists — recovers cleanly from a half-finished provision).
-  await prisma.$queryRaw`SELECT public.backenly_direct_create_role(${roleName}, ${password}, ${schema}, ${mode})`
+  await db.$queryRaw`SELECT public.backenly_direct_create_role(${roleName}, ${password}, ${schema}, ${mode})`
 
   const enc = encryptValue(password)
   const row = await prisma.databaseCredential.upsert({
@@ -162,7 +209,22 @@ export async function provisionDirectAccess(projectId: string, mode: DirectAcces
     },
   }).catch(() => {})
 
-  return buildCredential(row, schema)
+  return row
+}
+
+/**
+ * The role and password the platform itself connects as for an agent's
+ * read-only SQL (lib/mcp/read-query.ts), provisioning the role on first use.
+ * No public host is involved: that connection dials the project's database
+ * directly, so a region without a developer-facing host still works.
+ */
+export async function readOnlyLogin(projectId: string): Promise<{ roleName: string; password: string }> {
+  assertValidProjectId(projectId)
+  const row =
+    (await prisma.databaseCredential.findUnique({ where: { projectId_mode: { projectId, mode: 'READ_ONLY' } } })) ??
+    (await provisionRole(projectId, 'READ_ONLY', await resolveWorkspaceSchema(projectId)))
+  const password = decryptValue({ valueCipher: row.passwordCipher, valueIv: row.passwordIv, valueTag: row.passwordTag })
+  return { roleName: row.roleName, password }
 }
 
 export async function rotateDirectAccess(projectId: string, mode: DirectAccessMode): Promise<DirectAccessCredential> {
@@ -172,9 +234,12 @@ export async function rotateDirectAccess(projectId: string, mode: DirectAccessMo
   })
   if (!existing) throw new Error(`No ${mode} credential to rotate — provision first.`)
 
+  const target = await connectionTarget(projectId)
   const schema = await resolveWorkspaceSchema(projectId)
   const password = generatePassword()
-  await prisma.$queryRaw`SELECT public.backenly_direct_set_password(${existing.roleName}, ${password})`
+  // The role lives on the project's database, in its region.
+  const db = await workspaceRawClient(projectId)
+  await db.$queryRaw`SELECT public.backenly_direct_set_password(${existing.roleName}, ${password})`
 
   const enc = encryptValue(password)
   const row = await prisma.databaseCredential.update({
@@ -197,7 +262,7 @@ export async function rotateDirectAccess(projectId: string, mode: DirectAccessMo
     },
   }).catch(() => {})
 
-  return buildCredential(row, schema)
+  return buildCredential(row, schema, target)
 }
 
 export async function revokeDirectAccess(projectId: string, mode: DirectAccessMode): Promise<void> {
@@ -208,8 +273,10 @@ export async function revokeDirectAccess(projectId: string, mode: DirectAccessMo
   if (!existing) return
 
   // Terminates live sessions, drops policies naming the role, reassigns any
-  // tables it created to the platform role, then drops it.
-  await prisma.$queryRaw`SELECT public.backenly_direct_drop_role(${existing.roleName})`
+  // tables it created to the platform role, then drops it. On the project's
+  // database, in its region, where the role is.
+  const db = await workspaceRawClient(projectId)
+  await db.$queryRaw`SELECT public.backenly_direct_drop_role(${existing.roleName})`
   await prisma.databaseCredential.delete({ where: { id: existing.id } })
 
   await prisma.auditLog.create({
@@ -238,9 +305,11 @@ export async function revokeDirectAccess(projectId: string, mode: DirectAccessMo
  * A catalog probe rather than a caught failure: the question "is this
  * installed" has a cheap direct answer, and asking it directly is also what
  * lets one clear advisory replace one error block per mode.
+ *
+ * Per region: each region's database needs its own copy of the helpers.
  */
-export async function directAccessHelpersInstalled(): Promise<boolean> {
-  const rows = await prisma.$queryRaw<Array<{ present: boolean }>>`
+export async function directAccessHelpersInstalled(region: CloudRegionId = HOME_REGION): Promise<boolean> {
+  const rows = await regionRawClient(region).$queryRaw<Array<{ present: boolean }>>`
     SELECT EXISTS (
       SELECT 1
       FROM pg_proc p
@@ -258,9 +327,11 @@ export async function getDirectAccessStatus(projectId: string): Promise<DirectAc
     prisma.databaseCredential.findMany({ where: { projectId }, orderBy: { mode: 'asc' } }),
     prisma.schemaDriftEvent.count({ where: { projectId, status: 'pending' } }),
   ])
+  // Only a project that has credentials needs to know where they connect.
+  const target = rows.length > 0 ? await connectionTarget(projectId) : null
   return {
     schema,
-    credentials: rows.map(r => buildCredential(r, schema)),
+    credentials: target ? rows.map(r => buildCredential(r, schema, target)) : [],
     pendingDriftEvents,
   }
 }
@@ -290,5 +361,7 @@ export async function syncDirectAccessGrants(projectId: string): Promise<void> {
   const owner = rw ? names.owner : null
   const schema = await resolveWorkspaceSchema(projectId)
 
-  await prisma.$queryRaw`SELECT public.backenly_direct_sync_schema(${schema}, ${ro}, ${rw}, ${owner})`
+  // The grants are on the project's database, in its region, where its roles are.
+  const db = await workspaceRawClient(projectId)
+  await db.$queryRaw`SELECT public.backenly_direct_sync_schema(${schema}, ${ro}, ${rw}, ${owner})`
 }

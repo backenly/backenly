@@ -46,6 +46,8 @@ import { clearRegistrationCache, ensureSchemaRegistered } from '@/lib/postgrest/
 import { listenerHub } from '@/lib/realtime/listener-hub'
 import { mintSseTicket, redeemSseTicket } from '@/lib/realtime/sse-ticket'
 import { existingTables } from '@/lib/mcp/apply-migration'
+import { runReadQuery } from '@/lib/mcp/read-query'
+import { directAccessRoleNames, provisionDirectAccess, revokeDirectAccess } from '@/lib/services/direct-access'
 import { columnTypes } from '@/lib/mcp/runtime-db'
 import { getTableSchema, listExposedTables, workspaceTableExists } from '@/lib/mcp/schema-introspection'
 import { functionDbClient, functionRoleName, provisionFunctionRole } from '@/lib/services/ai-functions/function-db-role'
@@ -168,6 +170,10 @@ afterAll(async () => {
   await disconnectRegionalClients()
   if (regionalDbCreated) {
     await run(homeUrl(), `DROP DATABASE IF EXISTS "${REGIONAL_DB}" WITH (FORCE)`).catch(() => {})
+  }
+  // The direct-access block's role is cluster-wide; its grants went with the database.
+  if (regionalProject) {
+    await run(homeUrl(), `DROP ROLE IF EXISTS "${directAccessRoleNames(regionalProject).ro}"`).catch(() => {})
   }
   if (homeProject) {
     await run(homeUrl(), `DROP SCHEMA IF EXISTS "${schemaOf(homeProject)}" CASCADE`).catch(() => {})
@@ -648,6 +654,89 @@ describe('MCP reads a project’s catalog in its own region', () => {
     await expect(listExposedTables(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
     await expect(columnTypes(regionalProject, schema, 'marker')).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
     await expect(existingTables(regionalProject, schema, ['marker'])).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+  })
+})
+
+describe('direct database access and agents’ read-only SQL use the project’s region', () => {
+  // Stand-ins for the definer helpers (scripts/setup-direct-access.sql), in the
+  // regional database only. They record each call, and create_role makes a real
+  // login role with SELECT on the schema, so read-only SQL can connect as it.
+  // Locally both databases share one cluster, so the role is told apart by the
+  // database it reads: the regional marker row says 'us-east-1'.
+  const HOST_VARIABLE = 'DIRECT_DB_HOST_US_EAST_1'
+  const calls = () =>
+    rowsIn<{ op: string; role: string | null; schema_name: string | null }>(
+      regionalUrl,
+      'SELECT op, role, schema_name FROM public.direct_access_calls ORDER BY seq',
+    )
+
+  beforeAll(async () => {
+    await run(
+      regionalUrl,
+      `CREATE TABLE public.direct_access_calls (seq serial, op text, role text, schema_name text);
+       CREATE FUNCTION public.backenly_direct_create_role(r text, p text, s text, m text) RETURNS boolean
+       LANGUAGE plpgsql AS $$
+       BEGIN
+         INSERT INTO public.direct_access_calls (op, role, schema_name) VALUES ('create', r, s);
+         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
+           EXECUTE format('CREATE ROLE %I LOGIN PASSWORD %L', r, p);
+         END IF;
+         EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), r);
+         EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', s, r);
+         EXECUTE format('GRANT SELECT ON ALL TABLES IN SCHEMA %I TO %I', s, r);
+         RETURN true;
+       END $$;
+       CREATE FUNCTION public.backenly_direct_sync_schema(s text, ro text, rw text, o text) RETURNS boolean
+       LANGUAGE sql AS $$ INSERT INTO public.direct_access_calls (op, role, schema_name) VALUES ('sync', ro, s) RETURNING true $$;
+       CREATE FUNCTION public.backenly_direct_drop_role(r text) RETURNS boolean
+       LANGUAGE sql AS $$ INSERT INTO public.direct_access_calls (op, role) VALUES ('drop', r) RETURNING true $$;`,
+    )
+  })
+
+  afterAll(async () => {
+    delete process.env[HOST_VARIABLE]
+    await prisma.databaseCredential.deleteMany({ where: { projectId: regionalProject } }).catch(() => {})
+  })
+
+  it('refuses to hand out a credential with no public host for the region, before creating any role', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    delete process.env[HOST_VARIABLE]
+    await expect(provisionDirectAccess(regionalProject, 'READ_ONLY')).rejects.toMatchObject({
+      code: 'REGION_NOT_CONFIGURED',
+      variable: HOST_VARIABLE,
+    })
+    expect(await calls()).toEqual([])
+  })
+
+  it('creates the role in the region and points the developer at the region’s host and database', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    process.env[HOST_VARIABLE] = 'db.virginia.test'
+    const schema = schemaOf(regionalProject)
+    const credential = await provisionDirectAccess(regionalProject, 'READ_ONLY')
+    expect(credential).toMatchObject({ host: 'db.virginia.test', database: REGIONAL_DB })
+    expect(credential.connectionString).toContain(`@db.virginia.test:5432/${REGIONAL_DB}?`)
+    expect(await calls()).toEqual([
+      { op: 'create', role: credential.roleName, schema_name: schema },
+      { op: 'sync', role: credential.roleName, schema_name: schema },
+    ])
+  })
+
+  it('runs an agent’s read-only SQL on the regional database as that role', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const result = await runReadQuery(regionalProject, 'SELECT note FROM marker WHERE deleted_at IS NULL')
+    expect(result.rows).toEqual([{ note: 'us-east-1' }])
+  })
+
+  it('revokes the role in the region', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    await revokeDirectAccess(regionalProject, 'READ_ONLY')
+    const ops = (await calls()).map((c) => c.op)
+    expect(ops[ops.length - 1]).toBe('drop')
+  })
+
+  it('refuses read-only SQL without a connection to the region', async () => {
+    delete process.env[REGION_VARIABLE]
+    await expect(runReadQuery(regionalProject, 'SELECT 1')).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
   })
 })
 

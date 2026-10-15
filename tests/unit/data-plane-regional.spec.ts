@@ -13,6 +13,7 @@ import {
   regionEnvName,
   regionOfRecord,
   regionPostgrest,
+  regionSetting,
   requireRegionDatabaseUrl,
   type DataPlaneRole,
 } from '@/lib/data-plane/regional'
@@ -108,6 +109,33 @@ describe('regionOfRecord', () => {
     expect(() => regionOfRecord('p-odd', 'mars-north-1')).toThrow(UnknownRegionError)
     expect(() => regionOfRecord('p-odd', 'mars-north-1')).toThrow(/mars-north-1/)
     expect(() => regionOfRecord('p-odd', '')).toThrow(UnknownRegionError)
+  })
+})
+
+describe('regionSetting', () => {
+  const SETTING_ENV = {
+    DIRECT_DB_HOST: 'db.home.test',
+    DIRECT_DB_HOST_US_EAST_1: 'db.virginia.test',
+    DIRECT_DB_HOST_US_WEST_2: '  ',
+  }
+
+  it('names and reads the home setting as is, and every other region’s with the region appended', () => {
+    expect(regionSetting('DIRECT_DB_HOST', HOME_REGION, SETTING_ENV)).toEqual({
+      variable: 'DIRECT_DB_HOST',
+      value: 'db.home.test',
+    })
+    expect(regionSetting('DIRECT_DB_HOST', 'us-east-1', SETTING_ENV)).toEqual({
+      variable: 'DIRECT_DB_HOST_US_EAST_1',
+      value: 'db.virginia.test',
+    })
+  })
+
+  it('never answers with the home value for another region, and treats blank as unset', () => {
+    expect(regionSetting('DIRECT_DB_HOST', 'eu-central-1', SETTING_ENV)).toEqual({
+      variable: 'DIRECT_DB_HOST_EU_CENTRAL_1',
+      value: undefined,
+    })
+    expect(regionSetting('DIRECT_DB_HOST', 'us-west-2', SETTING_ENV).value).toBeUndefined()
   })
 })
 

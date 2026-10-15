@@ -38,7 +38,8 @@
  */
 
 import { Client } from 'pg'
-import { provisionDirectAccess, getDirectAccessStatus } from '@/lib/services/direct-access'
+import { projectDatabaseUrl } from '@/lib/data-plane/regional'
+import { readOnlyLogin } from '@/lib/services/direct-access'
 import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 
 export const MAX_ROWS = 1000
@@ -278,26 +279,19 @@ export function redactRows(
 // ── Execution ────────────────────────────────────────────────────────────────
 
 /**
- * Internal connection info. The stored credential's host is the PUBLIC one
- * (backenly.com) because it is built for a developer's psql; the server sits on
- * the same box as Postgres, so it dials localhost instead of leaving the machine.
+ * Internal connection info: the host, port and database of the project's own
+ * database, in its region, where its read-only role exists. The developer-facing
+ * credential carries a PUBLIC host built for psql; the server dials the database
+ * the way it reaches it itself. A region this process has no connection for is
+ * refused (REGION_NOT_CONFIGURED), never tried against another region.
  */
-function internalTarget(): { host: string; port: number; database: string } {
-  const url = new URL(process.env.DATABASE_URL ?? 'postgresql://localhost:5432/backenly')
+async function internalTarget(projectId: string): Promise<{ host: string; port: number; database: string }> {
+  const url = new URL(await projectDatabaseUrl(projectId))
   return {
     host: url.hostname || 'localhost',
     port: parseInt(url.port || '5432', 10),
     database: url.pathname.replace(/^\//, '').split('?')[0] || 'backenly',
   }
-}
-
-async function readOnlyCredential(projectId: string) {
-  const status = await getDirectAccessStatus(projectId)
-  const existing = status.credentials.find((c) => c.mode === 'READ_ONLY')
-  if (existing) return existing
-  // Provisioning is idempotent and instant; a read tool should never make the
-  // agent go and arrange its own access first.
-  return provisionDirectAccess(projectId, 'READ_ONLY')
 }
 
 export async function runReadQuery(
@@ -328,8 +322,10 @@ async function execute(
 ): Promise<ReadQueryResult> {
   const cap = Math.min(Math.max(1, Math.floor(limit)), MAX_ROWS)
   const schema = workspaceSchemaName(projectId)
-  const cred = await readOnlyCredential(projectId)
-  const { host, port, database } = internalTarget()
+  const { host, port, database } = await internalTarget(projectId)
+  // Provisioning is idempotent and instant; a read tool should never make the
+  // agent go and arrange its own access first.
+  const cred = await readOnlyLogin(projectId)
 
   const client = new Client({
     host,
