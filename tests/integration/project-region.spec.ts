@@ -1527,6 +1527,64 @@ describe('schema drift events live in the project’s region', () => {
     expect(virginia).toMatchObject({ health: { status: 'healthy' }, backlog: { pending: 1 }, errors: [] })
     await run(regionalUrl, `DELETE FROM public.schema_drift_events WHERE id = 'old-pending'`)
   })
+
+  it('attributes a statement that names no object to the login’s project', async () => {
+    // A GRANT or REVOKE reaches the capture with no schema. It used to be stored
+    // with no project, which no adoption could ever clear.
+    const schema = schemaOf(regionalProject)
+    const role = directAccessRoleNames(regionalProject).rw
+    await rw!.query(`REVOKE ALL ON "${schema}".drift_probe FROM PUBLIC`)
+    const revokes = await rowsIn<{ projectId: string | null; schemaName: string | null }>(
+      regionalUrl,
+      `SELECT "projectId", "schemaName" FROM public.schema_drift_events WHERE "commandTag" = 'REVOKE' AND "roleName" = '${role}'`,
+    )
+    expect(revokes).toEqual([{ projectId: regionalProject, schemaName: schema }])
+    await run(regionalUrl, `DELETE FROM public.schema_drift_events WHERE "commandTag" = 'REVOKE' AND "roleName" = '${role}'`)
+  })
+
+  it('reads a login’s project from its name, as the platform names it, and nothing else', async () => {
+    const schema = schemaOf(regionalProject)
+    const names = directAccessRoleNames(regionalProject)
+    const home = async (role: string) =>
+      (await rowsIn<{ home: string | null }>(regionalUrl, `SELECT public.backenly_capture_home_schema('${role}') AS home`))[0].home
+    expect(await home(names.rw)).toBe(schema)
+    expect(await home(names.ro)).toBe(schema)
+    // Function logins are named from the schema (scripts/sql/function-roles.sql).
+    expect(await home(functionRoleName(schema))).toBe(schema)
+    // Owner roles never log in, and no other name is anyone's.
+    expect(await home(names.owner)).toBeNull()
+    expect(await home('bkn_rw_000000000000')).toBeNull()
+    expect(await home('backenly_app')).toBeNull()
+  })
+
+  it('counts events no adoption can clear apart from the backlog, and prunes them past retention', async () => {
+    const { upkeep } = await load()
+    process.env[REGION_VARIABLE] = regionalUrl
+    const gone = randomUUID()
+    await run(
+      regionalUrl,
+      `INSERT INTO public.schema_drift_events ("id", "projectId", "roleName", "commandTag", "capturedAt", "status")
+       VALUES ('orphan-unnamed-old', NULL, 'bkn_rw_test', 'GRANT', (now() AT TIME ZONE 'UTC') - interval '120 days', 'pending'),
+              ('orphan-gone-old', '${gone}', 'bkn_rw_test', 'CREATE TABLE', (now() AT TIME ZONE 'UTC') - interval '120 days', 'pending'),
+              ('orphan-unnamed-new', NULL, 'bkn_rw_test', 'GRANT', now() AT TIME ZONE 'UTC', 'pending'),
+              ('held-old', '${regionalProject}', 'bkn_rw_test', 'CREATE TABLE', (now() AT TIME ZONE 'UTC') - interval '120 days', 'pending')`,
+    )
+    try {
+      const backlog = await upkeep.driftEventBacklog('us-east-1')
+      expect(backlog).toMatchObject({ pending: 1, orphaned: 3 })
+      expect(backlog.oldestPendingSeconds).toBeGreaterThan(119 * 24 * 3600)
+
+      // Past the window only, and never a project's own pending work.
+      expect(await upkeep.pruneOrphanedDriftEvents('us-east-1', 90)).toBe(2)
+      const left = await rowsIn<{ id: string }>(regionalUrl, `SELECT id FROM public.schema_drift_events WHERE id LIKE 'orphan-%' OR id = 'held-old' ORDER BY id`)
+      expect(left.map((r) => r.id)).toEqual(['held-old', 'orphan-unnamed-new'])
+
+      const virginia = (await upkeep.runDriftEventUpkeep()).find((r) => r.region === 'us-east-1')
+      expect(virginia).toMatchObject({ backlog: { pending: 1, orphaned: 1 }, prunedOrphans: 0, errors: [] })
+    } finally {
+      await run(regionalUrl, `DELETE FROM public.schema_drift_events WHERE id LIKE 'orphan-%' OR id = 'held-old'`)
+    }
+  })
 })
 
 describe('a project created in another region', () => {

@@ -357,18 +357,57 @@ REVOKE ALL ON FUNCTION public.backenly_direct_sync_schema(text, text, text, text
 --
 -- capturedAt is written in UTC. The column has no time zone, the application
 -- reads it as UTC (Prisma), and now() alone would store the session's local time.
+--
+-- Every event names its project. A GRANT or REVOKE names no single object, so
+-- pg_event_trigger_ddl_commands() reports it with no schema, and a dropped
+-- schema has none either; those events used to be stored with no project, so no
+-- adoption could ever clear them and they aged the region's drift backlog
+-- forever. They are attributed to the project the session's login belongs to.
+-- A direct-access login does DDL in its own project's schema only, and a GRANT
+-- inside it includes the PostgREST sync granting the API roles on a table the
+-- developer just created.
+
+-- The workspace schema a capturing login belongs to, read from its NAME:
+-- bkn_ro_/bkn_rw_ + sha256(projectId) (lib/services/direct-access.ts) and
+-- bkn_fn_ + sha256(schema) (scripts/sql/function-roles.sql), 12 hex each. The
+-- name, not a setting such as its search_path, because a login may change its
+-- own settings and could then point its events at another project. NULL when
+-- no workspace matches, or more than one does.
+CREATE OR REPLACE FUNCTION public.backenly_capture_home_schema(p_role text) RETURNS text
+LANGUAGE plpgsql STABLE SET search_path = pg_catalog
+AS $fn$
+DECLARE
+  v_kind    text := substring(p_role FROM '^bkn_(ro|rw|fn)_[0-9a-f]{12}$');
+  v_schema  text;
+  v_matches int;
+BEGIN
+  IF v_kind IS NULL THEN RETURN NULL; END IF;
+  SELECT min(n.nspname), count(*) INTO v_schema, v_matches
+    FROM pg_namespace n
+   WHERE n.nspname ~ '^workspace_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+     AND left(encode(sha256(convert_to(
+           CASE WHEN v_kind = 'fn' THEN n.nspname ELSE substring(n.nspname FROM 11) END, 'UTF8')), 'hex'), 12)
+         = right(p_role, 12);
+  RETURN CASE WHEN v_matches = 1 THEN v_schema END;
+END
+$fn$;
+
+REVOKE ALL ON FUNCTION public.backenly_capture_home_schema(text) FROM PUBLIC;
+
 CREATE OR REPLACE FUNCTION public.backenly_capture_ddl() RETURNS event_trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public
 AS $fn$
 DECLARE
   r        record;
   v_schema text;
+  v_home   text;
 BEGIN
   IF session_user NOT LIKE 'bkn\_%' THEN RETURN; END IF;
+  v_home := public.backenly_capture_home_schema(session_user);
   FOR r IN SELECT command_tag, object_type, object_identity, schema_name
            FROM pg_event_trigger_ddl_commands()
   LOOP
-    v_schema := COALESCE(r.schema_name, split_part(r.object_identity, '.', 1));
+    v_schema := COALESCE(r.schema_name, split_part(r.object_identity, '.', 1), v_home);
     INSERT INTO public.schema_drift_events
       ("id", "projectId", "roleName", "commandTag", "objectType", "objectIdentity", "schemaName", "capturedAt", "status")
     VALUES (
@@ -394,23 +433,31 @@ CREATE OR REPLACE FUNCTION public.backenly_capture_drop() RETURNS event_trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public
 AS $fn$
 DECLARE
-  r record;
+  r        record;
+  v_schema text;
+  v_home   text;
 BEGIN
   IF session_user NOT LIKE 'bkn\_%' THEN RETURN; END IF;
+  v_home := public.backenly_capture_home_schema(session_user);
   FOR r IN SELECT object_type, object_identity, schema_name
            FROM pg_event_trigger_dropped_objects()
            WHERE original AND NOT is_temporary
   LOOP
+    -- sql_drop runs after the catalog rows are gone, so a dropped schema is
+    -- named by its identity rather than looked up.
+    v_schema := COALESCE(r.schema_name,
+                         CASE WHEN r.object_type = 'schema' THEN trim(both '"' FROM r.object_identity) END,
+                         v_home);
     INSERT INTO public.schema_drift_events
       ("id", "projectId", "roleName", "commandTag", "objectType", "objectIdentity", "schemaName", "capturedAt", "status")
     VALUES (
       gen_random_uuid()::text,
-      CASE WHEN r.schema_name LIKE 'workspace\_%' THEN substring(r.schema_name FROM 11) ELSE NULL END,
+      CASE WHEN v_schema LIKE 'workspace\_%' THEN substring(v_schema FROM 11) ELSE NULL END,
       session_user::text,
       'DROP ' || upper(COALESCE(r.object_type, 'OBJECT')),
       r.object_type,
       r.object_identity,
-      r.schema_name,
+      v_schema,
       now() AT TIME ZONE 'UTC',
       'pending'
     );
