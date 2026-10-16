@@ -16,10 +16,13 @@
 import {
   claimNextJobs,
   claimPurgeJobs,
+  claimRegionalJobs,
   completeJob,
   completePurgeJob,
+  completeRegionalJob,
   failJob,
   failPurgeJob,
+  failRegionalJob,
 } from './index'
 import { emit } from '@/lib/events/bus'
 import { prisma } from '@/lib/db/prisma'
@@ -172,6 +175,88 @@ export async function processPurgeJobs(region: CloudRegionId = serviceRegion()):
   return { processed: jobs.length, succeeded, failed }
 }
 
+// ── Regional job processor ────────────────────────────────────────────────────
+
+let regionalJobsRunning = false
+
+/**
+ * Carry out what other regions asked of this one (lib/queue/index.ts, regional
+ * jobs): a project's snapshot taken, or restored, where its data is.
+ *
+ * Called every minute by every region's scheduler (`runRegionalSystemTasks`).
+ * One job at a time, each a pg_dump or a restore of a whole project, and never
+ * two passes at once in one process: the scheduler fires every minute whether
+ * or not the last pass has finished.
+ *
+ * What a failure records is the platform's own sentence. The reason the
+ * database gave can quote the project's rows, so it goes to this region's own
+ * logs and not to the platform database in the home region.
+ */
+export async function processRegionalJobs(region: CloudRegionId = serviceRegion()): Promise<{
+  processed: number
+  succeeded: number
+  failed: number
+}> {
+  if (regionalJobsRunning) return { processed: 0, succeeded: 0, failed: 0 }
+  regionalJobsRunning = true
+  try {
+    const jobs = await claimRegionalJobs(2, region)
+    let succeeded = 0
+    let failed = 0
+    for (const job of jobs) {
+      try {
+        await completeRegionalJob(job.id, await runRegionalJob(job.type, job.payload))
+        succeeded++
+      } catch (err: any) {
+        console.error(`[RegionalJobs] ${job.type} ${job.id} failed in ${region}:`, err?.message ?? err)
+        await failRegionalJob(job.id, err instanceof RegionalJobRefusal ? err.message : failureSentence(job.type, region))
+        failed++
+      }
+    }
+    if (jobs.length > 0) {
+      console.log(`[RegionalJobs] Processed ${jobs.length} job(s) in ${region}: ${succeeded} ok, ${failed} failed`)
+    }
+    return { processed: jobs.length, succeeded, failed }
+  } finally {
+    regionalJobsRunning = false
+  }
+}
+
+/** A refusal whose sentence is the platform's own, so it is safe to show and store. */
+class RegionalJobRefusal extends Error {}
+
+function failureSentence(type: string, region: CloudRegionId): string {
+  return type === 'workspace_restore'
+    ? `The restore did not complete in ${region}. The reason is in that region's logs.`
+    : `The snapshot was not taken in ${region}. The reason is in that region's logs.`
+}
+
+async function runRegionalJob(type: string, payload: unknown): Promise<Record<string, any>> {
+  const { projectId, backupId } = (payload ?? {}) as { projectId?: unknown; backupId?: unknown }
+  if (typeof projectId !== 'string' || projectId.length === 0) throw new RegionalJobRefusal('The job names no project.')
+  const backups = await import('@/lib/services/workspace-backup')
+
+  if (type === 'workspace_backup') {
+    const result = await backups.backupWorkspace(projectId)
+    if (!result.success) throw new Error(result.error ?? 'snapshot failed')
+    return { filename: result.filename, sizeBytes: Number(result.sizeBytes ?? 0) }
+  }
+
+  if (type === 'workspace_restore') {
+    // Checked again where it runs: a project paused since the request was made
+    // takes no writes, a restore least of all.
+    const { getProjectServingState } = await import('@/lib/projects/serving-state')
+    if ((await getProjectServingState(projectId)).kind === 'paused') {
+      throw new RegionalJobRefusal('This project is paused. Resume it before restoring a snapshot.')
+    }
+    const result = await backups.restoreWorkspace(projectId, typeof backupId === 'string' ? backupId : undefined)
+    if (!result.success) throw new Error(result.error ?? 'restore failed')
+    return { restoredFrom: result.restoredFrom }
+  }
+
+  throw new RegionalJobRefusal(`No handler for regional job type '${type}'.`)
+}
+
 // ── Main Processor ────────────────────────────────────────────────────────────
 
 /**
@@ -218,6 +303,11 @@ export async function processBackgroundJobs(): Promise<{
             // the default branch below completing it with the files still on
             // disk. The one outcome this must never have is silent success.
             throw new Error('purge_project must be processed by processPurgeJobs')
+          case 'workspace_backup':
+          case 'workspace_restore':
+            // The same: regional jobs never sit in 'queued', and must run in
+            // the project's own region (processRegionalJobs), never here.
+            throw new Error(`${job.type} must be processed by processRegionalJobs`)
           default:
             // Unknown type — complete immediately with a note rather than loop forever
             result = { skipped: true, reason: `No handler for job type '${job.type}'` }

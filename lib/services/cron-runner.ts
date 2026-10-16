@@ -15,8 +15,9 @@
  *                         runRegionalSystemTasks(), every region: turn its
  *                           projects' captured row changes into deliveries,
  *                           finish the external purges of deleted projects
- *                           kept in it, and prune the regional bodies it
- *                           keeps (hourly)
+ *                           kept in it, prune the regional bodies it keeps
+ *                           (hourly), and take or restore the snapshots other
+ *                           regions asked of it
  *                         runPlatformSystemTasks(), home region only:
  *                           1. Retry failed outbound webhooks
  *                           2. Detect & fail stuck background jobs (timeout)
@@ -37,7 +38,7 @@ import { retryFailedWebhooks } from '@/lib/webhooks/index'
 import { drainWebhookOutbox } from '@/lib/webhooks/capture'
 import { pruneRegionalBodies } from '@/lib/data-plane/regional-bodies'
 import { detectAndTimeoutStuckJobs, enqueue } from '@/lib/queue/index'
-import { processBackgroundJobs, processPurgeJobs } from '@/lib/queue/worker'
+import { processBackgroundJobs, processPurgeJobs, processRegionalJobs } from '@/lib/queue/worker'
 
 // ─── Cron Expression Matching ─────────────────────────────────────────────────
 //
@@ -191,6 +192,14 @@ export async function runRegionalSystemTasks(now: Date = new Date()): Promise<vo
       .then((pruned) => { if (pruned > 0) console.log(`[SystemTasks] pruned ${pruned} regional bodies past retention`) })
       .catch(err => console.error('[SystemTasks] regional body prune failed:', err?.message))
   }
+
+  // Snapshots taken or restored for this region's projects at another
+  // region's request (the console and MCP run at home): a project's data is
+  // dumped and restored only where it is kept (lib/queue/worker.ts
+  // processRegionalJobs). Last, because a pg_dump can take minutes.
+  await processRegionalJobs().catch(err =>
+    console.error('[SystemTasks] regional job processing failed:', err?.message)
+  )
 }
 
 const BODY_PRUNE_INTERVAL_MS = 60 * 60 * 1000

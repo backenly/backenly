@@ -444,3 +444,172 @@ export async function failPurgeJob(id: string, error: string) {
     },
   })
 }
+
+// ─── Regional jobs ────────────────────────────────────────────────────────────
+//
+// Work requested in one region that has to be done in another. The console,
+// MCP and the agent run in the home region, but a project kept elsewhere has
+// its database and its snapshots there: a pg_dump of it taken here would put
+// a full copy of its data in the home region, and a restore from here could
+// not even read its snapshot, which is in that region's bucket. So the request
+// is recorded here and carried out there, by that region's own scheduler
+// (lib/queue/worker.ts processRegionalJobs).
+//
+// Purges' rule, for the same reason (PURGE_STATUS above): these rows never
+// enter 'queued', so no generic worker, this build's or one already released,
+// can claim one and complete it without a handler, or run it in the wrong
+// region.
+
+/** The work one region may ask another to do. */
+export const REGIONAL_JOB_TYPES = ['workspace_backup', 'workspace_restore'] as const
+export type RegionalJobType = (typeof REGIONAL_JOB_TYPES)[number]
+
+export const REGIONAL_STATUS = {
+  /** Waiting for its region's scheduler. Invisible to every generic query. */
+  pending: 'regional_pending',
+  /** Claimed by its region's scheduler. */
+  running: 'regional_running',
+  /** Attempts exhausted. Terminal and never auto-pruned: the project is shown it. */
+  failed: 'regional_failed',
+} as const
+
+/**
+ * Long enough for any snapshot or restore (pg_dump itself stops at two minutes,
+ * lib/services/workspace-backup.ts), short enough that a worker that died is
+ * noticed within the hour. A run still going past it counts as an attempt.
+ */
+const REGIONAL_JOB_TIMEOUT_MS = 30 * 60 * 1000
+
+/**
+ * Ask `region` to do `type` for `projectId`. The region is recorded in the
+ * payload, which is where a region's claim looks for its own work.
+ */
+export async function enqueueRegionalJob(
+  type: RegionalJobType,
+  projectId: string,
+  region: CloudRegionId,
+  payload: Record<string, unknown> = {},
+  options: { maxAttempts?: number } = {},
+): Promise<{ id: string }> {
+  return prisma.backgroundJob.create({
+    data: {
+      type,
+      projectId,
+      status: REGIONAL_STATUS.pending,
+      payload: { ...payload, projectId, region } as Record<string, any>,
+      maxAttempts: options.maxAttempts ?? 3,
+      runAt: new Date(),
+    },
+    select: { id: true },
+  })
+}
+
+/**
+ * Claim up to `limit` due jobs of `region`, chosen in the query like purges.
+ *
+ * A job left running past its timeout by a worker that died, or one still
+ * running, counts that attempt: it goes back to pending while attempts remain
+ * and to failed after, so a slow restore is never started a second time
+ * without anyone deciding to.
+ */
+export async function claimRegionalJobs(limit = 2, region: CloudRegionId = serviceRegion()) {
+  const now = new Date()
+
+  // Only this region's: whether another region's run is stale is for that
+  // region to decide, where it may still be running.
+  const stale = (
+    await prisma.backgroundJob.findMany({
+      where: { type: { in: [...REGIONAL_JOB_TYPES] }, status: REGIONAL_STATUS.running, timeoutAt: { lte: now } },
+      select: { id: true, attempts: true, maxAttempts: true, payload: true },
+    })
+  ).filter((job) => ((job.payload ?? {}) as { region?: unknown }).region === region)
+  for (const job of stale) {
+    const attempts = job.attempts + 1
+    await prisma.backgroundJob.updateMany({
+      where: { id: job.id, status: REGIONAL_STATUS.running },
+      data: attempts >= job.maxAttempts
+        ? { status: REGIONAL_STATUS.failed, attempts, error: 'Timed out in its region.', completedAt: now, timeoutAt: null }
+        : { status: REGIONAL_STATUS.pending, attempts, error: 'Timed out in its region; retried.', startedAt: null, timeoutAt: null },
+    })
+  }
+
+  const candidates = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT "id" FROM "background_jobs"
+    WHERE "type" = ANY(${[...REGIONAL_JOB_TYPES]}::text[])
+      AND "status" = ${REGIONAL_STATUS.pending}
+      AND "runAt" <= (${now}::timestamptz AT TIME ZONE 'UTC')
+      AND "payload"->>'region' = ${region}
+    ORDER BY "runAt" ASC
+    LIMIT ${limit}`
+
+  if (candidates.length === 0) return []
+
+  const ids = candidates.map((c) => c.id)
+
+  await prisma.backgroundJob.updateMany({
+    where: { id: { in: ids }, status: REGIONAL_STATUS.pending },
+    data: {
+      status: REGIONAL_STATUS.running,
+      startedAt: now,
+      timeoutAt: new Date(now.getTime() + REGIONAL_JOB_TIMEOUT_MS),
+    },
+  })
+
+  return prisma.backgroundJob.findMany({
+    where: { id: { in: ids }, status: REGIONAL_STATUS.running },
+  })
+}
+
+/** Done. `completed` is shared with the generic vocabulary, as for purges. */
+export async function completeRegionalJob(id: string, result: Record<string, any>) {
+  await prisma.backgroundJob.update({
+    where: { id },
+    data: { status: 'completed', result, completedAt: new Date(), error: null, timeoutAt: null },
+  })
+}
+
+/**
+ * A failed attempt: pending again after the backoff while attempts remain,
+ * failed after. `error` is what the project is shown, so it is the platform's
+ * own sentence, never the database's (which can quote rows).
+ */
+export async function failRegionalJob(id: string, error: string) {
+  const job = await prisma.backgroundJob.findUnique({ where: { id } })
+  if (!job) return
+
+  const attempts = job.attempts + 1
+  if (attempts >= job.maxAttempts) {
+    await prisma.backgroundJob.update({
+      where: { id },
+      data: { status: REGIONAL_STATUS.failed, attempts, error, completedAt: new Date(), timeoutAt: null },
+    })
+    return
+  }
+
+  const delayMs = RETRY_DELAYS_MS[attempts] ?? RETRY_DELAYS_MS[RETRY_DELAYS_MS.length - 1]
+  await prisma.backgroundJob.update({
+    where: { id },
+    data: {
+      status: REGIONAL_STATUS.pending,
+      attempts,
+      error,
+      runAt: new Date(Date.now() + delayMs),
+      startedAt: null,
+      timeoutAt: null,
+    },
+  })
+}
+
+/**
+ * A project's recent regional jobs, newest first: what its console shows as
+ * queued, running or failed, and in which region. The payload stays here.
+ */
+export async function regionalJobsOf(projectId: string, take = 10) {
+  const jobs = await prisma.backgroundJob.findMany({
+    where: { projectId, type: { in: [...REGIONAL_JOB_TYPES] } },
+    orderBy: { createdAt: 'desc' },
+    take,
+    select: { id: true, type: true, status: true, error: true, createdAt: true, completedAt: true, payload: true },
+  })
+  return jobs.map(({ payload, ...job }) => ({ ...job, region: ((payload ?? {}) as { region?: string }).region ?? null }))
+}

@@ -1137,3 +1137,10 @@ tests/integration/dashboard-stats-counts.spec.ts
 # routes answer 404, and the approval card names the trigger. Real trigger and
 # approval rows are the property, so it needs a real Postgres.
 tests/integration/delete-trigger-scope.spec.ts
+# Regional jobs: a snapshot or restore of a project kept in another region,
+# asked for at home and carried out in that region. No generic worker can claim
+# one, each region claims its own, a run past its timeout counts as an attempt,
+# and a failure records the platform's sentence, never the database's. Real
+# background_jobs rows and the claim's SQL are the property, so it needs a real
+# Postgres.
+__tests__/queue/regional-jobs.test.ts

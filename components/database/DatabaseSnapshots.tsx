@@ -22,11 +22,12 @@
  * like one.
  */
 
-import { useCallback, useEffect, useState } from 'react'
-import { AlertTriangle, Camera, CheckCircle2, Info, RotateCcw } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { AlertTriangle, Camera, CheckCircle2, Clock, Info, RotateCcw } from 'lucide-react'
 import { EmptyState, KitButton, KitConfirmDialog, KitNote, Skeleton, StatusDot } from '@/components/inspector/kit'
 import { EDGE, RULE, R_PANEL } from '@/components/console/tokens'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
+import { regionLabel } from '@/lib/regions'
 
 interface Snapshot {
   id: string
@@ -36,6 +37,23 @@ interface Snapshot {
   error: string | null
   createdAt: string
 }
+
+/**
+ * A snapshot or restore of a project kept in another region, which runs in
+ * that region (lib/services/workspace-backup.ts requestBackup): the console
+ * waits on it here.
+ */
+interface RegionalJob {
+  id: string
+  type: 'workspace_backup' | 'workspace_restore'
+  status: string
+  error: string | null
+  region: string | null
+  createdAt: string
+}
+
+const OPEN = new Set(['regional_pending', 'regional_running'])
+const POLL_MS = 5_000
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -61,12 +79,29 @@ export function DatabaseSnapshots({ projectId }: { projectId: string }) {
   const [restoring, setRestoring] = useState<string | null>(null)
   const [message, setMessage] = useState<{ tone: 'danger' | 'success'; text: string } | null>(null)
   const [confirmRestore, setConfirmRestore] = useState<Snapshot | null>(null)
+  const [jobs, setJobs] = useState<RegionalJob[]>([])
+  // The jobs this panel queued, so their outcome is announced once they finish.
+  const watching = useRef(new Set<string>())
 
   const load = useCallback(async () => {
     try {
       const res = await fetch(`/api/projects/${projectId}/backup`)
       const data = await res.json()
-      if (res.ok) setSnapshots(data.data ?? [])
+      if (res.ok) {
+        setSnapshots(data.data ?? [])
+        const current: RegionalJob[] = data.jobs ?? []
+        setJobs(current)
+        for (const job of current) {
+          if (!watching.current.has(job.id) || OPEN.has(job.status)) continue
+          watching.current.delete(job.id)
+          const where = job.region ? ` in ${regionLabel(job.region)}` : ''
+          setMessage(
+            job.status === 'completed'
+              ? { tone: 'success', text: job.type === 'workspace_restore' ? `Restored${where}. Reload to see the current tables.` : `Snapshot taken${where}.` }
+              : { tone: 'danger', text: job.error ?? (job.type === 'workspace_restore' ? 'The restore did not complete.' : 'The snapshot was not taken.') },
+          )
+        }
+      }
     } catch {
       // A list that cannot load is not worth an error banner over the action
       // that still works. The empty state below reads honestly either way.
@@ -79,6 +114,27 @@ export function DatabaseSnapshots({ projectId }: { projectId: string }) {
     load()
   }, [load])
 
+  // A queued snapshot or restore runs in the project's region: check on it
+  // until nothing is waiting there.
+  const waiting = jobs.filter((job) => OPEN.has(job.status))
+  useEffect(() => {
+    if (waiting.length === 0) return
+    const timer = setInterval(load, POLL_MS)
+    return () => clearInterval(timer)
+  }, [waiting.length, load])
+
+  /** A 202: the work was queued in the project's region. */
+  function queued(data: { jobId?: string; region?: string }, what: 'snapshot' | 'restore') {
+    if (data.jobId) watching.current.add(data.jobId)
+    const where = data.region ? regionLabel(data.region) : 'the project’s region'
+    setMessage({
+      tone: 'success',
+      text: what === 'snapshot'
+        ? `Snapshot queued in ${where}, where this project's data is kept. It appears here when it finishes.`
+        : `Restore queued in ${where}, where this project's data is kept. It runs there within a few minutes.`,
+    })
+  }
+
   async function takeSnapshot() {
     setTaking(true)
     setMessage(null)
@@ -86,7 +142,8 @@ export function DatabaseSnapshots({ projectId }: { projectId: string }) {
       const res = await fetch(`/api/projects/${projectId}/backup`, { method: 'POST' })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? 'The snapshot failed.')
-      setMessage({ tone: 'success', text: 'Snapshot taken.' })
+      if (res.status === 202 && data.queued) queued(data, 'snapshot')
+      else setMessage({ tone: 'success', text: 'Snapshot taken.' })
       await load()
     } catch (err) {
       setMessage({ tone: 'danger', text: err instanceof Error ? err.message : 'The snapshot failed.' })
@@ -106,7 +163,8 @@ export function DatabaseSnapshots({ projectId }: { projectId: string }) {
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? 'The restore failed.')
-      setMessage({ tone: 'success', text: 'Restored. Reload to see the current tables.' })
+      if (res.status === 202 && data.queued) queued(data, 'restore')
+      else setMessage({ tone: 'success', text: 'Restored. Reload to see the current tables.' })
       await load()
     } catch (err) {
       setMessage({ tone: 'danger', text: err instanceof Error ? err.message : 'The restore failed.' })
@@ -143,6 +201,14 @@ export function DatabaseSnapshots({ projectId }: { projectId: string }) {
         {message && (
           <KitNote tone={message.tone} icon={message.tone === 'success' ? CheckCircle2 : AlertTriangle}>
             {message.text}
+          </KitNote>
+        )}
+
+        {waiting.length > 0 && (
+          <KitNote icon={Clock} title={waiting.some((job) => job.type === 'workspace_restore') ? 'Restore waiting' : 'Snapshot waiting'}>
+            {waiting.length === 1 ? 'One request is' : `${waiting.length} requests are`} waiting
+            {waiting[0].region ? ` in ${regionLabel(waiting[0].region)}` : ''}, where this project&rsquo;s data is kept.
+            This panel updates when {waiting.length === 1 ? 'it finishes' : 'they finish'}.
           </KitNote>
         )}
 
@@ -189,7 +255,8 @@ export function DatabaseSnapshots({ projectId }: { projectId: string }) {
                       variant="ghost"
                       icon={RotateCcw}
                       onClick={() => setConfirmRestore(snapshot)}
-                      disabled={restoring !== null}
+                      // Not a second restore behind one still waiting in the project's region.
+                      disabled={restoring !== null || waiting.some((job) => job.type === 'workspace_restore')}
                       loading={restoring === snapshot.id}
                     >
                       Restore

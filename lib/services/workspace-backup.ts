@@ -66,6 +66,8 @@ import {
   regionEnvName,
   regionRawClient,
 } from '@/lib/data-plane/regional'
+import { serviceRegion } from '@/lib/data-plane/serving'
+import { enqueueRegionalJob } from '@/lib/queue'
 
 const execFileAsync = promisify(execFile)
 
@@ -274,6 +276,78 @@ export interface BackupResult {
 }
 
 /**
+ * A snapshot of a project kept in another region, asked of a process that is
+ * not in it. Its data is dumped, stored and restored only in its own region:
+ * dumped here, a full copy of it would sit in this region. Callers that are
+ * not in the project's region ask that region instead (requestBackup,
+ * requestRestore).
+ */
+export class SnapshotElsewhereError extends Error {
+  readonly code = 'SNAPSHOT_IN_ANOTHER_REGION'
+
+  constructor(readonly projectId: string, readonly region: CloudRegionId) {
+    super(`This project's data is kept in ${region}, so its snapshots are taken, stored and restored there, not here.`)
+    this.name = 'SnapshotElsewhereError'
+  }
+}
+
+/** The snapshot is only ever handled where the project's data is (SnapshotElsewhereError). */
+function assertSnapshotsHere(projectId: string, region: CloudRegionId): void {
+  if (region !== serviceRegion()) throw new SnapshotElsewhereError(projectId, region)
+}
+
+/** A snapshot asked for: taken now, in this process, or queued in the project's own region. */
+export type SnapshotRequest<T> =
+  | { kind: 'done'; result: T }
+  | { kind: 'queued'; jobId: string; region: CloudRegionId }
+
+/**
+ * Take a snapshot of a project: here, when this process is in the project's
+ * region, as it always has been; otherwise as a job its own region's scheduler
+ * runs (lib/queue/worker.ts processRegionalJobs). The console, MCP and the
+ * agent run in the home region, and a regional project's dump never leaves
+ * its region.
+ */
+export async function requestBackup(projectId: string, requestedBy?: string | null): Promise<SnapshotRequest<BackupResult>> {
+  const region = await projectRegion(projectId)
+  if (region === serviceRegion()) return { kind: 'done', result: await backupWorkspace(projectId) }
+  const job = await enqueueRegionalJob('workspace_backup', projectId, region, { requestedBy: requestedBy ?? null })
+  return { kind: 'queued', jobId: job.id, region }
+}
+
+/**
+ * Restore a project from one of its snapshots, the same way: here when this
+ * process is in the project's region, otherwise in its region. The snapshot is
+ * checked now, so a wrong id is refused at once rather than minutes later, and
+ * a queued restore runs once: a restore that fails is the owner's to retry,
+ * not the scheduler's.
+ */
+export async function requestRestore(
+  projectId: string,
+  backupId: string | undefined,
+  requestedBy?: string | null,
+): Promise<SnapshotRequest<RestoreResult>> {
+  const region = await projectRegion(projectId)
+  if (region === serviceRegion()) return { kind: 'done', result: await restoreWorkspace(projectId, backupId) }
+  const backup = backupId
+    ? await prisma.workspaceBackup.findFirst({ where: { id: backupId, projectId, status: 'completed' }, select: { id: true } })
+    : await prisma.workspaceBackup.findFirst({
+        where: { projectId, status: 'completed' },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true },
+      })
+  if (!backup) return { kind: 'done', result: { success: false, error: 'No completed backup found for this project' } }
+  const job = await enqueueRegionalJob(
+    'workspace_restore',
+    projectId,
+    region,
+    { backupId: backup.id, requestedBy: requestedBy ?? null },
+    { maxAttempts: 1 },
+  )
+  return { kind: 'queued', jobId: job.id, region }
+}
+
+/**
  * Create a compressed SQL dump of workspace_{projectId} schema.
  * Runs pg_dump with --schema=workspace_{projectId} so only that tenant's
  * data is captured. Returns the file path of the created backup.
@@ -288,8 +362,10 @@ export async function backupWorkspace(projectId: string): Promise<BackupResult> 
   // Set once an upload is attempted, so a failure after it can remove the object.
   const bucket = snapshotBucket()
   let uploadedTo: string | null = null
-  // The schema is only in the database of the project's region.
+  // The schema is only in the database of the project's region, and its dump
+  // is taken and stored only there.
   const region = await projectRegion(projectId)
+  assertSnapshotsHere(projectId, region)
 
   try {
     // Ensure backup directory exists
@@ -418,7 +494,9 @@ export async function restoreWorkspace(
   // is in the project's region. Resolved before anything is touched: replayed
   // over another region's connection, the dump would create the schema there
   // and the check would find it, reporting a restore of data that never moved.
+  // Its snapshots are stored in its region, and restored only there.
   const region = await projectRegion(projectId)
+  assertSnapshotsHere(projectId, region)
   const db = regionRawClient(region, projectId)
 
   // Find the backup to restore from
@@ -602,6 +680,9 @@ export async function resolveSnapshotFile(
   projectId: string,
   backupId: string,
 ): Promise<{ filename: string; sizeBytes: bigint; open: () => Promise<Readable> } | null> {
+  // Another region's snapshot is in that region's bucket, which this process
+  // neither reads nor should stream a whole project's data out of.
+  assertSnapshotsHere(projectId, await projectRegion(projectId))
   const row = await prisma.workspaceBackup.findFirst({
     where: { id: backupId, projectId, status: 'completed' },
     select: { filePath: true, filename: true, sizeBytes: true },

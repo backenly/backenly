@@ -1305,25 +1305,78 @@ describe('backups, restores and archive cleanup use the project’s region', () 
   afterAll(async () => {
     delete process.env.BACKUP_DATABASE_URL_US_EAST_1
     await prisma.workspaceBackup.deleteMany({ where: { projectId: regionalProject } })
+    await prisma.backgroundJob.deleteMany({ where: { projectId: regionalProject, type: { in: ['workspace_backup', 'workspace_restore'] } } })
     await prisma.tableArchive.deleteMany({ where: { projectId: regionalProject } })
     await run(regionalUrl, `DROP TABLE IF EXISTS ${archivedTable()}`).catch(() => {})
     rmSync(BACKUP_DIR, { recursive: true, force: true })
   })
 
-  it('dumps the regional schema and restores it into the region, creating nothing at home', async () => {
+  /** Run `work` as Virginia's own process: snapshots of its projects are taken and restored only there. */
+  async function asVirginia<T>(work: () => Promise<T>): Promise<T> {
+    process.env.BACKENLY_SERVICE_REGION = 'us-east-1'
+    try {
+      return await work()
+    } finally {
+      delete process.env.BACKENLY_SERVICE_REGION
+    }
+  }
+
+  it('dumps the regional schema and restores it in the region, creating nothing at home', async () => {
     process.env[REGION_VARIABLE] = regionalUrl
     const schema = schemaOf(regionalProject)
 
-    const snapshot = await backups.backupWorkspace(regionalProject)
+    const snapshot = await asVirginia(() => backups.backupWorkspace(regionalProject))
     expect(snapshot).toMatchObject({ success: true })
     expect(snapshot.filePath?.startsWith(BACKUP_DIR)).toBe(true)
 
     await run(regionalUrl, `DELETE FROM "${schema}".marker`)
-    expect(await backups.restoreWorkspace(regionalProject)).toMatchObject({ success: true })
+    expect(await asVirginia(() => backups.restoreWorkspace(regionalProject))).toMatchObject({ success: true })
 
     const notes = await rowsIn<{ note: string }>(regionalUrl, `SELECT note FROM "${schema}".marker WHERE note = 'us-east-1'`)
     expect(notes).toEqual([{ note: 'us-east-1' }])
     expect(await rowsIn(homeUrl(), `SELECT 1 FROM information_schema.schemata WHERE schema_name = '${schema}'`)).toEqual([])
+  })
+
+  it('is never dumped or restored at home: the home process queues both for the region, which carries them out', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const { processRegionalJobs } = await import('@/lib/queue/worker')
+    const schema = schemaOf(regionalProject)
+    const elsewhere = { code: 'SNAPSHOT_IN_ANOTHER_REGION', region: 'us-east-1' }
+
+    // At home: refused outright, before anything is dumped, read or written.
+    const before = await prisma.workspaceBackup.count({ where: { projectId: regionalProject } })
+    await expect(backups.backupWorkspace(regionalProject)).rejects.toMatchObject(elsewhere)
+    await expect(backups.restoreWorkspace(regionalProject)).rejects.toMatchObject(elsewhere)
+    await expect(backups.resolveSnapshotFile(regionalProject, 'any')).rejects.toMatchObject(elsewhere)
+    expect(await prisma.workspaceBackup.count({ where: { projectId: regionalProject } })).toBe(before)
+
+    // Asked for at home, the snapshot is queued for us-east-1, which the home
+    // region's scheduler leaves alone and Virginia's carries out.
+    const asked = await backups.requestBackup(regionalProject, ownerId)
+    expect(asked).toMatchObject({ kind: 'queued', region: 'us-east-1' })
+    const jobId = asked.kind === 'queued' ? asked.jobId : ''
+    expect(await prisma.backgroundJob.findUnique({ where: { id: jobId } })).toMatchObject({ status: 'regional_pending' })
+    expect(await processRegionalJobs()).toMatchObject({ processed: 0 })
+    expect(await asVirginia(() => processRegionalJobs())).toMatchObject({ processed: 1, succeeded: 1 })
+    expect(await prisma.backgroundJob.findUnique({ where: { id: jobId } })).toMatchObject({ status: 'completed' })
+    const taken = await prisma.workspaceBackup.findFirst({
+      where: { projectId: regionalProject, status: 'completed' },
+      orderBy: { createdAt: 'desc' },
+    })
+    expect(taken?.filePath.startsWith(BACKUP_DIR)).toBe(true)
+
+    // Restored the same way, from that snapshot, in the region.
+    await run(regionalUrl, `DELETE FROM "${schema}".marker`)
+    const restore = await backups.requestRestore(regionalProject, taken!.id, ownerId)
+    expect(restore).toMatchObject({ kind: 'queued', region: 'us-east-1' })
+    expect(await asVirginia(() => processRegionalJobs())).toMatchObject({ processed: 1, succeeded: 1 })
+    expect(await rowsIn(regionalUrl, `SELECT note FROM "${schema}".marker WHERE note = 'us-east-1'`)).toEqual([{ note: 'us-east-1' }])
+
+    // A snapshot that is not this project's is refused at once, not queued.
+    expect(await backups.requestRestore(regionalProject, randomUUID(), ownerId)).toMatchObject({
+      kind: 'done',
+      result: { success: false },
+    })
   })
 
   it('drops an expired archive in the region, and only then records it deleted', async () => {
@@ -1351,9 +1404,10 @@ describe('backups, restores and archive cleanup use the project’s region', () 
 
   it('refuses without a connection to the region, and records no failed snapshot', async () => {
     delete process.env[REGION_VARIABLE]
-    await expect(backups.backupWorkspace(regionalProject)).rejects.toMatchObject(refused)
+    // In the region itself, so the refusal is the missing connection's.
+    await expect(asVirginia(() => backups.backupWorkspace(regionalProject))).rejects.toMatchObject(refused)
     expect(await prisma.workspaceBackup.count({ where: { projectId: regionalProject, status: 'failed' } })).toBe(0)
-    await expect(backups.restoreWorkspace(regionalProject)).rejects.toMatchObject(refused)
+    await expect(asVirginia(() => backups.restoreWorkspace(regionalProject))).rejects.toMatchObject(refused)
     let thrown: unknown
     try {
       backups.buildConnection('read', 'us-east-1')

@@ -20,7 +20,7 @@ import { Readable } from 'stream'
 import { NextRequest, NextResponse } from 'next/server'
 import { authenticateRequest } from '@/lib/auth/middleware'
 import { canAdministerProject } from '@/lib/edition/guard'
-import { resolveSnapshotFile } from '@/lib/services/workspace-backup'
+import { SnapshotElsewhereError, resolveSnapshotFile } from '@/lib/services/workspace-backup'
 
 export async function GET(
   request: NextRequest,
@@ -36,7 +36,20 @@ export async function GET(
     return NextResponse.json({ error: 'Project not found' }, { status: 404 })
   }
 
-  const snapshot = await resolveSnapshotFile(projectId, backupId)
+  // A project kept in another region has its snapshots in that region's
+  // bucket, out of this process's reach: say so, rather than "not found".
+  let snapshot: Awaited<ReturnType<typeof resolveSnapshotFile>>
+  try {
+    snapshot = await resolveSnapshotFile(projectId, backupId)
+  } catch (err) {
+    if (err instanceof SnapshotElsewhereError) {
+      return NextResponse.json(
+        { error: `${err.message} Downloading one from the console is not available yet.`, code: err.code, region: err.region },
+        { status: 409 },
+      )
+    }
+    throw err
+  }
   if (!snapshot) {
     return NextResponse.json({ error: 'Snapshot not found' }, { status: 404 })
   }

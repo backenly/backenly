@@ -3733,8 +3733,18 @@ async function executeSingleAction(
 
       // ========== DATABASE BACKUPS ==========
       case 'BACKUP_DATABASE': {
-        const { backupWorkspace, snapshotForJson } = await import('@/lib/services/workspace-backup')
-        const result = await backupWorkspace(projectId)
+        // A project kept in another region is snapshotted there, as a queued
+        // job: its dump never leaves its region (lib/services/workspace-backup.ts).
+        const { requestBackup, snapshotForJson } = await import('@/lib/services/workspace-backup')
+        const outcome = await requestBackup(projectId)
+        if (outcome.kind === 'queued') {
+          return {
+            success: true,
+            message: `Snapshot queued in ${outcome.region}, where this project's data is kept. It runs within a few minutes; list the backups to see it.`,
+            data: { queued: true, jobId: outcome.jobId, region: outcome.region },
+          }
+        }
+        const result = outcome.result
         if (!result.success) return { success: false, message: `Backup failed: ${result.error}` }
         return {
           success: true,
@@ -3756,8 +3766,18 @@ async function executeSingleAction(
       }
 
       case 'RESTORE_DATABASE': {
-        const { restoreWorkspace } = await import('@/lib/services/workspace-backup')
-        const result = await restoreWorkspace(projectId, action.params.backupId)
+        // Restored where the project's data is kept, as a queued job when that
+        // is another region (lib/services/workspace-backup.ts).
+        const { requestRestore } = await import('@/lib/services/workspace-backup')
+        const outcome = await requestRestore(projectId, action.params.backupId)
+        if (outcome.kind === 'queued') {
+          return {
+            success: true,
+            message: `Restore queued in ${outcome.region}, where this project's data is kept. It has not run yet: it runs once, within a few minutes. Read the project's state after it has, before changing anything.`,
+            data: { queued: true, jobId: outcome.jobId, region: outcome.region },
+          }
+        }
+        const result = outcome.result
         if (!result.success) return { success: false, message: `Restore failed: ${result.error}` }
         return {
           success: true,
