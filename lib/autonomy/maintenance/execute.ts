@@ -54,8 +54,9 @@
  */
 
 import { prisma } from '@/lib/db'
-import { enqueue } from '@/lib/queue'
+import { REGIONAL_STATUS } from '@/lib/queue'
 import { FLAGS } from '@/lib/config/flags'
+import { queueBackfillJob } from './primitives/backfill-job'
 import { isTierAutoAllowed, type AutonomyLevel } from '../autonomy-level'
 import { approvalStillValid, isPlanStale, type MaintenancePlan } from './plan'
 import { computeCatalogFingerprint } from './resolve'
@@ -659,23 +660,20 @@ async function runStep(
     case 'backfill': {
       // Dispatched, not run. BackgroundJob owns attempts, backoff and
       // dead-lettering; looping here would be a second retry lifecycle
-      // disagreeing with the first.
-      const job = await enqueue(
-        'maintenance_backfill',
-        {
-          projectId,
-          planVersion,
-          idempotencyKey: step.idempotencyKey,
-          table: binding.table,
-          sourceColumn: binding.sourceColumn,
-          targetColumn: binding.targetColumn,
-          transform: binding.transform,
-          batchRows: binding.batchRows,
-          lockTimeoutMs: binding.lockTimeoutMs,
-          cursor: null,
-        },
-        { projectId },
-      )
+      // disagreeing with the first. Queued where the project's data is: a
+      // regional project's batches run in its region (primitives/backfill-job.ts).
+      const job = await queueBackfillJob({
+        projectId,
+        planVersion,
+        idempotencyKey: step.idempotencyKey,
+        table: binding.table,
+        sourceColumn: binding.sourceColumn,
+        targetColumn: binding.targetColumn,
+        transform: binding.transform,
+        batchRows: binding.batchRows,
+        lockTimeoutMs: binding.lockTimeoutMs,
+        cursor: null,
+      })
       return { ...base, status: 'dispatched', detail: `backfill queued as job ${job.id}`, backgroundJobId: job.id }
     }
 
@@ -768,7 +766,9 @@ export async function inspectBackgroundJob(
     .catch(() => null)
   if (!job) return { state: 'failed', detail: `background job ${jobId} no longer exists` }
 
-  if (job.status === 'failed' || job.status === 'dead_letter') {
+  // A regional project's batches end as `regional_failed` (lib/queue REGIONAL_STATUS),
+  // whose error is the platform's own sentence. Read as pending, it would be waited on forever.
+  if (job.status === 'failed' || job.status === 'dead_letter' || job.status === REGIONAL_STATUS.failed) {
     return { state: 'failed', detail: `job ${job.id} is ${job.status}: ${job.error ?? 'no error recorded'}` }
   }
   if (job.status !== 'completed') {
