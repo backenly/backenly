@@ -75,6 +75,7 @@ export async function createProject(input: ProjectCreateInput): Promise<ProjectC
     apiUrlDev: input.apiUrlDev ?? null,
     apiUrlStaging: input.apiUrlStaging ?? null,
     apiUrlProd: input.apiUrlProd ?? null,
+    region: input.region ?? null,
   })
 
   const apiKey = await createDefaultApiKey(provisioned.id, provisioned.name, input.userId)

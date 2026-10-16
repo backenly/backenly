@@ -27,6 +27,8 @@ import { JWTSecretManager } from '@/lib/services/jwtSecretManager'
 import { createEmptyGraph } from '@/lib/orchestration/backend-state-graph'
 import { currentEdition } from '@/lib/edition'
 import { generateUniqueSlug } from '@/lib/utils/slug'
+import { regionRawClient } from '@/lib/data-plane/regional'
+import { HOME_REGION, type CloudRegionId } from '@/lib/regions'
 
 export class ProjectCreationUnsupportedError extends Error {
   readonly code = 'PROJECT_CREATION_UNSUPPORTED'
@@ -59,6 +61,13 @@ export interface ProvisionInput {
   apiUrlDev?: string | null
   apiUrlStaging?: string | null
   apiUrlProd?: string | null
+  /**
+   * The region the project's data lives in (lib/regions.ts). Omitted or null
+   * is the home region, recorded as null like every project before regions.
+   * The caller names it: nothing can look it up, because the row does not
+   * exist yet, and projectRegion() reads a project with no row as home.
+   */
+  region?: CloudRegionId | null
 }
 
 export interface ProvisionedProject {
@@ -86,6 +95,12 @@ export async function createProvisionedProject(input: ProvisionInput): Promise<P
   // project" an invariant instead of a convention.
   if (currentEdition() === 'single-tenant') throw new ProjectCreationUnsupportedError()
 
+  // The database the schema goes in: the region's. Resolved before anything is
+  // written, so a region this server has no connection to refuses the project
+  // rather than leaving a row whose schema exists nowhere.
+  const region = input.region ?? HOME_REGION
+  const db = regionRawClient(region)
+
   const id = randomUUID()
 
   const slug =
@@ -108,6 +123,7 @@ export async function createProvisionedProject(input: ProvisionInput): Promise<P
         apiUrlDev: input.apiUrlDev ?? null,
         apiUrlStaging: input.apiUrlStaging ?? null,
         apiUrlProd: input.apiUrlProd ?? null,
+        region: region === HOME_REGION ? null : region,
         // New Cloud projects start protected: a coding agent changes the schema
         // on a preview branch and production gets it through a reviewed merge.
         // Never on a self-hosted install, which has no branches to use instead.
@@ -123,7 +139,7 @@ export async function createProvisionedProject(input: ProvisionInput): Promise<P
   })
 
   const postgresSchema = workspaceSchemaName(id)
-  await prisma.$executeRawUnsafe(`CREATE SCHEMA IF NOT EXISTS "${postgresSchema.replace(/"/g, '""')}"`)
+  await db.$executeRawUnsafe(`CREATE SCHEMA IF NOT EXISTS "${postgresSchema.replace(/"/g, '""')}"`)
 
   await prisma.workspace.create({
     data: {

@@ -1353,6 +1353,62 @@ describe('storage is measured in the project’s region', () => {
   })
 })
 
+describe('a project created in another region', () => {
+  const savedEdition = process.env.BACKENLY_EDITION
+  const created: string[] = []
+  const schemaIn = async (url: string, schema: string) =>
+    (await rowsIn<{ n: number }>(url, `SELECT count(*)::int AS n FROM information_schema.schemata WHERE schema_name = '${schema}'`))[0].n
+
+  beforeAll(() => {
+    // Creating projects is Backenly Cloud's; the single-tenant edition refuses it.
+    process.env.BACKENLY_EDITION = 'cloud'
+  })
+
+  afterAll(async () => {
+    if (savedEdition === undefined) delete process.env.BACKENLY_EDITION
+    else process.env.BACKENLY_EDITION = savedEdition
+    for (const id of created) {
+      await run(homeUrl(), `DROP SCHEMA IF EXISTS "${schemaOf(id)}" CASCADE`).catch(() => {})
+    }
+    await prisma.project.deleteMany({ where: { id: { in: created } } }).catch(() => {})
+  })
+
+  it('is refused before anything is written when this server cannot reach the region', async () => {
+    // Loaded here rather than at the top, so this block adds no import lines.
+    const { createProject } = await import('@/lib/edition/oss/project-lifecycle')
+    delete process.env[REGION_VARIABLE]
+    const name = `region-create-${randomUUID()}`
+    await expect(createProject({ name, userId: ownerId, region: 'us-east-1' })).rejects.toMatchObject({
+      code: 'REGION_NOT_CONFIGURED',
+    })
+    expect(await prisma.project.count({ where: { name } })).toBe(0)
+  })
+
+  it('records the region and creates its schema in the region’s database only', async () => {
+    const { createProject } = await import('@/lib/edition/oss/project-lifecycle')
+    process.env[REGION_VARIABLE] = regionalUrl
+    const { project } = await createProject({ name: `region-create-${randomUUID()}`, userId: ownerId, region: 'us-east-1' })
+    created.push(project.id)
+
+    const row = await prisma.project.findUnique({ where: { id: project.id }, select: { region: true } })
+    expect(row?.region).toBe('us-east-1')
+    expect(await projectRegion(project.id)).toBe('us-east-1')
+    expect(await schemaIn(regionalUrl, schemaOf(project.id))).toBe(1)
+    expect(await schemaIn(homeUrl(), schemaOf(project.id))).toBe(0)
+  })
+
+  it('creates a project with no region in the home region, recorded as before', async () => {
+    const { createProject } = await import('@/lib/edition/oss/project-lifecycle')
+    const { project } = await createProject({ name: `region-create-${randomUUID()}`, userId: ownerId })
+    created.push(project.id)
+
+    const row = await prisma.project.findUnique({ where: { id: project.id }, select: { region: true } })
+    expect(row?.region).toBeNull()
+    expect(await schemaIn(homeUrl(), schemaOf(project.id))).toBe(1)
+    expect(await schemaIn(regionalUrl, schemaOf(project.id))).toBe(0)
+  })
+})
+
 describe('a project recording a region this build does not know', () => {
   it('is refused, never read as the home region', async () => {
     await expect(projectRegion(unknownProject)).rejects.toMatchObject({ code: 'UNKNOWN_REGION' })
