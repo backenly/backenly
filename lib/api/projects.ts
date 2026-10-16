@@ -26,6 +26,11 @@ export interface Project {
   pausedAt?: Date | string | null
   /** The Backenly Cloud region holding the project's data (lib/regions.ts). Null is the home region. */
   region?: string | null
+  /**
+   * `{origin}/api/v1/{id}` in the project's region (lib/data-plane/regional.ts
+   * regionApiOrigin). Null when the server has no API address for that region.
+   */
+  apiBaseUrl?: string | null
   metrics?: {
     totalFunctions: number
     totalTables: number

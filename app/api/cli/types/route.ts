@@ -27,6 +27,7 @@ import { readWorkspaceSchema } from '@/lib/typegen/schema-reader'
 import { generateTypes } from '@/lib/typegen/type-generator'
 import { generateTypedClient } from '@/lib/typegen/client-generator'
 import { generateOpenApiSpec } from '@/lib/typegen/openapi-generator'
+import { projectApiOrigin } from '@/lib/data-plane/regional'
 
 const ENDPOINT = '/api/cli/types'
 
@@ -69,6 +70,11 @@ export async function GET(request: NextRequest) {
     return NextResponse.json(spec, { status: 200 })
   }
 
+  // Where the generated code calls: the project's own API address, its
+  // region's for a project outside the home region.
+  const apiOrigin = async () =>
+    projectApiOrigin(auth.projectId, (await import('@/lib/services/public-url')).resolvePublicBaseUrl(request))
+
   try {
     const schema = await readWorkspaceSchema(auth.projectId)
     const types = generateTypes(schema)
@@ -86,7 +92,7 @@ export async function GET(request: NextRequest) {
         headers: { ...baseHeaders, 'Content-Type': 'text/plain; charset=utf-8' },
       })
     } else if (format === 'client') {
-      const client = generateTypedClient(schema, types, { projectId: auth.projectId })
+      const client = generateTypedClient(schema, types, { projectId: auth.projectId, apiUrl: await apiOrigin() })
       res = new NextResponse(client.source, {
         status: 200,
         headers: { ...baseHeaders, 'Content-Type': 'text/plain; charset=utf-8' },
@@ -98,7 +104,7 @@ export async function GET(request: NextRequest) {
       })
       const spec = generateOpenApiSpec(schema, {
         title: project?.name ? `${project.name} API` : 'Backenly Project API',
-        serverUrl: `${(await import('@/lib/services/public-url')).resolvePublicBaseUrl(request)}/api/v1/${auth.projectId}`,
+        serverUrl: `${await apiOrigin()}/api/v1/${auth.projectId}`,
       })
       res = NextResponse.json(spec, { status: 200, headers: baseHeaders })
     }

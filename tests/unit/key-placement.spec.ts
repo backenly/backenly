@@ -18,6 +18,14 @@
  * tests/integration/key-placement-surfaces.spec.ts.
  */
 
+// The workflow guide names the project's API address, which reads the
+// project's region from the platform database. This suite has none; a
+// home-region project's address is the deployment's origin.
+jest.mock('@/lib/data-plane/regional', () => ({
+  ...jest.requireActual('@/lib/data-plane/regional'),
+  projectApiOrigin: async (_projectId: string, homeOrigin: string) => homeOrigin,
+}))
+
 import {
   MCP_KEY_HINT,
   MCP_KEY_IN_APP,

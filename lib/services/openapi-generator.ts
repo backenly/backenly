@@ -11,6 +11,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
+import { projectApiOrigin, unlessRegionError } from '@/lib/data-plane/regional'
 
 // ─── Type helpers ─────────────────────────────────────────────────────────────
 
@@ -66,12 +67,13 @@ export async function generateOpenApiSpec(
     // resolves against, so the spec cannot drift from what is actually served.
     (async () => {
       const { listExposedTables, getTableSchema } = await import('@/lib/mcp/schema-introspection')
-      const exposed = await listExposedTables(projectId, scope).catch(() => [] as Array<{ name: string }>)
+      // A region this server cannot reach is an error, not a project with no tables.
+      const exposed = await listExposedTables(projectId, scope).catch(unlessRegionError([] as Array<{ name: string }>))
       return Promise.all(
         exposed.map(async t => ({
           table: {
             name: t.name,
-            schema: await getTableSchema(projectId, t.name, scope).catch(() => null),
+            schema: await getTableSchema(projectId, t.name, scope).catch(unlessRegionError(null)),
           },
         })),
       )
@@ -88,7 +90,9 @@ export async function generateOpenApiSpec(
     }),
   ])
 
-  const serverUrl = baseUrl
+  // `baseUrl` is this deployment's public origin; the server is the project's
+  // own API address, which for a project in another region is that region's.
+  const serverUrl = (baseUrl ? await projectApiOrigin(projectId, baseUrl) : null)
     || project?.apiUrlProd
     || project?.apiUrlDev
     || `https://api.backenly.com`
