@@ -3102,9 +3102,11 @@ export async function dispatchTool(
           take: 25,
         }),
         listPendingAgentApprovals(ctx.projectId, 10).catch(() => []),
-        prisma.schemaDriftEvent.count({
-          where: { projectId: ctx.projectId, status: 'pending' },
-        }).catch(() => 0),
+        // In the project's region, where they are captured. Null when they could
+        // not be read: "0 external changes" is a claim, not a default.
+        (await import('@/lib/data-plane/regional')).projectDriftEvents(ctx.projectId)
+          .then((events) => events.count({ where: { projectId: ctx.projectId, status: 'pending' } }))
+          .catch(() => null),
         prisma.healthFinding.findMany({
           where: { projectId: ctx.projectId, status: 'auto_fixed', fixAppliedAt: { gte: since24h } },
           orderBy: { fixAppliedAt: 'desc' },
@@ -3220,6 +3222,7 @@ export async function dispatchTool(
           appliedUnconfirmedLast24h: unconfirmedRows,
           /** Which checks the loop's last pass could run. */
           sensors,
+          /** Schema changes over a direct connection not yet adopted; null when unreadable. */
           pendingDriftEvents: driftPending,
           latestRestorePoint: snapshot,
         },

@@ -348,6 +348,15 @@ REVOKE ALL ON FUNCTION public.backenly_direct_sync_schema(text, text, text, text
 -- psql-as-postgres are never recorded. The insert is wrapped so a capture
 -- failure can NEVER break the developer's DDL statement. No recursion risk:
 -- the function only INSERTs (never DDL), and INSERT does not fire event triggers.
+--
+-- A failed capture is not silent, though: it raises a WARNING tagged
+-- BACKENLY_DRIFT_CAPTURE_FAILED with the SQLSTATE only (the developer's client
+-- sees the tag, not platform internals). The database log carries it; on RDS
+-- that log is exported to CloudWatch, where a metric filter alarms on the tag,
+-- and lib/autonomy/drift-event-upkeep.ts checks the apparatus hourly.
+--
+-- capturedAt is written in UTC. The column has no time zone, the application
+-- reads it as UTC (Prisma), and now() alone would store the session's local time.
 CREATE OR REPLACE FUNCTION public.backenly_capture_ddl() RETURNS event_trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public
 AS $fn$
@@ -370,12 +379,14 @@ BEGIN
       r.object_type,
       r.object_identity,
       v_schema,
-      now(),
+      now() AT TIME ZONE 'UTC',
       'pending'
     );
   END LOOP;
 EXCEPTION WHEN OTHERS THEN
-  NULL; -- never break user DDL because bookkeeping failed
+  -- Never break the developer's DDL because bookkeeping failed, and never
+  -- lose the event without a trace either (see the note above).
+  RAISE WARNING 'BACKENLY_DRIFT_CAPTURE_FAILED (SQLSTATE %)', SQLSTATE;
 END
 $fn$;
 
@@ -400,12 +411,12 @@ BEGIN
       r.object_type,
       r.object_identity,
       r.schema_name,
-      now(),
+      now() AT TIME ZONE 'UTC',
       'pending'
     );
   END LOOP;
 EXCEPTION WHEN OTHERS THEN
-  NULL;
+  RAISE WARNING 'BACKENLY_DRIFT_CAPTURE_FAILED (SQLSTATE %)', SQLSTATE;
 END
 $fn$;
 

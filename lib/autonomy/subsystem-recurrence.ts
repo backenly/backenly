@@ -42,6 +42,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
+import { projectDriftEvents } from '@/lib/data-plane/regional'
 import { isVerifiedFix } from '@/lib/core/fix-verification'
 import type { RawFinding, FindingSeverity } from '@/lib/core/types'
 import { FLAGS } from '@/lib/config/flags'
@@ -298,11 +299,12 @@ export async function evaluateSubsystemRecurrence(
       select: { id: true, title: true, affectedServices: true, startedAt: true },
       take: 200,
     }),
-    prisma.schemaDriftEvent.findMany({
+    // In the project's region, where they are captured.
+    projectDriftEvents(projectId).then((events) => events.findMany({
       where: { projectId, capturedAt: { gte: since } },
       select: { objectIdentity: true },
       take: 500,
-    }),
+    })),
   ])
 
   // ── Attribution coverage, measured on the repairs that matter ──────────────

@@ -15,6 +15,7 @@
  *   workspaceRawClient(id)           raw SQL on the project's database
  *   projectPostgrest(id)             the PostgREST serving the project's region
  *   projectApiOrigin(id, home)       the address the project's API is called at
+ *   projectDriftEvents(id)           the schema drift events, kept in the region
  *
  * The home region keeps the variables it always had: DATABASE_URL, DIRECT_URL,
  * BACKUP_DATABASE_URL, BACKENLY_ADMIN_DATABASE_URL, POSTGREST_URL and
@@ -47,7 +48,7 @@
 import { PrismaClient } from '@prisma/client'
 import { Pool, type PoolConfig } from 'pg'
 import { prisma } from '@/lib/db/prisma'
-import { HOME_REGION, findRegion, type CloudRegionId } from '@/lib/regions'
+import { CLOUD_REGIONS, HOME_REGION, findRegion, type CloudRegionId } from '@/lib/regions'
 
 /**
  * Which credential a caller needs. Each region has its own of every kind, for
@@ -276,6 +277,18 @@ export async function projectApiOrigin(projectId: string, homeOrigin: string): P
   return regionApiOrigin(await projectRegion(projectId), homeOrigin, { projectId })
 }
 
+/**
+ * The regions this process holds an application database connection for: the
+ * home region always, any other only when its DATABASE_URL_<REGION> is set.
+ * For work about a region rather than a project, such as its drift-event
+ * upkeep. Only configuration is checked; nothing is connected to.
+ */
+export function connectedRegions(env: Env = process.env): CloudRegionId[] {
+  return CLOUD_REGIONS.map((region) => region.id).filter(
+    (region) => region === HOME_REGION || regionDatabaseUrl(region, 'app', env) !== undefined,
+  )
+}
+
 /** A project this process cannot reach, and why. */
 export interface UnreachableProject {
   projectId: string
@@ -329,7 +342,8 @@ export async function partitionReachable<T extends { id: string }>(
 /**
  * Raw SQL against a project's database. Narrowed to the raw methods because a
  * regional database holds workspace schemas only: the platform tables a model
- * accessor would reach are not there.
+ * accessor would reach are not there. (The one exception, the drift events,
+ * has its own accessor: projectDriftEvents.)
  */
 export type WorkspaceRawClient = Pick<
   PrismaClient,
@@ -348,6 +362,11 @@ const regionalClients = new Map<CloudRegionId, PrismaClient>()
  * PostgREST registry. A project's own queries go through workspaceRawClient.
  */
 export function regionRawClient(region: CloudRegionId, projectId?: string): WorkspaceRawClient {
+  return regionClient(region, projectId)
+}
+
+/** The full client for a region's database. Private: see WorkspaceRawClient. */
+function regionClient(region: CloudRegionId, projectId?: string): PrismaClient {
   if (region === HOME_REGION) return prisma
 
   const url = requireRegionDatabaseUrl(region, 'app', { projectId })
@@ -362,6 +381,26 @@ export function regionRawClient(region: CloudRegionId, projectId?: string): Work
 /** Raw SQL against the database holding a project's data, in its region. */
 export async function workspaceRawClient(projectId: string): Promise<WorkspaceRawClient> {
   return regionRawClient(await projectRegion(projectId), projectId)
+}
+
+/**
+ * The schema drift events of a region, and of a project.
+ *
+ * The one platform-shaped table every regional database holds. The DDL-capture
+ * event triggers (scripts/setup-direct-access.sql) record each statement a
+ * direct-access role runs into public.schema_drift_events in the database that
+ * ran it, which for a project outside the home region is that region's
+ * (founders, 2026-10-16: the events stay there). The regional table is created
+ * by scripts/sql/schema-drift-events.sql, kept identical to the Prisma model, so
+ * the model's accessor reads it as it reads the home one. No other model may be
+ * reached on a regional client.
+ */
+export function regionDriftEvents(region: CloudRegionId): PrismaClient['schemaDriftEvent'] {
+  return regionClient(region).schemaDriftEvent
+}
+
+export async function projectDriftEvents(projectId: string): Promise<PrismaClient['schemaDriftEvent']> {
+  return regionClient(await projectRegion(projectId), projectId).schemaDriftEvent
 }
 
 /** The PostgREST serving a region's projects, and the secret its tokens are signed with. */
