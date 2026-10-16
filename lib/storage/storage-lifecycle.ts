@@ -266,10 +266,12 @@ export async function runLifecycleCleanup(
             })
           )
           
-          // Hard delete from database
+          // Hard delete from database, and the names its region kept for it
           await prisma.storageFile.delete({
             where: { id: file.id },
           })
+          const { forgetFileNames } = await import('@/lib/storage/file-names')
+          await forgetFileNames(file.projectId, [file.id])
         }
         
         result.deletedSoftDeletes++

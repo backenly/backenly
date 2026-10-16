@@ -7,6 +7,7 @@ import { storageService } from '@/lib/services/storage'
 import { prisma } from '@/lib/db'
 import { isStorageUnavailable } from '@/lib/storage/errors'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
+import { withFileName } from '@/lib/storage/file-names'
 
 /**
  * GET /v1/{projectId}/storage/files/{fileId}
@@ -79,7 +80,8 @@ async function handleGET(
       url,
       size: Number(row.size),
       contentType: row.mimeType,
-      name: row.name,
+      // A regional project's name is kept in its region (lib/storage/file-names.ts).
+      name: (await withFileName(context.projectId, { id: params.fileId, name: row.name })).name,
     })
   } catch (error: any) {
     if (isStorageUnavailable(error)) {

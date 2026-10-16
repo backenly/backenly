@@ -41,6 +41,9 @@ jest.mock('@/lib/ai/llm', () => ({
   ...jest.requireActual('@/lib/ai/llm'),
   generate: (...args: unknown[]) => mockGenerate(...args),
 }))
+// A regional bucket's client signs with its task role's credentials, which a test
+// has none of, so the stored-file tests' presigned links are stubbed.
+jest.mock('@aws-sdk/s3-request-presigner', () => ({ getSignedUrl: async () => 'https://presigned.example.test/object' }))
 
 import { prisma } from '@/lib/db'
 import { loadHistory, saveMessages } from '@/app/api/ai/chat/pipeline/conversation-store'
@@ -52,6 +55,7 @@ import { failureWithoutReply, pruneRegionalBodies } from '@/lib/data-plane/regio
 import { CURSOR_NOT_KEPT, queueBackfillJob, type BackfillJobPayload } from '@/lib/autonomy/maintenance/primitives/backfill-job'
 import { inspectBackgroundJob } from '@/lib/autonomy/maintenance/execute'
 import { processRegionalJobs } from '@/lib/queue/worker'
+import { executeAction } from '@/lib/ai/minimal-executor'
 import {
   ERROR_KEPT_IN_REGION,
   deleteFunctionRuns,
@@ -747,6 +751,104 @@ describe('a maintenance backfill', () => {
     }
     expect(await runRegionUntilIdle()).toBeGreaterThan(0)
     expect((await prisma.backgroundJob.findUniqueOrThrow({ where: { id: firstId } })).status).toBe('completed')
+  })
+})
+
+// ── Stored files ─────────────────────────────────────────────────────────────
+
+describe('a stored file', () => {
+  // An end user's own words, in its name.
+  const NAME = `passport-${randomBytes(3).toString('hex')}-jane.pdf`
+  const PDF = () => ({ name: NAME, buffer: Buffer.from('%PDF-1.4 fixture'), mimeType: 'application/pdf' })
+  const ENV: Record<string, string> = {
+    STORAGE_S3_BUCKET: 'home-files-test',
+    STORAGE_S3_REGION: 'ap-south-1',
+    STORAGE_S3_ACCESS_KEY: 'files-suite-not-a-real-key',
+    STORAGE_S3_SECRET_KEY: 'files-suite-not-a-real-secret',
+    STORAGE_S3_BUCKET_US_EAST_1: 'virginia-files-test',
+  }
+  const saved: Record<string, string | undefined> = {}
+  let send: jest.SpyInstance
+  let svc: any
+  let bucketId = ''
+  let homeBucketId = ''
+  let fileId = ''
+  const rowText = (row: { name: string; originalName: string; path: string; metadata: unknown }) =>
+    [row.name, row.originalName, row.path, JSON.stringify(row.metadata ?? null)].join(' ')
+
+  beforeAll(async () => {
+    for (const [k, v] of Object.entries(ENV)) {
+      saved[k] = process.env[k]
+      process.env[k] = v
+    }
+    // The bytes go nowhere: what is under test is what the rows and the region keep.
+    const { S3Client } = await import('@aws-sdk/client-s3')
+    send = jest.spyOn(S3Client.prototype, 'send').mockResolvedValue({} as never)
+    const { S3StorageService } = await import('@/lib/services/s3Storage')
+    svc = new S3StorageService()
+    bucketId = (
+      await prisma.storageBucket.create({ data: { name: 'uploads', projectId: regionalProject, overwriteStrategy: 'deny' }, select: { id: true } })
+    ).id
+    homeBucketId = (await prisma.storageBucket.create({ data: { name: 'uploads', projectId: homeProject }, select: { id: true } })).id
+  })
+
+  afterAll(async () => {
+    send.mockRestore()
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+    await prisma.storageFile.deleteMany({ where: { projectId: { in: [regionalProject, homeProject] } } })
+    await prisma.storageBucket.deleteMany({ where: { projectId: { in: [regionalProject, homeProject] } } })
+    await run(regionalUrl, `DELETE FROM public.regional_bodies WHERE "kind" = 'storage_file'`)
+  })
+
+  it('keeps a regional file’s name in the region, and shows and finds it from there', async () => {
+    const stored = await svc.uploadFile(bucketId, PDF(), { projectId: regionalProject })
+    fileId = stored.id
+    expect(stored.name).toBe(NAME)
+
+    const row = await prisma.storageFile.findUniqueOrThrow({ where: { id: fileId } })
+    expect(row.name).toMatch(/^f_[A-Za-z0-9_-]{32}\.pdf$/)
+    expect(rowText(row)).not.toMatch(/jane|passport/)
+    expect((await regionalBodyOf('storage_file', fileId))?.payload).toEqual({ name: NAME, originalName: NAME })
+    const [mentions] = await rowsIn<{ n: string }>(
+      homeUrl(),
+      `SELECT count(*)::text AS n FROM storage_files WHERE name LIKE $1 OR "originalName" LIKE $1 OR path LIKE $1`,
+      ['%jane%'],
+    )
+    expect(mentions.n).toBe('0')
+
+    expect((await svc.listFiles(bucketId, regionalProject, {})).map((f: { name: string }) => f.name)).toEqual([NAME])
+    expect((await svc.listFiles(bucketId, regionalProject, { search: 'JANE' })).map((f: { id: string }) => f.id)).toEqual([fileId])
+    expect(await svc.countFiles(bucketId, regionalProject, 'jane')).toBe(1)
+    expect(await svc.countFiles(bucketId, regionalProject, 'nobody')).toBe(0)
+
+    // The agent sees the same names, and finds a file by its name.
+    const listed: any = await executeAction(
+      { action: 'LIST_FILES', params: { bucketName: 'uploads', search: 'jane' } } as any,
+      regionalProject,
+      undefined,
+      0,
+      undefined,
+      false,
+    )
+    expect(listed.data.files.map((f: { name: string }) => f.name)).toEqual([NAME])
+  })
+
+  it('still refuses a second file of the same name in a bucket that denies overwrites', async () => {
+    await expect(svc.uploadFile(bucketId, PDF(), { projectId: regionalProject })).rejects.toMatchObject({ code: 'FILE_EXISTS' })
+  })
+
+  it('keeps a home file’s name on its row, as before', async () => {
+    const stored = await svc.uploadFile(homeBucketId, PDF(), { projectId: homeProject })
+    expect((await prisma.storageFile.findUniqueOrThrow({ where: { id: stored.id } })).name).toBe(NAME)
+    expect(await regionalBodyOf('storage_file', stored.id)).toBeUndefined()
+  })
+
+  it('forgets a regional file’s name when the file is deleted for good', async () => {
+    await svc.permanentlyDeleteFile(fileId, regionalProject)
+    expect(await regionalBodyOf('storage_file', fileId)).toBeUndefined()
   })
 })
 

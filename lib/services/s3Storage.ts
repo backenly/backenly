@@ -37,6 +37,7 @@ import { projectRegion } from '@/lib/data-plane/regional'
 import { StorageUnavailableError } from '@/lib/storage/errors'
 import { projectRestriction } from '@/lib/usage/restrictions'
 import { signCdnUrl, signedCdnConfig } from '@/lib/storage/cdn'
+import { fileIdsNamed, forgetFileNames, keepFileNames, storedFileName, withFileName, withFileNames } from '@/lib/storage/file-names'
 
 export class S3StorageService implements StorageService {
   private s3Client: S3Client
@@ -229,10 +230,15 @@ export class S3StorageService implements StorageService {
       await this.deleteFile(file.id, projectId)
     }
 
+    // Every row of the bucket goes with it, deleted ones included, and so do
+    // the names the region kept for them.
+    const rows = await prisma.storageFile.findMany({ where: { bucketId }, select: { id: true } })
+
     // Delete bucket from database
     await prisma.storageBucket.delete({
       where: { id: bucketId },
     })
+    await forgetFileNames(projectId, rows.map((r) => r.id))
 
     console.log(`[S3Storage] Deleted bucket: ${bucket.name}`)
   }
@@ -334,10 +340,12 @@ export class S3StorageService implements StorageService {
     assertFileSize(fileSize, { bucketMaxBytes: bucket.maxFileSizeBytes })
 
     // ============ OVERWRITE STRATEGY HANDLING ============
+    // A regional project's rows hold a stand-in for each name, so a name is
+    // looked up by its stand-in (lib/storage/file-names.ts).
     const existingFile = await prisma.storageFile.findFirst({
       where: {
         bucketId,
-        name: file.name,
+        name: await storedFileName(options.projectId, file.name),
         deletedAt: null,
       },
     })
@@ -378,7 +386,7 @@ export class S3StorageService implements StorageService {
             const exists = await prisma.storageFile.findFirst({
               where: {
                 bucketId,
-                name: candidateName,
+                name: await storedFileName(options.projectId, candidateName),
                 deletedAt: null,
               },
             })
@@ -423,6 +431,11 @@ export class S3StorageService implements StorageService {
       throw new Error(`Failed to upload file to S3: ${error instanceof Error ? error.message : 'Unknown error'}`)
     }
 
+    // The names, kept in the project's region before its row exists when the
+    // project is kept there; the row then holds their stand-ins.
+    const fileRowId = crypto.randomUUID()
+    const stored = await keepFileNames(options.projectId, fileRowId, { name: finalFileName, originalName })
+
     // Create database record and update project storage usage
     const storageFile = await prisma.$transaction(async (tx) => {
       // If strategy is 'replace', soft delete the existing file
@@ -447,9 +460,10 @@ export class S3StorageService implements StorageService {
 
       const newFile = await tx.storageFile.create({
         data: {
+          id: fileRowId,
           bucketId,
-          name: finalFileName,
-          originalName,
+          name: stored.name,
+          originalName: stored.originalName,
           version,
           path: s3Key, // S3 key is stored as path
           size: BigInt(file.buffer.length),
@@ -483,11 +497,11 @@ export class S3StorageService implements StorageService {
     // Generate URL
     const url = await this.getFileUrl(storageFile.id, options.projectId, 3600)
 
-    console.log(`[S3Storage] Uploaded: ${finalFileName} (${fileSize} bytes) to ${s3Key}`)
+    console.log(`[S3Storage] Uploaded: ${storageFile.name} (${fileSize} bytes) to ${s3Key}`)
 
     return {
       id: storageFile.id,
-      name: storageFile.name,
+      name: finalFileName,
       path: storageFile.path,
       url,
       size: storageFile.size, // Keep as BigInt
@@ -505,10 +519,13 @@ export class S3StorageService implements StorageService {
     }
     if (bucketId) where.bucketId = bucketId
     if (options?.search) {
-      where.name = { contains: options.search, mode: 'insensitive' }
+      // A regional project's names are in its region, so it is searched there.
+      const ids = await fileIdsNamed(projectId, options.search, 'contains')
+      if (ids) where.id = { in: ids }
+      else where.name = { contains: options.search, mode: 'insensitive' }
     }
 
-    const files = await prisma.storageFile.findMany({
+    const rows = await prisma.storageFile.findMany({
       where,
       include: {
         bucket: {
@@ -521,6 +538,7 @@ export class S3StorageService implements StorageService {
       take: options?.limit || 100,
       skip: options?.offset || 0,
     })
+    const files = await withFileNames(projectId, rows)
 
     return Promise.all(
       files.map(async (file) => ({
@@ -547,7 +565,11 @@ export class S3StorageService implements StorageService {
     }
     const where: any = { projectId, deletedAt: null }
     if (bucketId) where.bucketId = bucketId
-    if (search) where.name = { contains: search, mode: 'insensitive' }
+    if (search) {
+      const ids = await fileIdsNamed(projectId, search, 'contains')
+      if (ids) where.id = { in: ids }
+      else where.name = { contains: search, mode: 'insensitive' }
+    }
     return prisma.storageFile.count({ where })
   }
 
@@ -581,7 +603,7 @@ export class S3StorageService implements StorageService {
         path: file.path,
         buffer,
         mimeType: file.mimeType,
-        name: file.name,
+        name: (await withFileName(projectId, file)).name,
       }
     } catch (error) {
       // NOT `return null`. See the local driver and lib/storage/errors.ts: the
@@ -858,10 +880,11 @@ export class S3StorageService implements StorageService {
       console.error(`[S3Storage] Failed to delete from S3: ${file.path}`, error)
     }
 
-    // Delete database record
+    // Delete database record, and the names the region kept for it
     await prisma.storageFile.delete({
       where: { id: fileId },
     })
+    await forgetFileNames(projectId, [fileId])
   }
 
   /**
@@ -908,6 +931,7 @@ export class S3StorageService implements StorageService {
         await prisma.storageFile.delete({
           where: { id: file.id },
         })
+        await forgetFileNames(file.projectId, [file.id])
 
         successCount++
         console.log(`[S3Storage Cleanup] Permanently deleted: ${file.name}`)

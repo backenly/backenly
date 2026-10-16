@@ -10488,16 +10488,23 @@ async function executeListFiles(params: any, projectId: string): Promise<Executi
       }
     }
 
-    const files = await prisma.storageFile.findMany({
+    // A regional project's names are kept in its region, so they are searched
+    // there and read back from there (lib/storage/file-names.ts).
+    const { fileIdsNamed, withFileNames } = await import('@/lib/storage/file-names')
+    const term = prefix || search
+    const namedIds = term ? await fileIdsNamed(projectId, term, prefix ? 'starts' : 'contains') : null
+    const rows = await prisma.storageFile.findMany({
       where: {
         projectId,
         ...(bucket ? { bucketId: bucket.id } : {}),
         deletedAt: null,
-        ...(prefix
-          ? { name: { startsWith: prefix } }
-          : search
-            ? { name: { contains: search, mode: 'insensitive' } }
-            : {}),
+        ...(namedIds
+          ? { id: { in: namedIds } }
+          : prefix
+            ? { name: { startsWith: prefix } }
+            : search
+              ? { name: { contains: search, mode: 'insensitive' } }
+              : {}),
       },
       take: limit,
       orderBy: { createdAt: 'desc' },
@@ -10511,6 +10518,7 @@ async function executeListFiles(params: any, projectId: string): Promise<Executi
         bucket: { select: { name: true } },
       },
     })
+    const files = await withFileNames(projectId, rows)
 
     if (files.length === 0) {
       return {
@@ -10570,12 +10578,16 @@ async function resolveStorageFile(
     bucket: { select: { name: true, accessPolicy: true } },
   } as const
 
+  // A regional project's rows hold a stand-in for each name: a name is found
+  // by its stand-in, and the file is handed back with its real name.
+  const { storedFileName, withFileName } = await import('@/lib/storage/file-names')
+
   if (fileId) {
     const file = await prisma.storageFile.findFirst({
       where: { id: fileId, projectId, deletedAt: null },
       select: fileSelect,
     })
-    return file ? { file } : { error: `No file with id "${fileId}" in this project.` }
+    return file ? { file: await withFileName(projectId, file) } : { error: `No file with id "${fileId}" in this project.` }
   }
 
   if (!fileName) {
@@ -10595,12 +10607,12 @@ async function resolveStorageFile(
   }
 
   const file = await prisma.storageFile.findFirst({
-    where: { projectId, name: fileName, deletedAt: null, ...(bucketId ? { bucketId } : {}) },
+    where: { projectId, name: await storedFileName(projectId, fileName), deletedAt: null, ...(bucketId ? { bucketId } : {}) },
     select: fileSelect,
     orderBy: { createdAt: 'desc' },
   })
   return file
-    ? { file }
+    ? { file: await withFileName(projectId, file) }
     : {
         error: `File "${fileName}"${bucketName ? ` in bucket "${bucketName}"` : ''} not found. Run LIST_FILES first.`,
       }
