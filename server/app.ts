@@ -21,6 +21,7 @@ import { meterNodeResponse } from '@/lib/usage/egress'
 import { branchIdForRequest, refuseBranchKeyOffDataPlane } from '@/lib/branches/key-scope'
 import { refuseMisplacedKey } from '@/lib/security/key-placement'
 import { isRegionError } from '@/lib/data-plane/regional'
+import { misdirection } from '@/lib/data-plane/serving'
 
 const app = express()
 
@@ -140,6 +141,24 @@ app.use(['/api/v1/:projectId', '/api/v2/:projectId'], (req, res, next) => {
   })
   next()
 })
+
+// ── Each region's projects are served only in that region ─────────────────────
+// Before the serving gate, the Next proxy and every router: a project of another
+// region is answered 421 WRONG_REGION with its own address, and nothing about it
+// is looked up or checked here. Behind Next the same check has already run
+// (lib/traffic/recorded-v1.ts); on a single-box layout this is the only one.
+// lib/data-plane/serving.ts.
+app.use(['/api/v1/:projectId', '/api/v2/:projectId'], asyncRoute(async (req, res, next) => {
+  const projectId = /^\/api\/v[12]\/([^/?#]+)/.exec(req.originalUrl)?.[1]
+  if (projectId) {
+    const refusal = await misdirection(projectId, process.env.NEXT_PUBLIC_APP_URL || 'https://backenly.com')
+    if (refusal) {
+      res.status(refusal.status).json(refusal.body)
+      return
+    }
+  }
+  next()
+}))
 
 // ── Project serving gate ───────────────────────────────────────────────────────
 // Before the Next proxy and before every router, because it is the one check

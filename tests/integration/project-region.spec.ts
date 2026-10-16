@@ -462,7 +462,14 @@ describe('the v1 data routes read the project’s own database', () => {
       { params: Promise.resolve({ projectId: regionalProject }) },
     )
 
+  // A regional project's data routes are served by its region's own service
+  // (lib/data-plane/serving.ts); this process plays that service.
+  afterAll(() => {
+    delete process.env.BACKENLY_SERVICE_REGION
+  })
+
   beforeAll(async () => {
+    process.env.BACKENLY_SERVICE_REGION = 'us-east-1'
     const minted = mintKey({ keyType: 'public', serviceRole: true })
     key = minted.key
     await prisma.apiKey.create({
@@ -635,6 +642,8 @@ describe('realtime listens and notifies on the project’s own database', () => 
       },
     })
     const sub = await subscribe(regionalProject)
+    // Served by the region's own service, which this process plays here.
+    process.env.BACKENLY_SERVICE_REGION = 'us-east-1'
     try {
       const res = await broadcastRoute(
         new NextRequest(`https://backenly.test/api/v1/${regionalProject}/broadcast`, {
@@ -647,6 +656,7 @@ describe('realtime listens and notifies on the project’s own database', () => 
       expect(res.status).toBe(200)
       expect(await sub.event()).toMatchObject({ type: 'broadcast', channel: 'room', payload: { hello: 'virginia' } })
     } finally {
+      delete process.env.BACKENLY_SERVICE_REGION
       sub.unsubscribe()
     }
   })
@@ -998,24 +1008,49 @@ describe('background work skips what it cannot reach, and says so', () => {
   })
 
   it('records each skip once an hour per project, and leaves reachable projects alone', async () => {
-    delete process.env[REGION_VARIABLE]
+    // As Virginia's own service with no connection to Virginia's database: its
+    // project is the one this process must handle, and it cannot reach it. The
+    // home project is Mumbai's service's, so it is not this pass's at all.
+    process.env.BACKENLY_SERVICE_REGION = 'us-east-1'
+    try {
+      delete process.env[REGION_VARIABLE]
+      const targets = [{ id: homeProject }, { id: regionalProject }]
+      expect(await skipUnreachable(targets, 'test-pass')).toEqual([])
+      expect(await skipUnreachable(targets, 'test-pass')).toEqual([])
+      expect(await canReach(regionalProject, 'test-pass')).toBe(false)
+
+      const rows = await skipRows()
+      expect(rows).toHaveLength(1)
+      expect(rows[0].projectId).toBe(regionalProject)
+      expect(JSON.parse(rows[0].details ?? '{}')).toEqual({
+        reason: 'REGION_NOT_CONFIGURED',
+        region: 'us-east-1',
+        variable: REGION_VARIABLE,
+        pass: 'test-pass',
+      })
+
+      process.env[REGION_VARIABLE] = regionalUrl
+      expect(await canReach(regionalProject, 'test-pass')).toBe(true)
+    } finally {
+      delete process.env.BACKENLY_SERVICE_REGION
+    }
+  })
+
+  it('leaves another region’s projects to that region, even when it could reach them, and records nothing', async () => {
+    await prisma.auditLog.deleteMany({ where: { action: AUTONOMY_SKIPPED, projectId: { in: [homeProject, regionalProject] } } })
+    process.env[REGION_VARIABLE] = regionalUrl
+    delete process.env.BACKENLY_SERVICE_REGION
     const targets = [{ id: homeProject }, { id: regionalProject }]
-    expect(await skipUnreachable(targets, 'test-pass')).toEqual([{ id: homeProject }])
     expect(await skipUnreachable(targets, 'test-pass')).toEqual([{ id: homeProject }])
     expect(await canReach(regionalProject, 'test-pass')).toBe(false)
 
-    const rows = await skipRows()
-    expect(rows).toHaveLength(1)
-    expect(rows[0].projectId).toBe(regionalProject)
-    expect(JSON.parse(rows[0].details ?? '{}')).toEqual({
-      reason: 'REGION_NOT_CONFIGURED',
-      region: 'us-east-1',
-      variable: REGION_VARIABLE,
-      pass: 'test-pass',
-    })
-
-    process.env[REGION_VARIABLE] = regionalUrl
-    expect(await canReach(regionalProject, 'test-pass')).toBe(true)
+    process.env.BACKENLY_SERVICE_REGION = 'us-east-1'
+    try {
+      expect(await skipUnreachable(targets, 'test-pass')).toEqual([{ id: regionalProject }])
+    } finally {
+      delete process.env.BACKENLY_SERVICE_REGION
+    }
+    expect(await skipRows()).toEqual([])
   })
 })
 
@@ -1477,6 +1512,8 @@ describe('the address a regional project is given', () => {
       await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
       const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
       const initiate = () => fetch(`${base}/api/v1/${projectId}/auth/google`, { redirect: 'manual' })
+      // The sign-in starts at the region's own service, which this process plays.
+      process.env.BACKENLY_SERVICE_REGION = 'us-east-1'
 
       // No address for the region: refused, not sent to the provider with the home one.
       expect((await initiate()).status).toBe(503)
@@ -1491,10 +1528,86 @@ describe('the address a regional project is given', () => {
         server.closeAllConnections()
         await new Promise<void>((resolve) => server.close(() => resolve()))
       }
+      delete process.env.BACKENLY_SERVICE_REGION
       await prisma.workspaceOAuthConfig.deleteMany({ where: { projectId } }).catch(() => {})
       await prisma.project.delete({ where: { id: projectId } }).catch(() => {})
       if (savedKey === undefined) delete process.env.OAUTH_ENCRYPTION_KEY
       else process.env.OAUTH_ENCRYPTION_KEY = savedKey
+    }
+  })
+})
+
+describe('each region’s projects are served only in that region', () => {
+  // The guard sits in recordedV1, the wrapper every /api/v1 and /api/v2 Next
+  // route exports through, and in the runtime's Express chain for single-box
+  // layouts. Driven here through the real healthz route and the real runtime.
+  const API_VARIABLE = 'PUBLIC_API_ORIGIN_US_EAST_1'
+  const VIRGINIA = 'https://us-east-1.api.example.test'
+  const healthz = (projectId: string) =>
+    healthzRoute(new NextRequest(`https://backenly.test/api/v1/${projectId}/healthz`), {
+      params: Promise.resolve({ projectId }),
+    })
+
+  afterEach(() => {
+    delete process.env.BACKENLY_SERVICE_REGION
+    delete process.env[API_VARIABLE]
+  })
+
+  it('answers another region’s project 421 WRONG_REGION with its own address, and never serves it', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl // reachable from here over peering, and still refused
+    process.env[API_VARIABLE] = VIRGINIA
+    const res = await healthz(regionalProject)
+    expect(res.status).toBe(421)
+    expect(await res.json()).toEqual({
+      success: false,
+      error: "This project's data is in us-east-1, and it is served only there.",
+      code: 'WRONG_REGION',
+      region: 'us-east-1',
+      apiUrl: `${VIRGINIA}/api/v1/${regionalProject}`,
+    })
+
+    // Without an address for the region it still refuses; it just cannot say where to go.
+    delete process.env[API_VARIABLE]
+    expect(await (await healthz(regionalProject)).json()).toMatchObject({ code: 'WRONG_REGION', apiUrl: null })
+  })
+
+  it('serves its own region’s project, and refuses the home one when it is the regional service', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    process.env.BACKENLY_SERVICE_REGION = 'us-east-1'
+    expect((await healthz(regionalProject)).status).not.toBe(421)
+
+    const home = await healthz(homeProject)
+    expect(home.status).toBe(421)
+    expect(await home.json()).toMatchObject({ code: 'WRONG_REGION', region: 'ap-south-1' })
+
+    // The home project is served by the home service, as always.
+    delete process.env.BACKENLY_SERVICE_REGION
+    expect((await healthz(homeProject)).status).not.toBe(421)
+  })
+
+  it('refuses to serve anything while BACKENLY_SERVICE_REGION names no known region', async () => {
+    process.env.BACKENLY_SERVICE_REGION = 'mars-north-1'
+    const res = await healthz(homeProject)
+    expect(res.status).toBe(500)
+    expect(await res.json()).toMatchObject({ code: 'UNKNOWN_SERVICE_REGION' })
+  })
+
+  it('refuses the same way in the runtime, before any of its routers', async () => {
+    const { default: app } = await import('@/server/app')
+    const server = http.createServer(app)
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    try {
+      process.env[REGION_VARIABLE] = regionalUrl
+      process.env[API_VARIABLE] = VIRGINIA
+      const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+      for (const path of [`/api/v1/${regionalProject}/db/marker`, `/api/v2/${regionalProject}/marker`]) {
+        const res = await fetch(`${base}${path}`)
+        expect(res.status).toBe(421)
+        expect(await res.json()).toMatchObject({ code: 'WRONG_REGION', apiUrl: `${VIRGINIA}/api/v1/${regionalProject}` })
+      }
+    } finally {
+      server.closeAllConnections()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
     }
   })
 })
