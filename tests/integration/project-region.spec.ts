@@ -93,6 +93,7 @@ import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { measureProjectDbBytes, snapshotProjectDbStorage } from '@/lib/usage/db-storage'
+import { getSchemaVersion, rollbackToVersion, snapshotSchema } from '@/lib/versioning/schema-versions'
 
 // workspace-backup reads BACKUP_DIR when it loads, so it is pinned here and the
 // module is only loaded lazily, in the backup block below.
@@ -359,6 +360,43 @@ describe('schema introspection reads the project’s own database', () => {
     await expect(PostgresService.getTableStructure(regionalProject, schema, 'marker')).rejects.toMatchObject({
       code: 'REGION_NOT_CONFIGURED',
     })
+  })
+})
+
+describe('schema history is recorded and rolled back in the project’s region', () => {
+  // Read from the home database, a regional project's schema has no tables: a
+  // snapshot recorded none, and a rollback diffed two empty sets and reported
+  // there was nothing to roll back while the table it should drop stayed.
+  const probe = () => `"${schemaOf(regionalProject)}".rollback_probe`
+  let versionId = ''
+
+  afterAll(async () => {
+    await run(regionalUrl, `DROP TABLE IF EXISTS ${probe()} CASCADE`).catch(() => {})
+    await prisma.schemaVersion.deleteMany({ where: { projectId: regionalProject } }).catch(() => {})
+  })
+
+  it('records the regional schema, and rolls back a table added there since', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    versionId = await snapshotSchema(regionalProject, 'before rollback_probe', 'test')
+    expect((await getSchemaVersion(versionId, regionalProject))?.snapshot.tables.map((t) => t.name)).toEqual(['marker'])
+
+    await run(regionalUrl, `CREATE TABLE ${probe()} (id int PRIMARY KEY)`)
+    const result = await rollbackToVersion(regionalProject, versionId)
+    expect(result).toMatchObject({ success: true, message: expect.stringMatching(/Dropped 1 table/) })
+
+    const left = await rowsIn<{ table_name: string }>(
+      regionalUrl,
+      `SELECT table_name FROM information_schema.tables WHERE table_schema = '${schemaOf(regionalProject)}' ORDER BY table_name`,
+    )
+    expect(left.map((t) => t.table_name)).toEqual(['marker'])
+    expect(await rowsIn(regionalUrl, `SELECT note FROM "${schemaOf(regionalProject)}".marker`)).toEqual([{ note: 'us-east-1' }])
+  })
+
+  it('refuses without a connection to the region, never recording an empty schema or reporting nothing to roll back', async () => {
+    delete process.env[REGION_VARIABLE]
+    const refused = { code: 'REGION_NOT_CONFIGURED' }
+    await expect(snapshotSchema(regionalProject, 'no connection', 'test')).rejects.toMatchObject(refused)
+    await expect(rollbackToVersion(regionalProject, versionId)).rejects.toMatchObject(refused)
   })
 })
 

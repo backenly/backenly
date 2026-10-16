@@ -32,6 +32,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { withAuth } from '@/lib/auth/route-protection'
 import { canAccessProject, canAdministerProject } from '@/lib/edition/guard'
 import { listSchemaVersions, getSchemaVersion, rollbackToVersion } from '@/lib/versioning/schema-versions'
+import { regionErrorResponse } from '@/lib/api/v1/errors'
 
 export const GET = withAuth(async (request: NextRequest, { user, params }) => {
   try {
@@ -89,6 +90,8 @@ export const POST = withAuth(async (request: NextRequest, { user, params }) => {
       statementsExecuted: result.statementsExecuted,
     }, { status: result.success ? 200 : 500 })
   } catch (error: any) {
-    return NextResponse.json({ error: 'Rollback failed', details: error.message }, { status: 500 })
+    // A region this process cannot reach is answered as itself (503), as by
+    // every other route, never as a rollback that failed on its own.
+    return regionErrorResponse(error) ?? NextResponse.json({ error: 'Rollback failed', details: error.message }, { status: 500 })
   }
 })
