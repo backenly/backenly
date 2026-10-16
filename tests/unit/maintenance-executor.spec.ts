@@ -164,12 +164,21 @@ jest.mock('@/lib/autonomy/maintenance/single-flight', () => ({
 // read. There is no database here and a failed read takes about two seconds,
 // so it is answered as the home region: the pool then reaches exactly the
 // connection it always did, in the time it always did.
+// A backfill is queued where the project is (primitives/backfill-job.ts), so
+// the same lookup decides between the home queue and a regional job.
+const mockProjectRegion = jest.fn(async (_projectId?: string) => 'ap-south-1')
 jest.mock('@/lib/data-plane/regional', () => ({
   projectDatabaseUrl: async () => process.env.DATABASE_URL,
+  projectRegion: (...a: any[]) => mockProjectRegion(...(a as [string])),
 }))
 
-const mockEnqueue = jest.fn(async () => ({ id: 'job-1' }))
-jest.mock('@/lib/queue', () => ({ enqueue: (...a: any[]) => mockEnqueue(...(a as [])) }))
+const mockEnqueue = jest.fn(async (..._args: any[]) => ({ id: 'job-1' }))
+const mockEnqueueRegionalJob = jest.fn(async (..._args: any[]) => ({ id: 'regional-job-1' }))
+jest.mock('@/lib/queue', () => ({
+  enqueue: (...a: any[]) => mockEnqueue(...a),
+  enqueueRegionalJob: (...a: any[]) => mockEnqueueRegionalJob(...a),
+  REGIONAL_STATUS: { pending: 'regional_pending', running: 'regional_running', failed: 'regional_failed' },
+}))
 
 const mockAddStructure = jest.fn()
 jest.mock('@/lib/autonomy/maintenance/primitives/add-structure', () => ({
@@ -384,6 +393,7 @@ beforeEach(() => {
   })
   mockJobFindUnique.mockResolvedValue(null)
   mockJobFindMany.mockResolvedValue([])
+  mockProjectRegion.mockResolvedValue('ap-south-1')
 })
 
 // ── The ladder is all-or-nothing ─────────────────────────────────────────────
@@ -670,6 +680,22 @@ describe('a backfill is dispatched, not looped', () => {
     expect(mockEnqueue).toHaveBeenCalledTimes(1)
     expect(mockEnqueue.mock.calls[0][0]).toBe('maintenance_backfill')
   })
+
+  it('queues a regional project’s backfill in its region, never on the home queue', async () => {
+    // The ladder runs in the project's region; its batches belong there too,
+    // where a failed batch's database error, which can quote a row, is logged.
+    mockProjectRegion.mockResolvedValue('us-east-1')
+    const plan = fullLadder()
+    const r = await run({ plan, approvedPlanVersion: plan.planVersion, approvalId: 'a1' })
+    expect(r.steps.find(s => s.kind === 'backfill')).toMatchObject({ status: 'dispatched', backgroundJobId: 'regional-job-1' })
+    expect(mockEnqueue).not.toHaveBeenCalled()
+    expect(mockEnqueueRegionalJob).toHaveBeenCalledWith(
+      'maintenance_backfill',
+      'p1',
+      'us-east-1',
+      expect.objectContaining({ cursor: null, cursorKey: null }),
+    )
+  })
 })
 
 
@@ -827,6 +853,25 @@ describe('a dispatched backfill stops the ladder', () => {
     const r = await run(over)
     expect(r.status).toBe('halted')
     expect(r.haltReason).toMatch(/job job-2 is dead_letter: lock timeout/)
+    expect(mockRunVerify).not.toHaveBeenCalled()
+  })
+
+  it('halts when a regional batch failed in its region, with the platform’s own reason', async () => {
+    const { plan, over } = withBackfill()
+    completed(plan, ...plan.steps.slice(0, at(plan, 'backfill')).map(x => x.ordinal))
+    dispatched(plan, at(plan, 'backfill'))
+    firstBatchRan()
+    mockJobFindMany.mockResolvedValue([
+      chainJob('job-2', {
+        status: 'regional_failed',
+        error: 'The backfill batch did not complete in us-east-1. The reason is in that region’s logs.',
+        attempts: 3,
+      }, 1),
+    ])
+
+    const r = await run(over)
+    expect(r.status).toBe('halted')
+    expect(r.haltReason).toMatch(/job job-2 is regional_failed: The backfill batch did not complete in us-east-1/)
     expect(mockRunVerify).not.toHaveBeenCalled()
   })
 

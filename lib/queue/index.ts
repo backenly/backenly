@@ -459,10 +459,21 @@ export async function failPurgeJob(id: string, error: string) {
 // enter 'queued', so no generic worker, this build's or one already released,
 // can claim one and complete it without a handler, or run it in the wrong
 // region.
+//
+// A maintenance backfill of a regional project is the same kind of work: its
+// ladder runs in the project's region (lib/autonomy/region-skip.ts), and the
+// batches it dispatches belong there too, not to the home queue, where a
+// failed batch's database error, which can quote a row, would be recorded.
+
+/** Snapshots taken and restored for another region: what the console's snapshot panel lists. */
+export const SNAPSHOT_JOB_TYPES = ['workspace_backup', 'workspace_restore'] as const
 
 /** The work one region may ask another to do. */
-export const REGIONAL_JOB_TYPES = ['workspace_backup', 'workspace_restore'] as const
+export const REGIONAL_JOB_TYPES = [...SNAPSHOT_JOB_TYPES, 'maintenance_backfill'] as const
 export type RegionalJobType = (typeof REGIONAL_JOB_TYPES)[number]
+
+/** Work that writes the project's data, and so waits while the project is paused. */
+const REGIONAL_WRITES_HELD_WHILE_PAUSED: readonly RegionalJobType[] = ['maintenance_backfill']
 
 export const REGIONAL_STATUS = {
   /** Waiting for its region's scheduler. Invisible to every generic query. */
@@ -533,12 +544,21 @@ export async function claimRegionalJobs(limit = 2, region: CloudRegionId = servi
     })
   }
 
+  // A paused project takes no writes, so its backfill is left pending, not
+  // claimed: no attempt is spent, and it runs as normal once the project
+  // resumes, as the generic queue does (claimNextJobs). Snapshots are claimed:
+  // taking one is how an owner gets their data out, and a restore checks again
+  // where it runs.
   const candidates = await prisma.$queryRaw<{ id: string }[]>`
     SELECT "id" FROM "background_jobs"
     WHERE "type" = ANY(${[...REGIONAL_JOB_TYPES]}::text[])
       AND "status" = ${REGIONAL_STATUS.pending}
       AND "runAt" <= (${now}::timestamptz AT TIME ZONE 'UTC')
       AND "payload"->>'region' = ${region}
+      AND NOT (
+        "type" = ANY(${[...REGIONAL_WRITES_HELD_WHILE_PAUSED]}::text[])
+        AND "projectId" IN (SELECT "id" FROM "projects" WHERE "pausedAt" IS NOT NULL)
+      )
     ORDER BY "runAt" ASC
     LIMIT ${limit}`
 
@@ -601,12 +621,14 @@ export async function failRegionalJob(id: string, error: string) {
 }
 
 /**
- * A project's recent regional jobs, newest first: what its console shows as
- * queued, running or failed, and in which region. The payload stays here.
+ * A project's recent regional snapshots and restores, newest first: what its
+ * console's snapshot panel shows as queued, running or failed, and in which
+ * region. The payload stays here. Backfill batches are a maintenance ladder's,
+ * which reads them itself.
  */
 export async function regionalJobsOf(projectId: string, take = 10) {
   const jobs = await prisma.backgroundJob.findMany({
-    where: { projectId, type: { in: [...REGIONAL_JOB_TYPES] } },
+    where: { projectId, type: { in: [...SNAPSHOT_JOB_TYPES] } },
     orderBy: { createdAt: 'desc' },
     take,
     select: { id: true, type: true, status: true, error: true, createdAt: true, completedAt: true, payload: true },
