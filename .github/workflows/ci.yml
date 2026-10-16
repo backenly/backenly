@@ -481,6 +481,9 @@ jobs:
       # and one pool. This is a test-environment budget, set where it applies.
       WORKSPACE_POOL_MAX: '2'
       WORKSPACE_POOL_MAX_POOLS: '8'
+      # The runner's own PostgreSQL 16, for tests/integration/regional-bootstrap.spec.ts,
+      # which builds a throwaway cluster of its own (see the step below).
+      PG_BINDIR: /usr/lib/postgresql/16/bin
     steps:
       - uses: actions/checkout@v4
         with:
@@ -502,6 +505,26 @@ jobs:
       - name: Push schema to the test database
         run: npx prisma db push --accept-data-loss --skip-generate
       - run: npx prisma generate
+
+      # The regional database rehearsal runs the procedure against a PostgreSQL
+      # 16 cluster it creates with initdb, because the procedure creates
+      # cluster-wide roles by their real names and must not share the service
+      # database. pgvector is installed so the rehearsal applies the full
+      # extension set a region has, with no rehearsal-only allowances; the suite
+      # refuses to run in CI without it. Asserted here so a missing binary is
+      # named by this step rather than by a confusing failure in the suite.
+      - name: PostgreSQL 16 and pgvector for the regional rehearsal
+        run: |
+          set -euo pipefail
+          # Should apt need to install the server too, it must not start a
+          # cluster of its own beside the service container.
+          sudo mkdir -p /etc/postgresql-common/createcluster.d
+          echo 'create_main_cluster = false' | sudo tee /etc/postgresql-common/createcluster.d/no-main-cluster.conf
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends postgresql-16-pgvector
+          "$PG_BINDIR/initdb" --version | grep -E '\(PostgreSQL\) 16\.'
+          "$PG_BINDIR/psql" --version | grep -E '\(PostgreSQL\) 16\.'
+          test -f /usr/share/postgresql/16/extension/vector.control
 
       # --runInBand: these share one database and several seed and delete the
       # same User and Project rows. --forceExit for the same Prisma-singleton

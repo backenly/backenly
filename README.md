@@ -366,7 +366,7 @@ Those scripts talk to PostgreSQL through one explicit mechanism, chosen by
 | `BACKENLY_DB_ADMIN` | how it connects |
 | --- | --- |
 | `docker` (default) | `psql` inside the Compose `postgres` service |
-| `url` | `psql "$BACKENLY_ADMIN_DATABASE_URL"` — any reachable database |
+| `url` | `psql -d "$BACKENLY_ADMIN_DATABASE_URL"` — any reachable database |
 | `local` | `sudo -u postgres psql` — a cluster installed on this host |
 
 That order is not arbitrary and cannot be collapsed into one command. The first

@@ -102,7 +102,10 @@ db_admin_psql() {
         psql -U "$BACKENLY_DB_SUPERUSER" -d "$BACKENLY_DB" "$@"
       ;;
     url)
-      psql "$BACKENLY_ADMIN_DATABASE_URL" "$@"
+      # -d, not a leading argument: psql on Windows stops reading options at the
+      # first plain argument, so a URL first would silently drop ON_ERROR_STOP
+      # and -f, and the install would read stdin and report success.
+      psql -d "$BACKENLY_ADMIN_DATABASE_URL" "$@"
       ;;
     local)
       sudo -u postgres psql -d "$BACKENLY_DB" "$@"

@@ -588,6 +588,17 @@ tests/integration/selfhost-failed-migration.spec.ts
 # entrypoint, real Prisma CLI, real PostgreSQL. Needs CREATE DATABASE/ROLE.
 tests/integration/migration-ownership-recovery.spec.ts
 
+# ── Regional database initialisation ────────────────────────────────────────
+#
+# tools/managed-db/regional/bootstrap.sh, run from a copy of exactly the files
+# its image carries, against a PostgreSQL 16 cluster the suite creates with
+# initdb and throws away: the procedure creates cluster-wide roles by their real
+# names, so it cannot share the service database. An administrator that is not
+# a superuser, like the RDS master, then owns what was installed, and the
+# application's own paths run against it. Needs PostgreSQL 16 server binaries
+# (PG_BINDIR) and, in CI, pgvector; it fails rather than skips without them.
+tests/integration/regional-bootstrap.spec.ts
+
 # ── Credential rotation ─────────────────────────────────────────────────────
 #
 # A rotation proven only by "the new password works" is not proven: the point of

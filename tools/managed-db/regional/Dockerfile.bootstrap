@@ -1,0 +1,60 @@
+# Regional database initialisation (tools/managed-db/regional/bootstrap.sh).
+#
+# psql 16, bash, the RDS certificate authorities and the files listed in
+# image-files.txt, and nothing else: no Node, no Prisma, no application. It runs
+# as a one-off administrative task inside a region's VPC and exits.
+#
+# The build context is assembled by build-and-push.sh: the listed files under
+# tree/, at their repository paths, so bootstrap.sh finds scripts/ exactly where
+# it does in a checkout.
+
+FROM debian:bookworm-20260918-slim
+
+# psql from the PostgreSQL project's apt repository, as docker/web.Dockerfile
+# installs it: Debian's own client on bookworm is 15, and the procedure is
+# written and rehearsed for 16. The signing key is accepted only if its
+# fingerprint matches, and the installed version is asserted below.
+ARG PG_CLIENT_MAJOR=16
+ARG PGDG_KEY_FINGERPRINT=B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8
+
+# The RDS root certificates, pinned by checksum: this connection is the master
+# credential, so a substituted bundle would let anyone in the path read it.
+# When AWS publishes a new bundle the build fails here; check it against
+# https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html
+# and update the checksum.
+ARG RDS_CA_BUNDLE_URL=https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
+ARG RDS_CA_BUNDLE_SHA256=90a6f1a7978a1b1b096dca6c57511ca48d3b8cf052f8e704baf358f34ea2f21b
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+ && install -d /usr/share/postgresql-common/pgdg \
+ && curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+ && test "$(gpg --show-keys --with-colons /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc | awk -F: '/^fpr/ {print $10; exit}')" = "$PGDG_KEY_FINGERPRINT" \
+ && . /etc/os-release \
+ && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends "postgresql-client-${PG_CLIENT_MAJOR}" \
+ && install -d /etc/ssl/rds \
+ && curl -fsSL -o /etc/ssl/rds/global-bundle.pem "$RDS_CA_BUNDLE_URL" \
+ && echo "${RDS_CA_BUNDLE_SHA256}  /etc/ssl/rds/global-bundle.pem" | sha256sum -c - \
+ && apt-get purge -y curl gnupg \
+ && apt-get autoremove -y \
+ && rm -rf /var/lib/apt/lists/*
+RUN psql --version | grep -E "^psql \(PostgreSQL\) ${PG_CLIENT_MAJOR}\."
+
+# Verify the server against the RDS roots. verify-full is the default for a URL
+# that names no sslmode, and with a root file present libpq treats an explicit
+# sslmode=require as verify-ca. Only a URL that asks for less than require
+# (disable, allow, prefer) would skip verification, so the secret holding it
+# should say verify-full.
+ENV PGSSLROOTCERT=/etc/ssl/rds/global-bundle.pem \
+    PGSSLMODE=verify-full
+
+COPY tree/ /opt/backenly/
+
+RUN useradd --system --uid 10001 --home-dir /nonexistent --shell /usr/sbin/nologin bootstrap
+USER 10001
+
+# No default mode: BOOTSTRAP_MODE defaults to check, so a task that forgets to
+# say apply reports and writes nothing.
+ENTRYPOINT ["bash", "/opt/backenly/tools/managed-db/regional/bootstrap.sh"]
