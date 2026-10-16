@@ -31,7 +31,18 @@ import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { Client } from 'pg'
 
+// The summarizer's one model call, answered here: what it says is the
+// property, not which model says it. Everything else in the module is real.
+const mockGenerate = jest.fn()
+jest.mock('@/lib/ai/llm', () => ({
+  ...jest.requireActual('@/lib/ai/llm'),
+  generate: (...args: unknown[]) => mockGenerate(...args),
+}))
+
 import { prisma } from '@/lib/db'
+import { loadHistory, saveMessages } from '@/app/api/ai/chat/pipeline/conversation-store'
+import { MESSAGE_KEPT_IN_REGION, createConversationMessage, deleteConversationMessages } from '@/lib/ai/conversation-content'
+import { maybeSummarizeConversation } from '@/lib/ai/conversation-summarizer'
 import { disconnectRegionalClients } from '@/lib/data-plane/regional'
 import { fireTriggers, listDeliveryLogs, replayDelivery, withoutReply } from '@/lib/services/trigger-service'
 import { failureWithoutReply, pruneRegionalBodies } from '@/lib/data-plane/regional-bodies'
@@ -520,6 +531,98 @@ describe('deleting a regional project', () => {
   })
 })
 
+// ── Conversations ────────────────────────────────────────────────────────────
+
+describe("the agent's conversation", () => {
+  const EMAIL = `alice-${randomBytes(3).toString('hex')}@example.com`
+  const conversationRows = (projectId: string) =>
+    prisma.conversationMessage.findMany({ where: { projectId }, orderBy: { messageSeq: 'asc' } })
+
+  afterEach(async () => {
+    await prisma.conversationMessage.deleteMany({ where: { projectId: { in: [homeProject, regionalProject] } } })
+    await run(regionalUrl, `DELETE FROM public.regional_bodies WHERE "kind" = 'conversation_message'`)
+    mockGenerate.mockReset()
+  })
+
+  it("keeps a regional project's words in the region, and reads them back from there", async () => {
+    await saveMessages(regionalProject, `Block ${EMAIL}`, `Blocked ${EMAIL}.`, randomUUID())
+
+    const rows = await conversationRows(regionalProject)
+    expect(rows.map((row) => [row.role, row.content])).toEqual([
+      ['user', MESSAGE_KEPT_IN_REGION],
+      ['ai', MESSAGE_KEPT_IN_REGION],
+    ])
+    expect((await regionalBodyOf('conversation_message', rows[0].id))?.payload).toEqual({ content: `Block ${EMAIL}` })
+    expect((await regionalBodyOf('conversation_message', rows[1].id))?.payload).toEqual({ content: `Blocked ${EMAIL}.` })
+    const [mentions] = await rowsIn<{ n: string }>(
+      homeUrl(),
+      `SELECT count(*)::text AS n FROM conversation_messages WHERE content LIKE $1 OR metadata::text LIKE $1`,
+      [`%${EMAIL}%`],
+    )
+    expect(mentions.n).toBe('0')
+
+    const { history } = await loadHistory(regionalProject)
+    expect(history).toEqual([
+      { role: 'user', content: `Block ${EMAIL}` },
+      { role: 'assistant', content: `Blocked ${EMAIL}.` },
+    ])
+  })
+
+  it("keeps a home project's words on the row, as before", async () => {
+    await saveMessages(homeProject, `Block ${EMAIL}`, `Blocked ${EMAIL}.`, randomUUID())
+    expect((await conversationRows(homeProject)).map((row) => row.content)).toEqual([`Block ${EMAIL}`, `Blocked ${EMAIL}.`])
+    expect((await loadHistory(homeProject)).history.map((turn) => turn.content)).toEqual([`Block ${EMAIL}`, `Blocked ${EMAIL}.`])
+  })
+
+  // Written directly, not through saveMessages, so no background summary runs
+  // alongside the one each test calls for.
+  async function conversationOf(projectId: string, turns: number, ask: (i: number) => string): Promise<void> {
+    for (let i = 0; i < turns; i++) {
+      await createConversationMessage({ projectId, role: 'user', content: ask(i) })
+      await createConversationMessage({ projectId, role: 'ai', content: `answer ${i}` })
+    }
+  }
+
+  it('makes the summary from the words in the region, and keeps it there', async () => {
+    await conversationOf(regionalProject, 11, (i) => `question ${i} from ${EMAIL}`)
+    mockGenerate.mockResolvedValue({
+      json: { builtSoFar: ['notes table'], decisions: [], userPreferences: [], currentFocus: `notes for ${EMAIL}` },
+    })
+
+    await maybeSummarizeConversation(regionalProject)
+
+    // The model was shown the conversation itself, read from the region.
+    expect(mockGenerate).toHaveBeenCalledTimes(1)
+    expect(JSON.stringify(mockGenerate.mock.calls[0])).toContain(`question 10 from ${EMAIL}`)
+    const summary = await prisma.conversationMessage.findFirst({ where: { projectId: regionalProject, role: 'summary' } })
+    expect(summary?.content).toBe(MESSAGE_KEPT_IN_REGION)
+    expect(JSON.stringify((await regionalBodyOf('conversation_message', summary!.id))?.payload)).toContain(`notes for ${EMAIL}`)
+    expect((await loadHistory(regionalProject)).summaryContext).toContain(`notes for ${EMAIL}`)
+  })
+
+  it('makes no summary, and loads no history, while the region cannot be read', async () => {
+    await conversationOf(regionalProject, 11, (i) => `question ${i}`)
+    delete process.env[REGION_VARIABLE]
+    try {
+      await expect(maybeSummarizeConversation(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+      expect(await loadHistory(regionalProject)).toEqual({ history: [], summaryContext: '' })
+    } finally {
+      process.env[REGION_VARIABLE] = regionalUrl
+    }
+    expect(mockGenerate).not.toHaveBeenCalled()
+    expect(await prisma.conversationMessage.count({ where: { projectId: regionalProject, role: 'summary' } })).toBe(0)
+  })
+
+  it('deletes the words in the region with their messages', async () => {
+    await saveMessages(regionalProject, 'to be deleted', 'gone', randomUUID())
+    const ids = (await conversationRows(regionalProject)).map((row) => row.id)
+
+    expect(await deleteConversationMessages(regionalProject, {})).toBe(2)
+
+    for (const id of ids) expect(await regionalBodyOf('conversation_message', id)).toBeUndefined()
+  })
+})
+
 // ── Retention ────────────────────────────────────────────────────────────────
 
 describe('retention', () => {
@@ -537,6 +640,21 @@ describe('retention', () => {
     expect(await regionalBody(old)).toBeUndefined()
     expect(await regionalBody(fresh)).toBeDefined()
     expect(await pruneRegionalBodies('ap-south-1')).toBe(0)
+  })
+
+  it("keeps a conversation's words past 30 days: they last as long as the messages", async () => {
+    const words = randomUUID()
+    await run(
+      regionalUrl,
+      `INSERT INTO public.regional_bodies ("id", "kind", "projectId", "payload", "createdAt", "updatedAt")
+       VALUES ('${words}', 'conversation_message', '${regionalProject}', '{"content":"old words"}'::jsonb,
+               now() - interval '400 days', now() - interval '400 days')`,
+    )
+
+    await pruneRegionalBodies('us-east-1')
+
+    expect(await regionalBodyOf('conversation_message', words)).toBeDefined()
+    await run(regionalUrl, `DELETE FROM public.regional_bodies WHERE "id" = '${words}'`)
   })
 })
 
