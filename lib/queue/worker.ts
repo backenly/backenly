@@ -71,12 +71,18 @@ async function handleWebhookDeliveryJob(payload: any): Promise<Record<string, an
   return deliverSingleAttempt(webhookId, targetUrl, secret, webhookPayload, logId)
 }
 
-async function handleCleanupJob(payload: any): Promise<Record<string, any>> {
+export async function handleCleanupJob(payload: any): Promise<Record<string, any>> {
   const { cleanupType } = payload
   const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) // 30 days
+  // 90 days for two records the founders set it for (2026-10-16), both of which
+  // can hold an end user's data: an approval request, counted from its decision
+  // (it keeps the parked call's exact arguments, which the approver read), or
+  // from its expiry when nobody decided; and a security event, which records
+  // an end user's network, the path they asked for and its detail.
+  const retained = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000)
 
   if (cleanupType === 'old_logs') {
-    const [webhookLogs, requestLogs, intentLogs] = await Promise.all([
+    const [webhookLogs, requestLogs, intentLogs, approvalRequests, securityEvents] = await Promise.all([
       prisma.webhookLog
         .deleteMany({ where: { createdAt: { lt: cutoff }, status: 'SUCCESS' } })
         .then(r => r.count),
@@ -88,9 +94,17 @@ async function handleCleanupJob(payload: any): Promise<Record<string, any>> {
         .deleteMany({ where: { timestamp: { lt: cutoff } } })
         .then(r => r.count)
         .catch(() => 0), // intentLog may not exist in all environments
+      prisma.agentApprovalRequest
+        .deleteMany({
+          where: { OR: [{ decidedAt: { lt: retained } }, { decidedAt: null, expiresAt: { lt: retained } }] },
+        })
+        .then(r => r.count),
+      prisma.securityEvent
+        .deleteMany({ where: { createdAt: { lt: retained } } })
+        .then(r => r.count),
     ])
 
-    return { cleanupType, webhookLogs, requestLogs, intentLogs }
+    return { cleanupType, webhookLogs, requestLogs, intentLogs, approvalRequests, securityEvents }
   }
 
   if (cleanupType === 'dead_letter_jobs') {

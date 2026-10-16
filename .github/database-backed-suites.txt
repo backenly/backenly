@@ -1144,3 +1144,8 @@ tests/integration/delete-trigger-scope.spec.ts
 # background_jobs rows and the claim's SQL are the property, so it needs a real
 # Postgres.
 __tests__/queue/regional-jobs.test.ts
+
+# The daily cleanup's 90-day retention of approval requests (from their
+# decision, or their expiry when nobody decided) and security events. Real rows
+# and deleteMany filters are the property, so it needs a real Postgres.
+__tests__/queue/retention.test.ts
