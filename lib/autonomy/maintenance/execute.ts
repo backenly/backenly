@@ -438,7 +438,10 @@ async function runLadder(
     // A rung that already dispatched work resumes from the job, never by
     // dispatching a second one.
     if (existing?.status === 'dispatched' && existing.backgroundJobId) {
-      const progress = await inspectBackgroundJob(existing.backgroundJobId)
+      const progress = await inspectBackgroundJob(existing.backgroundJobId, {
+        projectId,
+        idempotencyKey: step.idempotencyKey,
+      })
       if (progress.state === 'pending') {
         steps.push({
           ordinal: step.ordinal,
@@ -748,20 +751,29 @@ async function nextAttempt(planId: string): Promise<number> {
  * production did on 2026-09-16 when it ran an image without the
  * `maintenance_backfill` handler. A skipped job that reads as success would let
  * `verify` run against rows nothing had backfilled.
+ *
+ * Nor is the dispatched job the one to read. Each batch queues the next as a
+ * NEW job (primitives/backfill-job.ts), so the job dispatched is only the
+ * chain's first: once it has run, its result says that more remain however far
+ * the chain has got, and a ladder that read only it would wait on a finished
+ * backfill forever. The chain is where its newest job is. Every job in it
+ * carries the step's idempotency key, and no other step's does.
  */
-async function inspectBackgroundJob(
+export async function inspectBackgroundJob(
   jobId: string,
+  chain: { projectId: string; idempotencyKey: string },
 ): Promise<{ state: 'pending' | 'done' | 'failed'; detail: string }> {
-  const job = await prisma.backgroundJob
-    .findUnique({ where: { id: jobId }, select: { status: true, result: true, error: true, attempts: true } })
+  const job = await newestJobOfChain(chain)
+    .then((newest) => newest ?? prisma.backgroundJob.findUnique({ where: { id: jobId }, select: JOB_FIELDS }))
     .catch(() => null)
   if (!job) return { state: 'failed', detail: `background job ${jobId} no longer exists` }
 
   if (job.status === 'failed' || job.status === 'dead_letter') {
-    return { state: 'failed', detail: `job ${jobId} is ${job.status}: ${job.error ?? 'no error recorded'}` }
+    return { state: 'failed', detail: `job ${job.id} is ${job.status}: ${job.error ?? 'no error recorded'}` }
   }
   if (job.status !== 'completed') {
-    return { state: 'pending', detail: `${job.status} (attempt ${job.attempts})` }
+    const at = job.id === jobId ? '' : `, at job ${job.id} of its batch chain`
+    return { state: 'pending', detail: `${job.status} (attempt ${job.attempts})${at}` }
   }
 
   const result = (job.result ?? {}) as Record<string, unknown>
@@ -769,12 +781,12 @@ async function inspectBackgroundJob(
     return {
       state: 'failed',
       detail:
-        `job ${jobId} was recorded completed but SKIPPED: ${String(result.reason ?? 'no reason given')}. ` +
+        `job ${job.id} was recorded completed but SKIPPED: ${String(result.reason ?? 'no reason given')}. ` +
         'A skipped job did no work, and treating it as success would verify rows nothing backfilled.',
     }
   }
   if (result.refusal) {
-    return { state: 'failed', detail: `job ${jobId} refused: ${String(result.refusal)}` }
+    return { state: 'failed', detail: `job ${job.id} refused: ${String(result.refusal)}` }
   }
   if (result.done !== true) {
     // A batch chain re-queues itself; the chain is finished only when a batch
@@ -785,6 +797,34 @@ async function inspectBackgroundJob(
     state: 'done',
     detail: `backfill complete: ${String(result.updated ?? 0)} row(s) updated over ${String(result.batches ?? 0)} batch(es)`,
   }
+}
+
+const JOB_FIELDS = { id: true, status: true, result: true, error: true, attempts: true } as const
+
+/**
+ * The newest job of a step's backfill chain, or null when it has none.
+ *
+ * Each job is created while the one before it runs, so the newest is the last
+ * created. Two created in the same millisecond, which a worker that claims
+ * once a minute does not do but nothing forbids, are told apart by the batches
+ * the chain had completed when each was queued.
+ */
+async function newestJobOfChain(chain: { projectId: string; idempotencyKey: string }) {
+  const [newest, previous] = await prisma.backgroundJob.findMany({
+    where: {
+      projectId: chain.projectId,
+      type: 'maintenance_backfill',
+      payload: { path: ['idempotencyKey'], equals: chain.idempotencyKey },
+    },
+    orderBy: { createdAt: 'desc' },
+    take: 2,
+    select: { ...JOB_FIELDS, createdAt: true, payload: true },
+  })
+  if (!newest) return null
+  const batchesBefore = (job: { payload: unknown }) => Number((job.payload as { batches?: unknown } | null)?.batches ?? 0)
+  return previous && previous.createdAt.getTime() === newest.createdAt.getTime() && batchesBefore(previous) > batchesBefore(newest)
+    ? previous
+    : newest
 }
 
 async function awaiting(
