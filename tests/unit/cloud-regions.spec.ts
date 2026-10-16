@@ -13,7 +13,7 @@
  * to change, together with the infra, the Project.region column and routing
  * that lib/regions.ts lists.
  */
-import { checkRequestedRegion, CLOUD_REGIONS, findRegion, HOME_REGION, regionLabel } from '@/lib/regions'
+import { checkRequestedRegion, CLOUD_REGIONS, findRegion, HOME_REGION, regionLabel, stagingOpenRegions } from '@/lib/regions'
 
 describe('Backenly Cloud regions', () => {
   it('lists the five decided regions, each once', () => {
@@ -60,6 +60,31 @@ describe('Backenly Cloud regions', () => {
     it('naming a region that does not exist is refused', () => {
       const check = checkRequestedRegion('eu-west-1')
       expect(check).toEqual(expect.objectContaining({ ok: false, code: 'UNKNOWN_REGION' }))
+    })
+  })
+
+  describe('a region staging opens to qualify it before customers can choose it', () => {
+    const staging = { BACKENLY_ENV: 'staging', BACKENLY_STAGING_OPEN_REGIONS: 'us-east-1, mars-north-1' }
+
+    it('is accepted on staging only', () => {
+      expect(checkRequestedRegion('us-east-1', staging)).toEqual({ ok: true, region: 'us-east-1' })
+      expect(stagingOpenRegions(staging)).toEqual(new Set(['us-east-1']))
+    })
+
+    it('is ignored anywhere that is not staging, including production and an unset environment', () => {
+      for (const env of [
+        { ...staging, BACKENLY_ENV: 'production' },
+        { ...staging, BACKENLY_ENV: undefined },
+        { ...staging, BACKENLY_ENV: '' },
+      ]) {
+        expect(checkRequestedRegion('us-east-1', env)).toEqual(expect.objectContaining({ ok: false, code: 'REGION_NOT_OPEN' }))
+        expect(stagingOpenRegions(env).size).toBe(0)
+      }
+    })
+
+    it('opens only the regions it names, and never one this build does not know', () => {
+      expect(checkRequestedRegion('eu-central-1', staging)).toEqual(expect.objectContaining({ ok: false, code: 'REGION_NOT_OPEN' }))
+      expect(checkRequestedRegion('mars-north-1', staging)).toEqual(expect.objectContaining({ ok: false, code: 'UNKNOWN_REGION' }))
     })
   })
 })

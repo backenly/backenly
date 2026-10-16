@@ -68,19 +68,38 @@ export type RegionCheck =
   | { ok: true; region: CloudRegionId }
   | { ok: false; code: 'UNKNOWN_REGION' | 'REGION_NOT_OPEN'; message: string }
 
+type Env = Readonly<Record<string, string | undefined>>
+
+/**
+ * The regions a staging deployment opens for project creation although they
+ * are not open to customers yet, so a region can be qualified end to end
+ * before it opens (a region opens only after its stack passes staging).
+ *
+ * BACKENLY_STAGING_OPEN_REGIONS, a comma-separated list of region ids, is
+ * honoured ONLY when BACKENLY_ENV is "staging"; anywhere else it is ignored,
+ * so a variable copied into production cannot open an unqualified region to
+ * customers. Server-side only: the console's picker still shows such a region
+ * as not open, and staging creates projects there through the API.
+ */
+export function stagingOpenRegions(env: Env = process.env): ReadonlySet<CloudRegionId> {
+  if ((env.BACKENLY_ENV ?? '').trim().toLowerCase() !== 'staging') return new Set()
+  const ids = (env.BACKENLY_STAGING_OPEN_REGIONS ?? '').split(',').map((id) => id.trim()).filter(Boolean)
+  return new Set(ids.map((id) => findRegion(id)?.id).filter((id): id is CloudRegionId => id !== undefined))
+}
+
 /**
  * The region a create request asked for. Omitted means the home region. A
  * region that is not on the list, or not open yet, is refused rather than
  * quietly replaced, so a caller never gets a project in a place it did not ask
  * for.
  */
-export function checkRequestedRegion(requested: string | null | undefined): RegionCheck {
+export function checkRequestedRegion(requested: string | null | undefined, env: Env = process.env): RegionCheck {
   if (requested === undefined || requested === null || requested === '') return { ok: true, region: HOME_REGION }
   const region = findRegion(requested)
   if (!region) {
     return { ok: false, code: 'UNKNOWN_REGION', message: `There is no Backenly Cloud region called "${requested}".` }
   }
-  if (!region.open) {
+  if (!region.open && !stagingOpenRegions(env).has(region.id)) {
     return {
       ok: false,
       code: 'REGION_NOT_OPEN',
