@@ -37,14 +37,20 @@ export async function loadHistoryWithSummary(
   projectId: string,
 ): Promise<{ history: Array<{ role: 'user' | 'assistant'; content: string }>; summaryContext: string }> {
   const { prisma } = await import('@/lib/db/prisma')
+  // A regional project's words are in its region (lib/ai/conversation-content.ts).
+  const { withMessageContents } = await import('@/lib/ai/conversation-content')
 
   try {
     // Check for an existing summary
-    const summaryRow = await prisma.conversationMessage.findFirst({
-      where: { projectId, role: 'summary' },
-      orderBy: { messageSeq: 'desc' },
-      select: { content: true, createdAt: true },
-    })
+    const [summaryRow] = await withMessageContents(
+      projectId,
+      await prisma.conversationMessage.findMany({
+        where: { projectId, role: 'summary' },
+        orderBy: { messageSeq: 'desc' },
+        take: 1,
+        select: { id: true, content: true, createdAt: true },
+      }),
+    )
 
     // How many raw messages to load
     const rawLimit = summaryRow ? RECENT_TURNS_AFTER_SUMMARY : SUMMARY_THRESHOLD
@@ -52,15 +58,18 @@ export async function loadHistoryWithSummary(
     // Load most-recent raw messages (desc then reverse for chronological order).
     // Include ALL messages (including build-state ones with noSummarize) so the
     // chat panel shows the full step-by-step credential flow on refresh.
-    const rawRows = await prisma.conversationMessage.findMany({
-      where: { projectId, role: { in: ['user', 'ai'] } },
-      // messageSeq, not createdAt: this picks WHICH messages are the most
-      // recent and then reverses them into the history the model reads, so a
-      // millisecond tie here reorders the conversation it is shown.
-      orderBy: { messageSeq: 'desc' },
-      take: rawLimit,
-      select: { role: true, content: true, metadata: true },
-    })
+    const rawRows = await withMessageContents(
+      projectId,
+      await prisma.conversationMessage.findMany({
+        where: { projectId, role: { in: ['user', 'ai'] } },
+        // messageSeq, not createdAt: this picks WHICH messages are the most
+        // recent and then reverses them into the history the model reads, so a
+        // millisecond tie here reorders the conversation it is shown.
+        orderBy: { messageSeq: 'desc' },
+        take: rawLimit,
+        select: { id: true, role: true, content: true, metadata: true },
+      }),
+    )
     rawRows.reverse()
 
     const history = rawRows.map((r: { role: string; content: string; metadata?: unknown }) => ({
@@ -93,6 +102,9 @@ export async function loadHistoryWithSummary(
  */
 export async function maybeSummarizeConversation(projectId: string): Promise<void> {
   const { prisma } = await import('@/lib/db/prisma')
+  const { createConversationMessage, deleteConversationMessages, withMessageContents } = await import(
+    '@/lib/ai/conversation-content'
+  )
 
   // Count raw messages
   const rawCount = await prisma.conversationMessage.count({
@@ -124,11 +136,15 @@ export async function maybeSummarizeConversation(projectId: string): Promise<voi
   // Messages with metadata.noSummarize = true are structured build state (e.g.
   // "✓ Stripe connected — now I need Resend") that must not be compressed into
   // a generic summary — doing so is what caused chat text to look different on refresh.
-  const allMessages = await prisma.conversationMessage.findMany({
-    where: { projectId, role: { in: ['user', 'ai'] } },
-    orderBy: { messageSeq: 'asc' },
-    select: { role: true, content: true, metadata: true },
-  })
+  // A region that cannot be read throws here, so no summary is made from blanks.
+  const allMessages = await withMessageContents(
+    projectId,
+    await prisma.conversationMessage.findMany({
+      where: { projectId, role: { in: ['user', 'ai'] } },
+      orderBy: { messageSeq: 'asc' },
+      select: { id: true, role: true, content: true, metadata: true },
+    }),
+  )
 
   const summarizableMessages = allMessages.filter((m: { metadata: unknown }) => {
     const meta = m.metadata as Record<string, unknown> | null
@@ -138,19 +154,12 @@ export async function maybeSummarizeConversation(projectId: string): Promise<voi
   const summary = await generateSummary(summarizableMessages, rawCount, projectId)
   if (!summary) return
 
-  // Save as a summary ConversationMessage (replaces previous if exists)
-  // First delete old summary
-  await prisma.conversationMessage.deleteMany({
-    where: { projectId, role: 'summary' },
-  })
+  // Save as a summary ConversationMessage (replaces previous if exists).
+  // First delete old summary. It is made from the conversation, so it is kept
+  // where the conversation's words are.
+  await deleteConversationMessages(projectId, { role: 'summary' })
 
-  await prisma.conversationMessage.create({
-    data: {
-      projectId,
-      role: 'summary',
-      content: JSON.stringify(summary),
-    },
-  })
+  await createConversationMessage({ projectId, role: 'summary', content: JSON.stringify(summary) })
 
   console.log(`[Summarizer] Summarized ${rawCount} messages for project ${projectId}`)
 }

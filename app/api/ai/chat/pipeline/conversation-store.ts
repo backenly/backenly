@@ -1,10 +1,14 @@
 /**
  * Shared conversation persistence utilities used by multiple pipeline stages.
  * Extracted from route.ts so each stage can import without circular deps.
+ *
+ * A message's words are written and deleted through lib/ai/conversation-content.ts,
+ * which keeps a regional project's in its region.
  */
 
 import { prisma } from '@/lib/db/prisma'
 import type { Prisma } from '@prisma/client'
+import { createConversationMessage, deleteConversationMessages } from '@/lib/ai/conversation-content'
 
 export async function loadHistory(projectId: string): Promise<{
   history: Array<{ role: 'user' | 'assistant'; content: string }>
@@ -89,14 +93,7 @@ export async function insertIfNotExists(
       return
     }
   }
-  await prisma.conversationMessage.create({
-    data: {
-      projectId,
-      role,
-      content,
-      metadata: (metadata ?? {}) as Prisma.InputJsonValue,
-    },
-  })
+  await createConversationMessage({ projectId, role, content, metadata: (metadata ?? {}) as Prisma.InputJsonValue })
 }
 
 /**
@@ -169,28 +166,25 @@ export async function saveBuildMessages(
         })
         .map((m) => m.id)
       if (toDelete.length > 0) {
-        await prisma.conversationMessage.deleteMany({ where: { id: { in: toDelete } } })
+        await deleteConversationMessages(projectId, { id: { in: toDelete } })
         console.log(`[ConvStore] dedup Pass 3 tombstoned ${toDelete.length} stale message(s)`)
       }
     } catch (err: any) {
       console.warn('[ConvStore] dedup Pass 3 (non-fatal):', err?.message)
     }
 
-    await prisma.conversationMessage.createMany({
-      data: [
-        { projectId, role: 'user', content: userContent },
-        {
-          projectId,
-          role: 'ai',
-          content: aiContent,
-          metadata: {
-            buildJobId,
-            savedAt: new Date().toISOString(),
-            noSummarize: true,
-            ...(buildResponseData ? { buildResponse: buildResponseData } : {}),
-          },
-        },
-      ],
+    // One after the other, so the user's message is sequenced before the reply.
+    await createConversationMessage({ projectId, role: 'user', content: userContent })
+    await createConversationMessage({
+      projectId,
+      role: 'ai',
+      content: aiContent,
+      metadata: {
+        buildJobId,
+        savedAt: new Date().toISOString(),
+        noSummarize: true,
+        ...(buildResponseData ? { buildResponse: buildResponseData } : {}),
+      },
     })
   } catch (err) {
     console.error('[ConvStore] Failed to save build messages:', err)
