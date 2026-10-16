@@ -49,14 +49,15 @@ export async function saveMessages(
       ? { requestId, side: 'ai' }
       : undefined
 
-    const writes: Array<Promise<unknown>> = []
+    // One after the other, so the user's message is sequenced before the reply.
+    // Written together, the reply could take the earlier messageSeq, and the
+    // history would show it ahead of the question it answers.
     if (userContent) {
-      writes.push(insertIfNotExists(projectId, 'user', userContent, metaUser, requestId))
+      await insertIfNotExists(projectId, 'user', userContent, metaUser, requestId)
     }
     if (aiContent) {
-      writes.push(insertIfNotExists(projectId, 'ai', aiContent, metaAi, requestId))
+      await insertIfNotExists(projectId, 'ai', aiContent, metaAi, requestId)
     }
-    await Promise.all(writes)
 
     import('@/lib/ai/conversation-summarizer')
       .then(({ maybeSummarizeConversation }) => maybeSummarizeConversation(projectId))
