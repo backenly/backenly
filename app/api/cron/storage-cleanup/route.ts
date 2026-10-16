@@ -14,7 +14,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { runLifecycleCleanup, getStorageHealth } from '@/lib/storage/storage-lifecycle'
+import { runLifecycleCleanup, getStorageHealth, STORAGE_SOFT_DELETE_RETENTION_DAYS } from '@/lib/storage/storage-lifecycle'
 import { s3LocationFor } from '@/lib/services/s3-config'
 import { serviceRegion } from '@/lib/data-plane/serving'
 import { prisma } from '@/lib/db'
@@ -71,7 +71,7 @@ export async function POST(request: NextRequest) {
 
     // Run cleanup
     const result = await runLifecycleCleanup(client, bucket, {
-      softDeleteRetentionDays: 7,
+      softDeleteRetentionDays: STORAGE_SOFT_DELETE_RETENTION_DAYS,
       dryRun: false,
       region,
     })

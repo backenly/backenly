@@ -596,3 +596,52 @@ export function generatePresignedUrlExpiry(
   // Enforce maximum expiry
   return Math.min(customExpiry, maxExpiry)
 }
+
+// ── The daily sweep ───────────────────────────────────────────────────────────
+
+/** How long a deleted file can still be restored before the sweep removes it. */
+export const STORAGE_SOFT_DELETE_RETENTION_DAYS = 7
+
+export type StoragePurgeMode = 'off' | 'dry-run' | 'enforce'
+
+/**
+ * How the scheduled sweep runs, read from BACKENLY_STORAGE_PURGE. The sweep
+ * deletes files for good, so until the founders turn it on (`enforce`) it only
+ * reports what it would delete; `off` stops it. Anything else is dry-run,
+ * never enforce.
+ */
+export function storagePurgeMode(raw: string | undefined = process.env.BACKENLY_STORAGE_PURGE): StoragePurgeMode {
+  const value = (raw ?? '').trim().toLowerCase()
+  return value === 'off' || value === 'enforce' ? value : 'dry-run'
+}
+
+/**
+ * This region's bucket, swept for this region's projects: files deleted more
+ * than STORAGE_SOFT_DELETE_RETENTION_DAYS ago, objects no row names, and
+ * abandoned uploads. Run daily by every region's scheduler
+ * (lib/services/cron-runner.ts runRegionalSystemTasks). Only the S3 driver
+ * keeps a bucket to sweep; `location` is the seam the tests inject through.
+ */
+export async function sweepRegionStorage(
+  region: CloudRegionId,
+  options: { mode?: StoragePurgeMode; location?: { client: S3Client; bucket: string } } = {},
+): Promise<Awaited<ReturnType<typeof runLifecycleCleanup>> | null> {
+  const mode = options.mode ?? storagePurgeMode()
+  if (mode === 'off') return null
+  if (!options.location && (process.env.STORAGE_DRIVER || 'local') !== 's3') return null
+
+  const { s3LocationFor } = await import('@/lib/services/s3-config')
+  const { client, bucket } = options.location ?? s3LocationFor(region)
+  const result = await runLifecycleCleanup(client, bucket, {
+    softDeleteRetentionDays: STORAGE_SOFT_DELETE_RETENTION_DAYS,
+    dryRun: mode !== 'enforce',
+    region,
+  })
+  console.log(
+    `[storage-sweep] ${mode === 'enforce' ? 'deleted' : 'would delete (dry-run)'} in ${region}: ` +
+      `${result.deletedSoftDeletes} deleted file(s), ${result.deletedOrphans} unreferenced object(s), ` +
+      `${result.deletedIncomplete} abandoned upload(s), ${result.totalBytesFreed} bytes` +
+      (result.errors.length ? `; ${result.errors.length} error(s)` : ''),
+  )
+  return result
+}
