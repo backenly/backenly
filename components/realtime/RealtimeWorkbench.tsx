@@ -17,6 +17,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { Radio, WifiOff, Circle, RefreshCw, AlertTriangle, Trash2, ChevronLeft } from 'lucide-react'
 import { getAuthToken } from '@/lib/api/auth'
+import { getProject } from '@/lib/api/projects'
 import {
   AgentPrompt, CommandBar, CopyField, EmptyState, IconButton, KIT, KitButton, NoticeStrip, StatusDot,
   type StatusTone,
@@ -107,6 +108,10 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
   const esRef = useRef<EventSource | null>(null)
   const counterRef = useRef(0)
   const anonKeyRef = useRef<string | null>(null)
+  // The project's API base in its own region ({origin}/api/v1/{id}). A project
+  // outside the home region streams from its region's service, which is the
+  // only one that serves it (lib/data-plane/serving.ts).
+  const apiBaseRef = useRef<string | null>(null)
   const retryAttemptRef = useRef(0)
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -228,8 +233,21 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
         setFatal("We couldn't generate this project's anon key. Try reloading.")
         return
       }
+      if (!apiBaseRef.current) {
+        try {
+          apiBaseRef.current = (await getProject(projectId)).apiBaseUrl ?? null
+        } catch {
+          scheduleReconnect()
+          return
+        }
+      }
+      if (destroyedRef.current) return
+      if (!apiBaseRef.current) {
+        setFatal("This project's API address is not available from this console. Try reloading.")
+        return
+      }
 
-      const url = `/api/v1/${projectId}/realtime?apiKey=${encodeURIComponent(anonKeyRef.current)}`
+      const url = `${apiBaseRef.current}/realtime?apiKey=${encodeURIComponent(anonKeyRef.current)}`
       const es = new EventSource(url)
       esRef.current = es
 

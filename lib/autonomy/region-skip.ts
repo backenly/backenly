@@ -14,10 +14,18 @@
  *   - an AUTONOMY_SKIPPED audit row per project, at most once an hour per
  *     process, so the project's own history shows that it was not checked and
  *     why, rather than going quiet.
+ *
+ * Before that, a pass takes only the projects of the region this process
+ * serves (BACKENLY_SERVICE_REGION, lib/data-plane/serving.ts), even ones it
+ * could reach over peering: each region's own worker checks, repairs and backs
+ * up its own projects, so no fleet pass runs across regions by accident and a
+ * regional outage is not quietly covered from elsewhere. That is the normal
+ * division of work, not a failure, so it is not recorded.
  */
 
 import { prisma } from '@/lib/db/prisma'
 import { partitionReachable, type UnreachableProject } from '@/lib/data-plane/regional'
+import { partitionServed } from '@/lib/data-plane/serving'
 
 export const AUTONOMY_SKIPPED = 'AUTONOMY_SKIPPED'
 
@@ -26,11 +34,13 @@ const RECORDED_MAX = 10_000
 const lastRecorded = new Map<string, number>()
 
 /**
- * The targets this process can reach. The rest are logged and recorded as
- * skipped for `pass` (a short name of the background work, e.g. 'reconciler').
+ * The targets this process serves and can reach. Another region's projects are
+ * left to that region; the unreachable rest are logged and recorded as skipped
+ * for `pass` (a short name of the background work, e.g. 'reconciler').
  */
 export async function skipUnreachable<T extends { id: string }>(targets: T[], pass: string): Promise<T[]> {
-  const { reachable, unreachable } = await partitionReachable(targets)
+  const { served } = await partitionServed(targets)
+  const { reachable, unreachable } = await partitionReachable(served)
   if (unreachable.length > 0) {
     console.warn(`[${pass}] skipped ${unreachable.length} project(s) this process cannot reach: ${summarize(unreachable)}`)
     await recordSkips(unreachable, pass)
@@ -38,7 +48,7 @@ export async function skipUnreachable<T extends { id: string }>(targets: T[], pa
   return reachable
 }
 
-/** skipUnreachable for one project: whether `pass` may go ahead with it. */
+/** skipUnreachable for one project: whether `pass` may go ahead with it here. */
 export async function canReach(projectId: string, pass: string): Promise<boolean> {
   return (await skipUnreachable([{ id: projectId }], pass)).length === 1
 }
