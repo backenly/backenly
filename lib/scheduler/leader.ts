@@ -28,14 +28,48 @@
  *
  * The two-integer key form lives in a separate key space from the single
  * bigint keys the build lock uses, so the two can never collide.
+ *
+ * One scheduler per REGION. Every region's processes take this lock on the
+ * platform database, the one database they all share, so a single key made
+ * one leader for the whole fleet: a Virginia worker that won it stopped
+ * Mumbai's jobs, and while Mumbai held it nothing scheduled Virginia's
+ * projects. Each region has its own slot. The jobs a regional leader runs see
+ * only that region's projects (lib/data-plane/serving.ts), and the platform's
+ * own work (billing, usage, back office) is scheduled in the home region only
+ * (instrumentation.ts), so neither is ever done twice.
  */
 import { Client } from 'pg'
 
-/** 'BKNS' and slot 1: the scheduler. Other slots are free for future singletons. */
-export const SCHEDULER_LOCK_KEY: readonly [number, number] = [0x424b4e53, 1]
+import { HOME_REGION, type CloudRegionId } from '@/lib/regions'
+
+/**
+ * 'BKNS', and one slot per region. The home region keeps slot 1, the key every
+ * earlier build took, so an old and a new Mumbai process still contend for the
+ * same lock during a rolling deploy. A slot belongs to its region for good: it
+ * is how that region's leader is found in pg_locks, so a slot is never reused.
+ */
+const LOCK_CLASS = 0x424b4e53
+const REGION_SLOTS: Record<CloudRegionId, number> = {
+  'ap-south-1': 1,
+  'us-east-1': 2,
+  'us-west-2': 3,
+  'eu-central-1': 4,
+  'ap-southeast-1': 5,
+}
+
+export function schedulerLockKey(region: CloudRegionId): readonly [number, number] {
+  const slot = REGION_SLOTS[region]
+  if (!slot) throw new Error(`no scheduler lock slot for region ${region}`)
+  return [LOCK_CLASS, slot]
+}
+
+/** The home region's key, unchanged since the lock was introduced. */
+export const SCHEDULER_LOCK_KEY = schedulerLockKey(HOME_REGION)
 
 export interface LeadershipOptions {
   connectionString?: string
+  /** The region whose scheduler this is. The home region when not given. */
+  region?: CloudRegionId
   /** How often a follower asks for the lock, and a lost connection reconnects. */
   retryMs?: number
   /** How often the leader proves its session (and therefore its lock) is alive. */
@@ -51,15 +85,23 @@ export class SchedulerLeadership {
   private stopped = false
   private timer: NodeJS.Timeout | null = null
   private readonly opts: Required<Omit<LeadershipOptions, 'connectionString'>> & { connectionString?: string }
+  private readonly key: readonly [number, number]
 
   constructor(options: LeadershipOptions = {}) {
     this.opts = {
       connectionString: options.connectionString,
+      region: options.region ?? HOME_REGION,
       retryMs: options.retryMs ?? 5_000,
       heartbeatMs: options.heartbeatMs ?? 15_000,
       queryTimeoutMs: options.queryTimeoutMs ?? 10_000,
       log: options.log ?? ((line) => console.log(line)),
     }
+    this.key = schedulerLockKey(this.opts.region)
+  }
+
+  /** The region whose scheduler this instance contends for. */
+  get region(): CloudRegionId {
+    return this.opts.region
   }
 
   isLeader(): boolean {
@@ -79,7 +121,7 @@ export class SchedulerLeadership {
     const wasLeader = this.leader
     this.leader = false
     await this.dropConnection()
-    if (wasLeader) this.opts.log('[Scheduler] released the scheduler lock')
+    if (wasLeader) this.opts.log(`[Scheduler] released the ${this.opts.region} scheduler lock`)
   }
 
   private schedule(ms: number): void {
@@ -99,11 +141,11 @@ export class SchedulerLeadership {
       } else {
         const res = await client.query<{ acquired: boolean }>(
           'SELECT pg_try_advisory_lock($1::int, $2::int) AS acquired',
-          [SCHEDULER_LOCK_KEY[0], SCHEDULER_LOCK_KEY[1]],
+          [this.key[0], this.key[1]],
         )
         if (res.rows[0]?.acquired === true && !this.stopped) {
           this.leader = true
-          this.opts.log('[Scheduler] this instance holds the scheduler lock and runs the scheduled jobs')
+          this.opts.log(`[Scheduler] this instance holds the ${this.opts.region} scheduler lock and runs that region's scheduled jobs`)
         }
       }
     } catch (err: any) {
@@ -139,7 +181,7 @@ export class SchedulerLeadership {
     this.leader = false
     void this.dropConnection()
     if (wasLeader && !this.stopped) {
-      this.opts.log(`[Scheduler] lost the scheduler lock (${reason}); scheduled jobs paused here until it is re-acquired`)
+      this.opts.log(`[Scheduler] lost the ${this.opts.region} scheduler lock (${reason}); scheduled jobs paused here until it is re-acquired`)
     }
   }
 

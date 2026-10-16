@@ -48,7 +48,7 @@
 import { PrismaClient } from '@prisma/client'
 import { Pool, type PoolConfig } from 'pg'
 import { prisma } from '@/lib/db/prisma'
-import { CLOUD_REGIONS, HOME_REGION, findRegion, type CloudRegionId } from '@/lib/regions'
+import { HOME_REGION, findRegion, type CloudRegionId } from '@/lib/regions'
 
 /**
  * Which credential a caller needs. Each region has its own of every kind, for
@@ -275,18 +275,6 @@ export function regionApiOrigin(
 /** regionApiOrigin for the region recorded on the project. */
 export async function projectApiOrigin(projectId: string, homeOrigin: string): Promise<string> {
   return regionApiOrigin(await projectRegion(projectId), homeOrigin, { projectId })
-}
-
-/**
- * The regions this process holds an application database connection for: the
- * home region always, any other only when its DATABASE_URL_<REGION> is set.
- * For work about a region rather than a project, such as its drift-event
- * upkeep. Only configuration is checked; nothing is connected to.
- */
-export function connectedRegions(env: Env = process.env): CloudRegionId[] {
-  return CLOUD_REGIONS.map((region) => region.id).filter(
-    (region) => region === HOME_REGION || regionDatabaseUrl(region, 'app', env) !== undefined,
-  )
 }
 
 /** A project this process cannot reach, and why. */

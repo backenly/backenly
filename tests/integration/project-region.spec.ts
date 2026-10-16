@@ -1522,10 +1522,25 @@ describe('schema drift events live in the project’s region', () => {
     const ids = await rowsIn<{ id: string }>(regionalUrl, `SELECT id FROM public.schema_drift_events WHERE id LIKE 'old-%'`)
     expect(ids.map((r) => r.id)).toEqual(['old-pending'])
 
-    const reports = await upkeep.runDriftEventUpkeep()
-    const virginia = reports.find((r) => r.region === 'us-east-1')
-    expect(virginia).toMatchObject({ health: { status: 'healthy' }, backlog: { pending: 1 }, errors: [] })
+    // As Virginia's own scheduler runs it: each region upkeeps its own database.
+    process.env.BACKENLY_SERVICE_REGION = 'us-east-1'
+    try {
+      const reports = await upkeep.runDriftEventUpkeep()
+      expect(reports.map((r) => r.region)).toEqual(['us-east-1'])
+      expect(reports[0]).toMatchObject({ health: { status: 'healthy' }, backlog: { pending: 1 }, errors: [] })
+    } finally {
+      delete process.env.BACKENLY_SERVICE_REGION
+    }
     await run(regionalUrl, `DELETE FROM public.schema_drift_events WHERE id = 'old-pending'`)
+  })
+
+  it('is upkept by the region’s own scheduler, and not by the home region’s', async () => {
+    const { upkeep } = await load()
+    process.env[REGION_VARIABLE] = regionalUrl
+    // Mumbai's process reaches Virginia's database for routing, and still
+    // leaves Virginia's upkeep to Virginia.
+    const reports = await upkeep.runDriftEventUpkeep()
+    expect(reports.map((r) => r.region)).toEqual(['ap-south-1'])
   })
 
   it('attributes a statement that names no object to the login’s project', async () => {
@@ -1579,10 +1594,55 @@ describe('schema drift events live in the project’s region', () => {
       const left = await rowsIn<{ id: string }>(regionalUrl, `SELECT id FROM public.schema_drift_events WHERE id LIKE 'orphan-%' OR id = 'held-old' ORDER BY id`)
       expect(left.map((r) => r.id)).toEqual(['held-old', 'orphan-unnamed-new'])
 
-      const virginia = (await upkeep.runDriftEventUpkeep()).find((r) => r.region === 'us-east-1')
-      expect(virginia).toMatchObject({ backlog: { pending: 1, orphaned: 1 }, prunedOrphans: 0, errors: [] })
+      const [virginia] = await upkeep.runDriftEventUpkeep(new Date(), ['us-east-1'])
+      expect(virginia).toMatchObject({ region: 'us-east-1', backlog: { pending: 1, orphaned: 1 }, prunedOrphans: 0, errors: [] })
     } finally {
       await run(regionalUrl, `DELETE FROM public.schema_drift_events WHERE id LIKE 'orphan-%' OR id = 'held-old'`)
+    }
+  })
+})
+
+describe('each region’s scheduler runs only its own projects’ cron functions', () => {
+  // A function's SQL and its data are in its project's region, so its schedule
+  // fires there. The home region's scheduler used to fire every region's.
+  const ids: string[] = []
+  const due = async () => {
+    const { dueCronJobs } = await import('@/lib/services/cron-runner')
+    return (await dueCronJobs(new Date())).due.filter((job) => ids.includes(job.id)).map((job) => job.projectId)
+  }
+
+  beforeAll(async () => {
+    for (const projectId of [homeProject, regionalProject]) {
+      const fn = await prisma.aiFunction.create({
+        data: {
+          projectId,
+          name: `cron-${projectId.slice(0, 8)}`,
+          description: 'region fixture',
+          generatedCode: 'return 1',
+          triggerType: 'cron',
+          triggerTable: '* * * * *',
+          status: 'active',
+        },
+        select: { id: true },
+      })
+      ids.push(fn.id)
+    }
+  })
+
+  afterAll(async () => {
+    await prisma.aiFunction.deleteMany({ where: { id: { in: ids } } }).catch(() => {})
+  })
+
+  it('fires a home project’s function in the home region, and not a Virginia project’s', async () => {
+    expect(await due()).toEqual([homeProject])
+  })
+
+  it('fires a Virginia project’s function in Virginia, and not the home project’s', async () => {
+    process.env.BACKENLY_SERVICE_REGION = 'us-east-1'
+    try {
+      expect(await due()).toEqual([regionalProject])
+    } finally {
+      delete process.env.BACKENLY_SERVICE_REGION
     }
   })
 })
