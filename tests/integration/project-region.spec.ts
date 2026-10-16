@@ -90,6 +90,7 @@ import { PROBE_REGISTRY } from '@/lib/autonomy/hypothesis/probes'
 import { executeMaintenanceAddStructure } from '@/lib/autonomy/maintenance/primitives/add-structure'
 import { dualWriteInstalled, installDualWrite, removeDualWrite } from '@/lib/autonomy/maintenance/primitives/dual-write'
 import { runBackfillBatch } from '@/lib/autonomy/maintenance/primitives/backfill'
+import { estimateDataMigration, executeDataMigration, rollbackDataMigration } from '@/lib/execution/data-migration'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -1386,6 +1387,54 @@ describe('the maintenance primitives act on the project’s region', () => {
     await expect(
       executeMaintenanceAddStructure({ projectId: regionalProject, table: 'ledger', column: 'extra', columnType: 'text' }),
     ).rejects.toMatchObject(refused)
+  })
+})
+
+describe('typed data migrations run in the project’s region', () => {
+  // The table and the checkpoint copied from it exist only in the regional
+  // database. Read from the home one, the table "does not exist in this project".
+  const statuses = () => `"${schemaOf(regionalProject)}".statuses`
+  const normalize = [{ op: 'normalize_values' as const, table: 'statuses', column: 'status', mapping: { Open: 'open' } }]
+  const values = async () =>
+    (await rowsIn<{ status: string }>(regionalUrl, `SELECT status FROM ${statuses()} ORDER BY id`)).map((r) => r.status)
+
+  beforeAll(async () => {
+    await run(
+      regionalUrl,
+      `CREATE TABLE ${statuses()} (id int PRIMARY KEY, status text);
+       INSERT INTO ${statuses()} VALUES (1, 'Open'), (2, 'open'), (3, 'closed')`,
+    )
+  })
+
+  afterAll(async () => {
+    await run(regionalUrl, `DROP TABLE IF EXISTS ${statuses()} CASCADE`).catch(() => {})
+  })
+
+  it('estimates, applies with its checkpoint, and rolls back, in the region', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+
+    expect(await estimateDataMigration(regionalProject, normalize)).toEqual([
+      expect.objectContaining({ table: 'statuses', affectedRows: 1, totalRows: 3 }),
+    ])
+
+    const applied = await executeDataMigration(regionalProject, normalize)
+    expect(applied).toMatchObject({ success: true, applied: [{ op: 'normalize_values', table: 'statuses', affectedRows: 1 }] })
+    expect(await values()).toEqual(['open', 'open', 'closed'])
+    const checkpoint = applied.backupTables.statuses
+    expect(await rowsIn(regionalUrl, `SELECT status FROM "${schemaOf(regionalProject)}"."${checkpoint}" ORDER BY id`)).toEqual([
+      { status: 'Open' }, { status: 'open' }, { status: 'closed' },
+    ])
+
+    expect(await rollbackDataMigration(regionalProject, 'statuses', checkpoint)).toEqual({ success: true })
+    expect(await values()).toEqual(['Open', 'open', 'closed'])
+  })
+
+  it('refuses without a connection to the region, and runs nothing anywhere else', async () => {
+    delete process.env[REGION_VARIABLE]
+    const refused = { code: 'REGION_NOT_CONFIGURED' }
+    await expect(estimateDataMigration(regionalProject, normalize)).rejects.toMatchObject(refused)
+    await expect(executeDataMigration(regionalProject, normalize)).rejects.toMatchObject(refused)
+    await expect(rollbackDataMigration(regionalProject, 'statuses', '_dm_backup_20261017000000_statuses')).rejects.toMatchObject(refused)
   })
 })
 
