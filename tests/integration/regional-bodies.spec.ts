@@ -18,6 +18,9 @@
  *                      receiver's words stay in the region
  *   function errors    the row keeps the platform's own prefix, which the
  *                      self-heal guards read, and none of the text
+ *   backfills          a maintenance backfill's batches run in the region, with
+ *                      the cursor (a natural key is a customer's value) kept
+ *                      there and the platform's own sentence on a failure
  *   retention          the region prunes 30 days after the last change; home
  *                      has nothing there to prune
  *
@@ -46,6 +49,9 @@ import { maybeSummarizeConversation } from '@/lib/ai/conversation-summarizer'
 import { disconnectRegionalClients } from '@/lib/data-plane/regional'
 import { fireTriggers, listDeliveryLogs, replayDelivery, withoutReply } from '@/lib/services/trigger-service'
 import { failureWithoutReply, pruneRegionalBodies } from '@/lib/data-plane/regional-bodies'
+import { CURSOR_NOT_KEPT, queueBackfillJob, type BackfillJobPayload } from '@/lib/autonomy/maintenance/primitives/backfill-job'
+import { inspectBackgroundJob } from '@/lib/autonomy/maintenance/execute'
+import { processRegionalJobs } from '@/lib/queue/worker'
 import {
   ERROR_KEPT_IN_REGION,
   deleteFunctionRuns,
@@ -620,6 +626,127 @@ describe("the agent's conversation", () => {
     expect(await deleteConversationMessages(regionalProject, {})).toBe(2)
 
     for (const id of ids) expect(await regionalBodyOf('conversation_message', id)).toBeUndefined()
+  })
+})
+
+// ── Maintenance backfills ────────────────────────────────────────────────────
+
+describe('a maintenance backfill', () => {
+  // A natural primary key: every cursor a batch leaves is a customer's own email.
+  const EMAILS = ['ann@example.com', 'ben@example.com', 'cal@example.com']
+  const schema = () => `workspace_${regionalProject}`
+  const payload = (table: string, idempotencyKey: string): BackfillJobPayload => ({
+    projectId: regionalProject,
+    planVersion: 'v1',
+    idempotencyKey,
+    table,
+    sourceColumn: 'status',
+    targetColumn: 'state',
+    transform: { kind: 'upper' },
+    batchRows: 1,
+    cursor: null,
+  })
+  /** What the region's own scheduler runs, until nothing more is due. */
+  async function runRegionUntilIdle(): Promise<number> {
+    let processed = 0
+    for (let i = 0; i < 10; i++) {
+      const pass = await processRegionalJobs('us-east-1')
+      if (pass.processed === 0) break
+      processed += pass.processed
+    }
+    return processed
+  }
+
+  beforeAll(async () => {
+    await run(
+      regionalUrl,
+      `CREATE SCHEMA IF NOT EXISTS "${schema()}";
+       CREATE TABLE "${schema()}".accounts (email text PRIMARY KEY, status text, state text);
+       INSERT INTO "${schema()}".accounts (email, status) VALUES ${EMAILS.map((e) => `('${e}', 'active')`).join(', ')};
+       CREATE TABLE "${schema()}".tallies (email text PRIMARY KEY, status text, state int);
+       INSERT INTO "${schema()}".tallies (email, status) VALUES ('${EMAILS[0]}', '${EMAILS[0]}')`,
+    )
+  })
+
+  afterAll(async () => {
+    await run(regionalUrl, `DROP TABLE IF EXISTS "${schema()}".accounts, "${schema()}".tallies`).catch(() => {})
+    await run(regionalUrl, `DELETE FROM public.regional_bodies WHERE "kind" = 'backfill_cursor'`).catch(() => {})
+    await prisma.backgroundJob.deleteMany({ where: { projectId: regionalProject } }).catch(() => {})
+  })
+
+  it('runs its batches in the region, with each cursor kept there and none on the platform rows', async () => {
+    const idempotencyKey = `bf-${randomUUID()}`
+    const first = await queueBackfillJob(payload('accounts', idempotencyKey))
+    // A regional job, so no home queue ever claims it.
+    expect(await prisma.backgroundJob.findUniqueOrThrow({ where: { id: first.id } })).toMatchObject({
+      status: 'regional_pending',
+      payload: expect.objectContaining({ region: 'us-east-1', cursor: null }),
+    })
+
+    // Three rows one at a time, then the batch that finds the end.
+    expect(await runRegionUntilIdle()).toBe(4)
+
+    const chain = await prisma.backgroundJob.findMany({
+      where: { projectId: regionalProject, type: 'maintenance_backfill', payload: { path: ['idempotencyKey'], equals: idempotencyKey } },
+    })
+    expect(chain.map((job) => job.status)).toEqual(['completed', 'completed', 'completed', 'completed'])
+    expect(JSON.stringify(chain.map((job) => [job.payload, job.result, job.error]))).not.toMatch(/example\.com/)
+    const kept = await rowsIn<{ cursor: string }>(
+      regionalUrl,
+      `SELECT payload->>'cursor' AS cursor FROM public.regional_bodies WHERE "kind" = 'backfill_cursor' AND "projectId" = $1 ORDER BY 1`,
+      [regionalProject],
+    )
+    expect(kept.map((k) => k.cursor)).toEqual(EMAILS)
+    expect(await rowsIn(regionalUrl, `SELECT state FROM "${schema()}".accounts ORDER BY email`)).toEqual(EMAILS.map(() => ({ state: 'ACTIVE' })))
+
+    // The ladder reads the chain as finished.
+    expect(await inspectBackgroundJob(first.id, { projectId: regionalProject, idempotencyKey })).toEqual({
+      state: 'done',
+      detail: 'backfill complete: 3 row(s) updated over 4 batch(es)',
+    })
+  })
+
+  it('records the platform’s own sentence when a batch fails, never the database’s words', async () => {
+    const first = await queueBackfillJob(payload('tallies', `bf-${randomUUID()}`))
+    expect(await runRegionUntilIdle()).toBe(1)
+    const job = await prisma.backgroundJob.findUniqueOrThrow({ where: { id: first.id } })
+    // Retried after its backoff; the reason is in the region's own logs.
+    expect(job).toMatchObject({
+      status: 'regional_pending',
+      attempts: 1,
+      error: "The backfill batch did not complete in us-east-1. The reason is in that region's logs.",
+    })
+    expect(JSON.stringify([job.payload, job.result, job.error])).not.toMatch(/example\.com/i)
+    // Due again in five seconds; out of the way of the tests below.
+    await prisma.backgroundJob.delete({ where: { id: first.id } })
+  })
+
+  it('refuses, and ends its chain, when its region no longer keeps where it stopped', async () => {
+    const idempotencyKey = `bf-${randomUUID()}`
+    await queueBackfillJob({ ...payload('accounts', idempotencyKey), cursor: EMAILS[0], batches: 1 })
+    await run(regionalUrl, `DELETE FROM public.regional_bodies WHERE "kind" = 'backfill_cursor'`)
+    expect(await runRegionUntilIdle()).toBe(1)
+    const [job] = await prisma.backgroundJob.findMany({
+      where: { projectId: regionalProject, payload: { path: ['idempotencyKey'], equals: idempotencyKey } },
+    })
+    expect(job).toMatchObject({ status: 'completed', result: expect.objectContaining({ refusal: CURSOR_NOT_KEPT, cursor: null }) })
+  })
+
+  it('waits, unclaimed, while its project is paused', async () => {
+    await prisma.project.update({ where: { id: regionalProject }, data: { pausedAt: new Date() } })
+    let firstId = ''
+    try {
+      firstId = (await queueBackfillJob(payload('accounts', `bf-${randomUUID()}`))).id
+      expect(await runRegionUntilIdle()).toBe(0)
+      expect(await prisma.backgroundJob.findUniqueOrThrow({ where: { id: firstId } })).toMatchObject({
+        status: 'regional_pending',
+        attempts: 0,
+      })
+    } finally {
+      await prisma.project.update({ where: { id: regionalProject }, data: { pausedAt: null } })
+    }
+    expect(await runRegionUntilIdle()).toBeGreaterThan(0)
+    expect((await prisma.backgroundJob.findUniqueOrThrow({ where: { id: firstId } })).status).toBe('completed')
   })
 })
 
