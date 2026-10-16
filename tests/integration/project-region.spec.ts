@@ -64,6 +64,7 @@ import { columnTypes } from '@/lib/mcp/runtime-db'
 import { getTableSchema, listExposedTables, workspaceTableExists } from '@/lib/mcp/schema-introspection'
 import { functionDbClient, functionRoleHelperInstalled, functionRoleName, provisionFunctionRole } from '@/lib/services/ai-functions/function-db-role'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
+import { scoreReadiness } from '@/lib/deployment/readiness-scorer'
 import { ensureEmailVerifiedColumn, logoutEndUser } from '@/lib/services/end-user-auth-flows'
 import { buildUserInsert, introspectAuthUsersTable } from '@/lib/services/end-user-auth-table'
 import { hashApiKey, resolveEndUserFromToken } from '@/server/lib/end-user-identity'
@@ -397,6 +398,49 @@ describe('schema history is recorded and rolled back in the project’s region',
     const refused = { code: 'REGION_NOT_CONFIGURED' }
     await expect(snapshotSchema(regionalProject, 'no connection', 'test')).rejects.toMatchObject(refused)
     await expect(rollbackToVersion(regionalProject, versionId)).rejects.toMatchObject(refused)
+  })
+})
+
+describe('the deploy readiness gate reads the project’s region', () => {
+  // Asked of the home database, a regional project had no tables there: the
+  // blocking route-protection check passed without looking at any, and the
+  // users table that auth needs was always missing.
+  let gated = ''
+  const schema = () => schemaOf(gated)
+  const check = (checks: Array<{ id: string }>, id: string) => checks.find((c) => c.id === id) as any
+
+  beforeAll(async () => {
+    gated = await createProject('us-east-1')
+    await prisma.project.update({
+      where: { id: gated },
+      data: { jwtSecret: randomBytes(32).toString('hex'), authManifest: { enabled: true } },
+    })
+    await run(
+      regionalUrl,
+      `DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN CREATE ROLE anon NOLOGIN; END IF; END $$;
+       CREATE SCHEMA "${schema()}";
+       CREATE TABLE "${schema()}".users (id uuid PRIMARY KEY);
+       CREATE TABLE "${schema()}".open_writes (id int PRIMARY KEY);
+       GRANT INSERT ON "${schema()}".open_writes TO anon`,
+    )
+  })
+
+  afterAll(async () => {
+    await run(regionalUrl, `DROP SCHEMA IF EXISTS "${schema()}" CASCADE`).catch(() => {})
+    await prisma.project.deleteMany({ where: { id: gated } }).catch(() => {})
+  })
+
+  it('finds the regional table anyone can write, and the regional users table', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const { checks } = await scoreReadiness(gated)
+    expect(check(checks, 'route_protection')).toMatchObject({ status: 'fail' })
+    expect(check(checks, 'route_protection').details.join(' ')).toMatch(/open_writes/)
+    expect(check(checks, 'end_user_auth_table')).toMatchObject({ status: 'pass' })
+  })
+
+  it('without a connection to the region, is refused rather than scored', async () => {
+    delete process.env[REGION_VARIABLE]
+    await expect(scoreReadiness(gated)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
   })
 })
 

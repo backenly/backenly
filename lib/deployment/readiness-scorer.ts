@@ -15,6 +15,7 @@
  */
 
 import { prisma } from '@/lib/db'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import { aiAvailability } from '@/lib/ai/llm'
 
@@ -255,7 +256,11 @@ async function checkProjectJwt(
  * authentication" because it iterated an empty list.
  *
  * A vacuous pass on a blocking security gate is worse than no gate. This reads
- * what actually decides the answer.
+ * what actually decides the answer, in the database that holds the project's
+ * schema and its roles: its region's (lib/data-plane/regional.ts). Asked of the
+ * home database, a regional project had no tables there, so this passed without
+ * looking at any. A catalog it cannot read is reported as unverified, never as
+ * protected.
  */
 async function checkRouteProtection(projectId: string): Promise<ReadinessCheck> {
   const base: Omit<ReadinessCheck, 'status' | 'message' | 'details' | 'fixApplied'> = {
@@ -267,32 +272,44 @@ async function checkRouteProtection(projectId: string): Promise<ReadinessCheck> 
 
   const schema = `workspace_${projectId}`
 
-  // `anon` is the role an unauthenticated request runs as. If it holds a write
-  // privilege on a table that does not enforce RLS, that table is writable by
-  // anyone holding the public key — no policy stands between them and the row.
-  const rows = await prisma.$queryRawUnsafe<Array<{ table_name: string; privs: string; rls: boolean }>>(
-    `SELECT c.relname AS table_name,
-            string_agg(DISTINCT g.privilege_type, ', ' ORDER BY g.privilege_type) AS privs,
-            c.relrowsecurity AS rls
-       FROM pg_class c
-       JOIN pg_namespace n ON n.oid = c.relnamespace
-       JOIN information_schema.role_table_grants g
-         ON g.table_schema = n.nspname AND g.table_name = c.relname
-      WHERE n.nspname = $1
-        AND c.relkind = 'r'
-        AND g.grantee = 'anon'
-        AND g.privilege_type IN ('INSERT', 'UPDATE', 'DELETE', 'TRUNCATE')
-        AND NOT c.relrowsecurity
-      GROUP BY c.relname, c.relrowsecurity
-      ORDER BY c.relname`,
-    schema,
-  ).catch(() => [] as Array<{ table_name: string; privs: string; rls: boolean }>)
-
-  // A dev/CI database may have no PostgREST roles at all. "The role does not
-  // exist" is not "the check passed" — say which one it is.
-  const rolesExist = await prisma.$queryRawUnsafe<Array<{ ok: boolean }>>(
-    `SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') AS ok`,
-  ).catch(() => [{ ok: false }])
+  let rows: Array<{ table_name: string; privs: string; rls: boolean }>
+  let rolesExist: Array<{ ok: boolean }>
+  try {
+    const db = await workspaceRawClient(projectId)
+    // `anon` is the role an unauthenticated request runs as. If it holds a write
+    // privilege on a table that does not enforce RLS, that table is writable by
+    // anyone holding the public key — no policy stands between them and the row.
+    rows = await db.$queryRawUnsafe<Array<{ table_name: string; privs: string; rls: boolean }>>(
+      `SELECT c.relname AS table_name,
+              string_agg(DISTINCT g.privilege_type, ', ' ORDER BY g.privilege_type) AS privs,
+              c.relrowsecurity AS rls
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         JOIN information_schema.role_table_grants g
+           ON g.table_schema = n.nspname AND g.table_name = c.relname
+        WHERE n.nspname = $1
+          AND c.relkind = 'r'
+          AND g.grantee = 'anon'
+          AND g.privilege_type IN ('INSERT', 'UPDATE', 'DELETE', 'TRUNCATE')
+          AND NOT c.relrowsecurity
+        GROUP BY c.relname, c.relrowsecurity
+        ORDER BY c.relname`,
+      schema,
+    )
+    // A dev/CI database may have no PostgREST roles at all. "The role does not
+    // exist" is not "the check passed" — say which one it is.
+    rolesExist = await db.$queryRawUnsafe<Array<{ ok: boolean }>>(
+      `SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') AS ok`,
+    )
+  } catch (err) {
+    return {
+      ...base,
+      status: 'fail',
+      message: 'Could not read which tables an unauthenticated caller can write, so route protection is unverified',
+      details: [`⚠ ${sanitizeDiagnostic(err) || 'Unknown error'}`],
+      fixApplied: false,
+    }
+  }
 
   if (!rolesExist[0]?.ok) {
     return {
@@ -752,7 +769,10 @@ async function checkEndUserAuthTable(
   const schemaName = `workspace_${projectId}`
 
   try {
-    const rows = await prisma.$queryRawUnsafe<{ count: string }[]>(
+    // In the project's region, which holds its schema: asked of the home
+    // database, a regional project's users table was always missing.
+    const db = await workspaceRawClient(projectId)
+    const rows = await db.$queryRawUnsafe<{ count: string }[]>(
       `SELECT COUNT(*)::text AS count
          FROM information_schema.tables
         WHERE table_schema = $1
