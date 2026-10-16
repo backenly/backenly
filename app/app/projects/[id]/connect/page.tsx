@@ -149,9 +149,9 @@ function DirectTab({ projectId }: { projectId: string }) {
   // (apiBaseUrl); this page's origin would be wrong for a project in another
   // region. The old read keyed off apiUrlProd/Staging/Dev, columns nothing in
   // the product ever writes (the console creates projects with a name only),
-  // so this row said "Set when the project is first published" forever —
-  // publishing never set it either. An operator-supplied override still wins
-  // when one of those columns is actually filled.
+  // so this row promised a value on first publish, forever, and publishing
+  // never set it either. An operator-supplied override still wins when one of
+  // those columns is actually filled.
   const apiBaseUrl =
     project?.apiUrlProd || project?.apiUrlStaging || project?.apiUrlDev || project?.apiBaseUrl || null
 
