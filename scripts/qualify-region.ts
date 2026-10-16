@@ -11,25 +11,32 @@
  * that arrives, the bytes that come back.
  *
  *   BACKENLY_QUALIFY_MCP_KEY=mcp_live_... BACKENLY_QUALIFY_PROJECT_KEY=proj_live_... \
+ *   BACKENLY_QUALIFY_OPERATOR_PASSWORD=... \
  *   npx tsx scripts/qualify-region.ts \
  *     --project <id> --region us-east-1 \
  *     --api https://us-east-1.api.staging.backenly.com \
  *     --home https://staging.backenly.com \
+ *     --operator <the probe project's owner, by email> \
  *     [--connect us-east-1.api.staging.backenly.com=<regional ALB DNS>,staging.backenly.com=<home ALB DNS>] \
- *     [--report qualify-us-east-1.json] [--skip-revocation] [--approval-wait-minutes 10]
+ *     [--report qualify-us-east-1.json] [--skip-revocation] [--approval-wait-minutes 10] \
+ *     [--job-wait-minutes 15]
  *
  * --connect is for hosts not in public DNS (staging): the TCP connection goes to
  * the named target while TLS (SNI, certificate validation) and the Host header
  * stay the real hostname, as the release smoke does.
  *
- * Both keys come from the ENVIRONMENT ONLY, never an argument, and are never
- * printed. The MCP key is the probe project's agent key; the project key is a
- * publishable key of the same project (create both once in the console).
+ * The keys and the operator's password come from the ENVIRONMENT ONLY, never an
+ * argument, and are never printed. The MCP key is the probe project's agent
+ * key; the project key is a publishable key of the same project (create both
+ * once in the console). The operator is the account that owns the probe
+ * project: it signs in at the home host for what only the console does
+ * (snapshots, restores and schema rollback), and signs out when the run ends.
  *
  * What it checks, in order:
  *   region     the region's host answers health; it serves no console path;
  *              the home host refuses the project with 421 WRONG_REGION, naming
  *              the region and its address
+ *   operator   the probe project's owner signs in at the home host
  *   fixtures   over MCP: the key is the probe project's; a table, an owner-only
  *              policy installed as exact SQL, end-user auth, realtime on the
  *              table, a private bucket, an HTTP function and a sandboxed one
@@ -41,16 +48,28 @@
  *   functions  the HTTP function answers at the region's host; the sandboxed
  *              one reads the region's table
  *   latency    p50 and p95 of 20 reads through the region's host
+ *   rollback   a table added over MCP is rolled back from the console to the
+ *              restore point recorded before it; the fixtures and their rows
+ *              are left as they were
+ *   recovery   the console asks for a snapshot and home queues it for the
+ *              region, which takes it; its download link is the region's own
+ *              bucket, never the home host; rows changed after it are put back
+ *              by a restore the region carries out, and both users then see
+ *              exactly their rows from the snapshot, on /api/v1 and PostgREST.
+ *              Each wait is timed, from the request to the job's end
  *   autonomy   the project's autonomy status, as the control plane reports it
  *   revocation a throwaway key is revoked (a person approves it in the Review
  *              Queue, by design) and the region refuses it; the wait is timed
- * Not here, and reported as not run: autonomy fault injection and repair, a
- * governed change rolled back, backup and restore. Those are qualification
- * steps of their own (failure injection and the recovery drill).
+ * Not here, and reported as not run: autonomy fault injection and repair, and
+ * the infrastructure failure drills (projection lag, blocked peering, a
+ * database failover, killed PostgREST tasks). Those need a fault made inside
+ * the region and are qualification steps of their own.
  *
- * The fixtures stay for the next run; this run's rows and file are removed. Its
- * two end users stay, with random passwords nobody keeps, named
- * qualify-<run>-a@example.com and -b@example.com.
+ * The fixtures stay for the next run; this run's rows and file are removed, and
+ * so is the table the rollback check adds. Its two end users stay, with random
+ * passwords nobody keeps, named qualify-<run>-a@example.com and -b@example.com.
+ * The snapshot the recovery check takes stays, under the snapshots' own
+ * retention.
  */
 
 import { randomBytes } from 'node:crypto'
@@ -76,8 +95,14 @@ export interface QualifyArgs {
   report: string | null
   skipRevocation: boolean
   approvalWaitMinutes: number
+  jobWaitMinutes: number
   mcpKey: string
   projectKey: string
+  /** The probe project's owner, who signs in at the home host for what only the console does. */
+  operator: string
+  operatorPassword: string
+  /** The operator's current two-factor code, when the account has two-factor sign-in. */
+  operatorTotp: string | null
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -94,10 +119,13 @@ export function parseArgs(argv: string[], env: Record<string, string | undefined
     if (/^--(mcp-key|project-key|key)/.test(arg)) {
       throw new Error('keys are read from BACKENLY_QUALIFY_MCP_KEY and BACKENLY_QUALIFY_PROJECT_KEY only, never from the command line')
     }
+    if (/^--(operator-password|password|token|session)/.test(arg)) {
+      throw new Error('the operator\'s password is read from BACKENLY_QUALIFY_OPERATOR_PASSWORD only, never from the command line')
+    }
     if (!arg.startsWith('--') || argv[i + 1] === undefined) throw new Error(`unexpected argument: ${arg}`)
     flags.set(arg, argv[++i])
   }
-  const known = ['--project', '--region', '--api', '--home', '--connect', '--report', '--approval-wait-minutes']
+  const known = ['--project', '--region', '--api', '--home', '--connect', '--report', '--approval-wait-minutes', '--job-wait-minutes', '--operator']
   for (const f of flags.keys()) if (!known.includes(f)) throw new Error(`unknown option: ${f}`)
 
   const project = flags.get('--project') ?? ''
@@ -133,11 +161,26 @@ export function parseArgs(argv: string[], env: Record<string, string | undefined
 
   const wait = Number(flags.get('--approval-wait-minutes') ?? '10')
   if (!Number.isFinite(wait) || wait <= 0 || wait > 120) throw new Error('--approval-wait-minutes must be between 0 and 120')
+  const jobWait = Number(flags.get('--job-wait-minutes') ?? '15')
+  if (!Number.isFinite(jobWait) || jobWait <= 0 || jobWait > 120) throw new Error('--job-wait-minutes must be between 0 and 120')
 
   const mcpKey = env.BACKENLY_QUALIFY_MCP_KEY?.trim() ?? ''
   const projectKey = env.BACKENLY_QUALIFY_PROJECT_KEY?.trim() ?? ''
   if (!mcpKey.startsWith('mcp_')) throw new Error('BACKENLY_QUALIFY_MCP_KEY must hold the probe project\'s MCP key (mcp_...)')
   if (!projectKey.startsWith('proj_')) throw new Error('BACKENLY_QUALIFY_PROJECT_KEY must hold a publishable key of the probe project (proj_...)')
+
+  // Recovery and rollback are not optional: a region is not qualified until a
+  // snapshot of its project has been restored there.
+  const operator = flags.get('--operator')?.trim() ?? ''
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(operator)) {
+    throw new Error('--operator <email> is required: the account that owns the probe project, for the snapshot, restore and rollback checks')
+  }
+  const operatorPassword = env.BACKENLY_QUALIFY_OPERATOR_PASSWORD ?? ''
+  if (!operatorPassword) throw new Error('BACKENLY_QUALIFY_OPERATOR_PASSWORD must hold the operator\'s password')
+  const operatorTotp = env.BACKENLY_QUALIFY_OPERATOR_TOTP?.trim() || null
+  if (operatorTotp !== null && !/^\d{6}$/.test(operatorTotp)) {
+    throw new Error('BACKENLY_QUALIFY_OPERATOR_TOTP, when set, must hold the operator\'s current six-digit code')
+  }
 
   return {
     project,
@@ -148,8 +191,12 @@ export function parseArgs(argv: string[], env: Record<string, string | undefined
     report: flags.get('--report') ?? null,
     skipRevocation: switches.has('--skip-revocation'),
     approvalWaitMinutes: wait,
+    jobWaitMinutes: jobWait,
     mcpKey,
     projectKey,
+    operator,
+    operatorPassword,
+    operatorTotp,
   }
 }
 
@@ -309,9 +356,11 @@ const SANDBOX_FUNCTION = 'qualify-count'
 
 const NOT_RUN = [
   'autonomy fault injection and repair (the failure-injection drill)',
-  'a governed change rolled back',
-  'backup and restore (the recovery drill)',
+  'the infrastructure failure drills: projection lag, blocked peering, a database failover, killed PostgREST tasks',
 ]
+
+/** How often a queued snapshot or restore is looked at while it waits for its region. */
+const JOB_POLL_MS = 5_000
 
 function percentile(sorted: number[], p: number): number {
   return sorted[Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1)]
@@ -366,6 +415,39 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
   let mcp: Mcp | null = null
   const users: Record<'a' | 'b', { client: any; id: string; email: string } | null> = { a: null, b: null }
   const madeRows: Array<{ user: 'a' | 'b'; id: string }> = []
+  /** Rows the restore is expected to take away: removed at the end if it did not. */
+  const rowsRestoreRemoves: Array<{ user: 'a' | 'b'; id: string }> = []
+  /** This run's rows deleted before the restore, which it should bring back. */
+  const rowsRestoreReturns = new Set<string>()
+
+  /** The operator's session at the home host, once signed in. Never printed. */
+  let session: { token: string; refreshToken: string | null } | null = null
+  const asOperator = (init: RequestInit = {}): RequestInit => ({
+    ...init,
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${session!.token}` },
+  })
+  async function operatorJson(path: string): Promise<any> {
+    const res = await theFetch(homeUrl(path), asOperator())
+    must(res.status === 200, `GET ${path} at the home host answered ${res.status}`)
+    return json(res)
+  }
+  const snapshotsPath = `/api/projects/${args.project}/backup`
+  const seconds = (ms: number) => `${(ms / 1000).toFixed(1)} s`
+
+  /** Wait for a snapshot or restore the home host queued, until its region has done it. */
+  async function untilRegionDone(jobId: string, what: string): Promise<void> {
+    const deadline = Date.now() + args.jobWaitMinutes * 60_000
+    let last = 'not listed'
+    while (Date.now() < deadline) {
+      const { jobs } = await operatorJson(snapshotsPath)
+      const job = (jobs ?? []).find((j: { id: string }) => j.id === jobId) as { status: string; error: string | null } | undefined
+      if (job?.status === 'completed') return
+      if (job?.status === 'regional_failed') throw new Error(`${what} failed in ${args.region}: ${job.error ?? 'no reason given'}`)
+      last = job ? `${job.status}${job.error ? ` (${job.error})` : ''}` : 'not listed'
+      await new Promise((r) => setTimeout(r, JOB_POLL_MS))
+    }
+    throw new Error(`${what} did not finish within ${args.jobWaitMinutes} minutes; last seen ${last}`)
+  }
 
   /** A parked call waits for a person: say so, and wait as long as allowed. */
   async function untilApproved(id: string, what: string): Promise<string> {
@@ -422,6 +504,29 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
       must(body.code === 'WRONG_REGION' && body.region === args.region, `the refusal names ${body.code}/${body.region}`)
       must(typeof body.apiUrl === 'string' && body.apiUrl.startsWith(args.api.origin), `the refusal points to ${body.apiUrl}, not the region's host`)
       return `421 WRONG_REGION, pointing to ${body.apiUrl}`
+    })
+
+    // ── operator ─────────────────────────────────────────────────────────────
+    log('\n── operator (control plane, signed in)')
+    await check('operator', 'sign-in', [], async () => {
+      const res = await theFetch(homeUrl('/api/auth/login'), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          email: args.operator,
+          password: args.operatorPassword,
+          ...(args.operatorTotp ? { totpCode: args.operatorTotp } : {}),
+        }),
+      })
+      const body = await json(res)
+      must(
+        body.code !== 'TOTP_REQUIRED',
+        'the operator account has two-factor sign-in: set BACKENLY_QUALIFY_OPERATOR_TOTP to its current code',
+      )
+      must(res.status === 200 && typeof body.token === 'string', `the sign-in at the home host answered ${res.status}`)
+      session = { token: body.token, refreshToken: typeof body.refreshToken === 'string' ? body.refreshToken : null }
+      await operatorJson(`/api/projects/${args.project}/schema-versions`)
+      return `${args.operator} signed in at the home host and can open the probe project`
     })
 
     // ── fixtures over MCP ────────────────────────────────────────────────────
@@ -643,6 +748,114 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
       return `p50 ${p50} ms, p95 ${p95} ms over 20 reads (from where this runs; each still checks the key in the home region)`
     })
 
+    // ── rollback ─────────────────────────────────────────────────────────────
+    log('\n── rollback (a governed change, undone from the console)')
+    const rollbackTable = `qualify_rollback_${run}`
+    let restorePoint: { id: string; versionNum: number } | null = null
+    await check('rollback', 'change', ['table', 'sign-in'], async () => {
+      await fixture('apply_migration', { sql: `CREATE TABLE ${rollbackTable} (note text)` })
+      const { versions } = await operatorJson(`/api/projects/${args.project}/schema-versions`)
+      // Every schema change records the schema as it was just before it.
+      const before = (versions ?? []).find((v: { description?: string }) => v.description?.includes(rollbackTable))
+      must(before, `no restore point was recorded before ${rollbackTable} was created`)
+      restorePoint = { id: before.id, versionNum: before.versionNum }
+      return `${rollbackTable} created over MCP, after restore point v${before.versionNum}`
+    })
+    await check('rollback', 'undone', ['change'], async () => {
+      const res = await theFetch(
+        homeUrl(`/api/projects/${args.project}/schema-versions`),
+        asOperator({ method: 'POST', body: JSON.stringify({ versionId: restorePoint!.id }) }),
+      )
+      const body = await json(res)
+      must(res.status === 200 && body.success === true, `the rollback answered ${res.status}: ${String(body.message ?? body.error ?? '').slice(0, 200)}`)
+      const state = await mcp!.call('read_backend_state', { section: 'schema' })
+      must(!state.text.includes(rollbackTable), `${rollbackTable} is still in the schema after the rollback`)
+      must(state.text.includes(TABLE), `the rollback removed ${TABLE}, which the restore point recorded`)
+      const rows: Array<{ body: string }> = await users.a!.client[TABLE].list({ limit: 1000 })
+      must(rows.some((r) => r.body === `${run}-a`), `user a no longer sees its row in ${TABLE} after the rollback`)
+      return `rolled back to v${restorePoint!.versionNum}: ${rollbackTable} is gone; ${TABLE} and its rows are as they were`
+    })
+
+    // ── recovery ─────────────────────────────────────────────────────────────
+    log('\n── recovery (a snapshot, taken and restored in the region)')
+    let snapshotId: string | null = null
+    const atSnapshot: Record<'a' | 'b', string[]> = { a: [], b: [] }
+    const idsOf = async (who: 'a' | 'b') =>
+      ((await users[who]!.client[TABLE].list({ limit: 1000 })) as Array<{ id: string }>).map((r) => r.id).sort()
+    await check('recovery', 'snapshot', ['sign-in', 'insert-a', 'insert-b'], async () => {
+      for (const who of ['a', 'b'] as const) atSnapshot[who] = await idsOf(who)
+      const known = new Set(((await operatorJson(snapshotsPath)).data ?? []).map((s: { id: string }) => s.id))
+      const started = Date.now()
+      const res = await theFetch(homeUrl(snapshotsPath), asOperator({ method: 'POST' }))
+      const body = await json(res)
+      // A snapshot of a regional project taken at home would be a full copy of
+      // its data outside its region: home must queue it for the region instead.
+      must(res.status === 202 && body.queued === true, `asking for a snapshot answered ${res.status}, not 202 queued for the region`)
+      must(body.region === args.region, `the snapshot was queued for ${body.region}, not ${args.region}`)
+      await untilRegionDone(body.jobId, 'the snapshot')
+      const taken = ((await operatorJson(snapshotsPath)).data ?? []).filter((s: { id: string }) => !known.has(s.id))
+      must(taken.length === 1 && taken[0].status === 'completed', `expected one new completed snapshot, found ${taken.length}`)
+      snapshotId = taken[0].id
+      return `taken in ${args.region} ${seconds(Date.now() - started)} after the request, ${taken[0].sizeBytes ?? '?'} bytes`
+    })
+    await check('recovery', 'download-from-region', ['snapshot'], async () => {
+      const res = await theFetch(homeUrl(`${snapshotsPath}/${snapshotId}/download`), asOperator({ redirect: 'manual' }))
+      must(res.status === 302, `the download answered ${res.status}, not a redirect to the region's bucket`)
+      const link = new URL(res.headers.get('location') ?? 'invalid:')
+      must(
+        link.protocol === 'https:' && link.hostname.endsWith('.amazonaws.com') && link.hostname.includes(args.region),
+        `the download link points at ${link.hostname}, not ${args.region}'s bucket`,
+      )
+      const expires = Number(link.searchParams.get('X-Amz-Expires'))
+      must(expires > 0 && expires <= 300, `the download link lasts ${expires} s, not at most 300`)
+      // The link is the bucket's own, fetched directly: the bytes never pass the home host.
+      const file = await originalFetch(link)
+      const bytes = Buffer.from(await file.arrayBuffer())
+      must(file.status === 200 && bytes[0] === 0x1f && bytes[1] === 0x8b, `the link answered ${file.status} with ${bytes.length} bytes that are not a gzip`)
+      return `${bytes.length} gzip bytes straight from ${link.hostname}, by a link valid ${expires} s`
+    })
+    await check('recovery', 'restore', ['snapshot'], async () => {
+      // Change what the snapshot holds: a row added after it, and one taken away.
+      const added = await users.a!.client[TABLE].create({ owner_id: users.a!.id, body: `${run}-after-snapshot` })
+      rowsRestoreRemoves.push({ user: 'a', id: added.id })
+      await users.a!.client[TABLE].delete(atSnapshot.a[0])
+      rowsRestoreReturns.add(atSnapshot.a[0])
+      const started = Date.now()
+      const res = await theFetch(homeUrl(snapshotsPath), asOperator({ method: 'PUT', body: JSON.stringify({ backupId: snapshotId }) }))
+      const body = await json(res)
+      must(res.status === 202 && body.queued === true && body.region === args.region, `asking for the restore answered ${res.status}, not 202 queued for ${args.region}`)
+      await untilRegionDone(body.jobId, 'the restore')
+      const took = Date.now() - started
+      for (const who of ['a', 'b'] as const) {
+        const now = await idsOf(who)
+        must(
+          JSON.stringify(now) === JSON.stringify(atSnapshot[who]),
+          `after the restore user ${who} sees ${now.length} row(s), not the ${atSnapshot[who].length} it had at the snapshot`,
+        )
+      }
+      return `restored in ${args.region} ${seconds(took)} after the request: each user sees exactly its rows at the snapshot`
+    })
+    await check('recovery', 'serves-after-restore', ['restore'], async () => {
+      for (const who of ['a', 'b'] as const) {
+        const res = await theFetch(apiUrl(`/api/v2/${args.project}/${TABLE}?select=id,owner_id`), {
+          headers: { 'x-api-key': args.projectKey, authorization: `Bearer ${users[who]!.client.getUserToken()}` },
+        })
+        const rows = await json(res)
+        must(res.status === 200 && Array.isArray(rows), `PostgREST answered ${res.status} for user ${who} after the restore`)
+        must(rows.every((r: { owner_id: string }) => r.owner_id === users[who]!.id), `after the restore PostgREST showed user ${who} another user's row`)
+        must(rows.length === atSnapshot[who].length, `after the restore PostgREST showed user ${who} ${rows.length} row(s), not ${atSnapshot[who].length}`)
+      }
+      return 'PostgREST serves the restored table, and each user still sees only its own rows'
+    })
+    await check('recovery', 'functions-after-restore', ['restore', 'functions'], async () => {
+      // A restore recreates the schema's objects; a function's own database role
+      // must still be granted them, or the function breaks while the rows are back.
+      const outcome = await mcp!.call('functions', { action: 'invoke', name: SANDBOX_FUNCTION })
+      const count = /"count"\s*:\s*(\d+)/.exec(outcome.text + JSON.stringify(outcome.structured ?? ''))
+      must(count && Number(count[1]) >= atSnapshot.a.length + atSnapshot.b.length, `after the restore ${SANDBOX_FUNCTION} answered ${outcome.text.slice(0, 300)}`)
+      return `${SANDBOX_FUNCTION} still reads the restored table (${count![1]} rows)`
+    })
+
     // ── autonomy ─────────────────────────────────────────────────────────────
     log('\n── autonomy')
     await check('autonomy', 'status', ['connect'], async () => {
@@ -683,10 +896,27 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
       try {
         await users[row.user]!.client[TABLE].delete(row.id)
       } catch {
-        log(`  note  could not delete row ${row.id}; remove it by hand`)
+        // A row deleted before the restore is gone for good if the restore failed.
+        if (!rowsRestoreReturns.has(row.id)) log(`  note  could not delete row ${row.id}; remove it by hand`)
       }
     }
+    for (const row of rowsRestoreRemoves) {
+      // Already gone when the restore worked.
+      await users[row.user]?.client[TABLE].delete(row.id).catch(() => {})
+    }
+    const rolledBack = results.find((r) => r.phase === 'rollback' && r.check === 'undone')?.status === 'pass'
+    if (results.some((r) => r.phase === 'rollback' && r.check === 'change' && r.status === 'pass') && !rolledBack) {
+      log(`  note  qualify_rollback_${run} may still exist; drop it from the console`)
+    }
     if (mcp) await (mcp as Mcp).close()
+    // Signed out with both of the session's tokens, so neither outlives the run.
+    if (session) {
+      const s = session as { token: string; refreshToken: string | null }
+      await theFetch(homeUrl('/api/auth/logout'), {
+        method: 'POST',
+        headers: { authorization: `Bearer ${s.token}`, ...(s.refreshToken ? { cookie: `refresh-token=${s.refreshToken}` } : {}) },
+      }).catch(() => log('  note  the operator could not be signed out; sign out of every device in the console'))
+    }
     globalThis.fetch = originalFetch
   }
 
