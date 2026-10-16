@@ -95,6 +95,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { measureProjectDbBytes, snapshotProjectDbStorage } from '@/lib/usage/db-storage'
 import { getSchemaVersion, rollbackToVersion, snapshotSchema } from '@/lib/versioning/schema-versions'
+import { authorizeAutonomousFix } from '@/lib/authority/gate'
 
 // workspace-backup reads BACKUP_DIR when it loads, so it is pinned here and the
 // module is only loaded lazily, in the backup block below.
@@ -1204,6 +1205,31 @@ describe('the autonomy probes read the project’s region', () => {
       verifyPostcondition('ADD_COLUMN', regionalProject, { tableName: 'marker', columnName: 'note', columnType: 'text' }),
     ).rejects.toMatchObject(refused)
     await expect(hasCapability('pg_stat_statements', 'us-east-1')).rejects.toMatchObject(refused)
+  })
+})
+
+describe('the authority over autonomous repairs observes the project’s region', () => {
+  // The gate asks whether the project's schema can be seen before it trusts any
+  // probe about it. Asked of the home database, a regional project's schema is
+  // never there, so every repair of it froze as unobservable.
+  const decide = () => authorizeAutonomousFix({ projectId: regionalProject, findingType: 'missing_index', tableName: 'marker' })
+
+  it('sees a regional project’s schema through the region’s own connection', async () => {
+    process.env[REGION_VARIABLE] = regionalUrl
+    const { decision } = await decide()
+    expect(decision.observation).toMatchObject({ resourceObservable: true, reason: null })
+    expect(decision.reasons.join(' ')).not.toMatch(/could not be observed/)
+  })
+
+  it('without a connection to the region, cannot tell and freezes', async () => {
+    delete process.env[REGION_VARIABLE]
+    const { decision, mayExecute } = await decide()
+    expect(decision.observation).toMatchObject({
+      resourceObservable: 'unknown',
+      reason: expect.stringMatching(/DATABASE_URL_US_EAST_1 is not set/),
+    })
+    expect(decision.decision).toBe('FREEZE')
+    expect(mayExecute).toBe(false)
   })
 })
 
