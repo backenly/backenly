@@ -18,9 +18,12 @@
  *   - Dry-run first-class. estimateDataMigration() reports affected-row counts
  *     without touching anything, so the AI (and the user) can see the blast
  *     radius before approving.
+ *   - In the project's region. Its tables, and so its checkpoints, are only in
+ *     its region's database (lib/data-plane/regional.ts); a region this process
+ *     cannot reach is refused, and nothing runs anywhere else.
  */
 
-import { prisma } from '@/lib/db'
+import { workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
 import { rlsSessionSql, rlsSessionParams } from '@/lib/services/rls-session'
 
 // ── Operation types ────────────────────────────────────────────────────────────
@@ -98,8 +101,8 @@ function assertIdent(name: string, what: string): void {
   }
 }
 
-async function loadColumns(schemaName: string, table: string): Promise<Map<string, string>> {
-  const rows = await prisma.$queryRawUnsafe<Array<{ column_name: string; data_type: string }>>(
+async function loadColumns(db: WorkspaceRawClient, schemaName: string, table: string): Promise<Map<string, string>> {
+  const rows = await db.$queryRawUnsafe<Array<{ column_name: string; data_type: string }>>(
     `SELECT column_name, data_type FROM information_schema.columns
      WHERE table_schema = $1 AND table_name = $2`,
     schemaName, table,
@@ -289,14 +292,15 @@ export async function estimateDataMigration(
   ops: DataMigrationOp[],
 ): Promise<DataMigrationEstimate[]> {
   const schemaName = `workspace_${projectId}`
+  const db = await workspaceRawClient(projectId)
   const out: DataMigrationEstimate[] = []
   for (const op of ops) {
     assertIdent(op.table, 'table')
-    const columns = await loadColumns(schemaName, op.table)
+    const columns = await loadColumns(db, schemaName, op.table)
     const built = buildOp(schemaName, columns, op)
     const [affected, total] = await Promise.all([
-      prisma.$queryRawUnsafe<{ n: number }[]>(built.countSql.sql, ...built.countSql.params),
-      prisma.$queryRawUnsafe<{ n: number }[]>(
+      db.$queryRawUnsafe<{ n: number }[]>(built.countSql.sql, ...built.countSql.params),
+      db.$queryRawUnsafe<{ n: number }[]>(
         `SELECT COUNT(*)::int AS n FROM "${schemaName}"."${op.table}"`,
       ),
     ])
@@ -324,6 +328,7 @@ export async function executeDataMigration(
   if (!Array.isArray(ops) || ops.length === 0 || ops.length > 20) {
     return { success: false, applied: [], backupTables: {}, error: 'A migration needs 1–20 operations.' }
   }
+  const db = await workspaceRawClient(projectId)
 
   // Validate + build everything BEFORE opening the transaction.
   let built: Array<{ op: DataMigrationOp; plan: BuiltOp }>
@@ -331,7 +336,7 @@ export async function executeDataMigration(
     built = []
     for (const op of ops) {
       assertIdent(op.table, 'table')
-      const columns = await loadColumns(schemaName, op.table)
+      const columns = await loadColumns(db, schemaName, op.table)
       built.push({ op, plan: buildOp(schemaName, columns, op) })
     }
   } catch (err: any) {
@@ -343,7 +348,7 @@ export async function executeDataMigration(
   const applied: Array<{ op: string; table: string; affectedRows: number }> = []
 
   try {
-    await prisma.$transaction(async (tx) => {
+    await db.$transaction(async (tx) => {
       // Service-role RLS context — FORCE-RLS tables must be fully visible to a
       // migration or it would silently transform a subset of rows.
       await tx.$executeRawUnsafe(
@@ -404,12 +409,13 @@ export async function rollbackDataMigration(
   backupTable: string,
 ): Promise<{ success: boolean; error?: string }> {
   const schemaName = `workspace_${projectId}`
+  const db = await workspaceRawClient(projectId)
   try {
     assertIdent(table, 'table')
     if (!/^_dm_backup_\d{8,14}_[a-zA-Z_][a-zA-Z0-9_]*$/.test(backupTable)) {
       throw new Error(`"${backupTable}" is not a data-migration backup table.`)
     }
-    await prisma.$transaction(async (tx) => {
+    await db.$transaction(async (tx) => {
       await tx.$executeRawUnsafe(
         rlsSessionSql(),
         ...rlsSessionParams({ userId: null, isServiceRole: true }),
