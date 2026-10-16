@@ -30,6 +30,7 @@ import { checkSensorHealth } from '@/lib/autonomy/sensor-health'
 import { DEFAULT_LEVEL, coerceAutonomyLevel, isTierAutoAllowed, type AutonomyLevel } from '@/lib/autonomy/autonomy-level'
 import type { AutonomyTier } from '@/lib/autonomy/desired-state'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { loopPrincipals, principalsToMetadata, type PrincipalSet } from '@/lib/principal'
 
 import { actionClassForFindingType } from './action-classes'
@@ -66,15 +67,21 @@ export function currentEnvironment(): 'development' | 'staging' | 'production' {
  * context the probes read through. A privileged context answering for a weaker
  * one is the Phase 0B finding, and it is why this does not simply ask whether
  * the schema exists in some other session.
+ *
+ * That connection is the project's region's (lib/data-plane/regional.ts), as
+ * the probes' is. Asked of the home database, a regional project's schema is
+ * never there, so every repair of it froze as unobservable; a region this
+ * process cannot reach leaves it unknown, which freezes too.
  */
 async function observe(projectId: string, resource: string): Promise<ObservationContext> {
   const observedAt = new Date().toISOString()
   try {
     const schema = await resolveWorkspaceSchema(projectId)
-    const who = await prisma.$queryRawUnsafe<
+    const db = await workspaceRawClient(projectId)
+    const who = await db.$queryRawUnsafe<
       Array<{ u: string; rolsuper: boolean; rolbypassrls: boolean }>
     >(`SELECT current_user AS u, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user`)
-    const rows = await prisma.$queryRawUnsafe<Array<{ n: number }>>(
+    const rows = await db.$queryRawUnsafe<Array<{ n: number }>>(
       `SELECT count(*)::int AS n FROM pg_namespace WHERE nspname = $1`,
       schema,
     )
