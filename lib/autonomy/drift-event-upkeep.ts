@@ -13,9 +13,14 @@
  *   driftEventBacklog(region)    how many events are pending, and the age of the
  *                                oldest: adoption normally runs within minutes,
  *                                so an old pending event means the loop is stuck.
+ *                                Events no adoption can clear (no project, or one
+ *                                this region does not hold) are counted apart as
+ *                                orphaned, so they cannot fake a stuck loop.
  *   pruneResolvedDriftEvents()   retention: adopted or ignored events older than
  *                                the window are deleted. Pending events are
  *                                never pruned; they are unfinished work.
+ *   pruneOrphanedDriftEvents()   except orphans, which no work will finish: past
+ *                                the window they are deleted too.
  *
  * runDriftEventUpkeep() runs all three for every region this process has a
  * database connection to, and logs one JSON line per region. CloudWatch metric
@@ -24,7 +29,8 @@
  * log BACKENLY_DRIFT_CAPTURE_FAILED to the database log when a write fails.
  */
 
-import { connectedRegions, regionDriftEvents, regionRawClient } from '@/lib/data-plane/regional'
+import { prisma } from '@/lib/db/prisma'
+import { connectedRegions, regionDriftEvents, regionOfRecord, regionRawClient } from '@/lib/data-plane/regional'
 import type { CloudRegionId } from '@/lib/regions'
 
 /** The two event triggers scripts/setup-direct-access.sql installs, and their functions. */
@@ -90,21 +96,63 @@ export async function driftCaptureHealth(region: CloudRegionId): Promise<DriftCa
 }
 
 export interface DriftEventBacklog {
+  /** Pending events adoption is expected to clear: those of a project this region holds. */
   pending: number
-  /** Seconds since the oldest pending event was captured; null when none is pending. */
+  /** Seconds since the oldest of those was captured; null when none is pending. */
   oldestPendingSeconds: number | null
+  /**
+   * Pending events no adoption can clear: they name no project, or one this
+   * region does not hold. Counted apart, so they never age the backlog that
+   * means "adoption is stuck", and pruned past the retention window.
+   */
+  orphaned: number
 }
 
 export async function driftEventBacklog(region: CloudRegionId, now: Date = new Date()): Promise<DriftEventBacklog> {
-  const events = regionDriftEvents(region)
-  const [pending, oldest] = await Promise.all([
-    events.count({ where: { status: 'pending' } }),
-    events.findFirst({ where: { status: 'pending' }, orderBy: { capturedAt: 'asc' }, select: { capturedAt: true } }),
-  ])
+  const groups = await pendingByProject(region)
+  const held = await projectsHeldIn(region, namedProjects(groups))
+  let pending = 0
+  let orphaned = 0
+  let oldest: Date | null = null
+  for (const group of groups) {
+    if (group.projectId !== null && held.has(group.projectId)) {
+      pending += group._count._all
+      const first = group._min.capturedAt
+      if (first && (!oldest || first < oldest)) oldest = first
+    } else {
+      orphaned += group._count._all
+    }
+  }
   return {
     pending,
-    oldestPendingSeconds: oldest ? Math.max(0, Math.round((now.getTime() - oldest.capturedAt.getTime()) / 1000)) : null,
+    oldestPendingSeconds: oldest ? Math.max(0, Math.round((now.getTime() - oldest.getTime()) / 1000)) : null,
+    orphaned,
   }
+}
+
+/** Pending events, grouped by the project they name, with the oldest capture of each. */
+async function pendingByProject(region: CloudRegionId, capturedBefore?: Date) {
+  return regionDriftEvents(region).groupBy({
+    by: ['projectId'],
+    where: { status: 'pending', ...(capturedBefore ? { capturedAt: { lt: capturedBefore } } : {}) },
+    _count: { _all: true },
+    _min: { capturedAt: true },
+  })
+}
+
+function namedProjects(groups: Array<{ projectId: string | null }>): string[] {
+  return groups.flatMap((group) => (group.projectId === null ? [] : [group.projectId]))
+}
+
+/**
+ * Which of these projects this region holds. Adoption runs per project, in its
+ * region, so a pending event naming any other project (one since deleted,
+ * typically) or none at all is never cleared by it.
+ */
+async function projectsHeldIn(region: CloudRegionId, projectIds: string[]): Promise<Set<string>> {
+  if (projectIds.length === 0) return new Set()
+  const rows = await prisma.project.findMany({ where: { id: { in: projectIds } }, select: { id: true, region: true } })
+  return new Set(rows.filter((row) => regionOfRecord(row.id, row.region) === region).map((row) => row.id))
 }
 
 /** Retention window in days: DRIFT_EVENT_RETENTION_DAYS, at least 7, default 90. */
@@ -126,11 +174,40 @@ export async function pruneResolvedDriftEvents(
   return count
 }
 
+/**
+ * Delete orphaned pending events captured more than `days` ago. Within the
+ * window they are kept and counted (driftEventBacklog().orphaned), so they are
+ * seen; past it they record a change nobody can adopt, for a project this
+ * region no longer holds.
+ */
+export async function pruneOrphanedDriftEvents(
+  region: CloudRegionId,
+  days: number = driftEventRetentionDays(),
+  now: Date = new Date(),
+): Promise<number> {
+  const cutoff = new Date(now.getTime() - days * 24 * 60 * 60 * 1000)
+  const groups = await pendingByProject(region, cutoff)
+  const named = namedProjects(groups)
+  const held = await projectsHeldIn(region, named)
+  const gone = named.filter((projectId) => !held.has(projectId))
+  const unnamed = groups.some((group) => group.projectId === null)
+  if (gone.length === 0 && !unnamed) return 0
+  const { count } = await regionDriftEvents(region).deleteMany({
+    where: {
+      status: 'pending',
+      capturedAt: { lt: cutoff },
+      OR: [...(unnamed ? [{ projectId: null }] : []), ...(gone.length > 0 ? [{ projectId: { in: gone } }] : [])],
+    },
+  })
+  return count
+}
+
 export interface DriftUpkeepReport {
   region: CloudRegionId
   health: DriftCaptureHealth | null
   backlog: DriftEventBacklog | null
   pruned: number | null
+  prunedOrphans: number | null
   /** Steps that failed, with the error, so a failing step is reported rather than skipped. */
   errors: string[]
 }
@@ -143,7 +220,7 @@ export interface DriftUpkeepReport {
 export async function runDriftEventUpkeep(now: Date = new Date()): Promise<DriftUpkeepReport[]> {
   const reports: DriftUpkeepReport[] = []
   for (const region of connectedRegions()) {
-    const report: DriftUpkeepReport = { region, health: null, backlog: null, pruned: null, errors: [] }
+    const report: DriftUpkeepReport = { region, health: null, backlog: null, pruned: null, prunedOrphans: null, errors: [] }
     const step = async <T>(name: string, run: () => Promise<T>): Promise<T | null> => {
       try {
         return await run()
@@ -155,6 +232,7 @@ export async function runDriftEventUpkeep(now: Date = new Date()): Promise<Drift
     report.health = await step('health', () => driftCaptureHealth(region))
     report.backlog = await step('backlog', () => driftEventBacklog(region, now))
     report.pruned = await step('prune', () => pruneResolvedDriftEvents(region, driftEventRetentionDays(), now))
+    report.prunedOrphans = await step('prune orphans', () => pruneOrphanedDriftEvents(region, driftEventRetentionDays(), now))
 
     // One line per region, in a fixed shape the metric filters match on.
     console.log(JSON.stringify({
@@ -164,7 +242,9 @@ export async function runDriftEventUpkeep(now: Date = new Date()): Promise<Drift
       problems: report.health?.problems ?? [],
       pending: report.backlog?.pending ?? null,
       oldestPendingSeconds: report.backlog?.oldestPendingSeconds ?? null,
+      orphaned: report.backlog?.orphaned ?? null,
       pruned: report.pruned,
+      prunedOrphans: report.prunedOrphans,
       errors: report.errors,
     }))
     reports.push(report)
