@@ -22,15 +22,17 @@
  *   pruneOrphanedDriftEvents()   except orphans, which no work will finish: past
  *                                the window they are deleted too.
  *
- * runDriftEventUpkeep() runs all three for every region this process has a
- * database connection to, and logs one JSON line per region. CloudWatch metric
+ * runDriftEventUpkeep() runs all three for the region this process serves (each
+ * region's scheduler upkeeps its own database, in that region), and logs one
+ * JSON line per region. CloudWatch metric
  * filters turn those lines into alarms (backenly-infra
  * aws/REGIONS_REFERENCE_ARCHITECTURE.md, section 8); the capture triggers also
  * log BACKENLY_DRIFT_CAPTURE_FAILED to the database log when a write fails.
  */
 
 import { prisma } from '@/lib/db/prisma'
-import { connectedRegions, regionDriftEvents, regionOfRecord, regionRawClient } from '@/lib/data-plane/regional'
+import { regionDriftEvents, regionOfRecord, regionRawClient } from '@/lib/data-plane/regional'
+import { serviceRegion } from '@/lib/data-plane/serving'
 import type { CloudRegionId } from '@/lib/regions'
 
 /** The two event triggers scripts/setup-direct-access.sql installs, and their functions. */
@@ -213,13 +215,16 @@ export interface DriftUpkeepReport {
 }
 
 /**
- * One upkeep pass over every region this process can reach. Each step's
- * failure is recorded in its region's report and logged; one region's problem
- * never hides another's.
+ * One upkeep pass over `regions`, by default the one this process serves. Each
+ * step's failure is recorded in its region's report and logged; one region's
+ * problem never hides another's.
  */
-export async function runDriftEventUpkeep(now: Date = new Date()): Promise<DriftUpkeepReport[]> {
+export async function runDriftEventUpkeep(
+  now: Date = new Date(),
+  regions: CloudRegionId[] = [serviceRegion()],
+): Promise<DriftUpkeepReport[]> {
   const reports: DriftUpkeepReport[] = []
-  for (const region of connectedRegions()) {
+  for (const region of regions) {
     const report: DriftUpkeepReport = { region, health: null, backlog: null, pruned: null, prunedOrphans: null, errors: [] }
     const step = async <T>(name: string, run: () => Promise<T>): Promise<T | null> => {
       try {

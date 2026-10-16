@@ -4,26 +4,31 @@
  * Two entry points:
  *
  *   runDueCronJobs()  — executes user-defined AiFunction records with
- *                       triggerType='cron' whose schedule matches now.
+ *                       triggerType='cron' whose schedule matches now, for
+ *                       the projects this process serves (dueCronJobs()).
  *                       Called every minute by:
  *                         • instrumentation.ts (node-cron, self-hosted/Hetzner)
  *                         • app/api/cron/run-ai-jobs/route.ts (Vercel Cron)
  *
- *   runSystemTasks()  — runs platform-level housekeeping tasks that must
- *                       happen regardless of user cron jobs:
- *                         1. Retry failed outbound webhooks
- *                         2. Detect & fail stuck background jobs (timeout)
- *                         3. Process the background job queue
- *                         3b. Finish external purges for deleted projects
- *                         4. Auto-provision system cleanup jobs (daily)
- *                       Called every minute by instrumentation.ts alongside
- *                       runDueCronJobs().
+ *   runSystemTasks()  — runs the housekeeping that must happen regardless of
+ *                       user cron jobs, in two shares:
+ *                         runRegionalSystemTasks(), every region: turn its
+ *                           projects' captured row changes into deliveries
+ *                         runPlatformSystemTasks(), home region only:
+ *                           1. Retry failed outbound webhooks
+ *                           2. Detect & fail stuck background jobs (timeout)
+ *                           3. Process the background job queue
+ *                           3b. Finish external purges for deleted projects
+ *                           4. Auto-provision system cleanup jobs (daily)
+ *                       instrumentation.ts schedules the two shares
+ *                       separately; the cron route runs both.
  *
  * The cron expression for user jobs is stored in AiFunction.triggerTable,
  * e.g. "0 9 * * *" = every day at 09:00 UTC.
  */
 
 import { prisma } from '@/lib/db/prisma'
+import { partitionServed } from '@/lib/data-plane/serving'
 import { matchesCronExpression } from '@/lib/services/cron-expression'
 import { executeAiFunction, FunctionEvent } from '@/lib/services/ai-functions/executor'
 import { retryFailedWebhooks } from '@/lib/webhooks/index'
@@ -50,25 +55,43 @@ export interface CronRunResult {
   timestamp: string
 }
 
-/**
- * Find and execute all user-defined cron AiFunctions that are due right now.
- */
-export async function runDueCronJobs(now?: Date): Promise<CronRunResult> {
-  const ts = now ?? new Date()
+export interface DueCronJob {
+  id: string
+  name: string
+  projectId: string
+  triggerTable: string | null
+}
 
+/**
+ * The user cron functions this process runs at `now`: active, due, of a
+ * project that is neither paused nor deleted, and served here. A region's
+ * scheduler runs its own projects' functions and no others
+ * (lib/data-plane/serving.ts): a function's SQL and its data are in its
+ * project's region, and the home region used to run every region's.
+ */
+export async function dueCronJobs(now: Date = new Date()): Promise<{ checked: number; due: DueCronJob[] }> {
   const cronJobs = await prisma.aiFunction.findMany({
     // A paused or deleted project's schedule does not fire. The function stays
     // `active`, so it resumes on its next tick after the project does.
     where: { status: 'active', triggerType: 'cron', project: { pausedAt: null, deletedAt: null } },
     select: { id: true, name: true, projectId: true, triggerTable: true },
   })
+  const due = cronJobs.filter(job => matchesCronExpression(job.triggerTable || '0 9 * * *', now))
+  const { served } = await partitionServed(due.map(job => ({ id: job.projectId, job })))
+  return { checked: cronJobs.length, due: served.map(s => s.job) }
+}
 
-  const dueJobs = cronJobs.filter(job =>
-    matchesCronExpression(job.triggerTable || '0 9 * * *', ts)
-  )
+/**
+ * Find and execute the user-defined cron AiFunctions due right now, in the
+ * projects this process serves.
+ */
+export async function runDueCronJobs(now?: Date): Promise<CronRunResult> {
+  const ts = now ?? new Date()
+
+  const { checked, due: dueJobs } = await dueCronJobs(ts)
 
   if (dueJobs.length === 0) {
-    return { ran: 0, succeeded: 0, failed: 0, checked: cronJobs.length, timestamp: ts.toISOString() }
+    return { ran: 0, succeeded: 0, failed: 0, checked, timestamp: ts.toISOString() }
   }
 
   const event: FunctionEvent = {
@@ -91,7 +114,7 @@ export async function runDueCronJobs(now?: Date): Promise<CronRunResult> {
     ran: dueJobs.length,
     succeeded,
     failed,
-    checked: cronJobs.length,
+    checked,
     timestamp: ts.toISOString(),
   }
 }
@@ -121,21 +144,39 @@ async function ensureSystemCleanupJobs(): Promise<void> {
 // ─── System Tasks ─────────────────────────────────────────────────────────────
 
 /**
- * Run all platform-level housekeeping tasks.
- * Each task is isolated — a failure in one never blocks the others.
+ * Run all housekeeping tasks: this region's share, then the platform's. For a
+ * deployment with one region, which is every self-hosted one and the cron
+ * route. Each task is isolated — a failure in one never blocks the others.
  */
 export async function runSystemTasks(): Promise<void> {
-  // 1a. Turn captured row changes into webhook deliveries.
-  //
-  //    BEFORE the retry pass, not after: draining first means an event
-  //    captured this minute gets its first attempt this minute. Reversed, every
-  //    delivery that failed on attempt one would wait an extra tick for a retry
-  //    pass that had already run before the log existed.
+  // BEFORE the retry pass, not after: draining first means an event captured
+  // this minute gets its first attempt this minute. Reversed, every delivery
+  // that failed on attempt one would wait an extra tick for a retry pass that
+  // had already run before the log existed.
+  await runRegionalSystemTasks()
+  await runPlatformSystemTasks()
+}
+
+/**
+ * This region's share, run by every region's scheduler: turn the row changes
+ * captured in its projects' databases into webhook deliveries
+ * (drainWebhookOutbox reads only the projects this process serves).
+ */
+export async function runRegionalSystemTasks(): Promise<void> {
   await drainWebhookOutbox().catch(err =>
     console.error('[SystemTasks] webhook outbox drain failed:', err?.message)
   )
+}
 
-  // 1b. Retry outbound webhooks whose nextRetryAt has passed
+/**
+ * The platform's share, run once, by the home region's scheduler: rows in the
+ * platform database that any project may own. The background queue, purges
+ * and delivery retries still serve every region from here; running each
+ * project's job in its own region needs the job to carry that region (a purge
+ * outlives its project's row) and is the next change.
+ */
+export async function runPlatformSystemTasks(): Promise<void> {
+  // 1. Retry outbound webhooks whose nextRetryAt has passed
   await retryFailedWebhooks().catch(err =>
     console.error('[SystemTasks] webhook retry failed:', err?.message)
   )
