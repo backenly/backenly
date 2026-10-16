@@ -9,12 +9,14 @@
  *   roles.sql never names an attribute the RDS master may not set, never
  *     widens an existing role, and never carries a password;
  *   the steps bootstrap.sh records are the steps verify.sql requires;
- *   the image carries every file the procedure reads;
+ *   the image carries every file the procedure reads, and trusts only the
+ *     region's own RDS roots, from a pinned copy in the repository;
  *   the SCRAM verifier is byte for byte the one PostgreSQL computes.
  *
  * tests/integration/regional-bootstrap.spec.ts runs the procedure itself.
  */
 
+import { createHash, X509Certificate } from 'crypto'
 import fs from 'fs'
 import path from 'path'
 
@@ -130,8 +132,50 @@ describe('the image', () => {
   it('is built from a dated base and runs as a user that is not root', () => {
     const docker = read(`${DIR}/Dockerfile.bootstrap`)
     expect(docker).toMatch(/^FROM debian:bookworm-\d{8}-slim$/m)
-    expect(docker).toMatch(/^ARG RDS_CA_BUNDLE_SHA256=[0-9a-f]{64}$/m)
     expect(docker).toMatch(/^USER 10001$/m)
+  })
+
+  it('trusts the region’s committed RDS roots and nothing it downloads', () => {
+    const docker = read(`${DIR}/Dockerfile.bootstrap`)
+    expect(docker).toContain('COPY rds-ca.pem /etc/ssl/rds/rds-ca.pem')
+    expect(docker).toMatch(/PGSSLROOTCERT=\/etc\/ssl\/rds\/rds-ca\.pem/)
+    expect(docker).not.toMatch(/truststore\.pki\.rds\.amazonaws\.com/)
+    const build = read(`${DIR}/build-and-push.sh`)
+    expect(build).toContain('CA="docker/certs/rds-ca-${REGION}.pem"')
+    expect(build).toContain('cp "$ROOT/$CA" "$CTX/rds-ca.pem"')
+  })
+})
+
+describe('the RDS roots a regional image trusts', () => {
+  // Fetched 2026-10-16 from https://truststore.pki.rds.amazonaws.com/<region>/<region>-bundle.pem
+  // and committed, so an edit is a reviewed change rather than whatever the
+  // network served at build time. ap-south-1, the home region, has its own pin
+  // in tests/unit/rds-ca-bundle-is-pinned.spec.ts.
+  const PINNED: Record<string, string> = {
+    'us-east-1': 'sXEdErrlGDhYEoHiO2y5exB0AWhztNr8gO0UACRi3Xc=',
+  }
+
+  it.each(Object.entries(PINNED))('%s is the pinned bundle, byte for byte', (region, sha256) => {
+    const pem = fs.readFileSync(path.join(ROOT, `docker/certs/rds-ca-${region}.pem`))
+    expect(createHash('sha256').update(pem).digest('base64')).toBe(sha256)
+  })
+
+  it.each(Object.keys(PINNED))('%s holds that region’s three roots and nothing else', (region) => {
+    const pem = read(`docker/certs/rds-ca-${region}.pem`)
+    const certificates = pem.match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g) ?? []
+    const subjects = certificates.map((c) => new X509Certificate(c).subject.match(/CN=(.+)/)?.[1]).sort()
+    expect(subjects).toEqual(
+      ['ECC384 G1', 'RSA2048 G1', 'RSA4096 G1'].map((kind) => `Amazon RDS ${region} Root CA ${kind}`),
+    )
+  })
+
+  it('exists for every region an image may be built for, and only those', () => {
+    const committed = fs
+      .readdirSync(path.join(ROOT, 'docker/certs'))
+      .map((f) => f.match(/^rds-ca-(.+)\.pem$/)?.[1])
+      .filter((r): r is string => Boolean(r) && r !== 'ap-south-1')
+      .sort()
+    expect(committed).toEqual(Object.keys(PINNED).sort())
   })
 })
 

@@ -22,6 +22,7 @@ REGION="${BOOTSTRAP_AWS_REGION:-}"
 ACCOUNT="${BOOTSTRAP_AWS_ACCOUNT_ID:-}"
 REPO="${BOOTSTRAP_ECR_REPO:-backenly-runtime}"
 [ -n "$REGION" ] || { echo "BOOTSTRAP_AWS_REGION is not set (the region whose database this image initialises)"; exit 2; }
+[[ "$REGION" =~ ^[a-z]{2}-[a-z]+-[0-9]$ ]] || { echo "refusing: \"$REGION\" is not an AWS region code"; exit 2; }
 [ -n "$ACCOUNT" ] || { echo "BOOTSTRAP_AWS_ACCOUNT_ID is not set"; exit 2; }
 
 ROOT="$(pwd)"
@@ -34,7 +35,17 @@ while IFS= read -r f; do
   FILES+=("$f")
 done < <(grep -vE '^[[:space:]]*(#|$)' "$ROOT/$HERE/image-files.txt")
 
-if [ -n "$(git status --porcelain -- "${FILES[@]}" "$HERE/image-files.txt" "$HERE/Dockerfile.bootstrap")" ]; then
+# The region's RDS roots, from the reviewed copy in the repository. The image
+# trusts these and no others; tests/unit/regional-bootstrap.spec.ts pins each.
+CA="docker/certs/rds-ca-${REGION}.pem"
+if [ ! -f "$ROOT/$CA" ]; then
+  echo "refusing: $CA is not in the repository. Add the region's bundle from"
+  echo "  https://truststore.pki.rds.amazonaws.com/${REGION}/${REGION}-bundle.pem"
+  echo "and pin it in tests/unit/regional-bootstrap.spec.ts before building for ${REGION}."
+  exit 2
+fi
+
+if [ -n "$(git status --porcelain -- "${FILES[@]}" "$HERE/image-files.txt" "$HERE/Dockerfile.bootstrap" "$CA")" ]; then
   echo "refusing: the image inputs have uncommitted changes; commit them so the tag identifies the image"
   exit 2
 fi
@@ -51,6 +62,7 @@ for f in "${FILES[@]}"; do
   cp "$ROOT/$f" "$CTX/tree/$f"
 done
 cp "$ROOT/$HERE/Dockerfile.bootstrap" "$CTX/"
+cp "$ROOT/$CA" "$CTX/rds-ca.pem"
 
 echo "context:"
 find "$CTX" -type f -printf '  %P\n' | sort
