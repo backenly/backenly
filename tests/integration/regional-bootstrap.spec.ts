@@ -52,6 +52,7 @@ import { Client } from 'pg'
 import { disconnectRegionalClients } from '@/lib/data-plane/regional'
 import { driftCaptureHealth, driftEventBacklog } from '@/lib/autonomy/drift-event-upkeep'
 import { hasCapability, resetCapabilityCache } from '@/lib/autonomy/platform-capabilities'
+import { directAccessRoleNames } from '@/lib/services/direct-access'
 import { generatePassword, scramSha256Verifier } from '@/tools/managed-db/regional/scram'
 
 jest.setTimeout(300_000)
@@ -177,7 +178,7 @@ function bootstrap(env: Record<string, string>): { status: number; output: strin
   const rehearsal: Record<string, string> = vectorAvailable ? {} : { BOOTSTRAP_REHEARSAL: 'true' }
   const result = spawnSync('bash', ['-c', 'exec bash "$0" 2>&1', script], {
     encoding: 'utf8',
-    env: { ...inherited, ...rehearsal, ...env },
+    env: { ...inherited, ...rehearsal, ...env } as NodeJS.ProcessEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
     timeout: 240_000,
   })
@@ -405,10 +406,8 @@ describe('a region’s first database', () => {
 describe('the application, against the database the procedure built', () => {
   const id = randomUUID()
   const schema = `workspace_${id}`
-  const hex = id.replace(/-/g, '').slice(0, 12)
-  const rw = `bkn_rw_${hex}`
-  const ro = `bkn_ro_${hex}`
-  const owner = `bkn_own_${hex}`
+  // Named as the platform names them, which is how the capture tells whose they are.
+  const { rw, ro, owner } = directAccessRoleNames(id)
   const rwPassword = generatePassword()
   const roPassword = generatePassword()
   const app = () => loginUrl('backenly_app')
@@ -436,8 +435,9 @@ describe('the application, against the database the procedure built', () => {
       { roleName: rw, commandTag: 'CREATE TABLE', status: 'pending', projectId: id },
     ])
     // The PostgREST sync's grants on the new table run inside the same statement
-    // and are captured too, so assert only that everything came from that session.
-    expect(events.every((e) => e.roleName === rw)).toBe(true)
+    // and are captured too. A GRANT names no object, and is still the project's.
+    expect(events.length).toBeGreaterThan(1)
+    expect(events.every((e) => e.roleName === rw && e.projectId === id)).toBe(true)
 
     expect(await rows(url(ro, roPassword), `SELECT body FROM "${schema}".notes`)).toEqual([{ body: 'from the app' }])
     expect(await refusal(url(ro, roPassword), `INSERT INTO "${schema}".notes (body) VALUES ('x')`)).toMatch(/read-only|permission denied/)
@@ -451,7 +451,9 @@ describe('the application, against the database the procedure built', () => {
       `SELECT count(*)::int AS pending FROM public.schema_drift_events WHERE status = 'pending'`,
     )
     expect(pending).toBeGreaterThan(0)
-    expect((await driftEventBacklog('us-east-1')).pending).toBe(pending)
+    // This suite made the workspace without a platform project, so no adoption
+    // will ever clear its events: they are orphaned, and do not age the backlog.
+    expect(await driftEventBacklog('us-east-1')).toEqual({ pending: 0, oldestPendingSeconds: null, orphaned: pending })
     resetCapabilityCache()
     expect(await hasCapability('pg_stat_statements', 'us-east-1')).toMatchObject({ available: true, indeterminate: false })
     expect(await hasCapability('pgstattuple', 'us-east-1')).toMatchObject({ available: true, indeterminate: false })
