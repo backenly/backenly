@@ -190,10 +190,12 @@ describe('outbox record', () => {
     const payload = job!.payload as any
 
     // The project id names the target; storageDriver names which backend held
-    // the files. Nothing else: no email, no absolute path, no credentials.
-    expect(Object.keys(payload).sort()).toEqual(['projectId', 'storageDriver'])
+    // the files; region names where they live. Nothing else: no email, no
+    // absolute path, no credentials.
+    expect(Object.keys(payload).sort()).toEqual(['projectId', 'region', 'storageDriver'])
     expect(payload.projectId).toBe(projectId)
     expect(['local', 's3']).toContain(payload.storageDriver)
+    expect(payload.region).toBe('ap-south-1')
     const serialized = JSON.stringify(payload).toLowerCase()
     for (const forbidden of ['@', '/', '\\', 'password', 'secret', 'token', 'bucket']) {
       expect(serialized).not.toContain(forbidden)

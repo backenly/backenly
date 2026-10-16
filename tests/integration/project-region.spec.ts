@@ -1823,3 +1823,96 @@ describe('a project with no row', () => {
     expect(await projectRegion(randomUUID())).toBe('ap-south-1')
   })
 })
+
+describe('deleting a project in another region', () => {
+  // Its schema and its logins live in its region's cluster, which the platform
+  // transaction cannot reach. They are dropped there first (lib/projects/delete.ts).
+  const load = async () => import('@/lib/projects/delete')
+  const purgeJobPayload = async (projectId: string) =>
+    (await prisma.backgroundJob.findFirst({ where: { type: 'purge_project', payload: { path: ['projectId'], equals: projectId } } }))
+      ?.payload as Record<string, unknown> | undefined
+
+  /** A regional project with a schema and a direct-access login granted on it, in the region. */
+  async function regionalProjectWithLogin(userId = ownerId): Promise<{ projectId: string; schema: string; role: string }> {
+    const project = await prisma.project.create({
+      data: { name: `region-${randomUUID()}`, userId, region: 'us-east-1' },
+      select: { id: true },
+    })
+    const projectId = project.id
+    const schema = schemaOf(projectId)
+    const role = directAccessRoleNames(projectId).ro
+    await seedMarker(regionalUrl, schema, 'to be deleted')
+    await run(
+      regionalUrl,
+      `CREATE ROLE "${role}" LOGIN PASSWORD '${randomBytes(12).toString('hex')}';
+       GRANT USAGE ON SCHEMA "${schema}" TO "${role}";
+       GRANT SELECT ON "${schema}".marker TO "${role}"`,
+    )
+    await prisma.databaseCredential.create({
+      data: { projectId, mode: 'READ_ONLY', roleName: role, passwordCipher: 'x', passwordIv: 'x', passwordTag: 'x' },
+    })
+    return { projectId, schema, role }
+  }
+
+  const schemaExists = async (url: string, schema: string) =>
+    (await rowsIn(url, `SELECT 1 FROM pg_namespace WHERE nspname = '${schema}'`)).length > 0
+  const roleExists = async (role: string) =>
+    (await rowsIn(homeUrl(), `SELECT 1 FROM pg_roles WHERE rolname = '${role}'`)).length > 0
+
+  it('drops its schema and its login in its region, then its platform rows', async () => {
+    const { deleteProjectCompletely } = await load()
+    process.env[REGION_VARIABLE] = regionalUrl
+    const { projectId, schema, role } = await regionalProjectWithLogin()
+
+    const result = await deleteProjectCompletely(projectId)
+
+    expect(result.schemasDropped).toContain(schema)
+    expect(await schemaExists(regionalUrl, schema)).toBe(false)
+    expect(await roleExists(role)).toBe(false)
+    expect(await prisma.project.findUnique({ where: { id: projectId } })).toBeNull()
+    expect(await prisma.databaseCredential.count({ where: { projectId } })).toBe(0)
+    // Where its files live is recorded while that can still be read.
+    expect(await purgeJobPayload(projectId)).toMatchObject({ projectId, region: 'us-east-1' })
+  })
+
+  it('stops before anything is dropped when this process cannot reach the region', async () => {
+    const { deleteProjectCompletely } = await load()
+    process.env[REGION_VARIABLE] = regionalUrl
+    const { projectId, schema, role } = await regionalProjectWithLogin()
+    delete process.env[REGION_VARIABLE]
+    try {
+      await expect(deleteProjectCompletely(projectId)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+      expect(await prisma.project.findUnique({ where: { id: projectId } })).not.toBeNull()
+      expect(await schemaExists(regionalUrl, schema)).toBe(true)
+      expect(await roleExists(role)).toBe(true)
+    } finally {
+      // The retry, once the region is reachable, finishes the job.
+      process.env[REGION_VARIABLE] = regionalUrl
+      await deleteProjectCompletely(projectId)
+    }
+    expect(await schemaExists(regionalUrl, schema)).toBe(false)
+  })
+
+  it('deletes an account’s projects in every region', async () => {
+    const { deleteAccountCompletely } = await load()
+    process.env[REGION_VARIABLE] = regionalUrl
+    const user = await prisma.user.create({
+      data: { email: `region-delete-${randomUUID()}@example.test`, name: 'region delete fixture' },
+      select: { id: true },
+    })
+    const home = await prisma.project.create({
+      data: { name: `region-${randomUUID()}`, userId: user.id, region: null },
+      select: { id: true },
+    })
+    await seedMarker(homeUrl(), schemaOf(home.id), 'home, to be deleted')
+    const regional = await regionalProjectWithLogin(user.id)
+
+    const result = await deleteAccountCompletely(user.id)
+
+    expect(result.projectIds.sort()).toEqual([home.id, regional.projectId].sort())
+    expect(await schemaExists(homeUrl(), schemaOf(home.id))).toBe(false)
+    expect(await schemaExists(regionalUrl, regional.schema)).toBe(false)
+    expect(await roleExists(regional.role)).toBe(false)
+    expect(await prisma.user.findUnique({ where: { id: user.id } })).toBeNull()
+  })
+})
