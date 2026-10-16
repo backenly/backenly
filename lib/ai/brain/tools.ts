@@ -2097,7 +2097,9 @@ export async function dispatchTool(
     // ── Read: agent workflow primer ───────────────────────────────────────
     if (name === 'get_instructions') {
       const pid = ctx.projectId
-      const base = `${publicOrigin()}/api/v1/${pid}`
+      // The project's own API address: its region's, for a project outside the home region.
+      const { projectApiOrigin } = await import('@/lib/data-plane/regional')
+      const base = `${await projectApiOrigin(pid, publicOrigin())}/api/v1/${pid}`
       // ── Every tool named below MUST be one the manifest advertises ───────────
       //
       // This guide used to instruct agents to call `get_backend_metadata`,
@@ -2328,6 +2330,13 @@ export async function dispatchTool(
         name === 'diff_branch' || name === 'merge_branch' || name === 'discard_branch') {
       const engine = await import('@/lib/branches/engine')
       const preview = await import('@/lib/branches/preview')
+      // A branch is served where its project is: the project's own API address.
+      // Resolved before a branch is created or a key minted, so a region with no
+      // address configured fails the call rather than leaving a branch nobody
+      // was told how to reach.
+      const apiOrigin = name === 'create_branch' || name === 'connect_branch'
+        ? await (await import('@/lib/data-plane/regional')).projectApiOrigin(ctx.projectId, publicOrigin())
+        : publicOrigin()
 
       // The preview endpoint, as one block an agent can act on. The key is in
       // the summary because the caller has to use it, exactly as create_api_key
@@ -2336,7 +2345,7 @@ export async function dispatchTool(
         branch: { id: string; name: string },
         minted: { key: string; serviceRole: boolean } | null,
       ) => {
-        const endpoint = preview.previewEndpoint(ctx.projectId, branch)
+        const endpoint = preview.previewEndpoint(ctx.projectId, branch, publicOrigin(), apiOrigin)
         const keyText = minted?.key ?? '$BACKENLY_PREVIEW_KEY'
         const lines = [
           `**Preview endpoint for "${branch.name}"**`,

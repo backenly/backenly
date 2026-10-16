@@ -609,10 +609,22 @@ export async function listTriggers(projectId: string) {
   })
 }
 
-export async function deleteTrigger(projectId: string, triggerId: string): Promise<void> {
-  await prisma.appTrigger.deleteMany({
+/**
+ * Delete one trigger of this project. Returns whether a trigger was deleted, so
+ * a caller never reports a removal that did not happen (WH-F15).
+ *
+ * The id is checked before the query: Prisma drops an undefined filter, so
+ * `deleteMany({ where: { id: undefined, projectId } })` deletes EVERY trigger
+ * in the project.
+ */
+export async function deleteTrigger(projectId: string, triggerId: string): Promise<boolean> {
+  if (typeof triggerId !== 'string' || !triggerId) {
+    throw new Error('deleteTrigger needs the id of the trigger to delete')
+  }
+  const { count } = await prisma.appTrigger.deleteMany({
     where: { id: triggerId, projectId },
   })
+  return count > 0
 }
 
 /**

@@ -24,6 +24,15 @@
  * the check that keeps it fixed.
  */
 
+// The guide names the project's API address, which reads the project's region
+// from the platform database. This suite has none; a home-region project's
+// address is the deployment's origin (tests/integration/project-region.spec.ts
+// covers another region's).
+jest.mock('@/lib/data-plane/regional', () => ({
+  ...jest.requireActual('@/lib/data-plane/regional'),
+  projectApiOrigin: async (_projectId: string, homeOrigin: string) => homeOrigin,
+}))
+
 import { buildCatalog, STATE_SECTIONS } from '@/lib/mcp/catalog'
 import { dispatchTool } from '@/lib/ai/brain/tools'
 

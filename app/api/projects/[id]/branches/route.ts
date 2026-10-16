@@ -23,6 +23,8 @@ import {
   previewSdkSnippet,
 } from '@/lib/branches/preview'
 import { resolvePublicBaseUrl } from '@/lib/services/public-url'
+import { projectApiOrigin } from '@/lib/data-plane/regional'
+import { regionErrorResponse } from '@/lib/api/v1/errors'
 
 // Preview branches are a Backenly Cloud capability. On a self-hosted
 // deployment the surface does not exist, so this answers 404 rather than 403:
@@ -35,6 +37,15 @@ export const GET = withProjectAccess(async (req: NextRequest, { projectId }) => 
   if (!isCloudEdition()) return cloudOnly404()
   const branches = await listBranches(projectId)
   const origin = resolvePublicBaseUrl(req)
+  // Branches are served where the project is, at its region's API address.
+  let apiOrigin: string
+  try {
+    apiOrigin = await projectApiOrigin(projectId, origin)
+  } catch (err) {
+    const regional = regionErrorResponse(err)
+    if (regional) return regional
+    throw err
+  }
   // Every active branch comes with its preview endpoint, so the panel can show
   // where to point an app without a second round trip. The snippets name the
   // key's slot rather than carrying a key: a key is shown once, when issued.
@@ -42,7 +53,7 @@ export const GET = withProjectAccess(async (req: NextRequest, { projectId }) => 
     success: true,
     branches: branches.map(b => {
       if (b.status !== 'active') return b
-      const endpoint = previewEndpoint(projectId, b, origin)
+      const endpoint = previewEndpoint(projectId, b, origin, apiOrigin)
       return {
         ...b,
         preview: {
@@ -50,7 +61,7 @@ export const GET = withProjectAccess(async (req: NextRequest, { projectId }) => 
           // The dashboard reads the spec with its own session, not an MCP key.
           openapiUrl: `/api/projects/${projectId}/openapi?branchId=${b.id}`,
           curl: previewCurl(endpoint),
-          sdk: previewSdkSnippet(projectId),
+          sdk: previewSdkSnippet(projectId, undefined, apiOrigin === origin ? undefined : apiOrigin),
           instructions: previewAgentInstructions(endpoint),
         },
       }

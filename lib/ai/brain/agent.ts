@@ -1164,8 +1164,26 @@ async function describeDanger(
       return { tool, target: 'an API key rotation (the old key stops working immediately)', rowCount: null, reversible: false, confirmPhrase: 'Confirm — rotate the API key' }
     case 'delete_env_var':
       return { tool, target: `the env var \`${namedThing ?? 'unknown'}\` (functions reading it will fail)`, rowCount: null, reversible: false, confirmPhrase: `Confirm — delete the ${namedThing ?? ''} env var`.trim() }
-    case 'delete_trigger':
-      return { tool, target: `the trigger \`${namedThing ?? 'unknown'}\``, rowCount: null, reversible: false, confirmPhrase: 'Confirm — delete the trigger' }
+    case 'delete_trigger': {
+      // The card names the trigger the person is approving. A call by id alone
+      // read as `unknown`, so the deletion was approved unseen (WH-F15).
+      const triggerId = str('triggerId')
+      let label = triggerId ? `\`${triggerId}\`` : namedThing ? `\`${namedThing}\`` : null
+      if (triggerId) {
+        try {
+          const { prisma } = await import('@/lib/db')
+          const found = await prisma.appTrigger.findFirst({ where: { id: triggerId, projectId }, select: { name: true } })
+          label = found ? `\`${found.name}\`` : `\`${triggerId}\` (no such trigger in this project)`
+        } catch { /* keep the id */ }
+      }
+      return {
+        tool,
+        target: label ? `the trigger ${label}` : 'no trigger (the call names none)',
+        rowCount: null,
+        reversible: false,
+        confirmPhrase: 'Confirm — delete the trigger',
+      }
+    }
     case 'delete_ai_function':
       return { tool, target: `the function \`${namedThing ?? 'unknown'}\``, rowCount: null, reversible: false, confirmPhrase: 'Confirm — delete the function' }
     case 'delete_cron_job':

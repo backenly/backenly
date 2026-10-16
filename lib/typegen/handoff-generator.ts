@@ -162,7 +162,7 @@ export function useRealtimeTable<T extends TableName>(tableName: T) {
 
 // ── Next.js ───────────────────────────────────────────────────────────────────
 
-function generateNextjs(schema: WorkspaceSchema, types: GeneratedTypes, projectId: string): HandoffAsset {
+function generateNextjs(schema: WorkspaceSchema, types: GeneratedTypes, projectId: string, apiUrl: string): HandoffAsset {
   const table = firstTable(schema)
   const pascal = toPascalCase(table)
   const insert = exampleInsert(schema)
@@ -172,7 +172,7 @@ function generateNextjs(schema: WorkspaceSchema, types: GeneratedTypes, projectI
  *
  * Setup:
  *   1. Copy \`backenly.types.ts\`, \`backenly.client.ts\`, and this file into your project.
- *   2. Set NEXT_PUBLIC_BACKENLY_URL=https://backenly.com in .env.local (optional — default already set)
+ *   2. Set NEXT_PUBLIC_BACKENLY_URL=${apiUrl} in .env.local (optional — default already set)
  *   3. Import from '@/lib/backenly' (or wherever you place these files)
  */
 
@@ -333,7 +333,7 @@ async function fetchAll<T extends TableName>(
 
 // ── Cursor (AI tool) ──────────────────────────────────────────────────────────
 
-function generateCursor(schema: WorkspaceSchema, types: GeneratedTypes, projectId: string): HandoffAsset {
+function generateCursor(schema: WorkspaceSchema, types: GeneratedTypes, projectId: string, apiUrl: string): HandoffAsset {
   const tableList = schema.tables.map(t => {
     const cols = t.columns.filter(c => !c.isPrimaryKey).slice(0, 3).map(c => c.columnName).join(', ')
     return `- \`${t.tableName}\` (${cols || 'id'})`
@@ -417,13 +417,13 @@ Every table has three types:
 ## Environment variable
 
 \`\`\`
-NEXT_PUBLIC_BACKENLY_URL=https://backenly.com  # (default — only override for self-hosted)
+NEXT_PUBLIC_BACKENLY_URL=${apiUrl}  # (default — only override for self-hosted)
 \`\`\`
 
 ## API base URL
 
 \`\`\`
-https://backenly.com/api/v1/${projectId}/
+${apiUrl}/api/v1/${projectId}/
 \`\`\`
 `
 
@@ -432,16 +432,21 @@ https://backenly.com/api/v1/${projectId}/
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
+/**
+ * `apiUrl` is the origin the project's API is served from (projectApiOrigin in
+ * lib/data-plane/regional.ts), the generated client's default.
+ */
 export function generateHandoffAssets(
   schema: WorkspaceSchema,
   types: GeneratedTypes,
-  projectId: string
+  projectId: string,
+  apiUrl = 'https://backenly.com',
 ): HandoffAsset[] {
   return [
     generateReact(schema, types, projectId),
-    generateNextjs(schema, types, projectId),
+    generateNextjs(schema, types, projectId, apiUrl),
     generateTypescript(schema, types, projectId),
-    generateCursor(schema, types, projectId),
+    generateCursor(schema, types, projectId, apiUrl),
   ]
 }
 
@@ -449,15 +454,16 @@ export function generateHandoffAsset(
   framework: HandoffFramework,
   schema: WorkspaceSchema,
   types: GeneratedTypes,
-  projectId: string
+  projectId: string,
+  apiUrl = 'https://backenly.com',
 ): HandoffAsset {
   switch (framework) {
     case 'react':      return generateReact(schema, types, projectId)
-    case 'nextjs':     return generateNextjs(schema, types, projectId)
+    case 'nextjs':     return generateNextjs(schema, types, projectId, apiUrl)
     case 'typescript': return generateTypescript(schema, types, projectId)
     case 'cursor':
     case 'bolt':
-    case 'lovable':    return generateCursor(schema, types, projectId)
-    default:           return generateCursor(schema, types, projectId)
+    case 'lovable':    return generateCursor(schema, types, projectId, apiUrl)
+    default:           return generateCursor(schema, types, projectId, apiUrl)
   }
 }

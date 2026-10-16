@@ -271,9 +271,16 @@ export async function POST(request: NextRequest) {
 
     let source = types.source
     let filename = 'backenly.types.ts'
+    // Where the generated code calls: the project's own API address, its
+    // region's for a project outside the home region.
+    const apiOrigin = async () =>
+      (await import('@/lib/data-plane/regional')).projectApiOrigin(
+        auth.projectId,
+        process.env.NEXT_PUBLIC_APP_URL || 'https://backenly.com',
+      )
     if (format === 'client') {
       const { generateTypedClient } = await import('@/lib/typegen/client-generator')
-      source = generateTypedClient(schema, types, { projectId: auth.projectId }).source
+      source = generateTypedClient(schema, types, { projectId: auth.projectId, apiUrl: await apiOrigin() }).source
       filename = 'backenly.client.ts'
     } else if (format === 'openapi') {
       const { generateOpenApiSpec } = await import('@/lib/typegen/openapi-generator')
@@ -284,7 +291,7 @@ export async function POST(request: NextRequest) {
       source = JSON.stringify(
         generateOpenApiSpec(schema, {
           title: `Backenly API — ${project?.name ?? auth.projectId}`,
-          serverUrl: process.env.NEXT_PUBLIC_APP_URL || 'https://backenly.com',
+          serverUrl: await apiOrigin(),
         }),
         null,
         2,

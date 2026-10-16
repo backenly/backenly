@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { Toast } from '@/components/ui/Toast'
+import { getProject } from '@/lib/api/projects'
 import { Mail, Shield, ExternalLink, KeyRound, ArrowRight } from 'lucide-react'
 import {
   CopyField, KitButton, KitChecklist, KitField, KitInput, KitModal, KitNote, SettingsCard, Stat, StatStrip,
@@ -158,12 +159,12 @@ export function AuthConfiguration() {
   const [stats, setStats] = useState<AuthStats | null>(null)
   const [statsLoading, setStatsLoading] = useState(true)
   const [recent, setRecent] = useState<RecentUser[]>([])
-  const [origin, setOrigin] = useState('')
+  // The project's API base in its own region ({origin}/api/v1/{id}), from the
+  // server. This page's origin is the console's, which is not where a project
+  // in another region is served, and the redirect URI below is registered with
+  // the provider and kept.
+  const [apiBaseUrl, setApiBaseUrl] = useState<string | null>(null)
   const [loadError, setLoadError] = useState(false)
-
-  useEffect(() => {
-    setOrigin(window.location.origin)
-  }, [])
 
   const authHeaders = useCallback((projectId: string): HeadersInit => {
     const token = localStorage.getItem('auth-token')
@@ -235,13 +236,23 @@ export function AuthConfiguration() {
     } catch { setLoadError(true) }
   }, [authHeaders])
 
+  const fetchApiBaseUrl = useCallback(async (projectId: string) => {
+    try {
+      const project = await getProject(projectId)
+      setApiBaseUrl(project.apiBaseUrl ?? null)
+    } catch {
+      setApiBaseUrl(null)
+    }
+  }, [])
+
   const loadAll = useCallback((projectId: string) => {
     setLoadError(false)
+    fetchApiBaseUrl(projectId)
     fetchEnabledProviders(projectId)
     fetchEmailAuthStatus(projectId)
     fetchStats(projectId)
     fetchRecent(projectId)
-  }, [fetchEnabledProviders, fetchEmailAuthStatus, fetchStats, fetchRecent])
+  }, [fetchApiBaseUrl, fetchEnabledProviders, fetchEmailAuthStatus, fetchStats, fetchRecent])
 
   useEffect(() => {
     const projectId = localStorage.getItem('current-project-id')
@@ -335,7 +346,7 @@ export function AuthConfiguration() {
   }
 
   const callbackUrl = (provider: ProviderId) =>
-    `${origin || 'https://backenly.com'}/api/v1/${currentProjectId ?? '{projectId}'}/auth/${provider}/callback`
+    apiBaseUrl ? `${apiBaseUrl}/auth/${provider}/callback` : ''
 
 
   const emailActive = emailProviderEnabled || (stats?.totalUsers ?? 0) > 0
@@ -530,7 +541,11 @@ export function AuthConfiguration() {
             } />
             {/* The redirect URI is where most OAuth setups fail; hand it over ready to paste. */}
             <OAuthStep n={2} title="Add this authorized redirect URI">
-              <CopyField value={callbackUrl(modalProvider)} />
+              {apiBaseUrl ? (
+                <CopyField value={callbackUrl(modalProvider)} />
+              ) : (
+                <span className="text-zinc-500">The project&apos;s address is not available. Reload the page to try again.</span>
+              )}
             </OAuthStep>
             <OAuthStep n={3} title={`Paste the credentials ${modalMeta.name} gives you`}>
               <div className="space-y-3">

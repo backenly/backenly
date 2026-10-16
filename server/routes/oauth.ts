@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express'
 import crypto from 'crypto'
 import jwt from 'jsonwebtoken'
 import { prisma } from '@/lib/db'
-import { workspaceRawClient } from '@/lib/data-plane/regional'
+import { projectApiOrigin, workspaceRawClient } from '@/lib/data-plane/regional'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { WorkspaceOAuthService } from '@/lib/services/workspaceOAuth'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
@@ -221,6 +221,17 @@ function baseUrlFrom(req: Request): string {
   return process.env.NEXTAUTH_URL || process.env.NEXT_PUBLIC_APP_URL || `${proto}://${host}`
 }
 
+/**
+ * The redirect URI the provider is sent, and the one the console tells the
+ * developer to register: on the project's own API address
+ * (lib/data-plane/regional.ts projectApiOrigin), so a project in another region
+ * is called back where it is served. Initiate and callback both build it here;
+ * the provider refuses a code exchange whose URI differs from the initiate's.
+ */
+async function redirectUriFor(req: Request, projectId: string, provider: string): Promise<string> {
+  return `${await projectApiOrigin(projectId, baseUrlFrom(req))}/api/v1/${projectId}/auth/${provider}/callback`
+}
+
 // ─── Token exchange ───────────────────────────────────────────────────────────
 
 interface TokenResponse {
@@ -347,7 +358,7 @@ async function handleOAuthInit(req: Request, res: Response) {
     return jsonError(res, 503, 'Authentication is not configured for this project.', 'INTERNAL_ERROR')
   }
 
-  const redirectUri = `${baseUrlFrom(req)}/api/v1/${projectId}/auth/${provider}/callback`
+  const redirectUri = await redirectUriFor(req, projectId, provider)
   const redirectTo = (req.query.redirect_to as string | undefined) || ''
 
   // Rejected HERE, at initiate time, rather than after the round trip. The
@@ -443,7 +454,7 @@ async function handleOAuthCallback(req: Request, res: Response) {
     return jsonError(res, 404, `${provider} OAuth is not configured for this project`, 'NOT_FOUND')
   }
 
-  const redirectUri = `${baseUrlFrom(req)}/api/v1/${projectId}/auth/${provider}/callback`
+  const redirectUri = await redirectUriFor(req, projectId, provider)
 
   try {
     // 1. Exchange code → access token (uses the DECRYPTED client secret).

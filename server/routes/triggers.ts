@@ -113,14 +113,17 @@ router.delete('/:projectId/triggers', asyncRoute(async (req: Request, res: Respo
     return
   }
 
-  const triggerId = req.query.id as string
-  if (!triggerId) {
+  const triggerId = req.query.id
+  if (typeof triggerId !== 'string' || !triggerId) {
     res.status(400).json({ error: 'id query parameter is required' })
     return
   }
 
   try {
-    await deleteTrigger(projectId, triggerId)
+    if (!(await deleteTrigger(projectId, triggerId))) {
+      res.status(404).json({ error: 'Trigger not found in this project' })
+      return
+    }
     res.json({ success: true })
   } catch (err: any) {
     res.status(500).json({ error: err.message })

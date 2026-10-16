@@ -7552,6 +7552,15 @@ async function executeGetRealtimeStatus(projectId: string): Promise<ExecutionRes
  */
 async function executeAddProvider(params: any, projectId: string): Promise<ExecutionResult> {
   const db = await projectDb(projectId)
+  // The redirect URI the runtime sends the provider (server/routes/oauth.ts) is
+  // on the project's own API address, which for a project in another region is
+  // that region's, not this server's. Resolved before anything is written, so a
+  // region with no address configured fails the call rather than a saved one.
+  const { projectApiOrigin } = await import('@/lib/data-plane/regional')
+  const apiOrigin = await projectApiOrigin(
+    projectId,
+    process.env.NEXTAUTH_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://your-domain.com',
+  )
   const { provider, clientId, clientSecret } = params
 
   const providerName = (provider || '').toLowerCase()
@@ -7660,8 +7669,7 @@ async function executeAddProvider(params: any, projectId: string): Promise<Execu
   }
 
   const displayName = providerName.charAt(0).toUpperCase() + providerName.slice(1)
-  const baseUrl = process.env.NEXTAUTH_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://your-domain.com'
-  const redirectUri = `${baseUrl}/api/v1/${projectId}/auth/${providerName}/callback`
+  const redirectUri = `${apiOrigin}/api/v1/${projectId}/auth/${providerName}/callback`
 
   return {
     success: true,
@@ -9950,28 +9958,58 @@ async function executeListTriggers(projectId: string): Promise<ExecutionResult> 
 
 /**
  * DELETE_TRIGGER: Remove an event trigger
+ *
+ * The trigger a person approves is the trigger that is deleted, and the answer
+ * says what happened (WH-F15). The id used to go straight to deleteMany and the
+ * result said "removed" whatever it matched: a mistyped id, or one from another
+ * project, deleted nothing and read as success, and a call naming no trigger
+ * deleted every trigger in the project.
  */
 async function executeDeleteTrigger(params: any, projectId: string): Promise<ExecutionResult> {
-  const { triggerId, name } = params
+  const { triggerId, name } = params ?? {}
 
   try {
     const { prisma } = await import('@/lib/db')
     const { deleteTrigger } = await import('@/lib/services/trigger-service')
 
-    // Resolve name → id if needed
-    let resolvedId = triggerId
-    if (!resolvedId && name) {
-      const found = await prisma.appTrigger.findFirst({ where: { projectId, name } })
-      if (!found) return { success: false, message: `Trigger "${name}" not found` }
-      resolvedId = found.id
+    let trigger: { id: string; name: string } | null = null
+    let asked: string
+    if (typeof triggerId === 'string' && triggerId) {
+      asked = `the id "${triggerId}"`
+      trigger = await prisma.appTrigger.findFirst({ where: { id: triggerId, projectId }, select: { id: true, name: true } })
+    } else if (typeof name === 'string' && name.trim()) {
+      asked = `the name "${name}"`
+      // Names are not unique (the REST route creates without checking), so a
+      // name two triggers answer to is a question, not an instruction.
+      const named = await prisma.appTrigger.findMany({ where: { projectId, name }, select: { id: true, name: true } })
+      if (named.length > 1) {
+        return {
+          success: false,
+          message: `More than one trigger is named "${name}" (${named.map((t) => t.id).join(', ')}). Name the one to delete by triggerId.`,
+          code: 'INVALID_ARGUMENT',
+        }
+      }
+      trigger = named[0] ?? null
+    } else {
+      return { success: false, message: 'triggerId or name is required: name the trigger to delete.', code: 'INVALID_ARGUMENT' }
     }
 
-    await deleteTrigger(projectId, resolvedId)
+    // A trigger deleted between the read and the delete is not found either.
+    if (!trigger || !(await deleteTrigger(projectId, trigger.id))) {
+      const triggers = await prisma.appTrigger.findMany({ where: { projectId }, select: { name: true } })
+      return {
+        success: false,
+        message:
+          `No trigger in this project has ${asked}, so nothing was deleted. ` +
+          (triggers.length ? `Its triggers are: ${triggers.map((t) => t.name).join(', ')}.` : 'This project has no triggers.'),
+        code: 'NOT_FOUND',
+      }
+    }
 
     return {
       success: true,
-      message: `✅ Trigger "${name || triggerId}" removed.`,
-      data: { deleted: true },
+      message: `✅ Trigger "${trigger.name}" removed.`,
+      data: { deleted: true, triggerId: trigger.id, name: trigger.name },
     }
   } catch (error: any) {
     return { success: false, message: `Failed to delete trigger: ${error.message}`, error: error.message }

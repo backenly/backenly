@@ -9,6 +9,7 @@
 import {
   RegionNotConfiguredError,
   UnknownRegionError,
+  regionApiOrigin,
   regionDatabaseUrl,
   regionEnvName,
   regionOfRecord,
@@ -170,6 +171,44 @@ describe('regionPostgrest', () => {
     // Oregon has a URL and no secret of its own; the home secret is not borrowed.
     expect(regionPostgrest('us-west-2', POSTGREST_ENV)).toBeNull()
     expect(regionPostgrest(HOME_REGION, { POSTGREST_URL: 'http://x.test', POSTGREST_JWT_SECRET: '  ' })).toBeNull()
+  })
+})
+
+describe('regionApiOrigin', () => {
+  const HOME = 'https://backenly.com'
+  const API_ENV = {
+    PUBLIC_API_ORIGIN: 'https://not-read-for-home.test',
+    PUBLIC_API_ORIGIN_US_EAST_1: 'https://us-east-1.api.backenly.com/',
+    PUBLIC_API_ORIGIN_US_WEST_2: '  ',
+    PUBLIC_API_ORIGIN_EU_CENTRAL_1: 'eu-central-1.api.backenly.com',
+  }
+
+  it('answers the home region with the origin it was given, as before', () => {
+    expect(regionApiOrigin(HOME_REGION, HOME, { env: API_ENV })).toBe(HOME)
+  })
+
+  it("answers another region with that region's own address, as an origin", () => {
+    expect(regionApiOrigin('us-east-1', HOME, { env: API_ENV })).toBe('https://us-east-1.api.backenly.com')
+  })
+
+  it('never hands out the home address for another region', () => {
+    for (const region of ['us-west-2', 'ap-southeast-1'] as const) {
+      let caught: unknown
+      try {
+        regionApiOrigin(region, HOME, { env: API_ENV, projectId: 'p1' })
+      } catch (err) {
+        caught = err
+      }
+      expect(caught).toBeInstanceOf(RegionNotConfiguredError)
+      expect((caught as RegionNotConfiguredError).variable).toBe(regionSetting('PUBLIC_API_ORIGIN', region).variable)
+      expect((caught as Error).message).toContain('No API address for project p1')
+    }
+  })
+
+  it('refuses a value that is not an http(s) URL', () => {
+    expect(() => regionApiOrigin('eu-central-1', HOME, { env: API_ENV })).toThrow(RegionNotConfiguredError)
+    expect(() => regionApiOrigin('eu-central-1', HOME, { env: { PUBLIC_API_ORIGIN_EU_CENTRAL_1: 'ftp://x.test' } }))
+      .toThrow(/not an http\(s\) URL/)
   })
 })
 

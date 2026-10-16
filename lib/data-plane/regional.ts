@@ -14,6 +14,7 @@
  *   projectDatabaseUrl(id, role)     both together
  *   workspaceRawClient(id)           raw SQL on the project's database
  *   projectPostgrest(id)             the PostgREST serving the project's region
+ *   projectApiOrigin(id, home)       the address the project's API is called at
  *
  * The home region keeps the variables it always had: DATABASE_URL, DIRECT_URL,
  * BACKUP_DATABASE_URL, BACKENLY_ADMIN_DATABASE_URL, POSTGREST_URL and
@@ -112,12 +113,14 @@ export class RegionNotConfiguredError extends Error {
     readonly region: CloudRegionId,
     readonly variable: string,
     readonly projectId?: string,
+    message?: string,
   ) {
     super(
-      region === HOME_REGION
-        ? `${variable} is not set`
-        : `No database connection for ${projectId ? `project ${projectId}, which is in ${region}` : region}: ` +
-            `${variable} is not set. The data is only in that region's database, so nothing was sent to another one.`,
+      message ??
+        (region === HOME_REGION
+          ? `${variable} is not set`
+          : `No database connection for ${projectId ? `project ${projectId}, which is in ${region}` : region}: ` +
+            `${variable} is not set. The data is only in that region's database, so nothing was sent to another one.`),
     )
     this.name = 'RegionNotConfiguredError'
   }
@@ -222,6 +225,55 @@ export async function projectRegion(projectId: string): Promise<CloudRegionId> {
 /** The connection string for `role` on the database holding this project's data. */
 export async function projectDatabaseUrl(projectId: string, role: DataPlaneRole = 'app'): Promise<string> {
   return requireRegionDatabaseUrl(await projectRegion(projectId), role, { projectId })
+}
+
+/**
+ * The origin a project's API is served from: what the console, SDK snippets,
+ * generated clients, the connect manifest and agents hand out as
+ * `{origin}/api/v1/{projectId}`.
+ *
+ * The home region answers with `homeOrigin`, the deployment's public origin, as
+ * every project always has. Another region answers with its own
+ * PUBLIC_API_ORIGIN_<REGION>, the API service running in that region. In
+ * Backenly Cloud production that is https://<region>.api.backenly.com
+ * (founders, 2026-10-16); staging sets its own.
+ *
+ * Never the home origin for another region. The home service would still
+ * answer, by crossing to the region and back on every request, so nothing would
+ * fail; but an address handed out is pasted into customers' apps and kept, and
+ * a wrong one cannot be taken back later.
+ */
+export function regionApiOrigin(
+  region: CloudRegionId,
+  homeOrigin: string,
+  { env = process.env, projectId }: { env?: Env; projectId?: string } = {},
+): string {
+  if (region === HOME_REGION) return homeOrigin
+  const { variable, value } = regionSetting('PUBLIC_API_ORIGIN', region, env)
+  const subject = projectId ? `project ${projectId}, which is in ${region}` : region
+  if (!value) {
+    throw new RegionNotConfiguredError(
+      region,
+      variable,
+      projectId,
+      `No API address for ${subject}: ${variable} is not set. The home address was not given out instead.`,
+    )
+  }
+  let url: URL | null = null
+  try {
+    url = new URL(value)
+  } catch {
+    // reported below
+  }
+  if (!url || (url.protocol !== 'https:' && url.protocol !== 'http:')) {
+    throw new RegionNotConfiguredError(region, variable, projectId, `${variable} is not an http(s) URL, so ${subject} has no API address.`)
+  }
+  return url.origin
+}
+
+/** regionApiOrigin for the region recorded on the project. */
+export async function projectApiOrigin(projectId: string, homeOrigin: string): Promise<string> {
+  return regionApiOrigin(await projectRegion(projectId), homeOrigin, { projectId })
 }
 
 /** A project this process cannot reach, and why. */
