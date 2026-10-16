@@ -556,7 +556,7 @@ describe("the agent's conversation", () => {
     expect((await regionalBodyOf('conversation_message', rows[1].id))?.payload).toEqual({ content: `Blocked ${EMAIL}.` })
     const [mentions] = await rowsIn<{ n: string }>(
       homeUrl(),
-      `SELECT count(*)::text AS n FROM "ConversationMessage" WHERE content LIKE $1 OR metadata::text LIKE $1`,
+      `SELECT count(*)::text AS n FROM conversation_messages WHERE content LIKE $1 OR metadata::text LIKE $1`,
       [`%${EMAIL}%`],
     )
     expect(mentions.n).toBe('0')
