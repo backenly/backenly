@@ -59,7 +59,9 @@ const mockUpdateExecution = jest.fn(async ({ where, data }: any) => {
   return row
 })
 const mockFindFirstExecution = jest.fn(async () => null)
-const mockJobFindUnique = jest.fn(async () => null as any)
+const mockJobFindUnique = jest.fn(async (_args?: any) => null as any)
+/** The step's batch chain, newest first. Empty means only the dispatched job is known. */
+const mockJobFindMany = jest.fn(async (_args?: any) => [] as any[])
 const mockFindUniqueStep = jest.fn(async ({ where }: any) => stepRows.get(where.idempotencyKey) ?? null)
 const mockUpsertStep = jest.fn(async ({ where, create, update }: any) => {
   const existing = stepRows.get(where.idempotencyKey)
@@ -86,7 +88,10 @@ jest.mock('@/lib/db', () => ({
       update: (...a: any[]) => mockUpdateExecution(...(a as [any])),
       findFirst: (...a: any[]) => mockFindFirstExecution(...(a as [])),
     },
-    backgroundJob: { findUnique: (...a: any[]) => mockJobFindUnique(...(a as [any])) },
+    backgroundJob: {
+      findUnique: (...a: any[]) => mockJobFindUnique(...(a as [any])),
+      findMany: (...a: any[]) => mockJobFindMany(...(a as [any])),
+    },
     maintenanceStepExecution: {
       findUnique: (...a: any[]) => mockFindUniqueStep(...(a as [any])),
       upsert: (...a: any[]) => mockUpsertStep(...(a as [any])),
@@ -378,6 +383,7 @@ beforeEach(() => {
     identity: { oidBefore: '1', oidAfter: '1', rowsBefore: 80, rowsAfter: 80 },
   })
   mockJobFindUnique.mockResolvedValue(null)
+  mockJobFindMany.mockResolvedValue([])
 })
 
 // ── The ladder is all-or-nothing ─────────────────────────────────────────────
@@ -721,7 +727,7 @@ describe('a dispatched backfill stops the ladder', () => {
     const { plan, over } = withBackfill()
     completed(plan, ...plan.steps.slice(0, at(plan, 'backfill')).map(x => x.ordinal))
     dispatched(plan, at(plan, 'backfill'))
-    mockJobFindUnique.mockResolvedValue({ status: 'queued', result: null, error: null, attempts: 0 })
+    mockJobFindUnique.mockResolvedValue({ id: 'job-1', status: 'queued', result: null, error: null, attempts: 0 })
 
     const r = await run(over)
     expect(r.status).toBe('awaiting_background_work')
@@ -737,6 +743,7 @@ describe('a dispatched backfill stops the ladder', () => {
     completed(plan, ...plan.steps.slice(0, at(plan, 'backfill')).map(x => x.ordinal))
     dispatched(plan, at(plan, 'backfill'))
     mockJobFindUnique.mockResolvedValue({
+      id: 'job-1',
       status: 'completed',
       result: { skipped: true, reason: 'No handler for job type maintenance_backfill' },
       error: null,
@@ -749,15 +756,95 @@ describe('a dispatched backfill stops the ladder', () => {
     expect(mockRunVerify).not.toHaveBeenCalled()
   })
 
+  /**
+   * A job of the step's batch chain, queued after `batchesBefore` batches. Each
+   * batch queues the next as a new job, so the dispatched job is only the first.
+   */
+  const chainJob = (
+    id: string,
+    fields: Record<string, unknown>,
+    batchesBefore: number,
+    createdAt = new Date(Date.UTC(2026, 9, 17, 0, batchesBefore)),
+  ) => ({ id, result: null, error: null, attempts: 0, createdAt, payload: { batches: batchesBefore }, ...fields })
+
+  /** The dispatched job after its one batch: whatever the chain has done since, it says more remain. */
+  const firstBatchRan = () =>
+    mockJobFindUnique.mockResolvedValue({ id: 'job-1', status: 'completed', result: { done: false, batches: 1 }, error: null, attempts: 0 })
+
   it('waits while a batch chain is still re-queueing itself', async () => {
     const { plan, over } = withBackfill()
     completed(plan, ...plan.steps.slice(0, at(plan, 'backfill')).map(x => x.ordinal))
     dispatched(plan, at(plan, 'backfill'))
-    // done:false means another batch is queued behind this one.
-    mockJobFindUnique.mockResolvedValue({ status: 'completed', result: { done: false, batches: 3 }, error: null, attempts: 0 })
+    firstBatchRan()
+    mockJobFindMany.mockResolvedValue([
+      chainJob('job-2', { status: 'queued' }, 1),
+      chainJob('job-1', { status: 'completed', result: { done: false, batches: 1 } }, 0),
+    ])
 
-    expect((await run(over)).status).toBe('awaiting_background_work')
+    const r = await run(over)
+    expect(r.status).toBe('awaiting_background_work')
+    expect(r.steps.find(s => s.kind === 'backfill')?.detail).toMatch(/queued \(attempt 0\), at job job-2 of its batch chain/)
+    expect(mockEnqueue).not.toHaveBeenCalled()
     expect(mockRunVerify).not.toHaveBeenCalled()
+  })
+
+  it('follows the batch chain past the dispatched job, and resumes into verify once its last batch is done', async () => {
+    // Read alone, the dispatched job said "more remain" for ever, and a ladder
+    // whose backfill took more than one batch never reached verify.
+    const { plan, over } = withBackfill()
+    const step = plan.steps[at(plan, 'backfill')]
+    completed(plan, ...plan.steps.slice(0, at(plan, 'backfill')).map(x => x.ordinal))
+    dispatched(plan, at(plan, 'backfill'))
+    firstBatchRan()
+    mockJobFindMany.mockResolvedValue([
+      chainJob('job-3', { status: 'completed', result: { done: true, updated: 250, batches: 3 } }, 2),
+      chainJob('job-2', { status: 'completed', result: { done: false, batches: 2 } }, 1),
+    ])
+
+    const r = await run(over)
+    expect(mockJobFindMany.mock.calls[0][0]).toMatchObject({
+      where: { projectId: 'p1', type: 'maintenance_backfill', payload: { path: ['idempotencyKey'], equals: step.idempotencyKey } },
+      orderBy: { createdAt: 'desc' },
+    })
+    expect(mockRunVerify).toHaveBeenCalledTimes(1)
+    expect(r.steps.find(s => s.kind === 'backfill')).toMatchObject({
+      status: 'completed',
+      detail: 'backfill complete: 250 row(s) updated over 3 batch(es)',
+    })
+    expect(r.status).toBe('completed')
+  })
+
+  it('halts when a later batch of the chain dead-lettered', async () => {
+    const { plan, over } = withBackfill()
+    completed(plan, ...plan.steps.slice(0, at(plan, 'backfill')).map(x => x.ordinal))
+    dispatched(plan, at(plan, 'backfill'))
+    firstBatchRan()
+    mockJobFindMany.mockResolvedValue([
+      chainJob('job-2', { status: 'dead_letter', error: 'lock timeout', attempts: 5 }, 1),
+      chainJob('job-1', { status: 'completed', result: { done: false, batches: 1 } }, 0),
+    ])
+
+    const r = await run(over)
+    expect(r.status).toBe('halted')
+    expect(r.haltReason).toMatch(/job job-2 is dead_letter: lock timeout/)
+    expect(mockRunVerify).not.toHaveBeenCalled()
+  })
+
+  it('tells apart two jobs of the chain queued in the same millisecond by the batches before each', async () => {
+    const { plan, over } = withBackfill()
+    completed(plan, ...plan.steps.slice(0, at(plan, 'backfill')).map(x => x.ordinal))
+    dispatched(plan, at(plan, 'backfill'))
+    firstBatchRan()
+    const sameMillisecond = new Date(Date.UTC(2026, 9, 17))
+    // Equal timestamps come back from the database in either order.
+    mockJobFindMany.mockResolvedValue([
+      chainJob('job-2', { status: 'completed', result: { done: false, batches: 2 } }, 1, sameMillisecond),
+      chainJob('job-3', { status: 'completed', result: { done: true, updated: 9, batches: 3 } }, 2, sameMillisecond),
+    ])
+
+    const r = await run(over)
+    expect(mockRunVerify).toHaveBeenCalledTimes(1)
+    expect(r.status).toBe('completed')
   })
 
   it('resumes into verify once the job really finished', async () => {
@@ -765,6 +852,7 @@ describe('a dispatched backfill stops the ladder', () => {
     completed(plan, ...plan.steps.slice(0, at(plan, 'backfill')).map(x => x.ordinal))
     dispatched(plan, at(plan, 'backfill'))
     mockJobFindUnique.mockResolvedValue({
+      id: 'job-1',
       status: 'completed',
       result: { done: true, updated: 80, batches: 1 },
       error: null,
@@ -781,7 +869,7 @@ describe('a dispatched backfill stops the ladder', () => {
     const { plan, over } = withBackfill()
     completed(plan, ...plan.steps.slice(0, at(plan, 'backfill')).map(x => x.ordinal))
     dispatched(plan, at(plan, 'backfill'))
-    mockJobFindUnique.mockResolvedValue({ status: 'dead_letter', result: null, error: 'lock timeout', attempts: 5 })
+    mockJobFindUnique.mockResolvedValue({ id: 'job-1', status: 'dead_letter', result: null, error: 'lock timeout', attempts: 5 })
 
     const r = await run(over)
     expect(r.status).toBe('halted')
