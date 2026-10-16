@@ -12,6 +12,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 
 export interface ColumnSnapshot {
   name: string
@@ -282,11 +283,18 @@ export async function rollbackToVersion(
  * This is what gets stored in a snapshot and what rollback diffs against —
  * both sides read the same shape from the same source, so a diff of the two is
  * a statement about the database rather than about a parser.
+ *
+ * Read in the project's own region (lib/data-plane/regional.ts). A regional
+ * project's schema exists only in its region's database: read from the home
+ * one it has no tables, so every snapshot would be empty and every rollback
+ * would report that there was nothing to roll back. A region this process
+ * cannot reach is refused, never read as empty.
  */
 async function captureLiveSchema(projectId: string): Promise<TableSnapshot[]> {
   const schemaName = `workspace_${projectId}`
+  const db = await workspaceRawClient(projectId)
 
-  const tables = await prisma.$queryRawUnsafe<Array<{ table_name: string }>>(
+  const tables = await db.$queryRawUnsafe<Array<{ table_name: string }>>(
     `SELECT table_name FROM information_schema.tables
       WHERE table_schema = $1 AND table_type = 'BASE TABLE'
       ORDER BY table_name`,
@@ -294,7 +302,7 @@ async function captureLiveSchema(projectId: string): Promise<TableSnapshot[]> {
   )
   if (tables.length === 0) return []
 
-  const columns = await prisma.$queryRawUnsafe<Array<{
+  const columns = await db.$queryRawUnsafe<Array<{
     table_name: string
     column_name: string
     data_type: string
@@ -309,7 +317,7 @@ async function captureLiveSchema(projectId: string): Promise<TableSnapshot[]> {
   )
 
   // Single-column UNIQUE constraints and unique indexes, for the `unique` flag.
-  const uniques = await prisma.$queryRawUnsafe<Array<{ table_name: string; column_name: string }>>(
+  const uniques = await db.$queryRawUnsafe<Array<{ table_name: string; column_name: string }>>(
     `SELECT c.relname AS table_name, a.attname AS column_name
        FROM pg_index i
        JOIN pg_class c ON c.oid = i.indrelid
@@ -320,7 +328,7 @@ async function captureLiveSchema(projectId: string): Promise<TableSnapshot[]> {
   )
   const uniqueSet = new Set(uniques.map(u => `${u.table_name}.${u.column_name}`))
 
-  const foreignKeys = await prisma.$queryRawUnsafe<Array<{
+  const foreignKeys = await db.$queryRawUnsafe<Array<{
     table_name: string
     column_name: string
     foreign_table: string
