@@ -27,6 +27,7 @@ import crypto from 'crypto'
 import { prisma } from '@/lib/db/prisma'
 import {
   RegionNotConfiguredError,
+  projectDriftEvents,
   projectRegion,
   regionDatabaseUrl,
   regionRawClient,
@@ -325,7 +326,8 @@ export async function getDirectAccessStatus(projectId: string): Promise<DirectAc
   const [schema, rows, pendingDriftEvents] = await Promise.all([
     resolveWorkspaceSchema(projectId),
     prisma.databaseCredential.findMany({ where: { projectId }, orderBy: { mode: 'asc' } }),
-    prisma.schemaDriftEvent.count({ where: { projectId, status: 'pending' } }),
+    // Counted in the project's region, where the capture trigger records them.
+    projectDriftEvents(projectId).then((events) => events.count({ where: { projectId, status: 'pending' } })),
   ])
   // Only a project that has credentials needs to know where they connect.
   const target = rows.length > 0 ? await connectionTarget(projectId) : null

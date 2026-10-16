@@ -32,7 +32,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
-import { workspaceRawClient } from '@/lib/data-plane/regional'
+import { projectDriftEvents, workspaceRawClient } from '@/lib/data-plane/regional'
 import type { RawFinding } from '@/lib/core/types'
 import { isReservedWorkspaceTable } from '@/lib/security/workspace-schema'
 
@@ -42,12 +42,16 @@ const DRIFT_LOCATION = 'direct-connection'
 // ── Probe (desired-state invariant) ───────────────────────────────────────────
 
 export async function detectPendingSchemaDrift(projectId: string): Promise<RawFinding[]> {
-  const events = await prisma.schemaDriftEvent.findMany({
+  // Read in the project's region, where the capture trigger wrote them. A read
+  // that fails throws: computeDesiredStateDiff then reports this invariant as
+  // not checked. It used to answer [] ("no drift"), which turned an unreadable
+  // event table into a clean bill of health for exactly the changes it records.
+  const events = await (await projectDriftEvents(projectId)).findMany({
     where: { projectId, status: 'pending' },
     orderBy: { capturedAt: 'asc' },
     take: 200,
     select: { id: true, roleName: true, commandTag: true, objectIdentity: true, capturedAt: true },
-  }).catch(() => [])
+  })
   if (events.length === 0) return []
 
   const commands: Record<string, number> = {}
@@ -131,7 +135,8 @@ export async function adoptExternalSchema(
   projectId: string,
   registerTable?: (tableName: string) => Promise<boolean>,
 ): Promise<AdoptExternalSchemaResult> {
-  const events = await prisma.schemaDriftEvent.findMany({
+  const driftEvents = await projectDriftEvents(projectId)
+  const events = await driftEvents.findMany({
     where: { projectId, status: 'pending' },
     select: { id: true, commandTag: true, objectIdentity: true, schemaName: true },
   })
@@ -292,8 +297,10 @@ export async function adoptExternalSchema(
   const marked =
     outcome === 'unverified'
       ? { count: 0 }
-      : await prisma.schemaDriftEvent.updateMany({
-          where: { projectId, status: 'pending' },
+      : await driftEvents.updateMany({
+          // Only the events this pass read: one captured while it ran has not
+          // been reconciled, and retiring it would lose the only record of it.
+          where: { projectId, status: 'pending', id: { in: events.map(e => e.id) } },
           data: { status: 'adopted', resolvedAt: new Date() },
         })
 
@@ -333,9 +340,9 @@ export async function adoptExternalSchema(
  * Wired into finding-reaper.reapStaleFindings so Re-scan clears it too.
  */
 export async function reapDriftFindings(projectId: string): Promise<number> {
-  const pending = await prisma.schemaDriftEvent.count({
-    where: { projectId, status: 'pending' },
-  }).catch(() => -1)
+  const pending = await projectDriftEvents(projectId)
+    .then((events) => events.count({ where: { projectId, status: 'pending' } }))
+    .catch(() => -1)
   if (pending !== 0) return 0 // events remain (or count failed) — never reap on uncertainty
 
   const open = await prisma.healthFinding.findMany({

@@ -1353,6 +1353,147 @@ describe('storage is measured in the project’s region', () => {
   })
 })
 
+describe('schema drift events live in the project’s region', () => {
+  // The real capture apparatus (scripts/setup-direct-access.sql) and the real
+  // regional table (scripts/sql/schema-drift-events.sql), installed in the
+  // regional database only, so an event found there was captured there. The
+  // DDL is run as a genuine bkn_rw_ login role, the only kind the triggers record.
+  // Loaded here rather than at the top, so this block adds no import lines.
+  const load = async () => ({
+    fs: await import('fs'),
+    watch: await import('@/lib/autonomy/drift-watch'),
+    upkeep: await import('@/lib/autonomy/drift-event-upkeep'),
+    regional: await import('@/lib/data-plane/regional'),
+  })
+  const password = randomBytes(18).toString('hex')
+  const notices: string[] = []
+  let rw: Client | null = null
+
+  const regionalEvents = (projectId: string) =>
+    rowsIn<{ commandTag: string; objectIdentity: string | null; status: string }>(
+      regionalUrl,
+      `SELECT "commandTag", "objectIdentity", status FROM public.schema_drift_events
+        WHERE "projectId" = '${projectId}' ORDER BY "capturedAt"`,
+    )
+  const columnsOf = (url: string) =>
+    rowsIn<{ column_name: string; data_type: string; is_nullable: string; column_default: string | null }>(
+      url,
+      `SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'schema_drift_events' ORDER BY column_name`,
+    )
+  const indexesOf = (url: string) =>
+    rowsIn<{ indexname: string }>(
+      url,
+      `SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'schema_drift_events' ORDER BY indexname`,
+    )
+
+  beforeAll(async () => {
+    const { fs } = await load()
+    await run(regionalUrl, fs.readFileSync('scripts/setup-direct-access.sql', 'utf8'))
+    await run(regionalUrl, fs.readFileSync('scripts/sql/schema-drift-events.sql', 'utf8'))
+    const schema = schemaOf(regionalProject)
+    const role = directAccessRoleNames(regionalProject).rw
+    await run(
+      regionalUrl,
+      `SELECT public.backenly_direct_create_role('${role}', '${password}', '${schema}', 'READ_WRITE');
+       GRANT USAGE, CREATE ON SCHEMA "${schema}" TO "${role}";`,
+    )
+    const url = new URL(regionalUrl)
+    url.username = role
+    url.password = password
+    rw = new Client({ connectionString: url.toString() })
+    rw.on('notice', (msg) => notices.push(msg.message ?? ''))
+    await rw.connect()
+  })
+
+  afterAll(async () => {
+    await rw?.end().catch(() => {})
+    await run(regionalUrl, `SELECT public.backenly_direct_drop_role('${directAccessRoleNames(regionalProject).rw}')`).catch(() => {})
+  })
+
+  it('creates the regional table exactly as the platform model defines it', async () => {
+    expect(await columnsOf(regionalUrl)).toEqual(await columnsOf(homeUrl()))
+    expect(await indexesOf(regionalUrl)).toEqual(await indexesOf(homeUrl()))
+  })
+
+  it('records DDL from a direct connection in the region, and nowhere else', async () => {
+    const schema = schemaOf(regionalProject)
+    await rw!.query(`CREATE TABLE "${schema}".drift_probe (id int)`)
+    const events = await regionalEvents(regionalProject)
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({ commandTag: 'CREATE TABLE', status: 'pending' })
+    expect(events[0].objectIdentity).toContain('drift_probe')
+    // The home table, the only one the platform model read before, has none.
+    expect(await prisma.schemaDriftEvent.count({ where: { projectId: regionalProject } })).toBe(0)
+  })
+
+  it('is what the drift probe reads, and a region it cannot reach is not "no drift"', async () => {
+    const { watch } = await load()
+    process.env[REGION_VARIABLE] = regionalUrl
+    const findings = await watch.detectPendingSchemaDrift(regionalProject)
+    expect(findings).toHaveLength(1)
+    expect(findings[0].type).toBe('external_schema_change')
+    expect(JSON.stringify(findings[0].details)).toContain('drift_probe')
+
+    delete process.env[REGION_VARIABLE]
+    await expect(watch.detectPendingSchemaDrift(regionalProject)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+  })
+
+  it('adopts the events in the region', async () => {
+    const { watch } = await load()
+    process.env[REGION_VARIABLE] = regionalUrl
+    const result = await watch.adoptExternalSchema(regionalProject)
+    expect(result.outcome).not.toBe('unverified')
+    expect(result.adoptedEvents).toBe(1)
+    expect((await regionalEvents(regionalProject)).map((e) => e.status)).toEqual(['adopted'])
+    expect(await watch.reapDriftFindings(regionalProject)).toBeGreaterThanOrEqual(0)
+  })
+
+  it('never breaks the developer’s DDL when capture fails, and never fails silently', async () => {
+    const { upkeep } = await load()
+    process.env[REGION_VARIABLE] = regionalUrl
+    expect(await upkeep.driftCaptureHealth('us-east-1')).toEqual({ status: 'healthy', problems: [] })
+
+    await run(regionalUrl, 'ALTER TABLE public.schema_drift_events RENAME TO schema_drift_events_away')
+    try {
+      notices.length = 0
+      await rw!.query(`CREATE TABLE "${schemaOf(regionalProject)}".drift_probe_2 (id int)`)
+      expect(notices.some((n) => n.includes('BACKENLY_DRIFT_CAPTURE_FAILED'))).toBe(true)
+      const health = await upkeep.driftCaptureHealth('us-east-1')
+      expect(health.status).toBe('broken')
+      expect(health.problems.join(' ')).toContain('schema_drift_events is missing')
+    } finally {
+      await run(regionalUrl, 'ALTER TABLE public.schema_drift_events_away RENAME TO schema_drift_events')
+    }
+    expect((await upkeep.driftCaptureHealth('us-east-1')).status).toBe('healthy')
+  })
+
+  it('keeps pending events, prunes resolved ones past retention, and reports the backlog', async () => {
+    const { upkeep } = await load()
+    process.env[REGION_VARIABLE] = regionalUrl
+    await run(
+      regionalUrl,
+      `INSERT INTO public.schema_drift_events ("id", "projectId", "roleName", "commandTag", "capturedAt", "status", "resolvedAt")
+       VALUES ('old-adopted', '${regionalProject}', 'bkn_rw_test', 'CREATE TABLE',
+               (now() AT TIME ZONE 'UTC') - interval '120 days', 'adopted', (now() AT TIME ZONE 'UTC') - interval '119 days'),
+              ('old-pending', '${regionalProject}', 'bkn_rw_test', 'CREATE TABLE',
+               (now() AT TIME ZONE 'UTC') - interval '120 days', 'pending', NULL)`,
+    )
+    const backlog = await upkeep.driftEventBacklog('us-east-1')
+    expect(backlog.pending).toBe(1)
+    expect(backlog.oldestPendingSeconds).toBeGreaterThan(119 * 24 * 3600)
+
+    expect(await upkeep.pruneResolvedDriftEvents('us-east-1', 90)).toBe(1)
+    const ids = await rowsIn<{ id: string }>(regionalUrl, `SELECT id FROM public.schema_drift_events WHERE id LIKE 'old-%'`)
+    expect(ids.map((r) => r.id)).toEqual(['old-pending'])
+
+    const reports = await upkeep.runDriftEventUpkeep()
+    const virginia = reports.find((r) => r.region === 'us-east-1')
+    expect(virginia).toMatchObject({ health: { status: 'healthy' }, backlog: { pending: 1 }, errors: [] })
+    await run(regionalUrl, `DELETE FROM public.schema_drift_events WHERE id = 'old-pending'`)
+  })
+})
+
 describe('a project recording a region this build does not know', () => {
   it('is refused, never read as the home region', async () => {
     await expect(projectRegion(unknownProject)).rejects.toMatchObject({ code: 'UNKNOWN_REGION' })

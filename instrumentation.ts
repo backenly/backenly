@@ -585,6 +585,28 @@ export async function register() {
         }
       })
 
+      // ── Drift event upkeep — hourly, per region ─────────────────────────────
+      //
+      // Schema drift events live in each region's database. Hourly, for every
+      // region this process can reach: is the capture apparatus able to write
+      // (it never breaks a developer's DDL, so a broken one would drop events
+      // silently), how old is the oldest pending event, and resolved events past
+      // the retention window are pruned. One JSON line per region for the
+      // CloudWatch metric filters (lib/autonomy/drift-event-upkeep.ts).
+      cron.schedule('17 * * * *', async () => {
+        const g = globalThis as any
+        if (g.__driftUpkeepRunning) return
+        g.__driftUpkeepRunning = true
+        try {
+          const { runDriftEventUpkeep } = await import('./lib/autonomy/drift-event-upkeep')
+          await runDriftEventUpkeep()
+        } catch (err: any) {
+          console.error('[DriftUpkeep] Cron error:', err?.message)
+        } finally {
+          g.__driftUpkeepRunning = false
+        }
+      })
+
       // ── DB storage snapshot — hourly ────────────────────────────────────────
       // Measures actual on-disk size of each project's workspace and branch
       // schemas: ProjectUsage.dbStorageUsedMb for the quota check, and the

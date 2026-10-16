@@ -30,6 +30,11 @@ import {
   getDirectAccessStatus,
 } from '../lib/services/direct-access'
 import { detectPendingSchemaDrift, reapDriftFindings } from '../lib/autonomy/drift-watch'
+import { projectDriftEvents } from '../lib/data-plane/regional'
+
+// Counted in the project's region, where the event trigger records them.
+const pendingDriftCount = async (projectId: string) =>
+  (await projectDriftEvents(projectId)).count({ where: { projectId, status: 'pending' } })
 
 const projectId = process.argv[2]
 const HOST = process.argv[3] || '127.0.0.1'
@@ -84,7 +89,7 @@ async function main() {
 
   // ── READ_WRITE + drift capture ──────────────────────────────────────────────
   console.log('\n— READ_WRITE + drift —')
-  const preEvents = await prisma.schemaDriftEvent.count({ where: { projectId, status: 'pending' } })
+  const preEvents = await pendingDriftCount(projectId)
   const rw = await provisionDirectAccess(projectId, 'READ_WRITE')
   console.log(`  provisioned ${rw.roleName}`)
 
@@ -95,7 +100,7 @@ async function main() {
   const dmlErr = await expectFail(() => rwClient.query(`INSERT INTO ${probe} (note) VALUES ('external write')`))
   check('5b. external INSERT succeeds', dmlErr === null, dmlErr ?? undefined)
 
-  const pendingAfterCreate = await prisma.schemaDriftEvent.count({ where: { projectId, status: 'pending' } })
+  const pendingAfterCreate = await pendingDriftCount(projectId)
   check('6. event trigger captured the DDL', pendingAfterCreate > preEvents,
     `pending ${preEvents} → ${pendingAfterCreate}`)
 
@@ -113,14 +118,14 @@ async function main() {
     adopt1.success && registered.includes(probe), adopt1.message?.slice(0, 200))
   const metaRow = await prisma.table.findFirst({ where: { projectId, name: probe }, select: { id: true } })
   check('8b. platform metadata row exists for the adopted table', !!metaRow)
-  const pendingAfterAdopt = await prisma.schemaDriftEvent.count({ where: { projectId, status: 'pending' } })
+  const pendingAfterAdopt = await pendingDriftCount(projectId)
   check('8c. no pending drift events remain', pendingAfterAdopt === 0, `pending=${pendingAfterAdopt}`)
 
   // ── External DROP → adopt prunes ────────────────────────────────────────────
   const dropErr = await expectFail(() => rwClient.query(`DROP TABLE ${probe}`))
   check('9. external DROP TABLE succeeds', dropErr === null, dropErr ?? undefined)
   await rwClient.end()
-  const pendingAfterDrop = await prisma.schemaDriftEvent.count({ where: { projectId, status: 'pending' } })
+  const pendingAfterDrop = await pendingDriftCount(projectId)
   check('9b. drop was captured', pendingAfterDrop > 0, `pending=${pendingAfterDrop}`)
   const adopt2 = await executeAction({ action: 'ADOPT_EXTERNAL_SCHEMA', params: {} } as any, projectId, undefined, 0, undefined, false)
   const pruned = (adopt2.data as any)?.prunedTables ?? []
