@@ -1364,6 +1364,10 @@ describe('backups, restores and archive cleanup use the project’s region', () 
       orderBy: { createdAt: 'desc' },
     })
     expect(taken?.filePath.startsWith(BACKUP_DIR)).toBe(true)
+    // A snapshot on the region's disk has no bucket a link could reach: the
+    // download is refused rather than streamed out through here.
+    expect(await backups.regionalSnapshotLink(regionalProject, taken!.id)).toEqual({ kind: 'unavailable' })
+    expect(await backups.regionalSnapshotLink(regionalProject, randomUUID())).toEqual({ kind: 'missing' })
 
     // Restored the same way, from that snapshot, in the region.
     await run(regionalUrl, `DELETE FROM "${schema}".marker`)

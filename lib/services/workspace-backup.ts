@@ -49,6 +49,7 @@ import {
   fetchSnapshotToFile,
   isS3Location,
   openS3Snapshot,
+  parseS3Location,
   putSnapshot,
   s3LocationBelongsTo,
   snapshotBucket,
@@ -65,6 +66,7 @@ import {
   regionDatabaseUrl,
   regionEnvName,
   regionRawClient,
+  regionSetting,
 } from '@/lib/data-plane/regional'
 import { serviceRegion } from '@/lib/data-plane/serving'
 import { enqueueRegionalJob } from '@/lib/queue'
@@ -714,6 +716,69 @@ export async function resolveSnapshotFile(
   } catch {
     return null
   }
+}
+
+/** How long a download link to another region's snapshot lasts: long enough to start it, no longer. */
+export const SNAPSHOT_LINK_TTL_SECONDS = 300
+
+const regionalSnapshotClients = new Map<CloudRegionId, import('@aws-sdk/client-s3').S3Client>()
+
+/**
+ * A short-lived link that downloads a snapshot of a project kept in another
+ * region straight from that region's snapshot bucket. Whoever follows it is
+ * served by the region, so a whole project's data is not streamed out through
+ * this one, which is what resolveSnapshotFile refuses to do.
+ *
+ *   link         the presigned URL, signed with this process's own credentials
+ *                (the home web task's role reads each connected region's
+ *                snapshots, and nothing else in its bucket)
+ *   missing      no completed snapshot with that id belongs to the project
+ *   unavailable  the snapshot is not one a link can reach: not in the region's
+ *                snapshot bucket (BACKUP_S3_BUCKET_<REGION>, unset here when the
+ *                region is not connected), or not under the project's own prefix
+ *
+ * For a project in this process's own region it is never called: the route
+ * streams the snapshot as it always has.
+ */
+export async function regionalSnapshotLink(
+  projectId: string,
+  backupId: string,
+  ttlSeconds: number = SNAPSHOT_LINK_TTL_SECONDS,
+): Promise<{ kind: 'link'; url: string; filename: string } | { kind: 'missing' } | { kind: 'unavailable' }> {
+  const region = await projectRegion(projectId)
+  const row = await prisma.workspaceBackup.findFirst({
+    where: { id: backupId, projectId, status: 'completed' },
+    select: { filePath: true, filename: true },
+  })
+  if (!row) return { kind: 'missing' }
+  const regionBucket = regionSetting('BACKUP_S3_BUCKET', region).value?.trim() || null
+  if (!isS3Location(row.filePath) || !s3LocationBelongsTo(row.filePath, projectId, regionBucket)) {
+    return { kind: 'unavailable' }
+  }
+
+  const { bucket, key } = parseS3Location(row.filePath)
+  const [{ S3Client, GetObjectCommand }, { getSignedUrl }] = await Promise.all([
+    import('@aws-sdk/client-s3'),
+    import('@aws-sdk/s3-request-presigner'),
+  ])
+  let client = regionalSnapshotClients.get(region)
+  if (!client) {
+    client = new S3Client({ region })
+    regionalSnapshotClients.set(region, client)
+  }
+  const safeName = row.filename.replace(/[^a-zA-Z0-9._-]/g, '_')
+  const url = await getSignedUrl(
+    client,
+    new GetObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      ResponseContentType: 'application/gzip',
+      ResponseContentDisposition: `attachment; filename="database-snapshot-${safeName}"`,
+      ResponseCacheControl: 'no-store',
+    }),
+    { expiresIn: ttlSeconds },
+  )
+  return { kind: 'link', url, filename: row.filename }
 }
 
 // ─── Retention Pruning ────────────────────────────────────────────────────────

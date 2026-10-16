@@ -115,15 +115,16 @@ export function snapshotKey(projectId: string, filename: string): string {
  * configured bucket, under this project's own prefix, one level deep. The
  * location comes from the database, and a row that pointed anywhere else must
  * not become a way to read another project's snapshot or another bucket.
+ * `bucket` is this process's own snapshot bucket unless another region's is
+ * named (lib/services/workspace-backup.ts regionalSnapshotLink).
  */
-export function s3LocationBelongsTo(location: string, projectId: string): boolean {
+export function s3LocationBelongsTo(location: string, projectId: string, bucket: string | null = snapshotBucket()): boolean {
   let parsed: { bucket: string; key: string }
   try {
     parsed = parseS3Location(location)
   } catch {
     return false
   }
-  const bucket = snapshotBucket()
   if (!bucket || parsed.bucket !== bucket) return false
   const dir = `${snapshotPrefix()}/${projectId}/`
   if (!parsed.key.startsWith(dir)) return false
