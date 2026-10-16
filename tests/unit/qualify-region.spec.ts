@@ -19,12 +19,17 @@ import type { AddressInfo } from 'node:net'
 import { SseReader, connectingFetch, parseArgs, pendingApproval, qualify } from '@/scripts/qualify-region'
 
 const PROJECT = '0b9e3a52-7a5d-4c1e-9a2b-1f2e3d4c5b6a'
-const ENV = { BACKENLY_QUALIFY_MCP_KEY: 'mcp_live_test', BACKENLY_QUALIFY_PROJECT_KEY: 'proj_live_test' }
+const ENV = {
+  BACKENLY_QUALIFY_MCP_KEY: 'mcp_live_test',
+  BACKENLY_QUALIFY_PROJECT_KEY: 'proj_live_test',
+  BACKENLY_QUALIFY_OPERATOR_PASSWORD: 'not-a-real-operator-password',
+}
 const ARGV = [
   '--project', PROJECT,
   '--region', 'us-east-1',
   '--api', 'https://us-east-1.api.staging.example.com',
   '--home', 'https://staging.example.com',
+  '--operator', 'qualify-operator@example.com',
 ]
 
 describe('arguments', () => {
@@ -36,13 +41,31 @@ describe('arguments', () => {
     expect(args.report).toBe('r.json')
     expect(args.skipRevocation).toBe(false)
     expect(args.approvalWaitMinutes).toBe(10)
+    expect(args.jobWaitMinutes).toBe(15)
+    expect(args.operator).toBe('qualify-operator@example.com')
+    expect(args.operatorPassword).toBe(ENV.BACKENLY_QUALIFY_OPERATOR_PASSWORD)
+    expect(args.operatorTotp).toBeNull()
   })
 
   it('takes keys from the environment only', () => {
     expect(() => parseArgs([...ARGV, '--mcp-key', 'mcp_live_x'], ENV)).toThrow(/never from the command line/)
     expect(() => parseArgs([...ARGV, '--project-key', 'proj_live_x'], ENV)).toThrow(/never from the command line/)
-    expect(() => parseArgs(ARGV, { BACKENLY_QUALIFY_PROJECT_KEY: 'proj_live_test' })).toThrow(/BACKENLY_QUALIFY_MCP_KEY/)
-    expect(() => parseArgs(ARGV, { BACKENLY_QUALIFY_MCP_KEY: 'mcp_live_test', BACKENLY_QUALIFY_PROJECT_KEY: 'svc_live_x' })).toThrow(/publishable key/)
+    expect(() => parseArgs(ARGV, { ...ENV, BACKENLY_QUALIFY_MCP_KEY: undefined })).toThrow(/BACKENLY_QUALIFY_MCP_KEY/)
+    expect(() => parseArgs(ARGV, { ...ENV, BACKENLY_QUALIFY_PROJECT_KEY: 'svc_live_x' })).toThrow(/publishable key/)
+  })
+
+  it('signs in an operator, whose password comes from the environment only', () => {
+    expect(() => parseArgs([...ARGV, '--operator-password', 'x'], ENV)).toThrow(/BACKENLY_QUALIFY_OPERATOR_PASSWORD only/)
+    expect(() => parseArgs([...ARGV, '--password', 'x'], ENV)).toThrow(/BACKENLY_QUALIFY_OPERATOR_PASSWORD only/)
+    expect(() => parseArgs(ARGV, { ...ENV, BACKENLY_QUALIFY_OPERATOR_PASSWORD: undefined })).toThrow(/BACKENLY_QUALIFY_OPERATOR_PASSWORD must/)
+    // Recovery and rollback cannot be left out by leaving the operator out.
+    const without = ARGV.slice(0, ARGV.indexOf('--operator'))
+    expect(() => parseArgs(without, ENV)).toThrow(/--operator <email> is required/)
+    expect(() => parseArgs([...without, '--operator', 'not-an-email'], ENV)).toThrow(/--operator <email> is required/)
+    expect(parseArgs(ARGV, { ...ENV, BACKENLY_QUALIFY_OPERATOR_TOTP: ' 123456 ' }).operatorTotp).toBe('123456')
+    expect(() => parseArgs(ARGV, { ...ENV, BACKENLY_QUALIFY_OPERATOR_TOTP: '12345' })).toThrow(/six-digit/)
+    expect(parseArgs([...ARGV, '--job-wait-minutes', '30'], ENV).jobWaitMinutes).toBe(30)
+    expect(() => parseArgs([...ARGV, '--job-wait-minutes', '0'], ENV)).toThrow(/--job-wait-minutes/)
   })
 
   it('refuses a run that would not test the region', () => {
@@ -139,6 +162,7 @@ describe('a region that cannot be reached', () => {
         '--api', `https://us-east-1.api.staging.example.com:${closed}`,
         '--home', `https://staging.example.com:${closed}`,
         '--connect', 'us-east-1.api.staging.example.com=127.0.0.1,staging.example.com=127.0.0.1',
+        '--operator', 'qualify-operator@example.com',
         '--skip-revocation',
       ],
       ENV,
@@ -151,12 +175,17 @@ describe('a region that cannot be reached', () => {
     expect(globalThis.fetch).toBe(originalFetch)
     const status = (check: string) => results.find((r) => r.check === check)?.status
     expect(status('health')).toBe('fail')
+    expect(status('sign-in')).toBe('fail')
     expect(status('connect')).toBe('fail')
     expect(status('table')).toBe('skip')
     expect(status('v1-own-rows-only')).toBe('skip')
+    // Recovery and rollback are skipped as unproven, never passed.
+    for (const check of ['change', 'undone', 'snapshot', 'download-from-region', 'restore', 'serves-after-restore', 'functions-after-restore']) {
+      expect([check, status(check)]).toEqual([check, 'skip'])
+    }
     expect(results.filter((r) => r.status === 'pass')).toEqual([])
     expect(lines.join('\n')).toContain('REGION NOT QUALIFIED')
-    // No key ever reaches the output.
-    expect(lines.join('\n')).not.toMatch(/mcp_live_test|proj_live_test/)
+    // No key or password ever reaches the output.
+    expect(lines.join('\n')).not.toMatch(/mcp_live_test|proj_live_test|not-a-real-operator-password/)
   }, 60_000)
 })
