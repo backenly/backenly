@@ -36,7 +36,8 @@
 #
 # Passwords never reach this script or the database: the operator's machine
 # computes each verifier and keeps the password only long enough to write the
-# connection string to Secrets Manager.
+# connection string to Secrets Manager. On Backenly Cloud that is launch.ts,
+# next to this file, which also runs this script as the region's one-off task.
 #
 # ── Output a launcher may read ────────────────────────────────────────────────
 #   step <id>: pending | current | changed           (check)
