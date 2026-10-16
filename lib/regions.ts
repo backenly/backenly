@@ -16,6 +16,9 @@
  *     storage), qualified on staging first;
  *   - every connection to a project's data opened in the project's region
  *     (lib/data-plane/regional.ts), and requests routed there;
+ *   - the region's API address handed out for its projects
+ *     (PUBLIC_API_ORIGIN_<REGION>, https://<region>.api.backenly.com in
+ *     production);
  *   - the Cloud lifecycle creating the project in the chosen region's database
  *     and recording it in Project.region.
  * Until then every project is created in the home region and Project.region

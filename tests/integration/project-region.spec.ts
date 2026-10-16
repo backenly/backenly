@@ -1494,6 +1494,152 @@ describe('schema drift events live in the project’s region', () => {
   })
 })
 
+describe('a project created in another region', () => {
+  const savedEdition = process.env.BACKENLY_EDITION
+  const created: string[] = []
+  const schemaIn = async (url: string, schema: string) =>
+    (await rowsIn<{ n: number }>(url, `SELECT count(*)::int AS n FROM information_schema.schemata WHERE schema_name = '${schema}'`))[0].n
+
+  beforeAll(() => {
+    // Creating projects is Backenly Cloud's; the single-tenant edition refuses it.
+    process.env.BACKENLY_EDITION = 'cloud'
+  })
+
+  afterAll(async () => {
+    if (savedEdition === undefined) delete process.env.BACKENLY_EDITION
+    else process.env.BACKENLY_EDITION = savedEdition
+    for (const id of created) {
+      await run(homeUrl(), `DROP SCHEMA IF EXISTS "${schemaOf(id)}" CASCADE`).catch(() => {})
+    }
+    await prisma.project.deleteMany({ where: { id: { in: created } } }).catch(() => {})
+  })
+
+  it('is refused before anything is written when this server cannot reach the region', async () => {
+    // Loaded here rather than at the top, so this block adds no import lines.
+    const { createProject } = await import('@/lib/edition/oss/project-lifecycle')
+    delete process.env[REGION_VARIABLE]
+    const name = `region-create-${randomUUID()}`
+    await expect(createProject({ name, userId: ownerId, region: 'us-east-1' })).rejects.toMatchObject({
+      code: 'REGION_NOT_CONFIGURED',
+    })
+    expect(await prisma.project.count({ where: { name } })).toBe(0)
+  })
+
+  it('records the region and creates its schema in the region’s database only', async () => {
+    const { createProject } = await import('@/lib/edition/oss/project-lifecycle')
+    process.env[REGION_VARIABLE] = regionalUrl
+    const { project } = await createProject({ name: `region-create-${randomUUID()}`, userId: ownerId, region: 'us-east-1' })
+    created.push(project.id)
+
+    const row = await prisma.project.findUnique({ where: { id: project.id }, select: { region: true } })
+    expect(row?.region).toBe('us-east-1')
+    expect(await projectRegion(project.id)).toBe('us-east-1')
+    expect(await schemaIn(regionalUrl, schemaOf(project.id))).toBe(1)
+    expect(await schemaIn(homeUrl(), schemaOf(project.id))).toBe(0)
+  })
+
+  it('creates a project with no region in the home region, recorded as before', async () => {
+    const { createProject } = await import('@/lib/edition/oss/project-lifecycle')
+    const { project } = await createProject({ name: `region-create-${randomUUID()}`, userId: ownerId })
+    created.push(project.id)
+
+    const row = await prisma.project.findUnique({ where: { id: project.id }, select: { region: true } })
+    expect(row?.region).toBeNull()
+    expect(await schemaIn(homeUrl(), schemaOf(project.id))).toBe(1)
+    expect(await schemaIn(regionalUrl, schemaOf(project.id))).toBe(0)
+  })
+})
+
+describe('the address a regional project is given', () => {
+  // Loaded here rather than at the top, so this block adds no import lines.
+  const regional = () => import('@/lib/data-plane/regional')
+  const API_VARIABLE = 'PUBLIC_API_ORIGIN_US_EAST_1'
+  const VIRGINIA = 'https://us-east-1.api.example.test'
+  const HOME = 'https://home.example.test'
+
+  afterEach(() => {
+    delete process.env[API_VARIABLE]
+  })
+
+  it('is the region’s own API address, never the home one', async () => {
+    const { projectApiOrigin } = await regional()
+    expect(await projectApiOrigin(homeProject, HOME)).toBe(HOME)
+
+    delete process.env[API_VARIABLE]
+    await expect(projectApiOrigin(regionalProject, HOME)).rejects.toMatchObject({
+      code: 'REGION_NOT_CONFIGURED',
+      variable: API_VARIABLE,
+    })
+
+    process.env[API_VARIABLE] = `${VIRGINIA}/`
+    expect(await projectApiOrigin(regionalProject, HOME)).toBe(VIRGINIA)
+  })
+
+  it('is what the connect manifest hands an agent, with the SDK pointed at it', async () => {
+    const { buildConnectManifest } = await import('@/lib/services/connect-manifest')
+    process.env[REGION_VARIABLE] = regionalUrl
+    const keys = () => prisma.apiKey.count({ where: { projectId: regionalProject } })
+
+    // Without an address nothing is handed out, and the anon key is not minted.
+    const before = await keys()
+    await expect(buildConnectManifest(regionalProject, HOME)).rejects.toMatchObject({ code: 'REGION_NOT_CONFIGURED' })
+    expect(await keys()).toBe(before)
+
+    process.env[API_VARIABLE] = VIRGINIA
+    const manifest = await buildConnectManifest(regionalProject, HOME)
+    expect(manifest.project.apiBaseUrl).toBe(`${VIRGINIA}/api/v1/${regionalProject}`)
+    expect(manifest.sdk.initLine).toContain(`apiUrl: "${VIRGINIA}"`)
+    // The SDK file itself is still served by this host.
+    expect(manifest.sdk.cdnEsm).toBe(`${HOME}/backenly-sdk.esm.js`)
+
+    // A home project's manifest is what it always was.
+    const home = await buildConnectManifest(homeProject, HOME)
+    expect(home.project.apiBaseUrl).toBe(`${HOME}/api/v1/${homeProject}`)
+    expect(home.sdk.initLine).not.toContain('apiUrl')
+  })
+
+  it('is where a sign-in provider is told to send the user back', async () => {
+    const { WorkspaceOAuthService } = await import('@/lib/services/workspaceOAuth')
+    const { default: app } = await import('@/server/app')
+    // The provider's client secret is stored encrypted, and there is no default key.
+    const savedKey = process.env.OAUTH_ENCRYPTION_KEY
+    process.env.OAUTH_ENCRYPTION_KEY = savedKey || randomBytes(32).toString('hex')
+    // A project of its own: the initiate needs a signing secret and a provider.
+    const projectId = await createProject('us-east-1')
+    const server = http.createServer(app)
+    try {
+      await prisma.project.update({ where: { id: projectId }, data: { jwtSecret: randomBytes(32).toString('hex') } })
+      await WorkspaceOAuthService.upsertConfig(projectId, {
+        provider: 'google',
+        clientId: 'region-client-id',
+        clientSecret: 'region-client-secret',
+      } as Parameters<typeof WorkspaceOAuthService.upsertConfig>[1])
+
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+      const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+      const initiate = () => fetch(`${base}/api/v1/${projectId}/auth/google`, { redirect: 'manual' })
+
+      // No address for the region: refused, not sent to the provider with the home one.
+      expect((await initiate()).status).toBe(503)
+
+      process.env[API_VARIABLE] = VIRGINIA
+      const res = await initiate()
+      expect(res.status).toBe(302)
+      const redirectUri = new URL(res.headers.get('location') as string).searchParams.get('redirect_uri')
+      expect(redirectUri).toBe(`${VIRGINIA}/api/v1/${projectId}/auth/google/callback`)
+    } finally {
+      if (server.listening) {
+        server.closeAllConnections()
+        await new Promise<void>((resolve) => server.close(() => resolve()))
+      }
+      await prisma.workspaceOAuthConfig.deleteMany({ where: { projectId } }).catch(() => {})
+      await prisma.project.delete({ where: { id: projectId } }).catch(() => {})
+      if (savedKey === undefined) delete process.env.OAUTH_ENCRYPTION_KEY
+      else process.env.OAUTH_ENCRYPTION_KEY = savedKey
+    }
+  })
+})
+
 describe('a project recording a region this build does not know', () => {
   it('is refused, never read as the home region', async () => {
     await expect(projectRegion(unknownProject)).rejects.toMatchObject({ code: 'UNKNOWN_REGION' })

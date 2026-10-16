@@ -7,6 +7,8 @@ import { withAuth } from '@/lib/auth/route-protection'
 import { deleteProjectCompletely } from '@/lib/projects/delete'
 import { canAccessProject, canAdministerProject, canWriteProject } from '@/lib/edition/guard'
 import { getProjectQuota } from '@/lib/services/storageQuota'
+import { resolvePublicBaseUrl } from '@/lib/services/public-url'
+import { isRegionError, regionApiOrigin, regionOfRecord } from '@/lib/data-plane/regional'
 
 // Usage figures (storageUsed, apiRequests, activeUsers, ...) are measured by the
 // server and are deliberately NOT accepted here. They used to be, which let any
@@ -62,13 +64,30 @@ type ProjectResponseRow = {
   errorCount: number
   activeUsers: number
   lastMetricsUpdate: Date | null
+  region: string | null
   _count: { tables: number; workspaces: number }
 } & Record<string, unknown>
 
-async function serializeProject(project: ProjectResponseRow, projectId: string) {
+/**
+ * Where to call this project's API, in the region its data is in. Null when
+ * this server has no API address for that region: the console then shows none,
+ * rather than the home address, which customers would copy and keep.
+ */
+function apiBaseUrl(projectId: string, recordedRegion: string | null, homeOrigin: string): string | null {
+  try {
+    const origin = regionApiOrigin(regionOfRecord(projectId, recordedRegion), homeOrigin, { projectId })
+    return `${origin}/api/v1/${projectId}`
+  } catch (err) {
+    if (isRegionError(err)) return null
+    throw err
+  }
+}
+
+async function serializeProject(project: ProjectResponseRow, projectId: string, homeOrigin: string) {
   const { _count, ...fields } = project
   return {
     ...fields,
+    apiBaseUrl: apiBaseUrl(projectId, project.region, homeOrigin),
     storageUsed: Number(project.storageUsed),
     // The plan's effective cap, not the unused Project.storageLimit column.
     storageLimit: Number((await getProjectQuota(projectId)).limit),
@@ -128,7 +147,7 @@ export const GET = withAuth(async (
 
     return NextResponse.json({
       success: true,
-      data: await serializeProject(project, projectId),
+      data: await serializeProject(project, projectId, resolvePublicBaseUrl(request)),
     })
   } catch (error: any) {
     console.error('Error fetching project:', error)
@@ -184,7 +203,7 @@ export const PUT = withAuth(async (
 
     return NextResponse.json({
       success: true,
-      data: await serializeProject(project, projectId),
+      data: await serializeProject(project, projectId, resolvePublicBaseUrl(request)),
     })
   } catch (error: any) {
     if (error instanceof z.ZodError) {

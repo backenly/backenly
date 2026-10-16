@@ -7552,6 +7552,15 @@ async function executeGetRealtimeStatus(projectId: string): Promise<ExecutionRes
  */
 async function executeAddProvider(params: any, projectId: string): Promise<ExecutionResult> {
   const db = await projectDb(projectId)
+  // The redirect URI the runtime sends the provider (server/routes/oauth.ts) is
+  // on the project's own API address, which for a project in another region is
+  // that region's, not this server's. Resolved before anything is written, so a
+  // region with no address configured fails the call rather than a saved one.
+  const { projectApiOrigin } = await import('@/lib/data-plane/regional')
+  const apiOrigin = await projectApiOrigin(
+    projectId,
+    process.env.NEXTAUTH_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://your-domain.com',
+  )
   const { provider, clientId, clientSecret } = params
 
   const providerName = (provider || '').toLowerCase()
@@ -7660,8 +7669,7 @@ async function executeAddProvider(params: any, projectId: string): Promise<Execu
   }
 
   const displayName = providerName.charAt(0).toUpperCase() + providerName.slice(1)
-  const baseUrl = process.env.NEXTAUTH_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://your-domain.com'
-  const redirectUri = `${baseUrl}/api/v1/${projectId}/auth/${providerName}/callback`
+  const redirectUri = `${apiOrigin}/api/v1/${projectId}/auth/${providerName}/callback`
 
   return {
     success: true,

@@ -12,9 +12,11 @@
  * The real base has been `{origin}/api/v1/{projectId}` since the project's
  * first request. Docs tell users to copy the value from these rows.
  *
- * Source-level pins: the pages now derive the live base from the deployment's
- * own origin (operator-supplied overrides still win), and the false claim is
- * gone.
+ * Source-level pins: the pages show the live base the server works out for the
+ * project's region (`apiBaseUrl`; operator-supplied overrides still win), and
+ * the false claim is gone. They must not build it from the console's own
+ * origin: a project in another region is not served there, and the address
+ * shown is the one customers copy into their apps.
  */
 
 import fs from 'fs'
@@ -27,8 +29,9 @@ const pages = {
 
 for (const [name, src] of Object.entries(pages)) {
   describe(`${name} page`, () => {
-    it('derives the live base from the deployment origin', () => {
-      expect(src).toContain('window.location.origin}/api/v1/${projectId}')
+    it('shows the live base the server gives for the project’s region', () => {
+      expect(src).toContain('project?.apiBaseUrl')
+      expect(src).not.toContain('window.location.origin}/api/v1/')
     })
 
     it('still honors an operator-supplied override first', () => {

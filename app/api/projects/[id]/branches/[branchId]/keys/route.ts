@@ -18,6 +18,8 @@ import { isCloudEdition } from '@/lib/edition/cloud-only'
 import { canAdministerProject } from '@/lib/edition/guard'
 import { mintPreviewKey, previewEndpoint } from '@/lib/branches/preview'
 import { resolvePublicBaseUrl } from '@/lib/services/public-url'
+import { projectApiOrigin } from '@/lib/data-plane/regional'
+import { regionErrorResponse } from '@/lib/api/v1/errors'
 
 function branchIdFrom(req: NextRequest): string {
   const parts = req.nextUrl.pathname.split('/').filter(Boolean)
@@ -39,6 +41,18 @@ export const POST = withProjectAccess(async (req: NextRequest, { user, projectId
     // An empty body asks for the default: a client key.
   }
 
+  // Resolved before the key is minted: the key is shown once, so a response
+  // that cannot say where to use it must not cost one.
+  const origin = resolvePublicBaseUrl(req)
+  let apiOrigin: string
+  try {
+    apiOrigin = await projectApiOrigin(projectId, origin)
+  } catch (err) {
+    const regional = regionErrorResponse(err)
+    if (regional) return regional
+    throw err
+  }
+
   const result = await mintPreviewKey(projectId, branchIdFrom(req), { serviceRole: body.serviceRole === true })
   if (!result.ok) {
     const fail = result as Extract<typeof result, { ok: false }>
@@ -52,6 +66,6 @@ export const POST = withProjectAccess(async (req: NextRequest, { user, projectId
     keyId: ok.minted.keyId,
     keyPrefix: ok.minted.keyPrefix,
     serviceRole: ok.minted.serviceRole,
-    preview: previewEndpoint(projectId, ok.branch, resolvePublicBaseUrl(req)),
+    preview: previewEndpoint(projectId, ok.branch, origin, apiOrigin),
   }, { status: 201 })
 })
