@@ -9,6 +9,9 @@
  *   function_error      a function's last error
  *   conversation_message  a message to or from the agent, which can quote rows
  *                       and end users' emails
+ *   backfill_cursor     where a maintenance backfill's next batch starts: the
+ *                       last primary key it scanned, which for a natural key is
+ *                       a customer's own value (an email, a slug)
  *
  * For a project in the home region all of it stays on the platform rows, as
  * it always has. For a project in another region it never leaves that region
@@ -33,7 +36,7 @@
 import { regionRawClient, projectRegion } from '@/lib/data-plane/regional'
 import { HOME_REGION, type CloudRegionId } from '@/lib/regions'
 
-export type BodyKind = 'webhook' | 'trigger' | 'function_run' | 'function_error' | 'conversation_message'
+export type BodyKind = 'webhook' | 'trigger' | 'function_run' | 'function_error' | 'conversation_message' | 'backfill_cursor'
 
 /** How long a region keeps a log body (PRUNED_KINDS) after its last change. */
 export const REGIONAL_BODY_RETENTION_DAYS = 30
@@ -42,9 +45,10 @@ export const REGIONAL_BODY_RETENTION_DAYS = 30
  * The kinds kept REGIONAL_BODY_RETENTION_DAYS: logs of work done. A
  * conversation's words are not a log: the agent reads them back, and a home
  * project keeps them as long as the project. A regional project's are kept the
- * same way, until the messages or the project are deleted.
+ * same way, until the messages or the project are deleted. A backfill's cursor
+ * is needed only while its chain of batches runs, minutes or hours.
  */
-const PRUNED_KINDS: BodyKind[] = ['webhook', 'trigger', 'function_run', 'function_error']
+const PRUNED_KINDS: BodyKind[] = ['webhook', 'trigger', 'function_run', 'function_error', 'backfill_cursor']
 
 export interface Body {
   payload: unknown

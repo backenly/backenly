@@ -181,7 +181,8 @@ let regionalJobsRunning = false
 
 /**
  * Carry out what other regions asked of this one (lib/queue/index.ts, regional
- * jobs): a project's snapshot taken, or restored, where its data is.
+ * jobs): a project's snapshot taken, or restored, where its data is, and the
+ * batches of a maintenance backfill of a project kept here.
  *
  * Called every minute by every region's scheduler (`runRegionalSystemTasks`).
  * One job at a time, each a pg_dump or a restore of a whole project, and never
@@ -226,6 +227,7 @@ export async function processRegionalJobs(region: CloudRegionId = serviceRegion(
 class RegionalJobRefusal extends Error {}
 
 function failureSentence(type: string, region: CloudRegionId): string {
+  if (type === 'maintenance_backfill') return `The backfill batch did not complete in ${region}. The reason is in that region's logs.`
   return type === 'workspace_restore'
     ? `The restore did not complete in ${region}. The reason is in that region's logs.`
     : `The snapshot was not taken in ${region}. The reason is in that region's logs.`
@@ -234,6 +236,14 @@ function failureSentence(type: string, region: CloudRegionId): string {
 async function runRegionalJob(type: string, payload: unknown): Promise<Record<string, any>> {
   const { projectId, backupId } = (payload ?? {}) as { projectId?: unknown; backupId?: unknown }
   if (typeof projectId !== 'string' || projectId.length === 0) throw new RegionalJobRefusal('The job names no project.')
+
+  if (type === 'maintenance_backfill') {
+    // One batch, then the next queued in this region (primitives/backfill-job.ts).
+    // A refusal is a result, read by the ladder; a batch that raised is retried.
+    const { handleBackfillJob } = await import('@/lib/autonomy/maintenance/primitives/backfill-job')
+    return (await handleBackfillJob(payload as any)) as unknown as Record<string, any>
+  }
+
   const backups = await import('@/lib/services/workspace-backup')
 
   if (type === 'workspace_backup') {
