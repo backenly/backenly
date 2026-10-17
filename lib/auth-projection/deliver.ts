@@ -48,6 +48,7 @@ import { regionDatabaseUrl, regionRawClient, type WorkspaceRawClient } from '@/l
 import { serviceRegion } from '@/lib/data-plane/serving'
 import { CLOUD_REGIONS, HOME_REGION, type CloudRegionId } from '@/lib/regions'
 import { JWTSecretManager } from '@/lib/services/jwtSecretManager'
+import { reconcileRegionCopy } from '@/lib/auth-projection/reconcile'
 
 type Entity = 'project' | 'api_key' | 'branch'
 type Tx = Prisma.TransactionClient
@@ -160,6 +161,8 @@ export function deliveryRegions(env: Readonly<Record<string, string | undefined>
 
 let delivering = false
 let lastPruneAt = 0
+const RECONCILE_EVERY_MS = 60 * 60 * 1000
+const lastReconciledAt = new Map<CloudRegionId, number>()
 
 /**
  * Deliver each region its pending changes and a new watermark. Run by the home
@@ -177,6 +180,16 @@ export async function deliverAuthProjection(options: { regions?: CloudRegionId[]
     if (Date.now() - lastPruneAt >= PRUNE_EVERY_MS) {
       lastPruneAt = Date.now()
       await pruneDeliveredChanges().catch((err) => console.error('[auth-projection] pruning delivered changes failed:', describe(err)))
+    }
+    // Hourly, each reachable region's copy is checked against home, so a change
+    // that never reached it is caught within the hour (lib/auth-projection/reconcile.ts).
+    for (const result of results) {
+      if (result.outcome !== 'delivered' && result.outcome !== 'resynced') continue
+      if (Date.now() - (lastReconciledAt.get(result.region) ?? 0) < RECONCILE_EVERY_MS) continue
+      lastReconciledAt.set(result.region, Date.now())
+      await reconcileRegionCopy(result.region).catch((err) =>
+        console.error(`[auth-projection] ${result.region}: checking the copy against home failed:`, describe(err)),
+      )
     }
     return results
   } finally {
