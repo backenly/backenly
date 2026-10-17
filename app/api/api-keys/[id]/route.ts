@@ -1,6 +1,7 @@
 export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
+import { confirmPropagation } from '@/lib/auth-projection/confirm'
 import { prisma } from '@/lib/db/postgres'
 import { requireAuth } from '@/lib/auth/middleware'
 import { apiKeyRateCeilingViolation } from '@/lib/quota/kernel'
@@ -127,8 +128,12 @@ export async function PUT(request: NextRequest, props: { params: Promise<{ id: s
     const updated = await prisma.apiKey.findUnique({
       where: { id: params.id },
     })
+    // A key narrowed or expired here keeps its old reach in its project's
+    // region until the region has the change (lib/auth-projection/confirm.ts).
+    const propagation = await confirmPropagation({ entity: 'api_key', entityId: params.id })
 
     return NextResponse.json({
+      propagation,
       apiKey: {
         id: updated!.id,
         name: updated!.name,
@@ -207,7 +212,10 @@ export async function DELETE(request: NextRequest, props: { params: Promise<{ id
       )
     }
 
-    return NextResponse.json({ message: 'API key deleted successfully' })
+    // Revoked only once its project's region has the revocation too
+    // (lib/auth-projection/confirm.ts); `pending` says it is still in flight.
+    const propagation = await confirmPropagation({ entity: 'api_key', entityId: params.id })
+    return NextResponse.json({ message: 'API key deleted successfully', propagation })
   } catch (error) {
     console.error('Delete API key error:', error)
     return NextResponse.json(

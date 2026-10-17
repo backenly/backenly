@@ -32,6 +32,7 @@ import { prisma } from '@/lib/db/prisma'
 import { ensureSchemaRegistered } from '@/lib/postgrest/registration'
 import { discardOutbox } from '@/lib/webhooks/capture'
 import { invalidateProjectServingState } from './serving-state'
+import { confirmPropagation, type Propagation } from '@/lib/auth-projection/confirm'
 
 export type LifecycleTx = Prisma.TransactionClient
 
@@ -148,10 +149,13 @@ export async function afterPauseCommitted(
     cancelledDeliveries: number
     snapshotId?: string | null
   },
-): Promise<{ discardedOutboxEvents: number; cancelledDeliveries: number }> {
+): Promise<{ discardedOutboxEvents: number; cancelledDeliveries: number; propagation: Propagation }> {
   // This process's own gates (MCP, the mutation kernel) see the pause now. The
-  // runtime is another process and catches up within FRESH_MS.
+  // runtime is another process and catches up within FRESH_MS. A project kept
+  // in another region is paused there once its region has the change
+  // (lib/auth-projection/confirm.ts).
   invalidateProjectServingState(projectId)
+  const propagation = await confirmPropagation({ entity: 'project', entityId: projectId })
 
   const discardedOutboxEvents = await discardOutbox(projectId)
   const lateCancellations = await cancelPendingDeliveries(prisma, projectId)
@@ -162,9 +166,10 @@ export async function afterPauseCommitted(
     cancelledDeliveries,
     discardedOutboxEvents,
     snapshotId: input.snapshotId ?? null,
+    propagation,
   })
 
-  return { discardedOutboxEvents, cancelledDeliveries }
+  return { discardedOutboxEvents, cancelledDeliveries, propagation }
 }
 
 /**
