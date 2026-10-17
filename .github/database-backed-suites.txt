@@ -192,6 +192,15 @@ __tests__/auth/block-user-rls.test.ts
 # non-bypassing role, so the token was accepted. Pins the premise and both
 # checks with the project's client running as such a role.
 __tests__/auth/blocked-token-under-app-role.test.ts
+# Every other path that takes or issues an end-user token applies revocation
+# and blocking, under the same non-bypassing role: Next's v1 middleware reads a
+# token in Authorization as the runtime does, the storage download and
+# accept-invite resolve theirs through the shared check (accept-invite reading
+# the email as the service role), OAuth, magic-link and reset sign-ins refuse a
+# blocked user and still sign the others in, and the function runner gives a
+# revoked or blocked token no identity. Real users, link and teams tables, and
+# the real flows, are the property.
+__tests__/auth/end-user-token-paths.test.ts
 # ENABLE_REALTIME answered "Realtime active" for tables that never streamed: a
 # failed CREATE TRIGGER (missing/wrong-case table) was a footnote under the
 # banner, a refused table (internal, auth-managed users) was listed under

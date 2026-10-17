@@ -5,9 +5,8 @@ import { storageService } from '@/lib/services/storage'
 import { authenticateRequest } from '@/lib/auth/middleware'
 import { prisma } from '@/lib/db'
 import crypto from 'crypto'
-import jwt from 'jsonwebtoken'
 import { canAccessProject } from '@/lib/edition/guard'
-import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
+import { resolveEndUserFromToken } from '@/server/lib/end-user-identity'
 import { cacheControlFor, mayRead, type Reader } from '@/lib/storage/access-policy'
 import { isExportToken, verifyExportToken } from '@/lib/storage/export-token'
 import { isStorageUnavailable } from '@/lib/storage/errors'
@@ -86,6 +85,14 @@ export async function GET(request: NextRequest, props: { params: Promise<{ fileI
     }
     if (reader === 'misconfigured') {
       return NextResponse.json({ error: 'Server misconfiguration' }, { status: 500 })
+    }
+    if (reader === 'blocked') {
+      // The runtime's answer for a blocked end user (server/routes/dynamic.ts),
+      // whatever the object's policy: refused, not read as anonymous.
+      return NextResponse.json(
+        { error: 'This account has been blocked by the project owner.', code: 'END_USER_BLOCKED' },
+        { status: 403 },
+      )
     }
 
     // A paused project stops serving its files through this route to everyone
@@ -234,7 +241,7 @@ async function classifyReader(
   fileId: string,
   token: string | null,
   projectId: string,
-): Promise<Reader | 'invalid-token' | 'misconfigured'> {
+): Promise<Reader | 'invalid-token' | 'misconfigured' | 'blocked'> {
   if (token) {
     const secret = process.env.STORAGE_SECRET
     if (!secret) {
@@ -284,29 +291,18 @@ function verifySignedToken(fileId: string, token: string, secret: string): boole
  * secret.
  *
  * Only consulted for the project that owns the object, so a token minted by one
- * project can never identify a reader of another project's storage.
+ * project can never identify a reader of another project's storage. Resolved by
+ * the check every data door uses (server/lib/end-user-identity.ts): a token
+ * signed for THIS project and not revoked by logout makes a reader, and a
+ * blocked user's token is refused rather than read as anonymous.
  */
-async function classifyEndUser(request: NextRequest, projectId: string): Promise<Reader | null> {
+async function classifyEndUser(request: NextRequest, projectId: string): Promise<Reader | 'blocked' | null> {
   const header = request.headers.get('authorization')
   if (!header?.startsWith('Bearer ')) return null
   const raw = header.slice(7).trim()
   if (!raw) return null
 
-  const project = await prisma.project.findUnique({
-    where: { id: projectId },
-    select: { jwtSecret: true },
-  })
-  if (!project?.jwtSecret || project.jwtSecret.length < 32) return null
-
-  try {
-    const payload = jwt.verify(raw, resolveJwtSecret(project.jwtSecret)) as Record<string, unknown>
-    // The token must name THIS project. A valid token for another project of the
-    // same deployment is not an identity here.
-    if (payload.projectId !== projectId) return null
-    const userId = payload.userId
-    if (typeof userId !== 'string' || !userId) return null
-    return { kind: 'endUser', userId }
-  } catch {
-    return null
-  }
+  const endUser = await resolveEndUserFromToken(projectId, raw)
+  if (endUser === 'blocked') return 'blocked'
+  return endUser ? { kind: 'endUser', userId: endUser.userId } : null
 }

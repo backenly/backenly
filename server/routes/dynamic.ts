@@ -37,6 +37,7 @@ import {
   isMcpCredential,
   mcpKeyRefusalMessage,
 } from '@/lib/security/key-placement'
+import { endUserBearerToken } from '@/lib/security/end-user-bearer'
 import { asyncRoute } from '../lib/async-route'
 import { refuseUnlessServing } from '../lib/serving-gate'
 import { touchProjectActivity } from '@/lib/projects/activity'
@@ -134,18 +135,11 @@ export function authRefusalStatus(code: string | undefined): 401 | 403 {
  * The end-user token in `Authorization: Bearer`, for a request that brings the
  * project's key in x-api-key and no X-User-Token. Only a token that names a
  * project (an end-user token) is taken; a platform session token is not one,
- * and the key path never reads it as a user.
+ * and the key path never reads it as a user. The rule is shared with the Next
+ * v1 routes (lib/security/end-user-bearer.ts).
  */
 export function endUserBearer(req: Request): string | undefined {
-  const header = req.headers['authorization'] as string | undefined
-  if (!header || !header.startsWith('Bearer ')) return undefined
-  const token = header.substring(7).trim()
-  try {
-    const claims: any = JSON.parse(Buffer.from(token.split('.')[1] ?? '', 'base64url').toString())
-    return typeof claims?.projectId === 'string' ? token : undefined
-  } catch {
-    return undefined
-  }
+  return endUserBearerToken(req.headers['authorization'] as string | undefined)
 }
 
 export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution> {

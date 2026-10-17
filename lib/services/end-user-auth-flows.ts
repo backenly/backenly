@@ -446,7 +446,7 @@ export async function resetEndUserPassword(
       projectId,
       '',
       true,
-      `SELECT id, email, name FROM "${schemaName}"."users" WHERE email = $1 LIMIT 1`,
+      `SELECT id, email, name${usersSchema.hasIsBlocked ? ', is_blocked' : ''} FROM "${schemaName}"."users" WHERE email = $1 LIMIT 1`,
       [reset.email],
     ).catch(() => [] as any[])
 
@@ -455,6 +455,10 @@ export async function resetEndUserPassword(
     }
 
     const user = users[0]
+    // A suspended account is refused before its password changes or a session
+    // is issued, with the answer sign-in and refresh give it. The link stays
+    // unused.
+    if (user.is_blocked) return err('FORBIDDEN', 'This account has been suspended.', 403)
     const hashedPassword = await hashPassword(newPassword)
 
     // Update the user's password — service-role so the UPDATE bypasses
@@ -757,9 +761,13 @@ export async function verifyMagicLink(projectId: string, tokenRaw: unknown): Pro
     let users = await executeWithUserContext<any>(
       projectId,
       '', true,
-      `SELECT id, email${usersSchema.hasName ? ', name' : ''}${usersSchema.hasRole ? ', role' : ''} FROM "${schemaName}"."users" WHERE email = $1 LIMIT 1`,
+      `SELECT id, email${usersSchema.hasName ? ', name' : ''}${usersSchema.hasRole ? ', role' : ''}${usersSchema.hasIsBlocked ? ', is_blocked' : ''} FROM "${schemaName}"."users" WHERE email = $1 LIMIT 1`,
       [email],
     ).catch(() => [] as any[])
+
+    // A suspended account is refused before it is verified or signed in, with
+    // the answer sign-in and refresh give it.
+    if (users[0]?.is_blocked) return err('FORBIDDEN', 'This account has been suspended.', 403)
 
     if (users.length === 0) {
       // First sign-in: create the account with an unguessable password hash.

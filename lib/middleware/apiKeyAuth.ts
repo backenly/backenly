@@ -5,6 +5,7 @@ import crypto from 'crypto'
 import { classifyKeyFailure } from './apiKeyFailureDiagnostic'
 import { countInRegion, regionalRateCounting } from '@/lib/auth-projection/rate'
 import { authorizingKeyByHash, type AuthorizingKey } from '@/lib/auth-projection/read'
+import { endUserBearerToken } from '@/lib/security/end-user-bearer'
 
 export interface ApiKeyAuthResult {
   authenticated: boolean
@@ -53,6 +54,17 @@ export async function authenticateApiKey(request: NextRequest): Promise<ApiKeyAu
   if (authHeader?.startsWith('Bearer ')) {
     providedKey = authHeader.substring(7).trim()
   }
+  // An end user's token in Authorization, sent with the key in x-api-key or the
+  // query, is the user and not the key: v1ApiMiddleware reads it as the user, as
+  // the runtime does (lib/security/end-user-bearer.ts). Sent without a key it is
+  // still read as one, and refused with the JWT hint as before.
+  const keyElsewhere = (
+    request.headers.get('x-api-key') ||
+    request.nextUrl.searchParams.get('apiKey') ||
+    request.nextUrl.searchParams.get('api_key') ||
+    ''
+  ).trim()
+  if (keyElsewhere && endUserBearerToken(authHeader)) providedKey = null
 
   if (!providedKey) {
     const xApiKey = request.headers.get('x-api-key')

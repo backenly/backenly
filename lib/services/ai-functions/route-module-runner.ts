@@ -60,6 +60,7 @@ import { makeRlsAwarePrisma, refusingPrisma, type RlsAwarePrisma } from './rls-a
 import { functionDbClient, forgetFunctionDbClient } from './function-db-role'
 import type { RlsIdentity } from '@/lib/services/rls-session'
 import { safeFetch } from '@/lib/security/outbound-guard'
+import { resolveEndUserFromToken } from '@/server/lib/end-user-identity'
 import { FORWARDABLE_FN_HEADERS } from './forward-headers'
 
 // esbuild is a native binary package — load it lazily through a non-bundled
@@ -185,14 +186,22 @@ function makeProjectVerifyToken(auth: ProjectFnAuth) {
  * this project's derived admin key. Never from the function body, and never
  * from an unverified claim in the payload.
  *
+ * A token that names a project is an end user's session, and it is resolved by
+ * the check every data door uses (server/lib/end-user-identity.ts), because it
+ * may not have passed one: it can arrive in the request body or in a header
+ * spelling the doors do not read, and the runtime's door serves a request whose
+ * token is revoked as no user rather than refusing it. Revoked, or its user
+ * blocked, it is no identity here either.
+ *
  * The default is `anon` (no user id, not service role), which is the secure
  * one: own-rows policies match nothing. That is a visibly empty result rather
  * than someone else's data.
  */
-function resolveCallerIdentity(
+async function resolveCallerIdentity(
+  projectId: string,
   headers: Record<string, string | undefined>,
   auth: ProjectFnAuth,
-): RlsIdentity {
+): Promise<RlsIdentity> {
   // An owner-issued admin key is a server-side decision, so it may name
   // service_role. Compared with timingSafeEqual because it is a secret.
   const presentedAdminKey = headers['x-admin-key']
@@ -204,22 +213,33 @@ function resolveCallerIdentity(
   const token = raw?.replace(/^Bearer\s+/i, '').trim()
   if (!token || !auth.jwtSecret) return { userId: null, isServiceRole: false }
 
+  let payload: any
   try {
     const realJwt: typeof jsonwebtoken = (jsonwebtoken as any).default ?? jsonwebtoken
-    const payload = realJwt.verify(token, auth.jwtSecret, { algorithms: ['HS256'] }) as any
-    // End-user tokens carry the id under a few historical names. `sub` is the
-    // one the claim predicates read, so any of them maps onto it.
-    const userId = payload?.sub ?? payload?.userId ?? payload?.user_id ?? payload?.id ?? null
-    if (!userId) return { userId: null, isServiceRole: false }
-    return {
-      userId: String(userId),
-      isServiceRole: false,
-      userRole: typeof payload?.role === 'string' ? payload.role : undefined,
-    }
+    payload = realJwt.verify(token, auth.jwtSecret, { algorithms: ['HS256'] }) as any
   } catch {
     // An unverifiable token is not an identity. Falling back to service_role
     // here would turn a bad token into full table access.
     return { userId: null, isServiceRole: false }
+  }
+
+  if (typeof payload?.projectId === 'string') {
+    // A status that cannot be read is no identity either.
+    const endUser = await resolveEndUserFromToken(projectId, token).catch(() => null)
+    if (!endUser || endUser === 'blocked') return { userId: null, isServiceRole: false }
+    return { userId: endUser.userId, isServiceRole: false, userRole: endUser.role }
+  }
+
+  // A token without a project claim was not issued by end-user auth: only code
+  // holding the project's secret, its own functions, signs one, and it is read
+  // as it always was. Such tokens carry the id under a few historical names.
+  // `sub` is the one the claim predicates read, so any of them maps onto it.
+  const userId = payload?.sub ?? payload?.userId ?? payload?.user_id ?? payload?.id ?? null
+  if (!userId) return { userId: null, isServiceRole: false }
+  return {
+    userId: String(userId),
+    isServiceRole: false,
+    userRole: typeof payload?.role === 'string' ? payload.role : undefined,
   }
 }
 
@@ -635,7 +655,7 @@ export async function executeRouteModuleFunction(
   }
 
 
-  const callerIdentity = resolveCallerIdentity(headers, auth)
+  const callerIdentity = await resolveCallerIdentity(projectId, headers, auth)
 
   // Outbound HTTP for module code: fetch's call shape, the egress guard's
   // rules. The host's bare fetch reaches everything this PROCESS can reach —

@@ -492,7 +492,7 @@ async function handleOAuthCallback(req: Request, res: Response) {
       projectId,
       '',
       true,
-      `SELECT id, email, name FROM "${schemaName}"."users" WHERE oauth_id = $1 OR email = $2 LIMIT 1`,
+      `SELECT id, email, name${schema.hasIsBlocked ? ', is_blocked' : ''} FROM "${schemaName}"."users" WHERE oauth_id = $1 OR email = $2 LIMIT 1`,
       [providerUser.id, providerUser.email],
     )
 
@@ -502,6 +502,9 @@ async function handleOAuthCallback(req: Request, res: Response) {
 
     if (existing.length > 0) {
       const row = existing[0]
+      // A suspended account is refused before it is linked or signed in, with
+      // the answer sign-in and refresh give it.
+      if (row.is_blocked) return jsonError(res, 403, 'This account has been suspended.', 'FORBIDDEN')
       userId = String(row.id)
       userEmail = row.email
       userName = row.name
