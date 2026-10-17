@@ -186,6 +186,12 @@ __tests__/auth/operate-role-floors.test.ts
 # role, that the executor takes the service-role claims path, and the real
 # row flip both ways through the real executor door.
 __tests__/auth/block-user-rls.test.ts
+# A blocked end user's token is refused at request time under the app role.
+# The runtime's resolver and Next's v1 middleware read users.is_blocked with no
+# claims, which FORCE row-level security answers with no row for a
+# non-bypassing role, so the token was accepted. Pins the premise and both
+# checks with the project's client running as such a role.
+__tests__/auth/blocked-token-under-app-role.test.ts
 # ENABLE_REALTIME answered "Realtime active" for tables that never streamed: a
 # failed CREATE TRIGGER (missing/wrong-case table) was a footnote under the
 # banner, a refused table (internal, auth-managed users) was listed under

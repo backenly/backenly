@@ -3,6 +3,7 @@ import { clientIpFromHeaders } from '@/lib/security/client-ip'
 import { authenticateApiKey } from '@/lib/middleware/apiKeyAuth'
 import { prisma } from '@/lib/db'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
+import { readEndUserBlocked } from '@/lib/services/end-user-blocked'
 import { createErrorResponse, ErrorCodes } from './errors'
 import { checkUsage, getUsageMessage } from '@/lib/scaling/usage-monitor'
 import { applySoftRateLimit } from '@/lib/scaling/usage-monitor'
@@ -493,18 +494,15 @@ export async function v1ApiMiddleware(
         // Blocking promises "existing JWT tokens stop working immediately" —
         // true only if request time checks it. Before this, is_blocked was
         // read at sign-in and refresh alone, so a blocked user's live token
-        // kept serving data for up to seven days. A missing table or column
-        // means nobody was ever blocked; other failures fail open, loudly,
-        // like the revocation check above.
+        // kept serving data for up to seven days. Read as the service role:
+        // the users table is row-level secured against the app role
+        // (lib/services/end-user-blocked.ts). A missing table or column means
+        // nobody was ever blocked; other failures fail open, loudly, like the
+        // revocation check above.
         let blocked = false
         if (!blacklisted) {
           try {
-            const schemaName = `workspace_${projectId}`
-            const rows = await db.$queryRawUnsafe<{ is_blocked: boolean | null }[]>(
-              `SELECT is_blocked FROM "${schemaName}"."users" WHERE id::text = $1 LIMIT 1`,
-              String(payload.userId)
-            )
-            blocked = rows[0]?.is_blocked === true
+            blocked = await readEndUserBlocked(db, `workspace_${projectId}`, String(payload.userId))
           } catch (err: any) {
             const text = String(err?.message ?? err)
             const absent =
