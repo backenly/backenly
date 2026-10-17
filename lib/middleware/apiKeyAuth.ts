@@ -4,6 +4,7 @@ import { trackApiKeyUsage } from '@/lib/services/apiKeyUsage'
 import crypto from 'crypto'
 import { classifyKeyFailure } from './apiKeyFailureDiagnostic'
 import { countInRegion, regionalRateCounting } from '@/lib/auth-projection/rate'
+import { authorizingKeyByHash, type AuthorizingKey } from '@/lib/auth-projection/read'
 
 export interface ApiKeyAuthResult {
   authenticated: boolean
@@ -15,6 +16,12 @@ export interface ApiKeyAuthResult {
   }
   error?: string
   rateLimited?: boolean
+  /**
+   * The key as the region's copy or home holds it, when it was read through
+   * lib/auth-projection/read.ts: the v1 middleware takes its checks from it
+   * instead of reading the key again.
+   */
+  record?: AuthorizingKey
   /**
    * Structured diagnostic for failed auth — surfaces WHY the key was rejected
    * and what the developer can do about it. Returned even on success=false so
@@ -70,6 +77,33 @@ export async function authenticateApiKey(request: NextRequest): Promise<ApiKeyAu
   // SHA-256 hash lookup — this IS the verification (no bcrypt needed for API keys)
   const keyHash = crypto.createHash('sha256').update(providedKey).digest('hex')
 
+  // In a region whose copy is enforced, the key comes from the copy while it is
+  // fresh and is counted in the region, by the same counter the runtime uses
+  // (lib/auth-projection/read.ts, rate.ts). The home path below is unchanged.
+  const region = regionalRateCounting()
+  if (region) {
+    const key = await authorizingKeyByHash(keyHash)
+    if (!key || (key.expiresAt && key.expiresAt <= new Date())) {
+      return {
+        authenticated: false,
+        error: 'Invalid API key',
+        failureReason: classifyKeyFailure(providedKey, key ? 'expired' : 'unknown_key'),
+      }
+    }
+    const decision = await countInRegion(region, {
+      id: key.id,
+      keyHash,
+      rateLimit: key.rateLimit,
+      rateLimitWindow: key.rateLimitWindow,
+    })
+    return {
+      authenticated: true,
+      apiKey: { id: key.id, userId: key.userId, permissions: key.permissions, role: key.role },
+      record: key,
+      ...(decision.allowed ? {} : { rateLimited: true, error: 'Rate limit exceeded' }),
+    }
+  }
+
   const apiKey = await prisma.apiKey.findFirst({
     where: {
       keyHash,
@@ -98,23 +132,6 @@ export async function authenticateApiKey(request: NextRequest): Promise<ApiKeyAu
     }
   }
   
-  // Counted in the region once its copy is enforced, by the same counter the
-  // runtime uses for this key (lib/auth-projection/rate.ts).
-  const region = regionalRateCounting()
-  if (region) {
-    const decision = await countInRegion(region, {
-      id: apiKey.id,
-      keyHash,
-      rateLimit: apiKey.rateLimit,
-      rateLimitWindow: apiKey.rateLimitWindow,
-    })
-    return {
-      authenticated: true,
-      apiKey: { id: apiKey.id, userId: apiKey.userId, permissions: apiKey.permissions, role: apiKey.role },
-      ...(decision.allowed ? {} : { rateLimited: true, error: 'Rate limit exceeded' }),
-    }
-  }
-
   // Check rate limits
   const now = new Date()
   const resetAt = apiKey.resetAt || new Date(now.getTime() + apiKey.rateLimitWindow * 1000)

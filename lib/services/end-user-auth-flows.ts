@@ -29,6 +29,9 @@ import { ensureAuthUsersTable, introspectAuthUsersTable, stampLastLogin, isReser
 import { trackEndUserActive } from '@/lib/quota/kernel'
 import { emitEndUserCreated } from '@/lib/services/end-user-auth-events'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
+// Existence and the signing secret, from the region's copy while it is fresh
+// (lib/auth-projection/read.ts): nothing else of the project is read here.
+import { authorizingProject } from '@/lib/auth-projection/read'
 import {
   mainAuthEnvironment,
   endUserTokenSecret,
@@ -68,7 +71,7 @@ export async function refreshEndUserToken(
   env: AuthEnvironment = mainAuthEnvironment(projectId),
 ): Promise<AuthFlowResult> {
   try {
-    const project = await prisma.project.findUnique({ where: { id: projectId } })
+    const project = await authorizingProject(projectId)
     if (!project) return err('NOT_FOUND', 'Project not found', 404)
 
     if (!rawToken) {
@@ -187,7 +190,7 @@ export async function logoutEndUser(
   env: AuthEnvironment = mainAuthEnvironment(projectId),
 ): Promise<AuthFlowResult> {
   try {
-    const project = await prisma.project.findUnique({ where: { id: projectId } })
+    const project = await authorizingProject(projectId)
     if (!project) return err('NOT_FOUND', 'Project not found', 404)
 
     if (rawToken) {
@@ -261,7 +264,7 @@ export async function logoutEndUser(
  */
 export async function forgotEndUserPassword(projectId: string, emailRaw: unknown): Promise<AuthFlowResult> {
   try {
-    const project = await prisma.project.findUnique({ where: { id: projectId } })
+    const project = await authorizingProject(projectId)
     if (!project) return err('NOT_FOUND', 'Project not found', 404)
 
     const email = typeof emailRaw === 'string' ? emailRaw.toLowerCase().trim() : undefined
@@ -390,7 +393,7 @@ export async function resetEndUserPassword(
   passwordRaw: unknown,
 ): Promise<AuthFlowResult> {
   try {
-    const project = await prisma.project.findUnique({ where: { id: projectId } })
+    const project = await authorizingProject(projectId)
     if (!project) return err('NOT_FOUND', 'Project not found', 404)
 
     if (!project.jwtSecret || project.jwtSecret.length < 32) {
@@ -587,7 +590,7 @@ async function consumeToken(
  */
 export async function requestEmailVerification(projectId: string, emailRaw: unknown): Promise<AuthFlowResult> {
   try {
-    const project = await prisma.project.findUnique({ where: { id: projectId } })
+    const project = await authorizingProject(projectId)
     if (!project) return err('NOT_FOUND', 'Project not found', 404)
 
     const email = typeof emailRaw === 'string' ? emailRaw.toLowerCase().trim() : undefined
@@ -638,7 +641,7 @@ export async function requestEmailVerification(projectId: string, emailRaw: unkn
  */
 export async function verifyEndUserEmail(projectId: string, tokenRaw: unknown): Promise<AuthFlowResult> {
   try {
-    const project = await prisma.project.findUnique({ where: { id: projectId } })
+    const project = await authorizingProject(projectId)
     if (!project) return err('NOT_FOUND', 'Project not found', 404)
 
     const token = typeof tokenRaw === 'string' ? tokenRaw.trim() : undefined
@@ -674,7 +677,7 @@ export async function verifyEndUserEmail(projectId: string, tokenRaw: unknown): 
  */
 export async function requestMagicLink(projectId: string, emailRaw: unknown): Promise<AuthFlowResult> {
   try {
-    const project = await prisma.project.findUnique({ where: { id: projectId } })
+    const project = await authorizingProject(projectId)
     if (!project) return err('NOT_FOUND', 'Project not found', 404)
     if (!project.jwtSecret || project.jwtSecret.length < 32) {
       return err('INTERNAL_ERROR', 'Authentication is not configured for this project.', 503)
@@ -726,7 +729,7 @@ export async function requestMagicLink(projectId: string, emailRaw: unknown): Pr
  */
 export async function verifyMagicLink(projectId: string, tokenRaw: unknown): Promise<AuthFlowResult> {
   try {
-    const project = await prisma.project.findUnique({ where: { id: projectId } })
+    const project = await authorizingProject(projectId)
     if (!project) return err('NOT_FOUND', 'Project not found', 404)
     if (!project.jwtSecret || project.jwtSecret.length < 32) {
       return err('INTERNAL_ERROR', 'Authentication is not configured for this project.', 503)
