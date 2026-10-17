@@ -18,8 +18,11 @@ import {
   CLOUD_REGIONS,
   findRegion,
   HOME_REGION,
+  isOpenToCustomers,
+  openedRegions,
   previewRegionsFor,
   regionLabel,
+  regionsAsServed,
   stagingOpenRegions,
 } from '@/lib/regions'
 
@@ -93,6 +96,41 @@ describe('Backenly Cloud regions', () => {
     it('opens only the regions it names, and never one this build does not know', () => {
       expect(checkRequestedRegion('eu-central-1', staging)).toEqual(expect.objectContaining({ ok: false, code: 'REGION_NOT_OPEN' }))
       expect(checkRequestedRegion('mars-north-1', staging)).toEqual(expect.objectContaining({ ok: false, code: 'UNKNOWN_REGION' }))
+    })
+  })
+
+  describe('regions opened on a running deployment, so several open at the same moment', () => {
+    const launch = { BACKENLY_OPEN_REGIONS: 'us-east-1, eu-central-1, mars-north-1' }
+
+    it('are accepted for every caller, named or not', () => {
+      for (const caller of [undefined, null, 'customer-1']) {
+        expect(checkRequestedRegion('us-east-1', launch, caller)).toEqual({ ok: true, region: 'us-east-1' })
+        expect(checkRequestedRegion('eu-central-1', launch, caller)).toEqual({ ok: true, region: 'eu-central-1' })
+      }
+      expect(openedRegions(launch)).toEqual(new Set(['us-east-1', 'eu-central-1']))
+    })
+
+    it('open only the regions named, and never one this build does not know', () => {
+      expect(checkRequestedRegion('us-west-2', launch)).toEqual(expect.objectContaining({ ok: false, code: 'REGION_NOT_OPEN' }))
+      expect(checkRequestedRegion('mars-north-1', launch)).toEqual(expect.objectContaining({ ok: false, code: 'UNKNOWN_REGION' }))
+      expect(isOpenToCustomers('mars-north-1', launch)).toBe(false)
+    })
+
+    it('only add: the home region stays open, and nothing opens when the setting is unset or empty', () => {
+      for (const env of [{}, { BACKENLY_OPEN_REGIONS: '' }, { BACKENLY_OPEN_REGIONS: ' , ' }]) {
+        expect(isOpenToCustomers(HOME_REGION, env)).toBe(true)
+        expect(openedRegions(env).size).toBe(0)
+        expect(checkRequestedRegion('us-east-1', env)).toEqual(expect.objectContaining({ ok: false, code: 'REGION_NOT_OPEN' }))
+      }
+    })
+
+    it('are served to the console as open, and every other region as it is listed', () => {
+      const served = regionsAsServed(launch)
+      expect(served.map((r) => r.id)).toEqual(CLOUD_REGIONS.map((r) => r.id))
+      expect(served.filter((r) => r.open).map((r) => r.id).sort()).toEqual(['ap-south-1', 'eu-central-1', 'us-east-1'])
+      expect(regionsAsServed({}).filter((r) => r.open).map((r) => r.id)).toEqual([HOME_REGION])
+      // The build's own list is never changed by serving it.
+      expect(CLOUD_REGIONS.filter((r) => r.open).map((r) => r.id)).toEqual([HOME_REGION])
     })
   })
 

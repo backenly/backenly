@@ -36,7 +36,7 @@ import {
 } from '@/components/inspector/kit'
 import { EDGE, FOCUS, PAGE_GUTTER, PAGE_WIDTH, PLATE, RULE, R_CONTROL, R_PANEL, WELL } from '@/components/console/tokens'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
-import { CLOUD_REGIONS, HOME_REGION, regionLabel, type CloudRegionId } from '@/lib/regions'
+import { CLOUD_REGIONS, HOME_REGION, regionLabel, type CloudRegion, type CloudRegionId } from '@/lib/regions'
 
 type UserProfile = { id: string; name?: string; email?: string }
 
@@ -682,6 +682,32 @@ function FormRow({
 }
 
 /**
+ * The regions with what this deployment serves as open (GET /api/regions), so
+ * a region opened on the running deployment can be chosen without a new build.
+ * Until the answer arrives, or if it never does, the build's own list stands.
+ * The answer can only open a region this build lists; creating the project is
+ * checked again on the server either way.
+ */
+function useRegionsAsServed(): readonly CloudRegion[] {
+  const [regions, setRegions] = useState<readonly CloudRegion[]>(CLOUD_REGIONS)
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/regions')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((body: { regions?: { id?: unknown; open?: unknown }[] } | null) => {
+        if (cancelled || !Array.isArray(body?.regions)) return
+        const open = new Set(body.regions.filter((r) => r?.open === true).map((r) => r.id))
+        setRegions(CLOUD_REGIONS.map((r) => ({ ...r, open: r.open || open.has(r.id) })))
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  return regions
+}
+
+/**
  * The five regions as one list. Native radio inputs underneath: Tab reaches
  * the group, the arrow keys move between the open regions, and the regions
  * that are not open are disabled, so they are skipped and announced as such.
@@ -697,13 +723,14 @@ function RegionPicker({
   disabled?: boolean
   labelledBy: string
 }) {
+  const regions = useRegionsAsServed()
   return (
     <div
       role="radiogroup"
       aria-labelledby={labelledBy}
       className={`divide-y divide-white/[0.06] overflow-hidden ${R_CONTROL} border ${EDGE} ${WELL}`}
     >
-      {CLOUD_REGIONS.map((r) => {
+      {regions.map((r) => {
         const selected = r.id === value
         return (
           <label
