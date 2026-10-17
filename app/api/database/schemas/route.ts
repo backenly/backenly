@@ -4,115 +4,83 @@ import { NextRequest, NextResponse } from 'next/server'
 import { withProjectAccess } from '@/lib/auth/route-protection'
 import { prisma } from '@/lib/db'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
-import { PostgresService } from '@/lib/db/hybrid'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
+import { regionErrorResponse } from '@/lib/api/v1/errors'
+import { isProjectOwnedSchema, projectSchemaPrefix, workspaceSchemaName } from '@/lib/security/workspace-schema'
 
 /**
- * GET /api/database/schemas - List all PostgreSQL schemas
+ * GET /api/database/schemas - The project's own PostgreSQL schemas
  * Query params:
- *   - projectId: Optional - if provided, shows workspace schema for that project
- *   - view: 'platform' | 'workspace' | 'all' (default: 'all')
+ *   - projectId: required; access to it is verified
+ *   - view: 'workspace' (the project's schema) | 'all' (the project's schema and
+ *     its branches' schemas) | 'platform' (refused) — default 'all'
+ *
+ * A project's schemas are the only ones a caller may list. Every other schema
+ * in the database is another tenant's (whose name carries its project id) or
+ * the platform's own, and neither is any one project's to read.
  * 🔒 Protected: Requires authentication and project access
  */
-export const GET = withProjectAccess(async (request: NextRequest, { user, project, projectId }) => {
-  const requestId = Math.random().toString(36).substring(7);
-  console.log(`[${requestId}] 🔍 GET /api/database/schemas - Request received`);
-  console.log(`[${requestId}] 📋 User:`, { userId: user?.userId, email: user?.email });
-  console.log(`[${requestId}] 📋 Project:`, { projectId, projectName: project?.name });
-  
+export const GET = withProjectAccess(async (request: NextRequest, { projectId }) => {
   try {
-    const searchParams = request.nextUrl.searchParams
-    const view = searchParams.get('view') || 'all'
-    console.log(`[${requestId}] 📋 Query params:`, { view, projectId });
+    const view = request.nextUrl.searchParams.get('view') || 'all'
 
-    // At this point, project access is already verified by withProjectAccess middleware
-    // The project variable contains the verified project
-
-    let schemas: string[] = []
-
-    if (view === 'platform' || view === 'all') {
-      console.log(`[${requestId}] 🔄 Fetching all schemas from PostgresService...`);
-      // Get all schemas (includes platform + workspace schemas)
-      const allSchemas = await PostgresService.listSchemas()
-      console.log(`[${requestId}] ✅ Retrieved ${allSchemas.length} schemas:`, allSchemas);
-      
-      if (view === 'platform') {
-        // Filter to only platform schemas (public and backenly_*)
-        schemas = allSchemas.filter(s => 
-          s === 'public' || 
-          s.startsWith('backenly_') ||
-          !s.startsWith('workspace_')
-        )
-        console.log(`[${requestId}] 🔍 Filtered to ${schemas.length} platform schemas:`, schemas);
-      } else {
-        schemas = allSchemas
-      }
+    if (view === 'platform') {
+      return NextResponse.json(
+        { success: false, error: "The platform's own schemas are not listed.", code: 'PLATFORM_SCHEMAS_NOT_LISTED' },
+        { status: 403 },
+      )
+    }
+    if (view !== 'workspace' && view !== 'all') {
+      return NextResponse.json({ success: false, error: 'view is workspace or all' }, { status: 400 })
     }
 
-    // If projectId is provided, also include/prioritize workspace schema
-    if (projectId) {
-      console.log(`[${requestId}] 🔄 Looking up workspace for projectId:`, projectId);
-      const workspace = await prisma.workspace.findFirst({
-        where: { projectId },
-        select: {
-          postgresSchema: true,
-          databaseProvisioned: true,
-        },
-      })
-      console.log(`[${requestId}] 📊 Workspace found:`, workspace);
+    // The project's own schema: as provisioned, or the name it will have.
+    const workspace = await prisma.workspace.findFirst({
+      where: { projectId },
+      select: { postgresSchema: true, databaseProvisioned: true },
+    })
+    const ownSchema =
+      workspace?.databaseProvisioned && workspace.postgresSchema && isProjectOwnedSchema(projectId, workspace.postgresSchema)
+        ? workspace.postgresSchema
+        : getWorkspaceDatabaseNames(projectId).postgresSchema
 
-      if (workspace?.databaseProvisioned && workspace.postgresSchema) {
-        console.log(`[${requestId}] ✅ Workspace is provisioned with schema:`, workspace.postgresSchema);
-        // Ensure workspace schema is in the list
-        if (!schemas.includes(workspace.postgresSchema)) {
-          schemas.push(workspace.postgresSchema)
-          console.log(`[${requestId}] ➕ Added workspace schema to list`);
-        }
-        // If view is 'workspace', only return workspace schema
-        if (view === 'workspace') {
-          schemas = [workspace.postgresSchema]
-          console.log(`[${requestId}] 🔍 Filtered to workspace schema only:`, schemas);
-        }
-      } else {
-        console.log(`[${requestId}] ⚠️ Workspace not provisioned or schema missing`);
-        // Workspace not provisioned yet, generate expected schema name
-        const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
-        console.log(`[${requestId}] 🔄 Generated expected schema name:`, postgresSchema);
-        if (view === 'workspace') {
-          schemas = [postgresSchema]
-          console.log(`[${requestId}] 📋 Using expected schema for workspace view:`, schemas);
-        }
-      }
-    } else if (view === 'workspace') {
-      console.log(`[${requestId}] 🔄 No projectId provided, fetching all workspace schemas`);
-      // No projectId but view is workspace - return empty or all workspace schemas
-      const allSchemas = await PostgresService.listSchemas()
-      schemas = allSchemas.filter(s => s.startsWith('workspace_'))
-      console.log(`[${requestId}] 📋 Found ${schemas.length} workspace schemas:`, schemas);
+    let schemas: string[]
+    if (view === 'workspace') {
+      schemas = [ownSchema]
+    } else {
+      // The project's schema and its branches', from the database holding its
+      // data (its region), never the whole catalog.
+      const canonical = workspaceSchemaName(projectId)
+      const prefix = projectSchemaPrefix(projectId)
+      const db = await workspaceRawClient(projectId)
+      const rows = await db.$queryRaw<Array<{ schema_name: string }>>`
+        SELECT schema_name
+          FROM information_schema.schemata
+         WHERE schema_name::text = ${canonical} OR starts_with(schema_name::text, ${prefix})
+         ORDER BY schema_name
+      `
+      schemas = rows.map((r) => r.schema_name).filter((s) => isProjectOwnedSchema(projectId, s))
+      if (!schemas.includes(ownSchema)) schemas.unshift(ownSchema)
     }
 
-    console.log(`[${requestId}] ✅ Final schemas to return:`, { count: schemas.length, schemas, view, projectId });
     return NextResponse.json({
       success: true,
       data: schemas,
       view,
-      projectId: projectId || null,
+      projectId,
     })
   } catch (error: any) {
-    console.error(`[${requestId}] ❌ Error fetching schemas:`, {
-      message: error.message,
-      stack: error.stack,
-      name: error.name,
-      code: error.code,
-    });
+    const regional = regionErrorResponse(error)
+    if (regional) return regional
+
+    console.error('Error fetching schemas:', { message: error?.message, code: error?.code })
     return NextResponse.json(
       {
         success: false,
         error: 'Failed to fetch schemas',
         message: error.message,
-        details: process.env.NODE_ENV === 'development' ? error.stack : undefined,
       },
       { status: 500 }
     )
   }
 });
-

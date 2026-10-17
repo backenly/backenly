@@ -61,6 +61,7 @@ import { FLAGS } from '@/lib/config/flags'
 import { watchableProjectsWhere, isWatchableProject } from '@/lib/projects/backend-presence'
 import { skipUnreachable } from '@/lib/autonomy/region-skip'
 import { projectRegion } from '@/lib/data-plane/regional'
+import { findingDetailsKeptHere } from '@/lib/data-plane/residency'
 import type { CloudRegionId } from '@/lib/regions'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -851,6 +852,8 @@ async function writeFinding(
   autoFixed: boolean,
   fixAppliedAt?: Date
 ): Promise<{ firstDetectedAt: Date }> {
+  finding.details = await findingDetailsKeptHere(projectId, finding.type, finding.details as Record<string, unknown>)
+
   // Upsert: if an open finding of the same type already exists, update it.
   //
   // Some types carry several INDEPENDENT instances at once, and keying the

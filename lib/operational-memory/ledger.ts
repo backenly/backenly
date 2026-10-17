@@ -649,14 +649,21 @@ export async function queuePendingActionFinding(input: QueuePendingActionInput) 
   // That id is the durable link between the Review Queue (HealthFinding) and the
   // Memory timeline (BackendEvent): approving/dismissing the finding later flips
   // this exact event out of the 'proposed' state instead of leaving it stale.
+  //
+  // The finding below keeps the target and arguments: they are what the
+  // approver reads, as an approval request keeps its own (founders' residency
+  // table, 2026-10-16). The timeline event is a record of work, redacted at
+  // write for a project kept in another region: the action, never its target,
+  // which can be a file's name or an end user's email (lib/data-plane/residency.ts).
+  const quote = await quotesKeptHere(input.projectId)
   let backendEventId: string | null = null
   try {
     const proposedEvent = await createBackendEvent({
       projectId: input.projectId,
       eventType: eventTypeForExecutorAction(input.action),
       actorType: 'system',
-      summary: `Held for your approval: ${title}.`,
-      afterState: { executorAction: input.action, target: input.target },
+      summary: `Held for your approval: ${quote ? title : capitalize(label)}.`,
+      afterState: quote ? { executorAction: input.action, target: input.target } : { executorAction: input.action },
       reason: `User approval required — ${input.reason}`,
       riskLevel: input.riskLevel,
       status: 'proposed',
