@@ -20,6 +20,7 @@ import { createHmac } from 'crypto'
 import { isIP } from 'net'
 import { HOME_REGION } from '@/lib/regions'
 import { projectRegion } from '@/lib/data-plane/regional'
+import { servedHere } from '@/lib/data-plane/serving'
 
 /**
  * Whether platform rows may quote a project's requests, replies, arguments,
@@ -40,6 +41,42 @@ export async function quotesKeptHere(projectId: string): Promise<boolean> {
  * one, and it was not recorded. It is not kept anywhere else either.
  */
 export const NOT_QUOTED = 'Not recorded: this project’s data stays in its own region.'
+
+/** An error code (MIGRATION_FAILED): a name the platform chose, never a message about data. */
+export const ERROR_CODE = /^[A-Z][A-Z0-9_]{1,63}$/
+
+/**
+ * An error message as a platform row about a project's work may keep it: in
+ * full for a project kept in the home region; for one kept in another region
+ * only when it is an error code, otherwise NOT_QUOTED. The full message stays
+ * in the logs of the process that met it, which for a regional project's
+ * background work run in its own region are that region's.
+ */
+export function quotedError(message: string, quote: boolean): string {
+  return quote || ERROR_CODE.test(message) ? message : NOT_QUOTED
+}
+
+/**
+ * A finding's details as the platform row may keep them. This row is in the
+ * home region; for a project kept in another region a failed repair's message
+ * is kept only when it is an error code (lib/data-plane/residency.ts), since
+ * PostgreSQL can fill a message with the offending values. The full message
+ * goes to this process's log only when this process serves the project's
+ * region, so it stays there too.
+ */
+export async function findingDetailsKeptHere(
+  projectId: string,
+  type: string,
+  details: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const message = details?.fixError
+  if (typeof message !== 'string' || (await quotesKeptHere(projectId))) return details
+  const kept = quotedError(message, false)
+  if (kept !== message && (await servedHere(projectId).catch(() => false))) {
+    console.warn(`[autonomy] ${type} repair failed on project ${projectId}: ${message}`)
+  }
+  return { ...details, fixError: kept }
+}
 
 /** Argument names whose values are a project's structure, not its data. */
 const STRUCTURE_KEYS = new Set([
