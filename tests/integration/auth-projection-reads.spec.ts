@@ -38,6 +38,10 @@ import { deliverRegion } from '@/lib/auth-projection/deliver'
 import { AuthorizationUnavailableError, authorizingKeyByHash, authorizingProject } from '@/lib/auth-projection/read'
 import { getProjectServingState, invalidateProjectServingState } from '@/lib/projects/serving-state'
 import { hashApiKey, resolveEndUserFromToken } from '@/server/lib/end-user-identity'
+import { NextRequest } from 'next/server'
+import { authenticateApiKey } from '@/lib/middleware/apiKeyAuth'
+import { v1ApiMiddleware } from '@/lib/api/v1/middleware'
+import { resolveAuthEnvironment } from '@/lib/branches/auth-environment'
 
 jest.setTimeout(120_000)
 
@@ -252,5 +256,56 @@ describe('the runtime route', () => {
     const res = await fetch(`${baseUrl}/api/v1/${projectId}/db/notes`, { headers: { 'x-api-key': publicKey } })
     expect(res.status).toBe(503)
     expect(await res.json()).toMatchObject({ code: 'AUTHORIZATION_UNAVAILABLE' })
+  })
+})
+
+describe('the Next-owned routes', () => {
+  const nextRequest = (key: string) =>
+    new NextRequest(`http://localhost/api/v1/${projectId}/storage/files`, { headers: { 'x-api-key': key } })
+
+  it('take a key from a fresh copy, without asking home, and count it in the region', async () => {
+    mode('enforce')
+    const home = jest.spyOn(prisma.apiKey, 'findFirst')
+    const auth = await authenticateApiKey(nextRequest(publicKey))
+    expect(auth).toMatchObject({ authenticated: true })
+    expect(auth.rateLimited).toBeUndefined()
+    expect(auth.record).toMatchObject({ projectId, serviceRole: false })
+    expect(home).not.toHaveBeenCalled()
+  })
+
+  it('refuse a project whose delivered lock is in the copy, reading neither its key nor its row at home', async () => {
+    mode('enforce')
+    await prisma.project.update({ where: { id: projectId }, data: { lockedDownAt: new Date(), lockedDownReason: 'probe' } })
+    try {
+      await deliverRegion(REGION)
+      const keyAtHome = jest.spyOn(prisma.apiKey, 'findUnique')
+      const projectAtHome = jest.spyOn(prisma.project, 'findUnique')
+      const { response } = await v1ApiMiddleware(nextRequest(publicKey), { projectId })
+      expect(response?.status).toBe(503)
+      expect(keyAtHome).not.toHaveBeenCalled()
+      expect(projectAtHome).not.toHaveBeenCalled()
+    } finally {
+      await prisma.project.update({ where: { id: projectId }, data: { lockedDownAt: null, lockedDownReason: null } })
+      await deliverRegion(REGION)
+    }
+  })
+
+  it("check an end-user sign-in's key against the copy", async () => {
+    mode('enforce')
+    const home = jest.spyOn(prisma.apiKey, 'findFirst')
+    const headers = new Headers({ 'x-api-key': publicKey })
+    const result = await resolveAuthEnvironment(projectId, headers)
+    expect(result.refusal).toBeNull()
+    expect(result.env).not.toBeNull()
+    expect(home).not.toHaveBeenCalled()
+  })
+
+  it('read home exactly as before while the switch is off', async () => {
+    mode('off')
+    const home = jest.spyOn(prisma.apiKey, 'findFirst')
+    const auth = await authenticateApiKey(nextRequest(publicKey))
+    expect(auth).toMatchObject({ authenticated: true })
+    expect(auth.record).toBeUndefined()
+    expect(home).toHaveBeenCalled()
   })
 })

@@ -8,7 +8,6 @@ import { carriesInternalToken, isPlatformProbe } from '@/lib/security/platform-p
 import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
 import { signInSchema } from '@/lib/api/v1/schemas'
 import { validateRequestBody } from '@/lib/validation/schemas'
-import { prisma } from '@/lib/db'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { verifyPassword, verifyPasswordAgainstDecoy } from '@/lib/auth/password'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
@@ -20,6 +19,7 @@ import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
 import { endUserTokenSecret, endUserTokenClaims, type AuthEnvironment } from '@/lib/branches/auth-environment'
 import { inAuthEnvironment } from '@/lib/branches/next-auth-environment'
+import { authorizingProject } from '@/lib/auth-projection/read'
 
 /**
  * POST /v1/{projectId}/auth/signin
@@ -52,10 +52,9 @@ async function signIn(request: NextRequest, projectId: string, env: AuthEnvironm
       if (!limit.allowed) return throttledV1Response(limit)
     }
 
-    // Validate project exists
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-    })
+    // Validate project exists. Existence and the signing secret are all this
+    // route reads of it: the region's copy while it is fresh, home otherwise.
+    const project = await authorizingProject(projectId)
 
     if (!project) {
       return createErrorResponse(ErrorCodes.NOT_FOUND, 'Project not found', 404)

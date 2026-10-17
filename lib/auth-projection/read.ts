@@ -66,7 +66,7 @@ export interface AuthorizingKey {
   serviceRole: boolean
   scope: string
   keyType: string
-  branch: { id: string; name: string; status: string; schemaName: string } | null
+  branch: { id: string; name: string; status: string; schemaName: string; projectId: string } | null
 }
 
 /** The project as the request path authorizes with it. */
@@ -79,6 +79,15 @@ export interface AuthorizingProject {
   jwtSecret: string | null
   userId: string | null
   organizationId: string | null
+}
+
+/**
+ * Whether this process answers from its region's copy: the switch is at
+ * `enforce` and this is a region other than home. Callers whose home path needs
+ * more than the copy holds keep that path for every other case.
+ */
+export function answersFromCopy(): boolean {
+  return authProjectionMode() === 'enforce' && copyRegion() !== null
 }
 
 /**
@@ -112,7 +121,7 @@ const KEY_SELECT = {
   serviceRole: true,
   scope: true,
   keyType: true,
-  branch: { select: { id: true, name: true, status: true, schemaName: true } },
+  branch: { select: { id: true, name: true, status: true, schemaName: true, projectId: true } },
 } as const
 
 function keyAtHome(keyHash: string): Promise<AuthorizingKey | null> {
@@ -165,6 +174,7 @@ interface CopiedKeyRow {
   branchName: string | null
   branchStatus: string | null
   branchSchema: string | null
+  branchProject: string | null
 }
 
 async function keyFromCopy(region: CloudRegionId, keyHash: string): Promise<CopyRead<AuthorizingKey>> {
@@ -175,7 +185,7 @@ async function keyFromCopy(region: CloudRegionId, keyHash: string): Promise<Copy
            k."scope", k."keyType", k."branchId",
            p."id" AS "copiedProject",
            b."id" AS "copiedBranch", b."name" AS "branchName", b."status" AS "branchStatus",
-           b."schemaName" AS "branchSchema"
+           b."schemaName" AS "branchSchema", b."projectId" AS "branchProject"
       FROM public.auth_projection_state s
       LEFT JOIN public.auth_projection_keys k ON k."keyHash" = ${keyHash}
       LEFT JOIN public.auth_projection_projects p ON p."id" = k."projectId"
@@ -212,6 +222,7 @@ async function keyFromCopy(region: CloudRegionId, keyHash: string): Promise<Copy
             name: found.branchName as string,
             status: found.branchStatus as string,
             schemaName: found.branchSchema as string,
+            projectId: found.branchProject as string,
           }
         : null,
     },

@@ -25,6 +25,7 @@ import {
 import { MCP_KEY_HINT, MCP_KEY_IN_APP, isMcpCredential, mcpKeyRefusalMessage } from '@/lib/security/key-placement'
 
 import { INTERNAL_DOMAINS, isInternalOrigin } from '@/lib/security/internal-origin'
+import { answersFromCopy, authorizingProject } from '@/lib/auth-projection/read'
 
 // Re-exported for existing importers; canonical home is lib/security/internal-origin.ts
 // (framework-free so the Express runtime can share it).
@@ -158,10 +159,12 @@ export async function v1ApiMiddleware(
     }
   }
 
-  // 2. Get full API key record to check keyType and capabilities
-  const apiKeyRecord = await prisma.apiKey.findUnique({
+  // 2. Get full API key record to check keyType and capabilities. Already read
+  // when it came through lib/auth-projection/read.ts, from the region's copy
+  // while it is fresh; read again at home otherwise, as before.
+  const apiKeyRecord = auth.record ?? (await prisma.apiKey.findUnique({
     where: { id: auth.apiKey.id },
-  })
+  }))
 
   if (!apiKeyRecord) {
     return {
@@ -218,10 +221,12 @@ export async function v1ApiMiddleware(
     }
   }
 
-  // 3. Verify project exists
-  const project = await prisma.project.findUnique({
-    where: { id: projectId },
-  })
+  // 3. Verify project exists. In a region whose copy is enforced, its lock,
+  // pause, owner and signing secret come from the copy while it is fresh
+  // (lib/auth-projection/read.ts); everywhere else the row is read at home.
+  const fromCopy = answersFromCopy()
+  const homeRow = fromCopy ? null : await prisma.project.findUnique({ where: { id: projectId } })
+  const project = fromCopy ? await authorizingProject(projectId) : homeRow
 
   if (!project) {
     return {
@@ -248,7 +253,7 @@ export async function v1ApiMiddleware(
       severity: 'high',
       projectId,
       ip: clientIpFromHeaders(request),
-      summary: `Public request blocked — project "${project.name}" is locked down`,
+      summary: `Public request blocked — project "${homeRow?.name ?? projectId}" is locked down`,
       detail: { path: request.nextUrl.pathname, method: request.method },
     }).catch(() => {})
     return {
@@ -547,13 +552,19 @@ export async function v1ApiMiddleware(
   // ── Founder Analytics: detect external usage (non-blocking) ───────────────
   const userId = apiKeyRecord.userId
   if (userId) {
-    // Any API key usage = frontend connected
-    if (!project.isFrontendConnected) {
-      markFrontendConnected(projectId, userId)
-    }
-    // Requests from an external domain = real external users
-    if (!project.hasExternalUsers && isExternalOrigin(request)) {
-      markExternalUsage(projectId, userId)
+    if (homeRow) {
+      // Any API key usage = frontend connected
+      if (!homeRow.isFrontendConnected) {
+        markFrontendConnected(projectId, userId)
+      }
+      // Requests from an external domain = real external users
+      if (!homeRow.hasExternalUsers && isExternalOrigin(request)) {
+        markExternalUsage(projectId, userId)
+      }
+    } else {
+      // The region's copy holds no milestones: they are settled at home, off
+      // the request path, once per process for each project.
+      void noteMilestonesAtHome(projectId, userId, isExternalOrigin(request))
     }
     // Track API call
     recordUsageMetrics(userId, projectId, { apiCalls: 1 })
@@ -578,6 +589,34 @@ export async function v1ApiMiddleware(
         serviceRole: apiKeyRecord.serviceRole,
       },
     },
+  }
+}
+
+// Projects this process has seen past each milestone, so a request from the
+// region's copy asks home about them once, not on every request. Bounded: a
+// cleared set only means one more lookup.
+const MILESTONE_MEMORY = 10_000
+const frontendConnected = new Set<string>()
+const externalUsers = new Set<string>()
+
+async function noteMilestonesAtHome(projectId: string, userId: string, external: boolean): Promise<void> {
+  if (frontendConnected.has(projectId) && (!external || externalUsers.has(projectId))) return
+  try {
+    const row = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { isFrontendConnected: true, hasExternalUsers: true },
+    })
+    if (!row) return
+    if (frontendConnected.size >= MILESTONE_MEMORY) frontendConnected.clear()
+    if (externalUsers.size >= MILESTONE_MEMORY) externalUsers.clear()
+    if (!row.isFrontendConnected) markFrontendConnected(projectId, userId)
+    frontendConnected.add(projectId)
+    if (external) {
+      if (!row.hasExternalUsers) markExternalUsage(projectId, userId)
+      externalUsers.add(projectId)
+    }
+  } catch {
+    // Bookkeeping only; the next request tries again.
   }
 }
 

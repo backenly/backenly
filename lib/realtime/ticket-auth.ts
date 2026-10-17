@@ -6,9 +6,9 @@
  * by both. Two copies of a credential check is how one of them ends up lenient.
  */
 
-import { prisma } from '@/lib/db/prisma'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { redeemSseTicket, type TicketRedemption } from './sse-ticket'
+import { authorizingProject } from '@/lib/auth-projection/read'
 
 /**
  * Redeem a `?ticket=` query parameter.
@@ -21,9 +21,9 @@ export async function redeemRealtimeTicketParam(
   projectId: string,
   ticket: string,
 ): Promise<TicketRedemption> {
-  const project = await prisma.project
-    .findUnique({ where: { id: projectId }, select: { jwtSecret: true } })
-    .catch(() => null)
+  // From the region's copy while it is fresh. A failure, including one to
+  // authorize at all, is a ticket this project cannot be shown to have issued.
+  const project = await authorizingProject(projectId).catch(() => null)
 
   if (!project?.jwtSecret) {
     return {
