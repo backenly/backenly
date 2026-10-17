@@ -1081,6 +1081,25 @@ export async function notifyCritical(
 // Exported so the declarative desired-state spec (lib/autonomy/desired-state.ts)
 // can reuse the canonical RLS probe read-only. Calling this never mutates —
 // the `fix` closure on each finding is lazy and only the observer loop invokes it.
+/**
+ * The tables whose latest Backenly RLS template is all-access: their owner (or
+ * an agent acting for them) chose to leave every row open. Template rows are
+ * upserted per table and template, so the latest by updatedAt is the choice in
+ * force.
+ */
+export async function tablesOwnerOpened(projectId: string, tables: string[]): Promise<Set<string>> {
+  const rows = await prisma.permissionPolicy.findMany({
+    where: { projectId, tableName: { in: tables }, enabled: true, policyName: { startsWith: 'backenly_' } },
+    select: { tableName: true, policyName: true, updatedAt: true },
+  })
+  const latest = new Map<string, { policyName: string; updatedAt: Date }>()
+  for (const row of rows) {
+    const current = latest.get(row.tableName)
+    if (!current || row.updatedAt > current.updatedAt) latest.set(row.tableName, row)
+  }
+  return new Set([...latest].filter(([, row]) => row.policyName === 'backenly_all_access').map(([table]) => table))
+}
+
 export async function detectMissingRls(projectId: string): Promise<RawFinding[]> {
   const schemaName = `workspace_${projectId}`
 
@@ -1134,8 +1153,16 @@ export async function detectMissingRls(projectId: string): Promise<RawFinding[]>
   // No swallow. "I could not look" must never be reported as "I looked and
   // found nothing" — that is precisely how this probe stayed dead for months.
 
-  const hits: Array<{ tablename: string; has_owner_column: boolean }> =
+  const found: Array<{ tablename: string; has_owner_column: boolean }> =
     (rows?.rows ?? rows ?? []) as any
+
+  // A table its owner opened on purpose is not missing anything. The all-access
+  // template turns RLS off and records the choice (backenly_all_access); while
+  // that is the table's latest Backenly template, the detector leaves the table
+  // alone, as reconcileAutoRls already does, rather than re-locking it on every
+  // pass. A later template (which turns RLS back on) outranks it.
+  const opened = found.length ? await tablesOwnerOpened(projectId, found.map((h) => h.tablename)) : new Set<string>()
+  const hits = found.filter((h) => !opened.has(h.tablename))
 
   if (!hits.length) return []
 
