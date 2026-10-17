@@ -336,6 +336,18 @@ export const PLATFORM_CREDENTIAL_TABLES: Readonly<Record<string, Disposition>> =
    * MCP clients re-run the authorization flow on their own.
    */
   mcp_oauth_refresh_tokens: 'drop',
+  /**
+   * Not credentials, but named like them: the delivery of each region's copy of
+   * what authorizes its requests (lib/auth-projection/deliver.ts). Both are
+   * dropped TOGETHER, and the pair must not be split. With no delivery state,
+   * the first delivery after a restore empties every region's copy and
+   * delivers it afresh from the restored rows; a copy may hold keys the
+   * restore took away. Carrying the state while the pending changes were
+   * dropped would leave each copy trusted with a revocation it never received.
+   */
+  auth_projection_regions: 'drop',
+  /** Ids of changed rows only; the delivery after a restore queues every row again. */
+  auth_projection_changes: 'drop',
 }
 
 /**

@@ -130,6 +130,21 @@ export async function register() {
         )
       })
 
+      // Each region's copy of what authorizes its projects' requests: the
+      // changes since the last delivery and a new watermark, every few seconds,
+      // from home (lib/auth-projection/deliver.ts). Off until
+      // BACKENLY_AUTH_PROJECTION is set, which waits for every region's database
+      // procedure to have run its auth-projection step.
+      const { authProjectionMode, AUTH_PROJECTION_DELIVERY_SECONDS } = await import('./lib/auth-projection/mode')
+      if (authProjectionMode() !== 'off') {
+        const { deliverAuthProjection } = await import('./lib/auth-projection/deliver')
+        cron.platform(`*/${AUTH_PROJECTION_DELIVERY_SECONDS} * * * * *`, async () => {
+          await deliverAuthProjection().catch((err: any) =>
+            console.error('[CronScheduler] Authorization projection error:', err?.message)
+          )
+        })
+      }
+
       // ── Tier B: diagnose what Tier A escalated ─────────────────────────────
       //
       // This was MISSING here, and that is why no escalated finding has ever

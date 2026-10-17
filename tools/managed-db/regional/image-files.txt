@@ -17,4 +17,5 @@ scripts/sql/postgrest-ddl-sync.sql
 scripts/sql/function-roles.sql
 scripts/sql/schema-drift-events.sql
 scripts/sql/regional-bodies.sql
+scripts/sql/auth-projection.sql
 scripts/setup-direct-access.sql

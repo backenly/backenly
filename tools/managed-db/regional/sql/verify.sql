@@ -250,6 +250,27 @@ BEGIN
     END IF;
   END IF;
 
+  -- ── Authorization projection: the app reads it and home writes it as the app ──
+  FOR r IN
+    SELECT * FROM (VALUES
+      ('public.auth_projection_state'),
+      ('public.auth_projection_projects'),
+      ('public.auth_projection_keys'),
+      ('public.auth_projection_branches')
+    ) AS x(relation)
+  LOOP
+    IF to_regclass(r.relation) IS NULL THEN
+      problems := problems || format('%s is missing', r.relation);
+    ELSE
+      IF app_exists AND NOT has_table_privilege('backenly_app', r.relation, 'SELECT, INSERT, UPDATE, DELETE') THEN
+        problems := problems || format('backenly_app cannot read and write %s', r.relation);
+      END IF;
+      IF has_table_privilege('public', r.relation, 'SELECT') THEN
+        problems := problems || format('PUBLIC can read %s', r.relation);
+      END IF;
+    END IF;
+  END LOOP;
+
   -- ── Extensions: installed in public, and working ──────────────────────────
   -- The probes are tools/managed-db/extension-spec.ts operationalProbe, verbatim.
   FOR r IN
@@ -279,7 +300,7 @@ BEGIN
   END LOOP;
 
   -- ── Every step recorded ───────────────────────────────────────────────────
-  FOREACH rname IN ARRAY ARRAY['roles', 'postgrest', 'drift-events', 'regional-bodies', 'direct-access', 'extensions'] LOOP
+  FOREACH rname IN ARRAY ARRAY['roles', 'postgrest', 'drift-events', 'regional-bodies', 'auth-projection', 'direct-access', 'extensions'] LOOP
     IF NOT EXISTS (SELECT 1 FROM backenly_meta.bootstrap_steps s WHERE s.step = rname) THEN
       problems := problems || format('step %s is not recorded in backenly_meta.bootstrap_steps', rname);
     END IF;

@@ -3813,6 +3813,51 @@ model SchemaDriftEvent {
   @@map("schema_drift_events")
 }
 
+// ─── Authorization projection ───────────────────────────────────────────────
+//
+// A request to a project kept outside the home region is authorized from rows
+// here: the project's lock, pause and signing secret, its keys, and the
+// branches they are bound to. Each region keeps a copy of those rows for its
+// own projects (scripts/sql/auth-projection.sql), delivered from here by
+// lib/auth-projection/deliver.ts. The triggers that fill
+// auth_projection_changes are in the migration that created it
+// (20261017120000_auth_projection): Prisma does not model triggers.
+
+// One changed row of a regional project, waiting for its region: which row,
+// never what it holds. The delivery reads the row's state when it delivers.
+model AuthProjectionChange {
+  id          BigInt    @id @default(autoincrement())
+  region      String
+  projectId   String
+  // project | api_key | branch
+  entity      String
+  entityId    String
+  createdAt   DateTime  @default(now())
+  deliveredAt DateTime?
+
+  @@index([region, deliveredAt, id])
+  @@index([deliveredAt])
+  @@map("auth_projection_changes")
+}
+
+// Where delivery to each region stands. The region keeps the same epoch and
+// round beside its copy; when the two differ, one side was restored or a
+// delivery committed in only one of them, and the region's copy is delivered
+// afresh.
+model AuthProjectionRegion {
+  region      String    @id
+  epoch       String
+  round       BigInt    @default(0)
+  // Every change committed here before this time is in the region's copy.
+  watermarkAt DateTime?
+  deliveredAt DateTime?
+  resyncedAt  DateTime  @default(now())
+  lastError   String?
+  lastErrorAt DateTime?
+
+  @@map("auth_projection_regions")
+}
+
 // ─── MCP OAuth ───────────────────────────────────────────────────────────────
 //
 // Why these exist: an MCP key had to be pasted into a config file by hand. Both

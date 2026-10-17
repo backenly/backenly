@@ -1149,3 +1149,11 @@ __tests__/queue/regional-jobs.test.ts
 # decision, or their expiry when nobody decided) and security events. Real rows
 # and deleteMany filters are the property, so it needs a real Postgres.
 __tests__/queue/retention.test.ts
+
+# Each region's copy of what authorizes its projects' requests: the capture
+# triggers from the migration, delivery to a second database standing in for a
+# region, the watermark, removal of revoked keys and deleted projects, the
+# encrypted signing secret, and a copy out of step after a restore emptied and
+# delivered afresh. The triggers and both databases are the property, so it
+# needs a real Postgres.
+tests/integration/auth-projection.spec.ts
