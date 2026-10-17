@@ -149,6 +149,11 @@ __tests__/auth/workspace-download-authorization.test.ts
 # named; the platform view is refused; the project's own answers are real.
 __tests__/auth/catalog-routes-own-schema.test.ts
 
+# Next's own /api/v1/{projectId} routes (end-user auth, healthz, and every route
+# recordedV1 wraps) answer a locked or paused project with the runtime gate's
+# 503, codes and words, and reach their handlers again once it serves.
+tests/integration/next-routes-serving-gate.spec.ts
+
 # Credential surfaces are held to a role, not to membership. The Connect page's
 # routes (mint/revoke MCP keys, read/provision/rotate direct Postgres
 # credentials, full pg_dump export) authorized with withProjectValidation alone,

@@ -35,6 +35,10 @@ import { branchIdForRequest, refuseBranchKeyOffDataPlane } from '@/lib/branches/
 import { refuseMisplacedKey } from '@/lib/security/key-placement'
 import { misdirectedResponse } from '@/lib/data-plane/serving'
 import { resolvePublicBaseUrl } from '@/lib/services/public-url'
+import { servingRefusal } from '@/lib/projects/serving-response'
+
+/** A project id, as the runtime gate requires before it looks one up. */
+const PROJECT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 export function recordedV1<R extends Request, C, T extends Response>(
   handler: (request: R, context: C) => T | Promise<T>,
@@ -56,6 +60,18 @@ export function recordedV1<R extends Request, C, T extends Response>(
         if (misdirected) {
           statusCode = misdirected.status
           return misdirected as unknown as T
+        }
+        // Then a project that is locked, paused or unreadable is not served
+        // either, by any route here: the same gate, codes and words as the
+        // runtime's (server/lib/serving-gate.ts), so no route Next owns
+        // outright (end-user auth, realtime, storage, functions, healthz) can
+        // serve a project the runtime would refuse.
+        if (PROJECT_ID_RE.test(requestedProject)) {
+          const refused = await servingRefusal(requestedProject)
+          if (refused) {
+            statusCode = refused.status
+            return refused as unknown as T
+          }
         }
       }
       const refusal =

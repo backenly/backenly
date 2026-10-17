@@ -15,12 +15,11 @@
 import { Router } from 'express'
 import type { Request, Response } from 'express'
 import { prisma } from '@/lib/db'
-import { isRegionError, workspaceRawClient } from '@/lib/data-plane/regional'
-import { authorizingKeyByHash, authorizingProject, isAuthorizationUnavailable } from '@/lib/auth-projection/read'
+import { isRegionError } from '@/lib/data-plane/regional'
+import { authorizingKeyByHash, isAuthorizationUnavailable } from '@/lib/auth-projection/read'
 import { verify } from 'jsonwebtoken'
 import { enforceKeyRateLimit, enforceRateLimitByKeyId } from '../lib/auth'
 import { regionalRateCounting, type RateKey } from '@/lib/auth-projection/rate'
-import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { hashApiKey, resolveEndUserFromToken, crossEnvironmentUserToken } from '../lib/end-user-identity'
 import { handleViaPostgrest } from './postgrest-handler'
 import { isFunctionSwitchedOff } from '@/lib/services/ai-functions/status'
@@ -121,6 +120,34 @@ export function refuseIfKeyLacksMethodPermission(
   return true
 }
 
+/**
+ * The status for a refused authentication on a data door. A refusal of a
+ * valid credential (a key used where it may not be, an end user the project
+ * blocked) is 403: the caller is known and refused, and 401 would send them to
+ * re-issue a credential that is fine. Anything else is 401.
+ */
+export function authRefusalStatus(code: string | undefined): 401 | 403 {
+  return isKeyPlacementRefusal(code) || code === 'END_USER_BLOCKED' ? 403 : 401
+}
+
+/**
+ * The end-user token in `Authorization: Bearer`, for a request that brings the
+ * project's key in x-api-key and no X-User-Token. Only a token that names a
+ * project (an end-user token) is taken; a platform session token is not one,
+ * and the key path never reads it as a user.
+ */
+export function endUserBearer(req: Request): string | undefined {
+  const header = req.headers['authorization'] as string | undefined
+  if (!header || !header.startsWith('Bearer ')) return undefined
+  const token = header.substring(7).trim()
+  try {
+    const claims: any = JSON.parse(Buffer.from(token.split('.')[1] ?? '', 'base64url').toString())
+    return typeof claims?.projectId === 'string' ? token : undefined
+  } catch {
+    return undefined
+  }
+}
+
 export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution> {
   const xApiKey = req.headers['x-api-key'] as string | undefined
   if (xApiKey) {
@@ -193,6 +220,8 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
     // RLS identity:
     //   - service-role key → bypass RLS (backends, cron, internal tools)
     //   - non-service key + X-User-Token → act as that end-user (own_rows)
+    //   - non-service key + Authorization: Bearer <end-user token>, when no
+    //     X-User-Token is sent → the same, through the same resolver
     //   - non-service key, no user token → no user context (own_rows → empty)
     //
     // On a branch key the user token must have been issued on that branch.
@@ -202,7 +231,7 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
     let endUserId: string | undefined
     let userRole: string | undefined
     if (!key.serviceRole) {
-      const userToken = req.headers['x-user-token'] as string | undefined
+      const userToken = (req.headers['x-user-token'] as string | undefined) ?? endUserBearer(req)
       const branch = key.branch
         ? { id: key.branch.id, name: key.branch.name, schemaName: key.branch.schemaName }
         : null
@@ -292,38 +321,18 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
             hint: 'Sign the user in with the same key you use for data requests.',
           }
         }
-        // End-user token — verify with project.jwtSecret
-        const project = await authorizingProject(unverified.projectId)
-        if (!project?.jwtSecret) return { success: false, error: 'Invalid token', code: 'INVALID_TOKEN' }
-        const decoded: any = verify(token, resolveJwtSecret(project.jwtSecret), { algorithms: ['HS256'] })
-        if (!decoded?.userId) return { success: false, error: 'Invalid token', code: 'INVALID_TOKEN' }
-        // Reject tokens revoked via /auth/logout.
-        if (decoded.jti) {
-          // The blacklist is in the project's database, in its region.
-          // Resolved outside the catch below, which reads any failure as "not
-          // revoked": a region this process cannot reach must not be.
-          const db = await workspaceRawClient(decoded.projectId)
-          try {
-            const schemaName = `workspace_${decoded.projectId}`
-            const rows = await db.$queryRawUnsafe<{ jti: string }[]>(
-              `SELECT jti FROM "${schemaName}"."_token_blacklist" WHERE jti = $1 LIMIT 1`,
-              decoded.jti,
-            )
-            if (rows.length > 0) {
-              return { success: false, error: 'Token has been revoked. Please sign in again.', code: 'TOKEN_REVOKED' }
-            }
-          } catch {
-            // Blacklist table doesn't exist yet — not revoked.
-          }
-        }
-        // End-user JWT → RLS scopes to their own rows.
+        // An end-user token says WHO is asking; the project's key says through
+        // what. The key carries the project's permission set and rate limit,
+        // and with it the token goes through the one end-user resolver (its
+        // revocation, block and branch checks). So the data plane takes an
+        // end-user token only together with a key, as the client docs and the
+        // SDK always send it; Authorization: Bearer is still read as the token
+        // when the key comes in x-api-key.
         return {
-          success: true,
-          projectId: decoded.projectId,
-          userId: decoded.userId,
-          endUserId: String(decoded.userId),
-          isServiceRole: false,
-          userRole: decoded.role ?? 'user',
+          success: false,
+          error: "End-user tokens are accepted with the project's key: send the key as x-api-key and this token as X-User-Token (or keep it in Authorization).",
+          code: 'API_KEY_REQUIRED',
+          hint: "Add the project's publishable key in the x-api-key header.",
         }
       }
 
@@ -398,10 +407,10 @@ async function handleDynamicRequest(req: Request, res: Response) {
   if (!authResult.success) {
     // A valid key used in the wrong place is refused, not unauthenticated: 401
     // would send the developer to re-issue a key that is fine. Matches /api/v2.
-    res.status(isKeyPlacementRefusal(authResult.code) ? 403 : 401).json({
+    res.status(authRefusalStatus(authResult.code)).json({
       error: authResult.error || 'Authentication required',
       code: authResult.code || 'AUTHENTICATION_REQUIRED',
-      hint: authResult.hint ?? 'Include x-api-key header or Authorization: Bearer token',
+      hint: authResult.hint ?? "Include the project's key in x-api-key, and an end user's token in X-User-Token.",
     })
     return
   }

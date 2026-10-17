@@ -127,6 +127,18 @@ const queryNotes = async (token: string) => {
   return { status: res.status, body: await res.json().catch(() => ({})) }
 }
 
+/**
+ * The data door that authenticates through getProjectIdFromAuth (server/routes/
+ * dynamic.ts), as /api/v2 does. No PostgREST runs in this suite, so a request
+ * that is authenticated goes on to the data plane and fails there; what is
+ * asserted is how far it got.
+ */
+const dataDoor = async (headers: Record<string, string>) => {
+  const res = await fetch(`${base}/api/v1/${projectId}/db/notes`, { headers })
+  return { status: res.status, body: await res.json().catch(() => ({})) }
+}
+const AUTH_REFUSALS = ['API_KEY_REQUIRED', 'END_USER_BLOCKED', 'INVALID_TOKEN', 'INVALID_API_KEY', 'AUTHENTICATION_REQUIRED']
+
 describe('AUTH-F4: a blocked user is refused at request time', () => {
   it('an unblocked user resolves and reads', async () => {
     const token = tokenFor(endUserId, jwtSecret, projectId)
@@ -192,5 +204,48 @@ describe('AUTH-F4: a blocked user is refused at request time', () => {
     )[0].id
     const token = tokenFor(legacyUserId, legacySecret, legacyProjectId)
     await expect(resolveEndUserFromToken(legacyProjectId, token)).resolves.toMatchObject({ userId: legacyUserId })
+  }, 60_000)
+})
+
+describe("an end-user token on the data door travels with the project's key", () => {
+  const setBlocked = (blocked: boolean) =>
+    prisma.$executeRawUnsafe(`UPDATE "workspace_${projectId}"."users" SET is_blocked = $2 WHERE id = $1::uuid`, endUserId, blocked)
+
+  it('is refused without the key, naming what to send', async () => {
+    const token = tokenFor(endUserId, jwtSecret, projectId)
+    const out = await dataDoor({ authorization: `Bearer ${token}` })
+    expect(out.status).toBe(401)
+    expect(out.body.code).toBe('API_KEY_REQUIRED')
+  }, 60_000)
+
+  it('is refused without the key for a blocked user too, before any data is read', async () => {
+    await setBlocked(true)
+    try {
+      const token = tokenFor(endUserId, jwtSecret, projectId)
+      const out = await dataDoor({ authorization: `Bearer ${token}` })
+      expect(out.status).toBe(401)
+      expect(out.body.code).toBe('API_KEY_REQUIRED')
+    } finally {
+      await setBlocked(false)
+    }
+  }, 60_000)
+
+  it('with the key, Authorization: Bearer is read as the user and passes authentication', async () => {
+    const token = tokenFor(endUserId, jwtSecret, projectId)
+    const out = await dataDoor({ 'x-api-key': publicKey, authorization: `Bearer ${token}` })
+    expect([401, 403]).not.toContain(out.status)
+    expect(AUTH_REFUSALS).not.toContain(out.body?.code)
+  }, 60_000)
+
+  it('with the key, Authorization: Bearer of a blocked user is refused 403', async () => {
+    await setBlocked(true)
+    try {
+      const token = tokenFor(endUserId, jwtSecret, projectId)
+      const out = await dataDoor({ 'x-api-key': publicKey, authorization: `Bearer ${token}` })
+      expect(out.status).toBe(403)
+      expect(out.body.code).toBe('END_USER_BLOCKED')
+    } finally {
+      await setBlocked(false)
+    }
   }, 60_000)
 })
