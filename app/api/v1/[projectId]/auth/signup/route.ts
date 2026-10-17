@@ -28,6 +28,7 @@ import {
   type AuthEnvironment,
 } from '@/lib/branches/auth-environment'
 import { inAuthEnvironment } from '@/lib/branches/next-auth-environment'
+import { authorizingProject } from '@/lib/auth-projection/read'
 
 /**
  * POST /v1/{projectId}/auth/signup
@@ -66,10 +67,9 @@ async function signUp(request: NextRequest, projectId: string, env: AuthEnvironm
       if (!limit.allowed) return throttledV1Response(limit)
     }
 
-    // Validate project exists
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-    })
+    // Validate project exists. Existence and the signing secret are all this
+    // route reads of it: the region's copy while it is fresh, home otherwise.
+    const project = await authorizingProject(projectId)
 
     if (!project) {
       return createErrorResponse(ErrorCodes.NOT_FOUND, 'Project not found', 404)
