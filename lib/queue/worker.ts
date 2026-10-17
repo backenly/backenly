@@ -71,6 +71,21 @@ async function handleWebhookDeliveryJob(payload: any): Promise<Record<string, an
   return deliverSingleAttempt(webhookId, targetUrl, secret, webhookPayload, logId)
 }
 
+export type RetentionPurgeMode = 'off' | 'dry-run' | 'enforce'
+
+/**
+ * How the 90-day retention of approval requests and security events runs,
+ * read from BACKENLY_RETENTION_PURGE. It deletes records for good, so a backup
+ * is the only way back; until the founders turn it on (`enforce`) the daily
+ * cleanup only counts what it would delete and logs the count, and `off`
+ * skips it. Anything else is dry-run, never enforce. The 30-day pruning of
+ * delivery, request and intent logs does not depend on it.
+ */
+export function retentionPurgeMode(raw: string | undefined = process.env.BACKENLY_RETENTION_PURGE): RetentionPurgeMode {
+  const value = (raw ?? '').trim().toLowerCase()
+  return value === 'off' || value === 'enforce' ? value : 'dry-run'
+}
+
 export async function handleCleanupJob(payload: any): Promise<Record<string, any>> {
   const { cleanupType } = payload
   const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) // 30 days
@@ -82,7 +97,13 @@ export async function handleCleanupJob(payload: any): Promise<Record<string, any
   const retained = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000)
 
   if (cleanupType === 'old_logs') {
-    const [webhookLogs, requestLogs, intentLogs, approvalRequests, securityEvents] = await Promise.all([
+    const retentionMode = retentionPurgeMode()
+    const approvalsPastRetention = {
+      OR: [{ decidedAt: { lt: retained } }, { decidedAt: null, expiresAt: { lt: retained } }],
+    }
+    const eventsPastRetention = { createdAt: { lt: retained } }
+
+    const [webhookLogs, requestLogs, intentLogs, retention] = await Promise.all([
       prisma.webhookLog
         .deleteMany({ where: { createdAt: { lt: cutoff }, status: 'SUCCESS' } })
         .then(r => r.count),
@@ -94,17 +115,37 @@ export async function handleCleanupJob(payload: any): Promise<Record<string, any
         .deleteMany({ where: { timestamp: { lt: cutoff } } })
         .then(r => r.count)
         .catch(() => 0), // intentLog may not exist in all environments
-      prisma.agentApprovalRequest
-        .deleteMany({
-          where: { OR: [{ decidedAt: { lt: retained } }, { decidedAt: null, expiresAt: { lt: retained } }] },
-        })
-        .then(r => r.count),
-      prisma.securityEvent
-        .deleteMany({ where: { createdAt: { lt: retained } } })
-        .then(r => r.count),
+      retentionMode === 'enforce'
+        ? Promise.all([
+            prisma.agentApprovalRequest.deleteMany({ where: approvalsPastRetention }).then(r => r.count),
+            prisma.securityEvent.deleteMany({ where: eventsPastRetention }).then(r => r.count),
+          ])
+        : retentionMode === 'dry-run'
+          ? Promise.all([
+              prisma.agentApprovalRequest.count({ where: approvalsPastRetention }),
+              prisma.securityEvent.count({ where: eventsPastRetention }),
+            ])
+          : Promise.resolve(null),
     ])
 
-    return { cleanupType, webhookLogs, requestLogs, intentLogs, approvalRequests, securityEvents }
+    if (retentionMode === 'enforce') {
+      const [approvalRequests, securityEvents] = retention!
+      return { cleanupType, webhookLogs, requestLogs, intentLogs, retentionMode, approvalRequests, securityEvents }
+    }
+    if (retentionMode === 'dry-run') {
+      const [approvalRequests, securityEvents] = retention!
+      console.info(
+        `[retention] dry run: ${approvalRequests} approval request(s) decided or expired before ` +
+          `${retained.toISOString()} and ${securityEvents} security event(s) recorded before then are past ` +
+          `90 days and were kept; BACKENLY_RETENTION_PURGE=enforce deletes them`,
+      )
+      return {
+        cleanupType, webhookLogs, requestLogs, intentLogs, retentionMode,
+        approvalRequests: 0, securityEvents: 0,
+        retentionDue: { approvalRequests, securityEvents, before: retained.toISOString() },
+      }
+    }
+    return { cleanupType, webhookLogs, requestLogs, intentLogs, retentionMode, approvalRequests: 0, securityEvents: 0 }
   }
 
   if (cleanupType === 'dead_letter_jobs') {
