@@ -21,6 +21,7 @@ import { meterNodeResponse } from '@/lib/usage/egress'
 import { branchIdForRequest, refuseBranchKeyOffDataPlane } from '@/lib/branches/key-scope'
 import { refuseMisplacedKey } from '@/lib/security/key-placement'
 import { isRegionError } from '@/lib/data-plane/regional'
+import { isAuthorizationUnavailable } from '@/lib/auth-projection/read'
 import { misdirection } from '@/lib/data-plane/serving'
 
 const app = express()
@@ -287,6 +288,14 @@ app.use((err: any, _req: express.Request, res: express.Response, next: express.N
       error: "This project's data region is not reachable from this server.",
       code: err.code,
     })
+    return
+  }
+
+  // The region's copy of what authorizes the request was past its bound and
+  // home could not be asked (lib/auth-projection/read.ts). Refused, never
+  // served on stale authorization; retryable.
+  if (isAuthorizationUnavailable(err)) {
+    res.status(503).json({ error: 'This request could not be authorized right now. Try again shortly.', code: err.code })
     return
   }
 

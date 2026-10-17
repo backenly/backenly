@@ -74,6 +74,36 @@ describe('what the reader answers when the database answers', () => {
     expect(h.loads()).toBe(2)
   })
 
+  it('keeps an answer that was already old when read only for what is left of the bound', async () => {
+    // A region's copy answers with its watermark's age: 11 s of a 15 s bound,
+    // so the answer may be trusted 4 s more, not the cache's full 15.
+    const h = harness()
+    h.set('p', { ...OPEN, freshForMs: 4_000 })
+    await h.reader.get('p')
+    h.advance(3_999)
+    await h.reader.get('p')
+    expect(h.loads()).toBe(1)
+
+    h.set('p', LOCKED)
+    h.advance(2)
+    await expect(h.reader.get('p')).resolves.toEqual({ kind: 'locked', reason: 'abuse' })
+    expect(h.loads()).toBe(2)
+  })
+
+  it('never keeps an answer longer than the cache would, nor for a negative time', async () => {
+    const h = harness()
+    h.set('long', { ...OPEN, freshForMs: 60_000 })
+    h.set('spent', { ...OPEN, freshForMs: -5 })
+    await h.reader.get('long')
+    await h.reader.get('spent')
+    h.advance(1)
+    await h.reader.get('spent')
+    expect(h.loads()).toBe(3)
+    h.advance(15_000)
+    await h.reader.get('long')
+    expect(h.loads()).toBe(4)
+  })
+
   it('reports a pause with when and why', async () => {
     const h = harness()
     h.set('idle', PAUSED)

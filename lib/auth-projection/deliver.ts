@@ -37,7 +37,8 @@
  * the founders' sensitive path. A row missing from a copy is not evidence of
  * anything; a reader asks home.
  *
- * Nothing reads the copy yet: BACKENLY_AUTH_PROJECTION (lib/auth-projection/mode.ts).
+ * The runtime reads the copy through lib/auth-projection/read.ts, as far as
+ * BACKENLY_AUTH_PROJECTION allows (lib/auth-projection/mode.ts).
  */
 
 import { randomUUID } from 'node:crypto'

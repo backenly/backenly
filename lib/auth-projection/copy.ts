@@ -28,6 +28,11 @@ export interface CopyFreshness {
   fresh: boolean
 }
 
+/** Whether a watermark this old may be trusted: younger than the bound, and not in this clock's future. */
+export function isFreshAge(ageMs: number | null, maxStalenessMs: number): boolean {
+  return ageMs !== null && ageMs > -CLOCK_TOLERANCE_MS && ageMs < maxStalenessMs
+}
+
 export async function copyFreshness(region: CloudRegionId, maxStalenessMs: number = authMaxStalenessMs()): Promise<CopyFreshness> {
   if (region === HOME_REGION) throw new Error('The home region authorizes from the platform database; it keeps no copy.')
   const [state] = await regionRawClient(region).$queryRaw<{ watermarkAt: Date | null; ageMs: number | null }[]>`
@@ -37,5 +42,5 @@ export async function copyFreshness(region: CloudRegionId, maxStalenessMs: numbe
      WHERE "region" = ${region}`
   if (!state || state.watermarkAt === null || state.ageMs === null) return { watermarkAt: null, ageMs: null, fresh: false }
   const ageMs = Number(state.ageMs)
-  return { watermarkAt: state.watermarkAt, ageMs, fresh: ageMs > -CLOCK_TOLERANCE_MS && ageMs < maxStalenessMs }
+  return { watermarkAt: state.watermarkAt, ageMs, fresh: isFreshAge(ageMs, maxStalenessMs) }
 }

@@ -58,7 +58,8 @@
  * serving from a runtime that had just read it, and on how long a resumed one
  * keeps being refused.
  */
-import { prisma } from '@/lib/db/prisma'
+import { authorizingProjectWithAge } from '@/lib/auth-projection/read'
+import { authMaxStalenessMs } from '@/lib/auth-projection/mode'
 
 export type ProjectServingState =
   | { kind: 'serving' }
@@ -80,6 +81,13 @@ export interface ServingRow {
   lockedDownReason: string | null
   pausedAt: Date | null
   pauseReason: string | null
+  /**
+   * How much longer this answer may be trusted, when it was already old as it
+   * was read: one from a region's copy is as old as the copy's watermark. It is
+   * cached no longer than that, so the copy's age and the cache's together
+   * stay within the bound. Unset for an answer read at home, just now.
+   */
+  freshForMs?: number
 }
 
 export interface ServingStateReaderOptions {
@@ -154,10 +162,12 @@ export function createServingStateReader(options: ServingStateReaderOptions): Se
     }
 
     try {
-      const state = toState(await options.load(projectId))
+      const row = await options.load(projectId)
+      const state = toState(row)
+      const fresh = Math.max(0, Math.min(freshMs, row?.freshForMs ?? freshMs))
       remember(projectId, {
         state,
-        freshUntil: at + (state.kind === 'not_found' ? notFoundFreshMs : freshMs),
+        freshUntil: at + (state.kind === 'not_found' ? notFoundFreshMs : fresh),
       })
       return state
     } catch (err: any) {
@@ -182,12 +192,16 @@ export function createServingStateReader(options: ServingStateReaderOptions): Se
   }
 }
 
+// The region's copy while it is fresh, home otherwise (lib/auth-projection/read.ts).
+// An answer from the copy is cached only for what is left of the bound after the
+// copy's own age, so the two never add up past it. When neither can answer the
+// loader throws, and the reader fails closed as above.
 const reader = createServingStateReader({
-  load: projectId =>
-    prisma.project.findUnique({
-      where: { id: projectId },
-      select: { lockedDownAt: true, lockedDownReason: true, pausedAt: true, pauseReason: true },
-    }),
+  load: async projectId => {
+    const { row, ageMs } = await authorizingProjectWithAge(projectId)
+    if (!row) return null
+    return ageMs > 0 ? { ...row, freshForMs: authMaxStalenessMs() - ageMs } : row
+  },
 })
 
 export function getProjectServingState(projectId: string): Promise<ProjectServingState> {

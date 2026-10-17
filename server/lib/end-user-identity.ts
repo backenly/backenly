@@ -10,8 +10,8 @@
 
 import crypto from 'crypto'
 import { verify } from 'jsonwebtoken'
-import { prisma } from '@/lib/db'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
+import { authorizingProject } from '@/lib/auth-projection/read'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { noteEndUserActivity } from '@/lib/quota/kernel'
 import { crossEnvironmentToken, endUserTokenSecret } from '@/lib/branches/auth-environment'
@@ -49,10 +49,8 @@ export async function resolveEndUserFromToken(
 ): Promise<EndUserIdentity | 'blocked' | null> {
   if (!rawTokenInput) return null
   const rawToken = bareToken(rawTokenInput)
-  const project = await prisma.project.findUnique({
-    where: { id: projectId },
-    select: { jwtSecret: true },
-  })
+  // The region's copy while it is fresh, home otherwise (lib/auth-projection/read.ts).
+  const project = await authorizingProject(projectId)
   if (!project?.jwtSecret) return null
   let payload: any
   try {
@@ -148,10 +146,7 @@ export async function crossEnvironmentUserToken(
   rawTokenInput: string,
   branch: EndUserBranch | null,
 ): Promise<{ code: string; error: string } | null> {
-  const project = await prisma.project.findUnique({
-    where: { id: projectId },
-    select: { jwtSecret: true },
-  })
+  const project = await authorizingProject(projectId)
   if (!project?.jwtSecret) return null
   return crossEnvironmentToken(bareToken(rawTokenInput), resolveJwtSecret(project.jwtSecret), branch)
 }

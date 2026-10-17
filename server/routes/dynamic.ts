@@ -16,6 +16,7 @@ import { Router } from 'express'
 import type { Request, Response } from 'express'
 import { prisma } from '@/lib/db'
 import { isRegionError, workspaceRawClient } from '@/lib/data-plane/regional'
+import { authorizingKeyByHash, authorizingProject, isAuthorizationUnavailable } from '@/lib/auth-projection/read'
 import { verify } from 'jsonwebtoken'
 import { enforceRateLimitByKeyId } from '../lib/auth'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
@@ -121,15 +122,8 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
   const xApiKey = req.headers['x-api-key'] as string | undefined
   if (xApiKey) {
     const keyHash = hashApiKey(xApiKey)
-    const key = await prisma.apiKey.findFirst({
-      where: { keyHash },
-      select: {
-        id: true, name: true, keyPrefix: true, projectId: true, userId: true,
-        permissions: true, rateLimit: true, expiresAt: true, serviceRole: true,
-        scope: true, keyType: true,
-        branch: { select: { id: true, schemaName: true, status: true, name: true } },
-      },
-    })
+    // The region's copy while it is fresh, home otherwise (lib/auth-projection/read.ts).
+    const key = await authorizingKeyByHash(keyHash)
     if (!key) return { success: false, error: 'Invalid API key', code: 'INVALID_API_KEY' }
     if (key.expiresAt && key.expiresAt < new Date()) return { success: false, error: 'API key has expired', code: 'API_KEY_EXPIRED' }
     if (!key.projectId) return { success: false, error: 'API key is not associated with a project', code: 'NO_PROJECT_ID' }
@@ -291,10 +285,7 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
           }
         }
         // End-user token — verify with project.jwtSecret
-        const project = await prisma.project.findUnique({
-          where: { id: unverified.projectId },
-          select: { id: true, jwtSecret: true },
-        })
+        const project = await authorizingProject(unverified.projectId)
         if (!project?.jwtSecret) return { success: false, error: 'Invalid token', code: 'INVALID_TOKEN' }
         const decoded: any = verify(token, resolveJwtSecret(project.jwtSecret), { algorithms: ['HS256'] })
         if (!decoded?.userId) return { success: false, error: 'Invalid token', code: 'INVALID_TOKEN' }
@@ -342,8 +333,9 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
       if (!user || user.projects.length === 0) return { success: false, error: 'No project found for user', code: 'NO_PROJECT' }
       return { success: true, projectId: user.projects[0].id, userId: user.id, isServiceRole: true }
     } catch (err) {
-      // An unreachable region is the server's fault, not the token's.
-      if (isRegionError(err)) throw err
+      // An unreachable region, or authorization that could not be checked, is
+      // the server's fault, not the token's.
+      if (isRegionError(err) || isAuthorizationUnavailable(err)) throw err
       return { success: false, error: 'Invalid or expired token', code: 'INVALID_TOKEN' }
     }
   }

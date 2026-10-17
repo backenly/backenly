@@ -1157,3 +1157,11 @@ __tests__/queue/retention.test.ts
 # delivered afresh. The triggers and both databases are the property, so it
 # needs a real Postgres.
 tests/integration/auth-projection.spec.ts
+
+# A regional request authorized from the region's copy while it is fresh: off
+# reads home only, enforce reads the copy and fails closed (503
+# AUTHORIZATION_UNAVAILABLE) when the copy is stale and home cannot answer,
+# shadow answers from home and reports differences, end-user tokens verify
+# against the copy's secret, and a delivered lock refuses the project. Both
+# databases and the Express app are the property, so it needs a real Postgres.
+tests/integration/auth-projection-reads.spec.ts

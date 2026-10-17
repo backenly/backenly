@@ -7,10 +7,10 @@
  *
  *   off       the default. Nothing is delivered and nothing reads the copy:
  *             every regional request is authorized at home, as before.
- *   shadow    the home region delivers; a regional reader may compare the copy
- *             with home and report a difference, but answers from home.
+ *   shadow    the home region delivers; a regional reader compares the copy
+ *             with home and reports a difference, but answers from home.
  *   enforce   a reader answers from the copy while it is fresh, and from home
- *             otherwise.
+ *             otherwise (lib/auth-projection/read.ts).
  *
  * Fresh means the copy's watermark is younger than AUTH_MAX_STALENESS_MS. The
  * founders set 15 seconds as the most it may ever be (2026-10-16), so a larger
