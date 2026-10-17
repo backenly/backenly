@@ -35,6 +35,7 @@ import { deliverAuthProjection, deliverRegion } from '@/lib/auth-projection/deli
 import { copyFreshness } from '@/lib/auth-projection/copy'
 import { reconcileRegionCopy } from '@/lib/auth-projection/reconcile'
 import { JWTSecretManager } from '@/lib/services/jwtSecretManager'
+import { ORPHANED_PROJECT_MODELS, deleteAccountCompletely, deleteProjectCompletely } from '@/lib/projects/delete'
 
 jest.setTimeout(120_000)
 
@@ -335,6 +336,44 @@ describe('delivery', () => {
     expect(await copiedProject(doomed)).toBeUndefined()
     expect(await copiedKeys(doomed)).toEqual([])
     expect(await copiedBranches(doomed)).toEqual([])
+  })
+
+  it("carries the product's own project and account deletions to the region, whose copy then holds none of their keys", async () => {
+    // deleteProjectCompletely and deleteAccountCompletely sweep every row that
+    // still names the project after the cascade, model by model from the
+    // generated client. The deletion's own record must survive that sweep, or
+    // the region never hears of it while its copy stays fresh, and the deleted
+    // project's keys keep working there.
+    expect(ORPHANED_PROJECT_MODELS).not.toContain('AuthProjectionChange')
+    const doomed = (await prisma.project.create({ data: { name: `authcopy-deleted-${randomUUID()}`, userId: ownerId, region: REGION }, select: { id: true } })).id
+    const doomedKey = await makeKey(doomed)
+    const leaver = (await prisma.user.create({ data: { email: `authcopy-leaver-${randomUUID()}@example.test`, name: 'leaving account' }, select: { id: true } })).id
+    const leaversProject = (await prisma.project.create({ data: { name: `authcopy-leaver-${randomUUID()}`, userId: leaver, region: REGION }, select: { id: true } })).id
+    const leaversKey = await prisma.apiKey.create({
+      data: { name: 'leaver key', keyPrefix: 'proj_live_x', keyHash: randomBytes(32).toString('hex'), userId: leaver, projectId: leaversProject, permissions: ['read'], capabilities: [] },
+      select: { id: true, keyHash: true },
+    })
+    await deliverRegion(REGION)
+    expect((await copiedKeys(doomed)).map((k) => k.id)).toEqual([doomedKey.id])
+    expect((await copiedKeys(leaversProject)).map((k) => k.id)).toEqual([leaversKey.id])
+
+    try {
+      await deleteProjectCompletely(doomed)
+      await deleteAccountCompletely(leaver)
+      expect((await deliverRegion(REGION)).outcome).toBe('delivered')
+
+      for (const gone of [doomed, leaversProject]) {
+        expect(await copiedProject(gone)).toBeUndefined()
+        expect(await copiedKeys(gone)).toEqual([])
+      }
+      expect((await copyFreshness(REGION)).fresh).toBe(true)
+    } finally {
+      // Each deletion queues its purge for the region, whose database this
+      // suite drops: not left for a later suite's purge pass to trip over.
+      await prisma.backgroundJob.deleteMany({
+        where: { type: 'purge_project', OR: [doomed, leaversProject].map((id) => ({ payload: { path: ['projectId'], equals: id } })) },
+      })
+    }
   })
 
   it('never copies a signing secret in the clear', async () => {
