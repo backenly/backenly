@@ -1,6 +1,7 @@
 export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
+import { confirmPropagation } from '@/lib/auth-projection/confirm'
 import { prisma } from '@/lib/db/postgres'
 import { requireAuth } from '@/lib/auth/middleware'
 import crypto from 'crypto'
@@ -103,12 +104,17 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
       },
     })
 
+    // The old secret stops working in the project's region once the region has
+    // the rotation (lib/auth-projection/confirm.ts); `pending` says it is in flight.
+    const propagation = await confirmPropagation({ entity: 'api_key', entityId: apiKey.id })
+
     return NextResponse.json({
       apiKey: {
         id: apiKey.id,
         key: fullKey, // Only returned on rotation
         keyPrefix,
       },
+      propagation,
       message: 'API key rotated successfully. Save the new key - it will not be shown again.',
     })
   } catch (error) {

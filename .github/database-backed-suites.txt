@@ -1173,3 +1173,10 @@ tests/integration/auth-projection-reads.spec.ts
 # of counts home for the console, and home counting while off or in shadow.
 # Both databases and the real SQL are the property, so it needs a real Postgres.
 tests/integration/auth-rate-windows.spec.ts
+
+# A revocation reported done only once the project's region has it: a home
+# project's change is not applicable, a regional key's revocation is confirmed
+# with the copy no longer holding the key, a region that cannot apply it leaves
+# it pending within the time allowed, and a lockdown reports where it stands.
+# Both databases and the real SQL are the property, so it needs a real Postgres.
+tests/integration/auth-projection-confirm.spec.ts

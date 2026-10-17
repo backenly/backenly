@@ -8,6 +8,7 @@
  */
 import { prisma } from '@/lib/db/prisma'
 import { recordSecurityEvent } from './security-events'
+import { confirmPropagation, type Propagation } from '@/lib/auth-projection/confirm'
 
 // ─── Per-project lockdown ────────────────────────────────────────────────────
 
@@ -16,7 +17,7 @@ export async function setProjectLockdown(
   locked: boolean,
   reason: string | null,
   actor: { userId: string; userEmail: string },
-): Promise<void> {
+): Promise<Propagation> {
   const proj = await prisma.project.findUnique({
     where: { id: projectId },
     select: { id: true, name: true, userId: true },
@@ -37,6 +38,9 @@ export async function setProjectLockdown(
       lockedDownReason: locked ? reason : null,
     },
   })
+  // A project kept in another region is sealed there once its region has the
+  // lock (lib/auth-projection/confirm.ts); `pending` says it is still in flight.
+  const propagation = await confirmPropagation({ entity: 'project', entityId: projectId })
 
   await prisma.auditLog.create({
     data: {
@@ -58,8 +62,9 @@ export async function setProjectLockdown(
     summary: locked
       ? `Project "${proj.name}" locked down: ${reason ?? 'no reason given'}`
       : `Project "${proj.name}" lockdown lifted`,
-    detail: { projectId, ownerUserId: proj.userId, reason },
+    detail: { projectId, ownerUserId: proj.userId, reason, propagation },
   })
+  return propagation
 }
 
 /** Cheap predicate used inside the public runtime middleware. */

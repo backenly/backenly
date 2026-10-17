@@ -69,6 +69,7 @@ import { functionRoleName } from '@/lib/services/ai-functions/function-db-role'
 import { purgeProjectExternals } from '@/lib/projects/purge'
 import { PURGE_JOB_TYPE, PURGE_STATUS } from '@/lib/queue'
 import { purgeAccountState } from '@/lib/usage/account'
+import { confirmPropagation, type Propagation } from '@/lib/auth-projection/confirm'
 
 export { PURGE_JOB_TYPE, PURGE_STATUS }
 
@@ -114,6 +115,12 @@ export interface DeletionResult {
   purgeJobIds: string[]
   /** False when the post-commit purge attempt failed and was left to the worker. */
   externalPurgeCompleted: boolean
+  /**
+   * Whether the project's region has the deletion yet, for a single project
+   * kept outside the home region (lib/auth-projection/confirm.ts). Unset for an
+   * account deletion, whose projects' deletions are delivered all the same.
+   */
+  propagation?: Propagation
 }
 
 type Tx = Prisma.TransactionClient
@@ -494,12 +501,16 @@ export async function deleteProjectCompletely(projectId: string): Promise<Deleti
   )
 
   const externalPurgeCompleted = await attemptImmediatePurge([{ projectId, jobId, region }])
+  // Its keys stop working in its region once the region has the deletion
+  // (lib/auth-projection/confirm.ts); `pending` says it is still in flight.
+  const propagation = await confirmPropagation({ entity: 'project', entityId: projectId })
 
   return {
     projectIds: [projectId],
     schemasDropped: schemas,
     purgeJobIds: [jobId],
     externalPurgeCompleted,
+    propagation,
   }
 }
 
