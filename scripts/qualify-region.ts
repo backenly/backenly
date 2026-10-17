@@ -19,7 +19,7 @@
  *     --operator <the probe project's owner, by email> \
  *     [--connect us-east-1.api.staging.backenly.com=<regional ALB DNS>,staging.backenly.com=<home ALB DNS>] \
  *     [--report qualify-us-east-1.json] [--skip-revocation] [--approval-wait-minutes 10] \
- *     [--job-wait-minutes 15]
+ *     [--job-wait-minutes 15] [--repair-wait-minutes 6]
  *
  * --connect is for hosts not in public DNS (staging): the TCP connection goes to
  * the named target while TLS (SNI, certificate validation) and the Host header
@@ -51,19 +51,26 @@
  *   rollback   a table added over MCP is rolled back from the console to the
  *              restore point recorded before it; the fixtures and their rows
  *              are left as they were
+ *   autonomy   a fault the region repairs on its own: a reference column added
+ *              over MCP with a DEFAULT, a path that creates no index, is
+ *              indexed by the region's repair loop without anyone asking
+ *              (missing_fk_index, Tier 0), confirmed by its HEALTH_AUTO_FIXED
+ *              record and by the table's own indexes. A repair made from home
+ *              instead proves nothing about the region and fails the check.
+ *              The column is then rolled back from the console
  *   recovery   the console asks for a snapshot and home queues it for the
  *              region, which takes it; its download link is the region's own
  *              bucket, never the home host; rows changed after it are put back
  *              by a restore the region carries out, and both users then see
  *              exactly their rows from the snapshot, on /api/v1 and PostgREST.
  *              Each wait is timed, from the request to the job's end
- *   autonomy   the project's autonomy status, as the control plane reports it
+ *              The autonomy status the control plane reports closes the phase
  *   revocation a throwaway key is revoked (a person approves it in the Review
  *              Queue, by design) and the region refuses it; the wait is timed
- * Not here, and reported as not run: autonomy fault injection and repair, and
- * the infrastructure failure drills (projection lag, blocked peering, a
- * database failover, killed PostgREST tasks). Those need a fault made inside
- * the region and are qualification steps of their own.
+ * Not here, and reported as not run: the infrastructure failure drills
+ * (projection lag, blocked peering, a database failover, killed PostgREST
+ * tasks). Those need a fault made inside the region's infrastructure and are
+ * qualification steps of their own.
  *
  * The fixtures stay for the next run; this run's rows and file are removed, and
  * so is the table the rollback check adds. Its two end users stay, with random
@@ -96,6 +103,8 @@ export interface QualifyArgs {
   skipRevocation: boolean
   approvalWaitMinutes: number
   jobWaitMinutes: number
+  /** How long the region's repair loop is given to repair the drill's fault. */
+  repairWaitMinutes: number
   mcpKey: string
   projectKey: string
   /** The probe project's owner, who signs in at the home host for what only the console does. */
@@ -125,7 +134,7 @@ export function parseArgs(argv: string[], env: Record<string, string | undefined
     if (!arg.startsWith('--') || argv[i + 1] === undefined) throw new Error(`unexpected argument: ${arg}`)
     flags.set(arg, argv[++i])
   }
-  const known = ['--project', '--region', '--api', '--home', '--connect', '--report', '--approval-wait-minutes', '--job-wait-minutes', '--operator']
+  const known = ['--project', '--region', '--api', '--home', '--connect', '--report', '--approval-wait-minutes', '--job-wait-minutes', '--repair-wait-minutes', '--operator']
   for (const f of flags.keys()) if (!known.includes(f)) throw new Error(`unknown option: ${f}`)
 
   const project = flags.get('--project') ?? ''
@@ -163,6 +172,8 @@ export function parseArgs(argv: string[], env: Record<string, string | undefined
   if (!Number.isFinite(wait) || wait <= 0 || wait > 120) throw new Error('--approval-wait-minutes must be between 0 and 120')
   const jobWait = Number(flags.get('--job-wait-minutes') ?? '15')
   if (!Number.isFinite(jobWait) || jobWait <= 0 || jobWait > 120) throw new Error('--job-wait-minutes must be between 0 and 120')
+  const repairWait = Number(flags.get('--repair-wait-minutes') ?? '6')
+  if (!Number.isFinite(repairWait) || repairWait <= 0 || repairWait > 60) throw new Error('--repair-wait-minutes must be between 0 and 60')
 
   const mcpKey = env.BACKENLY_QUALIFY_MCP_KEY?.trim() ?? ''
   const projectKey = env.BACKENLY_QUALIFY_PROJECT_KEY?.trim() ?? ''
@@ -192,6 +203,7 @@ export function parseArgs(argv: string[], env: Record<string, string | undefined
     skipRevocation: switches.has('--skip-revocation'),
     approvalWaitMinutes: wait,
     jobWaitMinutes: jobWait,
+    repairWaitMinutes: repairWait,
     mcpKey,
     projectKey,
     operator,
@@ -355,7 +367,6 @@ const HTTP_FUNCTION = 'qualify-ping'
 const SANDBOX_FUNCTION = 'qualify-count'
 
 const NOT_RUN = [
-  'autonomy fault injection and repair (the failure-injection drill)',
   'the infrastructure failure drills: projection lag, blocked peering, a database failover, killed PostgREST tasks',
 ]
 
@@ -776,6 +787,97 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
       return `rolled back to v${restorePoint!.versionNum}: ${rollbackTable} is gone; ${TABLE} and its rows are as they were`
     })
 
+    // ── autonomy: a fault the region repairs on its own ──────────────────────
+    // Before recovery, so a restore's brief errors cannot hold the repair loop
+    // back (it does not change a backend whose error rate is high).
+    log('\n── autonomy (a fault the region repairs without being asked)')
+    const probeColumn = `qualify_probe_${run}_id`
+    const versionsPath = `/api/projects/${args.project}/schema-versions`
+    let versionsBeforeFault: Set<string> | null = null
+    /** The definition of an index on TABLE that leads with `column`, or null. */
+    const indexLeadingWith = async (column: string): Promise<string | null> => {
+      const schema = await mcp!.call('get_table_schema', { tableName: TABLE })
+      const strings: string[] = []
+      const walk = (value: unknown): void => {
+        if (typeof value === 'string') strings.push(value)
+        else if (Array.isArray(value)) value.forEach(walk)
+        else if (value && typeof value === 'object') Object.values(value).forEach(walk)
+      }
+      walk(schema.structured)
+      try {
+        walk(JSON.parse(schema.text))
+      } catch {
+        strings.push(schema.text)
+      }
+      // pg_indexes writes every definition as "... USING <method> (<columns>)".
+      const leads = new RegExp(`USING \\w+ \\(\\s*"?${column}"?\\s*[,)]`)
+      return strings.find((s) => /CREATE (UNIQUE )?INDEX/.test(s) && leads.test(s)) ?? null
+    }
+    await check('autonomy', 'repaired-in-region', ['table', 'sign-in'], async () => {
+      versionsBeforeFault = new Set(((await operatorJson(versionsPath)).versions ?? []).map((v: { id: string }) => v.id))
+      // The region's repair loop runs at the top of each minute, and home's
+      // observer looks at a project 60 s after an MCP change to it. A fault made
+      // at second 40 or later reaches the region's loop first.
+      const second = new Date().getUTCSeconds()
+      if (second < 40) await new Promise((r) => setTimeout(r, (40 - second) * 1_000))
+      const since = new Date()
+      // With a DEFAULT, ADD COLUMN takes the declared-column path, which adds the
+      // column exactly as written and indexes it only when it REFERENCES a table.
+      // A column named like a reference with no index is the fault
+      // (missing_fk_index, Tier 0), which the loop repairs without asking.
+      await fixture('apply_migration', { sql: `ALTER TABLE ${TABLE} ADD COLUMN ${probeColumn} uuid DEFAULT NULL` })
+      must(!(await indexLeadingWith(probeColumn)), `${probeColumn} was indexed as it was added, so there is no fault to repair`)
+      const deadline = since.getTime() + args.repairWaitMinutes * 60_000
+      let indexedAt: number | null = null
+      for (;;) {
+        const { events } = await operatorJson(
+          `/api/projects/${args.project}/autonomy/events?since=${encodeURIComponent(since.toISOString())}&limit=50`,
+        )
+        const repair = ((events ?? []) as Array<{ action?: string; tableName?: string; full?: string; verified?: boolean; at?: string }>).find(
+          (e) => e.action === 'HEALTH_AUTO_FIXED' && e.tableName === TABLE && String(e.full ?? '').includes(`${TABLE}.${probeColumn}`),
+        )
+        const index = await indexLeadingWith(probeColumn)
+        if (repair) {
+          must(repair.verified === true, `the repair of ${probeColumn} ran but was not confirmed: ${repair.full}`)
+          must(index, `the repair was recorded, but ${TABLE} has no index leading with ${probeColumn}`)
+          const after = repair.at ? seconds(Date.parse(repair.at) - since.getTime()) : 'some time'
+          return `the region's repair loop indexed ${probeColumn} ${after} after the fault, confirmed, with nobody asking`
+        }
+        if (index && indexedAt === null) indexedAt = Date.now()
+        // The loop records its repair once it is verified, moments after the
+        // index. An index with no such record a while later was made elsewhere.
+        if (indexedAt !== null && Date.now() - indexedAt > 90_000) {
+          throw new Error(
+            `${probeColumn} was indexed, but the region's repair loop recorded no confirmed repair: home repaired it, ` +
+              `which proves nothing about ${args.region}. Run again`,
+          )
+        }
+        if (Date.now() > deadline) {
+          throw new Error(
+            `${probeColumn} was not repaired within ${args.repairWaitMinutes} minutes. The region's tasks need ` +
+              'ENABLE_AUTONOMY_RECONCILER and ENABLE_AUTONOMY_LIVE_EXECUTION; the autonomy trust report says whether ' +
+              'the loop ran in shadow or was held back',
+          )
+        }
+        await new Promise((r) => setTimeout(r, 10_000))
+      }
+    })
+    await check('autonomy', 'probe-rolled-back', ['repaired-in-region'], async () => {
+      // The first restore point recorded after the drill began is the one taken
+      // just before the probe column was added.
+      const recorded = (((await operatorJson(versionsPath)).versions ?? []) as Array<{ id: string; versionNum: number }>)
+        .filter((v) => !versionsBeforeFault!.has(v.id))
+        .sort((a, b) => a.versionNum - b.versionNum)
+      must(recorded.length > 0, `no restore point was recorded before ${probeColumn} was added`)
+      const res = await theFetch(homeUrl(versionsPath), asOperator({ method: 'POST', body: JSON.stringify({ versionId: recorded[0].id }) }))
+      const body = await json(res)
+      must(res.status === 200 && body.success === true, `rolling ${probeColumn} back answered ${res.status}: ${String(body.message ?? body.error ?? '').slice(0, 200)}`)
+      must(!(await indexLeadingWith(probeColumn)), `${probeColumn}'s index is still there after the rollback`)
+      const state = await mcp!.call('read_backend_state', { section: 'schema' })
+      must(!state.text.includes(probeColumn), `${probeColumn} is still in the schema after the rollback`)
+      return `rolled back to v${recorded[0].versionNum}: ${probeColumn} and its index are gone`
+    })
+
     // ── recovery ─────────────────────────────────────────────────────────────
     log('\n── recovery (a snapshot, taken and restored in the region)')
     let snapshotId: string | null = null
@@ -907,6 +1009,11 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
     const rolledBack = results.find((r) => r.phase === 'rollback' && r.check === 'undone')?.status === 'pass'
     if (results.some((r) => r.phase === 'rollback' && r.check === 'change' && r.status === 'pass') && !rolledBack) {
       log(`  note  qualify_rollback_${run} may still exist; drop it from the console`)
+    }
+    const drilled = results.some((r) => r.phase === 'autonomy' && r.check === 'repaired-in-region' && r.status !== 'skip')
+    const probeGone = results.find((r) => r.phase === 'autonomy' && r.check === 'probe-rolled-back')?.status === 'pass'
+    if (drilled && !probeGone) {
+      log(`  note  ${TABLE} may still have the column qualify_probe_${run}_id; roll it back from the console`)
     }
     if (mcp) await (mcp as Mcp).close()
     // Signed out with both of the session's tokens, so neither outlives the run.

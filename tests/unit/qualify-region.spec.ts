@@ -42,6 +42,7 @@ describe('arguments', () => {
     expect(args.skipRevocation).toBe(false)
     expect(args.approvalWaitMinutes).toBe(10)
     expect(args.jobWaitMinutes).toBe(15)
+    expect(args.repairWaitMinutes).toBe(6)
     expect(args.operator).toBe('qualify-operator@example.com')
     expect(args.operatorPassword).toBe(ENV.BACKENLY_QUALIFY_OPERATOR_PASSWORD)
     expect(args.operatorTotp).toBeNull()
@@ -66,6 +67,9 @@ describe('arguments', () => {
     expect(() => parseArgs(ARGV, { ...ENV, BACKENLY_QUALIFY_OPERATOR_TOTP: '12345' })).toThrow(/six-digit/)
     expect(parseArgs([...ARGV, '--job-wait-minutes', '30'], ENV).jobWaitMinutes).toBe(30)
     expect(() => parseArgs([...ARGV, '--job-wait-minutes', '0'], ENV)).toThrow(/--job-wait-minutes/)
+    expect(parseArgs([...ARGV, '--repair-wait-minutes', '12'], ENV).repairWaitMinutes).toBe(12)
+    expect(() => parseArgs([...ARGV, '--repair-wait-minutes', '0'], ENV)).toThrow(/--repair-wait-minutes/)
+    expect(() => parseArgs([...ARGV, '--repair-wait-minutes', '61'], ENV)).toThrow(/--repair-wait-minutes/)
   })
 
   it('refuses a run that would not test the region', () => {
