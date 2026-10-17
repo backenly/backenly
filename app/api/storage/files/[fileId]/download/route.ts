@@ -22,6 +22,7 @@ import { recordEgress } from '@/lib/usage/egress'
 import { projectRestriction, restrictionDetails, restrictionMessage, RESTRICTED_CODE } from '@/lib/usage/restrictions'
 import { DOWNLOAD_URL_TTL_SECONDS, signCdnUrl, signedCdnConfig } from '@/lib/storage/cdn'
 import { servedHere } from '@/lib/data-plane/serving'
+import { refusalForState } from '@/lib/projects/serving-response'
 
 /**
  * GET /api/storage/files/{fileId}/download — stream the file bytes.
@@ -93,6 +94,18 @@ export async function GET(request: NextRequest, props: { params: Promise<{ fileI
     // never reaches this code, so a pause cannot stop that and nothing claims
     // it does.
     const exporting = reader.kind === 'signed' && reader.purpose === 'export'
+
+    // A locked project is sealed: no file leaves through this route to anyone
+    // but its own members, export links included, with the runtime gate's
+    // answer. A state that cannot be read is not served either (try again),
+    // as the gate does.
+    if (reader.kind !== 'operator') {
+      const state = await getProjectServingState(record.projectId)
+      if (state.kind === 'locked' || state.kind === 'unavailable') {
+        return refusalForState(record.projectId, state)!
+      }
+    }
+
     if (reader.kind !== 'operator' && !exporting) {
       const serving = await getProjectServingState(record.projectId)
       if (serving.kind === 'paused') {
