@@ -24,7 +24,6 @@ const AI_WINDOW_MS = 60_000 // 1-minute sliding window
 
 // Limits per user per minute
 const AI_CHAT_LIMIT          = 20  // chat route   — model inference + DB reads
-const AI_EXECUTE_LIMIT       = 10  // execute route — model inference + mutations
 const AGENT_EXECUTION_LIMIT  = 10  // autonomous agent: schema writes + integrations
 const SCHEMA_WRITE_LIMIT     = 15  // table/column mutations
 const INTEGRATION_SETUP_LIMIT = 5  // integration executor calls (expensive, has side-effects)
@@ -77,18 +76,6 @@ export async function enforceAiChatRateLimit(userId: string, projectId: string):
     return { allowed: true, limit: AI_CHAT_LIMIT, remaining: AI_CHAT_LIMIT, resetAt: Date.now() + AI_WINDOW_MS }
   }
   return dbWindowCheck(userId, projectId, '/api/ai/chat', AI_CHAT_LIMIT)
-}
-
-/**
- * Rate-limit the AI execute endpoint by userId.
- * Async — await it before any OpenAI calls.
- * DB-backed so limits are shared across all server instances.
- */
-export async function enforceAiExecuteRateLimit(userId: string, projectId: string): Promise<RateLimitResult> {
-  if (process.env.NODE_ENV === 'test' || process.env.ENGINE_MODE === 'integration') {
-    return { allowed: true, limit: AI_EXECUTE_LIMIT, remaining: AI_EXECUTE_LIMIT, resetAt: Date.now() + AI_WINDOW_MS }
-  }
-  return dbWindowCheck(userId, projectId, '/api/ai/execute', AI_EXECUTE_LIMIT)
 }
 
 /**

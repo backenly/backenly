@@ -160,8 +160,6 @@ describe('every workspace module resolves through the shared helper', () => {
     'app/api/workspace/download/route.ts',
     'app/api/workspace/files/content/route.ts',
     'app/api/workspace/files/route.ts',
-    'lib/ai/execution-engine.ts',
-    'lib/ai/execution-journal.ts',
     'lib/execution/schema-writer.ts',
     'lib/projects/purge.ts',
     'lib/services/aiWorkspace.ts',
