@@ -25,6 +25,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { v1ApiMiddleware } from '@/lib/api/v1/middleware'
 import { listenerHub } from '@/lib/realtime/listener-hub'
 import { redeemRealtimeTicketParam } from '@/lib/realtime/ticket-auth'
+import { createVisibleEventQueue, type RealtimeChange, type RealtimeSubscriber } from '@/lib/realtime/visibility'
 import { getProjectServingState, PAUSED_CODE, PAUSED_MESSAGE } from '@/lib/projects/serving-state'
 import { LOCKED_MESSAGE } from '@/lib/projects/serving-response'
 
@@ -45,6 +46,9 @@ async function handleGET(request: NextRequest, props: { params: Promise<{ projec
   // signed with the project's own secret. `?apiKey=` still works for existing
   // clients — see the deprecation note below — but it puts a long-lived
   // credential into every access log it passes through.
+  // Who the stream is opened as: each change is delivered only if this
+  // identity could read the row (lib/realtime/visibility.ts).
+  let subscriber: RealtimeSubscriber
   const ticket = request.nextUrl.searchParams.get('ticket')
   if (ticket) {
     const redeemed = await redeemRealtimeTicketParam(params.projectId, ticket)
@@ -54,12 +58,24 @@ async function handleGET(request: NextRequest, props: { params: Promise<{ projec
     if (redeemed.ok === false) {
       return NextResponse.json({ error: redeemed.message, code: redeemed.code }, { status: 401 })
     }
+    subscriber = {
+      projectId: params.projectId,
+      endUserId: redeemed.claims?.endUserId ?? null,
+      endUserRole: redeemed.claims?.endUserRole ?? null,
+      serviceRole: !!redeemed.claims?.serviceRole,
+    }
   } else {
     // Authenticate via API key (supports ?apiKey= query param since EventSource
     // cannot send Authorization headers in the browser). DEPRECATED for browser
     // clients: prefer POST /realtime/ticket.
     const middleware = await v1ApiMiddleware(request, params)
     if (middleware.response) return middleware.response
+    subscriber = {
+      projectId: params.projectId,
+      endUserId: middleware.context.endUserId ?? null,
+      endUserRole: middleware.context.endUserRole ?? null,
+      serviceRole: !!middleware.context.apiKey?.serviceRole,
+    }
   }
 
   const { projectId } = params
@@ -99,9 +115,10 @@ async function handleGET(request: NextRequest, props: { params: Promise<{ projec
       request.signal.addEventListener('abort', cleanup)
 
       try {
+        const deliver = createVisibleEventQueue(subscriber, (change) => send(change))
         const result = await listenerHub.subscribe(projectId, (payload) => {
           if (!tableFilter || payload.table === tableFilter) {
-            send(payload)
+            deliver(payload as RealtimeChange)
           }
         })
 
