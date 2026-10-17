@@ -3211,7 +3211,12 @@ export async function executeAction(
           console.log('[Replanning] Generated new action:', newAction.action)
 
           // Retry with the replanned action — pass executionId so all attempts share a run
-          return await executeAction(newAction, projectId, apiKey, retryCount + 1, runId, allowReplan)
+          //
+          // The replacement carries no approval: one given for the failed action
+          // was for that action, and a model's output cannot grant one. So a
+          // medium- or high-risk replacement waits for the owner in the gate
+          // below like any other unconfirmed action.
+          return await executeAction(withoutApprovalParams(newAction), projectId, apiKey, retryCount + 1, runId, allowReplan)
         } catch (replanError: any) {
           console.error('[Replanning] Failed to replan:', replanError.message)
           // Fall through to return original error
@@ -3290,6 +3295,27 @@ export async function executeAction(
       error: error.message,
     }
   }
+}
+
+/**
+ * The params that carry an approval, or name who gave one. `confirmed` opens
+ * the executor's approval gates, and the deploy, rollback and frontend
+ * connection executors also take `force` as the go-ahead. Deploy and rollback
+ * record `actorVia` and `actorUserId` as who authorised the call. runExecutor
+ * (lib/ai/brain/tools.ts) sets them from how the call was authorised.
+ */
+const APPROVAL_PARAMS = ['confirmed', 'force', 'actorVia', 'actorUserId'] as const
+
+/**
+ * A replanned action as it may run: a model picked it from an error, so it
+ * keeps none of the approval params its output may name.
+ */
+export function withoutApprovalParams(action: AIAction): AIAction {
+  const params = action?.params
+  if (!params || typeof params !== 'object' || Array.isArray(params)) return action
+  const kept: Record<string, any> = { ...params }
+  for (const key of APPROVAL_PARAMS) delete kept[key]
+  return { ...action, params: kept }
 }
 
 /**

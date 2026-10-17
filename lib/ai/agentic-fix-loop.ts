@@ -364,7 +364,13 @@ function failedKey(checks: BehavioralCheck[]): string {
     .join('|')
 }
 
-async function applyCandidate(
+/**
+ * Apply one fix candidate, as planned. A failed candidate is reported as
+ * failed: the loop's next round decides what to try, so the executor does not
+ * hand the error to a model to pick a different action (no replanning).
+ * Exported for its test.
+ */
+export async function applyCandidate(
   fix: FixCandidate,
   projectId: string,
 ): Promise<{ success: boolean; message: string }> {
@@ -373,6 +379,10 @@ async function applyCandidate(
       executeAction(
         { action: fix.action as AIAction['action'], params: fix.params } as AIAction,
         projectId,
+        undefined,
+        0,
+        undefined,
+        false,
       ),
     )
     if (governed.error) {

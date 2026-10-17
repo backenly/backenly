@@ -553,9 +553,10 @@ export async function runBrain(
     understandingBlock,
     // A coding agent over MCP: the protected-production gate applies.
     agentSurface: isAgentDoor(input.door),
-    // The brain's loop keeps the executor's replanning, as it always has;
-    // every other dispatcher caller runs typed calls without it.
-    allowReplan: true,
+    // A failed action is reported to the agent as it failed. The loop does not
+    // hand the error to a model to pick a different action; the agent that
+    // asked decides what to do next, as on every other dispatcher path.
+    allowReplan: false,
     createdThisTurn: new Set<string>(),
     onToolEvent: (e) => {
       if (e.phase === 'start') emit({ type: 'tool_start', tool: e.tool, title: e.title })
