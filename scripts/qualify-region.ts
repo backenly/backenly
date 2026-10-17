@@ -493,7 +493,10 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
       const res = await theFetch(apiUrl('/api/health'))
       const body = await json(res)
       must(res.status === 200 && body.healthy === true, `GET /api/health answered ${res.status} ${JSON.stringify(body).slice(0, 200)}`)
-      return 'the region host is healthy (its platform database checks pass)'
+      must(body.region === args.region, `the region host reports serving ${body.region}, not ${args.region}`)
+      must(body.degraded === false, `the region host is degraded: ${JSON.stringify(body.dependencies ?? {}).slice(0, 300)}`)
+      const copy = body.dependencies?.authProjection
+      return `the region host is ready and not degraded: its own database answers, home answers, authorization copy ${copy?.mode ?? 'unknown'}${typeof copy?.ageMs === 'number' ? ` ${(copy.ageMs / 1000).toFixed(1)} s old` : ''}`
     })
     await check('region', 'project-health', [], async () => {
       const res = await theFetch(apiUrl(`/api/v1/${args.project}/healthz`), { headers: { 'x-api-key': args.projectKey } })
