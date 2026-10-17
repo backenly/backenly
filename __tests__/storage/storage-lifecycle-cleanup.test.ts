@@ -36,7 +36,7 @@
 import { randomUUID } from 'crypto'
 import type { S3Client } from '@aws-sdk/client-s3'
 import { prisma } from '@/lib/db/prisma'
-import { runLifecycleCleanup } from '@/lib/storage/storage-lifecycle'
+import { runLifecycleCleanup, storagePurgeMode, sweepRegionStorage } from '@/lib/storage/storage-lifecycle'
 
 const DB_URL = process.env.TEST_DATABASE_URL
 
@@ -312,5 +312,54 @@ describe("each region's sweep covers its own bucket and its own projects", () =>
       await prisma.storageBucket.deleteMany({ where: { projectId: f.projectId } })
       await prisma.project.delete({ where: { id: f.projectId } })
     }
+  })
+})
+
+describe('the daily sweep', () => {
+  it('runs in dry-run unless BACKENLY_STORAGE_PURGE says enforce, and never enforces by default', () => {
+    expect(storagePurgeMode(undefined)).toBe('dry-run')
+    expect(storagePurgeMode('')).toBe('dry-run')
+    expect(storagePurgeMode('yes')).toBe('dry-run')
+    expect(storagePurgeMode(' Enforce ')).toBe('enforce')
+    expect(storagePurgeMode('off')).toBe('off')
+  })
+
+  it('reports in dry-run what it would delete, and deletes nothing', async () => {
+    const f = await fixtureProject()
+    const s3 = new FakeS3()
+    const key = `${f.projectId}/expired-${randomUUID()}.png`
+    const row = await fileRow({ ...f, path: key, ageMs: 10 * DAY, deletedAgoMs: 8 * DAY })
+    s3.put(key, 10 * DAY)
+
+    const result = await sweepRegionStorage('ap-south-1', { mode: 'dry-run', location: { client: s3.asClient(), bucket: 'home-bucket' } })
+
+    expect(result?.deletedSoftDeletes).toBeGreaterThanOrEqual(1)
+    expect(await rowById(row.id)).not.toBeNull()
+    expect(s3.deleted).toHaveLength(0)
+  })
+
+  it('deletes in enforce a file deleted past the restore window, and keeps one inside it', async () => {
+    const f = await fixtureProject()
+    const s3 = new FakeS3()
+    const expired = `${f.projectId}/expired-${randomUUID()}.png`
+    const restorable = `${f.projectId}/restorable-${randomUUID()}.png`
+    const gone = await fileRow({ ...f, path: expired, ageMs: 10 * DAY, deletedAgoMs: 8 * DAY })
+    const kept = await fileRow({ ...f, path: restorable, ageMs: 10 * DAY, deletedAgoMs: 6 * DAY })
+    s3.put(expired, 10 * DAY)
+    s3.put(restorable, 10 * DAY)
+
+    await sweepRegionStorage('ap-south-1', { mode: 'enforce', location: { client: s3.asClient(), bucket: 'home-bucket' } })
+
+    expect(await rowById(gone.id)).toBeNull()
+    expect(s3.objects.has(expired)).toBe(false)
+    expect(await rowById(kept.id)).not.toBeNull()
+    expect(s3.objects.has(restorable)).toBe(true)
+  })
+
+  it('does nothing when off', async () => {
+    const s3 = new FakeS3()
+    s3.put(`orphan-${randomUUID()}.bin`, 10 * DAY)
+    expect(await sweepRegionStorage('ap-south-1', { mode: 'off', location: { client: s3.asClient(), bucket: 'home-bucket' } })).toBeNull()
+    expect(s3.deleted).toHaveLength(0)
   })
 })
