@@ -256,7 +256,8 @@ BEGIN
       ('public.auth_projection_state'),
       ('public.auth_projection_projects'),
       ('public.auth_projection_keys'),
-      ('public.auth_projection_branches')
+      ('public.auth_projection_branches'),
+      ('public.auth_rate_windows')
     ) AS x(relation)
   LOOP
     IF to_regclass(r.relation) IS NULL THEN

@@ -11,6 +11,7 @@
  */
 
 import { Request, Response, NextFunction } from 'express'
+import { countInRegion, regionalRateCounting, type RateKey } from '@/lib/auth-projection/rate'
 import { clientIpFromNodeRequest } from '@/lib/security/client-ip'
 import crypto from 'crypto'
 import { prisma } from '@/lib/db'
@@ -188,6 +189,16 @@ async function enforceHardRateLimit(apiKeyRecord: any): Promise<RateLimitDecisio
     remaining: Math.max(0, limit - apiKeyRecord.requestCount - 1),
     resetAt: apiKeyRecord.resetAt,
   }
+}
+
+/**
+ * Count a request against a key's window: in the region when it counts there
+ * (lib/auth-projection/rate.ts), at home otherwise.
+ */
+export async function enforceKeyRateLimit(key: RateKey): Promise<RateLimitDecision> {
+  const region = regionalRateCounting()
+  if (region) return countInRegion(region, key)
+  return enforceRateLimitByKeyId(key.id)
 }
 
 /**

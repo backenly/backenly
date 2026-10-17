@@ -469,7 +469,9 @@ describe('the application, against the database the procedure built', () => {
       await refusal(
         app(),
         `INSERT INTO public.auth_projection_projects ("id", "version") VALUES ('x', 1); DELETE FROM public.auth_projection_projects WHERE "id" = 'x'; ` +
-          `SELECT count(*) FROM public.auth_projection_keys; SELECT count(*) FROM public.auth_projection_branches; SELECT count(*) FROM public.auth_projection_state`,
+          `SELECT count(*) FROM public.auth_projection_keys; SELECT count(*) FROM public.auth_projection_branches; SELECT count(*) FROM public.auth_projection_state; ` +
+          `INSERT INTO public.auth_rate_windows ("keyId", "windowSeconds", "keyMark", "resetAt", "count", "lastUsedAt") VALUES ('x', 60, 'm', now(), 1, now()); ` +
+          `DELETE FROM public.auth_rate_windows WHERE "keyId" = 'x'`,
       ),
     ).toBeNull()
     // The backup role reads every workspace, for pg_dump.
@@ -478,7 +480,7 @@ describe('the application, against the database the procedure built', () => {
     const authenticator = loginUrl('backenly_authenticator')
     expect(await refusal(authenticator, `SELECT count(*) FROM public.schema_drift_events`)).toMatch(/permission denied/)
     expect(await refusal(authenticator, `SELECT count(*) FROM public.regional_bodies`)).toMatch(/permission denied/)
-    for (const copy of ['auth_projection_state', 'auth_projection_projects', 'auth_projection_keys', 'auth_projection_branches']) {
+    for (const copy of ['auth_projection_state', 'auth_projection_projects', 'auth_projection_keys', 'auth_projection_branches', 'auth_rate_windows']) {
       expect(await refusal(authenticator, `SELECT count(*) FROM public.${copy}`)).toMatch(/permission denied/)
       // Nor any role it can become: the copy holds key hashes and signing secrets.
       for (const apiRole of ['anon', 'authenticated', 'service_role']) {

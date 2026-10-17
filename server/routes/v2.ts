@@ -52,7 +52,7 @@ import { ensureSchemaRegistered } from '@/lib/postgrest/registration'
 import { getProjectIdFromAuth, refuseIfKeyLacksMethodPermission } from './dynamic'
 import { ENVIRONMENT_HEADER, environmentHeaderValue } from '@/lib/branches/key-scope'
 import { isKeyPlacementRefusal } from '@/lib/security/key-placement'
-import { enforceRateLimitByKeyId } from '../lib/auth'
+import { enforceKeyRateLimit, enforceRateLimitByKeyId } from '../lib/auth'
 import { asyncRoute } from '../lib/async-route'
 import { touchProjectActivity } from '@/lib/projects/activity'
 import {
@@ -131,7 +131,7 @@ router.all('/:projectId/*', asyncRoute(async (req: Request, res: Response) => {
   // lift it by changing one character in the URL. Rate limiting has to live on
   // every door the key opens, not on the one that happened to grow it first.
   if (auth.keyId) {
-    const rl = await enforceRateLimitByKeyId(auth.keyId)
+    const rl = auth.rateKey ? await enforceKeyRateLimit(auth.rateKey) : await enforceRateLimitByKeyId(auth.keyId)
     res.setHeader('X-RateLimit-Remaining', String(rl.remaining))
     res.setHeader('X-RateLimit-Reset', String(Math.floor(rl.resetAt.getTime() / 1000)))
     if (!rl.allowed) {

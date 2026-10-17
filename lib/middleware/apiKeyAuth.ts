@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db/postgres'
 import { trackApiKeyUsage } from '@/lib/services/apiKeyUsage'
 import crypto from 'crypto'
 import { classifyKeyFailure } from './apiKeyFailureDiagnostic'
+import { countInRegion, regionalRateCounting } from '@/lib/auth-projection/rate'
 
 export interface ApiKeyAuthResult {
   authenticated: boolean
@@ -97,6 +98,23 @@ export async function authenticateApiKey(request: NextRequest): Promise<ApiKeyAu
     }
   }
   
+  // Counted in the region once its copy is enforced, by the same counter the
+  // runtime uses for this key (lib/auth-projection/rate.ts).
+  const region = regionalRateCounting()
+  if (region) {
+    const decision = await countInRegion(region, {
+      id: apiKey.id,
+      keyHash,
+      rateLimit: apiKey.rateLimit,
+      rateLimitWindow: apiKey.rateLimitWindow,
+    })
+    return {
+      authenticated: true,
+      apiKey: { id: apiKey.id, userId: apiKey.userId, permissions: apiKey.permissions, role: apiKey.role },
+      ...(decision.allowed ? {} : { rateLimited: true, error: 'Rate limit exceeded' }),
+    }
+  }
+
   // Check rate limits
   const now = new Date()
   const resetAt = apiKey.resetAt || new Date(now.getTime() + apiKey.rateLimitWindow * 1000)
