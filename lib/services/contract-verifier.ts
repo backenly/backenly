@@ -32,6 +32,7 @@ import { isDataPlaneOutage } from '@/lib/core/fix-actions'
 import type { RawFinding } from '@/lib/core/types'
 import { internalTrafficHeaders } from '@/lib/traffic/request-recorder'
 import { PLATFORM_FAULT_HEADER } from '@/lib/runtime/forward-to-runtime'
+import { quotesKeptHere } from '@/lib/data-plane/residency'
 
 const PROBE_TIMEOUT_MS = 8_000
 
@@ -168,7 +169,16 @@ function describeBody(res: { body: any; raw: string }): string {
 /** `returned 404 — No API definition for "posts"` (or just `returned 502`). */
 function statusLine(res: { status: number; body: any; raw: string }): string {
   const why = describeBody(res)
-  return `returned ${res.status}${why ? ` — ${why}` : ''}`
+  return `returned ${res.status}${why ? `${HANDLER_MESSAGE}${why}` : ''}`
+}
+
+/** What separates a status line from the handler's own message in a probe's detail. */
+const HANDLER_MESSAGE = ' — '
+
+/** A probe's detail without the handler's message: `GET /db/posts returned 500`. */
+export function withoutHandlerMessage(detail: string): string {
+  const at = detail.indexOf(HANDLER_MESSAGE)
+  return at === -1 ? detail : detail.slice(0, at)
 }
 
 // ── Individual probes ──────────────────────────────────────────────────────────
@@ -620,11 +630,19 @@ export async function settleTenantContract(
     }).catch(() => {})
   }
 
+  // A project kept in another region: the finding keeps what failed and how
+  // (the surface, the request, the status, the size of the answer), not what
+  // the answer said. A probe's body, or the handler's message in the status
+  // line, can echo a row or an end user's value, and this row is in the home
+  // region (lib/data-plane/residency.ts).
+  const quote = await quotesKeptHere(projectId)
+
   return broken.map((r): RawFinding => {
     const details = {
       surface: r.surface,
-      detail: r.detail,
-      response: r.response?.slice(0, 300) ?? null,
+      detail: quote ? r.detail : withoutHandlerMessage(r.detail),
+      response: quote ? (r.response?.slice(0, 300) ?? null) : null,
+      ...(quote ? {} : { responseBytes: r.response?.length ?? null }),
       httpStatus: r.status ?? null,
       durationMs: r.durationMs,
       probedAt: new Date().toISOString(),
