@@ -49,9 +49,8 @@ import { checkExposure, type Operation } from '@/lib/postgrest/exposure'
 import { projectPostgrest } from '@/lib/data-plane/regional'
 import { stripUpstreamError } from '@/lib/postgrest/translate'
 import { ensureSchemaRegistered } from '@/lib/postgrest/registration'
-import { getProjectIdFromAuth, refuseIfKeyLacksMethodPermission } from './dynamic'
+import { authRefusalStatus, getProjectIdFromAuth, refuseIfKeyLacksMethodPermission } from './dynamic'
 import { ENVIRONMENT_HEADER, environmentHeaderValue } from '@/lib/branches/key-scope'
-import { isKeyPlacementRefusal } from '@/lib/security/key-placement'
 import { enforceKeyRateLimit, enforceRateLimitByKeyId } from '../lib/auth'
 import { asyncRoute } from '../lib/async-route'
 import { touchProjectActivity } from '@/lib/projects/activity'
@@ -117,7 +116,7 @@ router.all('/:projectId/*', asyncRoute(async (req: Request, res: Response) => {
     // credential, not a failed one. 401 would tell the developer their key is
     // wrong and send them to re-issue it, which is the opposite of the fix: the
     // key is fine, the place it is being used from is not.
-    const status = !auth.success && isKeyPlacementRefusal(auth.code) ? 403 : 401
+    const status = auth.success ? 401 : authRefusalStatus(auth.code)
     return res.status(status).json({
       code: auth.success ? 'PROJECT_MISMATCH' : (auth.code ?? 'UNAUTHORIZED'),
       message: auth.success ? 'This key does not belong to that project.' : (auth.error ?? 'Unauthorized'),

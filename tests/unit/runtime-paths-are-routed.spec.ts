@@ -13,6 +13,14 @@
  * against a stub runtime.
  */
 
+// The project serves. recordedV1 asks the serving gate first, which reads the
+// project's state from the database; this suite has none, and the gate is
+// pinned in tests/integration/next-routes-serving-gate.spec.ts.
+jest.mock('@/lib/projects/serving-response', () => ({
+  ...jest.requireActual('@/lib/projects/serving-response'),
+  servingRefusal: jest.fn(async () => null),
+}))
+
 import fs from 'fs'
 import path from 'path'
 import http from 'http'
