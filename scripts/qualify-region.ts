@@ -43,7 +43,8 @@
  *   auth       two end users sign up; one refreshes its session and signs out
  *   rls        each user sees exactly its own rows, on /api/v1 and on /api/v2
  *              (PostgREST); a caller with no user sees none
- *   realtime   an insert reaches a subscriber of the table within 15 s
+ *   realtime   an insert reaches a subscriber of the table within 15 s; a second
+ *              user's stream receives its own insert and never the first user's
  *   storage    upload, download (bytes equal), delete
  *   functions  the HTTP function answers at the region's host; the sandboxed
  *              one reads the region's table
@@ -704,6 +705,63 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
         }
       } catch (err) {
         if (controller.signal.aborted) throw new Error('no insert event within 15 s')
+        throw err
+      } finally {
+        clearTimeout(timer)
+        controller.abort()
+      }
+    })
+    await check('realtime', 'others-rows-withheld', ['realtime', 'insert-a', 'insert-b'], async () => {
+      // A stream opened as user b: a row user a inserts is not b's to read, so
+      // it must not arrive; the row b inserts right after must. Changes reach a
+      // stream in the order they were made, so a's would have come first.
+      const a = users.a!.client
+      const b = users.b!.client
+      const ticketRes = await theFetch(apiUrl(`/api/v1/${args.project}/realtime/ticket`), {
+        method: 'POST',
+        headers: { 'x-api-key': args.projectKey, 'content-type': 'application/json', 'X-User-Token': b.getUserToken() },
+      })
+      const { ticket } = await json(ticketRes)
+      must(ticketRes.status === 200 && ticket, `the ticket request answered ${ticketRes.status}`)
+      const controller = new AbortController()
+      const stream = await theFetch(apiUrl(`/api/v1/${args.project}/realtime?table=${TABLE}&ticket=${encodeURIComponent(ticket)}`), {
+        headers: { accept: 'text/event-stream' },
+        signal: controller.signal,
+      })
+      must(stream.status === 200 && stream.body, `the stream answered ${stream.status}`)
+      const reader = stream.body!.getReader()
+      const decoder = new TextDecoder()
+      const sse = new SseReader()
+      const othersMarker = `${run}-realtime-not-yours`
+      const ownMarker = `${run}-realtime-yours`
+      let inserted = false
+      const timer = setTimeout(() => controller.abort(), 15_000)
+      try {
+        for (;;) {
+          const { value, done } = await reader.read()
+          if (done) throw new Error('the stream ended before user b\'s own insert arrived')
+          for (const event of sse.push(decoder.decode(value, { stream: true }))) {
+            must(!event.data.includes(othersMarker), "user b's stream received user a's row")
+            let data: { type?: string; table?: string } = {}
+            try {
+              data = JSON.parse(event.data)
+            } catch {
+              continue
+            }
+            if (data.type === 'connected' && !inserted) {
+              inserted = true
+              const theirs = await a[TABLE].create({ owner_id: users.a!.id, body: othersMarker })
+              madeRows.push({ user: 'a', id: theirs.id })
+              const own = await b[TABLE].create({ owner_id: users.b!.id, body: ownMarker })
+              madeRows.push({ user: 'b', id: own.id })
+            }
+            if (data.type === 'insert' && data.table === TABLE && event.data.includes(ownMarker)) {
+              return "user b received its own insert and not user a's, which was made first"
+            }
+          }
+        }
+      } catch (err) {
+        if (controller.signal.aborted) throw new Error("user b's own insert did not arrive within 15 s")
         throw err
       } finally {
         clearTimeout(timer)
