@@ -189,6 +189,11 @@ __tests__/services/realtime-enable-honesty.test.ts
 # non-superuser role, all three writes through the service-role machinery
 # (environment-independent mechanism pin), and the real row effects.
 __tests__/database/dashboard-row-writes-rls.test.ts
+
+# A realtime change reaches a subscriber only if that subscriber could select
+# the row: a real own-rows policy, two end users, anonymous and service-role
+# subscribers, deletes reduced to the key, and a table without a primary key.
+__tests__/database/realtime-row-visibility.test.ts
 # Schema snapshots stored ZERO tables (the parser expected a format the
 # introspector never emitted), so the History snapshot view was always empty
 # and rollback diffed two empty sets and reported "Dropped 0 table(s)" as
