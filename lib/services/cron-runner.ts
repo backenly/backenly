@@ -34,6 +34,8 @@
 
 import { prisma } from '@/lib/db/prisma'
 import { partitionServed, serviceRegion } from '@/lib/data-plane/serving'
+import type { CloudRegionId } from '@/lib/regions'
+import { mirrorRateWindows, pruneRateWindows, regionalRateCounting } from '@/lib/auth-projection/rate'
 import { matchesCronExpression } from '@/lib/services/cron-expression'
 import { executeAiFunction, FunctionEvent } from '@/lib/services/ai-functions/executor'
 import { retryFailedWebhooks } from '@/lib/webhooks/index'
@@ -207,6 +209,21 @@ export async function runRegionalSystemTasks(now: Date = new Date()): Promise<vo
     )
   }
 
+  // Each key's request count, kept in this region once its authorization copy
+  // is enforced, is written home for the console (lib/auth-projection/rate.ts).
+  const countingIn = regionalRateCounting()
+  if (countingIn) {
+    await mirrorAllRateWindows(countingIn).catch(err =>
+      console.error('[SystemTasks] rate window mirror failed:', err?.message)
+    )
+    if (now.getTime() - lastRateWindowPruneAt >= RATE_WINDOW_PRUNE_INTERVAL_MS) {
+      lastRateWindowPruneAt = now.getTime()
+      await pruneRateWindows(countingIn).catch(err =>
+        console.error('[SystemTasks] rate window prune failed:', err?.message)
+      )
+    }
+  }
+
   // Snapshots taken or restored for this region's projects at another
   // region's request (the console and MCP run at home): a project's data is
   // dumped and restored only where it is kept (lib/queue/worker.ts
@@ -218,6 +235,17 @@ export async function runRegionalSystemTasks(now: Date = new Date()): Promise<vo
 
 const BODY_PRUNE_INTERVAL_MS = 60 * 60 * 1000
 let lastBodyPruneAt = 0
+
+const RATE_WINDOW_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000
+let lastRateWindowPruneAt = 0
+
+/** A minute's worth of windows, in batches, so a busy region's counts do not fall behind. */
+async function mirrorAllRateWindows(region: CloudRegionId): Promise<void> {
+  for (let round = 0; round < 10; round++) {
+    if ((await mirrorRateWindows(region)) < 500) return
+  }
+}
+
 const STORAGE_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000
 let lastStorageSweepAt = 0
 

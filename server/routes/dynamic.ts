@@ -18,7 +18,8 @@ import { prisma } from '@/lib/db'
 import { isRegionError, workspaceRawClient } from '@/lib/data-plane/regional'
 import { authorizingKeyByHash, authorizingProject, isAuthorizationUnavailable } from '@/lib/auth-projection/read'
 import { verify } from 'jsonwebtoken'
-import { enforceRateLimitByKeyId } from '../lib/auth'
+import { enforceKeyRateLimit, enforceRateLimitByKeyId } from '../lib/auth'
+import { regionalRateCounting, type RateKey } from '@/lib/auth-projection/rate'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { hashApiKey, resolveEndUserFromToken, crossEnvironmentUserToken } from '../lib/end-user-identity'
 import { handleViaPostgrest } from './postgrest-handler'
@@ -76,6 +77,8 @@ interface AuthResolution {
    * authority in the token (end-user RLS, platform service-role), not here.
    */
   permissions?: string[]
+  /** What the key's rate-limit window is counted by, when a key authenticated. */
+  rateKey?: RateKey
   error?: string
   code?: string
   /** Replaces the generic "include a credential" hint when the credential was present but wrong. */
@@ -167,7 +170,11 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
         }
       }
     }
-    prisma.apiKey.update({ where: { id: key.id }, data: { lastUsed: new Date() } }).catch(console.error)
+    // Counted in the region, the key's last use goes home with its count
+    // (lib/auth-projection/rate.ts), rather than as a write per request.
+    if (!regionalRateCounting()) {
+      prisma.apiKey.update({ where: { id: key.id }, data: { lastUsed: new Date() } }).catch(console.error)
+    }
 
     // A key bound to a branch that was merged or discarded must NOT silently
     // fall back to main. That is the one failure mode branch routing can have
@@ -258,6 +265,7 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
       branchSchema: key.branch?.schemaName,
       branchName: key.branch?.name,
       permissions: key.permissions ?? [],
+      rateKey: { id: key.id, keyHash, rateLimit: key.rateLimit, rateLimitWindow: key.rateLimitWindow },
     }
   }
 
@@ -575,7 +583,7 @@ async function handleDynamicRequest(req: Request, res: Response) {
 
   // Enforce hard rate limit on API key routes (JWT-authed dynamic routes skip this)
   if (keyId) {
-    const rl = await enforceRateLimitByKeyId(keyId)
+    const rl = authResult.rateKey ? await enforceKeyRateLimit(authResult.rateKey) : await enforceRateLimitByKeyId(keyId)
     res.setHeader('X-RateLimit-Remaining', String(rl.remaining))
     res.setHeader('X-RateLimit-Reset', String(Math.floor(rl.resetAt.getTime() / 1000)))
 

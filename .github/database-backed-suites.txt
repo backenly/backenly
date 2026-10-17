@@ -1165,3 +1165,11 @@ tests/integration/auth-projection.spec.ts
 # against the copy's secret, and a delivered lock refuses the project. Both
 # databases and the Express app are the property, so it needs a real Postgres.
 tests/integration/auth-projection-reads.spec.ts
+
+# A key's rate limit counted in its project's region once the copy is enforced:
+# home's rules (limit, a new window when the old one ends, its length changes
+# or the key is rotated), atomic under concurrency, one counter for the Express
+# runtime and the Next-owned routes with no write home per request, the mirror
+# of counts home for the console, and home counting while off or in shadow.
+# Both databases and the real SQL are the property, so it needs a real Postgres.
+tests/integration/auth-rate-windows.spec.ts

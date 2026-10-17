@@ -102,15 +102,37 @@ CREATE TABLE IF NOT EXISTS public.auth_projection_branches (
 CREATE INDEX IF NOT EXISTS "auth_projection_branches_projectId_idx"
     ON public.auth_projection_branches ("projectId");
 
+-- Each key's rate-limit window, counted here rather than at home once the copy
+-- is enforced (lib/auth-projection/rate.ts). A key's requests are all served
+-- in its project's region, so this is the one counter for it. The window
+-- starts again when the key's window length changes or the key is rotated
+-- ("keyMark" is the start of its hash), as home's counter does. The count is
+-- written home periodically, for the console ("mirroredAt").
+CREATE TABLE IF NOT EXISTS public.auth_rate_windows (
+    "keyId"         TEXT        NOT NULL,
+    "windowSeconds" INTEGER     NOT NULL,
+    "keyMark"       TEXT        NOT NULL,
+    "resetAt"       TIMESTAMPTZ NOT NULL,
+    "count"         INTEGER     NOT NULL,
+    "lastUsedAt"    TIMESTAMPTZ NOT NULL,
+    "mirroredAt"    TIMESTAMPTZ,
+
+    CONSTRAINT "auth_rate_windows_pkey" PRIMARY KEY ("keyId")
+);
+
+CREATE INDEX IF NOT EXISTS "auth_rate_windows_lastUsedAt_idx"
+    ON public.auth_rate_windows ("lastUsedAt");
+
 -- Nobody but the installer and the application role.
 REVOKE ALL ON public.auth_projection_state, public.auth_projection_projects,
-              public.auth_projection_keys, public.auth_projection_branches FROM PUBLIC;
+              public.auth_projection_keys, public.auth_projection_branches,
+              public.auth_rate_windows FROM PUBLIC;
 
 DO $$
 BEGIN
   EXECUTE format(
     'GRANT SELECT, INSERT, UPDATE, DELETE ON public.auth_projection_state, public.auth_projection_projects, '
-    'public.auth_projection_keys, public.auth_projection_branches TO %I',
+    'public.auth_projection_keys, public.auth_projection_branches, public.auth_rate_windows TO %I',
     public.backenly_app_role()
   );
 END $$;
