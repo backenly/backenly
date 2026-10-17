@@ -10333,11 +10333,17 @@ async function executeRevokeKey(params: any, projectId: string): Promise<Executi
     if (!key) return { success: false, message: `API key "${keyId}" not found` }
 
     await prisma.apiKey.delete({ where: { id: keyId } })
+    const { confirmPropagation, propagationSentence } = await import('@/lib/auth-projection/confirm')
+    const propagation = await confirmPropagation({ entity: 'api_key', entityId: keyId })
+    const where = propagationSentence(propagation)
 
     return {
       success: true,
-      message: `✅ API key \`${key.keyPrefix}...\` (${key.name}) revoked. It can no longer be used.`,
-      data: { revoked: true, keyId },
+      message:
+        propagation.status === 'pending'
+          ? `API key \`${key.keyPrefix}...\` (${key.name}) revoked at home. ${where}`
+          : `✅ API key \`${key.keyPrefix}...\` (${key.name}) revoked. It can no longer be used.${where ? ` ${where}` : ''}`,
+      data: { revoked: true, keyId, propagation },
     }
   } catch (error: any) {
     return { success: false, message: `Failed to revoke key: ${error.message}`, error: error.message }
@@ -10373,11 +10379,20 @@ async function executeRotateKey(params: any, projectId: string): Promise<Executi
       // one was not on the list. See lib/auth/api-key-plaintext.ts.
       data: { key: plaintextForStorage(), keyPrefix: newPrefix, keyHash: newHash },
     })
+    // The old secret stops working in the project's region once the region has
+    // the rotation (lib/auth-projection/confirm.ts).
+    const { confirmPropagation, propagationSentence } = await import('@/lib/auth-projection/confirm')
+    const propagation = await confirmPropagation({ entity: 'api_key', entityId: keyId })
+    const where = propagationSentence(propagation)
+    const oldKey =
+      propagation.status === 'pending'
+        ? `The old key is invalid at home. ${where}`
+        : `Old key is now invalid.${where ? ` ${where}` : ''}`
 
     return {
       success: true,
-      message: `✅ **API key rotated.**\n\n**New key (copy now — shown once):**\n\`\`\`\n${newKeyValue}\n\`\`\`\n\nOld key is now invalid.`,
-      data: { rotated: true, keyId, newKey: newKeyValue },
+      message: `✅ **API key rotated.**\n\n**New key (copy now — shown once):**\n\`\`\`\n${newKeyValue}\n\`\`\`\n\n${oldKey}`,
+      data: { rotated: true, keyId, newKey: newKeyValue, propagation },
     }
   } catch (error: any) {
     return { success: false, message: `Failed to rotate key: ${error.message}`, error: error.message }
@@ -10443,11 +10458,16 @@ async function executeSetKeyPermissions(params: any, projectId: string): Promise
 
     const before = key.permissions
     await prisma.apiKey.update({ where: { id: keyId }, data: { permissions } })
+    // A narrowed key keeps its old reach in its project's region until the
+    // region has the change (lib/auth-projection/confirm.ts).
+    const { confirmPropagation, propagationSentence } = await import('@/lib/auth-projection/confirm')
+    const propagation = await confirmPropagation({ entity: 'api_key', entityId: keyId })
+    const where = propagationSentence(propagation)
 
     return {
       success: true,
-      message: `✅ API key \`${key.keyPrefix}...\` permissions updated: ${before.join(', ') || '(none)'} → ${permissions.join(', ')}`,
-      data: { keyId, permissions, previousPermissions: before },
+      message: `✅ API key \`${key.keyPrefix}...\` permissions updated: ${before.join(', ') || '(none)'} → ${permissions.join(', ')}${where ? ` ${where}` : ''}`,
+      data: { keyId, permissions, previousPermissions: before, propagation },
     }
   } catch (error: any) {
     return { success: false, message: `Failed to set permissions: ${error.message}`, error: error.message }
