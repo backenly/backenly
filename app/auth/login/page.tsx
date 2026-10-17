@@ -4,7 +4,7 @@ import { useState, useEffect, Suspense } from 'react'
 import Link from 'next/link'
 import { Icon } from '@iconify/react'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { login } from '@/lib/api/auth'
+import { login, LoginError } from '@/lib/api/auth'
 import { useUserSession } from '@/lib/hooks/useUserSession'
 import { GlobalLoading } from '@/components/ui/GlobalLoading'
 import { registerSiteIcons } from '@/lib/icons/registry'
@@ -39,6 +39,8 @@ const OAUTH_ERRORS: Record<string, string> = {
   claim_requires_setup_token:
     'This deployment has not been claimed yet. Its operator claims it on the sign-up page with the setup token that npm run selfhost printed; Google and GitHub sign-in work after that.',
   blocked: 'This account cannot sign in. Contact support if you think that is wrong.',
+  second_factor_required:
+    'This account has two-factor authentication turned on. Sign in with your email, password and authenticator code instead of Google or GitHub.',
   signup_not_allowed: 'New accounts are not being accepted right now.',
   token_failed: 'Sign-in with that provider did not complete. Please try again.',
   userinfo_failed: 'Sign-in with that provider did not complete. Please try again.',
@@ -51,7 +53,11 @@ function LoginForm() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
-  const [errors, setErrors] = useState<{ email?: string; password?: string }>({})
+  const [errors, setErrors] = useState<{ email?: string; password?: string; totpCode?: string }>({})
+  // Shown once the server asks for it: an account with two-factor
+  // authentication signs in with its password and its authenticator's code.
+  const [needsCode, setNeedsCode] = useState(false)
+  const [totpCode, setTotpCode] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [showEmailForm, setShowEmailForm] = useState(false)
   const [oauthProviders, setOauthProviders] = useState<{ google: boolean; github: boolean } | null>(null)
@@ -76,6 +82,9 @@ function LoginForm() {
     if (message) {
       setErrors({ password: message })
       setIsSubmitting(false)
+      // This one sends the person to the email form, so open it: the message
+      // shows under the password field, which the provider view does not have.
+      if (errorParam === 'second_factor_required') setShowEmailForm(true)
     }
   }, [errorParam])
 
@@ -104,15 +113,27 @@ function LoginForm() {
       setErrors({ email: emailError, password: undefined })
       return
     }
+    if (needsCode && !totpCode.trim()) {
+      setErrors({ totpCode: 'Enter the code from your authenticator app, or a backup code' })
+      return
+    }
     setErrors({})
     setIsSubmitting(true)
     try {
-      await login({ email, password })
+      await login({ email, password, ...(needsCode ? { totpCode: totpCode.trim() } : {}) })
       setTimeout(() => {
         window.location.href = redirectUrl
       }, 200)
     } catch (error) {
-      setErrors({ password: error instanceof Error ? error.message : 'Login failed' })
+      const code = error instanceof LoginError ? error.code : null
+      if (code === 'TOTP_REQUIRED') {
+        setNeedsCode(true)
+        setErrors({})
+      } else if (code === 'TOTP_INVALID') {
+        setErrors({ totpCode: 'That code is not valid. Check your authenticator app and try again.' })
+      } else {
+        setErrors({ password: error instanceof Error ? error.message : 'Login failed' })
+      }
       setIsSubmitting(false)
     }
   }
@@ -218,8 +239,26 @@ function LoginForm() {
                 </Link>
               </div>
 
+              {needsCode && (
+                <div className="flex flex-col gap-2">
+                  <FieldLabel htmlFor="totp-code">Authenticator code</FieldLabel>
+                  <FieldInput
+                    id="totp-code"
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    autoFocus
+                    value={totpCode}
+                    onChange={(e) => setTotpCode(e.target.value)}
+                    placeholder="6-digit code or a backup code"
+                    disabled={isSubmitting}
+                    error={errors.totpCode}
+                  />
+                </div>
+              )}
+
               <PrimaryButton type="submit" disabled={isSubmitting} loading={isSubmitting}>
-                {isSubmitting ? 'Signing in…' : 'Sign in'}
+                {isSubmitting ? 'Signing in…' : needsCode ? 'Verify and sign in' : 'Sign in'}
               </PrimaryButton>
             </form>
 

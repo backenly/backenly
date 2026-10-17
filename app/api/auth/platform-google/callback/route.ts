@@ -8,6 +8,7 @@ import { createSession } from '@/lib/auth/session'
 import { assertSignupAllowed, isBlocked } from '@/lib/platform-controls'
 import { consume, AUTH_LIMITS, clientIp } from '@/lib/security/auth-rate-limit'
 import { googleVerifiedEmail } from '@/lib/auth/oauth/verified-email'
+import { providerSignInRefusal } from '@/lib/auth/oauth/second-factor'
 import { oauthMayCreateAccount } from '@/lib/auth/setup-token'
 
 /**
@@ -120,6 +121,13 @@ export async function GET(request: NextRequest) {
     where: { email },
     include: { role: true },
   })
+  // An account with two-factor authentication signs in with its password and
+  // authenticator code. Asked before anything is written to the account, so
+  // this sign-in links no provider and issues no session for it.
+  const refusal = providerSignInRefusal(user)
+  if (refusal) {
+    return NextResponse.redirect(`${appUrl()}/auth/login?error=${refusal}`)
+  }
   if (!user) {
     // An OAuth round trip carries no setup token, so it cannot claim a
     // self-hosted deployment that is waiting for one.
