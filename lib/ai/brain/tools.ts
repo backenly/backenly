@@ -339,7 +339,8 @@ export interface ToolDispatchContext {
    * never swapped for a different action it did not ask for. The MCP tool
    * route and approved calls used to inherit replanning, so a failed typed
    * call could run a model-chosen action and spend uncharged model budget.
-   * Only the brain's own loop opts in.
+   * No dispatcher caller opts in: the brain's loop reports a failure to its
+   * agent the same way.
    */
   allowReplan?: boolean
   /**
