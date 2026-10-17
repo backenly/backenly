@@ -356,15 +356,23 @@ describe('delivery', () => {
     expect((await copiedKeys(doomed)).map((k) => k.id)).toEqual([doomedKey.id])
     expect((await copiedKeys(leaversProject)).map((k) => k.id)).toEqual([leaversKey.id])
 
-    await deleteProjectCompletely(doomed)
-    await deleteAccountCompletely(leaver)
-    expect((await deliverRegion(REGION)).outcome).toBe('delivered')
+    try {
+      await deleteProjectCompletely(doomed)
+      await deleteAccountCompletely(leaver)
+      expect((await deliverRegion(REGION)).outcome).toBe('delivered')
 
-    for (const gone of [doomed, leaversProject]) {
-      expect(await copiedProject(gone)).toBeUndefined()
-      expect(await copiedKeys(gone)).toEqual([])
+      for (const gone of [doomed, leaversProject]) {
+        expect(await copiedProject(gone)).toBeUndefined()
+        expect(await copiedKeys(gone)).toEqual([])
+      }
+      expect((await copyFreshness(REGION)).fresh).toBe(true)
+    } finally {
+      // Each deletion queues its purge for the region, whose database this
+      // suite drops: not left for a later suite's purge pass to trip over.
+      await prisma.backgroundJob.deleteMany({
+        where: { type: 'purge_project', OR: [doomed, leaversProject].map((id) => ({ payload: { path: ['projectId'], equals: id } })) },
+      })
     }
-    expect((await copyFreshness(REGION)).fresh).toBe(true)
   })
 
   it('never copies a signing secret in the clear', async () => {
