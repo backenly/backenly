@@ -459,7 +459,9 @@ export async function resetEndUserPassword(
 
     // Update the user's password — service-role so the UPDATE bypasses
     // own_rows RLS that would otherwise gate the row on app.current_user_id.
-    // Column names come from the live schema descriptor, never hardcoded.
+    // Column names come from the live schema descriptor, never hardcoded, and
+    // the id is bound as the column's own type: a bare $2 arrives as text, and
+    // on a uuid `id` (the canonical shape) every reset failed with 42883.
     const setParts = [`"${usersSchema.passwordColumn}" = $1`]
     if (usersSchema.updatedAtColumn) setParts.push(`"${usersSchema.updatedAtColumn}" = NOW()`)
     await executeWithUserContext(
@@ -468,15 +470,16 @@ export async function resetEndUserPassword(
       true,
       `UPDATE "${schemaName}"."users"
          SET ${setParts.join(', ')}
-         WHERE id = $2`,
+         WHERE id = $2${userIdCast(usersSchema)}`,
       [hashedPassword, user.id],
     )
 
-    // Mark the reset token as used (single-use enforcement)
+    // Mark the reset token as used (single-use enforcement). The table's id is
+    // the uuid this file creates it with.
     await db.$executeRawUnsafe(
       `UPDATE "${schemaName}"."_password_resets"
          SET used_at = NOW()
-         WHERE id = $1`,
+         WHERE id = $1::uuid`,
       reset.id,
     )
 
@@ -576,8 +579,10 @@ async function consumeToken(
   const row = rows[0]
   if (row.used_at) return { error: 'This link has already been used.' }
   if (new Date(row.expires_at) < new Date()) return { error: 'This link has expired. Please request a new one.' }
+  // ensureTokenTable creates the id as uuid. A bare $1 arrives as text, which a
+  // uuid column refuses (42883), so no link could be consumed.
   await db.$executeRawUnsafe(
-    `UPDATE "${schemaName}"."${tableName}" SET used_at = NOW() WHERE id = $1`,
+    `UPDATE "${schemaName}"."${tableName}" SET used_at = NOW() WHERE id = $1::uuid`,
     row.id,
   )
   return { email: row.email }
