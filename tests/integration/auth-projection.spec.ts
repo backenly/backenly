@@ -33,6 +33,7 @@ import { prisma } from '@/lib/db'
 import { disconnectRegionalClients } from '@/lib/data-plane/regional'
 import { deliverAuthProjection, deliverRegion } from '@/lib/auth-projection/deliver'
 import { copyFreshness } from '@/lib/auth-projection/copy'
+import { reconcileRegionCopy } from '@/lib/auth-projection/reconcile'
 import { JWTSecretManager } from '@/lib/services/jwtSecretManager'
 import { ORPHANED_PROJECT_MODELS, deleteAccountCompletely, deleteProjectCompletely } from '@/lib/projects/delete'
 
@@ -481,5 +482,55 @@ describe('delivery', () => {
     expect((await copyFreshness(REGION, 15_000)).fresh).toBe(false)
     await deliverRegion(REGION)
     expect((await copyFreshness(REGION, 15_000)).fresh).toBe(true)
+  })
+})
+
+describe('the hourly check against home', () => {
+  // A change whose record never reached the region: the row is put straight
+  // into the copy, as a record removed before delivery would leave it.
+  const plantKey = (id: string, projectId: string) =>
+    run(
+      regionalUrl,
+      `INSERT INTO public.auth_projection_keys ("id", "projectId", "keyHash", "name", "keyPrefix", "userId", "role", "permissions",
+         "capabilities", "rateLimit", "rateLimitWindow", "scope", "keyType", "serviceRole", "version")
+       VALUES ($1, $2, $3, 'planted', 'proj_live_x', $4, 'client', '{read}', '{}', 1000, 3600, 'runtime', 'public', false, 1)`,
+      [id, projectId, randomBytes(32).toString('hex'), ownerId],
+    )
+
+  it('finds nothing to queue while the copy agrees with home', async () => {
+    await deliverRegion(REGION)
+    expect(await reconcileRegionCopy(REGION)).toMatchObject({ queued: 0 })
+    expect((await reconcileRegionCopy(REGION)).checked).toBeGreaterThan(0)
+  })
+
+  it('queues a key home no longer has, which the next delivery removes', async () => {
+    await deliverRegion(REGION)
+    const planted = `planted-${randomUUID()}`
+    await plantKey(planted, regionalProject)
+    const errors = jest.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      expect(await reconcileRegionCopy(REGION)).toMatchObject({ queued: 1 })
+      expect(errors.mock.calls.map((call) => String(call[0])).join('\n')).toMatch(/held 1 row\(s\) home no longer has/)
+    } finally {
+      errors.mockRestore()
+    }
+    await deliverRegion(REGION)
+    expect((await copiedKeys(regionalProject)).map((k) => k.id)).not.toContain(planted)
+  })
+
+  it('queues a project home no longer has, whose keys go with it', async () => {
+    await deliverRegion(REGION)
+    const ghost = `ghost-${randomUUID()}`
+    await run(regionalUrl, `INSERT INTO public.auth_projection_projects ("id", "userId", "version") VALUES ($1, $2, 1)`, [ghost, ownerId])
+    await plantKey(`ghost-key-${randomUUID()}`, ghost)
+    const errors = jest.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      expect(await reconcileRegionCopy(REGION)).toMatchObject({ queued: 2 })
+    } finally {
+      errors.mockRestore()
+    }
+    await deliverRegion(REGION)
+    expect(await copiedProject(ghost)).toBeUndefined()
+    expect(await copiedKeys(ghost)).toEqual([])
   })
 })
