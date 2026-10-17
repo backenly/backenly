@@ -184,6 +184,14 @@ const SWEEP_EXCLUDED: Record<string, string> = {
   UsageMetric: 'billing ledger',
   // Platform telemetry about Backenly itself, not customer content.
   ProductEvent: 'platform telemetry',
+  // The deletion itself, on its way to the project's region. The delete
+  // trigger records it in this same transaction, and the region removes the
+  // project and its keys from its authorization copy only when this row is
+  // delivered (lib/auth-projection/deliver.ts). Swept here, the region would
+  // never hear of the deletion while its copy stayed fresh, and the deleted
+  // project's keys would keep working there. Delivered rows are pruned a day
+  // later; they hold ids only.
+  AuthProjectionChange: 'carries the deletion to its region',
 }
 
 /** Exported for the deletion test, which seeds and sweeps this exact list. */
