@@ -39,6 +39,8 @@ const OAUTH_ERRORS: Record<string, string> = {
   claim_requires_setup_token:
     'This deployment has not been claimed yet. Its operator claims it on the sign-up page with the setup token that npm run selfhost printed; Google and GitHub sign-in work after that.',
   blocked: 'This account cannot sign in. Contact support if you think that is wrong.',
+  second_factor_required:
+    'This account has two-factor authentication turned on. Sign in with your email, password and authenticator code instead of Google or GitHub.',
   signup_not_allowed: 'New accounts are not being accepted right now.',
   token_failed: 'Sign-in with that provider did not complete. Please try again.',
   userinfo_failed: 'Sign-in with that provider did not complete. Please try again.',
@@ -76,6 +78,9 @@ function LoginForm() {
     if (message) {
       setErrors({ password: message })
       setIsSubmitting(false)
+      // This one sends the person to the email form, so open it: the message
+      // shows under the password field, which the provider view does not have.
+      if (errorParam === 'second_factor_required') setShowEmailForm(true)
     }
   }, [errorParam])
 
