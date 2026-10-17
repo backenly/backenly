@@ -2,6 +2,9 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectAccess } from '@/lib/auth/route-protection'
+import { workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
+import { regionErrorResponse } from '@/lib/api/v1/errors'
+import { isProjectOwnedSchema } from '@/lib/security/workspace-schema'
 import { z } from 'zod'
 
 const querySchema = z.object({
@@ -19,10 +22,9 @@ const SEMANTIC_FK_COLS = new Set([
 /**
  * Layer 1: Real PostgreSQL FOREIGN KEY constraints — authoritative source.
  */
-async function queryDbRelationships(pgSchema: string, tableFilter?: string) {
-  const { prisma } = await import('@/lib/db/prisma')
+async function queryDbRelationships(db: WorkspaceRawClient, pgSchema: string, tableFilter?: string) {
   try {
-    const rows = await prisma.$queryRawUnsafe<Array<{
+    const rows = await db.$queryRawUnsafe<Array<{
       table_name: string
       column_name: string
       referenced_table: string
@@ -66,10 +68,9 @@ async function queryDbRelationships(pgSchema: string, tableFilter?: string) {
  *
  * Handles: snake_case (*_id), camelCase (*Id), semantic cols, junction tables.
  */
-async function inferRelationshipsFromColumns(pgSchema: string, tableFilter?: string) {
-  const { prisma } = await import('@/lib/db/prisma')
+async function inferRelationshipsFromColumns(db: WorkspaceRawClient, pgSchema: string, tableFilter?: string) {
   try {
-    const tableRows = await prisma.$queryRawUnsafe<{ table_name: string }[]>(
+    const tableRows = await db.$queryRawUnsafe<{ table_name: string }[]>(
       `SELECT table_name FROM information_schema.tables
        WHERE table_schema = $1 AND table_type = 'BASE TABLE'`,
       pgSchema
@@ -82,7 +83,7 @@ async function inferRelationshipsFromColumns(pgSchema: string, tableFilter?: str
     }
     if (tableNames.size === 0) return []
 
-    const allCols = await prisma.$queryRawUnsafe<{ table_name: string; column_name: string }[]>(
+    const allCols = await db.$queryRawUnsafe<{ table_name: string; column_name: string }[]>(
       `SELECT table_name, column_name
        FROM information_schema.columns
        WHERE table_schema = $1 AND column_name != 'id'`,
@@ -201,7 +202,7 @@ async function inferRelationshipsFromColumns(pgSchema: string, tableFilter?: str
  * ?table=<name>  → relationships for one table
  * (no table)     → ALL relationships for the project
  */
-export const GET = withProjectAccess(async (request: NextRequest, { user, project, projectId }) => {
+export const GET = withProjectAccess(async (request: NextRequest, { projectId }) => {
   try {
     const searchParams = request.nextUrl.searchParams
     const validated = querySchema.parse({
@@ -210,20 +211,29 @@ export const GET = withProjectAccess(async (request: NextRequest, { user, projec
       projectId: searchParams.get('projectId') || undefined,
     })
 
-    const targetProjectId = validated.projectId || projectId
-    if (!targetProjectId) {
-      return NextResponse.json({ success: false, error: 'Project ID required' }, { status: 400 })
+    // Only the project whose access was verified, never a second id from the
+    // query, and only one of its own schemas (its schema or a branch's): a
+    // schema named by the caller is otherwise any schema in the database,
+    // another tenant's included.
+    const targetProjectId = projectId
+    const pgSchema = validated.schema || `workspace_${targetProjectId}`
+    if (!isProjectOwnedSchema(targetProjectId, pgSchema)) {
+      return NextResponse.json(
+        { success: false, error: 'That schema is not part of this project.', code: 'SCHEMA_NOT_IN_PROJECT' },
+        { status: 403 },
+      )
     }
 
-    const pgSchema = validated.schema || `workspace_${targetProjectId}`
+    // The catalog of the database holding the project's data, in its region.
+    const db = await workspaceRawClient(targetProjectId)
 
     // ── Layer 1: real FK constraints in PostgreSQL (authoritative) ────────────
-    const dbRels = await queryDbRelationships(pgSchema, validated.table)
+    const dbRels = await queryDbRelationships(db, pgSchema, validated.table)
 
     // ── Layer 2: direct column-name inference (graph-independent) ─────────────
     // This catches FK columns that exist but lack actual FOREIGN KEY constraints
     // (e.g., when the referenced table didn't exist at creation time).
-    const inferred = await inferRelationshipsFromColumns(pgSchema, validated.table)
+    const inferred = await inferRelationshipsFromColumns(db, pgSchema, validated.table)
 
     // Merge: real FKs take priority, inferred fills the gaps
     const realKeys = new Set(dbRels.map(r => `${r.from.table}.${r.from.column}->${r.to.table}.${r.to.column}`))
@@ -256,6 +266,9 @@ export const GET = withProjectAccess(async (request: NextRequest, { user, projec
         { status: 400 }
       )
     }
+    const regional = regionErrorResponse(error)
+    if (regional) return regional
+
     console.error('Error fetching relationships:', error)
     return NextResponse.json(
       { success: false, error: 'Failed to fetch relationships', message: error.message },
