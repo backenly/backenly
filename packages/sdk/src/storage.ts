@@ -1,6 +1,6 @@
 import type { BackenlyClient } from './client.js'
 import type { StorageUploadResponse } from './types.js'
-import { normalizeError } from './errors.js'
+import { errorFromResponse, normalizeError } from './errors.js'
 
 export interface StorageUploadOptions {
   /** Bucket name to upload into. Defaults to 'default'. */
@@ -77,8 +77,9 @@ export class StorageModule {
       )
 
       if (!response.ok) {
-        const error = await response.json().catch(() => ({ error: 'Upload failed' }))
-        throw new Error(error.error || error.message || 'Upload failed')
+        // The API's own message, code, status and details, built as
+        // client.request() builds them (errors.ts).
+        throw await errorFromResponse(response, 'Upload')
       }
 
       const json = await response.json()

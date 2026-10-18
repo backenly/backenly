@@ -527,16 +527,21 @@ describe('deleting a regional project', () => {
       await prisma.project.create({ data: { name: `bodies-doomed-${randomUUID()}`, userId: ownerId, region: 'us-east-1' }, select: { id: true } })
     ).id
     const mine = randomUUID()
+    const myRequest = randomUUID()
     const theirs = randomUUID()
     await run(
       regionalUrl,
       `INSERT INTO public.regional_bodies ("kind", "id", "projectId", "payload")
-       VALUES ('webhook', '${mine}', '${doomed}', '{}'::jsonb), ('webhook', '${theirs}', '${regionalProject}', '{}'::jsonb)`,
+       VALUES ('webhook', '${mine}', '${doomed}', '{}'::jsonb),
+              ('approval_request', '${myRequest}', '${doomed}', '{}'::jsonb),
+              ('webhook', '${theirs}', '${regionalProject}', '{}'::jsonb)`,
     )
 
     await deleteProjectCompletely(doomed)
 
     expect(await regionalBodyOf('webhook', mine)).toBeUndefined()
+    // An approval request's words and call go with the project too (lib/mcp/approval-request-bodies.ts).
+    expect(await regionalBodyOf('approval_request', myRequest)).toBeUndefined()
     expect(await regionalBodyOf('webhook', theirs)).toBeDefined()
   })
 })

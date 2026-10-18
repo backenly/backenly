@@ -1220,3 +1220,18 @@ tests/integration/auth-projection-confirm.spec.ts
 # jsonb column are written and filtered through each route. What PostgreSQL
 # accepts is the property, so it needs a real Postgres.
 tests/integration/v1-database-typed-columns.spec.ts
+
+# A project is recorded at home only once its workspace schema exists: a region
+# whose database is configured but unreachable refuses the project and leaves
+# no project, graph or workspace row; a home project gets every row and its
+# schema; a second database standing in for a region gets the schema and
+# nothing else, and drops it again when the home rows are refused. Rows,
+# schemas and both databases are the property, so it needs a real Postgres.
+tests/integration/project-creation-order.spec.ts
+
+# The SDK's create, get, list, count, update, delete and query builder return
+# the row and the results their documentation promises: all of them through the
+# Next data routes, and create, list and a multi-row insert through the
+# runtime's. Each server's insert answer is pinned. Real tables behind both
+# servers are the property, so it needs a real Postgres.
+tests/integration/sdk-data-routes.spec.ts

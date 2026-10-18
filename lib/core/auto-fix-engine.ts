@@ -22,7 +22,15 @@
 
 import { prisma } from '@/lib/db/prisma'
 import { executeAction } from '@/lib/ai/minimal-executor'
-import { argumentShape, findingDetailsKeptHere, quotedError, quotesKeptHere } from '@/lib/data-plane/residency'
+import {
+  findingDetailsKeptHere,
+  quotedError,
+  quotesKeptHere,
+  recordedFixAction,
+  recordedFixResult,
+  recordedResultMessage,
+  recordedStatements,
+} from '@/lib/data-plane/residency'
 import { HeldActionUnreadable, heldActionForReplay } from '@/lib/operational-memory/held-action-targets'
 import { captureSchemaSnapshot, rollbackToSchemaVersion } from '@/lib/services/workspace-schema-snapshot'
 import {
@@ -686,26 +694,27 @@ export async function executeApprovedFix(
     ? await captureSchemaSnapshot(projectId, 'post_migration').catch(() => null)
     : null
 
-  // What the record keeps of the call. A held action's arguments are its
-  // caller's own values, a secret among them (SET_ENV_VAR), which its finding
-  // keeps sealed or in the project's region: the record keeps their shape, in
-  // every region. Undo reads none of them (revertAutoFix). For a project kept
-  // in another region no repair's arguments, result or error text is kept here
-  // either (lib/data-plane/residency.ts).
+  // What the record keeps of the call (lib/data-plane/residency.ts). A held
+  // action's arguments are its caller's own values, a secret among them
+  // (SET_ENV_VAR), which its finding keeps sealed or in the project's region,
+  // the statements replaying it bind them, and its result can carry a value
+  // its approver is shown once (ROTATE_KEY's new key): the record keeps the
+  // arguments' shape, the statements' text and whether it succeeded, in every
+  // region. The approver still reads the result in full, in the response.
+  // Undo reads none of them (revertAutoFix). For a project kept in another
+  // region no repair's arguments, bound values, result or error text is kept
+  // here either.
   const quote = await quotesKeptHere(projectId)
-  const recordedAction =
-    finding.type === 'ai_action_pending' || !quote
-      ? { action: fixAction.action, params: argumentShape(fixAction.params as Record<string, unknown>) }
-      : fixAction
+  const keep = { quote, held: finding.type === 'ai_action_pending' }
 
   const rollbackData: Record<string, unknown> = {
-    fixAction: recordedAction,
-    fixResult: quote ? { message: result.message, data: result.data } : { success: result.success },
+    fixAction: recordedFixAction(fixAction, keep),
+    fixResult: recordedFixResult(result, keep),
     // The statements the executor actually sent, captured at the driver. This
     // is the half of the audit trail that used to be missing: the change was
     // derivable by diffing two schema snapshots, but the statement itself was
     // never stored, so "show me what it ran" had no answer.
-    statements,
+    statements: recordedStatements(statements, keep),
     // UNDO CONTRACT (rollbackFormat 2): snapshotId is the PRE-fix state.
     rollbackFormat: 2,
     snapshotId: pre.preSnapshotId,
@@ -857,10 +866,12 @@ export async function executeApprovedProposal(input: {
   }
 
   const result = governed.result.result
+  // What the record keeps of the call, as for an approved fix (lib/data-plane/residency.ts).
+  const keep = { quote: await quotesKeptHere(projectId), held: finding.type === 'ai_action_pending' }
   const rollbackData: Record<string, unknown> = {
-    fixAction,
-    fixResult: { message: result.message, data: result.data },
-    statements,
+    fixAction: recordedFixAction(fixAction, keep),
+    fixResult: recordedFixResult(result, keep),
+    statements: recordedStatements(statements, keep),
     rollbackFormat: 2,
     snapshotId: pre.preSnapshotId,
     preMetadata: pre.preMetadata,
@@ -1277,12 +1288,17 @@ export async function resolveFindingFromChat(
     },
   })
 
+  // The requester reads the result in full in the reply below; the audit row
+  // keeps it as the record keeps a result (lib/data-plane/residency.ts), so a
+  // held action's row says only that it ran.
+  const keep = { quote: await quotesKeptHere(projectId), held: finding.type === 'ai_action_pending' }
+  const action = typeof details.executorAction === 'string' ? details.executorAction : type
   await _writeAuditLog(projectId, 'HEALTH_FIX_RESOLVED_VIA_CHAT', {
     findingId,
     findingType: type,
     tableName: (details.tableName ?? details.table ?? details.location ?? null) as string | null,
     columnName: (details.columnName ?? details.column ?? null) as string | null,
-    message: result.message,
+    message: recordedResultMessage(result.message, action, keep),
     snapshotId: result.snapshotId ?? null,
   })
 
@@ -1495,6 +1511,17 @@ async function _executeAutoFix(
       : _escalate(findingId, projectId, type, details, full)
   }
 
+  // What the finding and the audit rows keep of the call, decided once so they
+  // agree (lib/data-plane/residency.ts): for a project kept in another region
+  // or a held action, the action's name, its arguments' shape and the
+  // statements' text, and not the result's text.
+  const keep = { quote: await quotesKeptHere(projectId), held: type === 'ai_action_pending' }
+  const recorded = {
+    fixAction: recordedFixAction(fixAction, keep),
+    statements: recordedStatements(statements, keep),
+    message: recordedResultMessage(result.message, fixAction.action, keep),
+  }
+
   // ── TRUST GUARANTEE: a fix is only "fixed" if the gap actually closed ───────
   // The executor can return success for work that did not resolve the finding —
   // a replan-to-INFO no-op, a default routine that swallowed a real failure, or
@@ -1564,10 +1591,10 @@ async function _executeAutoFix(
       // verification retry, using the machinery that already exists rather
       // than re-running a mutation that has already happened.
       return _appliedUnverified(findingId, projectId, type, details, {
-        fixAction,
-        statements,
+        fixAction: recorded.fixAction,
+        statements: recorded.statements,
         preSnapshotId: pre.preSnapshotId,
-        message: result.message,
+        message: recorded.message,
         verifierError,
       })
     }
@@ -1599,13 +1626,13 @@ async function _executeAutoFix(
     : null
 
   const rollbackData: Record<string, unknown> = {
-    fixAction,
-    fixResult: { message: result.message, data: result.data },
+    fixAction: recorded.fixAction,
+    fixResult: recordedFixResult(result, keep),
     // The statements the executor actually sent, captured at the driver. This
     // is the half of the audit trail that used to be missing: the change was
     // derivable by diffing two schema snapshots, but the statement itself was
     // never stored, so "show me what it ran" had no answer.
-    statements,
+    statements: recorded.statements,
     // UNDO CONTRACT (rollbackFormat 2): snapshotId is the PRE-fix state.
     rollbackFormat: 2,
     snapshotId: pre.preSnapshotId,
@@ -1641,15 +1668,15 @@ async function _executeAutoFix(
     // literal string "a table" and 30 distinct fixes rendered as 30 dupes.
     tableName: (details.tableName ?? details.table ?? details.location ?? null) as string | null,
     columnName: (details.columnName ?? details.column ?? null) as string | null,
-    fixAction,
-    message: result.message,
+    fixAction: recorded.fixAction,
+    message: recorded.message,
     snapshotId: pre.preSnapshotId,
     postSnapshotId: postSnapshot?.id ?? null,
     // The statements this fix actually ran. Duplicated onto the audit row rather
     // than left only in finding.details, because the audit log is the record
     // that survives the finding being dismissed or the project's queue being
     // cleared — and "what did it run" is a question asked long after.
-    statements,
+    statements: recorded.statements,
     // Read by the trust scoreboard: only 'confirmed' fixes count as verified.
     verification,
     regressionCheck,
@@ -1683,6 +1710,7 @@ async function _appliedUnverified(
   type: FindingType,
   details: Record<string, unknown>,
   applied: {
+    /** The call and its statements as the record keeps them (lib/data-plane/residency.ts). */
     fixAction: unknown
     statements: unknown
     preSnapshotId: string | null

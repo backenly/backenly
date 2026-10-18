@@ -22,7 +22,8 @@ import { withProjectAccess } from '@/lib/auth/route-protection'
 import { canWriteProject } from '@/lib/edition/guard'
 import { prisma } from '@/lib/db/prisma'
 import { executeApprovedFix, revertAutoFix } from '@/lib/core/auto-fix-engine'
-import { quotedError, quotesKeptHere } from '@/lib/data-plane/residency'
+import { quotedError, quotesKeptHere, recordedResultMessage, recordedStatements } from '@/lib/data-plane/residency'
+import type { RecordedStatement } from '@/lib/execution/sql-recorder'
 import { heldActionRecord } from '@/lib/operational-memory/held-action-targets'
 import { resolvePendingActionMemory } from '@/lib/operational-memory/ledger'
 
@@ -164,6 +165,11 @@ export const POST = withProjectAccess(async (req: NextRequest, { user, project, 
 
   // Persist the fixed state + rollback payload
   const details = (finding.details ?? {}) as Record<string, unknown>
+  // What the records keep of the run (lib/data-plane/residency.ts). A held
+  // action's result can carry a value its approver is shown once, in this
+  // response (ROTATE_KEY's new key), so its records say only that it ran.
+  const keep = { quote, held: finding.type === 'ai_action_pending' }
+  const action = typeof details.executorAction === 'string' ? details.executorAction : finding.type
   await prisma.healthFinding.update({
     where: { id: findingId },
     data: {
@@ -192,13 +198,17 @@ export const POST = withProjectAccess(async (req: NextRequest, { user, project, 
       details: JSON.stringify({
         findingId,
         findingType: finding.type,
-        message: quotedError(result.message, quote),
+        message: recordedResultMessage(result.message, action, keep),
         snapshotId: result.snapshotId ?? null,
         // The statements the approved fix actually ran, captured at the driver
-        // (lib/execution/sql-recorder.ts). The audit row outlives the finding,
-        // so the record of what was executed belongs here as well as in
-        // finding.details.rollbackData.
-        statements: (result.rollbackData as Record<string, unknown> | undefined)?.statements ?? [],
+        // (lib/execution/sql-recorder.ts), without their bound values for a held
+        // action or a project kept in another region (lib/data-plane/residency.ts).
+        // The audit row outlives the finding, so the record of what was executed
+        // belongs here as well as in finding.details.rollbackData.
+        statements: recordedStatements(
+          ((result.rollbackData as Record<string, unknown> | undefined)?.statements ?? []) as RecordedStatement[],
+          keep,
+        ),
         // Drives the ledger copy: only 'confirmed' may claim re-verification.
         verification: result.verification ?? 'unverified',
         // Only 'ran' may claim nothing else broke.

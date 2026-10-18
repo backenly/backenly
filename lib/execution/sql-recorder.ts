@@ -36,10 +36,17 @@
  * `SELECT ... FROM information_schema.columns`. Only statements that can change
  * something are kept.
  *
- * Bound parameters are recorded alongside the statement text because a
- * parameterised DDL is unreadable without them, and every governed fix action
- * binds identifiers and thresholds rather than user data. Both are bounded in
- * size — an audit row is a record, not a log sink.
+ * Bound parameters are captured alongside the statement text because a
+ * parameterised DDL is unreadable without them. They are not only identifiers
+ * and thresholds: an approved held action binds its caller's own values
+ * (BLOCK_USER binds the end user's email). So each record decides what it keeps
+ * of them (recordedStatements in lib/data-plane/residency.ts): the bound values
+ * are kept for a home project's repairs, and dropped for a project kept in
+ * another region and for a held action, whose records keep the statement text
+ * only. This recorder is installed on the home region's client alone; a project
+ * kept in another region runs its workspace SQL on that region's client
+ * (lib/data-plane/regional.ts), so none of that SQL is captured here. Text and
+ * values are both bounded in size: an audit row is a record, not a log sink.
  */
 
 import { AsyncLocalStorage } from 'async_hooks'

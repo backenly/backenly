@@ -31,6 +31,9 @@
  * once in the console). The operator is the account that owns the probe
  * project: it signs in at the home host for what only the console does
  * (snapshots, restores and schema rollback), and signs out when the run ends.
+ * The probe project's production must not be protected (Settings, or
+ * PUT /api/projects/<id>/protection): the run changes its schema directly, and
+ * a new Cloud project starts protected.
  *
  * What it checks, in order:
  *   region     the region's host answers health; it serves no console path;
@@ -335,6 +338,24 @@ export function toolData<T>(outcome: ToolOutcome): T | null {
   return null
 }
 
+/**
+ * A failed call's text for the report. The SDK throws BackenlyError (an Error
+ * with code and status beside its message); anything else is shown as JSON, so
+ * an object never reads "[object Object]".
+ */
+export function describeError(err: unknown): string {
+  if (err instanceof Error) {
+    const { code, status } = err as Error & { code?: unknown; status?: unknown }
+    const extra = [code, status].filter((v) => v !== undefined && v !== null && v !== '').join(' ')
+    return extra ? `${err.message} (${extra})` : err.message
+  }
+  try {
+    return JSON.stringify(err) ?? String(err)
+  } catch {
+    return String(err)
+  }
+}
+
 class Mcp {
   private constructor(private readonly client: Client) {}
 
@@ -417,7 +438,7 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
       log(`  ok    ${phase}/${name}: ${detail}`)
       return true
     } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err)
+      const detail = describeError(err)
       results.push({ phase, check: name, status: 'fail', detail, ms: Date.now() - started })
       log(`  FAIL  ${phase}/${name}: ${detail}`)
       failed.add(name)
@@ -493,7 +514,12 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
 
   /** A fixture call, waiting out an approval if the control plane parks it. */
   async function fixture(name: string, toolArgs: Record<string, unknown>): Promise<ToolOutcome> {
-    const outcome = await mcp!.call(name, toolArgs)
+    const outcome = await mcp!.call(name, toolArgs).catch((err: unknown) => {
+      if (describeError(err).includes('BRANCH_REQUIRED')) {
+        throw new Error(`${name}: the probe project's production is protected; turn protection off in its Settings, since the run changes its schema directly`)
+      }
+      throw err
+    })
     const approval = pendingApproval(outcome)
     if (approval) await untilApproved(approval, name)
     return outcome
@@ -647,7 +673,7 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
     }
     await check('rls', 'v1-own-rows-only', ['insert-a', 'insert-b'], async () => {
       for (const who of ['a', 'b'] as const) {
-        const rows: Array<{ owner_id: string; body: string }> = await users[who]!.client[TABLE].list({ limit: 1000 })
+        const rows: Array<{ owner_id: string; body: string }> = await users[who]!.client[TABLE].list({ limit: 100 })
         must(rows.length > 0, `user ${who} sees none of its rows`)
         must(rows.every((r) => r.owner_id === users[who]!.id), `user ${who} sees another user's row`)
         must(rows.some((r) => r.body === `${run}-${who}`), `user ${who} does not see this run's row`)
@@ -788,9 +814,10 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
     log('\n── storage')
     await check('storage', 'round-trip', ['bucket', 'sign-up-a'], async () => {
       const a = users.a!.client
-      const bytes = randomBytes(2048)
-      const file = new File([bytes], `qualify-${run}.bin`, { type: 'application/octet-stream' })
-      const up = await a.storage.upload(file, `qualify/${run}.bin`, { bucket: BUCKET })
+      // Plain text: the upload route refuses executable extensions (.bin among them).
+      const bytes = Buffer.from(randomBytes(1024).toString('hex'))
+      const file = new File([bytes], `qualify-${run}.txt`, { type: 'text/plain' })
+      const up = await a.storage.upload(file, `qualify/${run}.txt`, { bucket: BUCKET })
       must(up?.id && up?.url, 'the upload returned no file')
       try {
         const down = await theFetch(new URL(up.url, args.api).toString(), {
@@ -809,7 +836,9 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
     await check('functions', 'http-at-region', ['functions'], async () => {
       const res = await theFetch(apiUrl(`/api/v1/${args.project}/fn/${HTTP_FUNCTION}`), { headers: { 'x-api-key': args.projectKey } })
       const body = await json(res)
-      must(res.status === 200 && body.ok === true, `the function answered ${res.status} ${JSON.stringify(body).slice(0, 200)}`)
+      // The runtime answers with the function's own status and keeps its
+      // envelope: { success, name, result: { status, body }, logs, durationMs }.
+      must(res.status === 200 && body.success === true && body.result?.body?.ok === true, `the function answered ${res.status} ${JSON.stringify(body).slice(0, 200)}`)
       return `${HTTP_FUNCTION} answered at the region's host`
     })
     await check('functions', 'sandbox-reads-region', ['functions', 'insert-a'], async () => {
@@ -848,17 +877,19 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
       restorePoint = { id: before.id, versionNum: before.versionNum }
       return `${rollbackTable} created over MCP, after restore point v${before.versionNum}`
     })
-    await check('rollback', 'undone', ['change'], async () => {
+    await check('rollback', 'undone', ['change', 'insert-a'], async () => {
       const res = await theFetch(
         homeUrl(`/api/projects/${args.project}/schema-versions`),
         asOperator({ method: 'POST', body: JSON.stringify({ versionId: restorePoint!.id }) }),
       )
       const body = await json(res)
       must(res.status === 200 && body.success === true, `the rollback answered ${res.status}: ${String(body.message ?? body.error ?? '').slice(0, 200)}`)
-      const state = await mcp!.call('read_backend_state', { section: 'schema' })
-      must(!state.text.includes(rollbackTable), `${rollbackTable} is still in the schema after the rollback`)
-      must(state.text.includes(TABLE), `the rollback removed ${TABLE}, which the restore point recorded`)
-      const rows: Array<{ body: string }> = await users.a!.client[TABLE].list({ limit: 1000 })
+      // The region's live catalog: the rollback runs on the region's database.
+      const gone = await mcp!.call('get_table_schema', { tableName: rollbackTable }).then((o) => o.text, (err: unknown) => describeError(err))
+      must(/does not exist/i.test(gone), `${rollbackTable} is still in the region's schema after the rollback: ${gone.slice(0, 160)}`)
+      const tables = await mcp!.call('read_backend_state', { section: 'tables' })
+      must(tables.text.includes(TABLE), `the rollback removed ${TABLE}, which the restore point recorded`)
+      const rows: Array<{ body: string }> = await users.a!.client[TABLE].list({ limit: 100 })
       must(rows.some((r) => r.body === `${run}-a`), `user a no longer sees its row in ${TABLE} after the rollback`)
       return `rolled back to v${restorePoint!.versionNum}: ${rollbackTable} is gone; ${TABLE} and its rows are as they were`
     })
@@ -962,7 +993,7 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
     let snapshotId: string | null = null
     const atSnapshot: Record<'a' | 'b', string[]> = { a: [], b: [] }
     const idsOf = async (who: 'a' | 'b') =>
-      ((await users[who]!.client[TABLE].list({ limit: 1000 })) as Array<{ id: string }>).map((r) => r.id).sort()
+      ((await users[who]!.client[TABLE].list({ limit: 100 })) as Array<{ id: string }>).map((r) => r.id).sort()
     await check('recovery', 'snapshot', ['sign-in', 'insert-a', 'insert-b'], async () => {
       for (const who of ['a', 'b'] as const) atSnapshot[who] = await idsOf(who)
       const known = new Set(((await operatorJson(snapshotsPath)).data ?? []).map((s: { id: string }) => s.id))
@@ -1051,23 +1082,37 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
       results.push({ phase: 'revocation', check: 'revoked-key-refused', status: 'skip', detail: '--skip-revocation', ms: 0 })
       log('  skip  revocation/revoked-key-refused: --skip-revocation')
     } else {
-      await check('revocation', 'revoked-key-refused', ['connect', 'project-health'], async () => {
+      await check('revocation', 'revoked-key-refused', ['connect', 'project-health', 'functions'], async () => {
         const minted = await mcp!.call('connect', { action: 'create_api_key', description: `qualify ${run} (revoked by this run)` })
         // The whole key is data.apiKey (its prefix and 64 hex characters, lib/auth/key-prefix.ts).
         const created = toolData<{ apiKey?: unknown; keyId?: unknown }>(minted)
         const key = typeof created?.apiKey === 'string' ? created.apiKey : undefined
         const keyId = typeof created?.keyId === 'string' ? created.keyId : undefined
         must(key && keyId, 'create_api_key returned no key or id')
-        const probe = () => theFetch(apiUrl(`/api/v1/${args.project}/healthz`), { headers: { 'x-api-key': key! } })
-        must((await probe()).status === 200, 'the new key was not accepted')
+        // One key-checked endpoint per serving tier: the web tier's storage list
+        // (without a bucket it answers 400 once the key is accepted) and the
+        // runtime's HTTP function. /healthz takes no key, so it proves nothing.
+        const probes: Record<string, () => Promise<Response>> = {
+          web: () => theFetch(apiUrl(`/api/v1/${args.project}/storage/files`), { headers: { 'x-api-key': key! } }),
+          runtime: () => theFetch(apiUrl(`/api/v1/${args.project}/fn/${HTTP_FUNCTION}`), { headers: { 'x-api-key': key! } }),
+        }
+        const refused = (status: number) => status === 401 || status === 403
+        for (const [tier, probe] of Object.entries(probes)) {
+          const status = (await probe()).status
+          must(!refused(status), `the new key was refused by the ${tier} tier (${status}) before it was revoked`)
+        }
         const revoke = await mcp!.call('connect', { action: 'revoke_api_key', keyId })
         const approval = pendingApproval(revoke)
         if (approval) await untilApproved(approval, 'revoke_api_key')
         const revokedAt = Date.now()
+        const refusedAfter: Record<string, number> = {}
         for (;;) {
-          const status = (await probe()).status
-          if (status === 401 || status === 403) return `refused (${status}) ${Date.now() - revokedAt} ms after the revocation ran`
-          if (Date.now() - revokedAt > 120_000) throw new Error(`the revoked key was still accepted (${status}) 120 s after the revocation`)
+          for (const [tier, probe] of Object.entries(probes)) {
+            if (refusedAfter[tier] === undefined && refused((await probe()).status)) refusedAfter[tier] = Date.now() - revokedAt
+          }
+          const waiting = Object.keys(probes).filter((tier) => refusedAfter[tier] === undefined)
+          if (waiting.length === 0) return `refused by the web tier ${refusedAfter.web} ms and the runtime ${refusedAfter.runtime} ms after the revocation ran`
+          if (Date.now() - revokedAt > 120_000) throw new Error(`the revoked key was still accepted 120 s after the revocation by: ${waiting.join(', ')}`)
           await new Promise((r) => setTimeout(r, 1_000))
         }
       })

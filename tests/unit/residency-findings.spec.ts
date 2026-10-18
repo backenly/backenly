@@ -20,8 +20,8 @@
  *   - its held actions are not investigated by the model, and an approval
  *     request's notice names the action only.
  * A home project's rows are unchanged, except that no approval records a held
- * action's arguments, in any region: the record keeps their shape, since the
- * arguments can carry a secret.
+ * action's arguments or result, in any region: the record keeps the arguments'
+ * shape and whether it succeeded, since either can carry a secret.
  *
  * Database-free: the platform clients are recorders, each project's region is
  * whatever the test says it is, and a region's database is a map.
@@ -562,7 +562,7 @@ describe('approving a held action', () => {
     expect(JSON.stringify(events)).not.toContain('alice@example.com')
   })
 
-  it('keeps today\'s copies for a home project, except the arguments, of which the record keeps only the shape', async () => {
+  it('keeps today\'s copies for a home project, except the arguments and the result, of which the record keeps the shape and whether it succeeded', async () => {
     mockRegions.set('p-home-ok', null)
     const finding = await queuePendingActionFinding({
       projectId: 'p-home-ok',
@@ -586,14 +586,14 @@ describe('approving a held action', () => {
     })
     expect(row.details.rollbackData).toMatchObject({
       fixAction: { action: 'SET_ENV_VAR', params: { key: '[string]', value: '[string]', confirmed: true } },
-      fixResult: { message: 'SET_ENV_VAR ran on STRIPE_SECRET_KEY', data: { target: 'STRIPE_SECRET_KEY' } },
       baselineError: ROW_ECHO,
     })
+    expect(row.details.rollbackData.fixResult).toEqual({ success: true })
     // The secret was replayed and is stored nowhere in the clear.
     expect(JSON.stringify(row)).not.toContain(SECRET)
     expect(JSON.stringify(forProject(mockAudits, 'p-home-ok'))).not.toContain(SECRET)
 
-    expect(auditOf('p-home-ok', 'HEALTH_FIX_EXECUTED').message).toBe('SET_ENV_VAR ran on STRIPE_SECRET_KEY')
+    expect(auditOf('p-home-ok', 'HEALTH_FIX_EXECUTED').message).toBe('Ran SET_ENV_VAR')
     expect(forProject(mockCorrections, 'p-home-ok')[0].correctionDetail.details.location).toBe('STRIPE_SECRET_KEY')
     expect(forProject(mockEvents, 'p-home-ok').map((e) => e.summary)).toEqual([
       'Held for your approval: Set env var on STRIPE_SECRET_KEY.',
