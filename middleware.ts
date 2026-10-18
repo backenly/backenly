@@ -176,6 +176,12 @@ const publicApiRoutes = [
   '/api/connect/',                  // Legacy provider handshake flow (routes self-authenticate; flagged for removal)
 ]
 
+// ✅ PUBLIC API ROUTES matched exactly, not as prefixes, so a route added under
+// one later is not public by accident.
+const publicApiExactRoutes = [
+  '/api/regions',                   // The Cloud regions as served and which are open (app/api/regions); nothing per account
+]
+
 // Production: strict allowlist. Development: also accept localhost via a
 // separate check below in handleCORS. We never want localhost in prod allow-list.
 const ALLOWED_ORIGINS_PROD = [
@@ -360,7 +366,7 @@ export async function middleware(request: NextRequest) {
   }
 
   // ✅ Public API routes
-  if (publicApiRoutes.some(route => pathname.startsWith(route))) {
+  if (publicApiRoutes.some(route => pathname.startsWith(route)) || publicApiExactRoutes.includes(pathname)) {
     return applyCorsHeaders(NextResponse.next())
   }
 
