@@ -121,6 +121,8 @@ export async function clearPendingPlan(projectId: string): Promise<void> {
  */
 export interface ResumeQueue {
   domain: string
+   /** The user's original request, preserved when work needs to resume. */
+  originalRequest: string
   /** Why these specific steps still need to run (carried for context in the chat). */
   reason: string
   steps: Blueprint['steps']
@@ -133,11 +135,13 @@ export async function saveResumeQueue(
   domain: string,
   steps: Blueprint['steps'],
   reason: string,
+  originalRequest: string,
 ): Promise<void> {
   if (!steps.length) return
   const now = Date.now()
   const queue: ResumeQueue = {
     domain,
+    originalRequest,
     reason,
     steps,
     createdAt: new Date(now).toISOString(),

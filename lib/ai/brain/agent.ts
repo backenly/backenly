@@ -643,7 +643,8 @@ export async function runBrain(
     const resume = await loadResumeQueue(input.projectId).catch(() => null)
     if (resume) {
       console.log(`[Brain] route=BLUEPRINT_RESUME domain=${resume.domain} steps=${resume.steps.length}`)
-      return await blueprintExecuteTurn(resume.steps, 0, dispatchCtx, classification, emit, input, resume.domain)
+      return await blueprintExecuteTurn(resume.steps, 0, dispatchCtx, classification, emit, input, resume.domain,undefined,
+      resume.originalRequest,)
     }
 
     // No stored plan at all — but the user is confirming/continuing a build.
@@ -832,6 +833,7 @@ async function blueprintExecuteTurn(
   input: BrainInput,
   domain?: string,
   ledger?: RequirementsLedger,
+  originalRequest?: string,
 ): Promise<BrainResult> {
   emit({ type: 'phase', phase: 'execute' })
 
@@ -924,6 +926,7 @@ async function blueprintExecuteTurn(
       domain ?? 'custom',
       failed.map(f => f.step),
       `${failed.length} step(s) need a second pass after the first run.`,
+      originalRequest ?? input.message,
     ).catch(() => {})
   } else {
     await clearResumeQueue(input.projectId).catch(() => {})
