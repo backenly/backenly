@@ -1189,6 +1189,22 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
           'constraints never collide.',
       },
       referencedTable: { type: 'string', description: 'For FOREIGN KEY: the table being referenced.' },
+      references: {
+        type: 'object',
+        description:
+          'For FOREIGN KEY: the key exactly as declared, { table, column?, onDelete, onUpdate, name? }, each action one of ' +
+          'NO ACTION, RESTRICT, CASCADE, SET NULL, SET DEFAULT, and no column meaning the table\'s primary key. Given, ' +
+          'the key is installed exactly so; without it Backenly picks the referenced column (id) and the actions. ' +
+          'apply_migration sends it for every FOREIGN KEY.',
+        properties: {
+          table: { type: 'string' },
+          column: { type: 'string' },
+          onDelete: { type: 'string', enum: ['NO ACTION', 'RESTRICT', 'CASCADE', 'SET NULL', 'SET DEFAULT'] },
+          onUpdate: { type: 'string', enum: ['NO ACTION', 'RESTRICT', 'CASCADE', 'SET NULL', 'SET DEFAULT'] },
+          name: { type: 'string' },
+        },
+        required: ['table', 'onDelete', 'onUpdate'],
+      },
     },
     ['tableName', 'constraintType']),
 
@@ -1540,6 +1556,8 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
       expression: a.expression,
       constraintName: a.constraintName,
       referencedTable: a.referencedTable,
+      // A foreign key exactly as declared (lib/db/declared-foreign-key.ts).
+      references: a.references,
     },
   }),
   generate_api: (a) => ({ action: 'GENERATE_API', params: { tableName: a.tableName } }),

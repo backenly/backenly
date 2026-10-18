@@ -746,6 +746,9 @@ tests/integration/apply-migration-existing-table.spec.ts
 # Failed migration DDL preserves PostgreSQL data and stops without asking the
 # model to substitute a different action. Uses real projects, rows and catalogs.
 tests/integration/apply-migration-dispatch.spec.ts
+# A foreign key is installed exactly as the migration declares it: its actions,
+# referenced column and name, read back from the catalog and checked by deletes.
+tests/integration/apply-migration-foreign-keys.spec.ts
 # MCP acceptance (scripts/mcp-acceptance/cases.ts): two agent workflows, twice
 # each, and the acceptance cases no other suite covered. Real MCP route, real
 # keys, provisioned projects, runtime engine mode.

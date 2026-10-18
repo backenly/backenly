@@ -21,6 +21,11 @@ function parseOne(sql: string) {
   return actions[0]
 }
 
+/** A declared foreign key as the parser carries it; SQL's defaults unless overridden. */
+function fk(table: string, extra: Record<string, unknown> = {}) {
+  return { table, column: 'id', onDelete: 'NO ACTION', onUpdate: 'NO ACTION', ...extra }
+}
+
 function expectRefusal(sql: string): MigrationParseError {
   try {
     parseMigration(sql)
@@ -106,14 +111,18 @@ describe('CREATE TABLE', () => {
 
   it('reads an inline REFERENCES as a foreign key', () => {
     const a = parseOne('CREATE TABLE posts (author_id uuid REFERENCES users(id), title text)')
-    expect((a.args.columns as any[])[0]).toEqual({ name: 'author_id', type: 'uuid', fkTo: 'users', nullable: true })
+    expect((a.args.columns as any[])[0]).toEqual({
+      name: 'author_id', type: 'uuid', fkTo: 'users', references: fk('users'), nullable: true,
+    })
   })
 
   it('folds a table-level FOREIGN KEY onto its column', () => {
     const a = parseOne(
       'CREATE TABLE posts (author_id uuid, title text, FOREIGN KEY (author_id) REFERENCES users(id))',
     )
-    expect((a.args.columns as any[])[0]).toEqual({ name: 'author_id', type: 'uuid', fkTo: 'users', nullable: true })
+    expect((a.args.columns as any[])[0]).toEqual({
+      name: 'author_id', type: 'uuid', fkTo: 'users', references: fk('users'), nullable: true,
+    })
   })
 
   it('folds a table-level UNIQUE onto its column', () => {
@@ -134,7 +143,7 @@ describe('CREATE TABLE', () => {
     expect(a.args.columns).toEqual([
       { name: 'title', type: 'text', nullable: false },
       { name: 'body', type: 'text', nullable: true },
-      { name: 'author_id', type: 'uuid', fkTo: 'users', nullable: true },
+      { name: 'author_id', type: 'uuid', fkTo: 'users', references: fk('users'), nullable: true },
     ])
   })
 
@@ -240,6 +249,7 @@ describe('ALTER TABLE', () => {
       constraintType: 'foreign_key',
       expression: 'users(id)',
       referencedTable: 'users',
+      references: fk('users'),
     })
   })
 
@@ -729,5 +739,88 @@ describe('CHECK expressions cannot smuggle SQL into DDL', () => {
   it('rejects a CHECK that constrains nothing', () => {
     const err = expectRefusal('ALTER TABLE t ADD CONSTRAINT c CHECK (1 = 1)')
     expect(err.code).toBe('UNSAFE_CONSTRAINT')
+  })
+})
+
+// A foreign key used to keep only its referenced table, and the executor chose
+// the rest: `ON DELETE SET NULL` was installed as ON DELETE CASCADE. The whole
+// REFERENCES clause is now read and carried, and what it does not say takes
+// SQL's meaning.
+describe('foreign keys are carried exactly as declared', () => {
+  const column = (sql: string, i = 0) => (parseOne(sql).args.columns as any[])[i]
+
+  it('keeps the actions, the referenced column and SQL defaults', () => {
+    expect(column('CREATE TABLE members (guild_id uuid REFERENCES guilds(id) ON DELETE SET NULL ON UPDATE CASCADE)').references)
+      .toEqual(fk('guilds', { onDelete: 'SET NULL', onUpdate: 'CASCADE' }))
+    // No column named: the referenced table's primary key, which PostgreSQL resolves.
+    const noColumn = column('CREATE TABLE members (guild_id uuid REFERENCES guilds ON UPDATE RESTRICT ON DELETE CASCADE)').references
+    expect(noColumn).toEqual({ table: 'guilds', onDelete: 'CASCADE', onUpdate: 'RESTRICT' })
+    expect('column' in noColumn).toBe(false)
+    expect(column('CREATE TABLE members (email text REFERENCES invites(email))').references)
+      .toEqual(fk('invites', { column: 'email' }))
+    expect(column('CREATE TABLE members (guild_id uuid references GUILDS(ID) on delete no action)').references)
+      .toEqual(fk('guilds'))
+  })
+
+  it('does not read the actions as the column\'s own NULL or DEFAULT', () => {
+    // `SET NULL` and `SET DEFAULT` used to be visible to the nullability and DEFAULT scans.
+    expect(column('CREATE TABLE m (guild_id uuid REFERENCES guilds(id) ON DELETE SET NULL NOT NULL)')).toMatchObject({
+      nullable: false, references: fk('guilds', { onDelete: 'SET NULL' }),
+    })
+    const c = column(`CREATE TABLE m (status text DEFAULT 'free' REFERENCES plans(code) ON DELETE SET DEFAULT)`)
+    expect(c.default).toBe(`'free'`)
+    expect(c.references).toEqual(fk('plans', { column: 'code', onDelete: 'SET DEFAULT' }))
+    expect(column('CREATE TABLE m (guild_id uuid REFERENCES guilds(id) ON DELETE SET DEFAULT)').default).toBeUndefined()
+  })
+
+  it('keeps the name a constraint was given, inline, at table level and on ALTER', () => {
+    expect(column('CREATE TABLE m (owner_id uuid CONSTRAINT m_owner REFERENCES users(id))').references)
+      .toEqual(fk('users', { name: 'm_owner' }))
+    expect(column('CREATE TABLE m (owner_id uuid, CONSTRAINT m_owner FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE RESTRICT)').references)
+      .toEqual(fk('users', { name: 'm_owner', onDelete: 'RESTRICT' }))
+    // The case this was found with.
+    const a = parseOne(
+      'ALTER TABLE enrolments ADD CONSTRAINT enrolments_clan_fkey FOREIGN KEY (clan_id) REFERENCES guilds(id) ON DELETE SET NULL',
+    )
+    expect(a.args).toEqual({
+      tableName: 'enrolments',
+      columnName: 'clan_id',
+      constraintType: 'foreign_key',
+      expression: 'guilds(id)',
+      referencedTable: 'guilds',
+      constraintName: 'enrolments_clan_fkey',
+      references: fk('guilds', { onDelete: 'SET NULL', name: 'enrolments_clan_fkey' }),
+    })
+  })
+
+  it('carries it on ADD COLUMN', () => {
+    const a = parseOne('ALTER TABLE members ADD COLUMN mentor_id uuid REFERENCES members(id) ON DELETE SET NULL')
+    expect((a.args.column as any).references).toEqual(fk('members', { onDelete: 'SET NULL' }))
+  })
+
+  it('applies a table-level key declared before its column, instead of dropping it', () => {
+    expect(column('CREATE TABLE m (FOREIGN KEY (guild_id) REFERENCES guilds(id) ON DELETE CASCADE, guild_id uuid)').references)
+      .toEqual(fk('guilds', { onDelete: 'CASCADE' }))
+  })
+
+  it('accepts MATCH SIMPLE and MATCH FULL, which on one column are the same', () => {
+    expect(column('CREATE TABLE m (guild_id uuid REFERENCES guilds(id) MATCH FULL ON DELETE CASCADE)').references)
+      .toEqual(fk('guilds', { onDelete: 'CASCADE' }))
+  })
+
+  it.each([
+    ['a deferrable key', 'CREATE TABLE m (g uuid REFERENCES guilds(id) DEFERRABLE INITIALLY DEFERRED)', 'UNSUPPORTED_CONSTRAINT'],
+    ['MATCH PARTIAL', 'CREATE TABLE m (g uuid REFERENCES guilds(id) MATCH PARTIAL)', 'UNSUPPORTED_CONSTRAINT'],
+    ['a composite reference', 'CREATE TABLE m (g uuid REFERENCES guilds(id, region))', 'UNSUPPORTED_CONSTRAINT'],
+    ['SET NULL with a column list', 'CREATE TABLE m (g uuid REFERENCES guilds(id) ON DELETE SET NULL (g))', 'UNSUPPORTED_CONSTRAINT'],
+    ['an action given twice', 'CREATE TABLE m (g uuid REFERENCES guilds(id) ON DELETE CASCADE ON DELETE RESTRICT)', 'BAD_STATEMENT'],
+    ['a key on a column the table does not declare', 'CREATE TABLE m (title text, FOREIGN KEY (g) REFERENCES guilds(id))', 'BAD_STATEMENT'],
+    ['anything after the key on ALTER', 'ALTER TABLE m ADD FOREIGN KEY (g) REFERENCES guilds(id) ON DELETE CASCADE NOT VALID', 'UNSUPPORTED_CONSTRAINT'],
+    ['two keys on one column', 'CREATE TABLE m (g uuid REFERENCES a(id), FOREIGN KEY (g) REFERENCES b(id))', 'UNSUPPORTED_CONSTRAINT'],
+    ['a schema-qualified target', 'CREATE TABLE m (g uuid REFERENCES other.guilds(id))', 'QUALIFIED_NAME'],
+  ])('refuses %s rather than dropping part of it', (_label, sql, code) => {
+    const err = expectRefusal(sql)
+    expect(err.code).toBe(code)
+    expect(err.hint ?? err.message).toBeTruthy()
   })
 })

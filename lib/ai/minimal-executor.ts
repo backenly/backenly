@@ -8,6 +8,7 @@
  */
 
 import { isReservedWorkspaceTable } from '@/lib/security/workspace-schema'
+import { addForeignKeySql, columnForeignKeySql, describeTarget, isDeclaredForeignKey } from '@/lib/db/declared-foreign-key'
 import { getActiveGraph, saveNewGraph } from '@/lib/orchestration/graph-pointer'
 import { withTimeout } from './with-timeout'
 import { trackAction } from './execution-timeline'
@@ -4216,6 +4217,21 @@ async function executeCreateTable(
         let colSql = applyConstraintsToColumn(columnDef, constraints, postgresSchema)
         // Strip FK references — we'll add them in the retroactive pass below
         colSql = colSql.replace(/\s+REFERENCES\s+"[^"]*"\."[^"]*"\("[^"]*"\)[^,;]*/gi, '').trim()
+        // A foreign key declared in a migration is installed exactly as written,
+        // in this same statement, so a key that cannot be created leaves no table
+        // behind (lib/db/declared-foreign-key.ts). A branch is built without
+        // foreign keys, and gets this one when its merge replays the statement.
+        const declaredFk = (col as { references?: unknown }).references
+        if (declaredFk !== undefined && !branchMode) {
+          if (!isDeclaredForeignKey(declaredFk)) {
+            return {
+              success: false,
+              message: `The foreign key declared on "${col.name}" cannot be installed as written, so "${tableName}" was not created.`,
+              error: 'Invalid declared foreign key',
+            }
+          }
+          colSql += ` ${columnForeignKeySql(postgresSchema, tableName, col.name, declaredFk)}`
+        }
         columnDefs.push(colSql)
       }
     }
@@ -4545,6 +4561,8 @@ async function executeCreateTable(
     // up here, before the convention pass, using the target the caller named.
     try {
       for (const { col, constraints } of columnPlans) {
+        // A declared key was installed with the table, exactly as written.
+        if (col?.references !== undefined) continue
         if (typeof col?.fkTo !== 'string' || !col.fkTo.trim()) continue
 
         const target = String(col.fkTo).trim().toLowerCase().split('.')[0]
@@ -5731,7 +5749,8 @@ async function executeAddColumn(
     // NULL it cannot satisfy (23502), and either way the result is the truth.
     const spec = params.column && typeof params.column === 'object' ? params.column as Record<string, unknown> : null
     const declared = !!spec && colsToAdd.length === 1 &&
-      (spec.nullable === false || spec.default !== undefined || spec.unique === true || typeof spec.fkTo === 'string')
+      (spec.nullable === false || spec.default !== undefined || spec.unique === true || typeof spec.fkTo === 'string' ||
+        spec.references !== undefined)
     if (declared) {
       const name = String(spec!.name ?? colsToAdd[0].name)
       const ident = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/
@@ -5749,7 +5768,14 @@ async function executeAddColumn(
         defaultSql = ` DEFAULT ${d}`
       }
       let referencesSql = ''
-      if (typeof spec!.fkTo === 'string') {
+      const declaredFk = spec!.references
+      if (declaredFk !== undefined) {
+        // Declared in a migration: installed exactly as written (lib/db/declared-foreign-key.ts).
+        if (!isDeclaredForeignKey(declaredFk)) {
+          return { success: false, message: `The foreign key declared on "${name}" cannot be installed as written, so nothing was added.` }
+        }
+        referencesSql = ` ${columnForeignKeySql(postgresSchema, tableName, name, declaredFk)}`
+      } else if (typeof spec!.fkTo === 'string') {
         if (!ident.test(spec!.fkTo)) return { success: false, message: `"${spec!.fkTo}" is not a table this path can reference.` }
         referencesSql = ` REFERENCES "${postgresSchema}"."${spec!.fkTo}"("id")`
       }
@@ -9228,6 +9254,38 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
           `Recorded foreign key ${tableName}.${columnName}${target ? ` → ${target}` : ''}; it is not enforced on a ` +
           `branch and is added to production when the branch is merged.`,
         data: { tableName, columnName, referencedTable: target ?? null, enforcedOnBranch: false },
+      }
+    }
+    // A foreign key declared in a migration is installed exactly as written:
+    // its referenced column, both actions and its name. fk-repair's rules are
+    // for keys Backenly infers, and their default is ON DELETE CASCADE, which is
+    // how a declared ON DELETE SET NULL used to become one.
+    if (params.references !== undefined) {
+      const fk = params.references
+      if (!isDeclaredForeignKey(fk)) {
+        return {
+          success: false,
+          message: `The foreign key declared on "${tableName}.${columnName}" cannot be installed as written, so nothing was added.`,
+          code: 'FK_FAILED',
+        }
+      }
+      const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
+      const sql = addForeignKeySql(getWorkspaceDatabaseNames(projectId).postgresSchema, tableName, columnName, fk)
+      try {
+        await db.$executeRawUnsafe(sql)
+      } catch (err: any) {
+        const reason = err?.meta?.message ?? err?.message ?? String(err)
+        return {
+          success: false,
+          message: `The foreign key ${tableName}.${columnName} → ${describeTarget(fk)} was not added: ${reason}`,
+          error: reason,
+          code: 'FK_FAILED',
+        }
+      }
+      return {
+        success: true,
+        message: `✅ Added foreign key ${tableName}.${columnName} → ${describeTarget(fk)} ON DELETE ${fk.onDelete} ON UPDATE ${fk.onUpdate}`,
+        data: { tableName, columnName, referencedTable: fk.table, referencedColumn: fk.column ?? null, onDelete: fk.onDelete, onUpdate: fk.onUpdate },
       }
     }
     const { repairForeignKeyColumn } = await import('./fk-repair')
