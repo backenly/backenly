@@ -3,7 +3,8 @@
  *
  *   GET  /api/projects/:id/backup  — list this project's snapshots
  *   POST /api/projects/:id/backup  — take one now
- *   PUT  /api/projects/:id/backup  — restore one (requires backupId in the body)
+ *   PUT  /api/projects/:id/backup  — restore one (requires backupId in the body;
+ *                                    the project's administer role)
  *
  * Un-gated from Cloud once lib/recovery/ made the pair coherent. A snapshot
  * covers ONE project's schema and rows; it is not disaster recovery and the two
@@ -95,5 +96,7 @@ export async function PUT(request: NextRequest, props: { params: Promise<{ id: s
       return NextResponse.json({ error: outcome.result.error }, { status: 400 })
     }
     return NextResponse.json({ success: true, data: outcome.result })
-  })
+    // A restore replaces the whole database, so it takes the project's
+    // administer role, as every other whole-database write does.
+  }, { floor: 'administer' })
 }

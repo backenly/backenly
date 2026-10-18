@@ -239,6 +239,15 @@ const calls: Record<string, Call> = {
       params({ id: projectId, findingId: randomUUID() }),
     )
   },
+  // A snapshot restore replaces the whole database. Past the floor, an unknown
+  // snapshot id is refused by the restore itself, never by the floor.
+  restoreSnapshot: async (token, projectId) => {
+    const { PUT } = await import('@/app/api/projects/[id]/backup/route')
+    return PUT(
+      req({ method: 'PUT', token, path: `/api/projects/${projectId}/backup`, body: { backupId: randomUUID() } }) as any,
+      params({ id: projectId }),
+    )
+  },
   createBranch: async (token, projectId) => {
     const { POST } = await import('@/app/api/projects/[id]/branches/route')
     return POST(
@@ -308,7 +317,7 @@ const developerFloor: Array<keyof typeof calls> = [
 
 /** The ADMIN-floor surfaces: DEVELOPER refused, ADMIN past the floor. */
 const adminFloor: Array<keyof typeof calls> = [
-  'decideApproval', 'grantMaintenance', 'rollbackFinding', 'mergeBranch',
+  'decideApproval', 'grantMaintenance', 'rollbackFinding', 'mergeBranch', 'restoreSnapshot',
 ]
 
 describe('DEVELOPER-floor surfaces', () => {
