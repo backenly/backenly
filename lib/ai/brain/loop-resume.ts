@@ -1,0 +1,105 @@
+/**
+ * LOOP RESUME — "continue" AFTER AN AGENT-LOOP TURN STOPPED UNFINISHED
+ * ====================================================================
+ * An agent-loop turn that runs out of steps, out of time budget, or loses its
+ * model after applying changes tells the caller to say "continue". Only the
+ * blueprint executor saved anything to resume from, so "continue" reached the
+ * classifier as CONFIRM with nothing pending and got "nothing is waiting".
+ *
+ * This is the resume point for the loop: the request that was being worked on
+ * and what already landed. It is the original request, saved at the moment the
+ * turn stopped, not a search of the history for something that looks like it.
+ *
+ * Storage: ProjectPreference (type='pending_plan', key='loop_resume'), one per
+ * project, with the same 30-minute TTL as the other resumable states so a stale
+ * "continue" the next day cannot pick up work the person has forgotten.
+ */
+
+import { prisma } from '@/lib/db/prisma'
+
+const PREF_TYPE = 'pending_plan'
+const PREF_KEY = 'loop_resume'
+const TTL_MS = 30 * 60 * 1000
+/** Bounds what one marker can carry, so a long run cannot grow the row without limit. */
+const MAX_REQUEST_CHARS = 8000
+const MAX_APPLIED = 200
+
+export interface LoopResume {
+  /** The request the stopped turn was working on, as the person put it. */
+  request: string
+  /** Titles of the changes that already landed, across every turn of this request. */
+  applied: string[]
+  /** Why the turn stopped, for the model's context. */
+  reason: string
+  createdAt: string
+  expiresAt: string
+}
+
+export type LoopStop = 'step_budget' | 'time_budget' | 'model_failure'
+
+const STOP_REASON: Record<LoopStop, string> = {
+  step_budget: 'it ran out of steps',
+  time_budget: 'it stopped to keep time for verification',
+  model_failure: 'the AI model failed partway',
+}
+
+export async function saveLoopResume(
+  projectId: string,
+  request: string,
+  applied: string[],
+  stop: LoopStop,
+): Promise<void> {
+  const now = Date.now()
+  const marker: LoopResume = {
+    request: request.slice(0, MAX_REQUEST_CHARS),
+    applied: applied.slice(-MAX_APPLIED),
+    reason: STOP_REASON[stop],
+    createdAt: new Date(now).toISOString(),
+    expiresAt: new Date(now + TTL_MS).toISOString(),
+  }
+  await prisma.projectPreference.upsert({
+    where: { projectId_type_key: { projectId, type: PREF_TYPE, key: PREF_KEY } },
+    create: { projectId, type: PREF_TYPE, key: PREF_KEY, value: JSON.stringify(marker), confidence: 1 },
+    update: { value: JSON.stringify(marker), confidence: 1, lastSeen: new Date() },
+  })
+}
+
+export async function loadLoopResume(projectId: string): Promise<LoopResume | null> {
+  const pref = await prisma.projectPreference
+    .findUnique({ where: { projectId_type_key: { projectId, type: PREF_TYPE, key: PREF_KEY } } })
+    .catch(() => null)
+  if (!pref) return null
+  try {
+    const m = JSON.parse(pref.value) as LoopResume
+    if (typeof m.request !== 'string' || !m.request.trim()) return null
+    if (!Array.isArray(m.applied)) m.applied = []
+    if (Date.parse(m.expiresAt) < Date.now()) return null
+    return m
+  } catch {
+    return null
+  }
+}
+
+export async function clearLoopResume(projectId: string): Promise<void> {
+  await prisma.projectPreference
+    .deleteMany({ where: { projectId, type: PREF_TYPE, key: PREF_KEY } })
+    .catch(() => {})
+}
+
+/**
+ * The message the model is sent in place of a bare "continue". It carries the
+ * original request and the applied list so finished work is not redone; the
+ * person's own message is still what is stored in the conversation.
+ */
+export function resumePrompt(marker: LoopResume, said: string): string {
+  const applied = marker.applied.length
+    ? `ALREADY APPLIED — do not redo any of it:\n${marker.applied.map((t) => `  • ${t}`).join('\n')}`
+    : 'Nothing was applied before it stopped.'
+  return (
+    `The person said "${said.trim().slice(0, 200)}" to continue the request below, which stopped unfinished because ${marker.reason}.\n\n` +
+    `ORIGINAL REQUEST:\n${marker.request}\n\n` +
+    `${applied}\n\n` +
+    `Read the live backend state, then finish only what is still missing and verify it. ` +
+    `Do not start a different task.`
+  )
+}

@@ -48,6 +48,7 @@ import {
 import { getBlueprintForPrompt, isExplicitSpec } from '../blueprints'
 import { looksLikeBuildDescription } from './build-signals'
 import { findOriginalBuildPrompt } from './resume-routing'
+import { saveLoopResume, loadLoopResume, clearLoopResume, resumePrompt, type LoopResume, type LoopStop } from './loop-resume'
 import {
   savePendingPlan, loadPendingPlan, clearPendingPlan,
   saveResumeQueue, loadResumeQueue, clearResumeQueue,
@@ -470,10 +471,11 @@ export async function runBrain(
 
   // ── CLASSIFY ────────────────────────────────────────────────────────────
   emit({ type: 'phase', phase: 'classify' })
-  const [hasPendingProposal, hasResumeQueue, hasPendingBlueprint] = await Promise.all([
+  const [hasPendingProposal, hasResumeQueue, hasPendingBlueprint, loopResume] = await Promise.all([
     hasActiveProposal(input.projectId),
     loadResumeQueue(input.projectId).then(q => q !== null).catch(() => false),
     loadPendingPlan(input.projectId).then(p => p !== null).catch(() => false),
+    loadLoopResume(input.projectId).catch(() => null),
   ])
   let classification: Classification
   try {
@@ -487,7 +489,7 @@ export async function runBrain(
       // "finish it" / "resume" are CONFIRM, not UNCLEAR. Without this, the
       // classifier defaulted to UNCLEAR ("could you tell me a bit more
       // about 'continue'") and the user burned credits in confused loops.
-      hasPendingPlan: hasPendingBlueprint || hasResumeQueue || detectPendingPlan(memory.history),
+      hasPendingPlan: hasPendingBlueprint || hasResumeQueue || loopResume !== null || detectPendingPlan(memory.history),
       // On an empty project, an app description has one meaning: build it. This
       // stops the classifier dead-ending "Users can post recipes and follow
       // each other" in a canned clarification.
@@ -525,6 +527,7 @@ export async function runBrain(
     !hasPendingProposal &&
     !hasResumeQueue &&
     !hasPendingBlueprint &&
+    loopResume === null &&
     !detectPendingPlan(memory.history)
   ) {
     emit({ type: 'phase', phase: 'finish' })
@@ -653,6 +656,14 @@ export async function runBrain(
     if (resume) {
       console.log(`[Brain] route=BLUEPRINT_RESUME domain=${resume.domain} steps=${resume.steps.length}`)
       return await blueprintExecuteTurn(resume.steps, 0, dispatchCtx, classification, emit, input, resume.domain)
+    }
+
+    // A loop turn that stopped unfinished saved where it was. Resume the agent
+    // loop on that request with what already landed, rather than searching the
+    // history for a prompt that looks like one.
+    if (loopResume) {
+      console.log(`[Brain] route=LOOP_RESUME applied=${loopResume.applied.length} reason="${loopResume.reason}"`)
+      return await runAgentLoop(input, classification, memory.summary, understandingBlock, recent, dispatchCtx, emit, toolsRun, loopResume)
     }
 
     // No stored plan at all — but the user is confirming/continuing a build.
@@ -1280,6 +1291,7 @@ async function runAgentLoop(
   ctx: ToolDispatchContext,
   emit: (e: BrainEvent) => void,
   toolsRun: string[],
+  resume: LoopResume | null = null,
 ): Promise<BrainResult> {
   const turnTools = toolsForIntent(classification.intent)
 
@@ -1300,7 +1312,12 @@ async function runAgentLoop(
     `INTENT CLASSIFICATION (advisory): ${classification.intent} (${classification.confidence.toFixed(2)}) — ${classification.reasoning}\n` +
     `${intentHint}\n` +
     currentPageContext(input.surface)
-  const messages = conversationFor(recent, input.message)
+  // On a resumed turn the model is sent the saved request and the applied list
+  // instead of the bare "continue"; the conversation keeps the person's words.
+  const messages = conversationFor(recent, resume ? resumePrompt(resume, input.message) : input.message)
+  const resumeRequest = resume ? resume.request : input.message
+  /** Set where the summary tells the caller to say "continue", so the promise has something behind it. */
+  let stoppedUnfinished: LoopStop | null = null
 
   let mutated = false
   let verifiedAfterMutation = false
@@ -1657,6 +1674,7 @@ async function runAgentLoop(
   if (modelFailure) {
     const { reason, retryable, code } = modelFailure
     if (mutated) {
+      if (retryable || code === 'AI_UNAVAILABLE') stoppedUnfinished = 'model_failure'
       const proof = await collectProof(input.projectId).catch(() => null)
       const state = proof && !proof.nothingBuilt ? formatProof(proof) : ''
       finalSummary =
@@ -1682,6 +1700,7 @@ async function runAgentLoop(
   // tool or because a round trip ran long. It reads the live catalog directly.
   let verified = false
   if (budgetStopped) {
+    stoppedUnfinished = 'time_budget'
     emit({ type: 'phase', phase: 'verify' })
     const proof = await collectProof(input.projectId).catch(() => null)
     verified = !!proof
@@ -1710,11 +1729,28 @@ async function runAgentLoop(
     })
   }
 
+  if (!finalSummary && iter >= MAX_ITERATIONS) stoppedUnfinished = 'step_budget'
   if (!finalSummary) {
     finalSummary =
       iter >= MAX_ITERATIONS
         ? "I made progress but ran out of steps before fully finishing. Tell me to continue and I'll pick up where I left off."
         : 'Done.'
+  }
+
+  // The summary above invites "continue" only on these stops, so exactly these
+  // save something for it to resume. A turn that finishes the resumed work, or
+  // changes the backend for a new request, clears the marker so a later "yes"
+  // cannot revive work that is done or replaced. A read-only turn in between
+  // ("what tables do I have?") leaves it, so "continue" still works after it.
+  if (stoppedUnfinished) {
+    await saveLoopResume(
+      input.projectId,
+      resumeRequest,
+      [...(resume?.applied ?? []), ...appliedMutationTitles],
+      stoppedUnfinished,
+    ).catch((err) => console.error('[Brain] could not save the resume point:', err))
+  } else if (resume || mutated) {
+    await clearLoopResume(input.projectId)
   }
 
   emit({ type: 'final', summary: finalSummary, needsUser, data: terminalData })
