@@ -234,7 +234,7 @@ beforeAll(async () => {
     `CREATE OR REPLACE FUNCTION public.backenly_pgrst_noop() RETURNS event_trigger
      LANGUAGE plpgsql AS $$ BEGIN END $$`,
   )
-  for (const name of ['backenly_pgrst_ddl_sync', 'backenly_pgrst_schema_create', 'backenly_pgrst_schema_drop']) {
+  for (const name of ['backenly_pgrst_ddl_sync', 'backenly_pgrst_drop_sync', 'backenly_pgrst_schema_create', 'backenly_pgrst_schema_drop']) {
     await c.query(
       `CREATE EVENT TRIGGER ${name} ON ddl_command_end EXECUTE FUNCTION public.backenly_pgrst_noop()`,
     )
