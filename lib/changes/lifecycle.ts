@@ -34,7 +34,39 @@ import { randomUUID } from 'crypto'
 import type { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
 import { metrics } from '@/lib/observability/metrics'
+import { projectRegion } from '@/lib/data-plane/regional'
 import type { ChangeStatus } from './types'
+
+/**
+ * What every change metric names: the project, the region holding its data,
+ * the change, and how a recovery ran. Ids and kinds only, never row data.
+ */
+export async function changeLabels(
+  projectId: string,
+  changeId: string,
+  extra: Record<string, string> = {},
+): Promise<Record<string, string>> {
+  const region = await projectRegion(projectId).catch(() => 'unknown')
+  return { projectId, region, changeId, ...extra }
+}
+
+/**
+ * A change that needs a person is said once, in a fixed form an operator's log
+ * alarm can match: BACKENLY_CHANGE_NEEDS_PERSON, with ids only. The reason
+ * stays on the change's own record, where residency rules decide what it keeps.
+ */
+async function announce(changeId: string, to: ChangeStatus): Promise<void> {
+  if (to !== 'manual_intervention_required') return
+  try {
+    const row = await prisma.backendChange.findUnique({ where: { id: changeId }, select: { projectId: true, seq: true } })
+    if (!row) return
+    const labels = await changeLabels(row.projectId, changeId)
+    console.error(`BACKENLY_CHANGE_NEEDS_PERSON project=${row.projectId} region=${labels.region} change=${changeId} seq=${row.seq}`)
+    metrics.record('change.needs_person', 1, labels)
+  } catch (err) {
+    console.error(`[ChangeLifecycle] could not announce that change ${changeId} needs a person:`, err)
+  }
+}
 
 /** The edges the trigger allows, from → to. Kept identical to the migration. */
 export const TRANSITIONS: Readonly<Record<ChangeStatus, readonly ChangeStatus[]>> = {
@@ -97,12 +129,19 @@ export async function recordEvent(
   } catch (err) {
     console.error(`[ChangeLifecycle] could not record ${type} for change ${changeId}:`, err)
   }
-  metrics.record(`change.${type}`, 1, { projectId })
+  const mode = typeof data?.mode === 'string' ? { mode: data.mode } : {}
+  metrics.record(`change.${type}`, 1, await changeLabels(projectId, changeId, mode))
 }
 
 /** A duration, for the recovery timings the reliability work reads. */
-export function recordTiming(name: string, ms: number, labels: Record<string, string>): void {
-  metrics.record(`change.${name}_ms`, ms, labels)
+export async function recordTiming(
+  name: string,
+  ms: number,
+  projectId: string,
+  changeId: string,
+  labels: Record<string, string>,
+): Promise<void> {
+  metrics.record(`change.${name}_ms`, ms, await changeLabels(projectId, changeId, labels))
 }
 
 /**
@@ -121,6 +160,7 @@ export async function transition(
     where: { id: changeId, status: { in: [...allowed] } },
     data: { ...data, status: to },
   })
+  if (res.count === 1) await announce(changeId, to)
   return res.count === 1
 }
 
@@ -157,5 +197,6 @@ export async function releaseRecovery(
     where: { id: changeId, status: 'recovering', recoveryClaim: claim },
     data: { ...data, status: to, recoveryClaim: null, recoveryLeaseUntil: null },
   })
+  if (res.count === 1) await announce(changeId, to)
   return res.count === 1
 }

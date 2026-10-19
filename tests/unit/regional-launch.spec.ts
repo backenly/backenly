@@ -66,6 +66,11 @@ interface Database {
   roles: Partial<Record<ManagedRole, { verifier: string | null; recorded: boolean }>>
   applied: boolean
   failApply?: boolean
+  /**
+   * The direct-access step's files changed since it was applied, and the
+   * database does not verify against them until an apply converges it.
+   */
+  changed?: boolean
 }
 
 type Call = { args: string[]; stdin?: string }
@@ -172,8 +177,12 @@ class FakeAws {
   /** bootstrap.sh, as the launcher sees it: its report lines, its refusals, its exit code. */
   private procedure(env: Record<string, string>): { exitCode: number; lines: string[] } {
     const apply = env.BOOTSTRAP_MODE === 'apply'
+    const preApply = env.BOOTSTRAP_PRE_APPLY === 'true'
     const lines = ['', `Regional database initialisation (${apply ? 'apply' : 'check'})`]
     const rotate = (env.BOOTSTRAP_ROTATE ?? '').split(',').filter(Boolean)
+    if (apply && preApply) {
+      return { exitCode: 2, lines: [...lines, 'refusing: BOOTSTRAP_PRE_APPLY marks the check a launcher runs before its own apply, never the apply'] }
+    }
     if (apply) {
       if (this.db.failApply) return { exitCode: 3, lines: [...lines, 'ERROR:  could not connect'] }
       for (const role of ALL_ROLES) {
@@ -189,9 +198,17 @@ class FakeAws {
         if (verifier) this.db.roles[role] = { verifier, recorded: true }
       }
       this.db.applied = true
+      this.db.changed = false
       for (const id of STEPS) lines.push(`  step ${id}: applied`)
     } else {
-      for (const id of STEPS) lines.push(`  step ${id}: ${this.db.applied ? 'current (applied, files unchanged)' : 'pending (not applied)'}`)
+      for (const id of STEPS) {
+        const state = !this.db.applied
+          ? 'pending (not applied)'
+          : this.db.changed && id === 'direct-access'
+            ? 'changed (applied, but its files have changed since)'
+            : 'current (applied, files unchanged)'
+        lines.push(`  step ${id}: ${state}`)
+      }
     }
     for (const role of ALL_ROLES) {
       const have = this.db.roles[role]
@@ -200,6 +217,16 @@ class FakeAws {
           !have ? `missing (the first apply must supply ${ROLES[role].verifier})` : have.recorded ? 'recorded 2026-10-16T12:00:00Z' : 'unrecorded (exists, but this procedure never set its password)'
         }`,
       )
+    }
+    if (!apply && this.db.applied && this.db.changed) {
+      // As bootstrap.sh: only the check a launcher runs before its own apply passes.
+      lines.push('ERROR:  regional database verification failed: backenly_backup cannot use workspace schema workspace_0, so its snapshots fail')
+      if (!preApply) {
+        lines.push('Check only: nothing was written. 1 step(s) changed since applied, and the database does not verify.')
+        return { exitCode: 3, lines }
+      }
+      lines.push('Check only: nothing was written. 1 step(s) changed since applied: the apply that follows converges what does not verify.')
+      return { exitCode: 0, lines }
     }
     lines.push(apply ? 'Regional database initialised and verified.' : 'Check only: nothing was written.')
     return { exitCode: 0, lines }
@@ -285,21 +312,23 @@ describe('a first apply', () => {
   })
 })
 
-describe('an apply on a finished database', () => {
-  function finished(): { fake: FakeAws; passwords: Record<ManagedRole, string> } {
-    const passwords = { backenly_app: generatePassword(), backenly_backup: generatePassword(), backenly_authenticator: generatePassword() }
-    const fake = new FakeAws({
-      roles: Object.fromEntries(ALL_ROLES.map((role) => [role, { verifier: scramSha256Verifier(passwords[role]), recorded: true }])),
-      applied: true,
-    })
-    fake.seedCurrent(CONFIG.secrets.app, connectionString('backenly_app', passwords.backenly_app, CONFIG.database))
-    fake.seedCurrent(CONFIG.secrets.direct, connectionString('backenly_app', passwords.backenly_app, CONFIG.database))
-    fake.seedCurrent(CONFIG.secrets.backup, connectionString('backenly_backup', passwords.backenly_backup, CONFIG.database))
-    fake.seedCurrent(CONFIG.secrets.authenticator, connectionString('backenly_authenticator', passwords.backenly_authenticator, CONFIG.database))
-    fake.seedCurrent(CONFIG.secrets.postgrestJwt, 'kept-jwt-secret-of-at-least-thirty-two-characters')
-    return { fake, passwords }
-  }
+/** A database the procedure finished, with every credential in its secret. */
+function finished(db: Partial<Database> = {}): { fake: FakeAws; passwords: Record<ManagedRole, string> } {
+  const passwords = { backenly_app: generatePassword(), backenly_backup: generatePassword(), backenly_authenticator: generatePassword() }
+  const fake = new FakeAws({
+    roles: Object.fromEntries(ALL_ROLES.map((role) => [role, { verifier: scramSha256Verifier(passwords[role]), recorded: true }])),
+    applied: true,
+    ...db,
+  })
+  fake.seedCurrent(CONFIG.secrets.app, connectionString('backenly_app', passwords.backenly_app, CONFIG.database))
+  fake.seedCurrent(CONFIG.secrets.direct, connectionString('backenly_app', passwords.backenly_app, CONFIG.database))
+  fake.seedCurrent(CONFIG.secrets.backup, connectionString('backenly_backup', passwords.backenly_backup, CONFIG.database))
+  fake.seedCurrent(CONFIG.secrets.authenticator, connectionString('backenly_authenticator', passwords.backenly_authenticator, CONFIG.database))
+  fake.seedCurrent(CONFIG.secrets.postgrestJwt, 'kept-jwt-secret-of-at-least-thirty-two-characters')
+  return { fake, passwords }
+}
 
+describe('an apply on a finished database', () => {
   it('sets no password and keeps every secret', async () => {
     const { fake } = finished()
     const before = Object.values(CONFIG.secrets).map((arn) => fake.current(arn))
@@ -337,6 +366,35 @@ describe('an apply on a finished database', () => {
     expect(await launch('apply', CONFIG, ['backenly_app'], deps(fake))).toBe(1)
     expect(passwordOf(fake.current(CONFIG.secrets.app)!)).toBe(passwords.backenly_app)
     expect(passwordOf(fake.current(CONFIG.secrets.direct)!)).toBe(passwords.backenly_app)
+  })
+})
+
+describe('a region whose step files changed and do not verify yet', () => {
+  it('fails a check on its own, and writes nothing', async () => {
+    const { fake } = finished({ changed: true })
+    const log: string[] = []
+    expect(await launch('check', CONFIG, [], deps(fake, log))).toBe(1)
+    // A standalone check carries no pre-apply signal: a gate reading its exit code
+    // never passes a region that does not verify.
+    expect(runTasks(fake).map(envOf)).toEqual([{ BOOTSTRAP_MODE: 'check' }])
+    expect(fake.calls.filter((c) => c.args[0] === 'secretsmanager')).toHaveLength(0)
+    expect(log.join('\n')).toContain('The check failed. Nothing was written.')
+  })
+
+  it('is converged by an apply, whose first check alone is a pre-apply check', async () => {
+    const { fake } = finished({ changed: true })
+    const before = Object.values(CONFIG.secrets).map((arn) => fake.current(arn))
+    const log: string[] = []
+    expect(await launch('apply', CONFIG, [], deps(fake, log))).toBe(0)
+    expect(runTasks(fake).map(envOf)).toEqual([
+      { BOOTSTRAP_MODE: 'check', BOOTSTRAP_PRE_APPLY: 'true' },
+      { BOOTSTRAP_MODE: 'apply' },
+      // The closing check is strict again: it passes only because the apply converged.
+      { BOOTSTRAP_MODE: 'check' },
+    ])
+    expect(fake.db.changed).toBe(false)
+    expect(Object.values(CONFIG.secrets).map((arn) => fake.current(arn))).toEqual(before)
+    expect(log.join('\n')).toContain('The region database is initialised: every step current, every credential recorded and kept.')
   })
 })
 
