@@ -36,7 +36,7 @@ import { mcpGuard, recordMcpCall, refuseIfReadOnly } from '@/lib/mcp/guard'
 import { corsHeaders, optionsResponse } from '@/lib/mcp/cors'
 import { runBrain, type BrainEvent } from '@/lib/ai/brain/agent'
 import { assertAiAllowed } from '@/lib/platform-controls'
-import { createApprovalRequest } from '@/lib/mcp/approvals'
+import { createApprovalRequest, RestoreRequestRefusedError } from '@/lib/mcp/approvals'
 import { enforceAiCredits } from '@/lib/entitlements/policy'
 import { closeCreditTurn } from '@/lib/entitlements/credit-holds'
 import { createTokenScope, runInTokenScope } from '@/lib/ai/token-meter'
@@ -209,9 +209,12 @@ export async function POST(request: NextRequest) {
     const queued: Array<{ id: string; tool: string; target: string }> = []
     // Stopped calls whose request could not be created, for example because a
     // regional project's region could not keep it: nothing is waiting for them.
-    const notQueued: Array<{ tool: string; target: string }> = []
+    // A restore that cannot happen carries the reason it was refused.
+    const notQueued: Array<{ tool: string; target: string; reason?: string }> = []
     for (const blocked of result.blockedCalls ?? []) {
       try {
+        // The model's arguments are the call it asked for. A restore's are
+        // replaced by Backenly's measurement of it (createApprovalRequest).
         const row = await createApprovalRequest({
           projectId: auth.projectId,
           userId: auth.userId,
@@ -227,6 +230,10 @@ export async function POST(request: NextRequest) {
         })
         queued.push({ id: row.id, tool: blocked.tool, target: blocked.target })
       } catch (e) {
+        if (e instanceof RestoreRequestRefusedError) {
+          notQueued.push({ tool: blocked.tool, target: blocked.target, reason: e.message })
+          continue
+        }
         console.error('[MCP Chat] Failed to create approval request:', e)
         notQueued.push({ tool: blocked.tool, target: blocked.target })
       }
@@ -274,12 +281,20 @@ export async function POST(request: NextRequest) {
     // rest of the turn keeps its own answer, what it applied and any code the
     // brain gave it: only a turn that did nothing else is answered as this
     // failure, rather than as a success.
-    const notQueuedNote = notQueued.length
-      ? `Not queued, and not run: ${notQueued.map((q) => `${q.tool} on ${q.target}`).join('; ')}. ` +
-        `${notQueued.length === 1 ? 'It needs' : 'They need'} a human's approval, but the request for ` +
-        `${notQueued.length === 1 ? 'it' : 'them'} could not be created, so nothing is waiting in the ` +
-        `Review Queue. Send the request again.`
-      : ''
+    // A refused restore says why: sending it again would change nothing.
+    const refused = notQueued.filter((q) => q.reason)
+    const failed = notQueued.filter((q) => !q.reason)
+    const notQueuedNote = [
+      refused.length
+        ? `Refused, so not queued and not run: ${refused.map((q) => `${q.tool} on ${q.target} (${q.reason})`).join('; ')}.`
+        : '',
+      failed.length
+        ? `Not queued, and not run: ${failed.map((q) => `${q.tool} on ${q.target}`).join('; ')}. ` +
+          `${failed.length === 1 ? 'It needs' : 'They need'} a human's approval, but the request for ` +
+          `${failed.length === 1 ? 'it' : 'them'} could not be created, so nothing is waiting in the ` +
+          `Review Queue. Send the request again.`
+        : '',
+    ].filter(Boolean).join(' ')
     const onlyNotQueued = notQueued.length > 0 && !escalated && !result.applied?.length && !result.failureCode
     const summary =
       (escalated
