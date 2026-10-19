@@ -859,16 +859,24 @@ export async function reconcileChange(projectId: string, changeId: string, now =
   }
 }
 
-/** Every stale change in a project. Run by the maintenance cron. */
+/**
+ * Changes a process stopped working on: a recovery whose lease ran out, or a
+ * change still applying or verifying long after it began. reconcileChange
+ * settles each; lib/changes/upkeep.ts finds the projects that have any.
+ */
+export function interruptedChangesWhere(now: Date): Prisma.BackendChangeWhereInput {
+  return {
+    OR: [
+      { status: 'recovering', recoveryLeaseUntil: { lt: now } },
+      { status: { in: ['applying', 'verifying'] }, createdAt: { lt: new Date(now.getTime() - RECOVERY_LEASE_MS) } },
+    ],
+  }
+}
+
+/** Every stale change in a project. Run by each region's scheduler (lib/changes/upkeep.ts). */
 export async function reconcileChanges(projectId: string, now = new Date()): Promise<number> {
   const stale = await prisma.backendChange.findMany({
-    where: {
-      projectId,
-      OR: [
-        { status: 'recovering', recoveryLeaseUntil: { lt: now } },
-        { status: { in: ['applying', 'verifying'] }, createdAt: { lt: new Date(now.getTime() - RECOVERY_LEASE_MS) } },
-      ],
-    },
+    where: { projectId, ...interruptedChangesWhere(now) },
     select: { id: true },
     take: 50,
   })

@@ -1259,6 +1259,11 @@ tests/integration/branch-merge-governed.spec.ts
 # workspace or another project. Real schemas, vaults and purges.
 tests/integration/change-restore-point-unavailable.spec.ts
 
+# Each region's scheduler settles its own projects' interrupted changes and drops
+# their vaults past the window, and leaves another region's projects to that
+# region; a region it cannot reach is skipped and the skip recorded.
+tests/integration/change-upkeep.spec.ts
+
 # The undo routes that worked outside the change ledger (graph-pointer undo and
 # restore, the archive and approved-fix rollbacks) answer 410 MOVED to the
 # project admin and 404 to anyone else, and change nothing.
