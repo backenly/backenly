@@ -22,12 +22,14 @@ import {
   connectingFetch,
   describeError,
   describesTable,
+  freshStatus,
   generatedFunctionsFor,
   parseArgs,
   pendingApproval,
   qualify,
   toolBody,
   toolData,
+  untilAnswering,
 } from '@/scripts/qualify-region'
 
 const PROJECT = '0b9e3a52-7a5d-4c1e-9a2b-1f2e3d4c5b6a'
@@ -112,7 +114,7 @@ describe('arguments', () => {
   it('runs the rollback drills, with what each needs from the run', () => {
     const plain = parseArgs(ARGV, ENV)
     // Without a member or a kill command those two drills are not run, and say so.
-    expect(plain).toMatchObject({ freshnessSeconds: 30, skipDeletionDrill: false, member: null, killCommand: null, killAfterSeconds: 8, settleWaitMinutes: 30 })
+    expect(plain).toMatchObject({ freshnessSeconds: 30, skipDeletionDrill: false, member: null, killCommand: null, killAfterSeconds: 8, killDrainSeconds: 70, settleWaitMinutes: 30 })
 
     expect(parseArgs([...ARGV, '--freshness-seconds', '45'], ENV).freshnessSeconds).toBe(45)
     expect(() => parseArgs([...ARGV, '--freshness-seconds', '0'], ENV)).toThrow(/--freshness-seconds/)
@@ -132,6 +134,11 @@ describe('arguments', () => {
     expect(kill).toMatchObject({ killCommand: 'aws ecs stop-task --cluster c --task t', killAfterSeconds: 5, settleWaitMinutes: 40 })
     expect(() => parseArgs([...ARGV, '--kill-after-seconds', '0'], ENV)).toThrow(/--kill-after-seconds/)
     expect(() => parseArgs([...ARGV, '--settle-wait-minutes', '0'], ENV)).toThrow(/--settle-wait-minutes/)
+    // The wait after the kill fits the environment's drain and stop timeout; 0 is allowed, for an abrupt kill.
+    expect(parseArgs([...ARGV, '--kill-drain-seconds', '0'], ENV).killDrainSeconds).toBe(0)
+    expect(parseArgs([...ARGV, '--kill-drain-seconds', '120'], ENV).killDrainSeconds).toBe(120)
+    expect(() => parseArgs([...ARGV, '--kill-drain-seconds', '601'], ENV)).toThrow(/--kill-drain-seconds/)
+    expect(() => parseArgs([...ARGV, '--kill-drain-seconds', '-1'], ENV)).toThrow(/--kill-drain-seconds/)
   })
 
   it('names projects of other regions for the region host to refuse, and nothing else', () => {
@@ -190,6 +197,60 @@ describe('the transport', () => {
     const f = connectingFetch({ 'region.test': '127.0.0.1' }, base)
     expect(await (await f('https://elsewhere.test/x')).text()).toBe('base')
     expect(calls).toEqual(['https://elsewhere.test/x'])
+  })
+})
+
+describe('fresh connections, after a kill', () => {
+  let server: http.Server
+  let port: number
+  let connections = 0
+  /** The statuses the server answers with, in order; 200 once they run out. */
+  let script: number[] = []
+
+  beforeAll(async () => {
+    server = http.createServer((_req, res) => {
+      res.writeHead(script.shift() ?? 200)
+      res.end()
+    })
+    server.on('connection', () => connections++)
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    port = (server.address() as AddressInfo).port
+  })
+
+  afterAll(() => new Promise<void>((resolve) => server.close(() => resolve())))
+
+  it('asks on a connection of its own every time, so a draining one is never reused', async () => {
+    script = []
+    const before = connections
+    expect(await freshStatus(`http://127.0.0.1:${port}/api/health`)).toBe(200)
+    expect(await freshStatus(`http://127.0.0.1:${port}/api/health`)).toBe(200)
+    expect(connections - before).toBe(2)
+  })
+
+  it('goes where --connect says and keeps the hostname, and reads nothing answering as 0', async () => {
+    script = [503]
+    expect(await freshStatus(`http://home.test:${port}/api/health`, { 'home.test': '127.0.0.1' })).toBe(503)
+    const closed = http.createServer()
+    await new Promise<void>((resolve) => closed.listen(0, '127.0.0.1', resolve))
+    const gone = (closed.address() as AddressInfo).port
+    await new Promise<void>((resolve) => closed.close(() => resolve()))
+    expect(await freshStatus(`http://127.0.0.1:${gone}/api/health`)).toBe(0)
+  })
+
+  it('waits for answers in a row, not for one answer between refusals', async () => {
+    script = [503, 200, 503, 200]
+    const before = connections
+    await untilAnswering(`http://127.0.0.1:${port}/api/health`, {}, { consecutive: 2, byMs: Date.now() + 10_000, intervalMs: 1 })
+    // 503, 200, 503, then the two in a row.
+    expect(connections - before).toBe(5)
+  })
+
+  it('gives up at its deadline, saying what it last got', async () => {
+    script = Array(50).fill(503)
+    await expect(
+      untilAnswering(`http://127.0.0.1:${port}/api/health`, {}, { consecutive: 2, byMs: Date.now() + 50, intervalMs: 5 }),
+    ).rejects.toThrow(/did not answer 2 fresh connections in a row \(the last got 503\)/)
+    script = []
   })
 })
 

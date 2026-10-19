@@ -22,7 +22,7 @@
  *     [--job-wait-minutes 15] [--repair-wait-minutes 6] [--freshness-seconds 30] \
  *     [--member <a developer or viewer of the probe project, by email>] \
  *     [--kill-command '<kills the process serving the control plane>'] [--kill-after-seconds 8] \
- *     [--settle-wait-minutes 30] [--skip-deletion-drill] \
+ *     [--kill-drain-seconds 70] [--settle-wait-minutes 30] [--skip-deletion-drill] \
  *     [--foreign <a project of another region>@<its region>,...]
  *
  * The home region (--region ap-south-1) is qualified the same way through the
@@ -125,7 +125,14 @@
  *              with --kill-command: the process serving the control plane is
  *              killed while the drill's governed changes apply; the change it
  *              cut off is settled by the region's scheduler as needing a person
- *              within --settle-wait-minutes, and the change lock is free again
+ *              within --settle-wait-minutes, and the change lock is free again.
+ *              Nothing goes on until --kill-drain-seconds have passed (a
+ *              graceful stop drains connections, then signals the process and
+ *              waits out its stop timeout) and fresh connections to the home
+ *              host are answered twice in a row. A graceful stop lets a change
+ *              shorter than the drain finish, so when no change was cut off the
+ *              drill is reported as not exercised, never as passed: it needs an
+ *              abrupt kill, or a change that outlasts the drain
  *   deletion   unless --skip-deletion-drill: a project of the drill's own, in
  *              the region, with a governed change, the vault its restore kept
  *              the table in and a preview branch, is deleted, and is gone at
@@ -196,6 +203,13 @@ export interface QualifyArgs {
   killCommand: string | null
   /** How long after the drill's changes start the kill command runs. */
   killAfterSeconds: number
+  /**
+   * How long after the kill command returns before anything is sent again: a
+   * graceful stop (an ECS stop-task) drains the task's connections for the load
+   * balancer's deregistration delay, then signals the process and waits out its
+   * stop timeout. Until then a request can still land on the process going away.
+   */
+  killDrainSeconds: number
   /** How long the region's scheduler is given to settle a change whose process died. */
   settleWaitMinutes: number
   /** Projects of other regions, which the region's host must refuse. Empty: that check is not run. */
@@ -228,7 +242,7 @@ export function parseArgs(argv: string[], env: Record<string, string | undefined
   const known = [
     '--project', '--region', '--api', '--home', '--connect', '--report', '--approval-wait-minutes', '--job-wait-minutes',
     '--repair-wait-minutes', '--operator', '--freshness-seconds', '--member', '--kill-command', '--kill-after-seconds',
-    '--settle-wait-minutes', '--foreign',
+    '--kill-drain-seconds', '--settle-wait-minutes', '--foreign',
   ]
   for (const f of flags.keys()) if (!known.includes(f)) throw new Error(`unknown option: ${f}`)
 
@@ -313,6 +327,10 @@ export function parseArgs(argv: string[], env: Record<string, string | undefined
   const killCommand = flags.get('--kill-command')?.trim() || null
   const killAfter = Number(flags.get('--kill-after-seconds') ?? '8')
   if (!Number.isFinite(killAfter) || killAfter < 1 || killAfter > 120) throw new Error('--kill-after-seconds must be between 1 and 120')
+  // Staging's web target group drains for 30 s and its tasks have the Fargate
+  // default stop timeout of 30 s, so the process is gone a minute after the stop.
+  const killDrain = Number(flags.get('--kill-drain-seconds') ?? '70')
+  if (!Number.isFinite(killDrain) || killDrain < 0 || killDrain > 600) throw new Error('--kill-drain-seconds must be between 0 and 600')
   // A change counts as interrupted 15 minutes after it began (RECOVERY_LEASE_MS),
   // and the region's scheduler settles such changes every 10 minutes.
   const settleWait = Number(flags.get('--settle-wait-minutes') ?? '30')
@@ -350,6 +368,7 @@ export function parseArgs(argv: string[], env: Record<string, string | undefined
     member,
     killCommand,
     killAfterSeconds: killAfter,
+    killDrainSeconds: killDrain,
     settleWaitMinutes: settleWait,
     foreign,
   }
@@ -404,6 +423,62 @@ export function connectingFetch(overrides: Record<string, string>, base: typeof 
       req.end()
     })
   }) as typeof fetch
+}
+
+/**
+ * The status a GET of `url` gets on a connection of its own: no keep-alive and
+ * no pooled socket, so the answer comes from whatever serves a NEW connection
+ * now, never from a process still draining an old one. `overrides` are
+ * --connect's, kept as `connectingFetch` keeps them. 0 when nothing answered.
+ */
+export function freshStatus(url: string, overrides: Record<string, string> = {}, timeoutMs = 10_000): Promise<number> {
+  return new Promise((resolve) => {
+    const u = new URL(url)
+    const target = overrides[u.hostname.toLowerCase()]
+    const transport = u.protocol === 'https:' ? https : http
+    const req = transport.request(
+      {
+        protocol: u.protocol,
+        hostname: u.hostname,
+        port: u.port || (u.protocol === 'https:' ? 443 : 80),
+        path: u.pathname + u.search,
+        method: 'GET',
+        agent: false,
+        headers: { connection: 'close' },
+        timeout: timeoutMs,
+        ...(target ? { lookup: ((_host: string, options: any, callback: any) => dns.lookup(target, options, callback)) as any } : {}),
+      },
+      (res) => {
+        res.resume()
+        resolve(res.statusCode ?? 0)
+      },
+    )
+    req.on('timeout', () => req.destroy(new Error('timed out')))
+    req.on('error', () => resolve(0))
+    req.end()
+  })
+}
+
+/**
+ * Wait until `url` answers 200 on `consecutive` fresh connections in a row,
+ * and say how long that took. Throws once `byMs` passes without that.
+ */
+export async function untilAnswering(
+  url: string,
+  overrides: Record<string, string>,
+  opts: { consecutive: number; byMs: number; intervalMs?: number },
+): Promise<number> {
+  const started = Date.now()
+  let inARow = 0
+  for (;;) {
+    const status = await freshStatus(url, overrides)
+    inARow = status === 200 ? inARow + 1 : 0
+    if (inARow >= opts.consecutive) return Date.now() - started
+    if (Date.now() > opts.byMs) {
+      throw new Error(`${new URL(url).host} did not answer ${opts.consecutive} fresh connections in a row (the last got ${status || 'no answer'})`)
+    }
+    await new Promise((r) => setTimeout(r, opts.intervalMs ?? 3_000))
+  }
 }
 
 // ── Server-sent events ───────────────────────────────────────────────────────
@@ -1836,22 +1911,43 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
         await new Promise((r) => setTimeout(r, args.killAfterSeconds * 1_000))
         log(`        running the kill command, ${args.killAfterSeconds} s into the drill's changes`)
         const killed = spawnSync(args.killCommand!, { shell: true, encoding: 'utf8', timeout: 180_000 })
+        const killedAt = Date.now()
         stop = true
         await stream
         must(killed.status === 0, `the kill command exited ${killed.status ?? killed.signal}: ${String(killed.stderr ?? '').trim().slice(0, 200)}`)
-        // MCP was served by the process that died: connect again, to whatever serves it now.
+        // A graceful stop takes the task out of the load balancer, drains its
+        // connections, then signals the process and waits out its stop timeout.
+        // Until that is over a request can still reach the process going away,
+        // and with one task nothing answers new connections while its
+        // replacement starts. So nothing is sent until the drain has passed and
+        // fresh connections to the home host are answered twice in a row; then
+        // MCP connects again, to whatever serves it now.
         await mcp!.close()
+        const drainLeft = killedAt + args.killDrainSeconds * 1_000 - Date.now()
+        log(`        waiting ${seconds(Math.max(0, drainLeft))} for the killed process to drain and exit, then for fresh connections to the home host to be answered`)
+        if (drainLeft > 0) await new Promise((r) => setTimeout(r, drainLeft))
+        const answeredAfter = await untilAnswering(homeUrl('/api/health'), args.connect, { consecutive: 2, byMs: Date.now() + 5 * 60_000 })
+        log(`        the home host answered fresh connections ${seconds(Date.now() - killedAt)} after the kill (${seconds(answeredAfter)} after the drain)`)
         const reconnectBy = Date.now() + 5 * 60_000
         for (;;) {
           try {
             mcp = await Mcp.connect(args.home, args.mcpKey, theFetch)
             break
           } catch (err) {
-            if (Date.now() > reconnectBy) throw new Error(`the control plane did not come back within 5 minutes of the kill: ${describeError(err)}`)
+            if (Date.now() > reconnectBy) throw new Error(`the control plane did not come back within 5 minutes of answering health: ${describeError(err)}`)
             await new Promise((r) => setTimeout(r, 5_000))
           }
         }
-        const killedAt = Date.now()
+        // The drill's finished changes are restored, newest first, and any table
+        // left is named for removal, whether or not the kill cut a change off.
+        const cleanUp = async (mine: Array<{ id: string; seq: number; outcome: { state: string } }>) => {
+          for (const c of mine.filter((x) => x.outcome.state === 'healthy')) {
+            await restoreFromConsole(c).catch((err: unknown) => log(`  note  could not restore drill change #${c.seq}: ${describeError(err)}`))
+          }
+          for (const table of made) {
+            if ((await columnsOf(table)) !== null) log(`  note  ${table} is still in the schema; remove it from the console`)
+          }
+        }
         // Every change the drill made ends in a final state; one the kill cut off
         // is settled by the region's scheduler.
         const deadline = killedAt + args.settleWaitMinutes * 60_000
@@ -1864,21 +1960,22 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
               const { change } = await operatorJson(`/api/projects/${args.project}/changes/${c.id}`)
               if (/stopped before it finished/i.test(String(change?.error ?? ''))) cutOff.push(c)
             }
-            must(
-              cutOff.length > 0,
-              `no change was applying when the process died (${mine.length} changes, each finished): run again with another --kill-after-seconds`,
-            )
+            if (cutOff.length === 0) {
+              // Nothing to settle, so nothing about settling was shown. Not a
+              // failure of recovery, and not a pass either.
+              await cleanUp(mine)
+              throw new NotExercised(
+                `no change was applying when the process died (${mine.length} changes, each finished). A graceful stop drains ` +
+                  'requests before it signals the process, so a change shorter than the drain always finishes. This drill needs an ' +
+                  'abrupt kill (the process killed outright, e.g. over ECS Exec) or a change that outlasts the drain and the stop timeout',
+              )
+            }
             // A change cut off has no restore point it can vouch for: keep it, and
             // restore the drill's finished changes, newest first.
             for (const c of cutOff) {
               await theFetch(homeUrl(`/api/projects/${args.project}/changes/${c.id}/keep`), asOperator({ method: 'POST', body: JSON.stringify({ seq: c.seq }) }))
             }
-            for (const c of mine.filter((x) => x.outcome.state === 'healthy')) {
-              await restoreFromConsole(c).catch((err: unknown) => log(`  note  could not restore drill change #${c.seq}: ${describeError(err)}`))
-            }
-            for (const table of made) {
-              if ((await columnsOf(table)) !== null) log(`  note  ${table} is still in the schema; remove it from the console`)
-            }
+            await cleanUp(mine)
             // The change lock is free: a governed change applies again.
             const after = await mcp!.attempt('apply_migration', { sql: `CREATE TABLE qualify_after_kill_${run} (note text)` })
             must(after.ok, `a governed change after the drill was refused: ${after.text.slice(0, 200)}`)
