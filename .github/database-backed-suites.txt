@@ -1232,6 +1232,11 @@ tests/integration/change-recovery.spec.ts
 # restart interrupted is settled from the catalog. Real locks and approvals.
 tests/integration/change-verification-recovery.spec.ts
 
+# Change metrics name the project, the region and the change, never row data;
+# a change that needs a person writes one BACKENLY_CHANGE_NEEDS_PERSON line with
+# ids only, for an operator's log alarm.
+tests/integration/change-observability.spec.ts
+
 # An agent can ask for a restore and only a person can approve one: the agent's
 # migration is its governed change, nothing it sends weakens verification,
 # revert_change parks with only Backenly's numbers, the direct tool and the

@@ -603,7 +603,7 @@ export async function recoverChange(projectId: string, changeId: string, opts: R
       ms: Date.now() - started,
       ...principals,
     })
-    recordTiming('recovery', Date.now() - started, { projectId, mode: opts.mode, outcome: 'verified' })
+    await recordTiming('recovery', Date.now() - started, projectId, change.id, { mode: opts.mode, outcome: 'verified' })
     if (reapply && change.recoversId) {
       // The change this restore had undone is in effect again.
       await transition(change.recoversId, ['restored'], 'healthy')
@@ -666,7 +666,7 @@ export async function recoverChange(projectId: string, changeId: string, opts: R
       if (restoreRecord) await closeUncommitted((restoreRecord as { id: string }).id, projectId, err)
       const step = err instanceof RecoveryStepError && err.step ? { index: err.index, sql: err.step.sql, describe: err.step.describe } : undefined
       await recordEvent(change.id, projectId, 'recovery_failed', { phase: 'execute', error: keptText(String(err?.message ?? err), await quotesKeptHere(projectId)).slice(0, 500), ...(step ? { step: step.describe } : {}) })
-      recordTiming('recovery', Date.now() - started, { projectId, mode: opts.mode, outcome: 'failed' })
+      await recordTiming('recovery', Date.now() - started, projectId, change.id, { mode: opts.mode, outcome: 'failed' })
       if (opts.mode === 'automatic') await stopAndEscalate(projectId, change, `The automatic recovery failed and was rolled back: ${err?.message ?? err}`)
       return fail('RECOVERY_FAILED', `${err?.message ?? err}. The restore was rolled back, so nothing was changed.`, {
         status: to,
