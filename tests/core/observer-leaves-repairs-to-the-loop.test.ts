@@ -149,5 +149,12 @@ describe('the observer leaves every repair to the repair loop', () => {
     })
     expect(changes.length).toBeGreaterThan(0)
     expect(changes.every((c) => c.source === 'autonomy' && c.kind === 'change')).toBe(true)
+
+    // And the loop's own record of it, re-checked against the catalog.
+    const fixed = (await prisma.auditLog.findMany({ where: { projectId, action: 'HEALTH_AUTO_FIXED' }, select: { details: true } }))
+      .map((r) => JSON.parse(String(r.details)))
+      .filter((d) => d.findingId === found[0].id)
+    expect(fixed).toHaveLength(1)
+    expect(fixed[0]).toMatchObject({ tableName: 'line_items', columnName: 'order_id', verification: 'confirmed' })
   }, 300_000)
 })

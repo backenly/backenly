@@ -178,8 +178,8 @@ describe("every autonomous repair answers to the owner's dial", () => {
   })
 
   it('the observer leaves the schema alone when the owner set autonomy to Off', async () => {
-    // detectMissingRls carries an inline fix. It used to run whatever the dial
-    // said, while the dashboard told the owner nothing was being repaired.
+    // The observer repairs nothing, whatever the dial says; the repair loop
+    // does. With the dial at Off the finding still says why it waits.
     const p = await project({ built: true })
     const schema = `workspace_${p.projectId}`
     try {

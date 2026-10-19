@@ -23,7 +23,7 @@ import { prisma } from '@/lib/db/prisma'
 import { detectSubsystemRecurrence } from '@/lib/autonomy/subsystem-recurrence'
 import { detectIntentDrift } from '@/lib/autonomy/intent-conformance'
 import { probeQueryFailed } from '@/lib/core/drift-detector'
-import { queryWorkspaceSchema, executeInWorkspaceSchema } from './workspaceDatabase'
+import { queryWorkspaceSchema } from './workspaceDatabase'
 import {
   loadOwnershipCatalog,
   inferRlsPlanFromCatalog,
