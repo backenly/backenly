@@ -205,9 +205,10 @@ const DESTRUCTIVE_TOOLS = new Set<ToolName>([
   'delete_bucket',
   'delete_file',
   // NOTE: run_data_migration is NOT here — dry-runs must flow freely, and the
-  // executor's RUN_DATA_MIGRATION handler has its own confirmation gate that
-  // shows affected-row counts before a real run (destructiveConfirmed still
-  // forwards as params.confirmed so an explicit "confirm" applies it).
+  // executor's RUN_DATA_MIGRATION handler has its own gate that counts the
+  // rows a real run would change. The brain holds the call that gate stops
+  // for a person with those counts (lib/ai/brain/agent.ts), and approving it
+  // forwards destructiveConfirmed as params.confirmed, which applies it.
   // Breaks live SSE subscribers
   'disable_realtime',
   // Ships to / reverts production (engine also has its own "Type DEPLOY /
@@ -317,9 +318,9 @@ export interface ToolDispatchContext {
   /** Pre-formatted project understanding block (from memory.formatUnderstanding). */
   understandingBlock?: string
   /**
-   * True when the user's message in this turn explicitly authorised a destructive
-   * action ("yes drop it", "confirm revoke"). Forwarded to the executor as
-   * `params.confirmed=true` so its approval gate doesn't double-prompt.
+   * True only on the replay of a call a person approved (runApprovedCall in
+   * lib/mcp/approvals.ts); no message sets it. Forwarded to the executor as
+   * `params.confirmed=true` so its own gate does not stop the approved call.
    */
   destructiveConfirmed?: boolean
   /**
@@ -754,7 +755,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     '  • merge_columns — concatenate columns into one: {op:"merge_columns", table, sources:[…], target, separator}\n' +
     '  • cast_column — change a column\'s type converting live data: {op:"cast_column", table, column, toType:"integer|bigint|numeric|boolean|timestamptz|date|text|uuid|jsonb", onError:"fail"|"null"}\n' +
     '  • normalize_values — rewrite values via a mapping (unify "Active"/"ACTIVE"→"active"): {op:"normalize_values", table, column, mapping:{from:to}}\n' +
-    'ALWAYS call with dryRun:true first and show the user the affected-row counts before running it for real.',
+    'ALWAYS call with dryRun:true first and show the user the affected-row counts. A real run waits for a person: the call is queued, with its affected-row counts, for the project owner to approve in the dashboard, and the approved call runs exactly these operations. Nothing typed in chat approves it.',
     {
       operations: {
         type: 'array',

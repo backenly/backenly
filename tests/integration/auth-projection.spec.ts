@@ -547,4 +547,78 @@ describe('the hourly check against home', () => {
     expect(await copiedProject(ghost)).toBeUndefined()
     expect(await copiedKeys(ghost)).toEqual([])
   })
+
+  // A change whose record never reached the region, to a row the copy still holds:
+  // the copy is edited the way the missed change would have left it.
+  const quietly = async <T>(work: () => Promise<T>): Promise<{ value: T; errors: string }> => {
+    const errors = jest.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const value = await work()
+      return { value, errors: errors.mock.calls.map((call) => String(call[0])).join('\n') }
+    } finally {
+      errors.mockRestore()
+    }
+  }
+
+  it("queues a key whose permissions differ from home's, which the next delivery writes again", async () => {
+    await deliverRegion(REGION)
+    const [key] = await copiedKeys(regionalProject)
+    const atHome = await prisma.apiKey.findUniqueOrThrow({ where: { id: key.id }, select: { permissions: true } })
+    expect(atHome.permissions).not.toEqual(['admin'])
+    // As if a key narrowed to read had been widened back in the copy: the region would authorize more than home does.
+    await run(regionalUrl, `UPDATE public.auth_projection_keys SET "permissions" = '{admin}' WHERE "id" = $1`, [key.id])
+    const { value, errors } = await quietly(() => reconcileRegionCopy(REGION))
+    expect(value).toMatchObject({ queued: 1, drifted: 1 })
+    expect(errors).toMatch(/and 1 whose contents differ from home's/)
+    await deliverRegion(REGION)
+    expect((await copiedKeys(regionalProject)).find((k) => k.id === key.id)?.permissions).toEqual(atHome.permissions)
+  })
+
+  it('queues a project still locked in the copy after home lifted the lock, which the next delivery clears', async () => {
+    await deliverRegion(REGION)
+    expect((await copiedProject(regionalProject)).lockedDownAt).toBeNull()
+    await run(regionalUrl, `UPDATE public.auth_projection_projects SET "lockedDownAt" = now(), "lockedDownReason" = 'lifted at home' WHERE "id" = $1`, [regionalProject])
+    const { value } = await quietly(() => reconcileRegionCopy(REGION))
+    expect(value).toMatchObject({ queued: 1, drifted: 1 })
+    await deliverRegion(REGION)
+    expect((await copiedProject(regionalProject)).lockedDownAt).toBeNull()
+  })
+
+  it('compares a signing secret by its value: the same secret encrypted afresh agrees, another one is written again', async () => {
+    await deliverRegion(REGION)
+    // The copy's text never equals home's, yet the check finds nothing while they mean the same secret.
+    await run(regionalUrl, `UPDATE public.auth_projection_projects SET "jwtSecret" = $2 WHERE "id" = $1`, [
+      regionalProject,
+      JWTSecretManager.atRest(PLAINTEXT_SECRET),
+    ])
+    expect(await reconcileRegionCopy(REGION)).toMatchObject({ queued: 0, drifted: 0 })
+    // A secret rotated at home whose change never arrived: the copy still verifies the old one.
+    await run(regionalUrl, `UPDATE public.auth_projection_projects SET "jwtSecret" = $2 WHERE "id" = $1`, [
+      regionalProject,
+      JWTSecretManager.atRest(randomBytes(32).toString('hex')),
+    ])
+    const { value } = await quietly(() => reconcileRegionCopy(REGION))
+    expect(value).toMatchObject({ queued: 1, drifted: 1 })
+    await deliverRegion(REGION)
+    expect(JWTSecretManager.resolve((await copiedProject(regionalProject)).jwtSecret as string)).toBe(PLAINTEXT_SECRET)
+  })
+
+  it('leaves a change already waiting for delivery to it, and agrees on timestamps once it is delivered', async () => {
+    await deliverRegion(REGION)
+    const [key] = await copiedKeys(regionalProject)
+    await prisma.project.update({ where: { id: regionalProject }, data: { pausedAt: new Date(Date.now() - 60_000), pauseReason: 'reconcile probe' } })
+    await prisma.apiKey.update({ where: { id: key.id }, data: { expiresAt: new Date(Date.now() + 86_400_000) } })
+    try {
+      // Recorded by the capture triggers and not delivered yet: in flight, neither gone nor drifted.
+      expect(await reconcileRegionCopy(REGION)).toMatchObject({ queued: 0, drifted: 0 })
+      await deliverRegion(REGION)
+      expect((await copiedProject(regionalProject)).pausedAt).not.toBeNull()
+      // Delivered: a pause and an expiry, timestamps without a time zone on both sides, compare equal.
+      expect(await reconcileRegionCopy(REGION)).toMatchObject({ queued: 0, drifted: 0 })
+    } finally {
+      await prisma.project.update({ where: { id: regionalProject }, data: { pausedAt: null, pauseReason: null } })
+      await prisma.apiKey.update({ where: { id: key.id }, data: { expiresAt: null } })
+      await deliverRegion(REGION)
+    }
+  })
 })

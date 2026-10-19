@@ -367,3 +367,19 @@ export function explainAutonomyEvent(details: AutonomyEventDetails | null | unde
 export function shortHeadline(details: AutonomyEventDetails | null | undefined): string {
   return explainAutonomyEvent(details).what
 }
+
+/**
+ * A pass on which the repair loop held its repairs back because the project
+ * was mid-incident (AUTONOMY_CHANGE_FREEZE, lib/autonomy/reconciler.ts). Its
+ * details carry how many it would have applied and the health signals that
+ * declared the incident.
+ */
+export function explainHeldBack(details: { wouldHaveApplied?: unknown; health?: unknown } | null | undefined): BecauseSentence {
+  const n = Number(details?.wouldHaveApplied) || 0
+  const signals = Array.isArray(details?.health) ? details!.health.map(String).filter(Boolean) : []
+  const what = `Backenly held back ${n === 1 ? 'a repair' : n > 1 ? `${n} repairs` : 'its repairs'}`
+  const why =
+    'the project is mid-incident, and changing a backend that is already failing can make it worse.' +
+    (signals.length > 0 ? ` ${signals.join(' ')}` : '')
+  return { what, why, full: `${what} because ${why}`, kind: 'held_back' }
+}

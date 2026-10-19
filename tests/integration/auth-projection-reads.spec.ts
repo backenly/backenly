@@ -42,6 +42,8 @@ import { NextRequest } from 'next/server'
 import { authenticateApiKey } from '@/lib/middleware/apiKeyAuth'
 import { v1ApiMiddleware } from '@/lib/api/v1/middleware'
 import { resolveAuthEnvironment } from '@/lib/branches/auth-environment'
+import { clearBranchKeyCache } from '@/lib/branches/key-scope'
+import { clearKeyPlacementCache } from '@/lib/security/key-placement'
 
 jest.setTimeout(120_000)
 
@@ -256,6 +258,108 @@ describe('the runtime route', () => {
     const res = await fetch(`${baseUrl}/api/v1/${projectId}/db/notes`, { headers: { 'x-api-key': publicKey } })
     expect(res.status).toBe(503)
     expect(await res.json()).toMatchObject({ code: 'AUTHORIZATION_UNAVAILABLE' })
+  })
+})
+
+describe("the runtime's own v1 routes (database, logs, presence, broadcast, realtime)", () => {
+  // POST /broadcast with no channel answers 400 only after v1AuthMiddleware let the
+  // request through: the key, the project and the count, and nothing else.
+  const broadcast = (key: string) =>
+    fetch(`${baseUrl}/api/v1/${projectId}/broadcast`, {
+      method: 'POST',
+      headers: { 'x-api-key': key, 'content-type': 'application/json' },
+      body: '{}',
+    })
+  const regionCount = async (keyId: string): Promise<number | null> => {
+    const client = new Client({ connectionString: regionalUrl })
+    await client.connect()
+    try {
+      const { rows } = await client.query(`SELECT "count" FROM public.auth_rate_windows WHERE "keyId" = $1`, [keyId])
+      return rows[0] ? Number(rows[0].count) : null
+    } finally {
+      await client.end().catch(() => {})
+    }
+  }
+  const keyId = async (raw: string) =>
+    (await prisma.apiKey.findFirstOrThrow({ where: { keyHash: hashApiKey(raw) }, select: { id: true } })).id
+
+  it('take the key and its project from a fresh copy and count the request in the region, never asking home', async () => {
+    mode('enforce')
+    const id = await keyId(publicKey)
+    const before = (await regionCount(id)) ?? 0
+    // The gates before the middleware (key placement, branch scope) look the key up too: from nothing cached.
+    clearKeyPlacementCache()
+    clearBranchKeyCache()
+    const homeKey = jest.spyOn(prisma.apiKey, 'findFirst')
+    const homeCountWrite = jest.spyOn(prisma.apiKey, 'updateMany')
+    const homeCountReset = jest.spyOn(prisma.apiKey, 'update')
+    const homeProject = jest.spyOn(prisma.project, 'findUnique')
+    const res = await broadcast(publicKey)
+    expect(res.status).toBe(400)
+    expect(await res.json()).toMatchObject({ error: 'channel is required' })
+    expect(res.headers.get('x-ratelimit-limit')).not.toBeNull()
+    expect(await regionCount(id)).toBe(before + 1)
+    expect(homeKey).not.toHaveBeenCalled()
+    expect(homeCountWrite).not.toHaveBeenCalled()
+    expect(homeCountReset).not.toHaveBeenCalled()
+    expect(homeProject).not.toHaveBeenCalled()
+  })
+
+  it('keep serving a copied key from a fresh copy while home cannot answer at all', async () => {
+    mode('enforce')
+    clearKeyPlacementCache()
+    clearBranchKeyCache()
+    invalidateProjectServingState(projectId)
+    jest.spyOn(prisma.apiKey, 'findFirst').mockRejectedValue(new Error('home unreachable'))
+    jest.spyOn(prisma.apiKey, 'findUnique').mockRejectedValue(new Error('home unreachable'))
+    jest.spyOn(prisma.project, 'findUnique').mockRejectedValue(new Error('home unreachable'))
+    const res = await broadcast(publicKey)
+    expect(res.status).toBe(400)
+    expect(await res.json()).toMatchObject({ error: 'channel is required' })
+  })
+
+  it('keep one counter with the Next-owned routes: past the limit, both refuse', async () => {
+    const raw = `proj_live_${randomBytes(24).toString('hex')}`
+    const created = await prisma.apiKey.create({
+      data: {
+        name: 'copy-read-limit', keyPrefix: raw.slice(0, 12), keyHash: hashApiKey(raw), userId: ownerId, projectId,
+        permissions: ['read', 'write'], capabilities: [], serviceRole: false, rateLimit: 2, rateLimitWindow: 3600,
+      },
+      select: { id: true },
+    })
+    try {
+      await deliverRegion(REGION)
+      mode('enforce')
+      expect((await broadcast(raw)).status).toBe(400)
+      const viaNext = await authenticateApiKey(
+        new NextRequest(`http://localhost/api/v1/${projectId}/storage/files`, { headers: { 'x-api-key': raw } }),
+      )
+      expect(viaNext).toMatchObject({ authenticated: true })
+      expect(viaNext.rateLimited).toBeUndefined()
+      // Two counted, of two: the runtime route is refused now, as the Next route is.
+      const refused = await broadcast(raw)
+      expect(refused.status).toBe(429)
+      expect(refused.headers.get('retry-after')).not.toBeNull()
+      const refusedNext = await authenticateApiKey(
+        new NextRequest(`http://localhost/api/v1/${projectId}/storage/files`, { headers: { 'x-api-key': raw } }),
+      )
+      expect(refusedNext.rateLimited).toBe(true)
+      expect(await regionCount(created.id)).toBe(2)
+      // And home's counter, which the console reads, was not written on a request.
+      expect((await prisma.apiKey.findUniqueOrThrow({ where: { id: created.id }, select: { requestCount: true } })).requestCount).toBe(0)
+    } finally {
+      await prisma.apiKey.delete({ where: { id: created.id } }).catch(() => {})
+      await run(regionalUrl, `DELETE FROM public.auth_rate_windows WHERE "keyId" = $1`, [created.id]).catch(() => {})
+      await deliverRegion(REGION)
+    }
+  })
+
+  it('read and count at home exactly as before while the switch is off', async () => {
+    mode('off')
+    const homeKey = jest.spyOn(prisma.apiKey, 'findFirst')
+    const res = await broadcast(publicKey)
+    expect(res.status).toBe(400)
+    expect(homeKey).toHaveBeenCalled()
   })
 })
 

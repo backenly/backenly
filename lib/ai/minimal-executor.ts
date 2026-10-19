@@ -3808,6 +3808,10 @@ async function executeSingleAction(
         }
 
         // Real run: destructive-class operation → approval gate unless confirmed.
+        // The model cannot set `confirmed`: the tool passes only operations and
+        // dryRun, and the only call that reaches here with it is one a person
+        // approved (lib/mcp/approvals.ts). A brain run holds this answer for
+        // that approval, with the counts below (lib/ai/brain/agent.ts).
         if (!action.params.confirmed) {
           try {
             const estimates = await estimateDataMigration(projectId, ops)
@@ -3818,7 +3822,7 @@ async function executeSingleAction(
               message:
                 `⚠️ This data migration will modify existing rows:\n${lines.join('\n')}\n\n` +
                 `A checkpoint copy of each affected table is taken first, so this is reversible. ` +
-                `Reply **confirm** to apply.`,
+                `It runs once a person approves this exact call; nothing typed in chat approves it.`,
               data: { requiresApproval: true, estimates },
             }
           } catch (err: any) {

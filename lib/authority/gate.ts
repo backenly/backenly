@@ -337,16 +337,33 @@ export async function enforceLegacyCompatibility(
 }
 
 /**
- * The one check for repairs that do not yet run through `runAutoFix`: the
- * observer's inline fixes, infra intelligence's hot-table indexes and
- * coevolution's filtered-column indexes.
+ * Why the deployment's flags or the owner's dial hold back a repair of this
+ * tier, or null when they let it run. It asks exactly what `runReconciler`
+ * asks, in the same order (flags, then dial), and then whether the dial allows
+ * the tier. It records nothing, so a caller that only reports the answer, as
+ * the observer does, leaves no trace of a repair that never ran.
+ */
+export async function repairRefusal(projectId: string, tier: AutonomyTier): Promise<string | null> {
+  const { resolveExecutionMode } = await import('@/lib/autonomy/execution-mode')
+  const level = await projectLevel(projectId)
+  const mode = resolveExecutionMode(level)
+  if (!mode.repairsAreApplied) return mode.explanation
+  if (!isTierAutoAllowed(level, tier)) {
+    return `The ${level} autonomy mode does not apply tier ${tier} repairs on its own, so this is waiting for you.`
+  }
+  return null
+}
+
+/**
+ * The one check for repairs that do not yet run through `runAutoFix`: infra
+ * intelligence's hot-table indexes and coevolution's filtered-column indexes.
  *
  * Each of those used to mutate a customer's schema on its own schedule with no
  * reference to the deployment's live-execution flag or the owner's dial, so
- * setting a project to Off stopped the reconciler and left three other writers
+ * setting a project to Off stopped the reconciler and left other writers
  * running, and `resolveExecutionMode` told the owner nothing was being
- * repaired. This asks exactly what `runReconciler` asks, in the same order
- * (flag, then dial), and then whether the dial allows the repair's tier.
+ * repaired. This applies `repairRefusal`. The observer was a third such writer
+ * and no longer repairs anything (lib/services/workspace-observer.ts).
  *
  * Only executions are recorded, as legacy-compatibility use. A refusal is not:
  * infra intelligence runs every minute and its counters keep a repaired table
@@ -358,16 +375,8 @@ export async function permitInlineRepair(
   findingType: string,
   tier: AutonomyTier,
 ): Promise<{ allowed: boolean; reason: string | null }> {
-  const { resolveExecutionMode } = await import('@/lib/autonomy/execution-mode')
-  const level = await projectLevel(projectId)
-  const mode = resolveExecutionMode(level)
-  if (!mode.repairsAreApplied) return { allowed: false, reason: mode.explanation }
-  if (!isTierAutoAllowed(level, tier)) {
-    return {
-      allowed: false,
-      reason: `The ${level} autonomy mode does not apply tier ${tier} repairs on its own, so this is waiting for you.`,
-    }
-  }
+  const refusal = await repairRefusal(projectId, tier)
+  if (refusal) return { allowed: false, reason: refusal }
   await recordCompatibilityUse(projectId, findingType, 'permitted', null)
   return { allowed: true, reason: null }
 }

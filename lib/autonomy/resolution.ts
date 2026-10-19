@@ -56,7 +56,8 @@ function obj(v: unknown): Record<string, unknown> | null {
 /**
  * The verification outcome a repair recorded. Repairs store it on
  * `details.rollbackData.verification` (the auto-fix kernel and the approve
- * route) or `details.verification` (the observer's inline repairs).
+ * route). `details.verification` is where the observer's inline repairs kept
+ * it, read for the rows they left: the observer no longer repairs.
  */
 export function fixVerificationOf(details: Details): FixVerificationState | null {
   const d = obj(details)

@@ -18,7 +18,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
-import { queryWorkspaceSchema, executeInWorkspaceSchema } from '@/lib/services/workspaceDatabase'
+import { queryWorkspaceSchema } from '@/lib/services/workspaceDatabase'
 import { listSchemaSnapshots, getSchemaSnapshot } from '@/lib/services/workspace-schema-snapshot'
 import { isReservedWorkspaceTable, notReservedTableSql } from '@/lib/security/workspace-schema'
 import { isRegionError } from '@/lib/data-plane/regional'
@@ -363,16 +363,9 @@ export async function detectMissingFkIndexes(
         ? `Column "${r.column_name}" has a foreign key but no index — joins will scan the full table`
         : `Column "${r.column_name}" is a likely FK column but has no index — joins will scan the full table`,
     },
+    // No inline fix. The repair loop's CREATE_INDEX repair (runAutoFix) is the
+    // only one, so the index is a governed change that a restore can see.
     autoFixable: true,
-    fix: async () => {
-      const idxName = `idx_${r.table_name}_${r.column_name}`
-        .replace(/[^a-z0-9_]/g, '_')
-        .slice(0, 63)
-      await executeInWorkspaceSchema(
-        projectId,
-        `CREATE INDEX IF NOT EXISTS "${idxName}" ON {schema}."${r.table_name}" ("${r.column_name}")`,
-      )
-    },
   }))
 }
 
