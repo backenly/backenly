@@ -5170,7 +5170,7 @@ async function executeGenerateAPI(
     const _allProjectTables = await prisma.table.findMany({ where: { projectId }, select: { name: true } })
       .then(rows => rows.map(r => r.name)).catch(() => [])
     const { registerDomainEndpoints } = await import('@/lib/services/domain-endpoints')
-    const domainEndpoints = await registerDomainEndpoints(projectId, tableName, _allProjectTables, { replace: true })
+    const domainEndpoints = await registerDomainEndpoints(projectId, tableName, _allProjectTables)
     if (domainEndpoints.length > 0) {
       console.log(`[AI Executor] 🎯 Registered ${domainEndpoints.length} domain endpoints for "${tableName}"`)
     }
