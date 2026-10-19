@@ -22,7 +22,7 @@
  *     [--job-wait-minutes 15] [--repair-wait-minutes 6] [--freshness-seconds 30] \
  *     [--member <a developer or viewer of the probe project, by email>] \
  *     [--kill-command '<kills the process serving the control plane>'] [--kill-after-seconds 8] \
- *     [--kill-drain-seconds 70] [--settle-wait-minutes 30] [--skip-deletion-drill] \
+ *     [--kill-drain-seconds 70] [--kill-change-tables 4] [--settle-wait-minutes 30] [--skip-deletion-drill] \
  *     [--foreign <a project of another region>@<its region>,...]
  *
  * The home region (--region ap-south-1) is qualified the same way through the
@@ -126,15 +126,18 @@
  *              killed while the drill's governed changes apply; the change it
  *              cut off is settled by the region's scheduler as needing a person
  *              within --settle-wait-minutes, and the change lock is free again.
+ *              Each of the drill's changes creates --kill-change-tables tables
+ *              in one governed change, so that one change can outlast the stop.
  *              Nothing goes on until --kill-drain-seconds have passed (a
  *              graceful stop drains connections for the load balancer's
- *              deregistration delay, then sends SIGTERM, on which the web
- *              process exits at once) and fresh connections to the home host
- *              are answered twice in a row. A graceful stop lets a change
- *              shorter than the drain finish, so when no change was cut off the
- *              drill is reported as not exercised, never as passed: it needs a
- *              change that outlasts the drain (a regional project's, applied
- *              from home, can) or an abrupt kill
+ *              deregistration delay, then sends SIGTERM, and kills the process
+ *              at the stop timeout if it is still running) and fresh
+ *              connections to the home host are answered twice in a row. A
+ *              graceful stop lets a change shorter than that finish, so when no
+ *              change was cut off the drill is reported as not exercised, never
+ *              as passed: it needs a change that outlasts the drain and the
+ *              stop timeout (a regional project's several tables, applied from
+ *              home, can) or an abrupt kill
  *   deletion   unless --skip-deletion-drill: a project of the drill's own, in
  *              the region, with a governed change, the vault its restore kept
  *              the table in and a preview branch, is deleted, and is gone at
@@ -208,10 +211,18 @@ export interface QualifyArgs {
   /**
    * How long after the kill command returns before anything is sent again: a
    * graceful stop (an ECS stop-task) drains the task's connections for the load
-   * balancer's deregistration delay, then sends SIGTERM. Until then a request
-   * can still land on the process going away.
+   * balancer's deregistration delay, then sends SIGTERM, and kills the process
+   * at the stop timeout if it is still running. Until then a request can still
+   * land on the process going away.
    */
   killDrainSeconds: number
+  /**
+   * How many tables each of the drill's governed changes creates, in one
+   * migration. One table at home is a fraction of a second; in a region each is
+   * a round trip from home, so several make one change that outlasts the drain
+   * and the stop timeout, and the kill lands in it.
+   */
+  killChangeTables: number
   /** How long the region's scheduler is given to settle a change whose process died. */
   settleWaitMinutes: number
   /** Projects of other regions, which the region's host must refuse. Empty: that check is not run. */
@@ -244,7 +255,7 @@ export function parseArgs(argv: string[], env: Record<string, string | undefined
   const known = [
     '--project', '--region', '--api', '--home', '--connect', '--report', '--approval-wait-minutes', '--job-wait-minutes',
     '--repair-wait-minutes', '--operator', '--freshness-seconds', '--member', '--kill-command', '--kill-after-seconds',
-    '--kill-drain-seconds', '--settle-wait-minutes', '--foreign',
+    '--kill-drain-seconds', '--kill-change-tables', '--settle-wait-minutes', '--foreign',
   ]
   for (const f of flags.keys()) if (!known.includes(f)) throw new Error(`unknown option: ${f}`)
 
@@ -330,12 +341,15 @@ export function parseArgs(argv: string[], env: Record<string, string | undefined
   const killAfter = Number(flags.get('--kill-after-seconds') ?? '8')
   if (!Number.isFinite(killAfter) || killAfter < 1 || killAfter > 120) throw new Error('--kill-after-seconds must be between 1 and 120')
   // A web target group drains for its deregistration delay (30 s by default; an
-  // operator may shorten it on a qualification environment), and the process
-  // exits on the SIGTERM that follows:
-  // its own handlers (lib/db/mongodb.ts, lib/services/workspaceDatabase.ts)
-  // call process.exit. 70 s also covers one that waited out the 30 s stop timeout.
+  // operator may shorten it on a qualification environment). The process then
+  // gets SIGTERM and, still running at the stop timeout (30 s by default), is
+  // killed. 70 s covers both.
   const killDrain = Number(flags.get('--kill-drain-seconds') ?? '70')
   if (!Number.isFinite(killDrain) || killDrain < 0 || killDrain > 600) throw new Error('--kill-drain-seconds must be between 0 and 600')
+  // Four regional tables take about two minutes, longer than a 30 s drain and a
+  // 30 s stop timeout together.
+  const killTables = Number(flags.get('--kill-change-tables') ?? '4')
+  if (!Number.isInteger(killTables) || killTables < 1 || killTables > 20) throw new Error('--kill-change-tables must be a whole number from 1 to 20')
   // A change counts as interrupted 15 minutes after it began (RECOVERY_LEASE_MS),
   // and the region's scheduler settles such changes every 10 minutes.
   const settleWait = Number(flags.get('--settle-wait-minutes') ?? '30')
@@ -374,6 +388,7 @@ export function parseArgs(argv: string[], env: Record<string, string | undefined
     killCommand,
     killAfterSeconds: killAfter,
     killDrainSeconds: killDrain,
+    killChangeTables: killTables,
     settleWaitMinutes: settleWait,
     foreign,
   }
@@ -1905,12 +1920,16 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
         const before = (await changesSince(0))[0]?.seq ?? 0
         const made: string[] = []
         let stop = false
-        // One change after another, so one is applying when the kill lands.
+        // One change after another, so one is applying when the kill lands. Each
+        // is one migration of --kill-change-tables tables, one governed change,
+        // long enough in a region to outlast a graceful stop.
         const stream = (async () => {
           for (let i = 0; !stop && i < 100; i++) {
-            const table = `qualify_kill${i}_${run}`
-            made.push(table)
-            await mcp!.attempt('apply_migration', { sql: `CREATE TABLE ${table} (note text)` }).catch(() => undefined)
+            const tables = Array.from({ length: args.killChangeTables }, (_, k) => `qualify_kill${i}_${k}_${run}`)
+            made.push(...tables)
+            await mcp!
+              .attempt('apply_migration', { sql: tables.map((t) => `CREATE TABLE ${t} (note text);`).join('\n') })
+              .catch(() => undefined)
           }
         })()
         await new Promise((r) => setTimeout(r, args.killAfterSeconds * 1_000))
@@ -1922,8 +1941,8 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
         must(killed.status === 0, `the kill command exited ${killed.status ?? killed.signal}: ${String(killed.stderr ?? '').trim().slice(0, 200)}`)
         // A graceful stop takes the task out of the load balancer and drains its
         // connections; the load balancer answers a request still in flight at
-        // the end with a 502, and the SIGTERM that follows ends the process at
-        // once (its own handlers call process.exit). Until then a request can
+        // the end with a 502, SIGTERM follows, and a process still running at
+        // the stop timeout is killed. Until then a request can
         // still reach the process going away, and with one task nothing answers
         // new connections while its
         // replacement starts. So nothing is sent until the drain has passed and
@@ -1973,8 +1992,9 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
               await cleanUp(mine)
               throw new NotExercised(
                 `no change was applying when the process died (${mine.length} changes, each finished). A graceful stop drains ` +
-                  'requests before it signals the process, so a change shorter than the drain always finishes. This drill needs a ' +
-                  'change that outlasts the drain (a regional project\'s, applied from home, can) or an abrupt kill (e.g. over ECS Exec)',
+                  'requests and waits out a stop timeout before it kills the process, so a change shorter than both finishes. This ' +
+                  `drill needs a change that outlasts them (a regional project's; raise --kill-change-tables, now ${args.killChangeTables}) ` +
+                  'or an abrupt kill (e.g. over ECS Exec)',
               )
             }
             // A change cut off has no restore point it can vouch for: keep it, and

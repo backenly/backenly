@@ -114,7 +114,7 @@ describe('arguments', () => {
   it('runs the rollback drills, with what each needs from the run', () => {
     const plain = parseArgs(ARGV, ENV)
     // Without a member or a kill command those two drills are not run, and say so.
-    expect(plain).toMatchObject({ freshnessSeconds: 30, skipDeletionDrill: false, member: null, killCommand: null, killAfterSeconds: 8, killDrainSeconds: 70, settleWaitMinutes: 30 })
+    expect(plain).toMatchObject({ freshnessSeconds: 30, skipDeletionDrill: false, member: null, killCommand: null, killAfterSeconds: 8, killDrainSeconds: 70, killChangeTables: 4, settleWaitMinutes: 30 })
 
     expect(parseArgs([...ARGV, '--freshness-seconds', '45'], ENV).freshnessSeconds).toBe(45)
     expect(() => parseArgs([...ARGV, '--freshness-seconds', '0'], ENV)).toThrow(/--freshness-seconds/)
@@ -139,6 +139,9 @@ describe('arguments', () => {
     expect(parseArgs([...ARGV, '--kill-drain-seconds', '120'], ENV).killDrainSeconds).toBe(120)
     expect(() => parseArgs([...ARGV, '--kill-drain-seconds', '601'], ENV)).toThrow(/--kill-drain-seconds/)
     expect(() => parseArgs([...ARGV, '--kill-drain-seconds', '-1'], ENV)).toThrow(/--kill-drain-seconds/)
+    // How many tables one of the drill's changes creates, so it can outlast a graceful stop.
+    expect(parseArgs([...ARGV, '--kill-change-tables', '6'], ENV).killChangeTables).toBe(6)
+    for (const bad of ['0', '21', '2.5']) expect(() => parseArgs([...ARGV, '--kill-change-tables', bad], ENV)).toThrow(/--kill-change-tables/)
   })
 
   it('names projects of other regions for the region host to refuse, and nothing else', () => {
