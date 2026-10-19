@@ -26,6 +26,14 @@
  *
  * ONE RUN AT A TIME. A run of the procedure's task family that is still going
  * refuses another.
+ *
+ * A CHECK THAT DOES NOT VERIFY FAILS, with one exception. Once every step has
+ * been applied, `check` on its own, and the check that closes an apply, fail on
+ * anything the database does not verify. The check an apply runs first is told
+ * it is one (BOOTSTRAP_PRE_APPLY=true, bootstrap.sh): it reports what steps
+ * changed since they were applied have not converged yet without failing on it,
+ * because that is exactly what this apply converges, and the apply then fails
+ * the run if the database still does not verify.
  */
 
 import { spawn } from 'node:child_process'
@@ -368,7 +376,12 @@ export async function launch(mode: Mode, config: LaunchConfig, rotate: ManagedRo
   const { aws, log } = deps
   log(`Regional database procedure, ${mode}: ${config.database.host}/${config.database.name} in ${config.region}`)
 
-  const before = await runProcedure(config, { BOOTSTRAP_MODE: 'check' }, deps)
+  // Only the check this apply runs first is a pre-apply check (see the header).
+  const before = await runProcedure(
+    config,
+    mode === 'apply' ? { BOOTSTRAP_MODE: 'check', BOOTSTRAP_PRE_APPLY: 'true' } : { BOOTSTRAP_MODE: 'check' },
+    deps,
+  )
   printRun('check', before, log)
   if (before.exitCode !== 0) {
     log('The check failed. Nothing was written.')

@@ -19,6 +19,11 @@ const openaiKey = 'sk' + '-proj-' + alnum(48)
 const webhookSecret = 'wh' + 'sec_' + alnum(32)
 const awsKeyId = 'AK' + 'IA' + 'ABCDEFGHIJKLMNOP'
 const jwt = 'ey' + 'J' + alnum(20) + '.ey' + 'J' + alnum(30) + '.' + alnum(30)
+const restrictedKey = 'rk' + '_live_' + alnum(24)
+const githubToken = 'gh' + 'p_' + alnum(36)
+const slackToken = 'xo' + 'xb-' + alnum(12) + '-' + alnum(24)
+const resendKey = 're' + '_' + alnum(8) + '_' + alnum(24)
+const sendgridKey = 'SG' + '.' + alnum(22) + '.' + alnum(43)
 
 describe('redactSecretsInText', () => {
   it('redacts Backenly keys and keeps the prefix for debugging', () => {
@@ -66,6 +71,48 @@ describe('redactSecretsInText', () => {
   it('is a no-op on empty or secret-free text', () => {
     expect(redactSecretsInText('')).toBe('')
     expect(redactSecretsInText('Dropped the followers table (12 rows).')).toBe('Dropped the followers table (12 rows).')
+  })
+})
+
+describe('a key in stored JSON text', () => {
+  // JSON writes a newline as the two characters "\" and "n" (a tab as "\t", a
+  // control character as "\u0001"), so the character right before a key on
+  // its own line is a letter or a digit, which reads as the middle of a word.
+  const stored = (before: string, secret: string) =>
+    JSON.stringify({ summary: `Copy this key (shown once):${before}${secret}${before}Keep it safe.` })
+
+  it.each([
+    ['a Backenly key', projKey],
+    ['an MCP key', mcpKey],
+    ['a key with a legacy prefix', legacyKey],
+    ['an OpenAI key', openaiKey],
+    ['an Anthropic key', anthropicKey],
+    ['a Stripe restricted key', restrictedKey],
+    ['a webhook signing secret', webhookSecret],
+    ['an AWS access key id', awsKeyId],
+    ['a GitHub token', githubToken],
+    ['a Slack token', slackToken],
+    ['a Resend key', resendKey],
+    ['a SendGrid key', sendgridKey],
+    ['a JWT', jwt],
+  ])('%s after an escaped newline is withheld', (_label, secret) => {
+    const json = stored('\n', secret)
+    expect(json).toContain(`\\n${secret}`)
+    const out = redactSecretsInText(json)
+    expect(out).not.toContain(secret)
+    expect(out).toContain('Keep it safe.')
+  })
+
+  it('a key after an escaped tab or a \\u escape is withheld too', () => {
+    for (const before of ['\t', '\u0001']) {
+      expect(redactSecretsInText(stored(before, projKey))).not.toContain(projKey)
+      expect(redactSecretsInText(stored(before, openaiKey))).not.toContain(openaiKey)
+    }
+  })
+
+  it('an ordinary identifier on its own line stays as it is', () => {
+    const json = JSON.stringify({ summary: 'Created:\nproj_live_metrics\nstore_inventory_movements_history' })
+    expect(redactSecretsInText(json)).toBe(json)
   })
 })
 

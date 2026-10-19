@@ -84,6 +84,60 @@ describe('what is withheld', () => {
   })
 })
 
+describe('wherever a key sits in the text', () => {
+  // Stored copies are often JSON text, where a key on its own line follows the
+  // two characters "\" and "n", and a key can run straight into "_" or another
+  // word character. A word boundary sees neither as the edge of a key.
+  const ISSUED: Array<[string, string]> = [
+    ['a publishable project key', `proj_live_${'b2'.repeat(32)}`],
+    ['a service-role key', `svc_live_${'a1'.repeat(32)}`],
+    ['an MCP key', `mcp_live_${'c4'.repeat(32)}`],
+    ['a dashboard key', `dk_admin_${'d5'.repeat(32)}`],
+    ['a preview-branch key', `proj_preview_${'e6'.repeat(32)}`],
+    ['a preview-branch service-role key', `svc_preview_${'f7'.repeat(32)}`],
+    ['a legacy key', `sk_read_${'a8'.repeat(32)}`],
+    ['a rotated key with the old prefix', `sk_live_${'c3'.repeat(24)}`],
+    ['a webhook signing secret', `whsec_${'d4'.repeat(24)}`],
+    ['a project admin key', `bk_admin_${'e5'.repeat(16)}`],
+  ]
+  const PROVIDER: Array<[string, string]> = [
+    ['a Stripe secret key', `sk_live_${'Xy9'.repeat(10)}`],
+    ['an Anthropic key', `sk-ant-api03-${'Xy9'.repeat(12)}`],
+    ['an OpenAI project key', `sk-proj-${'Qw7'.repeat(10)}_${'Er4'.repeat(6)}-${'Ty2'.repeat(6)}`],
+    ['a Resend key', `re_Ab12Cd34_${'Ef56Gh78'.repeat(3)}`],
+    ['a SendGrid key', `SG.${'Xy9'.repeat(8)}.${'Zw4'.repeat(15)}`],
+    ['a PostHog key', `phc_${'Gh5'.repeat(10)}`],
+    ['a Replicate token', `r8_${'Jk6'.repeat(12)}`],
+  ]
+
+  it.each([...ISSUED, ...PROVIDER])('%s, after an escaped newline in JSON text', (_label, secret) => {
+    const json = JSON.stringify({ summary: `Copy this key (shown once):\n${secret}\nKeep it safe.` })
+    expect(json).toContain(`\\n${secret}`)
+    const stored = withholdSecrets(json)
+    expect(stored).not.toContain(secret)
+    expect(stored).toContain('Keep it safe.')
+  })
+
+  it.each([...ISSUED, ...PROVIDER])('%s, followed by an underscore or another word character', (_label, secret) => {
+    for (const after of ['_', '_backup', 'Z']) {
+      const stored = withholdSecrets(`saved ${secret}${after} for later`)
+      expect(stored).not.toContain(secret)
+      expect(stored).toContain('for later')
+    }
+  })
+
+  it('every occurrence of a provider key, not only the first', () => {
+    const first = `sk_live_${'Xy9'.repeat(10)}`
+    const second = `sk_live_${'Zw4'.repeat(10)}`
+    expect(withholdSecrets(`old ${first}, new ${second}`)).toBe('old [KEY_REDACTED], new [KEY_REDACTED]')
+  })
+
+  it('nothing from identifiers that merely contain a provider prefix', () => {
+    const plain = 'Renamed store_inventory_movements_history, future_release_notes and risk-assessmentproceduresforq3.'
+    expect(withholdSecrets(plain)).toBe(plain)
+  })
+})
+
 // recordMcpCall is fire-and-forget: its rows land once the project's region is read.
 const flush = () => new Promise((resolve) => setImmediate(resolve))
 

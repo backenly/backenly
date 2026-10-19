@@ -187,14 +187,31 @@ export function detectPartialKeyAttempt(message: string): PartialKeyAttempt | nu
 }
 
 /**
+ * Where a key can begin in stored text: not inside a word, as \b required, or
+ * right after an escape such as the "\n" of JSON text, where \b sees the "n"
+ * and the key and finds no boundary between them.
+ */
+const STORED_KEY_START = String.raw`(?:(?<![A-Za-z0-9_])|(?<=\\[bfnrt])|(?<=\\u[0-9A-Fa-f]{4}))`
+
+/**
+ * Each key shape as storage looks for it: every occurrence, from the start
+ * above, and through the end of its token. A trailing \b missed a key followed
+ * by "_" or another word character, since the match can only end where a word
+ * character meets a non-word one and inside a key there is none; it also cut
+ * short keys with "_" or "-" inside, such as Resend's re_<id>_<secret>.
+ */
+const STORED_KEY_SHAPES: RegExp[] = KEY_PATTERNS.map(({ keyRegex }) => new RegExp(
+  `${STORED_KEY_START}${keyRegex.source.replace(/^\\b/, '').replace(/\\b$/, '')}[A-Za-z0-9_-]*`,
+  'g',
+))
+
+/**
  * Return a copy of the message with any detected API key replaced by a redaction
  * placeholder — safe to write to ConversationMessage.
  */
 export function sanitizeMessageForStorage(message: string): string {
   let sanitized = message
-  for (const { keyRegex } of KEY_PATTERNS) {
-    sanitized = sanitized.replace(keyRegex, (_, key) => _.replace(key, '[KEY_REDACTED]'))
-  }
+  for (const shape of STORED_KEY_SHAPES) sanitized = sanitized.replace(shape, '[KEY_REDACTED]')
   // Also redact webhook secrets (whsec_...) which have their own detection path
   sanitized = sanitized.replace(/whsec_[A-Za-z0-9+/=_\-]{6,}/g, '[WEBHOOK_SECRET_REDACTED]')
   return sanitized
