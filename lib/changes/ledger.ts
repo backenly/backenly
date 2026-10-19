@@ -37,6 +37,7 @@
  */
 
 import { AsyncLocalStorage } from 'async_hooks'
+import { randomUUID } from 'crypto'
 import type { PoolClient } from 'pg'
 import { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
@@ -50,7 +51,16 @@ import { checkpointHash } from './integrity'
 import { recordEvent, transition } from './lifecycle'
 import { readCatalogOn, withChangeLock } from './lock'
 import { createVaultStatements, vaultSchemaName } from './names'
-import { keptSteps, keptText, keptVerification, quotesKeptHere } from './residency'
+import {
+  catalogStructure,
+  forgetCatalogInRegion,
+  keepCatalogInRegion,
+  keptSteps,
+  keptText,
+  keptVerification,
+  newCatalogKey,
+  quotesKeptHere,
+} from './residency'
 import { verifyChange, type ChangeVerification, type Expectation } from './verify'
 import type { ChangeKind, ChangePreservation, ChangeStatus, ChangeStep, PreservedEntry, RiskClass, TableChange } from './types'
 import type { AutoRecoveryOutcome } from './recovery'
@@ -198,38 +208,82 @@ function pickPlatform(state: PlatformState, tables: string[]): PlatformState {
   }
 }
 
-async function allocateRow(input: GovernedChangeInput, attr: ChangeAttribution, checkpoint: StoredSnapshot, quote: boolean) {
-  // seq is MAX+1 under the change lock, which serialises every writer for this
-  // project; the retry covers a writer from before this code shipped.
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const last = await prisma.backendChange.findFirst({
-      where: { projectId: input.projectId },
-      orderBy: { seq: 'desc' },
-      select: { id: true, seq: true },
-    })
-    try {
-      return await prisma.backendChange.create({
-        data: {
-          projectId: input.projectId,
-          seq: (last?.seq ?? 0) + 1,
-          kind: input.kind ?? 'change',
-          source: attr.source,
-          title: (quote ? input.title : input.regionalTitle ?? input.title).slice(0, 300),
-          actorUserId: attr.actorUserId ?? null,
-          apiKeyId: attr.apiKeyId ?? null,
-          groupId: attr.groupId ?? null,
-          parentId: last?.id ?? null,
-          status: 'applying',
-          checkpoint: { database: checkpoint } as unknown as Prisma.InputJsonValue,
-          recoversId: input.recoversId ?? null,
-        },
-        select: { id: true, seq: true, parentId: true, createdAt: true },
+/**
+ * The checkpoint as the record keeps it. For a project kept outside the home
+ * region the definitions stay there (lib/changes/residency.ts): the record
+ * keeps the catalog's structure, each definition as its digest under `key`,
+ * and says the definitions are in the region.
+ */
+function keptCheckpoint(database: StoredSnapshot, key: string | null): Prisma.InputJsonValue {
+  return (key ? { database: catalogStructure(database, key), definitionsInRegion: true } : { database }) as unknown as Prisma.InputJsonValue
+}
+
+/**
+ * `key` is null for a project in the home region, whose record keeps the
+ * catalog as it is.
+ */
+async function allocateRow(input: GovernedChangeInput, attr: ChangeAttribution, checkpoint: StoredSnapshot, key: string | null) {
+  const quote = key === null
+  // The region holds the definitions before any record digests them.
+  const id = randomUUID()
+  if (key) await keepCatalogInRegion(input.projectId, id, { key, opened: checkpoint })
+  try {
+    // seq is MAX+1 under the change lock, which serialises every writer for this
+    // project; the retry covers a writer from before this code shipped.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const last = await prisma.backendChange.findFirst({
+        where: { projectId: input.projectId },
+        orderBy: { seq: 'desc' },
+        select: { id: true, seq: true },
       })
-    } catch (err: any) {
-      if (err?.code !== 'P2002') throw err
+      try {
+        return await prisma.backendChange.create({
+          data: {
+            id,
+            projectId: input.projectId,
+            seq: (last?.seq ?? 0) + 1,
+            kind: input.kind ?? 'change',
+            source: attr.source,
+            title: (quote ? input.title : input.regionalTitle ?? input.title).slice(0, 300),
+            actorUserId: attr.actorUserId ?? null,
+            apiKeyId: attr.apiKeyId ?? null,
+            groupId: attr.groupId ?? null,
+            parentId: last?.id ?? null,
+            status: 'applying',
+            checkpoint: keptCheckpoint(checkpoint, key),
+            recoversId: input.recoversId ?? null,
+          },
+          select: { id: true, seq: true, parentId: true, createdAt: true },
+        })
+      } catch (err: any) {
+        if (err?.code !== 'P2002') throw err
+      }
     }
+    throw new Error('Could not allocate a change number after three attempts.')
+  } catch (err) {
+    // No record was written, so nothing digests what the region was given.
+    if (key) await forgetCatalogInRegion(input.projectId, id).catch(() => {})
+    throw err
   }
-  throw new Error('Could not allocate a change number after three attempts.')
+}
+
+/**
+ * What a change did, from the catalog before and after it. Values rewritten in
+ * place leave no trace in the catalog, so the tables holding them are named
+ * from what the change preserved.
+ */
+function footprintBetween(before: CatalogSnapshot, after: CatalogSnapshot, preserved: PreservedEntry[]): TableChange[] {
+  const footprint = diffCatalogs(before, after)
+  const rewritten = new Map<string, string[]>()
+  for (const e of preserved) {
+    if (e.kind === 'column' && e.reason === 'rewritten') rewritten.set(e.table, [...(rewritten.get(e.table) ?? []), e.column])
+  }
+  for (const [table, cols] of rewritten) {
+    const entry = footprint.find((c) => !c.object && c.after === table)
+    if (entry) entry.details.push(`values rewritten in ${cols.join(', ')}`)
+    else footprint.push({ kind: 'modified', before: table, after: table, details: [`values rewritten in ${cols.join(', ')}`] })
+  }
+  return footprint
 }
 
 /** How much protection the change needed, from what it did. */
@@ -282,8 +336,15 @@ export async function withGovernedChange<T>(
     const before = await readCatalogOn(client, schema)
     const platform = await readPlatformState(projectId)
     // Whether this record may quote the work's text (lib/changes/residency.ts).
+    // When it may not, the catalogs' definitions are kept in the region and
+    // this record digests them under a key kept there with them.
     const quote = await quotesKeptHere(projectId)
-    const row = await allocateRow(input, attr, before, quote)
+    const key = quote ? null : newCatalogKey()
+    const row = await allocateRow(input, attr, before, key)
+    const discard = async () => {
+      await prisma.backendChange.delete({ where: { id: row.id } }).catch(() => {})
+      if (key) await forgetCatalogInRegion(projectId, row.id).catch(() => {})
+    }
 
     const change: OpenChange = {
       projectId,
@@ -312,22 +373,16 @@ export async function withGovernedChange<T>(
     }
 
     if (thrown instanceof AbandonChange) {
-      await prisma.backendChange.delete({ where: { id: change.id } }).catch(() => {})
+      await discard()
       throw thrown
     }
 
     const after = await readCatalogOn(client, schema)
-    const footprint = diffCatalogs(before, after)
-    // Values rewritten in place leave no trace in the catalog: name those tables too.
-    const rewritten = new Map<string, string[]>()
-    for (const e of change.preserved) {
-      if (e.kind === 'column' && e.reason === 'rewritten') rewritten.set(e.table, [...(rewritten.get(e.table) ?? []), e.column])
-    }
-    for (const [table, cols] of rewritten) {
-      const entry = footprint.find((c) => !c.object && c.after === table)
-      if (entry) entry.details.push(`values rewritten in ${cols.join(', ')}`)
-      else footprint.push({ kind: 'modified', before: table, after: table, details: [`values rewritten in ${cols.join(', ')}`] })
-    }
+    const footprint = footprintBetween(before, after, change.preserved)
+    // What the record keeps of it. Outside the home region, the same lines
+    // from the catalogs' structure, which name definitions without quoting
+    // them: equal definitions digest equal under one key.
+    const keptFootprint = key ? footprintBetween(catalogStructure(before, key), catalogStructure(after, key), change.preserved) : footprint
 
     const verdict: ChangeVerdict = thrown
       ? { ok: false, error: thrown instanceof Error ? thrown.message : String(thrown) }
@@ -338,7 +393,7 @@ export async function withGovernedChange<T>(
     // Nothing changed and nothing was kept: a no-op is not worth a row. (A
     // failure that touched nothing is: someone asked, and it was refused.)
     if (footprint.length === 0 && change.preserved.length === 0 && verdict.ok && !change.verification) {
-      await prisma.backendChange.delete({ where: { id: change.id } }).catch(() => {})
+      await discard()
       if (thrown) throw thrown
       return { result: result as T, change: null }
     }
@@ -349,26 +404,37 @@ export async function withGovernedChange<T>(
     ]
     const tables = footprintTables(footprint)
     const objects = footprintObjects(footprint)
-    const checkpoint = { database: { ...pickTables(before, tables.before, objects.before), platform: pickPlatform(platform, tables.before) } }
+    const touchedBefore = pickTables(before, tables.before, objects.before)
+    const touchedAfter = pickTables(after, tables.after, objects.after)
+    // Outside the home region the definitions go to the region first, the
+    // whole catalog the change opened with still beside them until the record
+    // below is trimmed to match (definitionsFromRegion checks whichever the
+    // record holds).
+    if (key) await keepCatalogInRegion(projectId, change.id, { key, opened: before, checkpoint: touchedBefore, resultState: touchedAfter })
+    const kept = <S extends CatalogSnapshot>(snapshot: S): S => (key ? catalogStructure(snapshot, key) : snapshot)
+    const checkpoint = {
+      database: { ...kept(touchedBefore), platform: pickPlatform(platform, tables.before) },
+      ...(key ? { definitionsInRegion: true } : {}),
+    }
     const added = footprint.filter((c) => !c.object && (c.kind === 'added' || c.kind === 'replaced') && c.after).map((c) => ({ name: c.after! }))
     const resultState = {
-      ...pickTables(after, tables.after, objects.after),
+      ...kept(touchedAfter),
       data: await resultDataFor({ query: (sql, params) => client.query(sql, params as unknown[]) }, schema, added),
     }
     const preserved: ChangePreservation | null = change.preserved.length > 0 ? { vault: change.vault, entries: change.preserved } : null
-    const summary = input.summary ?? describeChange(footprint)
+    const summary = input.summary ?? describeChange(keptFootprint)
     const evidence = {
       steps: keptSteps(verdict.steps, quote) as unknown as Prisma.InputJsonValue,
       // For a project kept in another region the SQL stays there: it can carry values.
       statements: (quote ? statements : []) as unknown as Prisma.InputJsonValue,
       checkpoint: checkpoint as unknown as Prisma.InputJsonValue,
       resultState: resultState as unknown as Prisma.InputJsonValue,
-      footprint: footprint as unknown as Prisma.InputJsonValue,
+      footprint: keptFootprint as unknown as Prisma.InputJsonValue,
       preserved: preserved ? (preserved as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
       summary: summary.slice(0, 300),
       risk: classifyRisk(footprint, change.preserved),
     }
-    const hash = checkpointHash({ checkpoint, resultState, footprint })
+    const hash = checkpointHash({ checkpoint, resultState, footprint: keptFootprint })
     const principals = {
       requestedBy: attr.apiKeyId ? { kind: 'agent', apiKeyId: attr.apiKeyId } : attr.actorUserId ? { kind: 'user', userId: attr.actorUserId } : { kind: 'backenly' },
       executedBy: { kind: 'backenly' },
@@ -418,6 +484,9 @@ export async function withGovernedChange<T>(
         { checks: verification.checks.length, ...(failing.length ? { failing } : {}) },
       )
     }
+
+    // The record is trimmed now: the region no longer needs the whole catalog.
+    if (key) await keepCatalogInRegion(projectId, change.id, { key, checkpoint: touchedBefore, resultState: touchedAfter }).catch(() => {})
 
     const closed: ClosedChange = { id: change.id, seq: change.seq, status, summary, footprint, verification }
 

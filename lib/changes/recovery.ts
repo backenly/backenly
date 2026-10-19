@@ -67,7 +67,7 @@ import { createVaultStatements, qualified, vaultSchemaName } from './names'
 import { planRestore, verifyAgainstCheckpoint, type PlanConflict, type PlannedStep, type RestorePlan } from './plan'
 import { rollbackWindowDays, windowEndsAt } from './policy'
 import { IN_EFFECT, RECOVERY_OWED, type ChangePreservation, type ChangeStatus, type PreservedEntry, type TableChange } from './types'
-import { keptText, quotesKeptHere } from './residency'
+import { catalogStructure, definitionsFromRegion, keptText, quotesKeptHere } from './residency'
 import type { ChangeVerification, VerificationCheck } from './verify'
 
 // ── Loading ──────────────────────────────────────────────────────────────────
@@ -93,12 +93,29 @@ interface LoadedChange {
   resultState: CatalogSnapshot & { data?: ResultData }
   preserved: ChangePreservation | null
   intact: boolean
+  /**
+   * For a change kept outside the home region: the key its record's digests
+   * were made with, once its definitions were read from the region and
+   * matched them (lib/changes/residency.ts). Null otherwise.
+   */
+  catalogKey: string | null
+  /** Its definitions are kept in its region, which holds none that match its record. */
+  definitionsMissing: boolean
 }
 
 async function load(projectId: string, changeId: string): Promise<LoadedChange | null> {
   const row = await prisma.backendChange.findFirst({ where: { id: changeId, projectId } })
   if (!row) return null
-  const checkpoint = ((row.checkpoint as any)?.database ?? null) as StoredSnapshot | null
+  const stored = ((row.checkpoint as any)?.database ?? null) as StoredSnapshot | null
+  // A change outside the home region keeps its definitions there, and its
+  // record their digests: a restore works from the region's copy, and only
+  // when every definition in it digests to what the record holds.
+  const inRegion = (row.checkpoint as { definitionsInRegion?: boolean } | null)?.definitionsInRegion === true
+  const definitions = inRegion ? await definitionsFromRegion(projectId, row) : null
+  const checkpoint = definitions ? { ...definitions.checkpoint, platform: stored?.platform } : stored
+  const resultState = definitions?.resultState
+    ? { ...definitions.resultState, data: (row.resultState as { data?: ResultData } | null)?.data }
+    : (row.resultState as unknown as LoadedChange['resultState'] | null)
   const footprint = (row.footprint as unknown as TableChange[] | null) ?? []
   return {
     id: row.id,
@@ -118,10 +135,29 @@ async function load(projectId: string, changeId: string): Promise<LoadedChange |
     recoveryLeaseUntil: row.recoveryLeaseUntil,
     footprint,
     checkpoint: checkpoint ?? { schema: '', capturedAt: '', tables: {} },
-    resultState: (row.resultState as unknown as LoadedChange['resultState'] | null) ?? { schema: '', capturedAt: '', tables: {} },
+    resultState: resultState ?? { schema: '', capturedAt: '', tables: {} },
     preserved: (row.preserved as unknown as ChangePreservation | null) ?? null,
-    intact: !!checkpoint && checkpointIntact(row),
+    intact: !!checkpoint && checkpointIntact(row) && (!inRegion || definitions !== null),
+    catalogKey: definitions?.key ?? null,
+    definitionsMissing: inRegion && definitions === null,
   }
+}
+
+/**
+ * The restore read back and compared with the checkpoint. Outside the home
+ * region the comparison runs on both catalogs' structure: the outcome is the
+ * same, since equal definitions digest equal under one key, and the details,
+ * which the records keep, name what differs without quoting a definition.
+ */
+function checkedAgainstCheckpoint(
+  change: LoadedChange,
+  live: CatalogSnapshot,
+  keptObjects: Parameters<typeof verifyAgainstCheckpoint>[3],
+): ReturnType<typeof verifyAgainstCheckpoint> {
+  const key = change.catalogKey
+  return key
+    ? verifyAgainstCheckpoint(change.footprint, catalogStructure(change.checkpoint, key), catalogStructure(live, key), keptObjects)
+    : verifyAgainstCheckpoint(change.footprint, change.checkpoint, live, keptObjects)
 }
 
 /**
@@ -568,7 +604,7 @@ export async function recoverChange(projectId: string, changeId: string, opts: R
 
         // The independent check: read back from the catalog, compare to the checkpoint.
         const after = await readCatalogOn(open.client, open.schema)
-        const against = verifyAgainstCheckpoint(change.footprint, change.checkpoint, after, plan.keptObjects)
+        const against = checkedAgainstCheckpoint(change, after, plan.keptObjects)
         const checks: VerificationCheck[] = against.checks.map((c, i) => ({
           id: `checkpoint_${i}`,
           label: c.table,
@@ -842,7 +878,14 @@ export async function reconcileChange(projectId: string, changeId: string, now =
       // its effects can no longer be told apart from theirs.
       const later = await prisma.backendChange.count({ where: { projectId, seq: { gt: change.seq } } })
       const { diffCatalogs } = await import('./diff')
-      const footprint = later === 0 ? diffCatalogs(change.checkpoint, live) : null
+      // Outside the home region the record keeps the footprint from the
+      // catalogs' structure, as it would have when the change closed; with no
+      // definitions from the region to compare, it keeps none.
+      const footprint = later > 0 || change.definitionsMissing
+        ? null
+        : change.catalogKey
+          ? diffCatalogs(catalogStructure(change.checkpoint, change.catalogKey), catalogStructure(live, change.catalogKey))
+          : diffCatalogs(change.checkpoint, live)
       const moved = await transition(changeId, [row.status as ChangeStatus], 'manual_intervention_required', {
         ...(footprint ? { footprint: footprint as unknown as Prisma.InputJsonValue } : {}),
         error: later === 0

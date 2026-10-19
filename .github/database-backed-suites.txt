@@ -1306,3 +1306,13 @@ tests/integration/workspace-sql-cached-plan.spec.ts
 # executeWithUserContext, and its record must carry that statement. The change
 # ledger, its lock and its record are the property, so it needs a real Postgres.
 tests/integration/home-workspace-sql-recorded.spec.ts
+
+# A regional project's change record keeps structure at home and its
+# definitions in its region: no function body, view query, CHECK, policy,
+# default or generation expression, index or trigger statement, comment or
+# enum label of a regional change, its restore or an interrupted one is on its
+# home rows; the region keeps them under the change; a restore puts every
+# definition back exactly from the region's copy, and refuses a copy altered or
+# missing. A home project's record keeps its definitions as before. A second
+# database stands in for the region, so it needs a real Postgres.
+tests/integration/change-ledger-residency.spec.ts
