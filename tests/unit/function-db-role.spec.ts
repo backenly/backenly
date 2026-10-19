@@ -75,6 +75,13 @@ describe('the connection string', () => {
     expect(url.searchParams.get('sslmode')).toBe('require')
     expect(url.searchParams.get('connection_limit')).toBe('2')
   })
+
+  it("turns Prisma's statement cache off, so a table whose columns changed does not fail a cached statement", () => {
+    // lib/data-plane/statement-cache.ts; the database side is
+    // tests/integration/workspace-sql-cached-plan.spec.ts.
+    const url = new URL(functionDatabaseUrl('bkn_fn_0123456789ab', 'pw', process.env.DATABASE_URL as string))
+    expect(url.searchParams.get('statement_cache_size')).toBe('0')
+  })
 })
 
 describe('never falling back to the app connection', () => {

@@ -35,6 +35,11 @@
 #                                      password is to be replaced deliberately
 #   BOOTSTRAP_REHEARSAL              true only on a stock PostgreSQL 16 without
 #                                      pgvector or the preload; refused on RDS
+#   BOOTSTRAP_PRE_APPLY              true only for the check a launcher runs just
+#                                      before its own apply (launch.ts). That check
+#                                      reports, without failing on it, what steps
+#                                      changed since they were applied have not
+#                                      converged yet. Refused with an apply.
 #
 # Passwords never reach this script or the database: the operator's machine
 # computes each verifier and keeps the password only long enough to write the
@@ -51,6 +56,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${BOOTSTRAP_ROOT:-$(cd "$HERE/../../.." && pwd)}"
 MODE="${BOOTSTRAP_MODE:-check}"
 REHEARSAL="${BOOTSTRAP_REHEARSAL:-false}"
+PRE_APPLY="${BOOTSTRAP_PRE_APPLY:-false}"
 : "${DATABASE_URL:?DATABASE_URL must name the regional database}"
 
 case "$MODE" in
@@ -62,6 +68,14 @@ case "$REHEARSAL" in
   true | false) ;;
   *) echo "refusing: BOOTSTRAP_REHEARSAL must be true or false, not \"$REHEARSAL\""; exit 2 ;;
 esac
+case "$PRE_APPLY" in
+  true | false) ;;
+  *) echo "refusing: BOOTSTRAP_PRE_APPLY must be true or false, not \"$PRE_APPLY\""; exit 2 ;;
+esac
+if [ "$APPLY" = true ] && [ "$PRE_APPLY" = true ]; then
+  echo "refusing: BOOTSTRAP_PRE_APPLY marks the check a launcher runs before its own apply, never the apply"
+  exit 2
+fi
 
 # Which database did we actually reach? (as tools/managed-db/runner/entrypoint.sh)
 if [ -n "${EXPECT_DATABASE:-}" ]; then
@@ -97,6 +111,7 @@ record() {
 }
 
 PENDING=0
+CHANGED=0
 
 # step <id> <files> [command...]: apply the step, then record the checksum of
 # every file in <files> ('|'-separated, so a path may hold spaces). Without a
@@ -108,7 +123,7 @@ step() {
   local have; have="$(recorded "$id")"
   if [ "$APPLY" != true ]; then
     if [ "$have" = "$sum" ]; then echo "  step $id: current (applied, files unchanged)"
-    elif [ -n "$have" ]; then echo "  step $id: changed (applied, but its files have changed since)"
+    elif [ -n "$have" ]; then echo "  step $id: changed (applied, but its files have changed since)"; CHANGED=$((CHANGED + 1))
     else echo "  step $id: pending (not applied)"; PENDING=$((PENDING + 1)); fi
     return 0
   fi
@@ -174,7 +189,9 @@ step regional-bodies "$ROOT/scripts/sql/regional-bodies.sql"
 # 5. The region's copy of what authorizes its projects' requests, delivered
 #    from the home region (lib/auth-projection/deliver.ts).
 step auth-projection "$ROOT/scripts/sql/auth-projection.sql"
-# 6. Direct database access and its two DDL-capture event triggers.
+# 6. Direct database access and its two DDL-capture event triggers. Each apply
+#    also gives the backup role read on every workspace that already exists,
+#    which verify.sql then requires (the file's section 7).
 step direct-access "$ROOT/scripts/setup-direct-access.sql"
 # 7. Extensions the data plane and its probes use.
 step extensions "$HERE/sql/extensions.sql"
@@ -183,13 +200,31 @@ credentials
 
 # Verification fails the run when the database is not what the steps promise.
 # It is read-only, so a check runs it too once every step is recorded: that is
-# how a live region is audited.
+# how a live region is audited, and a check that does not verify fails.
+#
+# One check may pass without verifying: the one a launcher runs just before its
+# own apply (BOOTSTRAP_PRE_APPLY=true, launch.ts), when steps changed since they
+# were applied. What they now promise is exactly what that apply converges, and
+# the apply then fails the run if the database still does not verify. Failing
+# here would refuse the one run that converges it. Every other check, and a
+# pre-apply check whose steps are all current, fails on what does not verify.
 if [ "$APPLY" = true ]; then
   "${PSQL[@]}" -f "$HERE/sql/verify.sql"
   echo "Regional database initialised and verified."
-elif [ "$PENDING" -eq 0 ]; then
+elif [ "$PENDING" -gt 0 ]; then
+  echo "Check only: nothing was written. $PENDING step(s) not applied yet."
+elif [ "$CHANGED" -eq 0 ]; then
   "${PSQL[@]}" -f "$HERE/sql/verify.sql"
   echo "Check only: nothing was written. Every step is recorded, and the database verifies."
 else
-  echo "Check only: nothing was written. $PENDING step(s) not applied yet."
+  verified=0
+  "${PSQL[@]}" -f "$HERE/sql/verify.sql" || verified=$?
+  if [ "$verified" -eq 0 ]; then
+    echo "Check only: nothing was written. $CHANGED step(s) changed since applied, and the database verifies."
+  elif [ "$PRE_APPLY" = true ]; then
+    echo "Check only: nothing was written. $CHANGED step(s) changed since applied: the apply that follows converges what does not verify."
+  else
+    echo "Check only: nothing was written. $CHANGED step(s) changed since applied, and the database does not verify."
+    exit "$verified"
+  fi
 fi

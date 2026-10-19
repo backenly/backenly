@@ -24,13 +24,19 @@
 --                                     reassign owned objects, drop.
 --   5. backenly_direct_sync_schema  — idempotent grants/ownership/RLS-policy
 --                                     sync for a workspace schema, including the
---                                     backup role's read. Called after every
---                                     governed DDL mutation and on adopt.
+--                                     backup role's read, which every workspace
+--                                     gets whether or not it has direct access.
+--                                     Called when a workspace is created, after
+--                                     governed DDL, after a restore and on adopt.
 --   6. backenly_capture_ddl/_drop   — event triggers that record every DDL
 --                                     statement executed BY a bkn_% role into
 --                                     public.schema_drift_events (the evidence
 --                                     the autonomy loop adopts or flags).
 --                                     Platform DDL (backenly_user) is ignored.
+--
+-- Last, every workspace schema that already exists is brought to what the
+-- sync declares for the backup role, so re-running this file is also how an
+-- existing database is converged (section 7).
 --
 -- Network exposure (listen_addresses / pg_hba / firewall) is applied by
 -- scripts/setup-direct-access.sh — not here — because pg_hba syntax errors can
@@ -205,7 +211,10 @@ $fn$;
 REVOKE ALL ON FUNCTION public.backenly_direct_drop_role(text) FROM PUBLIC;
 -- ── 5. Idempotent grants / ownership / RLS-policy sync for one schema ────────
 --
--- Called: at provision, after every governed DDL mutation, and on drift adopt.
+-- Called for EVERY workspace, with or without direct access: when the schema is
+-- created (lib/projects/provision.ts), after governed DDL, after a restore, on
+-- drift adopt, and for each existing workspace when this file is installed
+-- (section 7). With no ro/rw role it grants the backup role and stops.
 -- Owner-role model (READ_WRITE only): a NOLOGIN role bkn_own_<hex> owns the
 -- schema and every table in it; backenly_user AND the rw login role are members,
 -- so BOTH the platform and the external developer can ALTER/DROP any table —
@@ -222,6 +231,7 @@ AS $fn$
 DECLARE
   t record;
   v_backup text;
+  v_creator text;
 BEGIN
   IF p_schema !~ '^workspace_[0-9a-fA-F][0-9a-fA-F-]{10,60}$' THEN
     RAISE EXCEPTION 'backenly_direct_sync_schema: invalid schema %', p_schema;
@@ -237,9 +247,6 @@ BEGIN
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = p_schema) THEN
     RETURN true; -- workspace not provisioned yet — nothing to sync
-  END IF;
-  IF p_ro IS NULL AND p_rw IS NULL THEN
-    RETURN true;
   END IF;
 
   -- Skip roles that disappeared (revoked between the app's read and this call).
@@ -287,14 +294,29 @@ BEGIN
     EXECUTE format('GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA %I TO %I', p_schema, p_rw);
   END IF;
 
-  -- ── The backup role ────────────────────────────────────────────────────────
-  -- Backups dump each workspace as the read-only backup role
-  -- (scripts/setup-backup-role.ts). Its default privileges name the roles that
-  -- created tables when it last converged, and a table created over a
-  -- READ_WRITE connection belongs to bkn_rw_* (then bkn_own_*), which did not
-  -- exist then. Without this grant pg_dump fails "permission denied" for that
-  -- project on every run until someone reruns the converge. Every external
-  -- table passes through here on adoption, so this is where it is closed.
+  -- ── The backup role: every workspace, with or without direct access ───────
+  -- Snapshots dump each workspace as the read-only backup role: pg_dump
+  -- --schema workspace_<id> locks every table, which needs USAGE on the schema
+  -- and SELECT on the table, and reads every sequence. One object it cannot
+  -- read fails every snapshot of that project, with "permission denied".
+  --
+  -- Nothing else grants it on a workspace made later: the regional procedure
+  -- (tools/managed-db/regional/sql/roles.sql) creates the role with CONNECT
+  -- only, and scripts/setup-backup-role.ts, which a self-hosted install runs,
+  -- converges the schemas that exist when it runs. So this runs for every
+  -- workspace. It used to come after an early return for a call with no ro/rw
+  -- role, which left every project without direct access unreadable.
+  --
+  -- Explicit grants cover what exists now. Default privileges cover a table
+  -- created before the next sync, by the roles that create them: the
+  -- application (every platform path: typed actions, migrations, imports,
+  -- branch merges) and, with READ_WRITE access, the developer's own role, whose
+  -- tables are otherwise unreadable until adoption, which may wait for the
+  -- owner's approval. PostgreSQL lets a role set defaults only for a role whose
+  -- privileges it holds, so a creator this definer cannot act for is left to
+  -- the explicit grants of the next sync. The bkn_own_* role creates nothing
+  -- unless a developer becomes it, and the adoption sync covers that.
+  --
   -- The role is BYPASSRLS, so it needs no policy. Name it with
   --   ALTER DATABASE <db> SET backenly.backup_role = '<role>';
   -- when BACKENLY_BACKUP_ROLE is not the default. No role, no grant.
@@ -303,6 +325,20 @@ BEGIN
     EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', p_schema, v_backup);
     EXECUTE format('GRANT SELECT ON ALL TABLES IN SCHEMA %I TO %I', p_schema, v_backup);
     EXECUTE format('GRANT SELECT ON ALL SEQUENCES IN SCHEMA %I TO %I', p_schema, v_backup);
+    -- One check per statement: a privilege check on a missing role raises.
+    FOREACH v_creator IN ARRAY ARRAY[public.backenly_app_role(), p_rw] LOOP
+      CONTINUE WHEN v_creator IS NULL;
+      CONTINUE WHEN NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = v_creator);
+      CONTINUE WHEN NOT pg_has_role(current_user, v_creator, 'USAGE');
+      EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT SELECT ON TABLES TO %I',
+                     v_creator, p_schema, v_backup);
+      EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT SELECT ON SEQUENCES TO %I',
+                     v_creator, p_schema, v_backup);
+    END LOOP;
+  END IF;
+
+  IF p_ro IS NULL AND p_rw IS NULL THEN
+    RETURN true; -- no direct-access role, so nothing below applies
   END IF;
 
   -- ── RLS pass-through policies ───────────────────────────────────────────────
@@ -494,3 +530,42 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_direct_sync_schema(text, text, text, text) TO %I', r);
   END IF;
 END $grant$;
+
+-- ── 7. Converge every existing workspace ─────────────────────────────────────
+--
+-- The application calls the sync for each workspace it creates, changes or
+-- restores. A workspace made before the sync covered every one (it granted the
+-- backup role only where direct access existed) is still unreadable, and so is
+-- every snapshot of it. Re-running this file is how an existing database is
+-- brought to what the sync declares: the regional procedure re-applies it
+-- (tools/managed-db/regional/bootstrap.sh, step direct-access), and its
+-- verify.sql then fails the run for any workspace the backup role still cannot
+-- read. Anywhere else it is re-run with scripts/install-sql.sh.
+--
+-- Backup grants only: no ro/rw role is named, so ownership, direct-access
+-- grants and policies are left as they are. The schemas are the ones the sync
+-- accepts, so a preview branch (workspace_<id>_br_<name>) is not one of them.
+-- Last in the file, so a failure here leaves every function installed and
+-- granted. One transaction: every failure is collected and reported together,
+-- and any failure leaves the grants exactly as they were.
+DO $converge$
+DECLARE
+  s text;
+  failed text[] := '{}';
+BEGIN
+  FOR s IN
+    SELECT nspname FROM pg_namespace
+     WHERE nspname ~ '^workspace_[0-9a-fA-F][0-9a-fA-F-]{10,60}$'
+     ORDER BY nspname
+  LOOP
+    BEGIN
+      PERFORM public.backenly_direct_sync_schema(s);
+    EXCEPTION WHEN OTHERS THEN
+      failed := failed || format('%s: %s', s, SQLERRM);
+    END;
+  END LOOP;
+  IF array_length(failed, 1) > 0 THEN
+    RAISE EXCEPTION 'the backup role could not be given read access to % workspace schema(s): %',
+      array_length(failed, 1), array_to_string(failed, '; ');
+  END IF;
+END $converge$;

@@ -237,8 +237,15 @@ describe('a home-region project', () => {
     expect(rows).toEqual([{ db: homeDb, note: 'home' }])
   })
 
-  it('keeps the shared raw client', async () => {
-    expect(await workspaceRawClient(homeProject)).toBe(prisma)
+  it('runs raw SQL on the home database, on a client of its own rather than the platform one', async () => {
+    // Workspace SQL runs with Prisma's statement cache off and the platform's
+    // own queries keep it (lib/data-plane/statement-cache.ts).
+    const raw = await workspaceRawClient(homeProject)
+    expect(raw).not.toBe(prisma)
+    const rows = await raw.$queryRawUnsafe<{ db: string; note: string }[]>(
+      `SELECT current_database() AS db, note FROM "${schemaOf(homeProject)}".marker`,
+    )
+    expect(rows).toEqual([{ db: homeDb, note: 'home' }])
   })
 })
 

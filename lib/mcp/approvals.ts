@@ -22,6 +22,10 @@
  *     arguments, never a re-interpretation of the request text. A request
  *     without an exact call cannot be executed at all: approving one closes
  *     it, unrun, with the reason.
+ *   • A restore (`revert_schema_change`) is parked with Backenly's own
+ *     measurement of what it would set aside, whatever arguments the door that
+ *     asked passed: the person approves what was measured, never an agent's
+ *     own counts (createApprovalRequest).
  *   • Requests expire (default 24h). Expired requests cannot be approved.
  *   • A request executes at most once (atomic pending → approved claim).
  *   • Execution happens server-side at decision time, by the approver's
@@ -37,6 +41,7 @@ import { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
 import { NOT_QUOTED, quotesKeptHere } from '@/lib/data-plane/residency'
 import { dispatchTool, type ToolDispatchContext, type ToolResult } from '@/lib/ai/brain/tools'
+import type { RestoreRequest } from '@/lib/changes/recovery'
 import {
   forgetApprovalRequests,
   keepApprovalRequest,
@@ -78,6 +83,30 @@ export interface DangerInfo {
   reversible: boolean
 }
 
+/** A restore that cannot happen is refused when asked for, and nothing is queued. */
+export class RestoreRequestRefusedError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+  ) {
+    super(message)
+    this.name = 'RestoreRequestRefusedError'
+  }
+}
+
+/** Backenly's own measurement of the restore a request names, taken now. */
+async function measuredRestore(projectId: string, args: Record<string, unknown>): Promise<RestoreRequest> {
+  const { describeRestoreRequest } = await import('@/lib/changes/recovery')
+  const d = await describeRestoreRequest(projectId, String(args.changeId ?? '').trim())
+  if (!d.ok) {
+    const refused = d as Extract<typeof d, { ok: false }>
+    throw new RestoreRequestRefusedError(refused.status, refused.code, refused.error)
+  }
+  const { target, rowCount, toolArgs } = d as Extract<typeof d, { ok: true }>
+  return { target, rowCount, toolArgs }
+}
+
 export async function createApprovalRequest(input: {
   projectId: string
   userId: string
@@ -88,9 +117,29 @@ export async function createApprovalRequest(input: {
    * The exact arguments for `danger.tool`. Approval runs this call verbatim,
    * so what executes is what the human read. Required: a request that cannot
    * name its exact call cannot be approved safely, so it must not be created.
+   * A restore's are replaced by its measurement (`restore`).
    */
   toolArgs: Record<string, unknown>
+  /**
+   * For a restore: Backenly's measurement of it, when the caller has just taken
+   * one (describeRestoreRequest, or a recovery escalating what it measured).
+   * Built by Backenly's code only, never from an agent's arguments. Left out,
+   * it is measured here.
+   */
+  restore?: RestoreRequest
 }) {
+  // A restore is parked with what Backenly measured it would do, whichever door
+  // asked: a brain run's parked call carries the model's own arguments, counts
+  // of what to set aside included, and those never reach the request. One that
+  // cannot happen throws RestoreRequestRefusedError, and nothing is queued.
+  let danger = input.danger
+  let toolArgs = input.toolArgs
+  if (danger.tool === 'revert_schema_change') {
+    const restore = input.restore ?? (await measuredRestore(input.projectId, input.toolArgs))
+    danger = { ...danger, target: restore.target, rowCount: restore.rowCount, reversible: true }
+    toolArgs = { ...restore.toolArgs }
+  }
+
   // The request's words, its target and its exact call are what the approver
   // reads and what approval runs. A project kept in another region keeps them
   // there, written first under the id the row then takes, and the row keeps the
@@ -101,10 +150,10 @@ export async function createApprovalRequest(input: {
   const quote = await quotesKeptHere(input.projectId)
   const request = {
     message: input.message.slice(0, 4000),
-    target: input.danger.target.slice(0, 300),
-    toolArgs: input.toolArgs,
+    target: danger.target.slice(0, 300),
+    toolArgs,
   }
-  const stored = quote ? request : await keepApprovalRequest(input.projectId, id, input.danger.tool, request)
+  const stored = quote ? request : await keepApprovalRequest(input.projectId, id, danger.tool, request)
   const row = await prisma.agentApprovalRequest
     .create({
       data: {
@@ -113,10 +162,10 @@ export async function createApprovalRequest(input: {
         userId: input.userId,
         apiKeyId: input.apiKeyId ?? null,
         message: stored.message,
-        tool: input.danger.tool,
+        tool: danger.tool,
         target: stored.target,
-        rowCount: input.danger.rowCount,
-        reversible: input.danger.reversible,
+        rowCount: danger.rowCount,
+        reversible: danger.reversible,
         toolArgs: stored.toolArgs as Prisma.InputJsonValue,
         expiresAt: new Date(Date.now() + APPROVAL_TTL_MS),
       },
@@ -138,9 +187,9 @@ export async function createApprovalRequest(input: {
       type: 'mcp',
       details: JSON.stringify({
         approvalId: row.id,
-        tool: input.danger.tool,
-        ...(quote ? { target: input.danger.target } : {}),
-        rowCount: input.danger.rowCount,
+        tool: danger.tool,
+        ...(quote ? { target: danger.target } : {}),
+        rowCount: danger.rowCount,
         at: new Date().toISOString(),
       }),
       timestamp: new Date(),
