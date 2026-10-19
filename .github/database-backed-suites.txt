@@ -1179,6 +1179,15 @@ tests/integration/agent-connections-revocable.spec.ts
 # approval, finding and notification rows are the property, so it needs a real
 # Postgres.
 tests/integration/parked-approvals-visible.spec.ts
+# A real data migration asked of backend_chat waits in the Review Queue as the
+# exact call, with the rows the executor's gate counted, and changes nothing;
+# approving the card runs exactly the parked operations, once; no argument the
+# model adds runs it without a person, and the typed tool door refuses it; an
+# invalid operation, or more than 20 of them, is refused in the same turn and
+# queues nothing; a dry run still runs at once. Real route, key, approval rows
+# and workspace table are the property, so it needs a real Postgres.
+tests/integration/brain-data-migration-approval.spec.ts
+
 # The dashboard's resource cards answer the real table count with a card-sized
 # list in the card's shape: 15 real workspace tables give tableCount 15 and
 # twelve { name, rowCount, estimated } entries with exact counts, and the
@@ -1244,6 +1253,7 @@ tests/integration/auth-projection-confirm.spec.ts
 # write-once evidence and append-only events are enforced by the database's own
 # guard trigger. Real catalog, DDL, transactions and triggers are the property.
 tests/integration/change-recovery.spec.ts
+tests/integration/restore-generated-endpoints.spec.ts
 
 # Protected verification and automatic recovery: a change that breaks
 # production without being asked to (RLS off, a CASCADE, a step that did not

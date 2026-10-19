@@ -114,6 +114,9 @@ export type ChangeEventType =
   | 'manual_intervention_required'
   | 'kept'
   | 'reconciled'
+  // A restore removed the functions Backenly generated for a table it removed;
+  // `data.functions` keeps each row, for undoing the restore (lib/services/domain-endpoints.ts).
+  | 'generated_endpoints_removed'
 
 /** Record one lifecycle event. Never throws: the evidence must not fail the change. */
 export async function recordEvent(

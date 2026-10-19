@@ -43,6 +43,7 @@
 import type { PoolClient } from 'pg'
 import { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
+import type { RemovedEndpoint } from '@/lib/services/domain-endpoints'
 import type { CatalogSnapshot } from './catalog'
 import { describeChange } from './describe'
 import {
@@ -618,7 +619,7 @@ export async function recoverChange(projectId: string, changeId: string, opts: R
           checkedAt: new Date().toISOString(),
           checks,
         }
-        await restorePlatformRecords(projectId, open.schema, change.footprint, change.checkpoint, after)
+        await restorePlatformRecords(projectId, open.schema, change, after, open.id)
       }),
     )
     if (!closed || !restoreRecord) throw new Error('The recovery was not recorded.')
@@ -882,7 +883,7 @@ export async function reconcileChange(projectId: string, changeId: string, now =
         // table repair re-creates. Whatever was found, the schema may have
         // changed, so every view of it is refreshed.
         if (released && restored) {
-          await restorePlatformRecords(projectId, schema, change.footprint, change.checkpoint, live)
+          await restorePlatformRecords(projectId, schema, change, live, record?.id ?? null)
           await supersedeRestoredIntents(projectId, change)
         }
         if (released) await refreshSchemaViews(projectId, tablesTouched(change.footprint))
@@ -960,13 +961,14 @@ export async function reconcileChanges(projectId: string, now = new Date()): Pro
 async function restorePlatformRecords(
   projectId: string,
   schema: string,
-  footprint: TableChange[],
-  checkpoint: StoredSnapshot,
+  change: Pick<LoadedChange, 'id' | 'kind' | 'footprint' | 'checkpoint' | 'resultState'>,
   live: CatalogSnapshot,
+  restoreId: string | null,
 ): Promise<void> {
-  const platform = checkpoint.platform
+  await generatedEndpointsFollow(projectId, change, live, restoreId)
+  const platform = change.checkpoint.platform
   if (!platform) return
-  const touched = new Set(tablesTouched(footprint))
+  const touched = new Set(tablesTouched(change.footprint))
   const registeredBefore = new Set(platform.registered)
 
   for (const name of touched) {
@@ -990,6 +992,62 @@ async function restorePlatformRecords(
       })),
       skipDuplicates: true,
     })
+  }
+}
+
+/**
+ * The functions Backenly generated for a table follow it as its registry row
+ * does (lib/services/domain-endpoints.ts). Left behind, they were callable
+ * routes over a table that was gone, and every description of the backend
+ * still listed them.
+ *
+ * A table the restore removed takes its generated endpoints with it, and the
+ * restore's own record keeps each row as it was. Only undoing that restore (a
+ * reapply: the change being undone is itself a restore) puts rows back, and
+ * only those, exactly: one switched off stays off, rewritten code is kept,
+ * and one the owner had deleted before is not invented. A restore of anything
+ * else brings no generated endpoint back.
+ *
+ * `change.resultState` is what the restore started from, since a later change
+ * to the same tables refuses the restore. Best-effort, as the rest of the
+ * platform's records are: the schema is already restored and verified.
+ */
+async function generatedEndpointsFollow(
+  projectId: string,
+  change: Pick<LoadedChange, 'id' | 'kind' | 'footprint' | 'resultState'>,
+  live: CatalogSnapshot,
+  restoreId: string | null,
+): Promise<void> {
+  const touched = tablesTouched(change.footprint)
+  const gone = touched.filter((t) => !live.tables[t])
+  const back = change.kind === 'recovery' ? touched.filter((t) => live.tables[t] && !change.resultState.tables[t]) : []
+  if (gone.length === 0 && back.length === 0) return
+  try {
+    const endpoints = await import('@/lib/services/domain-endpoints')
+    // Removed only where the restore's record can keep them: a row removed with
+    // nowhere to keep it could never be put back by undoing the restore.
+    if (gone.length > 0 && !restoreId) {
+      console.warn(`[Recovery] project=${projectId}: left the generated endpoints of ${gone.join(', ')}, with no restore record to keep them on`)
+    } else if (gone.length > 0) {
+      // Kept on the record first, and written directly: recordEvent swallows a
+      // failure, and a row whose copy was not kept must not be removed.
+      await endpoints.removeDomainEndpoints(projectId, gone, Object.keys(live.tables), async (functions) => {
+        await prisma.backendChangeEvent.create({
+          data: { changeId: restoreId!, projectId, type: 'generated_endpoints_removed', data: { functions } as unknown as Prisma.InputJsonValue },
+        })
+      })
+    }
+    if (back.length > 0) {
+      const kept = await prisma.backendChangeEvent.findMany({
+        where: { changeId: change.id, type: 'generated_endpoints_removed' },
+        orderBy: { at: 'asc' },
+        select: { data: true },
+      })
+      const rows = kept.flatMap((e) => ((e.data as { functions?: RemovedEndpoint[] } | null)?.functions ?? []))
+      if (rows.length > 0) await endpoints.restoreDomainEndpoints(projectId, rows)
+    }
+  } catch (err) {
+    console.warn(`[Recovery] project=${projectId}: generated endpoints were not brought in step:`, err instanceof Error ? err.message : err)
   }
 }
 
