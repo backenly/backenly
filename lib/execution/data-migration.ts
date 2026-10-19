@@ -95,6 +95,21 @@ export interface DataMigrationResult {
 
 const IDENT_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/
 
+/** One migration is one transaction of at most this many operations. */
+const MAX_OPERATIONS = 20
+
+/**
+ * Why these operations cannot be one migration, or null when they can. The
+ * estimate asks it as well as the run: the gate estimates a real run before it
+ * waits for a person, so one that could never run is refused when it is asked
+ * for, not after someone has approved it.
+ */
+function operationCountRefusal(ops: unknown): string | null {
+  return Array.isArray(ops) && ops.length > 0 && ops.length <= MAX_OPERATIONS
+    ? null
+    : `A migration needs 1–${MAX_OPERATIONS} operations.`
+}
+
 function assertIdent(name: string, what: string): void {
   if (!IDENT_RE.test(name)) {
     throw new Error(`Invalid ${what} "${name}" — identifiers must match [a-zA-Z_][a-zA-Z0-9_]*`)
@@ -291,6 +306,8 @@ export async function estimateDataMigration(
   projectId: string,
   ops: DataMigrationOp[],
 ): Promise<DataMigrationEstimate[]> {
+  const refused = operationCountRefusal(ops)
+  if (refused) throw new Error(refused)
   const schemaName = `workspace_${projectId}`
   const db = await workspaceRawClient(projectId)
   const out: DataMigrationEstimate[] = []
@@ -325,9 +342,8 @@ export async function executeDataMigration(
   ops: DataMigrationOp[],
 ): Promise<DataMigrationResult> {
   const schemaName = `workspace_${projectId}`
-  if (!Array.isArray(ops) || ops.length === 0 || ops.length > 20) {
-    return { success: false, applied: [], backupTables: {}, error: 'A migration needs 1–20 operations.' }
-  }
+  const refused = operationCountRefusal(ops)
+  if (refused) return { success: false, applied: [], backupTables: {}, error: refused }
   const db = await workspaceRawClient(projectId)
 
   // Validate + build everything BEFORE opening the transaction.
