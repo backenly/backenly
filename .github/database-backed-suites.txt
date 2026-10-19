@@ -1306,3 +1306,11 @@ tests/integration/workspace-sql-cached-plan.spec.ts
 # executeWithUserContext, and its record must carry that statement. The change
 # ledger, its lock and its record are the property, so it needs a real Postgres.
 tests/integration/home-workspace-sql-recorded.spec.ts
+
+# A project with a change history is deleted with the change ledger's guard
+# installed as production has it: before the deletion the guard refuses
+# deleting the changes or their events on their own; deleteProjectCompletely
+# then removes the project, every change and event, the restore's vault and a
+# preview branch, and leaves no schema in the project's namespace. The guard's
+# triggers and the schemas are the property, so it needs a real Postgres.
+tests/integration/project-deletion-change-ledger.spec.ts
