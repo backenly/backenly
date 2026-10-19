@@ -163,3 +163,29 @@ describe('autonomy digest and events', () => {
     for (const e of confirmed) expect(e.what).not.toMatch(/could not be confirmed/)
   }, 30_000)
 })
+
+describe('the event feed and an incident freeze', () => {
+  beforeAll(async () => {
+    // As the repair loop writes it when it holds a pass back (lib/autonomy/reconciler.ts).
+    await audit('AUTONOMY_CHANGE_FREEZE', {
+      reason: 'project is mid-incident — autonomous changes frozen this tick',
+      health: ['Response time spiked to 480ms (p95).'],
+      wouldHaveApplied: 1,
+    })
+  }, 30_000)
+
+  it('shows a held-back pass only when asked, and never as a fix', async () => {
+    const since = encodeURIComponent(new Date(Date.now() - 60 * 60 * 1000).toISOString())
+    const plain = await (await eventsGET(req(`/autonomy/events?since=${since}`), params())).json()
+    expect(plain.events.some((e: any) => e.action === 'AUTONOMY_CHANGE_FREEZE')).toBe(false)
+
+    const asked = await (await eventsGET(req(`/autonomy/events?since=${since}&include=held`), params())).json()
+    const held = asked.events.filter((e: any) => e.action === 'AUTONOMY_CHANGE_FREEZE')
+    expect(held).toHaveLength(1)
+    expect(held[0]).toMatchObject({ kind: 'held_back', verified: false, tableName: null })
+    expect(held[0].full).toMatch(/^Backenly held back a repair because the project is mid-incident/)
+    expect(held[0].full).toMatch(/Response time spiked to 480ms \(p95\)\./)
+    // Everything else in the feed is as it was.
+    expect(asked.events.length - held.length).toBe(plain.events.length)
+  }, 30_000)
+})
